@@ -167,18 +167,17 @@ AI Incident Database (№1424): удалены VPC, ECS, балансировщ�
 только изменившиеся трансформы. MDI и MDIC, mesh allocator. Meshlets /
 virtual geometry существуют с 0.14.
 
-**Обход render graph.** Задокументированный путь: render graph стоит
-использовать почти всегда, обходить — только при специализированном рендере
-вроде воксельного raytracing. То есть фаза 2 (ADR-006) — поддерживаемый
-сценарий, а не хак.
+~~**Обход render graph.**~~ **Устарело, см. девятый проход.** В Bevy 0.19
+API `RenderGraph` удалён целиком; кастомный проход — это система в расписании
+`Core3d`, а не обход чего-либо.
 
 **GPU-мешинг существует.** Есть GPU-driven воксельные движки, где binary
 greedy meshing выполняется в compute-шейдере, а видимость чанков, запросы на
 мешинг и выдача draw-вызовов идут через GPU и indirect rendering; меши
 кэшируются в VRAM. Мешинг — рендер-слой, детерминизма не требует.
 
-**wgpu.** Релизы продолжаются: v29 (март 2026), v30 (июль 2026),
-v30.0.1 (август 2026).
+**wgpu.** Релизы: v29 (март 2026), v30 (1 июля 2026), v30.0.1 (22 августа
+2026). Подробности по v30 и что из этого нам нужно — девятый проход.
 
 **Rust: переполнение целых.** В debug реализация обязана вставлять проверки
 и паниковать; в других профилях допускается паника **или** тихое заворачивание.
@@ -603,6 +602,183 @@ fixed-point, и портировать движок на них было бы «
 не существует. Публичного инженерного источника Capcom по нетокоду Street
 Fighter 6 нет ни на английском, ни на японском. Статья Chen et al. (Intel), на
 которую ссылаются исходники и Box2D, и Jolt, по указанному URL мертва.
+
+## Девятый проход, 2026-09-09: движок вглубь
+
+Разбор — `12-engine-notes.md` и ADR-011/018.
+
+**Аппаратный ray tracing в wgpu.** `Features::EXPERIMENTAL_RAY_QUERY` даёт
+inline ray tracing и acceleration structures; отдельной фичи под AS нет —
+дословно из спеки, «acceleration structures do not have a separate feature,
+instead they are enabled by `Features::EXPERIMENTAL_RAY_QUERY`». Бэкенды —
+Vulkan, DX12 (требует `D3D12_RAYTRACING_TIER_1_1` и Shader Model 6.5) и Metal;
+doc-комментарий в `wgpu-types` про «Supported platforms: Vulkan» устарел.
+В Bevy фичи включаются сами: `WgpuSettings::priority` по умолчанию
+`Functionality`, а `initialize_renderer` буквально берёт `adapter.features()`.
+Штатный крейт `bevy_solari` уже требует `EXPERIMENTAL_RAY_QUERY` вместе с
+binding arrays.
+
+**Процедурная AABB-геометрия — только с wgpu 30.** `BlasAabbGeometry` и
+`BlasGeometries::AabbGeometries` появились в wgpu 30.0.0 (1 июля 2026, PR
+#9290); в теге v29 слова «AABB» в `blas.rs` нет вообще. PR закрыл issue #7701,
+дословный текст которого — «I would really like to use acceleration structure
+for my custom AABB geometry (**I am writing a voxel engine**)». Бэкенды AABB —
+Vulkan и DX12; README примера: «**The Metal backend does not support AABB
+intersections in ray queries yet**».
+
+**Bevy 0.19.1 пинит `wgpu = "29.0.3"` и `naga 29.0.3`**, `bevy_winit` —
+`winit ^0.30`. Ветка `main` уже на wgpu 30. То есть AABB BLAS приедет с Bevy
+0.20.
+
+**Intersection-шейдеров в naga нет.** Стадии в `naga-types` тега v30: Vertex,
+Task, Mesh, Fragment, Compute, RayGeneration, Miss, AnyHit, ClosestHit —
+стадии `Intersection` **нет**. Единственный путь к процедурным вокселям —
+inline ray query в compute с `rayQueryGenerateIntersection`, как в официальном
+примере `ray_aabb_compute`.
+
+**Refit acceleration structure не реализован.** В `wgpu-core` дословно:
+«build_acceleration_structures called with PreferUpdate, but only rebuild is
+implemented». В типах: `ALLOW_UPDATE` — «currently this is unimplemented and
+will build as normal».
+
+**Цифры по вокселям и аппаратному RT** (Ray Tracing Gems II, гл. 37, Lacewell,
+NVIDIA, RTX 3060 Ti, сцена 4.94 млн бриков):
+
+| Представление | Время | Память |
+|---|---|---|
+| Триангуляция | 2.75 мс | 3903 МБ |
+| AABB на воксель | **2.45 мс** | 262 МБ |
+| DDA внутри intersection, блоки 8³ | 4.29 мс | **12.76 МБ** |
+| Инстансированные треугольные брики | 2.34 мс | 1244 МБ |
+
+То есть AABB на большой сцене **обогнал** треугольники, а DDA-в-intersection
+выигрывает по памяти до 300×. Расхожее «intersection-шейдеры медленные» —
+из рекомендаций NVIDIA 2019 года и получено на трубках и гауссианах,
+примитивах с плохим прилеганием к AABB; воксель заполняет свой AABB идеально.
+
+Смежное: CrossRT (arXiv:2409.12617) — тот же алгоритм по воксельным
+структурам, compute-софт 8.6 мс против HW-RT 5.5 мс на RTX 4090, причём у
+HW время «почти не растёт с размером модели».
+
+**Двухуровневый инстансинг вместо refit** (GRay, PACMCGIT 9(1) 2026, со
+ссылкой на Wald 2020): один BLAS с единичным AABB, инстансированный N раз в
+TLAS с трансформами. Замер там же на RTX 4090: обновление AS для 3.97 млн
+примитивов — **11.4 мс для OBB против 125.7 мс для треугольных прокси**.
+AMD рекомендует «перестраивать TLAS каждый кадр на compute-очереди».
+
+**Новый движок автора Teardown** (итоги 2024): «сильно опирается на аппаратный
+рейтрейсинг (**используя intersection-шейдеры, по-прежнему без треугольников!**)»,
+формат — разреженные чанки 8×8×8 с 3D-битмапом. Сам Teardown 1 аппаратного RT
+не использует: OpenGL 3.3, растеризация OBB и марш луча внутри.
+
+**Mesh-шейдеры.** Приехали в wgpu 28.0.0 (17 декабря 2025): «now fully
+supported on Vulkan, and supported on Metal and DX12 with passthrough shaders.
+**WGSL parsing and rewriting is supported.**» Значит доступны и в wgpu 29, то
+есть на нашем пине: `create_mesh_pipeline`, `draw_mesh_tasks`,
+`multi_draw_mesh_tasks_indirect_count`. Фича `EXPERIMENTAL_MESH_SHADER`,
+директива `enable wgpu_mesh_shader;`, стадии `@task`/`@mesh`. В Bevy 0.20 —
+первоклассная поддержка (PR #25627, слит 6 сентября 2026), и черновик
+релиз-ноута сам называет применения: меши от meshoptimizer, процедурная трава,
+**воксели (со ссылкой на nvidium)**, частицы.
+
+Механическое преимущество перед compute-мешингом: примитивы идут прямо в
+растеризатор, минуя вершинный буфер, и можно передавать
+**непроинтерполированные данные на примитив**. Оговорка из спеки: сцены, не
+упирающиеся в геометрию, выигрыша не увидят.
+
+**Bevy 0.19: Render Graph as Systems (PR #22144).** Дословно из гайда миграции:
+«**The `RenderGraph` API has been removed.** Render passes are now systems that
+run in `Core3d` or `Core2d` schedules.» Кастомный проход теперь — система,
+берущая `RenderContext` и через него сырой `ctx.command_encoder()`; порядок
+задаётся наборами `Core3dSystems::{Prepass, MainPass, PostProcess}`.
+
+**Bevy 0.19: ECS.** `ExecutorKind` удалён, вместо него
+`schedule.set_executor(SingleThreadedExecutor::new())`, а `SystemExecutor` стал
+публичным трейтом. `contiguous_iter`/`contiguous_iter_mut` дают плотный срез
+таблицы: на 10 000 сущностей обычная итерация 5.58 мкс → contiguous 4.88 мкс →
+**contiguous + AVX2 1.87 мкс**. Ресурсы теперь компоненты на синглтон-сущностях.
+
+**Bevy 0.19: производительность.** `many_cubes`, 1.6 млн кубов, 116 000 в
+кадре, мобильная RTX 4090: **49.47 мс → 18.77 мс**. Пример `bevy_city`,
+55 000 сущностей: статика 19.3 → 11.8 мс, движущиеся 22.1 → 16.2 мс.
+GPU-кластеризация света — около 20×. Partial bindless на сцене Bistro с 698
+материалами: +46% на RTX 5060 Ti.
+
+**Bevy 0.20: WESL.** Дословно из гайда миграции на `main`: «Bevy's shaders are
+now written in WESL and **the naga_oil preprocessor is gone**… renamed from
+`.wgsl` to `.wesl`. **Plain WGSL files with no preprocessor directives keep
+working.** … **GLSL support has also been removed.**» Счёт файлов: v0.18.0 —
+2 `.wesl` / 179 `.wgsl`; v0.19.1 — 2 / 193; `main` — **211 / 0**.
+
+**Bevy 0.20: рандомизация порядка систем (PR #25094, слит 29 июля 2026).**
+Дословно: «**до сих пор правилом было, что это недетерминировано**»; расписания
+выбирают порядок «**детерминированно, но произвольно**»; «эту проблему бывает
+очень трудно обнаружить». Рекомендация — однопоточный executor. Прямое
+подтверждение ADR-009 первоисточником.
+
+**Объём ломающих изменений Bevy.** Записей в гайдах миграции: 0.16→0.17 — 117,
+0.17→0.18 — 64, 0.18→0.19 — 103; гайд 0.20 содержит 65 до релиза. Каденция:
+0.16 (2025-04-24) → 0.17 (2025-09-30, 159 дн.) → 0.18 (2026-01-13, 105 дн.) →
+0.19 (2026-06-19, 157 дн.), в среднем 140 дней.
+
+**bevyengine/bevy#17000, открыт 2024-12-27.** «Интерфейс `Mesh` работает с
+раздельными массивами атрибутов, в стиле SoA. Вершинным буферам GPU нужны
+упакованные вершины… вынуждает дорогую переупаковку.» Замер: сетка 128³,
+`allocate_and_free_meshes()` = **150.8 мс**, больше 40% в
+`write_packed_vertex_buffer_data()`.
+
+**wgpu v30, прочее полезное.** `Features::SHADER_I16` и `enable wgpu_int16;` —
+i16/u16 прямо в WGSL (Vulkan, Metal, DX12 SM 6.2+), полезно для упаковки
+воксельных данных. Отдельной фичи `MULTI_DRAW_INDIRECT` нет: вызов доступен
+всегда, но без `MULTI_DRAW_INDIRECT_COUNT` эмулируется серией `draw_indirect`.
+Ломающее при апгрейде: `dispatch` → `dispatch_workgroups`, `VertexState::buffers`
+стал `&[Option<VertexBufferLayout>]`, целочисленный shader I/O больше не
+подразумевает `@interpolate(flat)`.
+
+**rust-gpu — отклонён.** Репозиторий Embark архивирован 31 октября 2025, проект
+переехал в организацию `Rust-GPU`. Релизы `spirv-std`: 0.9.0 (25 июля 2023),
+затем **0.10.0-alpha.1 (17 апреля 2026)** — пауза 2 года 9 месяцев, и вышла
+альфа; README: «this project is not yet production-ready», нужен точный
+nightly. Мост `bevy-rust-gpu` мёртв с 4 ноября 2023 и требовал форк Bevy. В
+Bevy 0.19.1 `Source::SpirV(_) => panic!("spirv not yet implemented")`. Плюс
+открытый с 2021 года баг naga #4449 про тихую некорректную компиляцию SPIR-V.
+И главное для нас: `Fx` — это i64, а `Int64` вне возможностей WGSL/WebGPU.
+Замена: `wgsl_to_wgpu` 0.19.0 (генерирует Rust-структуры и bind group layout
+**из** WGSL), `encase` 0.12.1, `bytemuck` 1.25.2.
+
+**Fyrox отпадает технически, не по вкусу.** 1.0.0 — 24 марта 2026, но рендер
+на **OpenGL 3.3** (`fyrox-graphics-gl`, glow + glutin), а в GL 3.3 нет
+compute-шейдеров (нужен 4.3). FAQ автора про переход на wgpu: «legacy…
+transition to it nowadays is a challenging task». В `master` есть каталог
+`fyrox-graphics-wgpu` версии 2.0.0-rc.1 с `wgpu = "30.0.0"`, но на crates.io он
+не опубликован. Загрузок `fyrox` — 72 063 против 7 233 869 у `bevy`.
+
+**Прочие альтернативы мертвы или вне класса.** `rend3` архивирован
+(«MAINTENCE MODE», последний релиз 0.3.0 от февраля 2022); Ambient — «work on
+the Ambient runtime is paused indefinitely»; Blade (kvark) жив, но это
+абстракция GPU без DX12. Единственный подтверждённый уход с Bevy — Dead Money
+(апрель 2025), и причины там нерендерные: онбординг непрограммиста, скорость
+итерации геймплея, моддинг, локализация.
+
+**winit.** Стабильная 0.30.13 (2 марта 2026); 0.31 в бете с ноября 2025, около
+десяти месяцев, майлстоуна нет. Чейнджлог 0.31 — крупнейший в истории winit:
+`ActiveEventLoop` и `Window` становятся трейтами, `create_window` возвращает
+`Box<dyn Window>`, MSRV с 1.70 до 1.86.
+
+**Поправки к записанному ранее.** `bevy_northstar` — **0.7.0 (8 июля 2026),
+требует `bevy ^0.19`**, а не 0.18, как было записано. `bevy_brp_mcp` — 0.22.5
+(28 августа 2026), зависимость `bevy ^0.19.1`, репозиторий пушился 8 сентября
+2026. Для hot reload данных: фича `file_watcher` плюс `bevy_common_assets`
+0.17.0 (21 июня 2026, фича `ron`) — своего RON-лоадера в Bevy нет.
+
+**Пост Густафссона о мультиплеере Teardown (13 марта 2026).** «Я решил
+**переписать логику разрушения на целочисленной арифметике с фиксированной
+точкой**, что довольно прямолинейно, учитывая что мы имеем дело с дискретными
+воксельными объёмами.» И: «Я отбросил идею полного детерминизма для всего
+движка (**взгляд, который я с тех пор пересмотрел**).» Модель — гибрид:
+детерминированный поток команд на структурные изменения плюс state sync на
+трансформы, бюджет около 1 Мбит на клиента. Самая дорогая часть работы —
+обратная совместимость, а не сеть.
 
 ## Прочее
 
