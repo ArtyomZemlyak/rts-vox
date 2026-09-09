@@ -37,6 +37,8 @@ RTS в полностью разрушаемом воксельном мире �
 | [09-roadmap.md](docs/09-roadmap.md) | Этапы и критерии готовности |
 | [10-verified-facts.md](docs/10-verified-facts.md) | Проверенные факты, версии, источники |
 | [11-research-notes.md](docs/11-research-notes.md) | Смежный опыт: Teardown, Space Engineers, Sanctuary, Stonehearth — и что он меняет |
+| [12-engine-notes.md](docs/12-engine-notes.md) | Bevy вглубь: что даёт, чего не даёт, прецедент Tiny Glade, цикл итерации |
+| [13-optimization.md](docs/13-optimization.md) | Плейбук оптимизаций по слоям и порядок применения |
 
 Рабочие инварианты для агента — [CLAUDE.md](CLAUDE.md).
 
