@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Артефакты сборки и запуска
+/out/
+/dist/
+*.log
+
+# Скриншоты и дампы агентных прогонов
+/.agent-out/
+/screenshots/
+
+# Golden-файлы, помеченные как временные
+*.golden.tmp
+
+# ОС / редакторы
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Локальные настройки Claude Code
+.claude/settings.local.json
