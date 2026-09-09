@@ -9,6 +9,26 @@ RTS, где **всё состоит из вокселей материалов**
 требованию: **агент должен уметь проверить себя сам — без человека, без GPU,
 из терминала.** Всё остальное вторично.
 
+## Как это читать
+
+Документы делятся на два слоя, и путать их не надо.
+
+**Канон — `docs/*.md`.** Что система есть. Всё в изъявительном наклонении,
+без вариантов и без истории вопроса. По нему можно начинать писать код.
+Минимальный путь: `01` → `02` → `03` → `11`.
+
+**Анализ — `docs/analysis/*.md`.** Почему именно так: рассмотренные варианты,
+замеры, источники, отвергнутые пути, поправки к обоснованиям. Ненормативно.
+Читается по надобности, когда нужно понять цену решения или оспорить его.
+
+Нерешённое живёт **в тексте канона**, а не отдельным списком:
+
+```bash
+grep -rn '\[QUESTION' docs/
+```
+
+Формат пометки и что значат поля — [CLAUDE.md](CLAUDE.md).
+
 ## Ключевые решения
 
 | Ось | Решение |
@@ -31,30 +51,40 @@ RTS, где **всё состоит из вокселей материалов**
 | Моддинг | данные (RON) + Luau; API определён **на ядре**, не на движке |
 | Дистрибуция | open source, десктоп (Windows/Linux) |
 
-Основания — [docs/02-decisions.md](docs/02-decisions.md).
+Реестр решений — [docs/12-decisions.md](docs/12-decisions.md);
+обоснования — [docs/analysis/10-decisions-full.md](docs/analysis/10-decisions-full.md).
 
-## Документы
+## Канон
 
 | | |
 |---|---|
 | [01-concept.md](docs/01-concept.md) | Что за игра, скоуп, не-цели, риски |
-| [02-decisions.md](docs/02-decisions.md) | ADR: принятые решения и почему |
-| [03-architecture.md](docs/03-architecture.md) | Слои, крейты, контракты между ними |
-| [04-determinism.md](docs/04-determinism.md) | Правила детерминизма и как они проверяются |
-| [05-voxel-world.md](docs/05-voxel-world.md) | Воксельная модель мира, разрушаемость, путь рендера |
-| [06-simulation.md](docs/06-simulation.md) | Юниты, pathfinding, бюджеты производительности |
-| [07-worldgen.md](docs/07-worldgen.md) | Процедурная генерация и балансировка карт |
-| [08-modding.md](docs/08-modding.md) | Мод-контракт |
-| [09-roadmap.md](docs/09-roadmap.md) | Этапы и критерии готовности |
-| [10-verified-facts.md](docs/10-verified-facts.md) | Проверенные факты, версии, источники |
-| [11-research-notes.md](docs/11-research-notes.md) | Смежный опыт: Teardown, Space Engineers, Sanctuary, Stonehearth — и что он меняет |
-| [12-engine-notes.md](docs/12-engine-notes.md) | Bevy вглубь: что даёт, чего не даёт, прецедент Tiny Glade, цикл итерации |
-| [13-optimization.md](docs/13-optimization.md) | Плейбук оптимизаций по слоям и порядок применения |
-| [14-mining-and-terrain.md](docs/14-mining-and-terrain.md) | Копка как экономика: что меняет полностью разрушаемый мир |
-| [15-units-as-voxels.md](docs/15-units-as-voxels.md) | Юниты как воксельные тома с ядром, позиционный урон, реклейм |
-| [16-voxel-scale-and-shape.md](docs/16-voxel-scale-and-shape.md) | Динамический размер воксела и сложные формы: семь вариантов, что брать |
-| [17-economy-and-factions.md](docs/17-economy-and-factions.md) | Экономика материи и энергии, аннигиляция, асимметрия фракций, исследования |
-| [18-gpu-compute.md](docs/18-gpu-compute.md) | Вычисления на GPU: почему симуляция остаётся на CPU, и механика wgpu-compute |
+| [02-architecture.md](docs/02-architecture.md) | Слои, крейты, контракт, фазы тика |
+| [03-determinism.md](docs/03-determinism.md) | Правила детерминизма и как они проверяются |
+| [04-world.md](docs/04-world.md) | Воксельный мир, разрушаемость, очередь правок, путь рендера |
+| [05-units.md](docs/05-units.md) | Юниты как тома, бой, обломки, AI |
+| [06-navigation.md](docs/06-navigation.md) | Навигация по меняющемуся миру, видимость |
+| [07-economy.md](docs/07-economy.md) | Материя, энергия, стоки, конверсии, скоуп экономики |
+| [08-worldgen.md](docs/08-worldgen.md) | Процедурная генерация и балансировка карт |
+| [09-modding.md](docs/09-modding.md) | Мод-контракт, палитра, слияние данных |
+| [10-budgets.md](docs/10-budgets.md) | Все пороги производительности одним списком |
+| [11-roadmap.md](docs/11-roadmap.md) | Этапы, гейты, первая неделя |
+| [12-decisions.md](docs/12-decisions.md) | Реестр решений: по строке на ADR |
+
+## Анализ
+
+| | |
+|---|---|
+| [01-verified-facts.md](docs/analysis/01-verified-facts.md) | Проверенные факты, версии, цифры с источниками |
+| [02-research-notes.md](docs/analysis/02-research-notes.md) | Смежный опыт: что убило похожие проекты |
+| [03-engine.md](docs/analysis/03-engine.md) | Выбор движка: что Bevy даёт и чего не даёт |
+| [04-optimization.md](docs/analysis/04-optimization.md) | Оптимизации по порядку применения, с замерами |
+| [05-mining-and-terrain.md](docs/analysis/05-mining-and-terrain.md) | Следствия копки-как-экономики |
+| [06-units-as-voxels.md](docs/analysis/06-units-as-voxels.md) | Юниты из вокселей: что это даёт и чего стоит |
+| [07-voxel-scale-and-shape.md](docs/analysis/07-voxel-scale-and-shape.md) | Динамический размер воксела и сложные формы: семь вариантов |
+| [08-economy-and-factions.md](docs/analysis/08-economy-and-factions.md) | Экономика материи и энергии, асимметрия фракций |
+| [09-gpu-compute.md](docs/analysis/09-gpu-compute.md) | Вычисления на GPU: почему симуляция остаётся на CPU |
+| [10-decisions-full.md](docs/analysis/10-decisions-full.md) | ADR целиком: контекст, основание, цена, поправки |
 
 Рабочие инварианты для агента — [CLAUDE.md](CLAUDE.md).
 
@@ -62,8 +92,8 @@ RTS, где **всё состоит из вокселей материалов**
 
 Сочетание «Teardown-класс разрушаемость × 5000 юнитов × детерминированный
 lockstep» не реализовано ни в одной шипнутой игре. Teardown — камера вблизи,
-маленькая сцена, недетерминированная физика. Supreme Commander — 1000 юнитов,
-heightmap, без разрушаемости геометрии. Здесь всё это одновременно.
+маленькая сцена, недетерминированная физика. Supreme Commander — сотни юнитов
+на армию, heightmap, без разрушаемости геометрии. Здесь всё это одновременно.
 
 Это не значит «нельзя». Это значит, что готовых рецептов на стыке нет и каждый
 бюджет производительности надо мерить, а не брать из статей.
@@ -72,9 +102,9 @@ heightmap, без разрушаемости геометрии. Здесь вс
 RTS нашего масштаба, всерьёз рассматривавшая мелкую деформацию рельефа, от неё
 **сознательно отказалась** — воронки делают карту непроходимой. Направленная
 копка от этого спасает (она увеличивает связность), непреднамеренный шум от
-боя — нет (OQ-7). Второй: навигация в копаемом 3D-мире — то, на чём умирает
-жанр; Dwarf Fortress тому канонический пример (OQ-8).
+боя — нет (Q-7). Второй: навигация в копаемом 3D-мире — то, на чём умирает
+жанр; Dwarf Fortress тому канонический пример (Q-8).
 
 См. [docs/01-concept.md](docs/01-concept.md), раздел «Риски»,
-[docs/11-research-notes.md](docs/11-research-notes.md), раздел 1, и
-[docs/14-mining-and-terrain.md](docs/14-mining-and-terrain.md).
+[docs/analysis/02-research-notes.md](docs/analysis/02-research-notes.md), раздел 1,
+и [docs/analysis/05-mining-and-terrain.md](docs/analysis/05-mining-and-terrain.md).
