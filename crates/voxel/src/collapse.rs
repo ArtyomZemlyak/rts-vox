@@ -44,6 +44,22 @@ const MAX_ROUNDS: usize = 8;
 /// же правка разметила бы карту целиком.
 const DEFAULT_PROMOTE_PER_TICK: usize = 64;
 
+/// Сколько чанков за тик разрешено переразметить.
+///
+/// Разметка компонент — основная цена каскада: 14.15 мкс на изрытый
+/// чанк 32³, и копка пачкает их шестьдесят пять за тик (ADR-127).
+/// Потолок здесь такой же, как у всего прочего в проекте, и с той же
+/// оговоркой: чанк, до которого не дошли, считается **заземляющим**,
+/// то есть ответ каскада — оценка сверху. Лишнего не упадёт; настоящий
+/// отвал сдвигается.
+///
+/// **Значение выбрано так, чтобы потолок не срабатывал** под нагрузкой
+/// D-1 (ADR-128). Потолок, упирающийся каждый тик, — не предохранитель,
+/// а постоянное ухудшение (ADR-116), и здесь это видно буквально:
+/// при шестнадцати отвалов не происходит вовсе. Признак — счётчик
+/// `relabel_pending`: пока он не ноль, ответ каскада приблизителен.
+const DEFAULT_RELABEL_PER_TICK: usize = 64;
+
 /// Шесть граней чанка: -x, +x, -y, +y, -z, +z.
 const FACES: usize = 6;
 
@@ -87,6 +103,8 @@ pub struct CollapseStats {
     /// Чанков ждёт втягивания. Пока фронтир не пуст, ответ каскада —
     /// оценка сверху: часть кусков ещё держится за неразмеченное.
     pub frontier: usize,
+    /// Чанков ждёт переразметки. То же: оценка сверху, отвал сдвигается.
+    pub relabel_pending: usize,
     /// Чанков размечено заново.
     pub relabelled: usize,
     /// Граней пересчитано.
@@ -161,6 +179,14 @@ pub struct CollapseLayer {
     frontier: Vec<u32>,
     /// Потолок втягивания за тик.
     pub max_promote_per_tick: usize,
+    /// Потолок переразметок за тик.
+    pub max_relabel_per_tick: usize,
+    /// Чанки, чья разметка отстала от их битовой карты, по возрастанию
+    /// индекса: порядок обхода обязан быть от карты, а не от того,
+    /// куда игрок кликнул раньше.
+    pending: Vec<u32>,
+    /// Отстала ли разметка чанка.
+    stale: Vec<bool>,
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
     /// Прежние отрезки — для сравнения при переразметке.
@@ -199,6 +225,9 @@ impl CollapseLayer {
             gathered: 0,
             frontier: Vec::new(),
             max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
+            max_relabel_per_tick: DEFAULT_RELABEL_PER_TICK,
+            pending: Vec::new(),
+            stale: vec![false; n],
             cells: Vec::new(),
         }
     }
@@ -290,13 +319,33 @@ impl CollapseLayer {
             let fresh = self.chunks[i].is_none();
             if fresh {
                 self.chunks[i] = Some(Self::build(w, cx, cy, cz));
-            } else {
-                let c = self.chunks[i].as_mut().expect("chunk checked");
-                for &(lx, ly, lz, solid) in &self.local[i] {
-                    c.set(lx as usize, ly as usize, lz as usize, solid);
-                }
+                // Свежий чанк размечается сразу: у него ещё нет узлов,
+                // а отложить нечего — граф о нём не знает вовсе.
+                self.relabel(i);
+                self.mark_faces(i);
+                continue;
             }
-            if self.relabel(i) || fresh {
+            // Битовая карта обновляется всегда — это O(правок).
+            // Дорогая переразметка ставится в очередь.
+            let c = self.chunks[i].as_mut().expect("chunk checked");
+            for &(lx, ly, lz, solid) in &self.local[i] {
+                c.set(lx as usize, ly as usize, lz as usize, solid);
+            }
+            if !self.stale[i] {
+                self.stale[i] = true;
+                self.pending.push(i as u32);
+            }
+        }
+        // Переразметка по потолку. Порядок — по возрастанию индекса
+        // чанка, поэтому от порядка правок он не зависит.
+        self.pending.sort_unstable();
+        let take = self.max_relabel_per_tick.min(self.pending.len());
+        let batch: Vec<u32> = self.pending.drain(..take).collect();
+        st.relabel_pending = self.pending.len();
+        for &ci in &batch {
+            let i = ci as usize;
+            self.stale[i] = false;
+            if self.relabel(i) {
                 self.mark_faces(i);
             }
         }
@@ -582,6 +631,18 @@ impl CollapseLayer {
             let base = self.base[i];
             let nd = self.nodes[i].as_ref().expect("known");
             edges += nd.edges.iter().map(|e| e.len()).sum::<usize>();
+            // Чанк с отставшей разметкой заземляет **всё своё**: его
+            // компоненты посчитаны по старой карте, и решать по ним,
+            // что́ отвалилось, нельзя. Оценка сверху.
+            if self.stale[i] {
+                for l in 0..nd.n {
+                    let id = base + l as u32;
+                    if !self.reached[id as usize] {
+                        self.reached[id as usize] = true;
+                        self.queue.push(id);
+                    }
+                }
+            }
             for (l, &bed) in nd.bedrock.iter().enumerate() {
                 if bed {
                     let id = base + l as u32;
@@ -793,6 +854,10 @@ impl CollapseLayer {
         let i = self.index(cx, cy, cz);
         self.chunks[i] = None;
         self.nodes[i] = None;
+        if self.stale[i] {
+            self.stale[i] = false;
+            self.pending.retain(|&x| x as usize != i);
+        }
     }
 
     /// Память графа компонент — она растёт с числом тронутых чанков

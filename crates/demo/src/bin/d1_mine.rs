@@ -43,6 +43,8 @@ struct Args {
     side: u32,
     dump_hash: bool,
     verify_seams: bool,
+    /// Потолок переразметок чанка за тик (ADR-128).
+    relabel_cap: usize,
 }
 
 impl Default for Args {
@@ -53,7 +55,7 @@ impl Default for Args {
             diggers: 300,
             clusters: 8,
             side: 256,
-            dump_hash: false,
+            dump_hash: false, relabel_cap: 64,
             verify_seams: true,
         }
     }
@@ -76,6 +78,7 @@ fn parse() -> Result<Args, String> {
             "--clusters" => a.clusters = num("--clusters")? as usize,
             "--side" => a.side = num("--side")? as u32,
             "--dump-hash" => a.dump_hash = true,
+            "--relabel-cap" => a.relabel_cap = num("--relabel-cap")? as usize,
             "--no-verify" => a.verify_seams = false,
             "--help" | "-h" => {
                 println!(
@@ -136,7 +139,9 @@ fn main() -> ExitCode {
     // воксела (2 м при вокселе 0.5 м), нав-клетка два воксела
     // по стороне (ADR-078).
     let mut sim = SimWorld::new(1, 1);
-    sim.attach_ground(Ground::new(world, 64, 4, 2));
+    let mut g = Ground::new(world, 64, 4, 2);
+    g.collapse.max_relabel_per_tick = a.relabel_cap;
+    sim.attach_ground(g);
 
     let mut hash = RunHash::new();
     let mut ms_mesh = 0.0f64;
@@ -255,6 +260,7 @@ fn main() -> ExitCode {
         println!("{:<28} {:>14}", "  не влезло в тело", c.too_big);
         println!("{:<28} {:>14}", "  чанков втянуто", c.promoted);
         println!("{:<28} {:>14}", "  ждёт втягивания", c.frontier);
+        println!("{:<28} {:>14}", "  ждёт переразметки", c.relabel_pending);
         println!("{:<28} {:>14.2}", "  раундов", cas_rounds as f64 / n);
         println!("{:<28} {:>14.2}", "  мкс на разметку", 1000.0 * ph(Phase::Destruction) / cas_relabel.max(1) as f64);
     }
