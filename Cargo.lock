@@ -7,6 +7,15 @@ name = "fx"
 version = "0.1.0"
 
 [[package]]
+name = "harness"
+version = "0.1.0"
+dependencies = [
+ "fx",
+ "mesh",
+ "topo",
+]
+
+[[package]]
 name = "mesh"
 version = "0.1.0"
 dependencies = [
