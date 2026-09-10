@@ -107,13 +107,15 @@ fn parse() -> Result<Args, String> {
 ///    вдоль стены и убивает прокопанный коридор; мягкий («достижима,
 ///    если хоть к одному соседу перепад мал») оставляет проходимой
 ///    вершину отвесной гряды, потому что её соседи — та же вершина.
-/// 3. **Достижимость решается заливкой от старта**, а не локально.
-///    Вершина гряды сама по себе проходима; недостижима она потому,
-///    что ни одно ребро не ведёт к ней с земли.
+/// 3. **Достижимость решается графом, а не клеткой.** Вершина гряды
+///    сама по себе проходима; недостижима она потому, что ни одно
+///    ребро не ведёт к ней с земли. Высота пола и посильный перепад
+///    отдаются `nav::Grid`, и рёбер через уступ там не возникает
+///    (ADR-121). Раньше сцена обходила это заливкой снаружи.
 ///
 /// Это ещё не объёмная навигация (ADR-039): в колонке берётся **один**
 /// уровень, нижний. Настоящая держала бы их несколько.
-fn passability(w: &World, height: u32, max_step: u32, start: (u32, u32)) -> (Grid, Vec<u32>) {
+fn passability(w: &World, height: u32, max_step: u32) -> (Grid, Vec<u32>) {
     let step = 2u32;
     let (nw, nh) = ((w.nx / step) as usize, (w.nz / step) as usize);
     let mut floor = vec![u32::MAX; nw * nh];
@@ -146,40 +148,20 @@ fn passability(w: &World, height: u32, max_step: u32, start: (u32, u32)) -> (Gri
         }
     }
 
-    // Заливка от стартовой клетки по рёбрам, которые юнит может пройти.
-    // Порядок обхода на результат не влияет: достижимость — множество,
-    // а не последовательность.
-    let s0 = (start.1 as usize / step as usize) * nw + start.0 as usize / step as usize;
-    let mut seen = vec![false; nw * nh];
-    let mut queue = Vec::with_capacity(nw * nh);
-    if floor[s0] != u32::MAX {
-        seen[s0] = true;
-        queue.push(s0 as u32);
-    }
-    let mut head = 0;
-    while head < queue.len() {
-        let i = queue[head] as usize;
-        head += 1;
-        let (cx, cz) = (i % nw, i / nw);
-        let f = floor[i];
-        for (ax, az) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
-            let (nx, nz) = (cx as i64 + ax, cz as i64 + az);
-            if nx < 0 || nz < 0 || nx >= nw as i64 || nz >= nh as i64 {
-                continue;
-            }
-            let j = nz as usize * nw + nx as usize;
-            if seen[j] || floor[j] == u32::MAX || f.abs_diff(floor[j]) > max_step {
-                continue;
-            }
-            seen[j] = true;
-            queue.push(j as u32);
-        }
-    }
-
+    // Высота и перепад отдаются графу порталов: **перепад — свойство
+    // ребра** (ADR-121). Заливка снаружи здесь была, пока движок про
+    // высоту не знал; теперь она не нужна, и это заодно проверка,
+    // что не нужна.
     let mut g = Grid::new(nw, nh, 1 as Cost);
-    for (i, &reached) in seen.iter().enumerate() {
+    g.max_step = max_step as u16;
+    for i in 0..nw * nh {
         let idx = g.idx(i % nw + 1, i / nw + 1);
-        g.cost[idx] = if reached { 1 } else { BLOCKED };
+        if floor[i] == u32::MAX {
+            g.cost[idx] = BLOCKED;
+        } else {
+            g.cost[idx] = 1;
+            g.floor[idx] = floor[i].min(u16::MAX as u32 - 1) as u16;
+        }
     }
     (g, floor)
 }
@@ -228,7 +210,7 @@ fn main() -> ExitCode {
     // --- 2. Проходимость: обойти нельзя, гряда от края до края.
     let t0 = Instant::now();
     // Рост четыре воксела (2 м), подъём не больше двух (1 м).
-    let (g0, _) = passability(&w, 4, 2, (shooter.0 as u32, shooter.2 as u32));
+    let (g0, _) = passability(&w, 4, 2);
     let (pg0, st0) = PortalGraph::build(&g0);
     let build0_ms = t0.elapsed().as_secs_f64() * 1e3;
     let mut ws = RouteWs::new(pg0.portals.len().max(1));
@@ -270,7 +252,7 @@ fn main() -> ExitCode {
     let los2 = line_of_sight(&w, shooter, target);
 
     let t1 = Instant::now();
-    let (g1, _) = passability(&w, 4, 2, (shooter.0 as u32, shooter.2 as u32));
+    let (g1, _) = passability(&w, 4, 2);
     let (pg1, st1) = PortalGraph::build(&g1);
     let build1_ms = t1.elapsed().as_secs_f64() * 1e3;
     let mut ws1 = RouteWs::new(pg1.portals.len().max(1));
@@ -346,9 +328,12 @@ fn main() -> ExitCode {
         ok = false;
     }
 
-    let verdict = if build1_ms <= BUDGET_MS { "держится" } else { "ПРЕВЫШЕН" };
-    println!("порог {BUDGET_MS} мс на перестройку графа: {build1_ms:.3} мс — {verdict}");
-    if build1_ms > BUDGET_MS {
+    // Порог берётся по ХУДШЕЙ из двух сборок: на нетронутой карте
+    // граф не дешевле, а проверять надо обе.
+    let worst_build = build0_ms.max(build1_ms);
+    let verdict = if worst_build <= BUDGET_MS { "держится" } else { "ПРЕВЫШЕН" };
+    println!("порог {BUDGET_MS} мс на перестройку графа: {worst_build:.3} мс — {verdict}");
+    if worst_build > BUDGET_MS {
         ok = false;
     }
 

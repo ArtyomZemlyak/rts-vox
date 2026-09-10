@@ -61,11 +61,6 @@ pub struct BuildStats {
     pub sector_solves: usize,
 }
 
-#[inline]
-fn passable(g: &Grid, i: usize) -> bool {
-    g.cost[i] != BLOCKED
-}
-
 impl PortalGraph {
     pub fn build(g: &Grid) -> (PortalGraph, BuildStats) {
         let (w, h) = (g.w, g.h);
@@ -90,21 +85,34 @@ impl PortalGraph {
                 let y1 = (y0 + SEC).min(h - 1);
                 let mut run_start: Option<usize> = None;
                 for y in y0..=y1 {
-                    let open = y < y1 && passable(g, y * w + x) && passable(g, y * w + x + 1);
-                    match (open, run_start) {
-                        (true, None) => run_start = Some(y),
-                        (false, Some(s)) => {
-                            let mid = (s + y - 1) / 2;
-                            portals.push(Portal {
-                                cell_a: (mid * w + x) as u32,
-                                cell_b: (mid * w + x + 1) as u32,
-                                sector_a: sec_of(x, mid),
-                                sector_b: sec_of(x + 1, mid),
-                                width: (y - s) as u16,
-                            });
-                            run_start = None;
-                        }
-                        _ => {}
+                    // Портал — не «обе клетки проходимы», а «между ними
+                    // есть переход»: непосильный перепад ребра не даёт
+                    // (ADR-121).
+                    let open = y < y1 && g.linked(y * w + x, y * w + x + 1);
+                    // Непрерывность отрезка считается по **обеим** осям:
+                    // через шов и вдоль него. Иначе прокопанный у земли
+                    // коридор и гребень над ним склеиваются в один отрезок
+                    // — пары через шов связаны обе, — и представителем
+                    // оказывается середина, то есть гребень, до которого
+                    // с земли не дойти.
+                    let joins = open
+                        && run_start.is_some()
+                        && g.linked((y - 1) * w + x, y * w + x)
+                        && g.linked((y - 1) * w + x + 1, y * w + x + 1);
+                    let close = run_start.is_some() && (!open || !joins);
+                    if close {
+                        let s = run_start.take().expect("проверено");
+                        let mid = (s + y - 1) / 2;
+                        portals.push(Portal {
+                            cell_a: (mid * w + x) as u32,
+                            cell_b: (mid * w + x + 1) as u32,
+                            sector_a: sec_of(x, mid),
+                            sector_b: sec_of(x + 1, mid),
+                            width: (y - s) as u16,
+                        });
+                    }
+                    if open && run_start.is_none() {
+                        run_start = Some(y);
                     }
                 }
             }
@@ -120,21 +128,25 @@ impl PortalGraph {
                 let x1 = (x0 + SEC).min(w - 1);
                 let mut run_start: Option<usize> = None;
                 for x in x0..=x1 {
-                    let open = x < x1 && passable(g, y * w + x) && passable(g, (y + 1) * w + x);
-                    match (open, run_start) {
-                        (true, None) => run_start = Some(x),
-                        (false, Some(s)) => {
-                            let mid = (s + x - 1) / 2;
-                            portals.push(Portal {
-                                cell_a: (mid + y * w) as u32,
-                                cell_b: (mid + (y + 1) * w) as u32,
-                                sector_a: sec_of(mid, y),
-                                sector_b: sec_of(mid, y + 1),
-                                width: (x - s) as u16,
-                            });
-                            run_start = None;
-                        }
-                        _ => {}
+                    let open = x < x1 && g.linked(y * w + x, (y + 1) * w + x);
+                    let joins = open
+                        && run_start.is_some()
+                        && g.linked(y * w + x - 1, y * w + x)
+                        && g.linked((y + 1) * w + x - 1, (y + 1) * w + x);
+                    let close = run_start.is_some() && (!open || !joins);
+                    if close {
+                        let s = run_start.take().expect("проверено");
+                        let mid = (s + x - 1) / 2;
+                        portals.push(Portal {
+                            cell_a: (mid + y * w) as u32,
+                            cell_b: (mid + (y + 1) * w) as u32,
+                            sector_a: sec_of(mid, y),
+                            sector_b: sec_of(mid, y + 1),
+                            width: (x - s) as u16,
+                        });
+                    }
+                    if open && run_start.is_none() {
+                        run_start = Some(x);
                     }
                 }
             }
@@ -263,6 +275,11 @@ fn dijkstra_in_box(
             let ni = ny * w + nx;
             let c = g.cost[ni];
             if c == BLOCKED {
+                continue;
+            }
+            // Тот же перепад и внутри сектора: иначе маршрут по графу
+            // нашёлся бы, а идти по нему было бы некуда.
+            if !g.linked(i, ni) {
                 continue;
             }
             let nd = d + c as u32;
@@ -449,5 +466,91 @@ mod tests {
             assert_eq!(x.cost, y.cost);
             assert_eq!(x.hops, y.hops);
         }
+    }
+}
+
+#[cfg(test)]
+mod height_tests {
+    use super::*;
+    use crate::godunov::BLOCKED;
+    use crate::scene::Grid;
+
+    /// Плато на востоке поднято на `rise`, плоское поле на западе.
+    /// Ни одной непроходимой клетки — разница только в высоте пола.
+    fn two_plateaus(n: usize, rise: u16, ramp: bool) -> Grid {
+        let mut g = Grid::new(n, n, 1);
+        g.max_step = 1;
+        let mid = n / 2;
+        for y in 1..g.h - 1 {
+            for x in 1..g.w - 1 {
+                let i = y * g.w + x;
+                g.floor[i] = if x > mid { rise } else { 0 };
+                // Пандус: одна полоса, по которой высота растёт по шагу.
+                if ramp && y == g.h / 2 && x > mid {
+                    g.floor[i] = ((x - mid) as u16).min(rise);
+                }
+            }
+        }
+        g
+    }
+
+    /// **Отвесный уступ не даёт портала.** До ADR-121 граф строился
+    /// по «клетка проходима с обеих сторон» и о высоте не знал:
+    /// маршрут прокладывался прямо через стену (Q-68).
+    #[test]
+    fn a_cliff_gives_no_portal_and_no_route() {
+        let g = two_plateaus(64, 8, false);
+        let (graph, st) = PortalGraph::build(&g);
+        assert!(st.portals > 0, "порталов нет вовсе — сцена не та");
+        // Ни один портал не пересекает уступ.
+        for p in &graph.portals {
+            let (ax, bx) = (p.cell_a as usize % g.w, p.cell_b as usize % g.w);
+            let (fa, fb) = (g.floor[p.cell_a as usize], g.floor[p.cell_b as usize]);
+            assert!(
+                fa.abs_diff(fb) <= g.max_step,
+                "портал через уступ: x {ax}->{bx}, высота {fa}->{fb}"
+            );
+        }
+        // И маршрута с запада на восток нет.
+        let mut ws = RouteWs::new(graph.portals.len());
+        let start = (g.h / 2) * g.w + 2;
+        let goal = (g.h / 2) * g.w + (g.w - 3);
+        let r = route(&graph, &g, &mut ws, start, goal);
+        assert!(!r.found, "маршрут нашёлся сквозь отвесный уступ");
+    }
+
+    /// **Пандус даёт проход.** Та же геометрия, но с полосой, по которой
+    /// высота растёт посильным шагом.
+    #[test]
+    fn a_ramp_opens_the_route() {
+        let g = two_plateaus(64, 8, true);
+        let graph = PortalGraph::build(&g).0;
+        let mut ws = RouteWs::new(graph.portals.len());
+        let start = (g.h / 2) * g.w + 2;
+        let goal = (g.h / 2) * g.w + (g.w - 3);
+        let r = route(&graph, &g, &mut ws, start, goal);
+        assert!(r.found, "по пандусу пройти не удалось");
+    }
+
+    /// Сетка без заданной высоты обязана вести себя ровно как раньше:
+    /// `max_step` по умолчанию не ограничивает ничего.
+    #[test]
+    fn a_grid_without_heights_is_unchanged() {
+        let mut g = Grid::new(64, 64, 1);
+        // Стена посередине с проходом — обычная сцена.
+        for y in 1..g.h - 1 {
+            let i = y * g.w + 32;
+            if y != g.h / 2 {
+                g.cost[i] = BLOCKED;
+            }
+        }
+        let flat = PortalGraph::build(&g).0;
+        let mut g2 = g.clone();
+        // Высота есть, но перепад не ограничен.
+        for v in g2.floor.iter_mut() {
+            *v = 100;
+        }
+        let hilly = PortalGraph::build(&g2).0;
+        assert_eq!(flat.portals.len(), hilly.portals.len());
     }
 }
