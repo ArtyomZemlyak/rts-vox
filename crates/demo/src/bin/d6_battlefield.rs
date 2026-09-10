@@ -154,13 +154,13 @@ fn passability(w: &World, height: u32, max_step: u32) -> (Grid, Vec<u32>) {
     // что не нужна.
     let mut g = Grid::new(nw, nh, 1 as Cost);
     g.max_step = max_step as u16;
-    for i in 0..nw * nh {
+    for (i, &f) in floor.iter().enumerate() {
         let idx = g.idx(i % nw + 1, i / nw + 1);
-        if floor[i] == u32::MAX {
+        if f == u32::MAX {
             g.cost[idx] = BLOCKED;
         } else {
             g.cost[idx] = 1;
-            g.floor[idx] = floor[i].min(u16::MAX as u32 - 1) as u16;
+            g.floor[idx] = f.min(u16::MAX as u32 - 1) as u16;
         }
     }
     (g, floor)
