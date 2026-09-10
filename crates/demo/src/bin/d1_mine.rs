@@ -133,7 +133,7 @@ fn main() -> ExitCode {
     let (mut nav_flips, mut nav_seen) = (0u64, 0u64);
 
     for tick in 1..=a.ticks {
-        dig.step(&mut world);
+        dig.step(&mut world, &|x, z| terrain.surface(x, z));
         let st = world.flush();
         edits_total += st.applied as u64;
         queued_peak = queued_peak.max(st.queued);

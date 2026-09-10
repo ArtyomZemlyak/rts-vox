@@ -35,6 +35,9 @@ pub struct MeshLayer {
     epoch: u32,
     /// Правки, сгруппированные по чанку, в локальных координатах.
     local: Vec<Vec<(u8, u8, u8)>>,
+    /// Сколько раз чанк собирался с нуля. Первое касание чанка стоит
+    /// полной пересборки, и на старте это даёт пик — см. D-7.
+    pub full_rebuilds: u64,
 }
 
 impl MeshLayer {
@@ -55,6 +58,7 @@ impl MeshLayer {
             stamp: vec![u32::MAX; n],
             epoch: 0,
             local: (0..n).map(|_| Vec::new()).collect(),
+            full_rebuilds: 0,
         }
     }
 
@@ -168,6 +172,7 @@ impl MeshLayer {
                 let mut mesher = IncMesher::new();
                 mesher.rebuild_all(&bits, self.opts);
                 self.chunks[i] = Some(Box::new(MeshChunk { bits, mesher }));
+                self.full_rebuilds += 1;
                 continue;
             }
             let c = self.chunks[i].as_mut().expect("чанк только что проверен");

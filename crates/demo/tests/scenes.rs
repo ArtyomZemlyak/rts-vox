@@ -39,7 +39,7 @@ fn run_mine(seed: u64, ticks: u64, diggers: usize, side: u32, verify: bool) -> R
     let mut hash = RunHash::new();
     let mut edits = 0u64;
     for tick in 1..=ticks {
-        dig.step(&mut world);
+        dig.step(&mut world, &|x, z| terrain.surface(x, z));
         let st = world.flush();
         edits += st.applied as u64;
         hash.feed_edits(tick, world.edits());
@@ -100,7 +100,7 @@ fn d1_actually_digs() {
     let before = solid_count(&world);
     let mut dig = Dig::clustered(&world, |x, z| terrain.surface(x, z), 40, 2, 2, 11);
     for _ in 0..60 {
-        dig.step(&mut world);
+        dig.step(&mut world, &|x, z| terrain.surface(x, z));
         world.flush();
     }
     let after = solid_count(&world);

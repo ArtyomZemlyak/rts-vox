@@ -147,20 +147,155 @@ pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
 }
 
 /// Материал воксела. Чистая функция: ни состояния, ни порядка.
-pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
-    if x >= p.nx || y >= p.ny || z >= p.nz {
-        return mat::AIR;
+/// Трёхмерный шум **вдоль колонки**: `x` и `z` зафиксированы, меняется
+/// только `y`.
+///
+/// Смысл в кэше. Билинейная часть — четыре угла решётки в плоскости
+/// `xz` — зависит от `y` только через номер ячейки `gy`, а тот меняется
+/// раз в `period` вокселей. Наивный вызов пересчитывает восемь хешей
+/// на каждый воксель; здесь их восемь на каждые 11–20 вокселей
+/// (ADR-114). Значение при этом **то же самое до бита**: это кэш, а не
+/// приближение, и на этом стоит `column_matches_per_voxel_material`.
+struct Sampler {
+    seed: u64,
+    pu: u64,
+    gx: i64,
+    gz: i64,
+    fx: u64,
+    fz: u64,
+    /// Ячейка решётки по `y`, для которой посчитаны `a0..b1`.
+    /// `i64::MIN` — кэш пуст.
+    gy: i64,
+    a0: u64,
+    a1: u64,
+    b0: u64,
+    b1: u64,
+}
+
+impl Sampler {
+    fn new(seed: u64, x: u32, z: u32, period: u32) -> Sampler {
+        let p = period.max(1) as i64;
+        Sampler {
+            seed,
+            pu: p as u64,
+            gx: x as i64 / p,
+            gz: z as i64 / p,
+            fx: (x as i64 % p) as u64,
+            fz: (z as i64 % p) as u64,
+            gy: i64::MIN,
+            a0: 0,
+            a1: 0,
+            b0: 0,
+            b1: 0,
+        }
     }
+
+    #[cold]
+    fn reload(&mut self, gy: i64) {
+        let (pu, fx) = (self.pu, self.fx);
+        let n = |dx: i64, dy: i64, dz: i64| -> u64 {
+            (hash3(self.seed, self.gx + dx, gy + dy, self.gz + dz) >> 32) & 0xFFFF
+        };
+        let lerp = |a: u64, b: u64| a * (pu - fx) + b * fx;
+        self.a0 = lerp(n(0, 0, 0), n(1, 0, 0)) / pu;
+        self.a1 = lerp(n(0, 1, 0), n(1, 1, 0)) / pu;
+        self.b0 = lerp(n(0, 0, 1), n(1, 0, 1)) / pu;
+        self.b1 = lerp(n(0, 1, 1), n(1, 1, 1)) / pu;
+        self.gy = gy;
+    }
+
+    #[inline]
+    fn at(&mut self, y: u32) -> u32 {
+        let p = self.pu as i64;
+        let gy = y as i64 / p;
+        let fy = (y as i64 % p) as u64;
+        if gy != self.gy {
+            self.reload(gy);
+        }
+        let (pu, fz) = (self.pu, self.fz);
+        let y0 = (self.a0 * (pu - fy) + self.a1 * fy) / pu;
+        let y1 = (self.b0 * (pu - fy) + self.b1 * fy) / pu;
+        ((y0 * (pu - fz) + y1 * fz) / pu) as u32
+    }
+}
+
+/// Три поля шума, которые нужны правилу залегания.
+///
+/// Трейт существует ровно затем, чтобы правило жило в **одном**
+/// экземпляре и всё же имело быстрый путь: повоксельный вызов и обход
+/// колонки отличаются только тем, откуда берутся эти три числа.
+trait Noise3 {
+    fn cave(&mut self, y: u32) -> u32;
+    fn iron(&mut self, y: u32) -> u32;
+    fn copper(&mut self, y: u32) -> u32;
+}
+
+/// Повоксельный источник: ничего не помнит, считает всё заново.
+struct Direct {
+    seed: u64,
+    x: u32,
+    z: u32,
+}
+
+impl Noise3 for Direct {
+    fn cave(&mut self, y: u32) -> u32 {
+        value_noise3(self.seed ^ 0xCAFE, self.x, y, self.z, 20)
+    }
+    fn iron(&mut self, y: u32) -> u32 {
+        value_noise3(self.seed ^ 0x1401, self.x, y, self.z, 14) * 255 / 65536
+    }
+    fn copper(&mut self, y: u32) -> u32 {
+        value_noise3(self.seed ^ 0x2402, self.x, y, self.z, 11) * 255 / 65536
+    }
+}
+
+/// Колоночный источник: три кэша, по одному на поле.
+struct Column {
+    cave: Sampler,
+    iron: Sampler,
+    copper: Sampler,
+}
+
+impl Column {
+    fn new(seed: u64, x: u32, z: u32) -> Column {
+        Column {
+            cave: Sampler::new(seed ^ 0xCAFE, x, z, 20),
+            iron: Sampler::new(seed ^ 0x1401, x, z, 14),
+            copper: Sampler::new(seed ^ 0x2402, x, z, 11),
+        }
+    }
+}
+
+impl Noise3 for Column {
+    fn cave(&mut self, y: u32) -> u32 {
+        self.cave.at(y)
+    }
+    fn iron(&mut self, y: u32) -> u32 {
+        self.iron.at(y) * 255 / 65536
+    }
+    fn copper(&mut self, y: u32) -> u32 {
+        self.copper.at(y) * 255 / 65536
+    }
+}
+
+/// Материал одного вокселя при **уже известной** высоте поверхности
+/// и при уже выбранном источнике шума.
+///
+/// Отдельно от `material`, потому что `surface_height` — свойство колонки,
+/// а не вокселя, и в обходе целого чанка её незачем считать 32 768 раз
+/// вместо 1 024. Обобщено по `Noise3`, потому что правило залегания
+/// обязано существовать в одном экземпляре: две копии разойдутся молча,
+/// а расхождение генератора — это расхождение всех сохранений.
+fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32) -> Mat {
     if y < p.lava_depth {
         return mat::LAVA;
     }
-    let h = surface_height(p, seed, x, z);
     if y >= h {
         return mat::AIR;
     }
     // Пещеры: пустоты в породе. Не у самой поверхности, иначе рельеф
     // превращается в решето и греди-мешинг перестаёт сливать.
-    if y + 12 < h && value_noise3(seed ^ 0xCAFE, x, y, z, 20) > 46000 {
+    if y + 12 < h && n.cave(y) > 46000 {
         return mat::AIR;
     }
     if y + p.soil >= h {
@@ -170,8 +305,8 @@ pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
     // Жилы. Порог по трёхмерному шуму — так руда лежит связными телами,
     // а не рассыпается по вокселю.
     let depth_frac = ((h - y) * 100 / h.max(1)).min(100);
-    let vein_iron = value_noise3(seed ^ 0x1401, x, y, z, 14) * 255 / 65536;
-    let vein_copper = value_noise3(seed ^ 0x2402, x, y, z, 11) * 255 / 65536;
+    let vein_iron = n.iron(y);
+    let vein_copper = n.copper(y);
     // Богатство растёт с глубиной (ADR-100): три материала, а не
     // модификатор одного.
     let grade = |v: u32, poor: Mat, mid: Mat, rich: Mat| -> Option<Mat> {
@@ -196,6 +331,33 @@ pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
         mat::DEEP_ROCK
     } else {
         mat::ROCK
+    }
+}
+
+pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
+    if x >= p.nx || y >= p.ny || z >= p.nz {
+        return mat::AIR;
+    }
+    let mut n = Direct { seed, x, z };
+    at_depth(p, &mut n, y, surface_height(p, seed, x, z))
+}
+
+/// Отрезок колонки `[y0, y0 + out.len())` разом.
+///
+/// Это единственный вход, которым генератор пользуется в горячем пути:
+/// первое касание чанка стоило 2.1 мс на 32³ ровно потому, что и высота
+/// поверхности, и узлы решётки трёхмерного шума пересчитывались на
+/// каждый воксель (ADR-114).
+pub fn column(p: &Params, seed: u64, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+    if x >= p.nx || z >= p.nz {
+        out.fill(mat::AIR);
+        return;
+    }
+    let h = surface_height(p, seed, x, z);
+    let mut n = Column::new(seed, x, z);
+    for (i, o) in out.iter_mut().enumerate() {
+        let y = y0 + i as u32;
+        *o = if y >= p.ny { mat::AIR } else { at_depth(p, &mut n, y, h) };
     }
 }
 
@@ -309,5 +471,29 @@ mod tests {
         }
         assert!(rich_deep > 0, "богатой руды нет на глубине");
         assert_eq!(rich_shallow, 0, "богатая руда встретилась у поверхности");
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    /// Быстрый вход не имеет права отличаться от медленного ни в одном
+    /// вокселе: на этом стоит и `world_hash`, и все golden-хеши сцен.
+    #[test]
+    fn column_matches_per_voxel_material() {
+        let p = Params { nx: 96, ny: 96, nz: 96, ..Params::default() };
+        let mut buf = [mat::AIR; 32];
+        for z in [0u32, 1, 17, 63, 95, 96, 200] {
+            for x in [0u32, 1, 17, 63, 95, 96, 200] {
+                for y0 in [0u32, 32, 64, 96] {
+                    column(&p, 7, x, z, y0, &mut buf);
+                    for (i, got) in buf.iter().enumerate() {
+                        let want = material(&p, 7, x, y0 + i as u32, z);
+                        assert_eq!(*got, want, "x={x} y={} z={z}", y0 + i as u32);
+                    }
+                }
+            }
+        }
     }
 }

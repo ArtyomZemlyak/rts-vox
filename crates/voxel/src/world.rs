@@ -33,6 +33,16 @@ pub struct Edit {
 /// не зависит ни от порядка обхода, ни от того, что уже посчитано.
 pub trait Generator {
     fn material(&self, x: u32, y: u32, z: u32) -> Mat;
+
+    /// Отрезок колонки разом. По умолчанию — повоксельный обход, чтобы
+    /// простой генератор оставался в одну строку; настоящий генератор
+    /// обязан её переопределить и вынести всё, что зависит только от
+    /// `(x, z)`, наружу цикла (ADR-114).
+    fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = self.material(x, y0 + i as u32, z);
+        }
+    }
 }
 
 /// Что вернул дренаж очереди.
@@ -44,6 +54,13 @@ pub struct FlushStats {
     pub queued: usize,
     /// Сколько правок ничего не изменили: воксель уже был таким.
     pub noop: usize,
+    /// Сколько чанков пришлось построить из генератора. Самая дорогая
+    /// часть дренажа, и она ограничена своим потолком (ADR-114).
+    pub materialized: usize,
+    /// Дренаж остановлен потолком материализаций, а не потолком правок.
+    pub materialize_capped: bool,
+    /// Сколько правок отложено потолком материализаций на следующий тик.
+    pub deferred: usize,
 }
 
 pub struct World {
@@ -52,6 +69,9 @@ pub struct World {
     pub nz: u32,
     /// Потолок затронутых вокселей за тик.
     pub max_edits_per_tick: usize,
+    /// Сколько чанков разрешено построить из генератора за тик.
+    /// Второй потолок дренажа — см. ADR-114.
+    pub max_materialize_per_tick: usize,
     gen: Box<dyn Generator>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Box<Paletted>>>,
@@ -65,6 +85,12 @@ pub struct World {
     /// Правки, применённые в текущем тике. Это и есть поток для рендера
     /// (ADR-103) и вход связности с навигацией.
     applied: Vec<Edit>,
+    /// Переиспользуемый буфер отложенного: дренаж идёт каждый тик,
+    /// и выделять его заново незачем.
+    defer_buf: Vec<Edit>,
+    /// Сколько чанков материализовано из генератора. Каждый стоит
+    /// полного обхода чанка, и на первом касании это пик — см. D-7.
+    pub materialized: u64,
 }
 
 impl World {
@@ -95,6 +121,11 @@ impl World {
             ny,
             nz,
             max_edits_per_tick,
+            // Четыре чанка — 2.9 мс на первом касании после колоночного
+            // генератора, то есть меньше трети тика. Значение подобрано
+            // разгонкой в D-7 (ADR-114) и живёт здесь до тех пор, пока
+            // мир не читает данные.
+            max_materialize_per_tick: 4,
             gen: g,
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
             cx,
@@ -103,6 +134,8 @@ impl World {
             wx,
             queue: std::collections::VecDeque::new(),
             applied: Vec::new(),
+            defer_buf: Vec::new(),
+            materialized: 0,
         }
     }
 
@@ -162,21 +195,28 @@ impl World {
         let c = (ci as u32) / (self.cx * self.cy);
         let (ox, oy, oz) = (a * CS as u32, b * CS as u32, c * CS as u32);
         let mut p = Paletted::new();
-        for ly in 0..CS as u32 {
-            for lz in 0..CS as u32 {
-                for lx in 0..CS as u32 {
-                    let (x, y, z) = (ox + lx, oy + ly, oz + lz);
-                    if !self.inside(x, y, z) {
-                        continue;
-                    }
-                    let m = self.gen.material(x, y, z);
-                    if m != AIR {
-                        p.set(lx as usize, ly as usize, lz as usize, m);
+        // Обход колоночный, а не послойный: всё, что зависит только от
+        // `(x, z)`, генератор считает один раз на колонку вместо `CS` раз
+        // (ADR-114). Палитра при этом набирается в другом порядке, но её
+        // порядок не наблюдаем — итоговый набор материалов, а значит и
+        // размер, и число расширений, от него не зависят.
+        let mut col = [AIR; CS];
+        for lz in 0..CS as u32 {
+            for lx in 0..CS as u32 {
+                let (x, z) = (ox + lx, oz + lz);
+                if x >= self.nx || z >= self.nz {
+                    continue;
+                }
+                self.gen.column(x, z, oy, &mut col);
+                for (ly, &m) in col.iter().enumerate() {
+                    if m != AIR && (oy + ly as u32) < self.ny {
+                        p.set(lx as usize, ly, lz as usize, m);
                     }
                 }
             }
         }
         self.chunks[ci] = Some(Box::new(p));
+        self.materialized += 1;
     }
 
     /// Поставить правку в очередь. Потолок применяется при дренаже,
@@ -201,15 +241,46 @@ impl World {
     pub fn flush(&mut self) -> FlushStats {
         self.applied.clear();
         let mut st = FlushStats::default();
-        while st.applied < self.max_edits_per_tick {
+        // Потолок материализаций — второй потолок дренажа, и он нужен
+        // по той же причине, что первый: без него тик, в котором забой
+        // вошёл в шестнадцать нетронутых чанков разом, стоит тридцать
+        // четыре миллисекунды (ADR-114).
+        //
+        // Упёршаяся правка **откладывается, а не останавливает дренаж**.
+        // Останавливать нельзя: очередь строго FIFO, и одна правка в
+        // свежий чанк заперла бы за собой всё, что идёт в уже тронутые.
+        // Замер: на потолке 8 это раздувало пик очереди с 3 388 до
+        // 16 216 правок. Порядок при этом сохраняется там, где он значим:
+        // правки в один воксель лежат в одном чанке и откладываются
+        // вместе, а правки в разные воксели переставимы по построению.
+        let mut deferred = std::mem::take(&mut self.defer_buf);
+        deferred.clear();
+        while st.applied < self.max_edits_per_tick && deferred.len() < self.max_edits_per_tick {
             let Some(e) = self.queue.pop_front() else { break };
+            let ci = self.chunk_index(e.x, e.y, e.z);
+            let fresh = self.chunks[ci].is_none();
+            if fresh && st.materialized >= self.max_materialize_per_tick {
+                st.materialize_capped = true;
+                deferred.push(e);
+                continue;
+            }
             if self.apply(e) {
+                if fresh {
+                    st.materialized += 1;
+                }
                 self.applied.push(e);
                 st.applied += 1;
             } else {
                 st.noop += 1;
             }
         }
+        // Отложенное возвращается в голову очереди: в следующем тике
+        // дренаж начнёт с него, иначе свежий чанк ждал бы вечно.
+        for &e in deferred.iter().rev() {
+            self.queue.push_front(e);
+        }
+        st.deferred = deferred.len();
+        self.defer_buf = deferred;
         st.queued = self.queue.len();
         st
     }
@@ -276,6 +347,109 @@ impl World {
 
 #[cfg(test)]
 mod tests {
+
+    /// Потолок материализаций обязан **откладывать** правку, а не
+    /// съедать её: иначе дыра в мире просто не появится, и никто
+    /// об этом не узнает.
+    #[test]
+    fn materialize_cap_defers_edits_instead_of_losing_them() {
+        struct Solid;
+        impl Generator for Solid {
+            fn material(&self, _x: u32, _y: u32, _z: u32) -> Mat {
+                7
+            }
+        }
+        // Мир из 4×1×1 чанков; правки идут по одной в каждый.
+        let mut w = World::new(128, 32, 32, 1000, Box::new(Solid));
+        w.max_materialize_per_tick = 1;
+        for c in 0..4u32 {
+            w.queue_dig(c * 32 + 5, 5, 5);
+        }
+
+        let st = w.flush();
+        assert_eq!(st.applied, 1, "за тик — один свежий чанк");
+        assert_eq!(st.materialized, 1);
+        assert!(st.materialize_capped);
+        assert_eq!(st.deferred, 3);
+        assert_eq!(st.queued, 3, "остальные ждут, а не пропали");
+
+        // Четыре тика — четыре дырки, ни одной потерянной.
+        for _ in 0..3 {
+            w.flush();
+        }
+        for c in 0..4u32 {
+            assert_eq!(w.material(c * 32 + 5, 5, 5), AIR, "чанк {c}");
+        }
+        assert_eq!(w.queued(), 0);
+    }
+
+    /// Правки в уже материализованный чанк потолок не трогает: он
+    /// ограничивает построение из генератора, а не работу вообще.
+    #[test]
+    fn materialize_cap_does_not_throttle_touched_chunks() {
+        struct Solid;
+        impl Generator for Solid {
+            fn material(&self, _x: u32, _y: u32, _z: u32) -> Mat {
+                7
+            }
+        }
+        let mut w = World::new(64, 32, 32, 1000, Box::new(Solid));
+        w.max_materialize_per_tick = 1;
+        w.queue_dig(5, 5, 5);
+        w.flush();
+
+        for y in 6..30 {
+            w.queue_dig(5, y, 5);
+        }
+        let st = w.flush();
+        assert_eq!(st.applied, 24);
+        assert_eq!(st.materialized, 0);
+        assert!(!st.materialize_capped);
+    }
+
+    /// Колоночный вход генератора и повоксельный обязаны давать один
+    /// и тот же чанк. Разойдутся — разойдётся весь мир, молча.
+    #[test]
+    fn column_and_per_voxel_generators_build_the_same_chunk() {
+        struct Ridged;
+        impl Generator for Ridged {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                if y < 4 + (x * 7 + z * 13) % 19 {
+                    ((x ^ y ^ z) % 5 + 1) as Mat
+                } else {
+                    AIR
+                }
+            }
+            // Переопределения нет: работает запасной повоксельный путь.
+        }
+        struct Fast;
+        impl Generator for Fast {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                Ridged.material(x, y, z)
+            }
+            fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+                let h = 4 + (x * 7 + z * 13) % 19;
+                for (i, o) in out.iter_mut().enumerate() {
+                    let y = y0 + i as u32;
+                    *o = if y < h { ((x ^ y ^ z) % 5 + 1) as Mat } else { AIR };
+                }
+            }
+        }
+
+        let mut a = World::new(64, 64, 64, 1, Box::new(Ridged));
+        let mut b = World::new(64, 64, 64, 1, Box::new(Fast));
+        a.queue_dig(1, 1, 1);
+        b.queue_dig(1, 1, 1);
+        a.flush();
+        b.flush();
+        for z in 0..32 {
+            for y in 0..32 {
+                for x in 0..32 {
+                    assert_eq!(a.material(x, y, z), b.material(x, y, z), "{x} {y} {z}");
+                }
+            }
+        }
+    }
     use super::*;
 
     /// Слоистый генератор: низ твёрдый, верх воздух, плюс «жила»

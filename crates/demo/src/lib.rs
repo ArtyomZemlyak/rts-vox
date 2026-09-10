@@ -26,6 +26,10 @@ impl Generator for Terrain {
     fn material(&self, x: u32, y: u32, z: u32) -> Mat {
         worldgen::material(&self.params, self.seed, x, y, z)
     }
+
+    fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+        worldgen::column(&self.params, self.seed, x, z, y0, out);
+    }
 }
 
 impl Terrain {

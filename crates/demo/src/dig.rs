@@ -20,11 +20,19 @@ pub struct Digger {
     dz: i8,
     /// Тиков на месте. Продвижение по `age % 3`.
     age: u32,
+    /// Сколько тиков подряд копатель не снял ни одного воксела.
+    idle: u32,
 }
 
 pub struct Dig {
     pub diggers: Vec<Digger>,
     pub radius: i32,
+    /// Центры забоев: к ним возвращается выработавшийся копатель.
+    centres: Vec<(u32, u32)>,
+    /// После скольких пустых тиков копатель начинает новый ход.
+    pub idle_limit: u32,
+    /// Сколько раз копатели начинали заново — это видно в отчёте сцены.
+    pub restarts: u64,
     rng: Rng,
 }
 
@@ -69,16 +77,27 @@ impl Dig {
                 dz,
                 // Стартовая фаза разная — иначе стенд резонирует (ADR-090).
                 age: rng.below(3),
+                idle: 0,
             });
         }
-        Dig { diggers, radius, rng }
+        Dig { diggers, radius, centres, idle_limit: 8, restarts: 0, rng }
     }
 
     /// Один тик копки: поставить правки в очередь мира.
     /// Дренаж и потолок — дело мира, а не копателя.
-    pub fn step(&mut self, w: &mut World) {
+    ///
+    /// `surface` нужен, чтобы **выработавшийся копатель начал новый ход**.
+    /// Без этого копатель уходит вниз до дна и дальше грызёт пустоту:
+    /// на длинном прогоне копка молча останавливается, и сцена мерит
+    /// не ту задачу. Поймано в D-7 — тридцать правок за тик вместо
+    /// тысячи двухсот.
+    pub fn step(&mut self, w: &mut World, surface: &impl Fn(u32, u32) -> u32) {
         let r = self.radius;
         for i in 0..self.diggers.len() {
+            // Очередь общая, поэтому «снял ли что-то ЭТОТ копатель»
+            // считается разницей её длины, а не самим фактом непустоты:
+            // иначе один работающий копатель держал бы активными всех.
+            let queued_before = w.queued();
             let d = &self.diggers[i];
             let (dx0, dy0, dz0) = (d.x as i64, d.y as i64, d.z as i64);
             for dy in -r..=r {
@@ -107,6 +126,27 @@ impl Dig {
                         }
                     }
                 }
+            }
+            // Копатель, ничего не снявший подряд, начинает новый ход
+            // от своего забоя.
+            let dug_now = w.queued() > queued_before;
+            let d = &mut self.diggers[i];
+            d.idle = if dug_now { 0 } else { d.idle + 1 };
+            if d.idle > self.idle_limit {
+                let (cx, cz) = self.centres[self.rng.below(self.centres.len() as u32) as usize];
+                let x = (cx as i64 + self.rng.range(-24, 24) as i64)
+                    .clamp(1, w.nx as i64 - 2) as u32;
+                let z = (cz as i64 + self.rng.range(-24, 24) as i64)
+                    .clamp(1, w.nz as i64 - 2) as u32;
+                let y = surface(x, z);
+                let d = &mut self.diggers[i];
+                d.x = x;
+                d.z = z;
+                d.y = y.saturating_sub(1).max(4);
+                d.idle = 0;
+                d.age = 0;
+                self.restarts += 1;
+                continue;
             }
             let d = &mut self.diggers[i];
             d.age += 1;
