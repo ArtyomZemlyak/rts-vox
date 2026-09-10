@@ -96,6 +96,7 @@ impl Ground {
     /// в ту же очередь, и она тут же дренажится: иначе мир до конца
     /// тика содержал бы воксели, уже ставшие телом.
     pub(crate) fn phase_destruction(&mut self) {
+        self.bodies.spawned.clear();
         let edits = std::mem::take(&mut self.edits);
         self.stats.collapse = self.collapse.apply(&mut self.world, &edits, &mut self.bodies);
         self.edits = edits;

@@ -16,14 +16,14 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use voxel::collapse::CollapseLayer;
 use meshing::layer::MeshLayer;
+use sim_core::ground::Ground;
+use sim_core::World as SimWorld;
 use demo::RunHash;
 use fx::rng::Rng;
 use meshing::Opts;
-use voxel::bodies::Bodies;
 use voxel::store::{Mat, AIR};
-use voxel::{Edit, Generator, World};
+use voxel::{Generator, World};
 
 /// Жёсткий лимит живых тел.
 const MAX_BODIES: usize = 64;
@@ -121,11 +121,15 @@ struct Args {
     /// Подрезать все грибы разом. Только так проверяется лимит тел:
     /// по очереди их живёт по одному, и потолок не трогается вовсе.
     burst: bool,
+    /// Потолок живых тел. Ключом, а не константой: потолок
+    /// переразметок растягивает залп во времени, и жёсткость лимита
+    /// иначе перестаёт проверяться (ADR-133).
+    max_bodies: usize,
 }
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, ticks: 400, side: 192, diggers: 24, units: 40, dump_hash: false, burst: false }
+        Args { seed: 42, ticks: 400, side: 192, diggers: 24, units: 40, dump_hash: false, burst: false, max_bodies: MAX_BODIES }
     }
 }
 
@@ -147,6 +151,7 @@ fn parse() -> Result<Args, String> {
             "--units" => a.units = num("--units")? as usize,
             "--dump-hash" => a.dump_hash = true,
             "--burst" => a.burst = true,
+            "--max-bodies" => a.max_bodies = num("--max-bodies")? as usize,
             "--help" | "-h" => {
                 println!("D-2 «Обрушение»\n\n  --seed N --ticks N --side N --diggers N --units N --dump-hash --burst\n");
                 std::process::exit(0);
@@ -172,6 +177,7 @@ struct Outcome {
     units_placed: usize,
     promoted_total: usize,
     frontier_max: usize,
+    max_bodies: usize,
     graph_chunks: usize,
     graph_bytes: usize,
     graph_nodes: usize,
@@ -181,16 +187,20 @@ struct Outcome {
     riders_total: usize,
     killed: usize,
     ms_collapse: f64,
-    ms_bodies: f64,
     quads: usize,
 }
 
 fn run(a: &Args) -> Outcome {
     let g = Mushrooms { nx: a.side, ny: 64, nz: a.side };
-    let mut world = World::new(a.side, 64, a.side, 8192, Box::new(Mushrooms { nx: a.side, ny: 64, nz: a.side }));
+    let world = World::new(a.side, 64, a.side, 8192, Box::new(Mushrooms { nx: a.side, ny: 64, nz: a.side }));
     let mut mesh = MeshLayer::new(&world, Opts::default());
-    let mut collapse = CollapseLayer::new(&world);
-    let mut bodies = Bodies::new(MAX_BODIES);
+
+
+    // Порядок фаз задаёт движок (ADR-125): сцена только копает
+    // и смотрит, что получилось.
+    let mut sim = SimWorld::new(1, 1);
+    sim.attach_ground(Ground::new(world, a.max_bodies, 4, 2));
+
     let mut hash = RunHash::new();
 
     // Копатели подрезают ножки: гриб за грибом, по одному на чанк.
@@ -227,7 +237,7 @@ fn run(a: &Args) -> Outcome {
         });
     }
 
-    let (mut ms_collapse, mut ms_bodies) = (0.0f64, 0.0f64);
+    let mut ms_collapse = 0.0f64;
     let (mut detached, mut overflow, mut cells, mut landed) = (0usize, 0usize, 0usize, 0usize);
     let (mut peak_bodies, mut riders_total, mut killed) = (0usize, 0usize, 0usize);
     let (mut graph_nodes, mut graph_edges, mut rounds_max) = (0usize, 0usize, 0usize);
@@ -240,6 +250,7 @@ fn run(a: &Args) -> Outcome {
         // на тике k*12. Так тела появляются вразнобой, а не все разом,
         // и лимит проверяется потоком, а не одним залпом.
         let step = if a.burst { 1 } else { 12 };
+        let w = &mut sim.ground.as_mut().expect("земля").world;
         for (k, &(cx, cz)) in targets.iter().enumerate() {
             let start = if a.burst { 0 } else { k as u64 * step };
             if tick <= start || tick > start + step {
@@ -252,25 +263,23 @@ fn run(a: &Args) -> Outcome {
                         if x < 0 || z < 0 || x >= a.side as i64 || z >= a.side as i64 {
                             continue;
                         }
-                        if world.solid(x as u32, y, z as u32) {
-                            world.queue_dig(x as u32, y, z as u32);
+                        if w.solid(x as u32, y, z as u32) {
+                            w.queue_dig(x as u32, y, z as u32);
                         }
                     }
                 }
             }
         }
-        let st = world.flush();
-        hash.feed_edits(tick, world.edits());
-        mesh.apply(&world, world.edits());
-
-        // Каскад отделения.
+        // Тик движка: дренаж, каскад, падение тел, связность.
         let t = Instant::now();
-        let before = bodies.list.len();
-        // Список правок копируется: каскад берёт мир исключительно,
-        // а правки — это его же поле.
-        let tick_edits: Vec<Edit> = world.edits().to_vec();
-        let cs = collapse.apply(&mut world, &tick_edits, &mut bodies);
+        sim.tick();
         ms_collapse += t.elapsed().as_secs_f64() * 1e3;
+
+        let g = sim.ground.as_mut().expect("земля");
+        let cs = g.stats.collapse;
+        let bs = g.stats.bodies;
+        hash.feed_edits(tick, g.edits());
+        mesh.apply(&g.world, g.edits());
         detached += cs.detached;
         overflow += cs.too_big;
         graph_nodes = graph_nodes.max(cs.nodes);
@@ -283,14 +292,18 @@ fn run(a: &Args) -> Outcome {
 
         // Юниты садятся на новые тела: тот, кто оказался над куском,
         // едет на нём (ADR-099).
-        for bi in before..bodies.list.len() {
-            let (ox, oy, oz) = (bodies.list[bi].ox, bodies.list[bi].oy, bodies.list[bi].oz);
-            let (sx, sz) = (bodies.list[bi].sx as i64, bodies.list[bi].sz as i64);
+        // Свежее тело в свой тик не падает (ADR-133), поэтому посадка
+        // наездников успевает случиться после тика, а не внутри него.
+        let spawned: Vec<u64> = g.bodies.spawned.clone();
+        for id in spawned {
+            let Some(bi) = g.bodies.index_of(id) else { continue };
+            let (ox, oy, oz) = (g.bodies.list[bi].ox, g.bodies.list[bi].oy, g.bodies.list[bi].oz);
+            let (sx, sz) = (g.bodies.list[bi].sx as i64, g.bodies.list[bi].sz as i64);
             // Габарит по высоте: юнит стоит НА куске, то есть не выше
             // его верха плюс воксель. Первая редакция брала здесь
             // константу двенадцать под тогдашнюю геометрию, и высокая
             // ножка сразу выключила все поездки (ADR-118).
-            let sy = bodies.list[bi]
+            let sy = g.bodies.list[bi]
                 .voxels
                 .iter()
                 .map(|v| v.y as i64)
@@ -308,29 +321,15 @@ fn run(a: &Args) -> Outcome {
                 // воксела плюс запас на неровность.
                 let uy = u.y as i64;
                 if dx >= 0 && dx < sx && dz >= 0 && dz < sz && uy >= oy && uy <= oy + sy {
-                    u.riding = bodies.list[bi].id;
+                    u.riding = g.bodies.list[bi].id;
                     u.off = (dx, u.y as i64 - oy, dz);
                     riders.push(ui as u32);
                 }
             }
             riders_total += riders.len();
-            bodies.list[bi].riders = riders;
+            g.bodies.list[bi].riders = riders;
         }
 
-        // Правки от отрыва применяются до падения: мир обязан увидеть
-        // дыру в тот же тик.
-        let st2 = world.flush();
-        hash.feed_edits(tick * 2 + 1, world.edits());
-        mesh.apply(&world, world.edits());
-        for e in world.edits() {
-            collapse.invalidate_at(e.x, e.y, e.z);
-        }
-        let _ = (st, st2);
-
-        // Падение.
-        let t = Instant::now();
-        let bs = bodies.step(&mut world);
-        ms_bodies += t.elapsed().as_secs_f64() * 1e3;
         landed += bs.landed;
         peak_bodies = peak_bodies.max(bs.alive);
 
@@ -344,8 +343,8 @@ fn run(a: &Args) -> Outcome {
             if u.riding == 0 {
                 continue;
             }
-            if let Some(bi) = bodies.index_of(u.riding) {
-                let b = &bodies.list[bi];
+            if let Some(bi) = g.bodies.index_of(u.riding) {
+                let b = &g.bodies.list[bi];
                 u.x = (b.ox + u.off.0).max(0) as u32;
                 u.y = (b.oy + u.off.1).max(0) as u32;
                 u.z = (b.oz + u.off.2).max(0) as u32;
@@ -353,7 +352,8 @@ fn run(a: &Args) -> Outcome {
             }
             // Тела больше нет: оно приземлилось на этом шаге и само
             // сказало, сколько пролетело.
-            let fallen = bodies
+            let fallen = g
+                .bodies
                 .landed_log
                 .iter()
                 .find(|l| l.id == u.riding)
@@ -370,7 +370,7 @@ fn run(a: &Args) -> Outcome {
         }
 
         hash.feed(bs.alive as u64);
-        hash.feed(bodies.refused as u64);
+        hash.feed(g.bodies.refused as u64);
     }
 
     for u in &units {
@@ -387,11 +387,12 @@ fn run(a: &Args) -> Outcome {
         cells,
         landed,
         peak_bodies,
-        refused: bodies.refused,
+        refused: sim.ground().expect("земля").bodies.refused,
         promoted_total,
         frontier_max,
-        graph_chunks: collapse.known_chunks(),
-        graph_bytes: collapse.graph_bytes(),
+        max_bodies: a.max_bodies,
+        graph_chunks: sim.ground().expect("земля").collapse.known_chunks(),
+        graph_bytes: sim.ground().expect("земля").collapse.graph_bytes(),
         graph_nodes,
         graph_edges,
         rounds_max,
@@ -400,7 +401,6 @@ fn run(a: &Args) -> Outcome {
         riders_total,
         killed,
         ms_collapse,
-        ms_bodies,
         quads: mesh.quad_total(),
     }
 }
@@ -433,8 +433,8 @@ fn main() -> ExitCode {
     println!("{:<30} {:>14}", "раундов разбора, максимум", o.rounds_max);
     println!(
         "{:<30} {:>14}",
-        "упёрлось в потолок раундов",
-        if o.rounds_capped { "ДА" } else { "нет" }
+        "разбор повторится следующим тиком",
+        if o.rounds_capped { "да" } else { "нет" }
     );
     println!("{:<30} {:>14}", "тел приземлилось", o.landed);
     println!("{:<30} {:>14}", "пик живых тел", o.peak_bodies);
@@ -459,8 +459,7 @@ fn main() -> ExitCode {
     );
 
     println!("\n{:<30} {:>14}", "время, мс на тик", "");
-    println!("{:<30} {:>14.3}", "каскад", o.ms_collapse / n);
-    println!("{:<30} {:>14.3}", "падение тел", o.ms_bodies / n);
+    println!("{:<30} {:>14.3}", "тик движка", o.ms_collapse / n);
     println!("{:<30} {:>14}", "квадов всего", o.quads);
 
     let mut ok = true;
@@ -475,10 +474,11 @@ fn main() -> ExitCode {
     }
 
     // Порог 2: лимит тел не превышен ни при каком входе.
-    let limit_ok = o.peak_bodies <= MAX_BODIES;
+    let limit_ok = o.peak_bodies <= o.max_bodies;
     println!(
-        "лимит тел: пик {} из {MAX_BODIES} — {}",
+        "лимит тел: пик {} из {} — {}",
         o.peak_bodies,
+        o.max_bodies,
         if limit_ok { "держится" } else { "ПРЕВЫШЕН" }
     );
     if !limit_ok {
