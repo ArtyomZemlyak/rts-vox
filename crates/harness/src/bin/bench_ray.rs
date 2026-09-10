@@ -10,7 +10,7 @@ use fx::rng::Rng;
 use fx::Fx;
 use harness::ray::{dda, dda_f64, dda_skip, Dir};
 use harness::World;
-use mesh::CS as MCS;
+use meshing::CS as MCS;
 
 fn section(t: &str) {
     println!("\n=== {t} ===");

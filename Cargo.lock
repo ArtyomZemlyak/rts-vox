@@ -235,8 +235,8 @@ name = "harness"
 version = "0.1.0"
 dependencies = [
  "fx",
- "mesh",
- "topo",
+ "meshing",
+ "voxel",
 ]
 
 [[package]]
@@ -336,7 +336,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "mesh"
+name = "meshing"
 version = "0.1.0"
 dependencies = [
  "fx",
@@ -587,7 +587,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "sim"
+name = "sim-core"
 version = "0.1.0"
 dependencies = [
  "fx",
@@ -621,13 +621,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
-name = "store"
-version = "0.1.0"
-dependencies = [
- "fx",
-]
-
-[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -647,13 +640,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "systems"
-version = "0.1.0"
-dependencies = [
- "fx",
 ]
 
 [[package]]
@@ -677,13 +663,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "topo"
-version = "0.1.0"
-dependencies = [
- "fx",
-]
-
-[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -694,6 +673,13 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "voxel"
+version = "0.1.0"
+dependencies = [
+ "fx",
+]
 
 [[package]]
 name = "wasm-bindgen"

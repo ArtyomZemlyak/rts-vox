@@ -1,0 +1,12 @@
+[package]
+name = "sim-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fx = { path = "../fx" }
+
+[lib]
+name = "sim_core"
+path = "src/lib.rs"

@@ -28,7 +28,7 @@ use std::time::Instant;
 
 use fx::rng::Rng;
 use harness::{Dig, World};
-use mesh::CS as MCS;
+use meshing::CS as MCS;
 
 /// Сторона нав-сектора в вокселях: 16 нав-клеток по 2 воксела (ADR-066).
 const SECTOR_VOX: usize = 32;

@@ -38,13 +38,13 @@ pub struct Pyramid {
 impl Pyramid {
     pub fn build(w: &World) -> Pyramid {
         let bx = w.voxels_x().div_ceil(BLK);
-        let by = mesh::CS.div_ceil(BLK);
+        let by = meshing::CS.div_ceil(BLK);
         let bz = w.voxels_z().div_ceil(BLK);
         let n = bx * by * bz;
         let mut l0 = vec![vec![0u64; BLK * BLK]; n];
 
         for z in 0..w.voxels_z() {
-            for y in 0..mesh::CS {
+            for y in 0..meshing::CS {
                 for x in 0..w.voxels_x() {
                     if !w.get(x, y, z) {
                         continue;
@@ -275,7 +275,7 @@ mod tests {
         let w = World::new(2, 2, 17);
         let p = Pyramid::build(&w);
         for z in 0..w.voxels_z() {
-            for y in 0..mesh::CS {
+            for y in 0..meshing::CS {
                 for x in 0..w.voxels_x() {
                     assert_eq!(p.solid(x, y, z), w.get(x, y, z), "({x},{y},{z})");
                 }
@@ -290,7 +290,7 @@ mod tests {
         let w = World::new(2, 2, 3);
         let p = Pyramid::build(&w);
         for z in 0..w.voxels_z() {
-            for y in 0..mesh::CS {
+            for y in 0..meshing::CS {
                 for x in 0..w.voxels_x() {
                     if w.get(x, y, z) {
                         assert!(p.brick_any(x, y, z), "брик пуст, а воксель твёрдый");
@@ -313,7 +313,7 @@ mod tests {
         for _ in 0..6000 {
             let o = [
                 r.below(w.voxels_x() as u32) as f32 + 0.5,
-                r.range(2, mesh::CS as i32 - 2) as f32 + 0.5,
+                r.range(2, meshing::CS as i32 - 2) as f32 + 0.5,
                 r.below(w.voxels_z() as u32) as f32 + 0.5,
             ];
             let (dx, dy, dz) = (

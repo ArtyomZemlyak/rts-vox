@@ -17,7 +17,7 @@ use std::time::Instant;
 use fx::rng::Rng;
 use harness::pyramid::{march_flat, march_pyramid, Pyramid};
 use harness::{Dig, World};
-use mesh::CS as MCS;
+use meshing::CS as MCS;
 
 /// Разрешение, на котором считает ADR-063.
 const PIX_W: u64 = 2560;

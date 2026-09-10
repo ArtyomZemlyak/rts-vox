@@ -22,11 +22,11 @@ pub mod pyramid;
 pub mod ray;
 
 use fx::rng::Rng;
-use mesh::bits::{bits_from_chunk, BitVolume};
-use mesh::incr::IncMesher;
-use mesh::{Chunk as MeshChunk, Opts, CS as MCS};
-use topo::stage_a::Adjacency;
-use topo::{Chunk as TopoChunk, Components, CS as TCS};
+use meshing::bits::{bits_from_chunk, BitVolume};
+use meshing::incr::IncMesher;
+use meshing::{Chunk as MeshChunk, Opts, CS as MCS};
+use voxel::topo::stage_a::Adjacency;
+use voxel::topo::{Chunk as TopoChunk, Components, CS as TCS};
 
 /// Мир из чанков мешинга, выложенных по горизонтали. По вертикали один слой:
 /// 62 воксела при вокселе в метр — этого хватает и для забоя, и для рельефа.
@@ -126,7 +126,7 @@ impl World {
         let (cx, cz) = (x as usize / MCS, z as usize / MCS);
         let lz = z as usize % MCS + 1;
         let ly = y as usize + 1;
-        Some(self.bits[cz * self.nx + cx][ly * mesh::CSP + lz])
+        Some(self.bits[cz * self.nx + cx][ly * meshing::CSP + lz])
     }
 
     /// Твёрдость воксела в мировых координатах.
@@ -137,7 +137,7 @@ impl World {
         }
         let (cx, lx) = (x / MCS, x % MCS + 1);
         let (cz, lz) = (z / MCS, z % MCS + 1);
-        self.chunks[cz * self.nx + cx].get(lx, y + 1, lz) != mesh::AIR
+        self.chunks[cz * self.nx + cx].get(lx, y + 1, lz) != meshing::AIR
     }
 
     /// Снять воксель. Возвращает `true`, если он был твёрдым.
@@ -152,28 +152,28 @@ impl World {
         let (cx, lx) = (x / MCS, x % MCS + 1);
         let (cz, lz) = (z / MCS, z % MCS + 1);
         let ci = cz * self.nx + cx;
-        self.chunks[ci].set(lx, y + 1, lz, mesh::AIR);
+        self.chunks[ci].set(lx, y + 1, lz, meshing::AIR);
         self.touch(ci, lx, y + 1, lz);
 
         // Паддинг соседей по X и Z.
         if lx == 1 && cx > 0 {
             let ni = cz * self.nx + (cx - 1);
-            self.chunks[ni].set(MCS + 1, y + 1, lz, mesh::AIR);
+            self.chunks[ni].set(MCS + 1, y + 1, lz, meshing::AIR);
             self.touch(ni, MCS + 1, y + 1, lz);
         }
         if lx == MCS && cx + 1 < self.nx {
             let ni = cz * self.nx + (cx + 1);
-            self.chunks[ni].set(0, y + 1, lz, mesh::AIR);
+            self.chunks[ni].set(0, y + 1, lz, meshing::AIR);
             self.touch(ni, 0, y + 1, lz);
         }
         if lz == 1 && cz > 0 {
             let ni = (cz - 1) * self.nx + cx;
-            self.chunks[ni].set(lx, y + 1, MCS + 1, mesh::AIR);
+            self.chunks[ni].set(lx, y + 1, MCS + 1, meshing::AIR);
             self.touch(ni, lx, y + 1, MCS + 1);
         }
         if lz == MCS && cz + 1 < self.nz {
             let ni = (cz + 1) * self.nx + cx;
-            self.chunks[ni].set(lx, y + 1, 0, mesh::AIR);
+            self.chunks[ni].set(lx, y + 1, 0, meshing::AIR);
             self.touch(ni, lx, y + 1, 0);
         }
         true
@@ -187,7 +187,7 @@ impl World {
     /// на чанк и в сто раз перекрывает сам инкрементальный ремеш.
     #[inline]
     fn touch(&mut self, ci: usize, lx: usize, ly: usize, lz: usize) {
-        self.bits[ci][ly * mesh::CSP + lz] &= !(1u64 << lx);
+        self.bits[ci][ly * meshing::CSP + lz] &= !(1u64 << lx);
         self.edits[ci].push((lx as u8, ly as u8, lz as u8));
         if !self.dirty[ci] {
             self.dirty[ci] = true;
@@ -666,7 +666,7 @@ mod tests {
             dig.step(&mut w, &mut out);
             w.flush_mesh();
         }
-        let mut full = mesh::Mesher::new();
+        let mut full = meshing::Mesher::new();
         for (ci, c) in w.chunks.iter().enumerate() {
             let inc = w.meshers[ci].quad_count();
             let exact = full.mesh(c, Opts::default()).quads;

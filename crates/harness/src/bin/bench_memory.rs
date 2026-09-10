@@ -12,7 +12,7 @@ use std::hint::black_box;
 
 use fx::rng::Rng;
 use harness::{Dig, World};
-use mesh::CS as MCS;
+use meshing::CS as MCS;
 
 fn section(t: &str) {
     println!("\n=== {t} ===");

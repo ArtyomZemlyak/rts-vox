@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use fx::rng::Rng;
 use harness::{Dig, World};
-use mesh::CS as MCS;
-use topo::scene::{build as build_topo, Scene as TopoScene};
-use topo::Components;
+use meshing::CS as MCS;
+use voxel::topo::scene::{build as build_topo, Scene as TopoScene};
+use voxel::topo::Components;
 
 fn section(t: &str) {
     println!("\n=== {t} ===");
@@ -192,16 +192,16 @@ fn main() {
         "{:<18} {:>12} {:>14} {:>12} {:>14}",
         "сцена", "событий", "обойдено ср.", "p99", "мкс/событие"
     );
-    let mut bufs = topo::stage_b::FloodBufs::new();
+    let mut bufs = voxel::topo::stage_b::FloodBufs::new();
     for scene in TopoScene::ALL {
         let c = build_topo(scene, 42);
-        let inv = topo::Chunk { cols: c.cols.iter().map(|w| !w).collect() };
+        let inv = voxel::topo::Chunk { cols: c.cols.iter().map(|w| !w).collect() };
         // Заполняем воду: событие разделения — снятие воксела пустоты,
         // то есть **добавление** твёрдого в мир.
         let mut cells = Vec::new();
-        for z in 0..topo::CS {
-            for y in 0..topo::CS {
-                for x in 0..topo::CS {
+        for z in 0..voxel::topo::CS {
+            for y in 0..voxel::topo::CS {
+                for x in 0..voxel::topo::CS {
                     if inv.get(x, y, z) {
                         cells.push((x, y, z));
                     }
@@ -217,7 +217,7 @@ fn main() {
         for &(x, y, z) in cells.iter().step_by(step) {
             let mut cut = inv.clone();
             cut.set(x, y, z, false);
-            let (_, t) = topo::stage_b::probe(&cut, &mut bufs, x, y, z, 512);
+            let (_, t) = voxel::topo::stage_b::probe(&cut, &mut bufs, x, y, z, 512);
             visited.push(t);
         }
         visited.sort_unstable();
@@ -228,7 +228,7 @@ fn main() {
             let t0 = Instant::now();
             let mut acc = 0u64;
             for &(x, y, z) in cells.iter().step_by(step) {
-                acc += topo::stage_b::probe(&inv, &mut bufs, x, y, z, 512).1 as u64;
+                acc += voxel::topo::stage_b::probe(&inv, &mut bufs, x, y, z, 512).1 as u64;
             }
             black_box(acc);
             best = best.min(t0.elapsed().as_secs_f64() * 1e6 / visited.len() as f64);

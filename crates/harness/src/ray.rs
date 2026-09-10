@@ -16,7 +16,7 @@
 
 use crate::World;
 use fx::Fx;
-use mesh::CS as MCS;
+use meshing::CS as MCS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Hit {
