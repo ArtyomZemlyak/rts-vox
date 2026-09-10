@@ -37,7 +37,8 @@ rts-vox/
 │  ├─ worldgen/      генерация. Чистая функция от сида                    → fx, voxel
 │  ├─ nav/           cost field, flow field, порталы, слой проходимости   → fx, voxel
 │  ├─ modding/       загрузка RON, Luau-хост, детерминированные биндинги  → fx
-│  ├─ sim-core/      мир, юниты, приказы, тик                → fx, voxel, worldgen, nav, modding
+│  ├─ sim-core/      мир (земля: воксели, тела, связность, проходимость),
+│  │                 юниты, приказы, тик              → fx, voxel, worldgen, nav, modding
 │  ├─ sim-cli/       headless-прогон, дампы, реплеи, хеши    → sim-core
 │  ├─ meshing/       чанк → квады, инкрементальный слой мешинга.
 │  │                 Рендер-слой, но без Bevy                            → voxel

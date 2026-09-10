@@ -111,7 +111,7 @@ fn main() -> ExitCode {
     // Потолок правок за тик (ADR-013, ADR-045). Триста копателей дают
     // порядка 1 300 правок; потолок держится выше, чтобы сцена мерила
     // подсистемы, а не очередь.
-    let mut world = World::new(
+    let world = World::new(
         params.nx,
         params.ny,
         params.nz,
