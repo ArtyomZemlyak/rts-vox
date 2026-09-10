@@ -7,4 +7,5 @@ rust-version.workspace = true
 # Крейт замеров видеокарты. От него **никто не зависит** — ни sim, ни fx.
 # Граница слоёв (CLAUDE.md): sim-core не знает про wgpu. Здесь наоборот.
 [dependencies]
+fx = { path = "../fx" }
 wgpu = { version = "=29.0.3", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }

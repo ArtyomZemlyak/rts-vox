@@ -111,6 +111,7 @@ grep -rn '\[QUESTION' docs/
 | [20-measurement-machine.md](docs/analysis/20-measurement-machine.md) | Машина замеров, время сборки и правила замера |
 | [21-render-bench.md](docs/analysis/21-render-bench.md) | Рендер: марш по пирамиде занятости, итерации на кадр |
 | [23-cut-shape.md](docs/analysis/23-cut-shape.md) | Форма забоя: осевой против рваного, квады и видеопамять |
+| [25-march-ms.md](docs/analysis/25-march-ms.md) | Марш луча в миллисекундах: бюджет кадра и память против мешей |
 | [22-gpu-batching.md](docs/analysis/22-gpu-batching.md) | Видеокарта: цена обращения, слияние операций, расчёт пачкой |
 | [21-render-bench.md](docs/analysis/21-render-bench.md) | Рендер: марш по пирамиде занятости, затенение против солнца |
 

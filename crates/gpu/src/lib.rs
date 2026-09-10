@@ -10,6 +10,8 @@
 //! цена dispatch, то вывод меняется: диспатчи можно упаковать в один
 //! submit и платить фиксированную часть один раз.
 
+pub mod edits;
+pub mod march;
 pub mod eikonal;
 
 use std::future::Future;
