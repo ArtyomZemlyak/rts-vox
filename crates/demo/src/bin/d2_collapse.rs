@@ -97,20 +97,6 @@ impl Generator for Mushrooms {
     }
 }
 
-/// Юнит: позиция, здоровье и тело, на котором он едет.
-struct Unit {
-    x: u32,
-    y: u32,
-    z: u32,
-    hp: u32,
-    /// Устойчивый номер тела; ноль — стоит на земле. Индексом
-    /// ссылаться нельзя: приземлившееся тело уходит из списка
-    /// сдвигом, и все индексы за ним съезжают (ADR-118).
-    riding: u64,
-    /// Смещение относительно начала координат тела.
-    off: (i64, i64, i64),
-}
-
 struct Args {
     seed: u64,
     ticks: u64,
@@ -218,8 +204,13 @@ fn run(a: &Args) -> Outcome {
         cz += p;
     }
 
-    // Юниты стоят на шляпках — их и уронит.
-    let mut units: Vec<Unit> = Vec::new();
+    // Юниты стоят на шляпках — их и уронит. Юниты **движковые**:
+    // посадку на кусок, поездку и урон от падения делает фаза тика,
+    // а не сцена. Пока навигация брала в колонке один уровень, сцена
+    // держала своих: движковые показали бы три поездки из сорока,
+    // потому что тридцать семь юнитов стояли там, где навигация
+    // ничего не видит (ADR-135). Объёмный слой это закрыл (ADR-136).
+    let mut ids: Vec<u32> = Vec::new();
     for _ in 0..a.units {
         let (cx, cz) = targets[r.below(targets.len().max(1) as u32) as usize];
         let x = (cx as i64 + r.range(-6, 6) as i64).clamp(1, a.side as i64 - 2) as u32;
@@ -227,20 +218,18 @@ fn run(a: &Args) -> Outcome {
         if g.material(x, Mushrooms::CAP_TOP - 1, z) == AIR {
             continue;
         }
-        units.push(Unit {
-            x,
-            // Стоит **на** шляпке: первый свободный над ней.
-            y: Mushrooms::CAP_TOP,
-            z,
-            hp: 100,
-            riding: 0,
-            off: (0, 0, 0),
-        });
+        // Скорость ноль: пассажир стоит, а не идёт. Сто вокселей,
+        // привязанных к ядру, — это здешнее «сто здоровья».
+        let id = sim.units.spawn(x as i32, z as i32, 0, 0, 100);
+        // Стоит **на** шляпке: первый свободный над ней.
+        sim.units.y[id as usize] = Mushrooms::CAP_TOP as i32;
+        ids.push(id);
     }
+    sim.units.refresh_live();
 
     let mut ms_collapse = 0.0f64;
     let (mut detached, mut overflow, mut cells, mut landed) = (0usize, 0usize, 0usize, 0usize);
-    let (mut peak_bodies, mut riders_total, mut killed) = (0usize, 0usize, 0usize);
+    let (mut peak_bodies, mut riders_total) = (0usize, 0usize);
     let (mut graph_nodes, mut graph_edges, mut rounds_max) = (0usize, 0usize, 0usize);
     let mut rounds_capped = false;
     let (mut promoted_total, mut frontier_max) = (0usize, 0usize);
@@ -273,8 +262,11 @@ fn run(a: &Args) -> Outcome {
         }
         // Тик движка: дренаж, каскад, падение тел, связность.
         let t = Instant::now();
-        sim.tick();
+        let th = sim.tick();
         ms_collapse += t.elapsed().as_secs_f64() * 1e3;
+        // Хеш тика движка — в хеш прогона: юниты теперь его, и сцена
+        // проверяет их состояние тем же числом, что и sim-cli.
+        hash.feed(th);
 
         let g = sim.ground.as_mut().expect("земля");
         let cs = g.stats.collapse;
@@ -291,93 +283,21 @@ fn run(a: &Args) -> Outcome {
         rounds_capped |= cs.rounds_capped;
         cells += cs.cells;
 
-        // Юниты садятся на новые тела: тот, кто оказался над куском,
-        // едет на нём (ADR-099).
-        // Свежее тело в свой тик не падает (ADR-133), поэтому посадка
-        // наездников успевает случиться после тика, а не внутри него.
-        let spawned: Vec<u64> = g.bodies.spawned.clone();
-        for id in spawned {
-            let Some(bi) = g.bodies.index_of(id) else { continue };
-            let (ox, oy, oz) = (g.bodies.list[bi].ox, g.bodies.list[bi].oy, g.bodies.list[bi].oz);
-            let (sx, sz) = (g.bodies.list[bi].sx as i64, g.bodies.list[bi].sz as i64);
-            // Габарит по высоте: юнит стоит НА куске, то есть не выше
-            // его верха плюс воксель. Первая редакция брала здесь
-            // константу двенадцать под тогдашнюю геометрию, и высокая
-            // ножка сразу выключила все поездки (ADR-118).
-            let sy = g.bodies.list[bi]
-                .voxels
-                .iter()
-                .map(|v| v.y as i64)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let mut riders = Vec::new();
-            for (ui, u) in units.iter_mut().enumerate() {
-                if u.riding != 0 || u.hp == 0 {
-                    continue;
-                }
-                let (dx, dz) = (u.x as i64 - ox, u.z as i64 - oz);
-                // Юнит едет, если он в габаритах куска по X и Z
-                // и стоит не выше его верха: шляпка толщиной четыре
-                // воксела плюс запас на неровность.
-                let uy = u.y as i64;
-                if dx >= 0 && dx < sx && dz >= 0 && dz < sz && uy >= oy && uy <= oy + sy {
-                    u.riding = g.bodies.list[bi].id;
-                    u.off = (dx, u.y as i64 - oy, dz);
-                    riders.push(ui as u32);
-                }
-            }
-            riders_total += riders.len();
-            g.bodies.list[bi].riders = riders;
-        }
+        // Посадка на свежие куски, поездка и урон по высоте падения —
+        // фаза `Bodies` (ADR-135). Сцена читает счётчики, а не повторяет
+        // механику: вторая её реализация расходилась бы с первой молча.
+        riders_total += g.stats.rides as usize;
+        max_fall = max_fall.max(g.stats.max_fall);
+        damage_total += g.stats.fall_damage;
 
         landed += bs.landed;
         peak_bodies = peak_bodies.max(bs.alive);
-
-        // Наездники следуют за телом; севшие на землю получают урон.
-        //
-        // Тело ищется по **устойчивому номеру**. Пока ссылались индексом,
-        // приходилось при каждой посадке ссаживать вообще всех — иначе
-        // наездник поехал бы за чужим телом, — и высота падения в отчёте
-        // выходила два воксела вместо четырнадцати (ADR-118).
-        for u in units.iter_mut() {
-            if u.riding == 0 {
-                continue;
-            }
-            if let Some(bi) = g.bodies.index_of(u.riding) {
-                let b = &g.bodies.list[bi];
-                u.x = (b.ox + u.off.0).max(0) as u32;
-                u.y = (b.oy + u.off.1).max(0) as u32;
-                u.z = (b.oz + u.off.2).max(0) as u32;
-                continue;
-            }
-            // Тела больше нет: оно приземлилось на этом шаге и само
-            // сказало, сколько пролетело.
-            let fallen = g
-                .bodies
-                .landed_log
-                .iter()
-                .find(|l| l.id == u.riding)
-                .map(|l| l.fallen)
-                .unwrap_or(0);
-            let dmg = fallen * FALL_DAMAGE_PER_VOXEL;
-            max_fall = max_fall.max(fallen);
-            damage_total += dmg as u64;
-            u.hp = u.hp.saturating_sub(dmg);
-            if u.hp == 0 {
-                killed += 1;
-            }
-            u.riding = 0;
-        }
 
         hash.feed(bs.alive as u64);
         hash.feed(g.bodies.refused as u64);
     }
 
-    for u in &units {
-        hash.feed(u.hp as u64);
-        hash.feed(u.x as u64 * 1_000_003 + u.y as u64 * 1009 + u.z as u64);
-    }
+    let killed = ids.iter().filter(|&&i| !sim.units.alive[i as usize]).count();
 
     Outcome {
         hash: hash.get(),
@@ -399,18 +319,21 @@ fn run(a: &Args) -> Outcome {
         rounds_max,
         rounds_capped,
         units_on_nav_floor: {
+            let u = &sim.units;
             let g = sim.ground().expect("земля");
-            let st = g.nav.step();
+            let st = g.nav.step() as i32;
             let (gw, gh) = g.nav.dims();
-            units
-                .iter()
-                .filter(|u| {
-                    let (cx, cz) = (u.x / st, u.z / st);
-                    cx < gw && cz < gh && g.nav.levels_at(cx, cz).iter().any(|&l| l as u32 == u.y)
+            ids.iter()
+                .filter(|&&i| {
+                    let i = i as usize;
+                    let (cx, cz) = ((u.x[i] / st) as u32, (u.z[i] / st) as u32);
+                    cx < gw
+                        && cz < gh
+                        && g.nav.levels_at(cx, cz).iter().any(|&l| l as i32 == u.y[i])
                 })
                 .count()
         },
-        units_placed: units.len(),
+        units_placed: ids.len(),
         riders_total,
         killed,
         ms_collapse,
@@ -455,9 +378,10 @@ fn main() -> ExitCode {
 
     println!("\n{:<30} {:>14}", "юниты на кусках (ADR-099)", "");
     println!("{:<30} {:>14}", "юнитов на шляпках", o.units_placed);
-    // Сколько из них навигация вообще способна представить: она берёт
-    // в колонке ОДИН уровень, нижний (ADR-039), а шляпка висит над
-    // пустотой. Сцена ставит юнита туда указом, движок — не может.
+    // Сколько из них навигация представляет. Одноуровневый слой видел
+    // три из сорока: он брал в колонке нижний уровень, а шляпка висит
+    // над пустотой (ADR-135). Объёмный видит все (ADR-136), и число
+    // печатается дальше — потому что именно на нём стоит вся сцена.
     println!(
         "{:<30} {:>14}",
         "  видит навигация",
@@ -509,6 +433,27 @@ fn main() -> ExitCode {
     // Порог 3: сцена обязана что-то уронить, иначе она ничего не проверяет.
     if o.detached == 0 {
         println!("НИЧЕГО НЕ ОТВАЛИЛОСЬ — сцена ничего не проверяет");
+        ok = false;
+    }
+
+    // Порог 4: навигация обязана представлять **каждое** положение юнита.
+    // Юнит, стоящий там, где навигации нет, стоит по указу сцены,
+    // и поездка его ничего не доказывает (ADR-135).
+    let nav_ok = o.units_on_nav_floor == o.units_placed;
+    println!(
+        "навигация видит юнитов: {} из {} — {}",
+        o.units_on_nav_floor,
+        o.units_placed,
+        if nav_ok { "все" } else { "НЕ ВСЕХ" }
+    );
+    if !nav_ok {
+        ok = false;
+    }
+
+    // Порог 5: поездки обязаны случиться. Ноль здесь значит, что
+    // механика, ради которой сцена написана, не сработала.
+    if o.riders_total == 0 && o.units_placed > 0 {
+        println!("НИ ОДНОЙ ПОЕЗДКИ — механика ADR-099 не сработала");
         ok = false;
     }
 

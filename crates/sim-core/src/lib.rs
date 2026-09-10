@@ -488,6 +488,7 @@ impl World {
                     riders.push(i as u32);
                 }
             }
+            g.stats.rides += riders.len() as u64;
             g.bodies.list[bi].riders = riders;
         }
 

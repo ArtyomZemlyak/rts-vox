@@ -30,6 +30,8 @@ pub struct GroundStats {
     pub topo_survived: usize,
     /// Урона от падения нанесено за тик.
     pub fall_damage: u64,
+    /// Поездок началось за тик: юнитов, севших на свежие куски.
+    pub rides: u64,
     /// Самое долгое падение, вокселей.
     pub max_fall: u32,
     pub collapse: CollapseStats,
