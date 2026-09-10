@@ -83,7 +83,13 @@ pub struct UnitBody {
 }
 
 impl UnitBody {
-    pub fn new(nx: u8, ny: u8, nz: u8, core: (u8, u8, u8), core_size: u8) -> UnitBody {
+    /// Пустой том. Положение ядра здесь **не задаётся**: оно выводится
+    /// из разметки вызовом `seat_core` после того, как воксели
+    /// расставлены. Причина в D-8: пока положение задавалось отдельным
+    /// числом, зашитый в код танк и он же, загруженный из данных,
+    /// получали разные ядра — обе величины были верны, но разные, и
+    /// расхождение не было видно ниоткуда.
+    pub fn new(nx: u8, ny: u8, nz: u8, core_size: u8) -> UnitBody {
         let n = nx as usize * ny as usize * nz as usize;
         UnitBody {
             vol: UnitVol::new(nx, ny, nz),
@@ -93,9 +99,55 @@ impl UnitBody {
                 vec![0; ny as usize * nz as usize],
                 vec![0; ny as usize * nz as usize],
             ],
-            core,
-            core_size,
+            core: (0, 0, 0),
+            core_size: core_size.max(1),
         }
+    }
+
+    /// Посадить затравку связности на разметку.
+    ///
+    /// Правило одно и живёт здесь: затравка — куб `core_size` в
+    /// **минимальном углу габарита вокселей, помеченных `Core`**, и
+    /// весь этот куб обязан быть ядром. Возвращает `false`, если ядра
+    /// нет вовсе или куб в него не влезает: юнит без ядра неубиваем,
+    /// и молча пропустить это нельзя.
+    pub fn seat_core(&mut self) -> bool {
+        let (nx, ny, nz) = (
+            self.vol.nx as usize,
+            self.vol.ny as usize,
+            self.vol.nz as usize,
+        );
+        let mut lo = (usize::MAX, usize::MAX, usize::MAX);
+        let mut any = false;
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    if self.vol.get(x, y, z) && self.part_at(x, y, z) == Part::Core {
+                        lo = (lo.0.min(x), lo.1.min(y), lo.2.min(z));
+                        any = true;
+                    }
+                }
+            }
+        }
+        if !any {
+            return false;
+        }
+        let cs = self.core_size as usize;
+        if lo.0 + cs > nx || lo.1 + cs > ny || lo.2 + cs > nz {
+            return false;
+        }
+        for dz in 0..cs {
+            for dy in 0..cs {
+                for dx in 0..cs {
+                    let (x, y, z) = (lo.0 + dx, lo.1 + dy, lo.2 + dz);
+                    if !self.vol.get(x, y, z) || self.part_at(x, y, z) != Part::Core {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.core = (lo.0 as u8, lo.1 as u8, lo.2 as u8);
+        true
     }
 
     #[inline]
@@ -194,7 +246,7 @@ fn subsystem_slot(p: Part) -> Option<usize> {
 /// сцена имела что разбирать.
 pub fn tank() -> UnitBody {
     let (nx, ny, nz) = (24u8, 12u8, 12u8);
-    let mut u = UnitBody::new(nx, ny, nz, (12, 5, 6), 2);
+    let mut u = UnitBody::new(nx, ny, nz, 2);
     for z in 0..nz as usize {
         for y in 0..ny as usize {
             for x in 0..nx as usize {
@@ -224,6 +276,7 @@ pub fn tank() -> UnitBody {
             }
         }
     }
+    assert!(u.seat_core(), "у танка обязано быть ядро");
     u
 }
 
@@ -349,5 +402,59 @@ mod tests {
         }
         let s = t.status(&mut b);
         assert!(s.alive && s.engine, "нос снесли, а двигатель встал: {s:?}");
+    }
+}
+
+#[cfg(test)]
+mod core_seat_tests {
+    use super::*;
+
+    /// Затравка обязана лежать внутри разметки ядра, иначе связность
+    /// считается не от ядра.
+    #[test]
+    fn the_seed_cube_lies_inside_the_core_marking() {
+        let t = tank();
+        let cs = t.core_size as usize;
+        let (cx, cy, cz) = (t.core.0 as usize, t.core.1 as usize, t.core.2 as usize);
+        for dz in 0..cs {
+            for dy in 0..cs {
+                for dx in 0..cs {
+                    assert_eq!(
+                        t.part_at(cx + dx, cy + dy, cz + dz),
+                        Part::Core,
+                        "затравка вышла из ядра"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Том без ядра обязан быть отвергнут, а не собран.
+    #[test]
+    fn a_body_without_a_core_is_refused() {
+        let mut u = UnitBody::new(4, 4, 4, 2);
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    u.set(x, y, z, Part::Armour);
+                }
+            }
+        }
+        assert!(!u.seat_core());
+    }
+
+    /// Ядро меньше затравки — тоже отказ: куб не влезает в разметку.
+    #[test]
+    fn a_core_smaller_than_the_seed_is_refused() {
+        let mut u = UnitBody::new(4, 4, 4, 2);
+        for z in 0..4 {
+            for y in 0..4 {
+                for x in 0..4 {
+                    u.set(x, y, z, Part::Armour);
+                }
+            }
+        }
+        u.set(1, 1, 1, Part::Core);
+        assert!(!u.seat_core());
     }
 }

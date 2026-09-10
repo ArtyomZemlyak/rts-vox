@@ -607,3 +607,135 @@ fn d6_one_voxel_changes_the_answer() {
     w.flush();
     assert!(!line_of_sight(&w, a, b).clear, "один воксель не закрыл линию");
 }
+
+// ---------------------------------------------------------------------
+// D-8 «Мод»: контент грузится данными.
+//
+// Сцена архитектурная, а не скоростная, поэтому и проверки здесь — про
+// утверждения, а не про миллисекунды. Пути идут от корня репозитория:
+// `cargo test` работает из каталога крейта.
+// ---------------------------------------------------------------------
+
+mod d8 {
+    use modding::{load_pack, merge_materials, PartTag, UnitModel};
+    use std::path::{Path, PathBuf};
+    use voxel::unit::{tank, Part, UnitBody};
+
+    fn root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn part_of(t: PartTag) -> Part {
+        match t {
+            PartTag::Armour => Part::Armour,
+            PartTag::Core => Part::Core,
+            PartTag::Engine => Part::Engine,
+            PartTag::Weapon => Part::Weapon,
+            PartTag::Sensor => Part::Sensor,
+        }
+    }
+
+    fn body_of(m: &UnitModel) -> UnitBody {
+        let mut b = UnitBody::new(m.nx, m.ny, m.nz, m.core_size);
+        for &(x, y, z, tag) in &m.voxels {
+            b.set(x as usize, y as usize, z as usize, part_of(tag));
+        }
+        assert!(b.seat_core(), "{}: ядро не садится", m.name);
+        b
+    }
+
+    /// Главное утверждение сцены: данные и код дают **одно и то же тело**.
+    /// Разойдутся — и «мод работает как ванильный контент» станет
+    /// обещанием без проверки.
+    #[test]
+    fn the_tank_from_data_equals_the_tank_from_code() {
+        let pack = load_pack(&root().join("data")).expect("ванильный пак");
+        let m = pack.units.iter().find(|u| u.name == "Танк").expect("танк");
+        let a = body_of(m);
+        let b = tank();
+        assert_eq!((a.vol.nx, a.vol.ny, a.vol.nz), (b.vol.nx, b.vol.ny, b.vol.nz));
+        assert_eq!((a.core, a.core_size), (b.core, b.core_size));
+        for z in 0..a.vol.nz as usize {
+            for y in 0..a.vol.ny as usize {
+                for x in 0..a.vol.nx as usize {
+                    assert_eq!(a.vol.get(x, y, z), b.vol.get(x, y, z), "{x} {y} {z}");
+                    if a.vol.get(x, y, z) {
+                        assert_eq!(a.part_at(x, y, z), b.part_at(x, y, z), "{x} {y} {z}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Мод меняет хеш партии, и порядок паков на него не влияет.
+    #[test]
+    fn a_mod_changes_the_registry_hash_but_load_order_does_not() {
+        let v = || load_pack(&root().join("data")).expect("ваниль");
+        let m = || load_pack(&root().join("mods/mushroom")).expect("мод");
+        let plain = merge_materials(&[v()]).unwrap().hash();
+        let both = merge_materials(&[v(), m()]).unwrap().hash();
+        let swapped = merge_materials(&[m(), v()]).unwrap().hash();
+        assert_ne!(plain, both, "мод обязан менять хеш");
+        assert_eq!(both, swapped, "порядок паков не имеет права влиять");
+    }
+
+    /// Столкновение номеров — ошибка загрузки, а не переопределение
+    /// (ADR-028). Проверяется тем же модом, поставленным дважды.
+    #[test]
+    fn a_material_id_clash_is_refused() {
+        let m = || load_pack(&root().join("mods/mushroom")).expect("мод");
+        assert!(merge_materials(&[m(), m()]).is_err());
+    }
+
+    /// Юнит мода — полноценное тело: подсистемы гаснут от попаданий,
+    /// ядро убивает.
+    #[test]
+    fn the_mod_unit_takes_damage_like_any_other() {
+        use voxel::topo::unit::CoreBufs;
+        let pack = load_pack(&root().join("mods/mushroom")).expect("мод");
+        let m = pack.units.first().expect("юнит мода");
+        let body = body_of(m);
+        let mut bufs = CoreBufs::default();
+        assert!(body.status(&mut bufs).alive);
+        assert!(body.status(&mut bufs).engine);
+
+        let strip = |b: &mut UnitBody, p: Part| {
+            for z in 0..b.vol.nz as usize {
+                for y in 0..b.vol.ny as usize {
+                    for x in 0..b.vol.nx as usize {
+                        if b.vol.get(x, y, z) && b.part_at(x, y, z) == p {
+                            b.remove(x, y, z);
+                        }
+                    }
+                }
+            }
+        };
+        let mut hurt = body.clone();
+        strip(&mut hurt, Part::Engine);
+        let s = hurt.status(&mut bufs);
+        assert!(s.alive, "двигатель — не ядро");
+        assert!(!s.engine);
+
+        let mut dead = body.clone();
+        strip(&mut dead, Part::Core);
+        assert!(!dead.status(&mut bufs).alive);
+    }
+
+    /// Путь из данных не имеет права выйти за пределы пака.
+    #[test]
+    fn a_path_escaping_the_pack_is_refused() {
+        let src = std::fs::read_to_string(root().join("mods/mushroom/units/sporeling.ron"))
+            .expect("исходный ron");
+        let tmp = std::env::temp_dir().join("rts-vox-d8-escape-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("units")).unwrap();
+        std::fs::write(
+            tmp.join("units/x.ron"),
+            src.replace("units/sporeling.vox", "../../data/units/tank.vox"),
+        )
+        .unwrap();
+        let r = load_pack(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(matches!(r, Err(modding::LoadError::Escape(_))));
+    }
+}

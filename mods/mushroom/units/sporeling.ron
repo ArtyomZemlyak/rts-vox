@@ -1,0 +1,13 @@
+// Юнит мода. Форма другая, путь загрузки тот же самый.
+(
+    name: "Споровик",
+    model: "units/sporeling.vox",
+    palette: [
+        (1, Armour),
+        (2, Core),
+        (3, Engine),
+        (4, Weapon),
+        (5, Sensor),
+    ],
+    core_size: 2,
+)

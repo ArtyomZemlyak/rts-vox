@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 fx = { path = "../fx" }
 meshing = { path = "../meshing" }
+modding = { path = "../modding" }
 nav = { path = "../nav" }
 sim-core = { path = "../sim-core" }
 voxel = { path = "../voxel" }

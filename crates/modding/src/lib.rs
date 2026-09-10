@@ -12,10 +12,29 @@
 
 #![forbid(unsafe_code)]
 
+pub mod data;
+pub mod vox;
+
+pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
+
 pub type Mat = u16;
 
+/// Роль воксела в теле юнита — **в данных**.
+///
+/// Дубликат `voxel::unit::Part` намеренный: `modding` описывает то, что
+/// лежит в файле, и не имеет права зависеть от движка. Полнота отображения
+/// одного в другое проверяется тестом на стороне движка, а не надеждой.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+pub enum PartTag {
+    Armour,
+    Core,
+    Engine,
+    Weapon,
+    Sensor,
+}
+
 /// Физические свойства материала. Всё, что влияет на симуляцию.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct MatDef {
     /// Явный номер. Не позиция в списке.
     pub id: Mat,
