@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bits;
+pub mod incr;
 pub mod scene;
 
 /// Сторона чанка без паддинга.
