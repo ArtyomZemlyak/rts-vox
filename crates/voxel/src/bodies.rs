@@ -30,6 +30,14 @@ pub struct BodyVoxel {
 
 #[derive(Clone, Debug)]
 pub struct Body {
+    /// Устойчивый номер тела.
+    ///
+    /// Ссылаться на тело **индексом в списке нельзя**: приземлившееся
+    /// тело уходит из списка сдвигом, и все индексы за ним съезжают.
+    /// В D-2 из-за этого наездники после первой посадки начинали
+    /// следовать за чужим телом, а отчёт о высоте падения показывал
+    /// два воксела вместо четырнадцати (ADR-118).
+    pub id: u64,
     /// Мировая позиция начала координат тела.
     pub ox: i64,
     pub oy: i64,
@@ -78,6 +86,8 @@ impl Body {
         // который детерминирован. Сортировать не нужно и нельзя:
         // сортировка скрыла бы недетерминированный вход, а не починила.
         Some(Body {
+            // Номер выдаёт Bodies::detach: тело само его не знает.
+            id: 0,
             ox: x0 as i64,
             oy: y0 as i64,
             oz: z0 as i64,
@@ -140,11 +150,35 @@ pub struct Bodies {
     /// Жёсткий потолок числа живых тел.
     pub max_bodies: usize,
     pub refused: usize,
+    /// Следующий свободный номер. Растёт монотонно и не переиспользуется:
+    /// номер, выданный дважды, — та же ловушка, что индекс.
+    next_id: u64,
+    /// Что приземлилось на последнем шаге. Тело к этому моменту уже
+    /// ушло из списка, а вызывающему нужно знать, сколько оно пролетело
+    /// и кто на нём ехал: снимок, снятый до шага, отстаёт на тик.
+    pub landed_log: Vec<Landed>,
+}
+
+/// Приземлившееся тело — то, что от него осталось знать.
+#[derive(Clone, Debug)]
+pub struct Landed {
+    pub id: u64,
+    /// Сколько вокселей тело пролетело за всю жизнь.
+    pub fallen: u32,
+    /// Где оно легло.
+    pub oy: i64,
+    pub riders: Vec<u32>,
 }
 
 impl Bodies {
     pub fn new(max_bodies: usize) -> Bodies {
-        Bodies { list: Vec::new(), max_bodies, refused: 0 }
+        Bodies {
+            list: Vec::new(),
+            max_bodies,
+            refused: 0,
+            next_id: 1,
+            landed_log: Vec::new(),
+        }
     }
 
     /// Оторвать кусок от мира: снять его воксели и завести тело.
@@ -156,9 +190,11 @@ impl Bodies {
             self.refused += 1;
             return false;
         }
-        let Some(b) = Body::from_world_cells(w, cells) else {
+        let Some(mut b) = Body::from_world_cells(w, cells) else {
             return false;
         };
+        b.id = self.next_id;
+        self.next_id += 1;
         for &(x, y, z) in cells {
             w.queue_edit(crate::Edit { x, y, z, mat: AIR });
         }
@@ -171,6 +207,7 @@ impl Bodies {
     /// рендер и связность не увидят появления материи.
     pub fn step(&mut self, w: &mut World) -> BodyStats {
         let mut st = BodyStats::default();
+        self.landed_log.clear();
         let mut i = 0;
         while i < self.list.len() {
             if self.list[i].resting {
@@ -185,6 +222,12 @@ impl Bodies {
             } else {
                 // Приземление: запечь обратно и убрать тело.
                 let b = self.list.swap_remove_stable(i);
+                self.landed_log.push(Landed {
+                    id: b.id,
+                    fallen: b.fallen,
+                    oy: b.oy,
+                    riders: b.riders.clone(),
+                });
                 for v in &b.voxels {
                     let (x, y, z) = b.world_of(*v);
                     if x >= 0 && y >= 0 && z >= 0 {
@@ -202,6 +245,12 @@ impl Bodies {
         st.alive = self.list.len();
         st.refused = self.refused;
         st
+    }
+
+    /// Место тела в списке по устойчивому номеру. Тел десятки,
+    /// поэтому перебор — и он же снимает вопрос о порядке.
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.list.iter().position(|b| b.id == id)
     }
 }
 

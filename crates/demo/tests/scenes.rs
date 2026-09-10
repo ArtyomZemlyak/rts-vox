@@ -174,7 +174,7 @@ fn d2_cutting_the_stem_detaches_the_cap() {
     let edits: Vec<Edit> = w.edits().to_vec();
     let st = collapse.apply(&mut w, &edits, &mut bodies);
     assert!(st.detached > 0, "ничего не отделилось");
-    assert_eq!(st.overflow, 0, "кусок не поместился в чанк");
+    assert_eq!(st.too_big, 0, "кусок не поместился в потолок тела");
     assert!(st.cells > 500, "отвал подозрительно мал: {}", st.cells);
     w.flush();
 

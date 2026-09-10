@@ -48,14 +48,22 @@ impl Mushrooms {
     /// Земля до этой высоты. Совпадает с началом чанка Y=1 плюс два
     /// слоя, чтобы гриб стоял на твёрдом внутри того же чанка.
     const GROUND: u32 = 34;
-    const STEM_TOP: u32 = 40;
-    const CAP_TOP: u32 = 44;
+    /// Ножка высокая нарочно. Первая редакция держала её в шесть
+    /// вокселей и подрезала **один** слой — шляпка падала ровно на
+    /// воксель, всегда, при любом входе. Механика «юнит едет вниз
+    /// и получает урон по высоте» при этом формально работала и
+    /// не проверялась ничем (ADR-118).
+    const STEM_TOP: u32 = 56;
+    const CAP_TOP: u32 = 60;
     /// Шаг решётки грибов = сторона чанка связности.
     const PITCH: u32 = 32;
     const STEM_R: i64 = 3;
     const CAP_R: i64 = 9;
-    /// На этом уровне подрезают ножку.
+    /// Подрез идёт от этого уровня и на `CUT_H` вокселей вверх —
+    /// одним тиком, иначе кусок отвалится после первого же слоя
+    /// и упадёт на него же.
     const CUT: u32 = 35;
+    const CUT_H: u32 = 14;
 
     fn nearest(&self, x: u32, z: u32) -> (i64, i64) {
         let p = Self::PITCH as i64;
@@ -95,8 +103,10 @@ struct Unit {
     y: u32,
     z: u32,
     hp: u32,
-    /// Индекс тела в списке; `usize::MAX` — стоит на земле.
-    riding: usize,
+    /// Устойчивый номер тела; ноль — стоит на земле. Индексом
+    /// ссылаться нельзя: приземлившееся тело уходит из списка
+    /// сдвигом, и все индексы за ним съезжают (ADR-118).
+    riding: u64,
     /// Смещение относительно начала координат тела.
     off: (i64, i64, i64),
 }
@@ -157,6 +167,9 @@ struct Outcome {
     landed: usize,
     peak_bodies: usize,
     refused: usize,
+    /// Сколько юнитов вообще удалось поставить на шляпки. Ноль здесь
+    /// значит, что сцена не собралась, а не что механика не работает.
+    units_placed: usize,
     riders_total: usize,
     killed: usize,
     ms_collapse: f64,
@@ -201,7 +214,7 @@ fn run(a: &Args) -> Outcome {
             y: Mushrooms::CAP_TOP,
             z,
             hp: 100,
-            riding: usize::MAX,
+            riding: 0,
             off: (0, 0, 0),
         });
     }
@@ -221,14 +234,16 @@ fn run(a: &Args) -> Outcome {
             if tick <= start || tick > start + step {
                 continue;
             }
-            for dz in -(Mushrooms::STEM_R + 1)..=(Mushrooms::STEM_R + 1) {
-                for dx in -(Mushrooms::STEM_R + 1)..=(Mushrooms::STEM_R + 1) {
-                    let (x, z) = (cx as i64 + dx, cz as i64 + dz);
-                    if x < 0 || z < 0 || x >= a.side as i64 || z >= a.side as i64 {
-                        continue;
-                    }
-                    if world.solid(x as u32, Mushrooms::CUT, z as u32) {
-                        world.queue_dig(x as u32, Mushrooms::CUT, z as u32);
+            for y in Mushrooms::CUT..Mushrooms::CUT + Mushrooms::CUT_H {
+                for dz in -(Mushrooms::STEM_R + 1)..=(Mushrooms::STEM_R + 1) {
+                    for dx in -(Mushrooms::STEM_R + 1)..=(Mushrooms::STEM_R + 1) {
+                        let (x, z) = (cx as i64 + dx, cz as i64 + dz);
+                        if x < 0 || z < 0 || x >= a.side as i64 || z >= a.side as i64 {
+                            continue;
+                        }
+                        if world.solid(x as u32, y, z as u32) {
+                            world.queue_dig(x as u32, y, z as u32);
+                        }
                     }
                 }
             }
@@ -246,7 +261,7 @@ fn run(a: &Args) -> Outcome {
         let cs = collapse.apply(&mut world, &tick_edits, &mut bodies);
         ms_collapse += t.elapsed().as_secs_f64() * 1e3;
         detached += cs.detached;
-        overflow += cs.overflow;
+        overflow += cs.assumed_anchored;
         cells += cs.cells;
 
         // Юниты садятся на новые тела: тот, кто оказался над куском,
@@ -254,9 +269,20 @@ fn run(a: &Args) -> Outcome {
         for bi in before..bodies.list.len() {
             let (ox, oy, oz) = (bodies.list[bi].ox, bodies.list[bi].oy, bodies.list[bi].oz);
             let (sx, sz) = (bodies.list[bi].sx as i64, bodies.list[bi].sz as i64);
+            // Габарит по высоте: юнит стоит НА куске, то есть не выше
+            // его верха плюс воксель. Первая редакция брала здесь
+            // константу двенадцать под тогдашнюю геометрию, и высокая
+            // ножка сразу выключила все поездки (ADR-118).
+            let sy = bodies.list[bi]
+                .voxels
+                .iter()
+                .map(|v| v.y as i64)
+                .max()
+                .unwrap_or(0)
+                + 1;
             let mut riders = Vec::new();
             for (ui, u) in units.iter_mut().enumerate() {
-                if u.riding != usize::MAX || u.hp == 0 {
+                if u.riding != 0 || u.hp == 0 {
                     continue;
                 }
                 let (dx, dz) = (u.x as i64 - ox, u.z as i64 - oz);
@@ -264,8 +290,8 @@ fn run(a: &Args) -> Outcome {
                 // и стоит не выше его верха: шляпка толщиной четыре
                 // воксела плюс запас на неровность.
                 let uy = u.y as i64;
-                if dx >= 0 && dx < sx && dz >= 0 && dz < sz && uy >= oy && uy <= oy + 12 {
-                    u.riding = bi;
+                if dx >= 0 && dx < sx && dz >= 0 && dz < sz && uy >= oy && uy <= oy + sy {
+                    u.riding = bodies.list[bi].id;
                     u.off = (dx, u.y as i64 - oy, dz);
                     riders.push(ui as u32);
                 }
@@ -286,58 +312,44 @@ fn run(a: &Args) -> Outcome {
 
         // Падение.
         let t = Instant::now();
-        let snapshot: Vec<(i64, i64, i64, u32, Vec<u32>)> = bodies
-            .list
-            .iter()
-            .map(|b| (b.ox, b.oy, b.oz, b.fallen, b.riders.clone()))
-            .collect();
         let bs = bodies.step(&mut world);
         ms_bodies += t.elapsed().as_secs_f64() * 1e3;
         landed += bs.landed;
         peak_bodies = peak_bodies.max(bs.alive);
 
         // Наездники следуют за телом; севшие на землю получают урон.
-        let alive_now: Vec<(i64, i64, i64)> =
-            bodies.list.iter().map(|b| (b.ox, b.oy, b.oz)).collect();
+        //
+        // Тело ищется по **устойчивому номеру**. Пока ссылались индексом,
+        // приходилось при каждой посадке ссаживать вообще всех — иначе
+        // наездник поехал бы за чужим телом, — и высота падения в отчёте
+        // выходила два воксела вместо четырнадцати (ADR-118).
         for u in units.iter_mut() {
-            if u.riding == usize::MAX {
+            if u.riding == 0 {
                 continue;
             }
-            match alive_now.get(u.riding) {
-                Some(&(ox, oy, oz)) if u.riding < alive_now.len() => {
-                    u.x = (ox + u.off.0).max(0) as u32;
-                    u.y = (oy + u.off.1).max(0) as u32;
-                    u.z = (oz + u.off.2).max(0) as u32;
-                }
-                _ => {
-                    // Тело приземлилось или исчезло: юнит слезает
-                    // и получает урон по тому, сколько пролетел.
-                    let fallen = snapshot
-                        .get(u.riding)
-                        .map(|s| s.3)
-                        .unwrap_or(0);
-                    let dmg = fallen * FALL_DAMAGE_PER_VOXEL;
-                    max_fall = max_fall.max(fallen);
-                    damage_total += dmg as u64;
-                    u.hp = u.hp.saturating_sub(dmg);
-                    if u.hp == 0 {
-                        killed += 1;
-                    }
-                    u.riding = usize::MAX;
-                }
+            if let Some(bi) = bodies.index_of(u.riding) {
+                let b = &bodies.list[bi];
+                u.x = (b.ox + u.off.0).max(0) as u32;
+                u.y = (b.oy + u.off.1).max(0) as u32;
+                u.z = (b.oz + u.off.2).max(0) as u32;
+                continue;
             }
-        }
-        // Индексы тел сдвигаются при приземлении; после шага привязки
-        // становятся неверны, поэтому пересаживаем всех на следующем
-        // тике заново. Дешевле, чем вести стабильные идентификаторы,
-        // и главное — детерминированно.
-        if bs.landed > 0 {
-            for u in units.iter_mut() {
-                u.riding = usize::MAX;
+            // Тела больше нет: оно приземлилось на этом шаге и само
+            // сказало, сколько пролетело.
+            let fallen = bodies
+                .landed_log
+                .iter()
+                .find(|l| l.id == u.riding)
+                .map(|l| l.fallen)
+                .unwrap_or(0);
+            let dmg = fallen * FALL_DAMAGE_PER_VOXEL;
+            max_fall = max_fall.max(fallen);
+            damage_total += dmg as u64;
+            u.hp = u.hp.saturating_sub(dmg);
+            if u.hp == 0 {
+                killed += 1;
             }
-            for b in bodies.list.iter_mut() {
-                b.riders.clear();
-            }
+            u.riding = 0;
         }
 
         hash.feed(bs.alive as u64);
@@ -359,6 +371,7 @@ fn run(a: &Args) -> Outcome {
         landed,
         peak_bodies,
         refused: bodies.refused,
+        units_placed: units.len(),
         riders_total,
         killed,
         ms_collapse,
@@ -385,16 +398,28 @@ fn main() -> ExitCode {
     println!("{:<30} {:>14}", "каскад отделения", "");
     println!("{:<30} {:>14}", "кусков отвалилось", o.detached);
     println!("{:<30} {:>14}", "вокселей в телах", o.cells);
-    println!("{:<30} {:>14}", "пробило потолок B (нет ступени C)", o.overflow);
+    println!("{:<30} {:>14}", "сочтено заякоренным по грани", o.overflow);
     println!("{:<30} {:>14}", "тел приземлилось", o.landed);
     println!("{:<30} {:>14}", "пик живых тел", o.peak_bodies);
     println!("{:<30} {:>14}", "отказано по лимиту", o.refused);
 
     println!("\n{:<30} {:>14}", "юниты на кусках (ADR-099)", "");
+    println!("{:<30} {:>14}", "юнитов на шляпках", o.units_placed);
     println!("{:<30} {:>14}", "поездок", o.riders_total);
     println!("{:<30} {:>14}", "погибло при падении", o.killed);
     println!("{:<30} {:>14}", "самое долгое падение, вокселей", o.max_fall);
     println!("{:<30} {:>14}", "урона от падения всего", o.damage_total);
+    // Ноль погибших здесь — арифметика, а не умолчание, и её надо видеть.
+    println!(
+        "{:<30} {:>14}",
+        "смертельное падение, вокселей",
+        (100 + FALL_DAMAGE_PER_VOXEL - 1) / FALL_DAMAGE_PER_VOXEL
+    );
+    println!(
+        "{:<30} {:>14}",
+        "  а в чанк помещается",
+        voxel::topo::CS
+    );
 
     println!("\n{:<30} {:>14}", "время, мс на тик", "");
     println!("{:<30} {:>14.3}", "каскад", o.ms_collapse / n);

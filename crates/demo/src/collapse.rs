@@ -1,40 +1,49 @@
-//! Каскад отделения: правка → ступень A → ступень B → тело.
+//! Каскад отделения: правки тика → компоненты чанка → тела.
 //!
-//! Три фильтра ADR-055, из которых здесь два. **Ступени C нет**, и это
-//! записано, а не умолчано: отвал, не поместившийся в чанк 32³, даёт
-//! `Overflow` и остаётся в мире. Настоящий каскад спросил бы граф
-//! компонент чанков; пока такой кусок просто не падает.
+//! **Тик — атом.** Вопрос «что отвалилось» задаётся по состоянию конца
+//! тика, а не по каждой правке отдельно. Это не оформительская разница:
+//! пока каскад спрашивал по правке, толстый вырез за один тик проходил
+//! мимо него целиком (ADR-118). Ступени A и B (ADR-055) отвечают на
+//! вопрос «расщепило ли снятие ЭТОГО воксела» и потому годятся только
+//! там, где снятие одно; на пачке они дают неверный ответ в обе
+//! стороны — либо не находят отвала вовсе, либо отрывают кусок вместе
+//! с породой, которую в том же тике выкопали.
 //!
-//! Ступень A — битовый фильтр «эта правка заведомо ничего не отделит»,
-//! пропускает единицы процентов (ADR-090). Ступень B — двухфронтовой
-//! флуд со строгим чередованием: обход ограничен удвоенной **меньшей**
-//! стороной, а не размером чанка.
+//! Ответ на пачку — разметка связных компонент чанка (5–10 мкс на
+//! чанк 32³) и проверка заякоренности: компонента держится, если хоть
+//! одна её ячейка стоит на грани чанка, за которой твёрдое, либо лежит
+//! на коренной породе.
+//!
+//! **Ступени C по-прежнему нет** (Q-66), и здесь это видно точно:
+//! компонента, касающаяся грани, считается заякоренной, хотя то, за
+//! что она держится, может само висеть в воздухе. Такие компоненты
+//! считаются отдельно — `assumed_anchored`.
 
 use voxel::bodies::Bodies;
-use voxel::topo::stage_a::Adjacency;
-use voxel::topo::stage_b::{probe, FloodBufs, Verdict};
-use voxel::topo::Chunk as TopoChunk;
+use voxel::topo::{Chunk as TopoChunk, Components, CS};
 use voxel::{Edit, World};
 
-/// Потолок обхода ступени B. Больше — дороже; ADR-055 берёт его так,
-/// чтобы худший случай оставался ограниченным.
-const CAP: u32 = 4096;
+/// Потолок на размер одного отвала в вокселях. Больше — не тело,
+/// а событие другого масштаба, и оно оставляется в мире.
+const MAX_BODY_CELLS: usize = 4096;
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct CollapseStats {
-    /// Правок, дошедших до ступени B.
+    /// Компонент рассмотрено.
     pub probed: usize,
     /// Из них признано отделением.
     pub detached: usize,
-    /// Пробило потолок — ступень C сказала бы больше.
-    pub overflow: usize,
+    /// Компонент сочтено заякоренными **только** по касанию грани чанка.
+    /// Ступень C сказала бы точнее (Q-66).
+    pub assumed_anchored: usize,
+    /// Компонент отвалилось, но не влезло в потолок тела.
+    pub too_big: usize,
     /// Вокселей ушло в тела.
     pub cells: usize,
 }
 
 pub struct CollapseLayer {
-    adj: Adjacency,
-    flood: FloodBufs,
+    comps: Components,
     chunks: Vec<Option<Box<TopoChunk>>>,
     nx: u32,
     ny: u32,
@@ -42,19 +51,21 @@ pub struct CollapseLayer {
     dirty: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
-    local: Vec<Vec<(u8, u8, u8)>>,
+    /// Правки тика по чанкам: местные координаты и твёрдость после.
+    local: Vec<Vec<(u8, u8, u8, bool)>>,
+    /// Заякоренность на метку компоненты (метка — индекс пробега).
+    anchored: Vec<bool>,
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
 }
 
 impl CollapseLayer {
     pub fn new(w: &World) -> CollapseLayer {
-        let cs = voxel::topo::CS as u32;
+        let cs = CS as u32;
         let (nx, ny, nz) = (w.nx.div_ceil(cs), w.ny.div_ceil(cs), w.nz.div_ceil(cs));
         let n = (nx * ny * nz) as usize;
         CollapseLayer {
-            adj: Adjacency::new(),
-            flood: FloodBufs::new(),
+            comps: Components::new(),
             chunks: (0..n).map(|_| None).collect(),
             nx,
             ny,
@@ -63,12 +74,13 @@ impl CollapseLayer {
             stamp: vec![u32::MAX; n],
             epoch: 0,
             local: (0..n).map(|_| Vec::new()).collect(),
+            anchored: Vec::new(),
             cells: Vec::new(),
         }
     }
 
     fn build(w: &World, cx: u32, cy: u32, cz: u32) -> Box<TopoChunk> {
-        let cs = voxel::topo::CS as u32;
+        let cs = CS as u32;
         let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
         let mut c = Box::new(TopoChunk::new());
         for z in 0..cs {
@@ -85,7 +97,7 @@ impl CollapseLayer {
 
     /// Прогнать правки тика через каскад и оторвать всё, что отвалилось.
     pub fn apply(&mut self, w: &mut World, edits: &[Edit], bodies: &mut Bodies) -> CollapseStats {
-        let cs = voxel::topo::CS as u32;
+        let cs = CS as u32;
         let mut st = CollapseStats::default();
         self.epoch = self.epoch.wrapping_add(1);
         if self.epoch == u32::MAX {
@@ -104,7 +116,12 @@ impl CollapseLayer {
                 self.local[i].clear();
                 self.dirty.push(i as u32);
             }
-            self.local[i].push(((e.x % cs) as u8, (e.y % cs) as u8, (e.z % cs) as u8));
+            self.local[i].push((
+                (e.x % cs) as u8,
+                (e.y % cs) as u8,
+                (e.z % cs) as u8,
+                e.mat != voxel::store::AIR,
+            ));
         }
 
         for k in 0..self.dirty.len() {
@@ -114,74 +131,150 @@ impl CollapseLayer {
                 ((i as u32) / self.nx) % self.ny,
                 (i as u32) / (self.nx * self.ny),
             );
+            // Засыпка материал добавляет, а добавление не расщепляет:
+            // чанк, в котором за тик ничего не сняли, можно не трогать.
+            if !self.local[i].iter().any(|&(_, _, _, solid)| !solid) {
+                continue;
+            }
             if self.chunks[i].is_none() {
                 self.chunks[i] = Some(Self::build(w, cx, cy, cz));
             } else {
                 let c = self.chunks[i].as_mut().expect("chunk checked");
-                for &(lx, ly, lz) in &self.local[i] {
-                    let solid =
-                        w.solid(cx * cs + lx as u32, cy * cs + ly as u32, cz * cs + lz as u32);
+                for &(lx, ly, lz, solid) in &self.local[i] {
                     c.set(lx as usize, ly as usize, lz as usize, solid);
                 }
             }
-            // Чанк вынимается из массива на время обработки: внутри
-            // цикла он и читается, и меняется, а держать одновременно
-            // общую и исключительную ссылку нельзя.
             let mut c = self.chunks[i].take().expect("chunk present");
-            // Порядок правок внутри чанка задан дренажем очереди (FIFO),
-            // поэтому и порядок отрывов детерминирован.
-            for e in 0..self.local[i].len() {
-                let (lx, ly, lz) = self.local[i][e];
-                let m = self.adj.gather(&c, lx as usize, ly as usize, lz as usize);
-                if self.adj.cannot_split(m) {
-                    continue;
-                }
-                st.probed += 1;
-                let (v, _) = probe(&c, &mut self.flood, lx as usize, ly as usize, lz as usize, CAP);
-                match v {
-                    Verdict::Connected => {}
-                    Verdict::Overflow => st.overflow += 1,
-                    Verdict::Detached { cells } => {
-                        if cells == 0 {
-                            continue;
-                        }
-                        self.cells.clear();
-                        for &ci in self.flood.detached_cells() {
-                            let (px, py, pz) = voxel::topo::stage_b::unpack_index(ci);
-                            self.cells.push((
-                                cx * cs + px as u32,
-                                cy * cs + py as u32,
-                                cz * cs + pz as u32,
-                            ));
-                        }
-                        if bodies.detach(w, &self.cells) {
-                            st.detached += 1;
-                            st.cells += self.cells.len();
-                            // Чанк изменился под нами: воксели куска ушли.
-                            // Обновляем сразу, иначе следующая правка того
-                            // же тика решала бы задачу по устаревшему
-                            // состоянию.
-                            for &(px, py, pz) in &self.cells {
-                                c.set(
-                                    (px - cx * cs) as usize,
-                                    (py - cy * cs) as usize,
-                                    (pz - cz * cs) as usize,
-                                    false,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            st.probed += self.detach_loose(w, &mut c, (cx, cy, cz), bodies, &mut st);
             self.chunks[i] = Some(c);
         }
         st
     }
 
+    /// Разметить компоненты чанка, найти незаякоренные и оторвать их.
+    /// Возвращает число рассмотренных компонент.
+    fn detach_loose(
+        &mut self,
+        w: &mut World,
+        c: &mut TopoChunk,
+        (cx, cy, cz): (u32, u32, u32),
+        bodies: &mut Bodies,
+        st: &mut CollapseStats,
+    ) -> usize {
+        let cs = CS as u32;
+        let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
+        let n = self.comps.build(c);
+        if n == 0 {
+            return 0;
+        }
+        // Метки компонент перенумерованы 0..n самим `build`, поэтому
+        // индексируем ими, а не индексами пробегов.
+        self.anchored.clear();
+        self.anchored.resize(n, false);
+        // Заякоренность проверяется по пробегам, а не по вокселям:
+        // граней шесть, и пробег знает, на какой из них он лежит.
+        let mut face_only = vec![false; n];
+        for (ri, r) in self.comps.runs.iter().enumerate() {
+            let lab = self.comps.label[ri] as usize;
+            let col = r.col as usize;
+            let (ly, lz) = (col % CS, col / CS);
+            let (wy, wz) = (oy + ly as u32, oz + lz as u32);
+            let m = r.mask;
+            let mut bedrock = false;
+            let mut face = false;
+            if m & 1 != 0 && ox > 0 && w.solid(ox - 1, wy, wz) {
+                face = true;
+            }
+            if m & (1 << 31) != 0 && w.solid(ox + cs, wy, wz) {
+                face = true;
+            }
+            if ly == 0 || ly == CS - 1 || lz == 0 || lz == CS - 1 {
+                let mut bits = m;
+                while bits != 0 {
+                    let x = bits.trailing_zeros();
+                    bits &= bits - 1;
+                    let wx = ox + x;
+                    if ly == 0 {
+                        if wy == 0 {
+                            bedrock = true;
+                        } else if w.solid(wx, wy - 1, wz) {
+                            face = true;
+                        }
+                    }
+                    if ly == CS - 1 && w.solid(wx, wy + 1, wz) {
+                        face = true;
+                    }
+                    if lz == 0 && wz > 0 && w.solid(wx, wy, wz - 1) {
+                        face = true;
+                    }
+                    if lz == CS - 1 && w.solid(wx, wy, wz + 1) {
+                        face = true;
+                    }
+                    if bedrock && face {
+                        break;
+                    }
+                }
+            }
+            if bedrock {
+                self.anchored[lab] = true;
+                face_only[lab] = false;
+            } else if face && !self.anchored[lab] {
+                self.anchored[lab] = true;
+                face_only[lab] = true;
+            }
+        }
+
+        // Собрать состав незаякоренных компонент. Порядок меток задан
+        // самим `build` — по первому появлению пробега, то есть по
+        // колонкам: детерминирован.
+        let mut loose: Vec<u32> = Vec::new();
+        for lab in 0..n {
+            if self.anchored[lab] {
+                if face_only[lab] {
+                    st.assumed_anchored += 1;
+                }
+                continue;
+            }
+            loose.push(lab as u32);
+        }
+
+        for lab in loose {
+            self.cells.clear();
+            for (ri, r) in self.comps.runs.iter().enumerate() {
+                if self.comps.label[ri] != lab {
+                    continue;
+                }
+                let col = r.col as usize;
+                let (ly, lz) = (col % CS, col / CS);
+                let mut bits = r.mask;
+                while bits != 0 {
+                    let x = bits.trailing_zeros();
+                    bits &= bits - 1;
+                    self.cells.push((ox + x, oy + ly as u32, oz + lz as u32));
+                }
+            }
+            if self.cells.is_empty() {
+                continue;
+            }
+            if self.cells.len() > MAX_BODY_CELLS {
+                st.too_big += 1;
+                continue;
+            }
+            if bodies.detach(w, &self.cells) {
+                st.detached += 1;
+                st.cells += self.cells.len();
+                for &(px, py, pz) in &self.cells {
+                    c.set((px - ox) as usize, (py - oy) as usize, (pz - oz) as usize, false);
+                }
+            }
+        }
+        n
+    }
+
     /// Пометить чанк как требующий пересборки: воксели тела вернулись
     /// в мир не правкой копки, а запеканием.
     pub fn invalidate_at(&mut self, x: u32, y: u32, z: u32) {
-        let cs = voxel::topo::CS as u32;
+        let cs = CS as u32;
         let (cx, cy, cz) = (x / cs, y / cs, z / cs);
         if cx >= self.nx || cy >= self.ny || cz >= self.nz {
             return;
