@@ -257,6 +257,9 @@ pub struct World {
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
+    /// Замер: сколько шагов упёрлось в рельеф. Ноль на карте с землёй
+    /// значит, что юниты по ней не ходят.
+    pub blocked_moves: u64,
     /// Замер: сколько юнитов действительно искали цель за тик.
     pub searches: u64,
     /// Замер: в скольких тиках поиск упёрся в потолок.
@@ -317,6 +320,7 @@ impl World {
             max_target_searches: 512,
             examined_move: 0,
             examined_combat: 0,
+            blocked_moves: 0,
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
@@ -615,10 +619,14 @@ impl World {
     /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
     /// целой части в сетку.
     fn apply_deltas(&mut self) {
-        let u = &mut self.units;
+        let Self { units: u, delta, ground, blocked_moves, .. } = self;
+        // Земля, если она есть, решает, куда можно шагнуть. Перепад —
+        // свойство ребра (ADR-121), поэтому спрашивается переход,
+        // а не клетка.
+        let terrain = ground.as_ref().map(|g| (&g.nav, g.extent()));
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
-            let (vx, vz) = self.delta[i];
+            let (vx, vz) = delta[i];
             let step_x = Fx::from_ratio(vx, TICKS_PER_SECOND);
             let step_z = Fx::from_ratio(vz, TICKS_PER_SECOND);
             let nx = u.fx[i].add(step_x);
@@ -627,8 +635,43 @@ impl World {
             let carry_z = nz.to_int_trunc();
             u.fx[i] = nx.sub(Fx::from_int(carry_x));
             u.fz[i] = nz.sub(Fx::from_int(carry_z));
-            u.x[i] = (u.x[i] + carry_x).clamp(0, WORLD - 1);
-            u.z[i] = (u.z[i] + carry_z).clamp(0, WORLD - 1);
+            let (x0, z0) = (u.x[i], u.z[i]);
+            let mut x1 = (x0 + carry_x).clamp(0, WORLD - 1);
+            let mut z1 = (z0 + carry_z).clamp(0, WORLD - 1);
+            if let Some((nav, (ex, ez))) = terrain {
+                let st = nav.step() as i32;
+                let (gw, gh) = nav.dims();
+                let cell = |x: i32, z: i32| -> Option<(u32, u32)> {
+                    if x < 0 || z < 0 || x >= ex || z >= ez {
+                        return None;
+                    }
+                    let (cx, cz) = ((x / st) as u32, (z / st) as u32);
+                    if cx >= gw || cz >= gh {
+                        return None;
+                    }
+                    Some((cx, cz))
+                };
+                // Оси проверяются по очереди: шаг, упёршийся в породу
+                // по одной, не обязан отменять другую.
+                if let (Some(a), Some(b)) = (cell(x0, z0), cell(x1, z0)) {
+                    if a != b && !nav.edge(a, b) {
+                        x1 = x0;
+                        *blocked_moves += 1;
+                    }
+                } else if cell(x1, z0).is_none() {
+                    x1 = x0;
+                }
+                if let (Some(a), Some(b)) = (cell(x1, z0), cell(x1, z1)) {
+                    if a != b && !nav.edge(a, b) {
+                        z1 = z0;
+                        *blocked_moves += 1;
+                    }
+                } else if cell(x1, z1).is_none() {
+                    z1 = z0;
+                }
+            }
+            u.x[i] = x1;
+            u.z[i] = z1;
         }
     }
 
@@ -810,17 +853,27 @@ impl World {
 /// случай с другой ценой (`--dense` в D-7).
 pub fn populate(w: &mut World, n: usize, seed: u64) {
     let mut r = Rng::new(seed, 0xA1);
-    let mid = WORLD / 2;
+    // Если земля есть, сетка у мира и у неё **одна**: юниты стоят
+    // в воксельных координатах, а не на отвлечённой плоскости
+    // (ADR-134). Без земли — прежний размах.
+    let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+    let (midx, midz) = (ex / 2, ez / 2);
     let gap = RANGE / 2;
+    let spread = (ex / 6).clamp(4, 100);
+    let depth = (ez / 4).clamp(4, 150);
     for k in 0..n {
         let owner = (k % 2) as u8;
-        let bx = if owner == 0 { mid - gap - 100 } else { mid + gap + 100 };
-        let x = (bx + r.range(-100, 100)).clamp(0, WORLD - 1);
-        let z = (mid + r.range(-150, 150)).clamp(0, WORLD - 1);
+        let bx = if owner == 0 {
+            midx - gap - spread
+        } else {
+            midx + gap + spread
+        };
+        let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
+        let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
         w.units.spawn(x, z, owner, r.range(2, 6), 300);
     }
-    w.fill_flow_towards(0, mid + gap + 100, mid);
-    w.fill_flow_towards(1, mid - gap - 100, mid);
+    w.fill_flow_towards(0, midx + gap + spread, midz);
+    w.fill_flow_towards(1, midx - gap - spread, midz);
     w.units.refresh_live();
 }
 

@@ -70,6 +70,14 @@ impl Ground {
         }
     }
 
+    /// Протяжённость рельефа в вокселях. Юниты живут в этих же
+    /// координатах: у мира и у земли **одна сетка**, иначе юниты
+    /// ходят по отвлечённой плоскости и о прокопанном не знают
+    /// (ADR-134).
+    pub fn extent(&self) -> (i32, i32) {
+        (self.world.nx as i32, self.world.nz as i32)
+    }
+
     /// Правки этого тика — весь поток, а не последний дренаж.
     pub fn edits(&self) -> &[Edit] {
         &self.edits
@@ -179,6 +187,79 @@ mod tests {
         let mut w = World::new(2, 16);
         w.attach_ground(Ground::new(vw, 16, 4, 2));
         w
+    }
+
+    /// Гряда поперёк карты: земля до `GY`, стена на `WALL` до `WY`.
+    struct Wall;
+    const GY: u32 = 8;
+    const WALL: u32 = 32;
+    const WY: u32 = 40;
+    impl voxel::Generator for Wall {
+        fn material(&self, x: u32, y: u32, _z: u32) -> Mat {
+            if y < GY {
+                return 2;
+            }
+            if x.abs_diff(WALL) <= 1 && y < WY {
+                return 3;
+            }
+            AIR
+        }
+    }
+
+    /// **Рельеф держит юнита.** Он идёт на стену и не проходит сквозь
+    /// неё; счётчик упёршихся шагов не ноль.
+    ///
+    /// Тест сторожит не столько стену, сколько то, что юниты вообще
+    /// живут в координатах земли: пока они ходили по отвлечённой
+    /// плоскости, прокопанная карта не влияла на них никак (ADR-134).
+    #[test]
+    fn terrain_stops_a_unit() {
+        let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Wall));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let id = w.units.spawn(28, 32, 0, 6, 300) as usize;
+        w.fill_flow_towards(0, 60, 32);
+        w.units.refresh_live();
+        for _ in 0..200 {
+            w.tick();
+        }
+        assert!(w.blocked_moves > 0, "ни один шаг не упёрся в породу");
+        assert!(
+            w.units.x[id] < WALL as i32,
+            "юнит прошёл сквозь стену: x = {}",
+            w.units.x[id]
+        );
+        assert!(w.units.x[id] > 28, "юнит вообще не пошёл");
+    }
+
+    /// **Прокопанный проход открывает дорогу.** Та же стена, но в ней
+    /// прорублен коридор: юнит проходит.
+    #[test]
+    fn a_dug_corridor_lets_the_unit_through() {
+        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        {
+            let g = w.ground.as_mut().expect("земля");
+            for y in GY..GY + 6 {
+                for z in 30..36 {
+                    for x in WALL - 1..=WALL + 1 {
+                        g.world.queue_dig(x, y, z);
+                    }
+                }
+            }
+        }
+        let id = w.units.spawn(28, 32, 0, 6, 300) as usize;
+        w.fill_flow_towards(0, 60, 32);
+        w.units.refresh_live();
+        for _ in 0..400 {
+            w.tick();
+        }
+        assert!(
+            w.units.x[id] > WALL as i32,
+            "юнит не прошёл по коридору: x = {}",
+            w.units.x[id]
+        );
     }
 
     /// **Дыра появляется в том же тике, где её прокопали**, и её видят

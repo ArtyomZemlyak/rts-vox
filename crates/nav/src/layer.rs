@@ -108,6 +108,16 @@ impl NavLayer {
         (cz * self.w + cx) as usize
     }
 
+    /// Сторона нав-клетки в вокселях.
+    pub fn step(&self) -> u32 {
+        self.step
+    }
+
+    /// Размеры сетки в клетках.
+    pub fn dims(&self) -> (u32, u32) {
+        (self.w, self.h)
+    }
+
     pub fn floor_at(&self, cx: u32, cz: u32) -> u16 {
         self.floor[self.idx(cx, cz)]
     }

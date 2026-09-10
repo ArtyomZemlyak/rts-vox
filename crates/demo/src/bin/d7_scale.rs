@@ -102,12 +102,14 @@ fn populate_dense(w: &mut SimWorld, n: usize, seed: u64) {
     let mut r = Rng::new(seed, 0xA1);
     for k in 0..n {
         let owner = (k % 2) as u8;
-        let x = (WORLD / 2 + r.range(-40, 40)).clamp(0, WORLD - 1);
-        let z = (WORLD / 2 + r.range(-40, 40)).clamp(0, WORLD - 1);
+        let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+        let x = (ex / 2 + r.range(-40, 40)).clamp(0, ex - 1);
+        let z = (ez / 2 + r.range(-40, 40)).clamp(0, ez - 1);
         w.units.spawn(x, z, owner, r.range(2, 6), 300);
     }
-    w.fill_flow_towards(0, WORLD / 2, WORLD / 2);
-    w.fill_flow_towards(1, WORLD / 2, WORLD / 2);
+    let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+    w.fill_flow_towards(0, ex / 2, ez / 2);
+    w.fill_flow_towards(1, ex / 2, ez / 2);
     w.units.refresh_live();
 }
 
@@ -164,13 +166,13 @@ fn main() -> ExitCode {
     // --- Юниты и земля в одном мире: порядок фаз задаёт движок
     // (ADR-125), а не сцена.
     let mut sim = SimWorld::new(2, a.units.max(1));
+    sim.attach_ground(Ground::new(world, 256, 4, 2));
     if a.dense {
         populate_dense(&mut sim, a.units, a.seed);
     } else {
         populate(&mut sim, a.units, a.seed);
     }
 
-    sim.attach_ground(Ground::new(world, 256, 4, 2));
 
     let mut hash = RunHash::new();
 
@@ -407,6 +409,12 @@ fn main() -> ExitCode {
         "{:<34} {:>14.1}",
         "осмотрено на бою",
         sim.examined_combat as f64 / (2.0 * n)
+    );
+    // Ноль здесь значит, что юниты по рельефу не ходят (ADR-134).
+    println!(
+        "{:<34} {:>14.1}",
+        "шагов упёрлось в породу",
+        sim.blocked_moves as f64 / (2.0 * n)
     );
     println!("{:<34} {:>11.1} мс", "генерация мира", gen_ms);
     println!(
