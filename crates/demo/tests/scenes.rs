@@ -166,7 +166,7 @@ fn cut_stem(w: &mut World, level: u32) {
 #[test]
 fn d2_cutting_the_stem_detaches_the_cap() {
     let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
-    let mut collapse = demo::collapse::CollapseLayer::new(&w);
+    let mut collapse = voxel::collapse::CollapseLayer::new(&w);
     let mut bodies = Bodies::new(16);
 
     cut_stem(&mut w, 35);
@@ -188,7 +188,7 @@ fn d2_cutting_the_stem_detaches_the_cap() {
 #[test]
 fn d2_body_limit_refuses_rather_than_drops() {
     let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
-    let mut collapse = demo::collapse::CollapseLayer::new(&w);
+    let mut collapse = voxel::collapse::CollapseLayer::new(&w);
     let mut bodies = Bodies::new(0);
 
     cut_stem(&mut w, 35);
@@ -207,7 +207,7 @@ fn d2_body_limit_refuses_rather_than_drops() {
 fn d2_cascade_is_deterministic() {
     let run = || -> Vec<(i64, i64, i64, usize)> {
         let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
-        let mut collapse = demo::collapse::CollapseLayer::new(&w);
+        let mut collapse = voxel::collapse::CollapseLayer::new(&w);
         let mut bodies = Bodies::new(16);
         let mut trace = Vec::new();
         for t in 0..12u32 {

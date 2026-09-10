@@ -204,7 +204,7 @@ fn main() -> ExitCode {
         worst_materialized: u64,
     }
 
-    let mut measure = |sim: &mut SimWorld,
+    let measure = |sim: &mut SimWorld,
                        world: &mut World,
                        mesh: &mut MeshLayer,
                        topo: &mut TopoLayer,

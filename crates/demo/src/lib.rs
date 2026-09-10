@@ -9,7 +9,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod collapse;
 pub mod dig;
 pub mod layers;
 

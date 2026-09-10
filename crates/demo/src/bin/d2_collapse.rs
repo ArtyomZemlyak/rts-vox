@@ -16,7 +16,7 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use demo::collapse::CollapseLayer;
+use voxel::collapse::CollapseLayer;
 use demo::layers::MeshLayer;
 use demo::RunHash;
 use fx::rng::Rng;
@@ -170,6 +170,14 @@ struct Outcome {
     /// Сколько юнитов вообще удалось поставить на шляпки. Ноль здесь
     /// значит, что сцена не собралась, а не что механика не работает.
     units_placed: usize,
+    promoted_total: usize,
+    frontier_max: usize,
+    graph_chunks: usize,
+    graph_bytes: usize,
+    graph_nodes: usize,
+    graph_edges: usize,
+    rounds_max: usize,
+    rounds_capped: bool,
     riders_total: usize,
     killed: usize,
     ms_collapse: f64,
@@ -222,6 +230,9 @@ fn run(a: &Args) -> Outcome {
     let (mut ms_collapse, mut ms_bodies) = (0.0f64, 0.0f64);
     let (mut detached, mut overflow, mut cells, mut landed) = (0usize, 0usize, 0usize, 0usize);
     let (mut peak_bodies, mut riders_total, mut killed) = (0usize, 0usize, 0usize);
+    let (mut graph_nodes, mut graph_edges, mut rounds_max) = (0usize, 0usize, 0usize);
+    let mut rounds_capped = false;
+    let (mut promoted_total, mut frontier_max) = (0usize, 0usize);
     let (mut max_fall, mut damage_total) = (0u32, 0u64);
 
     for tick in 1..=a.ticks {
@@ -261,7 +272,13 @@ fn run(a: &Args) -> Outcome {
         let cs = collapse.apply(&mut world, &tick_edits, &mut bodies);
         ms_collapse += t.elapsed().as_secs_f64() * 1e3;
         detached += cs.detached;
-        overflow += cs.assumed_anchored;
+        overflow += cs.too_big;
+        graph_nodes = graph_nodes.max(cs.nodes);
+        graph_edges = graph_edges.max(cs.edges);
+        rounds_max = rounds_max.max(cs.rounds);
+        promoted_total += cs.promoted;
+        frontier_max = frontier_max.max(cs.frontier);
+        rounds_capped |= cs.rounds_capped;
         cells += cs.cells;
 
         // Юниты садятся на новые тела: тот, кто оказался над куском,
@@ -371,6 +388,14 @@ fn run(a: &Args) -> Outcome {
         landed,
         peak_bodies,
         refused: bodies.refused,
+        promoted_total,
+        frontier_max,
+        graph_chunks: collapse.known_chunks(),
+        graph_bytes: collapse.graph_bytes(),
+        graph_nodes,
+        graph_edges,
+        rounds_max,
+        rounds_capped,
         units_placed: units.len(),
         riders_total,
         killed,
@@ -398,7 +423,19 @@ fn main() -> ExitCode {
     println!("{:<30} {:>14}", "каскад отделения", "");
     println!("{:<30} {:>14}", "кусков отвалилось", o.detached);
     println!("{:<30} {:>14}", "вокселей в телах", o.cells);
-    println!("{:<30} {:>14}", "сочтено заякоренным по грани", o.overflow);
+    println!("{:<30} {:>14}", "не влезло в потолок тела", o.overflow);
+    println!("{:<30} {:>14}", "узлов в графе компонент", o.graph_nodes);
+    println!("{:<30} {:>14}", "рёбер в графе", o.graph_edges);
+    println!("{:<30} {:>14}", "чанков в графе", o.graph_chunks);
+    println!("{:<30} {:>14}", "  втянуто за прогон", o.promoted_total);
+    println!("{:<30} {:>14}", "  ждало втягивания, максимум", o.frontier_max);
+    println!("{:<30} {:>11.2} МиБ", "память графа", o.graph_bytes as f64 / 1024.0 / 1024.0);
+    println!("{:<30} {:>14}", "раундов разбора, максимум", o.rounds_max);
+    println!(
+        "{:<30} {:>14}",
+        "упёрлось в потолок раундов",
+        if o.rounds_capped { "ДА" } else { "нет" }
+    );
     println!("{:<30} {:>14}", "тел приземлилось", o.landed);
     println!("{:<30} {:>14}", "пик живых тел", o.peak_bodies);
     println!("{:<30} {:>14}", "отказано по лимиту", o.refused);
@@ -413,7 +450,7 @@ fn main() -> ExitCode {
     println!(
         "{:<30} {:>14}",
         "смертельное падение, вокселей",
-        (100 + FALL_DAMAGE_PER_VOXEL - 1) / FALL_DAMAGE_PER_VOXEL
+        100u32.div_ceil(FALL_DAMAGE_PER_VOXEL)
     );
     println!(
         "{:<30} {:>14}",

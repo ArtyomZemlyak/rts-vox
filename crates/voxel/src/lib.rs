@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod bodies;
+pub mod collapse;
 pub mod fleet;
 pub mod los;
 pub mod store;

@@ -1,0 +1,856 @@
+//! Каскад отделения: правки тика → компоненты чанка → граф → тела.
+//!
+//! **Тик — атом.** Вопрос «что отвалилось» задаётся по состоянию конца
+//! тика, а не по каждой правке отдельно. Это не оформительская разница:
+//! пока каскад спрашивал по правке, толстый вырез за один тик проходил
+//! мимо него целиком (ADR-118). Ступени A и B (ADR-055) отвечают на
+//! вопрос «расщепило ли снятие ЭТОГО воксела» и потому годятся только
+//! там, где снятие одно.
+//!
+//! Ответ на пачку — разметка связных компонент чанка (5–10 мкс на
+//! чанк 32³) и проверка заякоренности.
+//!
+//! **Ступень C — граф компонент чанков** (ADR-119). Компонента,
+//! касающаяся грани чанка, держится не за грань, а за то, что с той
+//! стороны, и вопрос рекурсивен. Узел графа — пара (чанк, компонента),
+//! ребро — контакт твёрдого с твёрдым через грань, заземление —
+//! **только коренная порода**.
+//!
+//! Соблазн сказать «нетронутый чанк заякорен по определению» велик
+//! и неверен: настил моста лежит в нетронутом чанке, а держится
+//! за подрезанную опору в тронутом. Поэтому чанк, до которого достаёт
+//! контакт, **втягивается** в граф, а пока не втянут — считается
+//! заземляющим. Такая оценка консервативна: она не роняет лишнего,
+//! но может отложить обрушение на тик-другой.
+//!
+//! Втягивание идёт с потолком за тик, как и всё прочее: первая же
+//! правка иначе построила бы граф по всей карте разом.
+
+use crate::bodies::Bodies;
+use crate::topo::{Chunk as TopoChunk, Components, CS};
+use crate::{Edit, World};
+
+/// Потолок на размер одного отвала в вокселях. Больше — не тело,
+/// а событие другого масштаба, и оно оставляется в мире.
+const MAX_BODY_CELLS: usize = 4096;
+
+/// Сколько раз за тик каскад повторяет разбор. Оторвав кусок, он
+/// уносит с собой рёбра графа, и то, что держалось за него, тоже
+/// падает. Раундов немного, но их не ноль.
+const MAX_ROUNDS: usize = 8;
+
+/// Сколько чанков за тик разрешено втянуть в граф. Потолок обязателен:
+/// контакт твёрдого с твёрдым идёт по всему рельефу, и без него первая
+/// же правка разметила бы карту целиком.
+const DEFAULT_PROMOTE_PER_TICK: usize = 64;
+
+/// Пустая граничная ячейка.
+const NO_LABEL: u16 = u16::MAX;
+
+/// Шесть граней чанка: -x, +x, -y, +y, -z, +z.
+const FACES: usize = 6;
+
+/// Смещение чанка-соседа по грани.
+const FACE_DIR: [(i32, i32, i32); FACES] = [
+    (-1, 0, 0),
+    (1, 0, 0),
+    (0, -1, 0),
+    (0, 1, 0),
+    (0, 0, -1),
+    (0, 0, 1),
+];
+
+/// Грань-напарник: у соседа контакт идёт через противоположную грань.
+/// Порядок граней подобран так, что это один XOR.
+#[inline]
+const fn opposite(f: usize) -> usize {
+    f ^ 1
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct CollapseStats {
+    /// Компонент рассмотрено.
+    pub probed: usize,
+    /// Из них признано отделением.
+    pub detached: usize,
+    /// Компонент отвалилось, но не влезло в потолок тела.
+    pub too_big: usize,
+    /// Вокселей ушло в тела.
+    pub cells: usize,
+    /// Узлов в графе компонент — размер ступени C.
+    pub nodes: usize,
+    /// Рёбер в графе.
+    pub edges: usize,
+    /// Сколько раундов разбора понадобилось.
+    pub rounds: usize,
+    /// Разбор упёрся в потолок раундов: что-то осталось висеть.
+    pub rounds_capped: bool,
+    /// Чанков втянуто в граф за тик.
+    pub promoted: usize,
+    /// Чанков ждёт втягивания. Пока фронтир не пуст, ответ каскада —
+    /// оценка сверху: часть кусков ещё держится за неразмеченное.
+    pub frontier: usize,
+}
+
+/// Компоненты одного чанка, как их видит граф.
+struct ChunkNodes {
+    /// Сколько компонент в чанке.
+    n: usize,
+    /// Метка компоненты на каждую граничную ячейку каждой грани.
+    /// Раскладка внутри грани: для граней по X — `z * CS + y`,
+    /// по Y — `z * CS + x`, по Z — `y * CS + x`. У соседа та же
+    /// ячейка лежит по тому же индексу его противоположной грани.
+    faces: Vec<u16>,
+    /// Стоит ли компонента на коренной породе.
+    bedrock: Vec<bool>,
+    /// Производное от соседей: рёбра `(моя метка, метка соседа)`
+    /// и метки, заземлённые контактом с нетронутым чанком.
+    /// Пересчитывается, когда меняется этот чанк или сосед.
+    edges: [Vec<(u16, u16)>; FACES],
+    ground: [Vec<u16>; FACES],
+}
+
+impl ChunkNodes {
+    fn new() -> ChunkNodes {
+        ChunkNodes {
+            n: 0,
+            faces: vec![NO_LABEL; FACES * CS * CS],
+            bedrock: Vec::new(),
+            edges: Default::default(),
+            ground: Default::default(),
+        }
+    }
+}
+
+pub struct CollapseLayer {
+    comps: Components,
+    chunks: Vec<Option<Box<TopoChunk>>>,
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    dirty: Vec<u32>,
+    stamp: Vec<u32>,
+    epoch: u32,
+    /// Правки тика по чанкам: местные координаты и твёрдость после.
+    local: Vec<Vec<(u8, u8, u8, bool)>>,
+    /// Узлы графа на чанк. `None` — чанк каскаду неизвестен, то есть
+    /// его материал сгенерирован и заякорен по определению.
+    nodes: Vec<Option<Box<ChunkNodes>>>,
+    /// Номер первого узла чанка в общей нумерации.
+    base: Vec<u32>,
+    /// Известные чанки по возрастанию индекса: обход обязан быть
+    /// стабильным, а не зависеть от порядка появления.
+    known: Vec<u32>,
+    /// Заякоренность на глобальный номер узла.
+    reached: Vec<bool>,
+    queue: Vec<u32>,
+    /// Грани, которые надо пересчитать: `(чанк, грань)`.
+    face_todo: Vec<(u32, u8)>,
+    /// Чанки, до которых достаёт контакт, но которые ещё не размечены.
+    /// Пока чанк здесь, контакт с ним считается заземляющим.
+    frontier: Vec<u32>,
+    /// Потолок втягивания за тик.
+    pub max_promote_per_tick: usize,
+    /// Буфер состава куска в мировых координатах.
+    cells: Vec<(u32, u32, u32)>,
+}
+
+impl CollapseLayer {
+    pub fn new(w: &World) -> CollapseLayer {
+        let cs = CS as u32;
+        let (nx, ny, nz) = (w.nx.div_ceil(cs), w.ny.div_ceil(cs), w.nz.div_ceil(cs));
+        let n = (nx * ny * nz) as usize;
+        CollapseLayer {
+            comps: Components::new(),
+            chunks: (0..n).map(|_| None).collect(),
+            nx,
+            ny,
+            nz,
+            dirty: Vec::new(),
+            stamp: vec![u32::MAX; n],
+            epoch: 0,
+            local: (0..n).map(|_| Vec::new()).collect(),
+            nodes: (0..n).map(|_| None).collect(),
+            base: vec![0; n],
+            known: Vec::new(),
+            reached: Vec::new(),
+            queue: Vec::new(),
+            face_todo: Vec::new(),
+            frontier: Vec::new(),
+            max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
+            cells: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn index(&self, cx: u32, cy: u32, cz: u32) -> usize {
+        ((cz * self.ny + cy) * self.nx + cx) as usize
+    }
+
+    #[inline]
+    fn coords(&self, i: usize) -> (u32, u32, u32) {
+        let i = i as u32;
+        (i % self.nx, (i / self.nx) % self.ny, i / (self.nx * self.ny))
+    }
+
+    fn neighbour(&self, i: usize, f: usize) -> Option<usize> {
+        let (cx, cy, cz) = self.coords(i);
+        let (dx, dy, dz) = FACE_DIR[f];
+        let (nx, ny, nz) = (cx as i32 + dx, cy as i32 + dy, cz as i32 + dz);
+        if nx < 0 || ny < 0 || nz < 0 {
+            return None;
+        }
+        let (nx, ny, nz) = (nx as u32, ny as u32, nz as u32);
+        if nx >= self.nx || ny >= self.ny || nz >= self.nz {
+            return None;
+        }
+        Some(self.index(nx, ny, nz))
+    }
+
+    fn build(w: &World, cx: u32, cy: u32, cz: u32) -> Box<TopoChunk> {
+        let cs = CS as u32;
+        let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
+        let mut c = Box::new(TopoChunk::new());
+        for z in 0..cs {
+            for y in 0..cs {
+                for x in 0..cs {
+                    if w.solid(ox + x, oy + y, oz + z) {
+                        c.set(x as usize, y as usize, z as usize, true);
+                    }
+                }
+            }
+        }
+        c
+    }
+
+    /// Прогнать правки тика через каскад и оторвать всё, что отвалилось.
+    pub fn apply(&mut self, w: &mut World, edits: &[Edit], bodies: &mut Bodies) -> CollapseStats {
+        let cs = CS as u32;
+        let mut st = CollapseStats::default();
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.epoch == u32::MAX {
+            self.stamp.iter_mut().for_each(|v| *v = 0);
+            self.epoch = 1;
+        }
+        self.dirty.clear();
+        for e in edits {
+            let (cx, cy, cz) = (e.x / cs, e.y / cs, e.z / cs);
+            if cx >= self.nx || cy >= self.ny || cz >= self.nz {
+                continue;
+            }
+            let i = self.index(cx, cy, cz);
+            if self.stamp[i] != self.epoch {
+                self.stamp[i] = self.epoch;
+                self.local[i].clear();
+                self.dirty.push(i as u32);
+            }
+            self.local[i].push((
+                (e.x % cs) as u8,
+                (e.y % cs) as u8,
+                (e.z % cs) as u8,
+                e.mat != crate::store::AIR,
+            ));
+        }
+        if self.dirty.is_empty() {
+            return st;
+        }
+
+        // Чанк, до которого дошла правка, входит в граф — **любая**,
+        // не только снятие. Засыпка сама по себе ничего не роняет,
+        // но меняет рёбра: приземлившееся тело запекается засыпкой,
+        // и то, что оно подпёрло, держаться обязано.
+        self.face_todo.clear();
+        for k in 0..self.dirty.len() {
+            let i = self.dirty[k] as usize;
+            let (cx, cy, cz) = self.coords(i);
+            let fresh = self.chunks[i].is_none();
+            if fresh {
+                self.chunks[i] = Some(Self::build(w, cx, cy, cz));
+            } else {
+                let c = self.chunks[i].as_mut().expect("chunk checked");
+                for &(lx, ly, lz, solid) in &self.local[i] {
+                    c.set(lx as usize, ly as usize, lz as usize, solid);
+                }
+            }
+            self.relabel(i);
+            self.mark_faces(i);
+        }
+        self.rebuild_index();
+        self.refresh_faces(w);
+        st.promoted = self.promote(w);
+        st.frontier = self.frontier.len();
+
+        for round in 0..MAX_ROUNDS {
+            st.rounds = round + 1;
+            self.resolve(&mut st);
+            let torn = self.detach_unanchored(w, bodies, &mut st);
+            if torn == 0 {
+                return st;
+            }
+            self.rebuild_index();
+            self.refresh_faces(w);
+        }
+        st.rounds_capped = true;
+        st
+    }
+
+    /// Втянуть в граф чанки с фронтира, сколько позволяет потолок.
+    /// Возвращает, сколько втянуто.
+    ///
+    /// Порядок — по возрастанию индекса чанка, а не по порядку
+    /// появления: иначе состав графа зависел бы от порядка обхода
+    /// правок, то есть от того, куда игрок кликнул раньше.
+    fn promote(&mut self, w: &World) -> usize {
+        let mut done = 0usize;
+        while done < self.max_promote_per_tick {
+            self.frontier.sort_unstable();
+            self.frontier.dedup();
+            let Some(pos) = self
+                .frontier
+                .iter()
+                .position(|&i| self.nodes[i as usize].is_none())
+            else {
+                break;
+            };
+            let i = self.frontier.remove(pos) as usize;
+            let (cx, cy, cz) = self.coords(i);
+            self.chunks[i] = Some(Self::build(w, cx, cy, cz));
+            self.relabel(i);
+            self.mark_faces(i);
+            done += 1;
+            self.rebuild_index();
+            self.refresh_faces(w);
+        }
+        // Всё, что уже в графе, с фронтира уходит.
+        self.frontier.retain(|&i| self.nodes[i as usize].is_none());
+        done
+    }
+
+    /// Разметить компоненты чанка заново и обновить его грани.
+    fn relabel(&mut self, i: usize) {
+        let c = self.chunks[i].take().expect("chunk present");
+        let n = self.comps.build(&c);
+        let mut nd = self.nodes[i].take().unwrap_or_else(|| Box::new(ChunkNodes::new()));
+        nd.n = n;
+        nd.faces.iter_mut().for_each(|v| *v = NO_LABEL);
+        nd.bedrock.clear();
+        nd.bedrock.resize(n, false);
+        let (_, cy, _) = self.coords(i);
+        for (ri, r) in self.comps.runs.iter().enumerate() {
+            let lab = self.comps.label[ri] as u16;
+            let col = r.col as usize;
+            let (ly, lz) = (col % CS, col / CS);
+            let m = r.mask;
+            if m & 1 != 0 {
+                nd.faces[lz * CS + ly] = lab;
+            }
+            if m & (1 << 31) != 0 {
+                nd.faces[CS * CS + lz * CS + ly] = lab;
+            }
+            if ly == 0 || ly == CS - 1 || lz == 0 || lz == CS - 1 {
+                let (fy, fz) = (if ly == 0 { 2 } else { 3 }, if lz == 0 { 4 } else { 5 });
+                let mut bits = m;
+                while bits != 0 {
+                    let x = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if ly == 0 || ly == CS - 1 {
+                        nd.faces[fy * CS * CS + lz * CS + x] = lab;
+                    }
+                    if lz == 0 || lz == CS - 1 {
+                        nd.faces[fz * CS * CS + ly * CS + x] = lab;
+                    }
+                }
+            }
+            // Коренная порода: самый низ мира держит всё, что на нём стоит.
+            if cy == 0 && ly == 0 && m != 0 {
+                nd.bedrock[lab as usize] = true;
+            }
+        }
+        self.nodes[i] = Some(nd);
+        self.chunks[i] = Some(c);
+    }
+
+    /// Пометить к пересчёту грани чанка и обращённые к нему грани соседей.
+    fn mark_faces(&mut self, i: usize) {
+        for f in 0..FACES {
+            self.face_todo.push((i as u32, f as u8));
+            if let Some(j) = self.neighbour(i, f) {
+                if self.nodes[j].is_some() {
+                    self.face_todo.push((j as u32, opposite(f) as u8));
+                }
+            }
+        }
+    }
+
+    /// Пересчитать помеченные грани: рёбра и заземления.
+    fn refresh_faces(&mut self, w: &World) {
+        // Порядок обхода не влияет на результат — каждая грань считается
+        // независимо, — но сортировка убирает повторы и делает работу
+        // предсказуемой.
+        self.face_todo.sort_unstable();
+        self.face_todo.dedup();
+        let todo = std::mem::take(&mut self.face_todo);
+        for &(ci, f) in &todo {
+            self.refresh_face(w, ci as usize, f as usize);
+        }
+        self.face_todo = todo;
+        self.face_todo.clear();
+    }
+
+    fn refresh_face(&mut self, w: &World, i: usize, f: usize) {
+        if self.nodes[i].is_none() {
+            return;
+        }
+        let mut nd = self.nodes[i].take().expect("nodes present");
+        nd.edges[f].clear();
+        nd.ground[f].clear();
+        let cs = CS as u32;
+        let (cx, cy, cz) = self.coords(i);
+        let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
+        let j = self.neighbour(i, f);
+        match j {
+            None => {
+                // Край мира не держит: за ним ничего нет.
+            }
+            Some(j) if self.nodes[j].is_some() => {
+                let other = self.nodes[j].as_ref().expect("checked");
+                let g = opposite(f);
+                for idx in 0..CS * CS {
+                    let a = nd.faces[f * CS * CS + idx];
+                    if a == NO_LABEL {
+                        continue;
+                    }
+                    let b = other.faces[g * CS * CS + idx];
+                    if b == NO_LABEL {
+                        continue;
+                    }
+                    nd.edges[f].push((a, b));
+                }
+                nd.edges[f].sort_unstable();
+                nd.edges[f].dedup();
+            }
+            Some(j) => {
+                // Сосед ещё не в графе. Контакт с ним считается
+                // заземляющим — это оценка сверху, — а сам он ставится
+                // в очередь на втягивание.
+                let mut contact = false;
+                for idx in 0..CS * CS {
+                    let a = nd.faces[f * CS * CS + idx];
+                    if a == NO_LABEL {
+                        continue;
+                    }
+                    let (wx, wy, wz) = Self::face_cell(f, idx, ox, oy, oz);
+                    let (dx, dy, dz) = FACE_DIR[f];
+                    let (sx, sy, sz) = (wx as i32 + dx, wy as i32 + dy, wz as i32 + dz);
+                    if sx < 0 || sy < 0 || sz < 0 {
+                        continue;
+                    }
+                    if w.solid(sx as u32, sy as u32, sz as u32) {
+                        nd.ground[f].push(a);
+                        contact = true;
+                    }
+                }
+                nd.ground[f].sort_unstable();
+                nd.ground[f].dedup();
+                if contact && !self.frontier.contains(&(j as u32)) {
+                    self.frontier.push(j as u32);
+                }
+            }
+        }
+        self.nodes[i] = Some(nd);
+    }
+
+    /// Мировые координаты граничной ячейки грани.
+    #[inline]
+    fn face_cell(f: usize, idx: usize, ox: u32, oy: u32, oz: u32) -> (u32, u32, u32) {
+        let (a, b) = ((idx % CS) as u32, (idx / CS) as u32);
+        match f {
+            0 => (ox, oy + a, oz + b),
+            1 => (ox + CS as u32 - 1, oy + a, oz + b),
+            2 => (ox + a, oy, oz + b),
+            3 => (ox + a, oy + CS as u32 - 1, oz + b),
+            4 => (ox + a, oy + b, oz),
+            _ => (ox + a, oy + b, oz + CS as u32 - 1),
+        }
+    }
+
+    /// Пересобрать нумерацию узлов.
+    fn rebuild_index(&mut self) {
+        self.known.clear();
+        let mut total = 0u32;
+        for i in 0..self.nodes.len() {
+            if let Some(nd) = &self.nodes[i] {
+                // Пустой чанк узлов не даёт. Он обязан выпасть из
+                // нумерации: два чанка с одинаковой базой сделали бы
+                // двоичный поиск по ней неоднозначным.
+                if nd.n == 0 {
+                    continue;
+                }
+                self.base[i] = total;
+                total += nd.n as u32;
+                self.known.push(i as u32);
+            }
+        }
+        self.reached.clear();
+        self.reached.resize(total as usize, false);
+    }
+
+    /// Обход графа от заземлённых узлов.
+    fn resolve(&mut self, st: &mut CollapseStats) {
+        self.reached.iter_mut().for_each(|v| *v = false);
+        self.queue.clear();
+        let mut edges = 0usize;
+        for k in 0..self.known.len() {
+            let i = self.known[k] as usize;
+            let base = self.base[i];
+            let nd = self.nodes[i].as_ref().expect("known");
+            edges += nd.edges.iter().map(|e| e.len()).sum::<usize>();
+            for (l, &bed) in nd.bedrock.iter().enumerate() {
+                if bed {
+                    let id = base + l as u32;
+                    if !self.reached[id as usize] {
+                        self.reached[id as usize] = true;
+                        self.queue.push(id);
+                    }
+                }
+            }
+            for f in 0..FACES {
+                for &l in &nd.ground[f] {
+                    let id = base + l as u32;
+                    if !self.reached[id as usize] {
+                        self.reached[id as usize] = true;
+                        self.queue.push(id);
+                    }
+                }
+            }
+        }
+        // Максимум по раундам, а не последнее значение: к концу тика
+        // от графа остаётся то, что не упало, и размер его не о том.
+        st.nodes = st.nodes.max(self.reached.len());
+        st.edges = st.edges.max(edges);
+
+        let mut head = 0usize;
+        while head < self.queue.len() {
+            let id = self.queue[head];
+            head += 1;
+            // Найти чанк по номеру узла: `known` отсортирован, `base`
+            // монотонен, поэтому двоичный поиск.
+            let k = match self
+                .known
+                .binary_search_by(|&c| self.base[c as usize].cmp(&id))
+            {
+                Ok(k) => k,
+                Err(0) => continue,
+                Err(k) => k - 1,
+            };
+            let i = self.known[k] as usize;
+            let lab = (id - self.base[i]) as u16;
+            debug_assert!((lab as usize) < self.nodes[i].as_ref().expect("known").n);
+            for f in 0..FACES {
+                let Some(j) = self.neighbour(i, f) else { continue };
+                if self.nodes[j].is_none() {
+                    continue;
+                }
+                let jbase = self.base[j];
+                let nd = self.nodes[i].as_ref().expect("known");
+                for &(a, b) in &nd.edges[f] {
+                    if a != lab {
+                        continue;
+                    }
+                    let nid = jbase + b as u32;
+                    if !self.reached[nid as usize] {
+                        self.reached[nid as usize] = true;
+                        self.queue.push(nid);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Оторвать всё, до чего обход не дошёл. Возвращает число тел.
+    ///
+    /// **Кусок, лежащий в нескольких чанках, — одно тело.** Компоненты
+    /// в разных чанках, соединённые ребром графа, объединяются: иначе
+    /// мост через границу чанка развалился бы на куски размером с чанк,
+    /// а падают они как одно (ADR-119).
+    fn detach_unanchored(
+        &mut self,
+        w: &mut World,
+        bodies: &mut Bodies,
+        st: &mut CollapseStats,
+    ) -> usize {
+        for k in 0..self.known.len() {
+            let i = self.known[k] as usize;
+            st.probed += self.nodes[i].as_ref().expect("known").n;
+        }
+        if self.reached.iter().all(|&r| r) {
+            return 0;
+        }
+
+        // Объединение незаякоренных узлов по рёбрам графа.
+        let n_nodes = self.reached.len();
+        let mut parent: Vec<u32> = (0..n_nodes as u32).collect();
+        for k in 0..self.known.len() {
+            let i = self.known[k] as usize;
+            let base = self.base[i];
+            for f in 0..FACES {
+                let Some(j) = self.neighbour(i, f) else { continue };
+                if self.nodes[j].as_ref().map(|d| d.n).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let jbase = self.base[j];
+                let nd = self.nodes[i].as_ref().expect("known");
+                let pairs: Vec<(u16, u16)> = nd.edges[f].clone();
+                for (a, b) in pairs {
+                    let (ia, ib) = (base + a as u32, jbase + b as u32);
+                    if self.reached[ia as usize] || self.reached[ib as usize] {
+                        continue;
+                    }
+                    let (ra, rb) = (uf_find(&mut parent, ia), uf_find(&mut parent, ib));
+                    if ra != rb {
+                        // Меньший индекс становится корнем: ничьи
+                        // разрешаются индексом, а не порядком слияний.
+                        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
+                        parent[hi as usize] = lo;
+                    }
+                }
+            }
+        }
+
+        // Состав групп. Обход по чанкам в порядке возрастания индекса,
+        // внутри чанка — по пробегам: порядок вокселей детерминирован.
+        let cs = CS as u32;
+        let mut roots: Vec<u32> = Vec::new();
+        let mut group_cells: Vec<Vec<(u32, u32, u32)>> = Vec::new();
+        for k in 0..self.known.len() {
+            let i = self.known[k] as usize;
+            let base = self.base[i] as usize;
+            let n = self.nodes[i].as_ref().expect("known").n;
+            if (0..n).all(|l| self.reached[base + l]) {
+                continue;
+            }
+            let (cx, cy, cz) = self.coords(i);
+            let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
+            let c = self.chunks[i].take().expect("chunk present");
+            self.comps.build(&c);
+            self.chunks[i] = Some(c);
+            for ri in 0..self.comps.runs.len() {
+                let lab = self.comps.label[ri] as usize;
+                if self.reached[base + lab] {
+                    continue;
+                }
+                let root = uf_find(&mut parent, (base + lab) as u32);
+                let gi = match roots.iter().position(|&x| x == root) {
+                    Some(gi) => gi,
+                    None => {
+                        roots.push(root);
+                        group_cells.push(Vec::new());
+                        roots.len() - 1
+                    }
+                };
+                let r = self.comps.runs[ri];
+                let col = r.col as usize;
+                let (ly, lz) = (col % CS, col / CS);
+                let mut bits = r.mask;
+                while bits != 0 {
+                    let x = bits.trailing_zeros();
+                    bits &= bits - 1;
+                    group_cells[gi].push((ox + x, oy + ly as u32, oz + lz as u32));
+                }
+            }
+        }
+
+        let mut torn = 0usize;
+        let mut touched: Vec<u32> = Vec::new();
+        for cells in &group_cells {
+            if cells.is_empty() {
+                continue;
+            }
+            if cells.len() > MAX_BODY_CELLS {
+                st.too_big += 1;
+                continue;
+            }
+            self.cells.clear();
+            self.cells.extend_from_slice(cells);
+            if !bodies.detach(w, &self.cells) {
+                continue;
+            }
+            st.detached += 1;
+            st.cells += self.cells.len();
+            torn += 1;
+            for k in 0..self.cells.len() {
+                let (px, py, pz) = self.cells[k];
+                let (bx, by, bz) = (px / cs, py / cs, pz / cs);
+                let ci = self.index(bx, by, bz);
+                if let Some(c) = self.chunks[ci].as_mut() {
+                    c.set(
+                        (px - bx * cs) as usize,
+                        (py - by * cs) as usize,
+                        (pz - bz * cs) as usize,
+                        false,
+                    );
+                }
+                if !touched.contains(&(ci as u32)) {
+                    touched.push(ci as u32);
+                }
+            }
+        }
+        touched.sort_unstable();
+        for &ci in &touched {
+            self.relabel(ci as usize);
+            self.mark_faces(ci as usize);
+        }
+        torn
+    }
+
+    /// Пометить чанк как требующий пересборки: воксели тела вернулись
+    /// в мир не правкой копки, а запеканием.
+    pub fn invalidate_at(&mut self, x: u32, y: u32, z: u32) {
+        let cs = CS as u32;
+        let (cx, cy, cz) = (x / cs, y / cs, z / cs);
+        if cx >= self.nx || cy >= self.ny || cz >= self.nz {
+            return;
+        }
+        let i = self.index(cx, cy, cz);
+        self.chunks[i] = None;
+        self.nodes[i] = None;
+    }
+
+    /// Память графа компонент — она растёт с числом тронутых чанков
+    /// и обязана быть видна.
+    pub fn graph_bytes(&self) -> usize {
+        let mut n = 0;
+        for nd in self.nodes.iter().flatten() {
+            n += nd.faces.len() * 2 + nd.bedrock.len();
+            n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
+            n += nd.ground.iter().map(|g| g.len() * 2).sum::<usize>();
+        }
+        n
+    }
+
+    pub fn known_chunks(&self) -> usize {
+        self.known.len()
+    }
+}
+
+/// Поиск корня с укорачиванием пути. Свободная функция, потому что
+/// внутри метода она заняла бы `self` целиком.
+fn uf_find(p: &mut [u32], mut a: u32) -> u32 {
+    while p[a as usize] != a {
+        p[a as usize] = p[p[a as usize] as usize];
+        a = p[a as usize];
+    }
+    a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{Mat, AIR};
+
+    /// Мост: столб от дна до `DECK`, от него настил поперёк всей карты.
+    /// Настил заведомо длиннее чанка — в этом весь смысл.
+    struct Bridge;
+    const DECK: u32 = 40;
+    const PIER: u32 = 8;
+
+    impl crate::Generator for Bridge {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if z != 8 {
+                return AIR;
+            }
+            // Опора.
+            if x == PIER && y < DECK {
+                return 2;
+            }
+            // Настил.
+            if y == DECK && (PIER..60).contains(&x) {
+                return 2;
+            }
+            AIR
+        }
+    }
+
+    fn cut(w: &mut World, y: u32) {
+        w.queue_dig(PIER, y, 8);
+    }
+
+    /// **Кусок, уходящий за границу чанка, падает.** Настил длиной
+    /// пятьдесят два воксела лежит в двух чанках; до ступени C каждая
+    /// половина считалась заякоренной за другую, и мост не обрушивался
+    /// никогда (Q-66).
+    #[test]
+    fn a_span_crossing_a_chunk_boundary_falls() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16);
+
+        // Подрезать опору у основания.
+        cut(&mut w, 4);
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        let st = c.apply(&mut w, &edits, &mut b);
+        assert!(st.detached > 0, "мост не обрушился");
+        assert_eq!(st.detached, 1, "мост обязан упасть одним телом, а не по чанкам");
+        assert!(st.nodes >= 3, "граф слишком мал: {st:?}");
+        assert!(st.promoted >= 1, "соседей не втянули: {st:?}");
+        w.flush();
+
+        // Настил ушёл из мира по обе стороны границы чанка.
+        assert!(!w.solid(20, DECK, 8), "левая половина осталась");
+        assert!(!w.solid(50, DECK, 8), "правая половина осталась");
+        // Основание опоры ниже подреза стоит.
+        assert!(w.solid(PIER, 2, 8), "низ опоры пропал");
+    }
+
+    /// **Заякоренное не падает.** Тот же мост без подреза стоит,
+    /// сколько бы правок ни прошло рядом.
+    #[test]
+    fn an_anchored_span_stays() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16);
+        // Правка рядом с мостом, но не по нему.
+        w.queue_dig(20, 10, 8);
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        let st = c.apply(&mut w, &edits, &mut b);
+        assert_eq!(st.detached, 0, "мост упал сам по себе");
+        w.flush();
+        assert!(w.solid(50, DECK, 8), "настил исчез без причины");
+    }
+
+    /// **Цепочка чанков разрешается за один тик.** Настил держится
+    /// за опору, опора — за коренную породу; убрав основание, падает
+    /// вся цепочка, а не только тот чанк, где была правка.
+    #[test]
+    fn the_whole_chain_falls_not_just_the_edited_chunk() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16);
+        cut(&mut w, 4);
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        let st = c.apply(&mut w, &edits, &mut b);
+        // Опора выше подреза плюс весь настил — одно тело.
+        let expect = (DECK - 5) as usize + (60 - PIER) as usize;
+        assert_eq!(st.cells, expect, "состав тела: {} против {expect}", st.cells);
+        assert!(!st.rounds_capped);
+    }
+
+    /// Каскад детерминирован: тот же вход — тот же состав тел.
+    #[test]
+    fn the_cascade_is_deterministic_across_chunks() {
+        let run = || -> Vec<(i64, i64, i64, usize)> {
+            let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+            let mut c = CollapseLayer::new(&w);
+            let mut b = Bodies::new(16);
+            cut(&mut w, 4);
+            w.flush();
+            let edits: Vec<Edit> = w.edits().to_vec();
+            c.apply(&mut w, &edits, &mut b);
+            b.list.iter().map(|x| (x.ox, x.oy, x.oz, x.voxels.len())).collect()
+        };
+        assert_eq!(run(), run());
+    }
+}
