@@ -27,7 +27,7 @@
 //! правка иначе построила бы граф по всей карте разом.
 
 use crate::bodies::Bodies;
-use crate::topo::{Chunk as TopoChunk, Components, CS};
+use crate::topo::{batch_cannot_split, Chunk as TopoChunk, Components, SplitBufs, CS};
 use crate::{Edit, World};
 
 /// Потолок на размер одного отвала в вокселях. Больше — не тело,
@@ -125,6 +125,9 @@ pub struct CollapseStats {
     pub gathered: usize,
     /// Чанков собрано из мира целиком — 32 768 чтений на каждый.
     pub built: usize,
+    /// Чанков, которым переразметка не понадобилась: локальная
+    /// проверка доказала, что пачка снятий ничего не расщепила.
+    pub probe_skipped: usize,
 }
 
 /// Компоненты одного чанка, как их видит граф.
@@ -195,6 +198,12 @@ pub struct CollapseLayer {
     pub max_promote_per_tick: usize,
     /// Потолок переразметок за тик.
     pub max_relabel_per_tick: usize,
+    /// Пользоваться ли локальной проверкой «пачка не расщепила».
+    ///
+    /// Выключатель существует не для настройки, а для проверки:
+    /// каскад с проверкой и без обязан давать **один и тот же**
+    /// набор тел, и на этом стоит тест (ADR-131).
+    pub use_split_probe: bool,
     /// Чанки, чья разметка отстала от их битовой карты, по возрастанию
     /// индекса: порядок обхода обязан быть от карты, а не от того,
     /// куда игрок кликнул раньше.
@@ -208,6 +217,10 @@ pub struct CollapseLayer {
     cells: Vec<(u32, u32, u32)>,
     /// Прежние отрезки — для сравнения при переразметке.
     face_prev: [Vec<(u16, u16, u16)>; FACES],
+    /// Буферы локальной проверки «пачка не расщепила».
+    split: SplitBufs,
+    /// Снятое в текущем чанке — вход этой проверки.
+    removed: Vec<(u8, u8, u8)>,
     /// Счётчики работы за тик. Замер объёма, а не таймер: `std::time`
     /// в крейтах симуляции запрещён (`CLAUDE.md`).
     relabelled: usize,
@@ -238,6 +251,8 @@ impl CollapseLayer {
             queue: Vec::new(),
             face_todo: Vec::new(),
             face_prev: Default::default(),
+            split: SplitBufs::new(),
+            removed: Vec::new(),
             relabelled: 0,
             faces: 0,
             gathered: 0,
@@ -245,6 +260,7 @@ impl CollapseLayer {
             frontier: Vec::new(),
             max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
             max_relabel_per_tick: DEFAULT_RELABEL_PER_TICK,
+            use_split_probe: true,
             pending: Vec::new(),
             stale: vec![false; n],
             recheck: false,
@@ -350,12 +366,43 @@ impl CollapseLayer {
                 continue;
             }
             // Битовая карта обновляется всегда — это O(правок).
-            // Дорогая переразметка ставится в очередь.
-            let c = self.chunks[i].as_mut().expect("chunk checked");
+            let mut c = self.chunks[i].take().expect("chunk checked");
+            let mut only_removals = true;
+            let mut bottom_row = false;
+            self.removed.clear();
             for &(lx, ly, lz, solid) in &self.local[i] {
                 c.set(lx as usize, ly as usize, lz as usize, solid);
+                if solid {
+                    only_removals = false;
+                } else {
+                    self.removed.push((lx, ly, lz));
+                    if cy == 0 && ly == 0 {
+                        bottom_row = true;
+                    }
+                }
             }
-            if !self.stale[i] {
+            // Локальная проверка: расщепила ли пачка снятий состав
+            // компонент. Достаточное условие, поэтому «да» — это
+            // «переразмечать незачем», а «не знаю» — обычная очередь
+            // (ADR-131).
+            //
+            // Засыпка сливает компоненты, а не режет: её проверка
+            // не рассматривает. Нижний ряд чанков исключён отдельно —
+            // там снятие может отнять у компоненты коренную породу,
+            // а это меняет заземление, не меняя состава.
+            let skip = self.use_split_probe
+                && only_removals
+                && !bottom_row
+                && !self.removed.is_empty()
+                && self.nodes[i].is_some()
+                && batch_cannot_split(&c, &self.removed, &mut self.split);
+            self.chunks[i] = Some(c);
+            if skip {
+                st.probe_skipped += 1;
+                if self.drop_removed_from_faces(i) {
+                    self.mark_faces(i);
+                }
+            } else if !self.stale[i] {
                 self.stale[i] = true;
                 self.pending.push(i as u32);
             }
@@ -511,6 +558,46 @@ impl CollapseLayer {
         let changed = (0..FACES).any(|f| nd.faces[f] != self.face_prev[f]);
         self.nodes[i] = Some(nd);
         self.chunks[i] = Some(c);
+        changed
+    }
+
+    /// Выкинуть снятые ячейки из отрезков граней чанка.
+    ///
+    /// Нужно потому, что при пропуске переразметки метки остаются
+    /// верными, а вот **состав граничных ячеек** меняется: снятая
+    /// ячейка больше не касается соседа, и оставить её в отрезках —
+    /// значит держать ребро, которого нет.
+    ///
+    /// Возвращает `true`, если что-то изменилось.
+    fn drop_removed_from_faces(&mut self, i: usize) -> bool {
+        let Some(nd) = self.nodes[i].as_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        for &(lx, ly, lz) in &self.removed {
+            let (lx, ly, lz) = (lx as usize, ly as usize, lz as usize);
+            let mut hit = |f: usize, idx: usize| {
+                changed |= drop_face_cell(&mut nd.faces[f], idx as u16);
+            };
+            if lx == 0 {
+                hit(0, lz * CS + ly);
+            }
+            if lx == CS - 1 {
+                hit(1, lz * CS + ly);
+            }
+            if ly == 0 {
+                hit(2, lz * CS + lx);
+            }
+            if ly == CS - 1 {
+                hit(3, lz * CS + lx);
+            }
+            if lz == 0 {
+                hit(4, ly * CS + lx);
+            }
+            if lz == CS - 1 {
+                hit(5, ly * CS + lx);
+            }
+        }
         changed
     }
 
@@ -1052,5 +1139,114 @@ mod tests {
             b.list.iter().map(|x| (x.ox, x.oy, x.oz, x.voxels.len())).collect()
         };
         assert_eq!(run(), run());
+    }
+}
+
+/// Убрать одну ячейку из отрезков грани. Отрезок при этом может
+/// распасться надвое.
+fn drop_face_cell(seg: &mut Vec<(u16, u16, u16)>, idx: u16) -> bool {
+    let Some(k) = seg
+        .iter()
+        .position(|&(s, l, _)| idx >= s && idx < s + l)
+    else {
+        return false;
+    };
+    let (s0, l0, lab) = seg[k];
+    let head = idx - s0;
+    let tail = s0 + l0 - idx - 1;
+    match (head, tail) {
+        (0, 0) => {
+            seg.remove(k);
+        }
+        (0, _) => seg[k] = (idx + 1, tail, lab),
+        (_, 0) => seg[k] = (s0, head, lab),
+        _ => {
+            seg[k] = (s0, head, lab);
+            seg.insert(k + 1, (idx + 1, tail, lab));
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod probe_equivalence {
+    use super::*;
+    use crate::store::{Mat, AIR};
+    use fx::rng::Rng;
+
+    /// Слоистая порода с пустотами — чтобы было чему отваливаться.
+    struct Layers;
+    impl crate::Generator for Layers {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < 8 {
+                return 2;
+            }
+            // Столбы и перекрытия: подкоп столба роняет перекрытие.
+            let pillar = x % 12 < 3 && z % 12 < 3 && y < 44;
+            let deck = (40..44).contains(&y);
+            if pillar || deck {
+                3
+            } else {
+                AIR
+            }
+        }
+    }
+
+    /// Один и тот же прогон: тела, их состав и порядок.
+    fn run(probe: bool, ticks: u32) -> (Vec<(i64, i64, i64, usize)>, usize) {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Layers));
+        let mut c = CollapseLayer::new(&w);
+        c.use_split_probe = probe;
+        let mut b = Bodies::new(64);
+        let mut r = Rng::new(7, 0xC0DE);
+        let mut trace = Vec::new();
+        let mut fired = 0usize;
+        for _ in 0..ticks {
+            // Копка: случайный шар в породе.
+            let (cx, cy, cz) = (r.below(64), 8 + r.below(36), r.below(64));
+            for dz in -2i64..=2 {
+                for dy in -2i64..=2 {
+                    for dx in -2i64..=2 {
+                        if dx * dx + dy * dy + dz * dz > 4 {
+                            continue;
+                        }
+                        let (x, y, z) = (cx as i64 + dx, cy as i64 + dy, cz as i64 + dz);
+                        if !(0..64).contains(&x) || !(1..64).contains(&y) || !(0..64).contains(&z) {
+                            continue;
+                        }
+                        if w.solid(x as u32, y as u32, z as u32) {
+                            w.queue_dig(x as u32, y as u32, z as u32);
+                        }
+                    }
+                }
+            }
+            w.flush();
+            let edits: Vec<Edit> = w.edits().to_vec();
+            fired += c.apply(&mut w, &edits, &mut b).probe_skipped;
+            w.flush();
+            for x in b.list.iter() {
+                trace.push((x.ox, x.oy, x.oz, x.voxels.len()));
+            }
+            b.step(&mut w);
+            w.flush();
+        }
+        (trace, fired)
+    }
+
+    /// **Каскад с локальной проверкой и без обязан дать одно и то же.**
+    ///
+    /// Проверка достаточная, значит она не имеет права ни пропустить
+    /// отвал, ни выдумать его. Разойдутся — значит условие не
+    /// достаточное, и вся экономия неверна.
+    ///
+    /// Срабатывание проверки — часть самого теста: сравнение, в котором
+    /// она ни разу не сказала «да», ничего не сравнило.
+    #[test]
+    fn the_probe_does_not_change_what_falls() {
+        let (with, fired) = run(true, 120);
+        let (without, none) = run(false, 120);
+        assert!(fired > 0, "проверка не сработала ни разу — сравнивать нечего");
+        assert_eq!(none, 0, "проверка сработала при выключенной");
+        assert_eq!(with, without);
     }
 }
