@@ -37,6 +37,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "fx",
+]
+
+[[package]]
 name = "topo"
 version = "0.1.0"
 dependencies = [
