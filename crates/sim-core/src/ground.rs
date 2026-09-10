@@ -28,6 +28,10 @@ pub struct GroundStats {
     pub topo_dirty: usize,
     /// Правок, переживших ступень A.
     pub topo_survived: usize,
+    /// Урона от падения нанесено за тик.
+    pub fall_damage: u64,
+    /// Самое долгое падение, вокселей.
+    pub max_fall: u32,
     pub collapse: CollapseStats,
     pub bodies: BodyStats,
     pub nav: NavStats,
@@ -260,6 +264,77 @@ mod tests {
             "юнит не прошёл по коридору: x = {}",
             w.units.x[id]
         );
+    }
+
+    /// Гриб: земля, ножка, шляпка. Подкоп ножки роняет шляпку.
+    struct Mushroom;
+    impl voxel::Generator for Mushroom {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < 8 {
+                return 2;
+            }
+            let (dx, dz) = (x.abs_diff(32), z.abs_diff(32));
+            if dx <= 2 && dz <= 2 && y < 40 {
+                return 3;
+            }
+            if dx <= 6 && dz <= 6 && (40..44).contains(&y) {
+                return 4;
+            }
+            AIR
+        }
+    }
+
+    /// **Юнит едет вниз вместе с куском и получает урон по высоте
+    /// падения** (ADR-099, ADR-036).
+    ///
+    /// До ADR-135 у юнита не было высоты вовсе, и посадка на кусок
+    /// жила в сцене, а не в движке.
+    #[test]
+    fn a_unit_rides_the_falling_piece_and_is_hurt_by_the_drop() {
+        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Mushroom));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 16, 4, 2));
+        let id = w.units.spawn(32, 32, 0, 0, 300) as usize;
+        w.units.refresh_live();
+        // Первый тик ставит юнита на пол своей клетки — верх шляпки.
+        w.tick();
+        let y0 = w.units.y[id];
+        assert_eq!(y0, 44, "юнит встал не на шляпку: y = {y0}");
+
+        // Подрезаем ножку: двенадцать слоёв за тик.
+        {
+            let g = w.ground.as_mut().expect("земля");
+            for y in 9..21 {
+                for z in 29..36 {
+                    for x in 29..36 {
+                        if g.world.solid(x, y, z) {
+                            g.world.queue_dig(x, y, z);
+                        }
+                    }
+                }
+            }
+        }
+        let mut fell = 0u32;
+        let mut damage = 0u64;
+        for _ in 0..40 {
+            w.tick();
+            let g = w.ground().expect("земля");
+            fell = fell.max(g.stats.max_fall);
+            damage += g.stats.fall_damage;
+        }
+        assert!(fell >= 10, "кусок почти не падал: {fell}");
+        assert!(
+            w.units.y[id] < y0,
+            "юнит не поехал вниз: {} против {y0}",
+            w.units.y[id]
+        );
+        assert!(damage > 0, "урона от падения не было");
+        assert!(
+            w.units.voxels[id] < 300,
+            "юнит не пострадал: {}",
+            w.units.voxels[id]
+        );
+        assert_eq!(w.units.riding[id], 0, "юнит остался на несуществующем теле");
     }
 
     /// **Дыра появляется в том же тике, где её прокопали**, и её видят

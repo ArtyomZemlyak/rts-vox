@@ -82,24 +82,59 @@ fn main() -> ExitCode {
     println!("танк: том {} КиБ, {} твёрдых вокселей\n", one / 1024, tank().solid_count());
 
     // --- 1. Память: целые против повреждённых.
-    let mut f = Fleet::new(vec![tank()]);
-    let ids: Vec<u32> = (0..a.units).map(|_| f.spawn(0)).collect();
-    let pristine = f.bytes();
-    let no_cow = f.bytes_without_cow();
+    //
+    // Первое попадание меряется **лучшим из нескольких прогонов**,
+    // и каждый берёт свежий флот: измерить его дважды на одном нельзя
+    // — второе попадание уже дешёвое. Один замер здесь гулял от 2.77
+    // до 4.48 мс, то есть на шестьдесят процентов, и порог сцены
+    // попадал внутрь разброса: сцена мигала (ADR-135).
+    let build = |units: usize, seed: u64| -> (Fleet, Vec<u32>, f64) {
+        let mut f = Fleet::new(vec![tank()]);
+        let ids: Vec<u32> = (0..units).map(|_| f.spawn(0)).collect();
+        let mut r = Rng::new(seed, 0xC0);
+        let picks: Vec<(usize, usize, usize)> = ids
+            .iter()
+            .map(|_| {
+                (
+                    r.below(24) as usize,
+                    r.below(12) as usize,
+                    r.below(12) as usize,
+                )
+            })
+            .collect();
+        let t0 = Instant::now();
+        for (k, &id) in ids.iter().enumerate() {
+            let (x, y, z) = picks[k];
+            f.body_mut(id).remove(x, y, z);
+        }
+        let us = t0.elapsed().as_secs_f64() * 1e6 / units.max(1) as f64;
+        (f, ids, us)
+    };
+
+    let mut best = f64::INFINITY;
+    let (mut f, ids, us) = build(a.units, a.seed);
+    best = best.min(us);
+    for _ in 0..4 {
+        let (_, _, us) = build(a.units, a.seed);
+        best = best.min(us);
+    }
+    let first_us = best;
+    // Флот для отчёта — тот, что уже побит; целый меряется отдельно.
+    let clean = Fleet::new(vec![tank()]);
+    let mut clean = clean;
+    for _ in 0..a.units {
+        clean.spawn(0);
+    }
+    let pristine = clean.bytes();
+    let no_cow = clean.bytes_without_cow();
 
     println!("{:<34} {:>12} {:>12}", "состояние флота", "МиБ", "к целым");
     println!("{:<34} {:>12.3} {:>12}", "все целы", mib(pristine), "1.0x");
 
-    // Тронуть каждого один раз — худший случай для COW.
     let mut r = Rng::new(a.seed, 0xC0);
-    let t0 = Instant::now();
-    for &id in &ids {
-        let x = r.below(24) as usize;
-        let y = r.below(12) as usize;
-        let z = r.below(12) as usize;
-        f.body_mut(id).remove(x, y, z);
+    for _ in 0..a.units {
+        let _ = (r.below(24), r.below(12), r.below(12));
     }
-    let first_us = t0.elapsed().as_secs_f64() * 1e6 / a.units as f64;
     let damaged = f.bytes();
     println!(
         "{:<34} {:>12.3} {:>11.1}x",

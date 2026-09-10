@@ -108,6 +108,13 @@ impl Phase {
 /// (`CLAUDE.md`): перестановка соседей молча меняет исход ничьей.
 pub struct Units {
     pub x: Vec<i32>,
+    /// Высота: воксель, на котором юнит стоит. Без земли — ноль.
+    ///
+    /// Юнит двумерен по движению и трёхмерен по положению: он ходит
+    /// по полу нав-клетки, а высота этого пола меняется от копки.
+    /// Без третьей координаты нельзя ни посадить его на отвалившийся
+    /// кусок, ни сказать, откуда он упал (ADR-135).
+    pub y: Vec<i32>,
     pub z: Vec<i32>,
     /// Дробная часть положения: движение идёт в `Fx`, сетка — в целых.
     pub fx: Vec<Fx>,
@@ -118,6 +125,11 @@ pub struct Units {
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
     pub target: Vec<u32>,
+    /// Устойчивый номер тела, на котором юнит едет; ноль — стоит
+    /// на земле. Индексом ссылаться нельзя (ADR-118).
+    pub riding: Vec<u64>,
+    /// Смещение относительно начала координат тела.
+    pub ride_off: Vec<(i32, i32, i32)>,
     /// Тик, раньше которого юнит не ищет цель заново. Поиск цели —
     /// самая дорогая часть боя, и держать её потиковой незачем: цель,
     /// живая и в радиусе, остаётся целью (ADR-116).
@@ -138,6 +150,7 @@ impl Units {
     pub fn new() -> Units {
         Units {
             x: Vec::new(),
+            y: Vec::new(),
             z: Vec::new(),
             fx: Vec::new(),
             fz: Vec::new(),
@@ -146,6 +159,8 @@ impl Units {
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
+            riding: Vec::new(),
+            ride_off: Vec::new(),
             next_search: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
@@ -168,6 +183,7 @@ impl Units {
         if let Some(i) = self.free.pop() {
             let k = i as usize;
             self.x[k] = x;
+            self.y[k] = 0;
             self.z[k] = z;
             self.fx[k] = Fx::ZERO;
             self.fz[k] = Fx::ZERO;
@@ -176,10 +192,13 @@ impl Units {
             self.voxels[k] = voxels;
             self.alive[k] = true;
             self.target[k] = NO_TARGET;
+            self.riding[k] = 0;
+            self.ride_off[k] = (0, 0, 0);
             self.next_search[k] = 0;
             return i;
         }
         self.x.push(x);
+        self.y.push(0);
         self.z.push(z);
         self.fx.push(Fx::ZERO);
         self.fz.push(Fx::ZERO);
@@ -188,6 +207,8 @@ impl Units {
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
+        self.riding.push(0);
+        self.ride_off.push((0, 0, 0));
         self.next_search.push(0);
         (self.x.len() - 1) as u32
     }
@@ -250,6 +271,9 @@ pub struct World {
     /// потолок, упирающийся каждый тик, это не предохранитель, а
     /// постоянное ухудшение (ADR-116).
     pub retarget_period: u32,
+    /// Урон юниту за воксель падения (ADR-036). Число балансное
+    /// и живёт здесь до появления загрузчика данных.
+    pub fall_damage_per_voxel: u16,
     /// Потолок поисков цели за тик. Второй потолок того же рода, что
     /// у дренажа мира: работа, которой в плотном бою становится
     /// квадратично много, обязана быть ограничена (ADR-116).
@@ -316,6 +340,7 @@ impl World {
             delta: Vec::new(),
             tick: 0,
             damage: Vec::new(),
+            fall_damage_per_voxel: 3,
             retarget_period: TICKS_PER_SECOND as u32,
             max_target_searches: 512,
             examined_move: 0,
@@ -430,9 +455,73 @@ impl World {
         }
     }
 
+    /// Фаза тел: посадка наездников, шаг падения, следование за телом.
+    ///
+    /// Порядок внутри фазы важен и держится на ADR-133: тело,
+    /// отвалившееся в этом тике, в нём же не падает, поэтому посадка
+    /// успевает случиться до первого его движения.
     fn phase_ground_bodies(&mut self) {
-        if let Some(g) = self.ground.as_mut() {
-            g.phase_bodies();
+        let dmg = self.fall_damage_per_voxel;
+        let Self { ground, units: u, .. } = self;
+        let Some(g) = ground.as_mut() else { return };
+
+        // 1. Посадка на свежие тела: кто оказался над куском, едет
+        //    на нём (ADR-099).
+        for si in 0..g.bodies.spawned.len() {
+            let id = g.bodies.spawned[si];
+            let Some(bi) = g.bodies.index_of(id) else { continue };
+            let b = &g.bodies.list[bi];
+            let (ox, oy, oz) = (b.ox, b.oy, b.oz);
+            let (sx, sz) = (b.sx as i64, b.sz as i64);
+            let top = b.voxels.iter().map(|v| v.y as i64).max().unwrap_or(0) + 1;
+            let mut riders: Vec<u32> = Vec::new();
+            for k in 0..u.live_ids.len() {
+                let i = u.live_ids[k] as usize;
+                if u.riding[i] != 0 {
+                    continue;
+                }
+                let (dx, dz) = (u.x[i] as i64 - ox, u.z[i] as i64 - oz);
+                let dy = u.y[i] as i64 - oy;
+                if dx >= 0 && dx < sx && dz >= 0 && dz < sz && dy >= 0 && dy <= top {
+                    u.riding[i] = id;
+                    u.ride_off[i] = (dx as i32, dy as i32, dz as i32);
+                    riders.push(i as u32);
+                }
+            }
+            g.bodies.list[bi].riders = riders;
+        }
+
+        // 2. Шаг падения.
+        g.phase_bodies();
+
+        // 3. Наездники следуют за телом; севшие получают урон по высоте
+        //    падения (ADR-036). Тело ищется по устойчивому номеру.
+        for k in 0..u.live_ids.len() {
+            let i = u.live_ids[k] as usize;
+            if u.riding[i] == 0 {
+                continue;
+            }
+            if let Some(bi) = g.bodies.index_of(u.riding[i]) {
+                let b = &g.bodies.list[bi];
+                u.x[i] = (b.ox + u.ride_off[i].0 as i64).max(0) as i32;
+                u.y[i] = (b.oy + u.ride_off[i].1 as i64).max(0) as i32;
+                u.z[i] = (b.oz + u.ride_off[i].2 as i64).max(0) as i32;
+                continue;
+            }
+            // Тела нет: приземлилось на этом шаге и само сказало,
+            // сколько пролетело.
+            let fallen = g
+                .bodies
+                .landed_log
+                .iter()
+                .find(|l| l.id == u.riding[i])
+                .map(|l| l.fallen)
+                .unwrap_or(0);
+            let hit = fallen.saturating_mul(dmg as u32);
+            u.voxels[i] = u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
+            g.stats.fall_damage += hit as u64;
+            g.stats.max_fall = g.stats.max_fall.max(fallen);
+            u.riding[i] = 0;
         }
     }
 
@@ -672,6 +761,21 @@ impl World {
             }
             u.x[i] = x1;
             u.z[i] = z1;
+            // Высота следует за полом нав-клетки. Едущий на теле её
+            // не берёт: его высоту задаёт тело.
+            if let Some((nav, (ex, ez))) = terrain {
+                if u.riding[i] == 0 && x1 >= 0 && z1 >= 0 && x1 < ex && z1 < ez {
+                    let st = nav.step() as i32;
+                    let (gw, gh) = nav.dims();
+                    let (cx, cz) = ((x1 / st) as u32, (z1 / st) as u32);
+                    if cx < gw && cz < gh {
+                        let f = nav.floor_at(cx, cz);
+                        if f != nav::layer::NO_FLOOR {
+                            u.y[i] = f as i32;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -822,6 +926,8 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.fx[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.fz[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.voxels[i] as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }

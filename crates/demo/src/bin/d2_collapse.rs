@@ -175,6 +175,7 @@ struct Outcome {
     /// Сколько юнитов вообще удалось поставить на шляпки. Ноль здесь
     /// значит, что сцена не собралась, а не что механика не работает.
     units_placed: usize,
+    units_on_nav_floor: usize,
     promoted_total: usize,
     frontier_max: usize,
     max_bodies: usize,
@@ -397,6 +398,18 @@ fn run(a: &Args) -> Outcome {
         graph_edges,
         rounds_max,
         rounds_capped,
+        units_on_nav_floor: {
+            let g = sim.ground().expect("земля");
+            let st = g.nav.step();
+            let (gw, gh) = g.nav.dims();
+            units
+                .iter()
+                .filter(|u| {
+                    let (cx, cz) = (u.x / st, u.z / st);
+                    cx < gw && cz < gh && g.nav.floor_at(cx, cz) as u32 == u.y
+                })
+                .count()
+        },
         units_placed: units.len(),
         riders_total,
         killed,
@@ -442,6 +455,14 @@ fn main() -> ExitCode {
 
     println!("\n{:<30} {:>14}", "юниты на кусках (ADR-099)", "");
     println!("{:<30} {:>14}", "юнитов на шляпках", o.units_placed);
+    // Сколько из них навигация вообще способна представить: она берёт
+    // в колонке ОДИН уровень, нижний (ADR-039), а шляпка висит над
+    // пустотой. Сцена ставит юнита туда указом, движок — не может.
+    println!(
+        "{:<30} {:>14}",
+        "  видит навигация",
+        o.units_on_nav_floor
+    );
     println!("{:<30} {:>14}", "поездок", o.riders_total);
     println!("{:<30} {:>14}", "погибло при падении", o.killed);
     println!("{:<30} {:>14}", "самое долгое падение, вокселей", o.max_fall);
