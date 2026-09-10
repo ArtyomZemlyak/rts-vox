@@ -1,0 +1,10 @@
+[package]
+name = "gpu"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Крейт замеров видеокарты. От него **никто не зависит** — ни sim, ни fx.
+# Граница слоёв (CLAUDE.md): sim-core не знает про wgpu. Здесь наоборот.
+[dependencies]
+wgpu = { version = "=29.0.3", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl"] }
