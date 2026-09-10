@@ -1,0 +1,13 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Зависимостей нет. Первый кусок рендера — камера и отсечение, то есть
+# арифметика: она проверяется headless, а окно нет. Bevy появится здесь,
+# когда появится окно, и только здесь (`docs/02-architecture.md`).
+[dependencies]
+
+[lib]
+path = "src/lib.rs"
