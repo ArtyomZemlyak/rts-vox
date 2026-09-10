@@ -128,13 +128,50 @@ const OCTANTS: [(i32, i32, i32, i32); 8] = [
     (1, 0, 0, -1),
 ];
 
+/// Наклон как **точная дробь**, а не плавающее число.
+///
+/// Теневой каст сравнивает наклоны и ничего с ними не считает, поэтому
+/// дробь достаточна, а плавающее — избыточно и опасно: видимость входит
+/// в состояние симуляции, и `f64` там означает расхождение между
+/// машинами (`CLAUDE.md`). Знаменатель держится положительным, тогда
+/// сравнение `a/b` против `c/d` — это `a·d` против `c·b`.
+///
+/// Величины ограничены радиусом сенсора: числитель и знаменатель не
+/// превосходят `2r + 1`, произведение — квадрата этого, и `i64` хватает
+/// с запасом в десять порядков.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Slope {
+    n: i64,
+    d: i64,
+}
+
+impl Slope {
+    #[inline]
+    pub fn new(n: i64, d: i64) -> Slope {
+        debug_assert!(d != 0, "наклон с нулевым знаменателем");
+        if d < 0 {
+            Slope { n: -n, d: -d }
+        } else {
+            Slope { n, d }
+        }
+    }
+    #[inline]
+    pub fn lt(self, o: Slope) -> bool {
+        self.n * o.d < o.n * self.d
+    }
+    #[inline]
+    pub fn gt(self, o: Slope) -> bool {
+        self.n * o.d > o.n * self.d
+    }
+}
+
 /// Симметричный теневой каст: каждая клетка диска посещается один раз,
 /// луча на клетку нет вовсе.
 pub fn shadowcast(g: &Grid, s: Sensor, out: &mut VisMask) -> u64 {
     let mut visits = 1u64;
     out.set(s.x as usize, s.y as usize);
     for &(xx, xy, yx, yy) in OCTANTS.iter() {
-        visits += cast(g, s, 1, 1.0, 0.0, xx, xy, yx, yy, out);
+        visits += cast(g, s, 1, Slope::new(1, 1), Slope::new(0, 1), xx, xy, yx, yy, out);
     }
     visits
 }
@@ -144,18 +181,16 @@ fn cast(
     g: &Grid,
     s: Sensor,
     row: i32,
-    mut start: f64,
-    end: f64,
+    mut start: Slope,
+    end: Slope,
     xx: i32,
     xy: i32,
     yx: i32,
     yy: i32,
     out: &mut VisMask,
 ) -> u64 {
-    // Замер, а не симуляция: здесь плавающая точка допустима. В симуляции
-    // наклоны придётся вести целочисленно, парой (числитель, знаменатель).
     let mut visits = 0u64;
-    if start < end {
+    if start.lt(end) {
         return visits;
     }
     let r = s.radius as i32;
@@ -165,12 +200,13 @@ fn cast(
     while dist <= r && !blocked {
         let dy = -dist;
         for dx in dy..=0 {
-            let l_slope = (dx as f64 - 0.5) / (dy as f64 + 0.5);
-            let r_slope = (dx as f64 + 0.5) / (dy as f64 - 0.5);
-            if start < r_slope {
+            // (dx ∓ 0.5) / (dy ± 0.5), умноженное на два сверху и снизу.
+            let l_slope = Slope::new(2 * dx as i64 - 1, 2 * dy as i64 + 1);
+            let r_slope = Slope::new(2 * dx as i64 + 1, 2 * dy as i64 - 1);
+            if start.lt(r_slope) {
                 continue;
             }
-            if end > l_slope {
+            if end.gt(l_slope) {
                 break;
             }
             visits += 1;

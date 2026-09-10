@@ -142,12 +142,12 @@ fn bench_solvers() {
                 scene.name(),
                 n,
                 100.0 * g.passable() as f64 / g.inner_area() as f64,
-                s_fmm.per_cell(),
-                s_lsm.per_cell(),
-                s_fim.per_cell(),
-                s_fsm.per_cell(),
-                s_gs.per_cell(),
-                s_jac.per_cell(),
+                s_fmm.per_cell_permille() as f64 / 1000.0,
+                s_lsm.per_cell_permille() as f64 / 1000.0,
+                s_fim.per_cell_permille() as f64 / 1000.0,
+                s_fsm.per_cell_permille() as f64 / 1000.0,
+                s_gs.per_cell_permille() as f64 / 1000.0,
+                s_jac.per_cell_permille() as f64 / 1000.0,
             );
         }
     }
@@ -230,14 +230,14 @@ fn bench_sector_wall() {
                     black_box(lsm_ws(&mut ws, &g, &seeds, &h).updates);
                 }
                 best[0] = best[0].min(t0.elapsed().as_secs_f64() * 1e6 / reps as f64);
-                upc[0] = lsm_ws(&mut ws, &g, &seeds, &h).per_cell();
+                upc[0] = lsm_ws(&mut ws, &g, &seeds, &h).per_cell_permille() as f64 / 1000.0;
 
                 let t0 = Instant::now();
                 for _ in 0..reps {
                     black_box(fim_ws(&mut ws, &g, &seeds, &h).updates);
                 }
                 best[1] = best[1].min(t0.elapsed().as_secs_f64() * 1e6 / reps as f64);
-                upc[1] = fim_ws(&mut ws, &g, &seeds, &h).per_cell();
+                upc[1] = fim_ws(&mut ws, &g, &seeds, &h).per_cell_permille() as f64 / 1000.0;
             }
             let fast = best[0].min(best[1]);
             println!(
@@ -335,6 +335,7 @@ fn bench_direction_stability() {
                 let gs = scale_costs(&g, s);
                 let (ts, _) = fmm(&gs, &goals, &h);
                 let (differs, harmful) = dir_quality(&g, &tref, &ts);
+                let (differs, harmful) = (differs as f64 / 10.0, harmful as f64 / 10.0);
                 print!(" {:>8.2}/{:<9.2}", differs, harmful);
             }
             println!();

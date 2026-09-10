@@ -16,6 +16,7 @@
 
 use crate::vision::Sensor;
 use crate::godunov::BLOCKED;
+use crate::vision::Slope;
 use crate::scene::Grid;
 
 /// Маска одного сенсора в его собственных координатах.
@@ -136,7 +137,7 @@ pub fn shadowcast_local(g: &Grid, s: Sensor, m: &mut LocalMask) -> u64 {
     let mut visits = 1u64;
     m.set_local(m.r, m.r);
     for &(xx, xy, yx, yy) in OCTANTS.iter() {
-        visits += cast_local(g, s, 1, 1.0, 0.0, xx, xy, yx, yy, m);
+        visits += cast_local(g, s, 1, Slope::new(1, 1), Slope::new(0, 1), xx, xy, yx, yy, m);
     }
     visits
 }
@@ -157,8 +158,8 @@ fn cast_local(
     g: &Grid,
     s: Sensor,
     row: i32,
-    mut start: f64,
-    end: f64,
+    mut start: Slope,
+    end: Slope,
     xx: i32,
     xy: i32,
     yx: i32,
@@ -166,7 +167,7 @@ fn cast_local(
     m: &mut LocalMask,
 ) -> u64 {
     let mut visits = 0u64;
-    if start < end {
+    if start.lt(end) {
         return visits;
     }
     let r = s.radius as i32;
@@ -176,12 +177,13 @@ fn cast_local(
     while dist <= r && !blocked {
         let dy = -dist;
         for dx in dy..=0 {
-            let l_slope = (dx as f64 - 0.5) / (dy as f64 + 0.5);
-            let r_slope = (dx as f64 + 0.5) / (dy as f64 - 0.5);
-            if start < r_slope {
+            // (dx ∓ 0.5) / (dy ± 0.5), умноженное на два сверху и снизу.
+            let l_slope = Slope::new(2 * dx as i64 - 1, 2 * dy as i64 + 1);
+            let r_slope = Slope::new(2 * dx as i64 + 1, 2 * dy as i64 - 1);
+            if start.lt(r_slope) {
                 continue;
             }
-            if end > l_slope {
+            if end.gt(l_slope) {
                 break;
             }
             visits += 1;

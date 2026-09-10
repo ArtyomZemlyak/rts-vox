@@ -21,11 +21,11 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn per_cell(&self) -> f64 {
+    pub fn per_cell_permille(&self) -> u64 {
         if self.reachable == 0 {
-            0.0
+            0
         } else {
-            self.updates as f64 / self.reachable as f64
+            self.updates * 1000 / self.reachable as u64
         }
     }
 }
@@ -453,7 +453,7 @@ pub fn scale_costs(g: &Grid, s: Cost) -> Grid {
 ///
 /// Разделять обязательно: на целочисленной сетке ничьи массовы, и выбор
 /// другого из двух одинаково коротких путей ошибкой не является.
-pub fn dir_quality(g: &Grid, t_ref: &[Time], t_coarse: &[Time]) -> (f64, f64) {
+pub fn dir_quality(g: &Grid, t_ref: &[Time], t_coarse: &[Time]) -> (u64, u64) {
     let d_ref = flow_dirs(g, t_ref);
     let d_coarse = flow_dirs(g, t_coarse);
     let mut differs = 0usize;
@@ -488,8 +488,10 @@ pub fn dir_quality(g: &Grid, t_ref: &[Time], t_coarse: &[Time]) -> (f64, f64) {
             }
         }
     }
-    let tot = total.max(1) as f64;
-    (100.0 * differs as f64 / tot, 100.0 * harmful as f64 / tot)
+    // Доля в промилле: метрика входит в отчёт стенда, а стенд читает
+    // тот же крейт, что симуляция, и плавающего здесь быть не может.
+    let tot = total.max(1) as u64;
+    (differs as u64 * 1000 / tot, harmful as u64 * 1000 / tot)
 }
 
 /// Переиспользуемые буферы. Существуют, потому что на секторе 16x16 выделение
