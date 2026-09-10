@@ -8,6 +8,7 @@
 pub mod godunov;
 pub mod scene;
 pub mod solver;
+pub mod vision;
 
 #[cfg(test)]
 mod tests {
