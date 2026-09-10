@@ -69,6 +69,7 @@ impl Status {
     }
 }
 
+#[derive(Clone)]
 pub struct UnitBody {
     pub vol: UnitVol,
     /// Метка на воксель. Плотный массив: том маленький, и косвенность

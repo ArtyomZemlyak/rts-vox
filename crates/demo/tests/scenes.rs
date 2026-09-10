@@ -342,3 +342,62 @@ fn d3_teardown_is_deterministic() {
     assert!(a.len() > 3, "танк умер слишком быстро — тест ни о чём");
     assert_eq!(a, run());
 }
+
+// ---------------------------------------------------------------- D-4
+
+use voxel::fleet::Fleet;
+
+/// Сцена D-4 детерминирована: тот же обстрел флота даёт то же число
+/// копий и ту же память.
+#[test]
+fn d4_cow_is_deterministic() {
+    let run = || -> (u64, usize, usize) {
+        let mut f = Fleet::new(vec![tank()]);
+        let ids: Vec<u32> = (0..200).map(|_| f.spawn(0)).collect();
+        let mut r = fx::rng::Rng::new(5, 0xC0);
+        for _ in 0..600 {
+            let id = ids[r.below(ids.len() as u32) as usize];
+            let (x, y, z) = (
+                r.below(24) as usize,
+                r.below(12) as usize,
+                r.below(12) as usize,
+            );
+            f.body_mut(id).remove(x, y, z);
+        }
+        (f.stats().copies, f.stats().damaged, f.bytes())
+    };
+    let a = run();
+    assert!(a.0 > 0 && a.1 > 0);
+    assert_eq!(a, run());
+}
+
+/// **Копий ровно столько, сколько тронутых юнитов.** Лишняя копия —
+/// это молчаливое удвоение памяти боя.
+#[test]
+fn d4_copies_exactly_once_per_unit() {
+    let mut f = Fleet::new(vec![tank()]);
+    let ids: Vec<u32> = (0..50).map(|_| f.spawn(0)).collect();
+    for &id in &ids {
+        for k in 0..10 {
+            f.body_mut(id).remove(12, 6, k % 12);
+        }
+    }
+    assert_eq!(f.stats().copies, 50, "COW скопировал лишнее");
+    assert_eq!(f.stats().damaged, 50);
+}
+
+/// Нетронутый юнит читается через шаблон и даёт то же состояние,
+/// что свежесозданный. Иначе COW менял бы поведение, а не только память.
+#[test]
+fn d4_pristine_unit_reads_like_a_fresh_one() {
+    let mut b = CoreBufs::new();
+    let mut f = Fleet::new(vec![tank()]);
+    let a = f.spawn(0);
+    let c = f.spawn(0);
+    f.body_mut(c).remove(12, 6, 6);
+    let sa = f.status(a, &mut b);
+    let sc = f.status(c, &mut b);
+    assert!(f.is_pristine(a));
+    assert_eq!(sa.attached, tank().solid_count(), "целый юнит читается неверно");
+    assert!(sc.attached < sa.attached, "повреждение не отразилось");
+}
