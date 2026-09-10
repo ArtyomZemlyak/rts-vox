@@ -12,8 +12,10 @@
 pub mod bodies;
 pub mod store;
 pub mod topo;
+pub mod unit;
 pub mod world;
 
 pub use topo::{Chunk, Components, Run};
 pub use bodies::{Bodies, Body, BodyStats};
+pub use unit::{Part, Status, UnitBody};
 pub use world::{Edit, FlushStats, Generator, World};

@@ -228,3 +228,117 @@ fn d2_cascade_is_deterministic() {
     assert!(!a.is_empty(), "каскад ничего не сделал");
     assert_eq!(a, run());
 }
+
+// ---------------------------------------------------------------- D-3
+
+use voxel::topo::unit::CoreBufs;
+use voxel::unit::{tank, Part, UnitBody};
+
+fn shoot(u: &mut UnitBody, x: i64, y: i64, z: i64, r: i64) -> u32 {
+    let mut n = 0;
+    for dz in -r..=r {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy + dz * dz > r * r {
+                    continue;
+                }
+                let (px, py, pz) = (x + dx, y + dy, z + dz);
+                if px < 0 || py < 0 || pz < 0 {
+                    continue;
+                }
+                let (px, py, pz) = (px as usize, py as usize, pz as usize);
+                if px < u.vol.nx as usize && py < u.vol.ny as usize && pz < u.vol.nz as usize {
+                    n += u.remove(px, py, pz) as u32;
+                }
+            }
+        }
+    }
+    n
+}
+
+fn aim_at(u: &UnitBody, p: Part) -> Option<(i64, i64, i64)> {
+    for z in 0..u.vol.nz as usize {
+        for y in 0..u.vol.ny as usize {
+            for x in 0..u.vol.nx as usize {
+                if u.vol.get(x, y, z) && u.part_at(x, y, z) == p {
+                    return Some((x as i64, y as i64, z as i64));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// **Прицельный отстрел отключает ровно то, во что целились.**
+/// Это то, ради чего выбраны помеченные подсистемы (ADR-095):
+/// без этого воксельное тело неотличимо от скалярного HP с бронёй
+/// по направлению.
+#[test]
+fn d3_shooting_a_subsystem_disables_only_it() {
+    let mut b = CoreBufs::new();
+    for target in [Part::Engine, Part::Weapon, Part::Sensor] {
+        let mut t = tank();
+        let mut shots = 0;
+        while let Some((x, y, z)) = aim_at(&t, target) {
+            shoot(&mut t, x, y, z, 2);
+            shots += 1;
+            let s = t.status(&mut b);
+            if !s.get(target) {
+                assert!(s.alive, "{}: танк умер, а целились не в ядро", target.name());
+                for other in [Part::Engine, Part::Weapon, Part::Sensor] {
+                    if other != target {
+                        assert!(
+                            s.get(other),
+                            "{}: заодно отказал {}",
+                            target.name(),
+                            other.name()
+                        );
+                    }
+                }
+                break;
+            }
+            assert!(shots < 200, "{} не отказал за 200 выстрелов", target.name());
+        }
+        assert!(shots > 0);
+    }
+}
+
+/// Пробитие к ядру убивает, и это отличается от потери подсистемы.
+#[test]
+fn d3_core_hit_kills_but_a_subsystem_hit_does_not() {
+    let mut b = CoreBufs::new();
+    let mut t = tank();
+    while let Some((x, y, z)) = aim_at(&t, Part::Core) {
+        shoot(&mut t, x, y, z, 2);
+        if !t.status(&mut b).alive {
+            break;
+        }
+    }
+    assert!(!t.status(&mut b).alive, "танк пережил уничтожение ядра");
+}
+
+/// Разбор детерминирован: тот же обстрел — то же состояние.
+#[test]
+fn d3_teardown_is_deterministic() {
+    let run = || -> Vec<(bool, bool, bool, bool, u32)> {
+        let mut b = CoreBufs::new();
+        let mut t = tank();
+        let mut r = fx::rng::Rng::new(3, 0x3D);
+        let mut trace = Vec::new();
+        for _ in 0..40 {
+            let x = r.below(t.vol.nx as u32) as i64;
+            let y = r.below(t.vol.ny as u32) as i64;
+            let z = r.below(t.vol.nz as u32) as i64;
+            shoot(&mut t, x, y, z, 2);
+            let s = t.status(&mut b);
+            trace.push((s.alive, s.engine, s.weapon, s.sensor, s.attached));
+            if !s.alive {
+                break;
+            }
+        }
+        trace
+    };
+    let a = run();
+    assert!(a.len() > 3, "танк умер слишком быстро — тест ни о чём");
+    assert_eq!(a, run());
+}
