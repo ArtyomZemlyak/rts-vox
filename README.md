@@ -107,6 +107,7 @@ grep -rn '\[QUESTION' docs/
 | [18-storage-bench.md](docs/analysis/18-storage-bench.md) | Хранение чанка: три раскладки, копия в память игрока |
 | [19-remaining-bench.md](docs/analysis/19-remaining-bench.md) | Щиты, энергия, горячие чанки, пустоты, память игрока |
 | [20-measurement-machine.md](docs/analysis/20-measurement-machine.md) | Машина замеров, время сборки и три правила замера |
+| [21-render-bench.md](docs/analysis/21-render-bench.md) | Рендер: марш по пирамиде занятости, затенение против солнца |
 
 Запустить любой:
 

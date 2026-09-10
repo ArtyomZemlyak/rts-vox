@@ -18,6 +18,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod pyramid;
 pub mod ray;
 
 use fx::rng::Rng;
