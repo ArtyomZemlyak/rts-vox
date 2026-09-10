@@ -105,7 +105,7 @@ fn populate_dense(w: &mut SimWorld, n: usize, seed: u64) {
         let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
         let x = (ex / 2 + r.range(-40, 40)).clamp(0, ex - 1);
         let z = (ez / 2 + r.range(-40, 40)).clamp(0, ez - 1);
-        w.units.spawn(x, z, owner, r.range(2, 6), 300);
+        w.spawn_ground(x, z, owner, r.range(2, 6), 300);
     }
     let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
     w.fill_flow_towards(0, ex / 2, ez / 2);
@@ -411,6 +411,24 @@ fn main() -> ExitCode {
         sim.examined_combat as f64 / (2.0 * n)
     );
     // Ноль здесь значит, что юниты по рельефу не ходят (ADR-134).
+    // Поле целиком — то, чего тик не выдержит: потому оно и считается
+    // порциями (ADR-138). Число печатается, чтобы порция не выглядела
+    // осторожностью на пустом месте.
+    {
+        let t = Instant::now();
+        sim.solve_flow();
+        println!("{:<34} {:>11.3} мс", "поле направлений целиком", t.elapsed().as_secs_f64() * 1e3);
+    }
+    println!("{:<34} {:>14}", "решений поля направлений", sim.flow_solves);
+    println!("{:<34} {:>14}", "  узлов «клетка и уровень»", sim.flow_nodes);
+    println!("{:<34} {:>14}", "  рёбер", sim.flow_edges);
+    println!("{:<34} {:>14}", "  компонент связности", sim.flow_components);
+    // Достижимо считается по обоим владельцам, поэтому вдвое больше
+    // узлов. Меньше — значит часть карты приказа не получила,
+    // и фаза движения там пустая (ADR-138).
+    println!("{:<34} {:>14}", "  узлов достижимо", sim.flow_reachable);
+    println!("{:<34} {:>14}", "  годуновских обновлений", sim.flow_updates);
+    println!("{:<34} {:>14}", "  тиков на одно поле", sim.flow_ticks);
     println!(
         "{:<34} {:>14.1}",
         "шагов упёрлось в породу",

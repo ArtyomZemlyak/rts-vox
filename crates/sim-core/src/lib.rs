@@ -284,6 +284,34 @@ pub struct World {
     /// Замер: сколько шагов упёрлось в рельеф. Ноль на карте с землёй
     /// значит, что юниты по ней не ходят.
     pub blocked_moves: u64,
+    /// Точка сбора владельца — то, к чему считается поле.
+    flow_target: [Option<(i32, i32)>; 2],
+    /// Потолок работы за тик на поле направлений: клеток на сборку
+    /// графа и годуновских обновлений на развёртку.
+    ///
+    /// Целиком поле D-7 считается 38 мс — вчетверо больше всего тика,
+    /// поэтому расчёт идёт порциями и продолжается со следующего тика
+    /// (ADR-138). Потолок фиксирован, а не «сколько успеем»: разное
+    /// отставание у разных клиентов это десинк (ADR-089).
+    pub flow_cells_per_tick: u32,
+    pub flow_scan_per_tick: u32,
+    pub flow_updates_per_tick: u64,
+    /// Маршрут владельца: опубликованное поле и то, что считается.
+    routes: [nav::volume::VolRoute; 2],
+    /// Узлов получило конечное время в последнем опубликованном поле.
+    pub flow_reachable: usize,
+    /// Годуновских обновлений ушло на последнее поле.
+    pub flow_updates: u64,
+    /// Полей опубликовано за прогон.
+    pub flow_solves: u64,
+    /// Тиков ушло на последнее поле.
+    pub flow_ticks: u32,
+    /// Узлов и рёбер в графе последнего поля.
+    pub flow_nodes: usize,
+    pub flow_edges: usize,
+    /// Компонент связности при последнем решении. Единица — карта
+    /// цела; тысяча — она рассыпана, и это надо видеть.
+    pub flow_components: usize,
     /// Замер: сколько юнитов действительно искали цель за тик.
     pub searches: u64,
     /// Замер: в скольких тиках поиск упёрся в потолок.
@@ -346,6 +374,18 @@ impl World {
             examined_move: 0,
             examined_combat: 0,
             blocked_moves: 0,
+            flow_target: [None, None],
+            flow_cells_per_tick: 2_000,
+            flow_scan_per_tick: 8_000,
+            flow_updates_per_tick: 12_000,
+            routes: [nav::volume::VolRoute::new(), nav::volume::VolRoute::new()],
+            flow_reachable: 0,
+            flow_updates: 0,
+            flow_solves: 0,
+            flow_ticks: 0,
+            flow_nodes: 0,
+            flow_edges: 0,
+            flow_components: 0,
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
@@ -353,10 +393,37 @@ impl World {
         }
     }
 
+    /// Поставить юнита **на поверхность** его клетки.
+    ///
+    /// Без этого он начинает на нулевой высоте, и первый же тик
+    /// притягивает его к ближайшему уровню — то есть к **самому
+    /// нижнему**, на дно пещеры. На D-7 так и было: пять тысяч юнитов
+    /// стояли в подземельях, медиана высоты 78 при поверхности 120,
+    /// и связаны эти подземелья не были (ADR-138).
+    pub fn spawn_ground(&mut self, x: i32, z: i32, owner: u8, speed: i32, voxels: u16) -> u32 {
+        let id = self.units.spawn(x, z, owner, speed, voxels);
+        if let Some(g) = self.ground.as_ref() {
+            let st = g.nav.step() as i32;
+            let (gw, gh) = g.nav.dims();
+            let (cx, cz) = ((x / st).max(0) as u32, (z / st).max(0) as u32);
+            if cx < gw && cz < gh {
+                let t = g.nav.top_at(cx, cz);
+                if t != nav::layer::NO_FLOOR {
+                    self.units.y[id as usize] = t as i32;
+                }
+            }
+        }
+        id
+    }
+
     /// Поле направлений: все идут к точке сбора своего владельца.
-    /// Настоящее поле придёт из `nav`; здесь важна только форма доступа —
-    /// одно чтение байта на юнита за тик.
+    ///
+    /// **По прямой.** Земли эта заливка не знает и знать не может:
+    /// она есть и без воксельного мира. Когда земля привязана,
+    /// её накрывает решение эйконала (`solve_flow`), а прямая
+    /// остаётся тем, с чего поле начинается.
     pub fn fill_flow_towards(&mut self, owner: usize, tx: i32, tz: i32) {
+        self.flow_target[owner] = Some((tx, tz));
         let f = &mut self.flow[owner];
         for cz in 0..NAV {
             for cx in 0..NAV {
@@ -382,6 +449,64 @@ impl World {
         }
     }
 
+    /// Поле направлений по навигации: эйконал на сетке нав-слоя.
+    ///
+    /// До этого юниты шли к цели **по прямой**, а порода их просто
+    /// останавливала: на D-7 три с половиной тысячи шагов за тик
+    /// упирались в камень при трёх тысячах живых юнитов, то есть
+    /// каждый юнит каждый тик (ADR-138).
+    ///
+    /// Поле наземное: сетка берёт нижний уровень клетки. Юнит на крыше
+    /// поле по крыше не получит — для этого узлом должна стать пара
+    /// «клетка и уровень».
+    /// Продвинуть поле направлений одного владельца на порцию работы.
+    ///
+    /// Владельцы идут по очереди, по одному за тик: два поля разом
+    /// удваивают порцию, а порция и есть то, что держит тик.
+    pub fn step_flow(&mut self, owner: usize) {
+        use nav::godunov::h_exact_floor;
+        let Self { ground, flow_target, routes, .. } = self;
+        let Some(g) = ground.as_ref() else { return };
+        let Some((tx, tz)) = flow_target[owner] else { return };
+        let st = g.nav.step() as i32;
+        let (gw, gh) = g.nav.dims();
+        let cx = ((tx / st).max(0) as u32).min(gw.saturating_sub(1));
+        let cz = ((tz / st).max(0) as u32).min(gh.saturating_sub(1));
+        let b = nav::volume::Budget {
+            cells: self.flow_cells_per_tick,
+            scan: self.flow_scan_per_tick,
+            updates: self.flow_updates_per_tick,
+        };
+        let done = routes[owner].step(&g.nav, cx, cz, b, &h_exact_floor);
+        if done {
+            let r = &self.routes[owner];
+            self.flow_nodes = r.g.nodes;
+            self.flow_edges = r.g.edges;
+            self.flow_components = r.components;
+            self.flow_reachable = r.reachable;
+            self.flow_updates = r.updates;
+            self.flow_ticks = r.last_ticks;
+            self.flow_solves += 1;
+        }
+    }
+
+    /// Посчитать поля до конца. Для сцен и тестов, которым отставание
+    /// мешает: в тике так нельзя, там оно порциями.
+    pub fn solve_flow(&mut self) {
+        for owner in 0..2 {
+            if self.ground.is_none() || self.flow_target[owner].is_none() {
+                continue;
+            }
+            let before = self.flow_solves;
+            let mut guard = 0;
+            while self.flow_solves == before {
+                self.step_flow(owner);
+                guard += 1;
+                assert!(guard < 1_000_000, "поле не сошлось");
+            }
+        }
+    }
+
     /// Один тик на заданном числе воркеров. Хеш обязан совпадать
     /// при любом их числе (`CLAUDE.md`).
     pub fn tick_par(&mut self, threads: usize) -> u64 {
@@ -395,6 +520,7 @@ impl World {
                 Phase::Bodies => self.phase_ground_bodies(),
                 Phase::NavUpdate => {
                     self.phase_ground_nav();
+                    self.phase_flow();
                     self.phase_nav_update();
                 }
                 Phase::Movement => {
@@ -425,6 +551,7 @@ impl World {
                 Phase::Bodies => self.phase_ground_bodies(),
                 Phase::NavUpdate => {
                     self.phase_ground_nav();
+                    self.phase_flow();
                     self.phase_nav_update();
                 }
                 Phase::Movement => self.phase_movement(),
@@ -524,6 +651,15 @@ impl World {
             g.stats.max_fall = g.stats.max_fall.max(fallen);
             u.riding[i] = 0;
         }
+    }
+
+    /// Пересчёт поля по расписанию. Период — из данных, а не «когда
+    /// успеем»: разное отставание у разных клиентов это десинк (ADR-089).
+    fn phase_flow(&mut self) {
+        if self.ground.is_none() {
+            return;
+        }
+        self.step_flow((self.tick % 2) as usize);
     }
 
     fn phase_ground_nav(&mut self) {
@@ -632,15 +768,37 @@ impl World {
         let (sx, sz) = (&self.snap_x, &self.snap_z);
         let grid = &self.grid_near;
         let flow = &self.flow;
+        // Земля есть — направление берётся из **объёмного** поля по узлу
+        // «клетка и уровень»: юнит на крыше идёт по крышам, юнит
+        // в туннеле — по туннелю (ADR-138). Без земли поле прежнее,
+        // плоское: эталонный сценарий воксельного мира не строит.
+        let vol = self.ground.as_ref().map(|g| (&g.nav, &self.routes));
         let r2 = SEPARATION * SEPARATION;
 
         let compute = |i: usize| -> (i32, i32) {
             let (ux, uz) = (sx[i], sz[i]);
-            let (cx, cz) = (
-                (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-            );
-            let d = flow[u.owner[i] as usize][cz * NAV + cx];
+            let d = match vol {
+                Some((nav, routes)) => {
+                    let st = nav.step() as i32;
+                    let (gw, gh) = nav.dims();
+                    let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
+                    if cx >= gw || cz >= gh {
+                        255
+                    } else {
+                        match nav.level_index_near(cx, cz, u.y[i]) {
+                            Some(li) => routes[u.owner[i] as usize % 2].dir_at(cx, cz, li),
+                            None => 255,
+                        }
+                    }
+                }
+                None => {
+                    let (cx, cz) = (
+                        (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                        (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                    );
+                    flow[u.owner[i] as usize][cz * NAV + cx]
+                }
+            };
             let (mut vx, mut vz) = if d < 4 {
                 let (dx, dz) = DIRS[d as usize];
                 (dx * u.speed[i], dz * u.speed[i])
@@ -984,7 +1142,7 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
         };
         let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
         let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-        w.units.spawn(x, z, owner, r.range(2, 6), 300);
+        w.spawn_ground(x, z, owner, r.range(2, 6), 300);
     }
     w.fill_flow_towards(0, midx + gap + spread, midz);
     w.fill_flow_towards(1, midx - gap - spread, midz);

@@ -30,11 +30,26 @@ impl Stats {
     }
 }
 
+/// Минимумы по осям — **только по тем соседям, куда есть переход**.
+///
+/// Непроходимая клетка не нуждалась в проверке: её время остаётся `INF`
+/// навсегда. Клетка проходимая, но отрезанная перепадом, — нуждается:
+/// время у неё конечное, и без проверки поле течёт вверх по обрыву
+/// (ADR-121, ADR-138).
+///
+/// Сетка без заполненной высоты (`max_step == u16::MAX`) идёт прежним
+/// путём, без единой лишней проверки: замеры ADR-053…055 сделаны на ней.
 #[inline(always)]
-fn axis_mins(t: &[Time], w: usize, i: usize) -> (Time, Time) {
-    let a = t[i - 1].min(t[i + 1]);
-    let b = t[i - w].min(t[i + w]);
-    (a, b)
+fn axis_mins(g: &Grid, t: &[Time], i: usize) -> (Time, Time) {
+    let w = g.w;
+    if g.max_step == u16::MAX {
+        return (t[i - 1].min(t[i + 1]), t[i - w].min(t[i + w]));
+    }
+    let pick = |nb: usize| if g.linked(i, nb) { t[nb] } else { INF };
+    (
+        pick(i - 1).min(pick(i + 1)),
+        pick(i - w).min(pick(i + w)),
+    )
 }
 
 fn init(g: &Grid, goals: &[usize]) -> Vec<Time> {
@@ -67,7 +82,7 @@ where
                 if f == BLOCKED || t[i] == 0 {
                     continue;
                 }
-                let (a, b) = axis_mins(&t, g.w, i);
+                let (a, b) = axis_mins(g, &t, i);
                 st.updates += 1;
                 let q = update2d(a, b, f, h);
                 if q < t[i] {
@@ -103,7 +118,7 @@ where
                 if f == BLOCKED || t[i] == 0 {
                     continue;
                 }
-                let (a, b) = axis_mins(&t, g.w, i);
+                let (a, b) = axis_mins(g, &t, i);
                 st.updates += 1;
                 let q = update2d(a, b, f, h);
                 if q < t[i] {
@@ -144,7 +159,7 @@ where
                     if f == BLOCKED || t[i] == 0 {
                         continue;
                     }
-                    let (a, b) = axis_mins(&t, g.w, i);
+                    let (a, b) = axis_mins(g, &t, i);
                     st.updates += 1;
                     let q = update2d(a, b, f, h);
                     if q < t[i] {
@@ -196,7 +211,7 @@ where
                         active[i] = false;
                         continue;
                     }
-                    let (a, b) = axis_mins(&t, g.w, i);
+                    let (a, b) = axis_mins(g, &t, i);
                     st.updates += 1;
                     let q = update2d(a, b, f, h);
                     if q < t[i] {
@@ -249,7 +264,7 @@ where
         next.clear();
         for &i in list.iter() {
             let f = g.cost[i];
-            let (a, b) = axis_mins(&t, g.w, i);
+            let (a, b) = axis_mins(g, &t, i);
             st.updates += 1;
             let q = update2d(a, b, f, h);
             let old = t[i];
@@ -264,7 +279,7 @@ where
                 if g.cost[nb] == BLOCKED || in_list[nb] || t[nb] == 0 {
                     continue;
                 }
-                let (na, nbm) = axis_mins(&t, g.w, nb);
+                let (na, nbm) = axis_mins(g, &t, nb);
                 st.updates += 1;
                 let qn = update2d(na, nbm, g.cost[nb], h);
                 if qn < t[nb] {
@@ -306,7 +321,7 @@ where
             if g.cost[nb] == BLOCKED || frozen[nb] {
                 continue;
             }
-            let (a, b) = axis_mins(&t, g.w, nb);
+            let (a, b) = axis_mins(g, &t, nb);
             st.updates += 1;
             let q = update2d(a, b, g.cost[nb], h);
             if q < t[nb] {
@@ -349,7 +364,7 @@ where
                 if t[i] == 0 {
                     continue;
                 }
-                let (a, b) = axis_mins(&t, g.w, i);
+                let (a, b) = axis_mins(g, &t, i);
                 let q = update2d(a, b, g.cost[i], h);
                 if q < t[i] {
                     t[i] = q;
@@ -383,7 +398,9 @@ pub fn flow_dirs(g: &Grid, t: &[Time]) -> Vec<u8> {
             let mut best_k = 255u8;
             let mut best_idx = usize::MAX;
             for (k, &nb) in nbs.iter().enumerate() {
-                if g.cost[nb] == BLOCKED || t[nb] == INF {
+                // Не `cost != BLOCKED`, а **есть ли переход**: иначе поле
+                // показывает юниту на верх обрыва (ADR-138).
+                if !g.linked(i, nb) || t[nb] == INF {
                     continue;
                 }
                 if t[nb] < best || (t[nb] == best && nb < best_idx) {
@@ -414,7 +431,7 @@ pub fn tie_fraction(g: &Grid, t: &[Time]) -> (usize, usize) {
             let mut best = Time::MAX;
             let mut cnt = 0;
             for &nb in nbs.iter() {
-                if g.cost[nb] == BLOCKED || t[nb] == INF {
+                if !g.linked(i, nb) || t[nb] == INF {
                     continue;
                 }
                 if t[nb] < best {
@@ -473,7 +490,7 @@ pub fn dir_quality(g: &Grid, t_ref: &[Time], t_coarse: &[Time]) -> (u64, u64) {
             let nbs = [i - g.w, i - 1, i + 1, i + g.w];
             let mut best = Time::MAX;
             for &nb in nbs.iter() {
-                if g.cost[nb] != BLOCKED && t_ref[nb] < best {
+                if g.linked(i, nb) && t_ref[nb] < best {
                     best = t_ref[nb];
                 }
             }
@@ -483,7 +500,7 @@ pub fn dir_quality(g: &Grid, t_ref: &[Time], t_coarse: &[Time]) -> (u64, u64) {
                 continue;
             }
             let nb = nbs[k as usize];
-            if g.cost[nb] == BLOCKED || t_ref[nb] != best {
+            if !g.linked(i, nb) || t_ref[nb] != best {
                 harmful += 1;
             }
         }
@@ -564,7 +581,7 @@ where
                         ws.active[i] = false;
                         continue;
                     }
-                    let (a, b) = axis_mins(&ws.t, g.w, i);
+                    let (a, b) = axis_mins(g, &ws.t, i);
                     st.updates += 1;
                     let q = update2d(a, b, f, h);
                     if q < ws.t[i] {
@@ -609,7 +626,7 @@ where
         ws.next.clear();
         for k in 0..ws.list.len() {
             let i = ws.list[k];
-            let (a, b) = axis_mins(&ws.t, g.w, i);
+            let (a, b) = axis_mins(g, &ws.t, i);
             st.updates += 1;
             let q = update2d(a, b, g.cost[i], h);
             if q < ws.t[i] {
@@ -622,7 +639,7 @@ where
                 if g.cost[nb] == BLOCKED || ws.in_list[nb] || ws.fixed[nb] {
                     continue;
                 }
-                let (na, nbm) = axis_mins(&ws.t, g.w, nb);
+                let (na, nbm) = axis_mins(g, &ws.t, nb);
                 st.updates += 1;
                 let qn = update2d(na, nbm, g.cost[nb], h);
                 if qn < ws.t[nb] {

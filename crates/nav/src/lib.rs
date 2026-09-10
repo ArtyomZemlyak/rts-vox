@@ -13,6 +13,7 @@ pub mod solver;
 pub mod vision;
 pub mod vision_incr;
 pub mod vision_index;
+pub mod volume;
 
 #[cfg(test)]
 mod tests {

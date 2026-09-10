@@ -31,6 +31,7 @@ pub const NO_FLOOR: u16 = u16::MAX;
 /// и печатается, а не умалчивается (ADR-136).
 pub const MAX_LEVELS: usize = 8;
 
+
 pub struct NavLayer {
     /// Высота пола клетки — **нижнего** её уровня.
     ///
@@ -43,6 +44,12 @@ pub struct NavLayer {
     levels: Vec<u16>,
     /// Сколько уровней у клетки на самом деле уместилось.
     n_levels: Vec<u8>,
+    /// **Поверхность** — самый высокий уровень клетки, до всякой обрезки.
+    ///
+    /// Отдельно от `levels` потому, что обрезка может его не сохранить,
+    /// а поверхность — это то место, где юниты стоят по умолчанию
+    /// и по которому строится поле направлений (ADR-138).
+    top: Vec<u16>,
     /// Сколько раз уровней оказалось больше, чем слой помнит.
     pub overflow: u64,
     /// Есть ли над полом просвет в рост.
@@ -65,6 +72,7 @@ impl NavLayer {
             floor: vec![NO_FLOOR; (nw * nh) as usize],
             levels: vec![NO_FLOOR; (nw * nh) as usize * MAX_LEVELS],
             n_levels: vec![0; (nw * nh) as usize],
+            top: vec![NO_FLOOR; (nw * nh) as usize],
             overflow: 0,
             stand: vec![false; (nw * nh) as usize],
             stamp: vec![0; (nw * nh) as usize],
@@ -133,14 +141,21 @@ impl NavLayer {
             }
         }
         found[..n].sort_unstable();
+        let top = if n == 0 { NO_FLOOR } else { found[n - 1] };
         if n > MAX_LEVELS {
+            // Обрезка оставляет нижние — и **обязательно верхний**.
+            // Без него юнит на поверхности колонки, где уровней больше
+            // восьми, оказывался бы притянут вниз, в толщу: поверхность
+            // это не «ещё один уровень», это тот, где он стоит (ADR-138).
             over = true;
+            found[MAX_LEVELS - 1] = top;
             n = MAX_LEVELS;
         }
         let i = self.idx(cx, cz);
         let base = i * MAX_LEVELS;
         self.levels[base..base + MAX_LEVELS].copy_from_slice(&found[..MAX_LEVELS]);
         self.n_levels[i] = n as u8;
+        self.top[i] = top;
         if over {
             self.overflow += 1;
         }
@@ -169,6 +184,20 @@ impl NavLayer {
         best
     }
 
+    /// Номер ближайшего к `y` уровня клетки — то, чем юнит адресует
+    /// свой узел в объёмном поле направлений (ADR-138).
+    pub fn level_index_near(&self, cx: u32, cz: u32, y: i32) -> Option<usize> {
+        let mut best: Option<(u32, usize)> = None;
+        for (k, &l) in self.levels_at(cx, cz).iter().enumerate() {
+            let d = (l as i32 - y).unsigned_abs();
+            match best {
+                Some((bd, _)) if bd <= d => {}
+                _ => best = Some((d, k)),
+            }
+        }
+        best.map(|(_, k)| k)
+    }
+
     /// Есть ли переход из клетки `a` с высоты `y` в клетку `b`.
     /// Возвращает уровень, на который юнит попадёт.
     ///
@@ -195,6 +224,12 @@ impl NavLayer {
     #[inline]
     fn idx(&self, cx: u32, cz: u32) -> usize {
         (cz * self.w + cx) as usize
+    }
+
+    /// Поверхность клетки: самый высокий уровень, на котором можно
+    /// стоять. `NO_FLOOR`, если стоять негде.
+    pub fn top_at(&self, cx: u32, cz: u32) -> u16 {
+        self.top[self.idx(cx, cz)]
     }
 
     /// Сторона нав-клетки в вокселях.
