@@ -15,7 +15,7 @@ fn section(t: &str) {
 }
 
 /// Прогон N тиков, возвращает миллисекунды на тик и разбивку по фазам.
-fn run(n_units: usize, ticks: usize, seed: u64, spread: i32) -> (f64, [u64; 15], u64, u64, usize) {
+fn run(n_units: usize, ticks: usize, seed: u64, spread: i32) -> (f64, [u64; 16], u64, u64, usize) {
     run_cells(n_units, ticks, seed, spread, SEPARATION, RANGE)
 }
 
@@ -26,14 +26,14 @@ fn run_cells(
     spread: i32,
     near: i32,
     far: i32,
-) -> (f64, [u64; 15], u64, u64, usize) {
+) -> (f64, [u64; 16], u64, u64, usize) {
     let mut w = World::with_cells(2, n_units * 2, near, far);
     populate_spread(&mut w, n_units, seed, spread);
     // Прогрев: индекс и кэш.
     for _ in 0..5 {
         w.tick();
     }
-    w.phase_ns = [0; 15];
+    w.phase_ns = [0; 16];
     w.examined_move = 0;
     w.examined_combat = 0;
     let t0 = Instant::now();
@@ -183,7 +183,7 @@ fn main() {
             let mut w = World::with_cells(2, n * 2, SEPARATION, RANGE);
             populate_spread(&mut w, n, 42, 150);
             for _ in 0..5 { w.tick_par(threads); }
-            w.phase_ns = [0; 15];
+            w.phase_ns = [0; 16];
             let ticks = 100usize;
             let t0 = Instant::now();
             let mut h = 0u64;

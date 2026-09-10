@@ -37,6 +37,9 @@ pub enum Phase {
     VoxelEdits,
     Destruction,
     Fluids,
+    /// Диффузия разрежённых слоёв: урон, температура, насыщение (ADR-097).
+    /// Заглушка до этапа 6; место занято сейчас, пока golden-файлов нет.
+    Diffusion,
     Bodies,
     NavUpdate,
     Movement,
@@ -49,12 +52,13 @@ pub enum Phase {
     Hash,
 }
 
-pub const PHASES: [Phase; 15] = [
+pub const PHASES: [Phase; 16] = [
     Phase::ApplyCommands,
     Phase::ModPreTick,
     Phase::VoxelEdits,
     Phase::Destruction,
     Phase::Fluids,
+    Phase::Diffusion,
     Phase::Bodies,
     Phase::NavUpdate,
     Phase::Movement,
@@ -75,6 +79,7 @@ impl Phase {
             Phase::VoxelEdits => "voxel_edits",
             Phase::Destruction => "destruction",
             Phase::Fluids => "fluids",
+            Phase::Diffusion => "diffusion",
             Phase::Bodies => "bodies",
             Phase::NavUpdate => "nav_update",
             Phase::Movement => "movement",
@@ -218,7 +223,7 @@ pub struct World {
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
-    pub phase_ns: [u64; 15],
+    pub phase_ns: [u64; 16],
 }
 
 const DIRS: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
@@ -246,7 +251,7 @@ impl World {
             damage: Vec::new(),
             examined_move: 0,
             examined_combat: 0,
-            phase_ns: [0; 15],
+            phase_ns: [0; 16],
         }
     }
 

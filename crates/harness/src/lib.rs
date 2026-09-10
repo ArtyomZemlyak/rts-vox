@@ -334,9 +334,24 @@ pub struct Digger {
     pub age: u32,
 }
 
+/// Форма, которую снимает инструмент (Q-17). Разница между вариантами —
+/// не косметика: греди-мешинг сливает осевые объёмы почти идеально
+/// и не сливает рваные, и число квадов расходится в разы.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cut {
+    /// Осевой объём: куб со стороной `2r+1`. Стены ровные.
+    Boxy,
+    /// Сфера радиуса `r`. Стены гладкие, но не осевые.
+    Sphere,
+    /// Органический забой: сфера с дрожанием радиуса на воксель.
+    /// Стены рваные — «грызёт».
+    Organic,
+}
+
 pub struct Dig {
     pub diggers: Vec<Digger>,
     pub radius: i32,
+    pub cut: Cut,
     rng: Rng,
 }
 
@@ -377,7 +392,7 @@ impl Dig {
             };
             diggers.push(Digger { x, y, z, dx, dz, age: rng.below(3) });
         }
-        Dig { diggers, radius, rng }
+        Dig { diggers, radius, cut: Cut::Sphere, rng }
     }
 
     pub fn new(w: &World, n: usize, radius: i32, seed: u64) -> Dig {
@@ -412,6 +427,7 @@ impl Dig {
         Dig {
             diggers,
             radius,
+            cut: Cut::Sphere,
             rng,
         }
     }
@@ -426,8 +442,28 @@ impl Dig {
             for dy in -r..=r {
                 for dz in -r..=r {
                     for dx in -r..=r {
-                        if dx * dx + dy * dy + dz * dz > r * r {
-                            continue;
+                        let d2 = dx * dx + dy * dy + dz * dz;
+                        match self.cut {
+                            Cut::Boxy => {}
+                            Cut::Sphere => {
+                                if d2 > r * r {
+                                    continue;
+                                }
+                            }
+                            Cut::Organic => {
+                                // Дрожание радиуса детерминировано от мировой
+                                // позиции, а не от порядка обхода: иначе
+                                // стена менялась бы при каждом проходе.
+                                let h = (d.x as i64 * 0x9E37)
+                                    ^ (d.z as i64 * 0x85EB)
+                                    ^ ((dx as i64 + 8) * 0xC2B2)
+                                    ^ ((dy as i64 + 8) * 0x27D4)
+                                    ^ ((dz as i64 + 8) * 0x1656);
+                                let jitter = (h.unsigned_abs() % 3) as i32;
+                                if d2 > r * r + jitter - 1 {
+                                    continue;
+                                }
+                            }
                         }
                         let (x, y, z) = (
                             d.x as i64 + dx as i64,

@@ -76,6 +76,7 @@ grep -rn '\[QUESTION' docs/
 | [11-roadmap.md](docs/11-roadmap.md) | Этапы, гейты, первая неделя |
 | [12-decisions.md](docs/12-decisions.md) | Реестр решений: по строке на ADR |
 | [13-gpu.md](docs/13-gpu.md) | Слой видеокарты: портируемое подмножество, сверка, бюджет обращения |
+| [14-demo-scenes.md](docs/14-demo-scenes.md) | Сцены техно-демки: восемь штук, у каждой порог |
 
 ## Анализ
 
@@ -109,6 +110,7 @@ grep -rn '\[QUESTION' docs/
 | [19-remaining-bench.md](docs/analysis/19-remaining-bench.md) | Щиты, энергия, горячие чанки, пустоты, память игрока |
 | [20-measurement-machine.md](docs/analysis/20-measurement-machine.md) | Машина замеров, время сборки и правила замера |
 | [21-render-bench.md](docs/analysis/21-render-bench.md) | Рендер: марш по пирамиде занятости, итерации на кадр |
+| [23-cut-shape.md](docs/analysis/23-cut-shape.md) | Форма забоя: осевой против рваного, квады и видеопамять |
 | [22-gpu-batching.md](docs/analysis/22-gpu-batching.md) | Видеокарта: цена обращения, слияние операций, расчёт пачкой |
 | [21-render-bench.md](docs/analysis/21-render-bench.md) | Рендер: марш по пирамиде занятости, затенение против солнца |
 
