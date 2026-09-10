@@ -32,6 +32,11 @@ use voxel::World;
 /// Бюджет тика, миллисекунд (30 Гц).
 const BUDGET_MS: f64 = 10.0;
 
+/// Пороги по подсистемам из `docs/10-budgets.md`. Порога на целое мало:
+/// часть может уехать втрое, пока целое укладывается (ADR-146).
+const NAV_BUDGET_MS: f64 = 3.0;
+const MESH_BUDGET_MS: f64 = 5.0;
+
 struct Args {
     seed: u64,
     units: usize,
@@ -496,7 +501,21 @@ fn main() -> ExitCode {
         fresh.first_builds + worn.first_builds
     );
 
-    let mut ok = worst_avg <= BUDGET_MS && worst_tick <= BUDGET_MS * 2.0;
+    // Каждая подсистема отвечает за свою строку бюджета отдельно.
+    let nav_ms = (fresh.ms_topo / n).max(worn.ms_topo / n);
+    let mesh_ms = (fresh.ms_mesh / n).max(worn.ms_mesh / n);
+    for (name, got, budget) in [
+        ("связность и проходимость", nav_ms, NAV_BUDGET_MS),
+        ("ремеш", mesh_ms, MESH_BUDGET_MS),
+    ] {
+        let v = if got <= budget { "держится" } else { "ПРЕВЫШЕН" };
+        println!("  порог {budget} мс на «{name}»: {got:.3} мс — {v}");
+    }
+
+    let mut ok = worst_avg <= BUDGET_MS
+        && worst_tick <= BUDGET_MS * 2.0
+        && nav_ms <= NAV_BUDGET_MS
+        && mesh_ms <= MESH_BUDGET_MS;
     if fresh.edits == 0 || worn.edits == 0 {
         println!("копка не идёт — сцена мерит не ту задачу");
         ok = false;

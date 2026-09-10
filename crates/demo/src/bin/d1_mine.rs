@@ -35,6 +35,19 @@ use voxel::World;
 /// бюджет тика (ADR-126).
 const BUDGET_MS: f64 = 10.0;
 
+/// Пороги по подсистемам из `docs/10-budgets.md`.
+///
+/// Порога на целое **недостаточно**: каскад отделения три года стоял
+/// втрое дороже своей строки бюджета, и сцена этого не замечала, потому
+/// что тик целиком укладывался в десять миллисекунд (ADR-146). Строка
+/// бюджета без порога — пожелание, а не бюджет.
+const PART_BUDGETS: [(&str, f64); 4] = [
+    ("каскад отделения", 2.0),
+    ("падение тел", 0.5),
+    ("связность и проходимость", 3.0),
+    ("мешинг", 5.0),
+];
+
 struct Args {
     seed: u64,
     ticks: u64,
@@ -336,6 +349,21 @@ fn main() -> ExitCode {
     println!("порог {BUDGET_MS} мс на тик: {total:.3} мс — {verdict}");
     if total > BUDGET_MS {
         ok = false;
+    }
+
+    // Каждая подсистема отвечает за свою строку бюджета отдельно.
+    let parts = [
+        ph(Phase::Destruction) / n,
+        ph(Phase::Bodies) / n,
+        ms_topo / n,
+        ms_mesh / n,
+    ];
+    for (&(name, budget), got) in PART_BUDGETS.iter().zip(parts) {
+        let v = if got <= budget { "держится" } else { "ПРЕВЫШЕН" };
+        println!("  порог {budget} мс на «{name}»: {got:.3} мс — {v}");
+        if got > budget {
+            ok = false;
+        }
     }
 
     if ok {
