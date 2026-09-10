@@ -24,10 +24,27 @@ use voxel::{Edit, World};
 /// Отсутствие пола: колонка либо пустая до дна, либо сплошная до неба.
 pub const NO_FLOOR: u16 = u16::MAX;
 
+/// Сколько уровней в колонке слой помнит.
+///
+/// Перепись ADR-117 дала 2.9 уровня на подколонку в среднем; восемь
+/// берётся с запасом, а сколько раз его не хватило — считается
+/// и печатается, а не умалчивается (ADR-136).
+pub const MAX_LEVELS: usize = 8;
+
 pub struct NavLayer {
-    /// Высота пола клетки. **Это и есть та величина, которую меняет
-    /// копка** — булева проходимость её не видит.
+    /// Высота пола клетки — **нижнего** её уровня.
+    ///
+    /// Оставлен ради тех, кому одного уровня довольно: графа порталов
+    /// и отчётов. Всё, что решает, где стоит юнит, ходит через
+    /// `levels`.
     floor: Vec<u16>,
+    /// Уровни клетки по возрастанию, `MAX_LEVELS` ячеек на клетку.
+    /// Пустые заполнены `NO_FLOOR`.
+    levels: Vec<u16>,
+    /// Сколько уровней у клетки на самом деле уместилось.
+    n_levels: Vec<u8>,
+    /// Сколько раз уровней оказалось больше, чем слой помнит.
+    pub overflow: u64,
     /// Есть ли над полом просвет в рост.
     stand: Vec<bool>,
     stamp: Vec<u32>,
@@ -46,6 +63,9 @@ impl NavLayer {
         let (nw, nh) = (w.nx / step, w.nz / step);
         let mut l = NavLayer {
             floor: vec![NO_FLOOR; (nw * nh) as usize],
+            levels: vec![NO_FLOOR; (nw * nh) as usize * MAX_LEVELS],
+            n_levels: vec![0; (nw * nh) as usize],
+            overflow: 0,
             stand: vec![false; (nw * nh) as usize],
             stamp: vec![0; (nw * nh) as usize],
             epoch: 0,
@@ -57,27 +77,21 @@ impl NavLayer {
         };
         for cz in 0..nh {
             for cx in 0..nw {
-                let (f, st) = l.probe(w, cx, cz);
-                let i = (cz * nw + cx) as usize;
-                l.floor[i] = f;
-                l.stand[i] = st;
+                l.refresh_cell(w, cx, cz);
             }
         }
         l
     }
 
-    /// Пол клетки и есть ли над ним просвет.
-    ///
-    /// **Пол ищется снизу вверх.** Поверхностная мерка берёт верх
-    /// колонки и потому не видит прокопанный под грядой ход, а верх
-    /// отвесной стены считает проходимым (ADR-113). Снизу вверх
-    /// берётся нижний проходимый уровень — тот самый, который
-    /// единственный по ADR-039.
-    ///
-    /// Клетка шире воксела, поэтому берётся **самая низкая** её
-    /// подколонка с просветом: юнит стоит там, где может стоять.
-    fn probe(&self, w: &World, cx: u32, cz: u32) -> (u16, bool) {
-        let mut best = NO_FLOOR;
+    /// Пересчитать уровни клетки. Возвращает `(пол, можно ли стоять)`.
+    fn refresh_cell(&mut self, w: &World, cx: u32, cz: u32) -> (u16, bool) {
+        // Собираем с запасом, а обрезаем в конце: иначе выпадали бы
+        // те уровни, что нашлись позже, то есть произвольные.
+        // Остаются **нижние** — там, где юниты и ходят (ADR-136).
+        const SCRATCH: usize = 32;
+        let mut found = [NO_FLOOR; SCRATCH];
+        let mut n = 0usize;
+        let mut over = false;
         for dz in 0..self.step {
             for dx in 0..self.step {
                 let (x, z) = (cx * self.step + dx, cz * self.step + dz);
@@ -90,18 +104,93 @@ impl NavLayer {
                             clear += 1;
                         }
                         if clear >= self.height {
-                            if (y as u16) < best {
-                                best = y as u16;
+                            // Уровни, отличающиеся на воксель, — один
+                            // и тот же: клетка шире воксела, и пол
+                            // в ней бывает неровным.
+                            let yv = y as u16;
+                            let mut merged = false;
+                            for f in found.iter_mut().take(n) {
+                                if f.abs_diff(yv) <= 1 {
+                                    *f = (*f).min(yv);
+                                    merged = true;
+                                    break;
+                                }
                             }
-                            break;
+                            if !merged {
+                                if n < SCRATCH {
+                                    found[n] = yv;
+                                    n += 1;
+                                } else {
+                                    over = true;
+                                }
+                            }
+                            y += self.height;
+                            continue;
                         }
                     }
                     y += 1;
                 }
             }
         }
-        (best, best != NO_FLOOR)
+        found[..n].sort_unstable();
+        if n > MAX_LEVELS {
+            over = true;
+            n = MAX_LEVELS;
+        }
+        let i = self.idx(cx, cz);
+        let base = i * MAX_LEVELS;
+        self.levels[base..base + MAX_LEVELS].copy_from_slice(&found[..MAX_LEVELS]);
+        self.n_levels[i] = n as u8;
+        if over {
+            self.overflow += 1;
+        }
+        let f = if n == 0 { NO_FLOOR } else { found[0] };
+        self.floor[i] = f;
+        self.stand[i] = n > 0;
+        (f, n > 0)
     }
+
+    /// Уровни клетки по возрастанию.
+    pub fn levels_at(&self, cx: u32, cz: u32) -> &[u16] {
+        let i = self.idx(cx, cz);
+        &self.levels[i * MAX_LEVELS..i * MAX_LEVELS + self.n_levels[i] as usize]
+    }
+
+    /// Ближайший к `y` уровень клетки, если он есть.
+    pub fn level_near(&self, cx: u32, cz: u32, y: i32) -> Option<u16> {
+        let mut best: Option<u16> = None;
+        for &l in self.levels_at(cx, cz) {
+            let d = (l as i32 - y).abs();
+            match best {
+                Some(b) if (b as i32 - y).abs() <= d => {}
+                _ => best = Some(l),
+            }
+        }
+        best
+    }
+
+    /// Есть ли переход из клетки `a` с высоты `y` в клетку `b`.
+    /// Возвращает уровень, на который юнит попадёт.
+    ///
+    /// **Перепад — свойство ребра** (ADR-121), а уровень выбирается
+    /// по текущей высоте: с крыши переходят на крышу, а не на землю
+    /// под ней (ADR-136).
+    pub fn step_to(&self, a: (u32, u32), y: i32, b: (u32, u32)) -> Option<u16> {
+        let mut best: Option<u16> = None;
+        for &l in self.levels_at(b.0, b.1) {
+            let d = (l as i32 - y).unsigned_abs();
+            if d > self.max_step {
+                continue;
+            }
+            match best {
+                Some(bb) if (bb as i32 - y).unsigned_abs() <= d => {}
+                _ => best = Some(l),
+            }
+        }
+        let _ = a;
+        best
+    }
+
 
     #[inline]
     fn idx(&self, cx: u32, cz: u32) -> usize {
@@ -189,10 +278,7 @@ impl NavLayer {
         }
         st.seen = touched.len();
         for &(cx, cz, _, _, _) in &touched {
-            let (f, sd) = self.probe(w, cx, cz);
-            let ci = self.idx(cx, cz);
-            self.floor[ci] = f;
-            self.stand[ci] = sd;
+            self.refresh_cell(w, cx, cz);
         }
         for &(cx, cz, f0, s0, d0) in &touched {
             let ci = self.idx(cx, cz);
@@ -219,6 +305,7 @@ impl NavLayer {
     /// (ADR-113), снизу вверх выбирается пол пещеры под поверхностью.
     /// Оба ответа неверны там, где уровней больше одного, и вопрос
     /// в том, где таких колонок много.
+    #[allow(dead_code)]
     fn levels_in_column(&self, w: &World, x: u32, z: u32) -> u32 {
         let mut n = 0;
         let mut y = 1u32;

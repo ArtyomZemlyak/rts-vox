@@ -740,42 +740,49 @@ impl World {
                     }
                     Some((cx, cz))
                 };
-                // Оси проверяются по очереди: шаг, упёршийся в породу
-                // по одной, не обязан отменять другую.
-                if let (Some(a), Some(b)) = (cell(x0, z0), cell(x1, z0)) {
-                    if a != b && !nav.edge(a, b) {
-                        x1 = x0;
-                        *blocked_moves += 1;
+                let mut y = u.y[i];
+                // Уровень выбирается по текущей высоте: с крыши
+                // переходят на крышу, а не на землю под ней (ADR-136).
+                // Оси проверяются по очереди — упёршийся шаг по одной
+                // не отменяет другую.
+                if let Some(c0) = cell(x0, z0) {
+                    match cell(x1, z0) {
+                        None => x1 = x0,
+                        Some(c1) if c1 != c0 => match nav.step_to(c0, y, c1) {
+                            Some(l) => y = l as i32,
+                            None => {
+                                x1 = x0;
+                                *blocked_moves += 1;
+                            }
+                        },
+                        _ => {}
                     }
-                } else if cell(x1, z0).is_none() {
-                    x1 = x0;
+                    let a = cell(x1, z0);
+                    match (a, cell(x1, z1)) {
+                        (_, None) => z1 = z0,
+                        (Some(a), Some(b)) if a != b => match nav.step_to(a, y, b) {
+                            Some(l) => y = l as i32,
+                            None => {
+                                z1 = z0;
+                                *blocked_moves += 1;
+                            }
+                        },
+                        _ => {}
+                    }
                 }
-                if let (Some(a), Some(b)) = (cell(x1, z0), cell(x1, z1)) {
-                    if a != b && !nav.edge(a, b) {
-                        z1 = z0;
-                        *blocked_moves += 1;
+                // Высота следует за уровнем клетки. Едущий на теле её
+                // не берёт: его высоту задаёт тело.
+                if u.riding[i] == 0 {
+                    if let Some(c) = cell(x1, z1) {
+                        if let Some(l) = nav.level_near(c.0, c.1, y) {
+                            y = l as i32;
+                        }
                     }
-                } else if cell(x1, z1).is_none() {
-                    z1 = z0;
+                    u.y[i] = y;
                 }
             }
             u.x[i] = x1;
             u.z[i] = z1;
-            // Высота следует за полом нав-клетки. Едущий на теле её
-            // не берёт: его высоту задаёт тело.
-            if let Some((nav, (ex, ez))) = terrain {
-                if u.riding[i] == 0 && x1 >= 0 && z1 >= 0 && x1 < ex && z1 < ez {
-                    let st = nav.step() as i32;
-                    let (gw, gh) = nav.dims();
-                    let (cx, cz) = ((x1 / st) as u32, (z1 / st) as u32);
-                    if cx < gw && cz < gh {
-                        let f = nav.floor_at(cx, cz);
-                        if f != nav::layer::NO_FLOOR {
-                            u.y[i] = f as i32;
-                        }
-                    }
-                }
-            }
         }
     }
 

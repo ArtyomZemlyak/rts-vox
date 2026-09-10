@@ -406,7 +406,7 @@ fn run(a: &Args) -> Outcome {
                 .iter()
                 .filter(|u| {
                     let (cx, cz) = (u.x / st, u.z / st);
-                    cx < gw && cz < gh && g.nav.floor_at(cx, cz) as u32 == u.y
+                    cx < gw && cz < gh && g.nav.levels_at(cx, cz).iter().any(|&l| l as u32 == u.y)
                 })
                 .count()
         },

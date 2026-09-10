@@ -284,6 +284,34 @@ mod tests {
         }
     }
 
+    /// **Юнит на нависающей шляпке остаётся на ней**, а не
+    /// проваливается на землю под ней.
+    ///
+    /// До ADR-136 нав-слой держал в колонке один уровень, нижний,
+    /// и высота юнита каждый тик притягивалась к земле: стоять
+    /// на нависающем было нельзя в принципе.
+    #[test]
+    fn a_unit_on_an_overhang_stays_on_it() {
+        let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Mushroom));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        // Край шляпки: под ним пусто до самой земли.
+        let id = w.units.spawn(38, 38, 0, 0, 300) as usize;
+        w.units.y[id] = 44;
+        w.units.refresh_live();
+        {
+            let g = w.ground().expect("земля");
+            let (cx, cz) = (38 / g.nav.step(), 38 / g.nav.step());
+            let ls = g.nav.levels_at(cx, cz);
+            assert!(ls.len() >= 2, "у клетки один уровень: {ls:?}");
+            assert!(ls.contains(&44), "верха шляпки нет среди уровней: {ls:?}");
+        }
+        for _ in 0..20 {
+            w.tick();
+        }
+        assert_eq!(w.units.y[id], 44, "юнит провалился под шляпку");
+    }
+
     /// **Юнит едет вниз вместе с куском и получает урон по высоте
     /// падения** (ADR-099, ADR-036).
     ///
