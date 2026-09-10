@@ -72,12 +72,24 @@ impl Status {
 #[derive(Clone)]
 pub struct UnitBody {
     pub vol: UnitVol,
-    /// Метка на воксель. Плотный массив: том маленький, и косвенность
-    /// здесь дороже самих данных.
-    part: Vec<u8>,
-    /// Маски вокселей каждой подсистемы по колонкам, как у `UnitVol`.
+    /// Метка на воксель — **разделяемая**.
+    ///
+    /// После сборки она не меняется: урон снимает воксели (`remove`),
+    /// а роль оставшихся та же. Значит копия при записи (ADR-018) может
+    /// её не копировать, и это шестьдесят процентов тома (ADR-120).
+    /// `Arc` здесь не про потоки, а про владение: расхождения он внести
+    /// не может, потому что содержимое неизменяемо.
+    part: std::sync::Arc<Vec<u8>>,
+    /// Маски вокселей каждой подсистемы по колонкам, как у `UnitVol`,
+    /// **одним массивом** с шагом `ny * nz`.
+    ///
+    /// Три отдельных вектора — это три выделения памяти на каждую копию
+    /// при записи, а копия делается по первому попаданию, залпом
+    /// в тысячи штук. Выделение здесь дороже самих данных (ADR-120).
     /// Считаются один раз при сборке: попадание их только гасит.
-    masks: [Vec<u32>; 3],
+    masks: Vec<u32>,
+    /// Шаг между масками подсистем.
+    mstride: usize,
     pub core: (u8, u8, u8),
     pub core_size: u8,
 }
@@ -93,12 +105,9 @@ impl UnitBody {
         let n = nx as usize * ny as usize * nz as usize;
         UnitBody {
             vol: UnitVol::new(nx, ny, nz),
-            part: vec![Part::Armour as u8; n],
-            masks: [
-                vec![0; ny as usize * nz as usize],
-                vec![0; ny as usize * nz as usize],
-                vec![0; ny as usize * nz as usize],
-            ],
+            part: std::sync::Arc::new(vec![Part::Armour as u8; n]),
+            masks: vec![0; 3 * ny as usize * nz as usize],
+            mstride: ny as usize * nz as usize,
             core: (0, 0, 0),
             core_size: core_size.max(1),
         }
@@ -160,13 +169,15 @@ impl UnitBody {
         z * self.vol.ny as usize + y
     }
 
+    /// Расставить воксель. Единственное место, где меняются метки,
+    /// и потому единственное, где разделяемый массив расщепляется.
     pub fn set(&mut self, x: usize, y: usize, z: usize, p: Part) {
         self.vol.set(x, y, z, true);
         let i = self.idx(x, y, z);
-        self.part[i] = p as u8;
+        std::sync::Arc::make_mut(&mut self.part)[i] = p as u8;
         if let Some(k) = subsystem_slot(p) {
             let c = self.col(y, z);
-            self.masks[k][c] |= 1u32 << x;
+            self.masks[k * self.mstride + c] |= 1u32 << x;
         }
     }
 
@@ -188,7 +199,7 @@ impl UnitBody {
         self.vol.set(x, y, z, false);
         if let Some(k) = subsystem_slot(self.part_at(x, y, z)) {
             let c = self.col(y, z);
-            self.masks[k][c] &= !(1u32 << x);
+            self.masks[k * self.mstride + c] &= !(1u32 << x);
         }
         true
     }
@@ -202,7 +213,7 @@ impl UnitBody {
         let rep = core_connectivity(&self.vol, b, self.core, self.core_size);
         let reached = b.reached_cols();
         let live = |k: usize| -> bool {
-            self.masks[k]
+            self.masks[k * self.mstride..(k + 1) * self.mstride]
                 .iter()
                 .zip(reached)
                 .any(|(m, r)| m & r != 0)
@@ -223,8 +234,16 @@ impl UnitBody {
 
     /// Байты тома. Метка воксела — байт, и это самая дорогая часть:
     /// занятость стоит бит.
+    /// Весь том, включая разделяемые метки. Для шаблона это его
+    /// полный размер.
     pub fn bytes(&self) -> usize {
-        self.vol.cols.len() * 4 + self.part.len() + self.masks.iter().map(|m| m.len() * 4).sum::<usize>()
+        self.bytes_private() + self.part.len()
+    }
+
+    /// Только собственная память тома. У копии метки общие с шаблоном,
+    /// и считать их дважды — завысить расход флота вдвое с половиной.
+    pub fn bytes_private(&self) -> usize {
+        self.vol.cols.len() * 4 + self.masks.len() * 4
     }
 }
 

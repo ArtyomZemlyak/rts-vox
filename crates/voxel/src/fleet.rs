@@ -137,7 +137,8 @@ impl Fleet {
             .slots
             .iter()
             .filter_map(|s| match s {
-                Slot::Live { own: Some(b), .. } => Some(b.bytes()),
+                // Метки у копии общие с шаблоном (ADR-120).
+                Slot::Live { own: Some(b), .. } => Some(b.bytes_private()),
                 _ => None,
             })
             .sum();
