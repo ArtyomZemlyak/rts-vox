@@ -179,6 +179,8 @@ fn main() -> ExitCode {
     /// Что намерила одна фаза замера.
     struct Phase {
         ms_units: f64,
+        fall_damage: u64,
+        max_fall: u32,
         ms_dig: f64,
         ms_mesh: f64,
         ms_topo: f64,
@@ -231,6 +233,8 @@ fn main() -> ExitCode {
      -> Phase {
         let mut p = Phase {
             ms_units: 0.0,
+            fall_damage: 0,
+            max_fall: 0,
             ms_dig: 0.0,
             ms_mesh: 0.0,
             ms_topo: 0.0,
@@ -270,6 +274,8 @@ fn main() -> ExitCode {
 
             let g = sim.ground.as_ref().expect("земля");
             p.edits += g.stats.edits as u64;
+            p.fall_damage += g.stats.fall_damage;
+            p.max_fall = p.max_fall.max(g.stats.max_fall);
             p.worst_queued = p.worst_queued.max(g.stats.queued);
             p.dirty_topo += g.stats.topo_dirty as u64;
 
@@ -419,6 +425,20 @@ fn main() -> ExitCode {
         sim.solve_flow();
         println!("{:<34} {:>11.3} мс", "поле направлений целиком", t.elapsed().as_secs_f64() * 1e3);
     }
+    // Падает ли здесь вообще кто-нибудь: копатели снимают породу
+    // из-под своих же, и юнит на исчезнувшей опоре обязан лететь вниз
+    // (ADR-036, ADR-139). Ноль тут значил бы, что сцена этой механики
+    // не грузит.
+    println!(
+        "{:<34} {:>14}",
+        "урон от падения за прогон",
+        fresh.fall_damage + worn.fall_damage
+    );
+    println!(
+        "{:<34} {:>14}",
+        "  самое долгое падение, вокселей",
+        fresh.max_fall.max(worn.max_fall)
+    );
     println!("{:<34} {:>14}", "решений поля направлений", sim.flow_solves);
     println!("{:<34} {:>14}", "  узлов «клетка и уровень»", sim.flow_nodes);
     println!("{:<34} {:>14}", "  рёбер", sim.flow_edges);

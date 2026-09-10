@@ -241,6 +241,90 @@ mod tests {
         );
     }
 
+    /// **Юнит на исчезнувшей опоре падает** (ADR-036), и падает
+    /// по вокселю за тик, как падающее тело, — а не оказывается на дне
+    /// ямы тем же тиком и без урона, как было до ADR-139.
+    ///
+    /// Земля под юнитом снимается на шесть вокселей. Он обязан
+    /// пролететь эти шесть, потратить на них шесть тиков и получить
+    /// урон по высоте падения.
+    #[test]
+    fn digging_out_the_ground_drops_the_unit_and_hurts_it() {
+        const DEPTH: u32 = 6;
+        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
+        w.units.y[id] = GY as i32;
+        w.units.refresh_live();
+        w.tick();
+        assert_eq!(w.units.y[id], GY as i32, "юнит не на земле");
+        let hp0 = w.units.voxels[id];
+
+        // Шахта под юнитом: вся его нав-клетка, десять вокселей вглубь.
+        {
+            let g = w.ground.as_mut().expect("земля");
+            for y in (GY - DEPTH)..GY {
+                for z in 20..22 {
+                    for x in 20..22 {
+                        g.world.queue_dig(x, y, z);
+                    }
+                }
+            }
+        }
+        let mut ticks = 0;
+        while ticks < 100 && w.units.y[id] > (GY - DEPTH) as i32 {
+            w.tick();
+            ticks += 1;
+        }
+        assert_eq!(
+            w.units.y[id],
+            (GY - DEPTH) as i32,
+            "юнит не долетел до дна: y = {}",
+            w.units.y[id]
+        );
+        assert!(
+            ticks >= DEPTH as i32,
+            "падение заняло {ticks} тиков вместо {DEPTH}: это телепорт, а не падение"
+        );
+        let hurt = hp0 - w.units.voxels[id];
+        assert_eq!(
+            hurt as u32,
+            (DEPTH - 1) * w.fall_damage_per_voxel as u32,
+            "урон не по высоте падения за вычетом бесплатного воксела"
+        );
+        let g = w.ground().expect("земля");
+        assert_eq!(g.stats.max_fall, DEPTH, "падение не попало в отчёт земли");
+    }
+
+    /// **Шаг вниз на воксель бесплатен** (ADR-036): это не падение,
+    /// а неровность. Правило названо в каноне и обязано быть проверено —
+    /// иначе копка стоила бы здоровья каждому, кто идёт по забою.
+    #[test]
+    fn a_single_voxel_drop_is_free() {
+        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let mut w = World::new(1, 4);
+        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
+        w.units.y[id] = GY as i32;
+        w.units.refresh_live();
+        w.tick();
+        let hp0 = w.units.voxels[id];
+        {
+            let g = w.ground.as_mut().expect("земля");
+            for z in 20..22 {
+                for x in 20..22 {
+                    g.world.queue_dig(x, GY - 1, z);
+                }
+            }
+        }
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(w.units.y[id], GY as i32 - 1, "юнит не шагнул вниз");
+        assert_eq!(w.units.voxels[id], hp0, "шаг вниз на воксель стоил здоровья");
+    }
+
     /// **Критерий этапа 4** (`docs/11-roadmap.md`): до взрыва пути нет,
     /// после взрыва он находится, и число тиков на дорогу — одно и то же
     /// от прогона к прогону. Сейчас их **33**: до взрыва юнит успевает

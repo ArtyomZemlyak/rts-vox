@@ -184,6 +184,22 @@ impl NavLayer {
         best
     }
 
+    /// Есть ли у клетки уровень ровно на высоте `y` — то есть стоит ли
+    /// юнит на опоре.
+    pub fn has_level(&self, cx: u32, cz: u32, y: i32) -> bool {
+        self.levels_at(cx, cz).iter().any(|&l| l as i32 == y)
+    }
+
+    /// Ближайший уровень **ниже** `y` — то, на что юнит упадёт.
+    /// `None` — падать не на что.
+    pub fn level_below(&self, cx: u32, cz: u32, y: i32) -> Option<u16> {
+        self.levels_at(cx, cz)
+            .iter()
+            .rev()
+            .find(|&&l| (l as i32) < y)
+            .copied()
+    }
+
     /// Номер ближайшего к `y` уровня клетки — то, чем юнит адресует
     /// свой узел в объёмном поле направлений (ADR-138).
     pub fn level_index_near(&self, cx: u32, cz: u32, y: i32) -> Option<usize> {

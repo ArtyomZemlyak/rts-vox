@@ -130,6 +130,11 @@ pub struct Units {
     pub riding: Vec<u64>,
     /// Смещение относительно начала координат тела.
     pub ride_off: Vec<(i32, i32, i32)>,
+    /// Высота, с которой юнит падает; `NOT_FALLING` — стоит на опоре.
+    ///
+    /// Как и `ride_off`, в хеш не входит: хеш ловит расхождение по `y`
+    /// и по вокселям, а они меняются тем же падением на том же тике.
+    pub fall_from: Vec<i32>,
     /// Тик, раньше которого юнит не ищет цель заново. Поиск цели —
     /// самая дорогая часть боя, и держать её потиковой незачем: цель,
     /// живая и в радиусе, остаётся целью (ADR-116).
@@ -139,6 +144,27 @@ pub struct Units {
 }
 
 pub const NO_TARGET: u32 = u32::MAX;
+
+/// Юнит стоит на опоре, а не падает.
+pub const NOT_FALLING: i32 = i32::MIN;
+
+/// Урон от падения с высоты `fallen` вокселей.
+///
+/// **Первый воксель бесплатен** (ADR-036): падение на один воксель
+/// даёт нулевой урон и читается как шаг вниз. Иначе копатель платил бы
+/// здоровьем за каждый снятый у себя под ногами воксель, а забой —
+/// это то, где он стоит всю игру.
+///
+/// Правило одно для всех случаев — сам выкопал, отделился кусок,
+/// завалило оседающей материей, — поэтому и функция одна.
+pub fn fall_damage(fallen: u32, per_voxel: u16) -> u32 {
+    fallen.saturating_sub(1).saturating_mul(per_voxel as u32)
+}
+
+/// Сколько вокселей за тик пролетает падающий юнит. Столько же
+/// пролетает падающее тело (`voxel::bodies`): правило одно для всех,
+/// иначе юнит и кусок, отвалившиеся вместе, разъезжаются.
+pub const FALL_PER_TICK: i32 = 1;
 
 impl Default for Units {
     fn default() -> Self {
@@ -161,6 +187,7 @@ impl Units {
             target: Vec::new(),
             riding: Vec::new(),
             ride_off: Vec::new(),
+            fall_from: Vec::new(),
             next_search: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
@@ -194,6 +221,7 @@ impl Units {
             self.target[k] = NO_TARGET;
             self.riding[k] = 0;
             self.ride_off[k] = (0, 0, 0);
+            self.fall_from[k] = NOT_FALLING;
             self.next_search[k] = 0;
             return i;
         }
@@ -209,6 +237,7 @@ impl Units {
         self.target.push(NO_TARGET);
         self.riding.push(0);
         self.ride_off.push((0, 0, 0));
+        self.fall_from.push(NOT_FALLING);
         self.next_search.push(0);
         (self.x.len() - 1) as u32
     }
@@ -645,7 +674,7 @@ impl World {
                 .find(|l| l.id == u.riding[i])
                 .map(|l| l.fallen)
                 .unwrap_or(0);
-            let hit = fallen.saturating_mul(dmg as u32);
+            let hit = fall_damage(fallen, dmg);
             u.voxels[i] = u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
             g.stats.fall_damage += hit as u64;
             g.stats.max_fall = g.stats.max_fall.max(fallen);
@@ -867,7 +896,12 @@ impl World {
     /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
     /// целой части в сетку.
     fn apply_deltas(&mut self) {
-        let Self { units: u, delta, ground, blocked_moves, .. } = self;
+        let Self { units: u, delta, ground, blocked_moves, fall_damage_per_voxel, .. } = self;
+        let fall_dmg = *fall_damage_per_voxel;
+        // Счётчики падения — те же, что у наездников: правило одно,
+        // значит и отчёт один.
+        let (mut fall_damage_acc, mut max_fall_acc) = (0u64, 0u32);
+        let (dmg_acc, max_acc) = (&mut fall_damage_acc, &mut max_fall_acc);
         // Земля, если она есть, решает, куда можно шагнуть. Перепад —
         // свойство ребра (ADR-121), поэтому спрашивается переход,
         // а не клетка.
@@ -900,48 +934,96 @@ impl World {
                     Some((cx, cz))
                 };
                 let mut y = u.y[i];
-                // Уровень выбирается по текущей высоте: с крыши
-                // переходят на крышу, а не на землю под ней (ADR-136).
-                // Оси проверяются по очереди — упёршийся шаг по одной
-                // не отменяет другую.
-                if let Some(c0) = cell(x0, z0) {
-                    match cell(x1, z0) {
-                        None => x1 = x0,
-                        Some(c1) if c1 != c0 => match nav.step_to(c0, y, c1) {
-                            Some(l) => y = l as i32,
-                            None => {
-                                x1 = x0;
-                                *blocked_moves += 1;
+                let here = cell(x0, z0);
+                // **Опора исчезла — юнит падает** (ADR-036). Правило одно
+                // для всех случаев: сам выкопал под собой, отделился кусок,
+                // завалило оседающей материей. Падение на один воксель
+                // даёт нулевой урон и читается как шаг вниз.
+                //
+                // Раньше высота просто притягивалась к ближайшему уровню,
+                // то есть юнит над свежей ямой оказывался на её дне тем же
+                // тиком и без урона (ADR-139).
+                let unsupported = u.riding[i] == 0
+                    && here.is_some_and(|c| !nav.has_level(c.0, c.1, y));
+                if unsupported {
+                    let c = here.expect("клетка есть");
+                    match nav.level_below(c.0, c.1, y) {
+                        Some(l) => {
+                            if u.fall_from[i] == NOT_FALLING {
+                                u.fall_from[i] = y;
                             }
-                        },
-                        _ => {}
-                    }
-                    let a = cell(x1, z0);
-                    match (a, cell(x1, z1)) {
-                        (_, None) => z1 = z0,
-                        (Some(a), Some(b)) if a != b => match nav.step_to(a, y, b) {
-                            Some(l) => y = l as i32,
-                            None => {
-                                z1 = z0;
-                                *blocked_moves += 1;
+                            // Падает по вертикали: горизонтальный шаг
+                            // на этом тике отменяется.
+                            x1 = x0;
+                            z1 = z0;
+                            y = (y - FALL_PER_TICK).max(l as i32);
+                            if y == l as i32 {
+                                let fallen = (u.fall_from[i] - y).max(0) as u32;
+                                let hit = fall_damage(fallen, fall_dmg);
+                                u.voxels[i] =
+                                    u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
+                                *dmg_acc += hit as u64;
+                                *max_acc = (*max_acc).max(fallen);
+                                u.fall_from[i] = NOT_FALLING;
                             }
-                        },
-                        _ => {}
-                    }
-                }
-                // Высота следует за уровнем клетки. Едущий на теле её
-                // не берёт: его высоту задаёт тело.
-                if u.riding[i] == 0 {
-                    if let Some(c) = cell(x1, z1) {
-                        if let Some(l) = nav.level_near(c.0, c.1, y) {
-                            y = l as i32;
+                        }
+                        None => {
+                            // Ниже юнита уровней нет: он либо ещё не
+                            // поставлен на землю (высота ноль), либо его
+                            // завалило оседающей материей. Выталкивается
+                            // на нижний уровень клетки — вверх, без урона:
+                            // урон берётся с высоты падения, а падения
+                            // не было.
+                            if let Some(&l) = nav.levels_at(c.0, c.1).first() {
+                                y = l as i32;
+                            }
+                            u.fall_from[i] = NOT_FALLING;
+                            x1 = x0;
+                            z1 = z0;
                         }
                     }
                     u.y[i] = y;
+                } else {
+                    // Уровень выбирается по текущей высоте: с крыши
+                    // переходят на крышу, а не на землю под ней (ADR-136).
+                    // Оси проверяются по очереди — упёршийся шаг по одной
+                    // не отменяет другую.
+                    if let Some(c0) = here {
+                        match cell(x1, z0) {
+                            None => x1 = x0,
+                            Some(c1) if c1 != c0 => match nav.step_to(c0, y, c1) {
+                                Some(l) => y = l as i32,
+                                None => {
+                                    x1 = x0;
+                                    *blocked_moves += 1;
+                                }
+                            },
+                            _ => {}
+                        }
+                        let a = cell(x1, z0);
+                        match (a, cell(x1, z1)) {
+                            (_, None) => z1 = z0,
+                            (Some(a), Some(b)) if a != b => match nav.step_to(a, y, b) {
+                                Some(l) => y = l as i32,
+                                None => {
+                                    z1 = z0;
+                                    *blocked_moves += 1;
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+                    if u.riding[i] == 0 {
+                        u.y[i] = y;
+                    }
                 }
             }
             u.x[i] = x1;
             u.z[i] = z1;
+        }
+        if let Some(g) = ground.as_mut() {
+            g.stats.fall_damage += fall_damage_acc;
+            g.stats.max_fall = g.stats.max_fall.max(max_fall_acc);
         }
     }
 
