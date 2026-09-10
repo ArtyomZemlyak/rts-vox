@@ -34,10 +34,19 @@ use crate::{Edit, World};
 /// а событие другого масштаба, и оно оставляется в мире.
 const MAX_BODY_CELLS: usize = 4096;
 
-/// Сколько раз за тик каскад повторяет разбор. Оторвав кусок, он
-/// уносит с собой рёбра графа, и то, что держалось за него, тоже
-/// падает. Раундов немного, но их не ноль.
-const MAX_ROUNDS: usize = 8;
+/// Сколько раз за тик каскад повторяет разбор.
+///
+/// Оторвав кусок, каскад уносит с собой рёбра графа, и то, что
+/// держалось за него, тоже теряет опору. Раньше разбор повторялся
+/// до отсутствия отрывов, и это **удваивало цену каждый тик**: второй
+/// раунд шёл почти всегда и не находил ничего. Замер на D-1 — три
+/// тысячи семьсот девять отвалов за прогон, **ни одного** не первым
+/// раундом (ADR-129).
+///
+/// Поэтому раунд один, а повторный разбор откладывается на следующий
+/// тик: граф после отрыва приводится в порядок, а флаг `recheck`
+/// заставляет каскад отработать даже без единой правки.
+const MAX_ROUNDS: usize = 1;
 
 /// Сколько чанков за тик разрешено втянуть в граф. Потолок обязателен:
 /// контакт твёрдого с твёрдым идёт по всему рельефу, и без него первая
@@ -96,7 +105,7 @@ pub struct CollapseStats {
     pub edges: usize,
     /// Сколько раундов разбора понадобилось.
     pub rounds: usize,
-    /// Разбор упёрся в потолок раундов: что-то осталось висеть.
+    /// Разбор будет повторён следующим тиком: в этом что-то оторвалось.
     pub rounds_capped: bool,
     /// Чанков втянуто в граф за тик.
     pub promoted: usize,
@@ -105,12 +114,17 @@ pub struct CollapseStats {
     pub frontier: usize,
     /// Чанков ждёт переразметки. То же: оценка сверху, отвал сдвигается.
     pub relabel_pending: usize,
+    /// Отвалов, найденных **не первым** раундом. Если их нет, повторный
+    /// разбор — чистая трата.
+    pub torn_after_first: usize,
     /// Чанков размечено заново.
     pub relabelled: usize,
     /// Граней пересчитано.
     pub faces: usize,
     /// Чанков, в которых пришлось собирать состав незаякоренного.
     pub gathered: usize,
+    /// Чанков собрано из мира целиком — 32 768 чтений на каждый.
+    pub built: usize,
 }
 
 /// Компоненты одного чанка, как их видит граф.
@@ -187,6 +201,9 @@ pub struct CollapseLayer {
     pending: Vec<u32>,
     /// Отстала ли разметка чанка.
     stale: Vec<bool>,
+    /// В прошлом тике что-то оторвалось: граф изменился, и разбор
+    /// нужно повторить, даже если правок нет.
+    recheck: bool,
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
     /// Прежние отрезки — для сравнения при переразметке.
@@ -196,6 +213,7 @@ pub struct CollapseLayer {
     relabelled: usize,
     faces: usize,
     gathered: usize,
+    built: usize,
 }
 
 impl CollapseLayer {
@@ -223,11 +241,13 @@ impl CollapseLayer {
             relabelled: 0,
             faces: 0,
             gathered: 0,
+            built: 0,
             frontier: Vec::new(),
             max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
             max_relabel_per_tick: DEFAULT_RELABEL_PER_TICK,
             pending: Vec::new(),
             stale: vec![false; n],
+            recheck: false,
             cells: Vec::new(),
         }
     }
@@ -257,6 +277,8 @@ impl CollapseLayer {
         Some(self.index(nx, ny, nz))
     }
 
+    /// Собрать чанк из мира целиком: 32 768 чтений. Зовётся при первом
+    /// касании и при втягивании в граф, и это не дёшево.
     fn build(w: &World, cx: u32, cy: u32, cz: u32) -> Box<TopoChunk> {
         let cs = CS as u32;
         let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
@@ -285,6 +307,7 @@ impl CollapseLayer {
         self.relabelled = 0;
         self.faces = 0;
         self.gathered = 0;
+        self.built = 0;
         self.dirty.clear();
         for e in edits {
             let (cx, cy, cz) = (e.x / cs, e.y / cs, e.z / cs);
@@ -304,7 +327,7 @@ impl CollapseLayer {
                 e.mat != crate::store::AIR,
             ));
         }
-        if self.dirty.is_empty() {
+        if self.dirty.is_empty() && !self.recheck {
             return st;
         }
 
@@ -319,6 +342,7 @@ impl CollapseLayer {
             let fresh = self.chunks[i].is_none();
             if fresh {
                 self.chunks[i] = Some(Self::build(w, cx, cy, cz));
+                self.built += 1;
                 // Свежий чанк размечается сразу: у него ещё нет узлов,
                 // а отложить нечего — граф о нём не знает вовсе.
                 self.relabel(i);
@@ -354,18 +378,28 @@ impl CollapseLayer {
         st.promoted = self.promote(w);
         st.frontier = self.frontier.len();
 
+        let mut torn_total = 0usize;
         for round in 0..MAX_ROUNDS {
             st.rounds = round + 1;
             self.resolve(&mut st);
             let torn = self.detach_unanchored(w, bodies, &mut st);
-            if torn == 0 {
-                self.report(&mut st);
-                return st;
+            if round > 0 {
+                st.torn_after_first += torn;
             }
+            torn_total += torn;
+            if torn == 0 {
+                break;
+            }
+            // Граф после отрыва приводится в порядок здесь же: иначе
+            // следующий тик читал бы рёбра, ведущие в исчезнувшее.
             self.rebuild_index();
             self.refresh_faces(w);
         }
-        st.rounds_capped = true;
+        // Оторвав кусок, каскад мог лишить опоры что-то ещё. Разбор
+        // повторяется **следующим тиком**, а не сейчас: замер говорит,
+        // что повторный раунд не находит ничего, а стоит как первый.
+        self.recheck = torn_total > 0;
+        st.rounds_capped = self.recheck;
         self.report(&mut st);
         st
     }
@@ -374,6 +408,7 @@ impl CollapseLayer {
         st.relabelled = self.relabelled;
         st.faces = self.faces;
         st.gathered = self.gathered;
+        st.built = self.built;
     }
 
     /// Втянуть в граф чанки с фронтира, сколько позволяет потолок.
@@ -408,6 +443,7 @@ impl CollapseLayer {
                 let i = ci as usize;
                 let (cx, cy, cz) = self.coords(i);
                 self.chunks[i] = Some(Self::build(w, cx, cy, cz));
+                self.built += 1;
                 self.relabel(i);
                 self.mark_faces(i);
                 done += 1;
@@ -737,9 +773,12 @@ impl CollapseLayer {
                     continue;
                 }
                 let jbase = self.base[j];
-                let nd = self.nodes[i].as_ref().expect("known");
-                let pairs: Vec<(u16, u16)> = nd.edges[f].clone();
-                for (a, b) in pairs {
+                // Рёбра читаются по индексу, а не копией вектора.
+                // Копия на каждую грань каждого чанка — это полторы
+                // тысячи выделений за раунд (ADR-129).
+                let m = self.nodes[i].as_ref().expect("known").edges[f].len();
+                for ei in 0..m {
+                    let (a, b) = self.nodes[i].as_ref().expect("known").edges[f][ei];
                     let (ia, ib) = (base + a as u32, jbase + b as u32);
                     if self.reached[ia as usize] || self.reached[ib as usize] {
                         continue;
@@ -995,7 +1034,8 @@ mod tests {
         // Опора выше подреза плюс весь настил — одно тело.
         let expect = (DECK - 5) as usize + (60 - PIER) as usize;
         assert_eq!(st.cells, expect, "состав тела: {} против {expect}", st.cells);
-        assert!(!st.rounds_capped);
+        // Разбор будет повторён следующим тиком: в этом оторвалось.
+        assert!(st.rounds_capped);
     }
 
     /// Каскад детерминирован: тот же вход — тот же состав тел.

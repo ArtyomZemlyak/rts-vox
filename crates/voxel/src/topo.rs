@@ -79,6 +79,10 @@ pub struct Components {
     pub runs: Vec<Run>,
     /// Union-find по пробегам.
     parent: Vec<u32>,
+    /// Индекс первого пробега колонки. Переиспользуется: разметка
+    /// зовётся десятками раз за тик, и четыре килобайта на вызов —
+    /// это выделение с обнулением на каждый чанк (ADR-129).
+    col_start: Vec<u32>,
     /// Метка компоненты на пробег — **минимальный индекс пробега**,
     /// а не ранг: union by rank сделал бы метку зависимой от порядка слияний
     /// (ловушка, названная в ADR-055).
@@ -137,7 +141,9 @@ impl Components {
     pub fn build(&mut self, c: &Chunk) -> usize {
         self.clear();
         // Индекс первого пробега колонки, чтобы искать соседей без поиска.
-        let mut col_start = vec![0u32; COLS + 1];
+        let mut col_start = std::mem::take(&mut self.col_start);
+        col_start.clear();
+        col_start.resize(COLS + 1, 0);
 
         for (ci, start) in col_start.iter_mut().enumerate().take(COLS) {
             *start = self.runs.len() as u32;
@@ -160,7 +166,8 @@ impl Components {
         }
         col_start[COLS] = self.runs.len() as u32;
 
-        self.parent = (0..self.runs.len() as u32).collect();
+        self.parent.clear();
+        self.parent.extend(0..self.runs.len() as u32);
 
         // Соседние колонки: +Y и +Z. Каждая пара рассматривается один раз.
         for z in 0..CS {
@@ -193,7 +200,8 @@ impl Components {
         }
 
         // Канонизация: метка — корень, корни перенумерованы по возрастанию.
-        self.label = vec![u32::MAX; self.runs.len()];
+        self.label.clear();
+        self.label.resize(self.runs.len(), u32::MAX);
         let mut next = 0u32;
         for i in 0..self.runs.len() {
             let r = self.find(i as u32);
@@ -204,6 +212,7 @@ impl Components {
             self.label[i] = self.label[r as usize];
         }
         self.count = next as usize;
+        self.col_start = col_start;
         self.count
     }
 

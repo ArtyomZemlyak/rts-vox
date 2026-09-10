@@ -146,6 +146,7 @@ fn main() -> ExitCode {
     let mut hash = RunHash::new();
     let mut ms_mesh = 0.0f64;
     let (mut cas_relabel, mut cas_faces, mut cas_rounds) = (0u64, 0u64, 0u64);
+    let (mut cas_late, mut cas_torn) = (0u64, 0u64);
     let (mut edits_total, mut dirty_mesh, mut dirty_topo, mut survived) = (0u64, 0u64, 0u64, 0u64);
     let mut queued_peak = 0usize;
     let (mut nav_flips, mut nav_seen) = (0u64, 0u64);
@@ -185,6 +186,8 @@ fn main() -> ExitCode {
         cas_relabel += g.stats.collapse.relabelled as u64;
         cas_faces += g.stats.collapse.faces as u64;
         cas_rounds += g.stats.collapse.rounds as u64;
+        cas_late += g.stats.collapse.torn_after_first as u64;
+        cas_torn += g.stats.collapse.detached as u64;
         hash.feed_edits(tick, g.edits());
 
         // Мешинг — работа кадра, а не тика: его в списке фаз нет.
@@ -259,9 +262,12 @@ fn main() -> ExitCode {
         println!("{:<28} {:>14}", "  рёбер в графе", c.edges);
         println!("{:<28} {:>14}", "  не влезло в тело", c.too_big);
         println!("{:<28} {:>14}", "  чанков втянуто", c.promoted);
+        println!("{:<28} {:>14}", "  чанков собрано из мира", c.built);
         println!("{:<28} {:>14}", "  ждёт втягивания", c.frontier);
         println!("{:<28} {:>14}", "  ждёт переразметки", c.relabel_pending);
         println!("{:<28} {:>14.2}", "  раундов", cas_rounds as f64 / n);
+        println!("{:<28} {:>14}", "  отвалов всего", cas_torn);
+        println!("{:<28} {:>14}", "  из них не первым раундом", cas_late);
         println!("{:<28} {:>14.2}", "  мкс на разметку", 1000.0 * ph(Phase::Destruction) / cas_relabel.max(1) as f64);
     }
     println!("{:<28} {:>14.3}", "падение тел", ph(Phase::Bodies) / n);

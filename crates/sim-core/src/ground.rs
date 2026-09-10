@@ -41,6 +41,10 @@ pub struct Ground {
     pub nav: NavLayer,
     /// Все правки тика подряд, в порядке применения.
     edits: Vec<Edit>,
+    /// Правки, применённые **после** каскада: запекание приземлившихся
+    /// тел. Каскад в этом тике их уже не увидит, поэтому они переносятся
+    /// в следующий — иначе его чанки разошлись бы с миром (ADR-129).
+    carry: Vec<Edit>,
     pub stats: GroundStats,
 }
 
@@ -61,6 +65,7 @@ impl Ground {
             topo,
             nav,
             edits: Vec::new(),
+            carry: Vec::new(),
             stats: GroundStats::default(),
         }
     }
@@ -75,6 +80,9 @@ impl Ground {
     pub(crate) fn phase_edits(&mut self) {
         self.stats = GroundStats::default();
         self.edits.clear();
+        // Перенесённое с прошлого тика идёт первым: каскад обязан
+        // увидеть запекание тела как обычную правку.
+        self.edits.append(&mut self.carry);
         let st = self.world.flush();
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
@@ -102,14 +110,14 @@ impl Ground {
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
-        // Запечённое тело вернуло материю в мир не копкой: чанк каскада
-        // об этом не знает и обязан пересобраться.
-        for i in 0..self.world.edits().len() {
-            let e = self.world.edits()[i];
-            if e.mat != voxel::store::AIR {
-                self.collapse.invalidate_at(e.x, e.y, e.z);
-            }
-        }
+        // Каскад в этом тике уже отработал, а запекание тела — такая же
+        // правка мира, как копка. Переносим её ему на следующий тик.
+        //
+        // Первая редакция вместо этого выбрасывала затронутые чанки
+        // из каскада целиком, и он собирал их заново из мира: семь
+        // сборок по 32 768 чтений за тик, то есть четверть всей его
+        // цены (ADR-129).
+        self.carry.extend_from_slice(self.world.edits());
     }
 
     /// Фаза `NavUpdate`: связность и проходимость по потоку правок тика.
