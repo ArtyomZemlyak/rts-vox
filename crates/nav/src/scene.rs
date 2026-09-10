@@ -62,6 +62,27 @@ impl Grid {
         self.cost.iter().filter(|&&c| c != BLOCKED).count()
     }
 
+    /// Сколько переходов между соседними клетками.
+    ///
+    /// Не `passable`: булева проходимость почти не меняется — над
+    /// поверхностью всегда небо, — и сцена, мерившая её, мерила ноль
+    /// (ADR-117). Копка меняет **рёбра**.
+    pub fn links(&self) -> usize {
+        let mut n = 0;
+        for y in 1..self.h - 1 {
+            for x in 1..self.w - 1 {
+                let i = self.idx(x, y);
+                if self.linked(i, i + 1) {
+                    n += 1;
+                }
+                if self.linked(i, i + self.w) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     pub fn inner_area(&self) -> usize {
         (self.w - 2) * (self.h - 2)
     }

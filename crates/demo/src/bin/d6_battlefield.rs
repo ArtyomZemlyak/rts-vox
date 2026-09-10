@@ -234,6 +234,17 @@ fn main() -> ExitCode {
     }
     let los_hi1 = line_of_sight(&w, eye_hi, tgt_hi);
     let los1 = line_of_sight(&w, shooter, target);
+    // Снос гребня меряется отдельно от коридора: он открывает линию
+    // огня и при этом **отнимает** переходы — дно выемки на двадцать
+    // вокселей ниже соседнего гребня, и это обрыв. Одно число на две
+    // разные правки скрыло бы и то, и другое (ADR-143).
+    let (g_crest, _) = passability(&w, 4, 2);
+    let links_crest = g_crest.links();
+    let route_crest = {
+        let (pg, _) = PortalGraph::build(&g_crest);
+        let mut ws = RouteWs::new(pg.portals.len().max(1));
+        route(&pg, &g_crest, &mut ws, from, to).found
+    };
 
     // --- 4. Прокапываем коридор у основания.
     let mut dug_gap = 0u64;
@@ -271,12 +282,36 @@ fn main() -> ExitCode {
         los_hi1.clear
     );
     println!("{:<40} {:>10} {:>10}", "маршрут найден", r0.found, r1.found);
+    // Снос гребня открывает линию огня и маршрута не даёт: дно выемки
+    // на двадцать вокселей ниже соседнего гребня. Дорогу открывает
+    // коридор — и стоит он **минус два** перехода (ADR-143).
+    println!(
+        "{:<40} {:>10} {:>10}",
+        "  после одного лишь сноса гребня",
+        "",
+        route_crest
+    );
     println!("{:<40} {:>10} {:>10}", "порталов в графе", st0.portals, st1.portals);
+    // Не булева проходимость, а **рёбра**: над грядой небо, и клетка
+    // на её гребне проходима что до подрыва, что после. Сцена, мерившая
+    // клетки, показывала одно и то же число дважды (ADR-117, ADR-143).
     println!(
         "{:<40} {:>10} {:>10}",
         "проходимых нав-клеток",
         g0.passable(),
         g1.passable()
+    );
+    println!(
+        "{:<40} {:>10} {:>10}",
+        "переходов между клетками",
+        g0.links(),
+        g1.links()
+    );
+    println!(
+        "{:<40} {:>10} {:>10}",
+        "  из них после сноса гребня",
+        "",
+        links_crest
     );
 
     println!("\n{:<40} {:>12}", "работа", "");
@@ -290,6 +325,7 @@ fn main() -> ExitCode {
     hash.feed(dug_gap);
     hash.feed(st1.portals as u64);
     hash.feed(g1.passable() as u64);
+    hash.feed(g1.links() as u64);
     hash.feed(r1.cost as u64);
     hash.feed(los2.steps as u64);
 

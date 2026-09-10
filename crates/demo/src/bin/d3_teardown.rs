@@ -180,7 +180,17 @@ fn main() -> ExitCode {
     let mut lost = [0usize; 5];
     let mut prev = t.status(&mut bufs);
     let t_start = Instant::now();
+    // Цена выстрела считается **отдельно для целого танка и для
+    // обрубка**. После того как ядро остаётся с одним прикреплённым
+    // вокселем, пересчёт связности почти бесплатен, и сорок шесть таких
+    // выстрелов занижают среднее на четверть: это цена стрельбы
+    // по обломкам, а не по танку (ADR-143).
+    let (mut us_whole, mut n_whole) = (0.0f64, 0usize);
+    let (mut us_stump, mut n_stump) = (0.0f64, 0usize);
+    // Выстрел, на котором танк перестал быть танком, и что тогда отвалилось.
+    let (mut crippled_at, mut crippled_detached) = (0usize, 0u32);
     for _ in 0..a.shots {
+        let t_shot = Instant::now();
         let x = r.below(t.vol.nx as u32) as i64;
         let y = r.below(t.vol.ny as u32) as i64;
         let z = r.below(t.vol.nz as u32) as i64;
@@ -201,6 +211,18 @@ fn main() -> ExitCode {
         if prev.alive && !s.alive {
             lost[Part::Core as usize] = fired;
         }
+        if crippled_at == 0 && !(s.engine || s.weapon || s.sensor) {
+            crippled_at = fired;
+            crippled_detached = s.detached;
+        }
+        let dt = t_shot.elapsed().as_secs_f64() * 1e6;
+        if prev.engine && prev.weapon && prev.sensor {
+            us_whole += dt;
+            n_whole += 1;
+        } else {
+            us_stump += dt;
+            n_stump += 1;
+        }
         prev = s;
         hash.feed(s.attached as u64 * 31 + s.detached as u64);
         if !s.alive {
@@ -210,7 +232,17 @@ fn main() -> ExitCode {
     let us_per_shot = t_start.elapsed().as_secs_f64() * 1e6 / fired as f64;
 
     println!("\n{:<30} {:>14}", "случайный обстрел", "");
-    println!("{:<30} {:>14}", "выстрелов до гибели", fired);
+    println!("{:<30} {:>14}", "выстрелов до гибели ядра", fired);
+    // Гибель ядра — не конец боеспособности. Все три подсистемы
+    // отваливаются раньше и **одним куском**, поэтому три строки
+    // ниже показывают один и тот же выстрел: это одно событие,
+    // а не три совпадения (ADR-143).
+    println!(
+        "{:<30} {:>14}",
+        "  а боеспособность потеряна на",
+        if crippled_at == 0 { "не потеряна".to_string() } else { crippled_at.to_string() }
+    );
+    println!("{:<30} {:>14}", "  тем же выстрелом отвалилось", crippled_detached);
     println!("{:<30} {:>14}", "снято вокселей", removed);
     println!("{:<30} {:>14}", "пик отвалившегося от ядра", detached_peak);
     for p in [Part::Engine, Part::Weapon, Part::Sensor, Part::Core] {
@@ -223,7 +255,17 @@ fn main() -> ExitCode {
     }
 
     // --- 3. Цена пересчёта связности.
-    println!("\n{:<30} {:>14.3}", "мкс на выстрел (с пересчётом)", us_per_shot);
+    println!(
+        "\n{:<30} {:>14.3}",
+        "мкс на выстрел по целому",
+        us_whole / n_whole.max(1) as f64
+    );
+    println!(
+        "{:<30} {:>14.3}",
+        "  по обрубку",
+        us_stump / n_stump.max(1) as f64
+    );
+    println!("{:<30} {:>14.3}", "  вперемешку, как было", us_per_shot);
     let mut t = tank();
     hit(&mut t, 12, 6, 6, 3);
     let mut best = f64::MAX;
