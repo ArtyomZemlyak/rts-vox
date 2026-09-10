@@ -247,8 +247,7 @@ where
     let mut next: Vec<usize> = Vec::with_capacity(n / 4);
     while !list.is_empty() {
         next.clear();
-        for k in 0..list.len() {
-            let i = list[k];
+        for &i in list.iter() {
             let f = g.cost[i];
             let (a, b) = axis_mins(&t, g.w, i);
             st.updates += 1;

@@ -93,14 +93,13 @@ fn terrain(seed: u64, layered: bool) -> Chunk {
         for x in 0..=CS + 1 {
             let h = height_at(seed, x, z);
             for y in 1..=h.min(CS) {
-                let m: Mat = if !layered {
+                // Дёрн сверху, порода ниже, руда в нижней трети.
+                let m: Mat = if !layered || y + 2 >= h {
                     1
-                } else if y + 2 >= h {
-                    1 // дёрн
                 } else if y * 3 < h {
-                    3 // руда глубже
+                    3
                 } else {
-                    2 // порода
+                    2
                 };
                 c.set(x, y, z, m);
             }
