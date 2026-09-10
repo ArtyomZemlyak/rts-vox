@@ -13,6 +13,7 @@
 
 pub mod bits;
 pub mod incr;
+pub mod layer;
 pub mod scene;
 
 /// Сторона чанка без паддинга.

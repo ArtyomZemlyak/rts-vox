@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use voxel::collapse::CollapseLayer;
-use demo::layers::MeshLayer;
+use meshing::layer::MeshLayer;
 use demo::RunHash;
 use fx::rng::Rng;
 use meshing::Opts;

@@ -497,3 +497,29 @@ mod column_tests {
         }
     }
 }
+
+/// Генератор мира как источник материала для воксельного мира.
+///
+/// Мост между чистой функцией генерации и хранилищем. Живёт здесь,
+/// а не в крейте демки: это движок, а не сцена (ADR-124).
+pub struct Terrain {
+    pub params: Params,
+    pub seed: u64,
+}
+
+impl voxel::Generator for Terrain {
+    fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+        material(&self.params, self.seed, x, y, z)
+    }
+
+    fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+        column(&self.params, self.seed, x, z, y0, out);
+    }
+}
+
+impl Terrain {
+    /// Высота поверхности в колонке.
+    pub fn surface(&self, x: u32, z: u32) -> u32 {
+        surface_height(&self.params, self.seed, x, z)
+    }
+}

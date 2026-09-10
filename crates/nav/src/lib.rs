@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod godunov;
+pub mod layer;
 pub mod portals;
 pub mod scene;
 pub mod solver;

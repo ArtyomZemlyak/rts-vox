@@ -9,6 +9,7 @@
 //! и это единственная причина, по которой чанк именно 32.
 
 pub mod scene;
+pub mod layer;
 pub mod stage_a;
 pub mod stage_b;
 pub mod unit;

@@ -356,6 +356,7 @@ name = "meshing"
 version = "0.1.0"
 dependencies = [
  "fx",
+ "voxel",
 ]
 
 [[package]]
@@ -398,6 +399,7 @@ name = "nav"
 version = "0.1.0"
 dependencies = [
  "fx",
+ "voxel",
 ]
 
 [[package]]

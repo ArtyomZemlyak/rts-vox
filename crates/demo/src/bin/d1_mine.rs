@@ -19,7 +19,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use demo::dig::Dig;
-use demo::layers::{MeshLayer, NavLayer, TopoLayer};
+use meshing::layer::MeshLayer;
+use nav::layer::NavLayer;
+use voxel::topo::layer::TopoLayer;
 use demo::{RunHash, Terrain};
 use meshing::Opts;
 use voxel::World;

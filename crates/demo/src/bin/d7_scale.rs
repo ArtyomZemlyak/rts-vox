@@ -20,7 +20,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use demo::dig::Dig;
-use demo::layers::{MeshLayer, TopoLayer};
+use meshing::layer::MeshLayer;
+use voxel::topo::layer::TopoLayer;
 use demo::{RunHash, Terrain};
 use fx::rng::Rng;
 use meshing::Opts;

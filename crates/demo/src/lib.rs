@@ -4,38 +4,17 @@
 //! headless-режим с хешем и порог**, при превышении которого она
 //! считается провалённой. Сцена без порога — ролик, а не проверка.
 //!
-//! Здесь общая обвязка: мост от мира к мешингу и к связности, копатели
-//! и хеш прогона.
+//! Здесь только то, что принадлежит сценам: копатели и хеш прогона.
+//! Мосты от мира к подсистемам уехали в свои крейты (ADR-124) —
+//! это движок, а не сцена.
 
 #![forbid(unsafe_code)]
 
 pub mod dig;
-pub mod layers;
 
-use voxel::store::Mat;
-use voxel::Generator;
-
-/// Процедурный слой сцены — обёртка над `worldgen`.
-pub struct Terrain {
-    pub params: worldgen::Params,
-    pub seed: u64,
-}
-
-impl Generator for Terrain {
-    fn material(&self, x: u32, y: u32, z: u32) -> Mat {
-        worldgen::material(&self.params, self.seed, x, y, z)
-    }
-
-    fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
-        worldgen::column(&self.params, self.seed, x, z, y0, out);
-    }
-}
-
-impl Terrain {
-    pub fn surface(&self, x: u32, z: u32) -> u32 {
-        worldgen::surface_height(&self.params, self.seed, x, z)
-    }
-}
+/// Генератор мира. Живёт в `worldgen`; здесь реэкспорт, чтобы сцены
+/// не тянули имя из двух мест.
+pub use worldgen::Terrain;
 
 /// Хеш прогона сцены. Только `wrapping_*` — та же ассоциативная пара,
 /// что у хеша тика (`CLAUDE.md`).
