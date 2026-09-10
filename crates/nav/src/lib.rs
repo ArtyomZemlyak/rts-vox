@@ -9,6 +9,8 @@ pub mod godunov;
 pub mod scene;
 pub mod solver;
 pub mod vision;
+pub mod vision_incr;
+pub mod vision_index;
 
 #[cfg(test)]
 mod tests {
