@@ -44,9 +44,6 @@ const MAX_ROUNDS: usize = 8;
 /// же правка разметила бы карту целиком.
 const DEFAULT_PROMOTE_PER_TICK: usize = 64;
 
-/// Пустая граничная ячейка.
-const NO_LABEL: u16 = u16::MAX;
-
 /// Шесть граней чанка: -x, +x, -y, +y, -z, +z.
 const FACES: usize = 6;
 
@@ -102,11 +99,18 @@ pub struct CollapseStats {
 struct ChunkNodes {
     /// Сколько компонент в чанке.
     n: usize,
-    /// Метка компоненты на каждую граничную ячейку каждой грани.
-    /// Раскладка внутри грани: для граней по X — `z * CS + y`,
-    /// по Y — `z * CS + x`, по Z — `y * CS + x`. У соседа та же
-    /// ячейка лежит по тому же индексу его противоположной грани.
-    faces: Vec<u16>,
+    /// Метки компонент на граничных ячейках грани — **отрезками**,
+    /// а не ячейка за ячейкой.
+    ///
+    /// Раскладка индекса внутри грани: для граней по X — `z * CS + y`,
+    /// по Y — `z * CS + x`, по Z — `y * CS + x`. У соседа та же ячейка
+    /// лежит по тому же индексу его противоположной грани, поэтому
+    /// пересечение двух граней — слияние двух коротких списков.
+    ///
+    /// Различных меток на грани единицы, а ячеек тысяча двадцать
+    /// четыре: плотная карта стоила и обхода, и двенадцати килобайт
+    /// на чанк (ADR-127). Отрезок — `(начало, длина, метка)`.
+    faces: [Vec<(u16, u16, u16)>; FACES],
     /// Стоит ли компонента на коренной породе.
     bedrock: Vec<bool>,
     /// Производное от соседей: рёбра `(моя метка, метка соседа)`
@@ -120,7 +124,7 @@ impl ChunkNodes {
     fn new() -> ChunkNodes {
         ChunkNodes {
             n: 0,
-            faces: vec![NO_LABEL; FACES * CS * CS],
+            faces: Default::default(),
             bedrock: Vec::new(),
             edges: Default::default(),
             ground: Default::default(),
@@ -159,8 +163,8 @@ pub struct CollapseLayer {
     pub max_promote_per_tick: usize,
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
-    /// Прежняя карта граничных меток — для сравнения при переразметке.
-    face_prev: Vec<u16>,
+    /// Прежние отрезки — для сравнения при переразметке.
+    face_prev: [Vec<(u16, u16, u16)>; FACES],
     /// Счётчики работы за тик. Замер объёма, а не таймер: `std::time`
     /// в крейтах симуляции запрещён (`CLAUDE.md`).
     relabelled: usize,
@@ -189,7 +193,7 @@ impl CollapseLayer {
             reached: Vec::new(),
             queue: Vec::new(),
             face_todo: Vec::new(),
-            face_prev: Vec::new(),
+            face_prev: Default::default(),
             relabelled: 0,
             faces: 0,
             gathered: 0,
@@ -379,15 +383,13 @@ impl CollapseLayer {
         let c = self.chunks[i].take().expect("chunk present");
         self.relabelled += 1;
         let n = self.comps.build(&c);
-        let mut nd = self.nodes[i].take().unwrap_or_else(|| {
-            // Свежий чанк: прежней карты нет, значит она «изменилась».
-            self.face_prev.clear();
-            Box::new(ChunkNodes::new())
-        });
-        self.face_prev.clear();
-        self.face_prev.extend_from_slice(&nd.faces);
+        let mut nd = self.nodes[i].take().unwrap_or_else(|| Box::new(ChunkNodes::new()));
+        for f in 0..FACES {
+            self.face_prev[f].clear();
+            self.face_prev[f].extend_from_slice(&nd.faces[f]);
+            nd.faces[f].clear();
+        }
         nd.n = n;
-        nd.faces.iter_mut().for_each(|v| *v = NO_LABEL);
         nd.bedrock.clear();
         nd.bedrock.resize(n, false);
         let (_, cy, _) = self.coords(i);
@@ -397,10 +399,10 @@ impl CollapseLayer {
             let (ly, lz) = (col % CS, col / CS);
             let m = r.mask;
             if m & 1 != 0 {
-                nd.faces[lz * CS + ly] = lab;
+                push_face(&mut nd.faces[0], lz * CS + ly, lab);
             }
             if m & (1 << 31) != 0 {
-                nd.faces[CS * CS + lz * CS + ly] = lab;
+                push_face(&mut nd.faces[1], lz * CS + ly, lab);
             }
             if ly == 0 || ly == CS - 1 || lz == 0 || lz == CS - 1 {
                 let (fy, fz) = (if ly == 0 { 2 } else { 3 }, if lz == 0 { 4 } else { 5 });
@@ -409,10 +411,10 @@ impl CollapseLayer {
                     let x = bits.trailing_zeros() as usize;
                     bits &= bits - 1;
                     if ly == 0 || ly == CS - 1 {
-                        nd.faces[fy * CS * CS + lz * CS + x] = lab;
+                        push_face(&mut nd.faces[fy], lz * CS + x, lab);
                     }
                     if lz == 0 || lz == CS - 1 {
-                        nd.faces[fz * CS * CS + ly * CS + x] = lab;
+                        push_face(&mut nd.faces[fz], ly * CS + x, lab);
                     }
                 }
             }
@@ -421,7 +423,7 @@ impl CollapseLayer {
                 nd.bedrock[lab as usize] = true;
             }
         }
-        let changed = nd.faces != self.face_prev;
+        let changed = (0..FACES).any(|f| nd.faces[f] != self.face_prev[f]);
         self.nodes[i] = Some(nd);
         self.chunks[i] = Some(c);
         changed
@@ -471,25 +473,31 @@ impl CollapseLayer {
                 // Край мира не держит: за ним ничего нет.
             }
             Some(j) if self.nodes[j].is_some() => {
+                // Слияние двух списков отрезков: пересекающиеся дают
+                // ребро. Обход по отрезкам, а не по ячейкам, — в этом
+                // весь смысл кодировки (ADR-127).
                 let other = self.nodes[j].as_ref().expect("checked");
-                let g = opposite(f);
-                for idx in 0..CS * CS {
-                    let a = nd.faces[f * CS * CS + idx];
-                    if a == NO_LABEL {
+                let (a, b) = (&nd.faces[f], &other.faces[opposite(f)]);
+                let (mut ia, mut ib) = (0usize, 0usize);
+                while ia < a.len() && ib < b.len() {
+                    let (as_, al, alab) = a[ia];
+                    let (bs, bl, blab) = b[ib];
+                    let (ae, be) = (as_ + al, bs + bl);
+                    if ae <= bs {
+                        ia += 1;
                         continue;
                     }
-                    let b = other.faces[g * CS * CS + idx];
-                    if b == NO_LABEL {
+                    if be <= as_ {
+                        ib += 1;
                         continue;
                     }
-                    // Повтор схлопывается **на лету**. Сплошная грань
-                    // даёт тысячу двадцать четыре одинаковые пары,
-                    // и сортировать их потом — вчетверо дороже всего
-                    // остального каскада (ADR-126). Пар на грани
-                    // единицы, поэтому линейный поиск здесь дешевле
-                    // любой структуры.
-                    if !nd.edges[f].contains(&(a, b)) {
-                        nd.edges[f].push((a, b));
+                    if !nd.edges[f].contains(&(alab, blab)) {
+                        nd.edges[f].push((alab, blab));
+                    }
+                    if ae <= be {
+                        ia += 1;
+                    } else {
+                        ib += 1;
                     }
                 }
                 nd.edges[f].sort_unstable();
@@ -499,22 +507,25 @@ impl CollapseLayer {
                 // заземляющим — это оценка сверху, — а сам он ставится
                 // в очередь на втягивание.
                 let mut contact = false;
-                for idx in 0..CS * CS {
-                    let a = nd.faces[f * CS * CS + idx];
-                    if a == NO_LABEL {
+                let (dx, dy, dz) = FACE_DIR[f];
+                for seg in 0..nd.faces[f].len() {
+                    let (start, len, a) = nd.faces[f][seg];
+                    if nd.ground[f].contains(&a) {
                         continue;
                     }
-                    let (wx, wy, wz) = Self::face_cell(f, idx, ox, oy, oz);
-                    let (dx, dy, dz) = FACE_DIR[f];
-                    let (sx, sy, sz) = (wx as i32 + dx, wy as i32 + dy, wz as i32 + dz);
-                    if sx < 0 || sy < 0 || sz < 0 {
-                        continue;
-                    }
-                    if w.solid(sx as u32, sy as u32, sz as u32) {
-                        if !nd.ground[f].contains(&a) {
-                            nd.ground[f].push(a);
+                    // Отрезок обходится **до первого твёрдого**: метке
+                    // достаточно одного контакта, чтобы заземлиться.
+                    for idx in start as usize..(start + len) as usize {
+                        let (wx, wy, wz) = Self::face_cell(f, idx, ox, oy, oz);
+                        let (sx, sy, sz) = (wx as i32 + dx, wy as i32 + dy, wz as i32 + dz);
+                        if sx < 0 || sy < 0 || sz < 0 {
+                            continue;
                         }
-                        contact = true;
+                        if w.solid(sx as u32, sy as u32, sz as u32) {
+                            nd.ground[f].push(a);
+                            contact = true;
+                            break;
+                        }
                     }
                 }
                 nd.ground[f].sort_unstable();
@@ -789,7 +800,7 @@ impl CollapseLayer {
     pub fn graph_bytes(&self) -> usize {
         let mut n = 0;
         for nd in self.nodes.iter().flatten() {
-            n += nd.faces.len() * 2 + nd.bedrock.len();
+            n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
             n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
             n += nd.ground.iter().map(|g| g.len() * 2).sum::<usize>();
         }
@@ -809,6 +820,22 @@ fn uf_find(p: &mut [u32], mut a: u32) -> u32 {
         a = p[a as usize];
     }
     a
+}
+
+
+/// Дописать ячейку в отрезки грани.
+///
+/// Индексы приходят **по возрастанию**: пробеги идут по колонкам
+/// в порядке `z * CS + y`, а внутри колонки — по возрастанию `x`,
+/// и раскладка каждой из шести граней устроена так, что этот порядок
+/// её индексов и есть. Поэтому достаточно смотреть на последний
+/// отрезок, а плотный черновик не нужен вовсе (ADR-127).
+#[inline]
+fn push_face(seg: &mut Vec<(u16, u16, u16)>, idx: usize, lab: u16) {
+    match seg.last_mut() {
+        Some(last) if last.2 == lab && (last.0 + last.1) as usize == idx => last.1 += 1,
+        _ => seg.push((idx as u16, 1, lab)),
+    }
 }
 
 #[cfg(test)]

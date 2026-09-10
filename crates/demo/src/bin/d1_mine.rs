@@ -140,6 +140,7 @@ fn main() -> ExitCode {
 
     let mut hash = RunHash::new();
     let mut ms_mesh = 0.0f64;
+    let (mut cas_relabel, mut cas_faces, mut cas_rounds) = (0u64, 0u64, 0u64);
     let (mut edits_total, mut dirty_mesh, mut dirty_topo, mut survived) = (0u64, 0u64, 0u64, 0u64);
     let mut queued_peak = 0usize;
     let (mut nav_flips, mut nav_seen) = (0u64, 0u64);
@@ -176,6 +177,9 @@ fn main() -> ExitCode {
         nav_drop += ns.floor_drop;
         nav_lost += ns.edges_lost;
         nav_gained += ns.edges_gained;
+        cas_relabel += g.stats.collapse.relabelled as u64;
+        cas_faces += g.stats.collapse.faces as u64;
+        cas_rounds += g.stats.collapse.rounds as u64;
         hash.feed_edits(tick, g.edits());
 
         // Мешинг — работа кадра, а не тика: его в списке фаз нет.
@@ -243,15 +247,16 @@ fn main() -> ExitCode {
     println!("{:<28} {:>14.3}", "каскад отделения", ph(Phase::Destruction) / n);
     {
         let c = &sim.ground().expect("земля").stats.collapse;
-        println!("{:<28} {:>14}", "  чанков размечено", c.relabelled);
-        println!("{:<28} {:>14}", "  граней пересчитано", c.faces);
+        println!("{:<28} {:>14.1}", "  чанков размечено", cas_relabel as f64 / n);
+        println!("{:<28} {:>14.1}", "  граней пересчитано", cas_faces as f64 / n);
         println!("{:<28} {:>14}", "  собрано составов", c.gathered);
         println!("{:<28} {:>14}", "  узлов в графе", c.nodes);
         println!("{:<28} {:>14}", "  рёбер в графе", c.edges);
         println!("{:<28} {:>14}", "  не влезло в тело", c.too_big);
         println!("{:<28} {:>14}", "  чанков втянуто", c.promoted);
         println!("{:<28} {:>14}", "  ждёт втягивания", c.frontier);
-        println!("{:<28} {:>14}", "  раундов", c.rounds);
+        println!("{:<28} {:>14.2}", "  раундов", cas_rounds as f64 / n);
+        println!("{:<28} {:>14.2}", "  мкс на разметку", 1000.0 * ph(Phase::Destruction) / cas_relabel.max(1) as f64);
     }
     println!("{:<28} {:>14.3}", "падение тел", ph(Phase::Bodies) / n);
     println!("{:<28} {:>14.3}", "связность и проходимость", ms_topo / n);
