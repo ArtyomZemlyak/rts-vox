@@ -138,7 +138,13 @@ impl Gpu {
                 layout: None,
                 module: &m,
                 entry_point: Some(entry),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    // Явно, а не умолчанием: у wgpu оно `true`, у Bevy через
+                    // `#[derive(Default)]` — `false`, и чтение `var<workgroup>`
+                    // до записи вернуло бы мусор (`docs/13-gpu.md`).
+                    zero_initialize_workgroup_memory: true,
+                    ..Default::default()
+                },
                 cache: None,
             })
     }

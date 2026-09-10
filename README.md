@@ -75,6 +75,7 @@ grep -rn '\[QUESTION' docs/
 | [10-budgets.md](docs/10-budgets.md) | Все пороги производительности одним списком |
 | [11-roadmap.md](docs/11-roadmap.md) | Этапы, гейты, первая неделя |
 | [12-decisions.md](docs/12-decisions.md) | Реестр решений: по строке на ADR |
+| [13-gpu.md](docs/13-gpu.md) | Слой видеокарты: портируемое подмножество, сверка, бюджет обращения |
 
 ## Анализ
 
