@@ -13,6 +13,8 @@
 pub mod scene;
 pub mod stage_a;
 pub mod stage_b;
+pub mod unit;
+pub mod unit_scene;
 
 /// Сторона чанка.
 pub const CS: usize = 32;
