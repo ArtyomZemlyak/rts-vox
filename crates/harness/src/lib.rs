@@ -18,6 +18,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ray;
+
 use fx::rng::Rng;
 use mesh::bits::{bits_from_chunk, BitVolume};
 use mesh::incr::IncMesher;
@@ -90,6 +92,40 @@ impl World {
 
     pub fn voxels_z(&self) -> usize {
         self.nz * MCS
+    }
+
+    /// Внутри мира ли координата. Знаковая версия для DDA.
+    #[inline]
+    pub fn inside(&self, x: i32, y: i32, z: i32) -> bool {
+        x >= 0
+            && y >= 0
+            && z >= 0
+            && (x as usize) < self.voxels_x()
+            && (y as usize) < MCS
+            && (z as usize) < self.voxels_z()
+    }
+
+    /// Твёрдость по знаковым координатам: за пределами мира пусто.
+    #[inline]
+    pub fn get_i(&self, x: i32, y: i32, z: i32) -> bool {
+        if !self.inside(x, y, z) {
+            return false;
+        }
+        self.get(x as usize, y as usize, z as usize)
+    }
+
+    /// Слово битового объёма, содержащее колонку по X для данных `y, z`.
+    /// Именно оно позволяет проглотить пустую колонку одним тестом —
+    /// и именно поэтому раскладка анизотропна.
+    #[inline]
+    pub fn column_word(&self, x: i32, y: i32, z: i32) -> Option<u64> {
+        if !self.inside(x, y, z) {
+            return None;
+        }
+        let (cx, cz) = (x as usize / MCS, z as usize / MCS);
+        let lz = z as usize % MCS + 1;
+        let ly = y as usize + 1;
+        Some(self.bits[cz * self.nx + cx][ly * mesh::CSP + lz])
     }
 
     /// Твёрдость воксела в мировых координатах.
