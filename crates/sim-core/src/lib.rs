@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod energy;
+pub mod ground;
 pub mod index;
 pub mod matter;
 pub mod shield;
@@ -213,8 +214,15 @@ impl Units {
     }
 }
 
-/// Мир: юниты, поле направлений, индекс.
+/// Мир: земля, юниты, поле направлений, индекс.
 pub struct World {
+    /// Воксельная часть. `None` — мира из вокселей нет вовсе.
+    ///
+    /// Необязательна нарочно: стенд, мерящий пять тысяч юнитов, не
+    /// обязан строить под них двести пятьдесят шесть кубов породы,
+    /// а фазы земли на пустом месте не делают ничего. Это не
+    /// «опционально включаемая механика», а отсутствие данных.
+    pub ground: Option<ground::Ground>,
     pub units: Units,
     /// Направление потока по нав-клеткам: 0 = −Z, 1 = −X, 2 = +X, 3 = +Z,
     /// 255 = стоять. По одному полю на владельца.
@@ -266,6 +274,28 @@ impl World {
         World::with_cells(owners, capacity, SEPARATION, RANGE)
     }
 
+    /// Привязать воксельный мир. До этого фазы земли — заглушки.
+    pub fn attach_ground(&mut self, g: ground::Ground) {
+        self.ground = Some(g);
+    }
+
+    /// Сколько наносекунд ушло на фазу за всё время жизни мира.
+    ///
+    /// В наносекундах, а не в миллисекундах: доля — это плавающее,
+    /// а его в симуляции нет (`CLAUDE.md`). Делит на тысячу тот,
+    /// кто печатает.
+    pub fn phase_ns_of(&self, p: Phase) -> u64 {
+        match PHASES.iter().position(|&x| x == p) {
+            Some(i) => self.phase_ns[i],
+            None => 0,
+        }
+    }
+
+    /// Земля для чтения — рендеру и сценам.
+    pub fn ground(&self) -> Option<&ground::Ground> {
+        self.ground.as_ref()
+    }
+
     /// Размеры вёдер — параметр, а не константа: они задают обмен между
     /// ценой пересборки индекса и ценой запроса, и оптимум зависит
     /// от плотности. Мелкое ведро дёшево в запросе и дорого в пересборке:
@@ -278,6 +308,7 @@ impl World {
             grid_near: Grid::new(WORLD, near, capacity),
             grid_far: Grid::new(WORLD, far, capacity),
             snap_x: Vec::new(),
+            ground: None,
             snap_z: Vec::new(),
             delta: Vec::new(),
             tick: 0,
@@ -330,7 +361,13 @@ impl World {
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
-                Phase::NavUpdate => self.phase_nav_update(),
+                Phase::VoxelEdits => self.phase_ground_edits(),
+                Phase::Destruction => self.phase_ground_destruction(),
+                Phase::Bodies => self.phase_ground_bodies(),
+                Phase::NavUpdate => {
+                    self.phase_ground_nav();
+                    self.phase_nav_update();
+                }
                 Phase::Movement => {
                     self.movement_deltas(threads);
                     self.apply_deltas();
@@ -354,7 +391,13 @@ impl World {
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
-                Phase::NavUpdate => self.phase_nav_update(),
+                Phase::VoxelEdits => self.phase_ground_edits(),
+                Phase::Destruction => self.phase_ground_destruction(),
+                Phase::Bodies => self.phase_ground_bodies(),
+                Phase::NavUpdate => {
+                    self.phase_ground_nav();
+                    self.phase_nav_update();
+                }
                 Phase::Movement => self.phase_movement(),
                 Phase::Combat => self.phase_combat(),
                 Phase::Visibility => self.phase_visibility(),
@@ -367,6 +410,32 @@ impl World {
         }
         self.tick += 1;
         hash
+    }
+
+    /// Фазы земли. Без воксельного мира они ровно те же заглушки,
+    /// какими были: занятое место в списке, а не ветвление механики.
+    fn phase_ground_edits(&mut self) {
+        if let Some(g) = self.ground.as_mut() {
+            g.phase_edits();
+        }
+    }
+
+    fn phase_ground_destruction(&mut self) {
+        if let Some(g) = self.ground.as_mut() {
+            g.phase_destruction();
+        }
+    }
+
+    fn phase_ground_bodies(&mut self) {
+        if let Some(g) = self.ground.as_mut() {
+            g.phase_bodies();
+        }
+    }
+
+    fn phase_ground_nav(&mut self) {
+        if let Some(g) = self.ground.as_mut() {
+            g.phase_nav();
+        }
     }
 
     /// Индекс перестраивается один раз за тик, до фаз, которые его читают.
@@ -712,6 +781,9 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.voxels[i] as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
+        }
+        if let Some(g) = &self.ground {
+            h = h.wrapping_add(g.hash());
         }
         h
     }

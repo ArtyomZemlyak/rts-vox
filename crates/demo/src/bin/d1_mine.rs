@@ -20,14 +20,20 @@ use std::time::Instant;
 
 use demo::dig::Dig;
 use meshing::layer::MeshLayer;
-use nav::layer::NavLayer;
-use voxel::topo::layer::TopoLayer;
+use sim_core::ground::Ground;
+use sim_core::{Phase, World as SimWorld};
 use demo::{RunHash, Terrain};
 use meshing::Opts;
 use voxel::World;
 
 /// Порог сцены: три подсистемы вместе, миллисекунд на тик.
-const BUDGET_MS: f64 = 3.0;
+/// Бюджет тика (`docs/10-budgets.md`).
+///
+/// Было три: сцена мерила только ремеш, связность и навигацию. Теперь
+/// она гоняет **весь тик земли** — дренаж очереди, каскад отделения,
+/// падение тел, связность, проходимость, — то есть ровно то, что мерит
+/// бюджет тика (ADR-126).
+const BUDGET_MS: f64 = 10.0;
 
 struct Args {
     seed: u64,
@@ -115,10 +121,6 @@ fn main() -> ExitCode {
     let gen_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let mut mesh = MeshLayer::new(&world, Opts::default());
-    let mut topo = TopoLayer::new(&world);
-    // Рост юнита четыре воксела (2 м при вокселе 0.5 м), нав-клетка
-    // два воксела по стороне (ADR-078).
-    let mut nav = NavLayer::new(&world, 4, 2);
     let mut dig = Dig::clustered(
         &world,
         |x, z| terrain.surface(x, z),
@@ -128,53 +130,66 @@ fn main() -> ExitCode {
         a.seed ^ 0xD16,
     );
 
+    // Сцена больше не собирает порядок фаз сама: земля живёт в движке,
+    // и `sim.tick()` прогоняет дренаж, каскад, тела, связность
+    // и проходимость в объявленном порядке (ADR-125). Рост юнита четыре
+    // воксела (2 м при вокселе 0.5 м), нав-клетка два воксела
+    // по стороне (ADR-078).
+    let mut sim = SimWorld::new(1, 1);
+    sim.attach_ground(Ground::new(world, 64, 4, 2));
+
     let mut hash = RunHash::new();
-    let (mut ms_mesh, mut ms_topo, mut ms_nav) = (0.0f64, 0.0f64, 0.0f64);
+    let mut ms_mesh = 0.0f64;
     let (mut edits_total, mut dirty_mesh, mut dirty_topo, mut survived) = (0u64, 0u64, 0u64, 0u64);
     let mut queued_peak = 0usize;
     let (mut nav_flips, mut nav_seen) = (0u64, 0u64);
     // Перепись уровней до копки: надо различить пещеры генератора
     // и ходы, прокопанные за прогон.
-    let census0 = nav.level_census(&world);
+    let census0 = {
+        let g = sim.ground().expect("земля");
+        g.nav.level_census(&g.world)
+    };
     let (mut nav_moved, mut nav_drop) = (0u64, 0u64);
     let (mut nav_lost, mut nav_gained) = (0u64, 0u64);
 
     for tick in 1..=a.ticks {
-        dig.step(&mut world, &|x, z| terrain.surface(x, z));
-        let st = world.flush();
-        edits_total += st.applied as u64;
-        queued_peak = queued_peak.max(st.queued);
-        hash.feed_edits(tick, world.edits());
+        {
+            let g = sim.ground.as_mut().expect("земля");
+            dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+        }
+        // Тик движка: дренаж, каскад, тела, связность, проходимость.
+        sim.tick();
 
-        // Мешинг — работа кадра.
-        let t = Instant::now();
-        dirty_mesh += mesh.apply(&world, world.edits()) as u64;
-        ms_mesh += t.elapsed().as_secs_f64() * 1e3;
-
-        // Связность — работа тика.
-        let t = Instant::now();
-        let (d, s) = topo.apply(&world, world.edits());
-        dirty_topo += d as u64;
-        survived += s as u64;
-        ms_topo += t.elapsed().as_secs_f64() * 1e3;
-
-        // Навигация. Мерить надо **высоту пола и рёбра**, а не булеву
-        // проходимость: над поверхностью всегда небо, поэтому она
+        let g = sim.ground.as_ref().expect("земля");
+        edits_total += g.stats.edits as u64;
+        queued_peak = queued_peak.max(g.stats.queued);
+        dirty_topo += g.stats.topo_dirty as u64;
+        survived += g.stats.topo_survived as u64;
+        // Навигация мерится **высотой пола и рёбрами**, а не булевой
+        // проходимостью: над поверхностью всегда небо, поэтому она
         // не переворачивается почти никогда, и сцена, мерившая только
         // её, показывала ровный ноль (ADR-117).
-        let t = Instant::now();
-        let ns = nav.apply(&world, world.edits());
+        let ns = g.stats.nav;
         nav_seen += ns.seen as u64;
         nav_flips += ns.flips as u64;
         nav_moved += ns.floor_moved as u64;
         nav_drop += ns.floor_drop;
         nav_lost += ns.edges_lost;
         nav_gained += ns.edges_gained;
-        ms_nav += t.elapsed().as_secs_f64() * 1e3;
+        hash.feed_edits(tick, g.edits());
+
+        // Мешинг — работа кадра, а не тика: его в списке фаз нет.
+        let t = Instant::now();
+        dirty_mesh += mesh.apply(&g.world, g.edits()) as u64;
+        ms_mesh += t.elapsed().as_secs_f64() * 1e3;
     }
+    // Разбивку по фазам ведёт движок: сцена её больше не собирает.
+    let ph = |p: Phase| sim.phase_ns_of(p) as f64 / 1e6;
+    let ms_drain = ph(Phase::VoxelEdits) + ph(Phase::Destruction) + ph(Phase::Bodies);
+    let ms_topo = ph(Phase::NavUpdate);
 
     let n = a.ticks as f64;
-    let total = (ms_mesh + ms_topo + ms_nav) / n;
+    let total = (ms_mesh + ms_topo + ms_drain) / n;
     hash.feed(edits_total);
     hash.feed(mesh.quad_total() as u64);
 
@@ -205,7 +220,10 @@ fn main() -> ExitCode {
     println!("{:<28} {:>14.1}", "  у них сдвинулся пол", nav_moved as f64 / n);
     println!("{:<28} {:>14.2}", "  пол опустился, вокселей", nav_drop as f64 / n);
     println!("{:<28} {:>14.1}", "  стало нельзя стоять", nav_flips as f64 / n);
-    let (cells_with, cells_multi, levels) = nav.level_census(&world);
+    let (cells_with, cells_multi, levels) = {
+        let g = sim.ground().expect("земля");
+        g.nav.level_census(&g.world)
+    };
     println!("{:<28} {:>14.1}", "рёбер разорвано", nav_lost as f64 / n);
     println!("{:<28} {:>14.1}", "рёбер появилось", nav_gained as f64 / n);
     // Насколько неверна одноуровневая навигация на этой карте.
@@ -221,9 +239,23 @@ fn main() -> ExitCode {
     println!("{:<28} {:>14} {:>14}", "уровней в подколонках", census0.2, levels);
 
     println!("\n{:<28} {:>14}", "время, мс на тик", "");
+    println!("{:<28} {:>14.3}", "дренаж очереди", ph(Phase::VoxelEdits) / n);
+    println!("{:<28} {:>14.3}", "каскад отделения", ph(Phase::Destruction) / n);
+    {
+        let c = &sim.ground().expect("земля").stats.collapse;
+        println!("{:<28} {:>14}", "  чанков размечено", c.relabelled);
+        println!("{:<28} {:>14}", "  граней пересчитано", c.faces);
+        println!("{:<28} {:>14}", "  собрано составов", c.gathered);
+        println!("{:<28} {:>14}", "  узлов в графе", c.nodes);
+        println!("{:<28} {:>14}", "  рёбер в графе", c.edges);
+        println!("{:<28} {:>14}", "  не влезло в тело", c.too_big);
+        println!("{:<28} {:>14}", "  чанков втянуто", c.promoted);
+        println!("{:<28} {:>14}", "  ждёт втягивания", c.frontier);
+        println!("{:<28} {:>14}", "  раундов", c.rounds);
+    }
+    println!("{:<28} {:>14.3}", "падение тел", ph(Phase::Bodies) / n);
+    println!("{:<28} {:>14.3}", "связность и проходимость", ms_topo / n);
     println!("{:<28} {:>14.3}", "мешинг", ms_mesh / n);
-    println!("{:<28} {:>14.3}", "связность", ms_topo / n);
-    println!("{:<28} {:>14.3}", "навигация", ms_nav / n);
     println!("{:<28} {:>14.3}", "итого", total);
 
     println!("\n{:<28} {:>14}", "геометрия и память", "");
@@ -237,12 +269,12 @@ fn main() -> ExitCode {
     println!(
         "{:<28} {:>11.1} МиБ",
         "слой изменений мира",
-        world.diff_bytes() as f64 / 1024.0 / 1024.0
+        sim.ground().expect("земля").world.diff_bytes() as f64 / 1024.0 / 1024.0
     );
     println!(
         "{:<28} {:>11.1} МиБ",
         "битовый объём",
-        world.bit_bytes() as f64 / 1024.0 / 1024.0
+        sim.ground().expect("земля").world.bit_bytes() as f64 / 1024.0 / 1024.0
     );
 
     let mut ok = true;
@@ -250,10 +282,11 @@ fn main() -> ExitCode {
     if a.verify_seams {
         // Швы: инкрементальный ремеш обязан дать то же число квадов,
         // что полная пересборка. Иначе паддинг соседа обновлён неверно.
+        let vw = &sim.ground().expect("земля").world;
         let live = mesh.live_indices();
         let mut bad = 0usize;
         for &i in live.iter() {
-            if mesh.rebuilt_quad_count(&world, i) != quad_of(&mesh, i) {
+            if mesh.rebuilt_quad_count(vw, i) != quad_of(&mesh, i) {
                 bad += 1;
             }
         }

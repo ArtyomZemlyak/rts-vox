@@ -6,6 +6,12 @@ rust-version.workspace = true
 
 [dependencies]
 fx = { path = "../fx" }
+# Земля: воксельный мир, связность, проходимость (ADR-125). `modding`
+# появится здесь, когда симуляция начнёт читать свойства материалов, —
+# зависимость ради совпадения со схемой это не зависимость.
+nav = { path = "../nav" }
+voxel = { path = "../voxel" }
+worldgen = { path = "../worldgen" }
 
 [lib]
 name = "sim_core"

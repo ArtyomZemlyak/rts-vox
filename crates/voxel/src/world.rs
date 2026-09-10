@@ -31,7 +31,13 @@ pub struct Edit {
 
 /// Процедурный слой. Обязан быть чистой функцией от координат: значение
 /// не зависит ни от порядка обхода, ни от того, что уже посчитано.
-pub trait Generator {
+/// Источник материала для нетронутого мира.
+///
+/// `Send + Sync` обязательны: фаза, читающая мир, делится на потоки,
+/// а нетронутый чанк она берёт у генератора. Требование стоит здесь,
+/// а не у вызывающего, чтобы не выяснилось на первой параллельной
+/// фазе, что весь мир не переносится между потоками (ADR-125).
+pub trait Generator: Send + Sync {
     fn material(&self, x: u32, y: u32, z: u32) -> Mat;
 
     /// Отрезок колонки разом. По умолчанию — повоксельный обход, чтобы
@@ -72,7 +78,7 @@ pub struct World {
     /// Сколько чанков разрешено построить из генератора за тик.
     /// Второй потолок дренажа — см. ADR-114.
     pub max_materialize_per_tick: usize,
-    gen: Box<dyn Generator>,
+    gen: Box<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Box<Paletted>>>,
     cx: u32,
@@ -98,7 +104,7 @@ impl World {
     ///
     /// Построение — единственное место, где генератор обходится целиком;
     /// дальше мир живёт правками.
-    pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator>) -> World {
+    pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator + Send + Sync>) -> World {
         let (cx, cy, cz) = (
             nx.div_ceil(CS as u32),
             ny.div_ceil(CS as u32),

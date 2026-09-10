@@ -90,6 +90,12 @@ pub struct CollapseStats {
     /// Чанков ждёт втягивания. Пока фронтир не пуст, ответ каскада —
     /// оценка сверху: часть кусков ещё держится за неразмеченное.
     pub frontier: usize,
+    /// Чанков размечено заново.
+    pub relabelled: usize,
+    /// Граней пересчитано.
+    pub faces: usize,
+    /// Чанков, в которых пришлось собирать состав незаякоренного.
+    pub gathered: usize,
 }
 
 /// Компоненты одного чанка, как их видит граф.
@@ -153,6 +159,13 @@ pub struct CollapseLayer {
     pub max_promote_per_tick: usize,
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
+    /// Прежняя карта граничных меток — для сравнения при переразметке.
+    face_prev: Vec<u16>,
+    /// Счётчики работы за тик. Замер объёма, а не таймер: `std::time`
+    /// в крейтах симуляции запрещён (`CLAUDE.md`).
+    relabelled: usize,
+    faces: usize,
+    gathered: usize,
 }
 
 impl CollapseLayer {
@@ -176,6 +189,10 @@ impl CollapseLayer {
             reached: Vec::new(),
             queue: Vec::new(),
             face_todo: Vec::new(),
+            face_prev: Vec::new(),
+            relabelled: 0,
+            faces: 0,
+            gathered: 0,
             frontier: Vec::new(),
             max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
             cells: Vec::new(),
@@ -232,6 +249,9 @@ impl CollapseLayer {
             self.stamp.iter_mut().for_each(|v| *v = 0);
             self.epoch = 1;
         }
+        self.relabelled = 0;
+        self.faces = 0;
+        self.gathered = 0;
         self.dirty.clear();
         for e in edits {
             let (cx, cy, cz) = (e.x / cs, e.y / cs, e.z / cs);
@@ -272,8 +292,9 @@ impl CollapseLayer {
                     c.set(lx as usize, ly as usize, lz as usize, solid);
                 }
             }
-            self.relabel(i);
-            self.mark_faces(i);
+            if self.relabel(i) || fresh {
+                self.mark_faces(i);
+            }
         }
         self.rebuild_index();
         self.refresh_faces(w);
@@ -285,13 +306,21 @@ impl CollapseLayer {
             self.resolve(&mut st);
             let torn = self.detach_unanchored(w, bodies, &mut st);
             if torn == 0 {
+                self.report(&mut st);
                 return st;
             }
             self.rebuild_index();
             self.refresh_faces(w);
         }
         st.rounds_capped = true;
+        self.report(&mut st);
         st
+    }
+
+    fn report(&self, st: &mut CollapseStats) {
+        st.relabelled = self.relabelled;
+        st.faces = self.faces;
+        st.gathered = self.gathered;
     }
 
     /// Втянуть в граф чанки с фронтира, сколько позволяет потолок.
@@ -302,22 +331,35 @@ impl CollapseLayer {
     /// правок, то есть от того, куда игрок кликнул раньше.
     fn promote(&mut self, w: &World) -> usize {
         let mut done = 0usize;
+        // Втягивание идёт **пачками**, а не по чанку.
+        //
+        // Первая редакция пересчитывала грани после каждого чанка,
+        // и цена выходила квадратичной по числу втянутых: на реальной
+        // копке это дало 2.97 мс за тик (ADR-126). Новые чанки фронтира
+        // находятся при пересчёте граней, поэтому раунды нужны, но их
+        // единицы, а не десятки.
         while done < self.max_promote_per_tick {
             self.frontier.sort_unstable();
             self.frontier.dedup();
-            let Some(pos) = self
+            let batch: Vec<u32> = self
                 .frontier
                 .iter()
-                .position(|&i| self.nodes[i as usize].is_none())
-            else {
+                .copied()
+                .filter(|&i| self.nodes[i as usize].is_none())
+                .take(self.max_promote_per_tick - done)
+                .collect();
+            if batch.is_empty() {
                 break;
-            };
-            let i = self.frontier.remove(pos) as usize;
-            let (cx, cy, cz) = self.coords(i);
-            self.chunks[i] = Some(Self::build(w, cx, cy, cz));
-            self.relabel(i);
-            self.mark_faces(i);
-            done += 1;
+            }
+            for &ci in &batch {
+                let i = ci as usize;
+                let (cx, cy, cz) = self.coords(i);
+                self.chunks[i] = Some(Self::build(w, cx, cy, cz));
+                self.relabel(i);
+                self.mark_faces(i);
+                done += 1;
+            }
+            self.frontier.retain(|i| !batch.contains(i));
             self.rebuild_index();
             self.refresh_faces(w);
         }
@@ -327,10 +369,23 @@ impl CollapseLayer {
     }
 
     /// Разметить компоненты чанка заново и обновить его грани.
-    fn relabel(&mut self, i: usize) {
+    ///
+    /// Возвращает `true`, если **карта граничных меток изменилась**.
+    /// Копка в середине чанка её не трогает, а рёбра и заземления
+    /// графа выводятся ровно из неё: если она та же, пересчитывать
+    /// грани — свою и обращённые к себе у шести соседей — незачем.
+    /// На реальной копке это девять из десяти чанков (ADR-126).
+    fn relabel(&mut self, i: usize) -> bool {
         let c = self.chunks[i].take().expect("chunk present");
+        self.relabelled += 1;
         let n = self.comps.build(&c);
-        let mut nd = self.nodes[i].take().unwrap_or_else(|| Box::new(ChunkNodes::new()));
+        let mut nd = self.nodes[i].take().unwrap_or_else(|| {
+            // Свежий чанк: прежней карты нет, значит она «изменилась».
+            self.face_prev.clear();
+            Box::new(ChunkNodes::new())
+        });
+        self.face_prev.clear();
+        self.face_prev.extend_from_slice(&nd.faces);
         nd.n = n;
         nd.faces.iter_mut().for_each(|v| *v = NO_LABEL);
         nd.bedrock.clear();
@@ -366,8 +421,10 @@ impl CollapseLayer {
                 nd.bedrock[lab as usize] = true;
             }
         }
+        let changed = nd.faces != self.face_prev;
         self.nodes[i] = Some(nd);
         self.chunks[i] = Some(c);
+        changed
     }
 
     /// Пометить к пересчёту грани чанка и обращённые к нему грани соседей.
@@ -390,6 +447,7 @@ impl CollapseLayer {
         self.face_todo.sort_unstable();
         self.face_todo.dedup();
         let todo = std::mem::take(&mut self.face_todo);
+        self.faces += todo.len();
         for &(ci, f) in &todo {
             self.refresh_face(w, ci as usize, f as usize);
         }
@@ -424,10 +482,17 @@ impl CollapseLayer {
                     if b == NO_LABEL {
                         continue;
                     }
-                    nd.edges[f].push((a, b));
+                    // Повтор схлопывается **на лету**. Сплошная грань
+                    // даёт тысячу двадцать четыре одинаковые пары,
+                    // и сортировать их потом — вчетверо дороже всего
+                    // остального каскада (ADR-126). Пар на грани
+                    // единицы, поэтому линейный поиск здесь дешевле
+                    // любой структуры.
+                    if !nd.edges[f].contains(&(a, b)) {
+                        nd.edges[f].push((a, b));
+                    }
                 }
                 nd.edges[f].sort_unstable();
-                nd.edges[f].dedup();
             }
             Some(j) => {
                 // Сосед ещё не в графе. Контакт с ним считается
@@ -446,12 +511,13 @@ impl CollapseLayer {
                         continue;
                     }
                     if w.solid(sx as u32, sy as u32, sz as u32) {
-                        nd.ground[f].push(a);
+                        if !nd.ground[f].contains(&a) {
+                            nd.ground[f].push(a);
+                        }
                         contact = true;
                     }
                 }
                 nd.ground[f].sort_unstable();
-                nd.ground[f].dedup();
                 if contact && !self.frontier.contains(&(j as u32)) {
                     self.frontier.push(j as u32);
                 }
@@ -632,6 +698,7 @@ impl CollapseLayer {
             let (cx, cy, cz) = self.coords(i);
             let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
             let c = self.chunks[i].take().expect("chunk present");
+            self.gathered += 1;
             self.comps.build(&c);
             self.chunks[i] = Some(c);
             for ri in 0..self.comps.runs.len() {
@@ -697,8 +764,9 @@ impl CollapseLayer {
         }
         touched.sort_unstable();
         for &ci in &touched {
-            self.relabel(ci as usize);
-            self.mark_faces(ci as usize);
+            if self.relabel(ci as usize) {
+                self.mark_faces(ci as usize);
+            }
         }
         torn
     }
