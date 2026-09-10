@@ -598,7 +598,7 @@ mod tests {
 
     fn field(tunnel: bool) -> (VolGraph, VolField, NavLayer) {
         let w = voxel::World::new(64, 64, 64, 4096, Box::new(Tunnel { tunnel }));
-        let nav = NavLayer::new(&w, 4, 2);
+        let nav = NavLayer::new(&w, 4, 2, 1);
         let mut g = VolGraph::new();
         g.build(&nav);
         let mut f = VolField::new();
@@ -669,7 +669,7 @@ mod tests {
     #[test]
     fn a_budgeted_solve_matches_the_whole_one() {
         let w = voxel::World::new(64, 64, 64, 4096, Box::new(Tunnel { tunnel: true }));
-        let nav = NavLayer::new(&w, 4, 2);
+        let nav = NavLayer::new(&w, 4, 2, 1);
         let (g, f, _) = field(true);
         let mut r = VolRoute::new();
         let mut ticks = 0;

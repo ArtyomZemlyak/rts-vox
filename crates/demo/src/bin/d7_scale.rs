@@ -165,8 +165,9 @@ fn main() -> ExitCode {
 
     // --- Юниты и земля в одном мире: порядок фаз задаёт движок
     // (ADR-125), а не сцена.
-    let mut sim = SimWorld::new(2, a.units.max(1));
-    sim.attach_ground(Ground::new(world, 256, 4, 2));
+    let t = demo::tuning();
+    let mut sim = SimWorld::new(2, a.units.max(1), t);
+    sim.attach_ground(Ground::new(world, &t));
     if a.dense {
         populate_dense(&mut sim, a.units, a.seed);
     } else {

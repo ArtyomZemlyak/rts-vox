@@ -6,5 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 fx = { path = "../fx" }
+# Числа тика читаются из данных (ADR-140); `sim-core` файлов не знает.
+modding = { path = "../modding" }
 sim-core = { path = "../sim-core" }
 worldgen = { path = "../worldgen" }

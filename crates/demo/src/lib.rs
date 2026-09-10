@@ -12,6 +12,21 @@
 
 pub mod dig;
 
+/// Числа тика — из `data/sim.ron`, как и в игре (ADR-140).
+///
+/// Сцена запускается из корня репозитория, но полагаться на текущий
+/// каталог нельзя: путь берётся от места сборки, а `./data` остаётся
+/// запасным. Литералов здесь нет и быть не должно — ради этого файл
+/// и заведён.
+pub fn tuning() -> sim_core::Tuning {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
+    let path = if here.exists() { here } else { std::path::PathBuf::from("data/sim.ron") };
+    match modding::load_tuning(&path) {
+        Ok(t) => t,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
+}
+
 /// Генератор мира. Живёт в `worldgen`; здесь реэкспорт, чтобы сцены
 /// не тянули имя из двух мест.
 pub use worldgen::Terrain;

@@ -25,11 +25,6 @@ use meshing::Opts;
 use voxel::store::{Mat, AIR};
 use voxel::{Generator, World};
 
-/// Жёсткий лимит живых тел.
-const MAX_BODIES: usize = 64;
-/// Урон юниту за воксель падения (ADR-036). Число балансное и здесь
-/// стоит только потому, что сцена не грузит данные.
-const FALL_DAMAGE_PER_VOXEL: u32 = 3;
 
 /// Грибной рельеф: земля, ножка, шляпка. Подкоп ножки роняет шляпку.
 ///
@@ -110,12 +105,14 @@ struct Args {
     /// Потолок живых тел. Ключом, а не константой: потолок
     /// переразметок растягивает залп во времени, и жёсткость лимита
     /// иначе перестаёт проверяться (ADR-133).
-    max_bodies: usize,
+    /// `None` — брать из данных; флаг нужен, чтобы проверять потолок
+    /// тесным значением.
+    max_bodies: Option<usize>,
 }
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, ticks: 400, side: 192, diggers: 24, units: 40, dump_hash: false, burst: false, max_bodies: MAX_BODIES }
+        Args { seed: 42, ticks: 400, side: 192, diggers: 24, units: 40, dump_hash: false, burst: false, max_bodies: None }
     }
 }
 
@@ -137,7 +134,7 @@ fn parse() -> Result<Args, String> {
             "--units" => a.units = num("--units")? as usize,
             "--dump-hash" => a.dump_hash = true,
             "--burst" => a.burst = true,
-            "--max-bodies" => a.max_bodies = num("--max-bodies")? as usize,
+            "--max-bodies" => a.max_bodies = Some(num("--max-bodies")? as usize),
             "--help" | "-h" => {
                 println!("D-2 «Обрушение»\n\n  --seed N --ticks N --side N --diggers N --units N --dump-hash --burst\n");
                 std::process::exit(0);
@@ -165,6 +162,7 @@ struct Outcome {
     promoted_total: usize,
     frontier_max: usize,
     max_bodies: usize,
+    fall_per_voxel: u32,
     graph_chunks: usize,
     graph_bytes: usize,
     graph_nodes: usize,
@@ -185,8 +183,14 @@ fn run(a: &Args) -> Outcome {
 
     // Порядок фаз задаёт движок (ADR-125): сцена только копает
     // и смотрит, что получилось.
-    let mut sim = SimWorld::new(1, 1);
-    sim.attach_ground(Ground::new(world, a.max_bodies, 4, 2));
+    // Потолок тел сцена задаёт сама: она им и проверяется, залпом
+    // с тесным потолком. Остальные числа — из данных (ADR-140).
+    let mut t = demo::tuning();
+    if let Some(m) = a.max_bodies {
+        t.max_bodies = m;
+    }
+    let mut sim = SimWorld::new(1, 1, t);
+    sim.attach_ground(Ground::new(world, &t));
 
     let mut hash = RunHash::new();
 
@@ -311,7 +315,8 @@ fn run(a: &Args) -> Outcome {
         refused: sim.ground().expect("земля").bodies.refused,
         promoted_total,
         frontier_max,
-        max_bodies: a.max_bodies,
+        max_bodies: t.max_bodies,
+        fall_per_voxel: t.fall_damage_per_voxel as u32,
         graph_chunks: sim.ground().expect("земля").collapse.known_chunks(),
         graph_bytes: sim.ground().expect("земля").collapse.graph_bytes(),
         graph_nodes,
@@ -395,7 +400,7 @@ fn main() -> ExitCode {
     println!(
         "{:<30} {:>14}",
         "смертельное падение, вокселей",
-        100u32.div_ceil(FALL_DAMAGE_PER_VOXEL)
+        100u32.div_ceil(o.fall_per_voxel.max(1))
     );
     println!(
         "{:<30} {:>14}",

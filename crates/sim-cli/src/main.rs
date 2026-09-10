@@ -108,7 +108,19 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let mut w = World::new(2, a.units.max(1));
+    // Числа тика — из данных, а не из исходника (ADR-140). Файл
+    // ищется рядом с корнем репозитория, потом в текущем каталоге:
+    // headless-прогон запускают и оттуда, и отсюда.
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
+    let path = if here.exists() { here } else { std::path::PathBuf::from("data/sim.ron") };
+    let tuning = match modding::load_tuning(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let mut w = World::new(2, a.units.max(1), tuning);
     populate(&mut w, a.units, a.seed);
 
     let mut hash = 0u64;

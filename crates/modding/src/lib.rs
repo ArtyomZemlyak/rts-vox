@@ -13,9 +13,11 @@
 #![forbid(unsafe_code)]
 
 pub mod data;
+pub mod tuning;
 pub mod vox;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
+pub use tuning::{load_tuning, Tuning, TuningError};
 
 pub type Mat = u16;
 

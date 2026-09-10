@@ -662,6 +662,7 @@ name = "sim-cli"
 version = "0.1.0"
 dependencies = [
  "fx",
+ "modding",
  "sim-core",
  "worldgen",
 ]
@@ -671,6 +672,7 @@ name = "sim-core"
 version = "0.1.0"
 dependencies = [
  "fx",
+ "modding",
  "nav",
  "voxel",
  "worldgen",

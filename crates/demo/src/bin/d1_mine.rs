@@ -138,8 +138,9 @@ fn main() -> ExitCode {
     // и проходимость в объявленном порядке (ADR-125). Рост юнита четыре
     // воксела (2 м при вокселе 0.5 м), нав-клетка два воксела
     // по стороне (ADR-078).
-    let mut sim = SimWorld::new(1, 1);
-    let mut g = Ground::new(world, 64, 4, 2);
+    let t = demo::tuning();
+    let mut sim = SimWorld::new(1, 1, t);
+    let mut g = Ground::new(world, &t);
     g.collapse.max_relabel_per_tick = a.relabel_cap;
     sim.attach_ground(g);
 

@@ -11,6 +11,7 @@
 //! которая читает правки (связность, проходимость, ремеш, рендер),
 //! нужен весь тик, а не последний его кусок.
 
+use crate::Tuning;
 use nav::layer::{NavLayer, NavStats};
 use voxel::bodies::{Bodies, BodyStats};
 use voxel::collapse::{CollapseLayer, CollapseStats};
@@ -57,16 +58,16 @@ pub struct Ground {
 impl Ground {
     /// Собрать землю вокруг готового воксельного мира.
     ///
-    /// `nav_height` — рост юнита в вокселях, `nav_step` — сторона
-    /// нав-клетки. Обе величины принадлежат данным, а не коду, и здесь
-    /// стоят параметрами именно поэтому.
-    pub fn new(world: VoxelWorld, max_bodies: usize, nav_height: u32, nav_step: u32) -> Ground {
+    /// Рост юнита, сторона нав-клетки, посильный перепад и потолок тел
+    /// приходят из данных (ADR-140): все четыре — игровые числа,
+    /// и литералов им в исходнике не место.
+    pub fn new(world: VoxelWorld, t: &Tuning) -> Ground {
         let collapse = CollapseLayer::new(&world);
         let topo = TopoLayer::new(&world);
-        let nav = NavLayer::new(&world, nav_height, nav_step);
+        let nav = NavLayer::new(&world, t.unit_height, t.nav_cell, t.max_step);
         Ground {
             world,
-            bodies: Bodies::new(max_bodies),
+            bodies: Bodies::new(t.max_bodies),
             collapse,
             topo,
             nav,
@@ -172,6 +173,7 @@ impl Ground {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_tuning;
     use crate::World;
     use voxel::store::{Mat, AIR};
 
@@ -190,8 +192,8 @@ mod tests {
 
     fn world_with_ground() -> World {
         let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Slab));
-        let mut w = World::new(2, 16);
-        w.attach_ground(Ground::new(vw, 16, 4, 2));
+        let mut w = World::new(2, 16, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         w
     }
 
@@ -222,8 +224,8 @@ mod tests {
     #[test]
     fn terrain_stops_a_unit() {
         let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Wall));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         let id = w.units.spawn(28, 32, 0, 6, 300) as usize;
         w.fill_flow_towards(0, 60, 32);
         w.units.refresh_live();
@@ -252,8 +254,8 @@ mod tests {
     fn digging_out_the_ground_drops_the_unit_and_hurts_it() {
         const DEPTH: u32 = 6;
         let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
         w.units.y[id] = GY as i32;
         w.units.refresh_live();
@@ -290,7 +292,7 @@ mod tests {
         let hurt = hp0 - w.units.voxels[id];
         assert_eq!(
             hurt as u32,
-            (DEPTH - 1) * w.fall_damage_per_voxel as u32,
+            (DEPTH - 1) * w.tuning.fall_damage_per_voxel as u32,
             "урон не по высоте падения за вычетом бесплатного воксела"
         );
         let g = w.ground().expect("земля");
@@ -303,8 +305,8 @@ mod tests {
     #[test]
     fn a_single_voxel_drop_is_free() {
         let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
         w.units.y[id] = GY as i32;
         w.units.refresh_live();
@@ -340,8 +342,8 @@ mod tests {
     fn a_blast_opens_a_road_and_the_walk_is_the_same_length_every_time() {
         fn run() -> (bool, u32) {
             let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
-            let mut w = World::new(1, 4);
-            w.attach_ground(Ground::new(vw, 4, 4, 2));
+            let mut w = World::new(1, 4, test_tuning());
+            w.attach_ground(Ground::new(vw, &test_tuning()));
             // Юнит стоит напротив глухой части стены, в двадцати клетках
             // от того места, где потом появится пролом: дорога к нему —
             // вбок и только потом вперёд.
@@ -395,8 +397,8 @@ mod tests {
     #[test]
     fn a_unit_walks_around_to_the_opening() {
         let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         {
             let g = w.ground.as_mut().expect("земля");
             for y in GY..GY + 6 {
@@ -428,8 +430,8 @@ mod tests {
     #[test]
     fn a_dug_corridor_lets_the_unit_through() {
         let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         {
             let g = w.ground.as_mut().expect("земля");
             for y in GY..GY + 6 {
@@ -480,8 +482,8 @@ mod tests {
     #[test]
     fn a_unit_on_an_overhang_stays_on_it() {
         let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Mushroom));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 4, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         // Край шляпки: под ним пусто до самой земли.
         let id = w.units.spawn(38, 38, 0, 0, 300) as usize;
         w.units.y[id] = 44;
@@ -507,8 +509,8 @@ mod tests {
     #[test]
     fn a_unit_rides_the_falling_piece_and_is_hurt_by_the_drop() {
         let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Mushroom));
-        let mut w = World::new(1, 4);
-        w.attach_ground(Ground::new(vw, 16, 4, 2));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
         let id = w.units.spawn(32, 32, 0, 0, 300) as usize;
         w.units.refresh_live();
         // Первый тик ставит юнита на пол своей клетки — верх шляпки.
@@ -623,9 +625,9 @@ mod tests {
     /// заглушки, что были.
     #[test]
     fn a_world_without_ground_ticks_exactly_as_before() {
-        let mut a = World::new(2, 16);
+        let mut a = World::new(2, 16, test_tuning());
         crate::populate(&mut a, 200, 5);
-        let mut b = World::new(2, 16);
+        let mut b = World::new(2, 16, test_tuning());
         crate::populate(&mut b, 200, 5);
         let (mut ha, mut hb) = (0, 0);
         for _ in 0..50 {

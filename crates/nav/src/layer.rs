@@ -66,7 +66,9 @@ pub struct NavLayer {
 }
 
 impl NavLayer {
-    pub fn new(w: &World, height: u32, step: u32) -> NavLayer {
+    /// `max_step` — какой перепад юнит перешагивает. Число игровое
+    /// и приходит из данных (ADR-140), а не стоит здесь литералом.
+    pub fn new(w: &World, height: u32, step: u32, max_step: u32) -> NavLayer {
         let (nw, nh) = (w.nx / step, w.nz / step);
         let mut l = NavLayer {
             floor: vec![NO_FLOOR; (nw * nh) as usize],
@@ -80,7 +82,7 @@ impl NavLayer {
             w: nw,
             h: nh,
             height,
-            max_step: 1,
+            max_step,
             step,
         };
         for cz in 0..nh {

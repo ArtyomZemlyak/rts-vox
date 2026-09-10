@@ -29,7 +29,7 @@ fn run_mine(seed: u64, ticks: u64, diggers: usize, side: u32, verify: bool) -> R
     );
     let mut mesh = MeshLayer::new(&world, Opts::default());
     let mut topo = TopoLayer::new(&world);
-    let mut nav = NavLayer::new(&world, 4, 2);
+    let mut nav = NavLayer::new(&world, 4, 2, 1);
     let mut dig = Dig::clustered(
         &world,
         |x, z| terrain.surface(x, z),

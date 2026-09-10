@@ -19,6 +19,7 @@ pub mod shield;
 use fx::rng::Rng;
 use fx::Fx;
 use index::Grid;
+pub use modding::Tuning;
 
 /// Сторона мира в мировых единицах.
 pub const WORLD: i32 = 2000;
@@ -27,16 +28,12 @@ pub const NAV_CELL: i32 = 2;
 /// Сторона нав-сетки.
 pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 
-/// Радиус разделения: ближе этого юниты расталкиваются.
 /// Тиков в секунде. Скорость юнита задана в клетках **в секунду**,
 /// поэтому шаг за тик делится на это число. Голая тридцатка в формуле
 /// шага один раз уже стоила дорого: эталонный сценарий разводил
 /// стороны на расстояние, которое они не проходили за прогон (ADR-116).
 pub const TICKS_PER_SECOND: i32 = 30;
 
-pub const SEPARATION: i32 = 3;
-/// Дальность стрельбы.
-pub const RANGE: i32 = 24;
 
 /// Список фаз тика — окончательный (ADR-048). Порядок объявлен фиксированным
 /// навсегда: его изменение меняет хеши всех golden-файлов.
@@ -144,6 +141,16 @@ pub struct Units {
 }
 
 pub const NO_TARGET: u32 = u32::MAX;
+
+/// Настройки для тестов — **из того же файла**, по которому идёт игра.
+///
+/// Не литералы: числа тика живут в `data/sim.ron` и больше нигде
+/// (ADR-140). `include_str!` разворачивается на сборке, никакого
+/// ввода-вывода в тесте не появляется.
+#[cfg(test)]
+pub(crate) fn test_tuning() -> Tuning {
+    Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron")
+}
 
 /// Юнит стоит на опоре, а не падает.
 pub const NOT_FALLING: i32 = i32::MIN;
@@ -299,20 +306,21 @@ pub struct World {
     /// так, чтобы потолок поисков в обычном бою **не срабатывал**:
     /// потолок, упирающийся каждый тик, это не предохранитель, а
     /// постоянное ухудшение (ADR-116).
-    pub retarget_period: u32,
     /// Урон юниту за воксель падения (ADR-036). Число балансное
     /// и живёт здесь до появления загрузчика данных.
-    pub fall_damage_per_voxel: u16,
     /// Потолок поисков цели за тик. Второй потолок того же рода, что
     /// у дренажа мира: работа, которой в плотном бою становится
     /// квадратично много, обязана быть ограничена (ADR-116).
-    pub max_target_searches: usize,
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
     /// Замер: сколько шагов упёрлось в рельеф. Ноль на карте с землёй
     /// значит, что юниты по ней не ходят.
     pub blocked_moves: u64,
+    /// Числа тика: урон падения, периоды, потолки. **Из данных**
+    /// (ADR-140), поэтому не поля с литералами, а один слепок,
+    /// пришедший снаружи.
+    pub tuning: Tuning,
     /// Точка сбора владельца — то, к чему считается поле.
     flow_target: [Option<(i32, i32)>; 2],
     /// Потолок работы за тик на поле направлений: клеток на сборку
@@ -322,9 +330,6 @@ pub struct World {
     /// поэтому расчёт идёт порциями и продолжается со следующего тика
     /// (ADR-138). Потолок фиксирован, а не «сколько успеем»: разное
     /// отставание у разных клиентов это десинк (ADR-089).
-    pub flow_cells_per_tick: u32,
-    pub flow_scan_per_tick: u32,
-    pub flow_updates_per_tick: u64,
     /// Маршрут владельца: опубликованное поле и то, что считается.
     routes: [nav::volume::VolRoute; 2],
     /// Узлов получило конечное время в последнем опубликованном поле.
@@ -354,8 +359,8 @@ pub struct World {
 const DIRS: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
 
 impl World {
-    pub fn new(owners: usize, capacity: usize) -> World {
-        World::with_cells(owners, capacity, SEPARATION, RANGE)
+    pub fn new(owners: usize, capacity: usize, tuning: Tuning) -> World {
+        World::with_cells(owners, capacity, tuning.separation, tuning.range, tuning)
     }
 
     /// Привязать воксельный мир. До этого фазы земли — заглушки.
@@ -385,7 +390,13 @@ impl World {
     /// от плотности. Мелкое ведро дёшево в запросе и дорого в пересборке:
     /// при стороне 3 на карте 2000 это 445 тысяч корзин, которые надо
     /// обнулить каждый тик.
-    pub fn with_cells(owners: usize, capacity: usize, near: i32, far: i32) -> World {
+    pub fn with_cells(
+        owners: usize,
+        capacity: usize,
+        near: i32,
+        far: i32,
+        tuning: Tuning,
+    ) -> World {
         World {
             units: Units::new(),
             flow: (0..owners).map(|_| vec![255u8; NAV * NAV]).collect(),
@@ -397,16 +408,11 @@ impl World {
             delta: Vec::new(),
             tick: 0,
             damage: Vec::new(),
-            fall_damage_per_voxel: 3,
-            retarget_period: TICKS_PER_SECOND as u32,
-            max_target_searches: 512,
             examined_move: 0,
             examined_combat: 0,
             blocked_moves: 0,
+            tuning,
             flow_target: [None, None],
-            flow_cells_per_tick: 2_000,
-            flow_scan_per_tick: 8_000,
-            flow_updates_per_tick: 12_000,
             routes: [nav::volume::VolRoute::new(), nav::volume::VolRoute::new()],
             flow_reachable: 0,
             flow_updates: 0,
@@ -502,9 +508,9 @@ impl World {
         let cx = ((tx / st).max(0) as u32).min(gw.saturating_sub(1));
         let cz = ((tz / st).max(0) as u32).min(gh.saturating_sub(1));
         let b = nav::volume::Budget {
-            cells: self.flow_cells_per_tick,
-            scan: self.flow_scan_per_tick,
-            updates: self.flow_updates_per_tick,
+            cells: self.tuning.flow_cells_per_tick,
+            scan: self.tuning.flow_scan_per_tick,
+            updates: self.tuning.flow_updates_per_tick,
         };
         let done = routes[owner].step(&g.nav, cx, cz, b, &h_exact_floor);
         if done {
@@ -617,7 +623,7 @@ impl World {
     /// отвалившееся в этом тике, в нём же не падает, поэтому посадка
     /// успевает случиться до первого его движения.
     fn phase_ground_bodies(&mut self) {
-        let dmg = self.fall_damage_per_voxel;
+        let dmg = self.tuning.fall_damage_per_voxel;
         let Self { ground, units: u, .. } = self;
         let Some(g) = ground.as_mut() else { return };
 
@@ -744,7 +750,7 @@ impl World {
         } else {
             (0, 0)
         };
-        let r2 = SEPARATION * SEPARATION;
+        let r2 = self.tuning.separation * self.tuning.separation;
         let (sx, sz) = (&self.snap_x, &self.snap_z);
         self.grid_near.for_each_near(ux, uz, |j| {
             let j = j as usize;
@@ -802,7 +808,7 @@ impl World {
         // в туннеле — по туннелю (ADR-138). Без земли поле прежнее,
         // плоское: эталонный сценарий воксельного мира не строит.
         let vol = self.ground.as_ref().map(|g| (&g.nav, &self.routes));
-        let r2 = SEPARATION * SEPARATION;
+        let r2 = self.tuning.separation * self.tuning.separation;
 
         let compute = |i: usize| -> (i32, i32) {
             let (ux, uz) = (sx[i], sz[i]);
@@ -896,8 +902,8 @@ impl World {
     /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
     /// целой части в сетку.
     fn apply_deltas(&mut self) {
-        let Self { units: u, delta, ground, blocked_moves, fall_damage_per_voxel, .. } = self;
-        let fall_dmg = *fall_damage_per_voxel;
+        let fall_dmg = self.tuning.fall_damage_per_voxel;
+        let Self { units: u, delta, ground, blocked_moves, .. } = self;
         // Счётчики падения — те же, что у наездников: правило одно,
         // значит и отчёт один.
         let (mut fall_damage_acc, mut max_fall_acc) = (0u64, 0u32);
@@ -1036,7 +1042,7 @@ impl World {
     fn phase_combat(&mut self) {
         let u = &mut self.units;
         let mut examined = 0u64;
-        let r2 = RANGE * RANGE;
+        let r2 = self.tuning.range * self.tuning.range;
 
         // Часть первая: проверка уже выбранной цели. O(1) на юнита.
         //
@@ -1045,7 +1051,7 @@ impl World {
         // в плотном меняет всё: там поиск обходит весь сгусток, и цена
         // его квадратична по плотности, а не по числу юнитов (ADR-116).
         let tick = self.tick as u32;
-        let period = self.retarget_period;
+        let period = self.tuning.retarget_period;
         let mut need = std::mem::take(&mut self.need_search);
         need.clear();
         for k in 0..u.live_ids.len() {
@@ -1082,7 +1088,7 @@ impl World {
         // отсекал бы один и тот же хвост списка, и юниты с большими
         // номерами не стреляли бы никогда. Сдвиг — чистая функция тика,
         // то есть детерминирован.
-        let cap = self.max_target_searches.max(1);
+        let cap = self.tuning.max_target_searches.max(1);
         let n = need.len();
         let start = if n == 0 { 0 } else { tick as usize % n };
         let take = cap.min(n);
@@ -1212,7 +1218,7 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     // (ADR-134). Без земли — прежний размах.
     let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
     let (midx, midz) = (ex / 2, ez / 2);
-    let gap = RANGE / 2;
+    let gap = w.tuning.range / 2;
     let spread = (ex / 6).clamp(4, 100);
     let depth = (ez / 4).clamp(4, 150);
     for k in 0..n {
@@ -1243,7 +1249,7 @@ mod tests {
     /// (ADR-116).
     #[test]
     fn the_reference_scenario_actually_fights() {
-        let mut w = World::new(2, 2000);
+        let mut w = World::new(2, 2000, test_tuning());
         populate(&mut w, 2000, 42);
         let before = w.units.live().len();
         let mut ever_targeted = false;
@@ -1269,7 +1275,7 @@ mod tests {
     #[test]
     fn the_search_cap_does_not_change_with_worker_count() {
         let run = |threads: usize| {
-            let mut w = World::new(2, 2000);
+            let mut w = World::new(2, 2000, test_tuning());
             populate(&mut w, 2000, 7);
             let mut h = 0;
             for _ in 0..120 {
@@ -1285,7 +1291,7 @@ mod tests {
     #[test]
     fn same_seed_same_hash() {
         let run = || {
-            let mut w = World::new(2, 4096);
+            let mut w = World::new(2, 4096, test_tuning());
             populate(&mut w, 2000, 42);
             let mut h = 0u64;
             for _ in 0..60 {
@@ -1303,7 +1309,7 @@ mod tests {
     #[test]
     fn one_hash_across_worker_counts() {
         let run = |threads: usize| {
-            let mut w = World::new(2, 8192);
+            let mut w = World::new(2, 8192, test_tuning());
             populate(&mut w, 3000, 77);
             let mut h = 0u64;
             for _ in 0..80 {
@@ -1321,7 +1327,7 @@ mod tests {
     #[test]
     fn different_seeds_differ() {
         let run = |seed| {
-            let mut w = World::new(2, 4096);
+            let mut w = World::new(2, 4096, test_tuning());
             populate(&mut w, 500, seed);
             let mut h = 0u64;
             for _ in 0..30 {
@@ -1335,7 +1341,7 @@ mod tests {
     /// Состояние обязано **меняться**: тест на «фазы пустые и потому быстрые».
     #[test]
     fn state_actually_moves() {
-        let mut w = World::new(2, 4096);
+        let mut w = World::new(2, 4096, test_tuning());
         populate(&mut w, 500, 7);
         // Поле направлений четырёхстороннее, поэтому половина юнитов идёт
         // чисто по Z: проверять надо положение, а не одну координату.
@@ -1365,7 +1371,7 @@ mod tests {
     /// Именно перестановка соседей молча меняет исход ничьей.
     #[test]
     fn kill_does_not_move_neighbours() {
-        let mut w = World::new(2, 64);
+        let mut w = World::new(2, 64, test_tuning());
         for k in 0..10 {
             w.units.spawn(k * 10, 0, 0, 1, 100);
         }
@@ -1386,7 +1392,7 @@ mod tests {
     /// побеждает меньший индекс.
     #[test]
     fn ties_resolve_by_index() {
-        let mut w = World::new(2, 64);
+        let mut w = World::new(2, 64, test_tuning());
         let me = w.units.spawn(100, 100, 0, 0, 100);
         // Две цели на одинаковом расстоянии.
         let a = w.units.spawn(110, 100, 1, 0, 100);

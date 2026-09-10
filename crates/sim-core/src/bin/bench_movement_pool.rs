@@ -10,7 +10,12 @@ use std::hint::black_box;
 use std::sync::Barrier;
 use std::time::Instant;
 
-use sim_core::{populate, World, RANGE, SEPARATION};
+use sim_core::{populate, World};
+
+/// Числа тика — из `data/sim.ron`, как и в игре (ADR-140).
+fn tuning() -> sim_core::Tuning {
+    sim_core::Tuning::from_ron(include_str!("../../../../data/sim.ron")).expect("data/sim.ron")
+}
 
 fn main() {
     let cores = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
@@ -18,7 +23,7 @@ fn main() {
     println!("фаза движения: снимок положений, расталкивание, поле направлений\n");
 
     for n in [2500usize, 5000, 10000] {
-        let mut w = World::with_cells(2, n * 2, SEPARATION, RANGE);
+        let mut w = World::with_cells(2, n * 2, tuning().separation, tuning().range, tuning());
         populate(&mut w, n, 42);
         for _ in 0..5 {
             w.tick();

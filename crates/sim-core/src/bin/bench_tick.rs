@@ -8,7 +8,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use sim_core::{populate, Phase, World, PHASES, RANGE, SEPARATION, WORLD};
+use sim_core::{populate, Phase, World, PHASES, WORLD};
 
 fn section(t: &str) {
     println!("\n=== {t} ===");
@@ -16,7 +16,7 @@ fn section(t: &str) {
 
 /// Прогон N тиков, возвращает миллисекунды на тик и разбивку по фазам.
 fn run(n_units: usize, ticks: usize, seed: u64, spread: i32) -> (f64, [u64; 16], u64, u64, usize) {
-    run_cells(n_units, ticks, seed, spread, SEPARATION, RANGE)
+    run_cells(n_units, ticks, seed, spread, tuning().separation, tuning().range)
 }
 
 fn run_cells(
@@ -27,7 +27,7 @@ fn run_cells(
     near: i32,
     far: i32,
 ) -> (f64, [u64; 16], u64, u64, usize) {
-    let mut w = World::with_cells(2, n_units * 2, near, far);
+    let mut w = World::with_cells(2, n_units * 2, near, far, tuning());
     populate_spread(&mut w, n_units, seed, spread);
     // Прогрев: индекс и кэш.
     for _ in 0..5 {
@@ -67,9 +67,16 @@ fn populate_spread(w: &mut World, n: usize, seed: u64, spread: i32) {
     let _ = populate;
 }
 
+/// Числа тика — из `data/sim.ron`, как и в игре (ADR-140).
+fn tuning() -> sim_core::Tuning {
+    sim_core::Tuning::from_ron(include_str!("../../../../data/sim.ron")).expect("data/sim.ron")
+}
+
 fn main() {
     println!(
-        "мир {WORLD}×{WORLD} мировых единиц, радиус расталкивания {SEPARATION}, дальность {RANGE}"
+        "мир {WORLD}×{WORLD} мировых единиц, радиус расталкивания {}, дальность {}",
+        tuning().separation,
+        tuning().range
     );
     println!("бюджет тика — 10 мс при 30 Гц\n");
 
@@ -145,7 +152,7 @@ fn main() {
         "ведро", "корзин", "nav_update мкс", "movement мкс", "итого мс", "осмотров/движ."
     );
     for near in [3i32, 6, 12, 24, 48] {
-        let (ms, phases, em, _, _) = run_cells(5000, 100, 42, 150, near, RANGE);
+        let (ms, phases, em, _, _) = run_cells(5000, 100, 42, 150, near, tuning().range);
         let buckets = ((WORLD / near) as usize + 1).pow(2);
         println!(
             "{near:>12} {buckets:>14} {:>14.1} {:>14.1} {ms:>14.3} {:>16.1}",
@@ -163,7 +170,7 @@ fn main() {
         "ведро", "nav_update мкс", "movement мкс", "итого мс", "осмотров/движ."
     );
     for near in [3i32, 6, 12, 24] {
-        let (ms, phases, em, _, _) = run_cells(5000, 100, 42, 40, near, RANGE);
+        let (ms, phases, em, _, _) = run_cells(5000, 100, 42, 40, near, tuning().range);
         println!(
             "{near:>12} {:>14.1} {:>14.1} {ms:>14.3} {:>16.1}",
             phases[6] as f64 / 100.0 / 1000.0,
@@ -180,7 +187,7 @@ fn main() {
     for n in [5000usize, 10000] {
         let mut base = 0.0f64;
         for threads in [1usize, 2, 4, 7, 8] {
-            let mut w = World::with_cells(2, n * 2, SEPARATION, RANGE);
+            let mut w = World::with_cells(2, n * 2, tuning().separation, tuning().range, tuning());
             populate_spread(&mut w, n, 42, 150);
             for _ in 0..5 { w.tick_par(threads); }
             w.phase_ns = [0; 16];
@@ -197,7 +204,7 @@ fn main() {
 
     section("7. Детерминизм");
     let a = {
-        let mut w = World::new(2, 8192);
+        let mut w = World::new(2, 8192, tuning());
         populate_spread(&mut w, 4000, 99, 150);
         let mut h = 0;
         for _ in 0..120 {
@@ -206,7 +213,7 @@ fn main() {
         h
     };
     let b = {
-        let mut w = World::new(2, 8192);
+        let mut w = World::new(2, 8192, tuning());
         populate_spread(&mut w, 4000, 99, 150);
         let mut h = 0;
         for _ in 0..120 {
