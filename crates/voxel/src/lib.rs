@@ -11,5 +11,7 @@
 
 pub mod store;
 pub mod topo;
+pub mod world;
 
 pub use topo::{Chunk, Components, Run};
+pub use world::{Edit, FlushStats, Generator, World};

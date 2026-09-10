@@ -1,0 +1,403 @@
+//! Мир: двухслойный, с очередью правок и битовым объёмом занятости.
+//!
+//! **Два слоя** (`docs/04-world.md`): процедурный — мир восстанавливается
+//! из сида — плюс слой изменённых чанков. Нетронутый чанк не хранится
+//! вовсе: его материал спрашивается у генератора. Материализуется чанк
+//! при первой же правке.
+//!
+//! **Генератор входит трейтом, а не зависимостью.** `worldgen` зависит
+//! от `voxel`, значит обратно нельзя; трейт разворачивает стрелку
+//! и заодно позволяет сцене подставить свой рельеф.
+//!
+//! **Битовый объём обновляется списком правок, а не пересборкой**
+//! (ADR-061). Пересборка чанка обходом байт стоит около ста микросекунд
+//! и в сто раз перекрывает инкрементальный ремеш, который она обслуживает.
+//!
+//! **Очередь правок с потолком** (ADR-013, ADR-045). Потолок считает
+//! **затронутые воксели**, в любом масштабе: он защищает тик, а не
+//! экономику. Очередь детерминирована — FIFO, дренаж строго по порядку.
+
+use crate::store::{Mat, Paletted, AIR, CS};
+
+/// Правка: воксель и материал, который в нём оказался.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Edit {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    /// Материал **после** правки. `AIR` — снятие.
+    pub mat: Mat,
+}
+
+/// Процедурный слой. Обязан быть чистой функцией от координат: значение
+/// не зависит ни от порядка обхода, ни от того, что уже посчитано.
+pub trait Generator {
+    fn material(&self, x: u32, y: u32, z: u32) -> Mat;
+}
+
+/// Что вернул дренаж очереди.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct FlushStats {
+    /// Сколько правок применено в этот тик.
+    pub applied: usize,
+    /// Сколько осталось в очереди — это отставание, и оно видно игроку.
+    pub queued: usize,
+    /// Сколько правок ничего не изменили: воксель уже был таким.
+    pub noop: usize,
+}
+
+pub struct World {
+    pub nx: u32,
+    pub ny: u32,
+    pub nz: u32,
+    /// Потолок затронутых вокселей за тик.
+    pub max_edits_per_tick: usize,
+    gen: Box<dyn Generator>,
+    /// Слой изменений: `None` — чанк нетронут, материал у генератора.
+    chunks: Vec<Option<Box<Paletted>>>,
+    cx: u32,
+    cy: u32,
+    /// Битовый объём занятости, плотный. Слово на 64 воксела по X.
+    bits: Vec<u64>,
+    wx: u32,
+    /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
+    queue: std::collections::VecDeque<Edit>,
+    /// Правки, применённые в текущем тике. Это и есть поток для рендера
+    /// (ADR-103) и вход связности с навигацией.
+    applied: Vec<Edit>,
+}
+
+impl World {
+    /// Создать мир и построить битовый объём из генератора.
+    ///
+    /// Построение — единственное место, где генератор обходится целиком;
+    /// дальше мир живёт правками.
+    pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator>) -> World {
+        let (cx, cy, cz) = (
+            nx.div_ceil(CS as u32),
+            ny.div_ceil(CS as u32),
+            nz.div_ceil(CS as u32),
+        );
+        let wx = nx.div_ceil(64);
+        let mut bits = vec![0u64; (wx * ny * nz) as usize];
+        for z in 0..nz {
+            for y in 0..ny {
+                let row = ((y * nz + z) * wx) as usize;
+                for x in 0..nx {
+                    if g.material(x, y, z) != AIR {
+                        bits[row + (x >> 6) as usize] |= 1u64 << (x & 63);
+                    }
+                }
+            }
+        }
+        World {
+            nx,
+            ny,
+            nz,
+            max_edits_per_tick,
+            gen: g,
+            chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
+            cx,
+            cy,
+            bits,
+            wx,
+            queue: std::collections::VecDeque::new(),
+            applied: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn inside(&self, x: u32, y: u32, z: u32) -> bool {
+        x < self.nx && y < self.ny && z < self.nz
+    }
+
+    #[inline]
+    fn chunk_index(&self, x: u32, y: u32, z: u32) -> usize {
+        let (a, b, c) = (x / CS as u32, y / CS as u32, z / CS as u32);
+        ((c * self.cy + b) * self.cx + a) as usize
+    }
+
+    #[inline]
+    fn bit_index(&self, x: u32, y: u32, z: u32) -> (usize, u64) {
+        (
+            (((y * self.nz + z) * self.wx) + (x >> 6)) as usize,
+            1u64 << (x & 63),
+        )
+    }
+
+    /// Занят ли воксель. Читает битовый объём, а не материал: это
+    /// то, чем пользуются навигация, связность и марш.
+    #[inline]
+    pub fn solid(&self, x: u32, y: u32, z: u32) -> bool {
+        if !self.inside(x, y, z) {
+            return false;
+        }
+        let (w, m) = self.bit_index(x, y, z);
+        self.bits[w] & m != 0
+    }
+
+    /// Материал воксела. Тронутый чанк — из слоя изменений, нетронутый —
+    /// из генератора.
+    pub fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+        if !self.inside(x, y, z) {
+            return AIR;
+        }
+        match &self.chunks[self.chunk_index(x, y, z)] {
+            Some(c) => c.get(
+                (x % CS as u32) as usize,
+                (y % CS as u32) as usize,
+                (z % CS as u32) as usize,
+            ),
+            None => self.gen.material(x, y, z),
+        }
+    }
+
+    /// Материализовать чанк из генератора — цена первой правки в нём.
+    fn materialize(&mut self, ci: usize) {
+        if self.chunks[ci].is_some() {
+            return;
+        }
+        let a = (ci as u32) % self.cx;
+        let b = ((ci as u32) / self.cx) % self.cy;
+        let c = (ci as u32) / (self.cx * self.cy);
+        let (ox, oy, oz) = (a * CS as u32, b * CS as u32, c * CS as u32);
+        let mut p = Paletted::new();
+        for ly in 0..CS as u32 {
+            for lz in 0..CS as u32 {
+                for lx in 0..CS as u32 {
+                    let (x, y, z) = (ox + lx, oy + ly, oz + lz);
+                    if !self.inside(x, y, z) {
+                        continue;
+                    }
+                    let m = self.gen.material(x, y, z);
+                    if m != AIR {
+                        p.set(lx as usize, ly as usize, lz as usize, m);
+                    }
+                }
+            }
+        }
+        self.chunks[ci] = Some(Box::new(p));
+    }
+
+    /// Поставить правку в очередь. Потолок применяется при дренаже,
+    /// а не здесь: очередь не имеет длины по построению — иначе приказ
+    /// молча терялся бы.
+    pub fn queue_edit(&mut self, e: Edit) {
+        if self.inside(e.x, e.y, e.z) {
+            self.queue.push_back(e);
+        }
+    }
+
+    pub fn queue_dig(&mut self, x: u32, y: u32, z: u32) {
+        self.queue_edit(Edit { x, y, z, mat: AIR });
+    }
+
+    pub fn queued(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Дренаж очереди в пределах потолка. Возвращает статистику;
+    /// сам список применённых правок — [`World::edits`].
+    pub fn flush(&mut self) -> FlushStats {
+        self.applied.clear();
+        let mut st = FlushStats::default();
+        while st.applied < self.max_edits_per_tick {
+            let Some(e) = self.queue.pop_front() else { break };
+            if self.apply(e) {
+                self.applied.push(e);
+                st.applied += 1;
+            } else {
+                st.noop += 1;
+            }
+        }
+        st.queued = self.queue.len();
+        st
+    }
+
+    /// Применить одну правку. Возвращает `false`, если она ничего
+    /// не изменила.
+    fn apply(&mut self, e: Edit) -> bool {
+        let was = self.material(e.x, e.y, e.z);
+        if was == e.mat {
+            return false;
+        }
+        let ci = self.chunk_index(e.x, e.y, e.z);
+        self.materialize(ci);
+        if let Some(c) = &mut self.chunks[ci] {
+            c.set(
+                (e.x % CS as u32) as usize,
+                (e.y % CS as u32) as usize,
+                (e.z % CS as u32) as usize,
+                e.mat,
+            );
+        }
+        let (w, m) = self.bit_index(e.x, e.y, e.z);
+        if e.mat == AIR {
+            self.bits[w] &= !m;
+        } else {
+            self.bits[w] |= m;
+        }
+        true
+    }
+
+    /// Правки, применённые в последнем дренаже. Поток для рендера
+    /// (ADR-103), вход связности и переворотов нав-клеток.
+    pub fn edits(&self) -> &[Edit] {
+        &self.applied
+    }
+
+    /// Битовый объём целиком — для пирамиды и марша.
+    pub fn bits(&self) -> &[u64] {
+        &self.bits
+    }
+
+    pub fn bit_words_per_row(&self) -> u32 {
+        self.wx
+    }
+
+    /// Сколько чанков материализовано. Это и есть размер слоя изменений.
+    pub fn touched_chunks(&self) -> usize {
+        self.chunks.iter().filter(|c| c.is_some()).count()
+    }
+
+    /// Байты слоя изменений. Нетронутые чанки не стоят ничего.
+    pub fn diff_bytes(&self) -> usize {
+        self.chunks
+            .iter()
+            .filter_map(|c| c.as_ref())
+            .map(|c| c.bytes())
+            .sum()
+    }
+
+    pub fn bit_bytes(&self) -> usize {
+        self.bits.len() * 8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Слоистый генератор: низ твёрдый, верх воздух, плюс «жила»
+    /// в середине — чтобы материал был не один.
+    struct Layers {
+        h: u32,
+    }
+    impl Generator for Layers {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y >= self.h {
+                AIR
+            } else if (x / 4 + z / 4) % 5 == 0 && y > self.h / 2 {
+                7
+            } else {
+                2
+            }
+        }
+    }
+
+    fn world() -> World {
+        World::new(64, 48, 64, 1000, Box::new(Layers { h: 30 }))
+    }
+
+    /// Нетронутый мир обязан совпадать с генератором во всех вокселях —
+    /// и по материалу, и по битовому объёму. Расхождение здесь означает,
+    /// что навигация и рендер смотрят в разные миры.
+    #[test]
+    fn untouched_world_matches_the_generator() {
+        let w = world();
+        let g = Layers { h: 30 };
+        for z in 0..w.nz {
+            for y in 0..w.ny {
+                for x in 0..w.nx {
+                    let m = g.material(x, y, z);
+                    assert_eq!(w.material(x, y, z), m, "материал ({x},{y},{z})");
+                    assert_eq!(w.solid(x, y, z), m != AIR, "бит ({x},{y},{z})");
+                }
+            }
+        }
+        assert_eq!(w.touched_chunks(), 0, "нетронутый мир не должен ничего хранить");
+    }
+
+    /// Правка видна **в тот же дренаж** и в материале, и в битах
+    /// (`CLAUDE.md`, «мир меняется для симуляции в тот же тик»).
+    #[test]
+    fn edit_is_visible_immediately_in_both_layers() {
+        let mut w = world();
+        assert!(w.solid(10, 5, 10));
+        w.queue_dig(10, 5, 10);
+        let st = w.flush();
+        assert_eq!(st.applied, 1);
+        assert_eq!(w.material(10, 5, 10), AIR);
+        assert!(!w.solid(10, 5, 10));
+        assert_eq!(w.edits(), &[Edit { x: 10, y: 5, z: 10, mat: AIR }]);
+        assert_eq!(w.touched_chunks(), 1, "тронут ровно один чанк");
+    }
+
+    /// Потолок соблюдается точно, а остаток остаётся в очереди —
+    /// не теряется. Потолок защищает тик; потеря приказа сломала бы
+    /// экономику.
+    #[test]
+    fn cap_is_exact_and_the_rest_stays_queued() {
+        let mut w = World::new(64, 48, 64, 100, Box::new(Layers { h: 30 }));
+        for i in 0..250u32 {
+            w.queue_dig(i % 60, 5, i / 60);
+        }
+        let st = w.flush();
+        assert_eq!(st.applied, 100);
+        assert_eq!(st.queued, 150);
+        assert_eq!(w.edits().len(), 100);
+        let st = w.flush();
+        assert_eq!(st.applied, 100);
+        assert_eq!(st.queued, 50);
+        let st = w.flush();
+        assert_eq!(st.applied, 50);
+        assert_eq!(st.queued, 0);
+    }
+
+    /// Пустая правка не тратит потолок: снять уже снятое — не работа.
+    /// Иначе повторный приказ по одному месту съедал бы бюджет тика.
+    #[test]
+    fn noop_edits_do_not_spend_the_cap() {
+        let mut w = World::new(64, 48, 64, 10, Box::new(Layers { h: 30 }));
+        for _ in 0..8 {
+            w.queue_dig(10, 5, 10);
+        }
+        w.queue_dig(11, 5, 10);
+        w.queue_dig(12, 5, 10);
+        let st = w.flush();
+        assert_eq!(st.applied, 3, "три разных воксела");
+        assert_eq!(st.noop, 7);
+        assert_eq!(st.queued, 0);
+    }
+
+    /// Дренаж строго FIFO: порядок применения не зависит ни от чего,
+    /// кроме порядка постановки.
+    #[test]
+    fn drain_order_is_fifo() {
+        let mut w = World::new(64, 48, 64, 3, Box::new(Layers { h: 30 }));
+        for x in 0..9u32 {
+            w.queue_dig(x, 5, 0);
+        }
+        for round in 0..3 {
+            w.flush();
+            let got: Vec<u32> = w.edits().iter().map(|e| e.x).collect();
+            assert_eq!(got, vec![round * 3, round * 3 + 1, round * 3 + 2]);
+        }
+    }
+
+    /// Слой изменений растёт только там, где копали.
+    #[test]
+    fn diff_layer_grows_only_where_dug() {
+        let mut w = world();
+        assert_eq!(w.diff_bytes(), 0);
+        w.queue_dig(1, 1, 1);
+        w.flush();
+        let one = w.diff_bytes();
+        assert!(one > 0);
+        // Ещё одна правка в том же чанке не добавляет чанков.
+        w.queue_dig(2, 1, 1);
+        w.flush();
+        assert_eq!(w.touched_chunks(), 1);
+        assert_eq!(w.diff_bytes(), one);
+    }
+}

@@ -57,7 +57,7 @@ fn main() {
             let mut d = Dense::new();
             let mut r = Rng::new(5, 5);
             for i in d.v.iter_mut() {
-                *i = r.below(6) as u8;
+                *i = r.below(6) as u16;
             }
             d
         }),
@@ -200,13 +200,13 @@ fn main() {
     ] {
         let base = scene(3);
         let mut r = Rng::new(11, mats as u64);
-        let cells: Vec<(usize, usize, usize, u8)> = (0..edits)
+        let cells: Vec<(usize, usize, usize, u16)> = (0..edits)
             .map(|_| {
                 (
                     r.below(CS as u32) as usize,
                     r.below(CS as u32) as usize,
                     r.below(CS as u32) as usize,
-                    if mats == 1 { 0 } else { r.below(mats) as u8 },
+                    if mats == 1 { 0 } else { r.below(mats) as u16 },
                 )
             })
             .collect();
