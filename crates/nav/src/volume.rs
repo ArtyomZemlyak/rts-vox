@@ -44,8 +44,32 @@ pub struct VolGraph {
     start: Vec<u32>,
     /// Сколько узлов у клетки.
     count: Vec<u8>,
-    /// Соседи узла в порядке `SIDES`.
+    /// Первый сосед узла с каждой стороны, в порядке `SIDES`.
+    ///
+    /// Соседей на одну сторону бывает несколько: шагнуть из клетки
+    /// в соседнюю можно **на любой её уровень**, отстоящий не дальше
+    /// посильного перепада. Уровни отсортированы, поэтому подходящие
+    /// идут подряд, и хватает первого с количеством.
+    ///
+    /// Один сосед на сторону — «ближайший по высоте» — делал граф
+    /// **направленным**: из клетки с двумя уровнями ближайшим оказывался
+    /// не тот, из которого пришли. На D-7 это стоило шестнадцати
+    /// процентов узлов без направления при перепаде в воксель
+    /// и девяноста шести при перепаде в четыре (ADR-141).
     nb: Vec<[u32; 4]>,
+    /// Сколько соседей с каждой стороны.
+    nbn: Vec<[u8; 4]>,
+    /// Высота каждого узла — **снимок**, снятый в `begin`.
+    ///
+    /// Не обращение к слою: слой меняется, пока граф собирается
+    /// порциями, и клетка, собранная на третьем тике, видела бы
+    /// соседа не таким, каким тот увидит её на шестом. Рёбра тогда
+    /// расходятся, обход по ним перестаёт быть разметкой компонент,
+    /// и часть узлов остаётся без цели — на D-7 это было четырнадцать
+    /// процентов (ADR-141).
+    lev: Vec<u16>,
+    /// Посильный перепад — тоже снимок, по той же причине.
+    max_step: u32,
     pub nodes: usize,
     pub edges: usize,
     /// Клетка, с которой продолжится сборка рёбер.
@@ -71,6 +95,22 @@ impl VolGraph {
         self.start[i] + li as u32
     }
 
+    /// Соседи узла с одной стороны — подряд идущие узлы соседней клетки.
+    #[inline]
+    pub fn side(&self, node: usize, k: usize) -> std::ops::Range<u32> {
+        let first = self.nb[node][k];
+        if first == NO_NODE {
+            return 0..0;
+        }
+        first..first + self.nbn[node][k] as u32
+    }
+
+    /// Все соседи узла.
+    #[inline]
+    pub fn neighbours(&self, node: usize) -> impl Iterator<Item = u32> + '_ {
+        (0..4).flat_map(move |k| self.side(node, k))
+    }
+
     /// Начать сборку: пересчитать узлы. Проход дешёвый — по клеткам,
     /// а не по узлам, — поэтому идёт целиком.
     pub fn begin(&mut self, nav: &NavLayer) {
@@ -93,15 +133,28 @@ impl VolGraph {
             }
         }
         self.nodes = nodes as usize;
+        self.max_step = nav.max_step;
+        self.lev.clear();
+        self.lev.resize(nodes as usize, 0);
+        for cz in 0..h {
+            for cx in 0..w {
+                let i = (cz * w + cx) as usize;
+                let levels = nav.levels_at(cx, cz);
+                let base = self.start[i] as usize;
+                self.lev[base..base + levels.len()].copy_from_slice(levels);
+            }
+        }
         self.nb.clear();
         self.nb.resize(nodes as usize, [NO_NODE; 4]);
+        self.nbn.clear();
+        self.nbn.resize(nodes as usize, [0; 4]);
         self.edges = 0;
         self.cursor = 0;
     }
 
     /// Досчитать рёбра, но не более чем для `budget` узлов.
     /// `true` — граф собран.
-    pub fn build_step(&mut self, nav: &NavLayer, budget: u32) -> bool {
+    pub fn build_step(&mut self, budget: u32) -> bool {
         let cells = self.w * self.h;
         let mut spent = 0u32;
         while self.cursor < cells {
@@ -110,34 +163,38 @@ impl VolGraph {
             }
             let i = self.cursor as usize;
             let (cx, cz) = (self.cursor % self.w, self.cursor / self.w);
-            let levels = nav.levels_at(cx, cz);
-            // Граф собирается порциями, а слой за это время меняется:
-            // копка добавляет и убирает уровни. Число узлов зафиксировано
-            // в `begin`, поэтому здесь берётся оно, а не сегодняшняя
-            // длина списка — граф остаётся **снимком**, а не смесью
-            // двух состояний с ссылками в никуда.
             for li in 0..self.count[i] as usize {
-                let Some(&yv) = levels.get(li) else { continue };
-                let y = yv as i32;
                 let node = (self.start[i] as usize) + li;
+                let y = self.lev[node] as i32;
                 for (k, (dx, dz)) in SIDES.iter().enumerate() {
                     let (nx, nz) = (cx as i32 + dx, cz as i32 + dz);
                     if nx < 0 || nz < 0 || nx >= self.w as i32 || nz >= self.h as i32 {
                         continue;
                     }
                     let (nx, nz) = (nx as u32, nz as u32);
-                    let Some(l) = nav.step_to((cx, cz), y, (nx, nz)) else { continue };
                     let j = (nz * self.w + nx) as usize;
-                    // `step_to` вернул **высоту**, а узлу нужен номер
-                    // уровня: их порядок и есть нумерация узлов.
-                    let Some(lj) = nav.levels_at(nx, nz).iter().position(|&v| v == l) else {
-                        continue;
-                    };
-                    if lj >= self.count[j] as usize {
+                    let n_there = self.count[j] as usize;
+                    let base = self.start[j] as usize;
+                    // Все уровни соседа в пределах посильного перепада.
+                    // Отсортированы, значит подходящие идут подряд.
+                    //
+                    // Отношение симметрично по построению: если из `a`
+                    // видно `b`, то из `b` видно `a`. Разметка компонент
+                    // идёт по этим же рёбрам, и односторонность сделала бы
+                    // её не разметкой, а произвольным разбиением.
+                    let (mut lo, mut hi) = (n_there, 0usize);
+                    for lj in 0..n_there {
+                        if (self.lev[base + lj] as i32 - y).unsigned_abs() <= self.max_step {
+                            lo = lo.min(lj);
+                            hi = lj + 1;
+                        }
+                    }
+                    if lo >= hi {
                         continue;
                     }
-                    self.nb[node][k] = self.start[j] + lj as u32;
-                    self.edges += 1;
+                    self.nb[node][k] = self.start[j] + lo as u32;
+                    self.nbn[node][k] = (hi - lo) as u8;
+                    self.edges += hi - lo;
                 }
             }
             spent += (self.count[i] as u32).max(1);
@@ -149,7 +206,7 @@ impl VolGraph {
     /// Собрать целиком. Для тестов и замеров.
     pub fn build(&mut self, nav: &NavLayer) {
         self.begin(nav);
-        while !self.build_step(nav, u32::MAX) {}
+        while !self.build_step(u32::MAX) {}
     }
 }
 
@@ -231,8 +288,8 @@ impl VolField {
         let mut spent = 0u32;
         loop {
             while let Some(k) = self.stack.pop() {
-                for &m in g.nb[k as usize].iter() {
-                    if m != NO_NODE && self.comp[m as usize] == u32::MAX {
+                for m in g.neighbours(k as usize) {
+                    if self.comp[m as usize] == u32::MAX {
                         self.comp[m as usize] = self.lab_cur;
                         self.stack.push(m);
                     }
@@ -296,10 +353,8 @@ impl VolField {
             }
             self.t[s as usize] = 0;
             self.fixed[s as usize] = true;
-            for &m in g.nb[s as usize].iter() {
-                if m != NO_NODE {
-                    self.active[m as usize] = true;
-                }
+            for m in g.neighbours(s as usize) {
+                self.active[m as usize] = true;
             }
         }
         true
@@ -346,18 +401,22 @@ impl VolField {
                         self.active[node] = false;
                         continue;
                     }
-                    let nb = g.nb[node];
-                    let tv = |m: u32| if m == NO_NODE { INF } else { self.t[m as usize] };
-                    let a = tv(nb[1]).min(tv(nb[2]));
-                    let b = tv(nb[0]).min(tv(nb[3]));
+                    let side = |k: usize| -> Time {
+                        g.side(node, k)
+                            .map(|m| self.t[m as usize])
+                            .min()
+                            .unwrap_or(INF)
+                    };
+                    let a = side(1).min(side(2));
+                    let b = side(0).min(side(3));
                     self.updates += 1;
                     spent += 1;
                     let q = update2d(a, b, STEP_COST, h);
                     if q < self.t[node] {
                         self.t[node] = q;
                         self.round_changed = true;
-                        for &m in nb.iter() {
-                            if m != NO_NODE && !self.fixed[m as usize] {
+                        for m in g.neighbours(node) {
+                            if !self.fixed[m as usize] {
                                 self.active[m as usize] = true;
                             }
                         }
@@ -394,19 +453,20 @@ impl VolField {
                 continue;
             }
             self.reachable += 1;
-            let nb = g.nb[node];
             let mut best = self.t[node];
             let mut best_k = 255u8;
             let mut best_m = NO_NODE;
-            for (k, &m) in nb.iter().enumerate() {
-                if m == NO_NODE || self.t[m as usize] == INF {
-                    continue;
-                }
-                let tm = self.t[m as usize];
-                if tm < best || (tm == best && m < best_m) {
-                    best = tm;
-                    best_k = k as u8;
-                    best_m = m;
+            for k in 0..4 {
+                for m in g.side(node, k) {
+                    let tm = self.t[m as usize];
+                    if tm == INF {
+                        continue;
+                    }
+                    if tm < best || (tm == best && m < best_m) {
+                        best = tm;
+                        best_k = k as u8;
+                        best_m = m;
+                    }
                 }
             }
             self.dir[node] = best_k;
@@ -520,7 +580,7 @@ impl VolRoute {
                 return false;
             }
             Stage::Build => {
-                if !self.wg.build_step(nav, b.cells) {
+                if !self.wg.build_step(b.cells) {
                     return false;
                 }
                 self.wf.alloc(&self.wg);
@@ -661,6 +721,46 @@ mod tests {
         }
         assert!(multi > 0, "в мире нет многоуровневых клеток");
         assert!(g.nodes > (w * h) as usize, "узлов не больше клеток");
+    }
+
+    /// **Каждый узел получает направление.** У каждой компоненты своя
+    /// цель, значит недостижимых узлов быть не может. Пока рёбра были
+    /// односторонними, на D-7 без направления оставалось четырнадцать
+    /// процентов узлов при перепаде в воксель и девяносто шесть при
+    /// перепаде в четыре (ADR-141).
+    #[test]
+    fn every_node_gets_a_direction() {
+        for tunnel in [true, false] {
+            let (g, f, _) = field(tunnel);
+            assert_eq!(
+                f.reachable, g.nodes,
+                "узлов без времени: {}",
+                g.nodes - f.reachable
+            );
+            let blind = (0..g.nodes).filter(|&n| f.dir[n] == 255).count();
+            // Без направления остаются только сами цели: идти им некуда.
+            assert_eq!(blind, f.components, "узлов без направления больше, чем целей");
+        }
+    }
+
+    /// **Ребро двустороннее.** Из `a` видно `b` тогда и только тогда,
+    /// когда из `b` видно `a`, — иначе разметка компонент перестаёт
+    /// быть разметкой.
+    #[test]
+    fn an_edge_is_mutual() {
+        let (g, _, _) = field(true);
+        for n in 0..g.nodes {
+            for k in 0..4 {
+                // Обратная сторона: -Z против +Z, -X против +X.
+                let back = [3usize, 2, 1, 0][k];
+                for m in g.side(n, k) {
+                    assert!(
+                        g.side(m as usize, back).any(|x| x as usize == n),
+                        "ребро {n} -> {m} по стороне {k} не двустороннее"
+                    );
+                }
+            }
+        }
     }
 
     /// **Порционный расчёт даёт то же поле, что и разовый.** Потолок
