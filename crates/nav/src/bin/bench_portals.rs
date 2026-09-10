@@ -153,6 +153,63 @@ fn main() {
         "это {:.0}% бюджета тика — то есть каждый тик пересобирать нельзя,",
         full * 1e3 / TICK_MS * 100.0
     );
-    println!("нужна инкрементальная: только секторы, где менялась проходимость.");
-    println!("сколько это стоит — не измерено, инкремента ещё нет.");
+
+    // Инкрементальная пересборка: только секторы, где менялась
+    // проходимость. Мерится и **скученный** набор грязных секторов
+    // (копка идёт забоями, ADR-024), и рассыпанный по всей карте —
+    // разница между ними и есть цена того, что фронт грязного длиннее.
+    let sx = PortalGraph::build(&g).0.sx;
+    let sy = PortalGraph::build(&g).0.sy;
+    println!("\nсекторов на карте: {} × {} = {}\n", sx, sy, sx * sy);
+    println!(
+        "{:<10} {:>10} {:>12} {:>12} {:>12} {:>10}",
+        "грязных", "форма", "решений", "переисп.", "пересборка, мс", "к полной"
+    );
+    for &n in &[1usize, 8, 32, 70, 128, 256, 1024] {
+        for clustered in [true, false] {
+            if n > sx * sy {
+                continue;
+            }
+            let dirty: Vec<u32> = if clustered {
+                // Квадратный забой: n секторов подряд, ряд за рядом.
+                let side = (n as f64).sqrt().ceil() as usize;
+                (0..n)
+                    .map(|k| {
+                        let (cx, cy) = (10 + k % side, 10 + k / side);
+                        (cy.min(sy - 1) * sx + cx.min(sx - 1)) as u32
+                    })
+                    .collect()
+            } else {
+                // Рассыпанный: каждый k-й сектор карты.
+                let step = (sx * sy).div_ceil(n);
+                (0..n).map(|k| ((k * step) % (sx * sy)) as u32).collect()
+            };
+            let mut dirty: Vec<u32> = dirty;
+            dirty.sort_unstable();
+            dirty.dedup();
+
+            // Стенд обязан мерить пересборку, а не первую сборку:
+            // граф строится заново на каждом повторе.
+            let mut solves = 0usize;
+            let mut reused = 0usize;
+            let t = best_of(3, || {
+                let (mut pg, _) = PortalGraph::build(&g);
+                let st = pg.rebuild(&g, &dirty);
+                solves = st.sector_solves;
+                reused = st.reused_portals;
+                black_box(pg.portals.len());
+            });
+            // best_of включает полную сборку — вычитаем её.
+            let inc = (t - full).max(0.0);
+            println!(
+                "{:<10} {:>10} {:>12} {:>12} {:>12.3} {:>9.0}%",
+                dirty.len(),
+                if clustered { "забой" } else { "россыпь" },
+                solves,
+                reused,
+                inc * 1e3,
+                inc / full * 100.0
+            );
+        }
+    }
 }
