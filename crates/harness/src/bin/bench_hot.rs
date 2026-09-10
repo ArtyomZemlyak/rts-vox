@@ -183,4 +183,61 @@ fn main() {
         );
     }
     println!("(в цену пустоты входит инверсия колонок: 1024 слова)");
+
+    section("4. Разделение водоёма: то же чередование, но по пустоте");
+    println!("слияние — объединение меток, дёшево. Дорого разделение,");
+    println!("и его цена обязана следовать меньшей половине, а не объёму.
+");
+    println!(
+        "{:<18} {:>12} {:>14} {:>12} {:>14}",
+        "сцена", "событий", "обойдено ср.", "p99", "мкс/событие"
+    );
+    let mut bufs = topo::stage_b::FloodBufs::new();
+    for scene in TopoScene::ALL {
+        let c = build_topo(scene, 42);
+        let inv = topo::Chunk { cols: c.cols.iter().map(|w| !w).collect() };
+        // Заполняем воду: событие разделения — снятие воксела пустоты,
+        // то есть **добавление** твёрдого в мир.
+        let mut cells = Vec::new();
+        for z in 0..topo::CS {
+            for y in 0..topo::CS {
+                for x in 0..topo::CS {
+                    if inv.get(x, y, z) {
+                        cells.push((x, y, z));
+                    }
+                }
+            }
+        }
+        if cells.len() < 50 {
+            println!("{:<18} {:>12}", scene.name(), 0);
+            continue;
+        }
+        let mut visited: Vec<u32> = Vec::new();
+        let step = (cells.len() / 400).max(1);
+        for &(x, y, z) in cells.iter().step_by(step) {
+            let mut cut = inv.clone();
+            cut.set(x, y, z, false);
+            let (_, t) = topo::stage_b::probe(&cut, &mut bufs, x, y, z, 512);
+            visited.push(t);
+        }
+        visited.sort_unstable();
+        let mean = visited.iter().map(|&v| v as u64).sum::<u64>() as f64 / visited.len() as f64;
+        let p99 = visited[(visited.len() * 99 / 100).min(visited.len() - 1)];
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            let mut acc = 0u64;
+            for &(x, y, z) in cells.iter().step_by(step) {
+                acc += topo::stage_b::probe(&inv, &mut bufs, x, y, z, 512).1 as u64;
+            }
+            black_box(acc);
+            best = best.min(t0.elapsed().as_secs_f64() * 1e6 / visited.len() as f64);
+        }
+        println!(
+            "{:<18} {:>12} {mean:>14.1} {p99:>12} {best:>14.3}",
+            scene.name(),
+            visited.len()
+        );
+    }
+    println!("(потолок 512 клеток на сторону; пробитие потолка означает «спрашивать граф»)");
 }
