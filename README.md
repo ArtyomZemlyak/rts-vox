@@ -91,6 +91,31 @@ grep -rn '\[QUESTION' docs/
 | [09-gpu-compute.md](docs/analysis/09-gpu-compute.md) | Вычисления на GPU: почему симуляция остаётся на CPU |
 | [10-decisions-full.md](docs/analysis/10-decisions-full.md) | ADR целиком: контекст, основание, цена, поправки |
 
+**Замеры — `docs/analysis/11`…`20`.** Всё, что ниже, получено на работающем
+коде в `crates/`, а не оценкой. Каждый документ говорит и что померено,
+и что осталось непокрытым.
+
+| Документ | Что измерено |
+|---|---|
+| [11-eikonal-bench.md](docs/analysis/11-eikonal-bench.md) | Навигация: решатель, разрядность поля, порядок-независимость, масштабирование |
+| [12-meshing-bench.md](docs/analysis/12-meshing-bench.md) | Мешинг: квады на реальных сценах, рычаги, инкрементальный ремеш |
+| [13-vision-bench.md](docs/analysis/13-vision-bench.md) | Видимость: теневой каст, инкрементальность, инвалидация от копки |
+| [14-connectivity-bench.md](docs/analysis/14-connectivity-bench.md) | Связность: каскад мира и связность частей юнита с ядром |
+| [15-tick-bench.md](docs/analysis/15-tick-bench.md) | Тик под нагрузкой: 5000 сущностей, плотность, воркеры |
+| [16-sustained-digging.md](docs/analysis/16-sustained-digging.md) | Устойчивая копка: три подсистемы в одном прогоне |
+| [17-raycast-bench.md](docs/analysis/17-raycast-bench.md) | DDA: горизонтальные лучи против камерных, анизотропия раскладки |
+| [18-storage-bench.md](docs/analysis/18-storage-bench.md) | Хранение чанка: три раскладки, копия в память игрока |
+| [19-remaining-bench.md](docs/analysis/19-remaining-bench.md) | Щиты, энергия, горячие чанки, пустоты, память игрока |
+| [20-measurement-machine.md](docs/analysis/20-measurement-machine.md) | Машина замеров, время сборки и три правила замера |
+
+Запустить любой:
+
+```
+cargo run --release -p nav  --bin bench_eikonal
+cargo run --release -p mesh --bin bench_mesh
+cargo test  --release
+```
+
 Рабочие инварианты для агента — [CLAUDE.md](CLAUDE.md).
 
 ## Главный риск, названный явно
