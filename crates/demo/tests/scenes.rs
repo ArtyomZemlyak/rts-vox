@@ -509,3 +509,101 @@ fn d5_hash_distinguishes_runs_and_repeats_itself() {
     assert_ne!(a, run_haul(43, 300).0, "разный сид дал тот же хеш");
     assert_ne!(a, run_haul(42, 200).0, "разная длина дала тот же хеш");
 }
+
+// ---------------------------------------------------------------- D-6
+
+use voxel::los::line_of_sight;
+
+struct Ridge;
+impl Generator for Ridge {
+    fn material(&self, x: u32, y: u32, _z: u32) -> Mat {
+        if y < 8 {
+            return 2;
+        }
+        if x.abs_diff(64) <= 5 && y < 40 {
+            return 3;
+        }
+        AIR
+    }
+}
+
+fn dig_box(w: &mut World, xs: (u32, u32), ys: (u32, u32), zs: (u32, u32)) -> u64 {
+    for y in ys.0..ys.1 {
+        for z in zs.0..zs.1 {
+            for x in xs.0..xs.1 {
+                if w.solid(x, y, z) {
+                    w.queue_dig(x, y, z);
+                }
+            }
+        }
+    }
+    let mut n = 0;
+    while w.queued() > 0 {
+        n += w.flush().applied as u64;
+    }
+    n
+}
+
+/// **Линия огня следует за геометрией в тот же тик.** Гряда закрывает,
+/// прокопанный коридор открывает — без кэша и без отложенного
+/// обновления.
+#[test]
+fn d6_line_of_fire_follows_the_geometry() {
+    let mut w = World::new(128, 64, 128, 100_000, Box::new(Ridge));
+    let a = (32, 9, 64);
+    let b = (96, 9, 64);
+    assert!(!line_of_sight(&w, a, b).clear, "гряда не закрыла линию");
+
+    // Срыв гребня линию по полу не открывает — она идёт ниже.
+    dig_box(&mut w, (59, 70), (20, 40), (58, 70));
+    assert!(
+        !line_of_sight(&w, a, b).clear,
+        "срыв гребня открыл линию по полу"
+    );
+
+    // Коридор у основания — открывает.
+    let dug = dig_box(&mut w, (59, 70), (8, 14), (61, 67));
+    assert!(dug > 0, "коридор не прокопан");
+    assert!(
+        line_of_sight(&w, a, b).clear,
+        "коридор прокопан, а линия закрыта"
+    );
+}
+
+/// Срыв гребня открывает линию **над** грядой, но только её.
+#[test]
+fn d6_shaving_the_crest_opens_only_the_upper_line() {
+    let mut w = World::new(128, 64, 128, 100_000, Box::new(Ridge));
+    let hi_a = (32, 30, 64);
+    let hi_b = (96, 30, 64);
+    assert!(!line_of_sight(&w, hi_a, hi_b).clear);
+    dig_box(&mut w, (59, 70), (20, 40), (58, 70));
+    assert!(
+        line_of_sight(&w, hi_a, hi_b).clear,
+        "гребень сорван, а верхняя линия закрыта"
+    );
+    assert!(
+        !line_of_sight(&w, (32, 9, 64), (96, 9, 64)).clear,
+        "заодно открылась нижняя"
+    );
+}
+
+/// Правка мира видна линии огня **немедленно**: между `flush`
+/// и проверкой нет ничего, что могло бы отстать.
+#[test]
+fn d6_one_voxel_changes_the_answer() {
+    let mut w = World::new(128, 64, 128, 100_000, Box::new(Ridge));
+    let a = (32, 20, 64);
+    let b = (96, 20, 64);
+    assert!(!line_of_sight(&w, a, b).clear);
+    // Ровно одна колонка сквозь гряду.
+    for x in 59..70 {
+        w.queue_dig(x, 20, 64);
+    }
+    w.flush();
+    assert!(line_of_sight(&w, a, b).clear, "сквозная дыра не открыла линию");
+    // И обратно: один воксель закрывает.
+    w.queue_edit(voxel::Edit { x: 64, y: 20, z: 64, mat: 3 });
+    w.flush();
+    assert!(!line_of_sight(&w, a, b).clear, "один воксель не закрыл линию");
+}
