@@ -85,6 +85,24 @@ impl Fx {
         Fx(widened.isqrt() as i64)
     }
 
+    /// Корень с урезанной точностью, но целиком в 64 битах.
+    ///
+    /// Точный `sqrt` обязан считать `isqrt` от 128-битного значения, и это
+    /// **единственное место, где детерминизм действительно дорог**: замер даёт
+    /// 6.99 нс против 1.35 у `f64`. Здесь корень берётся от `raw << 8`,
+    /// что укладывается в `u64` при значениях до 2^24, и результат сдвигается
+    /// обратно: младшие 12 бит теряются, то есть разрешение падает с 2^-32
+    /// до 2^-20 — микрометр в мировых единицах.
+    ///
+    /// Монотонность сохраняется (`isqrt` монотонен, сдвиг монотонен),
+    /// поэтому функция пригодна там, где на ней стоит неподвижная точка.
+    #[inline]
+    pub fn sqrt_fast(self) -> Fx {
+        debug_assert!(self.0 >= 0, "sqrt отрицательного");
+        debug_assert!(self.0 < (1i64 << 56), "sqrt_fast: аргумент вне диапазона");
+        Fx((((self.0 as u64) << 8).isqrt() << 12) as i64)
+    }
+
     #[inline]
     pub const fn abs(self) -> Fx {
         Fx(self.0.wrapping_abs())
@@ -158,6 +176,32 @@ mod tests {
             let r = Fx::from_int(v).sqrt();
             let expect = (v as f64).sqrt() as i32;
             assert_eq!(r.to_int_trunc(), expect, "sqrt({v})");
+        }
+    }
+
+    #[test]
+    fn sqrt_fast_is_close_and_monotone() {
+        let mut prev = Fx::ZERO;
+        let mut worst = 0i64;
+        let mut v = 0i64;
+        while v < (1i64 << 50) {
+            let x = Fx(v);
+            let fast = x.sqrt_fast();
+            let exact = x.sqrt();
+            assert!(fast.raw() >= prev.raw(), "sqrt_fast немонотонен на {v}");
+            prev = fast;
+            let d = (exact.raw() - fast.raw()).abs();
+            assert!(d < (1i64 << 13), "расхождение {d} на {v}");
+            worst = worst.max(d);
+            v = (v * 3 / 2) + 1;
+        }
+        assert!(worst > 0, "тест ничего не проверил");
+    }
+
+    #[test]
+    fn sqrt_fast_exact_on_squares() {
+        for v in [0i32, 1, 4, 9, 144, 10_000, 1_000_000] {
+            assert_eq!(Fx::from_int(v).sqrt_fast().to_int_trunc(), (v as f64).sqrt() as i32);
         }
     }
 
