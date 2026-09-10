@@ -343,6 +343,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "modding"
+version = "0.1.0"
+dependencies = [
+ "fx",
+]
+
+[[package]]
 name = "naga"
 version = "29.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -585,6 +592,15 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "sim-cli"
+version = "0.1.0"
+dependencies = [
+ "fx",
+ "sim-core",
+ "worldgen",
+]
 
 [[package]]
 name = "sim-core"
@@ -982,6 +998,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "worldgen"
+version = "0.1.0"
+dependencies = [
+ "fx",
+ "voxel",
 ]
 
 [[package]]
