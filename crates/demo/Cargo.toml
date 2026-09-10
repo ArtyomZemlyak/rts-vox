@@ -11,6 +11,7 @@ fx = { path = "../fx" }
 meshing = { path = "../meshing" }
 modding = { path = "../modding" }
 nav = { path = "../nav" }
+render = { path = "../render" }
 sim-core = { path = "../sim-core" }
 voxel = { path = "../voxel" }
 worldgen = { path = "../worldgen" }
