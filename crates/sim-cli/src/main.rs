@@ -24,6 +24,7 @@ struct Args {
     dump_hash: bool,
     every: u64,
     world_hash: bool,
+    stats: bool,
 }
 
 impl Default for Args {
@@ -36,6 +37,7 @@ impl Default for Args {
             dump_hash: false,
             every: 0,
             world_hash: false,
+            stats: false,
         }
     }
 }
@@ -73,6 +75,7 @@ fn parse() -> Result<Args, String> {
             "--every" => a.every = num("--every")?,
             "--dump-hash" => a.dump_hash = true,
             "--world-hash" => a.world_hash = true,
+            "--stats" => a.stats = true,
             "--help" | "-h" => {
                 print!("{}", usage());
                 std::process::exit(0);
@@ -117,6 +120,36 @@ fn main() -> ExitCode {
         };
         if a.every > 0 && t % a.every == 0 {
             println!("tick={t} hash={hash:016x}");
+        }
+    }
+
+    if a.stats {
+        // Что сценарий на самом деле нагружает. Хеш, совпавший точно
+        // после правки боя, обязан быть объяснён, а не принят на веру
+        // (`docs/analysis/20-measurement-machine.md`, правило пятое).
+        let live = w.units.live().len();
+        let with_target = w
+            .units
+            .live()
+            .iter()
+            .filter(|&&i| w.units.target[i as usize] != sim_core::NO_TARGET)
+            .count();
+        println!(
+            "живых {live}, с целью {with_target}, осмотрено на бою {}, поисков {}, тиков в потолок {}",
+            w.examined_combat, w.searches, w.search_capped
+        );
+        for o in 0..2u8 {
+            let (mut sx, mut sz, mut n) = (0i64, 0i64, 0i64);
+            for &i in w.units.live() {
+                if w.units.owner[i as usize] == o {
+                    sx += w.units.x[i as usize] as i64;
+                    sz += w.units.z[i as usize] as i64;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                println!("  сторона {o}: {n} юнитов, центр ({}, {})", sx / n, sz / n);
+            }
         }
     }
 

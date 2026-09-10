@@ -27,6 +27,12 @@ pub const NAV_CELL: i32 = 2;
 pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 
 /// Радиус разделения: ближе этого юниты расталкиваются.
+/// Тиков в секунде. Скорость юнита задана в клетках **в секунду**,
+/// поэтому шаг за тик делится на это число. Голая тридцатка в формуле
+/// шага один раз уже стоила дорого: эталонный сценарий разводил
+/// стороны на расстояние, которое они не проходили за прогон (ADR-116).
+pub const TICKS_PER_SECOND: i32 = 30;
+
 pub const SEPARATION: i32 = 3;
 /// Дальность стрельбы.
 pub const RANGE: i32 = 24;
@@ -111,6 +117,10 @@ pub struct Units {
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
     pub target: Vec<u32>,
+    /// Тик, раньше которого юнит не ищет цель заново. Поиск цели —
+    /// самая дорогая часть боя, и держать её потиковой незачем: цель,
+    /// живая и в радиусе, остаётся целью (ADR-116).
+    next_search: Vec<u32>,
     free: Vec<u32>,
     live_ids: Vec<u32>,
 }
@@ -135,6 +145,7 @@ impl Units {
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
+            next_search: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
         }
@@ -164,6 +175,7 @@ impl Units {
             self.voxels[k] = voxels;
             self.alive[k] = true;
             self.target[k] = NO_TARGET;
+            self.next_search[k] = 0;
             return i;
         }
         self.x.push(x);
@@ -175,6 +187,7 @@ impl Units {
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
+        self.next_search.push(0);
         (self.x.len() - 1) as u32
     }
 
@@ -223,9 +236,26 @@ pub struct World {
     /// Смещения, посчитанные параллельно и применяемые одной серийной
     /// фазой (`CLAUDE.md`: клэмп применяется один раз, в конце).
     delta: Vec<(i32, i32)>,
+    /// Через сколько тиков юнит пересматривает живую цель. Ноль —
+    /// пересматривать каждый тик (старое поведение). Секунда выбрана
+    /// так, чтобы потолок поисков в обычном бою **не срабатывал**:
+    /// потолок, упирающийся каждый тик, это не предохранитель, а
+    /// постоянное ухудшение (ADR-116).
+    pub retarget_period: u32,
+    /// Потолок поисков цели за тик. Второй потолок того же рода, что
+    /// у дренажа мира: работа, которой в плотном бою становится
+    /// квадратично много, обязана быть ограничена (ADR-116).
+    pub max_target_searches: usize,
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
+    /// Замер: сколько юнитов действительно искали цель за тик.
+    pub searches: u64,
+    /// Замер: в скольких тиках поиск упёрся в потолок.
+    pub search_capped: u64,
+    /// Переиспользуемый список тех, кому нужен поиск. Бой идёт каждый
+    /// тик, и выделять его заново незачем.
+    need_search: Vec<u32>,
     pub phase_ns: [u64; 16],
 }
 
@@ -252,8 +282,13 @@ impl World {
             delta: Vec::new(),
             tick: 0,
             damage: Vec::new(),
+            retarget_period: TICKS_PER_SECOND as u32,
+            max_target_searches: 512,
             examined_move: 0,
             examined_combat: 0,
+            searches: 0,
+            search_capped: 0,
+            need_search: Vec::new(),
             phase_ns: [0; 16],
         }
     }
@@ -515,8 +550,8 @@ impl World {
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
             let (vx, vz) = self.delta[i];
-            let step_x = Fx::from_ratio(vx, 30);
-            let step_z = Fx::from_ratio(vz, 30);
+            let step_x = Fx::from_ratio(vx, TICKS_PER_SECOND);
+            let step_z = Fx::from_ratio(vz, TICKS_PER_SECOND);
             let nx = u.fx[i].add(step_x);
             let nz = u.fz[i].add(step_z);
             let carry_x = nx.to_int_trunc();
@@ -539,8 +574,59 @@ impl World {
         let mut examined = 0u64;
         let r2 = RANGE * RANGE;
 
+        // Часть первая: проверка уже выбранной цели. O(1) на юнита.
+        //
+        // Цель, живая, вражеская и в радиусе, остаётся целью — искать
+        // заново незачем. В разреженном бою это ничего не меняет,
+        // в плотном меняет всё: там поиск обходит весь сгусток, и цена
+        // его квадратична по плотности, а не по числу юнитов (ADR-116).
+        let tick = self.tick as u32;
+        let period = self.retarget_period;
+        let mut need = std::mem::take(&mut self.need_search);
+        need.clear();
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
+            let t = u.target[i];
+            if t != NO_TARGET {
+                let tt = t as usize;
+                let (dx, dz) = (u.x[i] - u.x[tt], u.z[i] - u.z[tt]);
+                let valid =
+                    u.alive[tt] && u.owner[tt] != u.owner[i] && dx * dx + dz * dz <= r2;
+                if !valid {
+                    // Цель была и пропала — этот ищет вне очереди.
+                    u.target[i] = NO_TARGET;
+                    u.next_search[i] = tick;
+                }
+            }
+            // Срок — **единственное** условие попадания в очередь поиска.
+            //
+            // Первая редакция ставила в очередь ещё и всякого, у кого
+            // цели нет. В разреженном бою целей нет у тысяч юнитов, они
+            // попадали в очередь каждый тик, потолок срабатывал все
+            // тысячу тиков подряд, и откат после безрезультатного
+            // поиска не работал вовсе. Потолок при этом маскировал
+            // ошибку: цена выглядела приличной, потому что была
+            // обрезана сверху.
+            if tick >= u.next_search[i] {
+                need.push(i as u32);
+            }
+        }
+
+        // Часть вторая: собственно поиск, с потолком.
+        //
+        // Начало обхода сдвигается тиком. Без сдвига потолок всегда
+        // отсекал бы один и тот же хвост списка, и юниты с большими
+        // номерами не стреляли бы никогда. Сдвиг — чистая функция тика,
+        // то есть детерминирован.
+        let cap = self.max_target_searches.max(1);
+        let n = need.len();
+        let start = if n == 0 { 0 } else { tick as usize % n };
+        let take = cap.min(n);
+        if take < n {
+            self.search_capped += 1;
+        }
+        for step in 0..take {
+            let i = need[(start + step) % n] as usize;
             let (ux, uz, mine) = (u.x[i], u.z[i], u.owner[i]);
             let mut best = i32::MAX;
             let mut best_j = NO_TARGET;
@@ -563,7 +649,14 @@ impl World {
                 }
             });
             u.target[i] = best_j;
+            // Срок следующего пересмотра разводится по юнитам, иначе
+            // они собираются в когорты и фаза снова становится пиковой
+            // раз в период (ADR-090).
+            let jitter = ((i as u32).wrapping_mul(2_654_435_761) >> 29) as u32;
+            u.next_search[i] = tick + period + jitter;
         }
+        self.searches += take as u64;
+        self.need_search = need;
         self.examined_combat += examined;
 
         self.damage.clear();
@@ -625,27 +718,89 @@ impl World {
 }
 
 /// Заселение мира: две армии, каждая идёт на позицию другой.
+/// Эталонный сценарий: две линии лицом к лицу, идущие навстречу.
+///
+/// **Стороны обязаны сойтись, и сойтись быстро.** Первая редакция
+/// ставила их по углам карты, в 1600 клетках друг от друга. Скорость
+/// задана в клетках **в секунду**, шаг делится на тридцать, значит за
+/// тысячу тиков — тридцать три секунды — сторона проходит сто тридцать
+/// клеток из тысячи шестисот. Они не встречались никогда: пять тысяч
+/// живых после тысячи тиков, ноль целей, ни одной смерти.
+///
+/// Цена ошибки не в самом сценарии, а в том, что на нём стоит
+/// golden-хеш. Фаза боя выполнялась каждый тик, всегда впустую, и
+/// **её поведение не входило в хеш вовсе** — правку прицеливания
+/// можно было внести и увидеть тот же хеш до бита (ADR-116).
+///
+/// Фронты ставятся ровно на дальность выстрела: бой начинается
+/// с первых тиков, и хеш покрывает его даже на коротком прогоне.
+/// Сваливать стороны в одну кучу нельзя — свалка это отдельный
+/// случай с другой ценой (`--dense` в D-7).
 pub fn populate(w: &mut World, n: usize, seed: u64) {
     let mut r = Rng::new(seed, 0xA1);
+    let mid = WORLD / 2;
+    let gap = RANGE / 2;
     for k in 0..n {
         let owner = (k % 2) as u8;
-        let (bx, bz) = if owner == 0 {
-            (200, 200)
-        } else {
-            (WORLD - 200, WORLD - 200)
-        };
-        let x = (bx + r.range(-150, 150)).clamp(0, WORLD - 1);
-        let z = (bz + r.range(-150, 150)).clamp(0, WORLD - 1);
+        let bx = if owner == 0 { mid - gap - 100 } else { mid + gap + 100 };
+        let x = (bx + r.range(-100, 100)).clamp(0, WORLD - 1);
+        let z = (mid + r.range(-150, 150)).clamp(0, WORLD - 1);
         w.units.spawn(x, z, owner, r.range(2, 6), 300);
     }
-    w.fill_flow_towards(0, WORLD - 200, WORLD - 200);
-    w.fill_flow_towards(1, 200, 200);
+    w.fill_flow_towards(0, mid + gap + 100, mid);
+    w.fill_flow_towards(1, mid - gap - 100, mid);
     w.units.refresh_live();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Эталонный сценарий обязан **действительно воевать**.
+    ///
+    /// Это не проверка боя, а проверка сценария: пока стороны стояли
+    /// в разных углах, фаза боя работала вхолостую и в golden-хеш
+    /// не входила. Тест сторожит именно это — что хеш что-то покрывает
+    /// (ADR-116).
+    #[test]
+    fn the_reference_scenario_actually_fights() {
+        let mut w = World::new(2, 2000);
+        populate(&mut w, 2000, 42);
+        let before = w.units.live().len();
+        let mut ever_targeted = false;
+        for _ in 0..400 {
+            w.tick();
+            ever_targeted |= w
+                .units
+                .live()
+                .iter()
+                .any(|&i| w.units.target[i as usize] != NO_TARGET);
+        }
+        assert!(ever_targeted, "никто ни разу не взял цель");
+        assert!(
+            w.units.live().len() < before,
+            "никто не погиб: {} из {before}",
+            w.units.live().len()
+        );
+        assert!(w.examined_combat > 0);
+    }
+
+    /// Потолок поисков не имеет права зависеть от числа воркеров:
+    /// он часть состояния, а не расписания.
+    #[test]
+    fn the_search_cap_does_not_change_with_worker_count() {
+        let run = |threads: usize| {
+            let mut w = World::new(2, 2000);
+            populate(&mut w, 2000, 7);
+            let mut h = 0;
+            for _ in 0..120 {
+                h = if threads > 1 { w.tick_par(threads) } else { w.tick() };
+            }
+            (h, w.searches, w.units.live().len())
+        };
+        assert_eq!(run(1), run(4));
+        assert_eq!(run(1), run(8));
+    }
 
     /// Один сид — один хеш. Базовое свойство, без которого нет ничего.
     #[test]
