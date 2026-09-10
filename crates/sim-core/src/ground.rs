@@ -83,6 +83,9 @@ impl Ground {
         // Перенесённое с прошлого тика идёт первым: каскад обязан
         // увидеть запекание тела как обычную правку.
         self.edits.append(&mut self.carry);
+        // Потолок материализаций считается от начала тика, а не
+        // от начала дренажа: дренажей три (ADR-132).
+        self.world.begin_tick();
         let st = self.world.flush();
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;

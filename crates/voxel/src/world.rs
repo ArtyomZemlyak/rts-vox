@@ -78,6 +78,16 @@ pub struct World {
     /// Сколько чанков разрешено построить из генератора за тик.
     /// Второй потолок дренажа — см. ADR-114.
     pub max_materialize_per_tick: usize,
+    /// Сколько уже построено в текущем тике.
+    ///
+    /// Считается **за тик, а не за дренаж**: дренажей в тике три —
+    /// копка, отрывы каскада, запекание тел (ADR-125), — и потолок,
+    /// живущий внутри одного `flush`, втрое больше объявленного.
+    /// Именно так и было, пока D-7 не переехала на движок (ADR-132).
+    materialized_in_tick: usize,
+    /// Идёт ли тик. Тот, кто зовёт `flush` напрямую, тика не
+    /// объявляет, и для него потолок остаётся на дренаж.
+    in_tick: bool,
     gen: Box<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Box<Paletted>>>,
@@ -132,6 +142,8 @@ impl World {
             // разгонкой в D-7 (ADR-114) и живёт здесь до тех пор, пока
             // мир не читает данные.
             max_materialize_per_tick: 4,
+            materialized_in_tick: 0,
+            in_tick: false,
             gen: g,
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
             cx,
@@ -244,7 +256,16 @@ impl World {
 
     /// Дренаж очереди в пределах потолка. Возвращает статистику;
     /// сам список применённых правок — [`World::edits`].
+    /// Объявить начало тика: потолок материализаций считается от сюда.
+    pub fn begin_tick(&mut self) {
+        self.in_tick = true;
+        self.materialized_in_tick = 0;
+    }
+
     pub fn flush(&mut self) -> FlushStats {
+        if !self.in_tick {
+            self.materialized_in_tick = 0;
+        }
         self.applied.clear();
         let mut st = FlushStats::default();
         // Потолок материализаций — второй потолок дренажа, и он нужен
@@ -265,7 +286,7 @@ impl World {
             let Some(e) = self.queue.pop_front() else { break };
             let ci = self.chunk_index(e.x, e.y, e.z);
             let fresh = self.chunks[ci].is_none();
-            if fresh && st.materialized >= self.max_materialize_per_tick {
+            if fresh && self.materialized_in_tick >= self.max_materialize_per_tick {
                 st.materialize_capped = true;
                 deferred.push(e);
                 continue;
@@ -273,6 +294,7 @@ impl World {
             if self.apply(e) {
                 if fresh {
                     st.materialized += 1;
+                    self.materialized_in_tick += 1;
                 }
                 self.applied.push(e);
                 st.applied += 1;

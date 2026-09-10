@@ -21,7 +21,8 @@ use std::time::Instant;
 
 use demo::dig::Dig;
 use meshing::layer::MeshLayer;
-use voxel::topo::layer::TopoLayer;
+use sim_core::ground::Ground;
+use sim_core::Phase as SimPhase;
 use demo::{RunHash, Terrain};
 use fx::rng::Rng;
 use meshing::Opts;
@@ -151,7 +152,6 @@ fn main() -> ExitCode {
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
 
     let mut mesh = MeshLayer::new(&world, Opts::default());
-    let mut topo = TopoLayer::new(&world);
     let mut dig = Dig::clustered(
         &world,
         |x, z| terrain.surface(x, z),
@@ -161,13 +161,16 @@ fn main() -> ExitCode {
         a.seed ^ 0xD16,
     );
 
-    // --- Юниты.
+    // --- Юниты и земля в одном мире: порядок фаз задаёт движок
+    // (ADR-125), а не сцена.
     let mut sim = SimWorld::new(2, a.units.max(1));
     if a.dense {
         populate_dense(&mut sim, a.units, a.seed);
     } else {
         populate(&mut sim, a.units, a.seed);
     }
+
+    sim.attach_ground(Ground::new(world, 256, 4, 2));
 
     let mut hash = RunHash::new();
 
@@ -205,10 +208,21 @@ fn main() -> ExitCode {
         worst_materialized: u64,
     }
 
+    // Время фаз движок ведёт сам; сцена берёт разницу за тик.
+    fn phase_split(sim: &SimWorld) -> [u64; 3] {
+        [
+            sim.phase_ns_of(SimPhase::VoxelEdits)
+                + sim.phase_ns_of(SimPhase::Destruction)
+                + sim.phase_ns_of(SimPhase::Bodies),
+            sim.phase_ns_of(SimPhase::NavUpdate),
+            sim.phase_ns_of(SimPhase::Movement)
+                + sim.phase_ns_of(SimPhase::Combat)
+                + sim.phase_ns_of(SimPhase::Cleanup),
+        ]
+    }
+
     let measure = |sim: &mut SimWorld,
-                       world: &mut World,
                        mesh: &mut MeshLayer,
-                       topo: &mut TopoLayer,
                        dig: &mut Dig,
                        hash: &mut RunHash,
                        ticks: u64|
@@ -231,37 +245,36 @@ fn main() -> ExitCode {
             mat_capped_ticks: 0,
             worst_split: [0.0; 4],
         };
-        let mat0 = world.materialized;
+        let mat0 = sim.ground().expect("земля").world.materialized;
         let rebuilds0 = mesh.full_rebuilds;
         for tick in 1..=ticks {
             let before_rebuilds = mesh.full_rebuilds;
-            let before_mat = world.materialized;
+            let before_mat = sim.ground().expect("земля").world.materialized;
+            let ns0 = phase_split(sim);
             let t_all = Instant::now();
 
-            let t = Instant::now();
+            {
+                let g = sim.ground.as_mut().expect("земля");
+                dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+            }
             let h = if a.threads > 1 { sim.tick_par(a.threads) } else { sim.tick() };
-            let s_units = t.elapsed().as_secs_f64() * 1e3;
+            let ns1 = phase_split(sim);
+            let s_dig = (ns1[0] - ns0[0]) as f64 / 1e6;
+            let s_topo = (ns1[1] - ns0[1]) as f64 / 1e6;
+            let s_units = (ns1[2] - ns0[2]) as f64 / 1e6;
+            p.ms_dig += s_dig;
+            p.ms_topo += s_topo;
             p.ms_units += s_units;
 
-            let t = Instant::now();
-            dig.step(world, &|x, z| terrain.surface(x, z));
-            let st = world.flush();
-            p.edits += st.applied as u64;
-            p.worst_queued = p.worst_queued.max(st.queued);
-            p.mat_capped_ticks += st.materialize_capped as u64;
-            let s_dig = t.elapsed().as_secs_f64() * 1e3;
-            p.ms_dig += s_dig;
+            let g = sim.ground.as_ref().expect("земля");
+            p.edits += g.stats.edits as u64;
+            p.worst_queued = p.worst_queued.max(g.stats.queued);
+            p.dirty_topo += g.stats.topo_dirty as u64;
 
             let t = Instant::now();
-            p.dirty_mesh += mesh.apply(world, world.edits()) as u64;
+            p.dirty_mesh += mesh.apply(&g.world, g.edits()) as u64;
             let s_mesh = t.elapsed().as_secs_f64() * 1e3;
             p.ms_mesh += s_mesh;
-
-            let t = Instant::now();
-            let (d, _) = topo.apply(world, world.edits());
-            p.dirty_topo += d as u64;
-            let s_topo = t.elapsed().as_secs_f64() * 1e3;
-            p.ms_topo += s_topo;
 
             let ms = t_all.elapsed().as_secs_f64() * 1e3;
             if mesh.full_rebuilds > before_rebuilds {
@@ -270,49 +283,37 @@ fn main() -> ExitCode {
                 p.worst = ms;
                 p.worst_at = tick;
                 p.worst_split = [s_units, s_dig, s_mesh, s_topo];
-                p.worst_materialized = world.materialized - before_mat;
+                p.worst_materialized =
+                    sim.ground().expect("земля").world.materialized - before_mat;
             }
             hash.feed(h);
-            hash.feed_edits(tick, world.edits());
+            hash.feed_edits(tick, sim.ground().expect("земля").edits());
         }
         p.first_builds = mesh.full_rebuilds - rebuilds0;
-        p.materialized = world.materialized - mat0;
+        p.materialized = sim.ground().expect("земля").world.materialized - mat0;
         p
     };
 
     // --- Фаза A: свежая карта. Копка идёт по нетронутой породе.
-    let fresh = measure(
-        &mut sim,
-        &mut world,
-        &mut mesh,
-        &mut topo,
-        &mut dig,
-        &mut hash,
-        a.ticks,
-    );
+    let fresh = measure(&mut sim, &mut mesh, &mut dig, &mut hash, a.ticks);
 
     // --- Прогрев: карту надо изрыть.
     let t_warm = Instant::now();
     let mut warm_edits = 0u64;
     for _ in 0..a.warmup {
-        dig.step(&mut world, &|x, z| terrain.surface(x, z));
-        let st = world.flush();
-        warm_edits += st.applied as u64;
-        mesh.apply(&world, world.edits());
-        topo.apply(&world, world.edits());
+        {
+            let g = sim.ground.as_mut().expect("земля");
+            dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+        }
+        sim.tick();
+        let g = sim.ground.as_ref().expect("земля");
+        warm_edits += g.stats.edits as u64;
+        mesh.apply(&g.world, g.edits());
     }
     let warm_s = t_warm.elapsed().as_secs_f64();
 
     // --- Фаза B: выработанная карта, копка продолжается.
-    let worn = measure(
-        &mut sim,
-        &mut world,
-        &mut mesh,
-        &mut topo,
-        &mut dig,
-        &mut hash,
-        a.ticks,
-    );
+    let worn = measure(&mut sim, &mut mesh, &mut dig, &mut hash, a.ticks);
 
     println!(
         "прогрев между замерами: {} тиков, {} правок, {:.1} с; перезапусков забоя {}",
@@ -411,12 +412,12 @@ fn main() -> ExitCode {
     println!(
         "{:<34} {:>11.1} МиБ",
         "слой изменений",
-        world.diff_bytes() as f64 / 1024.0 / 1024.0
+        sim.ground().expect("земля").world.diff_bytes() as f64 / 1024.0 / 1024.0
     );
     println!(
         "{:<34} {:>11.1} МиБ",
         "битовый объём",
-        world.bit_bytes() as f64 / 1024.0 / 1024.0
+        sim.ground().expect("земля").world.bit_bytes() as f64 / 1024.0 / 1024.0
     );
     println!(
         "{:<34} {:>11.1} МиБ",
