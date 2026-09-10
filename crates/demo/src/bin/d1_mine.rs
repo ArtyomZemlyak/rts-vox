@@ -131,6 +131,11 @@ fn main() -> ExitCode {
     let (mut edits_total, mut dirty_mesh, mut dirty_topo, mut survived) = (0u64, 0u64, 0u64, 0u64);
     let mut queued_peak = 0usize;
     let (mut nav_flips, mut nav_seen) = (0u64, 0u64);
+    // Перепись уровней до копки: надо различить пещеры генератора
+    // и ходы, прокопанные за прогон.
+    let census0 = nav.level_census(&world);
+    let (mut nav_moved, mut nav_drop) = (0u64, 0u64);
+    let (mut nav_lost, mut nav_gained) = (0u64, 0u64);
 
     for tick in 1..=a.ticks {
         dig.step(&mut world, &|x, z| terrain.surface(x, z));
@@ -151,13 +156,18 @@ fn main() -> ExitCode {
         survived += s as u64;
         ms_topo += t.elapsed().as_secs_f64() * 1e3;
 
-        // Навигация: перевороты непрозрачности нав-клетки. Клетка два
-        // воксела, непрозрачность решается на уровне глаз, поэтому
-        // переворачивается около процента правок (ADR-078).
+        // Навигация. Мерить надо **высоту пола и рёбра**, а не булеву
+        // проходимость: над поверхностью всегда небо, поэтому она
+        // не переворачивается почти никогда, и сцена, мерившая только
+        // её, показывала ровный ноль (ADR-117).
         let t = Instant::now();
-        let (seen, flips) = nav.apply(&world, world.edits());
-        nav_seen += seen as u64;
-        nav_flips += flips as u64;
+        let ns = nav.apply(&world, world.edits());
+        nav_seen += ns.seen as u64;
+        nav_flips += ns.flips as u64;
+        nav_moved += ns.floor_moved as u64;
+        nav_drop += ns.floor_drop;
+        nav_lost += ns.edges_lost;
+        nav_gained += ns.edges_gained;
         ms_nav += t.elapsed().as_secs_f64() * 1e3;
     }
 
@@ -190,7 +200,23 @@ fn main() -> ExitCode {
         100.0 * survived as f64 / edits_total.max(1) as f64
     );
     println!("{:<28} {:>14.1}", "нав-клеток пересчитано", nav_seen as f64 / n);
-    println!("{:<28} {:>14.1}", "из них перевернулось", nav_flips as f64 / n);
+    println!("{:<28} {:>14.1}", "  у них сдвинулся пол", nav_moved as f64 / n);
+    println!("{:<28} {:>14.2}", "  пол опустился, вокселей", nav_drop as f64 / n);
+    println!("{:<28} {:>14.1}", "  стало нельзя стоять", nav_flips as f64 / n);
+    let (cells_with, cells_multi, levels) = nav.level_census(&world);
+    println!("{:<28} {:>14.1}", "рёбер разорвано", nav_lost as f64 / n);
+    println!("{:<28} {:>14.1}", "рёбер появилось", nav_gained as f64 / n);
+    // Насколько неверна одноуровневая навигация на этой карте.
+    println!();
+    println!("{:<28} {:>14} {:>14}", "уровни в колонке", "до копки", "после");
+    println!("{:<28} {:>14} {:>14}", "клеток с полом", census0.0, cells_with);
+    println!(
+        "{:<28} {:>13.1}% {:>13.1}%",
+        "  из них многоуровневых",
+        100.0 * census0.1 as f64 / census0.0.max(1) as f64,
+        100.0 * cells_multi as f64 / cells_with.max(1) as f64
+    );
+    println!("{:<28} {:>14} {:>14}", "уровней в подколонках", census0.2, levels);
 
     println!("\n{:<28} {:>14}", "время, мс на тик", "");
     println!("{:<28} {:>14.3}", "мешинг", ms_mesh / n);
