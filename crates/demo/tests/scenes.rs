@@ -401,3 +401,111 @@ fn d4_pristine_unit_reads_like_a_fresh_one() {
     assert_eq!(sa.attached, tank().solid_count(), "целый юнит читается неверно");
     assert!(sc.attached < sa.attached, "повреждение не отразилось");
 }
+
+// ---------------------------------------------------------------- D-5
+
+use sim_core::matter::{resource_of, ContainerId, Kind, Ledger, Sink, SINKS};
+
+/// Прогон D-5 в миниатюре: копка, доставка, подбитие, реклейм.
+/// Возвращает (хеш, сработавшие стоки, худшее расхождение).
+fn run_haul(seed: u64, ticks: u64) -> (u64, [u64; 5], i128) {
+    let mut l = Ledger::new();
+    let ground = l.create(Kind::Ground, 1_000_000, u64::MAX);
+    // Потолок и переработка подобраны так, чтобы склад реально
+    // упирался в потолок: иначе сток «излишек над потолком»
+    // не срабатывает и инвариант проверяется на пустом.
+    let depot = l.create(Kind::Depot, 0, 2_000);
+    let refined = l.create(Kind::Depot, 0, u64::MAX);
+    let tanks: Vec<ContainerId> = (0..20).map(|_| l.create(Kind::Hauler, 0, 600)).collect();
+    let mut alive = vec![true; tanks.len()];
+    let mut debris: Vec<ContainerId> = Vec::new();
+    let mut r = fx::rng::Rng::new(seed, 0xD5);
+    let mut hash = RunHash::new();
+    let mut worst = 0i128;
+
+    for tick in 1..=ticks {
+        for (i, &t) in tanks.iter().enumerate() {
+            if !alive[i] {
+                continue;
+            }
+            let want = resource_of(3 + r.below(4) as u64, 2 + r.below(6));
+            l.transfer(ground, t, want);
+            if l.room(t) == 0 {
+                l.transfer(t, depot, l.held(t));
+            }
+        }
+        if l.held(depot) > 1_500 {
+            l.refine(depot, refined, 200, 7, 10);
+        }
+        if r.below(10) == 0 {
+            let live: Vec<usize> = (0..tanks.len()).filter(|&i| alive[i]).collect();
+            if !live.is_empty() {
+                let i = live[r.below(live.len() as u32) as usize];
+                let (d, _, rest) = l.breach(tanks[i], 1, 4);
+                alive[i] = false;
+                if rest > 0 {
+                    debris.push(d);
+                }
+            }
+        }
+        if let Some(&d) = debris.first() {
+            let live: Vec<usize> = (0..tanks.len())
+                .filter(|&i| alive[i] && l.room(tanks[i]) > 0)
+                .collect();
+            if !live.is_empty() {
+                let i = live[r.below(live.len() as u32) as usize];
+                l.transfer(d, tanks[i], 200);
+                if l.held(d) == 0 {
+                    debris.remove(0);
+                }
+            }
+        }
+        if tick % 120 == 0 {
+            l.lower_cap(depot, l.get(depot).cap / 2);
+        }
+        if !l.balanced() {
+            worst = l.imbalance();
+        }
+        hash.feed(tick);
+        hash.feed(l.held(ground));
+        hash.feed(l.held(depot));
+        for s in SINKS {
+            hash.feed(l.sunk(s));
+        }
+    }
+    let mut sunk = [0u64; 5];
+    for (k, s) in SINKS.iter().enumerate() {
+        sunk[k] = l.sunk(*s);
+    }
+    (hash.get(), sunk, worst)
+}
+
+/// **Главный порог сцены: материя сохраняется на каждом тике.**
+/// Проверять только в конце нельзя — ошибка, компенсировавшая сама
+/// себя, прошла бы незамеченной.
+#[test]
+fn d5_matter_is_conserved_every_tick() {
+    let (_, _, worst) = run_haul(42, 400);
+    assert_eq!(worst, 0, "расхождение баланса {worst}");
+}
+
+/// Сцена обязана задействовать стоки, иначе инвариант проверяется
+/// на пустом месте.
+#[test]
+fn d5_actually_exercises_the_sinks() {
+    let (_, sunk, _) = run_haul(42, 400);
+    assert!(sunk[Sink::RefiningLoss as usize] > 0, "переработка не сработала");
+    assert!(sunk[Sink::ContainerBreach as usize] > 0, "разрушений не было");
+    assert!(sunk[Sink::OverCap as usize] > 0, "потолок ни разу не срезал");
+}
+
+/// **Хеш обязан различать прогоны.** Первая редакция хешировала
+/// `in_containers` и `sunk_total`, чья сумма равна `initial`
+/// по самому инварианту, — и хеш не менялся ни от сида, ни от чего.
+#[test]
+fn d5_hash_distinguishes_runs_and_repeats_itself() {
+    let a = run_haul(42, 300).0;
+    assert_eq!(a, run_haul(42, 300).0, "прогон не воспроизводится");
+    assert_ne!(a, run_haul(43, 300).0, "разный сид дал тот же хеш");
+    assert_ne!(a, run_haul(42, 200).0, "разная длина дала тот же хеш");
+}

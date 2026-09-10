@@ -12,6 +12,7 @@
 
 pub mod energy;
 pub mod index;
+pub mod matter;
 pub mod shield;
 
 use fx::rng::Rng;
