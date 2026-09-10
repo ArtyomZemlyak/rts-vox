@@ -122,3 +122,109 @@ fn solid_count(w: &World) -> u64 {
     }
     n
 }
+
+// ---------------------------------------------------------------- D-2
+
+use voxel::bodies::Bodies;
+use voxel::store::{Mat, AIR};
+use voxel::{Edit, Generator};
+
+/// Гриб: земля, ножка, шляпка. Весь гриб внутри одного чанка 32³ —
+/// иначе ступень B вернёт `Overflow`, потому что ступени C нет.
+struct Mushroom;
+
+impl Generator for Mushroom {
+    fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+        if y < 34 {
+            return 2;
+        }
+        let (dx, dz) = (x as i64 - 16, z as i64 - 16);
+        let d2 = dx * dx + dz * dz;
+        if y < 40 {
+            return if d2 <= 9 { 3 } else { AIR };
+        }
+        if y < 44 && d2 <= 81 {
+            return 4;
+        }
+        AIR
+    }
+}
+
+fn cut_stem(w: &mut World, level: u32) {
+    for dz in -4i64..=4 {
+        for dx in -4i64..=4 {
+            let (x, z) = ((16 + dx) as u32, (16 + dz) as u32);
+            if w.solid(x, level, z) {
+                w.queue_dig(x, level, z);
+            }
+        }
+    }
+}
+
+/// **Подрезанная ножка роняет шляпку.** Без этого сцена D-2 ничего
+/// не показывает: каскад может «работать» и не отделять ничего.
+#[test]
+fn d2_cutting_the_stem_detaches_the_cap() {
+    let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
+    let mut collapse = demo::collapse::CollapseLayer::new(&w);
+    let mut bodies = Bodies::new(16);
+
+    cut_stem(&mut w, 35);
+    w.flush();
+    let edits: Vec<Edit> = w.edits().to_vec();
+    let st = collapse.apply(&mut w, &edits, &mut bodies);
+    assert!(st.detached > 0, "ничего не отделилось");
+    assert_eq!(st.overflow, 0, "кусок не поместился в чанк");
+    assert!(st.cells > 500, "отвал подозрительно мал: {}", st.cells);
+    w.flush();
+
+    // Шляпка ушла из мира в тело.
+    assert!(!w.solid(16, 42, 16), "шляпка осталась на месте");
+    assert!(!bodies.list.is_empty(), "тела не появилось");
+}
+
+/// **Лимит тел жёсткий.** Кусок сверх лимита остаётся в мире целым:
+/// «иногда падает, иногда нет» — это разное состояние у разных клиентов.
+#[test]
+fn d2_body_limit_refuses_rather_than_drops() {
+    let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
+    let mut collapse = demo::collapse::CollapseLayer::new(&w);
+    let mut bodies = Bodies::new(0);
+
+    cut_stem(&mut w, 35);
+    w.flush();
+    let edits: Vec<Edit> = w.edits().to_vec();
+    let st = collapse.apply(&mut w, &edits, &mut bodies);
+    assert_eq!(st.detached, 0, "тело появилось при нулевом лимите");
+    assert!(bodies.refused > 0, "отказ не засчитан");
+    w.flush();
+    assert!(w.solid(16, 42, 16), "отказанная шляпка исчезла из мира");
+}
+
+/// Каскад детерминирован: тот же вход — тот же состав тел, включая
+/// порядок вокселей внутри каждого.
+#[test]
+fn d2_cascade_is_deterministic() {
+    let run = || -> Vec<(i64, i64, i64, usize)> {
+        let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
+        let mut collapse = demo::collapse::CollapseLayer::new(&w);
+        let mut bodies = Bodies::new(16);
+        let mut trace = Vec::new();
+        for t in 0..12u32 {
+            cut_stem(&mut w, 35 + t % 3);
+            w.flush();
+            let edits: Vec<Edit> = w.edits().to_vec();
+            collapse.apply(&mut w, &edits, &mut bodies);
+            w.flush();
+            bodies.step(&mut w);
+            w.flush();
+            for b in &bodies.list {
+                trace.push((b.ox, b.oy, b.oz, b.voxels.len()));
+            }
+        }
+        trace
+    };
+    let a = run();
+    assert!(!a.is_empty(), "каскад ничего не сделал");
+    assert_eq!(a, run());
+}

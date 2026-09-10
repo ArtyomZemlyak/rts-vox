@@ -9,9 +9,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bodies;
 pub mod store;
 pub mod topo;
 pub mod world;
 
 pub use topo::{Chunk, Components, Run};
+pub use bodies::{Bodies, Body, BodyStats};
 pub use world::{Edit, FlushStats, Generator, World};

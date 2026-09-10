@@ -33,6 +33,9 @@ pub struct FloodBufs {
     epoch: u32,
     front: [Vec<u32>; 2],
     next: [Vec<u32>; 2],
+    /// Какая сторона исчерпалась последней. Её очередь и есть состав
+    /// отвалившегося куска: во фронт попадает каждая посещённая клетка.
+    last_side: Option<usize>,
 }
 
 impl Default for FloodBufs {
@@ -48,6 +51,20 @@ impl FloodBufs {
             epoch: 0,
             front: [Vec::with_capacity(1024), Vec::with_capacity(1024)],
             next: [Vec::with_capacity(1024), Vec::with_capacity(1024)],
+            last_side: None,
+        }
+    }
+
+    /// Состав последнего отвала. Пуст, если последний вердикт был
+    /// не [`Verdict::Detached`].
+    ///
+    /// Отдельный метод, а не поле вердикта: состав нужен только тому,
+    /// кто собирается делать из куска тело, а фильтру ступени A хватает
+    /// «отвалилось или нет», и платить за копию списка он не должен.
+    pub fn detached_cells(&self) -> &[u32] {
+        match self.last_side {
+            Some(k) => &self.front[k],
+            None => &[],
         }
     }
 
@@ -59,11 +76,19 @@ impl FloodBufs {
             self.seen.iter_mut().for_each(|v| *v = 0);
             self.epoch = 2;
         }
+        self.last_side = None;
         for i in 0..2 {
             self.front[i].clear();
             self.next[i].clear();
         }
     }
+}
+
+/// Индекс клетки чанка обратно в координаты. Нужен тому, кто собирает
+/// из отвала тело.
+#[inline]
+pub fn unpack_index(i: u32) -> (usize, usize, usize) {
+    unpack(i)
 }
 
 #[inline(always)]
@@ -138,6 +163,7 @@ pub fn probe(
         #[allow(clippy::needless_range_loop)]
         for side in 0..2 {
             if head[side] >= b.front[side].len() {
+                b.last_side = Some(side);
                 return (
                     Verdict::Detached {
                         cells: visited[side],
