@@ -207,6 +207,14 @@ pub struct World {
     pub tick: u64,
     /// Накопитель урона: серийная фаза, поэтому обычное сложение безопасно.
     damage: Vec<u32>,
+    /// Снимок положений на начало фазы движения. Без него расталкивание
+    /// читает уже сдвинутых соседей, то есть зависит от порядка обхода —
+    /// и параллелить его нельзя ни при каком разбиении.
+    snap_x: Vec<i32>,
+    snap_z: Vec<i32>,
+    /// Смещения, посчитанные параллельно и применяемые одной серийной
+    /// фазой (`CLAUDE.md`: клэмп применяется один раз, в конце).
+    delta: Vec<(i32, i32)>,
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
@@ -231,6 +239,9 @@ impl World {
             flow: (0..owners).map(|_| vec![255u8; NAV * NAV]).collect(),
             grid_near: Grid::new(WORLD, near, capacity),
             grid_far: Grid::new(WORLD, far, capacity),
+            snap_x: Vec::new(),
+            snap_z: Vec::new(),
+            delta: Vec::new(),
             tick: 0,
             damage: Vec::new(),
             examined_move: 0,
@@ -266,6 +277,31 @@ impl World {
                 f[cz * NAV + cx] = d;
             }
         }
+    }
+
+    /// Один тик на заданном числе воркеров. Хеш обязан совпадать
+    /// при любом их числе (`CLAUDE.md`).
+    pub fn tick_par(&mut self, threads: usize) -> u64 {
+        use std::time::Instant;
+        let mut hash = 0u64;
+        for (pi, &phase) in PHASES.iter().enumerate() {
+            let t0 = Instant::now();
+            match phase {
+                Phase::NavUpdate => self.phase_nav_update(),
+                Phase::Movement => {
+                    self.movement_deltas(threads);
+                    self.apply_deltas();
+                }
+                Phase::Combat => self.phase_combat(),
+                Phase::Visibility => self.phase_visibility(),
+                Phase::Cleanup => self.phase_cleanup(),
+                Phase::Hash => hash = self.phase_hash(),
+                _ => {}
+            }
+            self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;
+        }
+        self.tick += 1;
+        hash
     }
 
     /// Один тик: все пятнадцать фаз в объявленном порядке.
@@ -305,46 +341,172 @@ impl World {
     /// по числу юнитов: она линейна по числу **пар в радиусе**, а это
     /// плотность, а не количество.
     fn phase_movement(&mut self) {
-        let u = &mut self.units;
-        let mut examined = 0u64;
-        for k in 0..u.live_ids.len() {
-            let i = u.live_ids[k] as usize;
-            let (ux, uz) = (u.x[i], u.z[i]);
+        self.movement_deltas(1);
+        self.apply_deltas();
+    }
 
-            // Направление из поля владельца.
+    /// Подготовить снимок к фазе движения. Отделено от счёта, чтобы
+    /// постоянный пул мог звать счёт много раз без пересборки снимка.
+    pub fn prepare_movement(&mut self) {
+        self.snap_x.clear();
+        self.snap_x.extend_from_slice(&self.units.x);
+        self.snap_z.clear();
+        self.snap_z.extend_from_slice(&self.units.z);
+        self.delta.clear();
+        self.delta.resize(self.units.x.len(), (0, 0));
+    }
+
+    /// Смещение одного юнита. Читает только снимок и индекс —
+    /// значит вызов из любого потока даёт то же самое.
+    #[inline]
+    pub fn movement_kernel(&self, i: usize) -> (i32, i32) {
+        let u = &self.units;
+        let (ux, uz) = (self.snap_x[i], self.snap_z[i]);
+        let (cx, cz) = (
+            (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+            (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+        );
+        let d = self.flow[u.owner[i] as usize][cz * NAV + cx];
+        let (mut vx, mut vz) = if d < 4 {
+            let (dx, dz) = DIRS[d as usize];
+            (dx * u.speed[i], dz * u.speed[i])
+        } else {
+            (0, 0)
+        };
+        let r2 = SEPARATION * SEPARATION;
+        let (sx, sz) = (&self.snap_x, &self.snap_z);
+        self.grid_near.for_each_near(ux, uz, |j| {
+            let j = j as usize;
+            if j == i {
+                return;
+            }
+            let (dx, dz) = (ux - sx[j], uz - sz[j]);
+            let d2 = dx * dx + dz * dz;
+            if d2 == 0 || d2 >= r2 {
+                return;
+            }
+            let w = (r2 - d2) * 64 / r2;
+            vx += dx * w / 16;
+            vz += dz * w / 16;
+        });
+        (vx, vz)
+    }
+
+    /// Живые ли слот. Нужен пулу, чтобы не считать дырки free-list.
+    #[inline]
+    pub fn slot_alive(&self, i: usize) -> bool {
+        self.units.alive[i]
+    }
+
+    pub fn slots(&self) -> usize {
+        self.units.x.len()
+    }
+
+    /// Записать смещение — вызывается пулом в свой кусок буфера.
+    pub fn take_delta(&mut self) -> Vec<(i32, i32)> {
+        std::mem::take(&mut self.delta)
+    }
+
+    pub fn put_delta(&mut self, d: Vec<(i32, i32)>) {
+        self.delta = d;
+    }
+
+    /// Посчитать смещения. Читает **только снимок**, пишет только
+    /// в свой слот `delta` — значит фаза делится на потоки по слотам
+    /// и результат от разбиения не зависит.
+    fn movement_deltas(&mut self, threads: usize) {
+        let u = &self.units;
+        self.snap_x.clear();
+        self.snap_x.extend_from_slice(&u.x);
+        self.snap_z.clear();
+        self.snap_z.extend_from_slice(&u.z);
+        self.delta.clear();
+        self.delta.resize(u.x.len(), (0, 0));
+
+        let (sx, sz) = (&self.snap_x, &self.snap_z);
+        let grid = &self.grid_near;
+        let flow = &self.flow;
+        let r2 = SEPARATION * SEPARATION;
+
+        let compute = |i: usize| -> (i32, i32) {
+            let (ux, uz) = (sx[i], sz[i]);
             let (cx, cz) = (
                 (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
                 (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
             );
-            let d = self.flow[u.owner[i] as usize][cz * NAV + cx];
+            let d = flow[u.owner[i] as usize][cz * NAV + cx];
             let (mut vx, mut vz) = if d < 4 {
                 let (dx, dz) = DIRS[d as usize];
                 (dx * u.speed[i], dz * u.speed[i])
             } else {
                 (0, 0)
             };
-
-            // Расталкивание: сравнение квадратов, без корня (ADR-071).
-            let r2 = SEPARATION * SEPARATION;
-            self.grid_near.for_each_near(ux, uz, |j| {
-                examined += 1;
+            grid.for_each_near(ux, uz, |j| {
                 let j = j as usize;
                 if j == i {
                     return;
                 }
-                let (dx, dz) = (ux - u.x[j], uz - u.z[j]);
+                let (dx, dz) = (ux - sx[j], uz - sz[j]);
                 let d2 = dx * dx + dz * dz;
                 if d2 == 0 || d2 >= r2 {
                     return;
                 }
-                // Вес спадает линейно по квадрату расстояния — целочисленно.
                 let w = (r2 - d2) * 64 / r2;
                 vx += dx * w / 16;
                 vz += dz * w / 16;
             });
+            (vx, vz)
+        };
 
-            // Интегрирование в Fx: дробная часть копится, целая переносится
-            // в сетку. Тик 30 Гц, поэтому шаг — скорость, делённая на 30.
+        let live = &u.live_ids;
+        if threads <= 1 {
+            let mut examined = 0u64;
+            for &i in live.iter() {
+                let i = i as usize;
+                examined += grid.near_count(sx[i], sz[i]) as u64;
+                self.delta[i] = compute(i);
+            }
+            self.examined_move += examined;
+            return;
+        }
+
+        // Разбиение по слотам: каждый поток пишет в свой кусок `delta`,
+        // куски не пересекаются, и порядок внутри куска фиксирован.
+        let n = self.delta.len();
+        let block = n.div_ceil(threads);
+        let mut rest: &mut [(i32, i32)] = &mut self.delta;
+        let mut parts: Vec<(usize, &mut [(i32, i32)])> = Vec::with_capacity(threads);
+        let mut base = 0usize;
+        while !rest.is_empty() {
+            let take = block.min(rest.len());
+            let (head, tail) = rest.split_at_mut(take);
+            parts.push((base, head));
+            base += take;
+            rest = tail;
+        }
+        std::thread::scope(|sc| {
+            for (offset, part) in parts {
+                let compute = &compute;
+                sc.spawn(move || {
+                    for (k, slot) in part.iter_mut().enumerate() {
+                        let i = offset + k;
+                        if !u.alive[i] {
+                            continue;
+                        }
+                        *slot = compute(i);
+                    }
+                });
+            }
+        });
+    }
+
+    /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
+    /// целой части в сетку.
+    fn apply_deltas(&mut self) {
+        let u = &mut self.units;
+        for k in 0..u.live_ids.len() {
+            let i = u.live_ids[k] as usize;
+            let (vx, vz) = self.delta[i];
             let step_x = Fx::from_ratio(vx, 30);
             let step_z = Fx::from_ratio(vz, 30);
             let nx = u.fx[i].add(step_x);
@@ -353,10 +515,9 @@ impl World {
             let carry_z = nz.to_int_trunc();
             u.fx[i] = nx.sub(Fx::from_int(carry_x));
             u.fz[i] = nz.sub(Fx::from_int(carry_z));
-            u.x[i] = (ux + carry_x).clamp(0, WORLD - 1);
-            u.z[i] = (uz + carry_z).clamp(0, WORLD - 1);
+            u.x[i] = (u.x[i] + carry_x).clamp(0, WORLD - 1);
+            u.z[i] = (u.z[i] + carry_z).clamp(0, WORLD - 1);
         }
-        self.examined_move += examined;
     }
 
     /// Бой: поиск цели и урон.
@@ -491,6 +652,27 @@ mod tests {
             h
         };
         assert_eq!(run(), run());
+    }
+
+    /// **Требование `CLAUDE.md`: один сценарий на 1/2/4/8 воркерах даёт
+    /// один хеш.** Держится оно на том, что фаза движения читает снимок,
+    /// а не уже сдвинутых соседей: без снимка расталкивание зависит
+    /// от порядка обхода, и параллелить его нельзя ни при каком разбиении.
+    #[test]
+    fn one_hash_across_worker_counts() {
+        let run = |threads: usize| {
+            let mut w = World::new(2, 8192);
+            populate(&mut w, 3000, 77);
+            let mut h = 0u64;
+            for _ in 0..80 {
+                h = w.tick_par(threads);
+            }
+            h
+        };
+        let base = run(1);
+        for t in [2usize, 4, 8] {
+            assert_eq!(run(t), base, "хеш разошёлся на {t} воркерах");
+        }
     }
 
     /// Разные сиды — разные хеши. Ловит вырождение хеша в константу.
