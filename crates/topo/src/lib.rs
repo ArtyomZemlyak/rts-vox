@@ -122,6 +122,18 @@ impl Components {
         self.parent[hi as usize] = lo;
     }
 
+    /// Разложить на компоненты **пустоту**, а не твёрдое (ADR-057).
+    ///
+    /// Второй граф той же конструкции: инвертированные колонки. Вода живёт
+    /// в компонентах пустоты, и осушение делает этот граф декрементальным —
+    /// компоненты только дробятся.
+    pub fn build_void(&mut self, c: &Chunk) -> usize {
+        let inverted = Chunk {
+            cols: c.cols.iter().map(|w| !w).collect(),
+        };
+        self.build(&inverted)
+    }
+
     /// Разложить чанк на компоненты. Возвращает число компонент.
     pub fn build(&mut self, c: &Chunk) -> usize {
         self.clear();
@@ -306,6 +318,47 @@ mod tests {
             let c2 = c.clone();
             b.build(&c2);
             assert_eq!(a.label, b.label, "{}", scene.name());
+        }
+    }
+
+    /// Пустота и твёрдое — два графа одной конструкции. У полностью
+    /// сплошного чанка пустоты нет, у пустого — одна компонента.
+    #[test]
+    fn void_is_the_complement() {
+        let mut comp = Components::new();
+        assert_eq!(comp.build_void(&Chunk::new()), 1, "у пустого чанка нет пустоты");
+        let mut full = Chunk::new();
+        full.cols.iter_mut().for_each(|c| *c = u32::MAX);
+        assert_eq!(comp.build_void(&full), 0, "у сплошного чанка нашлась пустота");
+
+        // Две несвязанные полости в сплошной породе — две компоненты пустоты.
+        let mut c = full.clone();
+        for (cx, cy, cz) in [(8usize, 8usize, 8usize), (24, 24, 24)] {
+            for dz in 0..4 {
+                for dy in 0..4 {
+                    for dx in 0..4 {
+                        c.set(cx + dx, cy + dy, cz + dz, false);
+                    }
+                }
+            }
+        }
+        assert_eq!(comp.build_void(&c), 2, "полости слиплись");
+    }
+
+    /// Пустота, посчитанная по инверсии, обязана совпадать с эталоном
+    /// на инвертированном чанке.
+    #[test]
+    fn void_matches_reference() {
+        let mut comp = Components::new();
+        for scene in Scene::ALL {
+            let c = build(scene, 3);
+            let n = comp.build_void(&c);
+            let inv = Chunk {
+                cols: c.cols.iter().map(|w| !w).collect(),
+            };
+            let reference = reference_labels(&inv);
+            let want = reference.iter().copied().filter(|&v| v >= 0).max().map_or(0, |m| m + 1) as usize;
+            assert_eq!(n, want, "{}", scene.name());
         }
     }
 

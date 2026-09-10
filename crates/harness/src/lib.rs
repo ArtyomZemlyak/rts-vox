@@ -214,6 +214,11 @@ impl World {
         (n, total)
     }
 
+    /// Сколько чанков вообще есть.
+    pub fn chunk_count(&self) -> usize {
+        self.nx * self.nz
+    }
+
     pub fn quad_total(&self) -> usize {
         self.meshers.iter().map(|m| m.quad_count()).sum()
     }
@@ -330,6 +335,45 @@ pub struct Dig {
 }
 
 impl Dig {
+    /// Копатели, сбитые в `clusters` забоев. Равномерно рассыпанные копатели —
+    /// это не «копка», а фронт по всей площади: горячим становится весь мир
+    /// по построению. Кучность и есть та величина, от которой зависит
+    /// компактность горячего множества (ADR-024).
+    pub fn clustered(w: &World, n: usize, radius: i32, seed: u64, clusters: usize) -> Dig {
+        let mut rng = Rng::new(seed, 0xC10);
+        let centres: Vec<(i32, i32)> = (0..clusters.max(1))
+            .map(|_| {
+                (
+                    rng.below(w.voxels_x() as u32) as i32,
+                    rng.below(w.voxels_z() as u32) as i32,
+                )
+            })
+            .collect();
+        let mut diggers = Vec::with_capacity(n);
+        let mut guard = 0;
+        while diggers.len() < n && guard < n * 200 {
+            guard += 1;
+            let (cx, cz) = centres[rng.below(centres.len() as u32) as usize];
+            let x = (cx + rng.range(-24, 24)).clamp(0, w.voxels_x() as i32 - 1) as usize;
+            let z = (cz + rng.range(-24, 24)).clamp(0, w.voxels_z() as i32 - 1) as usize;
+            let mut y = MCS - 1;
+            while y > 0 && !w.get(x, y, z) {
+                y -= 1;
+            }
+            if y < 8 {
+                continue;
+            }
+            let (dx, dz) = match rng.below(4) {
+                0 => (1i8, 0i8),
+                1 => (-1, 0),
+                2 => (0, 1),
+                _ => (0, -1),
+            };
+            diggers.push(Digger { x, y, z, dx, dz, age: 0 });
+        }
+        Dig { diggers, radius, rng }
+    }
+
     pub fn new(w: &World, n: usize, radius: i32, seed: u64) -> Dig {
         let mut rng = Rng::new(seed, 0xD16);
         let mut diggers = Vec::with_capacity(n);
