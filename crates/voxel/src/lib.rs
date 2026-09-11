@@ -13,6 +13,7 @@ pub mod bodies;
 pub mod collapse;
 pub mod fleet;
 pub mod los;
+pub mod roster;
 pub mod store;
 pub mod topo;
 pub mod unit;
