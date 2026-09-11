@@ -198,10 +198,14 @@ fn main() -> ExitCode {
         let mut ws2 = RouteWs::new(sg.portals.len().max(1), g.nodes);
         let target = first;
         let mut fs = Default::default();
-        let ms = best_ms(
-            || fs = nav::sectors::solve_field(&sg, &g, &mut f, &mut ws2, target, &nav::godunov::h_exact_floor),
-            3,
-        );
+        let mut each: Vec<f64> = Vec::new();
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            fs = nav::sectors::solve_field(&sg, &g, &mut f, &mut ws2, target, &nav::godunov::h_exact_floor);
+            each.push(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        let ms = each.iter().cloned().fold(f64::MAX, f64::min);
+        println!("{:<34} {:>12?}", "поле, каждый прогон, мс", each.iter().map(|v| (v * 10.0).round() / 10.0).collect::<Vec<_>>());
         println!("
 {:<34} {:>12}", "поле по секторам: решено секторов", fs.sectors);
         println!("{:<34} {:>12}", "  годуновских обновлений", fs.updates);

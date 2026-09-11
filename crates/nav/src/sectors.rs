@@ -96,6 +96,25 @@ pub struct SectorGraph {
     /// CSR: узлы каждого сектора, в растровом порядке.
     sec_node_starts: Vec<u32>,
     sec_nodes: Vec<u32>,
+    /// Незаконченная пересборка: что переиспользовать, где остановились
+    /// и что уже насчитали.
+    reuse: Vec<bool>,
+    cursor: u32,
+    bucket: Vec<Vec<Edge>>,
+    prev: PrevGraph,
+    dist: Vec<u32>,
+    touched: Vec<u32>,
+}
+
+/// Прошлый граф, сохранённый на время пересборки.
+#[derive(Default)]
+struct PrevGraph {
+    starts: Vec<u32>,
+    edges: Vec<Edge>,
+    /// Старый номер портала по новому; `u32::MAX` — портал новый.
+    old_of: Vec<u32>,
+    /// Новый номер по старому.
+    new_of: Vec<u32>,
 }
 
 /// Стороны в порядке `volume::SIDES`: -Z, -X, +X, +Z.
@@ -256,6 +275,16 @@ impl SectorGraph {
     /// целиком и дёшево, и набор порталов сектора можно просто сравнить
     /// с прошлым (ADR-150).
     pub fn rebuild(&mut self, g: &VolGraph, dirty: &[u32]) -> BuildStats {
+        let mut st = self.rebuild_begin(g, dirty);
+        while !self.rebuild_step(g, u32::MAX, &mut st) {}
+        st
+    }
+
+    /// Начать пересборку: нарезать границы и решить, что уцелело.
+    ///
+    /// Нарезка дёшева и делается целиком; дорого — расстояния внутри
+    /// секторов, и вот они считаются порциями (ADR-152).
+    pub fn rebuild_begin(&mut self, g: &VolGraph, dirty: &[u32]) -> BuildStats {
         let (w, h) = g.dims();
         let first = self.w == 0;
         self.w = w;
@@ -331,26 +360,63 @@ impl SectorGraph {
             }
         }
 
-        let mut st = BuildStats { portals: self.portals.len(), ..Default::default() };
-        let prev = Prev {
-            portals: &old_portals,
-            starts: &old_starts,
-            edges: &old_edges,
-            old_of: &old_of,
+        let st = BuildStats { portals: self.portals.len(), ..Default::default() };
+        let mut new_of = vec![u32::MAX; old_portals.len()];
+        for (n, &o) in old_of.iter().enumerate() {
+            if o != u32::MAX {
+                new_of[o as usize] = n as u32;
+            }
+        }
+        let _ = old_portals;
+        self.prev = PrevGraph {
+            starts: old_starts,
+            edges: old_edges,
+            old_of,
+            new_of,
         };
-        solve(self, g, &reuse, &prev, &mut st);
-        st.edges = self.edges.len();
+        self.reuse = reuse;
+        self.cursor = 0;
+        let nport = self.portals.len() * 2;
+        self.bucket.clear();
+        self.bucket.resize(nport, Vec::new());
+        self.dist.clear();
+        self.dist.resize(g.nodes, u32::MAX);
+        // Переход на ту сторону — обычное ребро в один шаг.
+        for pi in 0..self.portals.len() as u32 {
+            self.bucket[(pi * 2) as usize].push(Edge { to: pi * 2 + 1, cost: STEP });
+            self.bucket[(pi * 2 + 1) as usize].push(Edge { to: pi * 2, cost: STEP });
+        }
         st
     }
-}
 
-/// Прошлый граф — для переиспользования.
-struct Prev<'a> {
-    portals: &'a [Portal],
-    starts: &'a [u32],
-    edges: &'a [Edge],
-    /// Старый номер портала по новому; `u32::MAX` — портал новый.
-    old_of: &'a [u32],
+    /// Досчитать не более `budget` секторов. `true` — граф собран.
+    pub fn rebuild_step(&mut self, g: &VolGraph, budget: u32, st: &mut BuildStats) -> bool {
+        let nsec = self.sw * self.sh;
+        let mut spent = 0u32;
+        while self.cursor < nsec {
+            if spent >= budget {
+                return false;
+            }
+            let s = self.cursor;
+            self.cursor += 1;
+            spent += 1;
+            solve_sector(self, g, s, st);
+        }
+        // Корзины раскладываются в CSR один раз, в конце.
+        let nport = self.portals.len() * 2;
+        let mut starts = vec![0u32; nport + 1];
+        let mut edges: Vec<Edge> = Vec::new();
+        for i in 0..nport {
+            starts[i + 1] = starts[i] + self.bucket[i].len() as u32;
+            edges.extend_from_slice(&self.bucket[i]);
+        }
+        self.starts = starts;
+        self.edges = edges;
+        st.edges = self.edges.len();
+        self.bucket.clear();
+        self.prev = PrevGraph::default();
+        true
+    }
 }
 
 /// Нарезать границы секторов на порталы.
@@ -473,109 +539,72 @@ fn group(sg: &mut SectorGraph, nsec: usize) {
     sg.sec_portals = out;
 }
 
-/// Расстояния между сторонами порталов.
+/// Расстояния между сторонами порталов **одного сектора**.
 ///
-/// Рёбер два рода: **внутри сектора** — дейкстра от стороны к стороне,
-/// и **через портал** — один шаг с одной стороны на другую. Второе
-/// раньше было бесплатным, потому что у портала была одна вершина
-/// на оба сектора (ADR-149).
-fn solve(sg: &mut SectorGraph, g: &VolGraph, reuse: &[bool], prev: &Prev, st: &mut BuildStats) {
-    let np = sg.portals.len();
-    let nport = np * 2;
-    let nsec = (sg.sw * sg.sh) as usize;
-    let mut starts = vec![0u32; nport + 1];
-    let mut edges: Vec<Edge> = Vec::new();
-    let mut dist = vec![u32::MAX; g.nodes];
-    let mut touched: Vec<u32> = Vec::new();
-    let mut bucket: Vec<Vec<Edge>> = (0..nport).map(|_| Vec::new()).collect();
-
-    // Переход на ту сторону — обычное ребро в один шаг.
-    for p in 0..np as u32 {
-        bucket[(p * 2) as usize].push(Edge { to: p * 2 + 1, cost: STEP });
-        bucket[(p * 2 + 1) as usize].push(Edge { to: p * 2, cost: STEP });
+/// Рёбер два рода: внутри сектора — дейкстра от стороны к стороне,
+/// и через портал — один шаг с одной стороны на другую. Второе
+/// добавлено разом в `rebuild_begin`.
+fn solve_sector(sg: &mut SectorGraph, g: &VolGraph, s: u32, st: &mut BuildStats) {
+    let ps: Vec<u32> = sg.portals_of(s).to_vec();
+    if ps.len() < 2 {
+        return;
     }
-
-    // Новый номер портала по старому — чтобы переводить цели рёбер.
-    let mut new_of = vec![u32::MAX; prev.portals.len()];
-    for (n, &o) in prev.old_of.iter().enumerate() {
-        if o != u32::MAX {
-            new_of[o as usize] = n as u32;
-        }
-    }
-
-    for s in 0..nsec as u32 {
-        let ps: Vec<u32> = sg.portals_of(s).to_vec();
-        if ps.len() < 2 {
-            continue;
-        }
-        if reuse[s as usize] {
-            // Сектор и его соседи чисты: стороны берутся из прошлого
-            // графа как есть, с переводом номеров.
-            let mut ok = true;
-            for &pi in ps.iter() {
-                if prev.old_of[pi as usize] == u32::MAX {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                for &pi in ps.iter() {
-                    let port_i = sg.port_of(pi, s);
-                    let op = prev.old_of[pi as usize];
-                    // Сторона у старого портала та же: секторы совпадают.
-                    let oport = op * 2 + (port_i % 2);
-                    let (a, b) = (
-                        prev.starts[oport as usize] as usize,
-                        prev.starts[oport as usize + 1] as usize,
-                    );
-                    for e in prev.edges[a..b].iter() {
-                        // Переход на ту сторону уже добавлен выше.
-                        if e.to / 2 == op {
-                            continue;
-                        }
-                        let nt = new_of[(e.to / 2) as usize];
-                        if nt == u32::MAX {
-                            continue;
-                        }
-                        bucket[port_i as usize].push(Edge {
-                            to: nt * 2 + (e.to % 2),
-                            cost: e.cost,
-                        });
-                        st.reused_edges += 1;
-                    }
-                    st.reused_ports += 1;
-                }
-                continue;
-            }
-        }
-        st.solved_sectors += 1;
+    if sg.reuse[s as usize] && ps.iter().all(|&pi| sg.prev.old_of[pi as usize] != u32::MAX) {
+        // Сектор чист и набор порталов тот же: стороны берутся
+        // из прошлого графа как есть, с переводом номеров.
         for &pi in ps.iter() {
             let port_i = sg.port_of(pi, s);
-            let from = sg.node_of_port(port_i);
-            st.sector_solves += 1;
-            st.visited += dijkstra_in_sector(sg, g, s, from, &mut dist, &mut touched) as u64;
-            for &pj in ps.iter() {
-                if pj == pi {
+            let op = sg.prev.old_of[pi as usize];
+            let oport = op * 2 + (port_i % 2);
+            let (a, b) = (
+                sg.prev.starts[oport as usize] as usize,
+                sg.prev.starts[oport as usize + 1] as usize,
+            );
+            for k in a..b {
+                let e = sg.prev.edges[k];
+                // Переход на ту сторону уже добавлен.
+                if e.to / 2 == op {
                     continue;
                 }
-                let port_j = sg.port_of(pj, s);
-                let d = dist[sg.node_of_port(port_j) as usize];
-                if d != u32::MAX {
-                    bucket[port_i as usize].push(Edge { to: port_j, cost: d });
+                let nt = sg.prev.new_of[(e.to / 2) as usize];
+                if nt == u32::MAX {
+                    continue;
                 }
+                sg.bucket[port_i as usize].push(Edge {
+                    to: nt * 2 + (e.to % 2),
+                    cost: e.cost,
+                });
+                st.reused_edges += 1;
             }
-            for &t in touched.iter() {
-                dist[t as usize] = u32::MAX;
-            }
-            touched.clear();
+            st.reused_ports += 1;
         }
+        return;
     }
-    for (i, b) in bucket.iter().enumerate() {
-        starts[i + 1] = starts[i] + b.len() as u32;
-        edges.extend_from_slice(b);
+    st.solved_sectors += 1;
+    let mut dist = std::mem::take(&mut sg.dist);
+    let mut touched = std::mem::take(&mut sg.touched);
+    for &pi in ps.iter() {
+        let port_i = sg.port_of(pi, s);
+        let from = sg.node_of_port(port_i);
+        st.sector_solves += 1;
+        st.visited += dijkstra_in_sector(sg, g, s, from, &mut dist, &mut touched) as u64;
+        for &pj in ps.iter() {
+            if pj == pi {
+                continue;
+            }
+            let port_j = sg.port_of(pj, s);
+            let d = dist[sg.node_of_port(port_j) as usize];
+            if d != u32::MAX {
+                sg.bucket[port_i as usize].push(Edge { to: port_j, cost: d });
+            }
+        }
+        for &t in touched.iter() {
+            dist[t as usize] = u32::MAX;
+        }
+        touched.clear();
     }
-    sg.starts = starts;
-    sg.edges = edges;
+    sg.dist = dist;
+    sg.touched = touched;
 }
 
 /// Дейкстра по узлам одного сектора. Возвращает число посещённых узлов.
@@ -634,6 +663,9 @@ pub struct RouteWs {
     /// Лучший узел каждой компоненты и цели поля.
     best: Vec<(u64, u32)>,
     goals: Vec<u32>,
+    /// Место в обходе секторов; `u32::MAX` — поле досчитано.
+    field_at: u32,
+    pub field_st: FieldStats,
 }
 
 impl RouteWs {
@@ -650,6 +682,8 @@ impl RouteWs {
             seeds: Vec::new(),
             best: Vec::new(),
             goals: Vec::new(),
+            field_at: u32::MAX,
+            field_st: FieldStats::default(),
         }
     }
 }
@@ -837,27 +871,36 @@ pub fn solve_field<F>(
 where
     F: Fn(u32, u32) -> u32,
 {
-    let mut st = FieldStats::default();
+    field_begin(sg, g, ws, target);
+    while !field_step(sg, g, f, ws, u32::MAX, h) {}
+    ws.field_st
+}
+
+/// Шаг нулевой и первый: цели компонент и цена выходов.
+///
+/// **Приказ называет точку, а не клетку** (ADR-138): компонента,
+/// из которой до цели не дойти, идёт к своему узлу, ближайшему
+/// к названной точке. Без этого половина карты остаётся без
+/// направления и армия там просто стоит.
+///
+/// Обход стоит не дороже прохода по графу: дейкстра внутри сектора
+/// видит только свою компоненту, а их размеры в сумме дают все узлы.
+pub fn field_begin(sg: &SectorGraph, g: &VolGraph, ws: &mut RouteWs, target: u32) {
+    // Перевыделение стирает всё состояние, поэтому идёт первым:
+    // сброшенный после него курсор означал бы поле из нуля секторов.
     let nport = sg.portals.len() * 2;
-    if ws.g.len() < nport.max(1) {
+    if ws.g.len() < nport.max(1) || ws.dist.len() != g.nodes {
         *ws = RouteWs::new(nport.max(1), g.nodes);
     }
+    ws.field_st = FieldStats::default();
+    ws.field_at = 0;
     ws.to_t.clear();
     ws.to_t.resize(nport, u32::MAX);
-    if sg.node_sector.is_empty() {
-        return st;
+    if sg.node_sector.is_empty() || g.nodes == 0 {
+        ws.field_at = u32::MAX;
+        return;
     }
-    let ts = sg.node_sector[target as usize];
 
-    // 0. Цель у каждой компоненты своя.
-    //
-    // **Приказ называет точку, а не клетку** (ADR-138): компонента,
-    // из которой до цели не дойти, идёт к своему узлу, ближайшему
-    // к названной точке. Без этого половина карты остаётся без
-    // направления и армия там просто стоит.
-    //
-    // Обход стоит не дороже прохода по графу: дейкстра внутри сектора
-    // видит только свою компоненту, а их размеры в сумме дают все узлы.
     let tw = sg.w;
     let tcell = g.cell_of(target as usize);
     let (tx, tz) = ((tcell % tw) as i64, (tcell / tw) as i64);
@@ -873,8 +916,7 @@ where
             ws.best[c] = (d, n as u32);
         }
     }
-    let tc = g.comp_of(target as usize) as usize;
-    ws.best[tc] = (0, target);
+    ws.best[g.comp_of(target as usize) as usize] = (0, target);
     ws.goals.clear();
     for &(_, n) in ws.best.iter() {
         if n != NO_NODE_LOCAL {
@@ -883,7 +925,6 @@ where
     }
     ws.goals.sort_unstable();
 
-    // 1. Цена добраться до ближайшей цели для каждой стороны портала.
     let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
     for gi in 0..ws.goals.len() {
         let goal = ws.goals[gi];
@@ -902,7 +943,6 @@ where
         }
         ws.touched.clear();
     }
-    let _ = ts;
     while let Some(Reverse((d, port))) = heap.pop() {
         if d > ws.to_t[port as usize] {
             continue;
@@ -915,12 +955,35 @@ where
             }
         }
     }
-    st.live_ports = ws.to_t.iter().filter(|&&v| v != u32::MAX).count();
+    ws.field_st.live_ports = ws.to_t.iter().filter(|&&v| v != u32::MAX).count();
+}
 
-    // 2. Сектор за сектором: засев в выходах, развёртка внутри.
-    let nsec = (sg.sw * sg.sh) as usize;
+/// Шаг второй и третий: развернуть засев внутри секторов и проставить
+/// переходы через порталы. Не более `budget` секторов за вызов.
+pub fn field_step<F>(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    f: &mut VolField,
+    ws: &mut RouteWs,
+    budget: u32,
+    h: &F,
+) -> bool
+where
+    F: Fn(u32, u32) -> u32,
+{
+    if ws.field_at == u32::MAX {
+        return true;
+    }
+    let nsec = sg.sw * sg.sh;
     let zones = sg.zones();
-    for sec in 0..nsec as u32 {
+    let mut spent = 0u32;
+    while ws.field_at < nsec {
+        if spent >= budget {
+            return false;
+        }
+        let sec = ws.field_at;
+        ws.field_at += 1;
+        spent += 1;
         let nodes = sg.nodes_of(sec);
         if nodes.is_empty() {
             continue;
@@ -948,13 +1011,14 @@ where
         // Ничьи в засеве разрешаются номером узла, а не порядком порталов.
         ws.seeds.sort_unstable();
         crate::volume::solve_zone(g, f, nodes, zones, sec, &ws.seeds, h);
-        st.sectors += 1;
-        st.updates += f.updates;
+        ws.field_st.sectors += 1;
+        ws.field_st.updates += f.updates;
     }
-    // 3. На выходе сектора поле молчит: внутри него идти уже некуда,
-    //    а перешагнуть портал — это не шаг поля, а шаг графа. Поэтому
-    //    сторонам, с которых выгодно перейти, направление проставляется
-    //    отдельно — иначе юнит доходит до границы и встаёт.
+
+    // На выходе сектора поле молчит: внутри него идти уже некуда,
+    // а перешагнуть портал — это не шаг поля, а шаг графа. Поэтому
+    // сторонам, с которых выгодно перейти, направление проставляется
+    // отдельно — иначе юнит доходит до границы и встаёт.
     for pi in 0..sg.portals.len() as u32 {
         for side in 0..2u32 {
             let here = pi * 2 + side;
@@ -972,8 +1036,9 @@ where
             }
         }
     }
-    st.reached = f.dir.iter().filter(|&&d| d != 255).count();
-    st
+    ws.field_st.reached = f.dir.iter().filter(|&&d| d != 255).count();
+    ws.field_at = u32::MAX;
+    true
 }
 
 /// Расстояние между двумя узлами внутри одного сектора.
@@ -1233,6 +1298,25 @@ mod tests {
         }
         assert!(checked > 100, "проверено всего {checked} узлов");
         assert!(to_target > 50, "в цель пришло всего {to_target}");
+    }
+
+    /// **Порционная пересборка равна разовой.** Потолок работы за тик
+    /// не имеет права менять результат (ADR-152).
+    #[test]
+    fn a_budgeted_rebuild_matches_a_whole_one() {
+        let (g, _, _, _) = world(true);
+        let mut whole = SectorGraph::new();
+        whole.build(&g);
+
+        let mut piece = SectorGraph::new();
+        let mut st = piece.rebuild_begin(&g, &[]);
+        let mut rounds = 0;
+        while !piece.rebuild_step(&g, 3, &mut st) {
+            rounds += 1;
+            assert!(rounds < 10_000, "порционная сборка не сошлась");
+        }
+        assert!(rounds > 1, "порция оказалась не порцией");
+        assert_eq!(dump(&piece), dump(&whole), "порции разошлись с разовой сборкой");
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.
