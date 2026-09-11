@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod dig;
+pub mod skirmish;
 
 /// Числа тика — из `data/sim.ron`, как и в игре (ADR-140).
 ///
