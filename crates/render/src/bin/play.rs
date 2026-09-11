@@ -186,9 +186,15 @@ struct Art {
 }
 
 fn main() {
-    let mut units = 240usize;
+    // **Шесть машин, по три на сторону.** Пока подбирается вид и
+    // управление, толпа мешает: на двухстах сорока не разобрать
+    // ни силуэта, ни того, кого выделили и куда он пошёл. Нагрузку
+    // меряют гейт и D-7, а не это окно; `--units` поднимает обратно.
+    let mut units = 6usize;
     let mut seed = 42u64;
-    let mut side = 384u32;
+    // Карта под шесть машин — соразмерная. На 384 они не встретятся
+    // за разумное время, и смотреть будет не на что.
+    let mut side = 128u32;
     let mut relief = 10u32;
     let mut speed = 1u32;
     let mut shot: Option<String> = None;
@@ -349,7 +355,30 @@ fn setup(
                          part: Slice,
                          meshes: &mut Assets<Mesh>| {
         ubuf.clear();
-        render::geom::volume_to_mesh(body, tint, UNIT_SCALE, part, &mut ubuf);
+        // Разворот **с фаской** (ADR-206): у тела юнита меш строится
+        // один раз на тип, и геометрическое скругление там дешевле
+        // шейдерного и честнее — срезается силуэт, а не только свет.
+        //
+        // `Slice` переводится в диапазон слоёв: башня и корпус
+        // вращаются врозь, поэтому и рисуются врозь.
+        let ty = body.turret_y as usize;
+        let layers = match part {
+            Slice::All => (0, usize::MAX),
+            Slice::Hull if ty == 0 => (0, usize::MAX),
+            Slice::Hull => (0, ty),
+            // Безбашенное тело не даёт башни вовсе: пустой диапазон,
+            // а не весь том — иначе корпус нарисовался бы дважды.
+            Slice::Turret if ty == 0 => (0, 0),
+            Slice::Turret => (ty, usize::MAX),
+        };
+        render::model::body_to_mesh(
+            body,
+            tint,
+            UNIT_SCALE,
+            layers,
+            render::model::BEVEL,
+            &mut ubuf,
+        );
         meshes.add(buf_to_mesh(&ubuf))
     };
     let hull = [
