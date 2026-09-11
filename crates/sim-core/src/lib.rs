@@ -693,6 +693,7 @@ impl World {
             self.flow_ticks = self.nav_field.last_ticks;
             self.flow_solves = self.nav_field.published;
             self.flow_edges = self.nav_field.portals;
+            self.flow_updates = self.nav_field.updates;
             self.flow_solved_sectors = self.nav_field.solved_sectors;
             self.flow_reused_sectors = self.nav_field.reused_sectors;
         }

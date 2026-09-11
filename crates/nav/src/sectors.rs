@@ -1325,6 +1325,12 @@ pub struct NavField {
     pub ticks: u32,
     pub last_ticks: u32,
     pub published: u64,
+    /// Годуновских обновлений за последний законченный цикл.
+    ///
+    /// Счёт вёлся и раньше, но наружу не выходил: `sim-core` держал
+    /// поле `flow_updates`, которому присваивался только ноль
+    /// в конструкторе, и D-7 печатала этот ноль как замер (ADR-190).
+    pub updates: u64,
     pub nodes: usize,
     pub portals: usize,
     pub components: usize,
@@ -1584,6 +1590,7 @@ impl NavField {
         self.portals = self.sg.portals.len();
         self.components = self.g.components;
         self.published += 1;
+        self.updates = self.ws.field_st.updates;
         self.last_ticks = self.ticks;
         self.ticks = 0;
         self.stage = Stage::Idle;
