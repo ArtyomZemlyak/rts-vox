@@ -22,11 +22,16 @@
 use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
-use bevy::light::{CascadeShadowConfigBuilder, DirectionalLightShadowMap};
+use bevy::light::atmosphere::ScatteringMedium;
+use bevy::light::{
+    Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder,
+    DirectionalLightShadowMap, SunDisk,
+};
 use bevy::mesh::Indices;
 use bevy::anti_alias::fxaa::Fxaa;
-use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
@@ -105,6 +110,32 @@ struct Fx {
     ssao: bool,
     /// Красить рельеф материалом мира или собирать одним цветом.
     paint: bool,
+    /// Процедурная атмосфера: небо, дымка по глубине и карта окружения
+    /// для отражений (ADR-198). Выключенная возвращает плоскую заливку
+    /// и линейный туман — то, с чем эту цену и сравнивают.
+    sky: bool,
+    /// Фаска на ребре воксела плиткой в `base_color` (ADR-199).
+    /// Выключенная снимает и текстуру, и её UV с вершин — иначе
+    /// в замер попала бы только половина цены.
+    chamfer: bool,
+}
+
+/// Время суток и глубина дымки.
+///
+/// Отдельно от `Fx`, потому что это не «включено или нет», а число:
+/// высота солнца перекрашивает сцену целиком, и подбирать её,
+/// пересобирая крейт, — это по две с половиной минуты на попытку.
+/// Значения по умолчанию — из `look`, и там же они и живут.
+#[derive(Resource, Clone, Copy)]
+struct Sky {
+    /// Высота солнца над горизонтом, радианы.
+    elevation: f32,
+    /// Азимут солнца, радианы.
+    azimuth: f32,
+    /// Метров атмосферы на воксель мира — ручка глубины.
+    haze: f32,
+    /// Экспозиция камеры, EV100.
+    ev100: f32,
 }
 
 /// Разбор кадра по работам ремешинга.
@@ -202,7 +233,20 @@ fn main() {
     let mut after = 8.0f32;
     let mut at_frame = 0u64;
     let mut frames = 0u64;
-    let mut fx = Fx { cascades: look::SHADOW_CASCADES, bloom: true, ssao: look::SSAO, paint: true };
+    let mut fx = Fx {
+        cascades: look::SHADOW_CASCADES,
+        bloom: true,
+        ssao: look::SSAO,
+        paint: true,
+        sky: true,
+        chamfer: true,
+    };
+    let mut sky = Sky {
+        elevation: look::SUN_ELEVATION,
+        azimuth: look::SUN_AZIMUTH,
+        haze: look::HAZE_METRES_PER_VOXEL,
+        ev100: look::EV100,
+    };
     let (mut yaw, mut pitch, mut dist) = (0.7f32, 0.75f32, 0.45f32);
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -220,6 +264,12 @@ fn main() {
             "--bloom" => fx.bloom = v != "0",
             "--ssao" => fx.ssao = v != "0",
             "--paint" => fx.paint = v != "0",
+            "--sky" => fx.sky = v != "0",
+            "--chamfer" => fx.chamfer = v != "0",
+            "--sun" => sky.elevation = v.parse().unwrap_or(sky.elevation),
+            "--sun-az" => sky.azimuth = v.parse().unwrap_or(sky.azimuth),
+            "--haze" => sky.haze = v.parse().unwrap_or(sky.haze),
+            "--ev" => sky.ev100 = v.parse().unwrap_or(sky.ev100),
             "--frames" => frames = v.parse().unwrap_or(frames),
             "--yaw" => yaw = v.parse().unwrap_or(yaw),
             "--pitch" => pitch = v.parse().unwrap_or(pitch),
@@ -228,7 +278,9 @@ fn main() {
                 println!(
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
-[--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1]"
+[--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
+[--sky 0|1] [--chamfer 0|1] \
+[--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100]"
                 );
                 return;
             }
@@ -303,6 +355,7 @@ fn main() {
             ..default()
         }))
         .insert_resource(fx)
+        .insert_resource(sky)
         .insert_resource(Prof::default())
         .insert_resource(DirectionalLightShadowMap { size: look::SHADOW_MAP })
         .insert_resource(GlobalAmbientLight {
@@ -340,14 +393,22 @@ fn srgb(c: [f32; 3]) -> Color {
     Color::srgb(c[0], c[1], c[2])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut mediums: ResMut<Assets<ScatteringMedium>>,
     mut sim: ResMut<Sim>,
     view: Res<View>,
     fx: Res<Fx>,
+    sky: Res<Sky>,
 ) {
+    // Уровень земли: генератор кладёт поверхность на половину высоты
+    // мира (`worldgen::Params::sized`). Нужен атмосфере — иначе строй
+    // стоял бы километрами выше уровня моря, а там воздух реже.
+    let ground = sim.r.world.ground().expect("земля").world.ny as f32 * 0.5;
     // Юниты — **настоящий воксельный том** из `voxel::unit`, а не
     // кубик: силуэт корпуса, башни и ствола читается, и видно, куда
     // смотрит юнит (ADR-172). Тело у сторон **разное** (ADR-176):
@@ -356,6 +417,7 @@ fn setup(
     // Масштаб — канонический: воксель тела вдвое мельче мирового
     // (ADR-094).
     let bodies = [voxel::unit::tank(), voxel::unit::strider()];
+    let uv = fx.chamfer;
     let mut ubuf = MeshBuf::default();
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
@@ -363,7 +425,7 @@ fn setup(
                          meshes: &mut Assets<Mesh>| {
         ubuf.clear();
         render::geom::volume_to_mesh(body, tint, UNIT_SCALE, part, &mut ubuf);
-        meshes.add(buf_to_mesh(&ubuf))
+        meshes.add(buf_to_mesh(&ubuf, uv))
     };
     let hull = [
         unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Hull, &mut meshes),
@@ -377,8 +439,13 @@ fn setup(
     // цвет вершины **подменяет** `base_color` целиком
     // (`pbr_fragment.wgsl`). База здесь не значит ничего, а
     // шероховатость и металличность — значат.
+    // Плитка фаски: повторяется по одной на воксель и **умножается**
+    // на цвет вершины (`pbr_fragment.wgsl`, строка 194), поэтому
+    // с раскраской материалом она не спорит (ADR-199).
+    let chamfer = fx.chamfer.then(|| images.add(chamfer_image()));
     let armour = || StandardMaterial {
         base_color: Color::WHITE,
+        base_color_texture: chamfer.clone(),
         perceptual_roughness: 0.55,
         metallic: 0.25,
         ..default()
@@ -388,6 +455,7 @@ fn setup(
         let (rough, metal) = look::surface(c);
         m.add(StandardMaterial {
             base_color: if painted { Color::WHITE } else { srgb(FLAT_GROUND) },
+            base_color_texture: chamfer.clone(),
             perceptual_roughness: rough,
             metallic: metal,
             ..default()
@@ -447,7 +515,7 @@ fn setup(
                 continue;
             }
             tris += bufs[k].idx.len() / 3;
-            let h = meshes.add(buf_to_mesh(&bufs[k]));
+            let h = meshes.add(buf_to_mesh(&bufs[k], fx.chamfer));
             slot[k] = Some(h.clone());
             let o = chunk_origin(i, grid.nx, grid.ny);
             commands.spawn((
@@ -488,27 +556,26 @@ fn setup(
     let eye = view.cam.eye();
     let t = view.cam.target;
     let side = view.side;
-    let cam = commands.spawn((
-        Camera3d::default(),
-        Camera {
-            // Небо за краем мира. Тот же цвет, что у тумана: разойдись
-            // они — на горизонте появилась бы полоса.
-            clear_color: ClearColorConfig::Custom(srgb(look::SKY_COLOUR_SRGB)),
-            ..default()
-        },
-        // Тонмаппинг тут не украшение: свет задан в люксах, и без
-        // него всё ярче половины улетает в белое.
-        Tonemapping::AcesFitted,
-        DistanceFog {
-            color: srgb(look::SKY_COLOUR_SRGB),
-            falloff: FogFalloff::Linear {
-                start: side * look::FOG_START_FRAC,
-                end: side * look::FOG_END_FRAC,
+    let cam = commands
+        .spawn((
+            Camera3d::default(),
+            Camera {
+                // Небо за краем мира на случай, когда атмосферы нет:
+                // её плагин требует вычислительных шейдеров и на машине
+                // без них молча не загрузится.
+                clear_color: ClearColorConfig::Custom(srgb(look::SKY_COLOUR_SRGB)),
+                ..default()
             },
-            ..default()
-        },
-        Transform::from_xyz(eye.x, eye.y, eye.z).looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y),
-    )).id();
+            // Тонмаппинг тут не украшение: свет задан в люксах, и без
+            // него всё ярче половины улетает в белое.
+            Tonemapping::AcesFitted,
+            // Экспозиция идёт в паре с яркостью солнца: 130 000 люкс
+            // на входе атмосферы — это не «ярче», а «до фильтрации»
+            // (ADR-198).
+            Exposure { ev100: sky.ev100 },
+            Transform::from_xyz(eye.x, eye.y, eye.z).looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y),
+        ))
+        .id();
     // Трассеры и лучи светятся сильнее единицы — свечение делает
     // видимым то, ради чего они и заведены. Отдельным вставлением,
     // а не полем набора: компонент либо есть, либо его нет.
@@ -520,10 +587,51 @@ fn setup(
             .entity(cam)
             .insert((Msaa::Off, ScreenSpaceAmbientOcclusion::default(), Fxaa::default()));
     }
+    if fx.sky {
+        // Атмосфера считается на камеру: её настройки — это размеры
+        // таблиц и число выборок, то есть цена, а не вид.
+        commands.entity(cam).insert((
+            AtmosphereSettings {
+                aerial_view_lut_max_distance: look::HAZE_RANGE_M,
+                ..default()
+            },
+            // Отражения и заполняющий свет **снимаются с настоящего
+            // неба**. Это и есть ответ на «руда без карты окружения
+            // выходит чёрной» из ADR-175: карта окружения появилась.
+            AtmosphereEnvironmentMapLight {
+                intensity: look::SKY_IBL,
+                size: UVec2::splat(look::SKY_IBL_SIZE),
+                ..default()
+            },
+        ));
+        // Планета. Её преобразование — это масштаб сцены: рассеяние
+        // считается в метрах, а мир у нас в вокселях, и растянутый
+        // воксель даёт видимую глубину (ADR-198).
+        let k = 1.0 / sky.haze;
+        let medium = mediums.add(ScatteringMedium::earth(256, 256));
+        let atmo = commands.spawn(Atmosphere::earth(medium)).id();
+        // Отдельной вставкой, а не полем набора: у `Atmosphere` есть
+        // хук на добавление, который ставит планету под сцену сам,
+        // и спорить с ним в одном наборе — значит зависеть от порядка.
+        // Компонента `Transform` здесь нет намеренно: была бы —
+        // распространение преобразований переписало бы это значение.
+        commands.entity(atmo).insert(GlobalTransform::from(
+            Transform::from_scale(Vec3::splat(k))
+                .with_translation(Vec3::new(0.0, ground - EARTH_RADIUS_M * k, 0.0)),
+        ));
+    } else {
+        // Старая картинка целиком, чтобы было с чем сравнивать: плоская
+        // заливка неба и линейный туман того же цвета.
+        commands.entity(cam).insert(DistanceFog {
+            color: srgb(look::SKY_COLOUR_SRGB),
+            falloff: FogFalloff::Linear { start: side * 0.35, end: side * 1.15 },
+            ..default()
+        });
+    }
 
-    // Солнце: тёплое, с каскадными тенями. Тень здесь не эффект —
-    // без неё рельеф читается как плоская заливка, а юнит не стоит
-    // на земле, а висит над ней.
+    // Солнце: белое, с каскадными тенями и видимым диском. Тень здесь
+    // не эффект — без неё рельеф читается как плоская заливка, а юнит
+    // не стоит на земле, а висит над ней.
     commands.spawn((
         DirectionalLight {
             color: srgb(look::SUN_SRGB),
@@ -535,7 +643,14 @@ fn setup(
             shadow_normal_bias: 2.0,
             ..default()
         },
-        Transform::default().looking_to(Vec3::from(look::SUN_DIR).normalize(), Vec3::Y),
+        // Диск солнца рисует атмосфера; без неё компонент не значит
+        // ничего и потому ставится всегда.
+        SunDisk {
+            angular_size: look::SUN_DISK_SIZE,
+            intensity: look::SUN_DISK_INTENSITY,
+        },
+        Transform::default()
+            .looking_to(Vec3::from(look::sun_dir_at(sky.elevation, sky.azimuth)), Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: fx.cascades.max(1),
             minimum_distance: 1.0,
@@ -545,21 +660,13 @@ fn setup(
         }
         .build(),
     ));
-    // Заполняющий свет неба: холодный, слабый и **без теней**. Ровный
-    // ambient задаёт теневой стороне уровень, но не форму; направленный
-    // подсвет даёт ей направление, и оттого теневая сторона перестаёт
-    // быть дырой. Карты окружения у нас нет — заполнять больше нечем.
-    commands.spawn((
-        DirectionalLight {
-            color: srgb(look::SKY_SRGB),
-            illuminance: look::SKY_LUX,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::default().looking_to(Vec3::from(look::SKY_DIR).normalize(), Vec3::Y),
-    ));
     commands.insert_resource(art);
 }
+
+/// Радиус планеты у `Atmosphere::earth`, метры. Повторён здесь, потому
+/// что Bevy держит его приватной константой, а вынести планету под
+/// сцену без него нельзя.
+const EARTH_RADIUS_M: f32 = 6_360_000.0;
 
 /// Развернуть квады чанка в буферы классов, покрасив материалом мира.
 #[allow(clippy::too_many_arguments)]
@@ -589,7 +696,7 @@ fn paint(
     );
 }
 
-fn buf_to_mesh(b: &MeshBuf) -> Mesh {
+fn buf_to_mesh(b: &MeshBuf, uv: bool) -> Mesh {
     let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.pos.clone())
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm.clone())
@@ -597,7 +704,46 @@ fn buf_to_mesh(b: &MeshBuf) -> Mesh {
     if !b.col.is_empty() && b.col.len() == b.pos.len() {
         m.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.col.clone());
     }
+    // UV кладутся только когда плитка включена: атрибут задаёт ключ
+    // конвейера, и без него шейдер не читает текстуру вовсе.
+    if uv && b.uv.len() == b.pos.len() {
+        m.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uv.clone());
+    }
     m
+}
+
+/// Плитка фаски — в текстуру Bevy.
+///
+/// Уровни детализации выкладываются **сами**: Bevy их не строит, а без
+/// них воксель размером в пиксель кипит муаром на каждом движении
+/// камеры (ADR-199).
+fn chamfer_image() -> Image {
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+    let t = look::chamfer_tile();
+    let mut img = Image::new_uninit(
+        Extent3d { width: t.size, height: t.size, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        // sRGB, а не Unorm: плитка — это цвет, и усреднение уровней
+        // в ней уже сделано в линейном пространстве.
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.mip_level_count = t.mips;
+    img.data = Some(t.rgba);
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        // Плитка повторяется на каждом вокселе — иначе она растянется
+        // на весь слитый квад, и фаска получится у чанка, а не у куба.
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 8,
+        ..default()
+    });
+    img
 }
 
 /// Корпуса: всё, что не башня и не снаряд. Два запроса на `Transform`
@@ -664,7 +810,7 @@ fn step(
             t_paint += t.elapsed().as_secs_f64() * 1e3;
             let t = Instant::now();
             for k in 0..look::CLASSES {
-                let m = buf_to_mesh(&bufs[k]);
+                let m = buf_to_mesh(&bufs[k], fx.chamfer);
                 match chunks[i][k].clone() {
                     Some(h) => {
                         let _ = meshes.insert(h.id(), m);

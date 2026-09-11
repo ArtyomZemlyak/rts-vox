@@ -22,6 +22,10 @@ pub struct MeshBuf {
     /// Цвет вершины. У юнитов несёт роль воксела (ADR-172), у рельефа —
     /// материал (ADR-175). Пуст только у неокрашенного разворота.
     pub col: Vec<[f32; 4]>,
+    /// Координаты плитки фаски, **в вокселях**: единица UV — ровно один
+    /// воксель, и поэтому плитка садится на сетку без подгонки, каким
+    /// бы большим ни вышел слитый квад (ADR-199).
+    pub uv: Vec<[f32; 2]>,
 }
 
 impl MeshBuf {
@@ -30,6 +34,7 @@ impl MeshBuf {
         self.nrm.clear();
         self.idx.clear();
         self.col.clear();
+        self.uv.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -104,6 +109,9 @@ fn push_quad(
     let base = out.pos.len() as u32;
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
+    // Углы квада разнесены на `h` и `w` вокселей — столько же плиток
+    // фаски в них и укладывается.
+    out.uv.extend_from_slice(&[[0.0, 0.0], [h, 0.0], [h, w], [0.0, w]]);
     if let Some(c) = col {
         out.col.extend_from_slice(&[c, c, c, c]);
     }
@@ -383,6 +391,8 @@ fn push_face(
     let base = out.pos.len() as u32;
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
+    // Грань тела — ровно один воксель, значит ровно одна плитка.
+    out.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
     out.col.extend_from_slice(&[c, c, c, c]);
     if positive {
         out.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
