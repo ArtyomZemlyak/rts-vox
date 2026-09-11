@@ -91,8 +91,8 @@ fn main() {
         }
         let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
 
-        let fp = footprint_permille(body);
-        let yards = courtyards(body);
+        let fp = footprint_permille(&body.vol);
+        let yards = courtyards(&body.vol);
         rows.push((name.to_string(), fp, yards));
 
         println!(
@@ -150,6 +150,48 @@ fn main() {
         println!("{name:<28} {fp:>4}‰  дворов {yards}");
     }
 
+    // Обломки. Куча вдвое грубее машины по сетке и обязана держать
+    // её материю до кубического миллиметра.
+    println!("
+ОБЛОМКИ (машина оседает, материя сохраняется)
+");
+    println!(
+        "{:<28} {:>12} {:>9} {:>8} {:>10} {:>11} {:>7} {:>8}",
+        "машина", "куча", "вокселей", "высота", "материя м3", "вместимость", "байт", "сборка"
+    );
+    for (name, body) in &bodies {
+        // Сборка обломка — операция на смерть машины: один проход
+        // по вокселям тела. Прогрев, потом замер, как у связности.
+        for _ in 0..4 {
+            std::hint::black_box(body.wreck(0));
+        }
+        let n = 64;
+        let t = Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(body.wreck(0));
+        }
+        let us = t.elapsed().as_secs_f64() * 1e6 / n as f64;
+
+        let w = body.wreck(0);
+        let (_, wy, _) = w.extent_mm();
+        let (_, by, _) = body.extent_mm();
+        assert_eq!(w.matter_mm3(), body.volume_mm3(), "{name}: материя не сошлась");
+        println!(
+            "{:<28} {:>3}x{:<3}x{:<4} {:>9} {:>4.1}/{:<3.1} {:>10.1} {:>11.1} {:>7} {:>7.2}",
+            name,
+            w.vol.nx,
+            w.vol.ny,
+            w.vol.nz,
+            w.solid_count(),
+            wy as f64 / 1000.0,
+            by as f64 / 1000.0,
+            w.matter_mm3() as f64 / 1e9,
+            w.capacity_mm3() as f64 / 1e9,
+            w.bytes(),
+            us
+        );
+    }
+
     // Насколько силуэты **не совпадают** как формы: общая сетка 16x16,
     // 256 клеток. Размер и так различает постройки; вопрос в форме.
     let base = voxel::roster::buildings();
@@ -162,7 +204,7 @@ fn main() {
                 "{:<10} / {:<10} {:>4}",
                 base[i].0,
                 base[j].0,
-                silhouette_distance(&silhouette(&base[i].1, 16), &silhouette(&base[j].1, 16))
+                silhouette_distance(&silhouette(&base[i].1.vol, 16), &silhouette(&base[j].1.vol, 16))
             );
         }
     }

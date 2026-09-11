@@ -17,7 +17,15 @@
 //! не «большими», а «из кубиков покрупнее». Колонка стала многословной
 //! (ADR-179), и подгонка больше не нужна: у всех машин набора
 //! четыре воксела на метр.
+//!
+//! **Набор сгруппирован: сторона, сторона, база.** [`tracked`] низкая
+//! и на сплошной опоре, [`walking`] высокая и на точечной — стороны
+//! разведены силуэтом, а не оттенком (ADR-203). [`buildings`] — то же
+//! `UnitBody`, только неподвижное, и силуэт постройки обязан читаться
+//! **сверху**, с высоты боевой камеры (ADR-202). [`all`] — склейка
+//! трёх списков: тело мимо одного из них пройдёт мимо всех проверок.
 
+use crate::topo::unit::UnitVol;
 use crate::unit::{Part, UnitBody};
 
 /// Ребро воксела тела в миллиметрах — канон (ADR-094).
@@ -703,13 +711,33 @@ pub fn top_view(body: &UnitBody) -> Vec<Option<Part>> {
     v
 }
 
+/// След: занята ли клетка `(x, z)` хоть на какой высоте.
+///
+/// Меры силуэта берут `UnitVol`, а не `UnitBody`: силуэт — свойство
+/// занятости, и обломок, у которого меток нет вовсе, обязан меряться
+/// тем же кодом.
+fn covered(vol: &UnitVol) -> Vec<bool> {
+    let (nx, ny, nz) = (vol.nx as usize, vol.ny as usize, vol.nz as usize);
+    let mut f = vec![false; nx * nz];
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if vol.get(x, y, z) {
+                    f[z * nx + x] = true;
+                }
+            }
+        }
+    }
+    f
+}
+
 /// Заполненность следа в **промилле**: доля занятых клеток проекции.
 ///
 /// Тысяча — сплошной прямоугольник, то есть сверху постройка выглядит
 /// плитой, чем бы она ни была сбоку.
-pub fn footprint_permille(body: &UnitBody) -> u32 {
-    let v = top_view(body);
-    (v.iter().filter(|c| c.is_some()).count() * 1000 / v.len().max(1)) as u32
+pub fn footprint_permille(vol: &UnitVol) -> u32 {
+    let v = covered(vol);
+    (v.iter().filter(|c| **c).count() * 1000 / v.len().max(1)) as u32
 }
 
 /// Дворов в проекции сверху: связных пятен пустоты, до которых
@@ -717,15 +745,15 @@ pub fn footprint_permille(body: &UnitBody) -> u32 {
 ///
 /// Каре склада отличается от бруска того же габарита ровно этим,
 /// и отличие видно только сверху.
-pub fn courtyards(body: &UnitBody) -> u32 {
-    let (nx, nz) = (body.vol.nx as usize, body.vol.nz as usize);
-    let v = top_view(body);
+pub fn courtyards(vol: &UnitVol) -> u32 {
+    let (nx, nz) = (vol.nx as usize, vol.nz as usize);
+    let v = covered(vol);
     // Достижимое снаружи — заливка от рамки. Оставшаяся пустота
     // и есть дворы.
     let mut open = vec![false; nx * nz];
     let mut st: Vec<usize> = Vec::new();
     let seed = |i: usize, open: &mut Vec<bool>, st: &mut Vec<usize>| {
-        if v[i].is_none() && !open[i] {
+        if !v[i] && !open[i] {
             open[i] = true;
             st.push(i);
         }
@@ -742,7 +770,7 @@ pub fn courtyards(body: &UnitBody) -> u32 {
         while let Some(i) = st.pop() {
             let (x, z) = (i % nx, i / nx);
             let mut go = |k: usize, st: &mut Vec<usize>| {
-                if v[k].is_none() && !mark[k] {
+                if !v[k] && !mark[k] {
                     mark[k] = true;
                     st.push(k);
                 }
@@ -766,7 +794,7 @@ pub fn courtyards(body: &UnitBody) -> u32 {
     let mut mark = open.clone();
     let mut yards = 0;
     for i in 0..nx * nz {
-        if v[i].is_some() || mark[i] {
+        if v[i] || mark[i] {
             continue;
         }
         yards += 1;
@@ -783,13 +811,13 @@ pub fn courtyards(body: &UnitBody) -> u32 {
 /// Приведение нужно, чтобы силуэты **разных габаритов** сравнивались
 /// как формы. Размер и так различает постройки; вопрос в том,
 /// различает ли их форма, и ответ на него даёт только общая сетка.
-pub fn silhouette(body: &UnitBody, n: usize) -> Vec<bool> {
-    let (nx, nz) = (body.vol.nx as usize, body.vol.nz as usize);
-    let v = top_view(body);
+pub fn silhouette(vol: &UnitVol, n: usize) -> Vec<bool> {
+    let (nx, nz) = (vol.nx as usize, vol.nz as usize);
+    let v = covered(vol);
     let mut s = vec![false; n * n];
     for z in 0..nz {
         for x in 0..nx {
-            if v[z * nx + x].is_some() {
+            if v[z * nx + x] {
                 s[(z * n / nz) * n + x * n / nx] = true;
             }
         }
@@ -923,7 +951,7 @@ mod tests {
     fn every_building_reads_from_above() {
         let base = buildings();
         for (name, body) in &base {
-            let fp = footprint_permille(body);
+            let fp = footprint_permille(&body.vol);
             assert!(fp < 900, "{name}: след занят на {fp}‰ — сверху это плита");
             let view = top_view(body);
             for p in [Part::Weapon, Part::Sensor] {
@@ -939,9 +967,9 @@ mod tests {
         // на мере, которая всегда мала.
         let mut slab = UnitBody::new_scaled(32, 16, 32, 2, MM);
         fill(&mut slab, (0, 32), (0, 16), (0, 32), Part::Armour);
-        assert_eq!(footprint_permille(&slab), 1000, "мера следа не работает");
-        assert_eq!(courtyards(&slab), 0, "двор нашёлся у сплошного короба");
-        let s16 = silhouette(&slab, 16);
+        assert_eq!(footprint_permille(&slab.vol), 1000, "мера следа не работает");
+        assert_eq!(courtyards(&slab.vol), 0, "двор нашёлся у сплошного короба");
+        let s16 = silhouette(&slab.vol, 16);
         assert_eq!(silhouette_distance(&s16, &s16), 0, "мера различия не работает");
 
         // Сравниваются **формы**: размер и так различает постройки,
@@ -949,7 +977,7 @@ mod tests {
         for i in 0..base.len() {
             for j in i + 1..base.len() {
                 let d =
-                    silhouette_distance(&silhouette(&base[i].1, 16), &silhouette(&base[j].1, 16));
+                    silhouette_distance(&silhouette(&base[i].1.vol, 16), &silhouette(&base[j].1.vol, 16));
                 assert!(
                     d >= 48,
                     "{} и {} сверху одной формы: расходятся {d} клеток из 256",
@@ -998,6 +1026,56 @@ mod tests {
             tracked().len() + walking().len() + buildings().len(),
             "тело мимо набора: all() обязан быть склейкой трёх списков"
         );
+    }
+
+    /// **Обломок любой машины держит её материю и лежит на её следе.**
+    ///
+    /// Сетка обломка вдвое грубее сетки тела, и это самое опасное
+    /// место для инварианта сохранения: наивный пересчёт «вокселей
+    /// стало вчетверо меньше» потерял бы семь восьмых материи разом
+    /// и на всех машинах сразу. Проверяется весь набор, потому что
+    /// плотность у машин разная, а округление ошибается на редких.
+    #[test]
+    fn every_wreck_holds_its_machine() {
+        let slack = crate::unit::WORLD_MM as u32;
+        for (name, body) in all() {
+            let w = body.wreck(0);
+            assert_eq!(
+                w.matter_mm3(),
+                body.volume_mm3(),
+                "{name}: материя не сошлась при огрублении сетки"
+            );
+            assert!(
+                w.capacity_mm3() >= body.volume_mm3(),
+                "{name}: форме обломка нечем держать материю машины"
+            );
+            let ((bx, by, bz), (wx, wy, wz)) = (body.extent_mm(), w.extent_mm());
+            assert!(
+                wx <= bx + slack && wy <= by + slack && wz <= bz + slack,
+                "{name}: обломок крупнее машины: {wx}x{wy}x{wz} против {bx}x{by}x{bz}"
+            );
+
+            // Куча лежит на следе машины, а не рядом с ним.
+            let k = (crate::unit::WORLD_MM / body.mm).max(1) as usize;
+            let (bf, wf) = (covered(&body.vol), covered(&w.vol));
+            let (nx, nz) = (body.vol.nx as usize, body.vol.nz as usize);
+            let (mx, mz) = (w.vol.nx as usize, w.vol.nz as usize);
+            for z in 0..mz {
+                for x in 0..mx {
+                    if !wf[z * mx + x] {
+                        continue;
+                    }
+                    let mut on = false;
+                    for dz in 0..k {
+                        for dx in 0..k {
+                            let (bx, bz) = (x * k + dx, z * k + dz);
+                            on |= bx < nx && bz < nz && bf[bz * nx + bx];
+                        }
+                    }
+                    assert!(on, "{name}: столб обломка ({x}, {z}) лёг мимо машины");
+                }
+            }
+        }
     }
 
     /// **Разброс размеров действительно есть.**
