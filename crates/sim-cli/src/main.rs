@@ -253,6 +253,10 @@ fn main() -> ExitCode {
             r.world.shots_refused,
             r.world.shots.alive_count()
         );
+        println!(
+            "  взрывы: {}, вокселей в очередь {}, задето волной {}",
+            r.world.blasts, r.world.blast_voxels, r.world.blast_hits
+        );
         let live = r.world.units.live().len();
         let with_target = r.world
             .units

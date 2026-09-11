@@ -71,6 +71,12 @@ pub struct Tuning {
     pub max_shots: usize,
     /// Радиус попадания, клеток: снаряд попал, если цель ближе.
     pub shot_hit_radius: i32,
+    /// Радиус воронки от попадания, вокселей. Ноль — взрыва нет,
+    /// снаряд снимает воксели только с того, в кого попал.
+    pub blast_radius: i32,
+    /// Урон всем в радиусе воронки, вокселей. Приходит и своим:
+    /// взрыв не разбирает, кто рядом (ADR-165).
+    pub blast_damage: u16,
 }
 
 #[derive(Debug)]
@@ -133,6 +139,7 @@ mod tests {
         assert!(t.shot_speed > 0 && t.shot_damage > 0);
         assert!(t.reload_period > 0 && t.max_shots > 0);
         assert!(t.shot_hit_radius > 0);
+        assert!(t.blast_radius >= 0);
         assert!(t.flow_cells_per_tick > 0 && t.flow_scan_per_tick > 0);
         assert!(t.flow_updates_per_tick > 0);
         assert!(t.flow_sectors_per_tick > 0);

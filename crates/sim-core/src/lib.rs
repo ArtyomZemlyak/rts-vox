@@ -351,6 +351,15 @@ pub struct World {
     /// Считается прямо, а не как убыль живых: с подкреплениями (ADR-161)
     /// число живых держится ровным, и смерти по нему не видны вовсе.
     pub deaths: u64,
+    /// Замер: взрывов было, вокселей поставлено в очередь на снос,
+    /// юнитов задето взрывной волной.
+    pub blasts: u64,
+    pub blast_voxels: u64,
+    pub blast_hits: u64,
+    /// Накопитель урона за тик. Взрыв задевает многих, и один юнит
+    /// может попасть под несколько: складывать надо до применения,
+    /// иначе исход зависит от порядка снарядов.
+    dmg_acc: Vec<u32>,
     /// Замер: сколько юнитов действительно искали цель за тик.
     pub searches: u64,
     /// Замер: в скольких тиках поиск упёрся в потолок.
@@ -457,6 +466,10 @@ impl World {
             shots_blocked: 0,
             shots_refused: 0,
             deaths: 0,
+            blasts: 0,
+            blast_voxels: 0,
+            blast_hits: 0,
+            dmg_acc: Vec::new(),
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
@@ -1241,7 +1254,23 @@ impl World {
     fn step_shots(&mut self) {
         let r2 = self.tuning.shot_hit_radius * self.tuning.shot_hit_radius;
         let height = self.tuning.unit_height as i32;
-        let Self { units: u, shots, ground, grid_far, shots_hit, shots_blocked, .. } = self;
+        let br = self.tuning.blast_radius;
+        let (br2, blast_dmg) = (br * br, self.tuning.blast_damage);
+        self.dmg_acc.clear();
+        self.dmg_acc.resize(self.units.x.len(), 0);
+        let Self {
+            units: u,
+            shots,
+            ground,
+            grid_far,
+            shots_hit,
+            shots_blocked,
+            dmg_acc,
+            blasts,
+            blast_voxels,
+            blast_hits,
+            ..
+        } = self;
         for k in 0..shots.live_ids.len() {
             let si = shots.live_ids[k];
             let s = si as usize;
@@ -1264,6 +1293,8 @@ impl World {
             shots.fz[s] = nz.sub(Fx::from_int(cz));
             let to = (from.0 + cx, from.1 + cy, from.2 + cz);
 
+            // Где рванёт, если рванёт.
+            let mut hit_at: Option<(i32, i32, i32)> = None;
             // Порода на пути. Оба конца исключены, поэтому стрелок
             // не заслоняет сам себя на первом тике.
             if let Some(g) = ground.as_ref() {
@@ -1280,17 +1311,20 @@ impl World {
                     shots.z[s] = los.blocked_at.2;
                     *shots_blocked += 1;
                     shots.kill(si);
-                    continue;
+                    hit_at = Some(los.blocked_at);
                 }
             }
-            shots.x[s] = to.0;
-            shots.y[s] = to.1;
-            shots.z[s] = to.2;
+            if hit_at.is_none() {
+                shots.x[s] = to.0;
+                shots.y[s] = to.1;
+                shots.z[s] = to.2;
+            }
 
             // Кого задело. Ничья разрешается **номером юнита**,
             // а не порядком обхода сетки.
             let mine = shots.owner[s];
             let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
+            if hit_at.is_none() {
             grid_far.for_each_near(to.0, to.2, |j| {
                 let jj = j as usize;
                 if !u.alive[jj] || u.owner[jj] == mine {
@@ -1309,12 +1343,65 @@ impl World {
                     best_j = j;
                 }
             });
+            }
             if best_j != NO_TARGET {
                 let j = best_j as usize;
-                u.voxels[j] = u.voxels[j].saturating_sub(shots.damage[s]);
+                dmg_acc[j] += shots.damage[s] as u32;
                 *shots_hit += 1;
                 shots.kill(si);
+                hit_at = Some(to);
             }
+
+            // Взрыв. Воронка идёт в **ту же очередь правок**, что копка:
+            // потолок за тик и откладывание у них общие, и боевая правка
+            // не имеет права обойти очередь (`CLAUDE.md`).
+            let Some(at) = hit_at else { continue };
+            if br <= 0 {
+                continue;
+            }
+            *blasts += 1;
+            if let Some(g) = ground.as_mut() {
+                let (ex, ey, ez) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
+                for dy in -br..=br {
+                    for dz in -br..=br {
+                        for dx in -br..=br {
+                            if dx * dx + dy * dy + dz * dz > br2 {
+                                continue;
+                            }
+                            let (x, y, z) = (at.0 + dx, at.1 + dy, at.2 + dz);
+                            if x < 0 || y < 0 || z < 0 || x >= ex || y >= ey || z >= ez {
+                                continue;
+                            }
+                            g.world.queue_dig(x as u32, y as u32, z as u32);
+                            *blast_voxels += 1;
+                        }
+                    }
+                }
+            }
+            // Взрывная волна не разбирает своих: урон всем в радиусе.
+            grid_far.for_each_near(at.0, at.2, |j| {
+                let jj = j as usize;
+                if !u.alive[jj] {
+                    return;
+                }
+                let (dx, dz) = (u.x[jj] - at.0, u.z[jj] - at.2);
+                let dy = u.y[jj] - at.1;
+                if dx * dx + dy * dy + dz * dz > br2 {
+                    return;
+                }
+                dmg_acc[jj] += blast_dmg as u32;
+                *blast_hits += 1;
+            });
+        }
+        // Урон применяется **один раз**, в конце фазы: иначе исход
+        // зависел бы от порядка снарядов, а не от множества попаданий.
+        for k in 0..u.live_ids.len() {
+            let i = u.live_ids[k] as usize;
+            let d = dmg_acc[i];
+            if d == 0 {
+                continue;
+            }
+            u.voxels[i] = u.voxels[i].saturating_sub(d.min(u16::MAX as u32) as u16);
         }
         shots.refresh_live();
     }
@@ -1738,10 +1825,18 @@ mod tests {
     /// **только на маске проходимости**: она обновляется в тот же тик,
     /// а поле направлений отстаёт намеренно, и на нём инварианта нет.
     ///
-    /// Исключение из канона ровно одно из применимых сейчас: **падение
-    /// на исчезнувшей опоре**. Юнит, под которым выкопали, летит вниз —
-    /// и в этот момент законно находится там, где опоры нет. Прочие
-    /// исключения канона (раздавливание телом, оседание материи,
+    /// Исключений из канона применимо два.
+    ///
+    /// **Падение на исчезнувшей опоре.** Юнит, под которым выкопали,
+    /// летит вниз — и в этот момент законно находится там, где опоры нет.
+    ///
+    /// **Поездка на отделившемся куске** (ADR-099). Наездник стоит
+    /// на теле, а не на рельефе, и уровня под ним нет по построению.
+    /// В перечне канона этого случая не было: перечень писался до
+    /// ADR-099, а поездок в эталоне не случалось ни одной, пока
+    /// не появились воронки (ADR-165).
+    ///
+    /// Прочие исключения канона (раздавливание телом, оседание материи,
     /// воздушный слой, граница щита) относятся к механикам этапа 6.
     ///
     /// Сцена обязана нагружать то, что заявляет: копают под ногами,
@@ -1751,6 +1846,7 @@ mod tests {
     fn a_unit_is_never_inside_solid_rock() {
         let mut r = Reference::new(42, 600, test_tuning());
         let mut ever_falling = 0u64;
+        let mut ever_riding = 0u64;
         let mut checked = 0u64;
         for t in 1..=250 {
             r.tick();
@@ -1769,10 +1865,15 @@ mod tests {
                     ever_falling += 1;
                     continue;
                 }
+                if r.world.units.riding[i] != 0 {
+                    ever_riding += 1;
+                    continue;
+                }
                 assert!(
                     g.nav.has_level(cx, cz, uy),
                     "тик {t}, юнит {i} в ({ux}, {uy}, {uz}) — клетка ({cx}, {cz}) \
-не имеет уровня {uy}, и юнит не падает: уровни {:?}",
+не имеет уровня {uy}, не падает, едет на теле {}: уровни {:?}",
+                    r.world.units.riding[i],
                     g.nav.levels_at(cx, cz)
                 );
             }
@@ -1782,6 +1883,11 @@ mod tests {
             ever_falling > 0,
             "никто ни разу не падал — сцена не копает под ногами, \
 и инвариант проверен на неподвижной земле"
+        );
+        assert!(
+            ever_riding > 0,
+            "никто ни разу не ехал на куске — воронки не подрывают \
+породу под строем, и второе исключение не проверено"
         );
     }
 
@@ -1862,15 +1968,21 @@ mod tests {
     #[test]
     fn a_ridge_stops_the_shot_and_a_tunnel_lets_it_through() {
         /// Земля до `GY` и стена во всю карту по `x == WALL`.
+        ///
+        /// Стена **толстая**: воронки прогрызают породу (ADR-165),
+        /// и на тонкой стене тест проверял бы не «порода закрывает»,
+        /// а «пробить её за двести тиков не успели». Толщина берётся
+        /// с запасом на обстрел, и целость стены проверяется в конце.
         struct Ridge;
         const GY: u32 = 8;
         const WALL: u32 = 32;
+        const HALF: u32 = 6;
         impl voxel::Generator for Ridge {
             fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
                 if y < GY {
                     return 2;
                 }
-                if x.abs_diff(WALL) <= 1 && y < GY + 12 {
+                if x.abs_diff(WALL) <= HALF && y < GY + 12 {
                     return 3;
                 }
                 voxel::store::AIR
@@ -1878,11 +1990,13 @@ mod tests {
         }
 
         // `tunnel` — прокопать в стене ход на высоте пола.
-        let run = |tunnel: bool| -> (u64, u64, u64) {
-            let t = test_tuning();
+        // `blast` — радиус воронки; ноль означает «проверяем только луч».
+        let run = |tunnel: bool, blast: i32| -> (u64, u64, u64, bool) {
+            let mut t = test_tuning();
+            t.blast_radius = blast;
             let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Ridge));
             if tunnel {
-                for x in WALL - 1..=WALL + 1 {
+                for x in WALL - HALF..=WALL + HALF {
                     for y in GY..GY + 6 {
                         for z in 28..36 {
                             vw.queue_dig(x, y, z);
@@ -1904,11 +2018,20 @@ mod tests {
             for _ in 0..200 {
                 w.tick();
             }
-            (w.shots_fired, w.shots_hit, w.shots_blocked)
+            // Стена обязана достоять: иначе «ноль попаданий» значит
+            // лишь «не успели пробить».
+            let g = w.ground().expect("земля");
+            let intact = !tunnel
+                && g.world.solid(WALL, GY + 1, 32)
+                && g.world.solid(WALL, GY + 3, 32);
+            (w.shots_fired, w.shots_hit, w.shots_blocked, intact)
         };
 
-        let (fired_wall, hit_wall, blocked_wall) = run(false);
+        // Воронка выключена: проверяется ровно луч, а не то, успели ли
+        // пробить стену.
+        let (fired_wall, hit_wall, blocked_wall, intact) = run(false, 0);
         assert!(fired_wall > 0, "со стеной никто не стрелял вовсе");
+        assert!(intact, "стена не устояла без воронок — тест проверяет не то");
         assert_eq!(
             hit_wall, 0,
             "сквозь стену прошло {hit_wall} попаданий из {fired_wall} выстрелов"
@@ -1918,11 +2041,67 @@ mod tests {
             "ни один снаряд не упёрся в стену: {fired_wall} выстрелов"
         );
 
-        let (fired_open, hit_open, _) = run(true);
+        let (fired_open, hit_open, _, _) = run(true, 0);
         assert!(
             hit_open > 0,
             "через прокопанный ход не прошло ни одного попадания \
 из {fired_open} выстрелов — сцена не проверяет ничего"
+        );
+    }
+
+    /// **Воронки проламывают стену, сквозь которую луч не проходил.**
+    ///
+    /// Обратная сторона предыдущего теста и главное следствие воронок
+    /// (ADR-165): порода закрывает не навсегда. Стена в тринадцать
+    /// вокселей, которую снаряд без воронки не пробивает ни разу
+    /// за двести тиков, с воронками перестаёт быть стеной.
+    ///
+    /// Тест сторожит **обе** стороны: без воронок ноль попаданий,
+    /// с воронками попадания появляются. Одна сторона без другой
+    /// ничего не значит.
+    #[test]
+    fn a_blast_breaches_a_wall_a_bullet_cannot() {
+        struct Wall;
+        const GY: u32 = 8;
+        const AT: u32 = 32;
+        const HALF: u32 = 6;
+        impl voxel::Generator for Wall {
+            fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+                if y < GY {
+                    return 2;
+                }
+                if x.abs_diff(AT) <= HALF && y < GY + 12 {
+                    return 3;
+                }
+                voxel::store::AIR
+            }
+        }
+        let run = |blast: i32| -> (u64, bool) {
+            let mut t = test_tuning();
+            t.blast_radius = blast;
+            let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Wall));
+            let g = ground::Ground::new(vw, &t);
+            let mut w = World::new(2, 8, t);
+            w.attach_ground(g);
+            w.spawn_ground(AT as i32 - 8, 32, 0, 0, 300);
+            w.spawn_ground(AT as i32 + 8, 32, 1, 0, 300);
+            w.units.refresh_live();
+            for _ in 0..200 {
+                w.tick();
+            }
+            let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
+            (w.shots_hit, solid)
+        };
+
+        let (hit_plain, solid_plain) = run(0);
+        assert_eq!(hit_plain, 0, "без воронок сквозь стену прошло {hit_plain}");
+        assert!(solid_plain, "без воронок стена всё равно исчезла");
+
+        let (hit_blast, solid_blast) = run(2);
+        assert!(!solid_blast, "воронки не тронули стену");
+        assert!(
+            hit_blast > 0,
+            "стену проломили, а попаданий нет: {hit_blast}"
         );
     }
 
