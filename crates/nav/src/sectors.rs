@@ -15,7 +15,7 @@
 //! вставки в очередь; `HashMap` не используется — только плотные
 //! массивы и двоичный поиск.
 
-use crate::volume::VolGraph;
+use crate::volume::{VolField, VolGraph};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
@@ -23,13 +23,18 @@ use std::collections::BinaryHeap;
 /// (ADR-066).
 pub const SEC: u32 = 16;
 
-/// Стоимость шага между соседними узлами — **в шагах, а не во времени**.
+/// Стоимость шага между соседними узлами — **та же, что у поля**.
 ///
-/// Граф порталов отвечает на вопрос «куда идти дальше», а не «сколько
-/// это займёт»: время считает эйконал внутри сектора, и метрика у него
-/// своя, годуновская. Смешивать их в одном числе — значит получить
-/// величину, которая ни то ни другое.
-pub const STEP: u32 = 1;
+/// Метрика у графа порталов и у эйконала обязана быть одна: цена дойти
+/// до выхода сектора становится **засевом** поля внутри него, и если
+/// шкалы разные, поле либо не замечает разницы между выходами, либо
+/// преувеличивает её (ADR-151).
+///
+/// Совпадает шкала, но не метрика: здесь манхэттенское расстояние
+/// (шаг на соседа), у эйконала — годуновское. По диагонали расхождение
+/// доходит до сорока процентов, и это записано как ограничение, а не
+/// как мелочь.
+pub const STEP: u32 = crate::volume::STEP_COST as u32;
 
 /// Портал — отрезок границы двух секторов, проходимый насквозь.
 ///
@@ -85,10 +90,18 @@ pub struct SectorGraph {
     /// CSR: порталы каждого сектора.
     sec_starts: Vec<u32>,
     sec_portals: Vec<u32>,
+    /// Сектор каждого узла. Не вычисляется на лету: в горячем цикле
+    /// это деление на каждый просмотр соседа.
+    node_sector: Vec<u32>,
+    /// CSR: узлы каждого сектора, в растровом порядке.
+    sec_node_starts: Vec<u32>,
+    sec_nodes: Vec<u32>,
 }
 
 /// Стороны в порядке `volume::SIDES`: -Z, -X, +X, +Z.
 const SIDE_PX: usize = 2;
+/// Локальное «узла нет» — совпадает с `volume::NO_NODE`.
+const NO_NODE_LOCAL: u32 = u32::MAX;
 const SIDE_PZ: usize = 3;
 
 /// Устойчивое имя портала: клетка и **номер уровня** с обеих сторон.
@@ -125,6 +138,56 @@ impl SectorGraph {
         let cell = g.cell_of(node);
         let (cx, cz) = (cell % self.w, cell / self.w);
         (cz / SEC) * self.sw + cx / SEC
+    }
+
+    /// Принадлежность узлов секторам — для решения в пределах зоны.
+    pub fn zones(&self) -> &[u32] {
+        &self.node_sector
+    }
+
+    /// Узлы сектора в растровом порядке.
+    pub fn nodes_of(&self, sector: u32) -> &[u32] {
+        let s = sector as usize;
+        &self.sec_nodes[self.sec_node_starts[s] as usize..self.sec_node_starts[s + 1] as usize]
+    }
+
+    /// Разложить узлы по секторам. Проход по клеткам в растровом
+    /// порядке, поэтому список каждого сектора тоже растровый.
+    fn index_nodes(&mut self, g: &VolGraph) {
+        let nsec = (self.sw * self.sh) as usize;
+        self.node_sector.clear();
+        self.node_sector.resize(g.nodes, u32::MAX);
+        let mut cnt = vec![0u32; nsec + 1];
+        let (w, h) = g.dims();
+        for cz in 0..h {
+            for cx in 0..w {
+                let cell = (cz * w + cx) as usize;
+                let sec = (cz / SEC) * self.sw + cx / SEC;
+                let n0 = g.first_node(cell);
+                for li in 0..g.levels_in(cell) {
+                    self.node_sector[(n0 + li as u32) as usize] = sec;
+                }
+                cnt[sec as usize + 1] += g.levels_in(cell) as u32;
+            }
+        }
+        for i in 0..nsec {
+            cnt[i + 1] += cnt[i];
+        }
+        let mut at = cnt.clone();
+        self.sec_nodes.clear();
+        self.sec_nodes.resize(cnt[nsec] as usize, 0);
+        for cz in 0..h {
+            for cx in 0..w {
+                let cell = (cz * w + cx) as usize;
+                let sec = ((cz / SEC) * self.sw + cx / SEC) as usize;
+                let n0 = g.first_node(cell);
+                for li in 0..g.levels_in(cell) {
+                    self.sec_nodes[at[sec] as usize] = n0 + li as u32;
+                    at[sec] += 1;
+                }
+            }
+        }
+        self.sec_node_starts = cnt;
     }
 
     pub fn portals_of(&self, sector: u32) -> &[u32] {
@@ -199,6 +262,8 @@ impl SectorGraph {
         self.sw = w.div_ceil(SEC);
         self.sh = h.div_ceil(SEC);
         let nsec = (self.sw * self.sh) as usize;
+
+        self.index_nodes(g);
 
         let mut touched = vec![false; nsec];
         for &d in dirty {
@@ -534,7 +599,7 @@ fn dijkstra_in_sector(
         visited += 1;
         for side in 0..4 {
             for m in g.side(i as usize, side) {
-                if sg.sector_of(g, m as usize) != sector {
+                if sg.node_sector[m as usize] != sector {
                     continue;
                 }
                 let nd = d + STEP;
@@ -562,6 +627,13 @@ pub struct RouteWs {
     touched: Vec<u32>,
     /// Порталы целевого сектора и цена хвоста до цели.
     ends: Vec<(u32, u32)>,
+    /// Цена добраться до цели от каждой стороны портала.
+    to_t: Vec<u32>,
+    /// Засевы сектора.
+    seeds: Vec<(u32, u32)>,
+    /// Лучший узел каждой компоненты и цели поля.
+    best: Vec<(u64, u32)>,
+    goals: Vec<u32>,
 }
 
 impl RouteWs {
@@ -574,6 +646,10 @@ impl RouteWs {
             dist: vec![u32::MAX; nodes],
             touched: Vec::new(),
             ends: Vec::new(),
+            to_t: Vec::new(),
+            seeds: Vec::new(),
+            best: Vec::new(),
+            goals: Vec::new(),
         }
     }
 }
@@ -725,6 +801,181 @@ pub fn route(
     st
 }
 
+/// Что стоило одно поле по секторам.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct FieldStats {
+    /// Секторов решено.
+    pub sectors: usize,
+    /// Годуновских обновлений всего.
+    pub updates: u64,
+    /// Узлов получило направление.
+    pub reached: usize,
+    /// Сторон порталов, до которых цель достижима.
+    pub live_ports: usize,
+}
+
+/// Поле направлений **по секторам**, а не по всей карте.
+///
+/// Порядок такой (ADR-106, ADR-151):
+///
+/// 1. Дейкстра по графу порталов **от цели** даёт каждой стороне цену
+///    добраться до неё.
+/// 2. Внутри каждого сектора эйконал решается с засевом в его выходах:
+///    значение засева — та самая цена. Поле получается тем же, что
+///    дало бы одно решение на всю карту, но считается посекторно.
+///
+/// Метрика у обоих шагов одна (`STEP`), иначе поле либо не заметило бы
+/// разницы между выходами, либо преувеличило её.
+pub fn solve_field<F>(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    f: &mut VolField,
+    ws: &mut RouteWs,
+    target: u32,
+    h: &F,
+) -> FieldStats
+where
+    F: Fn(u32, u32) -> u32,
+{
+    let mut st = FieldStats::default();
+    let nport = sg.portals.len() * 2;
+    if ws.g.len() < nport.max(1) {
+        *ws = RouteWs::new(nport.max(1), g.nodes);
+    }
+    ws.to_t.clear();
+    ws.to_t.resize(nport, u32::MAX);
+    if sg.node_sector.is_empty() {
+        return st;
+    }
+    let ts = sg.node_sector[target as usize];
+
+    // 0. Цель у каждой компоненты своя.
+    //
+    // **Приказ называет точку, а не клетку** (ADR-138): компонента,
+    // из которой до цели не дойти, идёт к своему узлу, ближайшему
+    // к названной точке. Без этого половина карты остаётся без
+    // направления и армия там просто стоит.
+    //
+    // Обход стоит не дороже прохода по графу: дейкстра внутри сектора
+    // видит только свою компоненту, а их размеры в сумме дают все узлы.
+    let tw = sg.w;
+    let tcell = g.cell_of(target as usize);
+    let (tx, tz) = ((tcell % tw) as i64, (tcell / tw) as i64);
+    ws.best.clear();
+    ws.best.resize(g.components.max(1), (u64::MAX, NO_NODE_LOCAL));
+    for n in 0..g.nodes {
+        let c = g.comp_of(n) as usize;
+        let cell = g.cell_of(n);
+        let (x, z) = ((cell % tw) as i64, (cell / tw) as i64);
+        let d = ((x - tx).pow(2) + (z - tz).pow(2)) as u64;
+        // Ничьи разрешаются номером узла, а не порядком обхода.
+        if (d, n as u32) < ws.best[c] {
+            ws.best[c] = (d, n as u32);
+        }
+    }
+    let tc = g.comp_of(target as usize) as usize;
+    ws.best[tc] = (0, target);
+    ws.goals.clear();
+    for &(_, n) in ws.best.iter() {
+        if n != NO_NODE_LOCAL {
+            ws.goals.push(n);
+        }
+    }
+    ws.goals.sort_unstable();
+
+    // 1. Цена добраться до ближайшей цели для каждой стороны портала.
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    for gi in 0..ws.goals.len() {
+        let goal = ws.goals[gi];
+        let gs = sg.node_sector[goal as usize];
+        dijkstra_in_sector(sg, g, gs, goal, &mut ws.dist, &mut ws.touched);
+        for &p in sg.portals_of(gs) {
+            let port = sg.port_of(p, gs);
+            let d = ws.dist[sg.node_of_port(port) as usize];
+            if d != u32::MAX && d < ws.to_t[port as usize] {
+                ws.to_t[port as usize] = d;
+                heap.push(Reverse((d, port)));
+            }
+        }
+        for &t in ws.touched.iter() {
+            ws.dist[t as usize] = u32::MAX;
+        }
+        ws.touched.clear();
+    }
+    let _ = ts;
+    while let Some(Reverse((d, port))) = heap.pop() {
+        if d > ws.to_t[port as usize] {
+            continue;
+        }
+        for (q, c) in sg.links_of(port) {
+            let nd = d + c;
+            if nd < ws.to_t[q as usize] {
+                ws.to_t[q as usize] = nd;
+                heap.push(Reverse((nd, q)));
+            }
+        }
+    }
+    st.live_ports = ws.to_t.iter().filter(|&&v| v != u32::MAX).count();
+
+    // 2. Сектор за сектором: засев в выходах, развёртка внутри.
+    let nsec = (sg.sw * sg.sh) as usize;
+    let zones = sg.zones();
+    for sec in 0..nsec as u32 {
+        let nodes = sg.nodes_of(sec);
+        if nodes.is_empty() {
+            continue;
+        }
+        ws.seeds.clear();
+        for &p in sg.portals_of(sec) {
+            let port = sg.port_of(p, sec);
+            let v = ws.to_t[port as usize];
+            if v != u32::MAX {
+                ws.seeds.push((sg.node_of_port(port), v));
+            }
+        }
+        // Цели, попавшие в этот сектор, — тоже засев.
+        for &goal in ws.goals.iter() {
+            if sg.node_sector[goal as usize] == sec {
+                ws.seeds.push((goal, 0));
+            }
+        }
+        if ws.seeds.is_empty() {
+            // До цели из этого сектора не дойти — направления нет,
+            // и это честный ответ, а не пропуск.
+            f.clear_zone(nodes);
+            continue;
+        }
+        // Ничьи в засеве разрешаются номером узла, а не порядком порталов.
+        ws.seeds.sort_unstable();
+        crate::volume::solve_zone(g, f, nodes, zones, sec, &ws.seeds, h);
+        st.sectors += 1;
+        st.updates += f.updates;
+    }
+    // 3. На выходе сектора поле молчит: внутри него идти уже некуда,
+    //    а перешагнуть портал — это не шаг поля, а шаг графа. Поэтому
+    //    сторонам, с которых выгодно перейти, направление проставляется
+    //    отдельно — иначе юнит доходит до границы и встаёт.
+    for pi in 0..sg.portals.len() as u32 {
+        for side in 0..2u32 {
+            let here = pi * 2 + side;
+            let there = pi * 2 + (1 - side);
+            if ws.to_t[there as usize] >= ws.to_t[here as usize] {
+                continue;
+            }
+            let a = sg.node_of_port(here);
+            let b = sg.node_of_port(there);
+            for k in 0..4 {
+                if g.side(a as usize, k).any(|m| m == b) {
+                    f.dir[a as usize] = k as u8;
+                    break;
+                }
+            }
+        }
+    }
+    st.reached = f.dir.iter().filter(|&&d| d != 255).count();
+    st
+}
+
 /// Расстояние между двумя узлами внутри одного сектора.
 fn one_to_one(
     sg: &SectorGraph,
@@ -751,6 +1002,7 @@ fn one_to_one(
 mod tests {
     use super::*;
     use crate::layer::NavLayer;
+    use crate::godunov::h_exact_floor;
     use crate::volume::NO_NODE;
     use voxel::store::{Mat, AIR};
 
@@ -929,6 +1181,58 @@ mod tests {
         }
         out.sort_unstable();
         out
+    }
+
+    /// **По полю можно дойти до цели.** Из каждого узла, у которого есть
+    /// направление, шаг за шагом приходишь в цель — без обрывов и петель.
+    ///
+    /// Это и есть проверка всей связки: дейкстра по порталам дала цену
+    /// выходам, эйконал развернул её внутри секторов, а переход через
+    /// портал проставлен отдельно (ADR-151). Ошибка в любом из трёх
+    /// мест кончается обрывом на границе или петлёй.
+    #[test]
+    fn following_the_field_reaches_the_target() {
+        let (g, sg, nav, _) = world(true);
+        let mut f = VolField::new();
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let target = floor_node(&g, &nav, 44, 16);
+        let st = solve_field(&sg, &g, &mut f, &mut ws, target, &h_exact_floor);
+        assert!(st.sectors > 1, "секторов решено {}", st.sectors);
+        assert!(st.reached > 100, "направлений всего {}", st.reached);
+
+        let tc = g.comp_of(target as usize);
+        let (mut checked, mut to_target) = (0usize, 0usize);
+        for n in 0..g.nodes {
+            if f.dir[n] == 255 {
+                continue;
+            }
+            let mut cur = n as u32;
+            let mut steps = 0;
+            while f.dir[cur as usize] != 255 {
+                let d = f.dir[cur as usize];
+                let next = g
+                    .side(cur as usize, d as usize)
+                    .min_by_key(|&m| (f.t[m as usize], m))
+                    .expect("сторона названа, а соседа нет");
+                assert_eq!(
+                    g.comp_of(next as usize),
+                    g.comp_of(cur as usize),
+                    "поле увело в другую компоненту"
+                );
+                cur = next;
+                steps += 1;
+                assert!(steps < 20_000, "поле зациклилось на пути из {n}");
+            }
+            // Пришли туда, где идти дальше некуда, — в цель своей
+            // компоненты. У компоненты цели это сама цель.
+            if g.comp_of(n) == tc {
+                assert_eq!(cur, target, "из {n} пришли не в цель, а в {cur}");
+                to_target += 1;
+            }
+            checked += 1;
+        }
+        assert!(checked > 100, "проверено всего {checked} узлов");
+        assert!(to_target > 50, "в цель пришло всего {to_target}");
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.

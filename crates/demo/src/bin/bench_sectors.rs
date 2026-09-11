@@ -192,6 +192,31 @@ fn main() -> ExitCode {
         );
     }
 
+    // --- Поле по секторам против поля на всю карту.
+    {
+        let mut f = nav::volume::VolField::new();
+        let mut ws2 = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let target = first;
+        let mut fs = Default::default();
+        let ms = best_ms(
+            || fs = nav::sectors::solve_field(&sg, &g, &mut f, &mut ws2, target, &nav::godunov::h_exact_floor),
+            3,
+        );
+        println!("
+{:<34} {:>12}", "поле по секторам: решено секторов", fs.sectors);
+        println!("{:<34} {:>12}", "  годуновских обновлений", fs.updates);
+        println!("{:<34} {:>12}", "  узлов получило направление", fs.reached);
+        println!("{:<34} {:>12}", "  сторон порталов живых", fs.live_ports);
+        println!("{:<34} {:>9.1} мс", "  всё поле", ms);
+
+        let mut gf = nav::volume::VolField::new();
+        let gms = best_ms(
+            || nav::volume::solve(&g, &mut gf, 0, 0, &nav::godunov::h_exact_floor),
+            3,
+        );
+        println!("{:<34} {:>9.1} мс", "поле на всю карту, для сравнения", gms);
+    }
+
     // --- Инкрементальная пересборка: копаем ещё немного и смотрим,
     //     сколько стоит догнать граф.
     println!(

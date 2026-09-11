@@ -413,6 +413,152 @@ impl VolField {
         while !self.seed_step(g, tcx, tcz, u32::MAX) {}
     }
 
+    /// Подготовить решение в зоне: обнулить **только её** узлы.
+    ///
+    /// Массивы общие на весь граф и заводятся один раз, а трогается
+    /// только зона: иначе каждый сектор стоил бы прохода по карте.
+    pub fn alloc_zone(
+        &mut self,
+        g: &VolGraph,
+        nodes: &[u32],
+        zone: &[u32],
+        zone_id: u32,
+        seeds: &[(u32, Time)],
+    ) {
+        let n = g.nodes;
+        if self.t.len() != n {
+            self.t.clear();
+            self.t.resize(n, INF);
+            self.dir.clear();
+            self.dir.resize(n, 255);
+            self.active.clear();
+            self.active.resize(n, false);
+            self.fixed.clear();
+            self.fixed.resize(n, false);
+        }
+        for &node in nodes {
+            let node = node as usize;
+            self.t[node] = INF;
+            self.dir[node] = 255;
+            self.active[node] = false;
+            self.fixed[node] = false;
+        }
+        self.updates = 0;
+        for &(node, v) in seeds {
+            if zone[node as usize] != zone_id {
+                continue;
+            }
+            self.t[node as usize] = v;
+            self.fixed[node as usize] = true;
+            for k in 0..4 {
+                for m in g.side(node as usize, k) {
+                    if zone[m as usize] == zone_id {
+                        self.active[m as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Развёртка в пределах зоны до неподвижной точки.
+    ///
+    /// Обходов два, вперёд и назад по списку узлов, а не четыре: список
+    /// уже в растровом порядке, и две его стороны — это те же две оси,
+    /// пройденные в обе стороны.
+    pub fn sweep_zone<F>(
+        &mut self,
+        g: &VolGraph,
+        nodes: &[u32],
+        zone: &[u32],
+        zone_id: u32,
+        h: &F,
+    ) where
+        F: Fn(u32, u32) -> u32,
+    {
+        loop {
+            let mut changed = false;
+            for back in [false, true] {
+                for k in 0..nodes.len() {
+                    let node = nodes[if back { nodes.len() - 1 - k } else { k }] as usize;
+                    if !self.active[node] {
+                        continue;
+                    }
+                    if self.fixed[node] {
+                        self.active[node] = false;
+                        continue;
+                    }
+                    let side = |j: usize| -> Time {
+                        g.side(node, j)
+                            .filter(|&m| zone[m as usize] == zone_id)
+                            .map(|m| self.t[m as usize])
+                            .min()
+                            .unwrap_or(INF)
+                    };
+                    let a = side(1).min(side(2));
+                    let b = side(0).min(side(3));
+                    self.updates += 1;
+                    let q = update2d(a, b, STEP_COST, h);
+                    if q < self.t[node] {
+                        self.t[node] = q;
+                        changed = true;
+                        for j in 0..4 {
+                            for m in g.side(node, j) {
+                                if zone[m as usize] == zone_id && !self.fixed[m as usize] {
+                                    self.active[m as usize] = true;
+                                }
+                            }
+                        }
+                    } else {
+                        self.active[node] = false;
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// Стереть направления зоны: до цели оттуда не дойти.
+    pub fn clear_zone(&mut self, nodes: &[u32]) {
+        for &node in nodes {
+            if (node as usize) < self.dir.len() {
+                self.dir[node as usize] = 255;
+                self.t[node as usize] = INF;
+            }
+        }
+    }
+
+    /// Направления для узлов зоны.
+    pub fn publish_zone(&mut self, g: &VolGraph, nodes: &[u32], zone: &[u32], zone_id: u32) {
+        for &node in nodes {
+            let node = node as usize;
+            if self.t[node] == INF {
+                continue;
+            }
+            let mut best = self.t[node];
+            let mut best_k = 255u8;
+            let mut best_m = NO_NODE;
+            for k in 0..4 {
+                for m in g.side(node, k) {
+                    if zone[m as usize] != zone_id {
+                        continue;
+                    }
+                    let tm = self.t[m as usize];
+                    if tm == INF {
+                        continue;
+                    }
+                    if tm < best || (tm == best && m < best_m) {
+                        best = tm;
+                        best_k = k as u8;
+                        best_m = m;
+                    }
+                }
+            }
+            self.dir[node] = best_k;
+        }
+    }
+
     /// Продолжить развёртку, потратив не более `budget` обновлений.
     /// `true` — поле сошлось.
     pub fn sweep_step<F>(&mut self, g: &VolGraph, budget: u64, h: &F) -> bool
@@ -516,6 +662,32 @@ impl VolField {
         }
         true
     }
+}
+
+/// Решить поле **в пределах одной зоны** с заданными засевами.
+///
+/// Зона — обычно сектор; засевы — его выходы с уже известной ценой
+/// добраться до цели. Это то, ради чего засев умеет быть не нулевым
+/// (ADR-151): пересчёт сектора стартует от граничных значений, а не
+/// от цели внутри него.
+///
+/// `nodes` — узлы зоны в растровом порядке, `zone` — принадлежность
+/// узла зоне, чтобы не заглядывать за её край. Решается до конца:
+/// сектор мал, рвать его на порции незачем.
+pub fn solve_zone<F>(
+    g: &VolGraph,
+    f: &mut VolField,
+    nodes: &[u32],
+    zone: &[u32],
+    zone_id: u32,
+    seeds: &[(u32, Time)],
+    h: &F,
+) where
+    F: Fn(u32, u32) -> u32,
+{
+    f.alloc_zone(g, nodes, zone, zone_id, seeds);
+    f.sweep_zone(g, nodes, zone, zone_id, h);
+    f.publish_zone(g, nodes, zone, zone_id);
 }
 
 /// Решить поле целиком. Для тестов и замеров: в тике так нельзя.
