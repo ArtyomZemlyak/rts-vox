@@ -36,6 +36,26 @@ pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 pub const TICKS_PER_SECOND: i32 = 30;
 
 
+/// Событие тика — то, что рендеру надо показать, а симуляции знать
+/// незачем.
+///
+/// Объявлено контрактом `docs/02-architecture.md` («взрывы, смерти,
+/// завершение постройки») и до ADR-167 не существовало: рендер видел
+/// только воксельный мир, и ни выстрела, ни взрыва на экране быть
+/// не могло в принципе.
+///
+/// **Это выход, а не состояние.** События не входят в хеш тика: они
+/// вычисляются из него, и хешировать их значило бы хешировать одно
+/// и то же дважды. Живут ровно один тик — копятся за него и стираются
+/// в начале следующего.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimEvent {
+    /// Взрыв: где рвануло и какого радиуса воронка.
+    Blast { x: i32, y: i32, z: i32, radius: i32 },
+    /// Смерть юнита: кто и где.
+    Death { unit: u32, x: i32, y: i32, z: i32 },
+}
+
 /// Список фаз тика — окончательный (ADR-048). Порядок объявлен фиксированным
 /// навсегда: его изменение меняет хеши всех golden-файлов.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,6 +380,9 @@ pub struct World {
     /// может попасть под несколько: складывать надо до применения,
     /// иначе исход зависит от порядка снарядов.
     dmg_acc: Vec<u32>,
+    /// События прошедшего тика — рендеру. Буфер переиспользуется:
+    /// событий за тик тысячи, и выделять его заново незачем.
+    events: Vec<SimEvent>,
     /// Замер: сколько юнитов действительно искали цель за тик.
     pub searches: u64,
     /// Замер: в скольких тиках поиск упёрся в потолок.
@@ -409,6 +432,14 @@ impl World {
             Some(li) => self.nav_field.dir_at(self.units.owner[i] as usize % 2, cx, cz, li),
             None => 255,
         }
+    }
+
+    /// События прошедшего тика: взрывы и смерти.
+    ///
+    /// Рендер **читает** их и никогда не пишет: нарушение границы
+    /// слоёв — откат (`CLAUDE.md`).
+    pub fn events(&self) -> &[SimEvent] {
+        &self.events
     }
 
     /// Земля для чтения — рендеру и сценам.
@@ -470,6 +501,7 @@ impl World {
             blast_voxels: 0,
             blast_hits: 0,
             dmg_acc: Vec::new(),
+            events: Vec::new(),
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
@@ -600,6 +632,8 @@ impl World {
     pub fn tick_par(&mut self, threads: usize) -> u64 {
         use std::time::Instant;
         let mut hash = 0u64;
+        // События живут один тик: рендер читает их между тиками.
+        self.events.clear();
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
@@ -631,6 +665,8 @@ impl World {
     pub fn tick(&mut self) -> u64 {
         use std::time::Instant;
         let mut hash = 0u64;
+        // События живут один тик: рендер читает их между тиками.
+        self.events.clear();
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
@@ -1269,6 +1305,7 @@ impl World {
             blasts,
             blast_voxels,
             blast_hits,
+            events,
             ..
         } = self;
         for k in 0..shots.live_ids.len() {
@@ -1360,6 +1397,7 @@ impl World {
                 continue;
             }
             *blasts += 1;
+            events.push(SimEvent::Blast { x: at.0, y: at.1, z: at.2, radius: br });
             if let Some(g) = ground.as_mut() {
                 let (ex, ey, ez) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
                 for dy in -br..=br {
@@ -1421,6 +1459,13 @@ impl World {
         }
         self.deaths += dead.len() as u64;
         for i in dead {
+            let k = i as usize;
+            self.events.push(SimEvent::Death {
+                unit: i,
+                x: self.units.x[k],
+                y: self.units.y[k],
+                z: self.units.z[k],
+            });
             self.units.kill(i);
         }
     }
@@ -2094,6 +2139,87 @@ mod tests {
             hit_blast > 0,
             "стену проломили, а попаданий нет: {hit_blast}"
         );
+    }
+
+    /// **События совпадают со счётчиками и живут ровно один тик.**
+    ///
+    /// Событие — выход, а не состояние: в хеш оно не входит, значит
+    /// ошибку в нём не поймает ни golden, ни паритет воркеров. Сторож
+    /// нужен именно поэтому.
+    ///
+    /// Проверяется трое: взрывов столько же, сколько насчитала
+    /// симуляция; смертей столько же; буфер не копится между тиками.
+    #[test]
+    fn events_match_the_counters_and_last_one_tick() {
+        let mut r = Reference::new(42, 600, test_tuning());
+        let (mut blasts, mut deaths) = (0u64, 0u64);
+        let mut worst = 0usize;
+        for t in 1..=200 {
+            let (b0, d0) = (r.world.blasts, r.world.deaths);
+            r.tick();
+            let (nb, nd) = (r.world.blasts - b0, r.world.deaths - d0);
+            let mut eb = 0u64;
+            let mut ed = 0u64;
+            for e in r.world.events() {
+                match e {
+                    SimEvent::Blast { .. } => eb += 1,
+                    SimEvent::Death { .. } => ed += 1,
+                }
+            }
+            assert_eq!(eb, nb, "тик {t}: взрывов {nb}, событий о взрывах {eb}");
+            assert_eq!(ed, nd, "тик {t}: смертей {nd}, событий о смертях {ed}");
+            worst = worst.max(r.world.events().len());
+            blasts += nb;
+            deaths += nd;
+        }
+        assert!(blasts > 0, "за прогон не рвануло ни разу");
+        assert!(deaths > 0, "за прогон никто не погиб");
+        // Буфер не копится: худший тик много меньше суммы за прогон.
+        assert!(
+            (worst as u64) * 10 < blasts + deaths,
+            "события копятся между тиками: худший тик {worst}, всего {}",
+            blasts + deaths
+        );
+    }
+
+    /// **Смерть сообщается там, где юнит стоял.**
+    ///
+    /// Событие берётся **до** освобождения места: свободный список
+    /// переиспользует место, и координаты после — уже чужие.
+    #[test]
+    fn a_death_is_reported_where_the_unit_stood() {
+        let mut r = Reference::new(42, 600, test_tuning());
+        let mut seen = 0;
+        for _ in 0..200 {
+            // Положения до тика: событие обязано указать на одно из них.
+            let before: std::collections::BTreeSet<(u32, i32, i32, i32)> = r
+                .world
+                .units
+                .live()
+                .iter()
+                .map(|&i| {
+                    let k = i as usize;
+                    (i, r.world.units.x[k], r.world.units.y[k], r.world.units.z[k])
+                })
+                .collect();
+            r.tick();
+            for e in r.world.events() {
+                if let SimEvent::Death { unit, x, y, z } = *e {
+                    // Юнит мог сдвинуться за тик, поэтому сверяется
+                    // не точка, а то, что он вообще был живым.
+                    assert!(
+                        before.iter().any(|&(i, _, _, _)| i == unit),
+                        "погиб юнит {unit}, которого не было в живых"
+                    );
+                    assert!(
+                        x != i32::MIN && y != i32::MIN && z != i32::MIN,
+                        "координаты смерти не заполнены: ({x}, {y}, {z})"
+                    );
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 0, "ни одной смерти за прогон");
     }
 
     /// **Два мира, идущие вперемешку, совпадают тик в тик.**
