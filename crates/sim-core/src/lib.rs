@@ -313,8 +313,9 @@ pub struct World {
     pub tuning: Tuning,
     /// Точка сбора владельца — то, к чему считается поле.
     flow_target: [Option<(i32, i32)>; 2],
-    /// Маршрут владельца: опубликованное поле и то, что считается.
-    routes: [nav::volume::VolRoute; 2],
+    /// Поле направлений: общий граф, секторы и по полю на владельца
+    /// (ADR-153).
+    nav_field: nav::sectors::NavField,
     /// Узлов получило конечное время в последнем опубликованном поле.
     pub flow_reachable: usize,
     /// Годуновских обновлений ушло на последнее поле.
@@ -396,7 +397,7 @@ impl World {
             blocked_moves: 0,
             tuning,
             flow_target: [None, None],
-            routes: [nav::volume::VolRoute::new(), nav::volume::VolRoute::new()],
+            nav_field: nav::sectors::NavField::new(2),
             flow_reachable: 0,
             flow_updates: 0,
             flow_solves: 0,
@@ -442,6 +443,7 @@ impl World {
     /// остаётся тем, с чего поле начинается.
     pub fn fill_flow_towards(&mut self, owner: usize, tx: i32, tz: i32) {
         self.flow_target[owner] = Some((tx, tz));
+        self.nav_field.set_target(owner, tx, tz);
         let f = &mut self.flow[owner];
         for cz in 0..NAV {
             for cx in 0..NAV {
@@ -481,47 +483,48 @@ impl World {
     ///
     /// Владельцы идут по очереди, по одному за тик: два поля разом
     /// удваивают порцию, а порция и есть то, что держит тик.
-    pub fn step_flow(&mut self, owner: usize) {
+    /// Продвинуть расчёт поля на порцию работы.
+    ///
+    /// Стадий четыре — граф, компоненты, секторы, поле, — и все идут
+    /// с потолками из данных (ADR-152, ADR-153). Юниты всё это время
+    /// читают опубликованное поле.
+    pub fn step_flow(&mut self) {
         use nav::godunov::h_exact_floor;
-        let Self { ground, flow_target, routes, .. } = self;
-        let Some(g) = ground.as_ref() else { return };
-        let Some((tx, tz)) = flow_target[owner] else { return };
-        let st = g.nav.step() as i32;
-        let (gw, gh) = g.nav.dims();
-        let cx = ((tx / st).max(0) as u32).min(gw.saturating_sub(1));
-        let cz = ((tz / st).max(0) as u32).min(gh.saturating_sub(1));
-        let b = nav::volume::Budget {
+        let b = nav::sectors::FieldBudget {
             cells: self.tuning.flow_cells_per_tick,
             scan: self.tuning.flow_scan_per_tick,
-            updates: self.tuning.flow_updates_per_tick,
+            sectors: self.tuning.flow_sectors_per_tick,
         };
-        let done = routes[owner].step(&g.nav, cx, cz, b, &h_exact_floor);
-        if done {
-            let r = &self.routes[owner];
-            self.flow_nodes = r.g.nodes;
-            self.flow_edges = r.g.edges;
-            self.flow_components = r.components;
-            self.flow_reachable = r.reachable;
-            self.flow_updates = r.updates;
-            self.flow_ticks = r.last_ticks;
-            self.flow_solves += 1;
+        let Some(g) = self.ground.as_ref() else { return };
+        // Правки тика метят секторы: пересобирать надо задетые.
+        let (gw, _) = g.nav.dims();
+        let step = g.nav.step();
+        for e in g.edits() {
+            self.nav_field.mark_cell(e.x / step, e.z / step, gw);
+        }
+        let nav = &self.ground.as_ref().expect("земля").nav;
+        if self.nav_field.step(nav, b, &h_exact_floor) {
+            self.flow_nodes = self.nav_field.nodes;
+            self.flow_components = self.nav_field.components;
+            self.flow_reachable = self.nav_field.reached;
+            self.flow_ticks = self.nav_field.last_ticks;
+            self.flow_solves = self.nav_field.published;
+            self.flow_edges = self.nav_field.portals;
         }
     }
 
-    /// Посчитать поля до конца. Для сцен и тестов, которым отставание
+    /// Посчитать поле до конца. Для сцен и тестов, которым отставание
     /// мешает: в тике так нельзя, там оно порциями.
     pub fn solve_flow(&mut self) {
-        for owner in 0..2 {
-            if self.ground.is_none() || self.flow_target[owner].is_none() {
-                continue;
-            }
-            let before = self.flow_solves;
-            let mut guard = 0;
-            while self.flow_solves == before {
-                self.step_flow(owner);
-                guard += 1;
-                assert!(guard < 1_000_000, "поле не сошлось");
-            }
+        if self.ground.is_none() {
+            return;
+        }
+        let before = self.nav_field.published;
+        let mut guard = 0;
+        while self.nav_field.published == before {
+            self.step_flow();
+            guard += 1;
+            assert!(guard < 1_000_000, "поле не сошлось");
         }
     }
 
@@ -677,7 +680,7 @@ impl World {
         if self.ground.is_none() {
             return;
         }
-        self.step_flow((self.tick % 2) as usize);
+        self.step_flow();
     }
 
     fn phase_ground_nav(&mut self) {
@@ -790,13 +793,13 @@ impl World {
         // «клетка и уровень»: юнит на крыше идёт по крышам, юнит
         // в туннеле — по туннелю (ADR-138). Без земли поле прежнее,
         // плоское: эталонный сценарий воксельного мира не строит.
-        let vol = self.ground.as_ref().map(|g| (&g.nav, &self.routes));
+        let vol = self.ground.as_ref().map(|g| (&g.nav, &self.nav_field));
         let r2 = self.tuning.separation * self.tuning.separation;
 
         let compute = |i: usize| -> (i32, i32) {
             let (ux, uz) = (sx[i], sz[i]);
             let d = match vol {
-                Some((nav, routes)) => {
+                Some((nav, field)) => {
                     let st = nav.step() as i32;
                     let (gw, gh) = nav.dims();
                     let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
@@ -804,7 +807,7 @@ impl World {
                         255
                     } else {
                         match nav.level_index_near(cx, cz, u.y[i]) {
-                            Some(li) => routes[u.owner[i] as usize % 2].dir_at(cx, cz, li),
+                            Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
                             None => 255,
                         }
                     }

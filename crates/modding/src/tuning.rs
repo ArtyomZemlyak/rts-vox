@@ -43,6 +43,8 @@ pub struct Tuning {
     pub flow_cells_per_tick: u32,
     pub flow_scan_per_tick: u32,
     pub flow_updates_per_tick: u64,
+    /// Секторов на пересборку графа секторов и на решение поля.
+    pub flow_sectors_per_tick: u32,
     /// Рост юнита в вокселях: столько нужно свободного над полом.
     pub unit_height: u32,
     /// Сторона нав-клетки в вокселях (ADR-014).
@@ -117,5 +119,6 @@ mod tests {
         assert!(t.separation > 0 && t.range > 0);
         assert!(t.flow_cells_per_tick > 0 && t.flow_scan_per_tick > 0);
         assert!(t.flow_updates_per_tick > 0);
+        assert!(t.flow_sectors_per_tick > 0);
     }
 }

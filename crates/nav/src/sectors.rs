@@ -15,6 +15,7 @@
 //! вставки в очередь; `HashMap` не используется — только плотные
 //! массивы и двоичный поиск.
 
+use crate::layer::NavLayer;
 use crate::volume::{VolField, VolGraph};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -1063,10 +1064,240 @@ fn one_to_one(
     d
 }
 
+/// Потолок работы за тик для всего расчёта поля.
+///
+/// Четыре стадии — сборка графа, разметка компонент, пересборка
+/// секторов, решение поля, — и у каждой своя единица работы: клетки,
+/// узлы, секторы. Один потолок на всех мерил бы разное одной меркой.
+#[derive(Clone, Copy)]
+pub struct FieldBudget {
+    /// Клеток на сборку рёбер объёмного графа.
+    pub cells: u32,
+    /// Узлов на разметку компонент.
+    pub scan: u32,
+    /// Секторов на пересборку графа секторов и на решение поля.
+    pub sectors: u32,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    #[default]
+    Idle,
+    Build,
+    Label,
+    Sectors,
+    FieldBegin,
+    Field,
+}
+
+/// Поле направлений на всю партию: граф, секторы и по полю на владельца.
+///
+/// Граф и секторы **общие** — они не зависят от того, куда кто идёт,
+/// и держать их по копии на владельца значило бы делать ту же работу
+/// дважды (ADR-153).
+///
+/// Пока идёт пересчёт, юниты читают **опубликованное**: и граф,
+/// и направления меняются разом, в конце цикла. Полграфа от одного
+/// цикла с полем от другого — это направления в никуда.
+#[derive(Default)]
+pub struct NavField {
+    /// Опубликованный граф и то, что по нему посчитано.
+    pub g: VolGraph,
+    pub sg: SectorGraph,
+    dir: Vec<Vec<u8>>,
+    /// Рабочее.
+    wg: VolGraph,
+    wsg: SectorGraph,
+    wf: VolField,
+    ws: RouteWs,
+    wdir: Vec<Vec<u8>>,
+    targets: Vec<Option<(u32, u32)>>,
+    /// Секторы, задетые правками с прошлой пересборки.
+    dirty: Vec<u32>,
+    taken: Vec<u32>,
+    stage: Stage,
+    owner: usize,
+    sec_st: BuildStats,
+    /// Тиков идёт текущий цикл и сколько ушло на прошлый.
+    pub ticks: u32,
+    pub last_ticks: u32,
+    pub published: u64,
+    pub nodes: usize,
+    pub portals: usize,
+    pub components: usize,
+    pub reached: usize,
+}
+
+impl NavField {
+    pub fn new(owners: usize) -> NavField {
+        NavField {
+            dir: (0..owners).map(|_| Vec::new()).collect(),
+            wdir: (0..owners).map(|_| Vec::new()).collect(),
+            targets: vec![None; owners],
+            ..Default::default()
+        }
+    }
+
+    /// Есть ли что читать юниту.
+    pub fn ready(&self) -> bool {
+        self.published > 0
+    }
+
+    /// Куда идут юниты владельца — точка в вокселях.
+    pub fn set_target(&mut self, owner: usize, tx: i32, tz: i32) {
+        if owner < self.targets.len() {
+            self.targets[owner] = Some((tx.max(0) as u32, tz.max(0) as u32));
+        }
+    }
+
+    /// Отметить клетку задетой. Сектор считается по её координатам.
+    pub fn mark_cell(&mut self, cx: u32, cz: u32, w: u32) {
+        let sw = w.div_ceil(SEC);
+        let sec = (cz / SEC) * sw + cx / SEC;
+        if !self.dirty.contains(&sec) {
+            self.dirty.push(sec);
+        }
+    }
+
+    /// Направление для узла опубликованного графа.
+    #[inline]
+    pub fn dir_at(&self, owner: usize, cx: u32, cz: u32, li: usize) -> u8 {
+        let node = self.g.node(cx, cz, li);
+        if node == NO_NODE_LOCAL {
+            return 255;
+        }
+        match self.dir.get(owner) {
+            Some(d) if (node as usize) < d.len() => d[node as usize],
+            _ => 255,
+        }
+    }
+
+    /// Продвинуть расчёт на порцию работы. `true` — поле опубликовано.
+    pub fn step<F>(&mut self, nav: &NavLayer, b: FieldBudget, h: &F) -> bool
+    where
+        F: Fn(u32, u32) -> u32,
+    {
+        self.ticks += 1;
+        match self.stage {
+            Stage::Idle => {
+                self.wg.begin(nav);
+                // Грязное забирается в начале цикла: всё, что накопится
+                // дальше, относится уже к следующему.
+                self.taken.clear();
+                self.taken.append(&mut self.dirty);
+                self.taken.sort_unstable();
+                self.stage = Stage::Build;
+                false
+            }
+            Stage::Build => {
+                if self.wg.build_step(b.cells) {
+                    self.stage = Stage::Label;
+                }
+                false
+            }
+            Stage::Label => {
+                if self.wg.label_step(b.scan) {
+                    self.sec_st = self.wsg.rebuild_begin(&self.wg, &self.taken);
+                    self.stage = Stage::Sectors;
+                }
+                false
+            }
+            Stage::Sectors => {
+                let mut st = self.sec_st;
+                let done = self.wsg.rebuild_step(&self.wg, b.sectors, &mut st);
+                self.sec_st = st;
+                if done {
+                    self.owner = 0;
+                    self.stage = Stage::FieldBegin;
+                }
+                false
+            }
+            Stage::FieldBegin => {
+                while self.owner < self.targets.len() {
+                    if let Some(node) = self.target_node(self.owner) {
+                        field_begin(&self.wsg, &self.wg, &mut self.ws, node);
+                        self.stage = Stage::Field;
+                        return false;
+                    }
+                    // Владельцу некуда идти — поле пустое, но своего
+                    // размера: чужое читать нельзя.
+                    self.wdir[self.owner].clear();
+                    self.wdir[self.owner].resize(self.wg.nodes, 255);
+                    self.owner += 1;
+                }
+                self.publish();
+                true
+            }
+            Stage::Field => {
+                if field_step(&self.wsg, &self.wg, &mut self.wf, &mut self.ws, b.sectors, h) {
+                    self.reached = self.ws.field_st.reached;
+                    self.wdir[self.owner].clear();
+                    self.wdir[self.owner].extend_from_slice(&self.wf.dir);
+                    self.owner += 1;
+                    self.stage = Stage::FieldBegin;
+                }
+                false
+            }
+        }
+    }
+
+    /// Узел, в который идут юниты владельца: верхний уровень клетки
+    /// цели, а если там стоять негде — ближайшей, где можно.
+    fn target_node(&self, owner: usize) -> Option<u32> {
+        let (tx, tz) = self.targets.get(owner).copied().flatten()?;
+        let (w, hh) = self.wg.dims();
+        if w == 0 || hh == 0 {
+            return None;
+        }
+        let step = SEC.max(1);
+        let _ = step;
+        let (cx0, cz0) = ((tx / 2).min(w - 1), (tz / 2).min(hh - 1));
+        for r in 0..w.max(hh) {
+            let mut best: Option<u32> = None;
+            let (x0, x1) = (cx0.saturating_sub(r), (cx0 + r).min(w - 1));
+            let (z0, z1) = (cz0.saturating_sub(r), (cz0 + r).min(hh - 1));
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    if x.abs_diff(cx0) != r && z.abs_diff(cz0) != r {
+                        continue;
+                    }
+                    let cell = (z * w + x) as usize;
+                    let n = self.wg.levels_in(cell);
+                    if n == 0 {
+                        continue;
+                    }
+                    // Верхний уровень: там юнит и стоит (ADR-138).
+                    let node = self.wg.first_node(cell) + n as u32 - 1;
+                    // Ничьи разрешаются номером узла.
+                    if best.is_none_or(|bb| node < bb) {
+                        best = Some(node);
+                    }
+                }
+            }
+            if best.is_some() {
+                return best;
+            }
+        }
+        None
+    }
+
+    fn publish(&mut self) {
+        std::mem::swap(&mut self.g, &mut self.wg);
+        std::mem::swap(&mut self.sg, &mut self.wsg);
+        std::mem::swap(&mut self.dir, &mut self.wdir);
+        self.nodes = self.g.nodes;
+        self.portals = self.sg.portals.len();
+        self.components = self.g.components;
+        self.published += 1;
+        self.last_ticks = self.ticks;
+        self.ticks = 0;
+        self.stage = Stage::Idle;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layer::NavLayer;
     use crate::godunov::h_exact_floor;
     use crate::volume::NO_NODE;
     use voxel::store::{Mat, AIR};
