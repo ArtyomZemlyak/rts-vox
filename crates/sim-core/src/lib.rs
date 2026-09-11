@@ -921,15 +921,40 @@ impl World {
 
     /// Смещение одного юнита. Читает только снимок и индекс —
     /// значит вызов из любого потока даёт то же самое.
+    ///
+    /// **Источник направления тот же, что у боевой фазы.** Раньше он
+    /// читал плоское поле всегда, а `movement_deltas` при наличии
+    /// земли читает объёмное: метод, документированный как «то же
+    /// самое», считал другое, и первый, кто повесил бы на него
+    /// настоящий пул, получил бы другую симуляцию. Сегодня им
+    /// пользуется только стенд, и мир у стенда без земли — поэтому
+    /// расхождение не проявлялось (ADR-194).
     #[inline]
     pub fn movement_kernel(&self, i: usize) -> (i32, i32) {
         let u = &self.units;
         let (ux, uz) = (self.snap_x[i], self.snap_z[i]);
-        let (cx, cz) = (
-            (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-            (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-        );
-        let d = self.flow[u.owner[i] as usize][cz * NAV + cx];
+        let d = match self.ground.as_ref() {
+            Some(g) => {
+                let st = g.nav.step() as i32;
+                let (gw, gh) = g.nav.dims();
+                let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
+                if cx >= gw || cz >= gh {
+                    255
+                } else {
+                    match g.nav.level_index_near(cx, cz, u.y[i]) {
+                        Some(li) => self.nav_field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
+                        None => 255,
+                    }
+                }
+            }
+            None => {
+                let (cx, cz) = (
+                    (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                    (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                );
+                self.flow[u.owner[i] as usize][cz * NAV + cx]
+            }
+        };
         let (mut vx, mut vz) = if d < 4 {
             let (dx, dz) = DIRS[d as usize];
             (dx * u.speed[i], dz * u.speed[i])
@@ -3139,6 +3164,55 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
     ///
     /// Сравнение **потиковое**, а не по итогу: расхождение ловится там,
     /// где внесено, а не через тысячу тиков (`docs/03-determinism.md`,
+    /// **Ядро движения считает то же, что боевая фаза.**
+    ///
+    /// `movement_kernel` документирован как «вызов из любого потока
+    /// даёт то же самое» и существует ради пула. Но источник
+    /// направления у него был **другой**: плоское поле вместо
+    /// объёмного, которое читает `movement_deltas` при наличии земли.
+    /// Метод, обещающий тождество и его не дающий, — заготовленный
+    /// десинк: он сработает у первого, кто повесит на него пул
+    /// (ADR-194).
+    ///
+    /// Мир здесь **с землёй** намеренно: на мире без земли обе
+    /// ветки совпадали, и расхождения не было видно — именно поэтому
+    /// его никто и не заметил.
+    #[test]
+    fn the_movement_kernel_matches_the_phase_it_stands_for() {
+        let t = test_tuning();
+        let mut r = Reference::with_params(
+            42,
+            200,
+            t,
+            test_weapons(),
+            worldgen::Params::sized(96, 48, 96),
+        );
+        for _ in 0..40 {
+            r.tick();
+        }
+        let w = &mut r.world;
+        w.prepare_movement();
+        w.movement_deltas(1);
+        let live: Vec<u32> = w.units.live().to_vec();
+        assert!(live.len() > 20, "юнитов слишком мало, тест ничего не проверит");
+        let mut differ = 0usize;
+        for &i in &live {
+            let i = i as usize;
+            if w.movement_kernel(i) != w.delta[i] {
+                differ += 1;
+            }
+        }
+        assert_eq!(
+            differ, 0,
+            "{differ} из {} юнитов: ядро и фаза разошлись",
+            live.len()
+        );
+        assert!(
+            w.ground().is_some(),
+            "мир без земли — обе ветки совпадают, тест вакуумный"
+        );
+    }
+
     /// SyncTest).
     #[test]
     fn two_worlds_run_side_by_side_match_every_tick() {
