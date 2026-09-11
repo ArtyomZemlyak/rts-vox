@@ -1290,6 +1290,9 @@ pub fn ref_params() -> worldgen::Params {
 /// внутри него: разнеси её по вызывающим, и они разойдутся снова.
 pub struct Reference {
     pub world: World,
+    /// Генератор нужен и дальше: копатель, догрызший свой столб,
+    /// переходит на новый и начинает с поверхности.
+    terrain: worldgen::Terrain,
     /// Копатели: где грызут и куда двинутся дальше.
     diggers: Vec<(i32, i32, i32)>,
     rng: Rng,
@@ -1321,7 +1324,7 @@ impl Reference {
             let y = terrain.surface(x as u32, z as u32) as i32;
             diggers.push((x, y, z));
         }
-        Reference { world, diggers, rng }
+        Reference { world, terrain, diggers, rng }
     }
 
     /// Тик сценария: сначала копка, потом сам тик.
@@ -1338,11 +1341,18 @@ impl Reference {
     }
 
     /// Каждый копатель снимает шарик породы и уходит вглубь.
+    ///
+    /// Догрызший свой столб **переходит на новый**, а не начинает тот же
+    /// сверху. Иначе копка кончается: за тысячу тиков двадцать четыре
+    /// столба выбираются насквозь, дальше шарик снимает воздух, правок
+    /// не возникает — и прогон на десять тысяч тиков девять десятых
+    /// времени хеширует неподвижный мир (ADR-159).
     fn dig(&mut self) {
         let Some(g) = self.world.ground_mut() else { return };
         let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
         let r = REF_RADIUS;
-        for d in self.diggers.iter_mut() {
+        let mut moved: Vec<usize> = Vec::new();
+        for (k, d) in self.diggers.iter_mut().enumerate() {
             for dy in -r..=r {
                 for dz in -r..=r {
                     for dx in -r..=r {
@@ -1357,14 +1367,19 @@ impl Reference {
                     }
                 }
             }
-            // Вниз, пока есть куда; на дне — вбок. Ничьи разрешаются
-            // порядком в массиве, а не обходом.
             d.1 -= 1;
             if d.1 <= 1 {
-                d.1 = ny - 2;
+                moved.push(k);
             }
         }
-        let _ = &mut self.rng;
+        // Переселение — после обхода: земля занята заимствованием,
+        // а порядок остаётся порядком в массиве, а не обхода.
+        for k in moved {
+            let x = self.rng.below(REF_SIDE) as i32;
+            let z = self.rng.below(REF_SIDE) as i32;
+            let y = self.terrain.surface(x as u32, z as u32) as i32;
+            self.diggers[k] = (x, y, z);
+        }
     }
 }
 
@@ -1462,6 +1477,56 @@ mod tests {
             h
         };
         assert_eq!(run(), run());
+    }
+
+    /// **Копка не кончается к середине прогона.**
+    ///
+    /// Сторож против затухания сценария. Первая редакция копателя грызла
+    /// свой столб сверху вниз и, дойдя до дна, начинала тот же столб
+    /// заново — по уже выкопанному. Правки шли первые шестьдесят тиков,
+    /// дальше шарик снимал воздух, и прогон на десять тысяч тиков
+    /// хешировал неподвижный мир (ADR-159).
+    ///
+    /// Проверять «копка была» недостаточно: она была. Проверять надо,
+    /// что она **есть во второй половине**.
+    #[test]
+    fn the_reference_keeps_digging_to_the_end() {
+        let mut r = Reference::new(42, 300, test_tuning());
+        let mut half = [0u64; 2];
+        for t in 0..400 {
+            r.tick();
+            let g = r.world.ground().expect("земля");
+            half[usize::from(t >= 200)] += g.stats.edits as u64;
+        }
+        assert!(half[0] > 0, "копки не было и в первой половине");
+        assert!(
+            half[1] * 4 > half[0],
+            "копка затухла: {} правок в первой половине против {} во второй",
+            half[0],
+            half[1]
+        );
+    }
+
+    /// **Два мира, идущие вперемешку, совпадают тик в тик.**
+    ///
+    /// `same_seed_same_hash` гоняет прогоны **подряд**, и скрытое общее
+    /// состояние — статик, потокоместное, кэш, зависящий от порядка
+    /// аллокаций — в обоих прогонах проходит одну и ту же
+    /// последовательность, то есть не видно. Здесь миры чередуются,
+    /// и такая зависимость расходится сразу.
+    ///
+    /// Сравнение **потиковое**, а не по итогу: расхождение ловится там,
+    /// где внесено, а не через тысячу тиков (`docs/03-determinism.md`,
+    /// SyncTest).
+    #[test]
+    fn two_worlds_run_side_by_side_match_every_tick() {
+        let mut a = Reference::new(42, 800, test_tuning());
+        let mut b = Reference::new(42, 800, test_tuning());
+        for t in 1..=150 {
+            let ha = a.tick();
+            let hb = b.tick();
+            assert_eq!(ha, hb, "миры разошлись на тике {t}: {ha:016x} против {hb:016x}");
+        }
     }
 
     /// **Требование `CLAUDE.md`: один сценарий на 1/2/4/8 воркерах даёт
