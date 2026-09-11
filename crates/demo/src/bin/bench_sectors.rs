@@ -282,6 +282,63 @@ fn main() -> ExitCode {
         );
     }
 
+    // --- Переиспользование секторов поля при продолжающейся копке.
+    {
+        let mut w3 = World::new(
+            params.nx,
+            params.ny,
+            params.nz,
+            1 << 16,
+            Box::new(Terrain { params, seed: a.seed }),
+        );
+        let mut d3 = Dig::clustered(
+            &w3,
+            |x, z| terrain.surface(x, z),
+            a.diggers,
+            2,
+            12,
+            a.seed ^ 0xF10,
+        );
+        for _ in 0..a.ticks {
+            d3.step(&mut w3, &|x, z| terrain.surface(x, z));
+            w3.flush();
+        }
+        let mut nav3 = NavLayer::new(&w3, t.unit_height, t.nav_cell, t.max_step);
+        let (cw, ch) = nav3.dims();
+        let mut nf = nav::sectors::NavField::new(1);
+        nf.set_target(0, (a.side / 2) as i32, (a.side / 2) as i32);
+        let b = nav::sectors::FieldBudget {
+            cells: t.flow_cells_per_tick,
+            scan: t.flow_scan_per_tick,
+            sectors: t.flow_sectors_per_tick,
+        };
+        let mut cycles = 0;
+        let mut ticks = 0u32;
+        let (mut solved, mut reused) = (0usize, 0usize);
+        while cycles < 4 && ticks < 100_000 {
+            d3.step(&mut w3, &|x, z| terrain.surface(x, z));
+            w3.flush();
+            nav3.apply(&w3, w3.edits());
+            for e in w3.edits() {
+                nf.mark_cell(e.x / t.nav_cell, e.z / t.nav_cell, cw);
+            }
+            if nf.step(&nav3, b, &nav::godunov::h_exact_floor) {
+                cycles += 1;
+                solved = nf.solved_sectors;
+                reused = nf.reused_sectors;
+            }
+            ticks += 1;
+        }
+        println!("\n{:<34} {:>12} {:>12}", "секторов поля за 4 цикла", "пересчёт", "готовыми");
+        println!("{:<34} {:>12} {:>12}", "", solved, reused);
+        println!("{:<34} {:>12}", "  тиков на цикл", nf.last_ticks);
+        println!(
+            "{:<34} {:>12}",
+            "  всего секторов",
+            (cw.div_ceil(16) * ch.div_ceil(16)) as usize
+        );
+    }
+
     println!("\nЦена иерархии — сборка графа секторов; цена запроса — таблица выше.");
     println!("Поле по всей карте стоит 40 мс (ADR-138); сектор — это {:.0} узлов",
              g.nodes as f64 / (sw * sh).max(1) as f64);

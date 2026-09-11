@@ -327,6 +327,9 @@ pub struct World {
     /// Узлов и рёбер в графе последнего поля.
     pub flow_nodes: usize,
     pub flow_edges: usize,
+    /// Секторов поля пересчитано и взято готовыми за прогон.
+    pub flow_solved_sectors: usize,
+    pub flow_reused_sectors: usize,
     /// Компонент связности при последнем решении. Единица — карта
     /// цела; тысяча — она рассыпана, и это надо видеть.
     pub flow_components: usize,
@@ -404,6 +407,8 @@ impl World {
             flow_ticks: 0,
             flow_nodes: 0,
             flow_edges: 0,
+            flow_solved_sectors: 0,
+            flow_reused_sectors: 0,
             flow_components: 0,
             searches: 0,
             search_capped: 0,
@@ -510,6 +515,8 @@ impl World {
             self.flow_ticks = self.nav_field.last_ticks;
             self.flow_solves = self.nav_field.published;
             self.flow_edges = self.nav_field.portals;
+            self.flow_solved_sectors = self.nav_field.solved_sectors;
+            self.flow_reused_sectors = self.nav_field.reused_sectors;
         }
     }
 

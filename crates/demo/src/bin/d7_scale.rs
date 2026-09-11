@@ -455,6 +455,8 @@ fn main() -> ExitCode {
     println!("{:<34} {:>14}", "  узлов достижимо", sim.flow_reachable);
     println!("{:<34} {:>14}", "  годуновских обновлений", sim.flow_updates);
     println!("{:<34} {:>14}", "  тиков на одно поле", sim.flow_ticks);
+    println!("{:<34} {:>14}", "  секторов пересчитано", sim.flow_solved_sectors);
+    println!("{:<34} {:>14}", "  секторов взято готовыми", sim.flow_reused_sectors);
     println!(
         "{:<34} {:>14.1}",
         "шагов упёрлось в породу",

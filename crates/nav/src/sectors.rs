@@ -15,7 +15,7 @@
 //! вставки в очередь; `HashMap` не используется — только плотные
 //! массивы и двоичный поиск.
 
-use crate::layer::NavLayer;
+use crate::layer::{NavLayer, MAX_LEVELS};
 use crate::volume::{VolField, VolGraph};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -976,7 +976,6 @@ where
         return true;
     }
     let nsec = sg.sw * sg.sh;
-    let zones = sg.zones();
     let mut spent = 0u32;
     while ws.field_at < nsec {
         if spent >= budget {
@@ -985,41 +984,95 @@ where
         let sec = ws.field_at;
         ws.field_at += 1;
         spent += 1;
-        let nodes = sg.nodes_of(sec);
-        if nodes.is_empty() {
-            continue;
-        }
-        ws.seeds.clear();
-        for &p in sg.portals_of(sec) {
-            let port = sg.port_of(p, sec);
-            let v = ws.to_t[port as usize];
-            if v != u32::MAX {
-                ws.seeds.push((sg.node_of_port(port), v));
-            }
-        }
-        // Цели, попавшие в этот сектор, — тоже засев.
-        for &goal in ws.goals.iter() {
-            if sg.node_sector[goal as usize] == sec {
-                ws.seeds.push((goal, 0));
-            }
-        }
-        if ws.seeds.is_empty() {
-            // До цели из этого сектора не дойти — направления нет,
-            // и это честный ответ, а не пропуск.
-            f.clear_zone(nodes);
-            continue;
-        }
-        // Ничьи в засеве разрешаются номером узла, а не порядком порталов.
-        ws.seeds.sort_unstable();
-        crate::volume::solve_zone(g, f, nodes, zones, sec, &ws.seeds, h);
-        ws.field_st.sectors += 1;
-        ws.field_st.updates += f.updates;
+        field_sector(sg, g, f, ws, sec, h);
     }
+    field_ports(sg, g, |node, k| f.dir[node as usize] = k, ws);
+    ws.field_st.reached = f.dir.iter().filter(|&&d| d != 255).count();
+    ws.field_at = u32::MAX;
+    true
+}
 
-    // На выходе сектора поле молчит: внутри него идти уже некуда,
-    // а перешагнуть портал — это не шаг поля, а шаг графа. Поэтому
-    // сторонам, с которых выгодно перейти, направление проставляется
-    // отдельно — иначе юнит доходит до границы и встаёт.
+/// Решить поле одного сектора.
+pub fn field_sector<F>(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    f: &mut VolField,
+    ws: &mut RouteWs,
+    sec: u32,
+    h: &F,
+) where
+    F: Fn(u32, u32) -> u32,
+{
+    let nodes = sg.nodes_of(sec);
+    if nodes.is_empty() {
+        return;
+    }
+    seeds_of(sg, ws, sec);
+    if ws.seeds.is_empty() {
+        // До цели из этого сектора не дойти — направления нет,
+        // и это честный ответ, а не пропуск.
+        f.clear_zone(nodes);
+        return;
+    }
+    crate::volume::solve_zone(g, f, nodes, sg.zones(), sec, &ws.seeds, h);
+    ws.field_st.sectors += 1;
+    ws.field_st.updates += f.updates;
+}
+
+/// Засев сектора: его выходы с ценой добраться до цели плюс цели,
+/// попавшие внутрь. Ничьи разрешаются номером узла.
+fn seeds_of(sg: &SectorGraph, ws: &mut RouteWs, sec: u32) {
+    ws.seeds.clear();
+    for &p in sg.portals_of(sec) {
+        let port = sg.port_of(p, sec);
+        let v = ws.to_t[port as usize];
+        if v != u32::MAX {
+            ws.seeds.push((sg.node_of_port(port), v));
+        }
+    }
+    for &goal in ws.goals.iter() {
+        if sg.node_sector[goal as usize] == sec {
+            ws.seeds.push((goal, 0));
+        }
+    }
+    ws.seeds.sort_unstable();
+}
+
+/// Подпись засева сектора: имена выходов и цена от них до цели.
+///
+/// Совпала с прошлым циклом — поле сектора то же, и считать его заново
+/// незачем (ADR-154).
+pub fn seed_signature(sg: &SectorGraph, ws: &RouteWs, sec: u32, out: &mut Vec<(Key, u32)>) {
+    out.clear();
+    // Значения берутся **со сдвигом к нулю**. Годуновское обновление
+    // переносоустойчиво: прибавь ко всем засевам одно и то же, и все
+    // времена сдвинутся на столько же, а направления — то, что
+    // публикуется, — не изменятся. Маршрут до цели удлинился на шаг
+    // где-то далеко — сектору всё равно (ADR-154).
+    let base = sg
+        .portals_of(sec)
+        .iter()
+        .map(|&p| ws.to_t[sg.port_of(p, sec) as usize])
+        .filter(|&v| v != u32::MAX)
+        .min();
+    for &p in sg.portals_of(sec) {
+        let port = sg.port_of(p, sec);
+        let v = ws.to_t[port as usize];
+        let v = match (v, base) {
+            (u32::MAX, _) => u32::MAX,
+            (v, Some(b)) => v - b,
+            (v, None) => v,
+        };
+        out.push((sg.portals[p as usize].key, v));
+    }
+    out.sort_unstable();
+}
+
+/// Направления на выходах секторов.
+///
+/// Внутри сектора идти уже некуда, а перешагнуть портал — это шаг
+/// графа, а не поля. Без этого юнит доходит до границы и встаёт.
+pub fn field_ports(sg: &SectorGraph, g: &VolGraph, mut set: impl FnMut(u32, u8), ws: &RouteWs) {
     for pi in 0..sg.portals.len() as u32 {
         for side in 0..2u32 {
             let here = pi * 2 + side;
@@ -1031,15 +1084,12 @@ where
             let b = sg.node_of_port(there);
             for k in 0..4 {
                 if g.side(a as usize, k).any(|m| m == b) {
-                    f.dir[a as usize] = k as u8;
+                    set(a, k as u8);
                     break;
                 }
             }
         }
     }
-    ws.field_st.reached = f.dir.iter().filter(|&&d| d != 255).count();
-    ws.field_at = u32::MAX;
-    true
 }
 
 /// Расстояние между двумя узлами внутри одного сектора.
@@ -1115,6 +1165,18 @@ pub struct NavField {
     /// Секторы, задетые правками с прошлой пересборки.
     dirty: Vec<u32>,
     taken: Vec<u32>,
+    /// Подпись засева сектора с прошлого цикла: имена выходов и цена
+    /// добраться от них до цели. Совпала — поле сектора не изменилось.
+    /// По владельцу, по сектору.
+    sig: Vec<Vec<Vec<(Key, u32)>>>,
+    wsig: Vec<Vec<Vec<(Key, u32)>>>,
+    /// Место в обходе секторов текущего владельца.
+    sec_at: u32,
+    /// Ширина сетки нав-клеток — чтобы адресовать направления клеткой.
+    w: u32,
+    /// Секторов пересчитано и переиспользовано в последнем цикле.
+    pub solved_sectors: usize,
+    pub reused_sectors: usize,
     stage: Stage,
     owner: usize,
     sec_st: BuildStats,
@@ -1159,15 +1221,21 @@ impl NavField {
         }
     }
 
-    /// Направление для узла опубликованного графа.
+    /// Направление в клетке на уровне `li`.
+    ///
+    /// Адресуется **клеткой и уровнем**, а не номером узла: номера
+    /// раздаются подряд по клеткам, и лишний уровень в одной клетке
+    /// сдвигает всё, что за ней. Поле, адресованное клеткой, переживает
+    /// пересборку графа — и только поэтому его можно переиспользовать
+    /// посекторно (ADR-154).
     #[inline]
     pub fn dir_at(&self, owner: usize, cx: u32, cz: u32, li: usize) -> u8 {
-        let node = self.g.node(cx, cz, li);
-        if node == NO_NODE_LOCAL {
+        if li >= MAX_LEVELS || self.w == 0 {
             return 255;
         }
+        let at = ((cz * self.w + cx) as usize) * MAX_LEVELS + li;
         match self.dir.get(owner) {
-            Some(d) if (node as usize) < d.len() => d[node as usize],
+            Some(d) if at < d.len() => d[at],
             _ => 255,
         }
     }
@@ -1216,23 +1284,25 @@ impl NavField {
                 while self.owner < self.targets.len() {
                     if let Some(node) = self.target_node(self.owner) {
                         field_begin(&self.wsg, &self.wg, &mut self.ws, node);
+                        let (w, hh) = self.wg.dims();
+                        self.wdir[self.owner].clear();
+                        self.wdir[self.owner].resize((w * hh) as usize * MAX_LEVELS, 255);
+                        self.sec_at = 0;
                         self.stage = Stage::Field;
                         return false;
                     }
                     // Владельцу некуда идти — поле пустое, но своего
                     // размера: чужое читать нельзя.
+                    let (w, hh) = self.wg.dims();
                     self.wdir[self.owner].clear();
-                    self.wdir[self.owner].resize(self.wg.nodes, 255);
+                    self.wdir[self.owner].resize((w * hh) as usize * MAX_LEVELS, 255);
                     self.owner += 1;
                 }
                 self.publish();
                 true
             }
             Stage::Field => {
-                if field_step(&self.wsg, &self.wg, &mut self.wf, &mut self.ws, b.sectors, h) {
-                    self.reached = self.ws.field_st.reached;
-                    self.wdir[self.owner].clear();
-                    self.wdir[self.owner].extend_from_slice(&self.wf.dir);
+                if self.field_sectors(b.sectors, h) {
                     self.owner += 1;
                     self.stage = Stage::FieldBegin;
                 }
@@ -1281,7 +1351,91 @@ impl NavField {
         None
     }
 
+    /// Пройти порцию секторов владельца: пересчитать или взять готовое.
+    ///
+    /// Сектор берётся готовым, если он не задет правками **и** подпись
+    /// его засева та же. Второе важнее первого: цель могла сдвинуться
+    /// далеко, и тогда меняются выходы у секторов, которых копка
+    /// не касалась вовсе (ADR-154).
+    fn field_sectors<F>(&mut self, budget: u32, h: &F) -> bool
+    where
+        F: Fn(u32, u32) -> u32,
+    {
+        let (w, hh) = self.wg.dims();
+        let nsec = (self.wsg.sectors().0 * self.wsg.sectors().1) as usize;
+        if self.wsig.len() < self.targets.len() {
+            self.wsig.resize(self.targets.len(), Vec::new());
+            self.sig.resize(self.targets.len(), Vec::new());
+        }
+        if self.wsig[self.owner].len() != nsec {
+            self.wsig[self.owner] = vec![Vec::new(); nsec];
+        }
+        let mut spent = 0u32;
+        while (self.sec_at as usize) < nsec {
+            if spent >= budget {
+                return false;
+            }
+            let sec = self.sec_at;
+            self.sec_at += 1;
+            spent += 1;
+            let mut sig = std::mem::take(&mut self.wsig[self.owner][sec as usize]);
+            seed_signature(&self.wsg, &self.ws, sec, &mut sig);
+            let same = !self.taken.contains(&sec)
+                && self
+                    .sig
+                    .get(self.owner)
+                    .and_then(|v| v.get(sec as usize))
+                    .is_some_and(|old| *old == sig);
+            self.wsig[self.owner][sec as usize] = sig;
+            if same {
+                // Готовое поле сектора переносится клетка в клетку:
+                // адресация клеткой это и позволяет.
+                self.reused_sectors += 1;
+                for &node in self.wsg.nodes_of(sec) {
+                    let cell = self.wg.cell_of(node as usize) as usize;
+                    let li = (node - self.wg.first_node(cell)) as usize;
+                    if li >= MAX_LEVELS {
+                        continue;
+                    }
+                    let at = cell * MAX_LEVELS + li;
+                    let v = self.dir[self.owner].get(at).copied().unwrap_or(255);
+                    self.wdir[self.owner][at] = v;
+                }
+                continue;
+            }
+            self.solved_sectors += 1;
+            field_sector(&self.wsg, &self.wg, &mut self.wf, &mut self.ws, sec, h);
+            for &node in self.wsg.nodes_of(sec) {
+                let cell = self.wg.cell_of(node as usize) as usize;
+                let li = (node - self.wg.first_node(cell)) as usize;
+                if li < MAX_LEVELS {
+                    self.wdir[self.owner][cell * MAX_LEVELS + li] = self.wf.dir[node as usize];
+                }
+            }
+        }
+        // Выходы: направление через портал, уже в клеточной адресации.
+        let (wg, wsg, ws) = (&self.wg, &self.wsg, &self.ws);
+        let d = &mut self.wdir[self.owner];
+        field_ports(
+            wsg,
+            wg,
+            |node, k| {
+                let cell = wg.cell_of(node as usize) as usize;
+                let li = (node - wg.first_node(cell)) as usize;
+                if li < MAX_LEVELS {
+                    d[cell * MAX_LEVELS + li] = k;
+                }
+            },
+            ws,
+        );
+        let _ = (w, hh);
+        self.reached = d.iter().filter(|&&v| v != 255).count();
+        true
+    }
+
     fn publish(&mut self) {
+        self.w = self.wg.dims().0;
+        std::mem::swap(&mut self.sig, &mut self.wsig);
         std::mem::swap(&mut self.g, &mut self.wg);
         std::mem::swap(&mut self.sg, &mut self.wsg);
         std::mem::swap(&mut self.dir, &mut self.wdir);
@@ -1548,6 +1702,73 @@ mod tests {
         }
         assert!(rounds > 1, "порция оказалась не порцией");
         assert_eq!(dump(&piece), dump(&whole), "порции разошлись с разовой сборкой");
+    }
+
+    /// **Переиспользованный сектор равен пересчитанному.**
+    ///
+    /// Поле, собранное с переносом готовых секторов, обязано совпасть
+    /// с полем, посчитанным с нуля по тому же миру. Иначе экономия
+    /// покупается тихой ошибкой (ADR-154).
+    #[test]
+    fn a_reused_sector_matches_a_recomputed_one() {
+        let mut w = voxel::World::new(96, 64, 96, 100_000, Box::new(Ridge { tunnel: true }));
+        let mut nav = NavLayer::new(&w, 4, 2, 1);
+
+        let mut inc = NavField::new(1);
+        inc.set_target(0, 80, 32);
+        let mut guard = 0;
+        while !inc.step(&nav, budget(), &h_exact_floor) {
+            guard += 1;
+            assert!(guard < 100_000);
+        }
+        // Копаем в одном секторе и гоняем второй цикл: часть секторов
+        // обязана переиспользоваться.
+        for y in GY - 4..GY {
+            for z in 70..76 {
+                for x in 70..76 {
+                    w.queue_dig(x, y, z);
+                }
+            }
+        }
+        w.flush();
+        nav.apply(&w, w.edits());
+        let (cw, _) = nav.dims();
+        for e in w.edits() {
+            inc.mark_cell(e.x / 2, e.z / 2, cw);
+        }
+        let before = inc.reused_sectors;
+        let mut guard = 0;
+        while !inc.step(&nav, budget(), &h_exact_floor) {
+            guard += 1;
+            assert!(guard < 100_000);
+        }
+        assert!(inc.reused_sectors > before, "не переиспользовано ни одного сектора");
+
+        let mut fresh = NavField::new(1);
+        fresh.set_target(0, 80, 32);
+        let mut guard = 0;
+        while !fresh.step(&nav, budget(), &h_exact_floor) {
+            guard += 1;
+            assert!(guard < 100_000);
+        }
+        assert_eq!(fresh.reused_sectors, 0, "свежее поле что-то переиспользовало");
+
+        let (w2, h2) = fresh.g.dims();
+        let mut diff = 0;
+        for cz in 0..h2 {
+            for cx in 0..w2 {
+                for li in 0..MAX_LEVELS {
+                    if inc.dir_at(0, cx, cz, li) != fresh.dir_at(0, cx, cz, li) {
+                        diff += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(diff, 0, "перенесённые секторы разошлись с пересчитанными");
+    }
+
+    fn budget() -> FieldBudget {
+        FieldBudget { cells: 64, scan: 512, sectors: 2 }
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.
