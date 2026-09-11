@@ -50,6 +50,8 @@ sim-cli — headless-прогон симуляции
   --threads N     число воркеров; фиксируется явно, не по числу ядер (1)
   --every N       печатать хеш каждые N тиков, а не только итоговый
   --dump-hash     напечатать итоговый хеш состояния
+  --stats         напечатать счётчики прогона: время по фазам,
+                  землю, стрельбу, смерти — то, чем меряют ADR
   --world-hash    напечатать хеш сгенерированного мира и выйти
   --help          это сообщение
 "
@@ -140,6 +142,9 @@ fn main() -> ExitCode {
     // Итоги по земле копятся по тикам: `g.stats` обнуляется каждый тик,
     // и последний снимок говорит про последний тик, а не про прогон.
     let (mut edits, mut topo, mut falls, mut rides, mut worst_q) = (0u64, 0u64, 0u64, 0u64, 0usize);
+    // Самое долгое падение за прогон. Обнуляется каждый тик вместе
+    // с остальной землёй, поэтому максимум копится здесь.
+    let mut max_fall = 0u32;
     let mut backlog = 0u64;
     let (mut spawned, mut detached, mut too_big) = (0u64, 0u64, 0u64);
     // Застрявшие: живой юнит, не сдвинувшийся за последнюю сотню тиков.
@@ -156,6 +161,7 @@ fn main() -> ExitCode {
             edits += g.stats.edits as u64;
             topo += g.stats.topo_dirty as u64;
             falls += g.stats.fall_damage;
+            max_fall = max_fall.max(g.stats.max_fall);
             rides += g.stats.rides;
             worst_q = worst_q.max(g.stats.queued);
             // Потолок, срабатывающий **каждый** тик, — не предохранитель,
@@ -217,7 +223,7 @@ fn main() -> ExitCode {
         if r.world.ground().is_some() {
             let cap = r.world.ground().map(|g| g.world.max_edits_per_tick).unwrap_or(0);
             println!(
-                "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}"
+                "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}, самое долгое падение {max_fall}"
             );
             println!(
                 "  очередь: худшая {worst_q}, тиков с хвостом {backlog} из {}, потолок правок {cap}",
@@ -272,6 +278,10 @@ fn main() -> ExitCode {
             "  взрывы: {}, вокселей в очередь {}, задето волной {}",
             r.world.blasts, r.world.blast_voxels, r.world.blast_hits
         );
+        // Смерти считаются прямо, а не как убыль живых: с подкреплениями
+        // численность держится ровной, и выбитый строй по ней
+        // неотличим от нетронутого (ADR-164). Мерило силы боя — это.
+        println!("  смертей за прогон: {}", r.world.deaths);
         let live = r.world.units.live().len();
         let with_target = r.world
             .units

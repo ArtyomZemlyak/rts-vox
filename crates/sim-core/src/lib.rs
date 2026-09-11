@@ -164,6 +164,17 @@ pub struct Units {
     /// Как и `ride_off`, в хеш не входит: хеш ловит расхождение по `y`
     /// и по вокселям, а они меняются тем же падением на том же тике.
     pub fall_from: Vec<i32>,
+    /// Вертикальная скорость падения, вокселей **за тик**. Растёт
+    /// на тяготение каждый тик полёта (ADR-174).
+    ///
+    /// В хеш не входит по той же причине, что `fall_from`: разошедшаяся
+    /// скорость разводит `y`, а `y` хешируется.
+    pub fall_v: Vec<Fx>,
+    /// Дробная часть высоты, пока юнит падает. Без неё падение шло бы
+    /// только целыми вокселями за тик, то есть не ускорялось бы
+    /// вовсе: первая секунда свободного падения — меньше воксела
+    /// за тик.
+    pub fall_f: Vec<Fx>,
     /// Тик, раньше которого юнит не ищет цель заново. Поиск цели —
     /// самая дорогая часть боя, и держать её потиковой незачем: цель,
     /// живая и в радиусе, остаётся целью (ADR-116).
@@ -213,10 +224,25 @@ pub fn fall_damage(fallen: u32, per_voxel: u16) -> u32 {
     fallen.saturating_sub(1).saturating_mul(per_voxel as u32)
 }
 
-/// Сколько вокселей за тик пролетает падающий юнит. Столько же
-/// пролетает падающее тело (`voxel::bodies`): правило одно для всех,
-/// иначе юнит и кусок, отвалившиеся вместе, разъезжаются.
-pub const FALL_PER_TICK: i32 = 1;
+/// Проходов по неподвижной точке прицела (ADR-173).
+///
+/// Не игровое число, а точность метода: подъём ствола зависит
+/// от времени полёта, а время — от подъёма. Три прохода доводят
+/// невязку на полной дальности до сотых долей воксела, четвёртый
+/// уже ничего не меняет.
+const AIM_ITERS: u32 = 3;
+
+/// Ускорение свободного падения **за тик**, в `Fx`.
+///
+/// В данных оно задано вокселями в секунду за секунду: в `data/*.ron`
+/// живут целые числа, а за тик выходит дробь (ADR-173). Перевод —
+/// одно точное деление в Q32.32, и делает его тот, кто считает,
+/// а не тот, кто хранит.
+///
+/// Число одно на всех: юнит, обломок и снаряд ускоряются одинаково.
+pub fn gravity_per_tick(t: &Tuning) -> Fx {
+    Fx::from_ratio(t.gravity, TICKS_PER_SECOND * TICKS_PER_SECOND)
+}
 
 impl Default for Units {
     fn default() -> Self {
@@ -240,6 +266,8 @@ impl Units {
             riding: Vec::new(),
             ride_off: Vec::new(),
             fall_from: Vec::new(),
+            fall_v: Vec::new(),
+            fall_f: Vec::new(),
             next_search: Vec::new(),
             next_shot: Vec::new(),
             weapon: Vec::new(),
@@ -276,6 +304,8 @@ impl Units {
             self.riding[k] = 0;
             self.ride_off[k] = (0, 0, 0);
             self.fall_from[k] = NOT_FALLING;
+            self.fall_v[k] = Fx::ZERO;
+            self.fall_f[k] = Fx::ZERO;
             self.next_search[k] = 0;
             self.next_shot[k] = 0;
             self.weapon[k] = 0;
@@ -294,6 +324,8 @@ impl Units {
         self.riding.push(0);
         self.ride_off.push((0, 0, 0));
         self.fall_from.push(NOT_FALLING);
+        self.fall_v.push(Fx::ZERO);
+        self.fall_f.push(Fx::ZERO);
         self.next_search.push(0);
         self.next_shot.push(0);
         self.weapon.push(0);
@@ -1036,6 +1068,10 @@ impl World {
     /// целой части в сетку.
     fn apply_deltas(&mut self) {
         let fall_dmg = self.tuning.fall_damage_per_voxel;
+        // Ускорение за тик считается **один раз на фазу**, а не на юнита:
+        // это точное деление в `i128`, и повторять его пять тысяч раз
+        // незачем.
+        let g_tick = gravity_per_tick(&self.tuning);
         let Self { units: u, delta, ground, blocked_moves, .. } = self;
         // Счётчики падения — те же, что у наездников: правило одно,
         // значит и отчёт один.
@@ -1088,22 +1124,51 @@ impl World {
                     let c = here.expect("клетка есть");
                     match nav.level_below(c.0, c.1, y) {
                         Some(l) => {
-                            if u.fall_from[i] == NOT_FALLING {
-                                u.fall_from[i] = y;
-                            }
+                            let l = l as i32;
                             // Падает по вертикали: горизонтальный шаг
                             // на этом тике отменяется.
                             x1 = x0;
                             z1 = z0;
-                            y = (y - FALL_PER_TICK).max(l as i32);
-                            if y == l as i32 {
-                                let fallen = (u.fall_from[i] - y).max(0) as u32;
-                                let hit = fall_damage(fallen, fall_dmg);
-                                u.voxels[i] =
-                                    u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
-                                *dmg_acc += hit as u64;
-                                *max_acc = (*max_acc).max(fallen);
-                                u.fall_from[i] = NOT_FALLING;
+                            if l == y - 1 && u.fall_from[i] == NOT_FALLING {
+                                // **Один воксель — шаг вниз, а не падение**
+                                // (ADR-036: «читается как шаг вниз»).
+                                // Копатель снимает воксель под собой всю
+                                // игру, и заставлять его треть секунды
+                                // висеть над собственной ямой — это
+                                // не физика, а заикание (ADR-174).
+                                y = l;
+                            } else {
+                                if u.fall_from[i] == NOT_FALLING {
+                                    u.fall_from[i] = y;
+                                    u.fall_v[i] = Fx::ZERO;
+                                    u.fall_f[i] = Fx::ZERO;
+                                }
+                                // Скорость растёт на тяготение, высота —
+                                // на скорость. Первые тики скорость
+                                // меньше воксела, поэтому дробная часть
+                                // копится отдельно.
+                                u.fall_v[i] = u.fall_v[i].add(g_tick);
+                                let nf = u.fall_f[i].add(u.fall_v[i]);
+                                let drop = nf.to_int_trunc();
+                                u.fall_f[i] = nf.sub(Fx::from_int(drop));
+                                // **Опора не проскакивается.** `level_below`
+                                // даёт ближайший уровень снизу, и клэмп
+                                // по нему сажает юнита ровно на него,
+                                // какой бы ни была скорость. Проверка
+                                // `has_level` на конечной высоте
+                                // пропустила бы пол (ADR-174).
+                                y = (y - drop).max(l);
+                                if y == l {
+                                    let fallen = (u.fall_from[i] - y).max(0) as u32;
+                                    let hit = fall_damage(fallen, fall_dmg);
+                                    u.voxels[i] =
+                                        u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
+                                    *dmg_acc += hit as u64;
+                                    *max_acc = (*max_acc).max(fallen);
+                                    u.fall_from[i] = NOT_FALLING;
+                                    u.fall_v[i] = Fx::ZERO;
+                                    u.fall_f[i] = Fx::ZERO;
+                                }
                             }
                         }
                         None => {
@@ -1117,6 +1182,8 @@ impl World {
                                 y = l as i32;
                             }
                             u.fall_from[i] = NOT_FALLING;
+                            u.fall_v[i] = Fx::ZERO;
+                            u.fall_f[i] = Fx::ZERO;
                             x1 = x0;
                             z1 = z0;
                         }
@@ -1280,6 +1347,18 @@ impl World {
             return;
         }
         let (range, cap) = (self.tuning.range, self.tuning.max_shots);
+        let g_tick = gravity_per_tick(&self.tuning);
+        // **Ствол на теле, а не под ногами** (ADR-173). `x, y, z` юнита —
+        // это его опора, то есть пол. Снаряд, пущенный с пола в пол,
+        // всю дорогу скребёт по земле: дуга провисает, а целая часть
+        // высоты берётся округлением вниз, и на первой же выпуклости
+        // рельефа снаряд втыкается в грунт, не долетев. Подъём — половина
+        // роста юнита, число из тех же данных (`unit_height`), а не
+        // из головы.
+        //
+        // Луча это не касается: он приходит в тот же тик, провисать
+        // ему нечем, и линия огня у него своя (ADR-170).
+        let muzzle = self.tuning.unit_height as i32 / 2;
         let tick = self.tick as u32;
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
@@ -1342,6 +1421,10 @@ impl World {
                     u.next_shot[i] = tick + w.reload;
                 }
                 WeaponKind::Bolt => {
+                    let (from, to) = (
+                        (from.0, from.1 + muzzle, from.2),
+                        (to.0, to.1 + muzzle, to.2),
+                    );
                     // Потолок на снаряды в воздухе. Упёршийся выстрел
                     // **не тратит перезарядку**: иначе юнит терял бы
                     // очередь из-за чужой стрельбы.
@@ -1358,7 +1441,50 @@ impl World {
                     let dx = Fx::from_int(to.0 - from.0);
                     let dy = Fx::from_int(to.1 - from.1);
                     let dz = Fx::from_int(to.2 - from.2);
-                    let len = dx.mul(dx).add(dy.mul(dy)).add(dz.mul(dz)).sqrt();
+                    let flat = dx.mul(dx).add(dz.mul(dz));
+                    let d2 = flat.add(dy.mul(dy));
+                    if d2.raw() == 0 {
+                        continue;
+                    }
+                    // **Прицел с упреждением по высоте** (ADR-173).
+                    // Снаряд падает всю дорогу, и целиться надо выше
+                    // цели ровно на то, что он потеряет за полёт:
+                    // `g*t*t/2`. Без этого каждый выстрел уходит
+                    // в землю за несколько вокселей до цели.
+                    //
+                    // **Корня здесь нет.** Время полёта равно длине
+                    // прицельного вектора на скорость за тик, а подъём
+                    // квадратичен по времени — значит он зависит
+                    // от **квадрата** длины, который считается без
+                    // корня: `подъём = k * |прицел|²`, где
+                    // `k = g / (2 * шаг²)` (ADR-071: корень —
+                    // последнее средство).
+                    let k = g_tick.div(step.mul(step).mul(Fx::from_int(2)));
+                    // Подъём зависит от времени полёта, а время —
+                    // от подъёма: это неподвижная точка, и берётся
+                    // она простой итерацией от прямой наводки.
+                    // При земном тяготении и полной дальности второй
+                    // проход правит ответ на полтора процента, третий —
+                    // на сотые доли.
+                    let mut rise = k.mul(d2);
+                    for _ in 0..AIM_ITERS {
+                        let a = dy.add(rise);
+                        let next = k.mul(flat.add(a.mul(a)));
+                        // Итерация сходится, только пока цель стволу
+                        // по силам. За этой границей она расходится,
+                        // и продолжать значит целиться в зенит: берём
+                        // последнее сошедшееся приближение.
+                        if next.raw() > rise.raw().saturating_mul(2) {
+                            break;
+                        }
+                        rise = next;
+                    }
+                    let ay = dy.add(rise);
+                    // Направление считается по **поднятому** прицелу,
+                    // и длина берётся от него же: нормировать на
+                    // расстояние до цели значило бы разогнать снаряд
+                    // тем сильнее, чем выше поднят ствол.
+                    let len = flat.add(ay.mul(ay)).sqrt();
                     if len.raw() == 0 {
                         continue;
                     }
@@ -1368,7 +1494,7 @@ impl World {
                     shots.spawn(
                         from,
                         (Fx::ZERO, Fx::ZERO, Fx::ZERO),
-                        (dx.div(len).mul(step), dy.div(len).mul(step), dz.div(len).mul(step)),
+                        (dx.div(len).mul(step), ay.div(len).mul(step), dz.div(len).mul(step)),
                         u.owner[i],
                         w.damage,
                         life,
@@ -1401,6 +1527,10 @@ impl World {
     fn step_shots(&mut self) {
         let r2 = self.tuning.shot_hit_radius * self.tuning.shot_hit_radius;
         let height = self.tuning.unit_height as i32;
+        // **Снаряд подчиняется тяготению** (ADR-173). Луча здесь нет
+        // вовсе: он не летит, а приходит в тот же тик, и ускорять
+        // у него нечего.
+        let g_tick = gravity_per_tick(&self.tuning);
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
         let Self {
@@ -1430,6 +1560,15 @@ impl World {
             shots.life[s] -= 1;
 
             let from = (shots.x[s], shots.y[s], shots.z[s]);
+            // Сначала тяготение меняет скорость, потом скорость —
+            // положение. Порядок фиксирован: обратный даёт другую
+            // траекторию, то есть другой хеш.
+            //
+            // **Вычитание, а не сложение.** `vy` — скорость по оси
+            // мира, а ось смотрит вверх; сложение разгоняло бы снаряд
+            // в небо. У юнита и у тела скорость падения хранится
+            // величиной, и знак там снимается вычитанием высоты.
+            shots.vy[s] = shots.vy[s].sub(g_tick);
             let nx = shots.fx[s].add(shots.vx[s]);
             let ny = shots.fy[s].add(shots.vy[s]);
             let nz = shots.fz[s].add(shots.vz[s]);
@@ -1443,6 +1582,7 @@ impl World {
             let mut hit_at: Option<(i32, i32, i32)> = None;
             // Порода на пути. Оба конца исключены, поэтому стрелок
             // не заслоняет сам себя на первом тике.
+            let mut wall: Option<(i32, i32, i32)> = None;
             if let Some(g) = ground.as_ref() {
                 let (ex, ez) = g.extent();
                 let ey = g.world.ny as i32;
@@ -1452,50 +1592,96 @@ impl World {
                 }
                 let los = voxel::los::line_of_sight(&g.world, from, to);
                 if !los.clear {
-                    shots.x[s] = los.blocked_at.0;
-                    shots.y[s] = los.blocked_at.1;
-                    shots.z[s] = los.blocked_at.2;
-                    *shots_blocked += 1;
-                    shots.kill(si);
-                    hit_at = Some(los.blocked_at);
+                    wall = Some(los.blocked_at);
+                } else if g.world.solid(to.0 as u32, to.1 as u32, to.2 as u32) {
+                    // **Конец шага — тоже порода.** Линия огня исключает
+                    // оба конца нарочно: цель себя не заслоняет. Снаряду
+                    // же конец шага — не цель, а место, где он окажется,
+                    // и на шаге в одну клетку обход между концами
+                    // не проверяет **ничего**: стена в воксель толщиной
+                    // пропускала бы снаряд насквозь (ADR-173).
+                    wall = Some(to);
                 }
             }
-            if hit_at.is_none() {
+
+            // **Кого задело — ищется по всему отрезку, а не в его конце**
+            // (ADR-173). Снаряд проходит за тик больше клетки, а допуск
+            // попадания — воксель: цель, мимо которой его пронесло между
+            // двумя тиками, в конечной точке шага не находится вовсе,
+            // и чем быстрее снаряд, тем больше он протыкает насквозь.
+            // Породы эта ловушка не касалась с самого начала — её
+            // проверяет тот же обход, — а юниты проверялись в одной точке.
+            //
+            // Отрезок обрывается о породу: до того, что за стеной, снаряд
+            // не долетел. Обход идёт **по ходу полёта**, поэтому первый
+            // найденный и есть тот, в кого попали; ничья внутри одной
+            // точки разрешается **номером юнита**, а не порядком обхода
+            // сетки.
+            let mine = shots.owner[s];
+            let end = wall.unwrap_or(to);
+            let (mut hit_unit, mut hit_point) = (NO_TARGET, None);
+            {
+                let probe = |px: i32, py: i32, pz: i32| -> u32 {
+                    let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
+                    grid_far.for_each_near(px, pz, |j| {
+                        let jj = j as usize;
+                        if !u.alive[jj] || u.owner[jj] == mine {
+                            return;
+                        }
+                        if (u.y[jj] - py).abs() > height {
+                            return;
+                        }
+                        let (dx, dz) = (u.x[jj] - px, u.z[jj] - pz);
+                        let d2 = dx * dx + dz * dz;
+                        if d2 > r2 {
+                            return;
+                        }
+                        if d2 < best || (d2 == best && j < best_j) {
+                            best = d2;
+                            best_j = j;
+                        }
+                    });
+                    best_j
+                };
+                voxel::los::walk(from, end, |px, py, pz| {
+                    let j = probe(px, py, pz);
+                    if j == NO_TARGET {
+                        return true;
+                    }
+                    hit_unit = j;
+                    hit_point = Some((px, py, pz));
+                    false
+                });
+                // Конец отрезка обход исключает, а попасть в него можно.
+                // Упёршийся конец — это порода, и там никого нет.
+                if hit_unit == NO_TARGET && wall.is_none() {
+                    let j = probe(to.0, to.1, to.2);
+                    if j != NO_TARGET {
+                        hit_unit = j;
+                        hit_point = Some(to);
+                    }
+                }
+            }
+
+            if let Some(p) = hit_point {
+                dmg_acc[hit_unit as usize] += shots.damage[s] as u32;
+                *shots_hit += 1;
+                shots.x[s] = p.0;
+                shots.y[s] = p.1;
+                shots.z[s] = p.2;
+                shots.kill(si);
+                hit_at = Some(p);
+            } else if let Some(b) = wall {
+                shots.x[s] = b.0;
+                shots.y[s] = b.1;
+                shots.z[s] = b.2;
+                *shots_blocked += 1;
+                shots.kill(si);
+                hit_at = Some(b);
+            } else {
                 shots.x[s] = to.0;
                 shots.y[s] = to.1;
                 shots.z[s] = to.2;
-            }
-
-            // Кого задело. Ничья разрешается **номером юнита**,
-            // а не порядком обхода сетки.
-            let mine = shots.owner[s];
-            let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
-            if hit_at.is_none() {
-            grid_far.for_each_near(to.0, to.2, |j| {
-                let jj = j as usize;
-                if !u.alive[jj] || u.owner[jj] == mine {
-                    return;
-                }
-                if (u.y[jj] - to.1).abs() > height {
-                    return;
-                }
-                let (dx, dz) = (u.x[jj] - to.0, u.z[jj] - to.2);
-                let d2 = dx * dx + dz * dz;
-                if d2 > r2 {
-                    return;
-                }
-                if d2 < best || (d2 == best && j < best_j) {
-                    best = d2;
-                    best_j = j;
-                }
-            });
-            }
-            if best_j != NO_TARGET {
-                let j = best_j as usize;
-                dmg_acc[j] += shots.damage[s] as u32;
-                *shots_hit += 1;
-                shots.kill(si);
-                hit_at = Some(to);
             }
 
             // Взрыв. Воронка идёт в **ту же очередь правок**, что копка:
@@ -1610,6 +1796,14 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.shots.z[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.shots.fx[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.shots.fz[i].raw() as u64);
+            // Вертикаль хешируется наравне с горизонталью: пока снаряд
+            // летел по прямой, `fy` не менялась и её отсутствие ничего
+            // не стоило. С тяготением вертикальная скорость — состояние,
+            // которое эволюционирует само, и не войди она в хеш,
+            // интегрирование можно было бы переписать и увидеть тот же
+            // хеш до бита (ADR-116, ADR-173).
+            w = w.wrapping_mul(31).wrapping_add(self.shots.fy[i].raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.vy[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.shots.life[i] as u64);
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
@@ -2148,6 +2342,305 @@ mod tests {
         );
     }
 
+    /// Плоская земля до `FLAT_GY` и ничего больше: сцена для баллистики,
+    /// где мешать снаряду может только тяготение.
+    struct Flat;
+    const FLAT_GY: u32 = 8;
+    impl voxel::Generator for Flat {
+        fn material(&self, _x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+            if y < FLAT_GY {
+                2
+            } else {
+                voxel::store::AIR
+            }
+        }
+    }
+
+    /// Двое на плоскости, лицом к лицу, на заданном расстоянии.
+    fn duel(t: Tuning, ws: modding::weapons::Weapons, apart: i32) -> World {
+        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Flat));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        w.attach_weapons(ws);
+        w.spawn_ground(32 - apart / 2, 32, 0, 0, 300);
+        w.spawn_ground(32 + apart / 2, 32, 1, 0, 300);
+        w.units.refresh_live();
+        w
+    }
+
+    fn bolt(speed: i32) -> modding::weapons::Weapons {
+        modding::weapons::from_ron(&format!(
+            "( weapons: [ ( id: 1, kind: Bolt, speed: {speed}, damage: 30, reload: 30, \
+blast_radius: 0, blast_damage: 0 ) ] )"
+        ))
+        .expect("реестр")
+    }
+
+    /// **Снаряд летит по дуге, а не по прямой** (ADR-173).
+    ///
+    /// До этого тяготения у снаряда не было вовсе: канон обещал падение
+    /// с ускорением телам (`04-world.md`), и ADR-164 прямо записал,
+    /// что снаряду придётся повторить.
+    ///
+    /// Проверяется вертикальная скорость одного снаряда за весь полёт:
+    /// у ствола она **положительна** — то есть ствол поднят, упреждение
+    /// есть, — дальше строго убывает и к концу уходит в минус, то есть
+    /// снаряд прошёл вершину и падает.
+    ///
+    /// Скорость, а не высота: при земном тяготении, скорости сорок
+    /// клеток в секунду и дальности в двадцать клеток вершина дуги
+    /// поднимается над стрелком на **0.6 воксела** — в целых
+    /// координатах её попросту не видно. Выбрать ради видимости
+    /// тяготение побольше значило бы проверять не ту сцену, в которую
+    /// играют.
+    #[test]
+    fn a_bolt_flies_an_arc_and_the_aim_leads_by_height() {
+        let mut w = duel(test_tuning(), bolt(40), 20);
+        // Следить надо за **одним** снарядом от рождения до гибели:
+        // сводка по всем живым лжёт, потому что свежий снаряд
+        // начинает полёт заново.
+        let mut track: Vec<Fx> = Vec::new();
+        for _ in 0..60 {
+            w.tick();
+            if w.shots.is_empty() || !w.shots.alive[0] {
+                if !track.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            track.push(w.shots.vy[0]);
+        }
+        assert!(w.shots_fired > 0, "никто не стрелял");
+        assert!(track.len() > 3, "снаряд прожил {} тиков", track.len());
+        assert!(
+            track[0].raw() > 0,
+            "ствол не поднят: скорость у дула {:?}, то есть упреждения нет",
+            track[0]
+        );
+        for k in 1..track.len() {
+            assert!(
+                track[k].raw() < track[k - 1].raw(),
+                "вертикальная скорость не убывает — тяготение не действует: {track:?}"
+            );
+        }
+        assert!(
+            track[track.len() - 1].raw() < 0,
+            "снаряд так и не начал падать: {track:?}"
+        );
+        assert!(w.shots_hit > 0, "дуга есть, а попаданий нет");
+    }
+
+    /// **Без упреждения по высоте бой умирает.** Снаряд, пущенный прямо
+    /// в цель, теряет `g*t*t/2` за дорогу и на полной дальности уходит
+    /// в землю за несколько вокселей до неё.
+    ///
+    /// Тяготение здесь втрое земного — оснастка, а не баланс: она
+    /// доводит потерю высоты до величины, которую допуск попадания
+    /// по высоте (рост юнита) заведомо не покрывает. С упреждением
+    /// попадания есть; без него их ноль, и это проверено снятием
+    /// упреждения.
+    #[test]
+    fn the_aim_leads_enough_to_reach_the_far_edge_of_the_range() {
+        let mut t = test_tuning();
+        t.gravity = 60;
+        let apart = t.range - 2;
+        let mut w = duel(t, bolt(40), apart);
+        for _ in 0..200 {
+            w.tick();
+        }
+        assert!(w.shots_fired > 0, "никто не стрелял");
+        assert!(
+            w.shots_hit > 0,
+            "с {} выстрелов ни одного попадания на дальности {apart}: \
+снаряд уходит в землю, не долетев",
+            w.shots_fired
+        );
+    }
+
+    /// **Луч тяготению не подчиняется** (ADR-173): он не снаряд, он
+    /// приходит в тот же тик по прямой линии огня, и ускорять у него
+    /// нечего.
+    ///
+    /// Проверяется сильнее, чем «попадания есть»: сцена с одними лучами
+    /// прогоняется при земном тяготении и при стократном, и **хеш тика
+    /// обязан совпасть до бита**. Совпадение значит, что от тяготения
+    /// в этой сцене не зависит ничего — ни луч, ни то, что он задевает.
+    #[test]
+    fn gravity_does_not_touch_the_laser() {
+        let laser = || {
+            modding::weapons::from_ron(
+                "( weapons: [ ( id: 2, kind: Laser, speed: 0, damage: 12, reload: 15, \
+blast_radius: 0, blast_damage: 0 ) ] )",
+            )
+            .expect("реестр")
+        };
+        let run = |gravity: i32| -> (u64, u64, u64) {
+            let mut t = test_tuning();
+            t.gravity = gravity;
+            let mut w = duel(t, laser(), 20);
+            let mut h = 0;
+            for _ in 0..120 {
+                h = w.tick();
+            }
+            (h, w.beams_fired, w.beams_hit)
+        };
+        let earth = run(test_tuning().gravity);
+        let heavy = run(test_tuning().gravity * 100);
+        assert!(earth.2 > 0, "лучи не попадали ни разу — сцена ничего не проверяет");
+        assert_eq!(
+            earth, heavy,
+            "стократное тяготение изменило сцену из одних лучей: \
+хеш, выстрелы и попадания {earth:?} против {heavy:?}"
+        );
+    }
+
+    /// Плоский пол и стена **в один воксель толщиной** поперёк пути.
+    /// Тонкая нарочно: толстую не проскочишь, и она ничего не проверяет.
+    struct Wall;
+    const WALL_X: u32 = 30;
+    impl voxel::Generator for Wall {
+        fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+            if y < FLAT_GY || (x == WALL_X && y < FLAT_GY + 8) {
+                2
+            } else {
+                voxel::store::AIR
+            }
+        }
+    }
+
+    /// Сцена для **одного** снаряда: мишень владельца 1 и никакого
+    /// стрелка. Снаряд запускается руками — проверяется полёт, а не
+    /// прицел, и скорость нужна та, какой в данных нет.
+    fn lone_target(g: impl voxel::Generator + 'static, at_x: i32) -> (World, usize) {
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(g));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        w.attach_weapons(test_weapons());
+        let id = w.spawn_ground(at_x, 32, 1, 0, 300) as usize;
+        w.units.refresh_live();
+        (w, id)
+    }
+
+    /// Снаряд владельца 0 по оси X, `vx` вокселей за тик.
+    ///
+    /// Высота на воксель выше пола: допуск попадания по вертикали —
+    /// рост юнита, так что мишень снаряд достанет, а пола за те
+    /// несколько тиков, что он живёт, не коснётся.
+    fn launch(w: &mut World, from_x: i32, vx: i32) {
+        w.shots.spawn(
+            (from_x, FLAT_GY as i32 + 1, 32),
+            (Fx::ZERO, Fx::ZERO, Fx::ZERO),
+            (Fx::from_int(vx), Fx::ZERO, Fx::ZERO),
+            0,
+            30,
+            8,
+            (0, 0),
+        );
+        w.shots.refresh_live();
+    }
+
+    /// **Снаряд не проскакивает цель** (ADR-173). Он летит больше
+    /// клетки за тик, а допуск попадания — воксель: цель, мимо которой
+    /// его пронесло между двумя тиками, в конечной точке шага
+    /// не находится вовсе.
+    ///
+    /// Пять вокселей за тик — оснастка, а не баланс: она делает дыру
+    /// видимой на одном снаряде. Мишень стоит на `33`, снаряд выходит
+    /// из `20`, и концы его шагов — `25`, `30`, `35`: ни в одном
+    /// из них мишени нет. Проверка только конца шага даёт ноль
+    /// попаданий, и на ней тест падает.
+    #[test]
+    fn a_fast_bolt_does_not_fly_through_its_target() {
+        let (mut w, id) = lone_target(Flat, 33);
+        let hp0 = w.units.voxels[id];
+        launch(&mut w, 20, 5);
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(
+            w.shots_hit, 1,
+            "снаряд прошёл сквозь мишень: попаданий {}, упоров в породу {}",
+            w.shots_hit, w.shots_blocked
+        );
+        assert_eq!(hp0 - w.units.voxels[id], 30, "урон пришёл не мишени");
+    }
+
+    /// **Снаряд не проскакивает опору** (ADR-173). Линия огня исключает
+    /// оба конца — цель себя не заслоняет, — и на шаге в одну клетку
+    /// между концами не остаётся ни одного воксела: стена толщиной
+    /// в воксель пропускала бы снаряд насквозь.
+    ///
+    /// Стена на `30`, снаряд выходит из `20` по пять вокселей за тик,
+    /// то есть встаёт на неё ровно концом второго шага. Мишень —
+    /// за стеной, на `40`: пока снаряд сквозь неё проходит, мишень
+    /// получает урон, и это видно.
+    #[test]
+    fn a_fast_bolt_stops_at_a_wall_one_voxel_thick() {
+        let (mut w, id) = lone_target(Wall, 40);
+        let hp0 = w.units.voxels[id];
+        launch(&mut w, 20, 5);
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(
+            w.shots_blocked, 1,
+            "снаряд не упёрся в стену: попаданий {}, упоров {}",
+            w.shots_hit, w.shots_blocked
+        );
+        assert_eq!(w.shots_hit, 0, "снаряд достал мишень сквозь стену");
+        assert_eq!(w.units.voxels[id], hp0, "мишень за стеной получила урон");
+    }
+
+    /// Плоский пол и **кочка в один воксель** посреди него.
+    /// Ровно та неровность, которую юнит перешагивает не глядя
+    /// (`max_step` в данных — единица).
+    struct Bump;
+    const BUMP_X: u32 = 32;
+    impl voxel::Generator for Bump {
+        fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+            if y < FLAT_GY || (x == BUMP_X && y == FLAT_GY) {
+                2
+            } else {
+                voxel::store::AIR
+            }
+        }
+    }
+
+    /// **Ствол на теле, а не под ногами** (ADR-173).
+    ///
+    /// Координата юнита — его опора, то есть пол. Снаряд, пущенный
+    /// из точки опоры в точку опоры, идёт по самой земле: дуга
+    /// провисает, целая часть высоты берётся округлением вниз, —
+    /// и первая же кочка съедает выстрел. Через кочку в один воксель
+    /// стрелять нельзя, а над ней можно, и разница целиком в высоте
+    /// ствола.
+    ///
+    /// На стрелковой сцене всего проекта это стоит трети попаданий
+    /// (`docs/analysis/10-decisions-full.md`, ADR-173).
+    #[test]
+    fn the_muzzle_clears_a_one_voxel_bump() {
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Bump));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        w.attach_weapons(bolt(40));
+        w.spawn_ground(BUMP_X as i32 - 10, 32, 0, 0, 300);
+        w.spawn_ground(BUMP_X as i32 + 10, 32, 1, 0, 300);
+        w.units.refresh_live();
+        for _ in 0..120 {
+            w.tick();
+        }
+        assert!(w.shots_fired > 0, "никто не стрелял");
+        assert!(
+            w.shots_hit > 0,
+            "с {} выстрелов ни одного попадания через кочку в воксель: \
+упоров в породу {} — снаряд идёт по земле, а не над ней",
+            w.shots_fired,
+            w.shots_blocked
+        );
+    }
+
     /// **Гора закрывает, прокопанный ход открывает.**
     ///
     /// Главное, ради чего снаряд стал объектом: раньше урон приходил
@@ -2299,7 +2792,12 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             for _ in 0..200 {
                 w.tick();
             }
-            let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
+            // Пролом проверяется на высоте, **на которой снаряд
+            // летит**. Он рвёт на лицевой грани, а не забравшись
+            // в породу на воксель (ADR-173), поэтому воронки
+            // выедают ход вдоль линии огня, а не сферу вокруг неё,
+            // и воксель этажом выше остаётся на кромке хода.
+            let solid = w.ground().expect("земля").world.solid(AT, GY, 32);
             (w.shots_hit, solid)
         };
 

@@ -18,6 +18,7 @@
 
 use crate::store::{Mat, AIR};
 use crate::World;
+use fx::Fx;
 
 /// Воксель тела в его собственных координатах плюс материал.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +52,15 @@ pub struct Body {
     /// Сколько вокселей тело уже пролетело. Из этого считается урон
     /// при приземлении (ADR-036).
     pub fallen: u32,
+    /// Вертикальная скорость, вокселей **за тик**. Растёт на тяготение
+    /// каждый тик полёта (ADR-174): канон обещал телам падение
+    /// «по вертикали с ускорением в `Fx`» (`docs/04-world.md`)
+    /// с самого начала.
+    pub vy: Fx,
+    /// Дробная часть высоты. Первую треть секунды свободного падения
+    /// скорость меньше воксела за тик, и без дробной части тело
+    /// не тронулось бы с места вовсе.
+    pub fy: Fx,
     /// Тело только что отвалилось и в этом тике ещё не падает.
     ///
     /// Пауза в один тик нужна не физике, а порядку фаз: между отрывом
@@ -104,6 +114,8 @@ impl Body {
             sz,
             floor,
             fallen: 0,
+            vy: Fx::ZERO,
+            fy: Fx::ZERO,
             resting: false,
             riders: Vec::new(),
         })
@@ -157,6 +169,13 @@ pub struct Bodies {
     pub list: Vec<Body>,
     /// Жёсткий потолок числа живых тел.
     pub max_bodies: usize,
+    /// Ускорение свободного падения, вокселей **за тик в квадрате**.
+    ///
+    /// Приходит снаружи уже переведённым: тело не знает ни про частоту
+    /// тика, ни про `data/sim.ron`. Число то же самое, что у юнита
+    /// (ADR-173) — иначе юнит и кусок, отвалившиеся вместе,
+    /// разъезжаются в воздухе.
+    pub gravity: Fx,
     pub refused: usize,
     /// Следующий свободный номер. Растёт монотонно и не переиспользуется:
     /// номер, выданный дважды, — та же ловушка, что индекс.
@@ -168,6 +187,17 @@ pub struct Bodies {
     /// ушло из списка, а вызывающему нужно знать, сколько оно пролетело
     /// и кто на нём ехал: снимок, снятый до шага, отстаёт на тик.
     pub landed_log: Vec<Landed>,
+}
+
+/// Тяготение для тестов крейта: земное при тридцати тиках в секунду.
+///
+/// Литерал здесь законен и в `data/sim.ron` не смотрит: игровое число
+/// живёт там (ADR-173), а крейту `voxel` про тот файл знать нечем —
+/// он получает уже переведённое ускорение снаружи. Это оснастка,
+/// а не баланс.
+#[cfg(test)]
+pub(crate) fn test_gravity() -> Fx {
+    Fx::from_ratio(20, 30 * 30)
 }
 
 /// Приземлившееся тело — то, что от него осталось знать.
@@ -182,10 +212,11 @@ pub struct Landed {
 }
 
 impl Bodies {
-    pub fn new(max_bodies: usize) -> Bodies {
+    pub fn new(max_bodies: usize, gravity: Fx) -> Bodies {
         Bodies {
             list: Vec::new(),
             max_bodies,
+            gravity,
             refused: 0,
             next_id: 1,
             spawned: Vec::new(),
@@ -218,6 +249,11 @@ impl Bodies {
     /// Один шаг падения всех тел. Приземлившиеся запекаются обратно
     /// в мир **через очередь правок**, а не записью напрямую: иначе
     /// рендер и связность не увидят появления материи.
+    ///
+    /// **Падение ускоряется** (ADR-174), и опора при этом
+    /// не проскакивается: тело опускается по вокселю, спрашивая
+    /// `can_fall` перед каждым, — на четырёх вокселях за тик проверка
+    /// только конечной высоты пропустила бы три пола из четырёх.
     pub fn step(&mut self, w: &mut World) -> BodyStats {
         let mut st = BodyStats::default();
         self.landed_log.clear();
@@ -234,11 +270,33 @@ impl Bodies {
                 continue;
             }
             if self.list[i].can_fall(w) {
-                self.list[i].oy -= 1;
-                self.list[i].fallen += 1;
-                st.fell += 1;
-                i += 1;
-            } else {
+                // Скорость растёт на тяготение, высота — на скорость.
+                // Пока скорость меньше воксела за тик, тело стоит
+                // на месте и копит дробную часть: так выглядит первая
+                // треть секунды свободного падения.
+                let g = self.gravity;
+                let b = &mut self.list[i];
+                b.vy = b.vy.add(g);
+                let nf = b.fy.add(b.vy);
+                let n = nf.to_int_trunc();
+                b.fy = nf.sub(Fx::from_int(n));
+                let mut moved = 0;
+                while moved < n && self.list[i].can_fall(w) {
+                    self.list[i].oy -= 1;
+                    self.list[i].fallen += 1;
+                    moved += 1;
+                }
+                if moved > 0 {
+                    st.fell += 1;
+                }
+                if moved == n {
+                    i += 1;
+                    continue;
+                }
+                // Упёрлись посреди шага: приземление здесь, а не
+                // на высоте, куда донесла бы скорость.
+            }
+            {
                 // Приземление: запечь обратно и убрать тело.
                 let b = self.list.swap_remove_stable(i);
                 self.landed_log.push(Landed {
@@ -328,7 +386,7 @@ mod tests {
             .flat_map(|z| (10..12).flat_map(move |y| (10..12).map(move |x| (x, y, z))))
             .collect();
 
-        let mut bodies = Bodies::new(64);
+        let mut bodies = Bodies::new(64, test_gravity());
         assert!(bodies.detach(&mut w, &cells));
         w.flush();
         for &(x, y, z) in &cells {
@@ -366,7 +424,7 @@ mod tests {
             w.queue_edit(crate::Edit { x, y, z, mat: 3 });
         }
         w.flush();
-        let mut bodies = Bodies::new(64);
+        let mut bodies = Bodies::new(64, test_gravity());
         bodies.detach(&mut w, &cells);
         w.flush();
         // Первый шаг свежее тело пропускает: падать оно начинает
@@ -385,7 +443,7 @@ mod tests {
     #[test]
     fn the_body_limit_is_hard_and_the_rock_stays() {
         let mut w = world();
-        let mut bodies = Bodies::new(2);
+        let mut bodies = Bodies::new(2, test_gravity());
         for k in 0..5u32 {
             let cells = vec![(5 + k, 10, 5)];
             w.queue_edit(crate::Edit { x: 5 + k, y: 10, z: 5, mat: 3 });
@@ -402,13 +460,112 @@ mod tests {
         assert_eq!(bodies.refused, 3);
     }
 
+    /// Мир повыше: падению нужна высота, а `world()` всего тридцать
+    /// два воксела в потолке.
+    fn tall_world() -> World {
+        World::new(32, 64, 32, 100_000, Box::new(Flat { floor: 4 }))
+    }
+
+    /// Собрать кубик 2x2x2 на высоте `at` и оторвать его от мира.
+    fn cube_at(w: &mut World, bodies: &mut Bodies, at: u32) {
+        let cells: Vec<(u32, u32, u32)> = (10..12)
+            .flat_map(|z| (at..at + 2).flat_map(move |y| (10..12).map(move |x| (x, y, z))))
+            .collect();
+        for &(x, y, z) in &cells {
+            w.queue_edit(crate::Edit { x, y, z, mat: 3 });
+        }
+        w.flush();
+        assert!(bodies.detach(w, &cells), "кусок не оторвался");
+        w.flush();
+    }
+
+    /// **Падение тела ускоряется** (ADR-174). Канон обещал телам падение
+    /// «по вертикали с ускорением в `Fx`» (`docs/04-world.md`), а тело
+    /// опускалось ровно на воксель за тик, сколько бы ни летело.
+    ///
+    /// Проверяется **форма**: первую половину высоты кусок летит вдвое
+    /// дольше второй. У равномерного падения половины равны — на старом
+    /// поведении тест падает.
+    #[test]
+    fn a_body_fall_speeds_up() {
+        const FROM: i64 = 40;
+        const FLOOR: i64 = 4;
+        let half = FROM - (FROM - FLOOR) / 2;
+        let mut w = tall_world();
+        let mut bodies = Bodies::new(64, test_gravity());
+        cube_at(&mut w, &mut bodies, FROM as u32);
+        let (mut first, mut total, mut biggest) = (0, 0, 0);
+        let mut prev = FROM;
+        for _ in 0..400 {
+            bodies.step(&mut w);
+            w.flush();
+            let Some(b) = bodies.list.first() else { break };
+            biggest = biggest.max(prev - b.oy);
+            prev = b.oy;
+            total += 1;
+            if prev > half {
+                first = total;
+            }
+        }
+        let second = total - first;
+        assert!(first > 0 && second > 0, "тело не падало: {first} и {second} тиков");
+        assert!(
+            first > second * 2,
+            "первая половина высоты занята {first} шагов, вторая {second}: падение не ускоряется"
+        );
+        assert!(biggest > 1, "самый быстрый шаг дал {biggest} воксель");
+    }
+
+    /// **Пол не проскакивается на скорости.** При шести вокселях за тик
+    /// проверка «свободен ли воксель под телом» один раз за тик уронила
+    /// бы кусок сквозь пол на пять вокселей вглубь; тело обязано
+    /// опускаться по вокселю, спрашивая опору перед каждым (ADR-174).
+    ///
+    /// Тяготение здесь вдвадцатеро земного — оснастка, а не баланс.
+    #[test]
+    fn a_fast_body_stops_at_the_first_floor_it_meets() {
+        let mut w = tall_world();
+        let mut bodies = Bodies::new(64, Fx::from_ratio(400, 30 * 30));
+        cube_at(&mut w, &mut bodies, 40);
+        let mut steps = 0;
+        while !bodies.list.is_empty() && steps < 100 {
+            bodies.step(&mut w);
+            w.flush();
+            steps += 1;
+        }
+        assert!(bodies.list.is_empty(), "тело не приземлилось за {steps} шагов");
+        assert!(steps < 20, "падение заняло {steps} шагов — тело не разогналось");
+        // Пол на высоте 4: низ кубика обязан встать ровно на него,
+        // а не внутрь породы.
+        let mut solid = 0;
+        for z in 10..12 {
+            for y in 4..6 {
+                for x in 10..12 {
+                    solid += w.solid(x, y, z) as u32;
+                }
+            }
+        }
+        assert_eq!(solid, 8, "кубик лёг не на пол: он провалился сквозь него");
+        // И ничего не осталось выше: тело именно опустилось, а не
+        // размазалось по дороге.
+        let mut above = 0;
+        for z in 10..12 {
+            for y in 6..42 {
+                for x in 10..12 {
+                    above += w.solid(x, y, z) as u32;
+                }
+            }
+        }
+        assert_eq!(above, 0, "часть кубика осталась висеть в воздухе");
+    }
+
     /// Падение детерминировано: два одинаковых прогона дают одинаковые
     /// позиции тел на каждом шаге.
     #[test]
     fn falling_is_deterministic() {
         let run = || -> Vec<(i64, i64, i64, u32)> {
             let mut w = world();
-            let mut bodies = Bodies::new(64);
+            let mut bodies = Bodies::new(64, test_gravity());
             for k in 0..6u32 {
                 let cells: Vec<(u32, u32, u32)> =
                     vec![(4 + k, 12 + k, 4), (5 + k, 12 + k, 4)];
