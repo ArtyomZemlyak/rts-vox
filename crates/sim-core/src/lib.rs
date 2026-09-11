@@ -1567,6 +1567,7 @@ impl World {
             let mut hit_at: Option<(i32, i32, i32)> = None;
             // Порода на пути. Оба конца исключены, поэтому стрелок
             // не заслоняет сам себя на первом тике.
+            let mut wall: Option<(i32, i32, i32)> = None;
             if let Some(g) = ground.as_ref() {
                 let (ex, ez) = g.extent();
                 let ey = g.world.ny as i32;
@@ -1576,50 +1577,96 @@ impl World {
                 }
                 let los = voxel::los::line_of_sight(&g.world, from, to);
                 if !los.clear {
-                    shots.x[s] = los.blocked_at.0;
-                    shots.y[s] = los.blocked_at.1;
-                    shots.z[s] = los.blocked_at.2;
-                    *shots_blocked += 1;
-                    shots.kill(si);
-                    hit_at = Some(los.blocked_at);
+                    wall = Some(los.blocked_at);
+                } else if g.world.solid(to.0 as u32, to.1 as u32, to.2 as u32) {
+                    // **Конец шага — тоже порода.** Линия огня исключает
+                    // оба конца нарочно: цель себя не заслоняет. Снаряду
+                    // же конец шага — не цель, а место, где он окажется,
+                    // и на шаге в одну клетку обход между концами
+                    // не проверяет **ничего**: стена в воксель толщиной
+                    // пропускала бы снаряд насквозь (ADR-173).
+                    wall = Some(to);
                 }
             }
-            if hit_at.is_none() {
+
+            // **Кого задело — ищется по всему отрезку, а не в его конце**
+            // (ADR-173). Снаряд проходит за тик больше клетки, а допуск
+            // попадания — воксель: цель, мимо которой его пронесло между
+            // двумя тиками, в конечной точке шага не находится вовсе,
+            // и чем быстрее снаряд, тем больше он протыкает насквозь.
+            // Породы эта ловушка не касалась с самого начала — её
+            // проверяет тот же обход, — а юниты проверялись в одной точке.
+            //
+            // Отрезок обрывается о породу: до того, что за стеной, снаряд
+            // не долетел. Обход идёт **по ходу полёта**, поэтому первый
+            // найденный и есть тот, в кого попали; ничья внутри одной
+            // точки разрешается **номером юнита**, а не порядком обхода
+            // сетки.
+            let mine = shots.owner[s];
+            let end = wall.unwrap_or(to);
+            let (mut hit_unit, mut hit_point) = (NO_TARGET, None);
+            {
+                let probe = |px: i32, py: i32, pz: i32| -> u32 {
+                    let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
+                    grid_far.for_each_near(px, pz, |j| {
+                        let jj = j as usize;
+                        if !u.alive[jj] || u.owner[jj] == mine {
+                            return;
+                        }
+                        if (u.y[jj] - py).abs() > height {
+                            return;
+                        }
+                        let (dx, dz) = (u.x[jj] - px, u.z[jj] - pz);
+                        let d2 = dx * dx + dz * dz;
+                        if d2 > r2 {
+                            return;
+                        }
+                        if d2 < best || (d2 == best && j < best_j) {
+                            best = d2;
+                            best_j = j;
+                        }
+                    });
+                    best_j
+                };
+                voxel::los::walk(from, end, |px, py, pz| {
+                    let j = probe(px, py, pz);
+                    if j == NO_TARGET {
+                        return true;
+                    }
+                    hit_unit = j;
+                    hit_point = Some((px, py, pz));
+                    false
+                });
+                // Конец отрезка обход исключает, а попасть в него можно.
+                // Упёршийся конец — это порода, и там никого нет.
+                if hit_unit == NO_TARGET && wall.is_none() {
+                    let j = probe(to.0, to.1, to.2);
+                    if j != NO_TARGET {
+                        hit_unit = j;
+                        hit_point = Some(to);
+                    }
+                }
+            }
+
+            if let Some(p) = hit_point {
+                dmg_acc[hit_unit as usize] += shots.damage[s] as u32;
+                *shots_hit += 1;
+                shots.x[s] = p.0;
+                shots.y[s] = p.1;
+                shots.z[s] = p.2;
+                shots.kill(si);
+                hit_at = Some(p);
+            } else if let Some(b) = wall {
+                shots.x[s] = b.0;
+                shots.y[s] = b.1;
+                shots.z[s] = b.2;
+                *shots_blocked += 1;
+                shots.kill(si);
+                hit_at = Some(b);
+            } else {
                 shots.x[s] = to.0;
                 shots.y[s] = to.1;
                 shots.z[s] = to.2;
-            }
-
-            // Кого задело. Ничья разрешается **номером юнита**,
-            // а не порядком обхода сетки.
-            let mine = shots.owner[s];
-            let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
-            if hit_at.is_none() {
-            grid_far.for_each_near(to.0, to.2, |j| {
-                let jj = j as usize;
-                if !u.alive[jj] || u.owner[jj] == mine {
-                    return;
-                }
-                if (u.y[jj] - to.1).abs() > height {
-                    return;
-                }
-                let (dx, dz) = (u.x[jj] - to.0, u.z[jj] - to.2);
-                let d2 = dx * dx + dz * dz;
-                if d2 > r2 {
-                    return;
-                }
-                if d2 < best || (d2 == best && j < best_j) {
-                    best = d2;
-                    best_j = j;
-                }
-            });
-            }
-            if best_j != NO_TARGET {
-                let j = best_j as usize;
-                dmg_acc[j] += shots.damage[s] as u32;
-                *shots_hit += 1;
-                shots.kill(si);
-                hit_at = Some(to);
             }
 
             // Взрыв. Воронка идёт в **ту же очередь правок**, что копка:
@@ -2432,6 +2479,104 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         );
     }
 
+    /// Плоский пол и стена **в один воксель толщиной** поперёк пути.
+    /// Тонкая нарочно: толстую не проскочишь, и она ничего не проверяет.
+    struct Wall;
+    const WALL_X: u32 = 30;
+    impl voxel::Generator for Wall {
+        fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+            if y < FLAT_GY || (x == WALL_X && y < FLAT_GY + 8) {
+                2
+            } else {
+                voxel::store::AIR
+            }
+        }
+    }
+
+    /// Сцена для **одного** снаряда: мишень владельца 1 и никакого
+    /// стрелка. Снаряд запускается руками — проверяется полёт, а не
+    /// прицел, и скорость нужна та, какой в данных нет.
+    fn lone_target(g: impl voxel::Generator + 'static, at_x: i32) -> (World, usize) {
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(g));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        w.attach_weapons(test_weapons());
+        let id = w.spawn_ground(at_x, 32, 1, 0, 300) as usize;
+        w.units.refresh_live();
+        (w, id)
+    }
+
+    /// Снаряд владельца 0 по оси X, `vx` вокселей за тик.
+    ///
+    /// Высота на воксель выше пола: допуск попадания по вертикали —
+    /// рост юнита, так что мишень снаряд достанет, а пола за те
+    /// несколько тиков, что он живёт, не коснётся.
+    fn launch(w: &mut World, from_x: i32, vx: i32) {
+        w.shots.spawn(
+            (from_x, FLAT_GY as i32 + 1, 32),
+            (Fx::ZERO, Fx::ZERO, Fx::ZERO),
+            (Fx::from_int(vx), Fx::ZERO, Fx::ZERO),
+            0,
+            30,
+            8,
+            (0, 0),
+        );
+        w.shots.refresh_live();
+    }
+
+    /// **Снаряд не проскакивает цель** (ADR-173). Он летит больше
+    /// клетки за тик, а допуск попадания — воксель: цель, мимо которой
+    /// его пронесло между двумя тиками, в конечной точке шага
+    /// не находится вовсе.
+    ///
+    /// Пять вокселей за тик — оснастка, а не баланс: она делает дыру
+    /// видимой на одном снаряде. Мишень стоит на `33`, снаряд выходит
+    /// из `20`, и концы его шагов — `25`, `30`, `35`: ни в одном
+    /// из них мишени нет. Проверка только конца шага даёт ноль
+    /// попаданий, и на ней тест падает.
+    #[test]
+    fn a_fast_bolt_does_not_fly_through_its_target() {
+        let (mut w, id) = lone_target(Flat, 33);
+        let hp0 = w.units.voxels[id];
+        launch(&mut w, 20, 5);
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(
+            w.shots_hit, 1,
+            "снаряд прошёл сквозь мишень: попаданий {}, упоров в породу {}",
+            w.shots_hit, w.shots_blocked
+        );
+        assert_eq!(hp0 - w.units.voxels[id], 30, "урон пришёл не мишени");
+    }
+
+    /// **Снаряд не проскакивает опору** (ADR-173). Линия огня исключает
+    /// оба конца — цель себя не заслоняет, — и на шаге в одну клетку
+    /// между концами не остаётся ни одного воксела: стена толщиной
+    /// в воксель пропускала бы снаряд насквозь.
+    ///
+    /// Стена на `30`, снаряд выходит из `20` по пять вокселей за тик,
+    /// то есть встаёт на неё ровно концом второго шага. Мишень —
+    /// за стеной, на `40`: пока снаряд сквозь неё проходит, мишень
+    /// получает урон, и это видно.
+    #[test]
+    fn a_fast_bolt_stops_at_a_wall_one_voxel_thick() {
+        let (mut w, id) = lone_target(Wall, 40);
+        let hp0 = w.units.voxels[id];
+        launch(&mut w, 20, 5);
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(
+            w.shots_blocked, 1,
+            "снаряд не упёрся в стену: попаданий {}, упоров {}",
+            w.shots_hit, w.shots_blocked
+        );
+        assert_eq!(w.shots_hit, 0, "снаряд достал мишень сквозь стену");
+        assert_eq!(w.units.voxels[id], hp0, "мишень за стеной получила урон");
+    }
+
     /// **Гора закрывает, прокопанный ход открывает.**
     ///
     /// Главное, ради чего снаряд стал объектом: раньше урон приходил
@@ -2583,7 +2728,12 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             for _ in 0..200 {
                 w.tick();
             }
-            let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
+            // Пролом проверяется на высоте, **на которой снаряд
+            // летит**. Он рвёт на лицевой грани, а не забравшись
+            // в породу на воксель (ADR-173), поэтому воронки
+            // выедают ход вдоль линии огня, а не сферу вокруг неё,
+            // и воксель этажом выше остаётся на кромке хода.
+            let solid = w.ground().expect("земля").world.solid(AT, GY, 32);
             (w.shots_hit, solid)
         };
 
