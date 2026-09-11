@@ -344,8 +344,18 @@ impl Units {
     }
 
     /// Пересобрать список живых. Порядок — по возрастанию индекса, всегда.
+    ///
+    /// Свободный список тут же приводится в порядок — тем же правилом,
+    /// что у снарядов (`shot::Shots::refresh_live`). Иначе номер
+    /// выданного места зависел бы от **истории смертей**, а не от
+    /// состояния: два мира с одинаковым набором живых юнитов, но
+    /// разной историей, выдали бы новому юниту разные слоты. Пока
+    /// состояние переигрывают с нуля, это безвредно; как только его
+    /// начнут восстанавливать из сохранения — перестанет (ADR-192).
     pub fn refresh_live(&mut self) {
         self.live_ids.clear();
+        self.free.sort_unstable();
+        self.free.reverse();
         for i in 0..self.x.len() {
             if self.alive[i] {
                 self.live_ids.push(i as u32);
@@ -1059,20 +1069,31 @@ impl World {
             base += take;
             rest = tail;
         }
+        // Счётчик осмотра собирается **по кускам и складывается
+        // в порядке кусков**: он не входит в хеш, но отчёт, который
+        // на воркерах показывает ноль, — это ноль, выданный за замер.
+        // Так уже было с годуновскими обновлениями (ADR-190, ADR-192).
+        let mut seen: Vec<u64> = vec![0; parts.len()];
         std::thread::scope(|sc| {
-            for (offset, part) in parts {
+            for ((offset, part), out) in parts.into_iter().zip(seen.iter_mut()) {
                 let compute = &compute;
                 sc.spawn(move || {
+                    let mut examined = 0u64;
                     for (k, slot) in part.iter_mut().enumerate() {
                         let i = offset + k;
                         if !u.alive[i] {
                             continue;
                         }
+                        examined += grid.near_count(sx[i], sz[i]) as u64;
                         *slot = compute(i);
                     }
+                    *out = examined;
                 });
             }
         });
+        for v in seen {
+            self.examined_move += v;
+        }
     }
 
     /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
@@ -1889,6 +1910,10 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
 /// раз, иначе иерархия в нём не участвует.
 pub const REF_SIDE: u32 = 256;
 
+/// Чем вооружены стороны эталонного сценария — **номерами видов**
+/// из `data/weapons.ron`, а не местами в массиве (ADR-192).
+pub const REF_WEAPON_IDS: [u16; 2] = [1, 2];
+
 /// Сколько копателей в эталонном сценарии и как глубоко они грызут
 /// за тик. Копка — экономика проекта, и сценарий, который не копает,
 /// не проверяет главного.
@@ -1986,12 +2011,18 @@ impl Reference {
         world.attach_ground(g);
         world.attach_weapons(weapons);
         populate(&mut world, units, seed);
-        // Сторона выбирает оружие по своему номеру: разводить их
-        // жребием значило бы поставить разбор по виду в зависимость
-        // от генератора случайных чисел.
-        let kinds = world.weapons.len().max(1);
+        // Сторона выбирает оружие **явным номером вида**, а не местом
+        // в массиве: место зависит от того, какие виды загружены,
+        // и мод, добавивший третий, молча перевооружил бы обе стороны.
+        // Ровно та ловушка, от которой ADR-028 защищает материалы
+        // (ADR-192). Жребием тоже нельзя: разбор по виду попал бы
+        // в зависимость от генератора случайных чисел.
         for k in 0..world.units.len() {
-            world.units.weapon[k] = (world.units.owner[k] as usize % kinds) as u16;
+            let id = REF_WEAPON_IDS[world.units.owner[k] as usize % REF_WEAPON_IDS.len()];
+            world.units.weapon[k] = world
+                .weapons
+                .index_of(id)
+                .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16;
         }
 
         // Копатели ставятся на поверхность, вразнос по карте: копка
