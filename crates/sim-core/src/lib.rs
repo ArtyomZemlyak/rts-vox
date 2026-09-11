@@ -1211,6 +1211,27 @@ impl World {
 /// с первых тиков, и хеш покрывает его даже на коротком прогоне.
 /// Сваливать стороны в одну кучу нельзя — свалка это отдельный
 /// случай с другой ценой (`--dense` в D-7).
+/// Поставить одного юнита в строй своей стороны.
+///
+/// Живёт отдельно, потому что мест расстановки два: начальная
+/// и подкрепление (ADR-161). Разойдись они — подкрепление приходило бы
+/// не туда, где стоял строй, и сцена перестала бы быть той же сценой.
+fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) {
+    let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+    let (midx, midz) = (ex / 2, ez / 2);
+    let gap = w.tuning.range / 2;
+    let spread = (ex / 6).clamp(4, 100);
+    let depth = (ez / 4).clamp(4, 150);
+    let bx = if owner == 0 {
+        midx - gap - spread
+    } else {
+        midx + gap + spread
+    };
+    let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
+    let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
+    w.spawn_ground(x, z, owner, r.range(2, 6), 300);
+}
+
 pub fn populate(w: &mut World, n: usize, seed: u64) {
     let mut r = Rng::new(seed, 0xA1);
     // Если земля есть, сетка у мира и у неё **одна**: юниты стоят
@@ -1220,17 +1241,8 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     let (midx, midz) = (ex / 2, ez / 2);
     let gap = w.tuning.range / 2;
     let spread = (ex / 6).clamp(4, 100);
-    let depth = (ez / 4).clamp(4, 150);
     for k in 0..n {
-        let owner = (k % 2) as u8;
-        let bx = if owner == 0 {
-            midx - gap - spread
-        } else {
-            midx + gap + spread
-        };
-        let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
-        let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-        w.spawn_ground(x, z, owner, r.range(2, 6), 300);
+        spawn_in_line(w, &mut r, (k % 2) as u8);
     }
     w.fill_flow_towards(0, midx + gap + spread, midz);
     w.fill_flow_towards(1, midx - gap - spread, midz);
@@ -1249,6 +1261,10 @@ pub const REF_SIDE: u32 = 256;
 /// не проверяет главного.
 const REF_DIGGERS: usize = 24;
 const REF_RADIUS: i32 = 2;
+
+/// Сколько юнитов сторона добирает за тик, пока не вернулась
+/// к заявленной численности.
+const REF_REINFORCE: usize = 4;
 
 /// Мир эталонного сценария — **в одном месте**.
 ///
@@ -1290,6 +1306,10 @@ pub fn ref_params() -> worldgen::Params {
 /// внутри него: разнеси её по вызывающим, и они разойдутся снова.
 pub struct Reference {
     pub world: World,
+    /// Заявленная численность стороны. Бой затухает без подкреплений,
+    /// и прогон на десять тысяч тиков восемь тысяч из них хеширует
+    /// почти пустое поле (ADR-161).
+    per_side: usize,
     /// Генератор нужен и дальше: копатель, догрызший свой столб,
     /// переходит на новый и начинает с поверхности.
     terrain: worldgen::Terrain,
@@ -1324,12 +1344,19 @@ impl Reference {
             let y = terrain.surface(x as u32, z as u32) as i32;
             diggers.push((x, y, z));
         }
-        Reference { world, terrain, diggers, rng }
+        Reference {
+            world,
+            per_side: units.max(1).div_ceil(2),
+            terrain,
+            diggers,
+            rng,
+        }
     }
 
-    /// Тик сценария: сначала копка, потом сам тик.
+    /// Тик сценария: копка, подкрепление, потом сам тик.
     pub fn tick(&mut self) -> u64 {
         self.dig();
+        self.reinforce();
         self.world.tick()
     }
 
@@ -1337,7 +1364,37 @@ impl Reference {
     /// и в состояние не входит: хеш обязан совпасть с однопоточным.
     pub fn tick_par(&mut self, threads: usize) -> u64 {
         self.dig();
+        self.reinforce();
         self.world.tick_par(threads)
+    }
+
+    /// Сторона добирает потери до заявленной численности.
+    ///
+    /// Без этого бой кончается: к двухтысячному тику живых впятеро
+    /// меньше начального, к десятитысячному — полсотни, и восемь тысяч
+    /// тиков из десяти фаза боя работает вхолостую. Это то же самое,
+    /// от чего лечил ADR-116, только растянутое во времени (ADR-161).
+    ///
+    /// Подкрепление идёт **струйкой**, а не залпом: залп по достижении
+    /// порога дал бы пилу, а струйка держит численность ровно.
+    fn reinforce(&mut self) {
+        let mut live = [0usize; 2];
+        for &i in self.world.units.live() {
+            live[(self.world.units.owner[i as usize] & 1) as usize] += 1;
+        }
+        let mut added = false;
+        // Стороны обходятся по номеру, а не по числу потерь: порядок
+        // расстановки обязан быть от данных, а не от хода боя.
+        for owner in 0..2u8 {
+            let have = live[owner as usize];
+            for _ in 0..REF_REINFORCE.min(self.per_side.saturating_sub(have)) {
+                spawn_in_line(&mut self.world, &mut self.rng, owner);
+                added = true;
+            }
+        }
+        if added {
+            self.world.units.refresh_live();
+        }
     }
 
     /// Каждый копатель снимает шарик породы и уходит вглубь.
@@ -1557,6 +1614,41 @@ mod tests {
             "копка затухла: {} правок в первой половине против {} во второй",
             half[0],
             half[1]
+        );
+    }
+
+    /// **Бой не кончается к середине прогона.**
+    ///
+    /// Сестра сторожа копки. Без подкреплений строй выбивается: к
+    /// двухтысячному тику живых впятеро меньше начального, к
+    /// десятитысячному — полсотни, и восемь тысяч тиков из десяти фаза
+    /// боя работает вхолостую (ADR-161).
+    ///
+    /// Проверять «бой был» бесполезно — он был. Проверяется, что он
+    /// **есть во второй половине**, и что строй не выбит.
+    #[test]
+    fn the_reference_keeps_fighting_to_the_end() {
+        let mut r = Reference::new(42, 600, test_tuning());
+        for _ in 0..200 {
+            r.tick();
+        }
+        let mid = r.world.examined_combat;
+        let alive_mid = r.world.units.live().len();
+        for _ in 0..200 {
+            r.tick();
+        }
+        let late = r.world.examined_combat - mid;
+        let alive_end = r.world.units.live().len();
+        assert!(mid > 0 && late > 0, "боя не было: {mid} и {late} осмотров по половинам");
+        // Настоящий признак затухания — **численность**, а не число
+        // осмотров: на коротком прогоне редеющий строй ищет цели даже
+        // усерднее, и по осмотрам затухание неотличимо от боя.
+        // Допуск два процента: подкрепление держит численность ровно,
+        // но упереться порогом в само равенство значило бы падать
+        // от одной лишней смерти. Проседание без подкрепления — 11%.
+        assert!(
+            alive_end * 50 >= alive_mid * 49,
+            "строй выбивается: {alive_mid} живых на середине, {alive_end} в конце — подкрепление не догоняет потери, и к концу долгого прогона бой кончится"
         );
     }
 
