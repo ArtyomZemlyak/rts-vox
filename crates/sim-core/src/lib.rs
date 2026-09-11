@@ -12,6 +12,7 @@
 
 pub mod energy;
 pub mod ground;
+pub mod shot;
 pub mod index;
 pub mod matter;
 pub mod shield;
@@ -136,6 +137,9 @@ pub struct Units {
     /// самая дорогая часть боя, и держать её потиковой незачем: цель,
     /// живая и в радиусе, остаётся целью (ADR-116).
     next_search: Vec<u32>,
+    /// Тик, раньше которого юнит не выстрелит. Перезарядка —
+    /// состояние юнита, а не свойство выстрела (ADR-164).
+    next_shot: Vec<u32>,
     free: Vec<u32>,
     live_ids: Vec<u32>,
 }
@@ -196,6 +200,7 @@ impl Units {
             ride_off: Vec::new(),
             fall_from: Vec::new(),
             next_search: Vec::new(),
+            next_shot: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
         }
@@ -230,6 +235,7 @@ impl Units {
             self.ride_off[k] = (0, 0, 0);
             self.fall_from[k] = NOT_FALLING;
             self.next_search[k] = 0;
+            self.next_shot[k] = 0;
             return i;
         }
         self.x.push(x);
@@ -246,6 +252,7 @@ impl Units {
         self.ride_off.push((0, 0, 0));
         self.fall_from.push(NOT_FALLING);
         self.next_search.push(0);
+        self.next_shot.push(0);
         (self.x.len() - 1) as u32
     }
 
@@ -291,8 +298,6 @@ pub struct World {
     pub grid_near: Grid,
     pub grid_far: Grid,
     pub tick: u64,
-    /// Накопитель урона: серийная фаза, поэтому обычное сложение безопасно.
-    damage: Vec<u32>,
     /// Снимок положений на начало фазы движения. Без него расталкивание
     /// читает уже сдвинутых соседей, то есть зависит от порядка обхода —
     /// и параллелить его нельзя ни при каком разбиении.
@@ -333,6 +338,19 @@ pub struct World {
     /// Компонент связности при последнем решении. Единица — карта
     /// цела; тысяча — она рассыпана, и это надо видеть.
     pub flow_components: usize,
+    /// Снаряды в воздухе. Бой больше не мгновенный (ADR-164).
+    pub shots: shot::Shots,
+    /// Замер: выстрелов сделано, попаданий по юнитам, упоров в породу.
+    pub shots_fired: u64,
+    pub shots_hit: u64,
+    pub shots_blocked: u64,
+    /// Замер: выстрелов не сделано, потому что воздух полон.
+    pub shots_refused: u64,
+    /// Замер: юнитов погибло за всё время жизни мира.
+    ///
+    /// Считается прямо, а не как убыль живых: с подкреплениями (ADR-161)
+    /// число живых держится ровным, и смерти по нему не видны вовсе.
+    pub deaths: u64,
     /// Замер: сколько юнитов действительно искали цель за тик.
     pub searches: u64,
     /// Замер: в скольких тиках поиск упёрся в потолок.
@@ -418,7 +436,6 @@ impl World {
             snap_z: Vec::new(),
             delta: Vec::new(),
             tick: 0,
-            damage: Vec::new(),
             examined_move: 0,
             examined_combat: 0,
             blocked_moves: 0,
@@ -434,6 +451,12 @@ impl World {
             flow_solved_sectors: 0,
             flow_reused_sectors: 0,
             flow_components: 0,
+            shots: shot::Shots::new(),
+            shots_fired: 0,
+            shots_hit: 0,
+            shots_blocked: 0,
+            shots_refused: 0,
+            deaths: 0,
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
@@ -1057,6 +1080,10 @@ impl World {
     /// Урон пишет в **чужие** слоты, поэтому идёт серийно; накопитель
     /// складывается обычным сложением, потому что фаза серийная.
     fn phase_combat(&mut self) {
+        // Сначала летят те, кто уже в воздухе, потом стреляют новые:
+        // иначе снаряд успевал бы родиться и попасть в одном тике,
+        // то есть время полёта было бы нулевым у первого шага.
+        self.step_shots();
         let u = &mut self.units;
         let mut examined = 0u64;
         let r2 = self.tuning.range * self.tuning.range;
@@ -1146,24 +1173,150 @@ impl World {
         self.need_search = need;
         self.examined_combat += examined;
 
-        self.damage.clear();
-        self.damage.resize(u.x.len(), 0);
+        self.fire();
+    }
+
+    /// Выстрелы: у кого есть цель и кто перезарядился.
+    ///
+    /// Раньше здесь стоял мгновенный урон — `damage[цель] += 1` за тик
+    /// с каждого стреляющего, сквозь горы и без времени на дорогу.
+    /// Теперь вылетает снаряд (ADR-164).
+    fn fire(&mut self) {
+        let t = &self.tuning;
+        // Сколько тиков снаряду хватит, чтобы пересечь дальность.
+        // Считается, а не задаётся: лишнее число в данных — лишняя
+        // возможность рассогласовать его с дальностью.
+        let life = ((t.range as i64 * TICKS_PER_SECOND as i64) / t.shot_speed.max(1) as i64 + 2)
+            .clamp(1, u16::MAX as i64) as u16;
+        let step = Fx::from_ratio(t.shot_speed, TICKS_PER_SECOND);
+        let (damage, reload, cap) = (t.shot_damage, t.reload_period, t.max_shots);
+        let tick = self.tick as u32;
+        let Self { units: u, shots, shots_fired, shots_refused, .. } = self;
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
-            let t = u.target[i];
-            if t == NO_TARGET {
+            let tgt = u.target[i];
+            if tgt == NO_TARGET || tick < u.next_shot[i] {
                 continue;
             }
-            self.damage[t as usize] += 1;
-        }
-        for k in 0..u.live_ids.len() {
-            let i = u.live_ids[k] as usize;
-            let d = self.damage[i];
-            if d == 0 {
+            // Потолок на снаряды в воздухе. Упёршийся выстрел
+            // **не тратит перезарядку**: иначе юнит терял бы очередь
+            // из-за чужой стрельбы.
+            if shots.alive_count() >= cap {
+                *shots_refused += 1;
                 continue;
             }
-            u.voxels[i] = u.voxels[i].saturating_sub(d.min(u16::MAX as u32) as u16);
+            let tt = tgt as usize;
+            let dx = Fx::from_int(u.x[tt] - u.x[i]);
+            let dy = Fx::from_int(u.y[tt] - u.y[i]);
+            let dz = Fx::from_int(u.z[tt] - u.z[i]);
+            let len = dx.mul(dx).add(dy.mul(dy)).add(dz.mul(dz)).sqrt();
+            if len.raw() == 0 {
+                continue;
+            }
+            let vel = (
+                dx.div(len).mul(step),
+                dy.div(len).mul(step),
+                dz.div(len).mul(step),
+            );
+            shots.spawn(
+                (u.x[i], u.y[i], u.z[i]),
+                (Fx::ZERO, Fx::ZERO, Fx::ZERO),
+                vel,
+                u.owner[i],
+                damage,
+                life,
+            );
+            *shots_fired += 1;
+            u.next_shot[i] = tick + reload;
         }
+        shots.refresh_live();
+    }
+
+    /// Шаг снарядов: подвинуть, упереться в породу, попасть по юниту.
+    ///
+    /// Порода проверяется **целочисленным лучом** (`voxel::los`) — тем
+    /// же, что и линия огня, и с той же канонизацией направления
+    /// (ADR-113). Иначе снаряд пролетал бы там, где стрелок цели
+    /// не видит.
+    fn step_shots(&mut self) {
+        let r2 = self.tuning.shot_hit_radius * self.tuning.shot_hit_radius;
+        let height = self.tuning.unit_height as i32;
+        let Self { units: u, shots, ground, grid_far, shots_hit, shots_blocked, .. } = self;
+        for k in 0..shots.live_ids.len() {
+            let si = shots.live_ids[k];
+            let s = si as usize;
+            if !shots.alive[s] {
+                continue;
+            }
+            if shots.life[s] == 0 {
+                shots.kill(si);
+                continue;
+            }
+            shots.life[s] -= 1;
+
+            let from = (shots.x[s], shots.y[s], shots.z[s]);
+            let nx = shots.fx[s].add(shots.vx[s]);
+            let ny = shots.fy[s].add(shots.vy[s]);
+            let nz = shots.fz[s].add(shots.vz[s]);
+            let (cx, cy, cz) = (nx.to_int_trunc(), ny.to_int_trunc(), nz.to_int_trunc());
+            shots.fx[s] = nx.sub(Fx::from_int(cx));
+            shots.fy[s] = ny.sub(Fx::from_int(cy));
+            shots.fz[s] = nz.sub(Fx::from_int(cz));
+            let to = (from.0 + cx, from.1 + cy, from.2 + cz);
+
+            // Порода на пути. Оба конца исключены, поэтому стрелок
+            // не заслоняет сам себя на первом тике.
+            if let Some(g) = ground.as_ref() {
+                let (ex, ez) = g.extent();
+                let ey = g.world.ny as i32;
+                if to.0 < 0 || to.2 < 0 || to.0 >= ex || to.2 >= ez || to.1 < 0 || to.1 >= ey {
+                    shots.kill(si);
+                    continue;
+                }
+                let los = voxel::los::line_of_sight(&g.world, from, to);
+                if !los.clear {
+                    shots.x[s] = los.blocked_at.0;
+                    shots.y[s] = los.blocked_at.1;
+                    shots.z[s] = los.blocked_at.2;
+                    *shots_blocked += 1;
+                    shots.kill(si);
+                    continue;
+                }
+            }
+            shots.x[s] = to.0;
+            shots.y[s] = to.1;
+            shots.z[s] = to.2;
+
+            // Кого задело. Ничья разрешается **номером юнита**,
+            // а не порядком обхода сетки.
+            let mine = shots.owner[s];
+            let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
+            grid_far.for_each_near(to.0, to.2, |j| {
+                let jj = j as usize;
+                if !u.alive[jj] || u.owner[jj] == mine {
+                    return;
+                }
+                if (u.y[jj] - to.1).abs() > height {
+                    return;
+                }
+                let (dx, dz) = (u.x[jj] - to.0, u.z[jj] - to.2);
+                let d2 = dx * dx + dz * dz;
+                if d2 > r2 {
+                    return;
+                }
+                if d2 < best || (d2 == best && j < best_j) {
+                    best = d2;
+                    best_j = j;
+                }
+            });
+            if best_j != NO_TARGET {
+                let j = best_j as usize;
+                u.voxels[j] = u.voxels[j].saturating_sub(shots.damage[s]);
+                *shots_hit += 1;
+                shots.kill(si);
+            }
+        }
+        shots.refresh_live();
     }
 
     /// Видимость: здесь заглушка с реалистичной формой доступа —
@@ -1179,6 +1332,7 @@ impl World {
                 dead.push(i);
             }
         }
+        self.deaths += dead.len() as u64;
         for i in dead {
             self.units.kill(i);
         }
@@ -1200,6 +1354,20 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
+            h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
+        }
+        // Снаряды — состояние, а не украшение: не войди они в хеш,
+        // полёт можно было бы переписать целиком и увидеть тот же
+        // хеш до бита (ADR-116).
+        for k in 0..self.shots.live_ids.len() {
+            let i = self.shots.live_ids[k] as usize;
+            let mut w = 0u64;
+            w = w.wrapping_mul(31).wrapping_add(self.shots.x[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.y[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.z[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.fx[i].raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.fz[i].raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.shots.life[i] as u64);
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         if let Some(g) = &self.ground {
@@ -1482,12 +1650,23 @@ mod tests {
                 .any(|&i| r.world.units.target[i as usize] != NO_TARGET);
         }
         assert!(ever_targeted, "никто ни разу не взял цель");
+        // Смерти считаются прямо. Убыль живых мерилом быть перестала,
+        // когда появились подкрепления: они держат численность ровной,
+        // и выбитый строй по ней неотличим от нетронутого (ADR-161).
         assert!(
-            r.world.units.live().len() < before,
-            "никто не погиб: {} из {before}",
+            r.world.deaths > 0,
+            "никто не погиб: живых {} из {before}",
             r.world.units.live().len()
         );
         assert!(r.world.examined_combat > 0);
+        // Снаряды долетают. Стрельба, которая ни во что не попадает,
+        // это не бой (ADR-164).
+        assert!(
+            r.world.shots_fired > 0 && r.world.shots_hit > 0,
+            "выстрелов {}, попаданий {}",
+            r.world.shots_fired,
+            r.world.shots_hit
+        );
     }
 
     /// **Эталонный сценарий обязан трогать землю.**
@@ -1666,6 +1845,84 @@ mod tests {
         assert!(
             alive_end * 50 >= alive_mid * 49,
             "строй выбивается: {alive_mid} живых на середине, {alive_end} в конце — подкрепление не догоняет потери, и к концу долгого прогона бой кончится"
+        );
+    }
+
+    /// **Гора закрывает, прокопанный ход открывает.**
+    ///
+    /// Главное, ради чего снаряд стал объектом: раньше урон приходил
+    /// мгновенно и сквозь породу. Канон обещает обратное с самого
+    /// начала — «линия огня учитывает воксельную геометрию: холм
+    /// закрывает, и это меняется, когда холм срыли» (`05-units.md`).
+    ///
+    /// Тест ставит двоих по разные стороны стены и требует **обоих**
+    /// исходов: со стеной ни одного попадания, с проходом — попадания
+    /// есть. Проверять только первое бесполезно: стрельба, которая
+    /// не попадает никогда, тоже даёт ноль.
+    #[test]
+    fn a_ridge_stops_the_shot_and_a_tunnel_lets_it_through() {
+        /// Земля до `GY` и стена во всю карту по `x == WALL`.
+        struct Ridge;
+        const GY: u32 = 8;
+        const WALL: u32 = 32;
+        impl voxel::Generator for Ridge {
+            fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+                if y < GY {
+                    return 2;
+                }
+                if x.abs_diff(WALL) <= 1 && y < GY + 12 {
+                    return 3;
+                }
+                voxel::store::AIR
+            }
+        }
+
+        // `tunnel` — прокопать в стене ход на высоте пола.
+        let run = |tunnel: bool| -> (u64, u64, u64) {
+            let t = test_tuning();
+            let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Ridge));
+            if tunnel {
+                for x in WALL - 1..=WALL + 1 {
+                    for y in GY..GY + 6 {
+                        for z in 28..36 {
+                            vw.queue_dig(x, y, z);
+                        }
+                    }
+                }
+                while vw.queued() > 0 {
+                    vw.begin_tick();
+                    vw.flush();
+                }
+            }
+            let g = ground::Ground::new(vw, &t);
+            let mut w = World::new(2, 8, t);
+            w.attach_ground(g);
+            // По разные стороны стены, на одной высоте и в створе хода.
+            w.spawn_ground(WALL as i32 - 8, 32, 0, 0, 300);
+            w.spawn_ground(WALL as i32 + 8, 32, 1, 0, 300);
+            w.units.refresh_live();
+            for _ in 0..200 {
+                w.tick();
+            }
+            (w.shots_fired, w.shots_hit, w.shots_blocked)
+        };
+
+        let (fired_wall, hit_wall, blocked_wall) = run(false);
+        assert!(fired_wall > 0, "со стеной никто не стрелял вовсе");
+        assert_eq!(
+            hit_wall, 0,
+            "сквозь стену прошло {hit_wall} попаданий из {fired_wall} выстрелов"
+        );
+        assert!(
+            blocked_wall > 0,
+            "ни один снаряд не упёрся в стену: {fired_wall} выстрелов"
+        );
+
+        let (fired_open, hit_open, _) = run(true);
+        assert!(
+            hit_open > 0,
+            "через прокопанный ход не прошло ни одного попадания \
+из {fired_open} выстрелов — сцена не проверяет ничего"
         );
     }
 

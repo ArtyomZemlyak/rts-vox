@@ -245,6 +245,14 @@ fn main() -> ExitCode {
                 a.ticks - 100
             );
         }
+        println!(
+            "  стрельба: выстрелов {}, попаданий {}, упоров в породу {}, отказов по потолку {}, в воздухе {}",
+            r.world.shots_fired,
+            r.world.shots_hit,
+            r.world.shots_blocked,
+            r.world.shots_refused,
+            r.world.shots.alive_count()
+        );
         let live = r.world.units.live().len();
         let with_target = r.world
             .units
