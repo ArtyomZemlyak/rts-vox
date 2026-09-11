@@ -8,6 +8,8 @@ use nav::layer::NavLayer;
 use voxel::topo::layer::TopoLayer;
 use demo::{RunHash, Terrain};
 use meshing::Opts;
+use sim_core::ground::Ground;
+use sim_core::{populate, World as SimWorld};
 use voxel::World;
 
 struct Run {
@@ -740,4 +742,110 @@ mod d8 {
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(matches!(r, Err(modding::LoadError::Escape(_))));
     }
+}
+
+/// Прогон D-7 в уменьшенном виде.
+///
+/// Суть сцены — **всё в одном тике**: юниты, копка, ремеш, связность
+/// и навигация. Поэтому прогон собирает связку целиком, а не части
+/// по отдельности: расхождение здесь ловится там, где подсистемы
+/// встречаются, а по отдельности каждая детерминирована и так.
+struct Scale {
+    hash: u64,
+    edits: u64,
+    dirty_mesh: u64,
+    live: usize,
+    with_target: usize,
+}
+
+fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> Scale {
+    let params = worldgen::Params { nx: side, ny: side / 2, nz: side, ..Default::default() };
+    let terrain = Terrain { params, seed };
+    let world = World::new(
+        params.nx,
+        params.ny,
+        params.nz,
+        4096,
+        Box::new(Terrain { params, seed }),
+    );
+    let t = demo::tuning();
+    let mut mesh = MeshLayer::new(&world, Opts::default());
+    let mut dig = Dig::clustered(
+        &world,
+        |x, z| terrain.surface(x, z),
+        diggers,
+        2,
+        4,
+        seed ^ 0xD16,
+    );
+    let mut sim = SimWorld::new(2, units.max(1), t);
+    sim.attach_ground(Ground::new(world, &t));
+    populate(&mut sim, units, seed);
+
+    let mut hash = RunHash::new();
+    let (mut edits, mut dirty_mesh) = (0u64, 0u64);
+    for tick in 1..=ticks {
+        {
+            let g = sim.ground_mut().expect("земля");
+            dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+        }
+        let h = sim.tick();
+        // Ремеш читает те же правки, что и хеш: это и есть «в одном
+        // тике». Копия правок — потому что `mesh.apply` берёт мир
+        // и правки порознь, а оба живут в земле.
+        let e = {
+            let g = sim.ground().expect("земля");
+            edits += g.stats.edits as u64;
+            hash.feed_edits(tick, g.edits());
+            hash.feed(h);
+            g.edits().to_vec()
+        };
+        dirty_mesh += mesh.apply(&sim.ground().expect("земля").world, &e) as u64;
+    }
+    let live = sim.units.live().len();
+    let with_target = sim
+        .units
+        .live()
+        .iter()
+        .filter(|&&i| sim.units.target[i as usize] != sim_core::NO_TARGET)
+        .count();
+    Scale { hash: hash.get(), edits, dirty_mesh, live, with_target }
+}
+
+/// **Тот же сид — тот же прогон, и связка не расходится.**
+///
+/// Единственная сцена, у которой этого теста не было: пороги она
+/// печатала, а повторяемость никто не требовал.
+#[test]
+fn d7_is_deterministic() {
+    let a = run_scale(42, 40, 400, 40, 96);
+    let b = run_scale(42, 40, 400, 40, 96);
+    assert_eq!(a.hash, b.hash, "тот же сид дал другой хеш");
+    assert_eq!(a.edits, b.edits);
+    assert_eq!(a.dirty_mesh, b.dirty_mesh);
+    assert_eq!(a.live, b.live);
+    let c = run_scale(43, 40, 400, 40, 96);
+    assert_ne!(a.hash, c.hash, "разный сид дал тот же прогон");
+}
+
+/// **Сцена нагружает всё, что декларирует, и это её единственное
+/// оправдание** (`CLAUDE.md`).
+///
+/// D-7 обещает юнитов, копку, ремеш и бой **одновременно**. Порог,
+/// снятый со сцены, где молчит хоть одна подсистема, — не порог.
+#[test]
+fn d7_loads_every_subsystem_at_once() {
+    let r = run_scale(42, 60, 600, 60, 96);
+    println!(
+        "D-7 уменьшенная: правок {}, грязных чанков меша {}, живых {}, с целью {}",
+        r.edits, r.dirty_mesh, r.live, r.with_target
+    );
+    assert!(r.edits > 1000, "копка почти ничего не сняла: {}", r.edits);
+    assert!(r.dirty_mesh > 100, "ремеш почти не вызывался: {}", r.dirty_mesh);
+    assert!(r.live > 0, "юниты кончились");
+    assert!(
+        r.with_target > 20,
+        "бой не начался: из {} живых никто не взял цель",
+        r.live
+    );
 }
