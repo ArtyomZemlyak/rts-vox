@@ -21,7 +21,7 @@ use bevy::render::render_resource::PrimitiveTopology;
 use bevy::light::CascadeShadowConfigBuilder;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
-use render::geom::{volume_to_mesh, MeshBuf};
+use render::geom::{volume_to_mesh, MeshBuf, Slice};
 
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019). Отсюда
 /// пересчёт габаритов тела: воксель тела в миллиметрах делится на
@@ -140,7 +140,9 @@ fn setup(
         // крупнее, и это ровно то, что делает их крупными (ADR-178).
         let s = body.mm as f32 / MM_PER_UNIT;
         buf.clear();
-        volume_to_mesh(body, TINTS[i % TINTS.len()], s, &mut buf);
+        // Плац показывает тело целиком: башня здесь не вращается,
+        // ей не в кого целиться.
+        volume_to_mesh(body, TINTS[i % TINTS.len()], s, Slice::All, &mut buf);
         let mesh = meshes.add(
             Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
                 .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())

@@ -166,23 +166,39 @@ fn every_external_dependency_is_pinned_exactly() {
 /// нельзя. Стенды в `src/bin` печатают миллисекунды и к состоянию
 /// симуляции отношения не имеют.
 fn production_sources(dir: &Path) -> Vec<(PathBuf, String)> {
-    fn walk(p: &Path, out: &mut Vec<PathBuf>) {
+    sources(dir, true)
+}
+
+/// Исходники крейта **вместе** с `src/bin`.
+///
+/// У sim-крейтов `src/bin` — стенды, и пропускать их правильно.
+/// У рендера в `src/bin` лежит весь код окна: `battle`, `view`,
+/// `parade`. Первая редакция проверки границы слоёв пользовалась
+/// `production_sources` и потому смотрела куда угодно, кроме предмета
+/// проверки, — подложенная в `battle.rs` запись в состояние симуляции
+/// прошла мимо неё (ADR-184).
+fn all_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    sources(dir, false)
+}
+
+fn sources(dir: &Path, skip_bin: bool) -> Vec<(PathBuf, String)> {
+    fn walk(p: &Path, out: &mut Vec<PathBuf>, skip_bin: bool) {
         let Ok(rd) = std::fs::read_dir(p) else { return };
         let mut items: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
         items.sort();
         for i in items {
             if i.is_dir() {
-                if i.file_name().map(|n| n == "bin").unwrap_or(false) {
+                if skip_bin && i.file_name().map(|n| n == "bin").unwrap_or(false) {
                     continue;
                 }
-                walk(&i, out);
+                walk(&i, out, skip_bin);
             } else if i.extension().map(|e| e == "rs").unwrap_or(false) {
                 out.push(i);
             }
         }
     }
     let mut files = Vec::new();
-    walk(&dir.join("src"), &mut files);
+    walk(&dir.join("src"), &mut files, skip_bin);
     files
         .into_iter()
         .map(|f| {
@@ -314,6 +330,115 @@ fn the_lint_sees_the_whole_production_file() {
     assert!(
         !prod.contains("fn test_tuning"),
         "тестовый помощник просочился в боевой текст"
+    );
+}
+
+/// Часть строки слева от присваивания, если оно в ней есть.
+///
+/// Нужна, чтобы отличить `units.x[i] = 5` от `let n = units.live()`:
+/// первое — запись в состояние симуляции, второе — чтение. Различает
+/// их только то, с какой стороны от знака стоит путь.
+fn assigned_path(line: &str) -> Option<&str> {
+    let b = line.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => return None,
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'=' => {
+                // Не сравнение и не стрелка.
+                let prev = if i > 0 { b[i - 1] } else { b' ' };
+                let next = if i + 1 < b.len() { b[i + 1] } else { b' ' };
+                if next == b'=' || matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                    i += 1;
+                } else {
+                    return Some(&line[..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// **Рендер читает состояние симуляции и никогда не пишет в него.**
+///
+/// `CLAUDE.md` называет нарушение этой границы откатом, а проверки
+/// на неё не было: соседний тест сторожит только направление
+/// зависимостей в `Cargo.toml`. Поля `Units` и `Shots` публичны,
+/// `World::ground_mut` тоже — запись компилируется в одну строку
+/// и отличается от чтения ровно тем, с какой стороны от `=` стоит
+/// путь (ADR-184).
+///
+/// Тикать симуляцию рендеру **можно**: окно владеет ею и двигает
+/// её вперёд целиком, а не правит по полю. Запрещено именно
+/// присваивание в её состояние и постановка правок мира в обход
+/// симуляции.
+#[test]
+fn the_render_layer_never_writes_into_the_simulation() {
+    // Прямые ходы в мир мимо симуляции — запрещены целиком.
+    const BANNED: [&str; 3] = ["ground_mut", "queue_dig", "queue_edit"];
+    // Пути состояния симуляции: присваивание в них — нарушение.
+    const STATE: [&str; 4] = [".units.", ".shots.", ".bodies.", ".world."];
+
+    let mut bad: Vec<String> = Vec::new();
+    // **Вместе с `src/bin`**: там и лежит весь код окна. Смотри
+    // `all_sources` — первая редакция этой проверки была слепа ровно
+    // к тому, что проверяет.
+    let files = all_sources(&root().join("crates").join("render"));
+    assert!(
+        files.iter().any(|(f, _)| f.ends_with("battle.rs")),
+        "проверка не видит окно боя — она смотрит не туда"
+    );
+    for (f, text) in files {
+        for (n, line) in text.lines().enumerate() {
+            if !is_code(line) {
+                continue;
+            }
+            if let Some(call) = BANNED.iter().find(|b| line.contains(**b)) {
+                bad.push(format!("{}:{}: {call} — {}", f.display(), n + 1, line.trim()));
+                continue;
+            }
+            let Some(lhs) = assigned_path(line) else { continue };
+            if let Some(path) = STATE.iter().find(|p| lhs.contains(**p)) {
+                bad.push(format!(
+                    "{}:{}: присваивание в {path} — {}",
+                    f.display(),
+                    n + 1,
+                    line.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "рендер пишет в состояние симуляции:\n{}",
+        bad.join("\n")
+    );
+
+    // Сторож на сам сторож: чтение не должно ловиться, запись должна.
+    assert!(assigned_path("let n = sim.r.world.units.live().len();").is_some());
+    assert!(
+        !assigned_path("let n = sim.r.world.units.live().len();")
+            .expect("присваивание есть")
+            .contains(".units."),
+        "чтение принято за запись"
+    );
+    assert!(
+        assigned_path("sim.r.world.units.x[i] = 5;")
+            .expect("присваивание есть")
+            .contains(".units."),
+        "запись в состояние не распознана"
+    );
+    assert!(
+        assigned_path("if a.units.x[i] == b { }").is_none(),
+        "сравнение принято за присваивание"
     );
 }
 
