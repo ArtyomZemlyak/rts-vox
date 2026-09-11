@@ -40,7 +40,7 @@ fn parse() -> Result<Args, String> {
             "--ticks" => a.ticks = num("--ticks")?,
             "--seed" => a.seed = num("--seed")?,
             "--help" => {
-                println!("bench_sectors [--side N] [--height N] [--diggers N] [--ticks N]");
+                println!("nav_report [--side N] [--height N] [--diggers N] [--ticks N]");
                 std::process::exit(0);
             }
             other => return Err(format!("неизвестный ключ {other}")),
