@@ -30,9 +30,14 @@ use crate::bodies::Bodies;
 use crate::topo::{batch_cannot_split, Chunk as TopoChunk, Components, SplitBufs, CS};
 use crate::{Edit, World};
 
-/// Потолок на размер одного отвала в вокселях. Больше — не тело,
-/// а событие другого масштаба, и оно оставляется в мире.
-const MAX_BODY_CELLS: usize = 4096;
+/// Потолок на размер одного отвала в вокселях **по умолчанию**.
+///
+/// Настоящее значение приходит из `data/sim.ron` через
+/// `CollapseLayer::set_max_body_cells`: это число тика, и жить
+/// в исходнике оно не должно (ADR-191). Здесь оно остаётся
+/// умолчанием для тех, кто строит слой без настроек — стендов
+/// и тестов самого `voxel`.
+pub const MAX_BODY_CELLS: usize = 4096;
 
 /// Сколько раз за тик каскад повторяет разбор.
 ///
@@ -176,6 +181,8 @@ pub struct CollapseLayer {
     dirty: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
+    /// Потолок на размер одного отвала, из данных.
+    max_body_cells: usize,
     /// Правки тика по чанкам: местные координаты и твёрдость после.
     local: Vec<Vec<(u8, u8, u8, bool)>>,
     /// Узлы графа на чанк. `None` — чанк каскаду неизвестен, то есть
@@ -230,6 +237,15 @@ pub struct CollapseLayer {
 }
 
 impl CollapseLayer {
+    /// Поставить потолок на размер отвала из данных.
+    ///
+    /// Отдельным вызовом, а не параметром конструктора: слой строят
+    /// стенды и тесты самого `voxel`, у которых `Tuning` нет и быть
+    /// не должно — крейт мира не знает про настройки игры (ADR-191).
+    pub fn set_max_body_cells(&mut self, n: usize) {
+        self.max_body_cells = n.max(1);
+    }
+
     pub fn new(w: &World) -> CollapseLayer {
         let cs = CS as u32;
         let (nx, ny, nz) = (w.nx.div_ceil(cs), w.ny.div_ceil(cs), w.nz.div_ceil(cs));
@@ -243,6 +259,7 @@ impl CollapseLayer {
             dirty: Vec::new(),
             stamp: vec![u32::MAX; n],
             epoch: 0,
+            max_body_cells: MAX_BODY_CELLS,
             local: (0..n).map(|_| Vec::new()).collect(),
             nodes: (0..n).map(|_| None).collect(),
             base: vec![0; n],
@@ -931,7 +948,7 @@ impl CollapseLayer {
             if cells.is_empty() {
                 continue;
             }
-            if cells.len() > MAX_BODY_CELLS {
+            if cells.len() > self.max_body_cells {
                 st.too_big += 1;
                 continue;
             }
