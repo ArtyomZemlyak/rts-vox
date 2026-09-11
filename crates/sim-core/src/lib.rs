@@ -367,6 +367,23 @@ impl World {
         }
     }
 
+    /// Направление поля под юнитом — **замерщику**, а не движению:
+    /// движение читает поле само. Нужно, чтобы отличить «юниту некуда
+    /// идти» от «юнит стоит в толпе»: без этого «застрял» — не диагноз.
+    pub fn dir_under(&self, i: usize) -> u8 {
+        let Some(g) = self.ground.as_ref() else { return 255 };
+        let st = g.nav.step() as i32;
+        let (gw, gh) = g.nav.dims();
+        let (cx, cz) = ((self.units.x[i] / st).max(0) as u32, (self.units.z[i] / st).max(0) as u32);
+        if cx >= gw || cz >= gh {
+            return 255;
+        }
+        match g.nav.level_index_near(cx, cz, self.units.y[i]) {
+            Some(li) => self.nav_field.dir_at(self.units.owner[i] as usize % 2, cx, cz, li),
+            None => 255,
+        }
+    }
+
     /// Земля для чтения — рендеру и сценам.
     pub fn ground(&self) -> Option<&ground::Ground> {
         self.ground.as_ref()

@@ -220,7 +220,7 @@ fn main() -> ExitCode {
         }
         // Стоять и стрелять — не «застрять». Считаются отдельно:
         // застрявшим называется тот, кто не сдвинулся и цели не имеет.
-        let (mut still, mut shooting) = (0usize, 0usize);
+        let (mut still, mut shooting, mut blind) = (0usize, 0usize, 0usize);
         for &(i, x, z) in snap.iter() {
             let i = i as usize;
             if !r.world.units.alive[i] || r.world.units.x[i] != x || r.world.units.z[i] != z {
@@ -230,11 +230,17 @@ fn main() -> ExitCode {
                 shooting += 1;
             } else {
                 still += 1;
+                // «Застрял» — не диагноз, пока не сказано почему.
+                // Нет направления — поле до него не дошло; есть —
+                // значит держит теснота или обрыв под ногами.
+                if r.world.dir_under(i) == 255 {
+                    blind += 1;
+                }
             }
         }
         if !snap.is_empty() {
             println!(
-                "  стоят сто тиков: {still} без цели (застряли), {shooting} с целью (стреляют), из {} живых на тике {}",
+                "  стоят сто тиков: {still} без цели ({blind} из них без направления), {shooting} с целью (стреляют), из {} живых на тике {}",
                 snap.len(),
                 a.ticks - 100
             );
