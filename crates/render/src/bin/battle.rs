@@ -198,10 +198,52 @@ struct TurretMark(usize);
 #[derive(Component)]
 struct ShotMark;
 
-/// Отметка взрыва живёт несколько кадров: событие приходит один раз,
-/// а показать его надо дольше одного кадра.
+/// Стареющий эффект: событие симуляции живёт один тик (`SimEvent`),
+/// а увидеть его надо дольше. Возраст считается в **кадрах**, потому
+/// что глаз смотрит кадры, а не тики.
 #[derive(Component)]
-struct BlastMark(u32);
+struct Fade {
+    age: u32,
+    life: u32,
+    kind: Kind,
+    /// Радиус воронки в мировых вокселях; у прочих эффектов — своя
+    /// мерка длины.
+    size: f32,
+}
+
+/// Что именно стареет. Разные вещи гаснут по-разному: шар раздувается
+/// и остывает, луч гаснет не раздуваясь, свет просто исчезает.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Огненный шар воронки.
+    Blast,
+    /// Луч и дульная вспышка: гаснут, не меняя размера.
+    Beam,
+    Muzzle,
+    /// Точечный свет от вспышки: живёт меньше самой вспышки.
+    Light,
+}
+
+/// Какие номера снарядов были живы в прошлом кадре.
+///
+/// Выстрела среди событий симуляции нет, а дульная вспышка нужна.
+/// Новый снаряд — это номер, которого в прошлом кадре не было; иначе
+/// вспышка загоралась бы на каждом кадре полёта.
+#[derive(Resource, Default)]
+struct Seen {
+    was: Vec<bool>,
+    live: Vec<bool>,
+}
+
+/// Обломок: летит по параболе и крутится. **Это декорация.** Он ничего
+/// не весит, никуда не попадает и в состояние симуляции не входит —
+/// границу слоёв это не задевает, потому что читает он только событие.
+#[derive(Component)]
+struct Debris {
+    vel: Vec3,
+    spin: Vec3,
+    age: u32,
+}
 
 /// Общие для всех меши и материалы.
 #[derive(Resource)]
@@ -210,15 +252,109 @@ struct Art {
     /// а тело у сторон разное, поэтому мешей четыре.
     hull: [Handle<Mesh>; 2],
     turret: [Handle<Mesh>; 2],
-    shot: Handle<Mesh>,
-    blast: Handle<Mesh>,
-    beam: Handle<Mesh>,
+    /// Шар единичного радиуса: вспышка, дуло, огонь воронки. Размер
+    /// задаёт масштаб, потому что размер у каждого свой и меняется
+    /// каждый кадр.
+    ball: Handle<Mesh>,
+    /// Единичный столбик по оси Y: поворот и масштаб превращают его
+    /// и в луч, и в трассер.
+    bar: Handle<Mesh>,
+    /// Кубик обломка.
+    chip: Handle<Mesh>,
     side: [Handle<StandardMaterial>; 2],
-    tracer: Handle<StandardMaterial>,
-    ray: [Handle<StandardMaterial>; 2],
-    boom: Handle<StandardMaterial>,
+    tracer: [Handle<StandardMaterial>; 2],
+    /// Лестница остывания огня воронки: от белого к тёмно-красному.
+    /// Материалов столько, сколько ступеней, потому что `StandardMaterial`
+    /// общий у всех, кто на него ссылается, — покрасить **один** шар,
+    /// не задев соседние, иначе нельзя.
+    boom: Vec<Handle<StandardMaterial>>,
+    /// То же для луча, по стороне.
+    ray: [Vec<Handle<StandardMaterial>>; 2],
+    /// И для дульной вспышки.
+    muzzle: Vec<Handle<StandardMaterial>>,
+    /// Пыль и обломки: порода по стороне не различается.
+    dust: Handle<StandardMaterial>,
     /// Материал рельефа по классу поверхности.
     ground: [Handle<StandardMaterial>; look::CLASSES],
+}
+
+/// Светящийся материал: цвет **за пределами единицы** прямо
+/// в `base_color`, смешивание сложением.
+///
+/// Не через `emissive`, и это не вкус: `pbr.wgsl` при `unlit`
+/// отдаёт `base_color` и **не зовёт** расчёт света вовсе, а эмиссия
+/// живёт внутри него (`apply_pbr_lighting`). Сочетание `unlit` плюс
+/// `emissive` не рисует ничего — проверено картинкой, где пропали
+/// разом все трассеры, лучи и вспышки.
+///
+/// Расчёт света здесь не нужен: огонь не освещён, он светит. Заодно
+/// уходит и блик неба, который на чёрном шаре читался бы серой плёнкой.
+fn glow(rgb: [f32; 3], a: f32) -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::LinearRgba(LinearRgba::new(rgb[0], rgb[1], rgb[2], a)),
+        // Сложением: огонь прибавляется к тому, что за ним, и потому
+        // не требует сортировки по глубине и не спорит с порядком,
+        // в котором Bevy его нарисует.
+        alpha_mode: AlphaMode::Add,
+        unlit: true,
+        ..default()
+    }
+}
+
+/// Лестница остывания: `n` материалов от горячего к остывшему.
+///
+/// Смешивание **сложением**: огонь прибавляется к тому, что за ним,
+/// и потому не требует сортировки по глубине и не спорит с порядком,
+/// в котором Bevy их нарисует. Прозрачность здесь — множитель
+/// прибавки, а не «сквозь него видно».
+fn ramp(
+    m: &mut Assets<StandardMaterial>,
+    n: usize,
+    hot: [f32; 3],
+    cold: [f32; 3],
+    fade_at: f32,
+) -> Vec<Handle<StandardMaterial>> {
+    (0..n)
+        .map(|i| {
+            let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+            // Остывание по квадрату: пик виден один кадр, а не треть
+            // всей жизни.
+            let k = (1.0 - t) * (1.0 - t);
+            let e = [
+                cold[0] + (hot[0] - cold[0]) * k,
+                cold[1] + (hot[1] - cold[1]) * k,
+                cold[2] + (hot[2] - cold[2]) * k,
+            ];
+            // Прозрачность держится, пока эффект не отжил `fade_at`
+            // своей жизни, и потом уходит в ноль **по квадрату**.
+            // Линейная оставляла в конце большой бледный шар: огонь
+            // раздувается, и его площадь растёт быстрее, чем падает
+            // яркость.
+            let a = ((1.0 - t) / (1.0 - fade_at)).clamp(0.0, 1.0);
+            let a = a * a;
+            m.add(glow([e[0], e[1], e[2]], a))
+        })
+        .collect()
+}
+
+/// Целое из трёх координат — для разлёта обломков.
+///
+/// Свой хеш, а не `rand`: два прогона одной сцены обязаны дать
+/// одинаковые снимки, иначе «до» и «после» сравнивать нечем. В хеш
+/// состояния это не входит и входить не может — рендер его не считает.
+fn scatter(x: i32, y: i32, z: i32, k: usize) -> u32 {
+    let mut h = 0x9E37_79B9u32;
+    for v in [x as u32, y as u32, z as u32, k as u32] {
+        h ^= v.wrapping_mul(0x85EB_CA6B);
+        h = h.rotate_left(13).wrapping_mul(0xC2B2_AE35);
+    }
+    h ^= h >> 16;
+    h
+}
+
+/// Дробь `0..1` из хеша.
+fn frac(h: u32) -> f32 {
+    (h & 0xFF_FFFF) as f32 / 16_777_216.0
 }
 
 fn main() {
@@ -357,6 +493,7 @@ fn main() {
         .insert_resource(fx)
         .insert_resource(sky)
         .insert_resource(Prof::default())
+        .insert_resource(Seen::default())
         .insert_resource(DirectionalLightShadowMap { size: look::SHADOW_MAP })
         .insert_resource(GlobalAmbientLight {
             color: srgb(look::AMBIENT_SRGB),
@@ -383,7 +520,7 @@ fn main() {
             hist: Vec::new(),
         })
         .add_systems(Startup, setup)
-        .add_systems(Update, (step, control, cull, snap))
+        .add_systems(Update, (step, effects, control, cull, snap))
         .run();
 }
 
@@ -461,35 +598,46 @@ fn setup(
             ..default()
         })
     };
+    // Трассер светится, а не освещён.
+    let tracer = |c: [f32; 3], m: &mut Assets<StandardMaterial>| m.add(glow(c, 1.0));
     let art = Art {
         hull,
         turret,
-        shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
-        blast: meshes.add(Sphere::new(2.5)),
-        // Единичный столбик по оси Y: поворот и масштаб превращают
-        // его в луч любой длины и направления.
-        beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
+        ball: meshes.add(Sphere::new(1.0).mesh().ico(2).expect("шар вспышки"))
+            ,
+        bar: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+        chip: meshes.add(Cuboid::new(
+            look::DEBRIS_SIZE,
+            look::DEBRIS_SIZE,
+            look::DEBRIS_SIZE,
+        )),
         side: [materials.add(armour()), materials.add(armour())],
-        tracer: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.95, 0.5),
-            emissive: LinearRgba::rgb(3.0, 2.6, 0.8),
-            ..default()
-        }),
-        ray: [
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(0.5, 0.9, 1.0),
-                emissive: LinearRgba::rgb(0.6, 3.0, 5.0),
-                ..default()
-            }),
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(1.0, 0.4, 0.9),
-                emissive: LinearRgba::rgb(4.0, 0.6, 3.0),
-                ..default()
-            }),
+        tracer: [
+            tracer([9.0, 6.4, 1.8], &mut materials),
+            tracer([9.0, 4.2, 1.1], &mut materials),
         ],
-        boom: materials.add(StandardMaterial {
-            base_color: Color::srgb(1.0, 0.5, 0.15),
-            emissive: LinearRgba::rgb(6.0, 2.0, 0.4),
+        boom: ramp(
+            &mut materials,
+            look::BLAST_STEPS,
+            look::BLAST_HOT,
+            look::BLAST_COLD,
+            0.15,
+        ),
+        ray: [
+            ramp(&mut materials, look::BEAM_FRAMES as usize, [1.0, 2.6, 4.2], [0.10, 0.26, 0.42], 0.2),
+            ramp(&mut materials, look::BEAM_FRAMES as usize, [4.2, 1.5, 0.45], [0.42, 0.15, 0.05], 0.2),
+        ],
+        muzzle: ramp(
+            &mut materials,
+            look::MUZZLE_FRAMES as usize,
+            [22.0, 14.0, 5.0],
+            [3.0, 1.4, 0.3],
+            0.1,
+        ),
+        dust: materials.add(StandardMaterial {
+            base_color: srgb(look::DUST_SRGB),
+            base_color_texture: chamfer.clone(),
+            perceptual_roughness: 0.95,
             ..default()
         }),
         ground: [
@@ -776,7 +924,7 @@ fn step(
     mut units: HullQuery,
     mut turrets: TurretQuery,
     shots: Query<Entity, With<ShotMark>>,
-    blasts: Query<(Entity, &mut BlastMark)>,
+    mut seen: ResMut<Seen>,
 ) {
     for _ in 0..sim.speed {
         sim.r.tick();
@@ -900,60 +1048,269 @@ fn step(
     }
 
     // Снаряды: их число скачет, поэтому сущности создаются и убираются.
+    //
+    // Трассер вытянут **по скорости**, а не по осям: снаряд за кадр
+    // проходит несколько вокселей, и кубик в его положении читается
+    // пунктиром из точек. Штрих обязан перекрывать разрыв между
+    // кадрами, оттого он и длиннее пути за тик.
     for e in shots.iter() {
         commands.entity(e).despawn();
     }
-    for &s in sim.r.world.shots.live() {
-        let i = s as usize;
-        commands.spawn((
-            Mesh3d(art.shot.clone()),
-            MeshMaterial3d(art.tracer.clone()),
-            Transform::from_xyz(
-                sim.r.world.shots.x[i] as f32,
-                sim.r.world.shots.y[i] as f32,
-                sim.r.world.shots.z[i] as f32,
-            ),
-            ShotMark,
-        ));
+    {
+        let s = &sim.r.world.shots;
+        for &id in s.live() {
+            let i = id as usize;
+            let p = Vec3::new(
+                s.x[i] as f32 + s.fx[i].to_f64_lossy() as f32,
+                s.y[i] as f32 + s.fy[i].to_f64_lossy() as f32,
+                s.z[i] as f32 + s.fz[i].to_f64_lossy() as f32,
+            );
+            let v = Vec3::new(
+                s.vx[i].to_f64_lossy() as f32,
+                s.vy[i].to_f64_lossy() as f32,
+                s.vz[i].to_f64_lossy() as f32,
+            );
+            let speed = v.length();
+            let (dir, len) = if speed > 1e-4 {
+                (v / speed, speed * look::TRACER_STRETCH)
+            } else {
+                (Vec3::Y, look::TRACER_W * 2.0)
+            };
+            commands.spawn((
+                Mesh3d(art.bar.clone()),
+                MeshMaterial3d(art.tracer[usize::from(s.owner[i] == 1)].clone()),
+                Transform::from_translation(p)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::Y, dir))
+                    .with_scale(Vec3::new(look::TRACER_W, len, look::TRACER_W)),
+                ShotMark,
+            ));
+        }
     }
 
-    // Взрывы: событие приходит один раз, отметка живёт несколько кадров.
-    for (e, mut b) in blasts {
-        if b.0 == 0 {
-            commands.entity(e).despawn();
-        } else {
-            b.0 -= 1;
+    // Дульная вспышка. Выстрела среди событий нет, поэтому она ставится
+    // по **появлению** снаряда: номер, которого в прошлом кадре
+    // не было, — это новый выстрел. Свободный список у снарядов
+    // (`shot.rs`) означает, что номер может вернуться, и различить
+    // «тот же» от «новый на том же месте» иначе нельзя.
+    {
+        let s = &sim.r.world.shots;
+        // Обе половины растут вместе: меняются они местами, и короткая
+        // после первого же обмена становится текущей.
+        if seen.live.len() < s.len() {
+            seen.live.resize(s.len(), false);
+            seen.was.resize(s.len(), false);
         }
+        for f in seen.live.iter_mut() {
+            *f = false;
+        }
+        for &id in s.live() {
+            let i = id as usize;
+            seen.live[i] = true;
+            if seen.was[i] {
+                continue;
+            }
+            let p = Vec3::new(
+                s.x[i] as f32 + s.fx[i].to_f64_lossy() as f32,
+                s.y[i] as f32 + s.fy[i].to_f64_lossy() as f32,
+                s.z[i] as f32 + s.fz[i].to_f64_lossy() as f32,
+            );
+            commands.spawn((
+                Mesh3d(art.ball.clone()),
+                MeshMaterial3d(art.muzzle[0].clone()),
+                Transform::from_translation(p).with_scale(Vec3::splat(look::MUZZLE_R)),
+                Fade { age: 0, life: look::MUZZLE_FRAMES, kind: Kind::Muzzle, size: look::MUZZLE_R },
+            ));
+            commands.spawn((
+                PointLight {
+                    color: srgb(look::MUZZLE_SRGB),
+                    intensity: look::MUZZLE_LIGHT_CD,
+                    range: 14.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::from_translation(p),
+                Fade { age: 0, life: 2, kind: Kind::Light, size: look::MUZZLE_LIGHT_CD },
+            ));
+        }
+        let Seen { was, live } = &mut *seen;
+        core::mem::swap(was, live);
     }
+
     for ev in sim.r.world.events() {
         match *ev {
-            SimEvent::Blast { x, y, z, .. } => {
+            SimEvent::Blast { x, y, z, radius } => {
+                // Радиус воронки берётся у события, а не выдумывается:
+                // прежний шар был одного размера при любой воронке,
+                // и по картинке нельзя было отличить царапину от ямы.
+                let r = (radius as f32).max(1.0);
+                // Центр воронки — **в земле**, и шар, поставленный
+                // туда, закопан целиком (`look::BLAST_LIFT`).
+                let p = Vec3::new(x as f32, y as f32 + r * look::BLAST_LIFT, z as f32);
                 commands.spawn((
-                    Mesh3d(art.blast.clone()),
-                    MeshMaterial3d(art.boom.clone()),
-                    Transform::from_xyz(x as f32, y as f32, z as f32),
-                    BlastMark(6),
+                    Mesh3d(art.ball.clone()),
+                    MeshMaterial3d(art.boom[0].clone()),
+                    Transform::from_translation(p).with_scale(Vec3::splat(r * look::BLAST_R0)),
+                    Fade { age: 0, life: look::BLAST_FRAMES, kind: Kind::Blast, size: r },
                 ));
+                commands.spawn((
+                    PointLight {
+                        color: srgb(look::BLAST_LIGHT_SRGB),
+                        intensity: look::BLAST_LIGHT_CD * r,
+                        range: r * 10.0,
+                        shadow_maps_enabled: false,
+                        ..default()
+                    },
+                    Transform::from_translation(p),
+                    Fade {
+                        age: 0,
+                        life: look::BLAST_LIGHT_FRAMES,
+                        kind: Kind::Light,
+                        size: look::BLAST_LIGHT_CD * r,
+                    },
+                ));
+                spawn_debris(&mut commands, &art.chip, &art.dust, p, r, look::DEBRIS_BLAST, (x, y, z));
             }
             SimEvent::Beam { x0, y0, z0, x1, y1, z1, owner } => {
-                // Луч — вытянутый кубик от стрелка к цели. Живёт
-                // столько же, сколько вспышка: событие приходит один
-                // раз, а увидеть его надо дольше одного кадра.
-                let a = Vec3::new(x0 as f32, y0 as f32 + 1.5, z0 as f32);
-                let b = Vec3::new(x1 as f32, y1 as f32 + 1.5, z1 as f32);
+                // Луч — вытянутый кубик от стрелка к цели, гаснущий
+                // за несколько кадров: событие приходит один раз,
+                // а увидеть его надо дольше.
+                let a = Vec3::new(x0 as f32, y0 as f32 + look::BEAM_LIFT, z0 as f32);
+                let b = Vec3::new(x1 as f32, y1 as f32 + look::BEAM_LIFT, z1 as f32);
                 let d = b - a;
                 let len = d.length().max(0.001);
+                let side = usize::from(owner == 1);
                 commands.spawn((
-                    Mesh3d(art.beam.clone()),
-                    MeshMaterial3d(art.ray[usize::from(owner == 1)].clone()),
+                    Mesh3d(art.bar.clone()),
+                    MeshMaterial3d(art.ray[side][0].clone()),
                     Transform::from_translation((a + b) * 0.5)
                         .with_rotation(Quat::from_rotation_arc(Vec3::Y, d / len))
-                        .with_scale(Vec3::new(1.0, len, 1.0)),
-                    BlastMark(2),
+                        .with_scale(Vec3::new(look::BEAM_W, len, look::BEAM_W)),
+                    Fade { age: 0, life: look::BEAM_FRAMES, kind: Kind::Beam, size: side as f32 },
+                ));
+                // Вспышка у дула луча — та же, что у ствола: стреляет
+                // и тот и другой, и видно это одинаково.
+                commands.spawn((
+                    Mesh3d(art.ball.clone()),
+                    MeshMaterial3d(art.muzzle[0].clone()),
+                    Transform::from_translation(a).with_scale(Vec3::splat(look::MUZZLE_R)),
+                    Fade { age: 0, life: look::MUZZLE_FRAMES, kind: Kind::Muzzle, size: look::MUZZLE_R },
                 ));
             }
-            SimEvent::Death { .. } => {}
+            SimEvent::Death { x, y, z, .. } => {
+                // Смерть событием была всегда и не показывалась ничем:
+                // юнит просто исчезал. Теперь от него остаются обломки.
+                let p = Vec3::new(x as f32, y as f32, z as f32);
+                spawn_debris(&mut commands, &art.chip, &art.dust, p, 2.0, look::DEBRIS_DEATH, (x, y, z));
+            }
         }
+    }
+}
+
+/// Разлёт обломков из точки. Направление — из хеша координат, а не
+/// из `rand`: два прогона одной сцены обязаны дать одинаковый снимок.
+fn spawn_debris(
+    commands: &mut Commands,
+    chip: &Handle<Mesh>,
+    dust: &Handle<StandardMaterial>,
+    at: Vec3,
+    r: f32,
+    n: usize,
+    key: (i32, i32, i32),
+) {
+    for k in 0..n {
+        let h = scatter(key.0, key.1, key.2, k);
+        let ang = frac(h) * core::f32::consts::TAU;
+        let up = look::DEBRIS_UP * (0.55 + frac(h >> 7));
+        let out = look::DEBRIS_OUT * (0.4 + frac(h >> 13)) * r.min(4.0);
+        let vel = Vec3::new(ang.cos() * out, up, ang.sin() * out);
+        commands.spawn((
+            Mesh3d(chip.clone()),
+            MeshMaterial3d(dust.clone()),
+            Transform::from_translation(at + vel * 2.0),
+            Debris {
+                vel,
+                spin: Vec3::new(
+                    frac(h >> 3) - 0.5,
+                    frac(h >> 9) - 0.5,
+                    frac(h >> 17) - 0.5,
+                ) * 0.35,
+                age: 0,
+            },
+        ));
+    }
+}
+
+/// Старение эффектов: вспышки, лучи, свет и обломки.
+///
+/// Одна система на всё, потому что стареют они одинаково — по кадру
+/// за кадр, — а отличаются только тем, что делают с возрастом.
+fn effects(
+    mut commands: Commands,
+    art: Res<Art>,
+    mut fades: Query<
+        (Entity, &mut Fade, &mut Transform, Option<&mut PointLight>, Option<&mut MeshMaterial3d<StandardMaterial>>),
+        Without<Debris>,
+    >,
+    mut debris: Query<(Entity, &mut Debris, &mut Transform)>,
+) {
+    for (e, mut f, mut tr, light, mat) in fades.iter_mut() {
+        if f.age >= f.life {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let t = f.age as f32 / f.life as f32;
+        match f.kind {
+            Kind::Blast => {
+                // Раздувается быстро в начале и медленно в конце:
+                // корень, а не прямая. Ударная волна так и выглядит.
+                let k = look::BLAST_R0 + (look::BLAST_R1 - look::BLAST_R0) * t.sqrt();
+                tr.scale = Vec3::splat(f.size * k);
+                if let Some(mut m) = mat {
+                    let i = (f.age as usize).min(art.boom.len() - 1);
+                    m.0 = art.boom[i].clone();
+                }
+            }
+            Kind::Beam => {
+                if let Some(mut m) = mat {
+                    let side = f.size as usize;
+                    let i = (f.age as usize).min(art.ray[side].len() - 1);
+                    m.0 = art.ray[side][i].clone();
+                }
+            }
+            Kind::Muzzle => {
+                tr.scale = Vec3::splat(f.size * (1.0 + t * 0.8));
+                if let Some(mut m) = mat {
+                    let i = (f.age as usize).min(art.muzzle.len() - 1);
+                    m.0 = art.muzzle[i].clone();
+                }
+            }
+            Kind::Light => {
+                if let Some(mut l) = light {
+                    // Свет гаснет по квадрату: линейный оставляет
+                    // заметную ступеньку на последнем кадре.
+                    l.intensity = f.size * (1.0 - t) * (1.0 - t);
+                }
+            }
+        }
+        f.age += 1;
+    }
+
+    for (e, mut d, mut tr) in debris.iter_mut() {
+        if d.age >= look::DEBRIS_FRAMES {
+            commands.entity(e).despawn();
+            continue;
+        }
+        d.vel.y -= look::DEBRIS_G;
+        let v = d.vel;
+        tr.translation += v;
+        tr.rotation *= Quat::from_euler(EulerRot::XYZ, d.spin.x, d.spin.y, d.spin.z);
+        // Последнюю треть жизни обломок оседает: осколок, зависший
+        // в воздухе и исчезнувший, заметнее, чем его отсутствие.
+        let t = d.age as f32 / look::DEBRIS_FRAMES as f32;
+        if t > 0.66 {
+            tr.scale = Vec3::splat(((1.0 - t) / 0.34).max(0.01));
+        }
+        d.age += 1;
     }
 }
 

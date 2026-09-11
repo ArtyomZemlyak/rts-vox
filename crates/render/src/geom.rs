@@ -10,7 +10,12 @@
 
 use crate::look::{self, Class};
 use meshing::{Quad, CS};
-use voxel::store::Mat;
+use voxel::store::{Mat, AIR};
+
+/// Чем красить грань, у которой воздух с обеих сторон. Порода:
+/// её ни с чем не спутать, и это честнее, чем фуксия «мод принёс
+/// свой номер».
+const FALLBACK: Mat = 2;
 
 /// Буферы одного чанка. Переиспользуются: выделение на чанк мерило бы
 /// аллокатор, а чанков тысячи.
@@ -193,14 +198,43 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
         // массиву, который весь лежит в кэше.
         p.mats.clear();
         p.mats.reserve(w * h);
+        // Воздух под гранью — **норма, а не сбой**, и это не догадка:
+        // геометрию берут у мешера, а материал у мира, и мешер отстаёт
+        // от мира на тик. Свежая воронка успевает съесть воксель
+        // раньше, чем пропадёт его грань, и тогда материал читается
+        // из дыры.
+        //
+        // Замерено на сцене шестисот юнитов: **десять миллионов таких
+        // граней за двести шестьдесят кадров**, и каждая красилась
+        // фуксией — цветом неизвестного материала. Ею залило поле боя.
+        //
+        // Шаг на другую сторону грани не помогает: там воздух тоже
+        // (проверено — вторая выборка возвращала `AIR` ровно столько
+        // же раз, сколько первая). Значит красить надо тем, что
+        // у квада осталось.
+        let mut any = AIR;
         for r in 0..w {
             for c in 0..h {
                 let (px, py, pz) = owner(axis, s, qa + r, qb + c);
-                p.mats.push(mat_at(
+                let m = mat_at(
                     at[0] + px as u32 - 1,
                     at[1] + py as u32 - 1,
                     at[2] + pz as u32 - 1,
-                ));
+                );
+                if m != AIR {
+                    any = m;
+                }
+                p.mats.push(m);
+            }
+        }
+        // Совсем пустой квад — порода. Фуксия означает «мод принёс свой
+        // номер материала» и обязана значить только это.
+        if any == AIR {
+            any = FALLBACK;
+        }
+        for m in p.mats.iter_mut() {
+            if *m == AIR {
+                *m = any;
             }
         }
         let first = p.mats[0];
@@ -724,6 +758,127 @@ mod tests {
         }
         assert!(checked > 5_000, "проверка почти ничего не проверила: {checked}");
         assert!(seen[ROCK] > 0 && seen[ORE] > 0, "один из классов пуст: {seen:?}");
+    }
+
+    /// **Воздух под гранью не красится фуксией.**
+    ///
+    /// Геометрию красильщик берёт у мешера, а материал у мира, и мешер
+    /// отстаёт на тик: свежая воронка съедает воксель раньше, чем
+    /// пропадает его грань. Тогда материал читается из дыры, и цвет
+    /// неизвестного материала заливает поле боя.
+    ///
+    /// Проверяется прямо: мир отдаёт воздух в половине вокселей квада.
+    #[test]
+    fn air_under_a_face_is_not_painted_unknown() {
+        let mut p = Painter::default();
+        let mut bufs = class_bufs();
+        quads_to_mesh_painted(
+            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 8, h: 8, mat: 1 }],
+            [0.0, 0.0, 0.0],
+            [0, 0, 0],
+            // Шахматка из породы и дыр.
+            |x, _, z| if (x + z) % 2 == 0 { 2 } else { voxel::store::AIR },
+            &mut p,
+            &mut bufs,
+        );
+        let fuchsia = look::colour(voxel::store::AIR);
+        let rock = look::colour(2);
+        let mut n = 0usize;
+        for b in bufs.iter() {
+            for c in b.col.iter() {
+                assert_ne!(*c, fuchsia, "дыра покрашена цветом неизвестного материала");
+                assert_eq!(*c, rock, "дыра покрашена не тем, что рядом");
+                n += 1;
+            }
+        }
+        assert!(n >= 4, "квад не выпущен вовсе");
+
+        // Совсем пустой квад тоже обязан быть породой, а не фуксией.
+        for b in bufs.iter_mut() {
+            b.clear();
+        }
+        quads_to_mesh_painted(
+            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 4, h: 4, mat: 1 }],
+            [0.0, 0.0, 0.0],
+            [0, 0, 0],
+            |_, _, _| voxel::store::AIR,
+            &mut p,
+            &mut bufs,
+        );
+        for b in bufs.iter() {
+            for c in b.col.iter() {
+                assert_ne!(*c, fuchsia, "пустой квад покрашен фуксией");
+            }
+        }
+    }
+
+    /// **После копки ни одна грань не принадлежит воздуху.**
+    ///
+    /// Тест выше красит **нетронутый** мир и берёт квады полной
+    /// пересборкой. Окно боя делает не так: оно копает и берёт квады
+    /// у живого мешера (`layer.quads`, ADR-175). Разница видна только
+    /// на воронке, и видна она фуксией — цветом неизвестного
+    /// материала, которым красится `AIR`.
+    #[test]
+    fn no_face_belongs_to_air_after_digging() {
+        use meshing::layer::MeshLayer;
+        use meshing::Opts;
+
+        let mut w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Layers));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let (nx, ny, _) = layer.dims();
+
+        // Воронка: шар радиуса пять у поверхности. Форма именно
+        // шаровая, а не столбик, — ровный столб не даёт наклонных
+        // стенок, на которых всё и ломается.
+        w.begin_tick();
+        let (cx, cy, cz) = (40i32, 13i32, 40i32);
+        for dz in -5..=5i32 {
+            for dy in -5..=5i32 {
+                for dx in -5..=5i32 {
+                    if dx * dx + dy * dy + dz * dz <= 25 {
+                        w.queue_dig((cx + dx) as u32, (cy + dy) as u32, (cz + dz) as u32);
+                    }
+                }
+            }
+        }
+        w.flush();
+        let edits: Vec<voxel::Edit> = w.edits().to_vec();
+        assert!(!edits.is_empty(), "копка не дала ни одной правки");
+        layer.apply(&w, &edits);
+        let dirty: Vec<usize> = layer.dirty().iter().map(|&i| i as usize).collect();
+        assert!(!dirty.is_empty(), "мешер не заметил воронку");
+
+        let mut p = Painter::default();
+        let mut checked = 0usize;
+        for i in dirty {
+            let quads = layer.quads(i);
+            if quads.is_empty() {
+                continue;
+            }
+            let mut bufs = class_bufs();
+            let at = chunk_at(i, nx, ny);
+            quads_to_mesh_painted(
+                &quads,
+                [0.0, 0.0, 0.0],
+                at,
+                |x, y, z| w.material(x, y, z),
+                &mut p,
+                &mut bufs,
+            );
+            for b in bufs.iter() {
+                for t in b.idx.chunks(6) {
+                    let base = t[0] as usize;
+                    assert_ne!(
+                        b.col[base],
+                        look::colour(voxel::store::AIR),
+                        "грань покрашена цветом неизвестного материала"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200, "проверка почти ничего не проверила: {checked}");
     }
 
     /// **Однородный квад не режется.** Быстрый путь — это не
