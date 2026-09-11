@@ -130,6 +130,10 @@ fn main() -> ExitCode {
     // и последний снимок говорит про последний тик, а не про прогон.
     let (mut edits, mut topo, mut falls, mut rides, mut worst_q) = (0u64, 0u64, 0u64, 0u64, 0usize);
     let mut backlog = 0u64;
+    // Застрявшие: живой юнит, не сдвинувшийся за последнюю сотню тиков.
+    // Это конечная проверка навигации — не «есть ли направление»,
+    // а «дошёл ли кто-нибудь куда-нибудь».
+    let mut snap: Vec<(u32, i32, i32)> = Vec::new();
     for t in 1..=a.ticks {
         hash = if a.threads > 1 {
             r.tick_par(a.threads)
@@ -147,6 +151,18 @@ fn main() -> ExitCode {
             // (`CLAUDE.md`, ADR-114, ADR-116). Считается по тому, остался
             // ли после тика хвост в очереди.
             backlog += u64::from(g.stats.queued > 0);
+        }
+        if a.stats && t + 100 == a.ticks {
+            snap = r
+                .world
+                .units
+                .live()
+                .iter()
+                .map(|&i| {
+                    let i = i as usize;
+                    (i as u32, r.world.units.x[i], r.world.units.z[i])
+                })
+                .collect();
         }
         if a.every > 0 && t % a.every == 0 {
             println!("tick={t} hash={hash:016x}");
@@ -194,6 +210,27 @@ fn main() -> ExitCode {
             );
         } else {
             println!("  земли нет");
+        }
+        // Стоять и стрелять — не «застрять». Считаются отдельно:
+        // застрявшим называется тот, кто не сдвинулся и цели не имеет.
+        let (mut still, mut shooting) = (0usize, 0usize);
+        for &(i, x, z) in snap.iter() {
+            let i = i as usize;
+            if !r.world.units.alive[i] || r.world.units.x[i] != x || r.world.units.z[i] != z {
+                continue;
+            }
+            if r.world.units.target[i] != sim_core::NO_TARGET {
+                shooting += 1;
+            } else {
+                still += 1;
+            }
+        }
+        if !snap.is_empty() {
+            println!(
+                "  стоят сто тиков: {still} без цели (застряли), {shooting} с целью (стреляют), из {} живых на тике {}",
+                snap.len(),
+                a.ticks - 100
+            );
         }
         let live = r.world.units.live().len();
         let with_target = r.world
