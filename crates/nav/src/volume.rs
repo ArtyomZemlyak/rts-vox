@@ -70,6 +70,22 @@ pub struct VolGraph {
     lev: Vec<u16>,
     /// Посильный перепад — тоже снимок, по той же причине.
     max_step: u32,
+    /// Метка компоненты связности узла.
+    ///
+    /// Живёт у графа, а не у поля: это свойство геометрии, и читают его
+    /// двое — поле (чтобы дать цель каждой компоненте) и граф секторов
+    /// (чтобы ответить «пути нет» одним сравнением). Две разметки
+    /// разошлись бы молча.
+    comp: Vec<u32>,
+    pub components: usize,
+    /// Место в разметке: узел, текущая метка, счётчик.
+    lab_at: usize,
+    lab_cur: u32,
+    lab_n: u32,
+    lab_stack: Vec<u32>,
+    /// Клетка узла. Заполняется в `begin` тем же проходом, что считает
+    /// узлы, поэтому стоит ноль.
+    node_cell: Vec<u32>,
     pub nodes: usize,
     pub edges: usize,
     /// Клетка, с которой продолжится сборка рёбер.
@@ -136,12 +152,17 @@ impl VolGraph {
         self.max_step = nav.max_step;
         self.lev.clear();
         self.lev.resize(nodes as usize, 0);
+        self.node_cell.clear();
+        self.node_cell.resize(nodes as usize, 0);
         for cz in 0..h {
             for cx in 0..w {
                 let i = (cz * w + cx) as usize;
                 let levels = nav.levels_at(cx, cz);
                 let base = self.start[i] as usize;
                 self.lev[base..base + levels.len()].copy_from_slice(levels);
+                for k in 0..levels.len() {
+                    self.node_cell[base + k] = i as u32;
+                }
             }
         }
         self.nb.clear();
@@ -150,6 +171,76 @@ impl VolGraph {
         self.nbn.resize(nodes as usize, [0; 4]);
         self.edges = 0;
         self.cursor = 0;
+        self.comp.clear();
+        self.comp.resize(nodes as usize, u32::MAX);
+        self.lab_stack.clear();
+        self.lab_at = 0;
+        self.lab_cur = 0;
+        self.lab_n = 0;
+        self.components = 0;
+    }
+
+    /// Клетка узла — линейный индекс в сетке нав-клеток.
+    #[inline]
+    pub fn cell_of(&self, node: usize) -> u32 {
+        self.node_cell[node]
+    }
+
+    /// Сколько уровней у клетки.
+    #[inline]
+    pub fn levels_in(&self, cell: usize) -> usize {
+        self.count[cell] as usize
+    }
+
+    /// Первый узел клетки.
+    #[inline]
+    pub fn first_node(&self, cell: usize) -> u32 {
+        self.start[cell]
+    }
+
+    /// Метка компоненты узла. Одинаковая метка — дорога есть.
+    #[inline]
+    pub fn comp_of(&self, node: usize) -> u32 {
+        self.comp[node]
+    }
+
+    /// Разметить компоненты, обойдя не более `budget` узлов.
+    ///
+    /// Стек обхода живёт между вызовами: разметка большой компоненты
+    /// не помещается в один тик, а обходить её заново с каждой порцией
+    /// значило бы не считать её никогда.
+    ///
+    /// Метки идут по возрастанию номера первого встреченного узла:
+    /// разметка — функция графа, а не порядка обхода.
+    pub fn label_step(&mut self, budget: u32) -> bool {
+        let mut spent = 0u32;
+        loop {
+            while let Some(k) = self.lab_stack.pop() {
+                for side in 0..4 {
+                    for m in self.side(k as usize, side) {
+                        if self.comp[m as usize] == u32::MAX {
+                            self.comp[m as usize] = self.lab_cur;
+                            self.lab_stack.push(m);
+                        }
+                    }
+                }
+                spent += 1;
+                if spent >= budget {
+                    return false;
+                }
+            }
+            while self.lab_at < self.nodes && self.comp[self.lab_at] != u32::MAX {
+                self.lab_at += 1;
+            }
+            if self.lab_at >= self.nodes {
+                self.components = self.lab_n as usize;
+                return true;
+            }
+            self.lab_cur = self.lab_n;
+            self.lab_n += 1;
+            self.comp[self.lab_at] = self.lab_cur;
+            self.lab_stack.push(self.lab_at as u32);
+        }
     }
 
     /// Досчитать рёбра, но не более чем для `budget` узлов.
@@ -207,6 +298,7 @@ impl VolGraph {
     pub fn build(&mut self, nav: &NavLayer) {
         self.begin(nav);
         while !self.build_step(u32::MAX) {}
+        while !self.label_step(u32::MAX) {}
     }
 }
 
@@ -218,17 +310,12 @@ pub struct VolField {
     pub dir: Vec<u8>,
     active: Vec<bool>,
     fixed: Vec<bool>,
-    comp: Vec<u32>,
     stack: Vec<u32>,
     best: Vec<(u64, u32)>,
     /// Место в развёртке: номер обхода и клетка.
     sweep: usize,
     at: u32,
     round_changed: bool,
-    /// Место в разметке компонент: узел, метка, счётчик.
-    lab_at: usize,
-    lab_cur: u32,
-    lab_n: u32,
     /// Место в выборе целей и в публикации.
     seed_at: u32,
     pub_at: usize,
@@ -246,11 +333,6 @@ impl VolField {
         VolField::default()
     }
 
-    /// Метка компоненты узла. Одинаковая метка — дорога есть.
-    pub fn comp_of(&self, node: usize) -> u32 {
-        self.comp[node]
-    }
-
     /// Отвести память и сбросить курсоры. Дальше работа идёт стадиями,
     /// и у каждой свой потолок за тик.
     pub fn alloc(&mut self, g: &VolGraph) {
@@ -263,54 +345,15 @@ impl VolField {
         self.active.resize(n, false);
         self.fixed.clear();
         self.fixed.resize(n, false);
-        self.comp.clear();
-        self.comp.resize(n, u32::MAX);
         self.stack.clear();
         self.updates = 0;
         self.reachable = 0;
         self.sweep = 0;
         self.at = 0;
         self.round_changed = false;
-        self.lab_at = 0;
-        self.lab_cur = 0;
-        self.lab_n = 0;
         self.seed_at = 0;
         self.pub_at = 0;
         self.components = 0;
-    }
-
-    /// Разметить компоненты, обойдя не более `budget` узлов.
-    ///
-    /// Стек обхода живёт между вызовами: разметка большой компоненты
-    /// не помещается в один тик, а обходить её заново с каждой порцией
-    /// значило бы не считать её никогда.
-    pub fn label_step(&mut self, g: &VolGraph, budget: u32) -> bool {
-        let mut spent = 0u32;
-        loop {
-            while let Some(k) = self.stack.pop() {
-                for m in g.neighbours(k as usize) {
-                    if self.comp[m as usize] == u32::MAX {
-                        self.comp[m as usize] = self.lab_cur;
-                        self.stack.push(m);
-                    }
-                }
-                spent += 1;
-                if spent >= budget {
-                    return false;
-                }
-            }
-            while self.lab_at < g.nodes && self.comp[self.lab_at] != u32::MAX {
-                self.lab_at += 1;
-            }
-            if self.lab_at >= g.nodes {
-                self.components = self.lab_n as usize;
-                return true;
-            }
-            self.lab_cur = self.lab_n;
-            self.lab_n += 1;
-            self.comp[self.lab_at] = self.lab_cur;
-            self.stack.push(self.lab_at as u32);
-        }
     }
 
     /// Выбрать цели: у каждой компоненты свой узел, ближайший к точке.
@@ -322,6 +365,7 @@ impl VolField {
     /// на четыре и на двадцать две клетки (ADR-138).
     pub fn seed_step(&mut self, g: &VolGraph, tcx: u32, tcz: u32, budget: u32) -> bool {
         if self.seed_at == 0 {
+            self.components = g.components;
             self.best.clear();
             self.best.resize(self.components, (u64::MAX, NO_NODE));
         }
@@ -338,7 +382,7 @@ impl VolField {
             for li in 0..g.count[i] as usize {
                 let node = g.start[i] + li as u32;
                 // Ничьи — по номеру узла (`CLAUDE.md`).
-                let c = self.comp[node as usize] as usize;
+                let c = g.comp_of(node as usize) as usize;
                 if (d, node) < self.best[c] {
                     self.best[c] = (d, node);
                 }
@@ -366,7 +410,6 @@ impl VolField {
         if g.nodes == 0 {
             return;
         }
-        while !self.label_step(g, u32::MAX) {}
         while !self.seed_step(g, tcx, tcz, u32::MAX) {}
     }
 
@@ -583,14 +626,14 @@ impl VolRoute {
                 if !self.wg.build_step(b.cells) {
                     return false;
                 }
-                self.wf.alloc(&self.wg);
                 self.stage = Stage::Label;
                 return false;
             }
             Stage::Label => {
-                if !self.wf.label_step(&self.wg, b.scan) {
+                if !self.wg.label_step(b.scan) {
                     return false;
                 }
+                self.wf.alloc(&self.wg);
                 self.stage = Stage::Seed;
                 return false;
             }
@@ -617,7 +660,7 @@ impl VolRoute {
         // Сошлось: меняем рабочее с опубликованным местами.
         std::mem::swap(&mut self.g, &mut self.wg);
         std::mem::swap(&mut self.dir, &mut self.wf.dir);
-        self.components = self.wf.components;
+        self.components = self.wg.components;
         self.reachable = self.wf.reachable;
         self.updates = self.wf.updates;
         self.published += 1;
@@ -683,12 +726,12 @@ mod tests {
     /// не видит крыш.
     #[test]
     fn a_tunnel_is_a_road() {
-        let (g, f, nav) = field(true);
+        let (g, _f, nav) = field(true);
         let near = floor_node(&g, &nav, 8, 16);
         let far = floor_node(&g, &nav, 24, 16);
         assert_eq!(
-            f.comp_of(near),
-            f.comp_of(far),
+            g.comp_of(near),
+            g.comp_of(far),
             "туннель не связал стороны"
         );
     }
@@ -700,7 +743,7 @@ mod tests {
         let (g, f, nav) = field(false);
         let near = floor_node(&g, &nav, 8, 16);
         let far = floor_node(&g, &nav, 24, 16);
-        assert_ne!(f.comp_of(near), f.comp_of(far), "стена не разрезала карту");
+        assert_ne!(g.comp_of(near), g.comp_of(far), "стена не разрезала карту");
         assert_ne!(f.t[near], INF, "у своей компоненты обязана быть цель");
         assert_ne!(f.t[far], INF, "у своей компоненты обязана быть цель");
     }
@@ -739,7 +782,7 @@ mod tests {
             );
             let blind = (0..g.nodes).filter(|&n| f.dir[n] == 255).count();
             // Без направления остаются только сами цели: идти им некуда.
-            assert_eq!(blind, f.components, "узлов без направления больше, чем целей");
+            assert_eq!(blind, g.components, "узлов без направления больше, чем целей");
         }
     }
 

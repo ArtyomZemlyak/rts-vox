@@ -1,0 +1,697 @@
+//! Граф секторов и порталов **по объёмной навигации**.
+//!
+//! Плоский граф порталов (`portals.rs`) режет сетку `Grid`, у которой
+//! на клетку один уровень. Такой граф не видит ни туннеля под горой,
+//! ни крыши: узлом ему служит клетка, а клетка — не место, где стоит
+//! юнит (ADR-138). Здесь узлом служит то же, что в `volume.rs`, —
+//! **клетка плюс уровень**.
+//!
+//! Зачем: поле направлений считается по всей карте и потому отстаёт
+//! на сотню тиков (ADR-138). Архитектура (ADR-106) требует другого —
+//! дальнее вести графом порталов, а эйконал решать **внутри сектора**.
+//! Первое, что для этого нужно, — портал, который знает про уровни.
+//!
+//! **Детерминизм.** Ничьи разрешаются номером узла, а не порядком
+//! вставки в очередь; `HashMap` не используется — только плотные
+//! массивы и двоичный поиск.
+
+use crate::volume::VolGraph;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
+/// Сторона сектора в клетках. Та же, что у плоского графа и у эйконала
+/// (ADR-066).
+pub const SEC: u32 = 16;
+
+/// Стоимость шага между соседними узлами — **в шагах, а не во времени**.
+///
+/// Граф порталов отвечает на вопрос «куда идти дальше», а не «сколько
+/// это займёт»: время считает эйконал внутри сектора, и метрика у него
+/// своя, годуновская. Смешивать их в одном числе — значит получить
+/// величину, которая ни то ни другое.
+pub const STEP: u32 = 1;
+
+/// Портал — отрезок границы двух секторов, проходимый насквозь.
+///
+/// Представителем служит узел с наименьшим номером: ничья не должна
+/// зависеть от того, с какого конца границу обходили.
+#[derive(Clone, Copy, Debug)]
+pub struct Portal {
+    pub node_a: u32,
+    pub node_b: u32,
+    pub sector_a: u32,
+    pub sector_b: u32,
+    /// Сколько узлов в отрезке — по нему видно, узкий проход или широкий.
+    pub width: u16,
+}
+
+#[derive(Clone, Copy)]
+struct Edge {
+    to: u32,
+    cost: u32,
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct BuildStats {
+    pub portals: usize,
+    pub edges: usize,
+    /// Сколько раз пришлось решать «расстояние внутри сектора».
+    pub sector_solves: usize,
+    /// Узлов посещено этими решениями — работа, а не таймер.
+    pub visited: u64,
+}
+
+#[derive(Default)]
+pub struct SectorGraph {
+    sw: u32,
+    sh: u32,
+    pub(crate) w: u32,
+    pub portals: Vec<Portal>,
+    /// CSR: рёбра, сгруппированные по исходному порталу.
+    starts: Vec<u32>,
+    edges: Vec<Edge>,
+    /// CSR: порталы каждого сектора.
+    sec_starts: Vec<u32>,
+    sec_portals: Vec<u32>,
+}
+
+/// Стороны в порядке `volume::SIDES`: -Z, -X, +X, +Z.
+const SIDE_PX: usize = 2;
+const SIDE_PZ: usize = 3;
+
+impl SectorGraph {
+    pub fn new() -> SectorGraph {
+        SectorGraph::default()
+    }
+
+    pub fn sectors(&self) -> (u32, u32) {
+        (self.sw, self.sh)
+    }
+
+    /// Сектор узла.
+    #[inline]
+    pub fn sector_of(&self, g: &VolGraph, node: usize) -> u32 {
+        let cell = g.cell_of(node);
+        let (cx, cz) = (cell % self.w, cell / self.w);
+        (cz / SEC) * self.sw + cx / SEC
+    }
+
+    pub fn portals_of(&self, sector: u32) -> &[u32] {
+        let s = sector as usize;
+        &self.sec_portals[self.sec_starts[s] as usize..self.sec_starts[s + 1] as usize]
+    }
+
+    /// Вершина поиска — **сторона портала**, а не портал.
+    ///
+    /// Портал соединяет два сектора, и путь через него состоит из двух
+    /// разных вещей: пройти сектором до портала и перешагнуть на ту
+    /// сторону. Пока сторона была одна на двоих, второе не стоило
+    /// ничего, и цена маршрута выходила ниже прямой линии (ADR-149).
+    #[inline]
+    pub fn port_of(&self, portal: u32, sector: u32) -> u32 {
+        let p = &self.portals[portal as usize];
+        portal * 2 + u32::from(p.sector_a != sector)
+    }
+
+    #[inline]
+    pub fn portal_of_port(&self, port: u32) -> u32 {
+        port / 2
+    }
+
+    /// Узел, которым сторона портала смотрит в свой сектор.
+    #[inline]
+    pub fn node_of_port(&self, port: u32) -> u32 {
+        let p = &self.portals[(port / 2) as usize];
+        if port % 2 == 0 {
+            p.node_a
+        } else {
+            p.node_b
+        }
+    }
+
+    pub fn links_of(&self, port: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let p = port as usize;
+        self.edges[self.starts[p] as usize..self.starts[p + 1] as usize]
+            .iter()
+            .map(|e| (e.to, e.cost))
+    }
+
+    /// Собрать граф по объёмному.
+    pub fn build(&mut self, g: &VolGraph) -> BuildStats {
+        let (w, h) = g.dims();
+        self.w = w;
+        self.sw = w.div_ceil(SEC);
+        self.sh = h.div_ceil(SEC);
+        self.portals.clear();
+        cut_portals(self, g, w, h);
+        let nsec = (self.sw * self.sh) as usize;
+        group(self, nsec);
+        let mut st = BuildStats { portals: self.portals.len(), ..Default::default() };
+        solve(self, g, &mut st);
+        st.edges = self.edges.len();
+        st
+    }
+}
+
+/// Нарезать границы секторов на порталы.
+///
+/// Два перехода через одну границу попадают в один портал, если их узлы
+/// со стороны `a` соседствуют **вдоль границы**. Иначе портал был бы
+/// на каждый узел, и граф раздулся бы до размеров сетки.
+fn cut_portals(sg: &mut SectorGraph, g: &VolGraph, w: u32, h: u32) {
+    let cell = |cx: u32, cz: u32| (cz * w + cx) as usize;
+    // Вертикальные границы: между столбцами cx-1 и cx, где cx кратно SEC.
+    let mut cx = SEC;
+    while cx < w {
+        let mut cz = 0;
+        while cz < h {
+            let z_end = (cz / SEC + 1) * SEC;
+            let z_end = z_end.min(h);
+            run_boundary(sg, g, cx, cz, z_end, true, cell);
+            cz = z_end;
+        }
+        cx += SEC;
+    }
+    // Горизонтальные: между строками cz-1 и cz.
+    let mut cz = SEC;
+    while cz < h {
+        let mut cx = 0;
+        while cx < w {
+            let x_end = ((cx / SEC + 1) * SEC).min(w);
+            run_boundary(sg, g, cz, cx, x_end, false, cell);
+            cx = x_end;
+        }
+        cz += SEC;
+    }
+}
+
+/// Один отрезок границы: `at` — координата поперёк, `from..to` — вдоль.
+fn run_boundary(
+    sg: &mut SectorGraph,
+    g: &VolGraph,
+    at: u32,
+    from: u32,
+    to: u32,
+    vertical: bool,
+    cell: impl Fn(u32, u32) -> usize,
+) {
+    // Сторона перехода: поперёк границы; сторона соседства: вдоль неё.
+    let (cross, along) = if vertical { (SIDE_PX, SIDE_PZ) } else { (SIDE_PZ, SIDE_PX) };
+    // Крайние узлы предыдущего шага вдоль границы — чтобы понять,
+    // продолжается отрезок или начинается новый.
+    let mut prev: Vec<u32> = Vec::new();
+    let mut cur: Vec<u32> = Vec::new();
+    // Открытый отрезок: представитель и ширина.
+    let mut open: Option<(u32, u32, u16)> = None;
+    for t in from..to {
+        let c = if vertical { cell(at - 1, t) } else { cell(t, at - 1) };
+        cur.clear();
+        let n0 = g.first_node(c);
+        for li in 0..g.levels_in(c) {
+            let node = n0 + li as u32;
+            let mut nb = g.side(node as usize, cross);
+            let Some(other) = nb.next() else { continue };
+            // Соседство вдоль границы: продолжает ли этот узел отрезок.
+            let joins = prev.iter().any(|&p| {
+                g.side(p as usize, along).any(|m| m == node)
+            });
+            match open {
+                Some((a, b, wd)) if joins => open = Some((a.min(node), b, wd + 1)),
+                _ => {
+                    if let Some((a, b, wd)) = open.take() {
+                        push_portal(sg, g, a, b, wd);
+                    }
+                    open = Some((node, other, 1));
+                }
+            }
+            cur.push(node);
+        }
+        if cur.is_empty() {
+            if let Some((a, b, wd)) = open.take() {
+                push_portal(sg, g, a, b, wd);
+            }
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    if let Some((a, b, wd)) = open.take() {
+        push_portal(sg, g, a, b, wd);
+    }
+}
+
+fn push_portal(sg: &mut SectorGraph, g: &VolGraph, node_a: u32, node_b: u32, width: u16) {
+    // Представителем отрезка служит наименьший его узел, и вторая
+    // сторона берётся у него же — иначе пара «представитель и его
+    // визави» зависела бы от порядка обхода.
+    let sector_a = sg.sector_of(g, node_a as usize);
+    let sector_b = sg.sector_of(g, node_b as usize);
+    if sector_a == sector_b {
+        return;
+    }
+    sg.portals.push(Portal { node_a, node_b, sector_a, sector_b, width });
+}
+
+/// Разложить порталы по секторам (CSR).
+fn group(sg: &mut SectorGraph, nsec: usize) {
+    let mut cnt = vec![0u32; nsec + 1];
+    for p in sg.portals.iter() {
+        cnt[p.sector_a as usize + 1] += 1;
+        cnt[p.sector_b as usize + 1] += 1;
+    }
+    for i in 0..nsec {
+        cnt[i + 1] += cnt[i];
+    }
+    let mut out = vec![0u32; cnt[nsec] as usize];
+    let mut at = cnt.clone();
+    for (i, p) in sg.portals.iter().enumerate() {
+        out[at[p.sector_a as usize] as usize] = i as u32;
+        at[p.sector_a as usize] += 1;
+        out[at[p.sector_b as usize] as usize] = i as u32;
+        at[p.sector_b as usize] += 1;
+    }
+    sg.sec_starts = cnt;
+    sg.sec_portals = out;
+}
+
+/// Расстояния между сторонами порталов.
+///
+/// Рёбер два рода: **внутри сектора** — дейкстра от стороны к стороне,
+/// и **через портал** — один шаг с одной стороны на другую. Второе
+/// раньше было бесплатным, потому что у портала была одна вершина
+/// на оба сектора (ADR-149).
+fn solve(sg: &mut SectorGraph, g: &VolGraph, st: &mut BuildStats) {
+    let np = sg.portals.len();
+    let nport = np * 2;
+    let nsec = (sg.sw * sg.sh) as usize;
+    let mut starts = vec![0u32; nport + 1];
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut dist = vec![u32::MAX; g.nodes];
+    let mut touched: Vec<u32> = Vec::new();
+    let mut bucket: Vec<Vec<Edge>> = (0..nport).map(|_| Vec::new()).collect();
+
+    // Переход на ту сторону — обычное ребро в один шаг.
+    for p in 0..np as u32 {
+        bucket[(p * 2) as usize].push(Edge { to: p * 2 + 1, cost: STEP });
+        bucket[(p * 2 + 1) as usize].push(Edge { to: p * 2, cost: STEP });
+    }
+
+    for s in 0..nsec as u32 {
+        let ps: Vec<u32> = sg.portals_of(s).to_vec();
+        if ps.len() < 2 {
+            continue;
+        }
+        for &pi in ps.iter() {
+            let port_i = sg.port_of(pi, s);
+            let from = sg.node_of_port(port_i);
+            st.sector_solves += 1;
+            st.visited += dijkstra_in_sector(sg, g, s, from, &mut dist, &mut touched) as u64;
+            for &pj in ps.iter() {
+                if pj == pi {
+                    continue;
+                }
+                let port_j = sg.port_of(pj, s);
+                let d = dist[sg.node_of_port(port_j) as usize];
+                if d != u32::MAX {
+                    bucket[port_i as usize].push(Edge { to: port_j, cost: d });
+                }
+            }
+            for &t in touched.iter() {
+                dist[t as usize] = u32::MAX;
+            }
+            touched.clear();
+        }
+    }
+    for (i, b) in bucket.iter().enumerate() {
+        starts[i + 1] = starts[i] + b.len() as u32;
+        edges.extend_from_slice(b);
+    }
+    sg.starts = starts;
+    sg.edges = edges;
+}
+
+/// Дейкстра по узлам одного сектора. Возвращает число посещённых узлов.
+fn dijkstra_in_sector(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    sector: u32,
+    start: u32,
+    dist: &mut [u32],
+    touched: &mut Vec<u32>,
+) -> usize {
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    dist[start as usize] = 0;
+    touched.push(start);
+    heap.push(Reverse((0, start)));
+    let mut visited = 0usize;
+    while let Some(Reverse((d, i))) = heap.pop() {
+        if d > dist[i as usize] {
+            continue;
+        }
+        visited += 1;
+        for side in 0..4 {
+            for m in g.side(i as usize, side) {
+                if sg.sector_of(g, m as usize) != sector {
+                    continue;
+                }
+                let nd = d + STEP;
+                if nd < dist[m as usize] {
+                    if dist[m as usize] == u32::MAX {
+                        touched.push(m);
+                    }
+                    dist[m as usize] = nd;
+                    heap.push(Reverse((nd, m)));
+                }
+            }
+        }
+    }
+    visited
+}
+
+/// Переиспользуемые буферы поиска маршрута.
+#[derive(Default)]
+pub struct RouteWs {
+    g: Vec<u32>,
+    seen: Vec<u32>,
+    came: Vec<u32>,
+    epoch: u32,
+    dist: Vec<u32>,
+    touched: Vec<u32>,
+    /// Порталы целевого сектора и цена хвоста до цели.
+    ends: Vec<(u32, u32)>,
+}
+
+impl RouteWs {
+    pub fn new(np: usize, nodes: usize) -> RouteWs {
+        RouteWs {
+            g: vec![0; np],
+            seen: vec![0; np],
+            came: vec![u32::MAX; np],
+            epoch: 0,
+            dist: vec![u32::MAX; nodes],
+            touched: Vec::new(),
+            ends: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RouteStats {
+    pub found: bool,
+    /// Сторон порталов в маршруте: перешагнуть портал — тоже шаг.
+    pub hops: u32,
+    /// Сторон снято с очереди.
+    pub expanded: u32,
+    pub cost: u32,
+    /// Ответ дан одним сравнением меток: разные компоненты — пути нет.
+    pub by_island: bool,
+}
+
+/// Маршрут от узла к узлу по графу порталов.
+///
+/// **Разные компоненты — пути нет, и это одно сравнение** (ADR-106):
+/// перебирать порталы, чтобы выяснить то, что известно из разметки,
+/// незачем.
+pub fn route(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    ws: &mut RouteWs,
+    from: u32,
+    to: u32,
+) -> RouteStats {
+    let mut st = RouteStats::default();
+    if from == to {
+        st.found = true;
+        return st;
+    }
+    if g.comp_of(from as usize) != g.comp_of(to as usize) {
+        st.by_island = true;
+        return st;
+    }
+    let (sa, sb) = (sg.sector_of(g, from as usize), sg.sector_of(g, to as usize));
+    if sa == sb {
+        // Внутри сектора порталы не нужны: дальше ведёт поле.
+        let d = one_to_one(sg, g, sa, from, to, &mut ws.dist, &mut ws.touched);
+        st.found = d != u32::MAX;
+        st.cost = if st.found { d } else { 0 };
+        return st;
+    }
+    let nport = sg.portals.len() * 2;
+    if ws.g.len() < nport {
+        *ws = RouteWs::new(nport, g.nodes);
+    }
+
+    // **Одна дейкстра на сектор, а не одна на портал.** Расстояния
+    // до всех сторон сектора читаются из одного решения; отдельный
+    // запуск на каждый портал стоил 130–350 мкс вместо единиц (ADR-149).
+    ws.ends.clear();
+    dijkstra_in_sector(sg, g, sb, to, &mut ws.dist, &mut ws.touched);
+    for &p in sg.portals_of(sb) {
+        let port = sg.port_of(p, sb);
+        let d = ws.dist[sg.node_of_port(port) as usize];
+        if d != u32::MAX {
+            ws.ends.push((port, d));
+        }
+    }
+    for &t in ws.touched.iter() {
+        ws.dist[t as usize] = u32::MAX;
+    }
+    ws.touched.clear();
+    ws.ends.sort_unstable();
+    if ws.ends.is_empty() {
+        return st;
+    }
+
+    // Оценка снизу — манхэттенское расстояние между клетками. Шаг между
+    // соседними клетками стоит `STEP` независимо от перепада, поэтому
+    // оценка допустима; перебор она режет вчетверо.
+    let tw = sg.w;
+    let tcell = g.cell_of(to as usize);
+    let (tx, tz) = ((tcell % tw) as i64, (tcell / tw) as i64);
+    let hh = |port: u32| -> u32 {
+        let c = g.cell_of(sg.node_of_port(port) as usize);
+        let (x, z) = ((c % tw) as i64, (c / tw) as i64);
+        (((x - tx).abs() + (z - tz).abs()) as u32) * STEP
+    };
+
+    ws.epoch = ws.epoch.wrapping_add(1);
+    if ws.epoch == 0 {
+        ws.seen.iter_mut().for_each(|v| *v = 0);
+        ws.epoch = 1;
+    }
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    dijkstra_in_sector(sg, g, sa, from, &mut ws.dist, &mut ws.touched);
+    for &p in sg.portals_of(sa) {
+        let port = sg.port_of(p, sa);
+        let d = ws.dist[sg.node_of_port(port) as usize];
+        if d == u32::MAX {
+            continue;
+        }
+        ws.g[port as usize] = d;
+        ws.seen[port as usize] = ws.epoch;
+        ws.came[port as usize] = u32::MAX;
+        heap.push(Reverse((d + hh(port), port)));
+    }
+    for &t in ws.touched.iter() {
+        ws.dist[t as usize] = u32::MAX;
+    }
+    ws.touched.clear();
+
+    let mut best = u32::MAX;
+    let mut best_p = u32::MAX;
+    while let Some(Reverse((f, port))) = heap.pop() {
+        if ws.seen[port as usize] != ws.epoch {
+            continue;
+        }
+        let d = ws.g[port as usize];
+        if f > d + hh(port) {
+            continue;
+        }
+        if f >= best {
+            // Оценка снизу уже хуже найденного: дальше только хуже.
+            break;
+        }
+        st.expanded += 1;
+        if let Ok(k) = ws.ends.binary_search_by(|probe| probe.0.cmp(&port)) {
+            let tail = ws.ends[k].1;
+            if d + tail < best {
+                best = d + tail;
+                best_p = port;
+            }
+        }
+        for (q, c) in sg.links_of(port) {
+            let nd = d + c;
+            if ws.seen[q as usize] != ws.epoch || nd < ws.g[q as usize] {
+                ws.seen[q as usize] = ws.epoch;
+                ws.g[q as usize] = nd;
+                ws.came[q as usize] = port;
+                heap.push(Reverse((nd + hh(q), q)));
+            }
+        }
+    }
+    if best == u32::MAX {
+        return st;
+    }
+    st.found = true;
+    st.cost = best;
+    let mut cur = best_p;
+    while cur != u32::MAX {
+        st.hops += 1;
+        cur = ws.came[cur as usize];
+    }
+    st
+}
+
+/// Расстояние между двумя узлами внутри одного сектора.
+fn one_to_one(
+    sg: &SectorGraph,
+    g: &VolGraph,
+    sector: u32,
+    from: u32,
+    to: u32,
+    dist: &mut [u32],
+    touched: &mut Vec<u32>,
+) -> u32 {
+    if from == to {
+        return 0;
+    }
+    dijkstra_in_sector(sg, g, sector, from, dist, touched);
+    let d = dist[to as usize];
+    for &t in touched.iter() {
+        dist[t as usize] = u32::MAX;
+    }
+    touched.clear();
+    d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layer::NavLayer;
+    use crate::volume::NO_NODE;
+    use voxel::store::{Mat, AIR};
+
+    /// Земля до `GY`, гряда во всю карту по `x == WALL`, и туннель в ней
+    /// при `z` в `[30, 36)` — если он есть.
+    struct Ridge {
+        tunnel: bool,
+    }
+    const GY: u32 = 8;
+    const WALL: u32 = 32;
+    impl voxel::Generator for Ridge {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < GY {
+                return 2;
+            }
+            if x.abs_diff(WALL) <= 2 && y < 40 {
+                if self.tunnel && (30..36).contains(&z) && (GY..GY + 6).contains(&y) {
+                    return AIR;
+                }
+                return 3;
+            }
+            AIR
+        }
+    }
+
+    fn world(tunnel: bool) -> (VolGraph, SectorGraph, NavLayer, BuildStats) {
+        let w = voxel::World::new(96, 64, 96, 8192, Box::new(Ridge { tunnel }));
+        let nav = NavLayer::new(&w, 4, 2, 1);
+        let mut g = VolGraph::new();
+        g.build(&nav);
+        let mut sg = SectorGraph::new();
+        let st = sg.build(&g);
+        (g, sg, nav, st)
+    }
+
+    fn floor_node(g: &VolGraph, nav: &NavLayer, cx: u32, cz: u32) -> u32 {
+        let li = nav
+            .levels_at(cx, cz)
+            .iter()
+            .position(|&l| l as u32 == GY)
+            .expect("уровень пола");
+        let n = g.node(cx, cz, li);
+        assert_ne!(n, NO_NODE, "нет узла в клетке ({cx}, {cz})");
+        n
+    }
+
+    /// **Порталы находятся, и их меньше, чем узлов на границах.**
+    /// Портал на узел означал бы, что нарезка не режет.
+    #[test]
+    fn boundaries_become_a_handful_of_portals() {
+        let (_, _sg, _, st) = world(true);
+        assert!(st.portals > 0, "порталов нет вовсе");
+        assert!(
+            st.portals < 400,
+            "порталов {} — граница не склеилась в отрезки",
+            st.portals
+        );
+        assert!(st.edges > 0, "рёбер между порталами нет");
+    }
+
+    /// **Маршрут идёт через туннель.** Плоский граф по поверхности его
+    /// не видит: над ходом порода.
+    #[test]
+    fn a_route_goes_through_the_tunnel() {
+        let (g, sg, nav, _) = world(true);
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let from = floor_node(&g, &nav, 4, 16);
+        let to = floor_node(&g, &nav, 44, 16);
+        let r = route(&sg, &g, &mut ws, from, to);
+        assert!(r.found, "маршрут через туннель не найден");
+        assert!(r.hops > 0, "маршрут без порталов при разных секторах");
+    }
+
+    /// **Без туннеля пути нет, и это видно одним сравнением меток.**
+    #[test]
+    fn a_solid_ridge_answers_by_island() {
+        let (g, sg, nav, _) = world(false);
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let from = floor_node(&g, &nav, 4, 16);
+        let to = floor_node(&g, &nav, 44, 16);
+        let r = route(&sg, &g, &mut ws, from, to);
+        assert!(!r.found, "маршрут нашёлся сквозь сплошную гряду");
+        assert!(r.by_island, "ответ дан перебором, а не меткой компоненты");
+        assert_eq!(r.expanded, 0, "перебор всё-таки был");
+    }
+
+    /// **Маршрут симметричен.** Рёбра двусторонние, значит и цена
+    /// в обе стороны одна. Недопустимая оценка снизу у A\* ломает это
+    /// первым делом.
+    #[test]
+    fn a_route_costs_the_same_both_ways() {
+        let (g, sg, nav, _) = world(true);
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let a = floor_node(&g, &nav, 4, 16);
+        let b = floor_node(&g, &nav, 44, 16);
+        let ab = route(&sg, &g, &mut ws, a, b);
+        let ba = route(&sg, &g, &mut ws, b, a);
+        assert!(ab.found && ba.found);
+        assert_eq!(ab.cost, ba.cost, "цена туда и обратно разная");
+    }
+
+    /// **Цена не ниже манхэттенского расстояния.** Шаг между соседними
+    /// клетками стоит `STEP`, значит короче прямой пути нет.
+    #[test]
+    fn a_route_is_never_shorter_than_the_straight_line() {
+        let (g, sg, nav, _) = world(true);
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let a = floor_node(&g, &nav, 4, 16);
+        let b = floor_node(&g, &nav, 44, 16);
+        let r = route(&sg, &g, &mut ws, a, b);
+        let (w, _) = nav.dims();
+        let (ca, cb) = (g.cell_of(a as usize), g.cell_of(b as usize));
+        let d = (ca % w).abs_diff(cb % w) + (ca / w).abs_diff(cb / w);
+        assert!(r.found);
+        assert!(r.cost >= d * STEP, "цена {} меньше прямой {}", r.cost, d * STEP);
+    }
+
+    /// **Сборка детерминирована**: два прогона дают тот же граф.
+    #[test]
+    fn the_build_is_deterministic() {
+        let (_, a, _, sa) = world(true);
+        let (_, b, _, sb) = world(true);
+        assert_eq!(sa.portals, sb.portals);
+        assert_eq!(sa.edges, sb.edges);
+        let pa: Vec<(u32, u32)> = a.portals.iter().map(|p| (p.node_a, p.node_b)).collect();
+        let pb: Vec<(u32, u32)> = b.portals.iter().map(|p| (p.node_a, p.node_b)).collect();
+        assert_eq!(pa, pb, "порталы разошлись между прогонами");
+    }
+}

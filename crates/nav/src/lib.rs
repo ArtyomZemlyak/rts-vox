@@ -9,6 +9,7 @@ pub mod godunov;
 pub mod layer;
 pub mod portals;
 pub mod scene;
+pub mod sectors;
 pub mod solver;
 pub mod vision;
 pub mod vision_incr;
