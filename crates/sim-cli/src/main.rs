@@ -130,6 +130,7 @@ fn main() -> ExitCode {
     // и последний снимок говорит про последний тик, а не про прогон.
     let (mut edits, mut topo, mut falls, mut rides, mut worst_q) = (0u64, 0u64, 0u64, 0u64, 0usize);
     let mut backlog = 0u64;
+    let (mut spawned, mut detached, mut too_big) = (0u64, 0u64, 0u64);
     // Застрявшие: живой юнит, не сдвинувшийся за последнюю сотню тиков.
     // Это конечная проверка навигации — не «есть ли направление»,
     // а «дошёл ли кто-нибудь куда-нибудь».
@@ -151,6 +152,9 @@ fn main() -> ExitCode {
             // (`CLAUDE.md`, ADR-114, ADR-116). Считается по тому, остался
             // ли после тика хвост в очереди.
             backlog += u64::from(g.stats.queued > 0);
+            spawned += g.bodies.spawned.len() as u64;
+            detached += g.stats.collapse.detached as u64;
+            too_big += g.stats.collapse.too_big as u64;
         }
         if a.stats && t + 100 == a.ticks {
             snap = r
@@ -207,6 +211,9 @@ fn main() -> ExitCode {
             println!(
                 "  очередь: худшая {worst_q}, тиков с хвостом {backlog} из {}, потолок правок {cap}",
                 a.ticks
+            );
+            println!(
+                "  каскад: отделений {detached}, тел создано {spawned}, не влезло в потолок {too_big}, поездок {rides}"
             );
         } else {
             println!("  земли нет");
