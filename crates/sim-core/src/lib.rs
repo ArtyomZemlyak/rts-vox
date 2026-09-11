@@ -389,6 +389,8 @@ pub struct World {
     /// Замер: выстрелов лучом и попаданий лучом.
     pub beams_fired: u64,
     pub beams_hit: u64,
+    /// Замер: сколько раз луч не выстрелил, потому что цель закрыта.
+    pub beams_blocked: u64,
     /// Замер: выстрелов сделано, попаданий по юнитам, упоров в породу.
     pub shots_fired: u64,
     pub shots_hit: u64,
@@ -533,6 +535,7 @@ impl World {
             shots: shot::Shots::new(),
             beams_fired: 0,
             beams_hit: 0,
+            beams_blocked: 0,
             shots_fired: 0,
             shots_hit: 0,
             shots_blocked: 0,
@@ -1289,6 +1292,7 @@ impl World {
             shots_refused,
             beams_fired,
             beams_hit,
+            beams_blocked,
             dmg_acc,
             events,
             ..
@@ -1310,15 +1314,22 @@ impl World {
                     // Луч приходит в тот же тик — но по той же линии
                     // огня, что и снаряд. Породу он не прожигает:
                     // упёрся, значит не попал.
-                    *beams_fired += 1;
+                    //
+                    // **Закрытая цель выстрела не стоит.** Линия
+                    // проверяется до выстрела, и если она закрыта,
+                    // очередь не тратится: стрелок ждёт, пока цель
+                    // выйдет, а не палит в холм (ADR-170).
                     let clear = match ground.as_ref() {
                         Some(g) => voxel::los::line_of_sight(&g.world, from, to).clear,
                         None => true,
                     };
-                    if clear {
-                        dmg_acc[tt] += w.damage as u32;
-                        *beams_hit += 1;
+                    if !clear {
+                        *beams_blocked += 1;
+                        continue;
                     }
+                    *beams_fired += 1;
+                    dmg_acc[tt] += w.damage as u32;
+                    *beams_hit += 1;
                     events.push(SimEvent::Beam {
                         x0: from.0,
                         y0: from.1,
@@ -2396,7 +2407,7 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             }
         }
         // `wall` — стоит ли стена между стрелками.
-        let run = |wall: bool| -> (u64, u64, bool) {
+        let run = |wall: bool| -> (u64, u64, bool, u64) {
             let t = test_tuning();
             let ws = modding::weapons::from_ron(
                 "( weapons: [ ( id: 2, kind: Laser, speed: 0, damage: 12, \
@@ -2428,19 +2439,22 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
                 w.tick();
             }
             let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
-            (w.beams_fired, w.beams_hit, solid)
+            (w.beams_fired, w.beams_hit, solid, w.beams_blocked)
         };
 
-        let (fired, hit, solid) = run(true);
-        assert!(fired > 0, "со стеной луч не стрелял вовсе");
-        assert_eq!(hit, 0, "сквозь стену прошло {hit} попаданий лучом из {fired}");
+        let (fired, hit, solid, blocked) = run(true);
+        assert_eq!(fired, 0, "по закрытой цели выстрелили {fired} раз");
+        assert_eq!(hit, 0, "сквозь стену прошло {hit} попаданий лучом");
+        assert!(blocked > 0, "стена не остановила ни одной попытки");
         assert!(solid, "луч проел стену — воронки у него быть не должно");
 
-        let (fired_open, hit_open, _) = run(false);
-        assert!(
-            hit_open > 0,
-            "без стены луч не попал ни разу из {fired_open} — \
-проверять тогда нечего"
+        let (fired_open, hit_open, _, _) = run(false);
+        assert!(hit_open > 0, "без стены луч не попал ни разу — проверять нечего");
+        // **Луч не мажет.** Линия проверяется до выстрела, поэтому
+        // выстрел и попадание — одно и то же событие (ADR-170).
+        assert_eq!(
+            fired_open, hit_open,
+            "выстрелов {fired_open}, попаданий {hit_open} — луч промахнулся"
         );
     }
 

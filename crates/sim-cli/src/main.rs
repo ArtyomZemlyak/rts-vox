@@ -257,8 +257,8 @@ fn main() -> ExitCode {
             );
         }
         println!(
-            "  лучом: выстрелов {}, попаданий {}",
-            r.world.beams_fired, r.world.beams_hit
+            "  лучом: выстрелов {}, попаданий {}, не стреляли по закрытой цели {}",
+            r.world.beams_fired, r.world.beams_hit, r.world.beams_blocked
         );
         println!(
             "  стрельба: выстрелов {}, попаданий {}, упоров в породу {}, отказов по потолку {}, в воздухе {}",
