@@ -63,7 +63,28 @@ fn print_top(body: &UnitBody, view: &[Option<Part>], w: usize) {
 
 fn main() {
     let views = std::env::args().any(|a| a == "--views");
-    let bodies = voxel::roster::all();
+    // `--mm N` пересобирает весь набор в другой воксельной сетке
+    // (ADR-208). Габарит в метрах не меняется — меняется, через
+    // сколько вокселей он выражен.
+    let mut mm: Option<u16> = None;
+    let mut it = std::env::args().skip(1);
+    while let Some(k) = it.next() {
+        if k == "--mm" {
+            mm = it.next().and_then(|v| v.parse().ok());
+        }
+    }
+    let mut bodies = voxel::roster::all();
+    if let Some(mm) = mm {
+        let mut kept = Vec::with_capacity(bodies.len());
+        for (name, b) in bodies {
+            match b.resampled(mm) {
+                Ok(r) => kept.push((name, r)),
+                Err(e) => println!("{name}: в сетке {mm} мм — {}", e.why()),
+            }
+        }
+        bodies = kept;
+        println!();
+    }
     println!("НАБОР ТЕЛ\n");
     println!(
         "{:<28} {:>12} {:>10} {:>9} {:>9} {:>7} {:>6} {:>9}",

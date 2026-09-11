@@ -35,6 +35,7 @@ struct Shot {
 #[derive(Resource)]
 struct Scene {
     bevel: f32,
+    mm: Option<u16>,
     spin: bool,
     pick: Vec<usize>,
 }
@@ -47,6 +48,8 @@ fn main() {
     let mut after = 4.0f32;
     let mut bevel = BEVEL;
     let mut spin = true;
+    // Пересобрать тела в другой воксельной сетке (ADR-208).
+    let mut mm: Option<u16> = None;
     // По умолчанию — танк, бот и командная машина: разные силуэты
     // при сравнимом размере, то есть видно и форму, и детали.
     let mut pick = vec![0usize, 1, 3];
@@ -58,6 +61,7 @@ fn main() {
             "--shot-after" => after = v().parse().unwrap_or(after),
             "--bevel" => bevel = v().parse().unwrap_or(bevel),
             "--still" => spin = false,
+            "--mm" => mm = v().parse().ok(),
             "--pick" => {
                 pick = v()
                     .split(',')
@@ -66,7 +70,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "models [--pick 0,1,3] [--bevel 0.12] [--still] [--shot файл] [--shot-after сек]"
+                    "models [--pick 0,1,3] [--bevel 0.5] [--mm 100] [--still] [--shot файл] [--shot-after сек]"
                 );
                 return;
             }
@@ -89,7 +93,7 @@ fn main() {
         }))
         .insert_resource(ClearColor(Color::srgb(0.14, 0.16, 0.20)))
         .insert_resource(Shot { path: shot, after, done: false, left, seen: 0 })
-        .insert_resource(Scene { bevel, spin, pick })
+        .insert_resource(Scene { bevel, mm, spin, pick })
         .add_systems(Startup, setup)
         .add_systems(Update, (turn, snap))
         .run();
@@ -101,7 +105,19 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene: Res<Scene>,
 ) {
-    let all = voxel::roster::all();
+    let mut all = voxel::roster::all();
+    if let Some(mm) = scene.mm {
+        all.retain_mut(|(name, b)| match b.resampled(mm) {
+            Ok(r) => {
+                *b = r;
+                true
+            }
+            Err(e) => {
+                println!("{name}: {}", e.why());
+                false
+            }
+        });
+    }
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.45,
@@ -176,7 +192,9 @@ fn setup(
         .iter()
         .map(|&i| all[i].1.extent_mm().1 as f32 / MM_PER_UNIT)
         .fold(0.0f32, f32::max);
-    let dist = (span * 0.72).max(tall * 1.6);
+    // Расстояние от **наибольшего** габарита, а не от ширины шеренги:
+    // на одной машине ширина мала, и камера утыкалась ей в борт.
+    let dist = span.max(tall) * 1.7;
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(dist * 0.30, tall * 0.85, dist)
