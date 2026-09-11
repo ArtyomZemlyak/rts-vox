@@ -1032,6 +1032,7 @@ fn push_face(seg: &mut Vec<(u16, u16, u16)>, idx: usize, lab: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bodies::test_gravity;
     use crate::store::{Mat, AIR};
 
     /// Мост: столб от дна до `DECK`, от него настил поперёк всей карты.
@@ -1069,7 +1070,7 @@ mod tests {
     fn a_span_crossing_a_chunk_boundary_falls() {
         let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
         let mut c = CollapseLayer::new(&w);
-        let mut b = Bodies::new(16);
+        let mut b = Bodies::new(16, test_gravity());
 
         // Подрезать опору у основания.
         cut(&mut w, 4);
@@ -1095,7 +1096,7 @@ mod tests {
     fn an_anchored_span_stays() {
         let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
         let mut c = CollapseLayer::new(&w);
-        let mut b = Bodies::new(16);
+        let mut b = Bodies::new(16, test_gravity());
         // Правка рядом с мостом, но не по нему.
         w.queue_dig(20, 10, 8);
         w.flush();
@@ -1113,7 +1114,7 @@ mod tests {
     fn the_whole_chain_falls_not_just_the_edited_chunk() {
         let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
         let mut c = CollapseLayer::new(&w);
-        let mut b = Bodies::new(16);
+        let mut b = Bodies::new(16, test_gravity());
         cut(&mut w, 4);
         w.flush();
         let edits: Vec<Edit> = w.edits().to_vec();
@@ -1131,7 +1132,7 @@ mod tests {
         let run = || -> Vec<(i64, i64, i64, usize)> {
             let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
             let mut c = CollapseLayer::new(&w);
-            let mut b = Bodies::new(16);
+            let mut b = Bodies::new(16, test_gravity());
             cut(&mut w, 4);
             w.flush();
             let edits: Vec<Edit> = w.edits().to_vec();
@@ -1171,6 +1172,7 @@ fn drop_face_cell(seg: &mut Vec<(u16, u16, u16)>, idx: u16) -> bool {
 #[cfg(test)]
 mod probe_equivalence {
     use super::*;
+    use crate::bodies::test_gravity;
     use crate::store::{Mat, AIR};
     use fx::rng::Rng;
 
@@ -1197,7 +1199,7 @@ mod probe_equivalence {
         let mut w = World::new(64, 64, 64, 100_000, Box::new(Layers));
         let mut c = CollapseLayer::new(&w);
         c.use_split_probe = probe;
-        let mut b = Bodies::new(64);
+        let mut b = Bodies::new(64, test_gravity());
         let mut r = Rng::new(7, 0xC0DE);
         let mut trace = Vec::new();
         let mut fired = 0usize;

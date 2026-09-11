@@ -130,6 +130,14 @@ fn solid_count(w: &World) -> u64 {
 // ---------------------------------------------------------------- D-2
 
 use voxel::bodies::Bodies;
+
+/// Тяготение сцены — то же, что у игры: из `data/sim.ron` (ADR-173).
+/// Литерала здесь нет нарочно: сцена обязана падать так же, как партия.
+fn scene_gravity() -> fx::Fx {
+    let t = modding::Tuning::from_ron(include_str!("../../../data/sim.ron"))
+        .expect("data/sim.ron");
+    sim_core::gravity_per_tick(&t)
+}
 use voxel::store::{Mat, AIR};
 use voxel::{Edit, Generator};
 
@@ -171,7 +179,7 @@ fn cut_stem(w: &mut World, level: u32) {
 fn d2_cutting_the_stem_detaches_the_cap() {
     let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
     let mut collapse = voxel::collapse::CollapseLayer::new(&w);
-    let mut bodies = Bodies::new(16);
+    let mut bodies = Bodies::new(16, scene_gravity());
 
     cut_stem(&mut w, 35);
     w.flush();
@@ -193,7 +201,7 @@ fn d2_cutting_the_stem_detaches_the_cap() {
 fn d2_body_limit_refuses_rather_than_drops() {
     let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
     let mut collapse = voxel::collapse::CollapseLayer::new(&w);
-    let mut bodies = Bodies::new(0);
+    let mut bodies = Bodies::new(0, scene_gravity());
 
     cut_stem(&mut w, 35);
     w.flush();
@@ -212,7 +220,7 @@ fn d2_cascade_is_deterministic() {
     let run = || -> Vec<(i64, i64, i64, usize)> {
         let mut w = World::new(32, 64, 32, 100_000, Box::new(Mushroom));
         let mut collapse = voxel::collapse::CollapseLayer::new(&w);
-        let mut bodies = Bodies::new(16);
+        let mut bodies = Bodies::new(16, scene_gravity());
         let mut trace = Vec::new();
         for t in 0..12u32 {
             cut_stem(&mut w, 35 + t % 3);
