@@ -192,6 +192,67 @@ fn main() -> ExitCode {
         );
     }
 
+    // --- Инкрементальная пересборка: копаем ещё немного и смотрим,
+    //     сколько стоит догнать граф.
+    println!(
+        "\n{:<24} {:>10} {:>10} {:>12} {:>10}",
+        "грязных секторов", "сторон", "переисп.", "пересчитано", "мс"
+    );
+    for more in [1u64, 20, 200] {
+        let mut w2 = World::new(
+            params.nx,
+            params.ny,
+            params.nz,
+            1 << 16,
+            Box::new(Terrain { params, seed: a.seed }),
+        );
+        let mut d2 = Dig::clustered(
+            &w2,
+            |x, z| terrain.surface(x, z),
+            a.diggers,
+            2,
+            12,
+            a.seed ^ 0xF10,
+        );
+        for _ in 0..a.ticks {
+            d2.step(&mut w2, &|x, z| terrain.surface(x, z));
+            w2.flush();
+        }
+        let mut nav2 = NavLayer::new(&w2, t.unit_height, t.nav_cell, t.max_step);
+        let mut g2 = VolGraph::new();
+        g2.build(&nav2);
+        let mut sg2 = SectorGraph::new();
+        sg2.build(&g2);
+
+        // Ещё немного копки — и отмечаем задетые секторы.
+        let mut dirty: Vec<u32> = Vec::new();
+        for _ in 0..more {
+            d2.step(&mut w2, &|x, z| terrain.surface(x, z));
+            let st = w2.flush();
+            let _ = st;
+            for e in w2.edits() {
+                let (cx, cz) = (e.x / t.nav_cell, e.z / t.nav_cell);
+                let sec = (cz / nav::sectors::SEC) * sg2.sectors().0 + cx / nav::sectors::SEC;
+                if !dirty.contains(&sec) {
+                    dirty.push(sec);
+                }
+            }
+            nav2.apply(&w2, w2.edits());
+        }
+        dirty.sort_unstable();
+        g2.build(&nav2);
+        let mut st2 = Default::default();
+        let ms = best_ms(|| st2 = sg2.rebuild(&g2, &dirty), 3);
+        println!(
+            "{:<24} {:>10} {:>10} {:>12} {:>10.2}",
+            dirty.len(),
+            st2.portals * 2,
+            st2.reused_ports,
+            st2.solved_sectors,
+            ms
+        );
+    }
+
     println!("\nЦена иерархии — сборка графа секторов; цена запроса — таблица выше.");
     println!("Поле по всей карте стоит 40 мс (ADR-138); сектор — это {:.0} узлов",
              g.nodes as f64 / (sw * sh).max(1) as f64);

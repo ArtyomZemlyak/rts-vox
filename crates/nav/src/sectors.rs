@@ -43,6 +43,12 @@ pub struct Portal {
     pub sector_b: u32,
     /// Сколько узлов в отрезке — по нему видно, узкий проход или широкий.
     pub width: u16,
+    /// Устойчивое имя, снятое **тем графом, которым портал нарезан**.
+    ///
+    /// Считать его потом по новому графу нельзя: номера узлов там уже
+    /// другие, и клетка у старого портала вышла бы чужая. Ошибка тихая —
+    /// ключ получился бы правдоподобным и мог бы совпасть с чужим.
+    key: Key,
 }
 
 #[derive(Clone, Copy)]
@@ -59,6 +65,12 @@ pub struct BuildStats {
     pub sector_solves: usize,
     /// Узлов посещено этими решениями — работа, а не таймер.
     pub visited: u64,
+    /// Сторон порталов, взятых из прошлого графа без пересчёта.
+    pub reused_ports: usize,
+    /// Рёбер, взятых оттуда же.
+    pub reused_edges: usize,
+    /// Секторов пересчитано.
+    pub solved_sectors: usize,
 }
 
 #[derive(Default)]
@@ -78,6 +90,25 @@ pub struct SectorGraph {
 /// Стороны в порядке `volume::SIDES`: -Z, -X, +X, +Z.
 const SIDE_PX: usize = 2;
 const SIDE_PZ: usize = 3;
+
+/// Устойчивое имя портала: клетка и **номер уровня** с обеих сторон.
+///
+/// Номера узлов не годятся: они раздаются подряд по клеткам, и стоит
+/// одной клетке получить лишний уровень, как всё, что за ней, съезжает.
+/// Клетка с номером уровня переживают пересборку там, где сама клетка
+/// не менялась, — а переиспользуются ровно такие (ADR-150).
+type Key = (u32, u32, u32, u32);
+
+fn key_of(g: &VolGraph, node_a: u32, node_b: u32) -> Key {
+    let ca = g.cell_of(node_a as usize);
+    let cb = g.cell_of(node_b as usize);
+    (
+        ca,
+        node_a - g.first_node(ca as usize),
+        cb,
+        node_b - g.first_node(cb as usize),
+    )
+}
 
 impl SectorGraph {
     pub fn new() -> SectorGraph {
@@ -136,21 +167,125 @@ impl SectorGraph {
             .map(|e| (e.to, e.cost))
     }
 
-    /// Собрать граф по объёмному.
+    /// Собрать граф по объёмному — целиком.
     pub fn build(&mut self, g: &VolGraph) -> BuildStats {
+        let nsec = {
+            let (w, h) = g.dims();
+            (w.div_ceil(SEC) * h.div_ceil(SEC)) as usize
+        };
+        self.rebuild(g, &(0..nsec as u32).collect::<Vec<_>>())
+    }
+
+    /// Пересобрать, пересчитав **только задетые секторы**.
+    ///
+    /// Нарезка границ дёшева и делается целиком; дорого — решение
+    /// «расстояние внутри сектора» на каждую сторону портала, и вот оно
+    /// и переиспользуется.
+    ///
+    /// **Сектор годится к переиспользованию, если чист он сам и его
+    /// набор порталов не изменился.**
+    ///
+    /// Правило «чист он и все четыре соседа» (так у плоского графа)
+    /// на копке не работает вовсе: триста копателей пачкают тридцать
+    /// секторов из шестидесяти четырёх за тик, и чистых без грязного
+    /// соседа не остаётся. Но грязь у соседа мешает только тогда, когда
+    /// она меняет **общую границу**, а это видно прямо: границы режутся
+    /// целиком и дёшево, и набор порталов сектора можно просто сравнить
+    /// с прошлым (ADR-150).
+    pub fn rebuild(&mut self, g: &VolGraph, dirty: &[u32]) -> BuildStats {
         let (w, h) = g.dims();
+        let first = self.w == 0;
         self.w = w;
         self.sw = w.div_ceil(SEC);
         self.sh = h.div_ceil(SEC);
-        self.portals.clear();
-        cut_portals(self, g, w, h);
         let nsec = (self.sw * self.sh) as usize;
+
+        let mut touched = vec![false; nsec];
+        for &d in dirty {
+            if (d as usize) < nsec {
+                touched[d as usize] = true;
+            }
+        }
+        // Набор порталов каждого сектора **до** пересборки.
+        let mut was: Vec<Vec<Key>> = (0..nsec).map(|_| Vec::new()).collect();
+        if !first {
+            for sc in 0..nsec as u32 {
+                let mut v: Vec<Key> = self
+                    .portals_of(sc)
+                    .iter()
+                    .map(|&i| self.portals[i as usize].key)
+                    .collect();
+                v.sort_unstable();
+                was[sc as usize] = v;
+            }
+        }
+
+        // Соответствие «новый портал — старый» по устойчивому имени.
+        // Двоичный поиск, а не словарь: словарь дал бы порядок обхода,
+        // зависящий от хеша.
+        let mut old_key: Vec<(Key, u32)> = self
+            .portals
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.key, i as u32))
+            .collect();
+        old_key.sort_unstable();
+        let old_portals = std::mem::take(&mut self.portals);
+        let old_starts = std::mem::take(&mut self.starts);
+        let old_edges = std::mem::take(&mut self.edges);
+
+        cut_portals(self, g, w, h);
         group(self, nsec);
+
+        let old_of: Vec<u32> = self
+            .portals
+            .iter()
+            .map(|p| {
+                match old_key.binary_search_by(|probe| probe.0.cmp(&p.key)) {
+                    Ok(i) => old_key[i].1,
+                    Err(_) => u32::MAX,
+                }
+            })
+            .collect();
+
+        // Теперь, когда границы нарезаны заново, видно, у кого набор
+        // порталов уцелел.
+        let mut reuse = vec![false; nsec];
+        if !first {
+            for sc in 0..nsec as u32 {
+                if touched[sc as usize] {
+                    continue;
+                }
+                let mut now: Vec<Key> = self
+                    .portals_of(sc)
+                    .iter()
+                    .map(|&i| self.portals[i as usize].key)
+                    .collect();
+                now.sort_unstable();
+                reuse[sc as usize] = now == was[sc as usize];
+            }
+        }
+
         let mut st = BuildStats { portals: self.portals.len(), ..Default::default() };
-        solve(self, g, &mut st);
+        let prev = Prev {
+            portals: &old_portals,
+            starts: &old_starts,
+            edges: &old_edges,
+            old_of: &old_of,
+        };
+        solve(self, g, &reuse, &prev, &mut st);
         st.edges = self.edges.len();
         st
     }
+}
+
+/// Прошлый граф — для переиспользования.
+struct Prev<'a> {
+    portals: &'a [Portal],
+    starts: &'a [u32],
+    edges: &'a [Edge],
+    /// Старый номер портала по новому; `u32::MAX` — портал новый.
+    old_of: &'a [u32],
 }
 
 /// Нарезать границы секторов на порталы.
@@ -247,7 +382,8 @@ fn push_portal(sg: &mut SectorGraph, g: &VolGraph, node_a: u32, node_b: u32, wid
     if sector_a == sector_b {
         return;
     }
-    sg.portals.push(Portal { node_a, node_b, sector_a, sector_b, width });
+    let key = key_of(g, node_a, node_b);
+    sg.portals.push(Portal { node_a, node_b, sector_a, sector_b, width, key });
 }
 
 /// Разложить порталы по секторам (CSR).
@@ -278,7 +414,7 @@ fn group(sg: &mut SectorGraph, nsec: usize) {
 /// и **через портал** — один шаг с одной стороны на другую. Второе
 /// раньше было бесплатным, потому что у портала была одна вершина
 /// на оба сектора (ADR-149).
-fn solve(sg: &mut SectorGraph, g: &VolGraph, st: &mut BuildStats) {
+fn solve(sg: &mut SectorGraph, g: &VolGraph, reuse: &[bool], prev: &Prev, st: &mut BuildStats) {
     let np = sg.portals.len();
     let nport = np * 2;
     let nsec = (sg.sw * sg.sh) as usize;
@@ -294,11 +430,60 @@ fn solve(sg: &mut SectorGraph, g: &VolGraph, st: &mut BuildStats) {
         bucket[(p * 2 + 1) as usize].push(Edge { to: p * 2, cost: STEP });
     }
 
+    // Новый номер портала по старому — чтобы переводить цели рёбер.
+    let mut new_of = vec![u32::MAX; prev.portals.len()];
+    for (n, &o) in prev.old_of.iter().enumerate() {
+        if o != u32::MAX {
+            new_of[o as usize] = n as u32;
+        }
+    }
+
     for s in 0..nsec as u32 {
         let ps: Vec<u32> = sg.portals_of(s).to_vec();
         if ps.len() < 2 {
             continue;
         }
+        if reuse[s as usize] {
+            // Сектор и его соседи чисты: стороны берутся из прошлого
+            // графа как есть, с переводом номеров.
+            let mut ok = true;
+            for &pi in ps.iter() {
+                if prev.old_of[pi as usize] == u32::MAX {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                for &pi in ps.iter() {
+                    let port_i = sg.port_of(pi, s);
+                    let op = prev.old_of[pi as usize];
+                    // Сторона у старого портала та же: секторы совпадают.
+                    let oport = op * 2 + (port_i % 2);
+                    let (a, b) = (
+                        prev.starts[oport as usize] as usize,
+                        prev.starts[oport as usize + 1] as usize,
+                    );
+                    for e in prev.edges[a..b].iter() {
+                        // Переход на ту сторону уже добавлен выше.
+                        if e.to / 2 == op {
+                            continue;
+                        }
+                        let nt = new_of[(e.to / 2) as usize];
+                        if nt == u32::MAX {
+                            continue;
+                        }
+                        bucket[port_i as usize].push(Edge {
+                            to: nt * 2 + (e.to % 2),
+                            cost: e.cost,
+                        });
+                        st.reused_edges += 1;
+                    }
+                    st.reused_ports += 1;
+                }
+                continue;
+            }
+        }
+        st.solved_sectors += 1;
         for &pi in ps.iter() {
             let port_i = sg.port_of(pi, s);
             let from = sg.node_of_port(port_i);
@@ -681,6 +866,69 @@ mod tests {
         let d = (ca % w).abs_diff(cb % w) + (ca / w).abs_diff(cb / w);
         assert!(r.found);
         assert!(r.cost >= d * STEP, "цена {} меньше прямой {}", r.cost, d * STEP);
+    }
+
+    /// **Инкрементальная пересборка обязана дать то же, что полная.**
+    ///
+    /// Это единственная проверка, которая держит переиспользование
+    /// честным: секторы, взятые из прошлого графа, не имеют права
+    /// отличаться от пересчитанных ни одним ребром (ADR-150).
+    #[test]
+    fn a_rebuild_matches_a_full_build() {
+        let mut w = voxel::World::new(96, 64, 96, 100_000, Box::new(Ridge { tunnel: true }));
+        let mut nav = NavLayer::new(&w, 4, 2, 1);
+        let mut g = VolGraph::new();
+        g.build(&nav);
+        let mut inc = SectorGraph::new();
+        inc.build(&g);
+
+        // Копаем яму в одном секторе и отмечаем его грязным.
+        let (dx, dz) = (70u32, 70u32);
+        for y in GY - 4..GY {
+            for z in dz..dz + 6 {
+                for x in dx..dx + 6 {
+                    w.queue_dig(x, y, z);
+                }
+            }
+        }
+        let edits = w.flush();
+        assert!(edits.applied > 0, "копка ничего не сняла");
+        nav.apply(&w, w.edits());
+        g.build(&nav);
+
+        let (sw, _) = inc.sectors();
+        let cell = (dz / 2) * (nav.dims().0) + dx / 2;
+        let sector = (cell / nav.dims().0 / SEC) * sw + (cell % nav.dims().0) / SEC;
+        let st = inc.rebuild(&g, &[sector]);
+        assert!(st.reused_ports > 0, "не переиспользовано ничего");
+        assert!(st.solved_sectors > 0, "не пересчитано ничего");
+
+        let mut full = SectorGraph::new();
+        full.build(&g);
+
+        assert_eq!(dump(&inc), dump(&full), "инкремент разошёлся с полной сборкой");
+    }
+
+    /// Ребро в каноническом виде: имя портала, сторона, цена.
+    type DumpEdge = (Key, u32, u32);
+
+    /// Канонический вид графа: имена порталов и рёбра по ним.
+    fn dump(sg: &SectorGraph) -> Vec<(Key, Vec<DumpEdge>)> {
+        let mut out: Vec<(Key, Vec<DumpEdge>)> = Vec::new();
+        for (i, p) in sg.portals.iter().enumerate() {
+            let k = p.key;
+            for side in 0..2u32 {
+                let port = i as u32 * 2 + side;
+                let mut es: Vec<DumpEdge> = sg
+                    .links_of(port)
+                    .map(|(q, c)| (sg.portals[(q / 2) as usize].key, q % 2, c))
+                    .collect();
+                es.sort_unstable();
+                out.push(((k.0, k.1 + side * 1_000_000, k.2, k.3), es));
+            }
+        }
+        out.sort_unstable();
+        out
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.
