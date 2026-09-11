@@ -250,6 +250,55 @@ fn the_simulation_has_no_hash_containers() {
     assert!(bad.is_empty(), "хеш-контейнер в симуляции:\n{}", bad.join("\n"));
 }
 
+/// **Симуляция не смотрит на часы.**
+///
+/// `CLAUDE.md` запрещает `std::time` в `sim-core` и всём, от чего он
+/// зависит, вместе с `rand::thread_rng`, вводом-выводом и глобальным
+/// состоянием. Запрет был записан, а проверки на него не было —
+/// при том, что рядом стоят такие же проверки на плавающее и на
+/// хеш-контейнеры (ADR-162).
+///
+/// Исключение одно и названо поимённо: **потиковый таймер фаз**
+/// в `sim-core`. Он пишет в `phase_ns`, который **не входит в хеш**,
+/// и стоит меньше разброса замера. Без него не найти фазу, работающую
+/// вхолостую, — а это тот самый класс ошибок, на котором стоят
+/// ADR-116, ADR-157 и ADR-159.
+///
+/// Исключение перечислено строками, а не крейтом: разрешено ровно то,
+/// что уже есть, и ни строкой больше.
+#[test]
+fn the_simulation_never_reads_the_clock() {
+    // (крейт, фрагмент строки) — ровно таймер фаз, и ничего кроме.
+    let allow: &[(&str, &str)] = &[
+        ("sim-core", "use std::time::Instant;"),
+        ("sim-core", "let t0 = Instant::now();"),
+        ("sim-core", "self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;"),
+    ];
+    let ms = all_manifests();
+    let mut bad: Vec<String> = Vec::new();
+    for c in sim_closure(&ms) {
+        for (f, text) in production_sources(&root().join("crates").join(&c)) {
+            for (n, line) in text.lines().enumerate() {
+                let hit = line.contains("std::time")
+                    || line.contains("Instant::now")
+                    || line.contains("SystemTime")
+                    || line.contains("thread_rng");
+                if !is_code(line) || !hit {
+                    continue;
+                }
+                if allow
+                    .iter()
+                    .any(|(cr, frag)| *cr == c && line.contains(frag))
+                {
+                    continue;
+                }
+                bad.push(format!("{}:{}: {}", f.display(), n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "часы в симуляции:\n{}", bad.join("\n"));
+}
+
 /// Состав рабочей области совпадает с объявленным в
 /// `docs/02-architecture.md`. Проверка односторонняя: лишний крейт —
 /// ошибка, отсутствующий — нет, потому что `render` ещё не написан.
