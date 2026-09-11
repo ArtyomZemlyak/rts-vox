@@ -465,9 +465,11 @@ fn run_boundary(
     // Сторона перехода: поперёк границы; сторона соседства: вдоль неё.
     let (cross, along) = if vertical { (SIDE_PX, SIDE_PZ) } else { (SIDE_PZ, SIDE_PX) };
     // Крайние узлы предыдущего шага вдоль границы — чтобы понять,
-    // продолжается отрезок или начинается новый.
-    let mut prev: Vec<u32> = Vec::new();
-    let mut cur: Vec<u32> = Vec::new();
+    // продолжается отрезок или начинается новый. Хранится **пара**:
+    // отрезок обязан быть связным с обеих сторон, иначе представитель
+    // достанется одному куску, а второй останется без засева.
+    let mut prev: Vec<(u32, u32)> = Vec::new();
+    let mut cur: Vec<(u32, u32)> = Vec::new();
     // Открытый отрезок: представитель и ширина.
     let mut open: Option<(u32, u32, u16)> = None;
     for t in from..to {
@@ -476,22 +478,34 @@ fn run_boundary(
         let n0 = g.first_node(c);
         for li in 0..g.levels_in(c) {
             let node = n0 + li as u32;
-            let mut nb = g.side(node as usize, cross);
-            let Some(other) = nb.next() else { continue };
-            // Соседство вдоль границы: продолжает ли этот узел отрезок.
-            let joins = prev.iter().any(|&p| {
-                g.side(p as usize, along).any(|m| m == node)
-            });
-            match open {
-                Some((a, b, wd)) if joins => open = Some((a.min(node), b, wd + 1)),
-                _ => {
-                    if let Some((a, b, wd)) = open.take() {
-                        push_portal(sg, g, a, b, wd);
+            // **Все** соседи поперёк границы, а не первый: у клетки
+            // несколько уровней, и переход с уровня на уровень через
+            // границу — отдельный проход. Брать первый значит оставить
+            // прочие уровни соседа без выхода.
+            let others: Vec<u32> = g.side(node as usize, cross).collect();
+            for other in others {
+                // Соседство вдоль границы: продолжает ли эта пара отрезок.
+                //
+                // Требуется с **обеих** сторон. Резать по одной стороне —
+                // это отрезок, связный слева и рваный справа: его
+                // представитель лежит в одном куске правого сектора,
+                // а прочие куски остаются без засева, и юниты в них
+                // стоят (ADR-156).
+                let joins = prev.iter().any(|&(pl, pr)| {
+                    g.side(pl as usize, along).any(|m| m == node)
+                        && g.side(pr as usize, along).any(|m| m == other)
+                });
+                match open {
+                    Some((a, b, wd)) if joins => open = Some((a.min(node), b, wd + 1)),
+                    _ => {
+                        if let Some((a, b, wd)) = open.take() {
+                            push_portal(sg, g, a, b, wd);
+                        }
+                        open = Some((node, other, 1));
                     }
-                    open = Some((node, other, 1));
                 }
+                cur.push((node, other));
             }
-            cur.push(node);
         }
         if cur.is_empty() {
             if let Some((a, b, wd)) = open.take() {
@@ -1092,6 +1106,133 @@ pub fn field_ports(sg: &SectorGraph, g: &VolGraph, mut set: impl FnMut(u32, u8),
     }
 }
 
+/// Разбор узлов без направления.
+///
+/// Без направления честно остаются двое: **цель** своей компоненты
+/// (идти уже некуда) и узел **глухого сектора**, у которого нет ни
+/// живого выхода, ни цели внутри. Всё остальное — **дыра**: юнит там
+/// просто стоит, хотя дойти было куда.
+///
+/// Считается по опубликованному полю, поэтому годится и для теста,
+/// и для замера: доля важнее факта.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Coverage {
+    pub nodes: usize,
+    pub with_dir: usize,
+    pub goals: usize,
+    pub dead: usize,
+    pub holes: usize,
+    /// Дыры, у которых есть сосед в другом секторе. Такой узел мог бы
+    /// выйти из сектора — значит выход у его куска был, а засева нет.
+    pub holes_touching: usize,
+    /// Дыры, чей **кусок внутри сектора** не содержит ни одного засева.
+    /// Волне неоткуда было прийти — это дыра засева.
+    pub holes_unseeded: usize,
+    /// Дыры, у которых засев в том же куске **есть**, а волна не дошла.
+    /// Это была бы дыра решателя.
+    pub holes_unreached: usize,
+    /// Кусков внутри секторов всего и из них без засева.
+    pub pieces: usize,
+    pub pieces_unseeded: usize,
+    /// Куски без засева, которые **касаются границы сектора**. У такого
+    /// куска выход есть, а представитель отрезка достался другому куску.
+    pub pieces_unseeded_touching: usize,
+}
+
+pub fn coverage(sg: &SectorGraph, g: &VolGraph, f: &VolField, ws: &RouteWs) -> Coverage {
+    let mut c = Coverage { nodes: g.nodes, ..Default::default() };
+    let nsec = sg.sec_starts.len().saturating_sub(1);
+    // Куски: связные части сектора по **внутренним** рёбрам. Компонента
+    // графа тут не годится — граница сектора режет её на части, и засев
+    // одной части не помогает другой.
+    const NONE: u32 = u32::MAX;
+    let mut piece = vec![NONE; g.nodes];
+    let mut stack: Vec<u32> = Vec::new();
+    let mut npiece = 0u32;
+    for sec in 0..nsec as u32 {
+        for &start in sg.nodes_of(sec) {
+            if piece[start as usize] != NONE {
+                continue;
+            }
+            let id = npiece;
+            npiece += 1;
+            piece[start as usize] = id;
+            stack.push(start);
+            while let Some(n) = stack.pop() {
+                for k in 0..4 {
+                    for m in g.side(n as usize, k) {
+                        if sg.node_sector[m as usize] == sec && piece[m as usize] == NONE {
+                            piece[m as usize] = id;
+                            stack.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut piece_seeded = vec![false; npiece as usize];
+    for sec in 0..nsec as u32 {
+        for &p in sg.portals_of(sec) {
+            let port = sg.port_of(p, sec);
+            if ws.to_t[port as usize] != u32::MAX {
+                let n = sg.node_of_port(port) as usize;
+                if piece[n] != NONE {
+                    piece_seeded[piece[n] as usize] = true;
+                }
+            }
+        }
+    }
+    for &gl in ws.goals.iter() {
+        if piece[gl as usize] != NONE {
+            piece_seeded[piece[gl as usize] as usize] = true;
+        }
+    }
+    c.pieces = npiece as usize;
+    c.pieces_unseeded = piece_seeded.iter().filter(|&&b| !b).count();
+    let mut touches = vec![false; npiece as usize];
+    for (n, &pi) in piece.iter().enumerate() {
+        if pi == NONE || piece_seeded[pi as usize] || touches[pi as usize] {
+            continue;
+        }
+        let sec = sg.node_sector[n];
+        if (0..4).any(|k| g.side(n, k).any(|m| sg.node_sector[m as usize] != sec)) {
+            touches[pi as usize] = true;
+        }
+    }
+    c.pieces_unseeded_touching = touches.iter().filter(|&&b| b).count();
+    let mut dead = vec![false; nsec];
+    for (sec, d) in dead.iter_mut().enumerate() {
+        let sec = sec as u32;
+        let live = sg
+            .portals_of(sec)
+            .iter()
+            .any(|&p| ws.to_t[sg.port_of(p, sec) as usize] != u32::MAX);
+        let goal_inside = ws.goals.iter().any(|&gl| sg.node_sector[gl as usize] == sec);
+        *d = !live && !goal_inside;
+    }
+    for n in 0..g.nodes {
+        if f.dir[n] != 255 {
+            c.with_dir += 1;
+        } else if ws.goals.contains(&(n as u32)) {
+            c.goals += 1;
+        } else if dead[sg.node_sector[n] as usize] {
+            c.dead += 1;
+        } else {
+            c.holes += 1;
+            let sec = sg.node_sector[n];
+            if (0..4).any(|k| g.side(n, k).any(|m| sg.node_sector[m as usize] != sec)) {
+                c.holes_touching += 1;
+            }
+            if piece[n] != NONE && piece_seeded[piece[n] as usize] {
+                c.holes_unreached += 1;
+            } else {
+                c.holes_unseeded += 1;
+            }
+        }
+    }
+    c
+}
+
 /// Расстояние между двумя узлами внутри одного сектора.
 fn one_to_one(
     sg: &SectorGraph,
@@ -1478,6 +1619,58 @@ mod tests {
         }
     }
 
+    /// Рваный рельеф с навесами: высота пола скачет от столбца
+    /// к столбцу, сверху висят плиты.
+    ///
+    /// Гряда `Ridge` для проверки покрытия не годится: она односвязна,
+    /// и дыр в поле на ней не бывает даже с поломанной нарезкой. Нужна
+    /// нагрузка, которую та не даёт, — **много кусков на сектор,
+    /// по нескольку уровней в клетке и разный рельеф по две стороны
+    /// от границы сектора**.
+    struct Rough;
+    impl Rough {
+        fn hash(x: u32, z: u32, salt: u32) -> u32 {
+            let h = x
+                .wrapping_mul(73_856_093)
+                .wrapping_add(z.wrapping_mul(19_349_663))
+                .wrapping_add(salt.wrapping_mul(83_492_791));
+            let h = h ^ (h >> 13);
+            h.wrapping_mul(1_274_126_177) ^ (h >> 16)
+        }
+        /// Пол: скачет на 0..6 вокселей от столбца к столбцу. При шаге
+        /// в один воксель соседи расходятся, и кусков становится много.
+        fn floor(x: u32, z: u32) -> u32 {
+            GY + Self::hash(x, z, 1) % 9
+        }
+    }
+    impl voxel::Generator for Rough {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < Self::floor(x, z) {
+                return 2;
+            }
+            // Навесы: плита на высоте, своей у каждого столбца.
+            let over = GY + 12 + Self::hash(x, z, 2) % 11;
+            if y == over || y == over + 1 {
+                return 3;
+            }
+            let deep = GY + 26 + Self::hash(x, z, 3) % 9;
+            if y == deep || y == deep + 1 {
+                return 3;
+            }
+            AIR
+        }
+    }
+
+    fn rough() -> (VolGraph, SectorGraph) {
+        let w = voxel::World::new(128, 64, 128, 16384, Box::new(Rough));
+        let nav = NavLayer::new(&w, 4, 2, 1);
+        let mut g = VolGraph::new();
+        g.build(&nav);
+        let mut sg = SectorGraph::new();
+        sg.build(&g);
+        (g, sg)
+    }
+
     fn world(tunnel: bool) -> (VolGraph, SectorGraph, NavLayer, BuildStats) {
         let w = voxel::World::new(96, 64, 96, 8192, Box::new(Ridge { tunnel }));
         let nav = NavLayer::new(&w, 4, 2, 1);
@@ -1497,6 +1690,84 @@ mod tests {
         let n = g.node(cx, cz, li);
         assert_ne!(n, NO_NODE, "нет узла в клетке ({cx}, {cz})");
         n
+    }
+
+    /// **Направление есть у каждого узла, из которого есть куда идти.**
+    ///
+    /// Без направления честно остаются двое: цель своей компоненты
+    /// (идти уже некуда) и узел сектора, из которого до цели не дойти
+    /// вовсе. Всё остальное — дыра в поле: юнит там просто стоит.
+    ///
+    /// Диагностика печатает разбор, потому что доля важнее факта:
+    /// `cargo test -p nav --release who_has_no_direction -- --nocapture`.
+    #[test]
+    fn every_node_that_can_move_has_a_direction() {
+        let (g, sg, nav, _) = world(true);
+        let mut f = VolField::new();
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        let target = floor_node(&g, &nav, 44, 16);
+        solve_field(&sg, &g, &mut f, &mut ws, target, &h_exact_floor);
+
+        let c = coverage(&sg, &g, &f, &ws);
+        println!(
+            "узлов {}: с направлением {} ({:.1}%), целей {}, в глухих секторах {}, дыр {} ({:.1}%)",
+            c.nodes,
+            c.with_dir,
+            100.0 * c.with_dir as f64 / c.nodes as f64,
+            c.goals,
+            c.dead,
+            c.holes,
+            100.0 * c.holes as f64 / c.nodes as f64
+        );
+        assert_eq!(
+            c.holes, 0,
+            "{} узлов из {} без направления при живых выходах сектора — юниты там стоят",
+            c.holes, c.nodes
+        );
+    }
+
+    /// **На многоуровневом мире дыр в поле тоже нет.**
+    ///
+    /// Это тест, ради которого писался `Shelves`: гряда его проходит
+    /// и с поломанной нарезкой границы, а полки — нет. Отрезок границы,
+    /// связный с одной стороны и рваный с другой, отдаёт представителя
+    /// одному куску соседнего сектора, а прочие куски остаются без
+    /// засева, и юниты в них стоят (ADR-156).
+    #[test]
+    fn a_many_levelled_world_has_no_holes_either() {
+        let (g, sg) = rough();
+        let mut f = VolField::new();
+        let mut ws = RouteWs::new(sg.portals.len().max(1), g.nodes);
+        // Цель — любой узел у дальнего угла; поле накрывает всё.
+        let target = (0..g.nodes)
+            .find(|&n| {
+                let c = g.cell_of(n);
+                (c % sg.w) > 40 && (c / sg.w) > 40
+            })
+            .expect("нет узла в дальнем углу") as u32;
+        solve_field(&sg, &g, &mut f, &mut ws, target, &h_exact_floor);
+        let c = coverage(&sg, &g, &f, &ws);
+        println!(
+            "рельеф: узлов {}, с направлением {} ({:.1}%), целей {}, глухих {}, дыр {} \
+в {} кусках без засева",
+            c.nodes,
+            c.with_dir,
+            100.0 * c.with_dir as f64 / c.nodes as f64,
+            c.goals,
+            c.dead,
+            c.holes,
+            c.pieces_unseeded
+        );
+        println!("  кусков {}, из них без засева {}", c.pieces, c.pieces_unseeded);
+        // Сцена обязана нагружать то, что заявляет: много уровней
+        // и не один кусок на сектор.
+        assert!(c.nodes > 8_000, "мир слишком беден: узлов {}", c.nodes);
+        assert!(c.pieces > 200, "кусков {} — сцена не многосвязна", c.pieces);
+        assert_eq!(
+            c.holes, 0,
+            "{} узлов без направления при живом выходе из куска — юниты там стоят",
+            c.holes
+        );
     }
 
     /// **Порталы находятся, и их меньше, чем узлов на границах.**

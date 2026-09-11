@@ -210,6 +210,49 @@ fn main() -> ExitCode {
 {:<34} {:>12}", "поле по секторам: решено секторов", fs.sectors);
         println!("{:<34} {:>12}", "  годуновских обновлений", fs.updates);
         println!("{:<34} {:>12}", "  узлов получило направление", fs.reached);
+        // Кто остался без направления. Доля важнее факта: «часть узлов
+        // без направления» — это не замер, а отговорка.
+        let cov = nav::sectors::coverage(&sg, &g, &f, &ws2);
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "  из них цели компонент", cov.goals,
+            100.0 * cov.goals as f64 / cov.nodes as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "  в глухих секторах", cov.dead,
+            100.0 * cov.dead as f64 / cov.nodes as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "  ДЫР (дойти было куда)", cov.holes,
+            100.0 * cov.holes as f64 / cov.nodes as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "    из них у границы сектора", cov.holes_touching,
+            100.0 * cov.holes_touching as f64 / cov.holes.max(1) as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "    кусок сектора без засева", cov.holes_unseeded,
+            100.0 * cov.holes_unseeded as f64 / cov.holes.max(1) as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "    засев в куске есть, не дошло", cov.holes_unreached,
+            100.0 * cov.holes_unreached as f64 / cov.holes.max(1) as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "  кусков в секторах без засева", cov.pieces_unseeded,
+            100.0 * cov.pieces_unseeded as f64 / cov.pieces.max(1) as f64
+        );
+        println!(
+            "{:<34} {:>12} {:>7.1}%",
+            "    из них у границы (есть выход)", cov.pieces_unseeded_touching,
+            100.0 * cov.pieces_unseeded_touching as f64 / cov.pieces_unseeded.max(1) as f64
+        );
         println!("{:<34} {:>12}", "  сторон порталов живых", fs.live_ports);
         println!("{:<34} {:>9.1} мс", "  всё поле", ms);
 
