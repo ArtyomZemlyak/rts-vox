@@ -15,6 +15,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod geom;
+
 /// Точка или направление.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct V3 {

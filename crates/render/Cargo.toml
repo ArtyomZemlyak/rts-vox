@@ -4,10 +4,15 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 
-# Зависимостей нет. Первый кусок рендера — камера и отсечение, то есть
-# арифметика: она проверяется headless, а окно нет. Bevy появится здесь,
-# когда появится окно, и только здесь (`docs/02-architecture.md`).
+# Bevy живёт только здесь (`docs/02-architecture.md`) и пинится точно:
+# не пин — это молчаливое обновление, которое сдвинет всё разом.
 [dependencies]
+bevy = { version = "=0.19.1", default-features = false, features = ["3d"] }
+# Мешинг тоже рендер-слой (`docs/02-architecture.md`), мир и генератор
+# нужны, чтобы было что показать.
+meshing = { path = "../meshing" }
+voxel = { path = "../voxel" }
+worldgen = { path = "../worldgen" }
 
 [lib]
 path = "src/lib.rs"

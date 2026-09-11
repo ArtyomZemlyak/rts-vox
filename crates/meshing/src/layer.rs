@@ -226,6 +226,27 @@ impl MeshLayer {
         m.quad_count()
     }
 
+    /// Квады чанка, собранные с нуля.
+    ///
+    /// Тот же путь, что у сверки швов, только результат — сама
+    /// геометрия: рендеру нужны квады, а не их число.
+    pub fn rebuilt_quads(&self, w: &World, i: usize) -> Vec<crate::Quad> {
+        let (cx, cy, cz) = (
+            (i as u32) % self.nx,
+            ((i as u32) / self.nx) % self.ny,
+            (i as u32) / (self.nx * self.ny),
+        );
+        let bits = Self::build_bits(w, cx, cy, cz);
+        let mut m = IncMesher::new();
+        m.rebuild_all(&bits, self.opts);
+        m.collect_quads()
+    }
+
+    /// Размеры сетки чанков.
+    pub fn dims(&self) -> (u32, u32, u32) {
+        (self.nx, self.ny, self.nz)
+    }
+
     /// Число квадов конкретного чанка — для сверки швов.
     pub fn quad_at(&self, i: usize) -> usize {
         self.chunks[i].as_ref().map_or(0, |c| c.mesher.quad_count())
