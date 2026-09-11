@@ -173,6 +173,8 @@ fn main() -> ExitCode {
     let t = demo::tuning();
     let mut sim = SimWorld::new(2, a.units.max(1), t);
     sim.attach_ground(Ground::new(world, &t));
+    // Без реестра оружия сцена боя не ведёт вовсе (ADR-187).
+    sim.attach_weapons(demo::weapons());
     if a.dense {
         populate_dense(&mut sim, a.units, a.seed);
     } else {

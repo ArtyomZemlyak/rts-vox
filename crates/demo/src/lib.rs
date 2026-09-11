@@ -27,6 +27,20 @@ pub fn tuning() -> sim_core::Tuning {
     }
 }
 
+/// Реестр оружия — из `data/weapons.ron`, как и в игре (ADR-169).
+///
+/// Сцена, у которой он не привязан, **боя не ведёт вовсе**: `fire()`
+/// выходит первой строкой, и ни выстрела, ни луча, ни воронки, ни
+/// смерти от боя в ней не случается. Молча (ADR-187).
+pub fn weapons() -> modding::weapons::Weapons {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
+    let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+    match modding::weapons::load(&path) {
+        Ok(w) => w,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
+}
+
 /// Генератор мира. Живёт в `worldgen`; здесь реэкспорт, чтобы сцены
 /// не тянули имя из двух мест.
 pub use worldgen::Terrain;

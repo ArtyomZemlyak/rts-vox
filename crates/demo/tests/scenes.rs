@@ -766,6 +766,13 @@ struct Scale {
     dirty_mesh: u64,
     live: usize,
     with_target: usize,
+    /// Результат боя, а не факт выбора цели. Считается **за вторую
+    /// половину прогона**: подсистема, работающая только вначале
+    /// и затухающая, — это уже дважды случалось (ADR-157, ADR-159).
+    shots: u64,
+    hits: u64,
+    blasts: u64,
+    deaths: u64,
 }
 
 fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> Scale {
@@ -790,11 +797,24 @@ fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> 
     );
     let mut sim = SimWorld::new(2, units.max(1), t);
     sim.attach_ground(Ground::new(world, &t));
+    // **Без реестра оружия сцена боя не ведёт** (ADR-187): `fire()`
+    // выходит первой строкой, и D-7, которая декларирует «всё вместе
+    // в одном тике», молчала целой подсистемой.
+    sim.attach_weapons(demo::weapons());
     populate(&mut sim, units, seed);
 
     let mut hash = RunHash::new();
     let (mut edits, mut dirty_mesh) = (0u64, 0u64);
+    // Снимок на середине: всё, что после него, — работа второй
+    // половины прогона.
+    let (mut mid_shots, mut mid_hits, mut mid_blasts, mut mid_deaths) = (0u64, 0u64, 0u64, 0u64);
     for tick in 1..=ticks {
+        if tick == ticks / 2 {
+            mid_shots = sim.shots_fired;
+            mid_hits = sim.shots_hit + sim.beams_hit;
+            mid_blasts = sim.blasts;
+            mid_deaths = sim.deaths;
+        }
         {
             let g = sim.ground_mut().expect("земля");
             dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
@@ -819,7 +839,17 @@ fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> 
         .iter()
         .filter(|&&i| sim.units.target[i as usize] != sim_core::NO_TARGET)
         .count();
-    Scale { hash: hash.get(), edits, dirty_mesh, live, with_target }
+    Scale {
+        hash: hash.get(),
+        edits,
+        dirty_mesh,
+        live,
+        with_target,
+        shots: sim.shots_fired - mid_shots,
+        hits: (sim.shots_hit + sim.beams_hit) - mid_hits,
+        blasts: sim.blasts - mid_blasts,
+        deaths: sim.deaths - mid_deaths,
+    }
 }
 
 /// **Тот же сид — тот же прогон, и связка не расходится.**
@@ -857,5 +887,20 @@ fn d7_loads_every_subsystem_at_once() {
         r.with_target > 20,
         "бой не начался: из {} живых никто не взял цель",
         r.live
+    );
+    // **Цель — не бой.** Прежняя проверка требовала факта выбора цели
+    // и проходила на сцене, где реестр оружия не привязан вовсе:
+    // `fire()` выходил первой строкой, и ни выстрела не случалось.
+    // Заглушённый `fire()` целиком оставлял все 25 тестов сцен
+    // зелёными (ADR-187).
+    //
+    // Требуется **результат, и во второй половине прогона**:
+    // подсистема, отработавшая вначале и затухшая, — не нагрузка.
+    assert!(r.shots > 0, "за вторую половину прогона не выпущено ни снаряда");
+    assert!(r.hits > 0, "ни одного попадания за вторую половину");
+    assert!(r.blasts > 0, "ни одной воронки за вторую половину");
+    assert!(
+        r.deaths > 0,
+        "никто не погиб за вторую половину: бой идёт вхолостую"
     );
 }
