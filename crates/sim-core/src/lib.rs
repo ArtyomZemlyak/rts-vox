@@ -15,12 +15,14 @@ pub mod ground;
 pub mod shot;
 pub mod index;
 pub mod matter;
+pub mod order;
 pub mod shield;
 
 use fx::rng::Rng;
 use fx::Fx;
 use index::Grid;
 pub use modding::Tuning;
+pub use order::{Order, STANCE_DIG, STANCE_FLOW, STANCE_HOLD, STANCE_MOVE};
 
 /// Сторона мира в мировых единицах.
 pub const WORLD: i32 = 2000;
@@ -185,6 +187,20 @@ pub struct Units {
     /// Место оружия в реестре. Место, а не номер: номер ищется
     /// перебором, а это горячий путь (ADR-169).
     pub weapon: Vec<u16>,
+    /// Что юнит делает: идёт по полю своей стороны, идёт в точку
+    /// приказа, стоит или грызёт забой (`order::STANCE_*`).
+    ///
+    /// Ноль — поведение **без приказа**, и свежий слот начинается
+    /// с него. Приказ живёт здесь, а не в отдельной таблице: таблица
+    /// по номеру юнита — это либо хеш-контейнер, либо второй свободный
+    /// список, и оба запрещены `CLAUDE.md` (ADR-195).
+    pub stance: Vec<u8>,
+    /// Точка приказа в **мировых единицах**, не в клетках и не
+    /// в вокселях (`CLAUDE.md`). Смысл задаёт `stance`: цель хода
+    /// или забой. При `STANCE_FLOW` не читается.
+    pub goal_x: Vec<i32>,
+    pub goal_y: Vec<i32>,
+    pub goal_z: Vec<i32>,
     free: Vec<u32>,
     live_ids: Vec<u32>,
 }
@@ -271,6 +287,10 @@ impl Units {
             next_search: Vec::new(),
             next_shot: Vec::new(),
             weapon: Vec::new(),
+            stance: Vec::new(),
+            goal_x: Vec::new(),
+            goal_y: Vec::new(),
+            goal_z: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
         }
@@ -309,6 +329,13 @@ impl Units {
             self.next_search[k] = 0;
             self.next_shot[k] = 0;
             self.weapon[k] = 0;
+            // **Слот из свободного списка не наследует приказ.**
+            // Забудь это — и подкрепление, попавшее в место погибшего
+            // копателя, пошло бы грызть его забой (ADR-195).
+            self.stance[k] = order::STANCE_FLOW;
+            self.goal_x[k] = 0;
+            self.goal_y[k] = 0;
+            self.goal_z[k] = 0;
             return i;
         }
         self.x.push(x);
@@ -329,6 +356,10 @@ impl Units {
         self.next_search.push(0);
         self.next_shot.push(0);
         self.weapon.push(0);
+        self.stance.push(order::STANCE_FLOW);
+        self.goal_x.push(0);
+        self.goal_y.push(0);
+        self.goal_z.push(0);
         (self.x.len() - 1) as u32
     }
 
@@ -463,6 +494,21 @@ pub struct World {
     /// Переиспользуемый список тех, кому нужен поиск. Бой идёт каждый
     /// тик, и выделять его заново незачем.
     need_search: Vec<u32>,
+    /// Очередь приказов — **единственный вход** в симуляцию снаружи
+    /// (ADR-195). Кладут в неё игрок и мод, вынимает фаза
+    /// `ApplyCommands`.
+    ///
+    /// Длины у очереди нет по построению — ровно по той же причине,
+    /// по которой её нет у очереди правок мира: потолок применяется
+    /// при дренаже, иначе приказ молча терялся бы.
+    orders: std::collections::VecDeque<Order>,
+    /// Замер: приказов применено и отброшено, и в скольких тиках
+    /// дренаж упёрся в потолок. Потолок, срабатывающий каждый тик, —
+    /// не предохранитель, а постоянное ухудшение (ADR-114), и видно
+    /// это только по счётчику.
+    pub orders_applied: u64,
+    pub orders_dropped: u64,
+    pub orders_capped: u64,
     pub phase_ns: [u64; 16],
 }
 
@@ -534,6 +580,26 @@ impl World {
         &self.events
     }
 
+    /// Поставить приказ в очередь.
+    ///
+    /// **Единственный способ снаружи повлиять на симуляцию.** Рендер
+    /// состояние читает и никогда не пишет (`CLAUDE.md`, границы
+    /// слоёв), мод — тоже (`docs/09-modding.md`): оба ставят запрос
+    /// в эту очередь, и применяет его фаза `ApplyCommands` того же
+    /// тика у **всех** клиентов lockstep одинаково (ADR-195).
+    ///
+    /// Приказ не проверяется здесь: между щелчком и тиком юнит успевает
+    /// погибнуть, и решать это обязана фаза, а не вызывающий.
+    pub fn push_order(&mut self, o: Order) {
+        self.orders.push_back(o);
+    }
+
+    /// Сколько приказов ждёт применения. Замерщику и окну: очередь,
+    /// которая не пустеет, — это упёршийся потолок.
+    pub fn orders_pending(&self) -> usize {
+        self.orders.len()
+    }
+
     /// Земля для чтения — рендеру и сценам.
     pub fn ground(&self) -> Option<&ground::Ground> {
         self.ground.as_ref()
@@ -601,6 +667,10 @@ impl World {
             searches: 0,
             search_capped: 0,
             need_search: Vec::new(),
+            orders: std::collections::VecDeque::new(),
+            orders_applied: 0,
+            orders_dropped: 0,
+            orders_capped: 0,
             phase_ns: [0; 16],
         }
     }
@@ -734,6 +804,7 @@ impl World {
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
+                Phase::ApplyCommands => self.phase_commands(),
                 Phase::VoxelEdits => self.phase_ground_edits(),
                 Phase::Destruction => self.phase_ground_destruction(),
                 Phase::Bodies => self.phase_ground_bodies(),
@@ -767,6 +838,7 @@ impl World {
         for (pi, &phase) in PHASES.iter().enumerate() {
             let t0 = Instant::now();
             match phase {
+                Phase::ApplyCommands => self.phase_commands(),
                 Phase::VoxelEdits => self.phase_ground_edits(),
                 Phase::Destruction => self.phase_ground_destruction(),
                 Phase::Bodies => self.phase_ground_bodies(),
@@ -787,6 +859,148 @@ impl World {
         }
         self.tick += 1;
         hash
+    }
+
+    /// Фаза `ApplyCommands`: приказы игрока и мода.
+    ///
+    /// **Первая в списке фаз, и это не украшение.** Копка ставит
+    /// правки в ту же очередь мира, что и всё остальное, а дренажит
+    /// её `VoxelEdits` — следующая фаза того же тика. Стой приказ
+    /// после движения, юнит шёл бы по приказу прошлого тика, а дыра
+    /// появлялась бы тиком позже, чем её увидела навигация
+    /// (`CLAUDE.md`: мир меняется для симуляции в тот же тик).
+    ///
+    /// Потолок — из данных. Упёршийся приказ **откладывается
+    /// на следующий тик, а не теряется**: очередь FIFO, и порядок
+    /// внутри неё тот, в котором приказы пришли (ADR-195).
+    fn phase_commands(&mut self) {
+        let cap = self.tuning.max_orders_per_tick.max(1);
+        let mut n = 0usize;
+        while n < cap {
+            let Some(o) = self.orders.pop_front() else { break };
+            n += 1;
+            self.apply_order(o);
+        }
+        if !self.orders.is_empty() {
+            self.orders_capped += 1;
+        }
+        self.dig_work();
+    }
+
+    /// Применить один приказ.
+    ///
+    /// Приказ мёртвому, несуществующему или своему же по стороне —
+    /// отбрасывается и считается. Это нормальный ход дел, а не ошибка:
+    /// между щелчком игрока и тиком, на котором приказ применяется,
+    /// адресат успевает погибнуть, и у клиентов lockstep это
+    /// происходит одинаково.
+    fn apply_order(&mut self, o: Order) {
+        let i = o.unit() as usize;
+        if i >= self.units.len() || !self.units.alive[i] {
+            self.orders_dropped += 1;
+            return;
+        }
+        let tick = self.tick as u32;
+        let period = self.tuning.retarget_period;
+        let u = &mut self.units;
+        match o {
+            Order::MoveTo { x, z, .. } => {
+                u.stance[i] = STANCE_MOVE;
+                u.goal_x[i] = x;
+                u.goal_y[i] = 0;
+                u.goal_z[i] = z;
+            }
+            Order::Hold { .. } => u.stance[i] = STANCE_HOLD,
+            Order::Release { .. } => u.stance[i] = STANCE_FLOW,
+            Order::Attack { target, .. } => {
+                let t = target as usize;
+                if t >= u.len() || !u.alive[t] || u.owner[t] == u.owner[i] {
+                    self.orders_dropped += 1;
+                    return;
+                }
+                // Цель назначена игроком — фаза боя не вправе сменить
+                // её на ближайшую в тот же тик. Срок перевыбора тот же,
+                // что у выбранной самим юнитом: приказ держится период,
+                // дальше юнит снова смотрит сам (ADR-116).
+                u.target[i] = target;
+                u.next_search[i] = tick.wrapping_add(period);
+                // И идти к ней. Точка — та, где цель **сейчас**:
+                // преследование сделало бы приказ вечным, а игрок
+                // щёлкает заново, и это дешевле (ADR-195).
+                u.stance[i] = STANCE_MOVE;
+                u.goal_x[i] = u.x[t];
+                u.goal_y[i] = 0;
+                u.goal_z[i] = u.z[t];
+            }
+            Order::Dig { x, y, z, .. } => {
+                u.stance[i] = STANCE_DIG;
+                u.goal_x[i] = x;
+                u.goal_y[i] = y;
+                u.goal_z[i] = z;
+            }
+        }
+        self.orders_applied += 1;
+    }
+
+    /// Работа по стоячему приказу копать.
+    ///
+    /// Копатель, дошедший до забоя, снимает шар породы и **уходит
+    /// на воксель вглубь**. Забой, который не углубляется, кончается
+    /// за один тик: шарик снимает воздух, правок не возникает, и копка
+    /// превращается в неподвижную картинку — ровно то, от чего лечил
+    /// эталонный сценарий ADR-159.
+    ///
+    /// Правки идут в **ту же очередь мира**, что у всех остальных,
+    /// и упираются в тот же потолок за тик: у приказа игрока нет
+    /// обхода `MAX_VOXEL_EDITS_PER_TICK` (ADR-013).
+    fn dig_work(&mut self) {
+        let r = self.tuning.dig_radius;
+        let reach = self.tuning.order_arrive;
+        if r <= 0 {
+            return;
+        }
+        let Self { units: u, ground, .. } = self;
+        let Some(g) = ground.as_mut() else { return };
+        let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
+        for k in 0..u.live_ids.len() {
+            let i = u.live_ids[k] as usize;
+            if !u.alive[i] || u.stance[i] != STANCE_DIG {
+                continue;
+            }
+            let (gx, gy, gz) = (u.goal_x[i], u.goal_y[i], u.goal_z[i]);
+            let (ax, az) = (u.x[i] - gx, u.z[i] - gz);
+            if ax * ax + az * az > reach * reach {
+                // Ещё в дороге: идёт он фазой движения, как все.
+                continue;
+            }
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    for dx in -r..=r {
+                        if dx * dx + dy * dy + dz * dz > r * r {
+                            continue;
+                        }
+                        let (x, y, z) = (gx + dx, gy + dy, gz + dz);
+                        // **Нижний слой мира не снимается.** Колонка
+                        // без пола — это юнит, зависший в воздухе:
+                        // падать ему не на что, и `apply_deltas`
+                        // оставляет его на прежней высоте навсегда.
+                        // Дешевле не создавать такую колонку, чем
+                        // потом решать, что с ней делать.
+                        if x < 0 || y < 1 || z < 0 || x >= nx || y >= ny || z >= nz {
+                            continue;
+                        }
+                        g.world.queue_dig(x as u32, y as u32, z as u32);
+                    }
+                }
+            }
+            u.goal_y[i] -= 1;
+            // Догрыз до дна — приказ исчерпан, юнит стоит. Вернуть его
+            // под поле стороны нельзя: он ушёл бы с забоя сам, а игрок
+            // этого не просил.
+            if u.goal_y[i] <= 1 {
+                u.stance[i] = STANCE_HOLD;
+            }
+        }
     }
 
     /// Фазы земли. Без воксельного мира они ровно те же заглушки,
@@ -933,33 +1147,50 @@ impl World {
     pub fn movement_kernel(&self, i: usize) -> (i32, i32) {
         let u = &self.units;
         let (ux, uz) = (self.snap_x[i], self.snap_z[i]);
-        let d = match self.ground.as_ref() {
-            Some(g) => {
-                let st = g.nav.step() as i32;
-                let (gw, gh) = g.nav.dims();
-                let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
-                if cx >= gw || cz >= gh {
-                    255
-                } else {
-                    match g.nav.level_index_near(cx, cz, u.y[i]) {
-                        Some(li) => self.nav_field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
-                        None => 255,
+        let (mut vx, mut vz) = match u.stance[i] {
+            // Без приказа юнит идёт по полю своей стороны — то же,
+            // что было до канала приказов.
+            STANCE_FLOW => {
+                let d = match self.ground.as_ref() {
+                    Some(g) => {
+                        let st = g.nav.step() as i32;
+                        let (gw, gh) = g.nav.dims();
+                        let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
+                        if cx >= gw || cz >= gh {
+                            255
+                        } else {
+                            match g.nav.level_index_near(cx, cz, u.y[i]) {
+                                Some(li) => {
+                                    self.nav_field.dir_at(u.owner[i] as usize % 2, cx, cz, li)
+                                }
+                                None => 255,
+                            }
+                        }
                     }
+                    None => {
+                        let (cx, cz) = (
+                            (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                            (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                        );
+                        self.flow[u.owner[i] as usize][cz * NAV + cx]
+                    }
+                };
+                if d < 4 {
+                    let (dx, dz) = DIRS[d as usize];
+                    (dx * u.speed[i], dz * u.speed[i])
+                } else {
+                    (0, 0)
                 }
             }
-            None => {
-                let (cx, cz) = (
-                    (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                    (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                );
-                self.flow[u.owner[i] as usize][cz * NAV + cx]
-            }
-        };
-        let (mut vx, mut vz) = if d < 4 {
-            let (dx, dz) = DIRS[d as usize];
-            (dx * u.speed[i], dz * u.speed[i])
-        } else {
-            (0, 0)
+            STANCE_HOLD => (0, 0),
+            _ => order::goal_velocity(
+                ux,
+                uz,
+                u.goal_x[i],
+                u.goal_z[i],
+                u.speed[i],
+                self.tuning.order_arrive,
+            ),
         };
         let r2 = self.tuning.separation * self.tuning.separation;
         let (sx, sz) = (&self.snap_x, &self.snap_z);
@@ -1021,35 +1252,46 @@ impl World {
         let vol = self.ground.as_ref().map(|g| (&g.nav, &self.nav_field));
         let r2 = self.tuning.separation * self.tuning.separation;
 
+        // Точка приказа читается **из состояния юнита**, а само
+        // состояние приказы за эту фазу не меняют: их фаза прошла
+        // первой. Значит и здесь читается снимок, и разбиение фазы
+        // на потоки ничего не меняет (ADR-195).
+        let arrive = self.tuning.order_arrive;
         let compute = |i: usize| -> (i32, i32) {
             let (ux, uz) = (sx[i], sz[i]);
-            let d = match vol {
-                Some((nav, field)) => {
-                    let st = nav.step() as i32;
-                    let (gw, gh) = nav.dims();
-                    let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
-                    if cx >= gw || cz >= gh {
-                        255
-                    } else {
-                        match nav.level_index_near(cx, cz, u.y[i]) {
-                            Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
-                            None => 255,
+            let (mut vx, mut vz) = match u.stance[i] {
+                STANCE_FLOW => {
+                    let d = match vol {
+                        Some((nav, field)) => {
+                            let st = nav.step() as i32;
+                            let (gw, gh) = nav.dims();
+                            let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
+                            if cx >= gw || cz >= gh {
+                                255
+                            } else {
+                                match nav.level_index_near(cx, cz, u.y[i]) {
+                                    Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
+                                    None => 255,
+                                }
+                            }
                         }
+                        None => {
+                            let (cx, cz) = (
+                                (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                                (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                            );
+                            flow[u.owner[i] as usize][cz * NAV + cx]
+                        }
+                    };
+                    if d < 4 {
+                        let (dx, dz) = DIRS[d as usize];
+                        (dx * u.speed[i], dz * u.speed[i])
+                    } else {
+                        (0, 0)
                     }
                 }
-                None => {
-                    let (cx, cz) = (
-                        (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                        (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                    );
-                    flow[u.owner[i] as usize][cz * NAV + cx]
-                }
-            };
-            let (mut vx, mut vz) = if d < 4 {
-                let (dx, dz) = DIRS[d as usize];
-                (dx * u.speed[i], dz * u.speed[i])
-            } else {
-                (0, 0)
+                STANCE_HOLD => (0, 0),
+                _ => order::goal_velocity(ux, uz, u.goal_x[i], u.goal_z[i], u.speed[i], arrive),
             };
             grid.for_each_near(ux, uz, |j| {
                 let j = j as usize;
@@ -1840,6 +2082,21 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
+            // Приказ — состояние: он переживает тик и задаёт движение,
+            // а состояние, не входящее в хеш, можно переписать целиком
+            // и увидеть тот же хеш до бита (ADR-116).
+            //
+            // Входит он **только когда он есть**. У юнита без приказа
+            // поля приказа не значат ничего, и прогон, в котором
+            // приказов не отдают, хеширует ровно то же, что хешировал
+            // до появления канала: эталонный хеш от него не сдвинулся
+            // ни на бит (ADR-195).
+            if self.units.stance[i] != STANCE_FLOW {
+                w = w.wrapping_mul(31).wrapping_add(self.units.stance[i] as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.goal_x[i] as u32 as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.goal_y[i] as u32 as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.goal_z[i] as u32 as u64);
+            }
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         // Снаряды — состояние, а не украшение: не войди они в хеш,
@@ -3190,7 +3447,24 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         for _ in 0..40 {
             r.tick();
         }
+        // Треть юнитов под приказом: у ядра три ветки — поле стороны,
+        // точка приказа и «стоять», — и тождество обязано держаться
+        // во всех трёх. Проверяй его только на первой, и расхождение
+        // в остальных ждало бы первого, кто повесит пул (ADR-195).
+        let ids: Vec<u32> = r.world.units.live().to_vec();
+        for (k, &i) in ids.iter().enumerate() {
+            match k % 3 {
+                0 => r.world.push_order(Order::MoveTo { unit: i, x: 10, z: 80 }),
+                1 => r.world.push_order(Order::Hold { unit: i }),
+                _ => {}
+            }
+        }
+        r.tick();
         let w = &mut r.world;
+        assert!(
+            w.units.live().iter().any(|&i| w.units.stance[i as usize] == STANCE_MOVE),
+            "приказы не применились — проверяется одна ветка из трёх"
+        );
         w.prepare_movement();
         w.movement_deltas(1);
         let live: Vec<u32> = w.units.live().to_vec();
@@ -3323,5 +3597,266 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         w.units.refresh_live();
         w.tick();
         assert_eq!(w.units.target[me as usize], a, "ничья ушла не меньшему индексу");
+    }
+
+    // --- канал приказов (ADR-195)
+
+    /// Один юнит на плоскости, поле стороны — в одну сторону.
+    /// Приказ будет отдан в другую, и разойтись они обязаны.
+    fn lone_walker(t: Tuning) -> (World, u32) {
+        let vw = voxel::World::new(96, 32, 96, 4096, Box::new(Flat));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        let id = w.spawn_ground(16, 16, 0, 6, 300);
+        w.units.refresh_live();
+        // Поле стороны ведёт на восток: без приказа юнит идёт туда.
+        w.fill_flow_towards(0, 80, 16);
+        w.solve_flow();
+        (w, id)
+    }
+
+    /// **Приказ уводит юнита туда, куда поле стороны его не вело.**
+    ///
+    /// Сторож на сам приказ: если фаза `ApplyCommands` ничего не
+    /// делает, юнит уходит по полю на восток, и обе проверки падают
+    /// разом — и «дошёл куда велено», и «не ушёл туда, куда вело поле».
+    #[test]
+    fn an_order_takes_the_unit_where_the_field_would_not() {
+        let t = test_tuning();
+        // Без приказа: юнит идёт по полю на восток.
+        let (mut free, id) = lone_walker(t);
+        for _ in 0..240 {
+            free.tick();
+        }
+        let i = id as usize;
+        assert!(
+            free.units.x[i] > 40,
+            "юнит без приказа не пошёл по полю: x={}",
+            free.units.x[i]
+        );
+
+        // С приказом: юнит идёт на юг, к точке приказа.
+        let (mut w, id) = lone_walker(t);
+        w.push_order(Order::MoveTo { unit: id, x: 16, z: 80 });
+        for _ in 0..240 {
+            w.tick();
+        }
+        let (x, z) = (w.units.x[i], w.units.z[i]);
+        let d2 = (x - 16) * (x - 16) + (z - 80) * (z - 80);
+        let arrive = t.order_arrive + 4;
+        assert!(
+            d2 <= arrive * arrive,
+            "юнит по приказу оказался в ({x}, {z}), а звали в (16, 80)"
+        );
+        assert!(x < 40, "юнит всё-таки ушёл по полю стороны: x={x}");
+        assert_eq!(w.orders_applied, 1);
+        assert_eq!(w.orders_dropped, 0);
+    }
+
+    /// **Новый приказ отменяет прежний.**
+    ///
+    /// Игрок щёлкает в другое место — юнит идёт туда, а не доходит
+    /// до старой точки. Проверяется разворотом: сначала на юг,
+    /// потом на север, и конец обязан быть севернее начала.
+    #[test]
+    fn a_second_order_replaces_the_first() {
+        let t = test_tuning();
+        let (mut w, id) = lone_walker(t);
+        let i = id as usize;
+        w.push_order(Order::MoveTo { unit: id, x: 16, z: 80 });
+        for _ in 0..90 {
+            w.tick();
+        }
+        let midway = w.units.z[i];
+        assert!(midway > 24, "юнит не тронулся по первому приказу: z={midway}");
+        w.push_order(Order::MoveTo { unit: id, x: 16, z: 8 });
+        for _ in 0..300 {
+            w.tick();
+        }
+        let z = w.units.z[i];
+        assert!(
+            z < midway,
+            "юнит не развернулся по второму приказу: z={z}, на развороте было {midway}"
+        );
+        assert!(
+            (z - 8).abs() <= t.order_arrive + 4,
+            "юнит развернулся, но до второй точки не дошёл: z={z}"
+        );
+        assert_eq!(w.orders_applied, 2);
+    }
+
+    /// **Приказ «стоять» держит юнита на месте.**
+    #[test]
+    fn a_hold_order_stops_the_unit() {
+        let t = test_tuning();
+        let (mut w, id) = lone_walker(t);
+        w.push_order(Order::Hold { unit: id });
+        let i = id as usize;
+        let (x0, z0) = (w.units.x[i], w.units.z[i]);
+        for _ in 0..120 {
+            w.tick();
+        }
+        assert_eq!((w.units.x[i], w.units.z[i]), (x0, z0), "стоящий сдвинулся");
+        // И отмена возвращает его под поле стороны.
+        w.push_order(Order::Release { unit: id });
+        for _ in 0..120 {
+            w.tick();
+        }
+        assert!(w.units.x[i] > x0, "отменённый приказ не вернул юнита под поле");
+    }
+
+    /// **Приказ входит в хеш — через движение, которое он задаёт.**
+    ///
+    /// Одинаковая последовательность приказов на одинаковом сиде даёт
+    /// одинаковый хеш; разная — разный. Второе важнее: приказ, который
+    /// хеш не замечает, можно переписать целиком и не узнать об этом
+    /// (ADR-116).
+    #[test]
+    fn the_same_orders_hash_the_same_and_different_ones_do_not() {
+        let t = test_tuning();
+        let run = |gx: i32, gz: i32| -> u64 {
+            let (mut w, id) = lone_walker(t);
+            w.push_order(Order::MoveTo { unit: id, x: gx, z: gz });
+            let mut h = 0u64;
+            for _ in 0..40 {
+                h = w.tick();
+            }
+            h
+        };
+        assert_eq!(run(16, 80), run(16, 80), "одинаковые приказы разошлись по хешу");
+        assert_ne!(run(16, 80), run(80, 16), "разные приказы дали один хеш");
+    }
+
+    /// **Потолок откладывает остаток, а не теряет его.**
+    ///
+    /// Очередь строго FIFO: упёршийся приказ ждёт следующего тика.
+    /// Потерянный приказ — это десинк у всех, кто его не потерял.
+    #[test]
+    fn the_order_cap_defers_the_rest_and_loses_nothing() {
+        let mut t = test_tuning();
+        t.max_orders_per_tick = 4;
+        let mut w = World::new(2, 32, t);
+        let ids: Vec<u32> = (0..10).map(|k| w.units.spawn(k * 4, 0, 0, 1, 100)).collect();
+        w.units.refresh_live();
+        for &id in &ids {
+            w.push_order(Order::Hold { unit: id });
+        }
+        assert_eq!(w.orders_pending(), 10);
+        w.tick();
+        assert_eq!(w.orders_applied, 4, "потолок не сработал");
+        assert_eq!(w.orders_pending(), 6, "остаток пропал");
+        assert_eq!(w.orders_capped, 1);
+        w.tick();
+        w.tick();
+        assert_eq!(w.orders_applied, 10, "отложенные приказы потерялись");
+        assert_eq!(w.orders_pending(), 0);
+        for &id in &ids {
+            assert_eq!(w.units.stance[id as usize], STANCE_HOLD);
+        }
+    }
+
+    /// **Слот из свободного списка не наследует приказа покойника.**
+    ///
+    /// Удаление — free-list, и слот переиспользуется (`CLAUDE.md`).
+    /// Забудь обнулить приказ в `spawn` — и подкрепление, попавшее
+    /// в место погибшего копателя, пошло бы грызть его забой.
+    #[test]
+    fn a_reused_slot_never_inherits_the_order_of_the_dead() {
+        let mut w = World::new(2, 8, test_tuning());
+        let id = w.units.spawn(10, 10, 0, 1, 100);
+        w.units.refresh_live();
+        w.push_order(Order::Dig { unit: id, x: 10, y: 5, z: 10 });
+        w.tick();
+        assert_eq!(w.units.stance[id as usize], STANCE_DIG);
+        w.units.kill(id);
+        w.units.refresh_live();
+        let again = w.units.spawn(20, 20, 1, 1, 100);
+        assert_eq!(again, id, "слот не переиспользован — тест ничего не проверяет");
+        assert_eq!(w.units.stance[again as usize], STANCE_FLOW, "приказ пережил смерть");
+        assert_eq!(
+            (w.units.goal_x[again as usize], w.units.goal_y[again as usize]),
+            (0, 0),
+            "точка приказа пережила смерть"
+        );
+    }
+
+    /// **Приказ мёртвому отбрасывается, а не роняет тик.**
+    #[test]
+    fn an_order_to_the_dead_is_dropped() {
+        let mut w = World::new(2, 8, test_tuning());
+        let id = w.units.spawn(10, 10, 0, 1, 100);
+        w.units.refresh_live();
+        w.units.kill(id);
+        w.units.refresh_live();
+        w.push_order(Order::MoveTo { unit: id, x: 1, z: 1 });
+        w.push_order(Order::MoveTo { unit: 999, x: 1, z: 1 });
+        w.tick();
+        assert_eq!(w.orders_dropped, 2);
+        assert_eq!(w.orders_applied, 0);
+    }
+
+    /// **Приказ атаковать держит названного, а не ближайшего.**
+    ///
+    /// Без него фаза боя выбирает ближайшего сама, и приказ игрока
+    /// был бы отменён в том же тике, в котором отдан.
+    #[test]
+    fn an_attack_order_holds_the_named_enemy_over_the_nearest() {
+        let mut w = World::new(2, 16, test_tuning());
+        let me = w.units.spawn(32, 32, 0, 0, 300);
+        let near = w.units.spawn(42, 32, 1, 0, 300);
+        let far = w.units.spawn(52, 32, 1, 0, 300);
+        w.units.refresh_live();
+        w.push_order(Order::Attack { unit: me, target: far });
+        w.tick();
+        assert_eq!(
+            w.units.target[me as usize], far,
+            "цель перевыбрана на ближайшую: приказ игрока не удержался"
+        );
+        // Свой своему не цель: такой приказ отбрасывается.
+        w.push_order(Order::Attack { unit: near, target: far });
+        w.tick();
+        assert_eq!(w.orders_dropped, 1, "приказ бить своего прошёл");
+    }
+
+    /// **Приказ копать снимает породу — той же очередью, что и всё.**
+    ///
+    /// Копка — экономика проекта, и приказ, который до вокселей
+    /// не доходит, проверяет только себя.
+    #[test]
+    fn a_dig_order_actually_removes_rock() {
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 32, 64, 4096, Box::new(Flat));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        let id = w.spawn_ground(32, 32, 0, 6, 300);
+        w.units.refresh_live();
+        let at = (FLAT_GY - 1) as i32;
+        assert!(
+            w.ground().expect("земля").world.solid(32, at as u32, 32),
+            "под юнитом не порода — копать нечего"
+        );
+        w.push_order(Order::Dig { unit: id, x: 32, y: at, z: 32 });
+        for _ in 0..30 {
+            w.tick();
+        }
+        let g = w.ground().expect("земля");
+        assert!(!g.world.solid(32, at as u32, 32), "порода на месте: приказ не копал");
+        // Копатель уходит в собственную шахту: опора исчезла у него
+        // под ногами, и падение по ADR-036 — тот же код, что у всех.
+        assert!(
+            w.units.y[id as usize] < at,
+            "копатель остался на поверхности: y={}",
+            w.units.y[id as usize]
+        );
+        // И дно мира на месте: колонка без пола оставила бы юнита
+        // висеть в воздухе.
+        assert!(g.world.solid(32, 0, 32), "снят нижний слой мира");
+        // Забой углубляется: копатель уходит вниз, а не грызёт воздух
+        // на одном месте (ADR-159).
+        assert!(
+            w.units.goal_y[id as usize] < at,
+            "забой не углубился: y остался {}",
+            w.units.goal_y[id as usize]
+        );
     }
 }
