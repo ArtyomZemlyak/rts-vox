@@ -187,16 +187,134 @@ fn production_sources(dir: &Path) -> Vec<(PathBuf, String)> {
         .into_iter()
         .map(|f| {
             let text = std::fs::read_to_string(&f).unwrap_or_default();
-            let cut = text.find("#[cfg(test)]").unwrap_or(text.len());
-            (f, text[..cut].to_string())
+            let prod = without_test_code(&text);
+            (f, prod)
         })
         .collect()
 }
 
-/// Строка кода, а не комментария и не строкового литерала документации.
+/// Исходник без всего, что помечено `#[cfg(test)]`.
+///
+/// **Не обрезка по первому вхождению.** В `sim-core/src/lib.rs`
+/// помощник `#[cfg(test)] fn test_tuning()` стоит на 188-й строке,
+/// а `mod tests` — на 1904-й. Обрезка по первому прятала от всех
+/// линтов 1715 строк боевого кода: шестнадцать фаз тика, движение,
+/// бой, стрельбу и сам хеш. Исключения ADR-162 были выписаны для
+/// строк, которых проверка никогда не видела (ADR-180).
+///
+/// Пропущенные строки заменяются пустыми, а не выбрасываются: линты
+/// печатают номер строки, и сдвиг нумерации сделал бы их выдачу ложью.
+fn without_test_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut skipping = false;
+    let mut depth = 0i32;
+    let mut opened = false;
+    for line in text.lines() {
+        if !skipping {
+            if line.trim_start().starts_with("#[cfg(test)]") {
+                skipping = true;
+                depth = 0;
+                opened = false;
+                out.push('\n');
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        depth += braces(line);
+        if line.contains('{') {
+            opened = true;
+        }
+        out.push('\n');
+        if opened && depth <= 0 {
+            skipping = false;
+        }
+    }
+    out
+}
+
+/// Перевес открывающих фигурных скобок над закрывающими.
+///
+/// Литералы и хвостовой комментарий пропускаются: `'{'` внутри строки
+/// увёл бы счётчик и съел остаток файла — то есть спрятал бы код
+/// ровно так же, как обрезка по первому `#[cfg(test)]`.
+fn braces(line: &str) -> i32 {
+    let b: Vec<char> = line.chars().collect();
+    let mut n = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            '/' if i + 1 < b.len() && b[i + 1] == '/' => break,
+            '"' => {
+                i += 1;
+                while i < b.len() && b[i] != '"' {
+                    i += if b[i] == '\\' { 2 } else { 1 };
+                }
+            }
+            // Символьный литерал, но не время жизни `'a`.
+            '\'' if i + 2 < b.len() && b[i + 2] == '\'' => i += 2,
+            '\'' if i + 3 < b.len() && b[i + 1] == '\\' && b[i + 3] == '\'' => i += 3,
+            '{' => n += 1,
+            '}' => n -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Строка кода, а не комментария.
+///
+/// Ведущей `*` здесь отсеивались строки продолжения блочного
+/// комментария. Блочных комментариев в проекте **нет ни одного**,
+/// а строк боевого кода, начинающихся с разыменования (`*slot = ...`,
+/// `*blocked_moves += 1`), — 39, и все они были невидимы линту.
+/// Правило защищало то, чего нет, ценой того, что есть (ADR-180).
 fn is_code(line: &str) -> bool {
     let t = line.trim_start();
-    !(t.starts_with("//") || t.starts_with("*") || t.starts_with("#!["))
+    !(t.starts_with("//") || t.starts_with("#!["))
+}
+
+/// **Линт видит боевой код целиком.**
+///
+/// Сторож на сам сторож. Три проверки ниже — на плавающее, на
+/// хеш-контейнеры и на часы — стоят ровно столько, сколько исходника
+/// они видят, и полтора года видели 62% (ADR-180).
+#[test]
+fn the_lint_sees_the_whole_production_file() {
+    // Синтетика: помощник, помеченный `#[cfg(test)]`, не должен
+    // прятать то, что идёт за ним.
+    let src = concat!(
+        "fn a() {}\n",
+        "#[cfg(test)]\n",
+        "fn helper() { let s = \"{\"; }\n",
+        "fn b() { let _: f64 = 0.0; }\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n    fn t() {}\n}\n",
+    );
+    let kept = without_test_code(src);
+    assert!(kept.contains("fn a()"), "потерян код до помощника");
+    assert!(kept.contains("f64"), "боевой код за помощником пропал");
+    assert!(!kept.contains("helper"), "тестовый помощник остался");
+    assert!(!kept.contains("fn t()"), "тестовый модуль остался");
+    assert_eq!(
+        kept.lines().count(),
+        src.lines().count(),
+        "нумерация строк поехала — линт будет печатать чужие номера"
+    );
+
+    // И на настоящем файле: самая дальняя боевая фаза видна.
+    // `sim-core/src/lib.rs` — тот файл, ради которого всё это.
+    let f = root().join("crates/sim-core/src/lib.rs");
+    let prod = without_test_code(&std::fs::read_to_string(&f).expect("sim-core/src/lib.rs"));
+    for marker in ["fn step_shots", "fn phase_hash", "fn apply_deltas"] {
+        assert!(prod.contains(marker), "линт не видит {marker}");
+    }
+    assert!(
+        !prod.contains("fn test_tuning"),
+        "тестовый помощник просочился в боевой текст"
+    );
 }
 
 /// **Ни `f32`, ни `f64` в симуляции** (`CLAUDE.md`). Исключения
