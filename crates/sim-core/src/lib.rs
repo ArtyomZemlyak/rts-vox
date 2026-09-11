@@ -1348,6 +1348,17 @@ impl World {
         }
         let (range, cap) = (self.tuning.range, self.tuning.max_shots);
         let g_tick = gravity_per_tick(&self.tuning);
+        // **Ствол на теле, а не под ногами** (ADR-173). `x, y, z` юнита —
+        // это его опора, то есть пол. Снаряд, пущенный с пола в пол,
+        // всю дорогу скребёт по земле: дуга провисает, а целая часть
+        // высоты берётся округлением вниз, и на первой же выпуклости
+        // рельефа снаряд втыкается в грунт, не долетев. Подъём — половина
+        // роста юнита, число из тех же данных (`unit_height`), а не
+        // из головы.
+        //
+        // Луча это не касается: он приходит в тот же тик, провисать
+        // ему нечем, и линия огня у него своя (ADR-170).
+        let muzzle = self.tuning.unit_height as i32 / 2;
         let tick = self.tick as u32;
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
@@ -1410,6 +1421,10 @@ impl World {
                     u.next_shot[i] = tick + w.reload;
                 }
                 WeaponKind::Bolt => {
+                    let (from, to) = (
+                        (from.0, from.1 + muzzle, from.2),
+                        (to.0, to.1 + muzzle, to.2),
+                    );
                     // Потолок на снаряды в воздухе. Упёршийся выстрел
                     // **не тратит перезарядку**: иначе юнит терял бы
                     // очередь из-за чужой стрельбы.
@@ -2575,6 +2590,55 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         );
         assert_eq!(w.shots_hit, 0, "снаряд достал мишень сквозь стену");
         assert_eq!(w.units.voxels[id], hp0, "мишень за стеной получила урон");
+    }
+
+    /// Плоский пол и **кочка в один воксель** посреди него.
+    /// Ровно та неровность, которую юнит перешагивает не глядя
+    /// (`max_step` в данных — единица).
+    struct Bump;
+    const BUMP_X: u32 = 32;
+    impl voxel::Generator for Bump {
+        fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+            if y < FLAT_GY || (x == BUMP_X && y == FLAT_GY) {
+                2
+            } else {
+                voxel::store::AIR
+            }
+        }
+    }
+
+    /// **Ствол на теле, а не под ногами** (ADR-173).
+    ///
+    /// Координата юнита — его опора, то есть пол. Снаряд, пущенный
+    /// из точки опоры в точку опоры, идёт по самой земле: дуга
+    /// провисает, целая часть высоты берётся округлением вниз, —
+    /// и первая же кочка съедает выстрел. Через кочку в один воксель
+    /// стрелять нельзя, а над ней можно, и разница целиком в высоте
+    /// ствола.
+    ///
+    /// На стрелковой сцене всего проекта это стоит трети попаданий
+    /// (`docs/analysis/10-decisions-full.md`, ADR-173).
+    #[test]
+    fn the_muzzle_clears_a_one_voxel_bump() {
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Bump));
+        let mut w = World::new(2, 8, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        w.attach_weapons(bolt(40));
+        w.spawn_ground(BUMP_X as i32 - 10, 32, 0, 0, 300);
+        w.spawn_ground(BUMP_X as i32 + 10, 32, 1, 0, 300);
+        w.units.refresh_live();
+        for _ in 0..120 {
+            w.tick();
+        }
+        assert!(w.shots_fired > 0, "никто не стрелял");
+        assert!(
+            w.shots_hit > 0,
+            "с {} выстрелов ни одного попадания через кочку в воксель: \
+упоров в породу {} — снаряд идёт по земле, а не над ней",
+            w.shots_fired,
+            w.shots_blocked
+        );
     }
 
     /// **Гора закрывает, прокопанный ход открывает.**
