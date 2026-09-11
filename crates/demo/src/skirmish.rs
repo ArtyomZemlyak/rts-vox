@@ -264,6 +264,31 @@ impl Skirmish {
         }
     }
 
+    /// Рельеф: высота поверхности по каждой клетке.
+    ///
+    /// Нужно, чтобы отличить «карта такая» от «это выел бой». Вопрос
+    /// не праздный: у генератора ступени в один воксель, и на пологом
+    /// склоне ступень тянется длинной канавой — на глаз неотличимо
+    /// от траншеи (ADR-207).
+    pub fn surface(&self) -> Vec<u32> {
+        let g = self.world.ground().expect("земля");
+        let (nx, ny, nz) = (g.world.nx, g.world.ny, g.world.nz);
+        let mut out = Vec::with_capacity((nx * nz) as usize);
+        for z in 0..nz {
+            for x in 0..nx {
+                let mut h = 0u32;
+                for y in (0..ny).rev() {
+                    if g.world.solid(x, y, z) {
+                        h = y + 1;
+                        break;
+                    }
+                }
+                out.push(h);
+            }
+        }
+        out
+    }
+
     /// Крутить до исхода. Возвращает исход и хеш последнего тика.
     pub fn play_out(&mut self) -> (Outcome, u64) {
         let mut h = 0u64;

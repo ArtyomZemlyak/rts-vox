@@ -41,6 +41,7 @@ fn main() {
     let t0 = Instant::now();
     let mut m = Skirmish::new(s);
     let build = t0.elapsed().as_secs_f64() * 1e3;
+    let before = m.surface();
     let t1 = Instant::now();
     let (out, hash) = m.play_out();
     let ms = t1.elapsed().as_secs_f64() * 1e3;
@@ -72,6 +73,44 @@ fn main() {
     println!(
         "\n{:<30} {:>9.1} мс   {:<30} {:>9.3} мс/тик",
         "сборка мира", build, "тик", ms / m.tick.max(1) as f64
+    );
+    // Насколько изрыта карта. Без этого «глубокие ямы» на экране
+    // остаются впечатлением: у генератора ступени в один воксель,
+    // и отличить их от воронок глазом нельзя (ADR-207).
+    let after = m.surface();
+    let (mut cut, mut deepest, mut total) = (0usize, 0u32, 0u64);
+    for (a, b) in before.iter().zip(after.iter()) {
+        if b < a {
+            cut += 1;
+            let d = a - b;
+            deepest = deepest.max(d);
+            total += d as u64;
+        }
+    }
+    let (lo, hi) = (
+        *before.iter().min().unwrap_or(&0),
+        *before.iter().max().unwrap_or(&0),
+    );
+    println!(
+        "\nрельеф до матча: высота {lo}..{hi} вокселей, размах {} ({:.1} м)",
+        hi - lo,
+        (hi - lo) as f64 * 0.5
+    );
+    println!(
+        "{:<30} {:>12} из {} ({:.1}%)",
+        "клеток стало ниже",
+        cut,
+        before.len(),
+        100.0 * cut as f64 / before.len().max(1) as f64
+    );
+    println!(
+        "{:<30} {:>12} вокселей ({:.1} м)",
+        "  глубже всего срыто", deepest, deepest as f64 * 0.5
+    );
+    println!(
+        "{:<30} {:>12.2} вокселя",
+        "  в среднем по просевшей",
+        total as f64 / cut.max(1) as f64
     );
     println!("хеш последнего тика: {hash:016x}");
 
