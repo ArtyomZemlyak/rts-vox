@@ -120,11 +120,15 @@ impl UnitBody {
     pub fn new_scaled(nx: u8, ny: u8, nz: u8, core_size: u8, mm: u16) -> UnitBody {
         assert!(mm > 0, "воксель нулевого размера");
         let n = nx as usize * ny as usize * nz as usize;
+        // Маски подсистем лежат теми же колонками, что и том, значит
+        // и шаг у них тот же: разойдутся — подсистема будет читаться
+        // из чужой колонки (ADR-179).
+        let words = nx.div_ceil(64) as usize;
         UnitBody {
             vol: UnitVol::new(nx, ny, nz),
             part: std::sync::Arc::new(vec![Part::Armour as u8; n]),
-            masks: vec![0; 3 * ny as usize * nz as usize],
-            mstride: ny as usize * nz as usize,
+            masks: vec![0; 3 * ny as usize * nz as usize * words],
+            mstride: ny as usize * nz as usize * words,
             core: (0, 0, 0),
             core_size: core_size.max(1),
             mm,
@@ -204,9 +208,10 @@ impl UnitBody {
         (z * self.vol.ny as usize + y) * self.vol.nx as usize + x
     }
 
+    /// Начало колонки в массиве масок.
     #[inline]
     fn col(&self, y: usize, z: usize) -> usize {
-        z * self.vol.ny as usize + y
+        (z * self.vol.ny as usize + y) * self.vol.words as usize
     }
 
     /// Расставить воксель. Единственное место, где меняются метки,
@@ -217,7 +222,7 @@ impl UnitBody {
         std::sync::Arc::make_mut(&mut self.part)[i] = p as u8;
         if let Some(k) = subsystem_slot(p) {
             let c = self.col(y, z);
-            self.masks[k * self.mstride + c] |= 1u64 << x;
+            self.masks[k * self.mstride + c + (x >> 6)] |= 1u64 << (x & 63);
         }
     }
 
@@ -239,7 +244,7 @@ impl UnitBody {
         self.vol.set(x, y, z, false);
         if let Some(k) = subsystem_slot(self.part_at(x, y, z)) {
             let c = self.col(y, z);
-            self.masks[k * self.mstride + c] &= !(1u64 << x);
+            self.masks[k * self.mstride + c + (x >> 6)] &= !(1u64 << (x & 63));
         }
         true
     }
