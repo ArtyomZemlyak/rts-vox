@@ -153,6 +153,13 @@ impl MeshLayer {
         self.local[i].push((lx, ly, lz));
     }
 
+    /// Чанки, задетые последним `apply`. Рендеру нужно знать **какие**,
+    /// а не сколько: пересобирать весь мир каждый кадр — это два порядка
+    /// лишней работы (ADR-155).
+    pub fn dirty(&self) -> &[u32] {
+        &self.dirty
+    }
+
     /// Применить правки тика. Возвращает число грязных чанков.
     pub fn apply(&mut self, w: &World, edits: &[Edit]) -> usize {
         self.scatter(edits);

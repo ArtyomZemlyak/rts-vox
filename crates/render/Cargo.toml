@@ -13,6 +13,13 @@ bevy = { version = "=0.19.1", default-features = false, features = ["3d"] }
 meshing = { path = "../meshing" }
 voxel = { path = "../voxel" }
 worldgen = { path = "../worldgen" }
+# Рендер **читает** состояние симуляции и никогда не пишет в него
+# (`docs/02-architecture.md`). Зависимость направлена сюда и только сюда:
+# обратную сторожит `harness`.
+sim-core = { path = "../sim-core" }
+# Числа тика читаются из данных: файл знает тот, кто запускает.
+modding = { path = "../modding" }
+fx = { path = "../fx" }
 
 [lib]
 path = "src/lib.rs"
