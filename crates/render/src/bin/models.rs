@@ -203,7 +203,9 @@ fn setup(
 
     // Свет — из общей палитры (`look`), чтобы модели выглядели так же,
     // как в бою, а не «красиво отдельно».
-    let d = render::look::SUN_DIR;
+    // Направление солнца теперь вычисляется из высоты и азимута
+    // (ADR-198), а не задано вектором.
+    let d = render::look::sun_dir();
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(
@@ -229,7 +231,7 @@ fn setup(
     commands.spawn((
         DirectionalLight {
             color: Color::srgb(0.55, 0.68, 0.95),
-            illuminance: render::look::SKY_LUX,
+            illuminance: render::look::SUN_LUX * 0.06,
             shadow_maps_enabled: false,
             ..default()
         },
@@ -237,11 +239,11 @@ fn setup(
     ));
     commands.insert_resource(GlobalAmbientLight {
         color: Color::srgb(
-            render::look::SKY_SRGB[0],
-            render::look::SKY_SRGB[1],
-            render::look::SKY_SRGB[2],
+            render::look::AMBIENT_SRGB[0],
+            render::look::AMBIENT_SRGB[1],
+            render::look::AMBIENT_SRGB[2],
         ),
-        brightness: 120.0,
+        brightness: render::look::AMBIENT_BRIGHTNESS * 3.0,
         ..default()
     });
 }

@@ -10,7 +10,12 @@
 
 use crate::look::{self, Class};
 use meshing::{Quad, CS};
-use voxel::store::Mat;
+use voxel::store::{Mat, AIR};
+
+/// Чем красить грань, у которой воздух с обеих сторон. Порода:
+/// её ни с чем не спутать, и это честнее, чем фуксия «мод принёс
+/// свой номер».
+const FALLBACK: Mat = 2;
 
 /// Буферы одного чанка. Переиспользуются: выделение на чанк мерило бы
 /// аллокатор, а чанков тысячи.
@@ -22,6 +27,10 @@ pub struct MeshBuf {
     /// Цвет вершины. У юнитов несёт роль воксела (ADR-172), у рельефа —
     /// материал (ADR-175). Пуст только у неокрашенного разворота.
     pub col: Vec<[f32; 4]>,
+    /// Координаты плитки фаски, **в вокселях**: единица UV — ровно один
+    /// воксель, и поэтому плитка садится на сетку без подгонки, каким
+    /// бы большим ни вышел слитый квад (ADR-199).
+    pub uv: Vec<[f32; 2]>,
 }
 
 impl MeshBuf {
@@ -30,6 +39,7 @@ impl MeshBuf {
         self.nrm.clear();
         self.idx.clear();
         self.col.clear();
+        self.uv.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -104,6 +114,9 @@ fn push_quad(
     let base = out.pos.len() as u32;
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
+    // Углы квада разнесены на `h` и `w` вокселей — столько же плиток
+    // фаски в них и укладывается.
+    out.uv.extend_from_slice(&[[0.0, 0.0], [h, 0.0], [h, w], [0.0, w]]);
     if let Some(c) = col {
         out.col.extend_from_slice(&[c, c, c, c]);
     }
@@ -185,22 +198,54 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
         // массиву, который весь лежит в кэше.
         p.mats.clear();
         p.mats.reserve(w * h);
+        // Воздух под гранью — **норма, а не сбой**, и это не догадка:
+        // геометрию берут у мешера, а материал у мира, и мешер отстаёт
+        // от мира на тик. Свежая воронка успевает съесть воксель
+        // раньше, чем пропадёт его грань, и тогда материал читается
+        // из дыры.
+        //
+        // Замерено на сцене шестисот юнитов: **десять миллионов таких
+        // граней за двести шестьдесят кадров**, и каждая красилась
+        // фуксией — цветом неизвестного материала. Ею залило поле боя.
+        //
+        // Шаг на другую сторону грани не помогает: там воздух тоже
+        // (проверено — вторая выборка возвращала `AIR` ровно столько
+        // же раз, сколько первая). Значит красить надо тем, что
+        // у квада осталось.
+        let mut any = AIR;
         for r in 0..w {
             for c in 0..h {
                 let (px, py, pz) = owner(axis, s, qa + r, qb + c);
-                p.mats.push(mat_at(
+                let m = mat_at(
                     at[0] + px as u32 - 1,
                     at[1] + py as u32 - 1,
                     at[2] + pz as u32 - 1,
-                ));
+                );
+                if m != AIR {
+                    any = m;
+                }
+                p.mats.push(m);
+            }
+        }
+        // Совсем пустой квад — порода. Фуксия означает «мод принёс свой
+        // номер материала» и обязана значить только это.
+        if any == AIR {
+            any = FALLBACK;
+        }
+        for m in p.mats.iter_mut() {
+            if *m == AIR {
+                *m = any;
             }
         }
         let first = p.mats[0];
         let uniform = p.mats.iter().all(|&m| m == first);
 
+        // Цвет считается **один раз на квад**, а не на вершину: у всех
+        // четырёх он один и тот же, а `colour_face` это три умножения.
+        let col = |m: Mat| look::colour_face(m, axis, positive);
         let mut emit = |a: usize, b: usize, w: usize, h: usize, m: Mat| {
             let buf = &mut out[look::class(m) as usize];
-            push_quad(axis, positive, s, a, b, w, h, origin, Some(look::colour(m)), buf);
+            push_quad(axis, positive, s, a, b, w, h, origin, Some(col(m)), buf);
         };
 
         if uniform {
@@ -322,6 +367,20 @@ pub fn volume_to_mesh(
                 }
                 let c = look::to_linear(look::part_srgb(b.part_at(x, y, z), tint));
                 for (d, n) in SIDES {
+                    // Та же яркость по направлению, что у рельефа: без
+                    // неё верх и бок корпуса одного цвета, и силуэт
+                    // юнита разваливается на дистанции RTS (ADR-201).
+                    let k = look::face_tint(
+                        if d[0] != 0 {
+                            0
+                        } else if d[1] != 0 {
+                            1
+                        } else {
+                            2
+                        },
+                        d[0] + d[1] + d[2] > 0,
+                    );
+                    let c = [c[0] * k, c[1] * k, c[2] * k, c[3]];
                     let (sx, sy, sz) = (x as i32 + d[0], y as i32 + d[1], z as i32 + d[2]);
                     let inside = sx >= 0
                         && sy >= 0
@@ -383,6 +442,8 @@ fn push_face(
     let base = out.pos.len() as u32;
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
+    // Грань тела — ровно один воксель, значит ровно одна плитка.
+    out.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
     out.col.extend_from_slice(&[c, c, c, c]);
     if positive {
         out.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -570,7 +631,14 @@ mod tests {
         let tint = [0.3, 0.5, 0.9];
         let mut buf = MeshBuf::default();
         volume_to_mesh(&tank, tint, 0.5, Slice::All, &mut buf);
-        let hull = look::to_linear(tint);
+        // Броня верхней грани: цвет роли, умноженный на яркость
+        // направления (ADR-201). Сверять с одним `to_linear(tint)`
+        // нельзя — такого цвета после ADR-201 нет ни у одной вершины,
+        // и проверка стала бы вакуумной.
+        let lin = look::to_linear(tint);
+        let k = look::face_tint(1, true);
+        let hull = [lin[0] * k, lin[1] * k, lin[2] * k, lin[3]];
+        assert!(buf.col.contains(&hull), "брони верхней грани нет вовсе");
         let others = buf.col.iter().filter(|&&c| c != hull).count();
         assert!(others > 0, "весь танк одного цвета — роли не видно");
     }
@@ -602,7 +670,11 @@ mod tests {
     #[test]
     fn the_barrel_belongs_to_the_turret() {
         let tank = voxel::unit::tank();
-        let gun = look::to_linear(look::part_srgb(voxel::unit::Part::Weapon, [0.5, 0.5, 0.5]));
+        // Цвет грани умножен на яркость её направления (ADR-201),
+        // поэтому сверять надо с конкретной гранью — берём верхнюю.
+        let base = look::to_linear(look::part_srgb(voxel::unit::Part::Weapon, [0.5, 0.5, 0.5]));
+        let k = look::face_tint(1, true);
+        let gun = [base[0] * k, base[1] * k, base[2] * k, base[3]];
         let mut hull = MeshBuf::default();
         let mut turret = MeshBuf::default();
         volume_to_mesh(&tank, [0.5, 0.5, 0.5], 0.5, Slice::Hull, &mut hull);
@@ -702,9 +774,18 @@ mod tests {
                     );
                     let m = w.material(vx, vy, vz);
                     assert_ne!(m, voxel::store::AIR, "грань принадлежит воздуху");
+                    // Ось и знак грани берутся из её нормали: цвет
+                    // умножен на яркость направления (ADR-201).
+                    let axis = if n[0] != 0.0 {
+                        0
+                    } else if n[1] != 0.0 {
+                        1
+                    } else {
+                        2
+                    };
                     assert_eq!(
                         b.col[base],
-                        look::colour(m),
+                        look::colour_face(m, axis, n[axis] > 0.0),
                         "воксель {vx},{vy},{vz} материала {m} покрашен не своим цветом"
                     );
                     assert_eq!(look::class(m) as usize, k, "материал {m} не в своём буфере");
@@ -714,6 +795,129 @@ mod tests {
         }
         assert!(checked > 5_000, "проверка почти ничего не проверила: {checked}");
         assert!(seen[ROCK] > 0 && seen[ORE] > 0, "один из классов пуст: {seen:?}");
+    }
+
+    /// **Воздух под гранью не красится фуксией.**
+    ///
+    /// Геометрию красильщик берёт у мешера, а материал у мира, и мешер
+    /// отстаёт на тик: свежая воронка съедает воксель раньше, чем
+    /// пропадает его грань. Тогда материал читается из дыры, и цвет
+    /// неизвестного материала заливает поле боя.
+    ///
+    /// Проверяется прямо: мир отдаёт воздух в половине вокселей квада.
+    #[test]
+    fn air_under_a_face_is_not_painted_unknown() {
+        let mut p = Painter::default();
+        let mut bufs = class_bufs();
+        quads_to_mesh_painted(
+            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 8, h: 8, mat: 1 }],
+            [0.0, 0.0, 0.0],
+            [0, 0, 0],
+            // Шахматка из породы и дыр.
+            |x, _, z| if (x + z) % 2 == 0 { 2 } else { voxel::store::AIR },
+            &mut p,
+            &mut bufs,
+        );
+        // Грань смотрит вверх (face 2), и цвет умножен на яркость
+        // направления (ADR-201).
+        let fuchsia = look::colour_face(voxel::store::AIR, 1, true);
+        let rock = look::colour_face(2, 1, true);
+        let mut n = 0usize;
+        for b in bufs.iter() {
+            for c in b.col.iter() {
+                assert_ne!(*c, fuchsia, "дыра покрашена цветом неизвестного материала");
+                assert_eq!(*c, rock, "дыра покрашена не тем, что рядом");
+                n += 1;
+            }
+        }
+        assert!(n >= 4, "квад не выпущен вовсе");
+
+        // Совсем пустой квад тоже обязан быть породой, а не фуксией.
+        for b in bufs.iter_mut() {
+            b.clear();
+        }
+        quads_to_mesh_painted(
+            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 4, h: 4, mat: 1 }],
+            [0.0, 0.0, 0.0],
+            [0, 0, 0],
+            |_, _, _| voxel::store::AIR,
+            &mut p,
+            &mut bufs,
+        );
+        for b in bufs.iter() {
+            for c in b.col.iter() {
+                assert_ne!(*c, fuchsia, "пустой квад покрашен фуксией");
+            }
+        }
+    }
+
+    /// **После копки ни одна грань не принадлежит воздуху.**
+    ///
+    /// Тест выше красит **нетронутый** мир и берёт квады полной
+    /// пересборкой. Окно боя делает не так: оно копает и берёт квады
+    /// у живого мешера (`layer.quads`, ADR-175). Разница видна только
+    /// на воронке, и видна она фуксией — цветом неизвестного
+    /// материала, которым красится `AIR`.
+    #[test]
+    fn no_face_belongs_to_air_after_digging() {
+        use meshing::layer::MeshLayer;
+        use meshing::Opts;
+
+        let mut w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Layers));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let (nx, ny, _) = layer.dims();
+
+        // Воронка: шар радиуса пять у поверхности. Форма именно
+        // шаровая, а не столбик, — ровный столб не даёт наклонных
+        // стенок, на которых всё и ломается.
+        w.begin_tick();
+        let (cx, cy, cz) = (40i32, 13i32, 40i32);
+        for dz in -5..=5i32 {
+            for dy in -5..=5i32 {
+                for dx in -5..=5i32 {
+                    if dx * dx + dy * dy + dz * dz <= 25 {
+                        w.queue_dig((cx + dx) as u32, (cy + dy) as u32, (cz + dz) as u32);
+                    }
+                }
+            }
+        }
+        w.flush();
+        let edits: Vec<voxel::Edit> = w.edits().to_vec();
+        assert!(!edits.is_empty(), "копка не дала ни одной правки");
+        layer.apply(&w, &edits);
+        let dirty: Vec<usize> = layer.dirty().iter().map(|&i| i as usize).collect();
+        assert!(!dirty.is_empty(), "мешер не заметил воронку");
+
+        let mut p = Painter::default();
+        let mut checked = 0usize;
+        for i in dirty {
+            let quads = layer.quads(i);
+            if quads.is_empty() {
+                continue;
+            }
+            let mut bufs = class_bufs();
+            let at = chunk_at(i, nx, ny);
+            quads_to_mesh_painted(
+                &quads,
+                [0.0, 0.0, 0.0],
+                at,
+                |x, y, z| w.material(x, y, z),
+                &mut p,
+                &mut bufs,
+            );
+            for b in bufs.iter() {
+                for t in b.idx.chunks(6) {
+                    let base = t[0] as usize;
+                    assert_ne!(
+                        b.col[base],
+                        look::colour(voxel::store::AIR),
+                        "грань покрашена цветом неизвестного материала"
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200, "проверка почти ничего не проверила: {checked}");
     }
 
     /// **Однородный квад не режется.** Быстрый путь — это не

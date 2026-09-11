@@ -504,11 +504,14 @@ fn setup(
                 ..default()
             },
             Tonemapping::AcesFitted,
+            // Дымка — по дальности, а не по доле карты: атмосфера
+            // (ADR-198) задаёт её в метрах, и окно берёт ту же
+            // величину, чтобы глубина читалась одинаково в обоих.
             DistanceFog {
                 color: srgb(look::SKY_COLOUR_SRGB),
                 falloff: FogFalloff::Linear {
-                    start: side * look::FOG_START_FRAC,
-                    end: side * look::FOG_END_FRAC,
+                    start: side * 0.35,
+                    end: side * 1.6,
                 },
                 ..default()
             },
@@ -531,7 +534,7 @@ fn setup(
             shadow_normal_bias: 2.0,
             ..default()
         },
-        Transform::default().looking_to(Vec3::from(look::SUN_DIR).normalize(), Vec3::Y),
+        Transform::default().looking_to(Vec3::from(look::sun_dir()).normalize(), Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: look::SHADOW_CASCADES.max(1),
             minimum_distance: 1.0,
@@ -541,15 +544,15 @@ fn setup(
         }
         .build(),
     ));
-    commands.spawn((
-        DirectionalLight {
-            color: srgb(look::SKY_SRGB),
-            illuminance: look::SKY_LUX,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::default().looking_to(Vec3::from(look::SKY_DIR).normalize(), Vec3::Y),
-    ));
+    // Заполняющий свет неба: раньше это была вторая лампа с своими
+    // константами, теперь их нет — небо считается атмосферой. Окно
+    // пока без атмосферы, поэтому подсветка берётся из палитры
+    // ambient, а не выдумывается заново (ADR-209).
+    commands.insert_resource(GlobalAmbientLight {
+        color: srgb(look::AMBIENT_SRGB),
+        brightness: look::AMBIENT_BRIGHTNESS * 4.0,
+        ..default()
+    });
     commands.insert_resource(art);
 }
 
