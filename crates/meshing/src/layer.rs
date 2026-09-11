@@ -254,6 +254,23 @@ impl MeshLayer {
         (self.nx, self.ny, self.nz)
     }
 
+    /// Квады чанка **как они есть** — из его живого мешера.
+    ///
+    /// Это то, ради чего инкрементальный ремеш и написан. Потребитель,
+    /// зовущий вместо этого `rebuilt_quads`, выбрасывает весь выигрыш:
+    /// полная пересборка заново строит битовый объём (64³ обращений
+    /// к миру) и сливает все триста семьдесят две пары «грань, слой»,
+    /// тогда как правка трогает около двенадцати (ADR-075).
+    ///
+    /// Пустой вектор у нетронутого чанка: слой ленивый, и чанк,
+    /// которого никто не касался, мешера ещё не имеет.
+    pub fn quads(&self, i: usize) -> Vec<crate::Quad> {
+        self.chunks[i]
+            .as_ref()
+            .map(|c| c.mesher.collect_quads())
+            .unwrap_or_default()
+    }
+
     /// Число квадов конкретного чанка — для сверки швов.
     pub fn quad_at(&self, i: usize) -> usize {
         self.chunks[i].as_ref().map_or(0, |c| c.mesher.quad_count())
@@ -263,6 +280,101 @@ impl MeshLayer {
         (0..self.chunks.len())
             .filter(|&i| self.chunks[i].is_some())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Quad;
+
+    /// Ступенчатый рельеф: слой соблюдает ленивость, поэтому чанк
+    /// обязан быть тронут правкой, чтобы вообще появиться.
+    struct Steps;
+
+    impl voxel::Generator for Steps {
+        fn material(&self, x: u32, y: u32, z: u32) -> voxel::store::Mat {
+            let h = 20 + x % 5 + (z % 3) * 3;
+            if y >= h {
+                voxel::store::AIR
+            } else if y + 3 >= h {
+                1
+            } else {
+                2
+            }
+        }
+    }
+
+    fn sorted(mut q: Vec<Quad>) -> Vec<Quad> {
+        q.sort_by_key(|x| (x.face, x.slice, x.a, x.b, x.w, x.h));
+        q
+    }
+
+    /// Прокопать список и вернуть **применённые** правки: слой обязан
+    /// получить ровно то, что легло в мир, а не то, что было заказано.
+    fn dig(w: &mut voxel::World, cells: impl Iterator<Item = (u32, u32, u32)>) -> Vec<Edit> {
+        for (x, y, z) in cells {
+            w.queue_dig(x, y, z);
+        }
+        let mut applied = Vec::new();
+        while w.queued() > 0 {
+            w.flush();
+            applied.extend_from_slice(w.edits());
+        }
+        applied
+    }
+
+    /// **Живые квады чанка — те же, что у полной пересборки.**
+    ///
+    /// Ровно это свойство даёт право не пересобирать чанк с нуля,
+    /// и без него `quads` — просто более быстрый неверный ответ.
+    /// Число квадов уже сверяется в сценах, но геометрию рендер берёт
+    /// не числом, а самими квадами.
+    #[test]
+    fn live_quads_equal_a_full_rebuild() {
+        let mut w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Steps));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let edits = dig(
+            &mut w,
+            (14..24u32).flat_map(|y| {
+                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
+            }),
+        );
+        assert!(!edits.is_empty(), "яма не выкопалась");
+        assert_eq!(layer.apply(&w, &edits), 1, "яма задела не один чанк");
+        let i = layer.dirty()[0] as usize;
+        assert!(layer.quad_at(i) > 0, "чанк пуст — сверять нечего");
+        assert_eq!(
+            sorted(layer.quads(i)),
+            sorted(layer.rebuilt_quads(&w, i)),
+            "живые квады разошлись с полной пересборкой"
+        );
+
+        // Вторая правка поверх первой: расхождение инкремента копится,
+        // и одна правка его не ловит.
+        let more = dig(
+            &mut w,
+            (16..20u32).flat_map(|y| (32..36u32).map(move |x| (x, y, 45u32))),
+        );
+        layer.apply(&w, &more);
+        for &d in layer.dirty() {
+            let d = d as usize;
+            assert_eq!(
+                sorted(layer.quads(d)),
+                sorted(layer.rebuilt_quads(&w, d)),
+                "чанк {d}: живые квады разошлись после второй правки"
+            );
+        }
+    }
+
+    /// **Нетронутый чанк квадов не отдаёт.** Слой ленивый, и выдумать
+    /// ему геометрию значило бы построить весь мир на первом запросе.
+    #[test]
+    fn an_untouched_chunk_has_no_live_quads() {
+        let w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Steps));
+        let layer = MeshLayer::new(&w, Opts::default());
+        assert!(layer.quads(0).is_empty());
+        assert!(!layer.rebuilt_quads(&w, 0).is_empty(), "чанк и правда пуст");
     }
 }
 
