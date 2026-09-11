@@ -13,6 +13,10 @@ pub struct Grid {
     pub h: usize,
     starts: Vec<u32>,
     items: Vec<u32>,
+    /// Курсор раскладки. Поле, а не `starts.clone()` на каждый тик:
+    /// клон — это выделение кучи размером со всю сетку, каждый тик,
+    /// дважды (ADR-189).
+    cursor: Vec<u32>,
 }
 
 impl Grid {
@@ -24,7 +28,31 @@ impl Grid {
             h: w,
             starts: vec![0; w * w + 1],
             items: vec![0; capacity],
+            cursor: vec![0; w * w + 1],
         }
+    }
+
+    /// Перевыставить сторону мира.
+    ///
+    /// Сетка создаётся вместе с миром, а настоящий размер мира
+    /// приходит позже, вместе с землёй. До этого она была размером
+    /// с `WORLD` — две тысячи единиц, — каким бы ни был мир на самом
+    /// деле, и каждый тик обнуляла вёдра мира, которого нет (ADR-189).
+    ///
+    /// Обнуление лишнего не меняет ответов: `bucket_of` клампит
+    /// координату, а юнит за пределы земли не выходит. Меняется
+    /// только цена.
+    pub fn resize_world(&mut self, world: i32) {
+        let w = (world / self.cell).max(1) as usize + 1;
+        if w == self.w {
+            return;
+        }
+        self.w = w;
+        self.h = w;
+        self.starts.clear();
+        self.starts.resize(w * w + 1, 0);
+        self.cursor.clear();
+        self.cursor.resize(w * w + 1, 0);
     }
 
     #[inline(always)]
@@ -48,11 +76,11 @@ impl Grid {
             self.starts[k] += self.starts[k - 1];
         }
         // Курсор поверх starts: второй проход раскладывает по вёдрам.
-        let mut cursor = self.starts.clone();
+        self.cursor.copy_from_slice(&self.starts);
         for &i in alive {
             let b = self.bucket_of(xs[i as usize], zs[i as usize]);
-            self.items[cursor[b] as usize] = i;
-            cursor[b] += 1;
+            self.items[self.cursor[b] as usize] = i;
+            self.cursor[b] += 1;
         }
     }
 

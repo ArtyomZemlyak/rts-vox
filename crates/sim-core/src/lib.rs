@@ -473,7 +473,17 @@ impl World {
     }
 
     /// Привязать воксельный мир. До этого фазы земли — заглушки.
+    ///
+    /// Здесь же индекс соседей узнаёт **настоящий** размер мира.
+    /// До этого он строился по `WORLD` — две тысячи единиц, — а мир
+    /// приходит из `worldgen::Params` и бывает вчетверо, а то и
+    /// вдесятеро меньше. Обнулялись вёдра мира, которого нет
+    /// (ADR-189).
     pub fn attach_ground(&mut self, g: ground::Ground) {
+        let (ex, ez) = g.extent();
+        let side = ex.max(ez);
+        self.grid_near.resize_world(side);
+        self.grid_far.resize_world(side);
         self.ground = Some(g);
     }
 
