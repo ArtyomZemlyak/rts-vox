@@ -372,6 +372,13 @@ impl World {
         self.ground.as_ref()
     }
 
+    /// Земля для правки — **сценарию**, который ставит правки в очередь.
+    /// Рендер сюда не ходит: он состояние читает, а не пишет
+    /// (`CLAUDE.md`, границы слоёв).
+    pub fn ground_mut(&mut self) -> Option<&mut ground::Ground> {
+        self.ground.as_mut()
+    }
+
     /// Размеры вёдер — параметр, а не константа: они задают обмен между
     /// ценой пересборки индекса и ценой запроса, и оптимум зависит
     /// от плотности. Мелкое ведро дёшево в запросе и дорого в пересборке:
@@ -1230,6 +1237,117 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     w.units.refresh_live();
 }
 
+/// Сторона мира эталонного сценария.
+///
+/// Меньше умолчания генератора (512³): гейт запускают руками и в CI,
+/// и он обязан оставаться быстрым. Больше сектора навигации во много
+/// раз, иначе иерархия в нём не участвует.
+pub const REF_SIDE: u32 = 256;
+
+/// Сколько копателей в эталонном сценарии и как глубоко они грызут
+/// за тик. Копка — экономика проекта, и сценарий, который не копает,
+/// не проверяет главного.
+const REF_DIGGERS: usize = 24;
+const REF_RADIUS: i32 = 2;
+
+/// **Эталонный сценарий — один на всех:** и на `sim-cli`, и на тесты
+/// детерминизма.
+///
+/// Живёт здесь, а не в `main.rs`, по той же причине, по которой написан
+/// этот комментарий. Пока сценарий собирался в `sim-cli`, тесты гоняли
+/// мир **без земли** — и гейт печатал хеш того же мира без земли. Пять
+/// фаз тика из шестнадцати не входили в хеш вовсе: правки вокселей,
+/// разрушение, тела, навигация и поле направлений (ADR-157). Это второй
+/// случай той же болезни после ADR-116.
+///
+/// Лечится он не тестом на фазу, а тем, что **прогнать сценарий можно
+/// ровно одним способом** — через [`Reference::tick`]. Копка идёт
+/// внутри него: разнеси её по вызывающим, и они разойдутся снова.
+pub struct Reference {
+    pub world: World,
+    /// Копатели: где грызут и куда двинутся дальше.
+    diggers: Vec<(i32, i32, i32)>,
+    rng: Rng,
+}
+
+impl Reference {
+    pub fn new(seed: u64, units: usize, tuning: Tuning) -> Reference {
+        let params = worldgen::Params {
+            nx: REF_SIDE,
+            ny: REF_SIDE / 2,
+            nz: REF_SIDE,
+            ..Default::default()
+        };
+        let terrain = worldgen::Terrain { params, seed };
+        let vw = voxel::World::new(
+            params.nx,
+            params.ny,
+            params.nz,
+            1 << 16,
+            Box::new(worldgen::Terrain { params, seed }),
+        );
+        let g = ground::Ground::new(vw, &tuning);
+        let mut world = World::new(2, units.max(1), tuning);
+        world.attach_ground(g);
+        populate(&mut world, units, seed);
+
+        // Копатели ставятся на поверхность, вразнос по карте: копка
+        // в одной точке — это другой случай с другой ценой.
+        let mut rng = Rng::new(seed, 0xD16);
+        let mut diggers = Vec::with_capacity(REF_DIGGERS);
+        for _ in 0..REF_DIGGERS {
+            let x = rng.below(REF_SIDE) as i32;
+            let z = rng.below(REF_SIDE) as i32;
+            let y = terrain.surface(x as u32, z as u32) as i32;
+            diggers.push((x, y, z));
+        }
+        Reference { world, diggers, rng }
+    }
+
+    /// Тик сценария: сначала копка, потом сам тик.
+    pub fn tick(&mut self) -> u64 {
+        self.dig();
+        self.world.tick()
+    }
+
+    /// То же на нескольких воркерах. Число воркеров задаётся явно
+    /// и в состояние не входит: хеш обязан совпасть с однопоточным.
+    pub fn tick_par(&mut self, threads: usize) -> u64 {
+        self.dig();
+        self.world.tick_par(threads)
+    }
+
+    /// Каждый копатель снимает шарик породы и уходит вглубь.
+    fn dig(&mut self) {
+        let Some(g) = self.world.ground_mut() else { return };
+        let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
+        let r = REF_RADIUS;
+        for d in self.diggers.iter_mut() {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    for dx in -r..=r {
+                        if dx * dx + dy * dy + dz * dz > r * r {
+                            continue;
+                        }
+                        let (x, y, z) = (d.0 + dx, d.1 + dy, d.2 + dz);
+                        if x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz {
+                            continue;
+                        }
+                        g.world.queue_dig(x as u32, y as u32, z as u32);
+                    }
+                }
+            }
+            // Вниз, пока есть куда; на дне — вбок. Ничьи разрешаются
+            // порядком в массиве, а не обходом.
+            d.1 -= 1;
+            if d.1 <= 1 {
+                d.1 = ny - 2;
+            }
+        }
+        let _ = &mut self.rng;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,25 +1360,57 @@ mod tests {
     /// (ADR-116).
     #[test]
     fn the_reference_scenario_actually_fights() {
-        let mut w = World::new(2, 2000, test_tuning());
-        populate(&mut w, 2000, 42);
-        let before = w.units.live().len();
+        let mut r = Reference::new(42, 2000, test_tuning());
+        let before = r.world.units.live().len();
         let mut ever_targeted = false;
         for _ in 0..400 {
-            w.tick();
-            ever_targeted |= w
+            r.tick();
+            ever_targeted |= r
+                .world
                 .units
                 .live()
                 .iter()
-                .any(|&i| w.units.target[i as usize] != NO_TARGET);
+                .any(|&i| r.world.units.target[i as usize] != NO_TARGET);
         }
         assert!(ever_targeted, "никто ни разу не взял цель");
         assert!(
-            w.units.live().len() < before,
+            r.world.units.live().len() < before,
             "никто не погиб: {} из {before}",
-            w.units.live().len()
+            r.world.units.live().len()
         );
-        assert!(w.examined_combat > 0);
+        assert!(r.world.examined_combat > 0);
+    }
+
+    /// **Эталонный сценарий обязан трогать землю.**
+    ///
+    /// Сестра теста на бой и та же болезнь: пока сценарий собирался
+    /// в `sim-cli` без земли, пять фаз тика из шестнадцати работали
+    /// вхолостую и в golden-хеш не входили вовсе — правки вокселей,
+    /// разрушение, тела, навигация, поле направлений. Переписать любую
+    /// из них можно было не меняя хеша (ADR-157).
+    ///
+    /// Тест проверяет не копку, а **сценарий**: что хеш что-то покрывает.
+    #[test]
+    fn the_reference_scenario_actually_works_the_ground() {
+        let mut r = Reference::new(42, 500, test_tuning());
+        assert!(r.world.ground().is_some(), "у эталона нет земли");
+        let (mut edits, mut topo, mut falls) = (0u64, 0u64, 0u64);
+        for _ in 0..200 {
+            r.tick();
+            let g = r.world.ground().expect("земля пропала");
+            edits += g.stats.edits as u64;
+            topo += g.stats.topo_dirty as u64;
+            falls += g.stats.fall_damage;
+        }
+        assert!(edits > 0, "правок вокселей ноль — фаза копки вхолостую");
+        assert!(topo > 0, "чанков связности ноль — разрушение вхолостую");
+        assert!(falls > 0, "урона от падения ноль — фаза тел вхолостую");
+        // Навигация: фаза не имеет права быть мгновенной, если она
+        // что-то делает. Нулевое время — признак заглушки.
+        assert!(
+            r.world.phase_ns_of(Phase::NavUpdate) > 0,
+            "навигация не заняла времени вовсе"
+        );
     }
 
     /// Потолок поисков не имеет права зависеть от числа воркеров:
@@ -1284,11 +1434,10 @@ mod tests {
     #[test]
     fn same_seed_same_hash() {
         let run = || {
-            let mut w = World::new(2, 4096, test_tuning());
-            populate(&mut w, 2000, 42);
+            let mut r = Reference::new(42, 2000, test_tuning());
             let mut h = 0u64;
             for _ in 0..60 {
-                h = w.tick();
+                h = r.tick();
             }
             h
         };
@@ -1302,11 +1451,10 @@ mod tests {
     #[test]
     fn one_hash_across_worker_counts() {
         let run = |threads: usize| {
-            let mut w = World::new(2, 8192, test_tuning());
-            populate(&mut w, 3000, 77);
+            let mut r = Reference::new(77, 3000, test_tuning());
             let mut h = 0u64;
             for _ in 0..80 {
-                h = w.tick_par(threads);
+                h = r.tick_par(threads);
             }
             h
         };

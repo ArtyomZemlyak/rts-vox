@@ -13,7 +13,6 @@
 
 use std::process::ExitCode;
 
-use sim_core::{populate, World};
 use worldgen::Params;
 
 struct Args {
@@ -96,7 +95,15 @@ fn main() -> ExitCode {
     };
 
     if a.world_hash {
-        let p = Params::default();
+        // Мир **эталонного сценария**, а не умолчание генератора: флаг,
+        // печатающий хеш мира, которым сценарий не пользуется, — это
+        // ровно та же ошибка, что и сам ADR-157.
+        let p = Params {
+            nx: sim_core::REF_SIDE,
+            ny: sim_core::REF_SIDE / 2,
+            nz: sim_core::REF_SIDE,
+            ..Default::default()
+        };
         println!(
             "world seed={} {}x{}x{} hash={:016x}",
             a.seed,
@@ -120,16 +127,27 @@ fn main() -> ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
-    let mut w = World::new(2, a.units.max(1), tuning);
-    populate(&mut w, a.units, a.seed);
+    // Сценарий собирает `sim-core`, а не этот файл: тесты детерминизма
+    // обязаны гонять ровно то, на чём стоит хеш (ADR-157).
+    let mut r = sim_core::Reference::new(a.seed, a.units, tuning);
 
     let mut hash = 0u64;
+    // Итоги по земле копятся по тикам: `g.stats` обнуляется каждый тик,
+    // и последний снимок говорит про последний тик, а не про прогон.
+    let (mut edits, mut topo, mut falls, mut rides, mut worst_q) = (0u64, 0u64, 0u64, 0u64, 0usize);
     for t in 1..=a.ticks {
         hash = if a.threads > 1 {
-            w.tick_par(a.threads)
+            r.tick_par(a.threads)
         } else {
-            w.tick()
+            r.tick()
         };
+        if let Some(g) = r.world.ground() {
+            edits += g.stats.edits as u64;
+            topo += g.stats.topo_dirty as u64;
+            falls += g.stats.fall_damage;
+            rides += g.stats.rides;
+            worst_q = worst_q.max(g.stats.queued);
+        }
         if a.every > 0 && t % a.every == 0 {
             println!("tick={t} hash={hash:016x}");
         }
@@ -139,23 +157,35 @@ fn main() -> ExitCode {
         // Что сценарий на самом деле нагружает. Хеш, совпавший точно
         // после правки боя, обязан быть объяснён, а не принят на веру
         // (`docs/analysis/20-measurement-machine.md`, правило пятое).
-        let live = w.units.live().len();
-        let with_target = w
+        // Что из земли сценарий трогает, а что стоит: фаза, у которой
+        // ноль и работы, и времени, в хеш не входит (ADR-116, ADR-157).
+        for p in sim_core::PHASES {
+            println!("  фаза {:<14} {:>10} мкс", p.name(), r.world.phase_ns_of(p) / 1000);
+        }
+        if r.world.ground().is_some() {
+            println!(
+                "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}, худшая очередь {worst_q}"
+            );
+        } else {
+            println!("  земли нет");
+        }
+        let live = r.world.units.live().len();
+        let with_target = r.world
             .units
             .live()
             .iter()
-            .filter(|&&i| w.units.target[i as usize] != sim_core::NO_TARGET)
+            .filter(|&&i| r.world.units.target[i as usize] != sim_core::NO_TARGET)
             .count();
         println!(
             "живых {live}, с целью {with_target}, осмотрено на бою {}, поисков {}, тиков в потолок {}",
-            w.examined_combat, w.searches, w.search_capped
+            r.world.examined_combat, r.world.searches, r.world.search_capped
         );
         for o in 0..2u8 {
             let (mut sx, mut sz, mut n) = (0i64, 0i64, 0i64);
-            for &i in w.units.live() {
-                if w.units.owner[i as usize] == o {
-                    sx += w.units.x[i as usize] as i64;
-                    sz += w.units.z[i as usize] as i64;
+            for &i in r.world.units.live() {
+                if r.world.units.owner[i as usize] == o {
+                    sx += r.world.units.x[i as usize] as i64;
+                    sz += r.world.units.z[i as usize] as i64;
                     n += 1;
                 }
             }
