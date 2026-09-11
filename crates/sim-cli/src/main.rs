@@ -123,7 +123,18 @@ fn main() -> ExitCode {
     };
     // Сценарий собирает `sim-core`, а не этот файл: тесты детерминизма
     // обязаны гонять ровно то, на чём стоит хеш (ADR-157).
-    let mut r = sim_core::Reference::new(a.seed, a.units, tuning);
+    let weapons = {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
+        let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+        match modding::weapons::load(&path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("{e}");
+                return std::process::ExitCode::FAILURE;
+            }
+        }
+    };
+    let mut r = sim_core::Reference::new(a.seed, a.units, tuning, weapons);
 
     let mut hash = 0u64;
     // Итоги по земле копятся по тикам: `g.stats` обнуляется каждый тик,
@@ -245,6 +256,10 @@ fn main() -> ExitCode {
                 a.ticks - 100
             );
         }
+        println!(
+            "  лучом: выстрелов {}, попаданий {}",
+            r.world.beams_fired, r.world.beams_hit
+        );
         println!(
             "  стрельба: выстрелов {}, попаданий {}, упоров в породу {}, отказов по потолку {}, в воздухе {}",
             r.world.shots_fired,

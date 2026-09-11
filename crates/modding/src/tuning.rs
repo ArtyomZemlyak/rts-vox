@@ -58,25 +58,15 @@ pub struct Tuning {
     pub separation: i32,
     /// Дальность стрельбы в мировых единицах.
     pub range: i32,
-    /// Скорость снаряда, клеток **в секунду** — та же единица, что
-    /// у юнита. Меньше скорости юнита быть не может: снаряд, который
-    /// не догоняет цель, не оружие (ADR-164).
-    pub shot_speed: i32,
-    /// Урон одного попадания, вокселей.
-    pub shot_damage: u16,
-    /// Тиков между выстрелами одного юнита.
-    pub reload_period: u32,
     /// Потолок на снаряды в воздухе. Работа за тик линейна по ним,
     /// и без потолка залп пяти тысяч юнитов кладёт тик.
+    ///
+    /// Числа **самого оружия** — скорость, урон, перезарядка, воронка —
+    /// живут не здесь, а в `data/weapons.ron` (ADR-169): они у каждого
+    /// вида свои, а это — общий потолок на всех.
     pub max_shots: usize,
     /// Радиус попадания, клеток: снаряд попал, если цель ближе.
     pub shot_hit_radius: i32,
-    /// Радиус воронки от попадания, вокселей. Ноль — взрыва нет,
-    /// снаряд снимает воксели только с того, в кого попал.
-    pub blast_radius: i32,
-    /// Урон всем в радиусе воронки, вокселей. Приходит и своим:
-    /// взрыв не разбирает, кто рядом (ADR-165).
-    pub blast_damage: u16,
 }
 
 #[derive(Debug)]
@@ -136,10 +126,7 @@ mod tests {
         assert!(t.max_bodies > 0 && t.max_target_searches > 0);
         assert!(t.retarget_period > 0);
         assert!(t.separation > 0 && t.range > 0);
-        assert!(t.shot_speed > 0 && t.shot_damage > 0);
-        assert!(t.reload_period > 0 && t.max_shots > 0);
-        assert!(t.shot_hit_radius > 0);
-        assert!(t.blast_radius >= 0);
+        assert!(t.max_shots > 0 && t.shot_hit_radius > 0);
         assert!(t.flow_cells_per_tick > 0 && t.flow_scan_per_tick > 0);
         assert!(t.flow_updates_per_tick > 0);
         assert!(t.flow_sectors_per_tick > 0);

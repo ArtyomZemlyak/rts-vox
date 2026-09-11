@@ -34,6 +34,11 @@ pub struct Shots {
     pub vz: Vec<Fx>,
     pub owner: Vec<u8>,
     pub damage: Vec<u16>,
+    /// Воронка этого снаряда: радиус и урон волны. Свойство снаряда,
+    /// а не общей настройки — оружие у стрелков разное, а снаряд
+    /// переживает того, кто его выпустил (ADR-169).
+    pub blast_r: Vec<i32>,
+    pub blast_d: Vec<u16>,
     /// Тиков жизни осталось. Снаряд, не попавший ни во что, обязан
     /// исчезнуть: без этого их число растёт без предела, а потолок
     /// на живые снаряды запирал бы стрельбу навсегда.
@@ -83,6 +88,7 @@ impl Shots {
         owner: u8,
         damage: u16,
         life: u16,
+        blast: (i32, u16),
     ) -> u32 {
         self.alive_n += 1;
         if let Some(i) = self.free.pop() {
@@ -98,6 +104,8 @@ impl Shots {
             self.vz[k] = vel.2;
             self.owner[k] = owner;
             self.damage[k] = damage;
+            self.blast_r[k] = blast.0;
+            self.blast_d[k] = blast.1;
             self.life[k] = life;
             self.alive[k] = true;
             return i;
@@ -113,6 +121,8 @@ impl Shots {
         self.vz.push(vel.2);
         self.owner.push(owner);
         self.damage.push(damage);
+        self.blast_r.push(blast.0);
+        self.blast_d.push(blast.1);
         self.life.push(life);
         self.alive.push(true);
         (self.x.len() - 1) as u32

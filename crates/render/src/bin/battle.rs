@@ -85,8 +85,10 @@ struct Art {
     unit: Handle<Mesh>,
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
+    beam: Handle<Mesh>,
     side: [Handle<StandardMaterial>; 2],
     tracer: Handle<StandardMaterial>,
+    ray: [Handle<StandardMaterial>; 2],
     boom: Handle<StandardMaterial>,
     rock: Handle<StandardMaterial>,
 }
@@ -138,7 +140,18 @@ fn main() {
             }
         }
     };
-    let r = Reference::new(seed, units, tuning);
+    let weapons = {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
+        let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+        match modding::weapons::load(&path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        }
+    };
+    let r = Reference::new(seed, units, tuning, weapons);
     let g = r.world.ground().expect("у эталона есть земля");
     let mesh = MeshLayer::new(&g.world, Opts::default());
     let (nx, ny, nz) = mesh.dims();
@@ -193,6 +206,9 @@ fn setup(
         unit: meshes.add(Cuboid::new(2.0, 3.0, 2.0)),
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
+        // Единичный столбик по оси Y: поворот и масштаб превращают
+        // его в луч любой длины и направления.
+        beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
         side: [
             materials.add(StandardMaterial {
                 base_color: Color::srgb(0.25, 0.55, 0.95),
@@ -208,6 +224,18 @@ fn setup(
             emissive: LinearRgba::rgb(3.0, 2.6, 0.8),
             ..default()
         }),
+        ray: [
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(0.5, 0.9, 1.0),
+                emissive: LinearRgba::rgb(0.6, 3.0, 5.0),
+                ..default()
+            }),
+            materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.4, 0.9),
+                emissive: LinearRgba::rgb(4.0, 0.6, 3.0),
+                ..default()
+            }),
+        ],
         boom: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.5, 0.15),
             emissive: LinearRgba::rgb(6.0, 2.0, 0.4),
@@ -375,13 +403,33 @@ fn step(
         }
     }
     for ev in sim.r.world.events() {
-        if let SimEvent::Blast { x, y, z, .. } = *ev {
-            commands.spawn((
-                Mesh3d(art.blast.clone()),
-                MeshMaterial3d(art.boom.clone()),
-                Transform::from_xyz(x as f32, y as f32, z as f32),
-                BlastMark(6),
-            ));
+        match *ev {
+            SimEvent::Blast { x, y, z, .. } => {
+                commands.spawn((
+                    Mesh3d(art.blast.clone()),
+                    MeshMaterial3d(art.boom.clone()),
+                    Transform::from_xyz(x as f32, y as f32, z as f32),
+                    BlastMark(6),
+                ));
+            }
+            SimEvent::Beam { x0, y0, z0, x1, y1, z1, owner } => {
+                // Луч — вытянутый кубик от стрелка к цели. Живёт
+                // столько же, сколько вспышка: событие приходит один
+                // раз, а увидеть его надо дольше одного кадра.
+                let a = Vec3::new(x0 as f32, y0 as f32 + 1.5, z0 as f32);
+                let b = Vec3::new(x1 as f32, y1 as f32 + 1.5, z1 as f32);
+                let d = b - a;
+                let len = d.length().max(0.001);
+                commands.spawn((
+                    Mesh3d(art.beam.clone()),
+                    MeshMaterial3d(art.ray[usize::from(owner == 1)].clone()),
+                    Transform::from_translation((a + b) * 0.5)
+                        .with_rotation(Quat::from_rotation_arc(Vec3::Y, d / len))
+                        .with_scale(Vec3::new(1.0, len, 1.0)),
+                    BlastMark(2),
+                ));
+            }
+            SimEvent::Death { .. } => {}
         }
     }
 }

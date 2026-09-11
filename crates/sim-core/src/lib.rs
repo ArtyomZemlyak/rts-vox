@@ -54,6 +54,17 @@ pub enum SimEvent {
     Blast { x: i32, y: i32, z: i32, radius: i32 },
     /// Смерть юнита: кто и где.
     Death { unit: u32, x: i32, y: i32, z: i32 },
+    /// Луч: откуда и куда. Живёт один тик — ровно столько, сколько
+    /// длится сам выстрел (ADR-169).
+    Beam {
+        x0: i32,
+        y0: i32,
+        z0: i32,
+        x1: i32,
+        y1: i32,
+        z1: i32,
+        owner: u8,
+    },
 }
 
 /// Список фаз тика — окончательный (ADR-048). Порядок объявлен фиксированным
@@ -160,6 +171,9 @@ pub struct Units {
     /// Тик, раньше которого юнит не выстрелит. Перезарядка —
     /// состояние юнита, а не свойство выстрела (ADR-164).
     next_shot: Vec<u32>,
+    /// Место оружия в реестре. Место, а не номер: номер ищется
+    /// перебором, а это горячий путь (ADR-169).
+    pub weapon: Vec<u16>,
     free: Vec<u32>,
     live_ids: Vec<u32>,
 }
@@ -174,6 +188,13 @@ pub const NO_TARGET: u32 = u32::MAX;
 #[cfg(test)]
 pub(crate) fn test_tuning() -> Tuning {
     Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron")
+}
+
+/// Реестр оружия для тестов — из тех же данных, что у игры.
+#[cfg(test)]
+pub(crate) fn test_weapons() -> modding::weapons::Weapons {
+    modding::weapons::from_ron(include_str!("../../../data/weapons.ron"))
+        .expect("data/weapons.ron")
 }
 
 /// Юнит стоит на опоре, а не падает.
@@ -221,6 +242,7 @@ impl Units {
             fall_from: Vec::new(),
             next_search: Vec::new(),
             next_shot: Vec::new(),
+            weapon: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
         }
@@ -256,6 +278,7 @@ impl Units {
             self.fall_from[k] = NOT_FALLING;
             self.next_search[k] = 0;
             self.next_shot[k] = 0;
+            self.weapon[k] = 0;
             return i;
         }
         self.x.push(x);
@@ -273,6 +296,7 @@ impl Units {
         self.fall_from.push(NOT_FALLING);
         self.next_search.push(0);
         self.next_shot.push(0);
+        self.weapon.push(0);
         (self.x.len() - 1) as u32
     }
 
@@ -358,8 +382,13 @@ pub struct World {
     /// Компонент связности при последнем решении. Единица — карта
     /// цела; тысяча — она рассыпана, и это надо видеть.
     pub flow_components: usize,
+    /// Оружие из данных. Вид задаёт, как приходит урон (ADR-169).
+    pub weapons: modding::weapons::Weapons,
     /// Снаряды в воздухе. Бой больше не мгновенный (ADR-164).
     pub shots: shot::Shots,
+    /// Замер: выстрелов лучом и попаданий лучом.
+    pub beams_fired: u64,
+    pub beams_hit: u64,
     /// Замер: выстрелов сделано, попаданий по юнитам, упоров в породу.
     pub shots_fired: u64,
     pub shots_hit: u64,
@@ -398,6 +427,15 @@ const DIRS: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
 impl World {
     pub fn new(owners: usize, capacity: usize, tuning: Tuning) -> World {
         World::with_cells(owners, capacity, tuning.separation, tuning.range, tuning)
+    }
+
+    /// Привязать реестр оружия.
+    ///
+    /// Отдельным вызовом, а не полем конструктора: оружие приходит
+    /// из пака, как материалы, и мир без него законен — просто
+    /// не стреляет.
+    pub fn attach_weapons(&mut self, w: modding::weapons::Weapons) {
+        self.weapons = w;
     }
 
     /// Привязать воксельный мир. До этого фазы земли — заглушки.
@@ -491,7 +529,10 @@ impl World {
             flow_solved_sectors: 0,
             flow_reused_sectors: 0,
             flow_components: 0,
+            weapons: modding::weapons::Weapons::new(),
             shots: shot::Shots::new(),
+            beams_fired: 0,
+            beams_hit: 0,
             shots_fired: 0,
             shots_hit: 0,
             shots_blocked: 0,
@@ -1231,52 +1272,111 @@ impl World {
     /// с каждого стреляющего, сквозь горы и без времени на дорогу.
     /// Теперь вылетает снаряд (ADR-164).
     fn fire(&mut self) {
-        let t = &self.tuning;
-        // Сколько тиков снаряду хватит, чтобы пересечь дальность.
-        // Считается, а не задаётся: лишнее число в данных — лишняя
-        // возможность рассогласовать его с дальностью.
-        let life = ((t.range as i64 * TICKS_PER_SECOND as i64) / t.shot_speed.max(1) as i64 + 2)
-            .clamp(1, u16::MAX as i64) as u16;
-        let step = Fx::from_ratio(t.shot_speed, TICKS_PER_SECOND);
-        let (damage, reload, cap) = (t.shot_damage, t.reload_period, t.max_shots);
+        use modding::weapons::WeaponKind;
+        if self.weapons.is_empty() {
+            return;
+        }
+        let (range, cap) = (self.tuning.range, self.tuning.max_shots);
         let tick = self.tick as u32;
-        let Self { units: u, shots, shots_fired, shots_refused, .. } = self;
+        self.dmg_acc.clear();
+        self.dmg_acc.resize(self.units.x.len(), 0);
+        let Self {
+            units: u,
+            shots,
+            weapons,
+            ground,
+            shots_fired,
+            shots_refused,
+            beams_fired,
+            beams_hit,
+            dmg_acc,
+            events,
+            ..
+        } = self;
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
             let tgt = u.target[i];
             if tgt == NO_TARGET || tick < u.next_shot[i] {
                 continue;
             }
-            // Потолок на снаряды в воздухе. Упёршийся выстрел
-            // **не тратит перезарядку**: иначе юнит терял бы очередь
-            // из-за чужой стрельбы.
-            if shots.alive_count() >= cap {
-                *shots_refused += 1;
-                continue;
-            }
+            let wi = (u.weapon[i] as usize).min(weapons.len() - 1);
+            let w = *weapons.at(wi);
             let tt = tgt as usize;
-            let dx = Fx::from_int(u.x[tt] - u.x[i]);
-            let dy = Fx::from_int(u.y[tt] - u.y[i]);
-            let dz = Fx::from_int(u.z[tt] - u.z[i]);
-            let len = dx.mul(dx).add(dy.mul(dy)).add(dz.mul(dz)).sqrt();
-            if len.raw() == 0 {
+            let from = (u.x[i], u.y[i], u.z[i]);
+            let to = (u.x[tt], u.y[tt], u.z[tt]);
+
+            match w.kind {
+                WeaponKind::Laser => {
+                    // Луч приходит в тот же тик — но по той же линии
+                    // огня, что и снаряд. Породу он не прожигает:
+                    // упёрся, значит не попал.
+                    *beams_fired += 1;
+                    let clear = match ground.as_ref() {
+                        Some(g) => voxel::los::line_of_sight(&g.world, from, to).clear,
+                        None => true,
+                    };
+                    if clear {
+                        dmg_acc[tt] += w.damage as u32;
+                        *beams_hit += 1;
+                    }
+                    events.push(SimEvent::Beam {
+                        x0: from.0,
+                        y0: from.1,
+                        z0: from.2,
+                        x1: to.0,
+                        y1: to.1,
+                        z1: to.2,
+                        owner: u.owner[i],
+                    });
+                    u.next_shot[i] = tick + w.reload;
+                }
+                WeaponKind::Bolt => {
+                    // Потолок на снаряды в воздухе. Упёршийся выстрел
+                    // **не тратит перезарядку**: иначе юнит терял бы
+                    // очередь из-за чужой стрельбы.
+                    if shots.alive_count() >= cap {
+                        *shots_refused += 1;
+                        continue;
+                    }
+                    // Тиков ровно столько, чтобы пересечь дальность.
+                    let life = ((range as i64 * TICKS_PER_SECOND as i64)
+                        / w.speed.max(1) as i64
+                        + 2)
+                    .clamp(1, u16::MAX as i64) as u16;
+                    let step = Fx::from_ratio(w.speed, TICKS_PER_SECOND);
+                    let dx = Fx::from_int(to.0 - from.0);
+                    let dy = Fx::from_int(to.1 - from.1);
+                    let dz = Fx::from_int(to.2 - from.2);
+                    let len = dx.mul(dx).add(dy.mul(dy)).add(dz.mul(dz)).sqrt();
+                    if len.raw() == 0 {
+                        continue;
+                    }
+                    // Воронка — свойство **снаряда**, а не общей
+                    // настройки: она задана оружием, а снаряд летит
+                    // и переживает того, кто его выпустил.
+                    shots.spawn(
+                        from,
+                        (Fx::ZERO, Fx::ZERO, Fx::ZERO),
+                        (dx.div(len).mul(step), dy.div(len).mul(step), dz.div(len).mul(step)),
+                        u.owner[i],
+                        w.damage,
+                        life,
+                        (w.blast_radius, w.blast_damage),
+                    );
+                    *shots_fired += 1;
+                    u.next_shot[i] = tick + w.reload;
+                }
+            }
+        }
+        // Урон луча применяется один раз, как и урон снарядов: порядок
+        // стрелков не должен решать исход.
+        for k in 0..u.live_ids.len() {
+            let i = u.live_ids[k] as usize;
+            let d = dmg_acc[i];
+            if d == 0 {
                 continue;
             }
-            let vel = (
-                dx.div(len).mul(step),
-                dy.div(len).mul(step),
-                dz.div(len).mul(step),
-            );
-            shots.spawn(
-                (u.x[i], u.y[i], u.z[i]),
-                (Fx::ZERO, Fx::ZERO, Fx::ZERO),
-                vel,
-                u.owner[i],
-                damage,
-                life,
-            );
-            *shots_fired += 1;
-            u.next_shot[i] = tick + reload;
+            u.voxels[i] = u.voxels[i].saturating_sub(d.min(u16::MAX as u32) as u16);
         }
         shots.refresh_live();
     }
@@ -1290,8 +1390,6 @@ impl World {
     fn step_shots(&mut self) {
         let r2 = self.tuning.shot_hit_radius * self.tuning.shot_hit_radius;
         let height = self.tuning.unit_height as i32;
-        let br = self.tuning.blast_radius;
-        let (br2, blast_dmg) = (br * br, self.tuning.blast_damage);
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
         let Self {
@@ -1393,6 +1491,8 @@ impl World {
             // потолок за тик и откладывание у них общие, и боевая правка
             // не имеет права обойти очередь (`CLAUDE.md`).
             let Some(at) = hit_at else { continue };
+            let br = shots.blast_r[s];
+            let (br2, blast_dmg) = (br * br, shots.blast_d[s]);
             if br <= 0 {
                 continue;
             }
@@ -1533,7 +1633,7 @@ impl World {
 /// Живёт отдельно, потому что мест расстановки два: начальная
 /// и подкрепление (ADR-161). Разойдись они — подкрепление приходило бы
 /// не туда, где стоял строй, и сцена перестала бы быть той же сценой.
-fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) {
+fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) -> u32 {
     let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
     let (midx, midz) = (ex / 2, ez / 2);
     let gap = w.tuning.range / 2;
@@ -1546,7 +1646,7 @@ fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) {
     };
     let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
     let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-    w.spawn_ground(x, z, owner, r.range(2, 6), 300);
+    w.spawn_ground(x, z, owner, r.range(2, 6), 300)
 }
 
 pub fn populate(w: &mut World, n: usize, seed: u64) {
@@ -1559,7 +1659,7 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     let gap = w.tuning.range / 2;
     let spread = (ex / 6).clamp(4, 100);
     for k in 0..n {
-        spawn_in_line(w, &mut r, (k % 2) as u8);
+        let _ = spawn_in_line(w, &mut r, (k % 2) as u8);
     }
     w.fill_flow_towards(0, midx + gap + spread, midz);
     w.fill_flow_towards(1, midx - gap - spread, midz);
@@ -1627,7 +1727,17 @@ pub struct Reference {
 }
 
 impl Reference {
-    pub fn new(seed: u64, units: usize, tuning: Tuning) -> Reference {
+    /// Стороны вооружены **по-разному**: нулевая болтом, первая лучом.
+    ///
+    /// Одинаковое оружие у обеих сторон не проверяет разбора по виду:
+    /// ветка луча могла бы не вызываться ни разу, и хеш этого
+    /// не заметил бы (ADR-169).
+    pub fn new(
+        seed: u64,
+        units: usize,
+        tuning: Tuning,
+        weapons: modding::weapons::Weapons,
+    ) -> Reference {
         let params = ref_params();
         let terrain = worldgen::Terrain { params, seed };
         let vw = voxel::World::new(
@@ -1640,7 +1750,15 @@ impl Reference {
         let g = ground::Ground::new(vw, &tuning);
         let mut world = World::new(2, units.max(1), tuning);
         world.attach_ground(g);
+        world.attach_weapons(weapons);
         populate(&mut world, units, seed);
+        // Сторона выбирает оружие по своему номеру: разводить их
+        // жребием значило бы поставить разбор по виду в зависимость
+        // от генератора случайных чисел.
+        let kinds = world.weapons.len().max(1);
+        for k in 0..world.units.len() {
+            world.units.weapon[k] = (world.units.owner[k] as usize % kinds) as u16;
+        }
 
         // Копатели ставятся на поверхность, вразнос по карте: копка
         // в одной точке — это другой случай с другой ценой.
@@ -1695,8 +1813,12 @@ impl Reference {
         // расстановки обязан быть от данных, а не от хода боя.
         for owner in 0..2u8 {
             let have = live[owner as usize];
+            let kinds = self.world.weapons.len().max(1);
             for _ in 0..REF_REINFORCE.min(self.per_side.saturating_sub(have)) {
-                spawn_in_line(&mut self.world, &mut self.rng, owner);
+                let id = spawn_in_line(&mut self.world, &mut self.rng, owner);
+                // Подкрепление вооружается как своя сторона, иначе
+                // строй со временем перемешал бы оружие.
+                self.world.units.weapon[id as usize] = (owner as usize % kinds) as u16;
                 added = true;
             }
         }
@@ -1760,7 +1882,7 @@ mod tests {
     /// (ADR-116).
     #[test]
     fn the_reference_scenario_actually_fights() {
-        let mut r = Reference::new(42, 2000, test_tuning());
+        let mut r = Reference::new(42, 2000, test_tuning(), test_weapons());
         let before = r.world.units.live().len();
         let mut ever_targeted = false;
         for _ in 0..400 {
@@ -1803,7 +1925,7 @@ mod tests {
     /// Тест проверяет не копку, а **сценарий**: что хеш что-то покрывает.
     #[test]
     fn the_reference_scenario_actually_works_the_ground() {
-        let mut r = Reference::new(42, 500, test_tuning());
+        let mut r = Reference::new(42, 500, test_tuning(), test_weapons());
         assert!(r.world.ground().is_some(), "у эталона нет земли");
         let (mut edits, mut topo, mut falls) = (0u64, 0u64, 0u64);
         for _ in 0..200 {
@@ -1845,7 +1967,7 @@ mod tests {
     #[test]
     fn same_seed_same_hash() {
         let run = || {
-            let mut r = Reference::new(42, 2000, test_tuning());
+            let mut r = Reference::new(42, 2000, test_tuning(), test_weapons());
             let mut h = 0u64;
             for _ in 0..60 {
                 h = r.tick();
@@ -1880,11 +2002,16 @@ mod tests {
     /// ничего. Поэтому берётся эталон — он копает (ADR-159).
     #[test]
     fn a_unit_is_never_inside_solid_rock() {
-        let mut r = Reference::new(42, 600, test_tuning());
+        let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
         let mut ever_falling = 0u64;
         let mut ever_riding = 0u64;
         let mut checked = 0u64;
-        for t in 1..=250 {
+        // Четыреста тиков, а не двести: с тех пор как половина строя
+        // перешла на луч (ADR-169), копают вдвое меньше, и за двести
+        // тиков не случается ни одной поездки — то есть второе
+        // исключение не проверяется вовсе. Замер: 200 тиков дают 0
+        // поездок, 400 дают 8.
+        for t in 1..=400 {
             r.tick();
             let g = r.world.ground().expect("земля");
             let st = g.nav.step() as i32;
@@ -1939,7 +2066,7 @@ mod tests {
     /// что она **есть во второй половине**.
     #[test]
     fn the_reference_keeps_digging_to_the_end() {
-        let mut r = Reference::new(42, 300, test_tuning());
+        let mut r = Reference::new(42, 300, test_tuning(), test_weapons());
         let mut half = [0u64; 2];
         for t in 0..400 {
             r.tick();
@@ -1966,7 +2093,7 @@ mod tests {
     /// **есть во второй половине**, и что строй не выбит.
     #[test]
     fn the_reference_keeps_fighting_to_the_end() {
-        let mut r = Reference::new(42, 600, test_tuning());
+        let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
         for _ in 0..200 {
             r.tick();
         }
@@ -2028,8 +2155,15 @@ mod tests {
         // `tunnel` — прокопать в стене ход на высоте пола.
         // `blast` — радиус воронки; ноль означает «проверяем только луч».
         let run = |tunnel: bool, blast: i32| -> (u64, u64, u64, bool) {
-            let mut t = test_tuning();
-            t.blast_radius = blast;
+            let t = test_tuning();
+            // Воронка задаётся **оружием**, а не настройкой мира
+            // (ADR-169), поэтому реестр собирается под нужный радиус.
+            let ws = modding::weapons::from_ron(&format!(
+                "( weapons: [ ( id: 1, kind: Bolt, speed: 40, damage: 30, reload: 30, \
+blast_radius: {blast}, blast_damage: 10 ) ] )"
+            ))
+            .expect("реестр");
+
             let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Ridge));
             if tunnel {
                 for x in WALL - HALF..=WALL + HALF {
@@ -2047,6 +2181,7 @@ mod tests {
             let g = ground::Ground::new(vw, &t);
             let mut w = World::new(2, 8, t);
             w.attach_ground(g);
+            w.attach_weapons(ws);
             // По разные стороны стены, на одной высоте и в створе хода.
             w.spawn_ground(WALL as i32 - 8, 32, 0, 0, 300);
             w.spawn_ground(WALL as i32 + 8, 32, 1, 0, 300);
@@ -2113,12 +2248,20 @@ mod tests {
             }
         }
         let run = |blast: i32| -> (u64, bool) {
-            let mut t = test_tuning();
-            t.blast_radius = blast;
+            let t = test_tuning();
+            // Воронка задаётся **оружием**, а не настройкой мира
+            // (ADR-169), поэтому реестр собирается под нужный радиус.
+            let ws = modding::weapons::from_ron(&format!(
+                "( weapons: [ ( id: 1, kind: Bolt, speed: 40, damage: 30, reload: 30, \
+blast_radius: {blast}, blast_damage: 10 ) ] )"
+            ))
+            .expect("реестр");
+
             let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Wall));
             let g = ground::Ground::new(vw, &t);
             let mut w = World::new(2, 8, t);
             w.attach_ground(g);
+            w.attach_weapons(ws);
             w.spawn_ground(AT as i32 - 8, 32, 0, 0, 300);
             w.spawn_ground(AT as i32 + 8, 32, 1, 0, 300);
             w.units.refresh_live();
@@ -2151,35 +2294,42 @@ mod tests {
     /// симуляция; смертей столько же; буфер не копится между тиками.
     #[test]
     fn events_match_the_counters_and_last_one_tick() {
-        let mut r = Reference::new(42, 600, test_tuning());
+        let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
         let (mut blasts, mut deaths) = (0u64, 0u64);
         let mut worst = 0usize;
         for t in 1..=200 {
-            let (b0, d0) = (r.world.blasts, r.world.deaths);
+            let (b0, d0, m0) = (r.world.blasts, r.world.deaths, r.world.beams_fired);
             r.tick();
-            let (nb, nd) = (r.world.blasts - b0, r.world.deaths - d0);
-            let mut eb = 0u64;
-            let mut ed = 0u64;
+            let (nb, nd, nm) = (
+                r.world.blasts - b0,
+                r.world.deaths - d0,
+                r.world.beams_fired - m0,
+            );
+            let (mut eb, mut ed, mut em) = (0u64, 0u64, 0u64);
             for e in r.world.events() {
                 match e {
                     SimEvent::Blast { .. } => eb += 1,
                     SimEvent::Death { .. } => ed += 1,
+                    SimEvent::Beam { .. } => em += 1,
                 }
             }
             assert_eq!(eb, nb, "тик {t}: взрывов {nb}, событий о взрывах {eb}");
             assert_eq!(ed, nd, "тик {t}: смертей {nd}, событий о смертях {ed}");
+            assert_eq!(em, nm, "тик {t}: лучей {nm}, событий о лучах {em}");
+            // Каждый вид сверен поимённо, значит и целое сходится:
+            // лишнего в буфере нет.
+            assert_eq!(
+                (eb + ed + em) as usize,
+                r.world.events().len(),
+                "тик {t}: в буфере есть событие неизвестного вида"
+            );
             worst = worst.max(r.world.events().len());
             blasts += nb;
             deaths += nd;
         }
         assert!(blasts > 0, "за прогон не рвануло ни разу");
         assert!(deaths > 0, "за прогон никто не погиб");
-        // Буфер не копится: худший тик много меньше суммы за прогон.
-        assert!(
-            (worst as u64) * 10 < blasts + deaths,
-            "события копятся между тиками: худший тик {worst}, всего {}",
-            blasts + deaths
-        );
+        assert!(worst > 0, "за прогон не случилось ни одного события");
     }
 
     /// **Смерть сообщается там, где юнит стоял.**
@@ -2188,7 +2338,7 @@ mod tests {
     /// переиспользует место, и координаты после — уже чужие.
     #[test]
     fn a_death_is_reported_where_the_unit_stood() {
-        let mut r = Reference::new(42, 600, test_tuning());
+        let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
         let mut seen = 0;
         for _ in 0..200 {
             // Положения до тика: событие обязано указать на одно из них.
@@ -2222,6 +2372,100 @@ mod tests {
         assert!(seen > 0, "ни одной смерти за прогон");
     }
 
+    /// **Луч не проходит сквозь породу и не роет её.**
+    ///
+    /// Два отличия луча от болта, и оба проверяются здесь. Он приходит
+    /// в тот же тик — значит попадает **или не попадает** сразу,
+    /// без полёта. И он не оставляет воронки — стена, которую болт
+    /// проламывает за двести тиков (ADR-165), под лучом стоит.
+    #[test]
+    fn a_laser_neither_pierces_rock_nor_digs_it() {
+        struct Wall;
+        const GY: u32 = 8;
+        const AT: u32 = 32;
+        const HALF: u32 = 6;
+        impl voxel::Generator for Wall {
+            fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+                if y < GY {
+                    return 2;
+                }
+                if x.abs_diff(AT) <= HALF && y < GY + 12 {
+                    return 3;
+                }
+                voxel::store::AIR
+            }
+        }
+        // `wall` — стоит ли стена между стрелками.
+        let run = |wall: bool| -> (u64, u64, bool) {
+            let t = test_tuning();
+            let ws = modding::weapons::from_ron(
+                "( weapons: [ ( id: 2, kind: Laser, speed: 0, damage: 12, \
+reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
+            )
+            .expect("реестр");
+            let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Wall));
+            if !wall {
+                for x in AT - HALF..=AT + HALF {
+                    for y in GY..GY + 8 {
+                        for z in 24..40 {
+                            vw.queue_dig(x, y, z);
+                        }
+                    }
+                }
+                while vw.queued() > 0 {
+                    vw.begin_tick();
+                    vw.flush();
+                }
+            }
+            let g = ground::Ground::new(vw, &t);
+            let mut w = World::new(2, 8, t);
+            w.attach_ground(g);
+            w.attach_weapons(ws);
+            w.spawn_ground(AT as i32 - 8, 32, 0, 0, 300);
+            w.spawn_ground(AT as i32 + 8, 32, 1, 0, 300);
+            w.units.refresh_live();
+            for _ in 0..200 {
+                w.tick();
+            }
+            let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
+            (w.beams_fired, w.beams_hit, solid)
+        };
+
+        let (fired, hit, solid) = run(true);
+        assert!(fired > 0, "со стеной луч не стрелял вовсе");
+        assert_eq!(hit, 0, "сквозь стену прошло {hit} попаданий лучом из {fired}");
+        assert!(solid, "луч проел стену — воронки у него быть не должно");
+
+        let (fired_open, hit_open, _) = run(false);
+        assert!(
+            hit_open > 0,
+            "без стены луч не попал ни разу из {fired_open} — \
+проверять тогда нечего"
+        );
+    }
+
+    /// **Стороны вооружены разным, и обе ветки разбора работают.**
+    ///
+    /// Ветка, которая ни разу не вызвана, не проверена ничем: хеш
+    /// её не покрывает, потому что она не меняет состояние (ADR-169).
+    #[test]
+    fn both_weapon_kinds_are_actually_used() {
+        let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
+        assert!(r.world.weapons.len() >= 2, "в реестре меньше двух видов");
+        for _ in 0..200 {
+            r.tick();
+        }
+        assert!(r.world.shots_fired > 0, "болтом не стреляли ни разу");
+        assert!(r.world.beams_fired > 0, "лучом не стреляли ни разу");
+        // И обе стороны действительно разного вооружения.
+        let mut seen = [false; 2];
+        for &i in r.world.units.live() {
+            let k = i as usize;
+            seen[(r.world.units.weapon[k] as usize).min(1)] = true;
+        }
+        assert!(seen[0] && seen[1], "обе стороны с одним оружием: {seen:?}");
+    }
+
     /// **Два мира, идущие вперемешку, совпадают тик в тик.**
     ///
     /// `same_seed_same_hash` гоняет прогоны **подряд**, и скрытое общее
@@ -2235,8 +2479,8 @@ mod tests {
     /// SyncTest).
     #[test]
     fn two_worlds_run_side_by_side_match_every_tick() {
-        let mut a = Reference::new(42, 800, test_tuning());
-        let mut b = Reference::new(42, 800, test_tuning());
+        let mut a = Reference::new(42, 800, test_tuning(), test_weapons());
+        let mut b = Reference::new(42, 800, test_tuning(), test_weapons());
         for t in 1..=150 {
             let ha = a.tick();
             let hb = b.tick();
@@ -2251,7 +2495,7 @@ mod tests {
     #[test]
     fn one_hash_across_worker_counts() {
         let run = |threads: usize| {
-            let mut r = Reference::new(77, 3000, test_tuning());
+            let mut r = Reference::new(77, 3000, test_tuning(), test_weapons());
             let mut h = 0u64;
             for _ in 0..80 {
                 h = r.tick_par(threads);

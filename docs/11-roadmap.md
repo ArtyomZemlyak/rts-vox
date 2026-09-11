@@ -127,7 +127,7 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --seed 42 --ticks 1000 --dump-hash
-seed=42 ticks=1000 units=5000 threads=1 hash=95a085a876d11ba1
+seed=42 ticks=1000 units=5000 threads=1 hash=73d2e599c8cdaa99
 ```
 
 Хеш стабилен между запусками, **совпадает между одним и четырьмя

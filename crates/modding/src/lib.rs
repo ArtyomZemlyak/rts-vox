@@ -14,6 +14,7 @@
 
 pub mod data;
 pub mod tuning;
+pub mod weapons;
 pub mod vox;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
