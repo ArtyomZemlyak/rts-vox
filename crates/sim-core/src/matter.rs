@@ -35,14 +35,22 @@ pub enum Sink {
     ContainerBreach = 3,
     /// Излишек над упавшим потолком игрока: разрушен склад (ADR-043).
     OverCap = 4,
+    /// Порода, снятая воронкой от попадания (ADR-165).
+    ///
+    /// Обломком она не становится намеренно: воронок в эталонном
+    /// прогоне 362 749 вокселей за тысячу тиков, а живых тел не больше
+    /// `max_bodies` = 256. Бой уменьшает запасы карты — это свойство
+    /// игры, а не недосмотр (ADR-185).
+    Pulverised = 5,
 }
 
-pub const SINKS: [Sink; 5] = [
+pub const SINKS: [Sink; 6] = [
     Sink::RefiningLoss,
     Sink::Annihilation,
     Sink::ToEnergy,
     Sink::ContainerBreach,
     Sink::OverCap,
+    Sink::Pulverised,
 ];
 
 impl Sink {
@@ -50,9 +58,10 @@ impl Sink {
         match self {
             Sink::RefiningLoss => "выход переработки < 1",
             Sink::Annihilation => "аннигиляция",
-            Sink::ToEnergy => "конверсия в энергию",
-            Sink::ContainerBreach => "разрушение контейнера",
-            Sink::OverCap => "излишек над потолком",
+            Sink::ToEnergy => "конверсия материи в энергию",
+            Sink::ContainerBreach => "потери при разрушении контейнера",
+            Sink::OverCap => "излишек над упавшим потолком игрока",
+            Sink::Pulverised => "распыление воронкой",
         }
     }
 }
@@ -88,7 +97,10 @@ pub struct Container {
 /// **начальная сумма == сумма в контейнерах + сумма по стокам**.
 pub struct Ledger {
     containers: Vec<Container>,
-    sunk: [Amount; 5],
+    /// Списано по каждому стоку. Длина — из самого перечня, а не
+    /// числом: шестой сток ронял этот массив по выходу за границу,
+    /// и ловилось это не сборкой, а паникой в проперти-тесте (ADR-185).
+    sunk: [Amount; SINKS.len()],
     initial: Amount,
     free_head: u32,
     free: Vec<u32>,
@@ -106,7 +118,7 @@ impl Ledger {
     pub fn new() -> Ledger {
         Ledger {
             containers: Vec::new(),
-            sunk: [0; 5],
+            sunk: [0; SINKS.len()],
             initial: 0,
             free_head: NIL,
             free: Vec::new(),
@@ -287,6 +299,52 @@ pub fn resource_of(voxels: Amount, density: u32) -> Amount {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Таблица стоков в каноне и перечень в коде — один список.**
+    ///
+    /// `CLAUDE.md`: «Единственный нормативный перечень стоков материи —
+    /// таблица в `docs/07-economy.md`. Новый сток обязан добавить строку
+    /// туда, а не утверждать, что она там есть». Сверял это человек
+    /// глазами, и ADR-165 ввёл сток, строки не добавив (ADR-185).
+    ///
+    /// Имена сверяются дословно: список, совпадающий только числом
+    /// строк, разошёлся бы по смыслу молча. На момент написания
+    /// два имени из пяти были написаны в коде иначе, чем в каноне.
+    ///
+    /// `include_str!` разворачивается на сборке — ввода-вывода в тесте
+    /// не появляется.
+    #[test]
+    fn the_canon_table_and_the_code_list_are_one_list() {
+        const CANON: &str = include_str!("../../../docs/07-economy.md");
+        let mut rows: Vec<String> = Vec::new();
+        let mut inside = false;
+        for line in CANON.lines() {
+            let t = line.trim();
+            if t.starts_with("| Сток |") {
+                inside = true;
+                continue;
+            }
+            if !inside {
+                continue;
+            }
+            if !t.starts_with('|') {
+                break;
+            }
+            if t.starts_with("|---") {
+                continue;
+            }
+            let name = t.split('|').nth(1).unwrap_or("").trim().to_lowercase();
+            if !name.is_empty() {
+                rows.push(name);
+            }
+        }
+        assert!(!rows.is_empty(), "таблица стоков в каноне не нашлась");
+        let code: Vec<String> = SINKS.iter().map(|s| s.name().to_lowercase()).collect();
+        assert_eq!(
+            rows, code,
+            "перечень стоков в каноне и в коде разошёлся:\nканон {rows:?}\nкод   {code:?}"
+        );
+    }
     use super::*;
 
     fn ground(l: &mut Ledger, n: Amount) -> ContainerId {
@@ -415,7 +473,7 @@ mod tests {
                 let n = r.below(400) as Amount;
                 match r.below(6) {
                     0 => {
-                        l.sink(a, n, SINKS[r.below(5) as usize]);
+                        l.sink(a, n, SINKS[r.below(SINKS.len() as u32) as usize]);
                     }
                     1 => {
                         if l.get(a).alive && l.held(a) > 0 {
