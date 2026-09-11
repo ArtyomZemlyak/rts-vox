@@ -13,7 +13,6 @@
 
 use std::process::ExitCode;
 
-use worldgen::Params;
 
 struct Args {
     seed: u64,
@@ -98,12 +97,7 @@ fn main() -> ExitCode {
         // Мир **эталонного сценария**, а не умолчание генератора: флаг,
         // печатающий хеш мира, которым сценарий не пользуется, — это
         // ровно та же ошибка, что и сам ADR-157.
-        let p = Params {
-            nx: sim_core::REF_SIDE,
-            ny: sim_core::REF_SIDE / 2,
-            nz: sim_core::REF_SIDE,
-            ..Default::default()
-        };
+        let p = sim_core::ref_params();
         println!(
             "world seed={} {}x{}x{} hash={:016x}",
             a.seed,
@@ -135,6 +129,7 @@ fn main() -> ExitCode {
     // Итоги по земле копятся по тикам: `g.stats` обнуляется каждый тик,
     // и последний снимок говорит про последний тик, а не про прогон.
     let (mut edits, mut topo, mut falls, mut rides, mut worst_q) = (0u64, 0u64, 0u64, 0u64, 0usize);
+    let mut backlog = 0u64;
     for t in 1..=a.ticks {
         hash = if a.threads > 1 {
             r.tick_par(a.threads)
@@ -147,6 +142,11 @@ fn main() -> ExitCode {
             falls += g.stats.fall_damage;
             rides += g.stats.rides;
             worst_q = worst_q.max(g.stats.queued);
+            // Потолок, срабатывающий **каждый** тик, — не предохранитель,
+            // а постоянное ухудшение: он скрывает то, что ограничивает
+            // (`CLAUDE.md`, ADR-114, ADR-116). Считается по тому, остался
+            // ли после тика хвост в очереди.
+            backlog += u64::from(g.stats.queued > 0);
         }
         if a.every > 0 && t % a.every == 0 {
             println!("tick={t} hash={hash:016x}");
@@ -162,9 +162,35 @@ fn main() -> ExitCode {
         for p in sim_core::PHASES {
             println!("  фаза {:<14} {:>10} мкс", p.name(), r.world.phase_ns_of(p) / 1000);
         }
-        if r.world.ground().is_some() {
+        // Рельеф сценария: плоская карта не нагружает навигацию по объёму,
+        // а плоской она становится молча — обрезкой высоты (ADR-157).
+        {
+            let pr = sim_core::ref_params();
+            let (mut lo, mut hi, mut sum) = (u32::MAX, 0u32, 0u64);
+            for z in (0..pr.nz).step_by(4) {
+                for x in (0..pr.nx).step_by(4) {
+                    let h = worldgen::surface_height(&pr, a.seed, x, z);
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                    sum += h as u64;
+                }
+            }
+            let n = ((pr.nx / 4) * (pr.nz / 4)) as u64;
             println!(
-                "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}, худшая очередь {worst_q}"
+                "  рельеф: высота {lo}..{hi} (размах {}), средняя {}, потолок мира {}",
+                hi - lo,
+                sum / n.max(1),
+                pr.ny
+            );
+        }
+        if r.world.ground().is_some() {
+            let cap = r.world.ground().map(|g| g.world.max_edits_per_tick).unwrap_or(0);
+            println!(
+                "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}"
+            );
+            println!(
+                "  очередь: худшая {worst_q}, тиков с хвостом {backlog} из {}, потолок правок {cap}",
+                a.ticks
             );
         } else {
             println!("  земли нет");

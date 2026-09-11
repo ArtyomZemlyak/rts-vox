@@ -1250,6 +1250,31 @@ pub const REF_SIDE: u32 = 256;
 const REF_DIGGERS: usize = 24;
 const REF_RADIUS: i32 = 2;
 
+/// Мир эталонного сценария — **в одном месте**.
+///
+/// Высота рельефа задаётся абсолютными вокселями, а `surface_height`
+/// обрезает её по высоте мира: `clamp(8, ny - 8)`. Умолчание генератора
+/// (`base_height` 140 при `ny` 256) в мире вдвое ниже упирается
+/// в обрезку **каждой колонкой** — карта выходит плоской, размах восемь
+/// вокселей вместо восьмидесяти, и навигация по объёму на ней не
+/// нагружается вовсе (ADR-157).
+///
+/// Плоской карта становится молча: ошибку видно только замером размаха,
+/// а он ровно на границе обрезки — то самое значение, совпавшее точно,
+/// которое обязано вызывать подозрение.
+pub fn ref_params() -> worldgen::Params {
+    let ny = REF_SIDE / 2;
+    worldgen::Params {
+        nx: REF_SIDE,
+        ny,
+        nz: REF_SIDE,
+        // Половина высоты мира плюс-минус рельеф: обрезка не срабатывает.
+        base_height: ny / 2,
+        relief: ny / 4,
+        ..Default::default()
+    }
+}
+
 /// **Эталонный сценарий — один на всех:** и на `sim-cli`, и на тесты
 /// детерминизма.
 ///
@@ -1272,12 +1297,7 @@ pub struct Reference {
 
 impl Reference {
     pub fn new(seed: u64, units: usize, tuning: Tuning) -> Reference {
-        let params = worldgen::Params {
-            nx: REF_SIDE,
-            ny: REF_SIDE / 2,
-            nz: REF_SIDE,
-            ..Default::default()
-        };
+        let params = ref_params();
         let terrain = worldgen::Terrain { params, seed };
         let vw = voxel::World::new(
             params.nx,
