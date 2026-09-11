@@ -9,8 +9,9 @@
 //! от ядра, а не пометка всего тома, и цена — размер **уцелевшего**, а не
 //! размер тома.
 //!
-//! Раскладка та же, что у чанка: колонка по X — один `u32`, но размеры тома
-//! произвольные до 32.
+//! Колонка по X — одно слово, как у чанка мира, но **шире его**: `u64`,
+//! то есть до 64 вокселей по длинной оси. Тридцати двух не хватало
+//! на крупный юнит (ADR-177).
 
 use crate::topo::stage_a::Adjacency;
 
@@ -20,12 +21,12 @@ pub struct UnitVol {
     pub nx: u8,
     pub ny: u8,
     pub nz: u8,
-    pub cols: Vec<u32>,
+    pub cols: Vec<u64>,
 }
 
 impl UnitVol {
     pub fn new(nx: u8, ny: u8, nz: u8) -> UnitVol {
-        assert!(nx <= 32 && nx > 0);
+        assert!(nx <= 64 && nx > 0);
         UnitVol {
             nx,
             ny,
@@ -35,22 +36,22 @@ impl UnitVol {
     }
 
     #[inline(always)]
-    pub fn col(&self, y: usize, z: usize) -> u32 {
+    pub fn col(&self, y: usize, z: usize) -> u64 {
         self.cols[z * self.ny as usize + y]
     }
 
     #[inline(always)]
     pub fn get(&self, x: usize, y: usize, z: usize) -> bool {
-        self.col(y, z) & (1u32 << x) != 0
+        self.col(y, z) & (1u64 << x) != 0
     }
 
     #[inline(always)]
     pub fn set(&mut self, x: usize, y: usize, z: usize, v: bool) {
         let i = z * self.ny as usize + y;
         if v {
-            self.cols[i] |= 1u32 << x;
+            self.cols[i] |= 1u64 << x;
         } else {
-            self.cols[i] &= !(1u32 << x);
+            self.cols[i] &= !(1u64 << x);
         }
     }
 
@@ -67,7 +68,7 @@ impl UnitVol {
 pub struct CoreBufs {
     /// Достигнутая часть каждой колонки. Не «посещено», а именно маска:
     /// колонка обрабатывается пробегами, а не по одному биту.
-    reached: Vec<u32>,
+    reached: Vec<u64>,
     queue: Vec<u32>,
     head: usize,
 }
@@ -100,7 +101,7 @@ impl CoreBufs {
     /// вот эта подсистема»: подсистема жива, пока хоть один её воксель
     /// **связан с ядром** (ADR-095), и ответ читается пересечением
     /// её маски с этой.
-    pub fn reached_cols(&self) -> &[u32] {
+    pub fn reached_cols(&self) -> &[u64] {
         &self.reached
     }
 }
@@ -120,7 +121,7 @@ pub struct CoreReport {
 /// Расширить маску пробега вверх и вниз внутри колонки: заливка по X
 /// делается сдвигами, а не по биту.
 #[inline(always)]
-fn saturate(seed: u32, solid: u32) -> u32 {
+fn saturate(seed: u64, solid: u64) -> u64 {
     // Классический приём: прибавление к маске «протаскивает» единицы
     // по сплошному участку. Делаем в обе стороны и пересекаем с solid.
     let mut r = seed;
@@ -162,12 +163,12 @@ pub fn core_connectivity(
                 continue;
             }
             let solid = v.cols[z * ny + y];
-            let lo = cx.min(31);
-            let hi = (cx + cs - 1).min(31);
-            let band = if hi >= 31 {
-                !0u32 << lo
+            let lo = cx.min(63);
+            let hi = (cx + cs - 1).min(63);
+            let band = if hi >= 63 {
+                !0u64 << lo
             } else {
-                ((1u32 << (hi - lo + 1)) - 1) << lo
+                ((1u64 << (hi - lo + 1)) - 1) << lo
             };
             let seed = solid & band;
             if seed != 0 {

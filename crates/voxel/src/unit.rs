@@ -87,11 +87,22 @@ pub struct UnitBody {
     /// при записи, а копия делается по первому попаданию, залпом
     /// в тысячи штук. Выделение здесь дороже самих данных (ADR-120).
     /// Считаются один раз при сборке: попадание их только гасит.
-    masks: Vec<u32>,
+    masks: Vec<u64>,
     /// Шаг между масками подсистем.
     mstride: usize,
     pub core: (u8, u8, u8),
     pub core_size: u8,
+    /// Ребро воксела тела в **миллиметрах**.
+    ///
+    /// Канон (ADR-094) даёт телам воксель 0.25 м против 0.5 м у мира,
+    /// и для танка это верно. Но ширина колонки — 64 воксела, то есть
+    /// при 0.25 м тело не длиннее шестнадцати метров, а крупные машины
+    /// бывают втрое длиннее. Масштаб становится свойством **тела**,
+    /// ровно как ADR-019 разрешает миру и телам иметь разные (ADR-178).
+    ///
+    /// Миллиметры, а не `Fx`: это константа шаблона, она не участвует
+    /// в арифметике тика, и целое число исключает вопрос о округлении.
+    pub mm: u16,
 }
 
 impl UnitBody {
@@ -102,6 +113,12 @@ impl UnitBody {
     /// получали разные ядра — обе величины были верны, но разные, и
     /// расхождение не было видно ниоткуда.
     pub fn new(nx: u8, ny: u8, nz: u8, core_size: u8) -> UnitBody {
+        UnitBody::new_scaled(nx, ny, nz, core_size, 250)
+    }
+
+    /// То же, но с явным ребром воксела в миллиметрах (ADR-178).
+    pub fn new_scaled(nx: u8, ny: u8, nz: u8, core_size: u8, mm: u16) -> UnitBody {
+        assert!(mm > 0, "воксель нулевого размера");
         let n = nx as usize * ny as usize * nz as usize;
         UnitBody {
             vol: UnitVol::new(nx, ny, nz),
@@ -110,7 +127,30 @@ impl UnitBody {
             mstride: ny as usize * nz as usize,
             core: (0, 0, 0),
             core_size: core_size.max(1),
+            mm,
         }
+    }
+
+    /// Габарит тела в миллиметрах: `(длина, высота, ширина)`.
+    pub fn extent_mm(&self) -> (u32, u32, u32) {
+        let mm = self.mm as u32;
+        (
+            self.vol.nx as u32 * mm,
+            self.vol.ny as u32 * mm,
+            self.vol.nz as u32 * mm,
+        )
+    }
+
+    /// Объём твёрдого в кубических миллиметрах.
+    ///
+    /// **Считается в мировых единицах, а не в вокселях** (`CLAUDE.md`):
+    /// ресурс есть объём на плотность, и воксель крупной машины стоит
+    /// ровно во столько раз больше воксела танка, во сколько он больше
+    /// по объёму. Без этого экономика разъезжается между классами
+    /// объектов — и разъезжается не сразу.
+    pub fn volume_mm3(&self) -> u64 {
+        let mm = self.mm as u64;
+        self.solid_count() as u64 * mm * mm * mm
     }
 
     /// Посадить затравку связности на разметку.
@@ -177,7 +217,7 @@ impl UnitBody {
         std::sync::Arc::make_mut(&mut self.part)[i] = p as u8;
         if let Some(k) = subsystem_slot(p) {
             let c = self.col(y, z);
-            self.masks[k * self.mstride + c] |= 1u32 << x;
+            self.masks[k * self.mstride + c] |= 1u64 << x;
         }
     }
 
@@ -199,7 +239,7 @@ impl UnitBody {
         self.vol.set(x, y, z, false);
         if let Some(k) = subsystem_slot(self.part_at(x, y, z)) {
             let c = self.col(y, z);
-            self.masks[k * self.mstride + c] &= !(1u32 << x);
+            self.masks[k * self.mstride + c] &= !(1u64 << x);
         }
         true
     }
@@ -243,7 +283,7 @@ impl UnitBody {
     /// Только собственная память тома. У копии метки общие с шаблоном,
     /// и считать их дважды — завысить расход флота вдвое с половиной.
     pub fn bytes_private(&self) -> usize {
-        self.vol.cols.len() * 4 + self.masks.len() * 4
+        self.vol.cols.len() * 8 + self.masks.len() * 8
     }
 }
 
