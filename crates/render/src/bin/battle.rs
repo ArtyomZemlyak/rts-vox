@@ -61,6 +61,13 @@ struct Shot {
     seen: u64,
 }
 
+/// Воксель тела к вокселю мира.
+///
+/// Канон: ребро воксела мира 0.5 м, воксела тела 0.25 м (ADR-094).
+/// Значит ровно половина — и танк 24×12×12 выходит 12×6×6 мировых
+/// вокселей, шесть метров в длину. Как и должен.
+const UNIT_SCALE: f32 = 0.5;
+
 #[derive(Component)]
 struct Chunk(usize);
 
@@ -82,7 +89,9 @@ struct BlastMark(u32);
 /// Общие для всех меши и материалы.
 #[derive(Resource)]
 struct Art {
-    unit: Handle<Mesh>,
+    /// Том юнита по сторонам: цвет вершины несёт роль воксела,
+    /// поэтому меш у каждой стороны свой.
+    hull: [Handle<Mesh>; 2],
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -94,8 +103,12 @@ struct Art {
 }
 
 fn main() {
-    let mut units = 2000usize;
+    let mut units = 240usize;
     let mut seed = 42u64;
+    // Показу нужен мир поплоще и побольше, чем гейту: на холмистой
+    // карте строй прячется в складках, и боя не видно (ADR-172).
+    let mut side = 384u32;
+    let mut relief = 10u32;
     let mut speed = 1u32;
     let mut shot: Option<String> = None;
     let mut after = 8.0f32;
@@ -106,6 +119,8 @@ fn main() {
         let v = it.next().unwrap_or_default();
         match k.as_str() {
             "--units" => units = v.parse().unwrap_or(units),
+            "--side" => side = v.parse().unwrap_or(side),
+            "--relief" => relief = v.parse().unwrap_or(relief),
             "--seed" => seed = v.parse().unwrap_or(seed),
             "--speed" => speed = v.parse().unwrap_or(speed),
             "--shot" => shot = Some(v.clone()),
@@ -116,8 +131,9 @@ fn main() {
             "--dist" => dist = v.parse().unwrap_or(dist),
             "--help" => {
                 println!(
-                    "battle [--units N] [--seed N] [--speed тиков-на-кадр] \
-[--shot файл] [--shot-after сек] [--frames N] [--yaw] [--pitch] [--dist]"
+                    "battle [--units N] [--side N] [--relief N] [--seed N] \
+[--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--frames N] \
+[--yaw] [--pitch] [--dist]"
                 );
                 return;
             }
@@ -151,12 +167,16 @@ fn main() {
             }
         }
     };
-    let r = Reference::new(seed, units, tuning, weapons);
+    let params = worldgen::Params {
+        relief,
+        ..worldgen::Params::sized(side, side / 2, side)
+    };
+    let r = Reference::with_params(seed, units, tuning, weapons, params);
     let g = r.world.ground().expect("у эталона есть земля");
     let mesh = MeshLayer::new(&g.world, Opts::default());
     let (nx, ny, nz) = mesh.dims();
     let grid = ChunkGrid { nx, ny, nz, cs: CS as u32 };
-    let side = sim_core::REF_SIDE as f32;
+    let side = side as f32;
     println!(
         "мир {}×{}×{}, чанков {}, юнитов {units}, сборка {:.0} мс",
         g.world.nx,
@@ -202,20 +222,51 @@ fn setup(
     mut sim: ResMut<Sim>,
     view: Res<View>,
 ) {
+    // Юниты — **настоящий воксельный том** из `voxel::unit`, а не
+    // кубик: силуэт корпуса, башни и ствола читается, и видно, куда
+    // смотрит юнит (ADR-172).
+    //
+    // Масштаб — канонический: воксель тела вдвое мельче мирового
+    // (ADR-094). Ужимать том под тесное расталкивание было бы
+    // пряталкой: расходились не картинка и канон, а **данные**
+    // и канон, и поправлены данные (ADR-172).
+    let tank = voxel::unit::tank();
+    let mut ubuf = MeshBuf::default();
+    let unit_mesh = |tint: [f32; 3], ubuf: &mut MeshBuf, meshes: &mut Assets<Mesh>| {
+        ubuf.clear();
+        render::geom::volume_to_mesh(&tank, tint, UNIT_SCALE, ubuf);
+        meshes.add(
+            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, ubuf.pos.clone())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, ubuf.nrm.clone())
+                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, ubuf.col.clone())
+                .with_inserted_indices(Indices::U32(ubuf.idx.clone())),
+        )
+    };
+    let hull = [
+        unit_mesh([0.22, 0.42, 0.72], &mut ubuf, &mut meshes),
+        unit_mesh([0.78, 0.34, 0.12], &mut ubuf, &mut meshes),
+    ];
     let art = Art {
-        unit: meshes.add(Cuboid::new(2.0, 3.0, 2.0)),
+        hull,
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
         // Единичный столбик по оси Y: поворот и масштаб превращают
         // его в луч любой длины и направления.
         beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
+        // Цвет несут вершины, поэтому материал один и белый:
+        // база умножается на цвет вершины.
         side: [
             materials.add(StandardMaterial {
-                base_color: Color::srgb(0.25, 0.55, 0.95),
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.6,
+                metallic: 0.1,
                 ..default()
             }),
             materials.add(StandardMaterial {
-                base_color: Color::srgb(0.95, 0.45, 0.15),
+                base_color: Color::WHITE,
+                perceptual_roughness: 0.6,
+                metallic: 0.1,
                 ..default()
             }),
         ],
@@ -278,7 +329,7 @@ fn setup(
     for i in 0..cap {
         let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
         commands.spawn((
-            Mesh3d(art.unit.clone()),
+            Mesh3d(art.hull[owner].clone()),
             MeshMaterial3d(art.side[owner].clone()),
             Transform::from_xyz(0.0, -1000.0, 0.0),
             Visibility::Hidden,
@@ -371,9 +422,15 @@ fn step(
         *vis = Visibility::Inherited;
         tr.translation = Vec3::new(
             sim.r.world.units.x[i] as f32,
-            sim.r.world.units.y[i] as f32 + 1.5,
+            sim.r.world.units.y[i] as f32,
             sim.r.world.units.z[i] as f32,
         );
+        // Разворот по направлению движения: без него строй стоит
+        // боком и выглядит россыпью кубиков, а не колонной.
+        let (dx, dz) = (sim.r.world.units.fx[i].raw(), sim.r.world.units.fz[i].raw());
+        if dx != 0 || dz != 0 {
+            tr.rotation = Quat::from_rotation_y((dz as f32).atan2(dx as f32));
+        }
     }
 
     // Снаряды: их число скачет, поэтому сущности создаются и убираются.

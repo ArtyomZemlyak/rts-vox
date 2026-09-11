@@ -1725,6 +1725,9 @@ pub fn ref_params() -> worldgen::Params {
 /// внутри него: разнеси её по вызывающим, и они разойдутся снова.
 pub struct Reference {
     pub world: World,
+    /// Сторона мира: копатели переселяются по ней, а мир у показа
+    /// и у гейта разный (ADR-172).
+    side: u32,
     /// Заявленная численность стороны. Бой затухает без подкреплений,
     /// и прогон на десять тысяч тиков восемь тысяч из них хеширует
     /// почти пустое поле (ADR-161).
@@ -1749,7 +1752,22 @@ impl Reference {
         tuning: Tuning,
         weapons: modding::weapons::Weapons,
     ) -> Reference {
-        let params = ref_params();
+        Reference::with_params(seed, units, tuning, weapons, ref_params())
+    }
+
+    /// Тот же сценарий на **другом** мире.
+    ///
+    /// Гейту нужен один мир — на нём стоит хеш, и менять его нельзя.
+    /// Показу нужен другой: поплоще, чтобы бой было видно, и побольше,
+    /// чтобы строй не стоял в куче. Развести их параметрами дешевле,
+    /// чем заводить второй сценарий (ADR-172).
+    pub fn with_params(
+        seed: u64,
+        units: usize,
+        tuning: Tuning,
+        weapons: modding::weapons::Weapons,
+        params: worldgen::Params,
+    ) -> Reference {
         let terrain = worldgen::Terrain { params, seed };
         let vw = voxel::World::new(
             params.nx,
@@ -1776,13 +1794,14 @@ impl Reference {
         let mut rng = Rng::new(seed, 0xD16);
         let mut diggers = Vec::with_capacity(REF_DIGGERS);
         for _ in 0..REF_DIGGERS {
-            let x = rng.below(REF_SIDE) as i32;
-            let z = rng.below(REF_SIDE) as i32;
+            let x = rng.below(params.nx) as i32;
+            let z = rng.below(params.nz) as i32;
             let y = terrain.surface(x as u32, z as u32) as i32;
             diggers.push((x, y, z));
         }
         Reference {
             world,
+            side: params.nx,
             per_side: units.max(1).div_ceil(2),
             terrain,
             diggers,
@@ -1873,8 +1892,8 @@ impl Reference {
         // Переселение — после обхода: земля занята заимствованием,
         // а порядок остаётся порядком в массиве, а не обхода.
         for k in moved {
-            let x = self.rng.below(REF_SIDE) as i32;
-            let z = self.rng.below(REF_SIDE) as i32;
+            let x = self.rng.below(self.side) as i32;
+            let z = self.rng.below(self.side) as i32;
             let y = self.terrain.surface(x as u32, z as u32) as i32;
             self.diggers[k] = (x, y, z);
         }
@@ -1994,6 +2013,12 @@ mod tests {
     /// **только на маске проходимости**: она обновляется в тот же тик,
     /// а поле направлений отстаёт намеренно, и на нём инварианта нет.
     ///
+    /// Здесь проверяется **падение**. Поездка — тоже законное
+    /// исключение, но её проверяет `a_rider_is_not_inside_solid_rock`
+    /// на построенном случае: выпрашивать редкое событие у большой
+    /// сцены оказалось хрупко — сторож ломался от каждой правки
+    /// баланса, трижды подряд (ADR-172).
+    ///
     /// Исключений из канона применимо два.
     ///
     /// **Падение на исчезнувшей опоре.** Юнит, под которым выкопали,
@@ -2015,7 +2040,6 @@ mod tests {
     fn a_unit_is_never_inside_solid_rock() {
         let mut r = Reference::new(42, 600, test_tuning(), test_weapons());
         let mut ever_falling = 0u64;
-        let mut ever_riding = 0u64;
         let mut checked = 0u64;
         // Четыреста тиков, а не двести: с тех пор как половина строя
         // перешла на луч (ADR-169), копают вдвое меньше, и за двести
@@ -2039,8 +2063,9 @@ mod tests {
                     ever_falling += 1;
                     continue;
                 }
+                // Наездник законно вне рельефа: он на теле.
+                // Проверяет это `a_rider_is_not_inside_solid_rock`.
                 if r.world.units.riding[i] != 0 {
-                    ever_riding += 1;
                     continue;
                 }
                 assert!(
@@ -2057,11 +2082,6 @@ mod tests {
             ever_falling > 0,
             "никто ни разу не падал — сцена не копает под ногами, \
 и инвариант проверен на неподвижной земле"
-        );
-        assert!(
-            ever_riding > 0,
-            "никто ни разу не ехал на куске — воронки не подрывают \
-породу под строем, и второе исключение не проверено"
         );
     }
 
@@ -2478,6 +2498,95 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             seen[(r.world.units.weapon[k] as usize).min(1)] = true;
         }
         assert!(seen[0] && seen[1], "обе стороны с одним оружием: {seen:?}");
+    }
+
+    /// **Наездник не считается «внутри породы».**
+    ///
+    /// Второе исключение инварианта (ADR-165), и проверяется оно
+    /// на **построенном** случае, а не выпрошенном у большой сцены:
+    /// юнит на шляпке гриба, ножку подрезают, шляпка падает вместе
+    /// с ним. Под ним в этот момент нет уровня — и не должно быть.
+    ///
+    /// Случай построен намеренно: та же проверка на эталонном
+    /// сценарии зависела от того, сколько в нём копают, и ломалась
+    /// от каждой правки баланса.
+    #[test]
+    fn a_rider_is_not_inside_solid_rock() {
+        /// Гриб: ножка до шляпки, шляпка над ней.
+        struct Mushroom;
+        impl voxel::Generator for Mushroom {
+            fn material(&self, x: u32, y: u32, z: u32) -> voxel::store::Mat {
+                if y < 8 {
+                    return 2;
+                }
+                // Ножка.
+                if (28..36).contains(&x) && (28..36).contains(&z) && y < 44 {
+                    return 3;
+                }
+                // Шляпка.
+                if (20..44).contains(&x) && (20..44).contains(&z) && (40..44).contains(&y) {
+                    return 3;
+                }
+                voxel::store::AIR
+            }
+        }
+        let t = test_tuning();
+        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Mushroom));
+        let mut w = World::new(1, 4, t);
+        w.attach_ground(ground::Ground::new(vw, &t));
+        let id = w.units.spawn(32, 32, 0, 0, 300) as usize;
+        w.units.refresh_live();
+        w.tick();
+        let y0 = w.units.y[id];
+        assert!(y0 > 40, "юнит не встал на шляпку: y = {y0}");
+
+        // Подрезать ножку.
+        {
+            let g = w.ground_mut().expect("земля");
+            for y in 9..21 {
+                for z in 28..36 {
+                    for x in 28..36 {
+                        if g.world.solid(x, y, z) {
+                            g.world.queue_dig(x, y, z);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut rode = 0u32;
+        let mut checked = 0u32;
+        for tick in 0..60 {
+            w.tick();
+            let g = w.ground().expect("земля");
+            let st = g.nav.step() as i32;
+            let (cx, cz) = (
+                (w.units.x[id] / st).max(0) as u32,
+                (w.units.z[id] / st).max(0) as u32,
+            );
+            let uy = w.units.y[id];
+            checked += 1;
+            if w.units.riding[id] != 0 {
+                rode += 1;
+                continue;
+            }
+            if w.units.fall_from[id] != NOT_FALLING {
+                continue;
+            }
+            assert!(
+                g.nav.has_level(cx, cz, uy),
+                "тик {tick}: юнит в ({}, {uy}, {}) без уровня, не падает и не едет",
+                w.units.x[id],
+                w.units.z[id]
+            );
+        }
+        assert!(checked > 0);
+        assert!(rode > 0, "юнит ни разу не ехал — случай не построился");
+        assert!(
+            w.units.y[id] < y0,
+            "юнит не поехал вниз: {} против {y0}",
+            w.units.y[id]
+        );
     }
 
     /// **Два мира, идущие вперемешку, совпадают тик в тик.**
