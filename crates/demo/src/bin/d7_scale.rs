@@ -410,17 +410,27 @@ fn main() -> ExitCode {
         worn.dirty_topo as f64 / n
     );
 
+    // **Пожизненные счётчики делятся на прожитые тики, а не на длину
+    // фазы.** `examined_move`, `examined_combat` и `blocked_moves`
+    // обнуляются только в конструкторе, а один и тот же мир проходит
+    // фазу A, прогрев и фазу B. Деление на `2 * ticks` завышало их
+    // ровно во столько раз, во сколько прогрев длиннее фазы: при
+    // каноническом `--warmup 2000 --ticks 200` это шестикратно
+    // (ADR-183).
+    let lived = sim.tick.max(1) as f64;
+    let per_tick = |v: u64| v as f64 / lived;
+
     println!("\n{:<34} {:>14}", "прочее", "");
     println!("{:<34} {:>14}", "живых юнитов", sim.units.live().len());
     println!(
         "{:<34} {:>14.1}",
         "осмотрено на движении",
-        sim.examined_move as f64 / (2.0 * n)
+        per_tick(sim.examined_move)
     );
     println!(
         "{:<34} {:>14.1}",
         "осмотрено на бою",
-        sim.examined_combat as f64 / (2.0 * n)
+        per_tick(sim.examined_combat)
     );
     // Ноль здесь значит, что юниты по рельефу не ходят (ADR-134).
     // Поле целиком — то, чего тик не выдержит: потому оно и считается
@@ -460,7 +470,7 @@ fn main() -> ExitCode {
     println!(
         "{:<34} {:>14.1}",
         "шагов упёрлось в породу",
-        sim.blocked_moves as f64 / (2.0 * n)
+        per_tick(sim.blocked_moves)
     );
     println!("{:<34} {:>11.1} мс", "генерация мира", gen_ms);
     println!(
