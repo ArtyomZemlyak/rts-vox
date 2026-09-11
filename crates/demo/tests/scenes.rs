@@ -412,7 +412,9 @@ use sim_core::matter::{resource_of, ContainerId, Kind, Ledger, Sink, SINKS};
 
 /// Прогон D-5 в миниатюре: копка, доставка, подбитие, реклейм.
 /// Возвращает (хеш, сработавшие стоки, худшее расхождение).
-fn run_haul(seed: u64, ticks: u64) -> (u64, [u64; 5], i128) {
+// Длина — из перечня, а не числом: шестой сток ронял этот массив
+// по выходу за границу (ADR-185).
+fn run_haul(seed: u64, ticks: u64) -> (u64, [u64; SINKS.len()], i128) {
     let mut l = Ledger::new();
     let ground = l.create(Kind::Ground, 1_000_000, u64::MAX);
     // Потолок и переработка подобраны так, чтобы склад реально
@@ -477,7 +479,7 @@ fn run_haul(seed: u64, ticks: u64) -> (u64, [u64; 5], i128) {
             hash.feed(l.sunk(s));
         }
     }
-    let mut sunk = [0u64; 5];
+    let mut sunk = [0u64; SINKS.len()];
     for (k, s) in SINKS.iter().enumerate() {
         sunk[k] = l.sunk(*s);
     }
