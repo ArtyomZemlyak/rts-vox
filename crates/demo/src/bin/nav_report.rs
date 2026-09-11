@@ -358,6 +358,11 @@ fn main() -> ExitCode {
         let mut cycles = 0;
         let mut ticks = 0u32;
         let (mut solved, mut reused) = (0usize, 0usize);
+        // Цена цикла целиком — не сумма отдельно замеренных кусков,
+        // а то, что тратит сам оркестратор. Часы держит замерщик:
+        // в `nav` время брать нельзя, это sim-крейт.
+        let mut cycle_ms = 0.0f64;
+        let mut each: Vec<f64> = Vec::new();
         while cycles < 4 && ticks < 100_000 {
             d3.step(&mut w3, &|x, z| terrain.surface(x, z));
             w3.flush();
@@ -365,16 +370,33 @@ fn main() -> ExitCode {
             for e in w3.edits() {
                 nf.mark_cell(e.x / t.nav_cell, e.z / t.nav_cell, cw);
             }
-            if nf.step(&nav3, b, &nav::godunov::h_exact_floor) {
+            let t0 = Instant::now();
+            let done = nf.step(&nav3, b, &nav::godunov::h_exact_floor);
+            cycle_ms += t0.elapsed().as_secs_f64() * 1e3;
+            if done {
                 cycles += 1;
                 solved = nf.solved_sectors;
                 reused = nf.reused_sectors;
+                each.push(cycle_ms);
+                cycle_ms = 0.0;
             }
             ticks += 1;
         }
         println!("\n{:<34} {:>12} {:>12}", "секторов поля за 4 цикла", "пересчёт", "готовыми");
         println!("{:<34} {:>12} {:>12}", "", solved, reused);
         println!("{:<34} {:>12}", "  тиков на цикл", nf.last_ticks);
+        println!(
+            "{:<34} {:>12?}",
+            "  цикл целиком, мс",
+            each.iter().map(|v| (v * 10.0).round() / 10.0).collect::<Vec<_>>()
+        );
+        if let Some(last) = each.last() {
+            println!(
+                "{:<34} {:>11.1}%",
+                "  из них сборка графа объёма",
+                100.0 * g_ms / last
+            );
+        }
         println!(
             "{:<34} {:>12}",
             "  всего секторов",
