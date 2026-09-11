@@ -21,6 +21,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::Indices;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use meshing::layer::MeshLayer;
 use meshing::{Opts, CS};
@@ -60,6 +61,19 @@ struct Bench {
     seen: u64,
     /// Ручки чанков: без них нечего заменять.
     handles: Vec<Handle<Mesh>>,
+    /// Куда сохранить снимок экрана и **через сколько секунд**.
+    ///
+    /// Снимок делается рендером, а не захватом экрана: так он повторяем
+    /// и не зависит от того, что поверх окна.
+    ///
+    /// Срок в секундах, а не в кадрах, и это не мелочь. Конвейеры
+    /// собираются асинхронно; пока они не готовы, не рисуется **ничего**,
+    /// и кадры от этого идут вчетверо быстрее. Снимок на девяностом
+    /// кадре выходил через четверть секунды после создания окна —
+    /// и был пуст (ADR-166).
+    shot: Option<String>,
+    shot_after: f32,
+    shot_done: bool,
     /// Времена кадров, миллисекунды. Печатаются все окна, а не лучшее.
     hist: Vec<f64>,
     /// Время самой переотдачи в кадре, миллисекунды.
@@ -74,6 +88,11 @@ fn main() {
     let mut seed = 42u64;
     let mut churn = 0usize;
     let mut frames = 0u64;
+    let mut shot: Option<String> = None;
+    // Секунды до снимка: раньше этого срока конвейеры ещё собираются,
+    // и кадр выходит пустым.
+    let mut shot_after = 4.0f32;
+    let (mut yaw, mut pitch, mut dist) = (0.7f32, 0.95f32, 0.9f32);
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -82,8 +101,16 @@ fn main() {
             "--seed" => seed = v.parse().unwrap_or(seed),
             "--churn" => churn = v.parse().unwrap_or(churn),
             "--frames" => frames = v.parse().unwrap_or(frames),
+            "--shot" => shot = Some(v.clone()),
+            "--shot-after" => shot_after = v.parse().unwrap_or(shot_after),
+            "--yaw" => yaw = v.parse().unwrap_or(yaw),
+            "--pitch" => pitch = v.parse().unwrap_or(pitch),
+            "--dist" => dist = v.parse().unwrap_or(dist),
             "--help" => {
-                println!("view [--side N] [--seed N] [--churn N] [--frames N]");
+                println!(
+                    "view [--side N] [--seed N] [--churn N] [--frames N] \
+[--shot файл] [--shot-after сек] [--yaw рад] [--pitch рад] [--dist доля]"
+                );
                 return;
             }
             other => {
@@ -93,7 +120,9 @@ fn main() {
         }
     }
 
-    let params = worldgen::Params { nx: side, ny: side / 2, nz: side, ..Default::default() };
+    // Параметры считает генератор: рельеф задаётся абсолютными
+    // вокселями и молча обрезается в низком мире (ADR-166).
+    let params = worldgen::Params::sized(side, side / 2, side);
     let w = voxel::World::new(
         params.nx,
         params.ny,
@@ -125,9 +154,9 @@ fn main() {
     let mid = side as f32 * 0.5;
     let cam = RtsCamera {
         target: V3::new(mid, params.ny as f32 * 0.55, mid),
-        yaw: 0.7,
-        pitch: 0.95,
-        distance: side as f32 * 0.9,
+        yaw,
+        pitch,
+        distance: side as f32 * dist,
         fovy: 0.87,
         aspect: 16.0 / 9.0,
         near: 1.0,
@@ -154,6 +183,9 @@ fn main() {
             cursor: 0,
             seen: 0,
             handles: Vec::new(),
+            shot,
+            shot_after,
+            shot_done: false,
             hist: Vec::new(),
             churn_ms: Vec::new(),
             present: 0,
@@ -369,12 +401,21 @@ fn churn_chunks(mut bench: ResMut<Bench>, world: Res<World>, mut meshes: ResMut<
 /// прогрев: там ещё компилируются конвейеры, и мерить их как
 /// установившийся режим нечестно.
 fn stats(
+    mut commands: Commands,
     time: Res<Time>,
     view: Res<View>,
     mut bench: ResMut<Bench>,
     mut exit: MessageWriter<AppExit>,
 ) {
     bench.seen += 1;
+    // Снимок — по времени и один раз.
+    if !bench.shot_done && time.elapsed_secs() >= bench.shot_after {
+        if let Some(path) = bench.shot.clone() {
+            println!("снимок на {:.1} с: {path}", time.elapsed_secs());
+            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+        }
+        bench.shot_done = true;
+    }
     if bench.seen <= 60 {
         return;
     }

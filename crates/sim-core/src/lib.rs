@@ -1551,16 +1551,7 @@ const REF_REINFORCE: usize = 4;
 /// а он ровно на границе обрезки — то самое значение, совпавшее точно,
 /// которое обязано вызывать подозрение.
 pub fn ref_params() -> worldgen::Params {
-    let ny = REF_SIDE / 2;
-    worldgen::Params {
-        nx: REF_SIDE,
-        ny,
-        nz: REF_SIDE,
-        // Половина высоты мира плюс-минус рельеф: обрезка не срабатывает.
-        base_height: ny / 2,
-        relief: ny / 4,
-        ..Default::default()
-    }
+    worldgen::Params::sized(REF_SIDE, REF_SIDE / 2, REF_SIDE)
 }
 
 /// **Эталонный сценарий — один на всех:** и на `sim-cli`, и на тесты
