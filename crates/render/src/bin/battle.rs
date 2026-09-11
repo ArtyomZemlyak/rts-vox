@@ -1240,6 +1240,21 @@ fn spawn_debris(
     }
 }
 
+/// Всё, что стареет, кроме обломков: у каждого своё — либо свет,
+/// либо материал, либо и то и другое.
+type FadeQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut Fade,
+        &'static mut Transform,
+        Option<&'static mut PointLight>,
+        Option<&'static mut MeshMaterial3d<StandardMaterial>>,
+    ),
+    Without<Debris>,
+>;
+
 /// Старение эффектов: вспышки, лучи, свет и обломки.
 ///
 /// Одна система на всё, потому что стареют они одинаково — по кадру
@@ -1247,10 +1262,7 @@ fn spawn_debris(
 fn effects(
     mut commands: Commands,
     art: Res<Art>,
-    mut fades: Query<
-        (Entity, &mut Fade, &mut Transform, Option<&mut PointLight>, Option<&mut MeshMaterial3d<StandardMaterial>>),
-        Without<Debris>,
-    >,
+    mut fades: FadeQuery,
     mut debris: Query<(Entity, &mut Debris, &mut Transform)>,
 ) {
     for (e, mut f, mut tr, light, mat) in fades.iter_mut() {

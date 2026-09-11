@@ -240,9 +240,12 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
         let first = p.mats[0];
         let uniform = p.mats.iter().all(|&m| m == first);
 
+        // Цвет считается **один раз на квад**, а не на вершину: у всех
+        // четырёх он один и тот же, а `colour_face` это три умножения.
+        let col = |m: Mat| look::colour_face(m, axis, positive);
         let mut emit = |a: usize, b: usize, w: usize, h: usize, m: Mat| {
             let buf = &mut out[look::class(m) as usize];
-            push_quad(axis, positive, s, a, b, w, h, origin, Some(look::colour(m)), buf);
+            push_quad(axis, positive, s, a, b, w, h, origin, Some(col(m)), buf);
         };
 
         if uniform {
@@ -364,6 +367,20 @@ pub fn volume_to_mesh(
                 }
                 let c = look::to_linear(look::part_srgb(b.part_at(x, y, z), tint));
                 for (d, n) in SIDES {
+                    // Та же яркость по направлению, что у рельефа: без
+                    // неё верх и бок корпуса одного цвета, и силуэт
+                    // юнита разваливается на дистанции RTS (ADR-201).
+                    let k = look::face_tint(
+                        if d[0] != 0 {
+                            0
+                        } else if d[1] != 0 {
+                            1
+                        } else {
+                            2
+                        },
+                        d[0] + d[1] + d[2] > 0,
+                    );
+                    let c = [c[0] * k, c[1] * k, c[2] * k, c[3]];
                     let (sx, sy, sz) = (x as i32 + d[0], y as i32 + d[1], z as i32 + d[2]);
                     let inside = sx >= 0
                         && sy >= 0
@@ -614,7 +631,14 @@ mod tests {
         let tint = [0.3, 0.5, 0.9];
         let mut buf = MeshBuf::default();
         volume_to_mesh(&tank, tint, 0.5, Slice::All, &mut buf);
-        let hull = look::to_linear(tint);
+        // Броня верхней грани: цвет роли, умноженный на яркость
+        // направления (ADR-201). Сверять с одним `to_linear(tint)`
+        // нельзя — такого цвета после ADR-201 нет ни у одной вершины,
+        // и проверка стала бы вакуумной.
+        let lin = look::to_linear(tint);
+        let k = look::face_tint(1, true);
+        let hull = [lin[0] * k, lin[1] * k, lin[2] * k, lin[3]];
+        assert!(buf.col.contains(&hull), "брони верхней грани нет вовсе");
         let others = buf.col.iter().filter(|&&c| c != hull).count();
         assert!(others > 0, "весь танк одного цвета — роли не видно");
     }
@@ -646,7 +670,11 @@ mod tests {
     #[test]
     fn the_barrel_belongs_to_the_turret() {
         let tank = voxel::unit::tank();
-        let gun = look::to_linear(look::part_srgb(voxel::unit::Part::Weapon, [0.5, 0.5, 0.5]));
+        // Цвет грани умножен на яркость её направления (ADR-201),
+        // поэтому сверять надо с конкретной гранью — берём верхнюю.
+        let base = look::to_linear(look::part_srgb(voxel::unit::Part::Weapon, [0.5, 0.5, 0.5]));
+        let k = look::face_tint(1, true);
+        let gun = [base[0] * k, base[1] * k, base[2] * k, base[3]];
         let mut hull = MeshBuf::default();
         let mut turret = MeshBuf::default();
         volume_to_mesh(&tank, [0.5, 0.5, 0.5], 0.5, Slice::Hull, &mut hull);
@@ -746,9 +774,18 @@ mod tests {
                     );
                     let m = w.material(vx, vy, vz);
                     assert_ne!(m, voxel::store::AIR, "грань принадлежит воздуху");
+                    // Ось и знак грани берутся из её нормали: цвет
+                    // умножен на яркость направления (ADR-201).
+                    let axis = if n[0] != 0.0 {
+                        0
+                    } else if n[1] != 0.0 {
+                        1
+                    } else {
+                        2
+                    };
                     assert_eq!(
                         b.col[base],
-                        look::colour(m),
+                        look::colour_face(m, axis, n[axis] > 0.0),
                         "воксель {vx},{vy},{vz} материала {m} покрашен не своим цветом"
                     );
                     assert_eq!(look::class(m) as usize, k, "материал {m} не в своём буфере");
@@ -781,8 +818,10 @@ mod tests {
             &mut p,
             &mut bufs,
         );
-        let fuchsia = look::colour(voxel::store::AIR);
-        let rock = look::colour(2);
+        // Грань смотрит вверх (face 2), и цвет умножен на яркость
+        // направления (ADR-201).
+        let fuchsia = look::colour_face(voxel::store::AIR, 1, true);
+        let rock = look::colour_face(2, 1, true);
         let mut n = 0usize;
         for b in bufs.iter() {
             for c in b.col.iter() {
