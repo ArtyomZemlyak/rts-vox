@@ -98,11 +98,28 @@ struct Sim {
     chunks: Vec<[Option<Handle<Mesh>>; look::CLASSES]>,
     bufs: [MeshBuf; look::CLASSES],
     painter: Painter,
-    /// Тиков симуляции на кадр. Ноль — пауза.
+    /// Во сколько раз симуляция быстрее реального времени. Ноль — пауза.
     speed: u32,
     /// Скорость до паузы: пробел обязан возвращать ту, что была.
     was: u32,
+    /// Недотиканное время, секунды.
+    ///
+    /// **Тик привязан к часам, а не к кадру.** У `battle` тик равен
+    /// кадру нарочно: там меряют, и два прогона обязаны показывать
+    /// одно и то же состояние. Здесь играют, и кадры идут во сколько
+    /// угодно раз чаще тридцати герц — на этой машине выходило больше
+    /// ста шестидесяти. Тик на кадр означал бы игру впятеро быстрее
+    /// на быстрой машине и вдвое медленнее на медленной.
+    acc: f32,
 }
+
+/// Длина тика в секундах. Частота — из симуляции, а не своя:
+/// скорость юнита задана в клетках в секунду и делится там же.
+const DT: f32 = 1.0 / sim_core::TICKS_PER_SECOND as f32;
+
+/// Сколько тиков окно догоняет за один кадр. Провал кадра не должен
+/// превращаться в лавину тиков, которая провалит следующий.
+const CATCH_UP: u32 = 8;
 
 /// Камера между кадрами.
 #[derive(Resource)]
@@ -187,6 +204,8 @@ fn main() {
             "--side" => side = v.parse().unwrap_or(side),
             "--relief" => relief = v.parse().unwrap_or(relief),
             "--seed" => seed = v.parse().unwrap_or(seed),
+            // Множитель реального времени, а не тиков на кадр:
+            // единица — тридцать тиков в секунду.
             "--speed" => speed = v.parse().unwrap_or(speed),
             "--shot" => shot = Some(v.clone()),
             "--shot-after" => after = v.parse().unwrap_or(after),
@@ -197,7 +216,7 @@ fn main() {
             "--dist" => dist = v.parse().unwrap_or(dist),
             "--help" => {
                 println!(
-                    "play [--units N] [--side N] [--relief N] [--seed N] [--speed тиков-на-кадр] \
+                    "play [--units N] [--side N] [--relief N] [--seed N] [--speed множитель] \
 [--shot файл] [--shot-after сек] [--frames N] [--demo кадр] [--yaw] [--pitch] [--dist]"
                 );
                 return;
@@ -292,6 +311,7 @@ fn main() {
             painter: Painter::default(),
             speed,
             was: speed.max(1),
+            acc: 0.0,
         })
         .insert_resource(View { cam, side })
         .insert_resource(Sel::default())
@@ -557,14 +577,24 @@ fn step(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sim: ResMut<Sim>,
+    time: Res<Time>,
     art: Res<Art>,
     mut units: HullQuery,
     mut turrets: TurretQuery,
     shots: Query<Entity, With<ShotMark>>,
     blasts: Query<(Entity, &mut BlastMark)>,
 ) {
-    for _ in 0..sim.speed {
+    // Часы, а не кадры: сколько тиков задолжали, столько и делаем,
+    // но не больше `CATCH_UP` за кадр.
+    sim.acc += time.delta_secs() * sim.speed as f32;
+    let mut done = 0u32;
+    while sim.acc >= DT && done < CATCH_UP {
         sim.r.tick();
+        sim.acc -= DT;
+        done += 1;
+    }
+    if sim.acc > DT * CATCH_UP as f32 {
+        sim.acc = 0.0;
     }
 
     {

@@ -3653,6 +3653,38 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         assert_eq!(w.orders_dropped, 0);
     }
 
+    /// **Новый приказ отменяет прежний.**
+    ///
+    /// Игрок щёлкает в другое место — юнит идёт туда, а не доходит
+    /// до старой точки. Проверяется разворотом: сначала на юг,
+    /// потом на север, и конец обязан быть севернее начала.
+    #[test]
+    fn a_second_order_replaces_the_first() {
+        let t = test_tuning();
+        let (mut w, id) = lone_walker(t);
+        let i = id as usize;
+        w.push_order(Order::MoveTo { unit: id, x: 16, z: 80 });
+        for _ in 0..90 {
+            w.tick();
+        }
+        let midway = w.units.z[i];
+        assert!(midway > 24, "юнит не тронулся по первому приказу: z={midway}");
+        w.push_order(Order::MoveTo { unit: id, x: 16, z: 8 });
+        for _ in 0..300 {
+            w.tick();
+        }
+        let z = w.units.z[i];
+        assert!(
+            z < midway,
+            "юнит не развернулся по второму приказу: z={z}, на развороте было {midway}"
+        );
+        assert!(
+            (z - 8).abs() <= t.order_arrive + 4,
+            "юнит развернулся, но до второй точки не дошёл: z={z}"
+        );
+        assert_eq!(w.orders_applied, 2);
+    }
+
     /// **Приказ «стоять» держит юнита на месте.**
     #[test]
     fn a_hold_order_stops_the_unit() {
