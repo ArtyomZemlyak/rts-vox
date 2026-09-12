@@ -38,14 +38,20 @@ pub fn to_linear(c: [f32; 3]) -> [f32; 4] {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Class {
-    /// Грунт и порода: шероховатый диэлектрик.
-    Rock = 0,
-    /// Руда: гладкая и металлическая, поэтому и видно, где копать.
-    Ore = 1,
+    /// Грунт: мелкое плотное зерно, матовый, без блика.
+    Soil = 0,
+    /// Порода: крупные сколы, твёрже и светлее грунта.
+    Rock = 1,
+    /// Руда: вкрапления, гладкая и металлическая — видно, где копать.
+    Ore = 2,
 }
 
-/// Сколько классов — столько мешей на чанк.
-pub const CLASSES: usize = 2;
+/// Сколько классов — столько мешей на чанк и столько материалов.
+///
+/// Грунт отделён от породы намеренно: пока они делили один класс,
+/// у них были одна шероховатость и одна плитка, и земля от камня
+/// не отличалась ничем, кроме оттенка (ADR-211).
+pub const CLASSES: usize = 3;
 
 /// Цвет и класс материала. Номер явный, как в `data/materials.ron`
 /// (ADR-028): вывести его из позиции в списке — значит перекрасить
@@ -62,9 +68,9 @@ struct MatLook {
 /// расширить контракт мод-API, а это отдельное решение. Пока мод,
 /// принёсший свой материал, получает цвет по умолчанию.
 const PALETTE: &[MatLook] = &[
-    MatLook { id: 1, srgb: [0.47, 0.37, 0.24], class: Class::Rock }, // почва
-    MatLook { id: 2, srgb: [0.47, 0.47, 0.49], class: Class::Rock }, // порода
-    MatLook { id: 3, srgb: [0.29, 0.31, 0.36], class: Class::Rock }, // глубинная
+    MatLook { id: 1, srgb: [0.47, 0.37, 0.24], class: Class::Soil }, // почва
+    MatLook { id: 2, srgb: [0.33, 0.32, 0.30], class: Class::Rock }, // порода
+    MatLook { id: 3, srgb: [0.20, 0.21, 0.23], class: Class::Rock }, // глубинная
     MatLook { id: 16, srgb: [0.52, 0.40, 0.31], class: Class::Ore }, // железо бедное
     MatLook { id: 17, srgb: [0.68, 0.47, 0.30], class: Class::Ore }, // железо
     MatLook { id: 18, srgb: [0.85, 0.55, 0.27], class: Class::Ore }, // железо богатое
@@ -128,12 +134,57 @@ pub fn colour(m: Mat) -> [f32; 4] {
 
 /// Шероховатость и металличность класса — то, что не влезло в вершину.
 pub fn surface(c: Class) -> (f32, f32) {
+    let s = surf(c);
+    (s.rough, s.metal)
+}
+
+/// Из чего складывается поверхность класса.
+///
+/// Один набор чисел на класс, и по нему строятся **обе** плитки —
+/// цветовая и нормалей. Держать их порознь значило бы рано или поздно
+/// развести: зерно на цвете одно, на нормали другое, и материал
+/// перестал бы читаться.
+pub struct Surf {
+    /// Шероховатость и металличность для `StandardMaterial`.
+    pub rough: f32,
+    pub metal: f32,
+    /// Ячеек зерна на воксель: крупное зерно — крупные сколы.
+    pub cells: f32,
+    /// Размах яркости зерна.
+    pub grain: f32,
+    /// Выгиб воксела к середине грани.
+    pub dome: f32,
+    /// Размах наклона нормали от зерна.
+    pub bump: f32,
+    /// Доля ярких вкраплений. Нужна руде, чтобы блестела крупинками,
+    /// а не целиком.
+    pub speck: f32,
+    /// Яркость у самого ребра воксела, 0..1. Единица — ребра не видно.
+    ///
+    /// **Одна на всех она быть не может.** Рыхлая земля не держит
+    /// ребра вовсе: чёткая сетка на ней читается не кубами, а
+    /// расчерченной бумагой. Камень ребро держит, и там сетка
+    /// на месте.
+    pub edge: f32,
+}
+
+pub fn surf(c: Class) -> Surf {
     match c {
-        // Порода матовая: блик на ней читается как мокрое пятно.
-        Class::Rock => (0.92, 0.0),
-        // Руда наполовину металлическая: полный металл без карты
+        // Грунт: мелкое плотное зерно, матовый насквозь. Блик на земле
+        // читается как мокрое пятно.
+        Class::Soil => {
+            Surf { rough: 0.97, metal: 0.0, cells: 7.0, grain: 0.17, dome: 0.22, bump: 0.34, speck: 0.0, edge: 0.94 }
+        }
+        // Порода: зерно вдвое крупнее и глубже, выгиб сильнее —
+        // отсюда ощущение скола, а не насыпи.
+        Class::Rock => {
+            Surf { rough: 0.84, metal: 0.0, cells: 2.5, grain: 0.24, dome: 0.50, bump: 0.26, speck: 0.0, edge: 0.84 }
+        }
+        // Руда: вкрапления и гладкость. Полный металл без карты
         // окружения выходит чёрным, потому что отражать нечего.
-        Class::Ore => (0.38, 0.55),
+        Class::Ore => {
+            Surf { rough: 0.26, metal: 0.80, cells: 3.0, grain: 0.11, dome: 0.42, bump: 0.40, speck: 0.16, edge: 0.88 }
+        }
     }
 }
 
@@ -154,6 +205,78 @@ pub fn part_srgb(p: voxel::unit::Part, tint: [f32; 3]) -> [f32; 3] {
         Part::Core => [1.00, 0.83, 0.22],
     }
 }
+
+/// Из чего сделан воксел тела.
+///
+/// **Цвет не говорит, из чего вещь сделана.** Синий корпус и синяя
+/// линза различаются не оттенком, а тем, как они отвечают на свет:
+/// у металла отражение окрашено собственным цветом и сидит узким
+/// пятном, у диэлектрика оно белое, у резины его нет вовсе. Пока
+/// всё тело красилось одним материалом, юнит читался пластмассовой
+/// игрушкой при любой раскраске (ADR-211).
+///
+/// Отделок столько же, сколько ролей воксела, и не больше: роль
+/// известна симуляции, а выдумывать поверх неё «панели» и «заклёпки»
+/// значит заводить данные, которых в теле нет.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Finish {
+    /// Броня: крашеная сталь. Полуматовая и **наполовину
+    /// металлическая** — краска съедает часть отражения, но не всё.
+    Plate = 0,
+    /// Ствол: воронёная сталь без краски. Тёмная и гладкая.
+    Gun = 1,
+    /// Оптика сенсора: стекло. Диэлектрик, зеркально гладкий —
+    /// отсюда белый блик, которого у металла не бывает.
+    Optic = 2,
+    /// Кожух двигателя: резина и композит. Мёртво-матовый.
+    Rubber = 3,
+    /// Ядро: светится само. Видно, только когда броню вокруг снесли, —
+    /// и тогда обязано быть видно сразу.
+    Core = 4,
+}
+
+/// Сколько отделок — столько мешей на тело и столько материалов.
+pub const FINISHES: usize = 5;
+
+/// Все отделки по порядку номеров. Массивы мешей и материалов
+/// индексируются номером, и перечень обязан идти тем же порядком.
+pub const FINISH_ALL: [Finish; FINISHES] =
+    [Finish::Plate, Finish::Gun, Finish::Optic, Finish::Rubber, Finish::Core];
+
+/// Отделка по роли воксела.
+pub fn finish(p: voxel::unit::Part) -> Finish {
+    use voxel::unit::Part;
+    match p {
+        Part::Armour => Finish::Plate,
+        Part::Weapon => Finish::Gun,
+        Part::Sensor => Finish::Optic,
+        Part::Engine => Finish::Rubber,
+        Part::Core => Finish::Core,
+    }
+}
+
+/// Шероховатость и металличность отделки.
+///
+/// Числа не произвольны. Металличность — величина двоичная по физике:
+/// вещество либо проводник, либо нет, и промежуточные значения врут.
+/// Здесь она всё же дробная у краски, и это честный компромисс:
+/// крашеная броня — тонкий слой диэлектрика на металле, а слоистых
+/// материалов у `StandardMaterial` нет.
+pub fn finish_surface(f: Finish) -> (f32, f32) {
+    match f {
+        Finish::Plate => (0.42, 0.55),
+        Finish::Gun => (0.22, 1.00),
+        // Полный ноль шероховатости даёт блик в один пиксель, который
+        // мерцает на движении; 0.08 — гладко, но уже без мерцания.
+        Finish::Optic => (0.08, 0.00),
+        Finish::Rubber => (0.94, 0.00),
+        Finish::Core => (0.40, 0.00),
+    }
+}
+
+/// Насколько ярко светится обнажённое ядро, линейный RGB.
+pub const CORE_GLOW: [f32; 3] = [7.0, 4.6, 1.2];
 
 // --- Бой: вспышка, трассер, обломок ----------------------------------
 //
@@ -280,22 +403,28 @@ pub fn colour_face(m: Mat, axis: usize, positive: bool) -> [f32; 4] {
 
 /// Сторона плитки в пикселях. Степень двойки: иначе цепочка уровней
 /// детализации не делится нацело.
-pub const TILE: u32 = 32;
+/// Сколько вокселей укладывается в одну плитку по стороне.
+///
+/// **Не один.** Плитка в воксель повторялась на каждом кубе, и ровная
+/// площадь получала правильную сетку — рисунок, которого в природе
+/// нет. На четырёх вокселях узор повторяется вчетверо реже, а каждая
+/// из шестнадцати клеток внутри плитки получает своё зерно: глазу
+/// не за что зацепиться (ADR-211).
+pub const TILE_VOXELS: f32 = 4.0;
+
+/// Сторона плитки в пикселях: тридцать два на воксель.
+pub const TILE: u32 = 128;
 
 /// Докуда тянется затемнение от ребра, в долях воксела.
 const EDGE: f32 = 0.10;
-/// Насколько темно у самого ребра.
-///
-/// **Число подобрано снимком, и подобрано вниз.** На 0.62 фаска читалась
-/// не как фаска, а как расчерченная бумага: воксель тела — четверть
-/// метра, и на корпусе танка таких клеток выходит две сотни. Сетка
-/// обязана говорить «это сложено из кубов», а не спорить с силуэтом.
-const EDGE_DARK: f32 = 0.88;
+// Насколько темно у самого ребра — у каждого класса своё
+// (`Surf::edge`). Числа подобраны снимком, и подобраны вниз: на 0.62
+// сетка читалась не фаской, а расчерченной бумагой.
 /// Светлая полоска на переломе фаски и её ширина в долях воксела.
 const RIM_LIGHT: f32 = 0.045;
 const RIM_WIDTH: f32 = 0.04;
 
-/// Плитка со всеми уровнями детализации подряд, RGBA8 в sRGB.
+/// Плитка со всеми уровнями детализации подряд, RGBA8.
 ///
 /// Уровни обязательны: плитка размером в воксель на дальнем краю карты
 /// занимает меньше пикселя, и без них весь рельеф кипел бы муаром.
@@ -306,68 +435,173 @@ pub struct Tile {
     pub rgba: Vec<u8>,
 }
 
-/// Яркость плитки в точке `(u, v)` внутри воксела, sRGB 0..1.
-fn chamfer_at(u: f32, v: f32) -> f32 {
+/// Значение из решётки. Та же хеш-функция, что у шума мира: заводить
+/// здесь свой генератор незачем, а разные — верный способ развести
+/// цвет и нормаль.
+fn cell_hash(a: i64, b: i64, salt: i64) -> f32 {
+    let mut h = (a.wrapping_mul(374_761_393) ^ b.wrapping_mul(668_265_263) ^ salt.wrapping_mul(2_654_435_761)) as u64;
+    h ^= h >> 13;
+    h = h.wrapping_mul(1_274_126_177);
+    h ^= h >> 16;
+    ((h >> 40) as f32 / 8_388_608.0) - 1.0
+}
+
+/// Яркость фаски в точке внутри **воксела**, 0..1 в sRGB.
+fn chamfer_at(u: f32, v: f32, dark: f32) -> f32 {
     // Расстояние до ближайшего ребра грани.
     let d = u.min(1.0 - u).min(v.min(1.0 - v));
     // Падение к ребру: гладкая ступенька, а не линейная — линейная
-    // даёт видимый излом ровно там, где её и не должно быть видно.
+    // даёт видимый излом ровно там, где его и не должно быть видно.
     let t = (d / EDGE).clamp(0.0, 1.0);
-    let s = t * t * (3.0 - 2.0 * t);
-    let base = EDGE_DARK + (1.0 - EDGE_DARK) * s;
+    let sm = t * t * (3.0 - 2.0 * t);
+    let base = dark + (1.0 - dark) * sm;
     // Блик на переломе. Нормали у фаски нет — её изображает эта
     // полоска, и без неё фаска читается просто как грязь по краю.
     let r = ((d - EDGE).abs() / RIM_WIDTH).clamp(0.0, 1.0);
     base + RIM_LIGHT * (1.0 - r) * (1.0 - r)
 }
 
-/// Собрать плитку фаски вместе с уровнями детализации.
-pub fn chamfer_tile() -> Tile {
-    let mut mips = 0u32;
-    let mut s = TILE;
-    while s >= 1 {
-        mips += 1;
-        if s == 1 {
-            break;
-        }
-        s /= 2;
-    }
-    let mut rgba: Vec<u8> = Vec::new();
 
-    // Нулевой уровень.
+/// Местные координаты: номер воксела внутри плитки и точка внутри него.
+fn split(u: f32, v: f32) -> (i64, i64, f32, f32) {
+    let (su, sv) = (u * TILE_VOXELS, v * TILE_VOXELS);
+    (su.floor() as i64, sv.floor() as i64, su.fract(), sv.fract())
+}
+
+/// Яркость цветовой плитки класса в точке `(u, v)` **плитки**.
+fn albedo_at(c: Class, u: f32, v: f32) -> f32 {
+    let s = surf(c);
+    let (vx, vz, fu, fv) = split(u, v);
+    // Зерно: решётка внутри воксела, посоленная номером воксела —
+    // поэтому соседние кубы не повторяют друг друга.
+    let salt = vx.wrapping_mul(73).wrapping_add(vz.wrapping_mul(9173));
+    let (gu, gv) = ((fu * s.cells).floor() as i64, (fv * s.cells).floor() as i64);
+    let g = cell_hash(gu, gv, salt);
+    // Каждый воксель к тому же чуть светлее или темнее соседа.
+    let per_voxel = 0.06 * cell_hash(vx, vz, 0x5EED);
+    let mut a = chamfer_at(fu, fv, s.edge) * (1.0 + s.grain * g + per_voxel);
+    // Вкрапления: редкие яркие крупинки поверх зерна.
+    if s.speck > 0.0 {
+        let f = cell_hash(gu, gv, salt ^ 0x51E);
+        if f > 1.0 - 2.0 * s.speck {
+            a *= 1.45;
+        }
+    }
+    a.clamp(0.0, 1.0)
+}
+
+/// Касательная нормаль в точке плитки. Единичная, `z` наружу.
+fn normal_at(c: Class, u: f32, v: f32) -> [f32; 3] {
+    let s = surf(c);
+    let (vx, vz, fu, fv) = split(u, v);
+    // Выгиб: наклон растёт к краю воксела и на самом краю обнуляется,
+    // иначе на стыке двух вокселей нормаль прыгает и шов виден полосой.
+    let bend = |t: f32| -> f32 {
+        let x = t * 2.0 - 1.0;
+        x * (1.0 - x * x)
+    };
+    let mut nx = -s.dome * bend(fu);
+    let mut ny = -s.dome * bend(fv);
+    let salt = vx.wrapping_mul(73).wrapping_add(vz.wrapping_mul(9173));
+    let (gu, gv) = ((fu * s.cells).floor() as i64, (fv * s.cells).floor() as i64);
+    nx += s.bump * cell_hash(gu, gv, salt ^ 0x0B1);
+    ny += s.bump * cell_hash(gu, gv, salt ^ 0x0B2);
+    let len = (nx * nx + ny * ny + 1.0).sqrt();
+    [nx / len, ny / len, 1.0 / len]
+}
+
+/// Цветовая плитка класса со всеми уровнями. **sRGB**: это цвет.
+pub fn surface_tile(c: Class) -> Tile {
     let n = TILE as usize;
-    let mut lin = vec![0.0f32; n * n];
+    let mut cur = vec![0.0f32; n * n];
     for y in 0..n {
         for x in 0..n {
             // Центр пикселя, а не угол: с углом плитка получается
             // на полпикселя сдвинутой и швы на стыке не сходятся.
             let u = (x as f32 + 0.5) / TILE as f32;
             let v = (y as f32 + 0.5) / TILE as f32;
-            lin[y * n + x] = srgb_to_lin(chamfer_at(u, v));
+            cur[y * n + x] = srgb_to_lin(albedo_at(c, u, v));
         }
     }
-    push_level(&lin, n, &mut rgba);
-
-    // Остальные — усреднением по четвёркам **в линейном пространстве**.
-    // Усреднить sRGB напрямую значит осветлить каждый следующий
-    // уровень, и рельеф вдали станет светлее, чем вблизи.
-    let mut cur = lin;
+    let mut rgba = Vec::new();
+    let mut mips = 0u32;
     let mut cs = n;
-    while cs > 1 {
+    loop {
+        push_level(&cur, cs, &mut rgba);
+        mips += 1;
+        if cs == 1 {
+            break;
+        }
+        // Усреднение **в линейном пространстве**: усреднить sRGB
+        // напрямую значит осветлить каждый следующий уровень,
+        // и рельеф вдали станет светлее, чем вблизи.
         let ns = cs / 2;
         let mut next = vec![0.0f32; ns * ns];
         for y in 0..ns {
             for x in 0..ns {
                 let i = |yy: usize, xx: usize| cur[yy * cs + xx];
-                next[y * ns + x] =
-                    0.25 * (i(2 * y, 2 * x) + i(2 * y, 2 * x + 1) + i(2 * y + 1, 2 * x) + i(2 * y + 1, 2 * x + 1));
+                next[y * ns + x] = 0.25
+                    * (i(2 * y, 2 * x) + i(2 * y, 2 * x + 1) + i(2 * y + 1, 2 * x) + i(2 * y + 1, 2 * x + 1));
             }
         }
-        push_level(&next, ns, &mut rgba);
         cur = next;
         cs = ns;
     }
     Tile { size: TILE, mips, rgba }
+}
+
+/// Плитка нормалей класса. **Линейная**, не sRGB: это вектор,
+/// а не цвет, и гамма его искривит.
+pub fn normal_tile(c: Class) -> Tile {
+    let n = TILE as usize;
+    let mut cur: Vec<[f32; 3]> = vec![[0.0; 3]; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            let u = (x as f32 + 0.5) / TILE as f32;
+            let v = (y as f32 + 0.5) / TILE as f32;
+            cur[y * n + x] = normal_at(c, u, v);
+        }
+    }
+    let mut rgba = Vec::new();
+    let mut mips = 0u32;
+    let mut cs = n;
+    loop {
+        push_normal_level(&cur, cs, &mut rgba);
+        mips += 1;
+        if cs == 1 {
+            break;
+        }
+        let ns = cs / 2;
+        let mut next = vec![[0.0f32; 3]; ns * ns];
+        for y in 0..ns {
+            for x in 0..ns {
+                let i = |yy: usize, xx: usize| cur[yy * cs + xx];
+                let mut a = [0.0f32; 3];
+                for q in [i(2 * y, 2 * x), i(2 * y, 2 * x + 1), i(2 * y + 1, 2 * x), i(2 * y + 1, 2 * x + 1)] {
+                    for k in 0..3 {
+                        a[k] += q[k] * 0.25;
+                    }
+                }
+                // Усреднённые векторы **перенормируются**: сумма
+                // единичных единичной не бывает, и без этого дальние
+                // уровни светили бы иначе, чем ближние.
+                let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt().max(1e-6);
+                next[y * ns + x] = [a[0] / l, a[1] / l, a[2] / l];
+            }
+        }
+        cur = next;
+        cs = ns;
+    }
+    Tile { size: TILE, mips, rgba }
+}
+
+/// Уровень из нормалей — в байты, со сдвигом из −1..1 в 0..1.
+fn push_normal_level(v: &[[f32; 3]], n: usize, out: &mut Vec<u8>) {
+    out.reserve(n * n * 4);
+    for q in v.iter().take(n * n) {
+        let b = |x: f32| ((x * 0.5 + 0.5) * 255.0 + 0.5).clamp(0.0, 255.0) as u8;
+        out.extend_from_slice(&[b(q[0]), b(q[1]), b(q[2]), 255]);
+    }
 }
 
 /// Уровень из линейных яркостей — в байты sRGB.
@@ -559,13 +793,63 @@ mod tests {
         }
     }
 
-    /// **Руда отличается от породы не только цветом.** Разная
-    /// шероховатость — единственное, ради чего заведён класс.
+    /// **Ни одна пара классов не совпадает поверхностью.** Разная
+    /// шероховатость — то, ради чего класс вообще заведён; совпади
+    /// она у двоих, и один из них лишний.
     #[test]
-    fn ore_and_rock_are_not_the_same_surface() {
-        assert_ne!(surface(Class::Rock), surface(Class::Ore));
+    fn no_two_classes_share_a_surface() {
+        let all = [Class::Soil, Class::Rock, Class::Ore];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(surface(*a), surface(*b), "{a:?} и {b:?} — одна поверхность");
+            }
+        }
+        assert_eq!(class(1), Class::Soil);
         assert_eq!(class(2), Class::Rock);
         assert_eq!(class(17), Class::Ore);
+    }
+
+    /// **Номер отделки и её место в перечне — одно и то же.**
+    /// Перечнем индексируются материалы, номером — меши; разойдись
+    /// они, и ствол получил бы отделку стекла.
+    #[test]
+    fn the_finish_list_is_in_index_order() {
+        for (k, f) in FINISH_ALL.iter().enumerate() {
+            assert_eq!(*f as usize, k, "{f:?} стоит на месте {k}");
+        }
+    }
+
+    /// **Ни одна пара отделок не отвечает на свет одинаково.**
+    ///
+    /// Совпади они у двоих — и одна из двух ролей перестала бы
+    /// читаться, а заметил бы это не тест, а снимок.
+    #[test]
+    fn no_two_finishes_answer_the_light_alike() {
+        let all = [Finish::Plate, Finish::Gun, Finish::Optic, Finish::Rubber, Finish::Core];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(finish_surface(*a), finish_surface(*b), "{a:?} и {b:?} — одна отделка");
+            }
+        }
+    }
+
+    /// **У каждой роли воксела своя отделка, и ровно одна.**
+    ///
+    /// Проверка против номера: `FINISHES` задаёт длину массивов мешей,
+    /// и отделка с номером за краем — это паника при сборке юнита,
+    /// а не промах в картинке.
+    #[test]
+    fn every_part_has_a_finish_within_range() {
+        use voxel::unit::Part;
+        let parts = [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor];
+        let mut seen = [false; FINISHES];
+        for p in parts {
+            let k = finish(p) as usize;
+            assert!(k < FINISHES, "{p:?} даёт отделку {k} при {FINISHES} местах");
+            assert!(!seen[k], "две роли делят отделку {k}");
+            seen[k] = true;
+        }
+        assert!(seen.iter().all(|x| *x), "отделка без роли — лишний материал");
     }
 
     /// **Стороны различимы.** Цвет — единственное, что отличает своих
@@ -599,17 +883,88 @@ mod tests {
     /// даёт светлую решётку по швам вместо тени.
     #[test]
     fn the_chamfer_is_dark_at_the_edge() {
-        let mid = chamfer_at(0.5, 0.5);
-        let edge = chamfer_at(0.0, 0.5);
-        let corner = chamfer_at(0.0, 0.0);
+        let mid = chamfer_at(0.5, 0.5, surf(Class::Rock).edge);
+        let edge = chamfer_at(0.0, 0.5, surf(Class::Rock).edge);
+        let corner = chamfer_at(0.0, 0.0, surf(Class::Rock).edge);
         assert!(edge < mid, "ребро {edge} не темнее середины {mid}");
         assert!(corner <= edge + 1e-6, "угол светлее ребра");
         assert!((mid - 1.0).abs() < 1e-6, "середина не единица: {mid}");
         // Плитка обязана быть симметричной: иначе соседние воксели
         // сойдутся швом разной яркости.
         for (u, v) in [(0.2f32, 0.7f32), (0.05, 0.5), (0.31, 0.13)] {
-            assert!((chamfer_at(u, v) - chamfer_at(1.0 - u, v)).abs() < 1e-6);
-            assert!((chamfer_at(u, v) - chamfer_at(v, u)).abs() < 1e-6);
+            assert!((chamfer_at(u, v, surf(Class::Rock).edge) - chamfer_at(1.0 - u, v, surf(Class::Rock).edge)).abs() < 1e-6);
+            assert!((chamfer_at(u, v, surf(Class::Rock).edge) - chamfer_at(v, u, surf(Class::Rock).edge)).abs() < 1e-6);
+        }
+    }
+
+    /// **Материалы различаются рисунком, а не только оттенком.**
+    ///
+    /// Это весь смысл затеи: земля обязана читаться землёй, порода
+    /// породой, руда рудой — при том, что цвет им всем даёт вершина,
+    /// а плитка приходит серой. Пока плитка была одна на всех, любые
+    /// две поверхности отличались только тем, чем их покрасили
+    /// (ADR-211).
+    #[test]
+    fn the_three_materials_do_not_share_a_tile() {
+        let tiles: Vec<Vec<u8>> = [Class::Soil, Class::Rock, Class::Ore]
+            .map(|c| surface_tile(c).rgba)
+            .into();
+        for (i, a) in tiles.iter().enumerate() {
+            for b in tiles.iter().skip(i + 1) {
+                let diff = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+                // Не «хоть чем-то»: рисунок должен расходиться
+                // на большей части плитки, иначе разницу съедят
+                // уровни детализации на первых же метрах.
+                assert!(
+                    diff * 4 > a.len(),
+                    "две плитки совпадают на {}% пикселей",
+                    100 - diff * 100 / a.len()
+                );
+            }
+        }
+        // И карты нормалей тоже: одинаковый рельеф при разном цвете —
+        // это перекрашенный один материал, а не три.
+        let soil = normal_tile(Class::Soil).rgba;
+        let rock = normal_tile(Class::Rock).rgba;
+        assert_ne!(soil, rock, "у грунта и породы один рельеф");
+    }
+
+    /// **Нормаль единичная везде.** Карта нормалей из неединичных
+    /// векторов светит то ярче, то тусклее без всякой причины,
+    /// и выглядит это грязью, а не рельефом.
+    #[test]
+    fn every_normal_is_unit_length() {
+        for c in [Class::Soil, Class::Rock, Class::Ore] {
+            for y in 0..29 {
+                for x in 0..29 {
+                    let n = normal_at(c, x as f32 / 28.0, y as f32 / 28.0);
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    assert!((l - 1.0).abs() < 1e-5, "длина {l} в ({x}, {y})");
+                    assert!(n[2] > 0.0, "нормаль смотрит внутрь грани");
+                }
+            }
+        }
+    }
+
+    /// **На стыке вокселей нормаль не прыгает.**
+    ///
+    /// Выгиб обнуляется у самого края: иначе на границе двух соседних
+    /// вокселей наклон меняет знак скачком, и шов виден полосой через
+    /// всю карту.
+    #[test]
+    fn the_dome_vanishes_at_the_voxel_edge() {
+        for c in [Class::Soil, Class::Rock, Class::Ore] {
+            let s = surf(c);
+            let e = 0.5 / TILE_VOXELS / 64.0;
+            for t in 0..9 {
+                let v = t as f32 / 8.0;
+                // Зерно у края остаётся, уходит только выгиб — потому
+                // и сравниваем с размахом зерна, а не с нулём.
+                for u in [e, 1.0 / TILE_VOXELS - e] {
+                    let n = normal_at(c, u, v);
+                    assert!(n[0].abs() < s.bump + 0.05, "у края наклон {}", n[0]);
+                }
+            }
         }
     }
 
@@ -617,35 +972,59 @@ mod tests {
     /// читает их из одного буфера по обещанному `mip_level_count`,
     /// и недосчитанный уровень — это чтение за краем.
     #[test]
-    fn the_chamfer_tile_carries_a_whole_mip_chain() {
-        let t = chamfer_tile();
-        assert_eq!(t.size, TILE);
-        assert_eq!(t.mips, TILE.trailing_zeros() + 1);
-        let mut want = 0usize;
-        let mut s = t.size as usize;
-        for _ in 0..t.mips {
-            want += s * s * 4;
-            s /= 2;
-        }
-        assert_eq!(t.rgba.len(), want, "цепочка уровней не сходится");
-
-        // **Уровни усреднены в линейном пространстве, а не в sRGB.**
-        // Единственный пиксель последнего уровня обязан совпасть
-        // с линейным средним всей плитки. Усреднение прямо в байтах
-        // sRGB даёт заметно светлее — и рельеф вдали становится
-        // светлее, чем вблизи, плавно и незаметно.
-        let n = TILE as usize;
-        let mut sum = 0.0f64;
-        for y in 0..n {
-            for x in 0..n {
-                let u = (x as f32 + 0.5) / TILE as f32;
-                let v = (y as f32 + 0.5) / TILE as f32;
-                sum += srgb_to_lin(chamfer_at(u, v)) as f64;
+    fn every_tile_carries_a_whole_mip_chain() {
+        for c in [Class::Soil, Class::Rock, Class::Ore] {
+            for t in [surface_tile(c), normal_tile(c)] {
+                assert_eq!(t.size, TILE);
+                assert_eq!(t.mips, TILE.trailing_zeros() + 1);
+                let mut want = 0usize;
+                let mut sz = t.size as usize;
+                for _ in 0..t.mips {
+                    want += sz * sz * 4;
+                    sz /= 2;
+                }
+                assert_eq!(t.rgba.len(), want, "цепочка уровней не сходится");
             }
         }
-        let want_byte = (lin_to_srgb((sum / (n * n) as f64) as f32) * 255.0 + 0.5) as i32;
-        let got = t.rgba[t.rgba.len() - 4] as i32;
-        assert!((got - want_byte).abs() <= 1, "мельчайший уровень {got}, ждали {want_byte}");
-        assert!(got < 255, "плитка не темнеет вовсе");
+    }
+
+    /// **Уровни усреднены в линейном пространстве, а не в sRGB.**
+    ///
+    /// Единственный пиксель последнего уровня обязан совпасть
+    /// с линейным средним всей плитки. Усреднение прямо в байтах sRGB
+    /// даёт заметно светлее — и поверхность вдали становится светлее,
+    /// чем вблизи, плавно и незаметно.
+    #[test]
+    fn the_mips_are_averaged_in_linear_light() {
+        for c in [Class::Soil, Class::Rock, Class::Ore] {
+            let n = TILE as usize;
+            let mut sum = 0.0f64;
+            for y in 0..n {
+                for x in 0..n {
+                    let u = (x as f32 + 0.5) / TILE as f32;
+                    let v = (y as f32 + 0.5) / TILE as f32;
+                    sum += srgb_to_lin(albedo_at(c, u, v)) as f64;
+                }
+            }
+            let t = surface_tile(c);
+            let want = (lin_to_srgb((sum / (n * n) as f64) as f32) * 255.0 + 0.5) as i32;
+            let got = t.rgba[t.rgba.len() - 4] as i32;
+            assert!((got - want).abs() <= 1, "мельчайший уровень {got}, ждали {want}");
+            assert!(got < 255, "плитка не темнеет вовсе");
+        }
+    }
+
+    /// **Нормали в мельчайшем уровне тоже единичные.** Среднее четырёх
+    /// единичных векторов короче единицы, и без перенормировки дальний
+    /// рельеф светил бы иначе, чем ближний.
+    #[test]
+    fn the_smallest_normal_level_is_still_unit_length() {
+        for c in [Class::Soil, Class::Rock, Class::Ore] {
+            let t = normal_tile(c);
+            let k = t.rgba.len() - 4;
+            let v = |i: usize| t.rgba[k + i] as f32 / 255.0 * 2.0 - 1.0;
+            let l = (v(0) * v(0) + v(1) * v(1) + v(2) * v(2)).sqrt();
+            assert!((l - 1.0).abs() < 0.01, "длина {l} в мельчайшем уровне");
+        }
     }
 }

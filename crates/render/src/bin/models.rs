@@ -18,6 +18,14 @@ use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use render::geom::MeshBuf;
+use bevy::anti_alias::fxaa::Fxaa;
+use bevy::camera::Exposure;
+use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::light::atmosphere::ScatteringMedium;
+use bevy::light::{Atmosphere, AtmosphereEnvironmentMapLight, SunDisk};
+use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
+use bevy::post_process::bloom::Bloom;
+use render::look;
 use render::model::{body_to_mesh, BEVEL};
 
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019).
@@ -103,6 +111,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut mediums: ResMut<Assets<ScatteringMedium>>,
     scene: Res<Scene>,
 ) {
     let mut all = voxel::roster::all();
@@ -118,11 +127,23 @@ fn setup(
             }
         });
     }
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.45,
-        metallic: 0.25,
-        ..default()
+    // Материал **по отделке**: тот же набор, что в бою. Смотровая
+    // и есть то место, где разница между сталью, стеклом и резиной
+    // видна вблизи (ADR-211).
+    let mats: [Handle<StandardMaterial>; look::FINISHES] = look::FINISH_ALL.map(|f| {
+        let (rough, metal) = look::finish_surface(f);
+        materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: rough,
+            metallic: metal,
+            emissive: if f == look::Finish::Core {
+                let g = look::CORE_GLOW;
+                LinearRgba::rgb(g[0], g[1], g[2])
+            } else {
+                LinearRgba::BLACK
+            },
+            ..default()
+        })
     });
 
     let picked: Vec<usize> = scene
@@ -139,44 +160,48 @@ fn setup(
     let span: f32 = widths.iter().sum::<f32>() + gap * (picked.len() as f32 - 1.0);
 
     let mut x = -span / 2.0;
-    let mut buf = MeshBuf::default();
+    let mut bufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     for (k, &i) in picked.iter().enumerate() {
         let (name, body) = &all[i];
         let w = widths[k];
         let s = body.mm as f32 / MM_PER_UNIT;
-        buf.clear();
+        for b in bufs.iter_mut() {
+            b.clear();
+        }
         body_to_mesh(
             body,
-            render::look::SIDE_TINT[i % render::look::SIDE_TINT.len()],
+            look::SIDE_TINT[i % look::SIDE_TINT.len()],
             s,
             (0, 255),
             scene.bevel,
-            &mut buf,
+            &mut bufs,
         );
-        println!(
-            "{name}: {} треугольников, фаска {:.2}",
-            buf.idx.len() / 3,
-            scene.bevel
-        );
-        let mesh = meshes.add(
-            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
-                .with_inserted_indices(Indices::U32(buf.idx.clone())),
-        );
-        commands.spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_xyz(x + w / 2.0, 0.0, 0.0),
-            Spin,
-        ));
+        let tris: usize = bufs.iter().map(|b| b.idx.len() / 3).sum();
+        println!("{name}: {tris} треугольников, фаска {:.2}", scene.bevel);
+        for (f, buf) in bufs.iter().enumerate() {
+            if buf.idx.is_empty() {
+                continue;
+            }
+            let mesh = meshes.add(
+                Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
+                    .with_inserted_indices(Indices::U32(buf.idx.clone())),
+            );
+            commands.spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(mats[f].clone()),
+                Transform::from_xyz(x + w / 2.0, 0.0, 0.0),
+                Spin,
+            ));
+        }
         x += w + gap;
     }
 
     // Подиум: тёмный, чтобы силуэт машины читался контуром.
     commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(span * 2.0, 1.0, span))),
+        Mesh3d(meshes.add(Cuboid::new(span * 1.3, 1.0, span * 0.55))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.10, 0.11, 0.13),
             perceptual_roughness: 0.8,
@@ -194,11 +219,39 @@ fn setup(
         .fold(0.0f32, f32::max);
     // Расстояние от **наибольшего** габарита, а не от ширины шеренги:
     // на одной машине ширина мала, и камера утыкалась ей в борт.
-    let dist = span.max(tall) * 1.7;
+    // Множитель — про то, ради чего смотровая заведена: разглядеть
+    // фаску и материал. На 1.7 машины занимали пятую часть кадра,
+    // и разница между сталью и стеклом на снимке терялась.
+    let dist = span.max(tall) * 1.05;
+    // **Смотровая светит тем же небом, что и бой.** Без карты
+    // окружения металлу нечего отражать, и он выходит плоской краской
+    // — то есть ровно тем, от чего отделки и заводились (ADR-211).
+    // Смотреть модели при другом свете значит подгонять их под свет,
+    // которого в игре нет.
     commands.spawn((
         Camera3d::default(),
+        Tonemapping::AcesFitted,
+        Exposure { ev100: look::EV100 },
+        Bloom::NATURAL,
+        Msaa::Off,
+        ScreenSpaceAmbientOcclusion::default(),
+        Fxaa::default(),
+        AtmosphereSettings { aerial_view_lut_max_distance: look::HAZE_RANGE_M, ..default() },
+        AtmosphereEnvironmentMapLight {
+            intensity: look::SKY_IBL,
+            size: UVec2::splat(look::SKY_IBL_SIZE),
+            ..default()
+        },
         Transform::from_xyz(dist * 0.30, tall * 0.85, dist)
             .looking_at(Vec3::new(0.0, tall * 0.45, 0.0), Vec3::Y),
+    ));
+    // Планета под сценой. Масштаб тот же, что в бою: рассеяние считает
+    // метры, подиум — воксели.
+    let k = 1.0 / look::HAZE_METRES_PER_VOXEL;
+    let medium = mediums.add(ScatteringMedium::earth(256, 256));
+    let atmo = commands.spawn(Atmosphere::earth(medium)).id();
+    commands.entity(atmo).insert(GlobalTransform::from(
+        Transform::from_scale(Vec3::splat(k)).with_translation(Vec3::new(0.0, -EARTH_RADIUS_M * k, 0.0)),
     ));
 
     // Свет — из общей палитры (`look`), чтобы модели выглядели так же,
@@ -218,6 +271,7 @@ fn setup(
             ..default()
         },
         Transform::from_xyz(-d[0], -d[1], -d[2]).looking_at(Vec3::ZERO, Vec3::Y),
+        SunDisk { angular_size: look::SUN_DISK_SIZE, intensity: look::SUN_DISK_INTENSITY },
         CascadeShadowConfigBuilder {
             num_cascades: 2,
             first_cascade_far_bound: span * 0.5,
@@ -226,27 +280,11 @@ fn setup(
         }
         .build(),
     ));
-    // Контровой свет сзади: без него скруглённое ребро на теневой
-    // стороне не отличить от острого — а ради ребра всё и затевалось.
-    commands.spawn((
-        DirectionalLight {
-            color: Color::srgb(0.55, 0.68, 0.95),
-            illuminance: render::look::SUN_LUX * 0.06,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::from_xyz(0.4, 0.5, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-    commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(
-            render::look::AMBIENT_SRGB[0],
-            render::look::AMBIENT_SRGB[1],
-            render::look::AMBIENT_SRGB[2],
-        ),
-        brightness: render::look::AMBIENT_BRIGHTNESS * 3.0,
-        ..default()
-    });
 }
+
+/// Радиус планеты у `Atmosphere::earth`, метры. Столько же, сколько
+/// в бою: центр сферы обязан лежать под сценой, а не в ней.
+const EARTH_RADIUS_M: f32 = 6_360_000.0;
 
 fn turn(time: Res<Time>, scene: Res<Scene>, mut q: Query<&mut Transform, With<Spin>>) {
     if !scene.spin {

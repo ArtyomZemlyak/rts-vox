@@ -48,6 +48,7 @@ use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
 use render::look;
+use render::tex::tile_image;
 use render::{yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Order, Reference, SimEvent, NO_TARGET};
 
@@ -173,12 +174,17 @@ struct BlastMark(u32);
 /// Общие меши и материалы.
 #[derive(Resource)]
 struct Art {
-    hull: [Handle<Mesh>; 2],
-    turret: [Handle<Mesh>; 2],
+    /// Меш корпуса **по отделке**: сталь, стекло и резина идут
+    /// разными материалами, а материал у меша один (ADR-211).
+    /// Пустая отделка ручки не получает и сущности не заводит.
+    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
+    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
     beam: Handle<Mesh>,
-    side: [Handle<StandardMaterial>; 2],
+    /// Материал отделки. У сторон он **общий**: цвет несут вершины,
+    /// а сталь остаётся сталью, какого бы цвета ни был корпус.
+    finish: [Handle<StandardMaterial>; look::FINISHES],
     tracer: Handle<StandardMaterial>,
     ray: [Handle<StandardMaterial>; 2],
     boom: Handle<StandardMaterial>,
@@ -335,6 +341,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut gizmo_cfg: ResMut<GizmoConfigStore>,
     mut sim: ResMut<Sim>,
     view: Res<View>,
@@ -349,12 +356,15 @@ fn setup(
     }
 
     let bodies = [voxel::unit::tank(), voxel::unit::strider()];
-    let mut ubuf = MeshBuf::default();
+    let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
                          part: Slice,
-                         meshes: &mut Assets<Mesh>| {
-        ubuf.clear();
+                         meshes: &mut Assets<Mesh>|
+     -> [Option<Handle<Mesh>>; look::FINISHES] {
+        for b in ubufs.iter_mut() {
+            b.clear();
+        }
         // Разворот **с фаской** (ADR-206): у тела юнита меш строится
         // один раз на тип, и геометрическое скругление там дешевле
         // шейдерного и честнее — срезается силуэт, а не только свет.
@@ -377,9 +387,14 @@ fn setup(
             UNIT_SCALE,
             layers,
             render::model::BEVEL,
-            &mut ubuf,
+            &mut ubufs,
         );
-        meshes.add(buf_to_mesh(&ubuf))
+        // Пустая отделка ручки не получает: у безбашенного тела
+        // башня пуста целиком, и заводить под неё сущность
+        // с нулевым мешем незачем.
+        std::array::from_fn(|k| {
+            (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k])))
+        })
     };
     let hull = [
         unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Hull, &mut meshes),
@@ -389,16 +404,39 @@ fn setup(
         unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Turret, &mut meshes),
         unit_mesh(&bodies[1], look::SIDE_TINT[1], Slice::Turret, &mut meshes),
     ];
-    let armour = || StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.55,
-        metallic: 0.25,
-        ..default()
+    // **Материал говорит, из чего вещь сделана.** Цвет вершины
+    // подменяет `base_color` целиком (`pbr_fragment.wgsl`), поэтому
+    // раскраска сторон остаётся при себе, а шероховатость
+    // и металличность делают из неё сталь, стекло или резину
+    // (ADR-211).
+    let finish_mat = |f: look::Finish, m: &mut Assets<StandardMaterial>| {
+        let (rough, metal) = look::finish_surface(f);
+        m.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: rough,
+            metallic: metal,
+            // Обнажённое ядро светится само: увидеть его надо сразу,
+            // а отражённого света внутри разбитого корпуса нет.
+            emissive: if f == look::Finish::Core {
+                let g = look::CORE_GLOW;
+                LinearRgba::rgb(g[0], g[1], g[2])
+            } else {
+                LinearRgba::BLACK
+            },
+            ..default()
+        })
     };
-    let ground_mat = |c: look::Class, m: &mut Assets<StandardMaterial>| {
+    // **У каждого класса своя поверхность**: своя плитка цвета, своя
+    // карта нормалей, своя шероховатость. Пока плитка была одна,
+    // земля отличалась от камня только оттенком (ADR-211).
+    let ground_mat = |c: look::Class, i: &mut Assets<Image>, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::surface(c);
         m.add(StandardMaterial {
             base_color: Color::WHITE,
+            base_color_texture: Some(i.add(tile_image(look::surface_tile(c), true))),
+            normal_map_texture: Some(i.add(tile_image(look::normal_tile(c), false))),
+            // UV приходят в вокселях, а плитка накрывает несколько.
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look::TILE_VOXELS)),
             perceptual_roughness: rough,
             metallic: metal,
             ..default()
@@ -410,7 +448,7 @@ fn setup(
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
         beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
-        side: [materials.add(armour()), materials.add(armour())],
+        finish: look::FINISH_ALL.map(|f| finish_mat(f, &mut materials)),
         tracer: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.95, 0.5),
             emissive: LinearRgba::rgb(3.0, 2.6, 0.8),
@@ -434,8 +472,9 @@ fn setup(
             ..default()
         }),
         ground: [
-            ground_mat(look::Class::Rock, &mut materials),
-            ground_mat(look::Class::Ore, &mut materials),
+            ground_mat(look::Class::Soil, &mut images, &mut materials),
+            ground_mat(look::Class::Rock, &mut images, &mut materials),
+            ground_mat(look::Class::Ore, &mut images, &mut materials),
         ],
     };
 
@@ -477,20 +516,30 @@ fn setup(
     let cap = sim.r.world.units.len().max(1);
     for i in 0..cap {
         let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
-        commands.spawn((
-            Mesh3d(art.hull[owner].clone()),
-            MeshMaterial3d(art.side[owner].clone()),
-            Transform::from_xyz(0.0, -1000.0, 0.0),
-            Visibility::Hidden,
-            UnitMark(i),
-        ));
-        commands.spawn((
-            Mesh3d(art.turret[owner].clone()),
-            MeshMaterial3d(art.side[owner].clone()),
-            Transform::from_xyz(0.0, -1000.0, 0.0),
-            Visibility::Hidden,
-            TurretMark(i),
-        ));
+        // По сущности на отделку. Системы движения ищут по метке
+        // и обновляют их все разом одним и тем же преобразованием:
+        // корпус остаётся корпусом, из скольких бы материалов он
+        // ни был собран.
+        for (k, m) in art.finish.iter().enumerate() {
+            if let Some(h) = art.hull[owner][k].clone() {
+                commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    UnitMark(i),
+                ));
+            }
+            if let Some(h) = art.turret[owner][k].clone() {
+                commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    TurretMark(i),
+                ));
+            }
+        }
     }
 
     let eye = view.cam.eye();

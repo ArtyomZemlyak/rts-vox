@@ -59,13 +59,18 @@ pub const BEVEL: f32 = 0.5;
 ///
 /// `layers` — какие слои по высоте брать, полуоткрыто: башню и корпус
 /// надо рисовать порознь, они вращаются в разные стороны.
+/// Треугольники раскладываются **по отделкам**, а не в один буфер:
+/// сталь, стекло и резина отвечают на свет по-разному, и ответ этот
+/// задаётся материалом, а вершина его нести не может (ADR-211).
+/// Буферов ровно [`crate::look::FINISHES`]; пустые вызывающий
+/// пропускает.
 pub fn body_to_mesh(
     b: &UnitBody,
     tint: [f32; 3],
     scale: f32,
     layers: (usize, usize),
     bevel: f32,
-    out: &mut MeshBuf,
+    outs: &mut [MeshBuf; crate::look::FINISHES],
 ) {
     let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
     let bevel = bevel.clamp(0.0, 0.5);
@@ -88,7 +93,9 @@ pub fn body_to_mesh(
                 if !b.vol.get(x, y, z) {
                     continue;
                 }
-                let c = colour(b.part_at(x, y, z), tint);
+                let part = b.part_at(x, y, z);
+                let c = colour(part, tint);
+                let out = &mut outs[crate::look::finish(part) as usize];
                 let at = [x as i32, y as i32, z as i32];
                 // Местная точка воксела → мировая.
                 let put = |p: [f32; 3]| -> [f32; 3] {
@@ -320,10 +327,48 @@ mod tests {
         b
     }
 
+    fn split(b: &UnitBody, bevel: f32) -> [MeshBuf; crate::look::FINISHES] {
+        let mut bufs: [MeshBuf; crate::look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
+        body_to_mesh(b, [0.3, 0.5, 0.9], 1.0, (0, 255), bevel, &mut bufs);
+        bufs
+    }
+
+    /// Все отделки в один буфер — для проверок, которым отделка
+    /// безразлична: геометрия от разделения не меняется.
     fn build(b: &UnitBody, bevel: f32) -> MeshBuf {
-        let mut buf = MeshBuf::default();
-        body_to_mesh(b, [0.3, 0.5, 0.9], 1.0, (0, 255), bevel, &mut buf);
-        buf
+        let mut out = MeshBuf::default();
+        for buf in split(b, bevel) {
+            let base = out.pos.len() as u32;
+            out.pos.extend_from_slice(&buf.pos);
+            out.nrm.extend_from_slice(&buf.nrm);
+            out.col.extend_from_slice(&buf.col);
+            out.idx.extend(buf.idx.iter().map(|i| i + base));
+        }
+        out
+    }
+
+    /// **Тело расходится по отделкам, и ничего при этом не теряется.**
+    ///
+    /// Разделение на буферы — чисто раскладка: сумма частей обязана
+    /// совпасть с целым до треугольника. Промах здесь выглядит как
+    /// дыра в корпусе, и заметить его на снимке трудно: не хватать
+    /// будет ровно тех граней, которые и так внутри строя.
+    #[test]
+    fn the_body_splits_by_finish_and_loses_nothing() {
+        let tank = voxel::unit::tank();
+        let bufs = split(&tank, BEVEL);
+        let whole = build(&tank, BEVEL);
+        let parts: usize = bufs.iter().map(|b| b.idx.len()).sum();
+        assert_eq!(parts, whole.idx.len(), "при раскладке пропали треугольники");
+        // Не меньше трёх непустых: броня, ствол, сенсор. Одна —
+        // значит отделка не различается вовсе.
+        let used = bufs.iter().filter(|b| !b.idx.is_empty()).count();
+        assert!(used >= 3, "танк лёг всего в {used} отделок");
+        // Ядро внутри брони, наружу оно граней не даёт.
+        assert!(
+            bufs[crate::look::Finish::Core as usize].idx.is_empty(),
+            "ядро видно снаружи целого танка"
+        );
     }
 
     /// **Каждый треугольник смотрит наружу.**

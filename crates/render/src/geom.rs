@@ -31,6 +31,13 @@ pub struct MeshBuf {
     /// воксель, и поэтому плитка садится на сетку без подгонки, каким
     /// бы большим ни вышел слитый квад (ADR-199).
     pub uv: Vec<[f32; 2]>,
+    /// Касательная и знак развёртки. Нужна карте нормалей.
+    ///
+    /// Считается **точно**, а не мikktspace: геометрия осевая, U растёт
+    /// вдоль известной оси, и касательная у всей грани одна. Обходить
+    /// ради неё треугольники значило бы платить за то, что и так
+    /// известно (ADR-211).
+    pub tan: Vec<[f32; 4]>,
 }
 
 impl MeshBuf {
@@ -40,6 +47,7 @@ impl MeshBuf {
         self.idx.clear();
         self.col.clear();
         self.uv.clear();
+        self.tan.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -117,6 +125,13 @@ fn push_quad(
     // Углы квада разнесены на `h` и `w` вокселей — столько же плиток
     // фаски в них и укладывается.
     out.uv.extend_from_slice(&[[0.0, 0.0], [h, 0.0], [h, w], [0.0, w]]);
+    // Касательная — направление роста U, то есть ось вектора `u`.
+    // Знак развёртки положителен у лицевой стороны и отрицателен
+    // у обратной: там нормаль перевёрнута, а U и V — нет.
+    let tl = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt().max(1e-6);
+    let sign = if positive { 1.0 } else { -1.0 };
+    let t4 = [u[0] / tl, u[1] / tl, u[2] / tl, sign];
+    out.tan.extend_from_slice(&[t4, t4, t4, t4]);
     if let Some(c) = col {
         out.col.extend_from_slice(&[c, c, c, c]);
     }
@@ -471,10 +486,11 @@ pub fn chunk_at(i: usize, nx: u32, ny: u32) -> [u32; 3] {
 
 /// Сколько классов поверхности — столько буферов.
 pub fn class_bufs() -> [MeshBuf; look::CLASSES] {
-    [MeshBuf::default(), MeshBuf::default()]
+    std::array::from_fn(|_| MeshBuf::default())
 }
 
 /// Индекс класса — чтобы вызывающий не гадал, где какой буфер.
+pub const SOIL: usize = Class::Soil as usize;
 pub const ROCK: usize = Class::Rock as usize;
 pub const ORE: usize = Class::Ore as usize;
 

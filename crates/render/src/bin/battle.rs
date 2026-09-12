@@ -43,6 +43,7 @@ use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
 use render::look;
+use render::tex::tile_image;
 use render::{yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Reference, SimEvent, NO_TARGET};
 
@@ -250,8 +251,11 @@ struct Debris {
 struct Art {
     /// Корпус и башня по сторонам: цвет вершины несёт роль воксела,
     /// а тело у сторон разное, поэтому мешей четыре.
-    hull: [Handle<Mesh>; 2],
-    turret: [Handle<Mesh>; 2],
+    /// Меш корпуса **по отделке**: сталь, стекло и резина идут
+    /// разными материалами, а материал у меша один (ADR-211).
+    /// Пустая отделка ручки не получает и сущности не заводит.
+    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
+    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
     /// Шар единичного радиуса: вспышка, дуло, огонь воронки. Размер
     /// задаёт масштаб, потому что размер у каждого свой и меняется
     /// каждый кадр.
@@ -261,7 +265,9 @@ struct Art {
     bar: Handle<Mesh>,
     /// Кубик обломка.
     chip: Handle<Mesh>,
-    side: [Handle<StandardMaterial>; 2],
+    /// Материал отделки. У сторон он **общий**: цвет несут вершины,
+    /// а сталь остаётся сталью, какого бы цвета ни был корпус.
+    finish: [Handle<StandardMaterial>; look::FINISHES],
     tracer: [Handle<StandardMaterial>; 2],
     /// Лестница остывания огня воронки: от белого к тёмно-красному.
     /// Материалов столько, сколько ступеней, потому что `StandardMaterial`
@@ -555,12 +561,15 @@ fn setup(
     // (ADR-094).
     let bodies = [voxel::unit::tank(), voxel::unit::strider()];
     let uv = fx.chamfer;
-    let mut ubuf = MeshBuf::default();
+    let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
                          part: Slice,
-                         meshes: &mut Assets<Mesh>| {
-        ubuf.clear();
+                         meshes: &mut Assets<Mesh>|
+     -> [Option<Handle<Mesh>>; look::FINISHES] {
+        for b in ubufs.iter_mut() {
+            b.clear();
+        }
         // **Тело юнита разворачивается с геометрической фаской**
         // (ADR-206), а не с нарисованной. Разделение по предмету:
         // рельефу текстурная фаска (ADR-199) — там миллионы вокселей
@@ -581,9 +590,14 @@ fn setup(
             UNIT_SCALE,
             layers,
             render::model::BEVEL,
-            &mut ubuf,
+            &mut ubufs,
         );
-        meshes.add(buf_to_mesh(&ubuf, uv))
+        // Пустая отделка ручки не получает: у безбашенного тела
+        // башня пуста целиком, и заводить под неё сущность
+        // с нулевым мешем незачем.
+        std::array::from_fn(|k| {
+            (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k], uv)))
+        })
     };
     let hull = [
         unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Hull, &mut meshes),
@@ -597,25 +611,55 @@ fn setup(
     // цвет вершины **подменяет** `base_color` целиком
     // (`pbr_fragment.wgsl`). База здесь не значит ничего, а
     // шероховатость и металличность — значат.
-    // Плитка фаски: повторяется по одной на воксель и **умножается**
-    // на цвет вершины (`pbr_fragment.wgsl`, строка 194), поэтому
-    // с раскраской материалом она не спорит (ADR-199).
-    let chamfer = fx.chamfer.then(|| images.add(chamfer_image()));
     // У брони текстурной фаски **нет**: ребро у неё срезано
     // по-настоящему, и нарисованная тень легла бы второй линией
     // внутри и без того скошенной грани (ADR-209).
-    let armour = || StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.55,
-        metallic: 0.25,
-        ..default()
+    // **Материал говорит, из чего вещь сделана.** Цвет вершины
+    // подменяет `base_color` целиком (`pbr_fragment.wgsl`), поэтому
+    // раскраска сторон остаётся при себе, а шероховатость
+    // и металличность делают из неё сталь, стекло или резину
+    // (ADR-211).
+    let finish_mat = |f: look::Finish, m: &mut Assets<StandardMaterial>| {
+        let (rough, metal) = look::finish_surface(f);
+        m.add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: rough,
+            metallic: metal,
+            // Обнажённое ядро светится само: увидеть его надо сразу,
+            // а отражённого света внутри разбитого корпуса нет.
+            emissive: if f == look::Finish::Core {
+                let g = look::CORE_GLOW;
+                LinearRgba::rgb(g[0], g[1], g[2])
+            } else {
+                LinearRgba::BLACK
+            },
+            ..default()
+        })
     };
     let painted = fx.paint;
-    let ground_mat = |c: look::Class, m: &mut Assets<StandardMaterial>| {
+    // **У каждого класса своя поверхность**: своя плитка цвета, своя
+    // карта нормалей, своя шероховатость. Пока плитка была одна,
+    // земля отличалась от камня только оттенком, и оба читались
+    // краской (ADR-211).
+    let tiles = fx.chamfer;
+    let ground_mat = |c: look::Class, i: &mut Assets<Image>, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::surface(c);
+        let (albedo, normal) = if tiles {
+            (
+                Some(i.add(tile_image(look::surface_tile(c), true))),
+                Some(i.add(tile_image(look::normal_tile(c), false))),
+            )
+        } else {
+            (None, None)
+        };
         m.add(StandardMaterial {
             base_color: if painted { Color::WHITE } else { srgb(FLAT_GROUND) },
-            base_color_texture: chamfer.clone(),
+            base_color_texture: albedo,
+            normal_map_texture: normal,
+            // UV приходят **в вокселях**, а плитка накрывает несколько:
+            // без этого сжатия узор повторялся бы на каждом кубе
+            // правильной сеткой.
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look::TILE_VOXELS)),
             perceptual_roughness: rough,
             metallic: metal,
             ..default()
@@ -634,7 +678,7 @@ fn setup(
             look::DEBRIS_SIZE,
             look::DEBRIS_SIZE,
         )),
-        side: [materials.add(armour()), materials.add(armour())],
+        finish: look::FINISH_ALL.map(|f| finish_mat(f, &mut materials)),
         tracer: [
             tracer([9.0, 6.4, 1.8], &mut materials),
             tracer([9.0, 4.2, 1.1], &mut materials),
@@ -659,13 +703,13 @@ fn setup(
         ),
         dust: materials.add(StandardMaterial {
             base_color: srgb(look::DUST_SRGB),
-            base_color_texture: chamfer.clone(),
             perceptual_roughness: 0.95,
             ..default()
         }),
         ground: [
-            ground_mat(look::Class::Rock, &mut materials),
-            ground_mat(look::Class::Ore, &mut materials),
+            ground_mat(look::Class::Soil, &mut images, &mut materials),
+            ground_mat(look::Class::Rock, &mut images, &mut materials),
+            ground_mat(look::Class::Ore, &mut images, &mut materials),
         ],
     };
 
@@ -708,20 +752,30 @@ fn setup(
     let cap = sim.r.world.units.len().max(1);
     for i in 0..cap {
         let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
-        commands.spawn((
-            Mesh3d(art.hull[owner].clone()),
-            MeshMaterial3d(art.side[owner].clone()),
-            Transform::from_xyz(0.0, -1000.0, 0.0),
-            Visibility::Hidden,
-            UnitMark(i),
-        ));
-        commands.spawn((
-            Mesh3d(art.turret[owner].clone()),
-            MeshMaterial3d(art.side[owner].clone()),
-            Transform::from_xyz(0.0, -1000.0, 0.0),
-            Visibility::Hidden,
-            TurretMark(i),
-        ));
+        // По сущности на отделку. Системы движения ищут по метке
+        // и обновляют их все разом одним и тем же преобразованием:
+        // корпус остаётся корпусом, из скольких бы материалов он
+        // ни был собран.
+        for (k, m) in art.finish.iter().enumerate() {
+            if let Some(h) = art.hull[owner][k].clone() {
+                commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    UnitMark(i),
+                ));
+            }
+            if let Some(h) = art.turret[owner][k].clone() {
+                commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    TurretMark(i),
+                ));
+            }
+        }
     }
 
     let eye = view.cam.eye();
@@ -879,42 +933,14 @@ fn buf_to_mesh(b: &MeshBuf, uv: bool) -> Mesh {
     // конвейера, и без него шейдер не читает текстуру вовсе.
     if uv && b.uv.len() == b.pos.len() {
         m.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uv.clone());
+        // Касательные — вместе с UV и только с ними: карта нормалей
+        // без них не читается вовсе, а без карты они лишний байт
+        // на вершину (ADR-211).
+        if b.tan.len() == b.pos.len() {
+            m.insert_attribute(Mesh::ATTRIBUTE_TANGENT, b.tan.clone());
+        }
     }
     m
-}
-
-/// Плитка фаски — в текстуру Bevy.
-///
-/// Уровни детализации выкладываются **сами**: Bevy их не строит, а без
-/// них воксель размером в пиксель кипит муаром на каждом движении
-/// камеры (ADR-199).
-fn chamfer_image() -> Image {
-    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
-    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-
-    let t = look::chamfer_tile();
-    let mut img = Image::new_uninit(
-        Extent3d { width: t.size, height: t.size, depth_or_array_layers: 1 },
-        TextureDimension::D2,
-        // sRGB, а не Unorm: плитка — это цвет, и усреднение уровней
-        // в ней уже сделано в линейном пространстве.
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    img.texture_descriptor.mip_level_count = t.mips;
-    img.data = Some(t.rgba);
-    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        // Плитка повторяется на каждом вокселе — иначе она растянется
-        // на весь слитый квад, и фаска получится у чанка, а не у куба.
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
-        ..default()
-    });
-    img
 }
 
 /// Корпуса: всё, что не башня и не снаряд. Два запроса на `Transform`
