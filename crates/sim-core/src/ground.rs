@@ -40,6 +40,29 @@ pub struct GroundStats {
     pub nav: NavStats,
 }
 
+/// Список правок в буфер: те же поля и тот же порядок, что у мира.
+fn save_edits(b: &mut fx::blob::Blob, e: &[Edit]) {
+    b.u32(e.len() as u32);
+    for x in e {
+        b.u32(x.x);
+        b.u32(x.y);
+        b.u32(x.z);
+        b.u16(x.mat);
+    }
+}
+
+fn load_edits(s: &mut fx::blob::Scan) -> Vec<Edit> {
+    let n = s.list(14);
+    (0..n)
+        .map(|_| Edit {
+            x: s.u32(),
+            y: s.u32(),
+            z: s.u32(),
+            mat: s.u16(),
+        })
+        .collect()
+}
+
 pub struct Ground {
     pub world: VoxelWorld,
     pub bodies: Bodies,
@@ -47,11 +70,11 @@ pub struct Ground {
     pub topo: TopoLayer,
     pub nav: NavLayer,
     /// Все правки тика подряд, в порядке применения.
-    edits: Vec<Edit>,
+    pub(crate) edits: Vec<Edit>,
     /// Правки, применённые **после** каскада: запекание приземлившихся
     /// тел. Каскад в этом тике их уже не увидит, поэтому они переносятся
     /// в следующий — иначе его чанки разошлись бы с миром (ADR-129).
-    carry: Vec<Edit>,
+    pub(crate) carry: Vec<Edit>,
     pub stats: GroundStats,
 }
 
@@ -150,6 +173,40 @@ impl Ground {
         self.stats.topo_survived = survived;
         self.stats.nav = self.nav.apply(&self.world, &edits);
         self.edits = edits;
+    }
+
+    /// Записать землю в буфер (ADR-229).
+    ///
+    /// Связность и проходимость **не пишутся**: обе — чистые функции
+    /// мира, и восстанавливаются из него `TopoLayer::new`
+    /// и `NavLayer::new`. Это замерено зондом, а не предположено:
+    /// пересобранные слои дают тот же хеш, пересобранный каскад —
+    /// нет. Каскад отстаёт от мира на перенесённые правки (ADR-129),
+    /// потому и пишется.
+    ///
+    /// `carry` — те самые перенесённые правки. Не запиши их,
+    /// и следующий тик не показал бы каскаду запекание тела.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        self.world.save(b);
+        self.bodies.save(b);
+        self.collapse.save(b);
+        save_edits(b, &self.edits);
+        save_edits(b, &self.carry);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        if !self.world.load(s) {
+            return false;
+        }
+        if !self.bodies.load(s) {
+            return false;
+        }
+        if !self.collapse.load(s) {
+            return false;
+        }
+        self.edits = load_edits(s);
+        self.carry = load_edits(s);
+        s.ok()
     }
 
     /// Подмешать состояние земли в хеш тика.

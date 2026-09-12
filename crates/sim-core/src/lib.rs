@@ -18,6 +18,7 @@ pub mod index;
 pub mod matter;
 pub mod order;
 pub mod ride;
+pub mod save;
 pub mod shield;
 
 use drive::{Drive, Limits, NO_WAY};
@@ -212,10 +213,10 @@ pub struct Units {
     /// Тик, раньше которого юнит не ищет цель заново. Поиск цели —
     /// самая дорогая часть боя, и держать её потиковой незачем: цель,
     /// живая и в радиусе, остаётся целью (ADR-116).
-    next_search: Vec<u32>,
+    pub(crate) next_search: Vec<u32>,
     /// Тик, раньше которого юнит не выстрелит. Перезарядка —
     /// состояние юнита, а не свойство выстрела (ADR-164).
-    next_shot: Vec<u32>,
+    pub(crate) next_shot: Vec<u32>,
     /// Место оружия в реестре. Место, а не номер: номер ищется
     /// перебором, а это горячий путь (ADR-169).
     pub weapon: Vec<u16>,
@@ -233,8 +234,8 @@ pub struct Units {
     pub goal_x: Vec<i32>,
     pub goal_y: Vec<i32>,
     pub goal_z: Vec<i32>,
-    free: Vec<u32>,
-    live_ids: Vec<u32>,
+    pub(crate) free: Vec<u32>,
+    pub(crate) live_ids: Vec<u32>,
 }
 
 pub const NO_TARGET: u32 = u32::MAX;
@@ -494,10 +495,10 @@ pub struct World {
     /// пришедший снаружи.
     pub tuning: Tuning,
     /// Точка сбора владельца — то, к чему считается поле.
-    flow_target: [Option<(i32, i32)>; 2],
+    pub(crate) flow_target: [Option<(i32, i32)>; 2],
     /// Поле направлений: общий граф, секторы и по полю на владельца
     /// (ADR-153).
-    nav_field: nav::sectors::NavField,
+    pub(crate) nav_field: nav::sectors::NavField,
     /// Узлов получило конечное время в последнем опубликованном поле.
     pub flow_reachable: usize,
     /// Годуновских обновлений ушло на последнее поле.
@@ -561,7 +562,7 @@ pub struct World {
     /// Длины у очереди нет по построению — ровно по той же причине,
     /// по которой её нет у очереди правок мира: потолок применяется
     /// при дренаже, иначе приказ молча терялся бы.
-    orders: std::collections::VecDeque<Order>,
+    pub(crate) orders: std::collections::VecDeque<Order>,
     /// Замер: приказов применено и отброшено, и в скольких тиках
     /// дренаж упёрся в потолок. Потолок, срабатывающий каждый тик, —
     /// не предохранитель, а постоянное ухудшение (ADR-114), и видно
@@ -2546,17 +2547,20 @@ pub struct Reference {
     pub world: World,
     /// Сторона мира: копатели переселяются по ней, а мир у показа
     /// и у гейта разный (ADR-172).
-    side: u32,
+    pub(crate) side: u32,
     /// Заявленная численность стороны. Бой затухает без подкреплений,
     /// и прогон на десять тысяч тиков восемь тысяч из них хеширует
     /// почти пустое поле (ADR-161).
-    per_side: usize,
+    pub(crate) per_side: usize,
     /// Генератор нужен и дальше: копатель, догрызший свой столб,
     /// переходит на новый и начинает с поверхности.
-    terrain: worldgen::Terrain,
+    pub(crate) terrain: worldgen::Terrain,
     /// Копатели: где грызут и куда двинутся дальше.
-    diggers: Vec<(i32, i32, i32)>,
-    rng: Rng,
+    pub(crate) diggers: Vec<(i32, i32, i32)>,
+    pub(crate) rng: Rng,
+    /// Сид партии. Нужен сохранению: мир восстанавливается
+    /// из него, а не хранится (ADR-229).
+    pub(crate) seed: u64,
 }
 
 impl Reference {
@@ -2631,6 +2635,7 @@ impl Reference {
             terrain,
             diggers,
             rng,
+            seed,
         }
     }
 
