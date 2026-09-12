@@ -491,14 +491,21 @@ fn setup(
     // земля отличалась от камня только оттенком (ADR-211).
     let ground_mat = |c: look::Class, i: &mut Assets<Image>, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::surface(c);
+        // Плитка свойств умножает числа материала, и они ставятся
+        // на единицу: шероховатость и металличность класса лежат
+        // в плитке, крупинками, а не гранью (ADR-235).
+        let _ = (rough, metal);
+        let props = i.add(tile_image(look::props_tile(c), false));
         m.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(i.add(tile_image(look::surface_tile(c), true))),
             normal_map_texture: Some(i.add(tile_image(look::normal_tile(c), false))),
+            metallic_roughness_texture: Some(props.clone()),
+            occlusion_texture: Some(props),
             // UV приходят в вокселях, а плитка накрывает несколько.
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look::TILE_VOXELS)),
-            perceptual_roughness: rough,
-            metallic: metal,
+            perceptual_roughness: 1.0,
+            metallic: 1.0,
             ..default()
         })
     };

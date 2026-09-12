@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dust;
 pub mod edge;
 pub mod geom;
 pub mod look;

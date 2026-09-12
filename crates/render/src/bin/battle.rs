@@ -33,8 +33,13 @@ use bevy::light::{
 };
 use bevy::mesh::Indices;
 use bevy::anti_alias::fxaa::Fxaa;
+use bevy::anti_alias::smaa::Smaa;
 use bevy::core_pipeline::prepass::DepthPrepass;
-use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
+use bevy::diagnostic::FrameCount;
+use bevy::light::{FogVolume, VolumetricFog, VolumetricLight};
+use bevy::pbr::{
+    AtmosphereSettings, ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel,
+};
 use bevy::post_process::bloom::Bloom;
 use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
 use bevy::post_process::effect_stack::Vignette;
@@ -51,6 +56,7 @@ use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::window::PresentMode;
 use meshing::layer::MeshLayer;
 use meshing::{Opts, CS};
+use render::dust::{self, DustArt, DustPlugin};
 use render::edge::{EdgePlugin, Edges};
 use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
@@ -322,6 +328,9 @@ struct Art {
     dust: Handle<StandardMaterial>,
     /// Материал рельефа по классу поверхности.
     ground: [Handle<StandardMaterial>; look::CLASSES],
+    /// Длина тела каждого набора в мировых единицах: пыль из-под
+    /// машины соразмерна машине, а не постоянной.
+    len: [f32; 4],
 }
 
 /// Светящийся материал: цвет **за пределами единицы** прямо
@@ -614,6 +623,8 @@ fn main() {
         // Обводка силуэта: проход ставится всегда, а работает только
         // там, где на камере есть `Edges` (ADR-214).
         .add_plugins(EdgePlugin)
+        // Пыль, дым и искры — по событиям и по движению (ADR-235).
+        .add_plugins(DustPlugin)
         .insert_resource(fx)
         .insert_resource(sky)
         .insert_resource(Prof::default())
@@ -836,13 +847,19 @@ fn setup(
     let rt_paint = fx.rt > 0;
     let ground_mat = |c: look::Class, i: &mut Assets<Image>, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::surface(c);
-        let (albedo, normal) = if tiles {
+        // Три плитки на класс: цвет, нормаль и свойства — затенение,
+        // шероховатость, металличность (ADR-235). Плитка свойств
+        // умножает числа материала, поэтому с ней они ставятся
+        // на единицу: значение целиком лежит в плитке, и руда
+        // блестит крупинками, а не гранью.
+        let (albedo, normal, props) = if tiles {
             (
                 Some(i.add(tile_image(look::surface_tile(c), true))),
                 Some(i.add(tile_image(look::normal_tile(c), false))),
+                Some(i.add(tile_image(look::props_tile(c), false))),
             )
         } else {
-            (None, None)
+            (None, None, None)
         };
         m.add(StandardMaterial {
             // Цвет вершины трассировка не видит: в её формате вершины
@@ -857,12 +874,14 @@ fn setup(
             },
             base_color_texture: albedo,
             normal_map_texture: normal,
+            metallic_roughness_texture: props.clone(),
+            occlusion_texture: props,
             // UV приходят **в вокселях**, а плитка накрывает несколько:
             // без этого сжатия узор повторялся бы на каждом кубе
             // правильной сеткой.
             uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(1.0 / look::TILE_VOXELS)),
-            perceptual_roughness: rough,
-            metallic: metal,
+            perceptual_roughness: if tiles { 1.0 } else { rough },
+            metallic: if tiles { 1.0 } else { metal },
             ..default()
         })
     };
@@ -913,6 +932,8 @@ fn setup(
             ground_mat(look::Class::Rock, &mut images, &mut materials),
             ground_mat(look::Class::Ore, &mut images, &mut materials),
         ],
+        // Длина по носу тела, в мировых вокселях.
+        len: std::array::from_fn(|o| bodies[o].extent_mm().0 as f32 / voxel::unit::WORLD_MM as f32),
     };
 
     // Рельеф целиком — один раз. Дальше пересобираются только грязные.
@@ -1082,9 +1103,49 @@ fn setup(
         commands.entity(cam).insert(Bloom { intensity: sc.bloom, ..Bloom::NATURAL });
     }
     if fx.ssao {
-        commands
-            .entity(cam)
-            .insert((Msaa::Off, ScreenSpaceAmbientOcclusion::default(), Fxaa::default()));
+        commands.entity(cam).insert((
+            Msaa::Off,
+            ScreenSpaceAmbientOcclusion {
+                quality_level: ScreenSpaceAmbientOcclusionQualityLevel::High,
+                constant_object_thickness: sc.ssao_thickness,
+            },
+        ));
+    }
+    // Сглаживание после выключенных подвыборок: FXAA либо SMAA —
+    // по направлению (ADR-235). Ставится один раз на всё, что
+    // выключает `Msaa`: щелевое затенение, обводку, туман.
+    if fx.ssao || sc.edge.strength > 0.0 || sc.fog.density > 0.0 {
+        if sc.smaa {
+            commands.entity(cam).insert((Msaa::Off, Smaa::default()));
+        } else {
+            commands.entity(cam).insert((Msaa::Off, Fxaa::default()));
+        }
+    }
+    // Объёмный туман: воздух, который видно, и лучи солнца сквозь
+    // него (ADR-235). Слой тумана — короб от пола мира на заданную
+    // долю стороны; выше него воздух чистый, и небо остаётся небом.
+    if sc.fog.density > 0.0 {
+        let f = sc.fog;
+        commands.entity(cam).insert((
+            DepthPrepass,
+            VolumetricFog {
+                ambient_color: srgb(sc.sky_colour_srgb),
+                ambient_intensity: f.ambient,
+                jitter: 0.0,
+                step_count: f.steps,
+            },
+        ));
+        let h = side * f.height;
+        commands.spawn((
+            FogVolume {
+                density_factor: f.density,
+                absorption: f.absorption,
+                scattering: f.scattering,
+                ..default()
+            },
+            Transform::from_xyz(side * 0.5, h * 0.5, side * 0.5)
+                .with_scale(Vec3::new(side * 1.5, h, side * 1.5)),
+        ));
     }
     if sc.vignette.intensity > 0.0 {
         let v = sc.vignette;
@@ -1106,7 +1167,6 @@ fn setup(
         let c = look::to_linear(e.srgb);
         commands.entity(cam).insert((
             Msaa::Off,
-            Fxaa::default(),
             Edges {
                 colour: Vec4::new(c[0], c[1], c[2], 1.0),
                 width: e.width,
@@ -1184,7 +1244,7 @@ fn setup(
     // Солнце: белое, с каскадными тенями и видимым диском. Тень здесь
     // не эффект — без неё рельеф читается как плоская заливка, а юнит
     // не стоит на земле, а висит над ней.
-    commands.spawn((
+    let sun = commands.spawn((
         DirectionalLight {
             color: srgb(sc.sun_srgb),
             illuminance: sc.sun_lux,
@@ -1213,7 +1273,13 @@ fn setup(
             overlap_proportion: 0.2,
         }
         .build(),
-    ));
+    ))
+    .id();
+    // Лучи в тумане идут от солнца: без этой метки туман светится
+    // ровно, и тени в воздухе нет.
+    if sc.fog.density > 0.0 {
+        commands.entity(sun).insert(VolumetricLight);
+    }
     commands.insert_resource(art);
 }
 
@@ -1350,6 +1416,8 @@ fn step(
     mut turrets: TurretQuery,
     shots: Query<Entity, With<ShotMark>>,
     mut seen: ResMut<Seen>,
+    dart: Res<DustArt>,
+    frame: Res<FrameCount>,
 ) {
     for _ in 0..sim.speed {
         sim.r.tick();
@@ -1487,6 +1555,25 @@ fn step(
         *vis = Visibility::Inherited;
         if let Some(y) = hull_yaw(i) {
             render::model::place(&mut tr, at(i), hull_rot(i, y), seg);
+        }
+    }
+    // Пыль из-под едущей машины (ADR-235). Не на каждом кадре
+    // и не у всех разом: машины разведены по кадрам номером, иначе
+    // весь строй пылит залпом. Скорость — из симуляции: стоящая
+    // машина не пылит, и это видно.
+    if sim.speed > 0 {
+        for i in 0..u.len() {
+            if !alive(i) || (frame.0.wrapping_add(i as u32)) % look::DUST_EVERY != 0 {
+                continue;
+            }
+            let v = u.vel[i].to_f64_lossy() as f32;
+            if v.abs() < look::DUST_MIN_SPEED {
+                continue;
+            }
+            let y = yaw_of(u.head[i]);
+            let f = Vec3::new(y.cos(), 0.0, -y.sin()) * v.signum();
+            let owner = usize::from(u.owner[i] == 1) + if i / 2 < fx.bigs { 2 } else { 0 };
+            dust::track_dust(&mut commands, &dart, at(i), -f, art.len[owner], frame.0 ^ (i as u32 * 7919));
         }
     }
     for (m, mut tr, mut vis, seg) in turrets.iter_mut() {
@@ -1628,6 +1715,9 @@ fn step(
                     },
                 ));
                 spawn_debris(&mut commands, &art.chip, &art.dust, p, r, look::DEBRIS_BLAST, (x, y, z));
+                // Пыль и искры от воронки: обломки летят по параболе,
+                // а пыль висит и оседает — и видна с любой высоты.
+                dust::blast_dust(&mut commands, &dart, p, r, (x, y, z));
             }
             SimEvent::Beam { x0, y0, z0, x1, y1, z1, owner } => {
                 // Луч — вытянутый кубик от стрелка к цели, гаснущий
@@ -1654,12 +1744,18 @@ fn step(
                     Transform::from_translation(a).with_scale(Vec3::splat(look::MUZZLE_R)),
                     Fade { age: 0, life: look::MUZZLE_FRAMES, kind: Kind::Muzzle, size: look::MUZZLE_R },
                 ));
+                // Искры там, куда луч попал: попадание — событие
+                // не менее заметное, чем выстрел.
+                dust::sparks(&mut commands, &dart, b, 1.0, (x1, y1, z1), 6);
             }
             SimEvent::Death { x, y, z, .. } => {
                 // Смерть событием была всегда и не показывалась ничем:
-                // юнит просто исчезал. Теперь от него остаются обломки.
+                // юнит просто исчезал. Теперь от него остаются обломки,
+                // искры и столб дыма, который стоит ещё несколько секунд.
                 let p = Vec3::new(x as f32, y as f32, z as f32);
                 spawn_debris(&mut commands, &art.chip, &art.dust, p, 2.0, look::DEBRIS_DEATH, (x, y, z));
+                dust::sparks(&mut commands, &dart, p + Vec3::Y * 3.0, 1.6, (x, y, z), 12);
+                dust::wreck_smoke(&mut commands, p + Vec3::Y * 4.0, (x, y, z));
             }
         }
     }
