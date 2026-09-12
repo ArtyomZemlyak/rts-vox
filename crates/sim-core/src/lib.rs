@@ -2822,9 +2822,28 @@ impl World {
             }
             let owner = self.units.owner[i];
 
+            // --- бак полон: везти на склад. Проверяется **до**
+            //     реклейма: полному копателю обломок ни к чему,
+            //     и просматривать их ему незачем.
+            if self.units.stance[i] == STANCE_DIG && e.ledger.room(c) == 0 {
+                self.units.stance[i] = STANCE_HAUL;
+                self.units.job[i] = NO_TARGET;
+            }
+
             // --- реклейм: копатель, чей забой пришёлся на обломок,
             //     сливает его тем же переводом, что и породу.
-            if self.units.stance[i] == STANCE_DIG {
+            //
+            // Просмотр обломков идёт из **того же бюджета**, что поиск
+            // склада: и там, и там копатель ищет, к чему приткнуться,
+            // а число пар «копатель × обломок» в плотном случае растёт
+            // квадратично (ADR-114). Упёршийся просмотр откладывается
+            // на следующий тик: обломок никуда не денется.
+            if self.units.stance[i] == STANCE_DIG && !e.wrecks.is_empty() {
+                if searches >= cap {
+                    capped = true;
+                    continue;
+                }
+                searches += 1;
                 let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
                 // Ничья — по **меньшему номеру обломка**, а не по
                 // порядку обхода (`CLAUDE.md`).
@@ -2849,14 +2868,14 @@ impl World {
                     let room = e.ledger.room(c);
                     let n = e.ledger.transfer(from, c, room);
                     e.reclaimed += n;
+                    // Набрал полный бак с обломка — тоже везти.
+                    if e.ledger.room(c) == 0 {
+                        self.units.stance[i] = STANCE_HAUL;
+                        self.units.job[i] = NO_TARGET;
+                    }
                 }
             }
 
-            // --- бак полон: везти на склад.
-            if self.units.stance[i] == STANCE_DIG && e.ledger.room(c) == 0 {
-                self.units.stance[i] = STANCE_HAUL;
-                self.units.job[i] = NO_TARGET;
-            }
             if self.units.stance[i] != STANCE_HAUL {
                 continue;
             }
@@ -2984,6 +3003,36 @@ impl World {
         self.build_work();
         self.produce_work();
         self.recount_caps();
+        self.sweep_wrecks();
+    }
+
+    /// Убрать выбранные обломки.
+    ///
+    /// Раз за тик и по всему списку, а не на каждом реклейме: список
+    /// читает каждый копатель, и пустая запись в нём — это работа
+    /// на каждом из них плюс запись в хеше.
+    ///
+    /// Порядок сохраняется: `retain`, а не `swap_remove`. Перестановка
+    /// соседей молча меняет исход ничьей в выборе ближайшего обломка
+    /// (`CLAUDE.md`).
+    fn sweep_wrecks(&mut self) {
+        let Some(e) = self.econ.as_mut() else { return };
+        if e.wrecks.is_empty() {
+            return;
+        }
+        let mut empty: Vec<matter::ContainerId> = Vec::new();
+        let ledger = &e.ledger;
+        e.wrecks.retain(|w| {
+            if ledger.held(w.held) == 0 {
+                empty.push(w.held);
+                false
+            } else {
+                true
+            }
+        });
+        for id in empty {
+            e.ledger.release(id);
+        }
     }
 
     /// Строители льют материю в недострой.
@@ -3247,21 +3296,8 @@ impl World {
         // погибшую машину.
         e.ledger.release(c);
         self.units.store[k] = economy::NO_CONTAINER;
-        // Выбранные обломки убираются: пустой контейнер в списке —
-        // это работа на каждом реклейме и запись в хеше.
-        let mut i = 0;
-        while i < e.wrecks.len() {
-            if e.ledger.held(e.wrecks[i].held) == 0 {
-                let id = e.wrecks[i].held;
-                // Порядок сохраняется: `remove`, а не `swap_remove`.
-                // Перестановка соседей молча меняет исход ничьей
-                // в выборе ближайшего обломка (`CLAUDE.md`).
-                e.wrecks.remove(i);
-                e.ledger.release(id);
-            } else {
-                i += 1;
-            }
-        }
+        // Выбранные обломки убирает `sweep_wrecks` — раз за тик
+        // и в одном месте.
     }
 
     /// Пересчёт исхода: у стороны не осталось живых — она проиграла.

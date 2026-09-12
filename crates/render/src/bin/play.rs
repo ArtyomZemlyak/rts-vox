@@ -200,6 +200,13 @@ struct ShotMark;
 #[derive(Component)]
 struct BlastMark(u32);
 
+/// Меши одного вида тела: по отделке и по стороне.
+///
+/// Отделок пять (сталь, стекло, резина, ядро, свечение), и у каждой
+/// свой материал: цвет вершины подменяет `base_color` целиком, поэтому
+/// раскраска сторон остаётся при себе (ADR-211).
+type BodyMeshes = [[Option<Handle<Mesh>>; look::FINISHES]; 2];
+
 /// Общие меши и материалы.
 #[derive(Resource)]
 struct Art {
@@ -211,8 +218,8 @@ struct Art {
     /// на карте стоят завод, склад и буровая, и рисовать их танком
     /// значило бы, что игрок не видит, что построил (ADR-230).
     /// Внутренний — сторона: цвет несут вершины.
-    hull: Vec<[[Option<Handle<Mesh>>; look::FINISHES]; 2]>,
-    turret: Vec<[[Option<Handle<Mesh>>; look::FINISHES]; 2]>,
+    hull: Vec<BodyMeshes>,
+    turret: Vec<BodyMeshes>,
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -575,8 +582,8 @@ fn setup(
         })
     };
     let tm = Instant::now();
-    let mut hull: Vec<[[Option<Handle<Mesh>>; look::FINISHES]; 2]> = Vec::new();
-    let mut turret: Vec<[[Option<Handle<Mesh>>; look::FINISHES]; 2]> = Vec::new();
+    let mut hull: Vec<BodyMeshes> = Vec::new();
+    let mut turret: Vec<BodyMeshes> = Vec::new();
     for b in &bodies {
         hull.push([
             unit_mesh(b, look::side_tint()[0], Slice::Hull, &mut meshes),
