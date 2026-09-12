@@ -369,13 +369,12 @@ fn main() {
     // Показу нужен мир побольше, чем гейту: строй в полтысячи машин
     // на маленькой карте стоит стеной (ADR-172).
     let mut side = 384u32;
-    // Размах рельефа сцены показа, в вокселях. **Не десять.** На
-    // десяти вокселях (пять метров на сто девяносто два) карта плоская,
-    // и склон получается в один воксель на много шагов: рельеф читается
-    // не холмами, а горизонталями топографической карты. На тридцати
-    // появляются лощины и гребни, а проходимость держится — дыр
-    // в навигации по-прежнему нет (ADR-212).
-    let mut relief = 30u32;
+    // Размах рельефа **не задаётся здесь числом**: его считает
+    // `Params::sized` от высоты мира. Своё число у сцены уже дважды
+    // расходилось с размером карты и давало плоский блин (ADR-157,
+    // ADR-166), а третий раз — просто устаревало (ADR-221). Ключ
+    // `--relief` по-прежнему перекрывает расчёт.
+    let mut relief = 0u32;
     let mut speed = 1u32;
     let mut shot: Option<String> = None;
     let mut after = 8.0f32;
@@ -462,10 +461,10 @@ fn main() {
             }
         }
     };
-    let params = worldgen::Params {
-        relief,
-        ..worldgen::Params::sized(side, side / 2, side)
-    };
+    let mut params = worldgen::Params::sized(side, side / 2, side);
+    if relief > 0 {
+        params.relief = relief;
+    }
     let r = Reference::with_params(seed, units, tuning, weapons, params);
     let g = r.world.ground().expect("у эталона есть земля");
     let mesh = MeshLayer::new(&g.world, Opts::default());
