@@ -9,6 +9,10 @@
 //! смотрит издали. Здесь наоборот: три машины крупно, чтобы было
 //! видно фаску, роль воксела в цвете и то, как ложится свет
 //! на скруглённое ребро.
+//!
+//! Направление картинки — ключом `--look` и тем же набором чисел,
+//! что и у боя (ADR-214): смотреть модели при другом свете значит
+//! подгонять их под свет, которого в игре нет.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::light::CascadeShadowConfigBuilder;
@@ -25,6 +29,9 @@ use bevy::light::atmosphere::ScatteringMedium;
 use bevy::light::{Atmosphere, AtmosphereEnvironmentMapLight, SunDisk};
 use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::bloom::Bloom;
+use bevy::post_process::effect_stack::Vignette;
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
+use render::edge::{EdgePlugin, Edges};
 use render::look;
 use render::model::{body_to_mesh, BEVEL};
 
@@ -51,6 +58,45 @@ struct Scene {
 #[derive(Component)]
 struct Spin;
 
+/// Те же переводы набора направления в компоненты, что и у боя
+/// (ADR-214). Повторены, а не вынесены: `look` не знает про Bevy
+/// намеренно, а заводить ради трёх функций общий модуль окон значит
+/// заводить слой из одного файла.
+fn tonemapping(t: look::Tonemap) -> Tonemapping {
+    match t {
+        look::Tonemap::Aces => Tonemapping::AcesFitted,
+        look::Tonemap::Tony => Tonemapping::TonyMcMapface,
+        look::Tonemap::AgX => Tonemapping::AgX,
+        look::Tonemap::Filmic => Tonemapping::BlenderFilmic,
+    }
+}
+
+fn section(s: look::Section) -> ColorGradingSection {
+    ColorGradingSection {
+        saturation: s.saturation,
+        contrast: s.contrast,
+        gamma: s.gamma,
+        gain: s.gain,
+        lift: s.lift,
+    }
+}
+
+fn grading(g: look::Grade) -> ColorGrading {
+    ColorGrading {
+        global: ColorGradingGlobal {
+            exposure: g.exposure,
+            temperature: g.temperature,
+            tint: g.tint,
+            hue: 0.0,
+            post_saturation: g.post_saturation,
+            midtones_range: g.midtones_range.0..g.midtones_range.1,
+        },
+        shadows: section(g.shadows),
+        midtones: section(g.midtones),
+        highlights: section(g.highlights),
+    }
+}
+
 fn main() {
     let mut shot: Option<String> = None;
     let mut after = 4.0f32;
@@ -76,9 +122,21 @@ fn main() {
                     .filter_map(|s| s.trim().parse().ok())
                     .collect();
             }
+            "--look" => match look::parse_look(&v()) {
+                Some(l) => look::set(l),
+                None => {
+                    eprintln!(
+                        "неизвестное направление; есть: {}",
+                        look::LOOK_ALL.map(look::look_name).join(", ")
+                    );
+                    return;
+                }
+            },
             "--help" | "-h" => {
                 println!(
-                    "models [--pick 0,1,3] [--bevel 0.5] [--mm 100] [--still] [--shot файл] [--shot-after сек]"
+                    "models [--pick 0,1,3] [--bevel 0.5] [--mm 100] [--still] \
+[--shot файл] [--shot-after сек] [--look {}]",
+                    look::LOOK_ALL.map(look::look_name).join("|")
                 );
                 return;
             }
@@ -99,6 +157,10 @@ fn main() {
             }),
             ..default()
         }))
+        // Тот же проход обводки, что и у боя: направление обязано быть
+        // одним и тем же в обоих окнах, иначе модели подгоняются
+        // под картинку, которой в игре нет (ADR-214).
+        .add_plugins(EdgePlugin)
         .insert_resource(ClearColor(Color::srgb(0.14, 0.16, 0.20)))
         .insert_resource(Shot { path: shot, after, done: false, left, seen: 0 })
         .insert_resource(Scene { bevel, mm, spin, pick })
@@ -130,6 +192,7 @@ fn setup(
     // Материал **по отделке**: тот же набор, что в бою. Смотровая
     // и есть то место, где разница между сталью, стеклом и резиной
     // видна вблизи (ADR-211).
+    let sc = look::scene();
     let mats: [Handle<StandardMaterial>; look::FINISHES] = look::FINISH_ALL.map(|f| {
         let (rough, metal) = look::finish_surface(f);
         materials.add(StandardMaterial {
@@ -168,9 +231,10 @@ fn setup(
         for b in bufs.iter_mut() {
             b.clear();
         }
+        let tint = look::side_tint();
         body_to_mesh(
             body,
-            look::SIDE_TINT[i % look::SIDE_TINT.len()],
+            tint[i % tint.len()],
             s,
             (0, 255),
             scene.bevel,
@@ -228,26 +292,58 @@ fn setup(
     // — то есть ровно тем, от чего отделки и заводились (ADR-211).
     // Смотреть модели при другом свете значит подгонять их под свет,
     // которого в игре нет.
-    commands.spawn((
-        Camera3d::default(),
-        Tonemapping::AcesFitted,
-        Exposure { ev100: look::EV100 },
-        Bloom::NATURAL,
-        Msaa::Off,
-        ScreenSpaceAmbientOcclusion::default(),
-        Fxaa::default(),
-        AtmosphereSettings { aerial_view_lut_max_distance: look::HAZE_RANGE_M, ..default() },
-        AtmosphereEnvironmentMapLight {
-            intensity: look::SKY_IBL,
-            size: UVec2::splat(look::SKY_IBL_SIZE),
+    let cam = commands
+        .spawn((
+            Camera3d::default(),
+            tonemapping(sc.tonemap),
+            grading(sc.grade),
+            Exposure { ev100: sc.ev100 },
+            Bloom { intensity: sc.bloom.max(0.02), ..Bloom::NATURAL },
+            Msaa::Off,
+            ScreenSpaceAmbientOcclusion::default(),
+            Fxaa::default(),
+            AtmosphereSettings { aerial_view_lut_max_distance: sc.haze_range_m, ..default() },
+            AtmosphereEnvironmentMapLight {
+                intensity: sc.sky_ibl,
+                size: UVec2::splat(sc.sky_ibl_size),
+                ..default()
+            },
+            Transform::from_xyz(dist * 0.30, tall * 0.85, dist)
+                .looking_at(Vec3::new(0.0, tall * 0.45, 0.0), Vec3::Y),
+        ))
+        .id();
+    if sc.vignette.intensity > 0.0 {
+        let v = sc.vignette;
+        commands.entity(cam).insert(Vignette {
+            intensity: v.intensity,
+            radius: v.radius,
+            smoothness: v.smoothness,
+            roundness: v.roundness,
+            color: Color::srgb(v.srgb[0], v.srgb[1], v.srgb[2]),
             ..default()
-        },
-        Transform::from_xyz(dist * 0.30, tall * 0.85, dist)
-            .looking_at(Vec3::new(0.0, tall * 0.45, 0.0), Vec3::Y),
-    ));
+        });
+    }
+    if sc.edge.strength > 0.0 {
+        let e = sc.edge;
+        let c = look::to_linear(e.srgb);
+        commands.entity(cam).insert(Edges {
+            colour: Vec4::new(c[0], c[1], c[2], 1.0),
+            width: e.width,
+            depth: e.depth,
+            normal: e.normal,
+            strength: e.strength,
+            steps: e.steps,
+            posterise: e.posterise,
+            pad0: 0.0,
+            pad1: 0.0,
+        });
+    }
+    // Глубины резкости у смотровой нет намеренно: она заведена, чтобы
+    // разглядеть отделку, а размытие прячет ровно её.
+    //
     // Планета под сценой. Масштаб тот же, что в бою: рассеяние считает
     // метры, подиум — воксели.
-    let k = 1.0 / look::HAZE_METRES_PER_VOXEL;
+    let k = 1.0 / sc.haze_metres_per_voxel;
     let medium = mediums.add(ScatteringMedium::earth(256, 256));
     let atmo = commands.spawn(Atmosphere::earth(medium)).id();
     commands.entity(atmo).insert(GlobalTransform::from(
@@ -258,20 +354,16 @@ fn setup(
     // как в бою, а не «красиво отдельно».
     // Направление солнца теперь вычисляется из высоты и азимута
     // (ADR-198), а не задано вектором.
-    let d = render::look::sun_dir();
+    let d = look::sun_dir();
     commands.spawn((
         DirectionalLight {
-            color: Color::srgb(
-                render::look::SUN_SRGB[0],
-                render::look::SUN_SRGB[1],
-                render::look::SUN_SRGB[2],
-            ),
-            illuminance: render::look::SUN_LUX,
+            color: Color::srgb(sc.sun_srgb[0], sc.sun_srgb[1], sc.sun_srgb[2]),
+            illuminance: sc.sun_lux,
             shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(-d[0], -d[1], -d[2]).looking_at(Vec3::ZERO, Vec3::Y),
-        SunDisk { angular_size: look::SUN_DISK_SIZE, intensity: look::SUN_DISK_INTENSITY },
+        SunDisk { angular_size: sc.sun_disk_size, intensity: sc.sun_disk_intensity },
         CascadeShadowConfigBuilder {
             num_cascades: 2,
             first_cascade_far_bound: span * 0.5,

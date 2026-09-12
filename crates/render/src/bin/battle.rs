@@ -31,14 +31,19 @@ use bevy::light::{
 };
 use bevy::mesh::Indices;
 use bevy::anti_alias::fxaa::Fxaa;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::bloom::Bloom;
+use bevy::post_process::dof::{DepthOfField, DepthOfFieldMode};
+use bevy::post_process::effect_stack::Vignette;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::window::PresentMode;
 use meshing::layer::MeshLayer;
 use meshing::{Opts, CS};
+use render::edge::{EdgePlugin, Edges};
 use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
@@ -363,7 +368,65 @@ fn frac(h: u32) -> f32 {
     (h & 0xFF_FFFF) as f32 / 16_777_216.0
 }
 
+/// Перевод набора чисел направления в компоненты камеры (ADR-214).
+///
+/// Одно место на всё окно: разнесённые по коду, эти шесть компонент
+/// расходятся при первой же правке, и половина направления остаётся
+/// от предыдущего.
+fn tonemapping(t: look::Tonemap) -> Tonemapping {
+    match t {
+        look::Tonemap::Aces => Tonemapping::AcesFitted,
+        look::Tonemap::Tony => Tonemapping::TonyMcMapface,
+        look::Tonemap::AgX => Tonemapping::AgX,
+        look::Tonemap::Filmic => Tonemapping::BlenderFilmic,
+    }
+}
+
+fn section(s: look::Section) -> ColorGradingSection {
+    ColorGradingSection {
+        saturation: s.saturation,
+        contrast: s.contrast,
+        gamma: s.gamma,
+        gain: s.gain,
+        lift: s.lift,
+    }
+}
+
+fn grading(g: look::Grade) -> ColorGrading {
+    ColorGrading {
+        global: ColorGradingGlobal {
+            exposure: g.exposure,
+            temperature: g.temperature,
+            tint: g.tint,
+            hue: 0.0,
+            post_saturation: g.post_saturation,
+            midtones_range: g.midtones_range.0..g.midtones_range.1,
+        },
+        shadows: section(g.shadows),
+        midtones: section(g.midtones),
+        highlights: section(g.highlights),
+    }
+}
+
 fn main() {
+    // Направление читается **до** всего остального: от него зависят
+    // умолчания солнца, дымки и экспозиции, а они разбираются тут же.
+    {
+        let a: Vec<String> = std::env::args().collect();
+        if let Some(i) = a.iter().position(|s| s == "--look") {
+            match a.get(i + 1).and_then(|s| look::parse_look(s)) {
+                Some(l) => look::set(l),
+                None => {
+                    eprintln!(
+                        "неизвестное направление; есть: {}",
+                        look::LOOK_ALL.map(look::look_name).join(", ")
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    let sc = look::scene();
     let mut units = 240usize;
     let mut seed = 42u64;
     // Показу нужен мир побольше, чем гейту: строй в полтысячи машин
@@ -382,18 +445,18 @@ fn main() {
     let mut at_frame = 0u64;
     let mut frames = 0u64;
     let mut fx = Fx {
-        cascades: look::SHADOW_CASCADES,
+        cascades: sc.shadow_cascades,
         bloom: true,
-        ssao: look::SSAO,
+        ssao: sc.ssao,
         paint: true,
         sky: true,
         chamfer: true,
     };
     let mut sky = Sky {
-        elevation: look::SUN_ELEVATION,
-        azimuth: look::SUN_AZIMUTH,
-        haze: look::HAZE_METRES_PER_VOXEL,
-        ev100: look::EV100,
+        elevation: sc.sun_elevation,
+        azimuth: sc.sun_azimuth,
+        haze: sc.haze_metres_per_voxel,
+        ev100: sc.ev100,
     };
     let (mut yaw, mut pitch, mut dist) = (0.7f32, 0.75f32, 0.45f32);
     let mut it = std::env::args().skip(1);
@@ -422,13 +485,17 @@ fn main() {
             "--yaw" => yaw = v.parse().unwrap_or(yaw),
             "--pitch" => pitch = v.parse().unwrap_or(pitch),
             "--dist" => dist = v.parse().unwrap_or(dist),
+            // Разобран выше: от него зависят умолчания остальных ключей.
+            "--look" => {}
             "--help" => {
                 println!(
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
 [--sky 0|1] [--chamfer 0|1] \
-[--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100]"
+[--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100] \
+[--look {}]",
+                    look::LOOK_ALL.map(look::look_name).join("|")
                 );
                 return;
             }
@@ -473,11 +540,12 @@ fn main() {
     let grid = ChunkGrid { nx, ny, nz, cs: CS as u32 };
     let side = side as f32;
     println!(
-        "мир {}×{}×{}, чанков {}, юнитов {units}, сборка {:.0} мс",
+        "мир {}×{}×{}, чанков {}, юнитов {units}, направление «{}», сборка {:.0} мс",
         g.world.nx,
         g.world.ny,
         g.world.nz,
         grid.len(),
+        look::look_name(look::active()),
         t0.elapsed().as_secs_f64() * 1e3
     );
 
@@ -502,14 +570,17 @@ fn main() {
             }),
             ..default()
         }))
+        // Обводка силуэта: проход ставится всегда, а работает только
+        // там, где на камере есть `Edges` (ADR-214).
+        .add_plugins(EdgePlugin)
         .insert_resource(fx)
         .insert_resource(sky)
         .insert_resource(Prof::default())
         .insert_resource(Seen::default())
-        .insert_resource(DirectionalLightShadowMap { size: look::SHADOW_MAP })
+        .insert_resource(DirectionalLightShadowMap { size: sc.shadow_map })
         .insert_resource(GlobalAmbientLight {
-            color: srgb(look::AMBIENT_SRGB),
-            brightness: look::AMBIENT_BRIGHTNESS,
+            color: srgb(sc.ambient_srgb),
+            brightness: sc.ambient_brightness,
             ..default()
         })
         .insert_resource(Sim {
@@ -605,13 +676,14 @@ fn setup(
             (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k], uv)))
         })
     };
+    let tint = look::side_tint();
     let hull = [
-        unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Hull, &mut meshes),
-        unit_mesh(&bodies[1], look::SIDE_TINT[1], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[0], tint[0], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[1], tint[1], Slice::Hull, &mut meshes),
     ];
     let turret = [
-        unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Turret, &mut meshes),
-        unit_mesh(&bodies[1], look::SIDE_TINT[1], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[0], tint[0], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[1], tint[1], Slice::Turret, &mut meshes),
     ];
     // Цвет несут вершины, и это не «умножается на базу»: в Bevy 0.19.1
     // цвет вершины **подменяет** `base_color` целиком
@@ -784,6 +856,7 @@ fn setup(
         }
     }
 
+    let sc = look::scene();
     let eye = view.cam.eye();
     let t = view.cam.target;
     let side = view.side;
@@ -794,12 +867,18 @@ fn setup(
                 // Небо за краем мира на случай, когда атмосферы нет:
                 // её плагин требует вычислительных шейдеров и на машине
                 // без них молча не загрузится.
-                clear_color: ClearColorConfig::Custom(srgb(look::SKY_COLOUR_SRGB)),
+                clear_color: ClearColorConfig::Custom(srgb(sc.sky_colour_srgb)),
                 ..default()
             },
             // Тонмаппинг тут не украшение: свет задан в люксах, и без
-            // него всё ярче половины улетает в белое.
-            Tonemapping::AcesFitted,
+            // него всё ярче половины улетает в белое. Кривая — от
+            // направления: ACES дерзкая и контрастная, AgX плёночная
+            // и приглушённая, и это половина разницы между ними
+            // (ADR-214).
+            tonemapping(sc.tonemap),
+            // Цветокоррекция — **после** расчёта света, поэтому она
+            // красит кадр, ничего не ломая в освещении.
+            grading(sc.grade),
             // Экспозиция идёт в паре с яркостью солнца: 130 000 люкс
             // на входе атмосферы — это не «ярче», а «до фильтрации»
             // (ADR-198).
@@ -810,28 +889,81 @@ fn setup(
     // Трассеры и лучи светятся сильнее единицы — свечение делает
     // видимым то, ради чего они и заведены. Отдельным вставлением,
     // а не полем набора: компонент либо есть, либо его нет.
-    if fx.bloom {
-        commands.entity(cam).insert(Bloom::NATURAL);
+    if fx.bloom && sc.bloom > 0.0 {
+        commands.entity(cam).insert(Bloom { intensity: sc.bloom, ..Bloom::NATURAL });
     }
     if fx.ssao {
         commands
             .entity(cam)
             .insert((Msaa::Off, ScreenSpaceAmbientOcclusion::default(), Fxaa::default()));
     }
+    if sc.vignette.intensity > 0.0 {
+        let v = sc.vignette;
+        commands.entity(cam).insert(Vignette {
+            intensity: v.intensity,
+            radius: v.radius,
+            smoothness: v.smoothness,
+            roundness: v.roundness,
+            color: srgb(v.srgb),
+            ..default()
+        });
+    }
+    // Обводка силуэта — по глубине и нормалям префасса (`render::edge`).
+    // Компонент тянет за собой префасс сам, поэтому сглаживание
+    // по подвыборкам приходится выключить и добрать FXAA — ровно как
+    // у щелевого затенения.
+    if sc.edge.strength > 0.0 {
+        let e = sc.edge;
+        let c = look::to_linear(e.srgb);
+        commands.entity(cam).insert((
+            Msaa::Off,
+            Fxaa::default(),
+            Edges {
+                colour: Vec4::new(c[0], c[1], c[2], 1.0),
+                width: e.width,
+                depth: e.depth,
+                normal: e.normal,
+                strength: e.strength,
+                steps: e.steps,
+                posterise: e.posterise,
+                pad0: 0.0,
+                pad1: 0.0,
+            },
+        ));
+    }
+    // Глубина резкости — признак макета, а не украшение: глаз читает
+    // размытый дальний план как «снято вблизи», то есть «вещь
+    // маленькая». Диафрагма здесь **неправдоподобно широкая**, и это
+    // умышленно: на честной оптике с фокусом в сотне метров кружок
+    // рассеяния выходит в сотую долю пикселя, то есть эффекта нет.
+    if sc.dof_f_stops > 0.0 {
+        commands.entity(cam).insert((
+            DepthPrepass,
+            DepthOfField {
+                mode: DepthOfFieldMode::Gaussian,
+                focal_distance: view.cam.distance,
+                aperture_f_stops: sc.dof_f_stops,
+                // Небо Bevy считает бесконечно далёким, и без потолка
+                // кружок рассеяния на нём был бы бесконечным.
+                max_depth: side * 1.5,
+                ..default()
+            },
+        ));
+    }
     if fx.sky {
         // Атмосфера считается на камеру: её настройки — это размеры
         // таблиц и число выборок, то есть цена, а не вид.
         commands.entity(cam).insert((
             AtmosphereSettings {
-                aerial_view_lut_max_distance: look::HAZE_RANGE_M,
+                aerial_view_lut_max_distance: sc.haze_range_m,
                 ..default()
             },
             // Отражения и заполняющий свет **снимаются с настоящего
             // неба**. Это и есть ответ на «руда без карты окружения
             // выходит чёрной» из ADR-175: карта окружения появилась.
             AtmosphereEnvironmentMapLight {
-                intensity: look::SKY_IBL,
-                size: UVec2::splat(look::SKY_IBL_SIZE),
+                intensity: sc.sky_ibl,
+                size: UVec2::splat(sc.sky_ibl_size),
                 ..default()
             },
         ));
@@ -854,7 +986,7 @@ fn setup(
         // Старая картинка целиком, чтобы было с чем сравнивать: плоская
         // заливка неба и линейный туман того же цвета.
         commands.entity(cam).insert(DistanceFog {
-            color: srgb(look::SKY_COLOUR_SRGB),
+            color: srgb(sc.sky_colour_srgb),
             falloff: FogFalloff::Linear { start: side * 0.35, end: side * 1.15 },
             ..default()
         });
@@ -865,8 +997,8 @@ fn setup(
     // не стоит на земле, а висит над ней.
     commands.spawn((
         DirectionalLight {
-            color: srgb(look::SUN_SRGB),
-            illuminance: look::SUN_LUX,
+            color: srgb(sc.sun_srgb),
+            illuminance: sc.sun_lux,
             shadow_maps_enabled: fx.cascades > 0,
             // Воксельный мир — сплошные плоские грани, и на них акне
             // теней видно лучше всего. Смещение подобрано по картинке.
@@ -877,16 +1009,16 @@ fn setup(
         // Диск солнца рисует атмосфера; без неё компонент не значит
         // ничего и потому ставится всегда.
         SunDisk {
-            angular_size: look::SUN_DISK_SIZE,
-            intensity: look::SUN_DISK_INTENSITY,
+            angular_size: sc.sun_disk_size,
+            intensity: sc.sun_disk_intensity,
         },
         Transform::default()
             .looking_to(Vec3::from(look::sun_dir_at(sky.elevation, sky.azimuth)), Vec3::Y),
         CascadeShadowConfigBuilder {
             num_cascades: fx.cascades.max(1),
             minimum_distance: 1.0,
-            first_cascade_far_bound: side * look::SHADOW_FIRST_FRAC,
-            maximum_distance: side * look::SHADOW_MAX_FRAC,
+            first_cascade_far_bound: side * sc.shadow_first_frac,
+            maximum_distance: side * sc.shadow_max_frac,
             overlap_proportion: 0.2,
         }
         .build(),
