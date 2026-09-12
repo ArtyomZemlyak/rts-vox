@@ -13,6 +13,7 @@
 pub mod drive;
 pub mod energy;
 pub mod ground;
+pub mod mapcache;
 pub mod shot;
 pub mod index;
 pub mod matter;
@@ -2503,6 +2504,12 @@ pub const REF_SIDE: u32 = 256;
 /// из `data/weapons.ron`, а не местами в массиве (ADR-192).
 pub const REF_WEAPON_IDS: [u16; 2] = [1, 2];
 
+/// Потолок затронутых вокселей за тик у мира эталонного сценария.
+/// Одно число на всех, кто собирает этот мир — из сида или из кэша
+/// карты (ADR-228): разный потолок — разный дренаж, то есть другая
+/// партия.
+pub const REF_MAX_EDITS: usize = 1 << 16;
+
 /// Сколько копателей в эталонном сценарии и как глубоко они грызут
 /// за тик. Копка — экономика проекта, и сценарий, который не копает,
 /// не проверяет главного.
@@ -2587,15 +2594,30 @@ impl Reference {
         weapons: modding::weapons::Weapons,
         params: worldgen::Params,
     ) -> Reference {
-        let terrain = worldgen::Terrain { params, seed };
         let vw = voxel::World::new(
             params.nx,
             params.ny,
             params.nz,
-            1 << 16,
+            REF_MAX_EDITS,
             Box::new(worldgen::Terrain { params, seed }),
         );
         let g = ground::Ground::new(vw, &tuning);
+        Reference::with_ground(seed, units, tuning, weapons, params, g)
+    }
+
+    /// Тот же сценарий на **готовой** земле — собранной из сида
+    /// или прочитанной из кэша карты (ADR-228). Земля обязана быть
+    /// той, что дал бы генератор от `params` и `seed`: сценарий
+    /// этого не проверяет, за это отвечает кэш.
+    pub fn with_ground(
+        seed: u64,
+        units: usize,
+        tuning: Tuning,
+        weapons: modding::weapons::Weapons,
+        params: worldgen::Params,
+        g: ground::Ground,
+    ) -> Reference {
+        let terrain = worldgen::Terrain { params, seed };
         let mut world = World::new(2, units.max(1), tuning);
         world.attach_ground(g);
         world.attach_weapons(weapons);

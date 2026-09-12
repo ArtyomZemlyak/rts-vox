@@ -62,10 +62,18 @@ impl Ground {
     /// и тяготение приходят из данных (ADR-140, ADR-173): все пять —
     /// игровые числа, и литералов им в исходнике не место.
     pub fn new(world: VoxelWorld, t: &Tuning) -> Ground {
+        let nav = NavLayer::new(&world, t.unit_height, t.nav_cell, t.max_step);
+        Ground::with_nav(world, nav, t)
+    }
+
+    /// Земля вокруг мира с **готовым** слоем навигации — из кэша карты
+    /// (ADR-228). Связность и каскад ленивы и строятся здесь как обычно;
+    /// слой навигации — единственное, что стоит полного обхода мира,
+    /// и единственное, что кэш даёт готовым.
+    pub fn with_nav(world: VoxelWorld, nav: NavLayer, t: &Tuning) -> Ground {
         let mut collapse = CollapseLayer::new(&world);
         collapse.set_max_body_cells(t.max_body_cells as usize);
         let topo = TopoLayer::new(&world);
-        let nav = NavLayer::new(&world, t.unit_height, t.nav_cell, t.max_step);
         let mut world = world;
         world.max_materialize_per_tick = t.max_materialize_per_tick as usize;
         Ground {

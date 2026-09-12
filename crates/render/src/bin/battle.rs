@@ -566,6 +566,11 @@ fn main() {
     // WASD никто не нажимает, и путь освобождения остаётся
     // непроверенным (ADR-228).
     let mut pan = 0.0f32;
+    // Кэш карты (ADR-228): `1` — каталог `cache/maps` в корне
+    // репозитория, `0` — без кэша, иначе — свой каталог. Нетронутая
+    // земля строится один раз и читается с диска за секунды; на
+    // километре построить её стоит минуты.
+    let mut cache = String::from("1");
     // Размах рельефа **не задаётся здесь числом**: его считает
     // `Params::sized` от высоты мира. Своё число у сцены уже дважды
     // расходилось с размером карты и давало плоский блин (ADR-157,
@@ -603,6 +608,7 @@ fn main() {
             "--side" => side = v.parse().unwrap_or(side),
             "--height" => height = v.parse().unwrap_or(height),
             "--pan" => pan = v.parse().unwrap_or(pan),
+            "--cache" => cache = v,
             "--relief" => relief = v.parse().unwrap_or(relief),
             "--seed" => seed = v.parse().unwrap_or(seed),
             "--speed" => speed = v.parse().unwrap_or(speed),
@@ -631,6 +637,7 @@ fn main() {
             "--help" => {
                 println!(
                     "battle [--units N] [--side N] [--height N] [--relief N] [--seed N] [--pan вокселей-в-сек] \
+[--cache 0|1|каталог] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
 [--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--big на-сторону] [--rt 0|1|2] \
@@ -690,7 +697,97 @@ fn main() {
     if relief > 0 {
         params.relief = relief;
     }
-    let r = Reference::with_params(seed, units, tuning, weapons, params);
+    let cache_dir: Option<std::path::PathBuf> = match cache.as_str() {
+        "0" => None,
+        "1" => {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            Some(if root.join("data").exists() {
+                root.join("cache/maps")
+            } else {
+                std::path::PathBuf::from("cache/maps")
+            })
+        }
+        dir => Some(std::path::PathBuf::from(dir)),
+    };
+    // Карта — из кэша, если он есть, иначе из генератора и в кэш
+    // (ADR-228). Кэшируется **нетронутая** земля: слой изменений —
+    // это партия, и снимок берётся до первой правки, то есть до того,
+    // как землю получит сценарий.
+    let g = {
+        let key = sim_core::mapcache::key(&params, seed, &tuning);
+        let path = cache_dir.as_ref().map(|d| d.join(format!("map-{key:016x}.bin")));
+        let cached = path.as_ref().and_then(|p| {
+            let t = Instant::now();
+            let bytes = match std::fs::read(p) {
+                Ok(b) => b,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(e) => {
+                    eprintln!("кэш карты {}: {e}; карта строится заново", p.display());
+                    return None;
+                }
+            };
+            match sim_core::mapcache::from_cache(
+                &bytes,
+                &params,
+                seed,
+                &tuning,
+                sim_core::REF_MAX_EDITS,
+            ) {
+                Ok(g) => {
+                    println!(
+                        "карта из кэша {}: {:.0} МиБ за {:.0} мс",
+                        p.display(),
+                        bytes.len() as f64 / (1024.0 * 1024.0),
+                        t.elapsed().as_secs_f64() * 1e3
+                    );
+                    Some(g)
+                }
+                Err(e) => {
+                    eprintln!("кэш карты {}: {e}; карта строится заново", p.display());
+                    None
+                }
+            }
+        });
+        match cached {
+            Some(g) => g,
+            None => {
+                let t = Instant::now();
+                let vw = voxel::World::new(
+                    params.nx,
+                    params.ny,
+                    params.nz,
+                    sim_core::REF_MAX_EDITS,
+                    Box::new(worldgen::Terrain { params, seed }),
+                );
+                let t_bits = t.elapsed().as_secs_f64() * 1e3;
+                let t = Instant::now();
+                let g = sim_core::ground::Ground::new(vw, &tuning);
+                println!(
+                    "карта построена: занятость {t_bits:.0} мс, навигация {:.0} мс",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+                if let Some(p) = &path {
+                    let t = Instant::now();
+                    let bytes = sim_core::mapcache::to_cache(&g, key);
+                    let written = p
+                        .parent()
+                        .map_or(Ok(()), std::fs::create_dir_all)
+                        .and_then(|()| std::fs::write(p, &bytes));
+                    match written {
+                        Ok(()) => println!(
+                            "кэш карты записан: {}, {:.0} МиБ за {:.0} мс",
+                            p.display(),
+                            bytes.len() as f64 / (1024.0 * 1024.0),
+                            t.elapsed().as_secs_f64() * 1e3
+                        ),
+                        Err(e) => eprintln!("кэш карты {} не записан: {e}", p.display()),
+                    }
+                }
+                g
+            }
+        }
+    };
+    let r = Reference::with_ground(seed, units, tuning, weapons, params, g);
     let t_world = t0.elapsed().as_secs_f64() * 1e3;
     let g = r.world.ground().expect("у эталона есть земля");
     let t = Instant::now();
@@ -731,7 +828,11 @@ fn main() {
         target: V3::new(side * 0.5, world_h as f32 * 0.56, side * 0.5),
         yaw,
         pitch,
-        distance: side * dist,
+        // От видимой дали, а не от стороны: на километре камера
+        // отъезжала бы на четыре с половиной, и в кадре стояло бы
+        // одно кольцо посреди пустоты. На прежних картах показа
+        // даль равна стороне, и это прежнее число.
+        distance: vista * dist,
         fovy: 0.87,
         aspect: 16.0 / 9.0,
         near: 1.0,

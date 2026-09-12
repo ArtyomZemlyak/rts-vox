@@ -24,3 +24,6 @@ Desktop.ini
 
 # Локальные настройки Claude Code
 .claude/settings.local.json
+
+# Кэш карт окна показа (ADR-228): нетронутая земля, строится заново из сида
+/cache/
