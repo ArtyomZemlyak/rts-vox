@@ -67,6 +67,10 @@ impl Ground {
         let topo = TopoLayer::new(&world);
         let nav = NavLayer::new(&world, t.unit_height, t.nav_cell, t.max_step);
         let mut world = world;
+        // Оба потолка дренажа — из данных, а не из аргумента
+        // `voxel::World::new`: тот остаётся у сцен без земли,
+        // а игра и гейт берут число тика отсюда (ADR-227).
+        world.max_edits_per_tick = t.max_voxel_edits_per_tick as usize;
         world.max_materialize_per_tick = t.max_materialize_per_tick as usize;
         Ground {
             world,
@@ -182,7 +186,7 @@ mod tests {
 
     /// Плита: твёрдо ниже `TOP`, воздух выше.
     struct Slab;
-    const TOP: u32 = 40;
+    const TOP: u32 = 200;
     impl voxel::Generator for Slab {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
             if y < TOP {
@@ -194,7 +198,7 @@ mod tests {
     }
 
     fn world_with_ground() -> World {
-        let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Slab));
+        let vw = voxel::World::new(320, 320, 320, 4096, Box::new(Slab));
         let mut w = World::new(2, 16, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
         w
@@ -202,15 +206,20 @@ mod tests {
 
     /// Гряда поперёк карты: земля до `GY`, стена на `WALL` до `WY`.
     struct Wall;
-    const GY: u32 = 8;
-    const WALL: u32 = 32;
-    const WY: u32 = 40;
+    const GY: u32 = 40;
+    /// Середина стены. **Выровнена по нав-клетке**: клетка в десять
+    /// вокселей проходима, если проходим хоть один её столб, и стена,
+    /// накрывшая половины двух клеток, перестала бы быть стеной
+    /// (ADR-227). 158..172 накрывает клетку 16 целиком.
+    const WALL: u32 = 165;
+    const WY: u32 = 200;
     impl voxel::Generator for Wall {
         fn material(&self, x: u32, y: u32, _z: u32) -> Mat {
             if y < GY {
                 return 2;
             }
-            if x.abs_diff(WALL) <= 1 && y < WY {
+            // Полтора метра толщины: три воксела полуметрового мира.
+            if x.abs_diff(WALL) <= 7 && y < WY {
                 return 3;
             }
             AIR
@@ -226,11 +235,11 @@ mod tests {
     /// про недостижимую цель знает и никуда не ведёт (ADR-138).
     #[test]
     fn terrain_stops_a_unit() {
-        let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Wall));
+        let vw = voxel::World::new(320, 320, 320, 4096, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
-        let id = w.units.spawn(28, 32, 0, 6, 300) as usize;
-        w.fill_flow_towards(0, 60, 32);
+        let id = w.units.spawn(140, 160, 0, 30, 300) as usize;
+        w.fill_flow_towards(0, 300, 160);
         w.units.refresh_live();
         for _ in 0..200 {
             w.tick();
@@ -249,30 +258,29 @@ mod tests {
     /// **Юнит на исчезнувшей опоре падает** (ADR-036) — а не оказывается
     /// на дне ямы тем же тиком и без урона, как было до ADR-139.
     ///
-    /// Земля под юнитом снимается на шесть вокселей. Он обязан
-    /// пролететь эти шесть, потратить на них **больше** шести тиков —
-    /// падение начинается с нуля и разгоняется (ADR-174), поэтому
-    /// первые вокселя даются дольше воксела за тик, — и получить урон
+    /// Земля под юнитом снимается на три метра. Он обязан пролететь
+    /// их, потратить на это **заметное число тиков** — падение
+    /// начинается с нуля и разгоняется (ADR-174), — и получить урон
     /// по высоте падения.
     #[test]
     fn digging_out_the_ground_drops_the_unit_and_hurts_it() {
-        const DEPTH: u32 = 6;
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        const DEPTH: u32 = 30;
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
-        let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
+        let id = w.units.spawn(100, 100, 0, 0, 300) as usize;
         w.units.y[id] = GY as i32;
         w.units.refresh_live();
         w.tick();
         assert_eq!(w.units.y[id], GY as i32, "юнит не на земле");
         let hp0 = w.units.voxels[id];
 
-        // Шахта под юнитом: вся его нав-клетка, десять вокселей вглубь.
+        // Шахта под юнитом: вся его нав-клетка, три метра вглубь.
         {
             let g = w.ground.as_mut().expect("земля");
             for y in (GY - DEPTH)..GY {
-                for z in 20..22 {
-                    for x in 20..22 {
+                for z in 100..110 {
+                    for x in 100..110 {
                         g.world.queue_dig(x, y, z);
                     }
                 }
@@ -289,15 +297,20 @@ mod tests {
             "юнит не долетел до дна: y = {}",
             w.units.y[id]
         );
+        // Свободное падение с нуля проходит `h` вокселей за
+        // `sqrt(2h/g)` секунды: при тридцати вокселях и тяготении
+        // в сто вокселей за секунду в квадрате это 0.78 с, то есть
+        // 23 тика при 30 Гц. Порог взят вдвое ниже — он ловит
+        // телепортацию, а не караулит точное число.
         assert!(
-            ticks > DEPTH as i32,
-            "падение заняло {ticks} тиков на {DEPTH} вокселей: с разгона от нуля столько не пролететь, значит падение не ускоряется, а телепортируется"
+            ticks > 11,
+            "падение заняло {ticks} тиков на {DEPTH} вокселей: с разгона от нуля три метра быстрее не пролететь, значит падение не ускоряется, а телепортируется"
         );
         let hurt = hp0 - w.units.voxels[id];
         assert_eq!(
             hurt as u32,
-            (DEPTH - 1) * w.tuning.fall_damage_per_voxel as u32,
-            "урон не по высоте падения за вычетом бесплатного воксела"
+            (DEPTH - w.tuning.max_step) * w.tuning.fall_damage_per_voxel as u32,
+            "урон не по высоте падения за вычетом бесплатного уступа"
         );
         let g = w.ground().expect("земля");
         assert_eq!(g.stats.max_fall, DEPTH, "падение не попало в отчёт земли");
@@ -310,8 +323,8 @@ mod tests {
     /// единственное, что тут нужно: между ними есть куда разогнаться,
     /// а внизу есть куда провалиться, если опору прозевать.
     struct Shelf;
-    const BED: u32 = 4;
-    const SHELF: u32 = 20;
+    const BED: u32 = 20;
+    const SHELF: u32 = 100;
     impl voxel::Generator for Shelf {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
             if y < BED || y == SHELF {
@@ -324,10 +337,10 @@ mod tests {
 
     /// Поставить одинокого юнита в воздух над полкой.
     fn dropped_from(t: Tuning, from: i32) -> (World, usize) {
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Shelf));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Shelf));
         let mut w = World::new(1, 4, t);
         w.attach_ground(Ground::new(vw, &t));
-        let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
+        let id = w.units.spawn(100, 100, 0, 0, 300) as usize;
         w.units.y[id] = from;
         w.units.refresh_live();
         (w, id)
@@ -347,7 +360,7 @@ mod tests {
     /// На старом поведении половины равны, и тест падает.
     #[test]
     fn a_long_fall_speeds_up() {
-        const FROM: i32 = 60;
+        const FROM: i32 = 300;
         let floor = SHELF as i32 + 1;
         let half = FROM - (FROM - floor) / 2;
         let (mut w, id) = dropped_from(test_tuning(), FROM);
@@ -373,9 +386,12 @@ mod tests {
             first > second * 2,
             "первая половина высоты занята {first} тиков, вторая {second}: падение не ускоряется"
         );
+        // Пять вокселей — полметра, то есть ровно та скорость,
+        // с которой падал юнит до ADR-174: воксель за тик в мире
+        // с полуметровым ребром.
         assert!(
-            biggest > 1,
-            "самый быстрый тик дал {biggest} воксель — падение так и идёт по вокселю за тик"
+            biggest > 5,
+            "самый быстрый тик дал {biggest} вокселей — падение так и идёт по полметра за тик"
         );
     }
 
@@ -391,8 +407,8 @@ mod tests {
     #[test]
     fn a_fast_fall_lands_on_the_ledge_and_not_through_it() {
         let mut t = test_tuning();
-        t.gravity = 400;
-        const FROM: i32 = 60;
+        t.gravity = 2000;
+        const FROM: i32 = 300;
         let (mut w, id) = dropped_from(t, FROM);
         let hp0 = w.units.voxels[id];
         let mut ticks = 0;
@@ -413,7 +429,7 @@ mod tests {
         let fallen = (FROM - (SHELF as i32 + 1)) as u32;
         assert_eq!(
             (hp0 - w.units.voxels[id]) as u32,
-            (fallen - 1) * w.tuning.fall_damage_per_voxel as u32,
+            (fallen - w.tuning.max_step) * w.tuning.fall_damage_per_voxel as u32,
             "урон не по высоте до полки: падение засчитано не туда"
         );
     }
@@ -423,18 +439,18 @@ mod tests {
     /// иначе копка стоила бы здоровья каждому, кто идёт по забою.
     #[test]
     fn a_single_voxel_drop_is_free() {
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
-        let id = w.units.spawn(20, 20, 0, 0, 300) as usize;
+        let id = w.units.spawn(100, 100, 0, 0, 300) as usize;
         w.units.y[id] = GY as i32;
         w.units.refresh_live();
         w.tick();
         let hp0 = w.units.voxels[id];
         {
             let g = w.ground.as_mut().expect("земля");
-            for z in 20..22 {
-                for x in 20..22 {
+            for z in 100..110 {
+                for x in 100..110 {
                     g.world.queue_dig(x, GY - 1, z);
                 }
             }
@@ -462,15 +478,15 @@ mod tests {
     #[test]
     fn a_blast_opens_a_road_and_the_walk_is_the_same_length_every_time() {
         fn run() -> (bool, u32) {
-            let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+            let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Wall));
             let mut w = World::new(1, 4, test_tuning());
             w.attach_ground(Ground::new(vw, &test_tuning()));
             // Юнит стоит напротив глухой части стены, в двадцати клетках
             // от того места, где потом появится пролом: дорога к нему —
             // вбок и только потом вперёд.
-            let id = w.units.spawn(28, 10, 0, 6, 300) as usize;
+            let id = w.units.spawn(140, 50, 0, 30, 300) as usize;
             w.units.y[id] = GY as i32;
-            w.fill_flow_towards(0, 60, 32);
+            w.fill_flow_towards(0, 300, 160);
             w.units.refresh_live();
 
             // До взрыва: стена сплошная, дороги нет.
@@ -482,9 +498,9 @@ mod tests {
             // Взрыв: коридор сквозь стену.
             {
                 let g = w.ground.as_mut().expect("земля");
-                for y in GY..GY + 6 {
-                    for z in 30..36 {
-                        for x in WALL - 1..=WALL + 1 {
+                for y in GY..GY + 30 {
+                    for z in 150..180 {
+                        for x in WALL - 7..=WALL + 7 {
                             g.world.queue_dig(x, y, z);
                         }
                     }
@@ -517,14 +533,14 @@ mod tests {
     /// на отвлечённой плоскости, иначе нельзя.
     #[test]
     fn a_unit_walks_around_to_the_opening() {
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
         {
             let g = w.ground.as_mut().expect("земля");
-            for y in GY..GY + 6 {
-                for z in 30..36 {
-                    for x in WALL - 1..=WALL + 1 {
+            for y in GY..GY + 30 {
+                for z in 150..180 {
+                    for x in WALL - 7..=WALL + 7 {
                         g.world.queue_dig(x, y, z);
                     }
                 }
@@ -532,8 +548,8 @@ mod tests {
         }
         // Юнит стоит напротив глухой части стены, в двадцати клетках
         // от пролома.
-        let id = w.units.spawn(28, 10, 0, 6, 300) as usize;
-        w.fill_flow_towards(0, 60, 32);
+        let id = w.units.spawn(140, 50, 0, 30, 300) as usize;
+        w.fill_flow_towards(0, 300, 160);
         w.units.refresh_live();
         for _ in 0..1200 {
             w.tick();
@@ -550,21 +566,21 @@ mod tests {
     /// прорублен коридор: юнит проходит.
     #[test]
     fn a_dug_corridor_lets_the_unit_through() {
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Wall));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Wall));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
         {
             let g = w.ground.as_mut().expect("земля");
-            for y in GY..GY + 6 {
-                for z in 30..36 {
-                    for x in WALL - 1..=WALL + 1 {
+            for y in GY..GY + 30 {
+                for z in 150..180 {
+                    for x in WALL - 7..=WALL + 7 {
                         g.world.queue_dig(x, y, z);
                     }
                 }
             }
         }
-        let id = w.units.spawn(28, 32, 0, 6, 300) as usize;
-        w.fill_flow_towards(0, 60, 32);
+        let id = w.units.spawn(140, 160, 0, 30, 300) as usize;
+        w.fill_flow_towards(0, 300, 160);
         w.units.refresh_live();
         for _ in 0..400 {
             w.tick();
@@ -580,14 +596,14 @@ mod tests {
     struct Mushroom;
     impl voxel::Generator for Mushroom {
         fn material(&self, x: u32, y: u32, z: u32) -> Mat {
-            if y < 8 {
+            if y < 40 {
                 return 2;
             }
-            let (dx, dz) = (x.abs_diff(32), z.abs_diff(32));
-            if dx <= 2 && dz <= 2 && y < 40 {
+            let (dx, dz) = (x.abs_diff(160), z.abs_diff(160));
+            if dx <= 10 && dz <= 10 && y < 200 {
                 return 3;
             }
-            if dx <= 6 && dz <= 6 && (40..44).contains(&y) {
+            if dx <= 30 && dz <= 30 && (200..220).contains(&y) {
                 return 4;
             }
             AIR
@@ -602,24 +618,24 @@ mod tests {
     /// на нависающем было нельзя в принципе.
     #[test]
     fn a_unit_on_an_overhang_stays_on_it() {
-        let vw = voxel::World::new(64, 64, 64, 4096, Box::new(Mushroom));
+        let vw = voxel::World::new(320, 320, 320, 4096, Box::new(Mushroom));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
         // Край шляпки: под ним пусто до самой земли.
-        let id = w.units.spawn(38, 38, 0, 0, 300) as usize;
-        w.units.y[id] = 44;
+        let id = w.units.spawn(190, 190, 0, 0, 300) as usize;
+        w.units.y[id] = 220;
         w.units.refresh_live();
         {
             let g = w.ground().expect("земля");
-            let (cx, cz) = (38 / g.nav.step(), 38 / g.nav.step());
+            let (cx, cz) = (190 / g.nav.step(), 190 / g.nav.step());
             let ls = g.nav.levels_at(cx, cz);
             assert!(ls.len() >= 2, "у клетки один уровень: {ls:?}");
-            assert!(ls.contains(&44), "верха шляпки нет среди уровней: {ls:?}");
+            assert!(ls.contains(&220), "верха шляпки нет среди уровней: {ls:?}");
         }
         for _ in 0..20 {
             w.tick();
         }
-        assert_eq!(w.units.y[id], 44, "юнит провалился под шляпку");
+        assert_eq!(w.units.y[id], 220, "юнит провалился под шляпку");
     }
 
     /// **Юнит едет вниз вместе с куском и получает урон по высоте
@@ -629,22 +645,22 @@ mod tests {
     /// жила в сцене, а не в движке.
     #[test]
     fn a_unit_rides_the_falling_piece_and_is_hurt_by_the_drop() {
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Mushroom));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Mushroom));
         let mut w = World::new(1, 4, test_tuning());
         w.attach_ground(Ground::new(vw, &test_tuning()));
-        let id = w.units.spawn(32, 32, 0, 0, 300) as usize;
+        let id = w.units.spawn(160, 160, 0, 0, 300) as usize;
         w.units.refresh_live();
         // Первый тик ставит юнита на пол своей клетки — верх шляпки.
         w.tick();
         let y0 = w.units.y[id];
-        assert_eq!(y0, 44, "юнит встал не на шляпку: y = {y0}");
+        assert_eq!(y0, 220, "юнит встал не на шляпку: y = {y0}");
 
-        // Подрезаем ножку: двенадцать слоёв за тик.
+        // Подрезаем ножку: шесть метров ножки за тик.
         {
             let g = w.ground.as_mut().expect("земля");
-            for y in 9..21 {
-                for z in 29..36 {
-                    for x in 29..36 {
+            for y in 45..105 {
+                for z in 145..180 {
+                    for x in 145..180 {
                         if g.world.solid(x, y, z) {
                             g.world.queue_dig(x, y, z);
                         }
@@ -654,13 +670,13 @@ mod tests {
         }
         let mut fell = 0u32;
         let mut damage = 0u64;
-        for _ in 0..40 {
+        for _ in 0..200 {
             w.tick();
             let g = w.ground().expect("земля");
             fell = fell.max(g.stats.max_fall);
             damage += g.stats.fall_damage;
         }
-        assert!(fell >= 10, "кусок почти не падал: {fell}");
+        assert!(fell >= 50, "кусок почти не падал: {fell}");
         assert!(
             w.units.y[id] < y0,
             "юнит не поехал вниз: {} против {y0}",
@@ -687,9 +703,9 @@ mod tests {
         };
         {
             let g = w.ground.as_mut().expect("земля");
-            for y in TOP - 6..TOP {
-                for z in 16..18 {
-                    for x in 16..18 {
+            for y in TOP - 30..TOP {
+                for z in 80..90 {
+                    for x in 80..90 {
                         g.world.queue_dig(x, y, z);
                     }
                 }
@@ -698,7 +714,7 @@ mod tests {
         w.tick();
         let g = w.ground().expect("земля");
         assert!(g.stats.edits > 0, "ни одной правки не применено");
-        assert!(!g.world.solid(16, TOP - 1, 16), "дыры в мире нет");
+        assert!(!g.world.solid(80, TOP - 1, 80), "дыры в мире нет");
         assert!(g.stats.topo_dirty > 0, "связность правок не увидела");
         // Нав-клетка над ямой опустила пол в этом же тике.
         assert!(
@@ -716,14 +732,14 @@ mod tests {
         let mut w = world_with_ground();
         {
             let g = w.ground.as_mut().expect("земля");
-            for x in 4..12 {
-                g.world.queue_dig(x, TOP - 1, 4);
+            for x in 20..60 {
+                g.world.queue_dig(x, TOP - 1, 20);
             }
         }
         w.tick();
         let g = w.ground().expect("земля");
         assert_eq!(g.edits().len(), g.stats.edits, "поток короче применённого");
-        assert_eq!(g.edits().len(), 8);
+        assert_eq!(g.edits().len(), 40);
     }
 
     /// Земля входит в хеш тика: расхождение по правкам обязано быть
@@ -734,7 +750,7 @@ mod tests {
             let mut w = world_with_ground();
             if dig {
                 let g = w.ground.as_mut().expect("земля");
-                g.world.queue_dig(20, TOP - 1, 20);
+                g.world.queue_dig(100, TOP - 1, 100);
             }
             w.tick()
         };

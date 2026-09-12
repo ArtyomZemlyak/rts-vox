@@ -131,6 +131,18 @@ impl World {
     ///
     /// Построение — единственное место, где генератор обходится целиком;
     /// дальше мир живёт правками.
+    ///
+    /// **Колонкой, а не вокселем** (ADR-114, ADR-227). Повоксельный
+    /// обход спрашивал у генератора высоту поверхности и четыре узла
+    /// решётки шума заново на каждый воксель; колонка считает их раз
+    /// на столб. Замерено на 512×256×512: 14.3 с против 2.5 с.
+    /// Значение бит в бит то же — на этом стоит
+    /// `column_matches_per_voxel_material` в `worldgen`.
+    ///
+    /// Срез `z` собирается в отдельном буфере и переливается в объём
+    /// целыми строками. Писать прямо в `bits` нельзя по цене: у строк
+    /// одного столба шаг `nz * wx` слов, то есть промах кэша на каждый
+    /// воксель высоты.
     pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator + Send + Sync>) -> World {
         let (cx, cy, cz) = (
             nx.div_ceil(CS as u32),
@@ -139,14 +151,23 @@ impl World {
         );
         let wx = nx.div_ceil(64);
         let mut bits = vec![0u64; (wx * ny * nz) as usize];
+        let mut col = vec![AIR; ny as usize];
+        let mut slab = vec![0u64; (wx * ny) as usize];
         for z in 0..nz {
-            for y in 0..ny {
-                let row = ((y * nz + z) * wx) as usize;
-                for x in 0..nx {
-                    if g.material(x, y, z) != AIR {
-                        bits[row + (x >> 6) as usize] |= 1u64 << (x & 63);
+            slab.iter_mut().for_each(|w| *w = 0);
+            for x in 0..nx {
+                g.column(x, z, 0, &mut col);
+                let (w, m) = ((x >> 6) as usize, 1u64 << (x & 63));
+                for (y, mat) in col.iter().enumerate() {
+                    if *mat != AIR {
+                        slab[y * wx as usize + w] |= m;
                     }
                 }
+            }
+            for y in 0..ny {
+                let dst = ((y * nz + z) * wx) as usize;
+                let src = (y * wx) as usize;
+                bits[dst..dst + wx as usize].copy_from_slice(&slab[src..src + wx as usize]);
             }
         }
         World {
@@ -177,6 +198,28 @@ impl World {
     #[inline]
     pub fn inside(&self, x: u32, y: u32, z: u32) -> bool {
         x < self.nx && y < self.ny && z < self.nz
+    }
+
+    /// Лежит ли воксель на **рамке мира**: дно и четыре боковые стенки
+    /// (ADR-034). Рамка не копается: правка в неё отбрасывается
+    /// на постановке в очередь, как правка за пределы мира.
+    ///
+    /// Потолка сверху у рамки нет — там воздух, и снять его нечем.
+    ///
+    /// Это не служебный материал, а правило очереди: материал рамки
+    /// остаётся тем, что дал генератор, и в хеш мира она не входит
+    /// отдельно. Заземление в каскаде (`collapse`) идёт по дну мира,
+    /// и рамка гарантирует, что дно на месте.
+    ///
+    /// Нашлось на ребре 0.1 м (ADR-227): шар копателя радиусом в метр
+    /// стал десятью вокселями и, дойдя до дна, снимал у мира диск
+    /// в два метра. Колонки под ним оставались без пола, нав-клетка —
+    /// без единого уровня, и юнит на дне шахты висел в воздухе,
+    /// не падая и не стоя. На ребре 0.5 м тот же шар в две клетки
+    /// снимал у дна один воксель, и соседние столбы клетки держали пол.
+    #[inline]
+    pub fn on_frame(&self, x: u32, y: u32, z: u32) -> bool {
+        y == 0 || x == 0 || z == 0 || x + 1 == self.nx || z + 1 == self.nz
     }
 
     #[inline]
@@ -293,8 +336,12 @@ impl World {
     /// Поставить правку в очередь. Потолок применяется при дренаже,
     /// а не здесь: очередь не имеет длины по построению — иначе приказ
     /// молча терялся бы.
+    ///
+    /// Правка за пределы мира и правка в рамку (ADR-034) отбрасываются
+    /// здесь же: они не заняли бы ни воксела, а очередь и просмотр
+    /// при дренаже заняли бы.
     pub fn queue_edit(&mut self, e: Edit) {
-        if self.inside(e.x, e.y, e.z) {
+        if self.inside(e.x, e.y, e.z) && !self.on_frame(e.x, e.y, e.z) {
             self.queue.push_back(e);
         }
     }
@@ -713,8 +760,10 @@ mod tests {
     #[test]
     fn cap_is_exact_and_the_rest_stays_queued() {
         let mut w = World::new(64, 48, 64, 100, Box::new(Layers { h: 30 }));
+        // От единицы: столбец `x = 0` и ряд `z = 0` — рамка мира,
+        // и правка в них в очередь не попадает (ADR-034).
         for i in 0..250u32 {
-            w.queue_dig(i % 60, 5, i / 60);
+            w.queue_dig(1 + i % 60, 5, 1 + i / 60);
         }
         let st = w.flush();
         assert_eq!(st.applied, 100);
@@ -780,13 +829,14 @@ mod tests {
     #[test]
     fn drain_order_is_fifo() {
         let mut w = World::new(64, 48, 64, 3, Box::new(Layers { h: 30 }));
-        for x in 0..9u32 {
-            w.queue_dig(x, 5, 0);
+        // Ряд `z = 1`, а не нулевой: нулевой — рамка мира (ADR-034).
+        for x in 1..10u32 {
+            w.queue_dig(x, 5, 1);
         }
         for round in 0..3 {
             w.flush();
             let got: Vec<u32> = w.edits().iter().map(|e| e.x).collect();
-            assert_eq!(got, vec![round * 3, round * 3 + 1, round * 3 + 2]);
+            assert_eq!(got, vec![round * 3 + 1, round * 3 + 2, round * 3 + 3]);
         }
     }
 
@@ -804,5 +854,39 @@ mod tests {
         w.flush();
         assert_eq!(w.touched_chunks(), 1);
         assert_eq!(w.diff_bytes(), one);
+    }
+
+    /// **Рамка мира не копается** (ADR-034): дно и четыре стенки
+    /// отбрасывают правку на постановке, а воксель рядом с рамкой
+    /// снимается как любой другой.
+    ///
+    /// Проверяется по миру, а не по очереди: правка, попавшая
+    /// в очередь и отброшенная дренажем, дала бы тот же мир, но
+    /// заняла бы просмотр — и то, и другое видно только так.
+    #[test]
+    fn the_frame_does_not_dig() {
+        let mut w = world();
+        let (nx, nz) = (w.nx, w.nz);
+        let frame = [(5, 0, 5), (0, 5, 5), (5, 5, 0), (nx - 1, 5, 5), (5, 5, nz - 1)];
+        for &(x, y, z) in &frame {
+            assert!(w.on_frame(x, y, z));
+            assert!(w.solid(x, y, z), "сцена: ({x}, {y}, {z}) не порода");
+            w.queue_dig(x, y, z);
+        }
+        assert_eq!(w.queued(), 0, "правки в рамку попали в очередь");
+        w.flush();
+        for &(x, y, z) in &frame {
+            assert!(w.solid(x, y, z), "рамка снята в ({x}, {y}, {z})");
+        }
+        // Соседний с рамкой воксель — обычный.
+        let inner = [(5, 1, 5), (1, 5, 5), (5, 5, 1), (nx - 2, 5, 5), (5, 5, nz - 2)];
+        for &(x, y, z) in &inner {
+            assert!(!w.on_frame(x, y, z));
+            w.queue_dig(x, y, z);
+        }
+        w.flush();
+        for &(x, y, z) in &inner {
+            assert!(!w.solid(x, y, z), "воксель у рамки не снялся в ({x}, {y}, {z})");
+        }
     }
 }

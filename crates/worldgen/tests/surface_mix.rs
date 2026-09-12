@@ -9,19 +9,27 @@
 use worldgen::mat::{self, Mat};
 use worldgen::{material, soil_depth, surface_height, Params};
 
-/// Карта показа: её и смотрит владелец.
+/// Карта показа: её и смотрит владелец. 192 м в стороне при ребре
+/// воксела 0.1 м — те же метры, что были при 0.5 м (ADR-227).
 fn show_map() -> Params {
-    Params { relief: 30, ..Params::sized(384, 192, 384) }
+    Params { relief: 150, ..Params::sized(1920, 960, 1920) }
 }
+
+/// Шаг выборки: **метр**, а не воксель.
+///
+/// Доли материалов — свойство карты, а не сетки, и шаг обязан быть
+/// физическим: иначе мельчание воксела вчетверо удорожает проверку,
+/// ничего к ней не добавляя.
+const STEP: usize = 10;
 
 /// Доли материалов на самой поверхности, в процентах по номеру.
 fn surface_mix(p: &Params, seed: u64) -> ([f64; 64], u32) {
     let mut hist = [0u32; 64];
     let mut n = 0u32;
-    // Через воксель: шаг вдвое мельче ничего не меняет в долях,
+    // Через метр: шаг вдвое мельче ничего не меняет в долях,
     // а прогон вчетверо дольше.
-    for z in (0..p.nz).step_by(2) {
-        for x in (0..p.nx).step_by(2) {
+    for z in (0..p.nz).step_by(STEP) {
+        for x in (0..p.nx).step_by(STEP) {
             let h = surface_height(p, seed, x, z);
             let m: Mat = material(p, seed, x, h - 1, z);
             hist[(m as usize) & 63] += 1;
@@ -44,6 +52,11 @@ fn no_single_material_owns_the_surface() {
     let p = show_map();
     let (mix, n) = surface_mix(&p, 42);
     assert!(n > 30_000, "проверка ничего не проверила: клеток {n}");
+    println!(
+        "карта показа: почва {:.1}%, порода {:.1}%",
+        mix[mat::SOIL as usize],
+        mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize]
+    );
     let mut top = 0usize;
     for (i, v) in mix.iter().enumerate() {
         if *v > mix[top] {
@@ -90,13 +103,17 @@ fn rock_and_ore_reach_the_surface() {
 fn ridges_lose_their_soil() {
     let p = show_map();
     let (mut high, mut low) = ((0u64, 0u32), (0u64, 0u32));
-    for z in (0..p.nz).step_by(2) {
-        for x in (0..p.nx).step_by(2) {
+    // Семь с половиной метров над базой — гребень, метр — равнина.
+    // Это половина размаха и его пятнадцатая: пороги названы в метрах,
+    // а не в вокселях, и потому впятеро больше прежних (ADR-227).
+    let (ridge, plain) = (75u32, 10u32);
+    for z in (0..p.nz).step_by(STEP) {
+        for x in (0..p.nx).step_by(STEP) {
             let h = surface_height(&p, 42, x, z);
             let d = soil_depth(&p, 42, x, z) as u64;
-            if h >= p.base_height + 15 {
+            if h >= p.base_height + ridge {
                 high = (high.0 + d, high.1 + 1);
-            } else if h <= p.base_height + 2 {
+            } else if h <= p.base_height + plain {
                 // **Равнина, а не лощина.** С маской равнин (ADR-226)
                 // большая часть карты лежит на базовой высоте, а ниже
                 // неё почти ничего нет: сравнивать гребень надо
@@ -118,14 +135,24 @@ fn ridges_lose_their_soil() {
 /// декларирует).
 #[test]
 fn the_reference_map_is_mixed_too() {
-    let p = Params::sized(256, 128, 256);
+    // Тот же мир, что у `sim_core::ref_params`: 64 м в стороне
+    // (`REF_SIDE` = 640, ADR-227). Зависеть от `sim-core` здесь
+    // нельзя — слои идут в обратную сторону, — поэтому число
+    // повторено, а не взято.
+    let p = Params::sized(640, 320, 640);
     let (mix, _) = surface_mix(&p, 42);
     let soil = mix[mat::SOIL as usize];
     let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
     println!("эталон: почва {soil:.1}%, порода {rock:.1}%");
     // Порог здесь мягче, чем у карты показа: эталонная карта меньше
     // и ровнее — размах рельефа считается от высоты мира, а она вдвое
-    // ниже, — поэтому почвы на ней всегда больше (ADR-221).
-    assert!(soil <= 70.0, "почвы {soil:.1}% — эталонная карта одного цвета");
-    assert!(rock >= 25.0, "голой породы {rock:.1}%");
+    // ниже, — поэтому почвы на ней всегда больше (ADR-221). Карта
+    // в 64 м к тому же короче шага маски равнин (160 м, ADR-226)
+    // и шага крупной октавы (80 м): она лежит на склоне одного холма,
+    // и превышения, снимающего почву, на ней мало. Замер: почва 77.7%,
+    // порода 21.1%; на карте в 128 м было 65.4% и 33.2% (ADR-227).
+    // Пороги сняты с этого замера с тем же запасом, что у карты показа,
+    // и ловят возврат к одному цвету, а не караулят текущее значение.
+    assert!(soil <= 85.0, "почвы {soil:.1}% — эталонная карта одного цвета");
+    assert!(rock >= 15.0, "голой породы {rock:.1}%");
 }
