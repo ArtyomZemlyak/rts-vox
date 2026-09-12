@@ -7,7 +7,10 @@ rust-version.workspace = true
 # Bevy живёт только здесь (`docs/02-architecture.md`) и пинится точно:
 # не пин — это молчаливое обновление, которое сдвинет всё разом.
 [dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["3d"] }
+# `bevy_solari` — трассировка лучей в реальном времени. Включена как
+# **отдельный уровень качества**, а не как основа: ей нужна аппаратная
+# трассировка, и картинка обязана быть хорошей без неё (ADR-222).
+bevy = { version = "=0.19.1", default-features = false, features = ["3d", "bevy_solari"] }
 # Мешинг тоже рендер-слой (`docs/02-architecture.md`), мир и генератор
 # нужны, чтобы было что показать.
 meshing = { path = "../meshing" }

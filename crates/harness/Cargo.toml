@@ -6,5 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 fx = { path = "../fx" }
+phys = { path = "../phys" }
 meshing = { path = "../meshing" }
 voxel = { path = "../voxel" }

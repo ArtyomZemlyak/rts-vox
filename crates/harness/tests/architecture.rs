@@ -548,8 +548,8 @@ fn the_simulation_never_reads_the_clock() {
 #[test]
 fn every_crate_is_one_the_architecture_declares() {
     let declared = [
-        "fx", "voxel", "worldgen", "nav", "modding", "sim-core", "sim-cli", "meshing", "gpu",
-        "render", "demo", "harness",
+        "fx", "voxel", "worldgen", "nav", "modding", "phys", "sim-core", "sim-cli", "meshing",
+        "gpu", "render", "demo", "harness",
     ];
     for name in all_manifests().keys() {
         assert!(

@@ -1,0 +1,14 @@
+[package]
+name = "phys"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+# Физика — это арифметика, и арифметика у нас одна: Q32.32 из `fx`.
+# Ничего больше ей не нужно: ни мира, ни юнитов, ни данных. Крейт
+# намеренно не знает, что такое танк.
+[dependencies]
+fx = { path = "../fx" }
+
+[lib]
+path = "src/lib.rs"
