@@ -67,6 +67,10 @@ impl Ground {
         let topo = TopoLayer::new(&world);
         let nav = NavLayer::new(&world, t.unit_height, t.nav_cell, t.max_step);
         let mut world = world;
+        // Оба потолка дренажа — из данных, а не из аргумента
+        // `voxel::World::new`: тот остаётся у сцен без земли,
+        // а игра и гейт берут число тика отсюда (ADR-227).
+        world.max_edits_per_tick = t.max_voxel_edits_per_tick as usize;
         world.max_materialize_per_tick = t.max_materialize_per_tick as usize;
         Ground {
             world,
@@ -305,8 +309,8 @@ mod tests {
         let hurt = hp0 - w.units.voxels[id];
         assert_eq!(
             hurt as u32,
-            (DEPTH - 1) * w.tuning.fall_damage_per_voxel as u32,
-            "урон не по высоте падения за вычетом бесплатного воксела"
+            (DEPTH - w.tuning.max_step) * w.tuning.fall_damage_per_voxel as u32,
+            "урон не по высоте падения за вычетом бесплатного уступа"
         );
         let g = w.ground().expect("земля");
         assert_eq!(g.stats.max_fall, DEPTH, "падение не попало в отчёт земли");
@@ -425,7 +429,7 @@ mod tests {
         let fallen = (FROM - (SHELF as i32 + 1)) as u32;
         assert_eq!(
             (hp0 - w.units.voxels[id]) as u32,
-            (fallen - 1) * w.tuning.fall_damage_per_voxel as u32,
+            (fallen - w.tuning.max_step) * w.tuning.fall_damage_per_voxel as u32,
             "урон не по высоте до полки: падение засчитано не туда"
         );
     }

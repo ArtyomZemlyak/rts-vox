@@ -94,50 +94,10 @@ fn main() {
     }
     println!();
 
-    // --- ВРЕМЕННО: цена колонки генератора и цена повоксельного пути
-    {
-        let mut buf = vec![mat::AIR; p.ny as usize];
-        let t = Instant::now();
-        let mut acc = 0u64;
-        for z in 0..p.nz {
-            for x in 0..p.nx {
-                worldgen::column(&p, seed, x, z, 0, &mut buf);
-                acc += buf[0] as u64;
-            }
-        }
-        println!("ВРЕМЕННО колонки {:.0} мс (acc {acc})", t.elapsed().as_secs_f64() * 1e3);
-        let g: Box<dyn voxel::Generator + Send + Sync> = Box::new(Terrain { params: p, seed });
-        let t = Instant::now();
-        let mut acc2 = 0u64;
-        for z in 0..p.nz {
-            for x in 0..p.nx {
-                g.column(x, z, 0, &mut buf);
-                acc2 += buf[0] as u64;
-            }
-        }
-        println!("ВРЕМЕННО колонки через trait {:.0} мс (acc {acc2})", t.elapsed().as_secs_f64() * 1e3);
-    }
-
     // --- мир и навигация
     let t = Instant::now();
     let w = World::new(p.nx, p.ny, p.nz, 1 << 16, Box::new(Terrain { params: p, seed }));
     let gen = t.elapsed().as_secs_f64() * 1e3;
-    {
-        let t = Instant::now();
-        let topo = voxel::topo::layer::TopoLayer::new(&w);
-        let topo_ms = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        let col = voxel::collapse::CollapseLayer::new(&w);
-        let col_ms = t.elapsed().as_secs_f64() * 1e3;
-        let t = Instant::now();
-        let tu2 = demo::tuning();
-        let nv = NavLayer::new(&w, tu2.unit_height, tu2.nav_cell, tu2.max_step);
-        let nav2 = t.elapsed().as_secs_f64() * 1e3;
-        println!("ВРЕМЕННО: topo {topo_ms:.0} мс, каскад {col_ms:.0} мс, нав {nav2:.0} мс (chunks {} {})",
-            std::hint::black_box(&topo) as *const _ as usize & 1,
-            std::hint::black_box(&col) as *const _ as usize & 1);
-        std::hint::black_box(&nv);
-    }
     let tu = demo::tuning();
     let t = Instant::now();
     let nav = NavLayer::new(&w, tu.unit_height, tu.nav_cell, tu.max_step);
