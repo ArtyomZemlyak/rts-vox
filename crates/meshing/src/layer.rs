@@ -332,7 +332,24 @@ impl MeshLayer {
     }
 
     /// Применить правки тика. Возвращает число грязных чанков.
+    ///
+    /// Нерезидентный грязный чанк строится с нуля и остаётся жить.
+    /// Если строить надо не всё — [`MeshLayer::apply_where`].
     pub fn apply(&mut self, w: &World, edits: &[Edit]) -> usize {
+        self.apply_where(w, edits, |_| true)
+    }
+
+    /// То же, но нерезидентный грязный чанк **строится, только если
+    /// `keep` разрешает**; иначе он остаётся в списке грязных
+    /// и не стоит ничего.
+    ///
+    /// Копают и за кольцом (ADR-228): карта в километр, а окно держит
+    /// сто метров. Без этого каждый задетый за кольцом чанк собирался
+    /// бы с нуля — объём, мешер на 726 КиБ, полная пересборка —
+    /// и тут же забывался, и так каждый тик заново: на километре
+    /// с двумя дюжинами копателей это три десятка сборок за кадр
+    /// впустую.
+    pub fn apply_where(&mut self, w: &World, edits: &[Edit], keep: impl Fn(usize) -> bool) -> usize {
         self.scatter(edits);
         for k in 0..self.dirty.len() {
             let i = self.dirty[k] as usize;
@@ -342,6 +359,9 @@ impl MeshLayer {
                 (i as u32) / (self.nx * self.ny),
             );
             if self.chunks[i].is_none() {
+                if !keep(i) {
+                    continue;
+                }
                 // Первое касание: собрать объём и смешить целиком.
                 let mut bits: BitVolume = [0u64; CSP * CSP];
                 fill_bits(w, cx, cy, cz, &mut bits);
@@ -709,6 +729,36 @@ mod tests {
         assert_eq!(before, sorted(layer.scratch_quads(&w, i).to_vec()));
         layer.apply(&w, &edits);
         assert_eq!(before, sorted(layer.quads(i)), "после возврата геометрия другая");
+    }
+
+    /// **Правка за кольцом ничего не строит.** Чанк попадает в грязные,
+    /// но мешера у него не появляется — иначе на километре каждый
+    /// задетый за кольцом чанк собирался бы и забывался каждый тик.
+    /// С разрешением тот же чанк строится и даёт ту же геометрию,
+    /// что разовая сборка из мира.
+    #[test]
+    fn an_edit_outside_the_kept_set_builds_nothing() {
+        let mut w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Steps));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let edits = dig(
+            &mut w,
+            (14..20u32).flat_map(|y| {
+                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
+            }),
+        );
+        let n = layer.apply_where(&w, &edits, |_| false);
+        assert!(n > 0, "правки никого не запачкали");
+        assert_eq!(layer.live_chunks(), 0, "чанк за кольцом построился");
+        assert_eq!(layer.state_bytes(), 0, "чанк за кольцом стоит память");
+        assert!(!layer.dirty().is_empty(), "грязных нет — рендеру нечего сбрасывать");
+        for &i in layer.dirty() {
+            assert!(!layer.is_live(i as usize), "чанк {i} осел в слое");
+        }
+        assert_eq!(layer.apply_where(&w, &edits, |_| true), n);
+        assert_eq!(layer.live_chunks(), n, "с разрешением построились не все");
+        let i = layer.dirty()[0] as usize;
+        assert!(!layer.quads(i).is_empty(), "построенный чанк пуст");
+        assert_eq!(sorted(layer.quads(i)), sorted(layer.scratch_quads(&w, i).to_vec()));
     }
 
     /// **Нетронутый чанк квадов не отдаёт.** Слой ленивый, и выдумать

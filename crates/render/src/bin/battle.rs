@@ -268,6 +268,14 @@ const BUILT: u8 = 4;
 /// и все четыре меняются вместе.
 #[derive(Resource, Default)]
 struct Prof {
+    /// Тики симуляции за кадр, миллисекунды.
+    tick: Vec<f64>,
+    /// Применение правок тика к слою мешинга, миллисекунды: развод
+    /// по чанкам и сборка тех, что окно держит.
+    apply: Vec<f64>,
+    /// Счётчики фаз симуляции на момент прошлого отчёта — чтобы
+    /// печатать разницу, а не накопленное с начала.
+    phase_ns: Vec<u64>,
     /// Грязных чанков за кадр.
     dirty: Vec<f64>,
     /// Пересборка квадов мешером, миллисекунды.
@@ -1526,9 +1534,11 @@ fn step(
     shots: Query<Entity, With<ShotMark>>,
     mut seen: ResMut<Seen>,
 ) {
+    let t = Instant::now();
     for _ in 0..sim.speed {
         sim.r.tick();
     }
+    prof.tick.push(t.elapsed().as_secs_f64() * 1e3);
 
     // Рельеф: только грязные чанки. Список берётся у мешинга, а не
     // угадывается по правкам.
@@ -1540,7 +1550,13 @@ fn step(
         // в земле. Копия за тик — сотни правок, это дешевле, чем
         // расщеплять `Ground`.
         let edits: Vec<voxel::Edit> = g.edits().to_vec();
-        mesh.apply(&g.world, &edits);
+        // Нерезидентный чанк строится, только если окно его держит:
+        // копают и за кольцом, а там сборка ушла бы в никуда — чанк
+        // забылся бы в этом же кадре и собрался бы заново в следующем
+        // (ADR-228).
+        let t = Instant::now();
+        mesh.apply_where(&g.world, &edits, |i| chunks.contains_key(&(i as u32)));
+        prof.apply.push(t.elapsed().as_secs_f64() * 1e3);
         let dirty: Vec<usize> = mesh.dirty().iter().map(|&i| i as usize).collect();
         let w = &g.world;
         prof.dirty.push(dirty.len() as f64);
@@ -2280,7 +2296,7 @@ fn snap(
     time: Res<Time>,
     sim: Res<Sim>,
     ring: Res<Ring>,
-    prof: Res<Prof>,
+    mut prof: ResMut<Prof>,
     mut shot: ResMut<Shot>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -2316,18 +2332,44 @@ fn snap(
             v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
             println!(
                 "кадры {}..{}: {:.2} / {:.2} / {:.2} мс (медиана/99-й/худший); \
-грязных {:.0}, квады {:.2}, раскраска {:.2}, отдача {:.2} мс; тик {}",
+симуляция {:.2}, применение {:.2}; грязных {:.0}, квады {:.2}, раскраска {:.2}, \
+отдача {:.2} мс; тик {}",
                 shot.seen - 119,
                 shot.seen,
                 v[60],
                 v[118],
                 v[119],
+                Prof::med(&prof.tick, 120),
+                Prof::med(&prof.apply, 120),
                 Prof::med(&prof.dirty, 120),
                 Prof::med(&prof.quads, 120),
                 Prof::med(&prof.paint, 120),
                 Prof::med(&prof.upload, 120),
                 sim.r.world.tick
             );
+            // Фазы симуляции — по её собственным счётчикам, разницей
+            // с прошлого отчёта. Тик на километре рос со временем,
+            // и без разбивки нельзя было сказать, где (ADR-228).
+            {
+                let now: Vec<u64> = sim_core::PHASES
+                    .iter()
+                    .map(|&p| sim.r.world.phase_ns_of(p))
+                    .collect();
+                if prof.phase_ns.len() == now.len() {
+                    let mut d: Vec<(f64, &str)> = now
+                        .iter()
+                        .zip(prof.phase_ns.iter())
+                        .zip(sim_core::PHASES.iter())
+                        .map(|((a, b), p)| (a.saturating_sub(*b) as f64 / 120.0 / 1e6, p.name()))
+                        .collect();
+                    let total: f64 = d.iter().map(|x| x.0).sum();
+                    d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
+                    let top: Vec<String> =
+                        d.iter().take(5).map(|(t, n)| format!("{n} {t:.2}")).collect();
+                    println!("  фазы тика за кадр: всего {total:.2} мс; {}", top.join(", "));
+                }
+                prof.phase_ns = now;
+            }
             // Кольцо отчитывается **вместе** с кадром: очередь, которая
             // не пустеет, и потолок, который срабатывает каждый кадр, —
             // это не предохранитель, а постоянное ухудшение (ADR-114,
@@ -2363,13 +2405,18 @@ fn snap(
             // число этого не покажет.
             let g = sim.r.world.ground().expect("земля");
             let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
+            // Граф каскада — рядом: на километре именно он рос
+            // с каждым тиком копки и тянул за собой фазу разрушения
+            // (ADR-228).
             println!(
                 "  память: занятость мира {:.0} МиБ, правки {:.1} МиБ, \
-состояние мешинга {:.1} МиБ на {} чанках",
+состояние мешинга {:.1} МиБ на {} чанках; граф каскада {} чанков, {:.1} МиБ",
                 mib(g.world.bit_bytes()),
                 mib(g.world.diff_bytes()),
                 mib(sim.mesh.state_bytes()),
-                sim.mesh.live_chunks()
+                sim.mesh.live_chunks(),
+                g.collapse.known_chunks(),
+                mib(g.collapse.graph_bytes())
             );
         }
     }
