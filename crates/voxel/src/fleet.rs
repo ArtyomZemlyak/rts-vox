@@ -219,10 +219,15 @@ mod tests {
     fn damage_does_not_leak_through_the_template() {
         let (mut f, ids) = fleet(4);
         let mut b = CoreBufs::new();
-        // Сносим ядро первому.
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..24 {
+        // Сносим ядро первому. Габарит берётся у самого тома:
+        // сетка тел менялась, и литералы пережили бы её молча.
+        let (nx, ny, nz) = {
+            let v = &f.body(ids[0]).vol;
+            (v.nx as usize, v.ny as usize, v.nz as usize)
+        };
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
                     let body = f.body(ids[0]);
                     if body.vol.get(x, y, z) && body.part_at(x, y, z) == Part::Core {
                         f.body_mut(ids[0]).remove(x, y, z);

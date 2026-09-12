@@ -86,9 +86,12 @@ const MOVE_COLOUR: Color = Color::srgb(0.35, 1.0, 0.45);
 const ATTACK_COLOUR: Color = Color::srgb(1.0, 0.35, 0.3);
 const DIG_COLOUR: Color = Color::srgb(1.0, 0.8, 0.25);
 
-/// Воксель тела к вокселю мира: ребро воксела мира 0.5 м, воксела тела
-/// 0.25 м (ADR-094).
-const UNIT_SCALE: f32 = 0.5;
+/// Ребро воксела **мира** в миллиметрах — канон (ADR-094).
+///
+/// Масштаб тела выводится из его собственного ребра (`UnitBody::mm`):
+/// ребро у машин разное (ADR-219), и постоянная растянула бы машину
+/// с мелкой сеткой.
+const WORLD_MM: f32 = 500.0;
 
 /// Симуляция и всё, что нужно, чтобы её показать.
 #[derive(Resource)]
@@ -390,7 +393,7 @@ fn setup(
         render::model::body_to_mesh(
             body,
             tint,
-            UNIT_SCALE,
+            body.mm as f32 / WORLD_MM,
             layers,
             render::model::BEVEL,
             &mut ubufs,
