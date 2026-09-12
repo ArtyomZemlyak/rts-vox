@@ -79,6 +79,32 @@ impl Blob {
         self.i64(x.raw());
     }
 
+    /// Число переменной длины, LEB128: по семь бит в байте, старший
+    /// бит — «продолжение».
+    ///
+    /// Не нарушает правила «явные размеры полей»: длина задаётся
+    /// самим числом по общеизвестной раскладке, а не тем, как сегодня
+    /// объявлено поле. Нужна очереди правок мира — она бывает
+    /// в миллионы записей, и три четверти их байт там нули (ADR-229).
+    pub fn uvar(&mut self, mut x: u64) {
+        loop {
+            let b = (x & 0x7f) as u8;
+            x >>= 7;
+            if x == 0 {
+                self.v.push(b);
+                return;
+            }
+            self.v.push(b | 0x80);
+        }
+    }
+
+    /// Знаковое переменной длины: зигзаг, потом LEB128. Зигзаг нужен,
+    /// потому что разности идут в обе стороны, а дополнительный код
+    /// делает −1 самым длинным числом из возможных.
+    pub fn ivar(&mut self, x: i64) {
+        self.uvar(((x << 1) ^ (x >> 63)) as u64);
+    }
+
     pub fn u8s(&mut self, s: &[u8]) {
         self.u32(s.len() as u32);
         self.v.extend_from_slice(s);
@@ -220,6 +246,26 @@ impl<'a> Scan<'a> {
         Fx(self.i64())
     }
 
+    /// Число переменной длины. Больше десяти байт подряд — порча:
+    /// в `u64` семибитных групп ровно десять.
+    pub fn uvar(&mut self) -> u64 {
+        let mut x = 0u64;
+        for k in 0..10u32 {
+            let b = self.u8();
+            x |= u64::from(b & 0x7f) << (k * 7);
+            if b & 0x80 == 0 {
+                return x;
+            }
+        }
+        self.bad = true;
+        0
+    }
+
+    pub fn ivar(&mut self) -> i64 {
+        let u = self.uvar();
+        ((u >> 1) as i64) ^ -((u & 1) as i64)
+    }
+
     /// Длина списка. Заведомо невозможная длина — это порча файла,
     /// а не запрос на выделение гигабайта: она отсекается по остатку
     /// буфера, потому что короче байта элемента не бывает.
@@ -356,5 +402,45 @@ mod tests {
         let mut b = Blob::new();
         b.bools(&vec![true; 1000]);
         assert_eq!(b.len(), 4 + 125);
+    }
+
+    /// Числа переменной длины читаются обратно точно, включая края.
+    #[test]
+    fn varints_round_trip_including_the_edges() {
+        let us = [0u64, 1, 127, 128, 16383, 16384, u32::MAX as u64, u64::MAX];
+        let is = [0i64, -1, 1, -64, 63, i32::MIN as i64, i64::MIN, i64::MAX];
+        let mut b = Blob::new();
+        for &x in &us {
+            b.uvar(x);
+        }
+        for &x in &is {
+            b.ivar(x);
+        }
+        let mut s = Scan::new(&b.v);
+        for &x in &us {
+            assert_eq!(s.uvar(), x);
+        }
+        for &x in &is {
+            assert_eq!(s.ivar(), x);
+        }
+        assert!(s.ok());
+        assert_eq!(s.left(), 0);
+    }
+
+    /// Маленькое число — один байт. Ради этого всё и затевалось.
+    #[test]
+    fn a_small_varint_takes_one_byte() {
+        let mut b = Blob::new();
+        b.uvar(100);
+        b.ivar(-5);
+        assert_eq!(b.len(), 2);
+    }
+
+    /// Бесконечное «продолжение» — порча, а не вечный цикл.
+    #[test]
+    fn an_endless_varint_is_bad() {
+        let mut s = Scan::new(&[0x80u8; 32]);
+        let _ = s.uvar();
+        assert!(!s.ok());
     }
 }

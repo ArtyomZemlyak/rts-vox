@@ -495,8 +495,9 @@ impl World {
                 b.u16(n);
             }
         }
-        save_edits(b, self.queue.iter().copied());
-        save_edits(b, self.applied.iter().copied());
+        let q: Vec<Edit> = self.queue.iter().copied().collect();
+        save_edits(b, self.nx, self.nz, &q);
+        save_edits(b, self.nx, self.nz, &self.applied);
     }
 
     /// Прочитать слой изменений в **уже построенный из генератора**
@@ -542,8 +543,8 @@ impl World {
             self.chunks[ci] = Some(Box::new(p));
             self.refresh_bits_of(ci);
         }
-        self.queue = load_edits(s).into_iter().collect();
-        self.applied = load_edits(s);
+        self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
+        self.applied = load_edits(s, self.nx, self.nz);
         s.ok()
     }
 
@@ -582,27 +583,169 @@ impl World {
     }
 }
 
-/// Список правок: длина, потом записи по одиннадцать байт.
-fn save_edits(b: &mut fx::blob::Blob, it: impl ExactSizeIterator<Item = Edit>) {
-    b.u32(it.len() as u32);
-    for e in it {
-        b.u32(e.x);
-        b.u32(e.y);
-        b.u32(e.z);
-        b.u16(e.mat);
+/// Список правок — **отрезками по линейному номеру воксела**.
+///
+/// Замер (ADR-229): очередь эталонного сценария на трёхсотом тике
+/// весит 48 МБ из пятидесяти, если писать каждую правку четырьмя
+/// полями. Причина не в формате, а в самой очереди: копатель ставит
+/// в неё шар вокселей, а потолок дренажа меньше, и хвост растёт
+/// каждый тик.
+///
+/// Шар обходится по `x` внутри, значит подряд идущие правки —
+/// это подряд идущие номера с одним материалом. Отрезок пишется
+/// разностью от конца прошлого (зигзаг), материалом и длиной,
+/// всё переменной длиной.
+///
+/// **Порядок сохраняется точно.** Очередь FIFO, и отрезок — это
+/// запись о подряд идущих её элементах, а не их пересортировка.
+pub fn save_edits(b: &mut fx::blob::Blob, nx: u32, nz: u32, e: &[Edit]) {
+    let at = |x: u32, y: u32, z: u32| (y as u64 * nz as u64 + z as u64) * nx as u64 + x as u64;
+    b.u32(e.len() as u32);
+    let mut runs: Vec<(u64, Mat, u32)> = Vec::new();
+    for x in e {
+        let i = at(x.x, x.y, x.z);
+        match runs.last_mut() {
+            Some((s, m, n)) if *m == x.mat && *s + u64::from(*n) == i => *n += 1,
+            _ => runs.push((i, x.mat, 1)),
+        }
+    }
+    b.u32(runs.len() as u32);
+    let mut prev = 0i64;
+    for &(i, m, n) in &runs {
+        b.ivar(i as i64 - prev);
+        b.uvar(u64::from(m));
+        b.uvar(u64::from(n));
+        prev = i as i64 + i64::from(n);
     }
 }
 
-fn load_edits(s: &mut fx::blob::Scan) -> Vec<Edit> {
-    let n = s.list(14);
-    (0..n)
-        .map(|_| Edit {
-            x: s.u32(),
-            y: s.u32(),
-            z: s.u32(),
-            mat: s.u16(),
-        })
-        .collect()
+pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
+    let total = s.u32() as usize;
+    let nruns = s.list(3);
+    let mut out = Vec::with_capacity(total.min(1 << 24));
+    let mut prev = 0i64;
+    for _ in 0..nruns {
+        let start = prev + s.ivar();
+        let m = s.uvar() as Mat;
+        let n = s.uvar();
+        if start < 0 || n > total as u64 {
+            return Vec::new();
+        }
+        for k in 0..n {
+            let i = start as u64 + k;
+            let x = (i % nx as u64) as u32;
+            let z = ((i / nx as u64) % nz as u64) as u32;
+            let y = (i / (nx as u64 * nz as u64)) as u32;
+            out.push(Edit { x, y, z, mat: m });
+        }
+        prev = start + n as i64;
+    }
+    out
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use fx::blob::{Blob, Scan};
+    use fx::rng::Rng;
+
+    /// **Сжатие отрезками не имеет права менять ни состав, ни порядок.**
+    ///
+    /// Очередь правок — FIFO, и её порядок задаёт, что окажется в мире
+    /// при столкновении двух правок в один воксель. Перестановка
+    /// молча изменила бы исход, а счётчик длины остался бы верным —
+    /// ровно та ловушка, из-за которой в этом файле проверяют мир,
+    /// а не число применённых правок.
+    #[test]
+    fn packing_edits_keeps_both_order_and_content() {
+        let (nx, ny, nz) = (256u32, 128u32, 256u32);
+        let mut r = Rng::new(9, 0x3D1);
+        for case in 0..8u64 {
+            let mut want: Vec<Edit> = Vec::new();
+            // Смесь трёх видов: шар копателя (подряд идущие номера),
+            // одиночные правки вразброс и повтор одного воксела разным
+            // материалом — сжатие обязано пережить все три.
+            for _ in 0..4 {
+                let (cx, cy, cz) = (
+                    r.range(12, nx as i32 - 12),
+                    r.range(12, ny as i32 - 12),
+                    r.range(12, nz as i32 - 12),
+                );
+                for dy in -3..=3i32 {
+                    for dz in -3..=3i32 {
+                        for dx in -3..=3i32 {
+                            want.push(Edit {
+                                x: (cx + dx) as u32,
+                                y: (cy + dy) as u32,
+                                z: (cz + dz) as u32,
+                                mat: AIR,
+                            });
+                        }
+                    }
+                }
+            }
+            for _ in 0..200 {
+                want.push(Edit {
+                    x: r.below(nx),
+                    y: r.below(ny),
+                    z: r.below(nz),
+                    mat: (r.below(5) + case as u32) as Mat,
+                });
+            }
+            for m in 0..6u16 {
+                want.push(Edit { x: 7, y: 7, z: 7, mat: m });
+            }
+            let mut b = Blob::new();
+            save_edits(&mut b, nx, nz, &want);
+            let mut s = Scan::new(&b.v);
+            let got = load_edits(&mut s, nx, nz);
+            assert!(s.ok());
+            assert_eq!(got, want, "случай {case}");
+        }
+    }
+
+    /// Пустой список — это список, а не отсутствие поля.
+    #[test]
+    fn an_empty_edit_list_round_trips() {
+        let mut b = Blob::new();
+        save_edits(&mut b, 64, 64, &[]);
+        let mut s = Scan::new(&b.v);
+        assert!(load_edits(&mut s, 64, 64).is_empty());
+        assert!(s.ok());
+    }
+
+    /// Шар копателя обязан лечь **отрезками**, а не по правке на запись.
+    /// Замер, ради которого сжатие и появилось: очередь эталонного
+    /// сценария весила 48 МБ из пятидесяти.
+    #[test]
+    fn a_diggers_ball_packs_into_runs() {
+        let (nx, nz) = (256u32, 256u32);
+        let mut ball = Vec::new();
+        for dy in -10..=10i32 {
+            for dz in -10..=10i32 {
+                for dx in -10..=10i32 {
+                    if dx * dx + dy * dy + dz * dz > 100 {
+                        continue;
+                    }
+                    ball.push(Edit {
+                        x: (60 + dx) as u32,
+                        y: (60 + dy) as u32,
+                        z: (60 + dz) as u32,
+                        mat: AIR,
+                    });
+                }
+            }
+        }
+        let mut b = Blob::new();
+        save_edits(&mut b, nx, nz, &ball);
+        // Четырнадцать байт на правку — то, с чего начинали.
+        assert!(
+            b.len() * 6 < ball.len() * 14,
+            "шар из {} правок лёг в {} байт — сжатия нет",
+            ball.len(),
+            b.len()
+        );
+    }
 }
 
 #[cfg(test)]

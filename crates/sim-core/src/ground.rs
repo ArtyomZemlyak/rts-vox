@@ -40,29 +40,6 @@ pub struct GroundStats {
     pub nav: NavStats,
 }
 
-/// Список правок в буфер: те же поля и тот же порядок, что у мира.
-fn save_edits(b: &mut fx::blob::Blob, e: &[Edit]) {
-    b.u32(e.len() as u32);
-    for x in e {
-        b.u32(x.x);
-        b.u32(x.y);
-        b.u32(x.z);
-        b.u16(x.mat);
-    }
-}
-
-fn load_edits(s: &mut fx::blob::Scan) -> Vec<Edit> {
-    let n = s.list(14);
-    (0..n)
-        .map(|_| Edit {
-            x: s.u32(),
-            y: s.u32(),
-            z: s.u32(),
-            mat: s.u16(),
-        })
-        .collect()
-}
-
 pub struct Ground {
     pub world: VoxelWorld,
     pub bodies: Bodies,
@@ -190,8 +167,9 @@ impl Ground {
         self.world.save(b);
         self.bodies.save(b);
         self.collapse.save(b);
-        save_edits(b, &self.edits);
-        save_edits(b, &self.carry);
+        let (nx, nz) = (self.world.nx, self.world.nz);
+        voxel::world::save_edits(b, nx, nz, &self.edits);
+        voxel::world::save_edits(b, nx, nz, &self.carry);
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
@@ -204,8 +182,9 @@ impl Ground {
         if !self.collapse.load(s) {
             return false;
         }
-        self.edits = load_edits(s);
-        self.carry = load_edits(s);
+        let (nx, nz) = (self.world.nx, self.world.nz);
+        self.edits = voxel::world::load_edits(s, nx, nz);
+        self.carry = voxel::world::load_edits(s, nx, nz);
         s.ok()
     }
 

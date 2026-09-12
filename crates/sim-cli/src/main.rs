@@ -23,6 +23,12 @@ struct Args {
     every: u64,
     world_hash: bool,
     stats: bool,
+    /// Куда записать состояние после прогона (ADR-229).
+    save: Option<std::path::PathBuf>,
+    /// Откуда взять состояние вместо заселения с нуля.
+    load: Option<std::path::PathBuf>,
+    /// Печатать размер файла и время записи-чтения.
+    save_stats: bool,
 }
 
 impl Default for Args {
@@ -36,6 +42,9 @@ impl Default for Args {
             every: 0,
             world_hash: false,
             stats: false,
+            save: None,
+            load: None,
+            save_stats: false,
         }
     }
 }
@@ -53,6 +62,10 @@ sim-cli — headless-прогон симуляции
   --stats         напечатать счётчики прогона: время по фазам,
                   землю, стрельбу, смерти — то, чем меряют ADR
   --world-hash    напечатать хеш сгенерированного мира и выйти
+  --save ФАЙЛ     записать состояние после прогона (ADR-229)
+  --load ФАЙЛ     продолжить с записанного состояния, а не с нуля;
+                  сид и заселение при этом берутся из файла
+  --save-stats    напечатать размер файла и время записи-чтения
   --help          это сообщение
 "
 }
@@ -76,6 +89,17 @@ fn parse() -> Result<Args, String> {
             "--dump-hash" => a.dump_hash = true,
             "--world-hash" => a.world_hash = true,
             "--stats" => a.stats = true,
+            "--save-stats" => a.save_stats = true,
+            "--save" => {
+                a.save = Some(std::path::PathBuf::from(
+                    it.next().ok_or_else(|| "--save: нет имени файла".to_string())?,
+                ))
+            }
+            "--load" => {
+                a.load = Some(std::path::PathBuf::from(
+                    it.next().ok_or_else(|| "--load: нет имени файла".to_string())?,
+                ))
+            }
             "--help" | "-h" => {
                 print!("{}", usage());
                 std::process::exit(0);
@@ -136,7 +160,53 @@ fn main() -> ExitCode {
             }
         }
     };
-    let mut r = sim_core::Reference::new(a.seed, a.units, tuning, weapons);
+    // Ввод-вывод живёт здесь, а не в симуляции: `sim-core` отдаёт
+    // буфер и принимает буфер, файл открывает вызывающий
+    // (`CLAUDE.md`, границы слоёв).
+    let mut r = match &a.load {
+        None => {
+            // Замер холодного старта — чтобы было с чем сравнивать
+            // загрузку. Мир строится из генератора в обоих случаях:
+            // процедурный слой не хранится, он воспроизводится
+            // (ADR-229).
+            let t0 = std::time::Instant::now();
+            let r = sim_core::Reference::new(a.seed, a.units, tuning, weapons);
+            if a.save_stats {
+                println!("холодный старт: {} мкс", t0.elapsed().as_nanos() / 1000);
+            }
+            r
+        }
+        Some(p) => {
+            let buf = match std::fs::read(p) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("{}: {e}", p.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            // Замер разбора отделён от замера чтения с диска: диск —
+            // не формат, и мерить их одним числом значит не померить
+            // ни того, ни другого.
+            let t0 = std::time::Instant::now();
+            let r = match sim_core::save::load(&buf, tuning, weapons) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{}: {e}", p.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let ns = t0.elapsed().as_nanos();
+            if a.save_stats {
+                println!(
+                    "загрузка: {} байт, разбор {} мкс, тик {}",
+                    buf.len(),
+                    ns / 1000,
+                    r.world.tick
+                );
+            }
+            r
+        }
+    };
 
     let mut hash = 0u64;
     // Итоги по земле копятся по тикам: `g.stats` обнуляется каждый тик,
@@ -313,6 +383,35 @@ fn main() -> ExitCode {
             "seed={} ticks={} units={} threads={} hash={:016x}",
             a.seed, a.ticks, a.units, a.threads, hash
         );
+    }
+
+    if let Some(p) = &a.save {
+        let t0 = std::time::Instant::now();
+        let buf = sim_core::save::save(&r);
+        let build_ns = t0.elapsed().as_nanos();
+        let t1 = std::time::Instant::now();
+        if let Err(e) = std::fs::write(p, &buf) {
+            eprintln!("{}: {e}", p.display());
+            return ExitCode::FAILURE;
+        }
+        let disk_ns = t1.elapsed().as_nanos();
+        if a.save_stats {
+            println!(
+                "сохранение: {} байт, сборка {} мкс, запись на диск {} мкс, тик {}",
+                buf.len(),
+                build_ns / 1000,
+                disk_ns / 1000,
+                r.world.tick
+            );
+            if let Some(g) = r.world.ground() {
+                println!(
+                    "  слой правок: тронутых чанков {}, в памяти {} байт; каскад знает {} чанков",
+                    g.world.touched_chunks(),
+                    g.world.diff_bytes(),
+                    g.collapse.known_chunks()
+                );
+            }
+        }
     }
     ExitCode::SUCCESS
 }
