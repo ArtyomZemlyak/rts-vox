@@ -97,6 +97,9 @@ struct ChunkArt {
 struct View {
     cam: RtsCamera,
     visible: usize,
+    /// Сколько вокселей в секунду камера едет сама, вдоль +X.
+    /// Ноль — стоит. Только для замера: см. ключ `--pan`.
+    pan: f32,
     /// Видимая даль в вокселях: туман, каскады теней и глубина резкости
     /// считаются от неё, а не абсолютными числами.
     ///
@@ -556,6 +559,13 @@ fn main() {
     // часов и 62.8 ГиБ. Уменьшив глубину, километр по X и Z можно
     // построить и померить **сегодня**, не трогая симуляцию.
     let mut height = 0u32;
+    // Сколько вокселей в секунду камера едет сама, вдоль +X.
+    //
+    // Ключ для замера, а не для игры: без движения камеры кольцо
+    // ничего не освобождает — из окна, запущенного из терминала,
+    // WASD никто не нажимает, и путь освобождения остаётся
+    // непроверенным (ADR-228).
+    let mut pan = 0.0f32;
     // Размах рельефа **не задаётся здесь числом**: его считает
     // `Params::sized` от высоты мира. Своё число у сцены уже дважды
     // расходилось с размером карты и давало плоский блин (ADR-157,
@@ -592,6 +602,7 @@ fn main() {
             "--units" => units = v.parse().unwrap_or(units),
             "--side" => side = v.parse().unwrap_or(side),
             "--height" => height = v.parse().unwrap_or(height),
+            "--pan" => pan = v.parse().unwrap_or(pan),
             "--relief" => relief = v.parse().unwrap_or(relief),
             "--seed" => seed = v.parse().unwrap_or(seed),
             "--speed" => speed = v.parse().unwrap_or(speed),
@@ -619,7 +630,7 @@ fn main() {
             "--look" => {}
             "--help" => {
                 println!(
-                    "battle [--units N] [--side N] [--height N] [--relief N] [--seed N] \
+                    "battle [--units N] [--side N] [--height N] [--relief N] [--seed N] [--pan вокселей-в-сек] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
 [--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--big на-сторону] [--rt 0|1|2] \
@@ -776,7 +787,7 @@ fn main() {
             t_build: 0.0,
             t_free: 0.0,
         })
-        .insert_resource(View { cam, visible: 0, vista })
+        .insert_resource(View { cam, visible: 0, pan, vista })
         .insert_resource(Shot {
             path: shot,
             after,
@@ -1893,6 +1904,11 @@ fn control(
         return;
     }
     let dt = time.delta_secs();
+    // Своим ходом — до края карты и обратно незачем: замеру нужно,
+    // чтобы кольцо ехало и что-то освобождало.
+    if view.pan != 0.0 {
+        view.cam.target.x += view.pan * dt;
+    }
     let pan = view.cam.distance * 0.6 * dt;
     let (s, c) = (view.cam.yaw.sin(), view.cam.yaw.cos());
     let mut d = (0.0f32, 0.0f32);
