@@ -629,7 +629,12 @@ pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
         let start = prev + s.ivar();
         let m = s.uvar() as Mat;
         let n = s.uvar();
-        if start < 0 || n > total as u64 {
+        // Бессмыслица **по смыслу**, а не по длине: отрицательное
+        // начало отрезка или отрезок длиннее всего списка. Молча
+        // вернуть пустоту нельзя — обрезанный файл прочитался бы
+        // как пустая очередь, то есть как другая партия.
+        if start < 0 || n > total as u64 || out.len() as u64 + n > total as u64 {
+            s.spoil();
             return Vec::new();
         }
         for k in 0..n {
@@ -640,6 +645,10 @@ pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
             out.push(Edit { x, y, z, mat: m });
         }
         prev = start + n as i64;
+    }
+    if out.len() != total {
+        s.spoil();
+        return Vec::new();
     }
     out
 }
@@ -713,6 +722,29 @@ mod codec_tests {
         let mut s = Scan::new(&b.v);
         assert!(load_edits(&mut s, 64, 64).is_empty());
         assert!(s.ok());
+    }
+
+    /// **Обрезанный список правок — порча, а не пустая очередь.**
+    ///
+    /// Разница существенная: пустая очередь это законное состояние,
+    /// и вернув её молча, читатель отдал бы другую партию вместо
+    /// отказа.
+    #[test]
+    fn a_truncated_edit_list_is_spoiled_not_empty() {
+        let want: Vec<Edit> = (0..50)
+            .map(|k| Edit { x: k, y: 3, z: 5, mat: 2 })
+            .collect();
+        let mut b = Blob::new();
+        save_edits(&mut b, 64, 64, &want);
+        for cut in 0..b.v.len() {
+            let mut s = Scan::new(&b.v[..cut]);
+            let got = load_edits(&mut s, 64, 64);
+            assert!(
+                !s.ok() || got == want,
+                "обрезка на {cut} байте дала {} правок и не пожаловалась",
+                got.len()
+            );
+        }
     }
 
     /// Шар копателя обязан лечь **отрезками**, а не по правке на запись.

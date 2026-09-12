@@ -160,6 +160,9 @@ pub fn load(
         Box::new(worldgen::Terrain { params, seed }),
     );
     let g = ground::Ground::new(vw, &tuning);
+    // Ёмкость индекса соседей — единица: сколько юнитов в файле, ещё
+    // неизвестно, а индекс всё равно пересобирается каждый тик и растёт
+    // сам. Это предвыделение, а не правило.
     let mut world = World::new(2, 1, tuning);
     world.attach_ground(g);
     world.attach_weapons(weapons);
