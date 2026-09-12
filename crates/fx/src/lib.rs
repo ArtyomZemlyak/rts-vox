@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod angle;
+pub mod blob;
 pub mod rng;
 
 /// Число дробных бит.
