@@ -48,6 +48,7 @@ use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
 use render::look;
+use render::model::SegFrame;
 use render::tex::tile_image;
 use render::{yaw_of, yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Order, Reference, SimEvent, NO_TARGET};
@@ -174,6 +175,12 @@ struct ShotMark;
 #[derive(Component)]
 struct BlastMark(u32);
 
+/// Сегмент тела: меш по отделкам и место в теле (ADR-231).
+struct SegArt {
+    mesh: [Option<Handle<Mesh>>; look::FINISHES],
+    frame: SegFrame,
+}
+
 /// Общие меши и материалы.
 #[derive(Resource)]
 struct Art {
@@ -182,6 +189,8 @@ struct Art {
     /// Пустая отделка ручки не получает и сущности не заводит.
     hull: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
     turret: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
+    /// Повёрнутые части тела; едут с корпусом или с башней.
+    segs: [Vec<SegArt>; 2],
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -389,6 +398,7 @@ fn setup(
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
                          part: Slice,
+                         centre: [f32; 3],
                          meshes: &mut Assets<Mesh>|
      -> [Option<Handle<Mesh>>; look::FINISHES] {
         for b in ubufs.iter_mut() {
@@ -416,6 +426,7 @@ fn setup(
             body.mm as f32 / voxel::unit::WORLD_MM as f32,
             layers,
             render::model::BEVEL,
+            centre,
             &mut ubufs,
         );
         // Пустая отделка ручки не получает: у безбашенного тела
@@ -425,14 +436,34 @@ fn setup(
             (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k])))
         })
     };
-    let hull = [
-        unit_mesh(&bodies[0], look::side_tint()[0], Slice::Hull, &mut meshes),
-        unit_mesh(&bodies[1], look::side_tint()[1], Slice::Hull, &mut meshes),
-    ];
-    let turret = [
-        unit_mesh(&bodies[0], look::side_tint()[0], Slice::Turret, &mut meshes),
-        unit_mesh(&bodies[1], look::side_tint()[1], Slice::Turret, &mut meshes),
-    ];
+    let tint = look::side_tint();
+    let hull: [_; 2] = std::array::from_fn(|o| {
+        unit_mesh(&bodies[o], tint[o], Slice::Hull, render::model::root_centre(&bodies[o]), &mut meshes)
+    });
+    let turret: [_; 2] = std::array::from_fn(|o| {
+        unit_mesh(&bodies[o], tint[o], Slice::Turret, render::model::root_centre(&bodies[o]), &mut meshes)
+    });
+    // Сегменты: у каждого свой меш вокруг шарнира и своё место
+    // в теле, сложенное по цепочке креплений (ADR-231).
+    let per_mm = 1.0 / voxel::unit::WORLD_MM as f32;
+    let segs: [Vec<SegArt>; 2] = std::array::from_fn(|o| {
+        let frames = render::model::segment_frames(&bodies[o], per_mm);
+        bodies[o]
+            .segments
+            .iter()
+            .zip(frames)
+            .map(|(s, frame)| SegArt {
+                mesh: unit_mesh(
+                    &s.body,
+                    tint[o],
+                    Slice::All,
+                    render::model::pivot_centre(&s.attach),
+                    &mut meshes,
+                ),
+                frame,
+            })
+            .collect()
+    });
     // **Материал говорит, из чего вещь сделана.** Цвет вершины
     // подменяет `base_color` целиком (`pbr_fragment.wgsl`), поэтому
     // раскраска сторон остаётся при себе, а шероховатость
@@ -474,6 +505,7 @@ fn setup(
     let art = Art {
         hull,
         turret,
+        segs,
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
         beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
@@ -567,6 +599,26 @@ fn setup(
                     Visibility::Hidden,
                     TurretMark(i),
                 ));
+            }
+        }
+        // Сегменты: метка корпуса или башни плюс рамка (ADR-231).
+        for seg in &art.segs[owner] {
+            for (k, m) in art.finish.iter().enumerate() {
+                let Some(h) = seg.mesh[k].clone() else {
+                    continue;
+                };
+                let mut e = commands.spawn((
+                    Mesh3d(h),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    seg.frame,
+                ));
+                if seg.frame.turret {
+                    e.insert(TurretMark(i));
+                } else {
+                    e.insert(UnitMark(i));
+                }
             }
         }
     }
@@ -676,14 +728,24 @@ fn buf_to_mesh(b: &MeshBuf) -> Mesh {
 type HullQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static UnitMark, &'static mut Transform, &'static mut Visibility),
+    (
+        &'static UnitMark,
+        &'static mut Transform,
+        &'static mut Visibility,
+        Option<&'static SegFrame>,
+    ),
     (Without<ShotMark>, Without<TurretMark>),
 >;
 
 type TurretQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static TurretMark, &'static mut Transform, &'static mut Visibility),
+    (
+        &'static TurretMark,
+        &'static mut Transform,
+        &'static mut Visibility,
+        Option<&'static SegFrame>,
+    ),
     Without<ShotMark>,
 >;
 
@@ -781,28 +843,26 @@ fn step(
         }
     };
 
-    for (m, mut tr, mut vis) in units.iter_mut() {
+    for (m, mut tr, mut vis, seg) in units.iter_mut() {
         let i = m.0;
         if !alive(i) {
             *vis = Visibility::Hidden;
             continue;
         }
         *vis = Visibility::Inherited;
-        tr.translation = at(i);
         if let Some(y) = hull_yaw(i) {
-            tr.rotation = Quat::from_rotation_y(y);
+            render::model::place(&mut tr, at(i), Quat::from_rotation_y(y), seg);
         }
     }
-    for (m, mut tr, mut vis) in turrets.iter_mut() {
+    for (m, mut tr, mut vis, seg) in turrets.iter_mut() {
         let i = m.0;
         if !alive(i) {
             *vis = Visibility::Hidden;
             continue;
         }
         *vis = Visibility::Inherited;
-        tr.translation = at(i);
         if let Some(y) = aim_yaw(i).or_else(|| hull_yaw(i)) {
-            tr.rotation = Quat::from_rotation_y(y);
+            render::model::place(&mut tr, at(i), Quat::from_rotation_y(y), seg);
         }
     }
 

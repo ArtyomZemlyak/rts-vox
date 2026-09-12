@@ -33,7 +33,7 @@ use bevy::post_process::effect_stack::Vignette;
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use render::edge::{EdgePlugin, Edges};
 use render::look;
-use render::model::{body_to_mesh, BEVEL};
+use render::model::{body_to_mesh, SegFrame, BEVEL};
 
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019).
 const MM_PER_UNIT: f32 = 500.0;
@@ -55,8 +55,13 @@ struct Scene {
     pick: Vec<usize>,
 }
 
+/// Что крутится на подиуме: корень тела в `base`, сегмент — на своём
+/// месте в теле, повёрнутом вместе с корнем (ADR-231).
 #[derive(Component)]
-struct Spin;
+struct Spin {
+    base: Vec3,
+    seg: Option<SegFrame>,
+}
 
 /// Те же переводы набора направления в компоненты, что и у боя
 /// (ADR-214). Повторены, а не вынесены: `look` не знает про Bevy
@@ -177,6 +182,9 @@ fn setup(
     scene: Res<Scene>,
 ) {
     let mut all = voxel::roster::all();
+    // Ванильный шагоход — тело боя, а не набора; в смотровой он
+    // нужен ради ног: там первые повёрнутые звенья (ADR-231).
+    all.push(("шагоход", voxel::unit::strider()));
     if let Some(mm) = scene.mm {
         all.retain_mut(|(name, b)| match b.resampled(mm) {
             Ok(r) => {
@@ -227,39 +235,50 @@ fn setup(
     for (k, &i) in picked.iter().enumerate() {
         let (name, body) = &all[i];
         let w = widths[k];
-        let s = body.mm as f32 / MM_PER_UNIT;
-        for b in bufs.iter_mut() {
-            b.clear();
-        }
-        let tint = look::side_tint();
-        body_to_mesh(
-            body,
-            tint[i % tint.len()],
-            s,
-            (0, 255),
-            scene.bevel,
-            &mut bufs,
+        let base = Vec3::new(x + w / 2.0, 0.0, 0.0);
+        let tint = look::side_tint()[i % 2];
+        // Корень и каждый сегмент — своим мешем вокруг своей точки:
+        // корень вокруг середины основания, сегмент вокруг шарнира.
+        let frames = render::model::segment_frames(body, 1.0 / MM_PER_UNIT);
+        let parts = std::iter::once((body, render::model::root_centre(body), None)).chain(
+            body.segments
+                .iter()
+                .zip(frames)
+                .map(|(s, f)| (&s.body, render::model::pivot_centre(&s.attach), Some(f))),
         );
-        let tris: usize = bufs.iter().map(|b| b.idx.len() / 3).sum();
-        println!("{name}: {tris} треугольников, фаска {:.2}", scene.bevel);
-        for (f, buf) in bufs.iter().enumerate() {
-            if buf.idx.is_empty() {
-                continue;
+        let mut tris = 0usize;
+        for (b, centre, seg) in parts {
+            for buf in bufs.iter_mut() {
+                buf.clear();
             }
-            let mesh = meshes.add(
-                Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-                    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-                    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
-                    .with_inserted_indices(Indices::U32(buf.idx.clone())),
-            );
-            commands.spawn((
-                Mesh3d(mesh),
-                MeshMaterial3d(mats[f].clone()),
-                Transform::from_xyz(x + w / 2.0, 0.0, 0.0),
-                Spin,
-            ));
+            body_to_mesh(b, tint, b.mm as f32 / MM_PER_UNIT, (0, 255), scene.bevel, centre, &mut bufs);
+            tris += bufs.iter().map(|b| b.idx.len() / 3).sum::<usize>();
+            let mut tr = Transform::IDENTITY;
+            render::model::place(&mut tr, base, Quat::IDENTITY, seg.as_ref());
+            for (f, buf) in bufs.iter().enumerate() {
+                if buf.idx.is_empty() {
+                    continue;
+                }
+                let mesh = meshes.add(
+                    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
+                        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+                        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+                        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
+                        .with_inserted_indices(Indices::U32(buf.idx.clone())),
+                );
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(mats[f].clone()),
+                    tr,
+                    Spin { base, seg },
+                ));
+            }
         }
+        println!(
+            "{name}: {tris} треугольников, сегментов {}, фаска {:.2}",
+            body.segments.len(),
+            scene.bevel
+        );
         x += w + gap;
     }
 
@@ -378,12 +397,13 @@ fn setup(
 /// в бою: центр сферы обязан лежать под сценой, а не в ней.
 const EARTH_RADIUS_M: f32 = 6_360_000.0;
 
-fn turn(time: Res<Time>, scene: Res<Scene>, mut q: Query<&mut Transform, With<Spin>>) {
+fn turn(time: Res<Time>, scene: Res<Scene>, mut q: Query<(&mut Transform, &Spin)>) {
     if !scene.spin {
         return;
     }
-    for mut t in &mut q {
-        t.rotation = Quat::from_rotation_y(time.elapsed_secs() * 0.35);
+    let rot = Quat::from_rotation_y(time.elapsed_secs() * 0.35);
+    for (mut t, s) in &mut q {
+        render::model::place(&mut t, s.base, rot, s.seg.as_ref());
     }
 }
 

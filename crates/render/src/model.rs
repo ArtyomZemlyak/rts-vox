@@ -25,8 +25,21 @@
 //! смотрит на векторное произведение своих же углов и разворачивает
 //! себя сам. Заодно он выбрасывает вырожденные: при нулевой фаске
 //! её четырёхугольники схлопываются в отрезок.
+//!
+//! **Наклонная деталь — повёрнутый том, а не лесенка.** Тело состоит
+//! из корневого тома и сегментов (`voxel::unit::Segment`): у каждого
+//! свой осевой том, своя точка крепления и свой поворот. Мешер
+//! разворачивает каждый том в своей системе координат — корень
+//! вокруг середины основания, сегмент вокруг шарнира, — а место
+//! в теле задаёт [`segment_frames`], складывая цепочку креплений.
+//! Мировая сетка не пиксельная: тело поворачивается целиком на любой
+//! угол, и сегмент внутри него — тоже (ADR-231).
+//!
+//! **Цвет и материал — по отделке воксела**, а не по роли: трак
+//! и корпус оба броня, но один резина, другой краска.
 
-use voxel::unit::{Part, UnitBody};
+use bevy::prelude::{Component, Quat, Transform, Vec3};
+use voxel::unit::{Attach, UnitBody, TURN};
 
 use crate::geom::MeshBuf;
 
@@ -59,6 +72,10 @@ pub const BEVEL: f32 = 0.5;
 ///
 /// `layers` — какие слои по высоте брать, полуоткрыто: башню и корпус
 /// надо рисовать порознь, они вращаются в разные стороны.
+/// `centre` — точка тома в вокселях, которая встаёт в начало
+/// координат меша: у корня это [`root_centre`], у сегмента —
+/// шарнир ([`pivot_centre`]), потому что вокруг него сегмент
+/// и поворачивается.
 /// Треугольники раскладываются **по отделкам**, а не в один буфер:
 /// сталь, стекло и резина отвечают на свет по-разному, и ответ этот
 /// задаётся материалом, а вершина его нести не может (ADR-211).
@@ -70,13 +87,12 @@ pub fn body_to_mesh(
     scale: f32,
     layers: (usize, usize),
     bevel: f32,
+    centre: [f32; 3],
     outs: &mut [MeshBuf; crate::look::FINISHES],
 ) {
     let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
     let bevel = bevel.clamp(0.0, 0.5);
-    // Том ставится серединой в начало координат по горизонтали и низом
-    // по высоте: юнит вращается вокруг себя, а не вокруг угла.
-    let half = [nx as f32 * 0.5, 0.0, nz as f32 * 0.5];
+    let half = centre;
     let solid = |p: [i32; 3]| -> bool {
         p[0] >= 0
             && p[1] >= 0
@@ -93,9 +109,11 @@ pub fn body_to_mesh(
                 if !b.vol.get(x, y, z) {
                     continue;
                 }
-                let part = b.part_at(x, y, z);
-                let c = colour(part, tint);
-                let out = &mut outs[crate::look::finish(part) as usize];
+                // Отделка воксела решает и цвет, и буфер: код тела,
+                // а без него — роль (ADR-231).
+                let f = crate::look::finish_of(b.finish_at(x, y, z), b.part_at(x, y, z));
+                let c = crate::look::to_linear(crate::look::finish_srgb(f, tint));
+                let out = &mut outs[f as usize];
                 let at = [x as i32, y as i32, z as i32];
                 // Местная точка воксела → мировая.
                 let put = |p: [f32; 3]| -> [f32; 3] {
@@ -122,9 +140,92 @@ pub fn body_to_mesh(
     }
 }
 
-/// Цвет по роли воксела — тот же, что у плоского разворота.
-fn colour(p: Part, tint: [f32; 3]) -> [f32; 4] {
-    crate::look::to_linear(crate::look::part_srgb(p, tint))
+/// Середина основания корневого тома: юнит вращается вокруг себя,
+/// а не вокруг угла, и стоит низом на земле.
+pub fn root_centre(b: &UnitBody) -> [f32; 3] {
+    [b.vol.nx as f32 * 0.5, 0.0, b.vol.nz as f32 * 0.5]
+}
+
+/// Шарнир сегмента — точка его тома, вокруг которой он повёрнут
+/// и которой посажен на родителя.
+pub fn pivot_centre(a: &Attach) -> [f32; 3] {
+    [a.pivot.0 as f32, a.pivot.1 as f32, a.pivot.2 as f32]
+}
+
+/// Поворот крепления: крен, потом тангаж, потом рыскание.
+///
+/// Порядок — часть контракта с телом, и знаки пришпилены тестом:
+/// тангаж положительный поднимает нос, рыскание положительное
+/// уводит его к `-Z` (тем же знаком, что курс машины), крен
+/// положительный кладёт верх к `+Z`.
+pub fn attach_rotation(a: &Attach) -> Quat {
+    let k = std::f32::consts::TAU / TURN as f32;
+    Quat::from_rotation_y(a.yaw as f32 * k)
+        * Quat::from_rotation_z(a.pitch as f32 * k)
+        * Quat::from_rotation_x(a.roll as f32 * k)
+}
+
+/// Место сегмента в системе координат тела: смещение и поворот
+/// относительно корня, уже сложенные по цепочке родителей.
+///
+/// Сущность сегмента несёт это как компонент и каждый кадр ставится
+/// в `base + rot * pos` с поворотом `rot * rot_seg`, где `rot` —
+/// поворот корпуса (или башни, если `turret`). Иерархии сущностей
+/// нет нарочно: положение читается из симуляции каждый кадр, и
+/// одна формула на сущность дешевле распространения преобразований
+/// по дереву.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct SegFrame {
+    pub pos: Vec3,
+    pub rot: Quat,
+    /// Едет с вращающейся частью тела: сам сегмент или любой из его
+    /// предков прикреплён к башне.
+    pub turret: bool,
+}
+
+/// Рамки всех сегментов тела по порядку. `per_mm` — мировых единиц
+/// в миллиметре: у каждого тома своё ребро, и смещение крепления
+/// меряется в вокселях **родителя**.
+pub fn segment_frames(b: &UnitBody, per_mm: f32) -> Vec<SegFrame> {
+    let mut frames: Vec<SegFrame> = Vec::with_capacity(b.segments.len());
+    for s in &b.segments {
+        let a = &s.attach;
+        let (pos, rot, centre, scale, turret) = if a.parent == 0 {
+            (Vec3::ZERO, Quat::IDENTITY, root_centre(b), b.mm as f32 * per_mm, false)
+        } else {
+            // Родитель добавлен раньше — это сторожит `push_segment`.
+            let k = a.parent as usize - 1;
+            let p = &frames[k];
+            let ps = &b.segments[k];
+            (p.pos, p.rot, pivot_centre(&ps.attach), ps.body.mm as f32 * per_mm, p.turret)
+        };
+        let off = Vec3::new(
+            (a.at.0 as f32 - centre[0]) * scale,
+            (a.at.1 as f32 - centre[1]) * scale,
+            (a.at.2 as f32 - centre[2]) * scale,
+        );
+        frames.push(SegFrame {
+            pos: pos + rot * off,
+            rot: rot * attach_rotation(a),
+            turret: a.turret || turret,
+        });
+    }
+    frames
+}
+
+/// Поставить сущность тела: корень — в `base` с поворотом `rot`,
+/// сегмент — на своё место в теле, повёрнутом тем же `rot`.
+pub fn place(tr: &mut Transform, base: Vec3, rot: Quat, seg: Option<&SegFrame>) {
+    match seg {
+        Some(s) => {
+            tr.translation = base + rot * s.pos;
+            tr.rotation = rot * s.rot;
+        }
+        None => {
+            tr.translation = base;
+            tr.rotation = rot;
+        }
+    }
 }
 
 /// Две другие оси при данной.
@@ -303,6 +404,7 @@ fn tri(p: [[f32; 3]; 3], n: [f32; 3], c: [f32; 4], out: &mut MeshBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use voxel::unit::Part;
 
     fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
         [
@@ -329,8 +431,101 @@ mod tests {
 
     fn split(b: &UnitBody, bevel: f32) -> [MeshBuf; crate::look::FINISHES] {
         let mut bufs: [MeshBuf; crate::look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
-        body_to_mesh(b, [0.3, 0.5, 0.9], 1.0, (0, 255), bevel, &mut bufs);
+        body_to_mesh(b, [0.3, 0.5, 0.9], 1.0, (0, 255), bevel, root_centre(b), &mut bufs);
         bufs
+    }
+
+    fn near(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 2e-3
+    }
+
+    /// **Знаки углов крепления пришпилены.** Тангаж положительный
+    /// поднимает нос, рыскание положительное уводит его к `-Z`
+    /// (как курс машины), крен положительный кладёт верх к `+Z`.
+    /// Тело пишет углы в этих знаках; разойдись они — лобовой лист
+    /// лёг бы на моторный отсек.
+    #[test]
+    fn attachment_angles_turn_the_way_the_body_says() {
+        let flat = Attach::flat((0, 0, 0), (0, 0, 0));
+        let x = |a: Attach| attach_rotation(&a) * Vec3::X;
+        assert!(near(x(Attach { pitch: TURN / 4, ..flat }), Vec3::Y), "тангаж не поднимает нос");
+        assert!(near(x(Attach { yaw: TURN / 4, ..flat }), -Vec3::Z), "рыскание не туда");
+        assert!(
+            near(attach_rotation(&Attach { roll: TURN / 4, ..flat }) * Vec3::Y, Vec3::Z),
+            "крен не туда"
+        );
+        // Наведённое крепление смотрит туда, куда просили, и в
+        // плоскости, и с наклоном.
+        let d = x(Attach::aimed((0, 0, 0), (0, 0, 0), (3, -4, 0)));
+        assert!(near(d, Vec3::new(0.6, -0.8, 0.0)), "наведение в плоскости: {d:?}");
+        let want = Vec3::new(-2.0, -2.0, -1.0).normalize();
+        let d = x(Attach::aimed((0, 0, 0), (0, 0, 0), (-2, -2, -1)));
+        assert!(near(d, want), "наведение с рысканием: {d:?} вместо {want:?}");
+    }
+
+    /// **Сегмент стоит там, где сказано крепление, и едет
+    /// за родителем.** Меш сегмента строится вокруг шарнира,
+    /// а рамка кладёт шарнир в точку крепления родителя.
+    #[test]
+    fn a_segment_rides_where_its_attachment_says() {
+        let mut root = cube(4);
+        // Лист на переднем нижнем ребре, носом вверх на сорок пять.
+        root.push_segment(
+            Attach { pitch: TURN / 8, ..Attach::flat((4, 0, 2), (0, 0, 1)) },
+            cube(2),
+        );
+        // Потомок на дальнем конце листа, башенный.
+        root.push_segment(
+            Attach { parent: 1, turret: true, ..Attach::flat((2, 0, 1), (0, 0, 1)) },
+            cube(1),
+        );
+        let f = segment_frames(&root, 1.0 / root.mm as f32);
+        assert_eq!(f.len(), 2);
+        // Корень серединой в начале координат: (4, 0, 2) − (2, 0, 2).
+        assert!(near(f[0].pos, Vec3::new(2.0, 0.0, 0.0)), "{:?}", f[0].pos);
+        assert!(!f[0].turret);
+        // Потомок: два воксела вдоль листа, поднятого на сорок пять.
+        let r = std::f32::consts::FRAC_1_SQRT_2 * 2.0;
+        assert!(near(f[1].pos, Vec3::new(2.0 + r, r, 0.0)), "{:?}", f[1].pos);
+        assert!(f[1].turret, "потомок башенного сегмента едет с башней");
+        assert!(f[1].rot.dot(f[0].rot).abs() > 0.9999, "потомок без своего поворота повёрнут иначе");
+
+        // Меш сегмента — вокруг шарнира: у листа 2×2×2 с шарниром
+        // (0, 0, 1) координаты лежат в [0, 2]×[0, 2]×[−1, 1].
+        let seg = &root.segments[0];
+        let mut bufs: [MeshBuf; crate::look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
+        body_to_mesh(&seg.body, [0.5; 3], 1.0, (0, 255), 0.0, pivot_centre(&seg.attach), &mut bufs);
+        let pos = &bufs[crate::look::Finish::Plate as usize].pos;
+        assert!(!pos.is_empty());
+        for p in pos {
+            assert!((0.0..=2.0).contains(&p[0]) && (0.0..=2.0).contains(&p[1]));
+            assert!((-1.0..=1.0).contains(&p[2]), "сегмент не вокруг шарнира: {p:?}");
+        }
+
+        // Постановка: корень в базе, сегмент — в базе плюс повёрнутое
+        // смещение.
+        let mut tr = Transform::IDENTITY;
+        let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        place(&mut tr, Vec3::new(10.0, 0.0, 0.0), rot, Some(&f[0]));
+        assert!(near(tr.translation, Vec3::new(10.0, 0.0, -2.0)), "{:?}", tr.translation);
+        place(&mut tr, Vec3::new(10.0, 0.0, 0.0), rot, None);
+        assert!(near(tr.translation, Vec3::new(10.0, 0.0, 0.0)));
+    }
+
+    /// **Отделка красит воксель, а не роль.** Трак танка — броня,
+    /// но резина; без кода он лёг бы в буфер краски.
+    #[test]
+    fn finish_codes_route_the_voxel_to_their_own_buffer() {
+        let tank = voxel::unit::tank();
+        let bufs = split(&tank, 0.0);
+        assert!(
+            !bufs[crate::look::Finish::Rubber as usize].idx.is_empty(),
+            "траки не резина"
+        );
+        assert!(!bufs[crate::look::Finish::Steel as usize].idx.is_empty(), "катки не сталь");
+        assert!(!bufs[crate::look::Finish::Gun as usize].idx.is_empty(), "ствол не воронёный");
+        // Сегменты в корневой меш не попадают: у них свой.
+        assert!(!tank.segments.is_empty(), "у танка нет наклонных листов");
     }
 
     /// Все отделки в один буфер — для проверок, которым отделка

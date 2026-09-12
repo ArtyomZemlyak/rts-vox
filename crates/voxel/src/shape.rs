@@ -17,6 +17,49 @@
 
 use crate::unit::{Part, UnitBody};
 
+/// Назначить отделку всем твёрдым вокселям параллелепипеда.
+///
+/// Кисть формы и кисть отделки разведены нарочно: форма — это роль,
+/// её видит симуляция; отделка — только вид, и назначается поверх
+/// уже нарисованного. Воздух отделки не получает (`set_finish`).
+pub(crate) fn mark(
+    b: &mut UnitBody,
+    xs: (usize, usize),
+    ys: (usize, usize),
+    zs: (usize, usize),
+    code: u8,
+) {
+    let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
+    for z in zs.0..zs.1.min(nz) {
+        for y in ys.0..ys.1.min(ny) {
+            for x in xs.0..xs.1.min(nx) {
+                b.set_finish(x, y, z, code);
+            }
+        }
+    }
+}
+
+/// Назначить отделку твёрдым вокселям шара — тем же условием, каким
+/// шар рисуется, чтобы сустав красился сталью целиком и только он.
+pub(crate) fn mark_ball(b: &mut UnitBody, c: (i32, i32, i32), r: i32, code: u8) {
+    let (nx, ny, nz) = (b.vol.nx as i32, b.vol.ny as i32, b.vol.nz as i32);
+    let r2 = r * r;
+    for dz in -r..=r {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy + dz * dz > r2 {
+                    continue;
+                }
+                let (x, y, z) = (c.0 + dx, c.1 + dy, c.2 + dz);
+                if x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz {
+                    continue;
+                }
+                b.set_finish(x as usize, y as usize, z as usize, code);
+            }
+        }
+    }
+}
+
 /// Заполнить параллелепипед. Диапазоны полуоткрытые, выход за габарит
 /// обрезается: формы строятся от руки, и промах на воксель не должен
 /// ронять сборку.
@@ -300,21 +343,20 @@ pub(crate) fn running_gear(
     let cy = (1 + t) as i32 + rw;
     let rs = rw + 2;
 
-    // Грунтозацепы: нижний слой прерывистый. Машина стоит на них,
-    // а не на сплошной подошве, и на просвет это видно.
-    let mut x = xs.0;
-    while x + 2 <= xs.1 {
-        fill(b, (x, x + 2), (0, 1), zs, p);
-        x += 3;
-    }
-    // Ветви: нижняя от грунтозацепов вверх, верхняя под полкой.
-    fill(b, xs, (1, 1 + t), zs, p);
-    fill(b, xs, (h - t, h), zs, p);
+    // **Колёса — сталь, лента — резина** (ADR-231). Колёса рисуются
+    // и красятся первыми, лента поверх: там, где ветвь ленты
+    // проходит по ободу, последнее слово за лентой.
+    let wheel = |b: &mut UnitBody, c: (i32, i32), r: i32| {
+        cyl(b, 2, zs, c, r, 0, p);
+        let lo = |v: i32| (v - r).max(0) as usize;
+        let hi = |v: i32| (v + r + 1).max(0) as usize;
+        mark(b, (lo(c.0), hi(c.0)), (lo(c.1), hi(c.1)), zs, crate::unit::FINISH_STEEL);
+    };
     // Ведущее колесо в корме, направляющее в носу: оба крупнее
     // опорного и достают до обеих ветвей — лента их огибает.
     let (x0, x1) = (xs.0 as i32 + rs, xs.1 as i32 - 1 - rs);
     for cx in [x0, x1] {
-        cyl(b, 2, zs, (cx, (h / 2) as i32), rs, 0, p);
+        wheel(b, (cx, (h / 2) as i32), rs);
     }
     // Опорные катки между ними: шаг на два воксела больше диаметра,
     // чтобы просвет читался. Ничья при дележе остатка разрешается
@@ -322,12 +364,25 @@ pub(crate) fn running_gear(
     let step = 2 * rw + 2;
     let mut cx = x0 + step;
     while cx + rw < x1 {
-        cyl(b, 2, zs, (cx, cy), rw, 0, p);
+        wheel(b, (cx, cy), rw);
         // Поддерживающий ролик под верхней ветвью — между катками,
         // а не над ними: иначе он сливается с катком в столб.
-        cyl(b, 2, zs, (cx + rw + 1, (h - t) as i32 - 2), 2, 0, p);
+        wheel(b, (cx + rw + 1, (h - t) as i32 - 2), 2);
         cx += step;
     }
+    // Грунтозацепы: нижний слой прерывистый. Машина стоит на них,
+    // а не на сплошной подошве, и на просвет это видно.
+    let mut x = xs.0;
+    while x + 2 <= xs.1 {
+        fill(b, (x, x + 2), (0, 1), zs, p);
+        x += 3;
+    }
+    mark(b, xs, (0, 1), zs, crate::unit::FINISH_RUBBER);
+    // Ветви: нижняя от грунтозацепов вверх, верхняя под полкой.
+    fill(b, xs, (1, 1 + t), zs, p);
+    fill(b, xs, (h - t, h), zs, p);
+    mark(b, xs, (1, 1 + t), zs, crate::unit::FINISH_RUBBER);
+    mark(b, xs, (h - t, h), zs, crate::unit::FINISH_RUBBER);
 }
 
 /// **Люк**: крышка на воксель выше крыши, с петлёй по краю.

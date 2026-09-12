@@ -454,9 +454,10 @@ pub fn part_srgb(p: voxel::unit::Part, tint: [f32; 3]) -> [f32; 3] {
 /// всё тело красилось одним материалом, юнит читался пластмассовой
 /// игрушкой при любой раскраске (ADR-211).
 ///
-/// Отделок столько же, сколько ролей воксела, и не больше: роль
-/// известна симуляции, а выдумывать поверх неё «панели» и «заклёпки»
-/// значит заводить данные, которых в теле нет.
+/// Отделка — код воксела поверх роли (ADR-231): роль известна
+/// симуляции, отделка — только виду, и без кода она выводится из роли.
+/// Перечень закрыт и короток: каждая отделка — это материал, который
+/// отвечает на свет по-своему, а не «панель» или «заклёпка».
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Finish {
@@ -473,15 +474,54 @@ pub enum Finish {
     /// Ядро: светится само. Видно, только когда броню вокруг снесли, —
     /// и тогда обязано быть видно сразу.
     Core = 4,
+    /// Голая сталь: катки, суставы, шарниры. Светлее воронёной
+    /// и грубее — её не полируют. Без неё каток сливался с траком
+    /// в одну чёрную ленту.
+    Steel = 5,
 }
 
 /// Сколько отделок — столько мешей на тело и столько материалов.
-pub const FINISHES: usize = 5;
+pub const FINISHES: usize = 6;
 
 /// Все отделки по порядку номеров. Массивы мешей и материалов
 /// индексируются номером, и перечень обязан идти тем же порядком.
-pub const FINISH_ALL: [Finish; FINISHES] =
-    [Finish::Plate, Finish::Gun, Finish::Optic, Finish::Rubber, Finish::Core];
+pub const FINISH_ALL: [Finish; FINISHES] = [
+    Finish::Plate,
+    Finish::Gun,
+    Finish::Optic,
+    Finish::Rubber,
+    Finish::Core,
+    Finish::Steel,
+];
+
+/// Отделка воксела: явный код тела, а если его нет — по роли.
+///
+/// Коды идут в порядке [`FINISH_ALL`] со сдвигом на единицу; ноль —
+/// «по роли». Порядок сторожится тестом `finish_codes_follow_the_list`:
+/// разойдись он — трак покрасился бы стеклом.
+pub fn finish_of(code: u8, p: voxel::unit::Part) -> Finish {
+    match code {
+        voxel::unit::FINISH_BY_PART => finish(p),
+        c => FINISH_ALL[((c as usize) - 1).min(FINISHES - 1)],
+    }
+}
+
+/// Цвет отделки, sRGB. Краска — цвет стороны; всё остальное —
+/// собственный цвет материала, у сторон один и тот же (ADR-231).
+pub fn finish_srgb(f: Finish, tint: [f32; 3]) -> [f32; 3] {
+    match f {
+        Finish::Plate => tint,
+        Finish::Gun => [0.18, 0.18, 0.20],
+        Finish::Optic => [0.88, 0.92, 0.96],
+        // Резина чуть теплее стали и заметно темнее краски: трак
+        // обязан читаться тёмной лентой при любом цвете стороны.
+        Finish::Rubber => [0.09, 0.09, 0.10],
+        Finish::Core => [1.00, 0.83, 0.22],
+        // Голая сталь светлая, чуть холодная: каток и сустав обязаны
+        // отделяться и от резины, и от воронёного ствола.
+        Finish::Steel => [0.52, 0.53, 0.55],
+    }
+}
 
 /// Отделка по роли воксела.
 pub fn finish(p: voxel::unit::Part) -> Finish {
@@ -516,6 +556,7 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Base, Finish::Optic) => (0.08, 0.00),
         (Look::Base, Finish::Rubber) => (0.94, 0.00),
         (Look::Base, Finish::Core) => (0.40, 0.00),
+        (Look::Base, Finish::Steel) => (0.45, 1.00),
 
         // Диорама: краски на модели больше, металла меньше —
         // у макета блик широкий и мягкий, а не узкий.
@@ -524,6 +565,7 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Diorama, Finish::Optic) => (0.06, 0.00),
         (Look::Diorama, Finish::Rubber) => (0.96, 0.00),
         (Look::Diorama, Finish::Core) => (0.45, 0.00),
+        (Look::Diorama, Finish::Steel) => (0.50, 0.90),
 
         // Графика: блика нет ни на чём. Металличность нулевая
         // у брони намеренно — отражение окрашено собственным цветом
@@ -535,6 +577,7 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Graphic, Finish::Optic) => (0.25, 0.00),
         (Look::Graphic, Finish::Rubber) => (1.00, 0.00),
         (Look::Graphic, Finish::Core) => (0.60, 0.00),
+        (Look::Graphic, Finish::Steel) => (0.85, 0.10),
 
         // Техно: краски мало, металла много. Броня здесь ближе
         // к некрашеному листу, чем к крашеному.
@@ -543,6 +586,7 @@ pub fn finish_surface_of(l: Look, f: Finish) -> (f32, f32) {
         (Look::Techno, Finish::Optic) => (0.05, 0.00),
         (Look::Techno, Finish::Rubber) => (0.92, 0.00),
         (Look::Techno, Finish::Core) => (0.35, 0.00),
+        (Look::Techno, Finish::Steel) => (0.38, 1.00),
     }
 }
 
@@ -1470,6 +1514,40 @@ mod tests {
         assert_eq!(class(17), Class::Ore);
     }
 
+    /// **Коды отделки тела идут в порядке перечня рендера.**
+    ///
+    /// Коды живут в `voxel`, перечень — здесь; связывает их только
+    /// порядок. Разойдись он — трак покрасился бы стеклом, и заметил
+    /// бы это снимок, а не сборка.
+    #[test]
+    fn finish_codes_follow_the_list() {
+        use voxel::unit::{
+            Part, FINISH_CORE, FINISH_GUN, FINISH_OPTIC, FINISH_PLATE, FINISH_RUBBER, FINISH_STEEL,
+        };
+        assert_eq!(finish_of(FINISH_PLATE, Part::Sensor), Finish::Plate);
+        assert_eq!(finish_of(FINISH_GUN, Part::Armour), Finish::Gun);
+        assert_eq!(finish_of(FINISH_OPTIC, Part::Armour), Finish::Optic);
+        assert_eq!(finish_of(FINISH_RUBBER, Part::Armour), Finish::Rubber);
+        assert_eq!(finish_of(FINISH_CORE, Part::Armour), Finish::Core);
+        assert_eq!(finish_of(FINISH_STEEL, Part::Armour), Finish::Steel);
+        // Сталь светлее резины и воронёного ствола: иначе каток
+        // не отделить от трака.
+        let (s, r, g) = (
+            finish_srgb(Finish::Steel, [0.5; 3]),
+            finish_srgb(Finish::Rubber, [0.5; 3]),
+            finish_srgb(Finish::Gun, [0.5; 3]),
+        );
+        assert!(s[0] > r[0] + 0.2 && s[0] > g[0] + 0.2, "сталь не светлее");
+        // Ноль — по роли: сенсор без явного кода остаётся стеклом.
+        assert_eq!(finish_of(voxel::unit::FINISH_BY_PART, Part::Sensor), Finish::Optic);
+        // Резина темнее любой краски стороны: иначе трак сольётся
+        // с корпусом.
+        for t in side_tint() {
+            let r = finish_srgb(Finish::Rubber, t);
+            assert!(r[0] + r[1] + r[2] < t[0] + t[1] + t[2], "резина светлее краски");
+        }
+    }
+
     /// **Номер отделки и её место в перечне — одно и то же.**
     /// Перечнем индексируются материалы, номером — меши; разойдись
     /// они, и ствол получил бы отделку стекла.
@@ -1501,11 +1579,13 @@ mod tests {
         }
     }
 
-    /// **У каждой роли воксела своя отделка, и ровно одна.**
+    /// **У каждой роли воксела своя отделка, и ровно одна; остальные
+    /// отделки достижимы только кодом тела.**
     ///
     /// Проверка против номера: `FINISHES` задаёт длину массивов мешей,
     /// и отделка с номером за краем — это паника при сборке юнита,
-    /// а не промах в картинке.
+    /// а не промах в картинке. Отделка, которую не даёт ни роль,
+    /// ни код, — лишний материал, который никто не носит.
     #[test]
     fn every_part_has_a_finish_within_range() {
         use voxel::unit::Part;
@@ -1517,7 +1597,14 @@ mod tests {
             assert!(!seen[k], "две роли делят отделку {k}");
             seen[k] = true;
         }
-        assert!(seen.iter().all(|x| *x), "отделка без роли — лишний материал");
+        // Без роли — только голая сталь катков и суставов, и её
+        // даёт код тела (ADR-231).
+        for (k, s) in seen.iter().enumerate() {
+            if !s {
+                assert_eq!(FINISH_ALL[k], Finish::Steel, "отделка {k} без роли — лишний материал");
+                assert_eq!(finish_of(k as u8 + 1, Part::Armour), Finish::Steel);
+            }
+        }
     }
 
     /// **Стороны различимы в каждом направлении.** Цвет — единственное,
