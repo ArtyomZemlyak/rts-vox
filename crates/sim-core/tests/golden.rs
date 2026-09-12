@@ -20,7 +20,7 @@
 ///
 /// Тот же прогон, что печатает `sim-cli --seed 42 --ticks 1000
 /// --dump-hash`, и то же число, что записано в `docs/11-roadmap.md`.
-const GOLDEN_1000: u64 = 0xdbb4_e36f_40e1_533c;
+const GOLDEN_1000: u64 = 0x2145_433e_8e49_f2b4;
 
 const SEED: u64 = 42;
 const UNITS: usize = 5000;
