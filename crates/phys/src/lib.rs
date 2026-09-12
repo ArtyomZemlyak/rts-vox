@@ -139,6 +139,17 @@ pub struct Ride {
     pub inertia: Fx,
     /// Тяготение.
     pub gravity: Fx,
+    /// Предварительный натяг: сила опоры при нулевом сжатии,
+    /// отнесённая к массе (ADR-234).
+    ///
+    /// Равный весу на опору, он держит корпус **ровно на клиренсе**
+    /// в покое. Без натяга мягкая подвеска (жёсткость два, выбранная
+    /// ради видимого клевка — ADR-225) просаживалась бы под весом
+    /// на метр с четвертью при ходе в двадцать сантиметров, а жёсткая
+    /// не клевала бы. Натяг снимает выбор: пружина остаётся мягкой
+    /// к отклонениям и держит вес. Ноль — старая пружина, которая
+    /// только толкает.
+    pub preload: Fx,
     /// Угловое трение. Без него корпус качается вечно: подвеска гасит
     /// подъём, но не вращение вокруг центра масс.
     pub angular_damping: Fx,
@@ -243,25 +254,27 @@ pub fn step(
         // это деление на каждую опору каждого юнита каждый тик.
         let lift = c.up.x.mul(rx).add(c.up.z.mul(rz)).neg();
         let foot = c.y.add(lift).sub(r.clearance);
-        // Сжатие. Пружина **только толкает**: подвеска не притягивает
-        // машину к земле, и отрицательное сжатие означает «опора
-        // в воздухе», а не «сила вниз».
+        // Сжатие, сверху ограниченное ходом; отрицательное — отбой.
         // Опора **касается** земли, если пол не дальше хода подвески
         // под ступнёй: пружина не только сжимается, но и **вытягивается**
         // на тот же ход, и клюнувший носом танк кормой с земли не
         // отрывается — задние катки едут, распрямив подвеску. Обрыв
         // под опорой — это пол на метры ниже, и он не считается.
-        if g.sub(foot).raw() >= r.travel.neg().raw() {
+        let ext = g.sub(foot).min(r.travel);
+        if ext.raw() >= r.travel.neg().raw() {
             touching += 1;
         }
-        let squash = g.sub(foot).max(Fx::ZERO).min(r.travel);
-        if squash.raw() == 0 {
+        // Пружина **только толкает**: подвеска не притягивает машину
+        // к земле. С натягом она толкает и в отбое — пока натяг
+        // перевешивает растяжение; без натяга — только при сжатии.
+        let spring = r.stiffness.mul(ext).add(r.preload);
+        if ext.raw() < r.travel.neg().raw() || spring.raw() <= 0 {
             continue;
         }
         // Скорость точки по вертикали: подъём центра масс плюс вклад
         // вращения, `(ω × r).y`.
         let vp = c.vy.add(c.w.z.mul(rx)).sub(c.w.x.mul(rz));
-        let f = r.stiffness.mul(squash).sub(r.damping.mul(vp)).max(Fx::ZERO);
+        let f = spring.sub(r.damping.mul(vp)).max(Fx::ZERO);
         fy = fy.add(f);
         // Момент `r × F` при вертикальной силе: `(−rz·f, 0, rx·f)`.
         tx = tx.sub(rz.mul(f));
@@ -328,6 +341,13 @@ pub fn step(
     // Позиционная поправка: ни одна опора не уходит под землю глубже
     // хода подвески. Без неё большой шаг по времени протыкает рельеф,
     // и машина проваливается насквозь — пружина не успевает.
+    //
+    // **Не больше хода за тик.** Уступ выше хода подвески иначе
+    // подбрасывал бы корпус на всю разницу одним тиком — ровно тот
+    // прыжок, который высота корпуса как состояние призвана убрать
+    // (ADR-234). Подвеска распрямляется не быстрее своего хода
+    // за тик: уступ в полметра при ходе в двадцать два сантиметра
+    // берётся за три тика, а не за один.
     let mut sink = Fx::ZERO;
     for (s, g) in supports.iter().zip(ground.iter()) {
         let rx = s.x.mul(hc).sub(s.z.mul(hs));
@@ -337,7 +357,7 @@ pub fn step(
         sink = sink.max(g.sub(r.travel).sub(foot));
     }
     if sink.raw() > 0 {
-        c.y = c.y.add(sink);
+        c.y = c.y.add(sink.min(r.travel));
         c.vy = c.vy.max(Fx::ZERO);
     }
 }
@@ -364,9 +384,20 @@ mod tests {
             // Радиус инерции порядка половины длины машины.
             inertia: Fx::from_int(4),
             gravity: Fx::from_ratio(98, 10),
+            preload: Fx::ZERO,
             angular_damping: Fx::from_int(3),
             min_up: Fx::from_ratio(87, 100),
         };
+        (s, r)
+    }
+
+    /// Та же ходовая с натягом под вес: в покое корпус стоит ровно
+    /// на клиренсе, а не на клиренсе минус просадка.
+    fn preloaded() -> (Vec<Support>, Ride) {
+        let (s, mut r) = tracked();
+        r.stiffness = Fx::from_int(2);
+        r.damping = Fx::ONE;
+        r.preload = r.gravity.div(Fx::from_int(s.len() as i32));
         (s, r)
     }
 
@@ -612,6 +643,71 @@ mod tests {
         }
         assert!(c.up.z < Fx::from_ratio(-1, 40), "крен не наружу: {:?}", c.up);
         assert!(c.up.x.abs() < Fx::from_ratio(1, 100), "поворот дал клевок");
+    }
+
+    /// **С натягом корпус стоит ровно на клиренсе** — и на мягкой
+    /// пружине, которая без натяга просела бы на метр с лишним.
+    #[test]
+    fn a_preloaded_ride_rests_at_its_clearance() {
+        let (s, r) = preloaded();
+        let mut c = Chassis::resting(FLAT, &r);
+        c.y = c.y.add(Fx::ONE);
+        let g = level(s.len());
+        for _ in 0..900 {
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        }
+        assert!(c.vy.abs() < Fx::from_ratio(1, 100), "качается: vy = {:?}", c.vy);
+        let want = FLAT.add(r.clearance);
+        assert!(
+            c.y.sub(want).abs() < Fx::from_ratio(1, 50),
+            "высота {:?}, ждали клиренс {:?}",
+            c.y,
+            want
+        );
+        assert!(c.grounded());
+        // Без натяга та же пружина не держит вес: центр масс уходит
+        // на просадку `g / (k·n)`, то есть на всю глубину хода.
+        let (s, mut soft) = preloaded();
+        soft.preload = Fx::ZERO;
+        let mut c = Chassis::resting(FLAT, &soft);
+        for _ in 0..900 {
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &soft, DT);
+        }
+        assert!(c.y < want.sub(soft.travel).add(Fx::from_ratio(1, 10)), "мягкая без натяга не просела: {:?}", c.y);
+    }
+
+    /// **Уступ берётся без прыжка.** Пол под всеми опорами поднялся
+    /// на два хода подвески разом — корпус поднимается за несколько
+    /// тиков, и ни на одном не больше хода. Это ровно перенос высоты,
+    /// который у навигации происходит одним тиком (ADR-234).
+    #[test]
+    fn a_hull_climbs_a_step_without_a_single_tick_jump() {
+        let (s, r) = preloaded();
+        let mut c = Chassis::resting(FLAT, &r);
+        let flat = level(s.len());
+        for _ in 0..300 {
+            step(&mut c, &s, &flat, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        }
+        let rise = r.travel.mul(Fx::from_int(2));
+        let g: Vec<Fx> = vec![rise; s.len()];
+        let mut biggest = Fx::ZERO;
+        for _ in 0..300 {
+            let before = c.y;
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+            biggest = biggest.max(c.y.sub(before).abs());
+        }
+        assert!(
+            biggest <= r.travel.add(Fx::from_ratio(1, 100)),
+            "корпус прыгнул на {biggest:?} за тик при ходе {:?}",
+            r.travel
+        );
+        let want = rise.add(r.clearance);
+        assert!(
+            c.y.sub(want).abs() < Fx::from_ratio(1, 20),
+            "после уступа корпус на {:?}, ждали {:?}",
+            c.y,
+            want
+        );
     }
 
     /// **Опора не уходит под землю глубже хода подвески.**
