@@ -530,6 +530,7 @@ fn small_match(seed: u64, hunt: u64) -> demo::skirmish::Skirmish {
         diggers: 12,
         patience: 1500,
         hunt_period: hunt,
+        ..demo::skirmish::Setup::default()
     })
 }
 
