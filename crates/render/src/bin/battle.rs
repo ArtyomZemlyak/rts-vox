@@ -19,6 +19,7 @@
 //! Числа картинки — свет, небо, палитра — живут в `render::look`
 //! и только там (ADR-175).
 
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
@@ -66,14 +67,29 @@ struct Sim {
     r: Reference,
     mesh: MeshLayer,
     grid: ChunkGrid,
-    /// Ручка меша каждого чанка **по классу поверхности**: у породы
-    /// и руды разная шероховатость, а её вершина нести не может
-    /// (ADR-175). Пересобирается только грязный чанк.
-    chunks: Vec<[Option<Handle<Mesh>>; look::CLASSES]>,
+    /// Ручки мешей **живых** чанков — тех, что сейчас в кольце вокруг
+    /// камеры (ADR-228). Разрежённая карта, а не массив по всей сетке:
+    /// на километре в ней два миллиона чанков, из которых живы тысячи.
+    /// `BTreeMap`, а не `HashMap`: порядок обхода стабилен, и два
+    /// прогона одного замера освобождают чанки в одном порядке.
+    chunks: BTreeMap<u32, ChunkArt>,
     bufs: [MeshBuf; look::CLASSES],
     painter: Painter,
     /// Тиков симуляции на кадр. Ноль — пауза.
     speed: u32,
+}
+
+/// Что окно держит на один живой чанк.
+///
+/// Ручка меша **по классу поверхности**: у породы и руды разная
+/// шероховатость, а её вершина нести не может (ADR-175). Сущность
+/// рядом с ручкой, потому что освобождение обязано снять обе: ручка
+/// без сущности оставляет буфер на видеокарте, сущность без ручки —
+/// пустой вызов отрисовки.
+#[derive(Default)]
+struct ChunkArt {
+    mesh: [Option<Handle<Mesh>>; look::CLASSES],
+    ent: [Option<Entity>; look::CLASSES],
 }
 
 /// Состояние камеры между кадрами.
@@ -81,10 +97,16 @@ struct Sim {
 struct View {
     cam: RtsCamera,
     visible: usize,
-    /// Сторона мира в вокселях. Туман и каскады теней считаются от неё,
-    /// а не абсолютными числами: мир показа меняется ключом `--side`,
-    /// и дальности обязаны ехать вместе с ним.
-    side: f32,
+    /// Видимая даль в вокселях: туман, каскады теней и глубина резкости
+    /// считаются от неё, а не абсолютными числами.
+    ///
+    /// Это **сторона мира, но не больше кольца** (ADR-228). Дальше
+    /// кольца показывать нечего — там ничего не построено. Каскад
+    /// тени длиной в километр рисовал бы пустоту и размазал бы
+    /// разрешение карты теней по карте, из которой видно сто метров.
+    /// На прежних картах показа кольцо шире мира, и это ровно сторона,
+    /// как было до ADR-228.
+    vista: f32,
 }
 
 /// Снимок и выход по расписанию — чтобы окно можно было запускать
@@ -167,6 +189,59 @@ struct Sky {
     /// Экспозиция камеры, EV100.
     ev100: f32,
 }
+
+/// Кольцо чанков вокруг камеры: что построено, что ждёт очереди
+/// и что пора забыть (ADR-228).
+#[derive(Resource)]
+struct Ring {
+    /// Числа из `data/render.ron`.
+    s: render::stream::Stream,
+    /// Состояние каждого чанка сетки, байтом на чанк.
+    ///
+    /// Плотный массив, а не множество: на километре это два мегабайта,
+    /// а запрос по индексу — одно обращение. Три состояния:
+    /// [`UNSEEN`] — не осмотрен, [`BARE`] — осмотрен и пуст,
+    /// [`BUILT`] — построен и держится.
+    state: Vec<u8>,
+    /// Чанки, ждущие осмотра, и чанки, ждущие сборки. **Две очереди,
+    /// а не одна**: осмотр и сборка стоят на два порядка врозь,
+    /// и общий потолок пришлось бы мерить по дорогому случаю.
+    ///
+    /// FIFO: упёршаяся работа откладывается на следующий кадр,
+    /// а не отбрасывается, и один дорогой чанк не запирает за собой
+    /// очередь (`CLAUDE.md`).
+    to_probe: VecDeque<u32>,
+    to_build: VecDeque<u32>,
+    /// Чанк, в котором была камера при последнем пересчёте кольца.
+    /// Пока камера в том же чанке, пересчитывать нечего: кольцо
+    /// сдвигается не плавно, а через чанк.
+    at: Option<[i32; 3]>,
+    /// Переиспользуемый список кольца.
+    scan: Vec<u32>,
+    /// Сколько кадров подряд потолок сборки срабатывал.
+    ///
+    /// Потолок, срабатывающий **каждый** кадр, — не предохранитель,
+    /// а постоянное ухудшение (ADR-114, ADR-116), и заметить это
+    /// обязано окно, а не глаз.
+    capped: u64,
+    /// Кадров всего — чтобы отличить разогрев от установившегося режима.
+    frames: u64,
+    /// Итоги для отчёта.
+    probed: u64,
+    built: u64,
+    freed: u64,
+}
+
+/// Чанк не осмотрен: неизвестно даже, есть ли у него грани.
+const UNSEEN: u8 = 0;
+/// Чанк осмотрен и пуст — сплошная порода или чистый воздух.
+/// Он не стоит ничего и остаётся таким, пока его не копнут.
+const BARE: u8 = 1;
+/// Чанк построен: у него есть буферы и сущности.
+const BUILT: u8 = 2;
+/// Чанк осмотрен, грани у него есть, и он ждёт своей очереди
+/// на сборку. Осмотр не повторяется: он уже оплачен.
+const QUEUED: u8 = 3;
 
 /// Разбор кадра по работам ремешинга.
 ///
@@ -559,26 +634,52 @@ fn main() {
             }
         }
     };
+    let ring_nums = {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/render.ron");
+        let path = if here.exists() { here } else { std::path::PathBuf::from("data/render.ron") };
+        match render::stream::Stream::load(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        }
+    };
     let mut params = worldgen::Params::sized(side, side / 2, side);
     if relief > 0 {
         params.relief = relief;
     }
     let r = Reference::with_params(seed, units, tuning, weapons, params);
+    let t_world = t0.elapsed().as_secs_f64() * 1e3;
     let g = r.world.ground().expect("у эталона есть земля");
+    let t = Instant::now();
     let mesh = MeshLayer::new(&g.world, Opts::default());
     let (nx, ny, nz) = mesh.dims();
     let grid = ChunkGrid { nx, ny, nz, cs: CS as u32 };
     let side = side as f32;
     println!(
-        "мир {}×{}×{}, чанков {}, юнитов {units}, направление «{}», сборка {:.0} мс",
+        "мир {}×{}×{}, чанков {}, юнитов {units}, направление «{}»; \
+мир {t_world:.0} мс, слой мешинга {:.0} мс",
         g.world.nx,
         g.world.ny,
         g.world.nz,
         grid.len(),
         look::look_name(look::active()),
-        t0.elapsed().as_secs_f64() * 1e3
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    println!(
+        "кольцо: сборка {} вокселей, удержание {}, за кадр осмотр {} / сборка {} / освобождение {}",
+        ring_nums.build_radius,
+        ring_nums.keep_radius,
+        ring_nums.probe_per_frame,
+        ring_nums.build_per_frame,
+        ring_nums.free_per_frame
     );
 
+    // Видимая даль: дальше кольца ничего не построено, и рисовать
+    // туда нечего. На прежних картах показа кольцо шире мира,
+    // и `vista` равна стороне — картинка та же, что была.
+    let vista = side.min(ring_nums.keep_radius as f32);
     let cam = RtsCamera {
         target: V3::new(side * 0.5, side * 0.28, side * 0.5),
         yaw,
@@ -587,7 +688,7 @@ fn main() {
         fovy: 0.87,
         aspect: 16.0 / 9.0,
         near: 1.0,
-        far: side * 4.0,
+        far: vista * 4.0,
     };
 
     let n = grid.len();
@@ -618,12 +719,25 @@ fn main() {
             r,
             mesh,
             grid,
-            chunks: vec![[const { None }; look::CLASSES]; n],
+            chunks: BTreeMap::new(),
             bufs: class_bufs(),
             painter: Painter::default(),
             speed,
         })
-        .insert_resource(View { cam, visible: 0, side })
+        .insert_resource(Ring {
+            s: ring_nums,
+            state: vec![UNSEEN; n],
+            to_probe: VecDeque::new(),
+            to_build: VecDeque::new(),
+            at: None,
+            scan: Vec::new(),
+            capped: 0,
+            frames: 0,
+            probed: 0,
+            built: 0,
+            freed: 0,
+        })
+        .insert_resource(View { cam, visible: 0, vista })
         .insert_resource(Shot {
             path: shot,
             after,
@@ -636,6 +750,11 @@ fn main() {
         })
         .add_systems(Startup, setup)
         .add_systems(Update, (step, effects, control, cull, snap))
+        // Порядок здесь не косметика: кольцо считается от камеры,
+        // которую только что подвинул `control`, а отсекает
+        // построенное уже `cull`. Перепутанный порядок даёт кольцо
+        // от прошлого кадра и чанк, видимый на кадр позже.
+        .add_systems(Update, stream.after(control).before(cull))
         ;
     // Трассировка подключается **плагинами**, а не полем набора: без
     // аппаратной поддержки их лучше не добавлять вовсе.
@@ -666,7 +785,9 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
-    mut sim: ResMut<Sim>,
+    // Рельеф здесь больше не строится — его подгружает кольцо
+    // (ADR-228), — поэтому симуляция читается, а не правится.
+    sim: Res<Sim>,
     view: Res<View>,
     fx: Res<Fx>,
     sky: Res<Sky>,
@@ -886,45 +1007,10 @@ fn setup(
         ],
     };
 
-    // Рельеф целиком — один раз. Дальше пересобираются только грязные.
-    let t = Instant::now();
-    let Sim { r, mesh, grid, chunks, bufs, painter, .. } = &mut *sim;
-    let grid = *grid;
-    let w = &r.world.ground().expect("земля").world;
-    let mut tris = 0usize;
-    for (i, slot) in chunks.iter_mut().enumerate().take(grid.len()) {
-        let quads = mesh.rebuilt_quads(w, i);
-        if quads.is_empty() {
-            continue;
-        }
-        paint(&quads, i, grid, w, fx.paint, painter, bufs);
-        for k in 0..look::CLASSES {
-            if bufs[k].is_empty() {
-                continue;
-            }
-            tris += bufs[k].idx.len() / 3;
-            let h = meshes.add(chunk_mesh(&bufs[k], fx.chamfer, fx.rt));
-            slot[k] = Some(h.clone());
-            let o = chunk_origin(i, grid.nx, grid.ny);
-            let e = commands
-                .spawn((
-                    Mesh3d(h.clone()),
-                    MeshMaterial3d(art.ground[k].clone()),
-                    Transform::from_xyz(o[0], o[1], o[2]),
-                    Chunk(i),
-                ))
-                .id();
-            #[cfg(feature = "rt")]
-            if fx.rt > 0 {
-                commands.entity(e).insert(RaytracingMesh3d(h.clone()));
-            }
-            let _ = (e, h);
-        }
-    }
-    println!(
-        "рельеф собран за {:.0} мс, треугольников {tris}",
-        t.elapsed().as_secs_f64() * 1e3
-    );
+    // Рельефа здесь нет вовсе, и это главное в ADR-228: он подгружается
+    // кольцом вокруг камеры, кадр за кадром, под потолком работы.
+    // Прежняя редакция строила все чанки разом — на 192 метрах это
+    // двенадцать минут ожидания, а на километре не кончилось бы никогда.
 
     // Юниты: корпус и башня отдельными сущностями. Число мест
     // фиксировано — юниты гибнут и воскресают в тех же местах
@@ -978,7 +1064,10 @@ fn setup(
     let sc = look::scene();
     let eye = view.cam.eye();
     let t = view.cam.target;
-    let side = view.side;
+    // Дальности картинки считаются от **видимой дали**, а не от стороны
+    // мира: за кольцом ничего не построено (ADR-228). На прежних картах
+    // показа кольцо шире мира, и это ровно прежнее число.
+    let side = view.vista;
     let cam = commands
         .spawn((
             Camera3d::default(),
@@ -1277,6 +1366,7 @@ fn step(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut sim: ResMut<Sim>,
+    mut ring: ResMut<Ring>,
     art: Res<Art>,
     fx: Res<Fx>,
     mut prof: ResMut<Prof>,
@@ -1305,6 +1395,25 @@ fn step(
         prof.dirty.push(dirty.len() as f64);
         let (mut t_quads, mut t_paint, mut t_up) = (0.0f64, 0.0f64, 0.0f64);
         for i in dirty {
+            // Копают и за кольцом: карта в километр, а видно сто метров.
+            // Чанк, которого окно не держит, **забывается тут же** —
+            // иначе слой копит по 726 КиБ на каждый когда-либо
+            // задетый чанк до конца партии (ADR-228). Дыра никуда
+            // не денется: мир авторитетен, и войдя в кольцо, чанк
+            // соберётся из него вместе с ней.
+            let Some(art_slot) = chunks.get_mut(&(i as u32)) else {
+                mesh.forget(i);
+                // Осмотренный и пустой чанк мог перестать быть пустым:
+                // его копнули. Обратно в очередь осмотра — иначе дыра
+                // появится только когда камера переедет в соседний
+                // чанк. Чанк за кольцом уже `UNSEEN` и в очередь
+                // не попадёт.
+                if ring.state[i] != UNSEEN {
+                    ring.state[i] = UNSEEN;
+                    ring.to_probe.push_back(i as u32);
+                }
+                continue;
+            };
             let t = Instant::now();
             // Квады берутся у **живого** мешера, а не пересобираются
             // с нуля: `apply` их уже обновил, и полная пересборка
@@ -1316,25 +1425,29 @@ fn step(
             paint(&quads, i, grid, w, fx.paint, painter, bufs);
             t_paint += t.elapsed().as_secs_f64() * 1e3;
             let t = Instant::now();
-            for k in 0..look::CLASSES {
-                let m = chunk_mesh(&bufs[k], fx.chamfer, fx.rt);
-                match chunks[i][k].clone() {
+            for (k, b) in bufs.iter().enumerate() {
+                let m = chunk_mesh(b, fx.chamfer, fx.rt);
+                match art_slot.mesh[k].clone() {
                     Some(h) => {
                         let _ = meshes.insert(h.id(), m);
                     }
                     None => {
-                        if bufs[k].is_empty() {
+                        if b.is_empty() {
                             continue;
                         }
                         let h = meshes.add(m);
-                        chunks[i][k] = Some(h.clone());
+                        art_slot.mesh[k] = Some(h.clone());
                         let o = chunk_origin(i, grid.nx, grid.ny);
-                        commands.spawn((
-                            Mesh3d(h),
-                            MeshMaterial3d(art.ground[k].clone()),
-                            Transform::from_xyz(o[0], o[1], o[2]),
-                            Chunk(i),
-                        ));
+                        art_slot.ent[k] = Some(
+                            commands
+                                .spawn((
+                                    Mesh3d(h),
+                                    MeshMaterial3d(art.ground[k].clone()),
+                                    Transform::from_xyz(o[0], o[1], o[2]),
+                                    Chunk(i),
+                                ))
+                                .id(),
+                        );
                     }
                 }
             }
@@ -1769,6 +1882,170 @@ fn control(
     }
 }
 
+/// Чанк, в котором лежит точка. Целые со знаком, а не индекс сетки:
+/// камера бывает и за краем карты, а кольцо обязано заметить, что она
+/// переехала, и там.
+fn chunk_of(g: ChunkGrid, p: V3) -> [i32; 3] {
+    let s = g.cs as f32;
+    [
+        (p.x / s).floor() as i32,
+        (p.y / s).floor() as i32,
+        (p.z / s).floor() as i32,
+    ]
+}
+
+/// Потоковая подгрузка рельефа: кольцо чанков вокруг камеры (ADR-228).
+///
+/// Кадр делится на три работы, и у каждой свой потолок из
+/// `data/render.ron`:
+///
+/// 1. **Осмотр** — есть ли у чанка грани вообще. Однородный объём
+///    (сплошная порода, чистый воздух) не даёт ни одного квада,
+///    и таких в кольце большинство.
+/// 2. **Сборка** — мешинг, раскраска материалом и отдача буфера.
+/// 3. **Освобождение** — чанк ушёл дальше радиуса удержания.
+///
+/// Не влезшее в потолок **откладывается на следующий кадр**, а не
+/// бросается: очередь FIFO, и упёршийся чанк не запирает за собой
+/// остальные (`CLAUDE.md`).
+#[allow(clippy::too_many_arguments)]
+fn stream(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut sim: ResMut<Sim>,
+    mut ring: ResMut<Ring>,
+    art: Res<Art>,
+    fx: Res<Fx>,
+    view: Res<View>,
+) {
+    ring.frames += 1;
+    let grid = sim.grid;
+    let centre = view.cam.target;
+
+    // Пересчёт кольца — только когда камера переехала в другой чанк.
+    // Кольцо сдвигается через чанк, а не плавно, и пересчитывать его
+    // каждый кадр значило бы сортировать десятки тысяч расстояний
+    // ради того же самого списка.
+    let here = chunk_of(grid, centre);
+    if ring.at != Some(here) {
+        ring.at = Some(here);
+        let r = ring.s.build_radius as f32;
+        let mut scan = core::mem::take(&mut ring.scan);
+        render::stream::ring(&grid, centre, r, &mut scan);
+        ring.to_probe.clear();
+        ring.to_build.clear();
+        for &i in scan.iter() {
+            match ring.state[i as usize] {
+                UNSEEN => ring.to_probe.push_back(i),
+                // Осмотр уже оплачен: повторять его — терять потолок
+                // осмотра на то, что и так известно.
+                QUEUED => ring.to_build.push_back(i),
+                _ => {}
+            }
+        }
+        ring.scan = scan;
+    }
+
+    let build_r = ring.s.build_radius as f32;
+    let keep_r = ring.s.keep_radius as f32;
+    let Sim { r, mesh, chunks, bufs, painter, .. } = &mut *sim;
+    let w = &r.world.ground().expect("земля").world;
+
+    // 1. Осмотр.
+    for _ in 0..ring.s.probe_per_frame {
+        let Some(i) = ring.to_probe.pop_front() else { break };
+        let k = i as usize;
+        // Пока чанк ждал очереди, кольцо могло уехать, а сам он —
+        // смениться. Пропуск тут дешевле, чем чистка очереди.
+        if ring.state[k] != UNSEEN || !render::stream::within(&grid, k, centre, build_r) {
+            continue;
+        }
+        ring.probed += 1;
+        if mesh.probe(w, k) {
+            ring.state[k] = QUEUED;
+            ring.to_build.push_back(i);
+        } else {
+            ring.state[k] = BARE;
+        }
+    }
+
+    // 2. Сборка.
+    let want = ring.to_build.len();
+    let mut done = 0u32;
+    while done < ring.s.build_per_frame {
+        let Some(i) = ring.to_build.pop_front() else { break };
+        let k = i as usize;
+        if ring.state[k] != QUEUED || !render::stream::within(&grid, k, centre, build_r) {
+            continue;
+        }
+        done += 1;
+        ring.built += 1;
+        let quads = mesh.scratch_quads(w, k);
+        paint(quads, k, grid, w, fx.paint, painter, bufs);
+        let mut slot = ChunkArt::default();
+        let o = chunk_origin(k, grid.nx, grid.ny);
+        for (c, b) in bufs.iter().enumerate() {
+            if b.is_empty() {
+                continue;
+            }
+            let h = meshes.add(chunk_mesh(b, fx.chamfer, fx.rt));
+            let e = commands
+                .spawn((
+                    Mesh3d(h.clone()),
+                    MeshMaterial3d(art.ground[c].clone()),
+                    Transform::from_xyz(o[0], o[1], o[2]),
+                    Chunk(k),
+                ))
+                .id();
+            #[cfg(feature = "rt")]
+            if fx.rt > 0 {
+                commands.entity(e).insert(RaytracingMesh3d(h.clone()));
+            }
+            slot.mesh[c] = Some(h);
+            slot.ent[c] = Some(e);
+        }
+        // Грани были, а буферов не вышло: все они у нижней грани,
+        // которую `Opts::skip_bottom` не выпускает. Держать под это
+        // запись незачем.
+        if slot.mesh.iter().all(|h| h.is_none()) {
+            ring.state[k] = BARE;
+            continue;
+        }
+        ring.state[k] = BUILT;
+        chunks.insert(i, slot);
+    }
+    // Потолок, срабатывающий **каждый** кадр, — не предохранитель,
+    // а постоянное ухудшение (ADR-114, ADR-116). Считаем, чтобы это
+    // было видно числом, а не на глаз.
+    if want > ring.s.build_per_frame as usize {
+        ring.capped += 1;
+    }
+
+    // 3. Освобождение. Обход идёт по живым чанкам, а не по сетке:
+    // живых тысячи, в сетке километра — два миллиона.
+    let mut stale: Vec<u32> = Vec::new();
+    for &i in chunks.keys() {
+        if stale.len() >= ring.s.free_per_frame as usize {
+            break;
+        }
+        if !render::stream::within(&grid, i as usize, centre, keep_r) {
+            stale.push(i);
+        }
+    }
+    for i in stale {
+        let Some(slot) = chunks.remove(&i) else { continue };
+        for e in slot.ent.into_iter().flatten() {
+            commands.entity(e).despawn();
+        }
+        // Ручки уходят вместе с записью: последняя снятая ручка
+        // освобождает и буфер на видеокарте. Инкрементальное
+        // состояние — отдельно, его держит слой мешинга.
+        mesh.forget(i as usize);
+        ring.state[i as usize] = UNSEEN;
+        ring.freed += 1;
+    }
+}
+
 /// Отсечение пирамидой — нашим счётом (ADR-142).
 fn cull(
     mut view: ResMut<View>,
@@ -1801,6 +2078,7 @@ fn snap(
     mut commands: Commands,
     time: Res<Time>,
     sim: Res<Sim>,
+    ring: Res<Ring>,
     prof: Res<Prof>,
     mut shot: ResMut<Shot>,
     mut exit: MessageWriter<AppExit>,
@@ -1809,13 +2087,17 @@ fn snap(
     if !shot.done && time.elapsed_secs() >= shot.after && shot.seen >= shot.at_frame {
         if let Some(p) = shot.path.clone() {
             println!(
-                "снимок на {:.1} с, кадр {}, тик {}: живых {}, снарядов {}, взрывов {}",
+                "снимок на {:.1} с, кадр {}, тик {}: живых {}, снарядов {}, взрывов {}; \
+кольцо: живых чанков {}, ждут осмотра {}, ждут сборки {}",
                 time.elapsed_secs(),
                 shot.seen,
                 sim.r.world.tick,
                 sim.r.world.units.live().len(),
                 sim.r.world.shots.alive_count(),
-                sim.r.world.blasts
+                sim.r.world.blasts,
+                sim.chunks.len(),
+                ring.to_probe.len(),
+                ring.to_build.len()
             );
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
         }
@@ -1844,6 +2126,35 @@ fn snap(
                 Prof::med(&prof.paint, 120),
                 Prof::med(&prof.upload, 120),
                 sim.r.world.tick
+            );
+            // Кольцо отчитывается **вместе** с кадром: очередь, которая
+            // не пустеет, и потолок, который срабатывает каждый кадр, —
+            // это не предохранитель, а постоянное ухудшение (ADR-114,
+            // ADR-116), и увидеть его надо числом.
+            println!(
+                "  кольцо: живых {}, осмотрено {}, собрано {}, освобождено {}; \
+очередь осмотра {}, сборки {}; потолок сборки сработал в {} кадрах из {}",
+                sim.chunks.len(),
+                ring.probed,
+                ring.built,
+                ring.freed,
+                ring.to_probe.len(),
+                ring.to_build.len(),
+                ring.capped,
+                ring.frames
+            );
+            // Память — то, ради чего кольцо освобождает чанки. Считается
+            // здесь, а не в конце: она обязана **не расти**, а конечное
+            // число этого не покажет.
+            let g = sim.r.world.ground().expect("земля");
+            let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
+            println!(
+                "  память: занятость мира {:.0} МиБ, правки {:.1} МиБ, \
+состояние мешинга {:.1} МиБ на {} чанках",
+                mib(g.world.bit_bytes()),
+                mib(g.world.diff_bytes()),
+                mib(sim.mesh.state_bytes()),
+                sim.mesh.live_chunks()
             );
         }
     }

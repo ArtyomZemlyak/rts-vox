@@ -20,6 +20,62 @@ struct MeshChunk {
     mesher: IncMesher,
 }
 
+/// Собрать битовый объём чанка **словами**, а не по вокселю.
+///
+/// Занятость мира уже лежит битами, и по оси X они идут подряд
+/// (`World::bits`). Колонка чанка — это те же биты, сдвинутые
+/// на невыровненное начало: чанк 62 воксела шириной, слово 64 бита,
+/// и совпадают они только у нулевого. Побитовый обход спрашивает
+/// занятость 262 144 раза на чанк; здесь это 4 096 сдвигов.
+///
+/// Возвращает, **однороден ли** чанк: сплошная порода или чистый
+/// воздух. У однородного объёма нет ни одной грани, и весь смысл
+/// проверки в том, что узнаётся это по дороге и бесплатно.
+///
+/// Край мира — воздух, как и у побитового обхода: грань на краю
+/// остаётся видимой, и сплошным такой чанк не считается.
+fn fill_bits(w: &World, cx: u32, cy: u32, cz: u32, b: &mut BitVolume) -> bool {
+    let (ox, oy, oz) = (cx * MCS as u32, cy * MCS as u32, cz * MCS as u32);
+    let src = w.bits();
+    let wpr = w.bit_words_per_row() as i64;
+    let (nx, ny, nz) = (w.nx as i64, w.ny as i64, w.nz as i64);
+    // Локальный ноль — паддинг, то есть воксел **перед** чанком.
+    let x0 = ox as i64 - 1;
+    let wi = x0.div_euclid(64);
+    let sh = x0.rem_euclid(64) as u32;
+    // Биты за краем мира гасятся маской: `solid` за краем отвечает
+    // «пусто», и словесная сборка обязана отвечать так же.
+    let mask = if x0 + 64 <= nx {
+        u64::MAX
+    } else if x0 >= nx {
+        0
+    } else {
+        let k = (nx - x0) as u32;
+        (1u64 << k) - 1
+    };
+    let (mut all_set, mut all_clear) = (true, true);
+    for ly in 0..CSP {
+        let wy = oy as i64 + ly as i64 - 1;
+        let row_ok = wy >= 0 && wy < ny;
+        for lz in 0..CSP {
+            let wz = oz as i64 + lz as i64 - 1;
+            let word = if !row_ok || wz < 0 || wz >= nz {
+                0
+            } else {
+                let base = (wy * nz + wz) * wpr;
+                let lo = if wi < 0 { 0 } else { src[(base + wi) as usize] };
+                let hi = if wi + 1 >= wpr { 0 } else { src[(base + wi + 1) as usize] };
+                let v = if sh == 0 { lo } else { (lo >> sh) | (hi << (64 - sh)) };
+                v & mask
+            };
+            b[ly * CSP + lz] = word;
+            all_set &= word == u64::MAX;
+            all_clear &= word == 0;
+        }
+    }
+    all_set | all_clear
+}
+
 pub struct MeshLayer {
     chunks: Vec<Option<Box<MeshChunk>>>,
     nx: u32,
@@ -35,6 +91,19 @@ pub struct MeshLayer {
     /// Сколько раз чанк собирался с нуля. Первое касание чанка стоит
     /// полной пересборки, и на старте это даёт пик — см. D-7.
     pub full_rebuilds: u64,
+    /// Битовый объём и мешер **на один раз**: потоковый слой строит
+    /// чанк, отдаёт квады и тут же забывает его. Заводить под это
+    /// `IncMesher` заново значило бы выделять 726 КиБ на каждый
+    /// построенный чанк (ADR-075) и возвращать их аллокатору
+    /// через сто микросекунд.
+    scratch: Box<Scratch>,
+}
+
+/// Переиспользуемое место под разовую сборку чанка.
+struct Scratch {
+    bits: BitVolume,
+    mesher: IncMesher,
+    quads: Vec<crate::Quad>,
 }
 
 impl MeshLayer {
@@ -56,12 +125,26 @@ impl MeshLayer {
             epoch: 0,
             local: (0..n).map(|_| Vec::new()).collect(),
             full_rebuilds: 0,
+            scratch: Box::new(Scratch {
+                bits: [0u64; CSP * CSP],
+                mesher: IncMesher::new(),
+                quads: Vec::new(),
+            }),
         }
     }
 
     #[inline]
     fn index(&self, cx: u32, cy: u32, cz: u32) -> usize {
         ((cz * self.ny + cy) * self.nx + cx) as usize
+    }
+
+    /// Координаты чанка по линейному индексу. Порядок растровый:
+    /// `x` быстрее всех, `z` медленнее — тот же, что у `ChunkGrid`
+    /// рендера, и разойтись им нельзя.
+    #[inline]
+    fn coords(&self, i: usize) -> (u32, u32, u32) {
+        let i = i as u32;
+        (i % self.nx, (i / self.nx) % self.ny, i / (self.nx * self.ny))
     }
 
     /// Собрать битовый объём чанка из мира, включая паддинг соседей.
@@ -96,6 +179,57 @@ impl MeshLayer {
             }
         }
         b
+    }
+
+    /// Осмотреть чанк, не собирая его.
+    ///
+    /// Отвечает, **есть ли у чанка грани вообще**. Однородный объём —
+    /// сплошная порода или чистый воздух — не даёт ни одного квада,
+    /// и мешить его незачем. В потоковом кольце таких большинство:
+    /// под поверхностью сплошная порода, над ней воздух, и только
+    /// тонкий пласт у поверхности несёт геометрию.
+    ///
+    /// Цена — 4 096 сдвигов вместо 262 144 запросов занятости,
+    /// и это разница между «осмотреть кольцо за кадр» и «за минуту».
+    pub fn probe(&mut self, w: &World, i: usize) -> bool {
+        let (cx, cy, cz) = self.coords(i);
+        !fill_bits(w, cx, cy, cz, &mut self.scratch.bits)
+    }
+
+    /// Квады чанка, собранные с нуля в **переиспользуемом** мешере.
+    ///
+    /// Путь потоковой подгрузки: чанк входит в кольцо, отдаёт геометрию
+    /// и состояния за собой не оставляет. Резидентный `IncMesher`
+    /// стоит 726 КиБ на чанк (ADR-075) и нужен тому, кого копают,
+    /// а не тому, на кого смотрят.
+    ///
+    /// Однородный чанк возвращает пустой срез, не дойдя до мешера.
+    pub fn scratch_quads(&mut self, w: &World, i: usize) -> &[crate::Quad] {
+        let (cx, cy, cz) = self.coords(i);
+        let opts = self.opts;
+        let s = &mut *self.scratch;
+        s.quads.clear();
+        if fill_bits(w, cx, cy, cz, &mut s.bits) {
+            return &s.quads;
+        }
+        s.mesher.rebuild_all(&s.bits, opts);
+        s.mesher.append_quads(&mut s.quads);
+        &s.quads
+    }
+
+    /// Забыть состояние чанка. Возвращает `true`, если было что забывать.
+    ///
+    /// Кольцо вокруг камеры конечно, а карта — нет: чанк, вышедший
+    /// из кольца, обязан вернуть свои 726 КиБ. Правильность от этого
+    /// не страдает: мир авторитетен, и вернувшийся чанк собирается
+    /// из него заново.
+    pub fn forget(&mut self, i: usize) -> bool {
+        self.chunks[i].take().is_some()
+    }
+
+    /// Держит ли слой состояние этого чанка.
+    pub fn is_live(&self, i: usize) -> bool {
+        self.chunks[i].is_some()
     }
 
     /// Развести правки тика по чанкам мешинга. Правка на границе чанка
@@ -172,7 +306,8 @@ impl MeshLayer {
             );
             if self.chunks[i].is_none() {
                 // Первое касание: собрать объём и смешить целиком.
-                let bits = Self::build_bits(w, cx, cy, cz);
+                let mut bits: BitVolume = [0u64; CSP * CSP];
+                fill_bits(w, cx, cy, cz, &mut bits);
                 let mut mesher = IncMesher::new();
                 mesher.rebuild_all(&bits, self.opts);
                 self.chunks[i] = Some(Box::new(MeshChunk { bits, mesher }));
@@ -365,6 +500,136 @@ mod tests {
                 "чанк {d}: живые квады разошлись после второй правки"
             );
         }
+    }
+
+    /// **Словесная сборка объёма совпадает с побитовой — до бита.**
+    ///
+    /// Это не оптимизация «примерно то же»: чанк 62 воксела шириной,
+    /// слово 64 бита, и выравниваются они только у нулевого чанка.
+    /// Сдвиг на единицу даёт геометрию, съехавшую на воксел, и заметно
+    /// это не на числе квадов, а на шве между чанками.
+    ///
+    /// Мир берётся **с правками**: край мира, пустые чанки и дыры
+    /// в породе — три разных случая границы, и путать их легко.
+    #[test]
+    fn the_word_fill_matches_the_voxel_walk() {
+        // Мир нарочно шире шести чанков по каждой оси: чанк 62 воксела,
+        // слово 64 бита, и сдвиг колонки у каждого следующего чанка
+        // свой — 63, 61, 59, 57, 55, 53. Проверять надо их все, а не
+        // выровненный нулевой.
+        let mut w = voxel::World::new(320, 192, 320, 1 << 16, Box::new(Steps));
+        dig(
+            &mut w,
+            (14..26u32).flat_map(|y| {
+                (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))
+            }),
+        );
+        let layer = MeshLayer::new(&w, Opts::default());
+        let (nx, ny, nz) = layer.dims();
+        let mut checked = 0usize;
+        let (mut uniform, mut mixed) = (0usize, 0usize);
+        for cz in 0..nz {
+            for cy in 0..ny {
+                for cx in 0..nx {
+                    let want = MeshLayer::build_bits(&w, cx, cy, cz);
+                    let mut got: BitVolume = [0u64; CSP * CSP];
+                    let u = fill_bits(&w, cx, cy, cz, &mut got);
+                    assert_eq!(
+                        want.as_slice(),
+                        got.as_slice(),
+                        "чанк {cx},{cy},{cz}: словесный объём разошёлся с побитовым"
+                    );
+                    let flat = want.iter().all(|&v| v == 0) || want.iter().all(|&v| v == u64::MAX);
+                    assert_eq!(u, flat, "чанк {cx},{cy},{cz}: однородность определена неверно");
+                    checked += 1;
+                    if u {
+                        uniform += 1;
+                    } else {
+                        mixed += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 100, "проверка ничего не проверила");
+        // Оба случая обязаны встретиться: без однородных нечего было бы
+        // пропускать, без смешанных — нечего сверять.
+        assert!(uniform > 0 && mixed > 0, "однородных {uniform}, смешанных {mixed}");
+    }
+
+    /// **Однородный чанк граней не даёт, смешанный даёт.** Ровно на этом
+    /// стоит потолок работы кольца: осмотр отделяет породу и воздух
+    /// от поверхности, не доходя до мешера.
+    #[test]
+    fn a_uniform_chunk_has_no_quads() {
+        let w = voxel::World::new(200, 128, 200, 1 << 16, Box::new(Steps));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let (nx, ny, nz) = layer.dims();
+        let (mut skipped, mut built) = (0usize, 0usize);
+        for i in 0..(nx * ny * nz) as usize {
+            let has = layer.probe(&w, i);
+            let n = layer.scratch_quads(&w, i).len();
+            assert_eq!(has, n > 0, "чанк {i}: осмотр обещал {has}, а квадов {n}");
+            // Разовая сборка состояния за собой не оставляет.
+            assert!(!layer.is_live(i), "чанк {i}: разовая сборка осела в слое");
+            if has {
+                built += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+        assert!(skipped > 0 && built > 0, "пропущено {skipped}, собрано {built}");
+    }
+
+    /// **Разовая сборка даёт ту же геометрию, что полная пересборка.**
+    /// Кольцо показывает именно её, и разойдись они — на экране будет
+    /// не мир, а его пересказ.
+    #[test]
+    fn the_scratch_build_equals_a_full_rebuild() {
+        let mut w = voxel::World::new(200, 128, 200, 1 << 16, Box::new(Steps));
+        dig(
+            &mut w,
+            (14..26u32).flat_map(|y| {
+                (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))
+            }),
+        );
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let (nx, ny, nz) = layer.dims();
+        let mut seen = 0usize;
+        for i in 0..(nx * ny * nz) as usize {
+            let want = sorted(layer.rebuilt_quads(&w, i));
+            let got = sorted(layer.scratch_quads(&w, i).to_vec());
+            assert_eq!(want, got, "чанк {i}: разовая сборка разошлась с полной");
+            seen += usize::from(!want.is_empty());
+        }
+        assert!(seen > 5, "непустых чанков всего {seen} — сверять почти нечего");
+    }
+
+    /// **Забытый чанк перестаёт стоить память и собирается заново.**
+    /// Без этого кольцо на карте в километр копит состояние до конца
+    /// партии: 726 КиБ на каждый чанк, который когда-либо копали.
+    #[test]
+    fn a_forgotten_chunk_is_rebuilt_from_the_world() {
+        let mut w = voxel::World::new(128, 64, 128, 1 << 16, Box::new(Steps));
+        let mut layer = MeshLayer::new(&w, Opts::default());
+        let edits = dig(
+            &mut w,
+            (14..24u32).flat_map(|y| {
+                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
+            }),
+        );
+        layer.apply(&w, &edits);
+        let i = layer.dirty()[0] as usize;
+        let before = sorted(layer.quads(i));
+        assert!(!before.is_empty(), "чанк пуст — забывать нечего");
+        assert!(layer.is_live(i));
+        assert!(layer.forget(i), "чанк не забылся");
+        assert!(!layer.is_live(i));
+        assert!(layer.quads(i).is_empty(), "забытый чанк всё ещё отдаёт квады");
+        assert!(!layer.forget(i), "забыть дважды удалось");
+        // Возвращается — тем же, каким был.
+        assert_eq!(before, sorted(layer.scratch_quads(&w, i).to_vec()));
+        layer.apply(&w, &edits);
+        assert_eq!(before, sorted(layer.quads(i)), "после возврата геометрия другая");
     }
 
     /// **Нетронутый чанк квадов не отдаёт.** Слой ленивый, и выдумать
