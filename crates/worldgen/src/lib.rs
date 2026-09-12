@@ -171,6 +171,39 @@ pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
     h.clamp(8, p.ny as u64 - 8) as u32
 }
 
+/// Толщина почвы в этой колонке.
+///
+/// **Ровный слой давал одноцветную бурую землю.** Порода, глубинная
+/// порода и жилы в генераторе есть, но сверху их накрывал слой почвы
+/// в `p.soil` вокселей, и увидеть их можно было, только выкопав.
+/// Половину кадра занимал один цвет (ADR-210).
+///
+/// Толщина складывается из двух причин, и обе нужны:
+///
+/// - **пятна.** Почва лежит неровно; где её мало, выходит голая
+///   порода. Шум с крупным шагом даёт плешины в десятки метров,
+///   а не рябь по вокселю.
+/// - **склон.** Почва не держится на крутизне. Геологически это
+///   главная причина, и на наших картах она **почти не работает**:
+///   замерено, что на карте показа 87.9% клеток имеют нулевой склон,
+///   а больше двух вокселей он не бывает нигде. Оставлена потому,
+///   что верна, и сработает на карте с настоящим рельефом.
+///
+/// Всё целочисленно и без состояния, поэтому `material` и `column`
+/// считают одинаково, а порядок обхода ни на что не влияет.
+pub fn soil_depth(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
+    let h = surface_height(p, seed, x, z) as i64;
+    let dx = (surface_height(p, seed, x + 1, z) as i64 - h).abs();
+    let dz = (surface_height(p, seed, x, z + 1) as i64 - h).abs();
+    // Шаг 40 вокселей — плешины по двадцать метров: крупнее машины,
+    // мельче поля боя.
+    let patch = value_noise(seed ^ 0x50A1, x, z, 40) as u64;
+    // Ноль примерно на трети клеток, дальше растёт до `soil + 1`:
+    // слой получается неровным, а не «есть либо нет».
+    let base = ((patch * (p.soil as u64 + 3)) / 65536).saturating_sub(1) as u32;
+    base.saturating_sub((dx + dz) as u32)
+}
+
 /// Материал воксела. Чистая функция: ни состояния, ни порядка.
 /// Трёхмерный шум **вдоль колонки**: `x` и `z` зафиксированы, меняется
 /// только `y`.
@@ -311,7 +344,7 @@ impl Noise3 for Column {
 /// вместо 1 024. Обобщено по `Noise3`, потому что правило залегания
 /// обязано существовать в одном экземпляре: две копии разойдутся молча,
 /// а расхождение генератора — это расхождение всех сохранений.
-fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32) -> Mat {
+fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32, soil: u32) -> Mat {
     if y < p.lava_depth {
         return mat::LAVA;
     }
@@ -323,7 +356,7 @@ fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32) -> Mat {
     if y + 12 < h && n.cave(y) > 46000 {
         return mat::AIR;
     }
-    if y + p.soil >= h {
+    if soil > 0 && y + soil >= h {
         return mat::SOIL;
     }
 
@@ -364,7 +397,8 @@ pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
         return mat::AIR;
     }
     let mut n = Direct { seed, x, z };
-    at_depth(p, &mut n, y, surface_height(p, seed, x, z))
+    let h = surface_height(p, seed, x, z);
+    at_depth(p, &mut n, y, h, soil_depth(p, seed, x, z))
 }
 
 /// Отрезок колонки `[y0, y0 + out.len())` разом.
@@ -379,10 +413,14 @@ pub fn column(p: &Params, seed: u64, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
         return;
     }
     let h = surface_height(p, seed, x, z);
+    // Толщина почвы считается **один раз на колонку**, а не на воксель:
+    // это два обращения к шуму высоты, и в цикле они стоили бы столько
+    // же, сколько всё остальное.
+    let soil = soil_depth(p, seed, x, z);
     let mut n = Column::new(seed, x, z);
     for (i, o) in out.iter_mut().enumerate() {
         let y = y0 + i as u32;
-        *o = if y >= p.ny { mat::AIR } else { at_depth(p, &mut n, y, h) };
+        *o = if y >= p.ny { mat::AIR } else { at_depth(p, &mut n, y, h, soil) };
     }
 }
 
