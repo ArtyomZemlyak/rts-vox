@@ -86,9 +86,14 @@ const MOVE_COLOUR: Color = Color::srgb(0.35, 1.0, 0.45);
 const ATTACK_COLOUR: Color = Color::srgb(1.0, 0.35, 0.3);
 const DIG_COLOUR: Color = Color::srgb(1.0, 0.8, 0.25);
 
-/// Воксель тела к вокселю мира: ребро воксела мира 0.5 м, воксела тела
-/// 0.25 м (ADR-094).
-const UNIT_SCALE: f32 = 0.5;
+/// Ребро воксела тела по умолчанию, миллиметры.
+///
+/// **Сто, а не двести пятьдесят.** Канон ADR-094 держал воксел тела
+/// вдвое мельче мирового — четверть метра, — и танк выходил
+/// из 24×12×12 кубиков. На ста миллиметрах тех же кубиков 60×30×30:
+/// форма перестаёт быть набором крупных блоков (ADR-218). Ключ `--mm`
+/// меняет число, чтобы сравнивать не по памяти.
+const BODY_MM: u16 = 100;
 
 /// Симуляция и всё, что нужно, чтобы её показать.
 #[derive(Resource)]
@@ -127,6 +132,8 @@ const CATCH_UP: u32 = 8;
 struct View {
     cam: RtsCamera,
     side: f32,
+    /// Ребро воксела тела юнита, миллиметры.
+    body_mm: u16,
 }
 
 /// Что выделено и что с этим происходит.
@@ -207,6 +214,7 @@ fn main() {
     // не холмами, а горизонталями топографической карты. На тридцати
     // появляются лощины и гребни, а проходимость держится — дыр
     // в навигации по-прежнему нет (ADR-212).
+    let mut body_mm = BODY_MM;
     let mut relief = 30u32;
     let mut speed = 1u32;
     let mut shot: Option<String> = None;
@@ -221,6 +229,7 @@ fn main() {
             "--units" => units = v.parse().unwrap_or(units),
             "--side" => side = v.parse().unwrap_or(side),
             "--relief" => relief = v.parse().unwrap_or(relief),
+            "--mm" => body_mm = v.parse().unwrap_or(body_mm),
             "--seed" => seed = v.parse().unwrap_or(seed),
             // Множитель реального времени, а не тиков на кадр:
             // единица — тридцать тиков в секунду.
@@ -234,7 +243,7 @@ fn main() {
             "--dist" => dist = v.parse().unwrap_or(dist),
             "--help" => {
                 println!(
-                    "play [--units N] [--side N] [--relief N] [--seed N] [--speed множитель] \
+                    "play [--units N] [--side N] [--relief N] [--seed N] [--mm ребро-тела-мм] [--speed множитель] \
 [--shot файл] [--shot-after сек] [--frames N] [--demo кадр] [--yaw] [--pitch] [--dist]"
                 );
                 return;
@@ -331,7 +340,7 @@ fn main() {
             was: speed.max(1),
             acc: 0.0,
         })
-        .insert_resource(View { cam, side })
+        .insert_resource(View { cam, side, body_mm })
         .insert_resource(Sel::default())
         .insert_resource(Shot { path: shot, after, frames, seen: 0, done: false, demo })
         .add_systems(Startup, setup)
@@ -361,7 +370,18 @@ fn setup(
         cfg.line.width = 2.5;
     }
 
-    let bodies = [voxel::unit::tank(), voxel::unit::strider()];
+    // Пересэмплирование **не украшение**: тело хранит своё ребро
+    // в миллиметрах, и мешер ставит воксел в мировых единицах,
+    // а не в клетках. Отказ пересэмплировать — не повод рисовать
+    // не то: тело остаётся в прежнем масштабе и говорит об этом.
+    let mm = view.body_mm;
+    let bodies = [voxel::unit::tank(), voxel::unit::strider()].map(|b| match b.resampled(mm) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("тело в {mm} мм не вышло: {}", e.why());
+            b
+        }
+    });
     let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
@@ -390,7 +410,7 @@ fn setup(
         render::model::body_to_mesh(
             body,
             tint,
-            UNIT_SCALE,
+            body.mm as f32 / voxel::unit::WORLD_MM as f32,
             layers,
             render::model::BEVEL,
             &mut ubufs,

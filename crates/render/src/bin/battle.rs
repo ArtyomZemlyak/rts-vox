@@ -119,6 +119,8 @@ struct Fx {
     /// Выключенная снимает и текстуру, и её UV с вершин — иначе
     /// в замер попала бы только половина цены.
     chamfer: bool,
+    /// Ребро воксела тела юнита, миллиметры.
+    body_mm: u16,
 }
 
 /// Время суток и глубина дымки.
@@ -174,12 +176,16 @@ impl Prof {
 /// пришлось бы белое с коричневым.
 const FLAT_GROUND: [f32; 3] = [0.47, 0.37, 0.24];
 
-/// Воксель тела к вокселю мира.
+/// Ребро воксела тела по умолчанию, миллиметры.
 ///
-/// Канон: ребро воксела мира 0.5 м, воксела тела 0.25 м (ADR-094).
-/// Значит ровно половина — и танк 24×12×12 выходит 12×6×6 мировых
-/// вокселей, шесть метров в длину. Как и должен.
-const UNIT_SCALE: f32 = 0.5;
+/// **Сто, а не двести пятьдесят.** Канон ADR-094 держал воксел тела
+/// вдвое мельче мирового — четверть метра, — и танк выходил
+/// из 24×12×12 кубиков. На ста миллиметрах тех же кубиков
+/// 60×30×30: форма перестаёт быть набором крупных блоков и начинает
+/// читаться машиной (ADR-218).
+///
+/// Ключ `--mm` меняет число, чтобы сравнивать не по памяти.
+const BODY_MM: u16 = 100;
 
 #[derive(Component)]
 struct Chunk(usize);
@@ -388,6 +394,7 @@ fn main() {
         paint: true,
         sky: true,
         chamfer: true,
+        body_mm: BODY_MM,
     };
     let mut sky = Sky {
         elevation: look::SUN_ELEVATION,
@@ -414,6 +421,7 @@ fn main() {
             "--paint" => fx.paint = v != "0",
             "--sky" => fx.sky = v != "0",
             "--chamfer" => fx.chamfer = v != "0",
+            "--mm" => fx.body_mm = v.parse().unwrap_or(fx.body_mm),
             "--sun" => sky.elevation = v.parse().unwrap_or(sky.elevation),
             "--sun-az" => sky.azimuth = v.parse().unwrap_or(sky.azimuth),
             "--haze" => sky.haze = v.parse().unwrap_or(sky.haze),
@@ -427,7 +435,7 @@ fn main() {
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
-[--sky 0|1] [--chamfer 0|1] \
+[--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] \
 [--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100]"
                 );
                 return;
@@ -565,7 +573,18 @@ fn setup(
     //
     // Масштаб — канонический: воксель тела вдвое мельче мирового
     // (ADR-094).
-    let bodies = [voxel::unit::tank(), voxel::unit::strider()];
+    // Пересэмплирование **не украшение**: тело хранит своё ребро
+    // в миллиметрах, и мешер обязан ставить воксел в мировых единицах,
+    // а не в клетках. Отказ пересэмплировать — не повод рисовать
+    // не то: тело остаётся в прежнем масштабе и говорит об этом.
+    let mm = fx.body_mm;
+    let bodies = [voxel::unit::tank(), voxel::unit::strider()].map(|b| match b.resampled(mm) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("тело в {mm} мм не вышло: {}", e.why());
+            b
+        }
+    });
     let uv = fx.chamfer;
     let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
@@ -593,7 +612,7 @@ fn setup(
         render::model::body_to_mesh(
             body,
             tint,
-            UNIT_SCALE,
+            body.mm as f32 / voxel::unit::WORLD_MM as f32,
             layers,
             render::model::BEVEL,
             &mut ubufs,
