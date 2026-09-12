@@ -230,6 +230,14 @@ struct Ring {
     probed: u64,
     built: u64,
     freed: u64,
+    /// Время трёх работ, миллисекунды, накопленное за весь прогон.
+    ///
+    /// Вместе со счётчиками оно даёт цену **одного** чанка. Без него
+    /// потолки за кадр пришлось бы подбирать на глаз, а «осмотр дешевле
+    /// сборки на два порядка» осталось бы утверждением, а не замером.
+    t_probe: f64,
+    t_build: f64,
+    t_free: f64,
 }
 
 /// Чанк не осмотрен: неизвестно даже, есть ли у него грани.
@@ -532,6 +540,15 @@ fn main() {
     // Показу нужен мир побольше, чем гейту: строй в полтысячи машин
     // на маленькой карте стоит стеной (ADR-172).
     let mut side = 384u32;
+    // Высота мира. Ноль — половина стороны, как было.
+    //
+    // Ключ существует ради **замера километра** и только ради него
+    // (ADR-228). Занятость мира `voxel::World::new` заполняет разом,
+    // по вызову генератора на воксел, то есть за время `nx·ny·nz`.
+    // При `ny = side/2` километр — это пять · 10¹¹ вокселей: тридцать
+    // часов и 62.8 ГиБ. Уменьшив глубину, километр по X и Z можно
+    // построить и померить **сегодня**, не трогая симуляцию.
+    let mut height = 0u32;
     // Размах рельефа **не задаётся здесь числом**: его считает
     // `Params::sized` от высоты мира. Своё число у сцены уже дважды
     // расходилось с размером карты и давало плоский блин (ADR-157,
@@ -567,6 +584,7 @@ fn main() {
         match k.as_str() {
             "--units" => units = v.parse().unwrap_or(units),
             "--side" => side = v.parse().unwrap_or(side),
+            "--height" => height = v.parse().unwrap_or(height),
             "--relief" => relief = v.parse().unwrap_or(relief),
             "--seed" => seed = v.parse().unwrap_or(seed),
             "--speed" => speed = v.parse().unwrap_or(speed),
@@ -594,7 +612,7 @@ fn main() {
             "--look" => {}
             "--help" => {
                 println!(
-                    "battle [--units N] [--side N] [--relief N] [--seed N] \
+                    "battle [--units N] [--side N] [--height N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
 [--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--big на-сторону] [--rt 0|1|2] \
@@ -645,7 +663,8 @@ fn main() {
             }
         }
     };
-    let mut params = worldgen::Params::sized(side, side / 2, side);
+    let ny = if height > 0 { height } else { side / 2 };
+    let mut params = worldgen::Params::sized(side, ny, side);
     if relief > 0 {
         params.relief = relief;
     }
@@ -668,9 +687,12 @@ fn main() {
         t.elapsed().as_secs_f64() * 1e3
     );
     println!(
-        "кольцо: сборка {} вокселей, удержание {}, за кадр осмотр {} / сборка {} / освобождение {}",
+        "кольцо: сборка {}\u{00d7}{} вокселей, удержание {}\u{00d7}{}, \
+за кадр осмотр {} / сборка {} / освобождение {}",
         ring_nums.build_radius,
+        ring_nums.build_height,
         ring_nums.keep_radius,
+        ring_nums.keep_height,
         ring_nums.probe_per_frame,
         ring_nums.build_per_frame,
         ring_nums.free_per_frame
@@ -681,7 +703,12 @@ fn main() {
     // и `vista` равна стороне — картинка та же, что была.
     let vista = side.min(ring_nums.keep_radius as f32);
     let cam = RtsCamera {
-        target: V3::new(side * 0.5, side * 0.28, side * 0.5),
+        // Высота цели считается **от высоты мира**, а не от стороны:
+        // генератор кладёт поверхность на половину `ny`, и при
+        // `ny = side/2` это ровно прежнее `side * 0.28`. На мелкой
+        // карте километра прежняя запись увела бы камеру на два
+        // с половиной километра вверх.
+        target: V3::new(side * 0.5, ny as f32 * 0.56, side * 0.5),
         yaw,
         pitch,
         distance: side * dist,
@@ -736,6 +763,9 @@ fn main() {
             probed: 0,
             built: 0,
             freed: 0,
+            t_probe: 0.0,
+            t_build: 0.0,
+            t_free: 0.0,
         })
         .insert_resource(View { cam, visible: 0, vista })
         .insert_resource(Shot {
@@ -1403,12 +1433,19 @@ fn step(
             // соберётся из него вместе с ней.
             let Some(art_slot) = chunks.get_mut(&(i as u32)) else {
                 mesh.forget(i);
-                // Осмотренный и пустой чанк мог перестать быть пустым:
-                // его копнули. Обратно в очередь осмотра — иначе дыра
-                // появится только когда камера переедет в соседний
-                // чанк. Чанк за кольцом уже `UNSEEN` и в очередь
-                // не попадёт.
-                if ring.state[i] != UNSEEN {
+                // Осмотренный и **пустой** чанк мог перестать быть
+                // пустым: его копнули. Обратно в очередь осмотра —
+                // иначе дыра появится только когда камера переедет
+                // в соседний чанк. Чанк за кольцом уже `UNSEEN`
+                // и в очередь не попадёт.
+                //
+                // Чанк в состоянии `QUEUED` не трогается: осмотр
+                // за него уже оплачен, и сбрасывать его значило бы
+                // гонять по кругу ровно то, что копают. На карте
+                // 1920³ так не построился ни один чанк забоя: они
+                // ждали сборки и возвращались в осмотр каждый кадр,
+                // а в кадре на их месте стояли серые дыры.
+                if ring.state[i] == BARE {
                     ring.state[i] = UNSEEN;
                     ring.to_probe.push_back(i as u32);
                 }
@@ -1929,9 +1966,9 @@ fn stream(
     let here = chunk_of(grid, centre);
     if ring.at != Some(here) {
         ring.at = Some(here);
-        let r = ring.s.build_radius as f32;
+        let (r, h) = (ring.s.build_radius as f32, ring.s.build_height as f32);
         let mut scan = core::mem::take(&mut ring.scan);
-        render::stream::ring(&grid, centre, r, &mut scan);
+        render::stream::ring(&grid, centre, r, h, &mut scan);
         ring.to_probe.clear();
         ring.to_build.clear();
         for &i in scan.iter() {
@@ -1946,18 +1983,21 @@ fn stream(
         ring.scan = scan;
     }
 
-    let build_r = ring.s.build_radius as f32;
-    let keep_r = ring.s.keep_radius as f32;
+    let (build_r, build_h) = (ring.s.build_radius as f32, ring.s.build_height as f32);
+    let (keep_r, keep_h) = (ring.s.keep_radius as f32, ring.s.keep_height as f32);
     let Sim { r, mesh, chunks, bufs, painter, .. } = &mut *sim;
     let w = &r.world.ground().expect("земля").world;
 
     // 1. Осмотр.
+    let t = Instant::now();
     for _ in 0..ring.s.probe_per_frame {
         let Some(i) = ring.to_probe.pop_front() else { break };
         let k = i as usize;
         // Пока чанк ждал очереди, кольцо могло уехать, а сам он —
         // смениться. Пропуск тут дешевле, чем чистка очереди.
-        if ring.state[k] != UNSEEN || !render::stream::within(&grid, k, centre, build_r) {
+        if ring.state[k] != UNSEEN
+            || !render::stream::within(&grid, k, centre, build_r, build_h)
+        {
             continue;
         }
         ring.probed += 1;
@@ -1969,13 +2009,18 @@ fn stream(
         }
     }
 
+    ring.t_probe += t.elapsed().as_secs_f64() * 1e3;
+
     // 2. Сборка.
+    let t = Instant::now();
     let want = ring.to_build.len();
     let mut done = 0u32;
     while done < ring.s.build_per_frame {
         let Some(i) = ring.to_build.pop_front() else { break };
         let k = i as usize;
-        if ring.state[k] != QUEUED || !render::stream::within(&grid, k, centre, build_r) {
+        if ring.state[k] != QUEUED
+            || !render::stream::within(&grid, k, centre, build_r, build_h)
+        {
             continue;
         }
         done += 1;
@@ -2014,6 +2059,7 @@ fn stream(
         ring.state[k] = BUILT;
         chunks.insert(i, slot);
     }
+    ring.t_build += t.elapsed().as_secs_f64() * 1e3;
     // Потолок, срабатывающий **каждый** кадр, — не предохранитель,
     // а постоянное ухудшение (ADR-114, ADR-116). Считаем, чтобы это
     // было видно числом, а не на глаз.
@@ -2023,12 +2069,13 @@ fn stream(
 
     // 3. Освобождение. Обход идёт по живым чанкам, а не по сетке:
     // живых тысячи, в сетке километра — два миллиона.
+    let t = Instant::now();
     let mut stale: Vec<u32> = Vec::new();
     for &i in chunks.keys() {
         if stale.len() >= ring.s.free_per_frame as usize {
             break;
         }
-        if !render::stream::within(&grid, i as usize, centre, keep_r) {
+        if !render::stream::within(&grid, i as usize, centre, keep_r, keep_h) {
             stale.push(i);
         }
     }
@@ -2044,6 +2091,7 @@ fn stream(
         ring.state[i as usize] = UNSEEN;
         ring.freed += 1;
     }
+    ring.t_free += t.elapsed().as_secs_f64() * 1e3;
 }
 
 /// Отсечение пирамидой — нашим счётом (ADR-142).
@@ -2142,6 +2190,20 @@ fn snap(
                 ring.to_build.len(),
                 ring.capped,
                 ring.frames
+            );
+            // Цена одного чанка — частное накопленного времени
+            // и счётчика. Именно она задаёт потолки за кадр, и без неё
+            // их пришлось бы подбирать на глаз.
+            let per = |t: f64, n: u64| if n == 0 { 0.0 } else { t * 1e3 / n as f64 };
+            println!(
+                "  цена чанка: осмотр {:.1} мкс, сборка {:.1} мкс, освобождение {:.1} мкс; \
+за прогон {:.0} / {:.0} / {:.0} мс",
+                per(ring.t_probe, ring.probed),
+                per(ring.t_build, ring.built),
+                per(ring.t_free, ring.freed),
+                ring.t_probe,
+                ring.t_build,
+                ring.t_free
             );
             // Память — то, ради чего кольцо освобождает чанки. Считается
             // здесь, а не в конце: она обязана **не расти**, а конечное

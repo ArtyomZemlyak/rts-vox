@@ -88,6 +88,14 @@ pub struct MeshLayer {
     epoch: u32,
     /// Правки, сгруппированные по чанку, в локальных координатах.
     local: Vec<Vec<(u8, u8, u8)>>,
+    /// Чанки, состояние которых слой держит.
+    ///
+    /// Отдельным множеством, а не обходом `chunks`: на карте
+    /// в километр в сетке два миллиона чанков, а живых — тысячи,
+    /// и «сколько занято памяти» не должно стоить линейного прохода
+    /// по всей карте. `BTreeSet`, а не `HashSet`: порядок обхода
+    /// стабилен, и два прогона одного замера дают одно число.
+    live: std::collections::BTreeSet<u32>,
     /// Сколько раз чанк собирался с нуля. Первое касание чанка стоит
     /// полной пересборки, и на старте это даёт пик — см. D-7.
     pub full_rebuilds: u64,
@@ -124,6 +132,7 @@ impl MeshLayer {
             stamp: vec![u32::MAX; n],
             epoch: 0,
             local: (0..n).map(|_| Vec::new()).collect(),
+            live: std::collections::BTreeSet::new(),
             full_rebuilds: 0,
             scratch: Box::new(Scratch {
                 bits: [0u64; CSP * CSP],
@@ -224,6 +233,7 @@ impl MeshLayer {
     /// не страдает: мир авторитетен, и вернувшийся чанк собирается
     /// из него заново.
     pub fn forget(&mut self, i: usize) -> bool {
+        self.live.remove(&(i as u32));
         self.chunks[i].take().is_some()
     }
 
@@ -311,6 +321,7 @@ impl MeshLayer {
                 let mut mesher = IncMesher::new();
                 mesher.rebuild_all(&bits, self.opts);
                 self.chunks[i] = Some(Box::new(MeshChunk { bits, mesher }));
+                self.live.insert(i as u32);
                 self.full_rebuilds += 1;
                 continue;
             }
@@ -336,21 +347,24 @@ impl MeshLayer {
     }
 
     pub fn quad_total(&self) -> usize {
-        self.chunks
+        self.live
             .iter()
-            .filter_map(|c| c.as_ref())
+            .filter_map(|&i| self.chunks[i as usize].as_ref())
             .map(|c| c.mesher.quad_count())
             .sum()
     }
 
     pub fn live_chunks(&self) -> usize {
-        self.chunks.iter().filter(|c| c.is_some()).count()
+        self.live.len()
     }
 
+    /// Сколько памяти держит слой. Обход идёт по живым чанкам, а не
+    /// по сетке: на километре в ней два миллиона мест, и вопрос
+    /// «сколько занято» не должен стоить прохода по всей карте.
     pub fn state_bytes(&self) -> usize {
-        self.chunks
+        self.live
             .iter()
-            .filter_map(|c| c.as_ref())
+            .filter_map(|&i| self.chunks[i as usize].as_ref())
             .map(|c| c.mesher.state_bytes() + core::mem::size_of::<BitVolume>())
             .sum()
     }
@@ -412,9 +426,7 @@ impl MeshLayer {
     }
 
     pub fn live_indices(&self) -> Vec<usize> {
-        (0..self.chunks.len())
-            .filter(|&i| self.chunks[i].is_some())
-            .collect()
+        self.live.iter().map(|&i| i as usize).collect()
     }
 }
 
