@@ -568,12 +568,21 @@ fn load_v3s(s: &mut Scan) -> Vec<phys::V3> {
 mod tests {
     use super::*;
 
+    /// Ошибка чтения — или паника теста. `Reference` не `Debug`
+    /// и быть им не обязан: это состояние партии, а не отчёт.
+    fn err(buf: &[u8]) -> LoadError {
+        match load(buf, tune(), guns()) {
+            Err(e) => e,
+            Ok(_) => panic!("прочиталось то, что читаться не должно"),
+        }
+    }
+
     /// **Не наш файл — внятный отказ, а не разбор наугад.**
     #[test]
     fn a_foreign_file_is_refused() {
-        assert_eq!(load(b"", tune(), guns()).unwrap_err(), LoadError::NotASave);
+        assert_eq!(err(b""), LoadError::NotASave);
         assert_eq!(
-            load(b"PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x00", tune(), guns()).unwrap_err(),
+            err(b"PNG\x0d\x0a\x1a\x0a\x00\x00\x00\x00"),
             LoadError::NotASave
         );
     }
@@ -587,7 +596,7 @@ mod tests {
         let mut b = Blob::new();
         b.v.extend_from_slice(&MAGIC);
         b.u32(VERSION + 7);
-        let e = load(&b.v, tune(), guns()).unwrap_err();
+        let e = err(&b.v);
         assert_eq!(
             e,
             LoadError::Version {
@@ -603,15 +612,20 @@ mod tests {
 
     /// **Обрезанное сохранение не паникует.** Читают его с диска,
     /// а диск врёт.
+    /// Мир здесь **маленький нарочно**: проверяется разбор буфера,
+    /// а не генератор, а каждая попытка чтения строит мир из сида
+    /// заново. На эталонных 256×128×256 шестьдесят четыре попытки
+    /// стоили бы под две минуты — и мерили бы worldgen.
     #[test]
     fn a_truncated_save_is_an_error_not_a_panic() {
-        let mut r = Reference::new(3, 40, tune(), guns());
+        let small = worldgen::Params::sized(64, 64, 64);
+        let mut r = Reference::with_params(3, 40, tune(), guns(), small);
         for _ in 0..5 {
             r.tick();
         }
         let full = save(&r);
-        // Шаг по срезам, а не каждый байт: файл большой, а проверка
-        // здесь на «не паникует», и одного среза на килобайт довольно.
+        // Шаг по срезам, а не каждый байт: проверка здесь
+        // на «не паникует», и шестидесяти четырёх срезов довольно.
         let step = (full.len() / 64).max(1);
         for cut in (MAGIC.len() + 4..full.len()).step_by(step) {
             assert!(
