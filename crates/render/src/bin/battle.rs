@@ -1326,6 +1326,24 @@ fn step(
     let alive = |i: usize| i < u.len() && u.alive[i];
     // Курс — из симуляции, а не из дробной части положения.
     let hull_yaw = |i: usize| Some(yaw_of(u.head[i]));
+    // **Поворот корпуса — это курс плюс наклон.** Наклон считает
+    // подвеска (ADR-225), рендер его только читает: местный «верх»
+    // тела кладётся на нормаль корпуса, а нос — на курс, спрямлённый
+    // поперёк этой нормали. Без второго нос уезжал бы под землю
+    // на склоне.
+    let hull_rot = |i: usize, yaw: f32| -> Quat {
+        let n = u.up[i];
+        let up = Vec3::new(
+            n.x.to_f64_lossy() as f32,
+            n.y.to_f64_lossy() as f32,
+            n.z.to_f64_lossy() as f32,
+        )
+        .try_normalize()
+        .unwrap_or(Vec3::Y);
+        let f = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
+        let f = (f - up * f.dot(up)).try_normalize().unwrap_or(Vec3::X);
+        Quat::from_mat3(&Mat3::from_cols(f, up, f.cross(up)))
+    };
     // Башня смотрит **в цель**, и цель эта — не догадка рендера:
     // симуляция выбрала её сама и держит в `units.target` (ADR-176).
     // Читать её можно, писать туда — нельзя.
@@ -1355,7 +1373,7 @@ fn step(
         *vis = Visibility::Inherited;
         tr.translation = at(i);
         if let Some(y) = hull_yaw(i) {
-            tr.rotation = Quat::from_rotation_y(y);
+            tr.rotation = hull_rot(i, y);
         }
     }
     for (m, mut tr, mut vis) in turrets.iter_mut() {
@@ -1369,8 +1387,10 @@ fn step(
         // Нет цели — башня едет вместе с корпусом. Оставить её
         // в прежнем повороте значит показать, что юнит целится
         // в того, кого уже нет.
+        // Башня наклоняется вместе с корпусом — она на нём стоит, —
+        // но смотрит в свою сторону.
         if let Some(y) = aim_yaw(i).or_else(|| hull_yaw(i)) {
-            tr.rotation = Quat::from_rotation_y(y);
+            tr.rotation = hull_rot(i, y);
         }
     }
 

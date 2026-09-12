@@ -17,6 +17,7 @@ pub mod shot;
 pub mod index;
 pub mod matter;
 pub mod order;
+pub mod ride;
 pub mod shield;
 
 use drive::{Drive, Limits, NO_WAY};
@@ -170,6 +171,19 @@ pub struct Units {
     /// Вид ходовой: у гусеничной и шагающей машины пределы хода
     /// разные, и лежат они в `data/sim.ron`.
     pub chassis: Vec<ChassisKind>,
+    /// Нормаль корпуса: куда смотрит «верх» машины. Почти единичная.
+    ///
+    /// **Состояние, а не вывод из рельефа.** Её двигает подвеска
+    /// в точках опоры (ADR-225), поэтому машина клюёт на уступе
+    /// и качается на кочках, а не мгновенно ложится на новый уклон.
+    /// Переживает тик — значит входит в хеш (ADR-116).
+    pub up: Vec<phys::V3>,
+    /// Угловая скорость корпуса. Вертикальная составляющая не
+    /// используется: поворотом заведует ход, а не подвеска.
+    pub spin: Vec<phys::V3>,
+    /// Сумма нормальных реакций прошлого тика, отнесённая к массе.
+    /// Ноль — машина висит в воздухе.
+    pub load: Vec<Fx>,
     /// Прикреплённых к ядру вокселей — то, что у нас вместо скалярного HP.
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
@@ -297,6 +311,9 @@ impl Units {
             head: Vec::new(),
             vel: Vec::new(),
             chassis: Vec::new(),
+            up: Vec::new(),
+            spin: Vec::new(),
+            load: Vec::new(),
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
@@ -345,6 +362,12 @@ impl Units {
             self.head[k] = 0;
             self.vel[k] = Fx::ZERO;
             self.chassis[k] = ChassisKind::Tracked;
+            // И наклона покойника тоже не наследует: подкрепление,
+            // вставшее в слот машины, лежавшей на боку, лежало бы
+            // на боку само.
+            self.up[k] = phys::V3::UP;
+            self.spin[k] = phys::V3::ZERO;
+            self.load[k] = Fx::ZERO;
             self.voxels[k] = voxels;
             self.alive[k] = true;
             self.target[k] = NO_TARGET;
@@ -375,6 +398,9 @@ impl Units {
         self.head.push(0);
         self.vel.push(Fx::ZERO);
         self.chassis.push(ChassisKind::Tracked);
+        self.up.push(phys::V3::UP);
+        self.spin.push(phys::V3::ZERO);
+        self.load.push(Fx::ZERO);
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
@@ -1030,6 +1056,10 @@ impl World {
                 Phase::Movement => {
                     self.movement_deltas(threads);
                     self.apply_deltas();
+                    // Подвеска идёт и здесь: фаза, выполняемая только
+                    // в серийном пути, — это разный мир при разном
+                    // числе воркеров, то есть десинк.
+                    self.phase_ride();
                 }
                 Phase::Combat => self.phase_combat(),
                 Phase::Visibility => self.phase_visibility(),
@@ -1061,7 +1091,10 @@ impl World {
                     self.phase_flow();
                     self.phase_nav_update();
                 }
-                Phase::Movement => self.phase_movement(),
+                Phase::Movement => {
+                    self.phase_movement();
+                    self.phase_ride();
+                }
                 Phase::Combat => self.phase_combat(),
                 Phase::Visibility => self.phase_visibility(),
                 Phase::Cleanup => self.phase_cleanup(),
@@ -1334,6 +1367,59 @@ impl World {
     fn phase_movement(&mut self) {
         self.movement_deltas(1);
         self.apply_deltas();
+    }
+
+    /// Подвеска: наклон корпуса от высот пола под точками опоры.
+    ///
+    /// Идёт **после** хода: наклон отвечает на то, где машина
+    /// оказалась, а не на то, где была. Высоту фаза не трогает
+    /// (ADR-225).
+    fn phase_ride(&mut self) {
+        let Some(g) = self.ground.as_ref() else { return };
+        let nav = &g.nav;
+        let (ex, ez) = g.extent();
+        let dt = Fx::from_ratio(1, TICKS_PER_SECOND);
+        for k in 0..self.units.live_ids.len() {
+            let i = self.units.live_ids[k] as usize;
+            let kind = self.units.chassis[i];
+            let c = self.tuning.chassis(kind);
+            let r = ride::ride_of(c);
+            let sup = ride::supports_of(c);
+            let (hc, hs) = ride::heading_of(self.units.head[i]);
+            let mut floors = [Fx::ZERO; 4];
+            for (f, sp) in floors.iter_mut().zip(sup.iter()) {
+                // Местная опора — в мировые координаты. Поворот только
+                // вокруг вертикали: наклон учитывает сама физика.
+                let rx = sp.x.mul(hc).sub(sp.z.mul(hs));
+                let rz = sp.x.mul(hs).add(sp.z.mul(hc));
+                let px = (self.units.x[i] + rx.to_int_trunc()).clamp(0, ex - 1) as u32;
+                let pz = (self.units.z[i] + rz.to_int_trunc()).clamp(0, ez - 1) as u32;
+                let (cx, cz) = (px / NAV_CELL as u32, pz / NAV_CELL as u32);
+                // Уровень **ближайший к машине**, а не первый: юнит
+                // может стоять на крыше, и пол под ней — не пол ямы
+                // (ADR-136).
+                let mut best = nav.floor_at(cx, cz) as i32;
+                let mut gap = (best - self.units.y[i]).abs();
+                for &l in nav.levels_at(cx, cz) {
+                    let d = (l as i32 - self.units.y[i]).abs();
+                    if d < gap {
+                        gap = d;
+                        best = l as i32;
+                    }
+                }
+                *f = Fx::from_int(best);
+            }
+            ride::step_hull(
+                &mut self.units.up[i],
+                &mut self.units.spin[i],
+                &mut self.units.load[i],
+                &floors,
+                self.units.head[i],
+                &r,
+                &sup,
+                dt,
+            );
+        }
     }
 
     /// Подготовить снимок к фазе движения. Отделено от счёта, чтобы
@@ -2260,6 +2346,13 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
+            // Наклон корпуса переживает тик, значит входит в хеш:
+            // не войди он — подвеску можно было бы переписать целиком
+            // и увидеть тот же хеш до бита (ADR-116, ADR-225).
+            w = w.wrapping_mul(31).wrapping_add(self.units.up[i].x.raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.up[i].z.raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.spin[i].x.raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.spin[i].z.raw() as u64);
             // **Ход — состояние.** Курс и скорость переживают тик
             // и задают, куда юнит поедет дальше; не войди они в хеш,
             // трансмиссию можно было бы переписать целиком и увидеть

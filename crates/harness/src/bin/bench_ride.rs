@@ -18,6 +18,7 @@ fn ride() -> Ride {
         inertia: Fx::from_int(4),
         gravity: Fx::from_ratio(98, 10),
         angular_damping: Fx::from_int(3),
+        min_up: Fx::from_ratio(91, 100),
     }
 }
 

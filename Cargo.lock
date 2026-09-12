@@ -4514,6 +4514,7 @@ dependencies = [
  "fx",
  "modding",
  "nav",
+ "phys",
  "voxel",
  "worldgen",
 ]
