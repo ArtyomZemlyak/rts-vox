@@ -96,6 +96,13 @@ pub struct Economy {
     pub banks: Vec<Bank>,
     pub(crate) lines: Vec<Line>,
     pub wrecks: Vec<Wreck>,
+    /// Слоты **недостроенных** построек, по возрастанию номера.
+    ///
+    /// Отдельный список, а не обход всех юнитов: приказ «строить»
+    /// ищет, к чему пристроиться, и обходить ради этого пять тысяч
+    /// слотов на каждый приказ — это потолок приказов, умноженный
+    /// на число слотов, то есть способ занять тик приказами (ADR-114).
+    pub(crate) sites: Vec<u32>,
 
     // --- замер. Ни одно из этих чисел не влияет на симуляцию.
     /// Выкопано из земли всего.
@@ -134,6 +141,7 @@ impl Economy {
             banks,
             lines: Vec::new(),
             wrecks: Vec::new(),
+            sites: Vec::new(),
             mined: 0,
             delivered: 0,
             spent: 0,
@@ -167,6 +175,26 @@ impl Economy {
             // Молча считать его дорогим нельзя: это создавало бы
             // материю из дыры в данных.
             None => 0,
+        }
+    }
+
+    /// Недостроенные постройки, по возрастанию номера слота.
+    pub fn sites(&self) -> &[u32] {
+        &self.sites
+    }
+
+    /// Записать недострой. Порядок — по слоту: ничьи разрешаются
+    /// линейным индексом, а не порядком постановки (`CLAUDE.md`).
+    pub(crate) fn add_site(&mut self, unit: u32) {
+        if let Err(i) = self.sites.binary_search(&unit) {
+            self.sites.insert(i, unit);
+        }
+    }
+
+    /// Снять недострой: достроен или погиб.
+    pub(crate) fn drop_site(&mut self, unit: u32) {
+        if let Ok(i) = self.sites.binary_search(&unit) {
+            self.sites.remove(i);
         }
     }
 

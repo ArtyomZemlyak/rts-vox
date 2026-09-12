@@ -1449,6 +1449,49 @@ impl World {
         if e.kinds.at(bki as usize).build_rate == 0 {
             return false;
         }
+        // **Недострой на этом месте уже есть — вставать к нему,
+        // а не класть второй.** Приказ отдаётся каждому выделенному
+        // юниту отдельно, и без этого щелчок по месту при двадцати
+        // выделенных краулерах разметил бы двадцать фундаментов
+        // в одной точке. Заодно это и защита от мода: цикл «размечай
+        // фундаменты» иначе становится способом занять слоты юнитов.
+        //
+        // Ничья — по **меньшему номеру слота** (`CLAUDE.md`).
+        let reach = self.tuning.work_reach;
+        let mut join = NO_TARGET;
+        {
+            // Список недостроев — свой, короткий: обходить ради этого
+            // все слоты значило бы умножить потолок приказов на их
+            // число. **Список живых тут не годится**: его пересобирает
+            // `NavUpdate` в начале тика, а недострой заводится
+            // в `ApplyCommands`, и второй приказ того же щелчка его
+            // бы не увидел.
+            let e = self.econ.as_ref().expect("экономика");
+            for &j in &e.sites {
+                let j = j as usize;
+                if !self.units.alive[j]
+                    || self.units.site[j] == 0
+                    || self.units.owner[j] != owner
+                    || self.units.kind[j] != ki as u16
+                {
+                    continue;
+                }
+                let (dx, dz) = (self.units.x[j] - x, self.units.z[j] - z);
+                if dx * dx + dz * dz <= reach * reach {
+                    join = j as u32;
+                    break;
+                }
+            }
+        }
+        if join != NO_TARGET {
+            let k = join as usize;
+            self.units.stance[by] = STANCE_BUILD;
+            self.units.goal_x[by] = self.units.x[k];
+            self.units.goal_y[by] = self.units.y[k];
+            self.units.goal_z[by] = self.units.z[k];
+            self.units.job[by] = join;
+            return true;
+        }
         let Some(site) = self.spawn_kind_empty(x, z, owner, kind_id) else { return false };
         let k = site as usize;
         let cost = self
@@ -1462,6 +1505,7 @@ impl World {
         // Недострой начинается с одного воксела: ноль означал бы
         // мёртвого при рождении, и уборка снесла бы его тем же тиком.
         self.units.voxels[k] = 1;
+        self.econ.as_mut().expect("экономика").add_site(site);
         self.units.stance[by] = STANCE_BUILD;
         self.units.goal_x[by] = x;
         self.units.goal_y[by] = self.units.y[k];
@@ -2863,8 +2907,22 @@ impl World {
             let cargo = e.ledger.held(c).saturating_sub(body);
             if cargo > 0 {
                 let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
-                let got = e.ledger.refine(c, bank.stock, cargo, rn, rd);
-                e.delivered += got;
+                // **Больше, чем влезет в запас, не перерабатывается.**
+                // Переработка списывает в сток всё взятое, что не ушло
+                // приёмнику: сдай полный бак в полный склад — и груз
+                // целиком уйдёт в «выход переработки < 1». Это был бы
+                // не сток, а уничтожение груза полным складом, и
+                // выглядело бы оно как работающая переработка.
+                //
+                // Отсюда: сколько руды брать, считается **от места**
+                // в запасе, а не от того, сколько её в баке.
+                let room = e.ledger.room(bank.stock);
+                let fits = room.saturating_mul(rd) / rn.max(1);
+                let want = cargo.min(fits);
+                if want > 0 {
+                    let got = e.ledger.refine(c, bank.stock, want, rn, rd);
+                    e.delivered += got;
+                }
             }
             // Разгрузился — обратно к забою. Забой запомнен приказом,
             // а не тем местом, где кончился бак.
@@ -2985,6 +3043,7 @@ impl World {
                 .saturating_add((after - before).min(u16::MAX as u64) as u16);
             if self.units.site[s] == 0 {
                 e.built += 1;
+                e.drop_site(s as u32);
                 self.units.voxels[s] = full.min(u16::MAX as u64) as u16;
                 self.units.stance[i] = STANCE_HOLD;
                 self.units.job[i] = NO_TARGET;
@@ -3170,6 +3229,9 @@ impl World {
         let (x, y, z) = (self.units.x[k], self.units.y[k], self.units.z[k]);
         let unit = k as u32;
         let Some(e) = self.econ.as_mut() else { return };
+        // Недострой погиб — снять его из списка: иначе к покойнику
+        // будут пристраиваться следующие приказы «строить».
+        e.drop_site(unit);
         let (debris, _lost, rest) = e.ledger.breach(c, num, den);
         // Заготовка погибшего завода разделяет его судьбу — и ложится
         // в тот же обломок.

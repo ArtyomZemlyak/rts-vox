@@ -148,6 +148,47 @@ fn a_full_tank_is_hauled_to_a_depot_and_the_side_gets_richer() {
     assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
 }
 
+/// **Полный склад не уничтожает груз.**
+///
+/// Переработка списывает в объявленный сток всё взятое, что не ушло
+/// приёмнику. Сдай полный бак в полный запас — и груз целиком уйдёт
+/// в «выход переработки < 1»: это было бы не стоком, а уничтожением
+/// груза полным складом, и выглядело бы как работающая переработка.
+#[test]
+fn a_full_stock_does_not_eat_the_cargo() {
+    let mut w = world();
+    let _dep = w.spawn_kind(40, 30, 0, DEPOT).expect("склад");
+    let d = w.spawn_kind(44, 30, 0, CRAWLER).expect("краулер");
+    w.units.refresh_live();
+    w.tick();
+    // Запас забит под потолок: место кончилось.
+    {
+        let e = w.econ.as_mut().expect("учёт");
+        let stock = e.banks[0].stock;
+        let room = e.ledger.room(stock);
+        e.ledger.reveal(e.ground, room);
+        e.ledger.transfer(e.ground, stock, room);
+        assert_eq!(e.ledger.room(stock), 0, "запас не полон");
+    }
+    let lost_before = w.econ.as_ref().expect("учёт").sunk(Sink::RefiningLoss);
+    // Забой рядом: копатель наберёт бак и приедет к складу.
+    w.push_order(Order::Dig { unit: d, x: 60, y: TOP as i32 - 1, z: 30 });
+    for _ in 0..600 {
+        w.tick();
+    }
+    let e = w.econ.as_ref().expect("учёт");
+    assert!(
+        w.cargo(d as usize) > 0,
+        "груз пропал: полный склад его съел"
+    );
+    assert_eq!(
+        e.sunk(Sink::RefiningLoss),
+        lost_before,
+        "полный склад списал груз в сток переработки"
+    );
+    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+}
+
 /// **Постройка растёт из запаса, воксель за вокселем.**
 #[test]
 fn a_building_grows_out_of_the_stock_voxel_by_voxel() {
@@ -201,6 +242,61 @@ fn a_building_grows_out_of_the_stock_voxel_by_voxel() {
     assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
     // Вложенное лежит **в теле постройки**: тело юнита — контейнер.
     assert!(e.ledger.held(w.units.store[s]) > 0, "в постройке нет материи");
+}
+
+/// **Группа строит одну постройку, а не по одной на каждого.**
+///
+/// Приказ отдаётся каждому выделенному юниту отдельно, и без проверки
+/// «недострой тут уже есть» щелчок по месту при двадцати выделенных
+/// краулерах разметил бы двадцать фундаментов в одной точке.
+///
+/// Ловится это только так: все приказы применяются в **одном** дренаже,
+/// а список живых пересобирают в начале тика — значит второй приказ
+/// первого не увидит, если искать по списку живых.
+#[test]
+fn a_group_builds_one_thing_not_one_each() {
+    let mut w = world();
+    let mut crew = Vec::new();
+    for k in 0..6i32 {
+        crew.push(w.spawn_kind(40 + k * 4, 40, 0, CRAWLER).expect("краулер"));
+    }
+    w.units.refresh_live();
+    {
+        let e = w.econ.as_mut().expect("учёт");
+        let stock = e.banks[0].stock;
+        e.ledger.reveal(e.ground, 4_000_000);
+        e.ledger.transfer(e.ground, stock, 4_000_000);
+    }
+    let before = w.units.live().len();
+    for &id in &crew {
+        w.push_order(Order::Build { unit: id, kind: DEPOT, x: 60, z: 40 });
+    }
+    w.tick();
+    assert_eq!(
+        w.econ.as_ref().expect("учёт").sites().len(),
+        1,
+        "шесть приказов разметили {} фундаментов вместо одного",
+        w.econ.as_ref().expect("учёт").sites().len()
+    );
+    assert_eq!(w.units.live().len(), before + 1, "появился лишний юнит");
+    // И все шестеро работают над одним и тем же.
+    let site = w.units.job[crew[0] as usize];
+    for &id in &crew {
+        assert_eq!(w.units.job[id as usize], site, "краулеры строят разное");
+    }
+    // Достроив, они снимают его из списка: иначе к покойнику или
+    // к готовой постройке пристраивались бы следующие приказы.
+    for _ in 0..4000 {
+        w.tick();
+        if w.units.site[site as usize] == 0 {
+            break;
+        }
+    }
+    assert_eq!(w.units.site[site as usize], 0, "склад не достроился");
+    assert!(
+        w.econ.as_ref().expect("учёт").sites().is_empty(),
+        "достроенный остался в списке недостроев"
+    );
 }
 
 /// **Завод делает машину за материю и время, и она выходит живой.**
