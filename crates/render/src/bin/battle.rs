@@ -670,8 +670,12 @@ fn main() {
             }
         }
     };
-    let ny = if height > 0 { height } else { side / 2 };
-    let mut params = worldgen::Params::sized(side, ny, side);
+    // Имя не `ny`: ниже `mesh.dims()` отдаёт **число слоёв чанков**,
+    // и одноимённая переменная его затеняет. Такое затенение уже
+    // опустило камеру на дно мира — из полутора тысяч вокселей высоты
+    // получилось девять, и в кадре вместо рельефа были пещеры изнутри.
+    let world_h = if height > 0 { height } else { side / 2 };
+    let mut params = worldgen::Params::sized(side, world_h, side);
     if relief > 0 {
         params.relief = relief;
     }
@@ -709,11 +713,11 @@ fn main() {
     let vista = side.min(ring_nums.keep_radius as f32);
     let cam = RtsCamera {
         // Высота цели считается **от высоты мира**, а не от стороны:
-        // генератор кладёт поверхность на половину `ny`, и при
-        // `ny = side/2` это ровно прежнее `side * 0.28`. На мелкой
-        // карте километра прежняя запись увела бы камеру на два
-        // с половиной километра вверх.
-        target: V3::new(side * 0.5, ny as f32 * 0.56, side * 0.5),
+        // генератор кладёт поверхность на половину высоты, и при
+        // `world_h = side/2` это ровно прежнее `side * 0.28`.
+        // На мелкой карте километра запись через сторону увела бы
+        // камеру на два с половиной километра вверх.
+        target: V3::new(side * 0.5, world_h as f32 * 0.56, side * 0.5),
         yaw,
         pitch,
         distance: side * dist,
