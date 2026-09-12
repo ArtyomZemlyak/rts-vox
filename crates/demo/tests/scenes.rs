@@ -733,7 +733,7 @@ fn d6_one_voxel_changes_the_answer() {
     w.flush();
     assert!(line_of_sight(&w, a, b).clear, "сквозная дыра не открыла линию");
     // И обратно: один воксель закрывает.
-    w.queue_edit(voxel::Edit { x: 64, y: 20, z: 64, mat: 3 });
+    w.queue_edit(voxel::Edit::put(64, 20, 64, 3));
     w.flush();
     assert!(!line_of_sight(&w, a, b).clear, "один воксель не закрыл линию");
 }

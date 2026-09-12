@@ -201,6 +201,24 @@ fn build_unit(where_: &str, def: UnitDef, vm: crate::vox::VoxModel) -> Result<Un
 /// Сложить паки в один реестр материалов. Порядок паков задаёт только
 /// сообщение об ошибке: столкновение номеров — ошибка загрузки, а не
 /// «последний побеждает» (ADR-028).
+/// Разобрать файл материалов из текста.
+///
+/// Без ввода-вывода: этим пользуются и тесты, и тот, кто подшил
+/// `data/materials.ron` в двоичный файл через `include_str!`.
+/// Реестр материалов нужен экономике — плотность решает, сколько
+/// материи в вокселе (ADR-230), — и тянуть ради этого разбор RON
+/// в каждый крейт было бы лишней зависимостью.
+pub fn materials_from_ron(s: &str) -> Result<Registry, LoadError> {
+    let f: MaterialsFile =
+        ron::from_str(s).map_err(|e| LoadError::Ron("materials.ron".into(), e.to_string()))?;
+    let mut r = Registry::new();
+    for m in f.materials {
+        r.insert(m)
+            .map_err(|e| LoadError::Registry("materials.ron".into(), e))?;
+    }
+    Ok(r)
+}
+
 pub fn merge_materials(packs: &[Pack]) -> Result<Registry, LoadError> {
     let mut r = Registry::new();
     for p in packs {

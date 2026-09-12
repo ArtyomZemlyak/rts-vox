@@ -48,6 +48,14 @@ pub struct Ground {
     pub nav: NavLayer,
     /// Все правки тика подряд, в порядке применения.
     edits: Vec<Edit>,
+    /// Что **снято** за тик: заказчик и материал, который в вокселе
+    /// был. Вход экономики (`docs/07-economy.md`): выкопанное идёт
+    /// заказчику в бак, бесхозное — в объявленный сток.
+    ///
+    /// Отдельный список, а не поле правки: материал «до» известен
+    /// только в момент применения, а список короче потока правок —
+    /// укладка и пустая правка сюда не попадают.
+    taken: Vec<(u32, voxel::store::Mat)>,
     /// Правки, применённые **после** каскада: запекание приземлившихся
     /// тел. Каскад в этом тике их уже не увидит, поэтому они переносятся
     /// в следующий — иначе его чанки разошлись бы с миром (ADR-129).
@@ -75,6 +83,7 @@ impl Ground {
             topo,
             nav,
             edits: Vec::new(),
+            taken: Vec::new(),
             carry: Vec::new(),
             stats: GroundStats::default(),
         }
@@ -93,11 +102,18 @@ impl Ground {
         &self.edits
     }
 
+    /// Что снято за тик: заказчик и материал. Весь поток, а не
+    /// последний дренаж — по той же причине, что у правок.
+    pub fn taken(&self) -> &[(u32, voxel::store::Mat)] {
+        &self.taken
+    }
+
     /// Фаза `VoxelEdits`: дренаж очереди. Дыра обязана появиться
     /// в мире здесь, до всех, кто её читает (`CLAUDE.md`).
     pub(crate) fn phase_edits(&mut self) {
         self.stats = GroundStats::default();
         self.edits.clear();
+        self.taken.clear();
         // Перенесённое с прошлого тика идёт первым: каскад обязан
         // увидеть запекание тела как обычную правку.
         self.edits.append(&mut self.carry);
@@ -108,6 +124,7 @@ impl Ground {
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
+        self.taken.extend_from_slice(self.world.taken());
     }
 
     /// Фаза `Destruction`: каскад отделения. Отрывы ставят свои правки
@@ -122,6 +139,7 @@ impl Ground {
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
+        self.taken.extend_from_slice(self.world.taken());
     }
 
     /// Фаза `Bodies`: шаг падения. Приземлившиеся запекаются обратно
@@ -132,6 +150,7 @@ impl Ground {
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
+        self.taken.extend_from_slice(self.world.taken());
         // Каскад в этом тике уже отработал, а запекание тела — такая же
         // правка мира, как копка. Переносим её ему на следующий тик.
         //

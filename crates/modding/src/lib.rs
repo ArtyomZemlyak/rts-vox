@@ -13,11 +13,13 @@
 #![forbid(unsafe_code)]
 
 pub mod data;
+pub mod kinds;
 pub mod tuning;
 pub mod weapons;
 pub mod vox;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
+pub use kinds::{KindDef, Kinds};
 pub use tuning::{load_tuning, Chassis, ChassisKind, Tuning, TuningError};
 
 pub type Mat = u16;

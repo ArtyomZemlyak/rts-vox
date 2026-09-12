@@ -136,7 +136,7 @@ mod tests {
     fn wall(w: &mut World, x: u32) {
         for z in 0..64 {
             for y in 0..64 {
-                w.queue_edit(crate::Edit { x, y, z, mat: 2 });
+                w.queue_edit(crate::Edit::put(x, y, z, 2));
             }
         }
         w.flush();
@@ -180,8 +180,8 @@ mod tests {
     fn the_ray_does_not_squeeze_through_a_corner() {
         let mut w = world();
         // Два блока по диагонали: между ними «щель» нулевой ширины.
-        w.queue_edit(crate::Edit { x: 32, y: 32, z: 32, mat: 2 });
-        w.queue_edit(crate::Edit { x: 33, y: 33, z: 32, mat: 2 });
+        w.queue_edit(crate::Edit::put(32, 32, 32, 2));
+        w.queue_edit(crate::Edit::put(33, 33, 32, 2));
         w.flush();
         // Луч идёт ровно через стык.
         let r = line_of_sight(&w, (30, 30, 32), (35, 35, 32));
@@ -197,7 +197,7 @@ mod tests {
         let mut r = fx::rng::Rng::new(3, 0x105);
         for _ in 0..300 {
             let (x, y, z) = (r.below(64), r.below(64), r.below(64));
-            w.queue_edit(crate::Edit { x, y, z, mat: 2 });
+            w.queue_edit(crate::Edit::put(x, y, z, 2));
         }
         w.flush();
         let mut checked = 0;
