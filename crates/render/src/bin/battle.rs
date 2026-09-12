@@ -44,7 +44,7 @@ use render::geom::{
 };
 use render::look;
 use render::tex::tile_image;
-use render::{yaw_to, Camera as RtsCamera, ChunkGrid, V3};
+use render::{yaw_of, yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Reference, SimEvent, NO_TARGET};
 
 /// Симуляция и всё, что нужно, чтобы её показать.
@@ -1044,16 +1044,20 @@ fn step(
     // Юниты. Корпус разворачивается по движению — без этого строй
     // стоит боком и выглядит россыпью кубиков, а не колонной.
     let u = &sim.r.world.units;
-    let at = |i: usize| Vec3::new(u.x[i] as f32, u.y[i] as f32, u.z[i] as f32);
-    let alive = |i: usize| i < u.len() && u.alive[i];
-    let hull_yaw = |i: usize| {
-        let (dx, dz) = (u.fx[i].raw(), u.fz[i].raw());
-        if dx == 0 && dz == 0 {
-            None
-        } else {
-            Some(yaw_to(dx as f32, dz as f32))
-        }
+    // Положение — **с дробной частью**. Целая часть меняется раз
+    // в несколько тиков, и корпус от этого переставлялся скачком
+    // на полметра пять раз в секунду: рывки, которые владелец видел,
+    // наполовину были отсюда (ADR-220).
+    let at = |i: usize| {
+        Vec3::new(
+            u.x[i] as f32 + u.fx[i].to_f64_lossy() as f32,
+            u.y[i] as f32,
+            u.z[i] as f32 + u.fz[i].to_f64_lossy() as f32,
+        )
     };
+    let alive = |i: usize| i < u.len() && u.alive[i];
+    // Курс — из симуляции, а не из дробной части положения.
+    let hull_yaw = |i: usize| Some(yaw_of(u.head[i]));
     // Башня смотрит **в цель**, и цель эта — не догадка рендера:
     // симуляция выбрала её сама и держит в `units.target` (ADR-176).
     // Читать её можно, писать туда — нельзя.

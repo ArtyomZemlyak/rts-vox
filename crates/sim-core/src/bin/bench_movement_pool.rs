@@ -61,8 +61,8 @@ fn main() {
             let trials = 5usize;
             let mut best = f64::MAX;
 
-            let mut rest: &mut [(i32, i32)] = &mut buf;
-            let mut parts: Vec<(usize, &mut [(i32, i32)])> = Vec::new();
+            let mut rest: &mut [sim_core::drive::Want] = &mut buf;
+            let mut parts: Vec<(usize, &mut [sim_core::drive::Want])> = Vec::new();
             let mut base = 0usize;
             while !rest.is_empty() {
                 let take = block.min(rest.len());

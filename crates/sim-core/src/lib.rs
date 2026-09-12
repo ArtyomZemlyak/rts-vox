@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod drive;
 pub mod energy;
 pub mod ground;
 pub mod shot;
@@ -18,10 +19,12 @@ pub mod matter;
 pub mod order;
 pub mod shield;
 
+use drive::{Drive, Limits, NO_WAY};
+use fx::angle;
 use fx::rng::Rng;
 use fx::Fx;
 use index::Grid;
-pub use modding::Tuning;
+pub use modding::{ChassisKind, Tuning};
 pub use order::{Order, STANCE_DIG, STANCE_FLOW, STANCE_HOLD, STANCE_MOVE};
 
 /// Сторона мира в мировых единицах.
@@ -151,7 +154,22 @@ pub struct Units {
     pub fx: Vec<Fx>,
     pub fz: Vec<Fx>,
     pub owner: Vec<u8>,
+    /// Предельная скорость машины, мировых единиц в секунду. Не шаг
+    /// за тик: шаг считает тот, кто едет (ADR-220).
     pub speed: Vec<i32>,
+    /// Курс: куда машина смотрит, двоичный угол `fx::angle`.
+    ///
+    /// Состояние, а не вывод из положения. Машина едет **по курсу**,
+    /// а курс доворачивается с предельной угловой скоростью: без
+    /// этого поворот на прямой угол занимал один тик, и диагональный
+    /// путь по четырёхстороннему полю выглядел лестницей (ADR-220).
+    pub head: Vec<i32>,
+    /// Скорость вдоль курса, мировых единиц в секунду. Растёт
+    /// с предельным ускорением, падает с предельным торможением.
+    pub vel: Vec<Fx>,
+    /// Вид ходовой: у гусеничной и шагающей машины пределы хода
+    /// разные, и лежат они в `data/sim.ron`.
+    pub chassis: Vec<ChassisKind>,
     /// Прикреплённых к ядру вокселей — то, что у нас вместо скалярного HP.
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
@@ -276,6 +294,9 @@ impl Units {
             fz: Vec::new(),
             owner: Vec::new(),
             speed: Vec::new(),
+            head: Vec::new(),
+            vel: Vec::new(),
+            chassis: Vec::new(),
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
@@ -318,6 +339,12 @@ impl Units {
             self.fz[k] = Fx::ZERO;
             self.owner[k] = owner;
             self.speed[k] = speed;
+            // **Слот из свободного списка не наследует хода.** Курс
+            // и скорость покойника означали бы, что подкрепление
+            // появляется на полном ходу и носом не туда.
+            self.head[k] = 0;
+            self.vel[k] = Fx::ZERO;
+            self.chassis[k] = ChassisKind::Tracked;
             self.voxels[k] = voxels;
             self.alive[k] = true;
             self.target[k] = NO_TARGET;
@@ -345,6 +372,9 @@ impl Units {
         self.fz.push(Fx::ZERO);
         self.owner.push(owner);
         self.speed.push(speed);
+        self.head.push(0);
+        self.vel.push(Fx::ZERO);
+        self.chassis.push(ChassisKind::Tracked);
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
@@ -420,9 +450,13 @@ pub struct World {
     /// и параллелить его нельзя ни при каком разбиении.
     snap_x: Vec<i32>,
     snap_z: Vec<i32>,
-    /// Смещения, посчитанные параллельно и применяемые одной серийной
+    /// Желания, посчитанные параллельно и применяемые одной серийной
     /// фазой (`CLAUDE.md`: клэмп применяется один раз, в конце).
-    delta: Vec<(i32, i32)>,
+    ///
+    /// Не смещения: смещение теперь считает трансмиссия, и считает
+    /// она его из **состояния** юнита — курса и скорости, — которое
+    /// параллельная фаза трогать не имеет права (ADR-220).
+    delta: Vec<drive::Want>,
     /// Замер: сколько сущностей осмотрели фазы за тик.
     pub examined_move: u64,
     pub examined_combat: u64,
@@ -513,6 +547,186 @@ pub struct World {
 }
 
 const DIRS: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
+
+/// Курс одного из четырёх направлений поля.
+const fn axis_way(d: (i32, i32)) -> i32 {
+    if d.0 > 0 {
+        0
+    } else if d.0 < 0 {
+        angle::HALF
+    } else if d.1 > 0 {
+        angle::QUARTER
+    } else {
+        angle::norm(-angle::QUARTER)
+    }
+}
+
+/// Курсы четырёх направлений поля, в порядке `DIRS`.
+///
+/// **Считаются из самих `DIRS`**, а не записаны числами рядом:
+/// две записи одного и того же разошлись бы молча, и юниты пошли бы
+/// в сторону, обратную полю.
+const DIR_WAYS: [i32; 4] = [
+    axis_way(DIRS[0]),
+    axis_way(DIRS[1]),
+    axis_way(DIRS[2]),
+    axis_way(DIRS[3]),
+];
+
+/// Куда юнит хочет ехать, двоичный угол или [`NO_WAY`].
+///
+/// Читает **только снимок положений, поле направлений и приказ**, и
+/// ничего не пишет. Отсюда и свобода разбиения фазы на потоки.
+///
+/// Функция одна на оба вызова — и на ядро, и на фазу. Пока их было
+/// две, они разошлись источником направления и тождество, которое
+/// ядро обещает, держалось только на словах (ADR-194).
+#[inline]
+fn want_way(
+    u: &Units,
+    i: usize,
+    ux: i32,
+    uz: i32,
+    vol: Option<(&nav::layer::NavLayer, &nav::sectors::NavField)>,
+    flow: &[Vec<u8>],
+    arrive: i32,
+) -> i32 {
+    match u.stance[i] {
+        // Без приказа юнит идёт по полю своей стороны.
+        STANCE_FLOW => {
+            let d = match vol {
+                Some((nav, field)) => {
+                    let st = nav.step() as i32;
+                    let (gw, gh) = nav.dims();
+                    let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
+                    if cx >= gw || cz >= gh {
+                        255
+                    } else {
+                        match nav.level_index_near(cx, cz, u.y[i]) {
+                            Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
+                            None => 255,
+                        }
+                    }
+                }
+                None => {
+                    let (cx, cz) = (
+                        (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                        (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
+                    );
+                    flow[u.owner[i] as usize][cz * NAV + cx]
+                }
+            };
+            if d < 4 {
+                DIR_WAYS[d as usize]
+            } else {
+                NO_WAY
+            }
+        }
+        STANCE_HOLD => NO_WAY,
+        _ => order::goal_way(ux, uz, u.goal_x[i], u.goal_z[i], arrive),
+    }
+}
+
+/// Во сколько процентов предельной скорости обходится уклон впереди.
+///
+/// Смотрится **соседняя нав-клетка по курсу**, а не соседний воксель:
+/// уклон — свойство ребра навигации (ADR-121), и внутри одной клетки
+/// его нет. Порог в половину единицы по косинусу даёт восемь румбов:
+/// машина, идущая ровно на север, смотрит на север, идущая на
+/// северо-восток — по диагонали.
+///
+/// Перепад, которого ребро не держит, считается подъёмом: туда
+/// машина всё равно не поедет, а подкатывать к обрыву на полном ходу
+/// ей незачем.
+#[inline]
+fn slope_percent(
+    nav: &nav::layer::NavLayer,
+    x: i32,
+    z: i32,
+    y: i32,
+    head: i32,
+    climb: i32,
+    descend: i32,
+) -> i32 {
+    let st = nav.step() as i32;
+    if x < 0 || z < 0 {
+        return 100;
+    }
+    let (cx, cz) = (x / st, z / st);
+    let (gw, gh) = nav.dims();
+    if cx >= gw as i32 || cz >= gh as i32 {
+        return 100;
+    }
+    let half = Fx::from_ratio(1, 2).raw();
+    let rumb = |v: Fx| -> i32 {
+        if v.raw() > half {
+            1
+        } else if v.raw() < -half {
+            -1
+        } else {
+            0
+        }
+    };
+    let (ax, az) = (rumb(angle::cos(head)), rumb(angle::sin(head)));
+    if ax == 0 && az == 0 {
+        return 100;
+    }
+    let (nx, nz) = (cx + ax, cz + az);
+    if nx < 0 || nz < 0 || nx >= gw as i32 || nz >= gh as i32 {
+        return 100;
+    }
+    match nav.step_to((cx as u32, cz as u32), y, (nx as u32, nz as u32)) {
+        Some(l) => match (l as i32).cmp(&y) {
+            std::cmp::Ordering::Greater => climb,
+            std::cmp::Ordering::Less => descend,
+            std::cmp::Ordering::Equal => 100,
+        },
+        None => climb,
+    }
+}
+
+/// Толчок соседей, мировых единиц в секунду по осям.
+///
+/// **Не тяга, а контакт тел**, поэтому через трансмиссию не идёт
+/// и курса не спрашивает: подпёртая в бок машина сдвигается вбок.
+/// Но и толкать быстрее, чем машина умеет ехать, контакт не может —
+/// отсюда клэмп по осям на предельную скорость (ADR-220). Без него
+/// зажатый в толпе юнит получал восьмикратную свою скорость,
+/// и это и была та самая «телепортация по клеткам».
+#[inline]
+fn separation_push(near: Near<'_>, i: usize, ux: i32, uz: i32, cap: i32) -> (i32, i32) {
+    let Near { sx, sz, grid, r2 } = near;
+    let (mut px, mut pz) = (0i32, 0i32);
+    grid.for_each_near(ux, uz, |j| {
+        let j = j as usize;
+        if j == i {
+            return;
+        }
+        let (dx, dz) = (ux - sx[j], uz - sz[j]);
+        let d2 = dx * dx + dz * dz;
+        if d2 == 0 || d2 >= r2 {
+            return;
+        }
+        let w = (r2 - d2) * 64 / r2;
+        px += dx * w / 16;
+        pz += dz * w / 16;
+    });
+    (px.clamp(-cap, cap), pz.clamp(-cap, cap))
+}
+
+/// Снимок соседей на начало фазы движения плюс квадрат радиуса
+/// расталкивания — всё, что нужно, чтобы спросить «кто рядом».
+///
+/// Собрано в одно нарочно: снимок и индекс осмысленны только вместе,
+/// и передавать их порознь значит однажды передать снимок от одной
+/// фазы с индексом от другой.
+#[derive(Clone, Copy)]
+struct Near<'a> {
+    sx: &'a [i32],
+    sz: &'a [i32],
+    grid: &'a Grid,
+    r2: i32,
+}
 
 impl World {
     pub fn new(owners: usize, capacity: usize, tuning: Tuning) -> World {
@@ -1130,85 +1344,42 @@ impl World {
         self.snap_z.clear();
         self.snap_z.extend_from_slice(&self.units.z);
         self.delta.clear();
-        self.delta.resize(self.units.x.len(), (0, 0));
+        self.delta.resize(self.units.x.len(), drive::Want::default());
     }
 
-    /// Смещение одного юнита. Читает только снимок и индекс —
+    /// Чего хочет один юнит. Читает только снимок, поле и индекс —
     /// значит вызов из любого потока даёт то же самое.
     ///
-    /// **Источник направления тот же, что у боевой фазы.** Раньше он
-    /// читал плоское поле всегда, а `movement_deltas` при наличии
-    /// земли читает объёмное: метод, документированный как «то же
-    /// самое», считал другое, и первый, кто повесил бы на него
-    /// настоящий пул, получил бы другую симуляцию. Сегодня им
-    /// пользуется только стенд, и мир у стенда без земли — поэтому
-    /// расхождение не проявлялось (ADR-194).
+    /// **Это желание, а не смещение** (ADR-220): куда ехать и куда
+    /// толкают соседи. Во что оно превратится, решает трансмиссия
+    /// в серийной фазе, потому что ей нужно состояние хода.
+    ///
+    /// Источник направления у ядра и у фазы **один и тот же** —
+    /// [`want_way`]. Пока их было два, они разошлись: ядро читало
+    /// плоское поле всегда, а фаза при наличии земли — объёмное,
+    /// и метод, документированный как «то же самое», считал другое
+    /// (ADR-194).
     #[inline]
-    pub fn movement_kernel(&self, i: usize) -> (i32, i32) {
-        let u = &self.units;
+    pub fn movement_kernel(&self, i: usize) -> drive::Want {
         let (ux, uz) = (self.snap_x[i], self.snap_z[i]);
-        let (mut vx, mut vz) = match u.stance[i] {
-            // Без приказа юнит идёт по полю своей стороны — то же,
-            // что было до канала приказов.
-            STANCE_FLOW => {
-                let d = match self.ground.as_ref() {
-                    Some(g) => {
-                        let st = g.nav.step() as i32;
-                        let (gw, gh) = g.nav.dims();
-                        let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
-                        if cx >= gw || cz >= gh {
-                            255
-                        } else {
-                            match g.nav.level_index_near(cx, cz, u.y[i]) {
-                                Some(li) => {
-                                    self.nav_field.dir_at(u.owner[i] as usize % 2, cx, cz, li)
-                                }
-                                None => 255,
-                            }
-                        }
-                    }
-                    None => {
-                        let (cx, cz) = (
-                            (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                            (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                        );
-                        self.flow[u.owner[i] as usize][cz * NAV + cx]
-                    }
-                };
-                if d < 4 {
-                    let (dx, dz) = DIRS[d as usize];
-                    (dx * u.speed[i], dz * u.speed[i])
-                } else {
-                    (0, 0)
-                }
-            }
-            STANCE_HOLD => (0, 0),
-            _ => order::goal_velocity(
-                ux,
-                uz,
-                u.goal_x[i],
-                u.goal_z[i],
-                u.speed[i],
-                self.tuning.order_arrive,
-            ),
+        let vol = self.ground.as_ref().map(|g| (&g.nav, &self.nav_field));
+        let way = want_way(
+            &self.units,
+            i,
+            ux,
+            uz,
+            vol,
+            &self.flow,
+            self.tuning.order_arrive,
+        );
+        let near = Near {
+            sx: &self.snap_x,
+            sz: &self.snap_z,
+            grid: &self.grid_near,
+            r2: self.tuning.separation * self.tuning.separation,
         };
-        let r2 = self.tuning.separation * self.tuning.separation;
-        let (sx, sz) = (&self.snap_x, &self.snap_z);
-        self.grid_near.for_each_near(ux, uz, |j| {
-            let j = j as usize;
-            if j == i {
-                return;
-            }
-            let (dx, dz) = (ux - sx[j], uz - sz[j]);
-            let d2 = dx * dx + dz * dz;
-            if d2 == 0 || d2 >= r2 {
-                return;
-            }
-            let w = (r2 - d2) * 64 / r2;
-            vx += dx * w / 16;
-            vz += dz * w / 16;
-        });
-        (vx, vz)
+        let (px, pz) = separation_push(near, i, ux, uz, self.units.speed[i]);
+        drive::Want { way, push_x: px, push_z: pz }
     }
 
     /// Живые ли слот. Нужен пулу, чтобы не считать дырки free-list.
@@ -1221,16 +1392,16 @@ impl World {
         self.units.x.len()
     }
 
-    /// Записать смещение — вызывается пулом в свой кусок буфера.
-    pub fn take_delta(&mut self) -> Vec<(i32, i32)> {
+    /// Забрать буфер желаний — пул пишет в свой кусок.
+    pub fn take_delta(&mut self) -> Vec<drive::Want> {
         std::mem::take(&mut self.delta)
     }
 
-    pub fn put_delta(&mut self, d: Vec<(i32, i32)>) {
+    pub fn put_delta(&mut self, d: Vec<drive::Want>) {
         self.delta = d;
     }
 
-    /// Посчитать смещения. Читает **только снимок**, пишет только
+    /// Посчитать желания. Читает **только снимок**, пишет только
     /// в свой слот `delta` — значит фаза делится на потоки по слотам
     /// и результат от разбиения не зависит.
     fn movement_deltas(&mut self, threads: usize) {
@@ -1240,74 +1411,28 @@ impl World {
         self.snap_z.clear();
         self.snap_z.extend_from_slice(&u.z);
         self.delta.clear();
-        self.delta.resize(u.x.len(), (0, 0));
+        self.delta.resize(u.x.len(), drive::Want::default());
 
         let (sx, sz) = (&self.snap_x, &self.snap_z);
         let grid = &self.grid_near;
         let flow = &self.flow;
+        let near = Near { sx, sz, grid, r2: self.tuning.separation * self.tuning.separation };
         // Земля есть — направление берётся из **объёмного** поля по узлу
         // «клетка и уровень»: юнит на крыше идёт по крышам, юнит
         // в туннеле — по туннелю (ADR-138). Без земли поле прежнее,
         // плоское: эталонный сценарий воксельного мира не строит.
         let vol = self.ground.as_ref().map(|g| (&g.nav, &self.nav_field));
-        let r2 = self.tuning.separation * self.tuning.separation;
 
         // Точка приказа читается **из состояния юнита**, а само
         // состояние приказы за эту фазу не меняют: их фаза прошла
         // первой. Значит и здесь читается снимок, и разбиение фазы
         // на потоки ничего не меняет (ADR-195).
         let arrive = self.tuning.order_arrive;
-        let compute = |i: usize| -> (i32, i32) {
+        let compute = |i: usize| -> drive::Want {
             let (ux, uz) = (sx[i], sz[i]);
-            let (mut vx, mut vz) = match u.stance[i] {
-                STANCE_FLOW => {
-                    let d = match vol {
-                        Some((nav, field)) => {
-                            let st = nav.step() as i32;
-                            let (gw, gh) = nav.dims();
-                            let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
-                            if cx >= gw || cz >= gh {
-                                255
-                            } else {
-                                match nav.level_index_near(cx, cz, u.y[i]) {
-                                    Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
-                                    None => 255,
-                                }
-                            }
-                        }
-                        None => {
-                            let (cx, cz) = (
-                                (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                                (uz / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
-                            );
-                            flow[u.owner[i] as usize][cz * NAV + cx]
-                        }
-                    };
-                    if d < 4 {
-                        let (dx, dz) = DIRS[d as usize];
-                        (dx * u.speed[i], dz * u.speed[i])
-                    } else {
-                        (0, 0)
-                    }
-                }
-                STANCE_HOLD => (0, 0),
-                _ => order::goal_velocity(ux, uz, u.goal_x[i], u.goal_z[i], u.speed[i], arrive),
-            };
-            grid.for_each_near(ux, uz, |j| {
-                let j = j as usize;
-                if j == i {
-                    return;
-                }
-                let (dx, dz) = (ux - sx[j], uz - sz[j]);
-                let d2 = dx * dx + dz * dz;
-                if d2 == 0 || d2 >= r2 {
-                    return;
-                }
-                let w = (r2 - d2) * 64 / r2;
-                vx += dx * w / 16;
-                vz += dz * w / 16;
-            });
-            (vx, vz)
+            let way = want_way(u, i, ux, uz, vol, flow, arrive);
+            let (px, pz) = separation_push(near, i, ux, uz, u.speed[i]);
+            drive::Want { way, push_x: px, push_z: pz }
         };
 
         let live = &u.live_ids;
@@ -1326,8 +1451,8 @@ impl World {
         // куски не пересекаются, и порядок внутри куска фиксирован.
         let n = self.delta.len();
         let block = n.div_ceil(threads);
-        let mut rest: &mut [(i32, i32)] = &mut self.delta;
-        let mut parts: Vec<(usize, &mut [(i32, i32)])> = Vec::with_capacity(threads);
+        let mut rest: &mut [drive::Want] = &mut self.delta;
+        let mut parts: Vec<(usize, &mut [drive::Want])> = Vec::with_capacity(threads);
         let mut base = 0usize;
         while !rest.is_empty() {
             let take = block.min(rest.len());
@@ -1363,14 +1488,29 @@ impl World {
         }
     }
 
-    /// Применить смещения. Серийная фаза: интегрирование в `Fx` и перенос
-    /// целой части в сетку.
+    /// Применить желания. Серийная фаза: трансмиссия, интегрирование
+    /// в `Fx` и перенос целой части в сетку.
+    ///
+    /// Серийная она потому, что читает и пишет **состояние хода** —
+    /// курс и скорость, — а состояние за фазу меняется. Параллельная
+    /// часть своё уже посчитала и лежит в `delta`.
     fn apply_deltas(&mut self) {
         let fall_dmg = self.tuning.fall_damage_per_voxel;
         // Ускорение за тик считается **один раз на фазу**, а не на юнита:
         // это точное деление в `i128`, и повторять его пять тысяч раз
         // незачем.
         let g_tick = gravity_per_tick(&self.tuning);
+        // Пределы хода — тоже один раз на фазу и по одному на вид
+        // ходовой, а не по одному на юнита (ADR-220).
+        let limits = [
+            Limits::of(&self.tuning.tracked, TICKS_PER_SECOND),
+            Limits::of(&self.tuning.walking, TICKS_PER_SECOND),
+        ];
+        let inv_tick = Fx::from_ratio(1, TICKS_PER_SECOND);
+        let (climb, descend) = (
+            [self.tuning.tracked.climb, self.tuning.walking.climb],
+            [self.tuning.tracked.descend, self.tuning.walking.descend],
+        );
         let Self { units: u, delta, ground, blocked_moves, .. } = self;
         // Счётчики падения — те же, что у наездников: правило одно,
         // значит и отчёт один.
@@ -1382,16 +1522,54 @@ impl World {
         let terrain = ground.as_ref().map(|g| (&g.nav, g.extent()));
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
-            let (vx, vz) = delta[i];
-            let step_x = Fx::from_ratio(vx, TICKS_PER_SECOND);
-            let step_z = Fx::from_ratio(vz, TICKS_PER_SECOND);
+            let want = delta[i];
+            let (x0, z0) = (u.x[i], u.z[i]);
+            let kind = u.chassis[i].code() as usize;
+
+            // **Предельная скорость с учётом уклона.** Смотрится
+            // клетка на шаг вперёд по курсу: вверх медленнее, вниз
+            // быстрее. Слишком крутой перепад ребра не имеет вовсе
+            // (`max_step`, ADR-121) — туда машина просто не едет,
+            // и отдельного правила для этого не нужно.
+            let mut vmax = Fx::from_int(u.speed[i]);
+            if u.riding[i] == 0 {
+                if let Some((nav, _)) = terrain {
+                    let pct = slope_percent(
+                        nav,
+                        x0,
+                        z0,
+                        u.y[i],
+                        u.head[i],
+                        climb[kind],
+                        descend[kind],
+                    );
+                    vmax = vmax.mul(Fx::from_ratio(pct, 100));
+                }
+            }
+
+            // Трансмиссия: курс доворачивается, скорость меняется,
+            // и только из них получается шаг.
+            let (nd, mv) = drive::advance(
+                Drive { head: u.head[i], vel: u.vel[i] },
+                want.way,
+                vmax,
+                &limits[kind],
+                inv_tick,
+            );
+            u.head[i] = nd.head;
+            u.vel[i] = nd.vel;
+
+            // Толчок соседей прибавляется **к шагу**, а не к тяге:
+            // это контакт тел, и разворачиваться ради него машина
+            // не обязана (ADR-220).
+            let step_x = mv.dx.add(Fx::from_ratio(want.push_x, TICKS_PER_SECOND));
+            let step_z = mv.dz.add(Fx::from_ratio(want.push_z, TICKS_PER_SECOND));
             let nx = u.fx[i].add(step_x);
             let nz = u.fz[i].add(step_z);
             let carry_x = nx.to_int_trunc();
             let carry_z = nz.to_int_trunc();
             u.fx[i] = nx.sub(Fx::from_int(carry_x));
             u.fz[i] = nz.sub(Fx::from_int(carry_z));
-            let (x0, z0) = (u.x[i], u.z[i]);
             let mut x1 = (x0 + carry_x).clamp(0, WORLD - 1);
             let mut z1 = (z0 + carry_z).clamp(0, WORLD - 1);
             if let Some((nav, (ex, ez))) = terrain {
@@ -2082,6 +2260,18 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
+            // **Ход — состояние.** Курс и скорость переживают тик
+            // и задают, куда юнит поедет дальше; не войди они в хеш,
+            // трансмиссию можно было бы переписать целиком и увидеть
+            // тот же хеш до бита. Это ровно то, ради чего написан
+            // ADR-116 (ADR-220).
+            //
+            // Курс входит **всегда**, а не только на ходу: стоящая
+            // машина носом куда-то смотрит, и по положению этого
+            // не видно.
+            w = w.wrapping_mul(31).wrapping_add(self.units.head[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.vel[i].raw() as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.chassis[i].code() as u64);
             // Приказ — состояние: он переживает тик и задаёт движение,
             // а состояние, не входящее в хеш, можно переписать целиком
             // и увидеть тот же хеш до бита (ADR-116).
@@ -2165,7 +2355,23 @@ fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) -> u32 {
     };
     let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
     let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-    w.spawn_ground(x, z, owner, r.range(2, 6), 300)
+    let id = w.spawn_ground(x, z, owner, r.range(2, 6), 300);
+    // **Строй стоит лицом к противнику, а не носом на восток.**
+    // Курс — состояние (ADR-220), и оставить его нулевым значило бы,
+    // что половина армии первым делом разворачивается на месте.
+    //
+    // Вид ходовой у стороны свой, и задаётся он **здесь, явно**, —
+    // той же рукой, что и оружие (ADR-192). Вывести его из номера
+    // владельца в фазе движения значило бы спрятать правило
+    // в горячем пути.
+    let k = id as usize;
+    w.units.head[k] = if owner == 0 { 0 } else { fx::angle::HALF };
+    w.units.chassis[k] = if owner == 0 {
+        ChassisKind::Tracked
+    } else {
+        ChassisKind::Walking
+    };
+    id
 }
 
 pub fn populate(w: &mut World, n: usize, seed: u64) {

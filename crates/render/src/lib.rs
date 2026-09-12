@@ -32,6 +32,19 @@ pub fn yaw_to(dx: f32, dz: f32) -> f32 {
     (-dz).atan2(dx)
 }
 
+/// Поворот по **курсу из симуляции** (`units.head`, двоичный угол
+/// `fx::angle`).
+///
+/// Корпус разворачивается по курсу, а не по догадке рендера. Догадка
+/// и стояла здесь до ADR-220: `yaw_to` брал **дробную часть
+/// положения**, которая при каждом переносе в целую часть
+/// перескакивает через ноль. Строй от этого дёргался в такт шагу —
+/// не потому, что симуляция дёргалась, а потому, что угол считался
+/// не из того.
+pub fn yaw_of(head: i32) -> f32 {
+    -(head as f32) * std::f32::consts::TAU / fx::angle::FULL as f32
+}
+
 /// Точка или направление.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct V3 {
@@ -518,6 +531,25 @@ mod tests {
                 dx / l,
                 dz / l
             );
+        }
+    }
+
+    /// **Поворот по курсу — тот же, что по направлению курса.**
+    ///
+    /// Сторож на знак: `yaw_of` и `yaw_to` обязаны сходиться, иначе
+    /// корпус смотрит зеркально, и это не падает и не ругается.
+    #[test]
+    fn the_heading_yaw_matches_the_direction_yaw() {
+        for k in 0..64 {
+            let a = k * (fx::angle::FULL / 64);
+            let (c, s) = (
+                fx::angle::cos(a).to_f64_lossy() as f32,
+                fx::angle::sin(a).to_f64_lossy() as f32,
+            );
+            let (want, got) = (yaw_to(c, s), yaw_of(a));
+            let d = (want - got).abs() % std::f32::consts::TAU;
+            let d = d.min(std::f32::consts::TAU - d);
+            assert!(d < 1e-3, "курс {a}: {got} вместо {want}");
         }
     }
 
