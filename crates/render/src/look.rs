@@ -1155,16 +1155,13 @@ fn albedo_at(l: Look, c: Class, u: f32, v: f32) -> [f32; 3] {
     let (warm, cool) = hue_axis(c);
     let pole = if t >= 0.0 { warm } else { cool };
     let k = t.abs() * s.hue;
-    let mut rgb = [0.0f32; 3];
-    for ch in 0..3 {
-        rgb[ch] = a * (1.0 + (pole[ch] - 1.0) * k);
-    }
+    let mut rgb = pole.map(|p| a * (1.0 + (p - 1.0) * k));
     if n.speck {
-        for ch in 0..3 {
-            rgb[ch] *= s.speck_srgb[ch];
+        for (c, m) in rgb.iter_mut().zip(s.speck_srgb) {
+            *c *= m;
         }
     }
-    [rgb[0].clamp(0.0, 1.0), rgb[1].clamp(0.0, 1.0), rgb[2].clamp(0.0, 1.0)]
+    rgb.map(|c| c.clamp(0.0, 1.0))
 }
 
 /// Свойства поверхности в точке плитки: затенение, шероховатость,
@@ -2373,14 +2370,14 @@ mod tests {
                         let u = (x as f32 + 0.5) / TILE as f32;
                         let v = (y as f32 + 0.5) / TILE as f32;
                         let s = albedo_at(l, c, u, v);
-                        for k in 0..3 {
-                            sum[k] += srgb_to_lin(s[k]) as f64;
+                        for (acc, ch) in sum.iter_mut().zip(s) {
+                            *acc += srgb_to_lin(ch) as f64;
                         }
                     }
                 }
                 let t = surface_tile_of(l, c);
-                for k in 0..3 {
-                    let want = (lin_to_srgb((sum[k] / (n * n) as f64) as f32) * 255.0 + 0.5) as i32;
+                for (k, total) in sum.iter().enumerate() {
+                    let want = (lin_to_srgb((total / (n * n) as f64) as f32) * 255.0 + 0.5) as i32;
                     let got = t.rgba[t.rgba.len() - 4 + k] as i32;
                     assert!((got - want).abs() <= 1, "мельчайший уровень {got}, ждали {want}");
                     assert!(got < 255, "плитка не темнеет вовсе");
