@@ -28,10 +28,11 @@ use index::Grid;
 pub use modding::{ChassisKind, Tuning};
 pub use order::{Order, STANCE_DIG, STANCE_FLOW, STANCE_HOLD, STANCE_MOVE};
 
-/// Сторона мира в мировых единицах.
-pub const WORLD: i32 = 2000;
-/// Сторона нав-клетки.
-pub const NAV_CELL: i32 = 2;
+/// Сторона мира в мировых единицах. Тысяча метров при ребре
+/// воксела 0.1 м (ADR-227).
+pub const WORLD: i32 = 10_000;
+/// Сторона нав-клетки — метр, как в `data/sim.ron`.
+pub const NAV_CELL: i32 = 10;
 /// Сторона нав-сетки.
 pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 
@@ -771,7 +772,7 @@ impl World {
     /// Привязать воксельный мир. До этого фазы земли — заглушки.
     ///
     /// Здесь же индекс соседей узнаёт **настоящий** размер мира.
-    /// До этого он строился по `WORLD` — две тысячи единиц, — а мир
+    /// До этого он строился по `WORLD` — десять тысяч единиц, — а мир
     /// приходит из `worldgen::Params` и бывает вчетверо, а то и
     /// вдесятеро меньше. Обнулялись вёдра мира, которого нет
     /// (ADR-189).
@@ -855,7 +856,7 @@ impl World {
     /// Размеры вёдер — параметр, а не константа: они задают обмен между
     /// ценой пересборки индекса и ценой запроса, и оптимум зависит
     /// от плотности. Мелкое ведро дёшево в запросе и дорого в пересборке:
-    /// при стороне 3 на карте 2000 это 445 тысяч корзин, которые надо
+    /// при стороне 15 на карте 10000 это 445 тысяч корзин, которые надо
     /// обнулить каждый тик.
     pub fn with_cells(
         owners: usize,
@@ -2447,8 +2448,8 @@ fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) -> u32 {
     let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
     let (midx, midz) = (ex / 2, ez / 2);
     let gap = w.tuning.range / 2;
-    let spread = (ex / 6).clamp(4, 100);
-    let depth = (ez / 4).clamp(4, 150);
+    let spread = (ex / 6).clamp(20, 500);
+    let depth = (ez / 4).clamp(20, 750);
     let bx = if owner == 0 {
         midx - gap - spread
     } else {
@@ -2456,7 +2457,7 @@ fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) -> u32 {
     };
     let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
     let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-    let id = w.spawn_ground(x, z, owner, r.range(10, 30), 300);
+    let id = w.spawn_ground(x, z, owner, r.range(50, 150), 300);
     // **Строй стоит лицом к противнику, а не носом на восток.**
     // Курс — состояние (ADR-220), и оставить его нулевым значило бы,
     // что половина армии первым делом разворачивается на месте.
@@ -2483,7 +2484,7 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     let (ex, ez) = w.ground().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
     let (midx, midz) = (ex / 2, ez / 2);
     let gap = w.tuning.range / 2;
-    let spread = (ex / 6).clamp(4, 100);
+    let spread = (ex / 6).clamp(20, 500);
     for k in 0..n {
         let _ = spawn_in_line(w, &mut r, (k % 2) as u8);
     }
@@ -2492,12 +2493,19 @@ pub fn populate(w: &mut World, n: usize, seed: u64) {
     w.units.refresh_live();
 }
 
-/// Сторона мира эталонного сценария.
+/// Сторона мира эталонного сценария — 128 м.
 ///
-/// Меньше умолчания генератора (512³): гейт запускают руками и в CI,
-/// и он обязан оставаться быстрым. Больше сектора навигации во много
-/// раз, иначе иерархия в нём не участвует.
-pub const REF_SIDE: u32 = 256;
+/// Меньше умолчания генератора (256 м в стороне): гейт запускают
+/// руками и в CI, и он обязан оставаться быстрым. Больше сектора
+/// навигации во много раз, иначе иерархия в нём не участвует.
+///
+/// **Второе условие и задаёт число.** Сектор — шестнадцать нав-клеток
+/// (`nav::sectors::SEC`), нав-клетка — десять вокселей из данных,
+/// то есть сектор это 160 вокселей; 1280 даёт восемь секторов
+/// на сторону. Сохрани здесь прежние 256 вокселей — и на сторону
+/// пришлось бы полтора сектора, то есть иерархии в сценарии
+/// не осталось бы вовсе (ADR-227).
+pub const REF_SIDE: u32 = 640;
 
 /// Чем вооружены стороны эталонного сценария — **номерами видов**
 /// из `data/weapons.ron`, а не местами в массиве (ADR-192).
@@ -2507,7 +2515,7 @@ pub const REF_WEAPON_IDS: [u16; 2] = [1, 2];
 /// за тик. Копка — экономика проекта, и сценарий, который не копает,
 /// не проверяет главного.
 const REF_DIGGERS: usize = 24;
-const REF_RADIUS: i32 = 2;
+const REF_RADIUS: i32 = 10;
 
 /// Сколько юнитов сторона добирает за тик, пока не вернулась
 /// к заявленной численности.
@@ -2976,7 +2984,7 @@ mod tests {
     /// Плоская земля до `FLAT_GY` и ничего больше: сцена для баллистики,
     /// где мешать снаряду может только тяготение.
     struct Flat;
-    const FLAT_GY: u32 = 8;
+    const FLAT_GY: u32 = 40;
     impl voxel::Generator for Flat {
         fn material(&self, _x: u32, y: u32, _z: u32) -> voxel::store::Mat {
             if y < FLAT_GY {
@@ -2989,12 +2997,12 @@ mod tests {
 
     /// Двое на плоскости, лицом к лицу, на заданном расстоянии.
     fn duel(t: Tuning, ws: modding::weapons::Weapons, apart: i32) -> World {
-        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Flat));
+        let vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Flat));
         let mut w = World::new(2, 8, t);
         w.attach_ground(ground::Ground::new(vw, &t));
         w.attach_weapons(ws);
-        w.spawn_ground(32 - apart / 2, 32, 0, 0, 300);
-        w.spawn_ground(32 + apart / 2, 32, 1, 0, 300);
+        w.spawn_ground(160 - apart / 2, 160, 0, 0, 300);
+        w.spawn_ground(160 + apart / 2, 160, 1, 0, 300);
         w.units.refresh_live();
         w
     }
@@ -3018,15 +3026,14 @@ blast_radius: 0, blast_damage: 0 ) ] )"
     /// есть, — дальше строго убывает и к концу уходит в минус, то есть
     /// снаряд прошёл вершину и падает.
     ///
-    /// Скорость, а не высота: при земном тяготении, скорости сорок
-    /// клеток в секунду и дальности в двадцать клеток вершина дуги
-    /// поднимается над стрелком на **0.6 воксела** — в целых
-    /// координатах её попросту не видно. Выбрать ради видимости
-    /// тяготение побольше значило бы проверять не ту сцену, в которую
-    /// играют.
+    /// Скорость, а не высота: при земном тяготении, скорости двадцать
+    /// метров в секунду и дальности в десять метров вершина дуги
+    /// поднимается над стрелком на **три воксела**, то есть на
+    /// тридцать сантиметров. Выбрать ради видимости тяготение
+    /// побольше значило бы проверять не ту сцену, в которую играют.
     #[test]
     fn a_bolt_flies_an_arc_and_the_aim_leads_by_height() {
-        let mut w = duel(test_tuning(), bolt(40), 20);
+        let mut w = duel(test_tuning(), bolt(200), 100);
         // Следить надо за **одним** снарядом от рождения до гибели:
         // сводка по всем живым лжёт, потому что свежий снаряд
         // начинает полёт заново.
@@ -3073,9 +3080,9 @@ blast_radius: 0, blast_damage: 0 ) ] )"
     #[test]
     fn the_aim_leads_enough_to_reach_the_far_edge_of_the_range() {
         let mut t = test_tuning();
-        t.gravity = 60;
-        let apart = t.range - 2;
-        let mut w = duel(t, bolt(40), apart);
+        t.gravity = 300;
+        let apart = t.range - 10;
+        let mut w = duel(t, bolt(200), apart);
         for _ in 0..200 {
             w.tick();
         }
@@ -3108,7 +3115,7 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         let run = |gravity: i32| -> (u64, u64, u64) {
             let mut t = test_tuning();
             t.gravity = gravity;
-            let mut w = duel(t, laser(), 20);
+            let mut w = duel(t, laser(), 100);
             let mut h = 0;
             for _ in 0..120 {
                 h = w.tick();
@@ -3128,10 +3135,10 @@ blast_radius: 0, blast_damage: 0 ) ] )",
     /// Плоский пол и стена **в один воксель толщиной** поперёк пути.
     /// Тонкая нарочно: толстую не проскочишь, и она ничего не проверяет.
     struct Wall;
-    const WALL_X: u32 = 30;
+    const WALL_X: u32 = 150;
     impl voxel::Generator for Wall {
         fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
-            if y < FLAT_GY || (x == WALL_X && y < FLAT_GY + 8) {
+            if y < FLAT_GY || (x == WALL_X && y < FLAT_GY + 40) {
                 2
             } else {
                 voxel::store::AIR
@@ -3144,23 +3151,23 @@ blast_radius: 0, blast_damage: 0 ) ] )",
     /// прицел, и скорость нужна та, какой в данных нет.
     fn lone_target(g: impl voxel::Generator + 'static, at_x: i32) -> (World, usize) {
         let t = test_tuning();
-        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(g));
+        let vw = voxel::World::new(320, 240, 320, 100_000, Box::new(g));
         let mut w = World::new(2, 8, t);
         w.attach_ground(ground::Ground::new(vw, &t));
         w.attach_weapons(test_weapons());
-        let id = w.spawn_ground(at_x, 32, 1, 0, 300) as usize;
+        let id = w.spawn_ground(at_x, 160, 1, 0, 300) as usize;
         w.units.refresh_live();
         (w, id)
     }
 
     /// Снаряд владельца 0 по оси X, `vx` вокселей за тик.
     ///
-    /// Высота на воксель выше пола: допуск попадания по вертикали —
+    /// Высота на полметра выше пола: допуск попадания по вертикали —
     /// рост юнита, так что мишень снаряд достанет, а пола за те
     /// несколько тиков, что он живёт, не коснётся.
     fn launch(w: &mut World, from_x: i32, vx: i32) {
         w.shots.spawn(
-            (from_x, FLAT_GY as i32 + 1, 32),
+            (from_x, FLAT_GY as i32 + 5, 160),
             (Fx::ZERO, Fx::ZERO, Fx::ZERO),
             (Fx::from_int(vx), Fx::ZERO, Fx::ZERO),
             0,
@@ -3176,16 +3183,16 @@ blast_radius: 0, blast_damage: 0 ) ] )",
     /// его пронесло между двумя тиками, в конечной точке шага
     /// не находится вовсе.
     ///
-    /// Пять вокселей за тик — оснастка, а не баланс: она делает дыру
-    /// видимой на одном снаряде. Мишень стоит на `33`, снаряд выходит
-    /// из `20`, и концы его шагов — `25`, `30`, `35`: ни в одном
-    /// из них мишени нет. Проверка только конца шага даёт ноль
-    /// попаданий, и на ней тест падает.
+    /// Двадцать пять вокселей за тик — оснастка, а не баланс: она
+    /// делает дыру видимой на одном снаряде. Мишень стоит на `165`,
+    /// снаряд выходит из `100`, и концы его шагов — `125`, `150`,
+    /// `175`: ни в одном из них мишени нет. Проверка только конца
+    /// шага даёт ноль попаданий, и на ней тест падает.
     #[test]
     fn a_fast_bolt_does_not_fly_through_its_target() {
-        let (mut w, id) = lone_target(Flat, 33);
+        let (mut w, id) = lone_target(Flat, 165);
         let hp0 = w.units.voxels[id];
-        launch(&mut w, 20, 5);
+        launch(&mut w, 100, 25);
         for _ in 0..10 {
             w.tick();
         }
@@ -3202,15 +3209,15 @@ blast_radius: 0, blast_damage: 0 ) ] )",
     /// между концами не остаётся ни одного воксела: стена толщиной
     /// в воксель пропускала бы снаряд насквозь.
     ///
-    /// Стена на `30`, снаряд выходит из `20` по пять вокселей за тик,
-    /// то есть встаёт на неё ровно концом второго шага. Мишень —
-    /// за стеной, на `40`: пока снаряд сквозь неё проходит, мишень
-    /// получает урон, и это видно.
+    /// Стена на `150`, снаряд выходит из `100` по двадцать пять
+    /// вокселей за тик, то есть встаёт на неё ровно концом второго
+    /// шага. Мишень — за стеной, на `200`: пока снаряд сквозь неё
+    /// проходит, мишень получает урон, и это видно.
     #[test]
     fn a_fast_bolt_stops_at_a_wall_one_voxel_thick() {
-        let (mut w, id) = lone_target(Wall, 40);
+        let (mut w, id) = lone_target(Wall, 200);
         let hp0 = w.units.voxels[id];
-        launch(&mut w, 20, 5);
+        launch(&mut w, 100, 25);
         for _ in 0..10 {
             w.tick();
         }
@@ -3223,14 +3230,15 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         assert_eq!(w.units.voxels[id], hp0, "мишень за стеной получила урон");
     }
 
-    /// Плоский пол и **кочка в один воксель** посреди него.
-    /// Ровно та неровность, которую юнит перешагивает не глядя
-    /// (`max_step` в данных — единица).
+    /// Плоский пол и **кочка в полметра** посреди него.
+    /// Ровно та неровность, которую юнит перешагивает не глядя:
+    /// `max_step` в данных — пять вокселей (ADR-227).
     struct Bump;
-    const BUMP_X: u32 = 32;
+    const BUMP_X: u32 = 160;
+    const BUMP_H: u32 = 5;
     impl voxel::Generator for Bump {
         fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
-            if y < FLAT_GY || (x == BUMP_X && y == FLAT_GY) {
+            if y < FLAT_GY || (x == BUMP_X && y < FLAT_GY + BUMP_H) {
                 2
             } else {
                 voxel::store::AIR
@@ -3248,16 +3256,17 @@ blast_radius: 0, blast_damage: 0 ) ] )",
     /// ствола.
     ///
     /// На стрелковой сцене всего проекта это стоит трети попаданий
-    /// (`docs/analysis/10-decisions-full.md`, ADR-173).
+    /// (`docs/analysis/10-decisions-full.md`, ADR-173). Через кочку
+    /// в полметра стрелять нельзя, а над ней можно.
     #[test]
-    fn the_muzzle_clears_a_one_voxel_bump() {
+    fn the_muzzle_clears_a_bump_the_unit_steps_over() {
         let t = test_tuning();
-        let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Bump));
+        let vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Bump));
         let mut w = World::new(2, 8, t);
         w.attach_ground(ground::Ground::new(vw, &t));
-        w.attach_weapons(bolt(40));
-        w.spawn_ground(BUMP_X as i32 - 10, 32, 0, 0, 300);
-        w.spawn_ground(BUMP_X as i32 + 10, 32, 1, 0, 300);
+        w.attach_weapons(bolt(200));
+        w.spawn_ground(BUMP_X as i32 - 50, 160, 0, 0, 300);
+        w.spawn_ground(BUMP_X as i32 + 50, 160, 1, 0, 300);
         w.units.refresh_live();
         for _ in 0..120 {
             w.tick();
@@ -3265,7 +3274,7 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         assert!(w.shots_fired > 0, "никто не стрелял");
         assert!(
             w.shots_hit > 0,
-            "с {} выстрелов ни одного попадания через кочку в воксель: \
+            "с {} выстрелов ни одного попадания через кочку в полметра: \
 упоров в породу {} — снаряд идёт по земле, а не над ней",
             w.shots_fired,
             w.shots_blocked
@@ -3292,15 +3301,15 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         /// а «пробить её за двести тиков не успели». Толщина берётся
         /// с запасом на обстрел, и целость стены проверяется в конце.
         struct Ridge;
-        const GY: u32 = 8;
-        const WALL: u32 = 32;
-        const HALF: u32 = 6;
+        const GY: u32 = 40;
+        const WALL: u32 = 160;
+        const HALF: u32 = 30;
         impl voxel::Generator for Ridge {
             fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
                 if y < GY {
                     return 2;
                 }
-                if x.abs_diff(WALL) <= HALF && y < GY + 12 {
+                if x.abs_diff(WALL) <= HALF && y < GY + 60 {
                     return 3;
                 }
                 voxel::store::AIR
@@ -3314,16 +3323,16 @@ blast_radius: 0, blast_damage: 0 ) ] )",
             // Воронка задаётся **оружием**, а не настройкой мира
             // (ADR-169), поэтому реестр собирается под нужный радиус.
             let ws = modding::weapons::from_ron(&format!(
-                "( weapons: [ ( id: 1, kind: Bolt, speed: 40, damage: 30, reload: 30, \
+                "( weapons: [ ( id: 1, kind: Bolt, speed: 200, damage: 30, reload: 30, \
 blast_radius: {blast}, blast_damage: 10 ) ] )"
             ))
             .expect("реестр");
 
-            let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Ridge));
+            let mut vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Ridge));
             if tunnel {
                 for x in WALL - HALF..=WALL + HALF {
-                    for y in GY..GY + 6 {
-                        for z in 28..36 {
+                    for y in GY..GY + 30 {
+                        for z in 140..180 {
                             vw.queue_dig(x, y, z);
                         }
                     }
@@ -3338,8 +3347,8 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             w.attach_ground(g);
             w.attach_weapons(ws);
             // По разные стороны стены, на одной высоте и в створе хода.
-            w.spawn_ground(WALL as i32 - 8, 32, 0, 0, 300);
-            w.spawn_ground(WALL as i32 + 8, 32, 1, 0, 300);
+            w.spawn_ground(WALL as i32 - 40, 160, 0, 0, 300);
+            w.spawn_ground(WALL as i32 + 40, 160, 1, 0, 300);
             w.units.refresh_live();
             for _ in 0..200 {
                 w.tick();
@@ -3348,8 +3357,8 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             // лишь «не успели пробить».
             let g = w.ground().expect("земля");
             let intact = !tunnel
-                && g.world.solid(WALL, GY + 1, 32)
-                && g.world.solid(WALL, GY + 3, 32);
+                && g.world.solid(WALL, GY + 5, 160)
+                && g.world.solid(WALL, GY + 15, 160);
             (w.shots_fired, w.shots_hit, w.shots_blocked, intact)
         };
 
@@ -3378,9 +3387,9 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
     /// **Воронки проламывают стену, сквозь которую луч не проходил.**
     ///
     /// Обратная сторона предыдущего теста и главное следствие воронок
-    /// (ADR-165): порода закрывает не навсегда. Стена в тринадцать
-    /// вокселей, которую снаряд без воронки не пробивает ни разу
-    /// за двести тиков, с воронками перестаёт быть стеной.
+    /// (ADR-165): порода закрывает не навсегда. Стена в шесть метров,
+    /// которую снаряд без воронки не пробивает ни разу за двести
+    /// тиков, с воронками перестаёт быть стеной.
     ///
     /// Тест сторожит **обе** стороны: без воронок ноль попаданий,
     /// с воронками попадания появляются. Одна сторона без другой
@@ -3388,15 +3397,15 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
     #[test]
     fn a_blast_breaches_a_wall_a_bullet_cannot() {
         struct Wall;
-        const GY: u32 = 8;
-        const AT: u32 = 32;
-        const HALF: u32 = 6;
+        const GY: u32 = 40;
+        const AT: u32 = 160;
+        const HALF: u32 = 30;
         impl voxel::Generator for Wall {
             fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
                 if y < GY {
                     return 2;
                 }
-                if x.abs_diff(AT) <= HALF && y < GY + 12 {
+                if x.abs_diff(AT) <= HALF && y < GY + 60 {
                     return 3;
                 }
                 voxel::store::AIR
@@ -3407,28 +3416,33 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             // Воронка задаётся **оружием**, а не настройкой мира
             // (ADR-169), поэтому реестр собирается под нужный радиус.
             let ws = modding::weapons::from_ron(&format!(
-                "( weapons: [ ( id: 1, kind: Bolt, speed: 40, damage: 30, reload: 30, \
+                "( weapons: [ ( id: 1, kind: Bolt, speed: 200, damage: 30, reload: 30, \
 blast_radius: {blast}, blast_damage: 10 ) ] )"
             ))
             .expect("реестр");
 
-            let vw = voxel::World::new(64, 48, 64, 4096, Box::new(Wall));
+            let vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Wall));
             let g = ground::Ground::new(vw, &t);
             let mut w = World::new(2, 8, t);
             w.attach_ground(g);
             w.attach_weapons(ws);
-            w.spawn_ground(AT as i32 - 8, 32, 0, 0, 300);
-            w.spawn_ground(AT as i32 + 8, 32, 1, 0, 300);
+            w.spawn_ground(AT as i32 - 40, 160, 0, 0, 300);
+            w.spawn_ground(AT as i32 + 40, 160, 1, 0, 300);
             w.units.refresh_live();
             for _ in 0..200 {
                 w.tick();
             }
             // Пролом проверяется на высоте, **на которой снаряд
-            // летит**. Он рвёт на лицевой грани, а не забравшись
-            // в породу на воксель (ADR-173), поэтому воронки
-            // выедают ход вдоль линии огня, а не сферу вокруг неё,
-            // и воксель этажом выше остаётся на кромке хода.
-            let solid = w.ground().expect("земля").world.solid(AT, GY, 32);
+            // летит**, — это половина роста юнита над полом, и
+            // литералом она стоять не может: рост живёт в данных.
+            // Снаряд рвёт на лицевой грани, а не забравшись в породу
+            // на воксель (ADR-173), поэтому воронки выедают ход вдоль
+            // линии огня, а не сферу вокруг неё, и воксель у пола
+            // остаётся под ходом. Замер на blast=10: на высоте полёта
+            // стена снесена целиком (130..190 пусто), а у пола цела
+            // от края до края (ADR-227).
+            let fly = GY + t.unit_height as u32 / 2;
+            let solid = w.ground().expect("земля").world.solid(AT, fly, 160);
             (w.shots_hit, solid)
         };
 
@@ -3436,7 +3450,7 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
         assert_eq!(hit_plain, 0, "без воронок сквозь стену прошло {hit_plain}");
         assert!(solid_plain, "без воронок стена всё равно исчезла");
 
-        let (hit_blast, solid_blast) = run(2);
+        let (hit_blast, solid_blast) = run(10);
         assert!(!solid_blast, "воронки не тронули стену");
         assert!(
             hit_blast > 0,
@@ -3541,15 +3555,15 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
     #[test]
     fn a_laser_neither_pierces_rock_nor_digs_it() {
         struct Wall;
-        const GY: u32 = 8;
-        const AT: u32 = 32;
-        const HALF: u32 = 6;
+        const GY: u32 = 40;
+        const AT: u32 = 160;
+        const HALF: u32 = 30;
         impl voxel::Generator for Wall {
             fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
                 if y < GY {
                     return 2;
                 }
-                if x.abs_diff(AT) <= HALF && y < GY + 12 {
+                if x.abs_diff(AT) <= HALF && y < GY + 60 {
                     return 3;
                 }
                 voxel::store::AIR
@@ -3563,11 +3577,11 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
 reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             )
             .expect("реестр");
-            let mut vw = voxel::World::new(64, 48, 64, 4096, Box::new(Wall));
+            let mut vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Wall));
             if !wall {
                 for x in AT - HALF..=AT + HALF {
-                    for y in GY..GY + 8 {
-                        for z in 24..40 {
+                    for y in GY..GY + 40 {
+                        for z in 120..200 {
                             vw.queue_dig(x, y, z);
                         }
                     }
@@ -3581,13 +3595,13 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             let mut w = World::new(2, 8, t);
             w.attach_ground(g);
             w.attach_weapons(ws);
-            w.spawn_ground(AT as i32 - 8, 32, 0, 0, 300);
-            w.spawn_ground(AT as i32 + 8, 32, 1, 0, 300);
+            w.spawn_ground(AT as i32 - 40, 160, 0, 0, 300);
+            w.spawn_ground(AT as i32 + 40, 160, 1, 0, 300);
             w.units.refresh_live();
             for _ in 0..200 {
                 w.tick();
             }
-            let solid = w.ground().expect("земля").world.solid(AT, GY + 1, 32);
+            let solid = w.ground().expect("земля").world.solid(AT, GY + 5, 160);
             (w.beams_fired, w.beams_hit, solid, w.beams_blocked)
         };
 
@@ -3645,36 +3659,36 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         struct Mushroom;
         impl voxel::Generator for Mushroom {
             fn material(&self, x: u32, y: u32, z: u32) -> voxel::store::Mat {
-                if y < 8 {
+                if y < 40 {
                     return 2;
                 }
                 // Ножка.
-                if (28..36).contains(&x) && (28..36).contains(&z) && y < 44 {
+                if (140..180).contains(&x) && (140..180).contains(&z) && y < 220 {
                     return 3;
                 }
                 // Шляпка.
-                if (20..44).contains(&x) && (20..44).contains(&z) && (40..44).contains(&y) {
+                if (100..220).contains(&x) && (100..220).contains(&z) && (200..220).contains(&y) {
                     return 3;
                 }
                 voxel::store::AIR
             }
         }
         let t = test_tuning();
-        let vw = voxel::World::new(64, 64, 64, 100_000, Box::new(Mushroom));
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Mushroom));
         let mut w = World::new(1, 4, t);
         w.attach_ground(ground::Ground::new(vw, &t));
-        let id = w.units.spawn(32, 32, 0, 0, 300) as usize;
+        let id = w.units.spawn(160, 160, 0, 0, 300) as usize;
         w.units.refresh_live();
         w.tick();
         let y0 = w.units.y[id];
-        assert!(y0 > 40, "юнит не встал на шляпку: y = {y0}");
+        assert!(y0 > 200, "юнит не встал на шляпку: y = {y0}");
 
         // Подрезать ножку.
         {
             let g = w.ground_mut().expect("земля");
-            for y in 9..21 {
-                for z in 28..36 {
-                    for x in 28..36 {
+            for y in 45..105 {
+                for z in 140..180 {
+                    for x in 140..180 {
                         if g.world.solid(x, y, z) {
                             g.world.queue_dig(x, y, z);
                         }
@@ -3685,7 +3699,7 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
 
         let mut rode = 0u32;
         let mut checked = 0u32;
-        for tick in 0..60 {
+        for tick in 0..200 {
             w.tick();
             let g = w.ground().expect("земля");
             let st = g.nav.step() as i32;
@@ -3749,7 +3763,7 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             200,
             t,
             test_weapons(),
-            worldgen::Params::sized(96, 48, 96),
+            worldgen::Params::sized(480, 240, 480),
         );
         for _ in 0..40 {
             r.tick();
@@ -3761,7 +3775,7 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let ids: Vec<u32> = r.world.units.live().to_vec();
         for (k, &i) in ids.iter().enumerate() {
             match k % 3 {
-                0 => r.world.push_order(Order::MoveTo { unit: i, x: 10, z: 80 }),
+                0 => r.world.push_order(Order::MoveTo { unit: i, x: 50, z: 400 }),
                 1 => r.world.push_order(Order::Hold { unit: i }),
                 _ => {}
             }
@@ -3896,10 +3910,10 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
     #[test]
     fn ties_resolve_by_index() {
         let mut w = World::new(2, 64, test_tuning());
-        let me = w.units.spawn(100, 100, 0, 0, 100);
+        let me = w.units.spawn(500, 500, 0, 0, 100);
         // Две цели на одинаковом расстоянии.
-        let a = w.units.spawn(110, 100, 1, 0, 100);
-        let b = w.units.spawn(90, 100, 1, 0, 100);
+        let a = w.units.spawn(550, 500, 1, 0, 100);
+        let b = w.units.spawn(450, 500, 1, 0, 100);
         assert!(a < b);
         w.units.refresh_live();
         w.tick();
@@ -3911,13 +3925,13 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
     /// Один юнит на плоскости, поле стороны — в одну сторону.
     /// Приказ будет отдан в другую, и разойтись они обязаны.
     fn lone_walker(t: Tuning) -> (World, u32) {
-        let vw = voxel::World::new(96, 32, 96, 4096, Box::new(Flat));
+        let vw = voxel::World::new(480, 160, 480, 4096, Box::new(Flat));
         let mut w = World::new(2, 8, t);
         w.attach_ground(ground::Ground::new(vw, &t));
-        let id = w.spawn_ground(16, 16, 0, 6, 300);
+        let id = w.spawn_ground(80, 80, 0, 30, 300);
         w.units.refresh_live();
         // Поле стороны ведёт на восток: без приказа юнит идёт туда.
-        w.fill_flow_towards(0, 80, 16);
+        w.fill_flow_towards(0, 400, 80);
         w.solve_flow();
         (w, id)
     }
@@ -3937,25 +3951,25 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         }
         let i = id as usize;
         assert!(
-            free.units.x[i] > 40,
+            free.units.x[i] > 200,
             "юнит без приказа не пошёл по полю: x={}",
             free.units.x[i]
         );
 
         // С приказом: юнит идёт на юг, к точке приказа.
         let (mut w, id) = lone_walker(t);
-        w.push_order(Order::MoveTo { unit: id, x: 16, z: 80 });
+        w.push_order(Order::MoveTo { unit: id, x: 80, z: 400 });
         for _ in 0..240 {
             w.tick();
         }
         let (x, z) = (w.units.x[i], w.units.z[i]);
-        let d2 = (x - 16) * (x - 16) + (z - 80) * (z - 80);
-        let arrive = t.order_arrive + 4;
+        let d2 = (x - 80) * (x - 80) + (z - 400) * (z - 400);
+        let arrive = t.order_arrive + 20;
         assert!(
             d2 <= arrive * arrive,
-            "юнит по приказу оказался в ({x}, {z}), а звали в (16, 80)"
+            "юнит по приказу оказался в ({x}, {z}), а звали в (80, 400)"
         );
-        assert!(x < 40, "юнит всё-таки ушёл по полю стороны: x={x}");
+        assert!(x < 200, "юнит всё-таки ушёл по полю стороны: x={x}");
         assert_eq!(w.orders_applied, 1);
         assert_eq!(w.orders_dropped, 0);
     }
@@ -3970,13 +3984,13 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let t = test_tuning();
         let (mut w, id) = lone_walker(t);
         let i = id as usize;
-        w.push_order(Order::MoveTo { unit: id, x: 16, z: 80 });
+        w.push_order(Order::MoveTo { unit: id, x: 80, z: 400 });
         for _ in 0..90 {
             w.tick();
         }
         let midway = w.units.z[i];
-        assert!(midway > 24, "юнит не тронулся по первому приказу: z={midway}");
-        w.push_order(Order::MoveTo { unit: id, x: 16, z: 8 });
+        assert!(midway > 120, "юнит не тронулся по первому приказу: z={midway}");
+        w.push_order(Order::MoveTo { unit: id, x: 80, z: 40 });
         for _ in 0..300 {
             w.tick();
         }
@@ -3986,7 +4000,7 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             "юнит не развернулся по второму приказу: z={z}, на развороте было {midway}"
         );
         assert!(
-            (z - 8).abs() <= t.order_arrive + 4,
+            (z - 40).abs() <= t.order_arrive + 20,
             "юнит развернулся, но до второй точки не дошёл: z={z}"
         );
         assert_eq!(w.orders_applied, 2);
@@ -4030,8 +4044,8 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             }
             h
         };
-        assert_eq!(run(16, 80), run(16, 80), "одинаковые приказы разошлись по хешу");
-        assert_ne!(run(16, 80), run(80, 16), "разные приказы дали один хеш");
+        assert_eq!(run(80, 400), run(80, 400), "одинаковые приказы разошлись по хешу");
+        assert_ne!(run(80, 400), run(400, 80), "разные приказы дали один хеш");
     }
 
     /// **Потолок откладывает остаток, а не теряет его.**
@@ -4132,22 +4146,28 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
     #[test]
     fn a_dig_order_actually_removes_rock() {
         let t = test_tuning();
-        let vw = voxel::World::new(64, 32, 64, 4096, Box::new(Flat));
+        let vw = voxel::World::new(320, 160, 320, 4096, Box::new(Flat));
         let mut w = World::new(2, 8, t);
         w.attach_ground(ground::Ground::new(vw, &t));
-        let id = w.spawn_ground(32, 32, 0, 6, 300);
+        // **Середина нав-клетки, а не её угол.** Шар копателя —
+        // метр радиусом, клетка — метр стороной, и шар, поставленный
+        // в угол клетки, до дальнего её угла не достаёт: диагональ
+        // в 1.41 раза длиннее. На сетке в полметра этого видно не было —
+        // там клетка была два воксела, и шар накрывал её целиком
+        // из любого места (ADR-227).
+        let id = w.spawn_ground(165, 165, 0, 30, 300);
         w.units.refresh_live();
         let at = (FLAT_GY - 1) as i32;
         assert!(
-            w.ground().expect("земля").world.solid(32, at as u32, 32),
+            w.ground().expect("земля").world.solid(165, at as u32, 165),
             "под юнитом не порода — копать нечего"
         );
-        w.push_order(Order::Dig { unit: id, x: 32, y: at, z: 32 });
+        w.push_order(Order::Dig { unit: id, x: 165, y: at, z: 165 });
         for _ in 0..30 {
             w.tick();
         }
         let g = w.ground().expect("земля");
-        assert!(!g.world.solid(32, at as u32, 32), "порода на месте: приказ не копал");
+        assert!(!g.world.solid(165, at as u32, 165), "порода на месте: приказ не копал");
         // Копатель уходит в собственную шахту: опора исчезла у него
         // под ногами, и падение по ADR-036 — тот же код, что у всех.
         assert!(
@@ -4157,7 +4177,7 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         );
         // И дно мира на месте: колонка без пола оставила бы юнита
         // висеть в воздухе.
-        assert!(g.world.solid(32, 0, 32), "снят нижний слой мира");
+        assert!(g.world.solid(165, 0, 165), "снят нижний слой мира");
         // Забой углубляется: копатель уходит вниз, а не грызёт воздух
         // на одном месте (ADR-159).
         assert!(
