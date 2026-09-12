@@ -18,7 +18,7 @@ pub mod weapons;
 pub mod vox;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
-pub use tuning::{load_tuning, Tuning, TuningError};
+pub use tuning::{load_tuning, Chassis, ChassisKind, Tuning, TuningError};
 
 pub type Mat = u16;
 
