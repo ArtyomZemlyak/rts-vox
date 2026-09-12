@@ -123,18 +123,18 @@ impl Default for Params {
             nz: 512,
             base_height: 140,
             relief: 40,
-            feature: 160,
+            feature: 800,
             detail: 2,
             soil: 4,
             lava_depth: 6,
             deep_at: 90,
             vein_threshold: 200,
-            terrace: 8,
+            terrace: 40,
             terrace_lo: 31_000,
             terrace_hi: 34_000,
-            bed: 3,
+            bed: 15,
             plains: 620,
-            plains_period: 320,
+            plains_period: 1600,
             plains_floor: 130,
         }
     }
@@ -221,7 +221,7 @@ fn value_noise3(seed: u64, x: u32, y: u32, z: u32, period: u32) -> u32 {
 /// четыре метра: плато крупнее боевого строя, и на сторону карты
 /// показа их укладывается три. Мельче — и уступы читаются рябью,
 /// крупнее — и на карту приходится одно плато.
-const TERRACE_PERIOD: u32 = 128;
+const TERRACE_PERIOD: u32 = 640;
 
 /// Высота, обрезанная по ступени: плато с обрывами вместо сплошного
 /// склона.
@@ -328,7 +328,7 @@ pub fn soil_depth(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
     let dz = (surface_height(p, seed, x, z + 1) as i64 - h).abs();
     // Шаг 40 вокселей — плешины по двадцать метров: крупнее машины,
     // мельче поля боя.
-    let patch = value_noise(seed ^ 0x50A1, x, z, 40) as u64;
+    let patch = value_noise(seed ^ 0x50A1, x, z, 200) as u64;
     // Ноль примерно на трети клеток, дальше растёт до `soil + 1`:
     // слой получается неровным, а не «есть либо нет».
     let base = ((patch * (p.soil as u64 + 3)) / 65536).saturating_sub(1) as u32;
@@ -434,13 +434,13 @@ struct Direct {
 
 impl Noise3 for Direct {
     fn cave(&mut self, y: u32) -> u32 {
-        value_noise3(self.seed ^ 0xCAFE, self.x, y, self.z, 20)
+        value_noise3(self.seed ^ 0xCAFE, self.x, y, self.z, 100)
     }
     fn iron(&mut self, y: u32) -> u32 {
-        value_noise3(self.seed ^ 0x1401, self.x, y, self.z, 14) * 255 / 65536
+        value_noise3(self.seed ^ 0x1401, self.x, y, self.z, 70) * 255 / 65536
     }
     fn copper(&mut self, y: u32) -> u32 {
-        value_noise3(self.seed ^ 0x2402, self.x, y, self.z, 11) * 255 / 65536
+        value_noise3(self.seed ^ 0x2402, self.x, y, self.z, 55) * 255 / 65536
     }
 }
 
@@ -454,9 +454,9 @@ struct Column {
 impl Column {
     fn new(seed: u64, x: u32, z: u32) -> Column {
         Column {
-            cave: Sampler::new(seed ^ 0xCAFE, x, z, 20),
-            iron: Sampler::new(seed ^ 0x1401, x, z, 14),
-            copper: Sampler::new(seed ^ 0x2402, x, z, 11),
+            cave: Sampler::new(seed ^ 0xCAFE, x, z, 100),
+            iron: Sampler::new(seed ^ 0x1401, x, z, 70),
+            copper: Sampler::new(seed ^ 0x2402, x, z, 55),
         }
     }
 }

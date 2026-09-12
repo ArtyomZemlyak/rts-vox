@@ -650,7 +650,13 @@ fn paint(
         quads,
         [0.0, 0.0, 0.0],
         chunk_at(i, grid.nx, grid.ny),
-        |x, y, z| w.material(x, y, z),
+        {
+            // Курсор помнит чанк между выборками: почти все воксели
+            // одной грани лежат в одном чанке, и деления на его
+            // сторону не нужны вовсе (ADR-227).
+            let mut cur = voxel::World::mat_cursor();
+            move |x, y, z| w.material_cached(&mut cur, x, y, z)
+        },
         painter,
         bufs,
     );

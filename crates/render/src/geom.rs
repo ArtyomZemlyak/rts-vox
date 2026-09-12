@@ -170,6 +170,15 @@ pub fn quads_to_mesh(quads: &[Quad], origin: [f32; 3], out: &mut MeshBuf) {
 pub struct Painter {
     mats: Vec<Mat>,
     used: Vec<bool>,
+    /// Счётчики прохода — **для замера, а не для картинки**.
+    ///
+    /// Две гипотезы о том, куда уходит время раскраски, оказались
+    /// мимо: ни деления в поиске чанка, ни потолок материализации
+    /// ничего не сдвинули. Гадать дальше дороже, чем посчитать.
+    pub quads: u64,
+    pub split: u64,
+    pub samples: u64,
+    pub emitted: u64,
 }
 
 /// Развернуть квады чанка, покрасив их материалом мира.
@@ -191,11 +200,11 @@ pub struct Painter {
 /// мира**: геометрия чанка локальная, а материал ищется в мире.
 /// Выход разложен по классам поверхности (`look::Class`): у них разная
 /// шероховатость, а её вершина нести не может.
-pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
+pub fn quads_to_mesh_painted<F: FnMut(u32, u32, u32) -> Mat>(
     quads: &[Quad],
     origin: [f32; 3],
     at: [u32; 3],
-    mat_at: F,
+    mut mat_at: F,
     p: &mut Painter,
     out: &mut [MeshBuf; look::CLASSES],
 ) {
@@ -240,6 +249,7 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
                     any = m;
                 }
                 p.mats.push(m);
+                p.samples += 1;
             }
         }
         // Совсем пустой квад — порода. Фуксия означает «мод принёс свой
@@ -258,15 +268,19 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
         // Цвет считается **один раз на квад**, а не на вершину: у всех
         // четырёх он один и тот же, а `colour_face` это три умножения.
         let col = |m: Mat| look::colour_face(m, axis, positive);
+        let mut emitted = 0u64;
         let mut emit = |a: usize, b: usize, w: usize, h: usize, m: Mat| {
+            emitted += 1;
             let buf = &mut out[look::class(m) as usize];
             push_quad(axis, positive, s, a, b, w, h, origin, Some(col(m)), buf);
         };
 
         if uniform {
             emit(qa, qb, w, h, first);
+            p.emitted += 1;
             continue;
         }
+        p.split += 1;
 
         // Неоднородный квад: то же жадное слияние, что у мешера, но
         // внутри одного квада и с материалом вместо бита.
@@ -303,6 +317,8 @@ pub fn quads_to_mesh_painted<F: Fn(u32, u32, u32) -> Mat>(
                 c += run;
             }
         }
+        drop(emit);
+        p.emitted += emitted;
     }
 }
 

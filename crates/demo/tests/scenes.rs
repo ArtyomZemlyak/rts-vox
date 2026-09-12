@@ -974,13 +974,13 @@ fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> 
 /// печатала, а повторяемость никто не требовал.
 #[test]
 fn d7_is_deterministic() {
-    let a = run_scale(42, 40, 400, 40, 96);
-    let b = run_scale(42, 40, 400, 40, 96);
+    let a = run_scale(42, 40, 400, 40, 480);
+    let b = run_scale(42, 40, 400, 40, 480);
     assert_eq!(a.hash, b.hash, "тот же сид дал другой хеш");
     assert_eq!(a.edits, b.edits);
     assert_eq!(a.dirty_mesh, b.dirty_mesh);
     assert_eq!(a.live, b.live);
-    let c = run_scale(43, 40, 400, 40, 96);
+    let c = run_scale(43, 40, 400, 40, 480);
     assert_ne!(a.hash, c.hash, "разный сид дал тот же прогон");
 }
 
@@ -991,10 +991,10 @@ fn d7_is_deterministic() {
 /// снятый со сцены, где молчит хоть одна подсистема, — не порог.
 #[test]
 fn d7_loads_every_subsystem_at_once() {
-    let r = run_scale(42, 60, 600, 60, 96);
+    let r = run_scale(42, 60, 600, 60, 480);
     println!(
-        "D-7 уменьшенная: правок {}, грязных чанков меша {}, живых {}, с целью {}",
-        r.edits, r.dirty_mesh, r.live, r.with_target
+        "D-7 уменьшенная: правок {}, грязных чанков меша {}, живых {}, с целью {}, выстрелов {}, попаданий {}, упёрлось в породу {}, отказов {}",
+        r.edits, r.dirty_mesh, r.live, r.with_target, r.shots, r.hits, 0, 0
     );
     assert!(r.edits > 1000, "копка почти ничего не сняла: {}", r.edits);
     assert!(r.dirty_mesh > 100, "ремеш почти не вызывался: {}", r.dirty_mesh);

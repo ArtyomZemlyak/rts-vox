@@ -1378,6 +1378,7 @@ impl World {
         let Some(g) = self.ground.as_ref() else { return };
         let nav = &g.nav;
         let (ex, ez) = g.extent();
+        let (nw, nh) = nav.dims();
         let dt = Fx::from_ratio(1, TICKS_PER_SECOND);
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
@@ -1394,7 +1395,14 @@ impl World {
                 let rz = sp.x.mul(hs).add(sp.z.mul(hc));
                 let px = (self.units.x[i] + rx.to_int_trunc()).clamp(0, ex - 1) as u32;
                 let pz = (self.units.z[i] + rz.to_int_trunc()).clamp(0, ez - 1) as u32;
-                let (cx, cz) = (px / NAV_CELL as u32, pz / NAV_CELL as u32);
+                // Размер нав-клетки берётся **у самого слоя**, а не
+                // из постоянной: он приходит из данных, и при другом
+                // ребре воксела постоянная промахивается мимо сетки
+                // в пять раз — выход за край на первом же тике.
+                let (cx, cz) = (
+                    (px * nw / ex.max(1) as u32).min(nw - 1),
+                    (pz * nh / ez.max(1) as u32).min(nh - 1),
+                );
                 // Уровень **ближайший к машине**, а не первый: юнит
                 // может стоять на крыше, и пол под ней — не пол ямы
                 // (ADR-136).
@@ -2448,7 +2456,7 @@ fn spawn_in_line(w: &mut World, r: &mut Rng, owner: u8) -> u32 {
     };
     let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
     let z = (midz + r.range(-depth, depth)).clamp(0, ez - 1);
-    let id = w.spawn_ground(x, z, owner, r.range(2, 6), 300);
+    let id = w.spawn_ground(x, z, owner, r.range(10, 30), 300);
     // **Строй стоит лицом к противнику, а не носом на восток.**
     // Курс — состояние (ADR-220), и оставить его нулевым значило бы,
     // что половина армии первым делом разворачивается на месте.

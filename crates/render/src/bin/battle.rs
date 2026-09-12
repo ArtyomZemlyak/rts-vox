@@ -99,6 +99,10 @@ struct Shot {
     /// скоростью показывают одно и то же состояние боя, а не разное.
     at_frame: u64,
     done: bool,
+    /// Кадр, на котором снимок был заказан. Запись у Bevy идёт
+    /// **асинхронно**, и выход сразу после заказа теряет файл: так
+    /// пропал снимок карты, которая строилась двенадцать минут.
+    at: u64,
     frames: u64,
     seen: u64,
     /// Времена кадров, миллисекунды. Копятся окнами по сто двадцать
@@ -203,6 +207,9 @@ const FLAT_GROUND: [f32; 3] = [0.47, 0.37, 0.24];
 // (`UnitBody::mm`), а масштаб выводится делением на мировое ребро
 // `voxel::unit::WORLD_MM`. Постоянная «ровно половина» тихо растянула
 // бы машину, у которой ребро другое (ADR-219).
+
+/// Сколько кадров подождать после заказа снимка, прежде чем выходить.
+const SHOT_GRACE: u64 = 30;
 
 #[derive(Component)]
 struct Chunk(usize);
@@ -622,6 +629,7 @@ fn main() {
             after,
             at_frame,
             done: false,
+            at: 0,
             frames,
             seen: 0,
             hist: Vec::new(),
@@ -1180,7 +1188,13 @@ fn paint(
         quads,
         [0.0, 0.0, 0.0],
         chunk_at(i, grid.nx, grid.ny),
-        |x, y, z| w.material(x, y, z),
+        {
+            // Курсор помнит чанк между выборками: почти все воксели
+            // одной грани лежат в одном чанке, и деления на его
+            // сторону не нужны вовсе (ADR-227).
+            let mut cur = voxel::World::mat_cursor();
+            move |x, y, z| w.material_cached(&mut cur, x, y, z)
+        },
         painter,
         bufs,
     );
@@ -1328,6 +1342,16 @@ fn step(
         }
         prof.quads.push(t_quads);
         prof.paint.push(t_paint);
+        if prof.paint.len() % 120 == 0 {
+            println!(
+                "раскраска: квадов {}, из них резаных {}, выборок {}, выпущено {}",
+                painter.quads, painter.split, painter.samples, painter.emitted
+            );
+            painter.quads = 0;
+            painter.split = 0;
+            painter.samples = 0;
+            painter.emitted = 0;
+        }
         prof.upload.push(t_up);
     }
 
@@ -1796,6 +1820,7 @@ fn snap(
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
         }
         shot.done = true;
+        shot.at = shot.seen;
     }
     // Первые шестьдесят кадров — прогрев: там ещё компилируются
     // конвейеры, и мерить их как установившийся режим нечестно
@@ -1822,7 +1847,11 @@ fn snap(
             );
         }
     }
-    if shot.frames != 0 && shot.seen >= shot.frames {
+    // Выход ждёт **и** срок кадров, **и** запись снимка: заказанный
+    // снимок сохраняется через несколько кадров, и выйти раньше
+    // значит потерять его молча.
+    let saved = shot.path.is_none() || (shot.done && shot.seen >= shot.at + SHOT_GRACE);
+    if shot.frames != 0 && shot.seen >= shot.frames && saved {
         exit.write(AppExit::Success);
     }
 }

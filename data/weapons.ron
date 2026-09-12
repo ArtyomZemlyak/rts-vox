@@ -17,7 +17,7 @@
 //            в ту же очередь, что копка (ADR-165).
 (
     weapons: [
-        ( id: 1, kind: Bolt,  speed: 40, damage: 30, reload: 30, blast_radius: 2, blast_damage: 10 ),
+        ( id: 1, kind: Bolt,  speed: 200, damage: 30, reload: 30, blast_radius: 10, blast_damage: 10 ),
 
         // Луч: вдвое чаще, вчетверо слабее, воронки нет. Против породы
         // бессилен — тем и отличается от болта.

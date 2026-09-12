@@ -116,6 +116,16 @@ pub struct World {
     pub materialized: u64,
 }
 
+/// Запомненный чанк для [`World::material_cached`].
+#[derive(Clone, Copy, Debug)]
+pub struct MatCursor {
+    ci: usize,
+    ox: u32,
+    oy: u32,
+    oz: u32,
+    valid: bool,
+}
+
 impl World {
     /// Создать мир и построить битовый объём из генератора.
     ///
@@ -196,6 +206,41 @@ impl World {
 
     /// Материал воксела. Тронутый чанк — из слоя изменений, нетронутый —
     /// из генератора.
+    /// Курсор материала: помнит последний чанк и его начало.
+    ///
+    /// **Деления — вот что стоит дорого.** `material` считает индекс
+    /// чанка тремя делениями на его сторону и местные координаты тремя
+    /// остатками, то есть шесть делений на каждый спрошенный воксель.
+    /// Раскраска рельефа спрашивает материал у каждого воксела каждой
+    /// грани чанка, и почти все эти воксели лежат в **одном и том же**
+    /// чанке. Курсор пересчитывает индекс только при выходе за его
+    /// границы (ADR-227).
+    pub fn mat_cursor() -> MatCursor {
+        MatCursor { ci: 0, ox: 0, oy: 0, oz: 0, valid: false }
+    }
+
+    /// Материал с курсором. Ответ **тот же до бита**, что у
+    /// [`World::material`]: это ускорение, а не приближение.
+    pub fn material_cached(&self, c: &mut MatCursor, x: u32, y: u32, z: u32) -> Mat {
+        if !self.inside(x, y, z) {
+            return AIR;
+        }
+        let cs = CS as u32;
+        if !c.valid || x < c.ox || x - c.ox >= cs || y < c.oy || y - c.oy >= cs || z < c.oz || z - c.oz >= cs
+        {
+            let (a, b, d) = (x / cs, y / cs, z / cs);
+            c.ci = ((d * self.cy + b) * self.cx + a) as usize;
+            c.ox = a * cs;
+            c.oy = b * cs;
+            c.oz = d * cs;
+            c.valid = true;
+        }
+        match &self.chunks[c.ci] {
+            Some(k) => k.get((x - c.ox) as usize, (y - c.oy) as usize, (z - c.oz) as usize),
+            None => self.gen.material(x, y, z),
+        }
+    }
+
     pub fn material(&self, x: u32, y: u32, z: u32) -> Mat {
         if !self.inside(x, y, z) {
             return AIR;
