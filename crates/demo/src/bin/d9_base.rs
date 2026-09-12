@@ -23,10 +23,9 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use demo::skirmish::{Setup, Skirmish};
+use demo::skirmish::{Outcome, Setup, Skirmish};
 use demo::RunHash;
 use sim_core::matter::{Sink, SINKS};
-use sim_core::Outcome;
 
 /// Бюджет тика, миллисекунд (30 Гц). Тот же, что у D-7.
 const BUDGET_MS: f64 = 10.0;
@@ -147,7 +146,10 @@ fn main() -> ExitCode {
     let ms = t1.elapsed().as_secs_f64() * 1e3;
     let per_tick = ms / ticks.max(1) as f64;
 
-    let out = m.world.outcome();
+    // Исход **матча**, а не мира: у мира правило одно — «не осталось
+    // живых», а у состязания есть ещё срок и счёт (ADR-205).
+    let out = m.outcome();
+    let wiped = m.world.outcome();
     let e = m.world.econ.as_ref().expect("учёт");
 
     println!("\n{:<34} {:>16}", "звено петли", "единиц");
@@ -190,11 +192,16 @@ fn main() -> ExitCode {
     println!("{:<34} {:>16}", "первая выпущенная машина", show(made_at));
 
     let what = match out {
-        Outcome::Won(o) => format!("сторона {o} победила: у противника не осталось живых"),
-        Outcome::Draw => "ничья: живых не осталось ни у кого".to_string(),
-        Outcome::Fighting => format!("срок вышел, бой идёт ({} тиков)", ticks),
+        Outcome::Wiped(o) => format!("сторона {o} выбила противника подчистую"),
+        Outcome::OnPoints(o) => format!("сторона {o} победила по счёту на тике {ticks}"),
+        Outcome::Draw if m.alive == [0, 0] => "обе стороны погибли".to_string(),
+        Outcome::Draw => "ничья: срок вышел при равном счёте".to_string(),
+        Outcome::Fighting => format!("срок не вышел, бой идёт ({ticks} тиков)"),
     };
     println!("\n{what}");
+    if wiped.over() {
+        println!("мир согласен: {wiped:?}");
+    }
     println!(
         "{:<34} {:>9.1} мс   {:<18} {:>8.3} мс/тик",
         "сборка мира", build, "тик", per_tick

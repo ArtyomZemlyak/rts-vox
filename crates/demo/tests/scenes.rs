@@ -1021,3 +1021,108 @@ fn d7_loads_every_subsystem_at_once() {
         "никто не погиб за вторую половину: бой идёт вхолостую"
     );
 }
+
+// ---------------------------------------------------------------------
+// D-9 «База» — петля экономики (ADR-230).
+// ---------------------------------------------------------------------
+
+/// Короткий матч с экономикой — тот же, что гоняет сцена, только
+/// поменьше.
+fn small_base(seed: u64, ticks: u64) -> demo::skirmish::Skirmish {
+    demo::skirmish::Skirmish::new(demo::skirmish::Setup {
+        seed,
+        side: 160,
+        per_side: 10,
+        diggers: 4,
+        patience: ticks,
+        ..demo::skirmish::Setup::default()
+    })
+}
+
+/// **Петля замыкается, и замыкается вся.**
+///
+/// Каждое звено обязано дать ненулевое число: выкопано, довезено,
+/// потрачено, выпущено. Звено, которое молча не работает, выглядит
+/// как «просто медленно» и ловится только порогом — ровно та болезнь,
+/// от которой написаны ADR-116 и ADR-187.
+#[test]
+fn the_economy_loop_closes_end_to_end() {
+    let mut m = small_base(42, 2500);
+    while !m.outcome().over() {
+        m.step();
+    }
+    let e = m.world.econ.as_ref().expect("учёт");
+    assert!(e.mined > 0, "копка не дала ничего");
+    assert!(e.delivered > 0, "на склады не довезено ничего");
+    assert!(e.spent > 0, "запас никуда не потрачен");
+    assert!(e.produced > 0, "заводы не выпустили ни одной машины");
+    assert!(
+        e.sunk(sim_core::matter::Sink::RefiningLoss) > 0,
+        "переработка не списала ничего — выход равен единице, стока нет"
+    );
+    assert!(
+        e.balanced(),
+        "материя не сошлась: расхождение {}",
+        e.ledger.imbalance()
+    );
+}
+
+/// **Материя сходится на каждом тике, а не в конце.**
+///
+/// Ошибка, компенсировавшая сама себя, иначе прошла бы незамеченной:
+/// то же правило, что в D-5.
+#[test]
+fn matter_balances_on_every_tick_of_a_match() {
+    let mut m = small_base(7, 900);
+    for t in 0..900u64 {
+        m.step();
+        let e = m.world.econ.as_ref().expect("учёт");
+        assert!(e.balanced(), "тик {t}: расхождение {}", e.ledger.imbalance());
+        if m.outcome().over() {
+            break;
+        }
+    }
+}
+
+/// **Экономика не меняет исход от прогона к прогону.**
+#[test]
+fn a_match_with_economy_is_deterministic() {
+    let (mut a, mut b) = (small_base(42, 900), small_base(42, 900));
+    let (mut ha, mut hb) = (0u64, 0u64);
+    for _ in 0..900 {
+        ha = a.step();
+        hb = b.step();
+    }
+    assert_eq!(ha, hb, "тот же сид дал другой хеш");
+    let (ea, eb) = (
+        a.world.econ.as_ref().expect("учёт"),
+        b.world.econ.as_ref().expect("учёт"),
+    );
+    assert_eq!(ea.mined, eb.mined);
+    assert_eq!(ea.delivered, eb.delivered);
+    assert_eq!(ea.produced, eb.produced);
+}
+
+/// **Запас входит в хеш тика.**
+///
+/// Не войди он — запас стороны можно было бы переписать целиком
+/// и увидеть тот же хеш до бита (ADR-116). Проверяется тем же
+/// способом, каким golden-тест сторожит сам себя: одно изменение
+/// обязано сдвинуть хеш.
+#[test]
+fn the_side_stock_is_in_the_tick_hash() {
+    let (mut a, mut b) = (small_base(42, 400), small_base(42, 400));
+    for _ in 0..200 {
+        a.step();
+        b.step();
+    }
+    {
+        let e = b.world.econ.as_mut().expect("учёт");
+        let stock = e.banks[0].stock;
+        e.ledger.reveal(e.ground, 1_000);
+        e.ledger.transfer(e.ground, stock, 1_000);
+    }
+    let ha = a.step();
+    let hb = b.step();
+    assert_ne!(ha, hb, "тысяча единиц в запасе не сдвинула хеш тика");
+}

@@ -3204,8 +3204,13 @@ impl World {
 
     /// Пересчёт исхода: у стороны не осталось живых — она проиграла.
     fn recount_outcome(&mut self) {
-        let owners = self.flow.len().max(1);
-        let mut live = vec![0usize; owners];
+        // Массив на стеке, а не `Vec`: фаза идёт каждый тик, в том
+        // числе на прогоне гейта, которому исход не нужен вовсе.
+        // Выделение на тик ради двух чисел — это цена, которую платят
+        // все, включая тех, кто за неё ничего не получает.
+        const MAX_OWNERS: usize = 8;
+        let owners = self.flow.len().clamp(1, MAX_OWNERS);
+        let mut live = [0usize; MAX_OWNERS];
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
             // **По `alive`, а не по списку живых.** Список пересобирает
@@ -3221,14 +3226,22 @@ impl World {
                 live[o] += 1;
             }
         }
-        let standing: Vec<u8> = (0..owners)
-            .filter(|&o| live[o] > 0)
-            .map(|o| o as u8)
-            .collect();
+        let mut standing = 0usize;
+        let mut who = 0u8;
+        for (o, n) in live.iter().enumerate().take(owners) {
+            if *n > 0 {
+                standing += 1;
+                // Первый по номеру, а не по порядку обхода: ничьи
+                // разрешаются линейным индексом (`CLAUDE.md`).
+                if standing == 1 {
+                    who = o as u8;
+                }
+            }
+        }
         let was = self.outcome;
-        self.outcome = match standing.len() {
+        self.outcome = match standing {
             0 => Outcome::Draw,
-            1 => Outcome::Won(standing[0]),
+            1 => Outcome::Won(who),
             _ => Outcome::Fighting,
         };
         if was == Outcome::Fighting && self.outcome.over() && self.decided_at.is_none() {
