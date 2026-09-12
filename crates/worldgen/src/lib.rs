@@ -25,6 +25,10 @@ pub mod mat {
     pub const SOIL: Mat = 1;
     pub const ROCK: Mat = 2;
     pub const DEEP_ROCK: Mat = 3;
+    /// Светлый пласт: горизонтальный слой в толще породы. Мягче её
+    /// и заметно светлее — на срезе обрыва порода читается слоистой,
+    /// а не сплошной серой стеной.
+    pub const ROCK_PALE: Mat = 4;
     pub const IRON_POOR: Mat = 16;
     pub const IRON: Mat = 17;
     pub const IRON_RICH: Mat = 18;
@@ -47,6 +51,12 @@ pub struct Params {
     pub base_height: u32,
     /// Размах рельефа.
     pub relief: u32,
+    /// Шаг крупной октавы рельефа в вокселях — размер холма или лощины.
+    /// Мелкая октава берёт четверть от него.
+    pub feature: u32,
+    /// Вес мелкой октавы в шестнадцатых. Он же — крутизна: мелкая
+    /// октава при том же весе даёт вчетверо больший уклон, чем крупная.
+    pub detail: u32,
     /// Толщина почвы под поверхностью.
     pub soil: u32,
     /// Сколько вокселей от дна занимает лава.
@@ -55,6 +65,15 @@ pub struct Params {
     pub deep_at: u32,
     /// Порог жилы: чем выше, тем реже руда. 0..=255.
     pub vein_threshold: u32,
+    /// Высота уступа в вокселях. Ноль или единица — террас нет.
+    pub terrace: u32,
+    /// Порог маски террас, ниже которого рельеф гладкий. 0..=65535.
+    pub terrace_lo: u32,
+    /// Порог маски террас, выше которого рельеф ступенчатый целиком.
+    /// Между `terrace_lo` и ним лежат пандусы. 0..=65535.
+    pub terrace_hi: u32,
+    /// Толщина пласта породы в вокселях. Ноль — слоистости нет.
+    pub bed: u32,
 }
 
 impl Params {
@@ -90,10 +109,16 @@ impl Default for Params {
             nz: 512,
             base_height: 140,
             relief: 40,
+            feature: 160,
+            detail: 2,
             soil: 4,
             lava_depth: 6,
             deep_at: 90,
             vein_threshold: 200,
+            terrace: 8,
+            terrace_lo: 31_000,
+            terrace_hi: 34_000,
+            bed: 3,
         }
     }
 }
@@ -175,13 +200,59 @@ fn value_noise3(seed: u64, x: u32, y: u32, z: u32, period: u32) -> u32 {
     ((y0 * (pu - fz) + y1 * fz) / pu) as u32
 }
 
+/// Период маски террас, вокселей. Сто двадцать восемь — шестьдесят
+/// четыре метра: плато крупнее боевого строя, и на сторону карты
+/// показа их укладывается три. Мельче — и уступы читаются рябью,
+/// крупнее — и на карту приходится одно плато.
+const TERRACE_PERIOD: u32 = 128;
+
+/// Высота, обрезанная по ступени: плато с обрывами вместо сплошного
+/// склона.
+///
+/// **Сплошной уклон — это карта без мест.** Рельеф из одного шума даёт
+/// холмы, у которых нет ни ровной площадки, чтобы построиться, ни
+/// стенки, за которой укрыться: каждая точка карты чуть-чуть наклонена
+/// и ничем не отличается от соседней. Обрезка высоты по ступени
+/// собирает весь набор высоты в уступы: полка между ними **ровная
+/// до воксела**, а уступ — стенка в `terrace` вокселей.
+///
+/// Ступенчато не всё. Маска с шагом `TERRACE_PERIOD` решает, где
+/// рельеф обрезан, а где остался гладким, и переход между ними —
+/// это и есть пандус: там ступень размазана и проходима. Без маски
+/// карта распалась бы на изолированные полки, потому что перепад
+/// в `terrace` вокселей юниту не по силам (`max_step` в данных —
+/// единица).
+///
+/// Округление **к ближайшей** ступени, а не вниз: обрезание вниз
+/// опускало бы ступенчатые места относительно гладких, и по контуру
+/// маски шёл бы уступ, которого в рельефе нет.
+///
+/// Всё целочисленно и без состояния: `material` и `column` считают
+/// одинаково, порядок обхода ни на что не влияет.
+fn terraced(p: &Params, seed: u64, x: u32, z: u32, h: i64) -> i64 {
+    let t = p.terrace as i64;
+    if t < 2 || p.terrace_hi <= p.terrace_lo {
+        return h;
+    }
+    let (lo, hi) = (p.terrace_lo as i64, p.terrace_hi as i64);
+    let m = value_noise(seed ^ 0x7E44, x, z, TERRACE_PERIOD) as i64;
+    let w = ((m - lo) * 65536 / (hi - lo)).clamp(0, 65536);
+    if w == 0 {
+        return h;
+    }
+    let hard = (h + t / 2).div_euclid(t) * t;
+    (h * (65536 - w) + hard * w) / 65536
+}
+
 /// Высота поверхности в колонке. Две октавы: крупный рельеф плюс мелкий.
+/// Поверх них — обрезка по ступени (`terraced`).
 pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
-    let big = value_noise(seed, x, z, 96) as u64;
-    let small = value_noise(seed ^ 0x51ED, x, z, 24) as u64;
-    let n = (big * 3 + small) / 4;
-    let h = p.base_height as u64 + (n * p.relief as u64 * 2) / 65536 - p.relief as u64;
-    h.clamp(8, p.ny as u64 - 8) as u32
+    let d = (p.detail as u64).min(16);
+    let big = value_noise(seed, x, z, p.feature.max(4)) as u64;
+    let small = value_noise(seed ^ 0x51ED, x, z, (p.feature / 4).max(1)) as u64;
+    let n = (big * (16 - d) + small * d) / 16;
+    let h = p.base_height as i64 + (n * p.relief as u64 * 2) as i64 / 65536 - p.relief as i64;
+    terraced(p, seed, x, z, h).clamp(8, p.ny as i64 - 8) as u32
 }
 
 /// Толщина почвы в этой колонке.
@@ -211,7 +282,7 @@ pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
 /// из шести возможных. Меньше — и гребни не оголяются; больше — и
 /// порода выходит уже на середине склона, а лощины остаются
 /// единственным местом с землёй.
-const HILL_STRIP: u32 = 6;
+const HILL_STRIP: u32 = 3;
 
 pub fn soil_depth(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
     let h = surface_height(p, seed, x, z) as i64;
@@ -372,7 +443,28 @@ impl Noise3 for Column {
 /// вместо 1 024. Обобщено по `Noise3`, потому что правило залегания
 /// обязано существовать в одном экземпляре: две копии разойдутся молча,
 /// а расхождение генератора — это расхождение всех сохранений.
-fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32, soil: u32) -> Mat {
+/// Светлый ли пласт на этой высоте.
+///
+/// **Пласты строго горизонтальны и считаются от дна мира**, а не от
+/// поверхности: осадочная толща лежит там, где легла, и обрыв режет её
+/// поперёк. Отмерь их от поверхности — и полосы поехали бы за рельефом,
+/// то есть перестали бы быть пластами и стали бы обводкой склона.
+///
+/// Один хеш на воксель и ни одного обращения к шуму. Номер пласта
+/// меняется раз в `bed` вокселей, а хеш берётся **от номера**, не от
+/// координаты, поэтому пласт целиком либо светлый, либо нет, и толщина
+/// его кратна `bed`: подряд выпавшие светлые номера дают слой потолще.
+#[inline]
+fn pale_bed(p: &Params, seed: u64, y: u32) -> bool {
+    if p.bed == 0 {
+        return false;
+    }
+    // Каждый третий: реже — полос не видно; чаще — светлой становится
+    // стенка, а тёмная порода в ней прослойкой.
+    (hash3(seed ^ 0xBED0, (y / p.bed) as i64, 0, 0) >> 32) % 3 == 0
+}
+
+fn at_depth(p: &Params, seed: u64, n: &mut impl Noise3, y: u32, h: u32, soil: u32) -> Mat {
     if y < p.lava_depth {
         return mat::LAVA;
     }
@@ -415,6 +507,8 @@ fn at_depth(p: &Params, n: &mut impl Noise3, y: u32, h: u32, soil: u32) -> Mat {
     }
     if depth_frac >= p.deep_at {
         mat::DEEP_ROCK
+    } else if pale_bed(p, seed, y) {
+        mat::ROCK_PALE
     } else {
         mat::ROCK
     }
@@ -426,7 +520,7 @@ pub fn material(p: &Params, seed: u64, x: u32, y: u32, z: u32) -> Mat {
     }
     let mut n = Direct { seed, x, z };
     let h = surface_height(p, seed, x, z);
-    at_depth(p, &mut n, y, h, soil_depth(p, seed, x, z))
+    at_depth(p, seed, &mut n, y, h, soil_depth(p, seed, x, z))
 }
 
 /// Отрезок колонки `[y0, y0 + out.len())` разом.
@@ -448,7 +542,7 @@ pub fn column(p: &Params, seed: u64, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
     let mut n = Column::new(seed, x, z);
     for (i, o) in out.iter_mut().enumerate() {
         let y = y0 + i as u32;
-        *o = if y >= p.ny { mat::AIR } else { at_depth(p, &mut n, y, h, soil) };
+        *o = if y >= p.ny { mat::AIR } else { at_depth(p, seed, &mut n, y, h, soil) };
     }
 }
 

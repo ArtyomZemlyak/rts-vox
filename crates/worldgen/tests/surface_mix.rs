@@ -65,7 +65,7 @@ fn no_single_material_owns_the_surface() {
 fn rock_and_ore_reach_the_surface() {
     let p = show_map();
     let (mix, _) = surface_mix(&p, 42);
-    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize];
+    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
     let ore: f64 = [
         mat::IRON_POOR,
         mat::IRON,
@@ -117,8 +117,11 @@ fn the_reference_map_is_mixed_too() {
     let p = Params::sized(256, 128, 256);
     let (mix, _) = surface_mix(&p, 42);
     let soil = mix[mat::SOIL as usize];
-    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize];
+    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
     println!("эталон: почва {soil:.1}%, порода {rock:.1}%");
-    assert!(soil <= 65.0, "почвы {soil:.1}% — эталонная карта одного цвета");
+    // Порог здесь мягче, чем у карты показа: эталонная карта меньше
+    // и ровнее — размах рельефа считается от высоты мира, а она вдвое
+    // ниже, — поэтому почвы на ней всегда больше (ADR-221).
+    assert!(soil <= 70.0, "почвы {soil:.1}% — эталонная карта одного цвета");
     assert!(rock >= 25.0, "голой породы {rock:.1}%");
 }

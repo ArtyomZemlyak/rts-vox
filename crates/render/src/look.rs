@@ -71,6 +71,7 @@ const PALETTE: &[MatLook] = &[
     MatLook { id: 1, srgb: [0.47, 0.37, 0.24], class: Class::Soil }, // почва
     MatLook { id: 2, srgb: [0.33, 0.32, 0.30], class: Class::Rock }, // порода
     MatLook { id: 3, srgb: [0.20, 0.21, 0.23], class: Class::Rock }, // глубинная
+    MatLook { id: 4, srgb: [0.50, 0.46, 0.39], class: Class::Rock }, // светлый пласт
     MatLook { id: 16, srgb: [0.52, 0.40, 0.31], class: Class::Ore }, // железо бедное
     MatLook { id: 17, srgb: [0.68, 0.47, 0.30], class: Class::Ore }, // железо
     MatLook { id: 18, srgb: [0.85, 0.55, 0.27], class: Class::Ore }, // железо богатое

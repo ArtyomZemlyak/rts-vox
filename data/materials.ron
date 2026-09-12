@@ -15,6 +15,7 @@
         ( id:  1, density:  120, strength:   30, harmful: false ),  // почва
         ( id:  2, density:  260, strength:  140, harmful: false ),  // порода
         ( id:  3, density:  310, strength:  220, harmful: false ),  // глубинная порода
+        ( id:  4, density:  250, strength:  115, harmful: false ),  // светлый пласт
 
         ( id: 16, density:  340, strength:  150, harmful: false ),  // железо бедное
         ( id: 17, density:  430, strength:  160, harmful: false ),  // железо
