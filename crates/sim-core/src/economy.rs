@@ -298,6 +298,7 @@ impl Economy {
             let mut w = 0u64;
             w = w.wrapping_mul(31).wrapping_add(self.ledger.held(wr.held));
             w = w.wrapping_mul(31).wrapping_add(wr.x as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(wr.y as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(wr.z as u32 as u64);
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }

@@ -1069,12 +1069,18 @@ fn dress(
         return;
     }
     for (e, m) in hulls.iter() {
-        if redress.contains(&m.0) {
+        // Двоичным поиском: список собран обходом по возрастанию,
+        // а сущностей у слота пять — линейный поиск по каждой из них
+        // дал бы квадрат на залпе, выбившем полсотни машин разом.
+        if redress.binary_search(&m.0).is_ok() {
             commands.entity(e).despawn();
         }
     }
     for (e, m) in turrets.iter() {
-        if redress.contains(&m.0) {
+        // Двоичным поиском: список собран обходом по возрастанию,
+        // а сущностей у слота пять — линейный поиск по каждой из них
+        // дал бы квадрат на залпе, выбившем полсотни машин разом.
+        if redress.binary_search(&m.0).is_ok() {
             commands.entity(e).despawn();
         }
     }

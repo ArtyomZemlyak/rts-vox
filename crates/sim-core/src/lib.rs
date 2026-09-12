@@ -3407,7 +3407,13 @@ impl World {
                 w = w.wrapping_mul(31).wrapping_add(self.units.kind[i] as u64);
                 w = w.wrapping_mul(31).wrapping_add(self.units.site[i]);
                 w = w.wrapping_mul(31).wrapping_add(self.units.job[i] as u64);
+                // Забой входит **целиком**, с высотой: пока копатель
+                // везёт груз, его `goal_y` — это высота склада,
+                // а глубина забоя живёт только здесь. Не войди она —
+                // копатель вернулся бы на другую глубину, и хеш
+                // этого не заметил бы.
                 w = w.wrapping_mul(31).wrapping_add(self.units.face[i].0 as u32 as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].1 as u32 as u64);
                 w = w.wrapping_mul(31).wrapping_add(self.units.face[i].2 as u32 as u64);
                 if let Some(e) = &self.econ {
                     if self.units.store[i] != economy::NO_CONTAINER {
