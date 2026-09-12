@@ -15,9 +15,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dust;
 pub mod edge;
 pub mod geom;
 pub mod look;
+pub mod occlusion;
 pub mod model;
 pub mod tex;
 

@@ -34,6 +34,7 @@ use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use render::edge::{EdgePlugin, Edges};
 use render::look;
 use render::model::{body_to_mesh, SegFrame, BEVEL};
+use render::occlusion::{Occlusion, OcclusionPlugin};
 
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019).
 const MM_PER_UNIT: f32 = 500.0;
@@ -166,6 +167,8 @@ fn main() {
         // одним и тем же в обоих окнах, иначе модели подгоняются
         // под картинку, которой в игре нет (ADR-214).
         .add_plugins(EdgePlugin)
+        // И то же щелевое затенение по вокселям (ADR-235).
+        .add_plugins(OcclusionPlugin)
         .insert_resource(ClearColor(Color::srgb(0.14, 0.16, 0.20)))
         .insert_resource(Shot { path: shot, after, done: false, left, seen: 0 })
         .insert_resource(Scene { bevel, mm, spin, pick })
@@ -341,6 +344,12 @@ fn setup(
             color: Color::srgb(v.srgb[0], v.srgb[1], v.srgb[2]),
             ..default()
         });
+    }
+    if sc.occlusion.on() {
+        let o = sc.occlusion;
+        commands
+            .entity(cam)
+            .insert(Occlusion { radius: o.radius, strength: o.strength, bias: o.bias, power: o.power });
     }
     if sc.edge.strength > 0.0 {
         let e = sc.edge;
