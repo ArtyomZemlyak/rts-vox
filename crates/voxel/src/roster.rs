@@ -28,10 +28,15 @@
 //! трёх списков: тело мимо одного из них пройдёт мимо всех проверок.
 
 use crate::shape::{
-    ball, beam, cyl, disc, fill, grille, hatch, limb, ring, running_gear, seat, shell,
+    ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, joint,
+    lamp, leg, lid, link, link_pivot, mark, mark_cyl, mount, plate_ring, plated_turret, rail,
+    ram, ring, rivets, rod, running_gear, seat, shell, skirt, slab, span,
 };
 use crate::topo::unit::UnitVol;
-use crate::unit::{Part, UnitBody, BODY_MM};
+use crate::unit::{
+    Attach, Part, UnitBody, BODY_MM, FINISH_GUN, FINISH_OPTIC, FINISH_PLATE, FINISH_RUBBER,
+    FINISH_STEEL, TURN,
+};
 
 /// Ребро воксела обычной боевой машины — десять сантиметров (ADR-219).
 const FINE: u16 = BODY_MM;
@@ -44,6 +49,51 @@ const FINE: u16 = BODY_MM;
 /// при 100 мм стоит 1.24 мс связности на попадание (ADR-208).
 const COARSE: u16 = 250;
 
+/// Стопа шагающей машины: подошва под голеностопом, пятка назад,
+/// два пальца вперёд с просветом между ними. Плоская плита не
+/// говорит, куда машина идёт; пальцы говорят. `c` — узел голеностопа
+/// по `x`/`z`, `half` — полуширина подошвы, `len` — вынос пальца.
+fn foot(b: &mut UnitBody, c: (i32, i32), half: i32, len: i32, h: usize, p: Part) {
+    let s = |v: i32| v.max(0) as usize;
+    fill(b, (s(c.0 - half), s(c.0 + half)), (0, h), (s(c.1 - half), s(c.1 + half)), p);
+    fill(b, (s(c.0 - half - len / 2), s(c.0 - half)), (0, h - 1), (s(c.1 - half / 2), s(c.1 + half / 2)), p);
+    let t = (half / 2).max(1);
+    fill(b, (s(c.0 + half), s(c.0 + half + len)), (0, h - 1), (s(c.1 - half), s(c.1 - half + t)), p);
+    fill(b, (s(c.0 + half), s(c.0 + half + len)), (0, h - 1), (s(c.1 + half - t), s(c.1 + half)), p);
+}
+
+/// Ствол под углом: маска в корне, звено-сегмент со скрытой костью
+/// и дульный тормоз потомком на его конце. `a` — узел у маски,
+/// `e` — дульный срез, радиусы в полувокселях. Тормоз толще ствола
+/// на два полувоксела и длиной в четверть своего диаметра.
+#[allow(clippy::too_many_arguments)]
+fn gun(b: &mut UnitBody, a: (i32, i32, i32), e: (i32, i32, i32), r2: i32, brake: bool, turret: bool) {
+    let bone = if r2 >= 4 { 0 } else { -1 };
+    let k = rod(b, a, e, r2, r2, bone, Part::Weapon, FINISH_GUN, turret);
+    if brake {
+        let len = span(a, e);
+        let r = link_pivot(r2, r2);
+        let br = r2 + 2;
+        let tube = link((br / 2).max(2) as u8, br, br, b.mm, Part::Weapon, FINISH_GUN);
+        let pivot = link_pivot(br, br);
+        b.push_segment(
+            Attach {
+                parent: k,
+                turret,
+                ..Attach::flat((len as i16 - (br / 4).max(1) as i16, r as i16, r as i16), (0, pivot, pivot))
+            },
+            tube,
+        );
+    }
+}
+
+/// Стойки антенн — стальной прут назад и вверх от узла `a`.
+fn antenna(b: &mut UnitBody, a: (i32, i32, i32), len: i32, turret: bool) {
+    let s = |v: i32| v.max(0) as usize;
+    fill_f(b, (s(a.0 - 1), s(a.0 + 1)), (s(a.1 - 1), s(a.1 + 1)), (s(a.2 - 1), s(a.2 + 1)), Part::Armour, FINISH_STEEL);
+    rod(b, a, (a.0 - len / 3, a.1 + len, a.2), 2, 2, -1, Part::Armour, FINISH_STEEL, turret);
+}
+
 // ---------------------------------------------------------------------
 // Лёгкий класс.
 // ---------------------------------------------------------------------
@@ -52,114 +102,121 @@ const COARSE: u16 = 250;
 ///
 /// Двуногий, вдвое выше танка и вчетверо уже: силуэт обязан читаться
 /// с той же высоты камеры, что и танк, иначе класс не различить.
-/// Ноги с бедренным шаром и коленом, руки-орудия на плечевых шарнирах.
+/// Ноги обратного излома — бедро и голень сегментами на стальных
+/// шарах, гидроцилиндры снаружи излома; грудь и забрало — наклонные
+/// листы; орудия — стволы под небольшим склонением с плечевых шаров.
 pub fn assault_bot() -> UnitBody {
     let mut b = UnitBody::new_scaled(40, 70, 40, 5, FINE);
+    let a = Part::Armour;
     for &hz in &[10i32, 30] {
-        let kz = if hz < 20 { hz - 3 } else { hz + 3 };
-        ball(&mut b, (20, 32, hz), 7, Part::Armour);
-        limb(&mut b, (20, 31, hz), (13, 18, kz), 7, 6, 6, Part::Armour);
-        limb(&mut b, (13, 18, kz), (22, 5, hz), 6, 5, 0, Part::Armour);
-        // Ступня плоская и длинная: двуногий держится носком,
-        // и это видно в профиль.
-        fill(
-            &mut b,
-            (14, 30),
-            (0, 3),
-            ((hz - 5) as usize, (hz + 6) as usize),
-            Part::Armour,
-        );
+        let s = if hz < 20 { -1 } else { 1 };
+        leg(&mut b, (20, 33, hz), (12, 19, hz + s * 2), (21, 6, hz), 10, 8, a);
+        foot(&mut b, (21, hz), 4, 5, 3, a);
+        ram(&mut b, (21, 31, hz + s * 5), (13, 18, hz + s * 5), 4, a);
+        // Щека над тазобедренным шаром: из-под неё нога и выходит.
+        skirt(&mut b, 14, 12, 36, if s < 0 { 12 } else { 28 }, s, TURN / 10, 7, 2, false, a, FINISH_PLATE);
     }
-    // Таз и торс со скошенной грудью: передняя стенка уходит назад
-    // кверху, и по ней машину видно в профиль.
-    for y in 30..36 {
-        disc(&mut b, (20, 20), 10, (y, y + 1), Part::Armour);
+    // Таз и торс; грудь — лист, откинутый назад кверху.
+    fill(&mut b, (14, 26), (30, 36), (12, 28), a);
+    fill(&mut b, (9, 30), (36, 52), (12, 28), a);
+    let chest = slab(17, 3, 16, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((30, 52, 20), (0, 3, 8), (4, -16, 0)), chest, 10, 0, a);
+    // Плечи шире торса, наплечники — наклонные листы на концах.
+    fill(&mut b, (11, 29), (46, 54), (5, 35), a);
+    skirt(&mut b, 12, 16, 54, 5, -1, TURN / 12, 7, 2, false, a, FINISH_PLATE);
+    skirt(&mut b, 12, 16, 54, 35, 1, TURN / 12, 7, 2, false, a, FINISH_PLATE);
+    // Руки-орудия: кожух с плечевого шара под небольшим склонением,
+    // ствол из кожуха, казённик в корне.
+    for &cz in &[8i32, 32] {
+        joint(&mut b, (20, 50, cz), 6, a, FINISH_STEEL);
+        rod(&mut b, (21, 50, cz), (35, 48, cz), 10, 8, 2, a, FINISH_PLATE, false);
+        fill(&mut b, (20, 30), (47, 51), ((cz - 2) as usize, (cz + 2) as usize), Part::Weapon);
+        gun(&mut b, (33, 48, cz), (40, 47, cz), 4, true, false);
     }
-    for y in 36..52 {
-        let f = 32 - (y - 36) / 3;
-        fill(&mut b, (9, f), (y, y + 1), (12, 28), Part::Armour);
-    }
-    // Плечи шире торса, руки-орудия на шарнирах: ствол круглый
-    // и висит с плеча, а не пересекает грудь бруском.
-    fill(&mut b, (11, 29), (46, 54), (5, 35), Part::Armour);
-    for &cz in &[8i32, 31] {
-        ball(&mut b, (20, 50, cz), 6, Part::Armour);
-        cyl(&mut b, 0, (18, 30), (44, cz), 5, 0, Part::Weapon);
-        cyl(&mut b, 0, (30, 40), (44, cz), 3, 0, Part::Weapon);
-    }
-    // Двигатель — ранец на спине: скруглённый горб, а не панель
-    // во всю спину, и два сопла назад.
-    for y in 38usize..52 {
-        let k = y.saturating_sub(48);
-        fill(&mut b, (5 + k, 11), (y, y + 1), (15 + k, 25 - k), Part::Engine);
-    }
-    cyl(&mut b, 0, (1, 8), (42, 16), 3, 0, Part::Engine);
-    cyl(&mut b, 0, (1, 8), (42, 24), 3, 0, Part::Engine);
+    // Двигатель — ранец на спине с двумя соплами назад.
+    fill(&mut b, (5, 11), (38, 50), (14, 26), Part::Engine);
+    exhaust(&mut b, (1, 6), (42, 16), 2, Part::Engine);
+    exhaust(&mut b, (1, 6), (42, 24), 2, Part::Engine);
     fill(&mut b, (16, 24), (40, 48), (16, 24), Part::Core);
-    // Шея-шар, голова и купол наблюдения на макушке.
-    ball(&mut b, (20, 54, 20), 6, Part::Armour);
-    for y in 56usize..66 {
-        let k = y.saturating_sub(64);
-        fill(&mut b, (14 + k, 28 - k), (y, y + 1), (14 + k, 26 - k), Part::Armour);
-    }
-    fill(&mut b, (26, 30), (58, 64), (15, 25), Part::Sensor);
-    disc(&mut b, (20, 20), 5, (66, 69), Part::Sensor);
+    // Шея-шар, голова с забралом-листом и приборы на макушке.
+    joint(&mut b, (20, 55, 20), 6, a, FINISH_STEEL);
+    fill(&mut b, (14, 26), (56, 66), (14, 26), a);
+    fill(&mut b, (24, 26), (58, 64), (15, 25), Part::Sensor);
+    let visor = slab(9, 2, 12, FINE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach::aimed((26, 66, 20), (0, 2, 6), (3, -8, 0)), visor, 6, 0, Part::Sensor);
+    disc(&mut b, (20, 20), 4, (66, 68), Part::Sensor);
+    antenna(&mut b, (15, 66, 16), 6, false);
+    antenna(&mut b, (15, 66, 24), 5, false);
     seat(b, "штурмовой бот")
 }
 
 /// **Осадный шагоход.** 9.0 × 12.0 × 8.0 м, том 90×120×80.
 ///
 /// Четыре опоры и одно тяжёлое орудие: машина прорыва, вдвое выше
-/// бота и вчетверо тяжелее танка. Нога из трёх звеньев с шарами
-/// в бедре и колене — при вокселе 250 мм она была парой брусков.
+/// бота и вчетверо тяжелее танка. Нос свисает над передними ногами
+/// наклонным листом, башня — короб в листах, орудие поднято.
 pub fn siege_walker() -> UnitBody {
     let mut b = UnitBody::new_scaled(90, 120, 80, 8, FINE);
+    let a = Part::Armour;
     for &hx in &[24i32, 66] {
+        let ox = if hx < 45 { -9 } else { 9 };
         for &hz in &[22i32, 58] {
-            let kx = if hx < 45 { hx - 9 } else { hx + 9 };
-            let kz = if hz < 40 { hz - 7 } else { hz + 7 };
-            ball(&mut b, (hx, 58, hz), 11, Part::Armour);
-            limb(&mut b, (hx, 56, hz), (kx, 34, kz), 10, 8, 9, Part::Armour);
-            limb(&mut b, (kx, 34, kz), (hx, 9, hz), 8, 6, 0, Part::Armour);
-            fill(
-                &mut b,
-                ((hx - 9) as usize, (hx + 10) as usize),
-                (0, 8),
-                ((hz - 9) as usize, (hz + 10) as usize),
-                Part::Armour,
-            );
+            let s = if hz < 40 { -1 } else { 1 };
+            let (kx, kz) = (hx + ox, hz + s * 7);
+            leg(&mut b, (hx, 58, hz), (kx, 34, kz), (hx, 9, hz), 20, 16, a);
+            foot(&mut b, (hx, hz), 9, 8, 8, a);
+            ram(&mut b, (hx + ox / 3, 55, hz + s * 9), (kx - ox / 3, 37, kz + s * 5), 5, a);
+            // Щека над тазом: лист, из-под которого выходит нога.
+            skirt(&mut b, hx - 12, 24, 58, if s < 0 { 14 } else { 66 }, s, TURN / 12, 10, 3, false, a, FINISH_PLATE);
         }
     }
-    // Корпус: нависающий вперёд короб. Нос шире кормы и свисает
-    // над передними ногами — так машина читается идущей, а не стоящей.
-    for y in 58usize..84 {
-        let k = y.saturating_sub(76) / 4;
-        let front = 74 + (y - 58) / 2;
-        fill(&mut b, (10 + k, front), (y, y + 1), (14 + k, 66 - k), Part::Armour);
-    }
-    fill(&mut b, (14, 36), (62, 80), (20, 60), Part::Engine);
-    grille(&mut b, (16, 34), 83, (18, 62), Part::Engine);
-    cyl(&mut b, 0, (2, 14), (72, 24), 5, 0, Part::Engine);
-    cyl(&mut b, 0, (2, 14), (72, 56), 5, 0, Part::Engine);
-    fill(&mut b, (42, 52), (64, 74), (35, 45), Part::Core);
-    // Башня: погон, скошенный короб, маска и ствол.
-    disc(&mut b, (46, 40), 22, (84, 88), Part::Armour);
-    for y in 86..104 {
-        let k = ((y - 86) as i32) * 2 / 18;
-        fill(
-            &mut b,
-            ((28 + k) as usize, (74 - k) as usize),
-            (y, y + 1),
-            ((24 + k) as usize, (56 - k) as usize),
-            Part::Armour,
+    // Корпус и нос, свисающий над передними ногами: лист от кромки
+    // крыши вниз и назад, короб под ним.
+    fill(&mut b, (10, 74), (58, 84), (14, 66), a);
+    fill(&mut b, (10, 87), (80, 84), (14, 66), a);
+    let prow = slab(29, 3, 52, FINE, a, FINISH_PLATE);
+    let prow = mount(&mut b, Attach::aimed((87, 84, 40), (0, 0, 26), (-13, -26, 0)), prow, 0, 14, a);
+    // Фары на носовом листе — потомки листа, смотрят по его нормали.
+    for z in [6i16, 44] {
+        b.push_segment(
+            Attach { parent: prow, ..Attach::aimed((6, 0, z), (0, 1, 1), (0, -5, 0)) },
+            lamp(FINE, a),
         );
     }
-    fill(&mut b, (66, 78), (90, 102), (28, 52), Part::Weapon);
-    cyl(&mut b, 0, (66, 80), (95, 40), 10, 0, Part::Weapon);
-    cyl(&mut b, 0, (78, 90), (95, 40), 5, 0, Part::Weapon);
-    // Мачта наблюдения на корме башни — выше всего остального.
-    fill(&mut b, (30, 40), (104, 112), (34, 46), Part::Armour);
-    disc(&mut b, (35, 40), 9, (112, 120), Part::Sensor);
+    // Двигатель под кормовой палубой, жалюзи прорезями, выхлоп назад.
+    fill(&mut b, (14, 36), (62, 82), (20, 60), Part::Engine);
+    let mut z = 20;
+    while z + 3 <= 60 {
+        carve(&mut b, (16, 34), (83, 84), (z, z + 3));
+        z += 6;
+    }
+    exhaust(&mut b, (2, 14), (72, 24), 4, Part::Engine);
+    exhaust(&mut b, (2, 14), (72, 56), 4, Part::Engine);
+    fill(&mut b, (42, 52), (64, 74), (35, 45), Part::Core);
+    // Поручни по кромкам крыши, трап на корме.
+    rail(&mut b, (12, 84, 15), 0, 60, a);
+    rail(&mut b, (12, 84, 64), 0, 60, a);
+    let mut y = 60;
+    while y < 82 {
+        fill_f(&mut b, (9, 10), (y, y + 1), (36, 44), a, FINISH_STEEL);
+        y += 3;
+    }
+    // Погон и башня: короб в наклонных листах, маска и поднятый ствол.
+    disc(&mut b, (46, 40), 22, (84, 86), a);
+    mark_cyl(&mut b, 1, (84, 86), (46, 40), 22, FINISH_STEEL);
+    plated_turret(&mut b, (28, 74), (86, 104), (24, 56), (10, 6), TURN / 16, 19, 3, false, a, FINISH_PLATE);
+    cyl_f(&mut b, 0, (72, 80), (95, 40), 8, 0, a, FINISH_GUN);
+    fill(&mut b, (60, 72), (90, 100), (34, 46), Part::Weapon);
+    gun(&mut b, (78, 95, 40), (90, 97, 40), 14, true, false);
+    hatch(&mut b, (40, 30), 4, 104, a);
+    lid(&mut b, (40, 50), 4, 104, a);
+    // Мачта наблюдения на корме башни, тарелка на ней и антенны.
+    fill(&mut b, (30, 40), (104, 112), (34, 46), a);
+    disc(&mut b, (35, 40), 7, (112, 117), Part::Sensor);
+    let dish = slab(13, 1, 13, FINE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach { pitch: TURN / 10, ..Attach::flat((35, 117, 40), (6, 0, 6)) }, dish, -1, -1, Part::Sensor);
+    antenna(&mut b, (30, 104, 26), 10, false);
+    antenna(&mut b, (30, 104, 54), 8, false);
     seat(b, "осадный шагоход")
 }
 
@@ -168,70 +225,69 @@ pub fn siege_walker() -> UnitBody {
 /// Не самая крупная и не самая сильная — самая дорогая. Силуэт
 /// человекоподобный нарочно: командира надо узнавать в толпе,
 /// и узнают его по несимметричным рукам — орудие с одной стороны,
-/// строительный манипулятор с другой.
+/// строительный манипулятор с клешнёй с другой.
 pub fn commander() -> UnitBody {
     let mut b = UnitBody::new_scaled(80, 110, 70, 7, FINE);
+    let a = Part::Armour;
     for &hz in &[24i32, 46] {
-        let kz = if hz < 35 { hz - 6 } else { hz + 6 };
-        ball(&mut b, (38, 50, hz), 9, Part::Armour);
-        limb(&mut b, (38, 48, hz), (28, 29, kz), 9, 7, 7, Part::Armour);
-        limb(&mut b, (28, 29, kz), (40, 8, hz), 7, 6, 0, Part::Armour);
-        fill(
-            &mut b,
-            (30, 52),
-            (0, 7),
-            ((hz - 8) as usize, (hz + 9) as usize),
-            Part::Armour,
-        );
+        let s = if hz < 35 { -1 } else { 1 };
+        leg(&mut b, (38, 50, hz), (28, 30, hz + s * 3), (39, 8, hz), 18, 14, a);
+        foot(&mut b, (39, hz), 8, 8, 7, a);
+        ram(&mut b, (39, 48, hz + s * 8), (30, 29, hz + s * 8), 5, a);
+        skirt(&mut b, 28, 20, 56, if s < 0 { 18 } else { 52 }, s, TURN / 10, 9, 3, false, a, FINISH_PLATE);
     }
-    // Таз и торс со скошенной грудью.
-    for y in 48..56 {
-        disc(&mut b, (38, 35), 16, (y, y + 1), Part::Armour);
-    }
-    for y in 56..84 {
-        let f = 62 - (y - 56) / 3;
-        fill(&mut b, (14, f), (y, y + 1), (18, 52), Part::Armour);
-    }
-    // Плечи и ранец-двигатель: горб на спине с двумя соплами назад,
-    // а не панель во всю спину.
-    fill(&mut b, (18, 58), (72, 84), (6, 64), Part::Armour);
-    for y in 58usize..80 {
-        let k = y.saturating_sub(74) / 2;
-        fill(&mut b, (8 + k, 18), (y, y + 1), (22 + k, 48 - k), Part::Engine);
-    }
-    cyl(&mut b, 0, (2, 10), (68, 26), 4, 0, Part::Engine);
-    cyl(&mut b, 0, (2, 10), (68, 44), 4, 0, Part::Engine);
+    // Таз, торс, грудной лист.
+    fill(&mut b, (30, 46), (48, 56), (18, 52), a);
+    fill(&mut b, (14, 58), (56, 84), (18, 52), a);
+    let chest = slab(27, 3, 34, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((58, 84, 35), (0, 3, 17), (6, -26, 0)), chest, 12, 0, a);
+    // Плечи с наплечниками, ранец-двигатель с соплами.
+    fill(&mut b, (18, 58), (72, 84), (6, 64), a);
+    skirt(&mut b, 20, 36, 84, 6, -1, TURN / 12, 10, 3, false, a, FINISH_PLATE);
+    skirt(&mut b, 20, 36, 84, 64, 1, TURN / 12, 10, 3, false, a, FINISH_PLATE);
+    fill(&mut b, (8, 18), (58, 80), (22, 48), Part::Engine);
+    exhaust(&mut b, (2, 10), (68, 26), 3, Part::Engine);
+    exhaust(&mut b, (2, 10), (68, 44), 3, Part::Engine);
     fill(&mut b, (32, 44), (60, 72), (29, 41), Part::Core);
-    // Правая рука — орудие на плечевом шаре: круглый кожух и ствол.
-    ball(&mut b, (38, 74, 13), 9, Part::Armour);
-    cyl(&mut b, 0, (32, 52), (68, 13), 8, 0, Part::Weapon);
-    cyl(&mut b, 0, (52, 74), (68, 13), 4, 0, Part::Weapon);
-    // Левая рука — строительная: предплечье с локтем и клешня
-    // из двух пальцев. Ни ствола, ни симметрии — командира узнают
-    // по тому, что руки у него разные.
-    ball(&mut b, (38, 74, 57), 9, Part::Armour);
-    limb(&mut b, (38, 72, 57), (48, 52, 58), 8, 6, 6, Part::Armour);
-    fill(&mut b, (48, 66), (48, 54), (50, 55), Part::Armour);
-    fill(&mut b, (48, 66), (48, 54), (61, 66), Part::Armour);
-    // Голова с забралом-сенсором.
-    ball(&mut b, (38, 84, 35), 8, Part::Armour);
-    fill(&mut b, (26, 50), (86, 100), (24, 46), Part::Armour);
-    fill(&mut b, (48, 52), (90, 98), (26, 44), Part::Sensor);
-    disc(&mut b, (36, 35), 7, (100, 106), Part::Sensor);
+    // Правая рука — орудие: кожух с плечевого шара, ствол, тормоз.
+    joint(&mut b, (38, 74, 13), 9, a, FINISH_STEEL);
+    rod(&mut b, (40, 72, 13), (56, 68, 13), 16, 12, 4, a, FINISH_PLATE, false);
+    fill(&mut b, (38, 52), (66, 72), (10, 16), Part::Weapon);
+    gun(&mut b, (54, 68, 13), (76, 66, 13), 6, true, false);
+    // Левая рука — манипулятор: плечо, локоть, предплечье и клешня
+    // из двух пальцев врозь. Ни ствола, ни симметрии.
+    joint(&mut b, (38, 74, 57), 9, a, FINISH_STEEL);
+    rod(&mut b, (38, 72, 57), (48, 54, 58), 16, 12, 4, a, FINISH_PLATE, false);
+    joint(&mut b, (48, 54, 58), 8, a, FINISH_STEEL);
+    rod(&mut b, (48, 54, 58), (64, 46, 58), 12, 10, 3, a, FINISH_PLATE, false);
+    joint(&mut b, (64, 46, 58), 6, a, FINISH_STEEL);
+    rod(&mut b, (64, 46, 58), (76, 44, 52), 6, 4, -1, a, FINISH_STEEL, false);
+    rod(&mut b, (64, 46, 58), (76, 44, 64), 6, 4, -1, a, FINISH_STEEL, false);
+    ram(&mut b, (44, 70, 62), (54, 56, 62), 4, a);
+    // Голова с забралом, купол приборов, антенны.
+    joint(&mut b, (38, 84, 35), 8, a, FINISH_STEEL);
+    fill(&mut b, (26, 48), (86, 100), (24, 46), a);
+    fill(&mut b, (46, 48), (90, 98), (26, 44), Part::Sensor);
+    let visor = slab(13, 2, 20, FINE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach::aimed((48, 100, 35), (0, 2, 10), (4, -12, 0)), visor, 8, 0, Part::Sensor);
+    disc(&mut b, (36, 35), 6, (100, 104), Part::Sensor);
+    antenna(&mut b, (28, 100, 28), 8, false);
+    antenna(&mut b, (28, 100, 42), 7, false);
     seat(b, "командная машина")
 }
 
 // ---------------------------------------------------------------------
-// Экспериментальный класс. Тот же воксель, просто машины больше.
+// Экспериментальный класс. Крупнее — и воксель крупнее.
 // ---------------------------------------------------------------------
 
 /// **Экспериментальный паук.** 40 × 22 × 40 м, том 160×88×160.
 ///
-/// Шесть с лишним танков в длину и те же четыре воксела на метр.
-/// Восемь ног из трёх звеньев: тазик наружу и вверх, бедро к колену,
-/// голень до земли.
+/// Шесть с лишним танков в длину. Восемь ног из трёх звеньев —
+/// все звенья сегментами на стальных шарах, кости внутри; купол —
+/// венец наклонных листов, а не ступени; лучевое орудие носом вперёд.
 pub fn spider() -> UnitBody {
     let mut b = UnitBody::new_scaled(160, 88, 160, 8, COARSE);
+    let a = Part::Armour;
     let c = (80usize, 80usize);
     let ci = (80i32, 80i32);
 
@@ -249,48 +305,68 @@ pub fn spider() -> UnitBody {
     ];
     for (dx, dz) in DIRS {
         let at = |r: i32, y: i32| (ci.0 + dx * r / 10, y, ci.1 + dz * r / 10);
-        beam(&mut b, at(30, 44), at(52, 58), 14, 11, Part::Armour);
-        beam(&mut b, at(52, 58), at(74, 66), 11, 8, Part::Armour);
-        beam(&mut b, at(74, 66), at(70, 5), 8, 6, Part::Armour);
+        let (hip, knee, ankle, toe) = (at(30, 44), at(52, 58), at(74, 66), at(70, 6));
+        joint(&mut b, hip, 8, a, FINISH_STEEL);
+        rod(&mut b, hip, knee, 14, 12, 4, a, FINISH_PLATE, false);
+        joint(&mut b, knee, 7, a, FINISH_STEEL);
+        rod(&mut b, knee, ankle, 12, 10, 3, a, FINISH_PLATE, false);
+        joint(&mut b, ankle, 6, a, FINISH_STEEL);
+        rod(&mut b, ankle, toe, 10, 6, 1, a, FINISH_PLATE, false);
+        // Гидроцилиндр поверх бедра — от таза к колену.
+        let up = |p: (i32, i32, i32), d: i32| (p.0, p.1 + d, p.2);
+        ram(&mut b, up(hip, 6), up(knee, 4), 4, a);
         let f = at(70, 2);
         fill(
             &mut b,
             ((f.0 - 6).max(0) as usize, (f.0 + 6).max(0) as usize),
             (0, 6),
             ((f.2 - 6).max(0) as usize, (f.2 + 6).max(0) as usize),
-            Part::Armour,
+            a,
+        );
+        fill(
+            &mut b,
+            ((f.0 - 4).max(0) as usize, (f.0 + 4).max(0) as usize),
+            (6, 9),
+            ((f.2 - 4).max(0) as usize, (f.2 + 4).max(0) as usize),
+            a,
         );
     }
 
-    // Корпус: купол ступенями, с выступающими поясами брони. Пояс
-    // шире своего яруса на три воксела — без поясов купол читается
-    // как гладкий конус, а не как бронированная машина.
-    const TIERS: [(i32, usize, usize); 6] = [
-        (40, 16, 26),
-        (48, 26, 42),
-        (46, 42, 54),
-        (38, 54, 64),
-        (28, 64, 72),
-        (16, 72, 78),
-    ];
-    for (r, y0, y1) in TIERS {
-        disc(&mut b, c, r, (y0, y1), Part::Armour);
-        ring(&mut b, c, r + 3, r - 2, (y0, y0 + 3), Part::Armour);
-    }
-    // Двигатель — внутри нижнего яруса.
+    // Корпус: два цилиндрических яруса с поясами брони, над ними —
+    // венец наклонных листов до верхней палубы и второй, круче,
+    // до купола. Пояс шире своего яруса — без поясов купол читается
+    // гладким конусом, а не бронированной машиной.
+    disc(&mut b, c, 40, (16, 26), a);
+    ring(&mut b, c, 43, 38, (16, 19), a);
+    disc(&mut b, c, 48, (26, 42), a);
+    ring(&mut b, c, 51, 46, (26, 29), a);
+    disc(&mut b, c, 30, (42, 64), a);
+    plate_ring(&mut b, ci, 64, 32, 42, 50, 8, 3, 14, false, a, FINISH_PLATE);
+    disc(&mut b, c, 18, (64, 76), a);
+    plate_ring(&mut b, ci, 76, 18, 64, 32, 8, 2, 10, false, a, FINISH_PLATE);
+    // Двигатель — внутри нижнего яруса, выхлопные стаканы на корме.
     disc(&mut b, c, 22, (20, 36), Part::Engine);
+    for &z in &[70usize, 90] {
+        cyl_f(&mut b, 1, (42, 50), (36, z as i32), 3, 0, Part::Engine, FINISH_GUN);
+        carve(&mut b, (36, 37), (49, 50), (z, z + 1));
+    }
+    // Люки на верхней палубе.
+    hatch(&mut b, (92, 68), 3, 76, a);
+    hatch(&mut b, (92, 92), 3, 76, a);
 
-    // Сенсорная надстройка на макушке: купол и четыре пилона.
-    disc(&mut b, c, 12, (78, 84), Part::Sensor);
+    // Сенсорная надстройка на макушке: купол, четыре пилона, антенны.
+    disc(&mut b, c, 12, (76, 84), Part::Sensor);
     for (dx, dz) in [(1i32, 1i32), (1, -1), (-1, 1), (-1, -1)] {
-        let (x, z) = (ci.0 + dx * 18, ci.1 + dz * 18);
-        beam(&mut b, (x, 70, z), (x, 82, z), 6, 4, Part::Sensor);
+        let (x, z) = (ci.0 + dx * 14, ci.1 + dz * 14);
+        fill(&mut b, ((x - 2) as usize, (x + 2) as usize), (74, 84), ((z - 2) as usize, (z + 2) as usize), Part::Sensor);
+        antenna(&mut b, (x, 84, z), 4, false);
     }
 
-    // Лучевое орудие носом вперёд: маска, ствол, дульное кольцо.
-    fill(&mut b, (100, 124), (42, 62), (66, 94), Part::Armour);
-    beam(&mut b, (118, 52, 80), (150, 52, 80), 18, 12, Part::Weapon);
-    ring(&mut b, (150, 80), 11, 5, (46, 58), Part::Weapon);
+    // Лучевое орудие носом вперёд: кожух, ствол чуть склонён,
+    // дульное кольцо потомком, казённик в корне.
+    fill(&mut b, (100, 124), (42, 62), (66, 94), a);
+    fill(&mut b, (104, 122), (46, 58), (70, 90), Part::Weapon);
+    gun(&mut b, (120, 52, 80), (152, 50, 80), 18, true, false);
 
     fill(&mut b, (76, 84), (40, 48), (76, 84), Part::Core);
     seat(b, "экспериментальный паук")
@@ -300,57 +376,87 @@ pub fn spider() -> UnitBody {
 ///
 /// Девять танков в длину. Три башни на надстройке: у машины этого
 /// класса одно орудие смотрелось бы как у танка, а разница классов
-/// обязана читаться силуэтом.
+/// обязана читаться силуэтом. Нос и корма — наклонные листы, борта
+/// надстройки — скосы, стволы подняты.
 pub fn fortress() -> UnitBody {
     let mut b = UnitBody::new_scaled(224, 64, 104, 8, COARSE);
+    let a = Part::Armour;
 
-    // Гусеничные ленты с траками: без выступов лента читается
-    // как брус, и машина выглядит стоящей на ящиках.
-    for &(z0, z1) in &[(0usize, 22usize), (82, 104)] {
-        fill(&mut b, (10, 214), (0, 16), (z0, z1), Part::Armour);
-        let mut x = 12;
-        while x < 212 {
-            fill(&mut b, (x, x + 4), (0, 18), (z0, z1), Part::Armour);
-            x += 8;
-        }
+    // Ходовая: замкнутые ленты четыре метра высотой.
+    running_gear(&mut b, (10, 214), 16, (0, 22), a);
+    running_gear(&mut b, (10, 214), 16, (82, 104), a);
+
+    // Корпус между лентами, палуба во всю ширину, нос и корма — листы.
+    fill(&mut b, (8, 216), (2, 18), (22, 82), a);
+    fill(&mut b, (8, 216), (17, 36), (14, 90), a);
+    let bow = slab(22, 3, 76, COARSE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((216, 36, 52), (0, 3, 38), (8, -20, 0)), bow, 10, 0, a);
+    let stern = slab(22, 3, 68, COARSE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((8, 36, 52), (0, 3, 34), (-8, -20, 0)), stern, 10, 0, a);
+    // Боковые спонсоны и ящики на палубе.
+    fill(&mut b, (76, 148), (22, 34), (6, 16), a);
+    fill(&mut b, (76, 148), (22, 34), (88, 98), a);
+    for &x in &[30usize, 194] {
+        crate_box(&mut b, (x, x + 10), (36, 41), (16, 22), a);
+        crate_box(&mut b, (x, x + 10), (36, 41), (82, 88), a);
     }
 
-    // Корпус со ступенчатым скосом по носу и корме.
-    fill(&mut b, (8, 216), (16, 36), (14, 90), Part::Armour);
-    for i in 0..7usize {
-        fill(&mut b, (216 + i, 224), (16 + i * 3, 36), (14, 90), Part::Armour);
-        fill(&mut b, (0, 8 - i), (16 + i * 3, 36), (20, 84), Part::Armour);
+    // Надстройка со скошенными бортами, моторный отсек с жалюзи
+    // и выхлопными трубами вверх.
+    fill(&mut b, (40, 188), (36, 48), (26, 78), a);
+    skirt(&mut b, 40, 148, 48, 78, 1, TURN / 14, 13, 2, false, a, FINISH_PLATE);
+    skirt(&mut b, 40, 148, 48, 26, -1, TURN / 14, 13, 2, false, a, FINISH_PLATE);
+    fill(&mut b, (150, 186), (36, 47), (30, 74), Part::Engine);
+    let mut z = 32;
+    while z < 72 {
+        carve(&mut b, (152, 184), (47, 48), (z, z + 3));
+        z += 6;
     }
-    // Боковые спонсоны.
-    fill(&mut b, (76, 148), (22, 34), (6, 16), Part::Armour);
-    fill(&mut b, (76, 148), (22, 34), (88, 98), Part::Armour);
-
-    // Надстройка и моторный отсек с решётками.
-    fill(&mut b, (40, 188), (36, 48), (24, 80), Part::Armour);
-    fill(&mut b, (150, 186), (36, 46), (28, 76), Part::Engine);
-    let mut z = 30;
-    while z < 74 {
-        fill(&mut b, (152, 184), (46, 48), (z, z + 4), Part::Engine);
-        z += 8;
+    for &z in &[34i32, 70] {
+        cyl_f(&mut b, 1, (48, 58), (170, z), 2, 0, Part::Engine, FINISH_GUN);
+        carve(&mut b, (170, 171), (57, 58), (z as usize, z as usize + 1));
     }
+    // Поручни по кромкам надстройки и палубы.
+    rail(&mut b, (44, 48, 28), 0, 100, a);
+    rail(&mut b, (44, 48, 75), 0, 100, a);
+    rail(&mut b, (12, 36, 15), 0, 26, a);
+    rail(&mut b, (12, 36, 88), 0, 26, a);
 
-    // Три башни: круглое основание, маска, ствол.
+    // Три башни: погон, короб в листах, маска, поднятый ствол.
     for x0 in [58i32, 106, 154] {
         let cx = x0 + 14;
-        disc(&mut b, (cx as usize, 52), 16, (48, 62), Part::Armour);
-        fill(
+        disc(&mut b, (cx as usize, 52), 16, (48, 50), a);
+        mark_cyl(&mut b, 1, (48, 50), (cx, 52), 16, FINISH_STEEL);
+        plated_turret(
             &mut b,
-            ((cx + 10) as usize, (cx + 22) as usize),
-            (51, 59),
-            (44, 60),
-            Part::Weapon,
+            ((cx - 12) as usize, (cx + 12) as usize),
+            (50, 62),
+            (40, 64),
+            (8, 5),
+            TURN / 16,
+            13,
+            2,
+            false,
+            a,
+            FINISH_PLATE,
         );
-        beam(&mut b, (cx + 20, 55, 52), (cx + 42, 55, 52), 8, 6, Part::Weapon);
+        cyl_f(&mut b, 0, ((cx + 10) as usize, (cx + 16) as usize), (56, 52), 5, 0, a, FINISH_GUN);
+        fill(&mut b, ((cx + 2) as usize, (cx + 12) as usize), (52, 60), (47, 57), Part::Weapon);
+        gun(&mut b, (cx + 14, 56, 52), (cx + 42, 59, 52), 10, true, false);
+        hatch(&mut b, ((cx - 4) as usize, 46), 2, 62, a);
     }
 
-    // Мачта и антенна на носу.
-    fill(&mut b, (16, 28), (36, 52), (44, 60), Part::Armour);
-    disc(&mut b, (22, 52), 10, (52, 58), Part::Sensor);
+    // Мачта на носу: ферма из четырёх стоек, площадка, тарелка.
+    fill(&mut b, (16, 28), (36, 40), (44, 60), a);
+    for (x, z) in [(17i32, 45i32), (17, 59), (27, 45), (27, 59)] {
+        rod(&mut b, (x, 40, z), (22, 54, 52), 3, 3, -1, a, FINISH_STEEL, false);
+    }
+    fill(&mut b, (18, 26), (54, 57), (48, 56), a);
+    disc(&mut b, (22, 52), 5, (57, 60), Part::Sensor);
+    let dish = slab(11, 1, 11, COARSE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach { pitch: TURN / 8, ..Attach::flat((22, 60, 52), (5, 0, 5)) }, dish, -1, -1, Part::Sensor);
+    antenna(&mut b, (44, 48, 30), 12, false);
+    antenna(&mut b, (44, 48, 74), 12, false);
 
     fill(&mut b, (104, 112), (20, 28), (48, 56), Part::Core);
     seat(b, "мобильная крепость")
@@ -363,79 +469,98 @@ pub fn fortress() -> UnitBody {
 /// **Гусеничный разведчик.** 5.0 × 2.0 × 3.0 м, том 50×20×30.
 ///
 /// Самая мелкая машина набора и единственная ниже танка. Пушка стоит
-/// на открытой тумбе: башни на такой машине нет, и это видно.
+/// на открытой тумбе: башни на такой машине нет, и это видно. Лоб —
+/// крутой лист между лентами, ствол поднят.
 pub fn scout_tracked() -> UnitBody {
     let mut b = UnitBody::new_scaled(50, 20, 30, 3, FINE);
-    running_gear(&mut b, (2, 48), 8, (1, 7), Part::Armour);
-    running_gear(&mut b, (2, 48), 8, (23, 29), Part::Armour);
-    fill(&mut b, (2, 48), (8, 10), (0, 30), Part::Armour);
-    // Корпус: ниже полок стоит между лентами, выше расходится на них.
-    // Лоб отступает на воксель со слоем — это скос, а не плита.
-    for y in 3..13 {
-        let front = 48 - (y - 3);
-        let (z0, z1) = if y < 10 { (7, 23) } else { (2, 28) };
-        fill(&mut b, (3, front), (y, y + 1), (z0, z1), Part::Armour);
+    let a = Part::Armour;
+    running_gear(&mut b, (2, 48), 10, (1, 7), a);
+    running_gear(&mut b, (2, 48), 10, (23, 29), a);
+    // Корпус между лентами, полки над ними, лоб — лист.
+    fill(&mut b, (4, 44), (2, 14), (7, 23), a);
+    fill(&mut b, (2, 48), (11, 13), (0, 30), a);
+    let glacis = slab(13, 2, 16, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((44, 14, 15), (0, 2, 8), (5, -12, 0)), glacis, 8, 0, a);
+    // Ящики и фары на полках, выхлоп назад, антенна на корме.
+    crate_box(&mut b, (6, 14), (13, 16), (1, 6), a);
+    crate_box(&mut b, (30, 38), (13, 16), (24, 29), a);
+    headlight(&mut b, (44, 13, 1), 4, a);
+    headlight(&mut b, (44, 13, 25), 4, a);
+    fill(&mut b, (5, 16), (4, 12), (9, 21), Part::Engine);
+    let mut z = 9;
+    while z + 2 <= 21 {
+        carve(&mut b, (6, 15), (13, 14), (z, z + 2));
+        z += 4;
     }
-    fill(&mut b, (4, 16), (5, 11), (9, 21), Part::Engine);
-    grille(&mut b, (5, 15), 12, (8, 22), Part::Engine);
-    cyl(&mut b, 0, (0, 8), (11, 4), 2, 0, Part::Engine);
-    fill(&mut b, (20, 26), (5, 11), (12, 18), Part::Core);
-    // Открытая тумба: погон, качающаяся часть, ствол. Башни нет,
-    // и по круглому основанию без крыши это видно сверху.
-    disc(&mut b, (24, 15), 6, (13, 15), Part::Armour);
-    disc(&mut b, (24, 15), 4, (15, 17), Part::Armour);
-    fill(&mut b, (24, 30), (15, 19), (12, 18), Part::Weapon);
-    cyl(&mut b, 0, (28, 44), (17, 15), 2, 0, Part::Weapon);
-    fill(&mut b, (16, 22), (15, 18), (11, 15), Part::Sensor);
+    exhaust(&mut b, (0, 4), (11, 4), 1, Part::Engine);
+    antenna(&mut b, (5, 14, 25), 5, false);
+    fill(&mut b, (20, 26), (4, 10), (12, 18), Part::Core);
+    // Открытая тумба: стальной погон, качающаяся часть, поднятый
+    // ствол, прибор наблюдения сбоку.
+    ring(&mut b, (24, 15), 7, 5, (14, 15), a);
+    mark_cyl(&mut b, 1, (14, 15), (24, 15), 7, FINISH_STEEL);
+    disc(&mut b, (24, 15), 4, (14, 17), a);
+    fill(&mut b, (22, 28), (16, 19), (12, 18), Part::Weapon);
+    gun(&mut b, (28, 18, 15), (44, 20, 15), 3, false, true);
+    fill_f(&mut b, (18, 22), (16, 19), (11, 15), Part::Sensor, FINISH_OPTIC);
     let mut b = seat(b, "гусеничный разведчик");
-    b.turret_y = 13;
+    b.turret_y = 14;
     b
 }
 
 /// **Гусеничная САУ.** 10.0 × 4.0 × 4.0 м, том 100×40×40.
 ///
 /// Осадная машина гусеничной стороны: рубка вместо башни, ствол
-/// длиннее корпуса на треть, сошники сзади. Ни один из трёх признаков
-/// не встречается у шагающей стороны — по ним класс и узнают.
+/// поднят и длиннее корпуса на треть, сошники сзади. Ни один из трёх
+/// признаков не встречается у шагающей стороны — по ним класс и узнают.
 pub fn spg_tracked() -> UnitBody {
     let mut b = UnitBody::new_scaled(100, 40, 40, 5, FINE);
-    running_gear(&mut b, (4, 96), 14, (2, 10), Part::Armour);
-    running_gear(&mut b, (4, 96), 14, (30, 38), Part::Armour);
-    fill(&mut b, (4, 96), (14, 17), (0, 40), Part::Armour);
-    // Сошники: без них машина этого класса читается как длинный танк.
-    fill(&mut b, (0, 7), (0, 15), (8, 32), Part::Armour);
-    // Корпус со скошенным лбом.
-    for y in 6..22 {
-        let front = 96 - (y - 6);
-        let (z0, z1) = if y < 17 { (10, 30) } else { (3, 37) };
-        fill(&mut b, (7, front), (y, y + 1), (z0, z1), Part::Armour);
+    let a = Part::Armour;
+    running_gear(&mut b, (4, 96), 14, (2, 10), a);
+    running_gear(&mut b, (4, 96), 14, (30, 38), a);
+    // Корпус между лентами, полки, верхний корпус, лобовые листы.
+    fill(&mut b, (7, 92), (2, 15), (10, 30), a);
+    fill(&mut b, (4, 96), (15, 17), (0, 40), a);
+    fill(&mut b, (7, 80), (17, 22), (3, 37), a);
+    let glacis = slab(8, 3, 34, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((80, 22, 20), (0, 3, 17), (6, -5, 0)), glacis, 10, 0, a);
+    let nose = slab(14, 2, 20, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((92, 2, 20), (0, 0, 10), (4, 13, 0)), nose, 0, 10, a);
+    // Сошники: два листа с кормы, поднятые на сорок пять градусов,
+    // на стальных петлях. Без них машина этого класса — длинный танк.
+    for &z in &[10i16, 24] {
+        fill_f(&mut b, (5, 8), (4, 8), (z as usize, z as usize + 6), a, FINISH_STEEL);
+        let spade = slab(9, 2, 6, FINE, a, FINISH_PLATE);
+        mount(&mut b, Attach::aimed((5, 6, z + 3), (0, 0, 3), (-6, 6, 0)), spade, -1, -1, a);
     }
     fill(&mut b, (9, 24), (8, 20), (12, 28), Part::Engine);
-    grille(&mut b, (10, 24), 21, (10, 30), Part::Engine);
-    cyl(&mut b, 0, (0, 14), (19, 6), 3, 0, Part::Engine);
-    cyl(&mut b, 0, (0, 14), (19, 33), 3, 0, Part::Engine);
-    fill(&mut b, (40, 48), (9, 17), (16, 24), Part::Core);
-    // Рубка неподвижная, со скосом лобового листа и бортов.
-    for y in 22..34 {
-        // Скос рубки — два уступа на двенадцать слоёв: четыре
-        // читаются зиккуратом, а не наклонной бронёй.
-        let k = ((y - 22) / 6) as i32;
-        fill(
-            &mut b,
-            ((26 + k) as usize, (72 - k) as usize),
-            (y, y + 1),
-            ((8 + k) as usize, (32 - k) as usize),
-            Part::Armour,
-        );
+    let mut z = 8;
+    while z + 3 <= 32 {
+        carve(&mut b, (10, 24), (21, 22), (z, z + 3));
+        z += 6;
     }
-    // Орудие в лобовом листе рубки: маска, ствол, дульный тормоз.
-    fill(&mut b, (66, 74), (24, 33), (13, 27), Part::Weapon);
-    cyl(&mut b, 0, (66, 76), (28, 20), 6, 0, Part::Weapon);
-    cyl(&mut b, 0, (74, 94), (28, 20), 3, 0, Part::Weapon);
-    cyl(&mut b, 0, (92, 100), (28, 20), 4, 1, Part::Weapon);
-    // Люк заряжающего и командирский прибор на крыше рубки.
-    hatch(&mut b, (40, 24), 4, 34, Part::Armour);
-    fill(&mut b, (30, 40), (34, 38), (12, 20), Part::Sensor);
+    exhaust(&mut b, (2, 8), (19, 6), 2, Part::Engine);
+    exhaust(&mut b, (2, 8), (19, 33), 2, Part::Engine);
+    fill(&mut b, (40, 48), (9, 17), (16, 24), Part::Core);
+    // Рубка в наклонных листах: скулы и борта, лоб под маску.
+    plated_turret(&mut b, (26, 72), (22, 34), (8, 32), (6, 5), TURN / 18, 13, 2, false, a, FINISH_PLATE);
+    cyl_f(&mut b, 0, (70, 78), (28, 20), 5, 0, a, FINISH_GUN);
+    fill(&mut b, (56, 70), (24, 32), (15, 25), Part::Weapon);
+    gun(&mut b, (78, 28, 20), (100, 32, 20), 10, true, false);
+    // Крыша рубки: люки, прибор командира, антенны; ящики на полках,
+    // фары, поручни по бортам рубки.
+    hatch(&mut b, (40, 14), 3, 34, a);
+    hatch(&mut b, (52, 26), 3, 34, a);
+    fill_f(&mut b, (34, 40), (34, 37), (22, 28), Part::Sensor, FINISH_OPTIC);
+    antenna(&mut b, (30, 34, 12), 6, false);
+    antenna(&mut b, (30, 34, 28), 5, false);
+    crate_box(&mut b, (30, 44), (17, 21), (0, 3), a);
+    crate_box(&mut b, (48, 60), (17, 21), (37, 40), a);
+    cyl_f(&mut b, 0, (30, 46), (18, 38), 1, 0, a, FINISH_STEEL);
+    headlight(&mut b, (82, 17, 0), 3, a);
+    headlight(&mut b, (82, 17, 37), 3, a);
+    rail(&mut b, (30, 22, 2), 0, 20, a);
+    rail(&mut b, (30, 22, 37), 0, 20, a);
     seat(b, "гусеничная САУ")
 }
 
@@ -446,24 +571,32 @@ pub fn spg_tracked() -> UnitBody {
 /// пара силуэтов в наборе, и видна она сверху.
 pub fn commander_tracked() -> UnitBody {
     let mut b = UnitBody::new_scaled(95, 45, 50, 5, FINE);
-    running_gear(&mut b, (4, 91), 14, (3, 12), Part::Armour);
-    running_gear(&mut b, (4, 91), 14, (38, 47), Part::Armour);
-    fill(&mut b, (4, 91), (14, 17), (0, 50), Part::Armour);
-    for y in 6..22 {
-        let front = 91 - (y - 6);
-        let (z0, z1) = if y < 17 { (12, 38) } else { (3, 47) };
-        fill(&mut b, (6, front), (y, y + 1), (z0, z1), Part::Armour);
-    }
+    let a = Part::Armour;
+    running_gear(&mut b, (4, 91), 14, (3, 12), a);
+    running_gear(&mut b, (4, 91), 14, (38, 47), a);
+    fill(&mut b, (6, 86), (2, 15), (12, 38), a);
+    fill(&mut b, (4, 91), (15, 17), (0, 50), a);
+    fill(&mut b, (6, 76), (17, 22), (3, 47), a);
+    let glacis = slab(8, 3, 44, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((76, 22, 25), (0, 3, 22), (6, -5, 0)), glacis, 10, 0, a);
+    let nose = slab(14, 2, 26, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((86, 2, 25), (0, 0, 13), (4, 13, 0)), nose, 0, 10, a);
     fill(&mut b, (8, 24), (8, 20), (15, 35), Part::Engine);
-    grille(&mut b, (9, 23), 21, (13, 37), Part::Engine);
-    cyl(&mut b, 0, (0, 12), (19, 7), 3, 0, Part::Engine);
+    let mut z = 12;
+    while z + 3 <= 38 {
+        carve(&mut b, (9, 23), (21, 22), (z, z + 3));
+        z += 6;
+    }
+    exhaust(&mut b, (2, 8), (19, 7), 2, Part::Engine);
     fill(&mut b, (40, 48), (9, 17), (21, 29), Part::Core);
-    // Рубка штаба во всю ширину корпуса, с бронедверью в корме.
-    fill(&mut b, (20, 76), (22, 34), (8, 42), Part::Armour);
-    fill(&mut b, (16, 20), (22, 32), (16, 34), Part::Armour);
+    // Рубка штаба в наклонных листах, бронедверь в корме с поручнем.
+    plated_turret(&mut b, (20, 76), (22, 34), (8, 42), (6, 5), TURN / 20, 13, 2, false, a, FINISH_PLATE);
+    fill(&mut b, (16, 20), (22, 32), (16, 34), a);
+    carve(&mut b, (16, 17), (24, 31), (20, 30));
+    fill_f(&mut b, (15, 16), (26, 29), (21, 22), a, FINISH_STEEL);
     // Мачта и решётка радара: чаша кольцами, а не сплошным диском —
     // сплошной читается как крышка, а не как антенна.
-    fill(&mut b, (34, 42), (34, 38), (21, 29), Part::Armour);
+    fill(&mut b, (34, 42), (34, 38), (21, 29), a);
     for k in 0..5i32 {
         ring(
             &mut b,
@@ -474,10 +607,23 @@ pub fn commander_tracked() -> UnitBody {
             Part::Sensor,
         );
     }
-    // Дистанционная точка на носу рубки.
-    disc(&mut b, (64, 25), 7, (34, 37), Part::Armour);
-    fill(&mut b, (62, 72), (36, 41), (20, 30), Part::Weapon);
-    cyl(&mut b, 0, (70, 86), (38, 25), 3, 0, Part::Weapon);
+    // Дистанционная точка на носу рубки, ствол поднят.
+    disc(&mut b, (64, 25), 6, (34, 37), a);
+    mark_cyl(&mut b, 1, (34, 35), (64, 25), 6, FINISH_STEEL);
+    fill(&mut b, (60, 70), (36, 41), (21, 29), Part::Weapon);
+    gun(&mut b, (70, 39, 25), (84, 41, 25), 3, false, false);
+    // Люки, штыревые антенны по углам рубки, ящики, фары, поручни.
+    hatch(&mut b, (28, 14), 3, 34, a);
+    hatch(&mut b, (28, 36), 3, 34, a);
+    antenna(&mut b, (22, 34, 10), 9, false);
+    antenna(&mut b, (22, 34, 40), 9, false);
+    antenna(&mut b, (72, 34, 10), 6, false);
+    crate_box(&mut b, (30, 44), (17, 21), (0, 3), a);
+    crate_box(&mut b, (50, 62), (17, 21), (47, 50), a);
+    headlight(&mut b, (78, 17, 0), 3, a);
+    headlight(&mut b, (78, 17, 47), 3, a);
+    rail(&mut b, (24, 22, 2), 0, 24, a);
+    rail(&mut b, (24, 22, 47), 0, 24, a);
     seat(b, "гусеничная командная машина")
 }
 
@@ -489,40 +635,42 @@ pub fn commander_tracked() -> UnitBody {
 ///
 /// Вдвое выше своей длины — предельный случай шагающего силуэта
 /// и самая узкая машина набора. Нога обратного излома: колено
-/// выносится назад, ступня возвращается под корпус.
+/// выносится назад, ступня возвращается под корпус. Корпус висит
+/// между опорами в наклонных листах, на мачте — тарелка.
 pub fn scout_walking() -> UnitBody {
     let mut b = UnitBody::new_scaled(30, 60, 30, 4, FINE);
-    for &hz in &[10i32, 20] {
-        ball(&mut b, (15, 30, hz), 5, Part::Armour);
-        limb(&mut b, (15, 29, hz), (9, 17, hz), 5, 4, 4, Part::Armour);
-        limb(&mut b, (9, 17, hz), (16, 4, hz), 4, 3, 0, Part::Armour);
-        fill(
-            &mut b,
-            (11, 23),
-            (0, 3),
-            ((hz - 4) as usize, (hz + 5) as usize),
-            Part::Armour,
-        );
+    let a = Part::Armour;
+    for &hz in &[9i32, 21] {
+        let s = if hz < 15 { -1 } else { 1 };
+        leg(&mut b, (15, 30, hz), (8, 18, hz), (16, 5, hz), 8, 6, a);
+        foot(&mut b, (16, hz), 3, 4, 3, a);
+        ram(&mut b, (16, 28, hz + s * 4), (9, 17, hz + s * 3), 3, a);
     }
-    // Корпус висит между опорами — у гусеничной стороны так не бывает.
-    for y in 28..42 {
-        let k = if y < 38 { 0 } else { (y - 38) as i32 };
-        disc(&mut b, (15, 15), 9 - k, (y, y + 1), Part::Armour);
-    }
-    fill(&mut b, (6, 12), (30, 38), (10, 20), Part::Engine);
-    cyl(&mut b, 0, (2, 8), (36, 15), 3, 0, Part::Engine);
+    // Таз с юбками над шарами, корпус, грудной и кормовой листы.
+    fill(&mut b, (9, 21), (28, 33), (7, 23), a);
+    skirt(&mut b, 9, 12, 33, 7, -1, TURN / 12, 6, 2, false, a, FINISH_PLATE);
+    skirt(&mut b, 9, 12, 33, 23, 1, TURN / 12, 6, 2, false, a, FINISH_PLATE);
+    fill(&mut b, (7, 23), (30, 42), (8, 22), a);
+    let chest = slab(13, 2, 14, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((23, 42, 15), (0, 2, 7), (3, -12, 0)), chest, 8, 0, a);
+    let back = slab(13, 2, 14, FINE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((7, 42, 15), (0, 2, 7), (-3, -12, 0)), back, 8, 0, a);
+    fill(&mut b, (8, 14), (31, 39), (10, 20), Part::Engine);
+    cyl_f(&mut b, 1, (42, 46), (10, 15), 1, 0, Part::Engine, FINISH_GUN);
+    carve(&mut b, (10, 11), (45, 46), (15, 16));
     fill(&mut b, (12, 18), (31, 37), (12, 18), Part::Core);
-    // Шея-шар и голова со стволом.
-    ball(&mut b, (15, 42, 15), 5, Part::Armour);
-    for y in 44usize..52 {
-        let k = y.saturating_sub(50);
-        fill(&mut b, (9 + k, 21 - k), (y, y + 1), (9 + k, 21 - k), Part::Armour);
-    }
-    fill(&mut b, (18, 22), (45, 51), (11, 19), Part::Weapon);
-    cyl(&mut b, 0, (20, 30), (48, 15), 2, 0, Part::Weapon);
-    // Мачта наблюдения: самая высокая точка машины.
-    fill(&mut b, (13, 17), (52, 56), (13, 17), Part::Armour);
-    disc(&mut b, (15, 15), 6, (56, 60), Part::Sensor);
+    // Шея-шар, голова с забралом и орудием, мачта с тарелкой.
+    joint(&mut b, (15, 42, 15), 4, a, FINISH_STEEL);
+    fill(&mut b, (10, 20), (44, 52), (10, 20), a);
+    fill(&mut b, (18, 20), (46, 50), (11, 19), Part::Sensor);
+    let visor = slab(7, 2, 10, FINE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach::aimed((20, 52, 15), (0, 2, 5), (2, -6, 0)), visor, 5, 0, Part::Sensor);
+    fill(&mut b, (17, 22), (45, 49), (13, 17), Part::Weapon);
+    gun(&mut b, (22, 47, 15), (30, 46, 15), 3, false, true);
+    fill_f(&mut b, (14, 16), (52, 56), (14, 16), a, FINISH_STEEL);
+    disc(&mut b, (15, 15), 3, (56, 58), Part::Sensor);
+    let dish = slab(7, 1, 7, FINE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach { pitch: TURN / 12, turret: true, ..Attach::flat((15, 58, 15), (3, 0, 3)) }, dish, -1, -1, Part::Sensor);
     let mut b = seat(b, "шагающий разведчик");
     b.turret_y = 42;
     b
@@ -536,50 +684,70 @@ pub fn scout_walking() -> UnitBody {
 /// **Завод.** 24.0 × 16.0 × 20.0 м, том 96×64×80.
 ///
 /// Ангар с воротами в торце, площадкой перед ними и портальным краном
-/// над площадкой. Сверху это прямоугольник с вырезом и двумя рельсами
-/// поперёк выреза — форма, которой больше нет ни у одной постройки.
+/// над площадкой. Крыша — пилообразная: три ската листами и три
+/// вертикальных стеклянных фонаря. Сверху это прямоугольник
+/// с вырезом и двумя рельсами поперёк выреза — форма, которой больше
+/// нет ни у одной постройки.
 pub fn factory() -> UnitBody {
     let mut b = UnitBody::new_scaled(96, 64, 80, 4, COARSE);
+    let a = Part::Armour;
 
     // Ангар: стены, пол и крыша. Ворота вырезаются тем, что передняя
-    // стена кладётся не целиком, а косяками и перемычкой.
-    fill(&mut b, (0, 3), (0, 48), (0, 80), Part::Armour);
-    fill(&mut b, (0, 64), (0, 48), (0, 3), Part::Armour);
-    fill(&mut b, (0, 64), (0, 48), (77, 80), Part::Armour);
-    fill(&mut b, (0, 64), (0, 3), (0, 80), Part::Armour);
-    fill(&mut b, (0, 64), (45, 48), (0, 80), Part::Armour);
-    fill(&mut b, (61, 64), (0, 48), (0, 20), Part::Armour);
-    fill(&mut b, (61, 64), (0, 48), (60, 80), Part::Armour);
-    fill(&mut b, (61, 64), (44, 48), (20, 60), Part::Armour);
+    // стена кладётся не целиком, а косяками и перемычкой; одна
+    // створка задвинута наполовину.
+    fill(&mut b, (0, 3), (0, 48), (0, 80), a);
+    fill(&mut b, (0, 64), (0, 48), (0, 3), a);
+    fill(&mut b, (0, 64), (0, 48), (77, 80), a);
+    fill(&mut b, (0, 64), (0, 3), (0, 80), a);
+    fill(&mut b, (0, 64), (45, 48), (0, 80), a);
+    fill(&mut b, (61, 64), (0, 48), (0, 20), a);
+    fill(&mut b, (61, 64), (0, 48), (60, 80), a);
+    fill(&mut b, (61, 64), (44, 48), (20, 60), a);
+    fill_f(&mut b, (62, 63), (3, 44), (20, 40), a, FINISH_STEEL);
+    rivets(&mut b, (62, 42, 21), 2, 18, 3, a);
+    // Пилообразная крыша: скат — лист, фонарь — стекло во всю длину.
+    for k in 0..3usize {
+        let x0 = 4 + 20 * k;
+        let ramp = slab(16, 2, 72, COARSE, a, FINISH_PLATE);
+        mount(&mut b, Attach::aimed((x0 as i16, 48, 40), (0, 2, 36), (14, 8, 0)), ramp, 8, 0, a);
+        fill_f(&mut b, (x0 + 14, x0 + 16), (48, 56), (5, 75), a, FINISH_OPTIC);
+        fill(&mut b, (x0 + 14, x0 + 16), (48, 56), (4, 5), a);
+        fill(&mut b, (x0 + 14, x0 + 16), (48, 56), (75, 76), a);
+    }
+    // Труба у задней стены и трубопровод вдоль неё.
+    cyl_f(&mut b, 1, (48, 62), (8, 72), 3, 0, Part::Engine, FINISH_GUN);
+    cyl_f(&mut b, 1, (56, 58), (8, 72), 4, 3, Part::Engine, FINISH_STEEL);
+    carve(&mut b, (7, 10), (61, 62), (71, 74));
+    fill_f(&mut b, (3, 5), (40, 42), (10, 70), a, FINISH_STEEL);
 
-    // Площадка выката и портальный кран над ней.
-    fill(&mut b, (64, 96), (0, 3), (24, 56), Part::Armour);
+    // Площадка выката и портальный кран над ней: тележка и крюк.
+    fill(&mut b, (64, 96), (0, 3), (24, 56), a);
     for &x0 in &[68usize, 86] {
         for &z0 in &[20usize, 56] {
-            fill(&mut b, (x0, x0 + 6), (0, 44), (z0, z0 + 4), Part::Armour);
+            fill(&mut b, (x0, x0 + 6), (0, 44), (z0, z0 + 4), a);
         }
-        fill(&mut b, (x0, x0 + 6), (40, 44), (20, 60), Part::Armour);
+        fill(&mut b, (x0, x0 + 6), (40, 44), (20, 60), a);
     }
+    fill(&mut b, (74, 86), (42, 46), (20, 60), a);
+    fill_f(&mut b, (76, 84), (38, 42), (32, 40), a, FINISH_STEEL);
+    rod(&mut b, (80, 38, 36), (80, 26, 36), 2, 2, -1, a, FINISH_STEEL, false);
 
     // Реактор внутри ангара и постамент ядра рядом с ним.
     disc(&mut b, (20, 40), 11, (3, 40), Part::Engine);
-    fill(&mut b, (36, 48), (3, 20), (34, 46), Part::Armour);
+    fill(&mut b, (36, 48), (3, 20), (34, 46), a);
     fill(&mut b, (40, 44), (8, 12), (38, 42), Part::Core);
 
-    // Вентиляционные решётки на крыше: без них крыша сверху — пустое
-    // поле в треть силуэта.
-    let mut z = 8;
-    while z + 4 <= 60 {
-        fill(&mut b, (26, 58), (45, 50), (z, z + 4), Part::Engine);
-        z += 12;
-    }
-
-    // Диспетчерская вышка и точка ПВО — обе на крыше.
-    fill(&mut b, (8, 20), (48, 58), (8, 20), Part::Armour);
-    fill(&mut b, (6, 22), (56, 64), (6, 22), Part::Sensor);
-    disc(&mut b, (48, 68), 7, (48, 54), Part::Armour);
-    fill(&mut b, (44, 52), (54, 60), (64, 72), Part::Weapon);
-    beam(&mut b, (50, 57, 68), (60, 57, 68), 5, 3, Part::Weapon);
+    // Диспетчерская вышка над крышей — остеклённая кабина, тарелка —
+    // и точка ПВО на площадке.
+    fill(&mut b, (8, 20), (48, 58), (8, 20), a);
+    fill(&mut b, (6, 22), (56, 62), (6, 22), Part::Sensor);
+    fill(&mut b, (6, 22), (62, 64), (6, 22), a);
+    let dish = slab(9, 1, 9, COARSE, Part::Sensor, FINISH_OPTIC);
+    mount(&mut b, Attach { pitch: TURN / 8, ..Attach::flat((14, 64, 14), (4, 0, 4)) }, dish, -1, -1, Part::Sensor);
+    disc(&mut b, (80, 12), 6, (3, 8), a);
+    mark_cyl(&mut b, 1, (7, 8), (80, 12), 6, FINISH_STEEL);
+    fill(&mut b, (76, 84), (8, 14), (8, 16), Part::Weapon);
+    gun(&mut b, (84, 12, 12), (94, 17, 12), 4, false, false);
 
     seat(b, "завод")
 }
@@ -587,11 +755,12 @@ pub fn factory() -> UnitBody {
 /// **Склад.** 16.0 × 8.0 × 16.0 м, том 64×32×64.
 ///
 /// Каре из ящиков вокруг открытого двора, в середине двора — башня
-/// с конвейерами на четыре стороны. Сверху это рамка с крестом
-/// внутри, и двор в ней настоящий: он проверяется тестом как дыра
-/// в проекции, а не на глаз.
+/// с наклонными конвейерами на четыре стороны и стрелой крана.
+/// Сверху это рамка с крестом внутри, и двор в ней настоящий: он
+/// проверяется тестом как дыра в проекции, а не на глаз.
 pub fn depot() -> UnitBody {
     let mut b = UnitBody::new_scaled(64, 32, 64, 4, COARSE);
+    let a = Part::Armour;
 
     // Ящики по периметру. Между ними промежутки — сплошная стена
     // читалась бы как бункер, а не как склад.
@@ -609,25 +778,46 @@ pub fn depot() -> UnitBody {
         (52, 26),
         (52, 44),
     ] {
-        shell(&mut b, (x0, x0 + 16), (0, 20), (z0, z0 + 12), 2, Part::Armour);
+        shell(&mut b, (x0, x0 + 16), (0, 20), (z0, z0 + 12), 2, a);
+        rivets(&mut b, (x0 + 1, 19, z0 + 1), 0, 14, 3, a);
     }
-    // Обходной мостик по верху: он и связывает ящики между собой.
-    fill(&mut b, (0, 64), (18, 20), (0, 4), Part::Armour);
-    fill(&mut b, (0, 64), (18, 20), (60, 64), Part::Armour);
-    fill(&mut b, (0, 4), (18, 20), (0, 64), Part::Armour);
-    fill(&mut b, (60, 64), (18, 20), (0, 64), Part::Armour);
+    // Обходной мостик по верху с поручнем по наружной кромке: он
+    // и связывает ящики между собой.
+    fill(&mut b, (0, 64), (18, 20), (0, 4), a);
+    fill(&mut b, (0, 64), (18, 20), (60, 64), a);
+    fill(&mut b, (0, 4), (18, 20), (0, 64), a);
+    fill(&mut b, (60, 64), (18, 20), (0, 64), a);
+    rail(&mut b, (0, 20, 0), 0, 64, a);
+    rail(&mut b, (0, 20, 63), 0, 64, a);
+    rail(&mut b, (0, 20, 0), 2, 64, a);
+    rail(&mut b, (63, 20, 0), 2, 64, a);
 
-    // Башня в середине двора и четыре конвейера к каре.
-    fill(&mut b, (26, 38), (0, 28), (26, 38), Part::Armour);
+    // Башня в середине двора, наклонные конвейеры к каре — лента
+    // резиной поверх станины, стойки под ними в корне.
+    fill(&mut b, (26, 38), (0, 28), (26, 38), a);
     fill(&mut b, (28, 36), (0, 4), (28, 36), Part::Engine);
-    fill(&mut b, (10, 26), (12, 16), (30, 34), Part::Armour);
-    fill(&mut b, (38, 54), (12, 16), (30, 34), Part::Armour);
-    fill(&mut b, (30, 34), (12, 16), (10, 26), Part::Armour);
-    fill(&mut b, (30, 34), (12, 16), (38, 54), Part::Armour);
+    let belt = |len: u8| {
+        let mut s = slab(len, 2, 4, COARSE, a, FINISH_PLATE);
+        mark(&mut s, (0, len as usize), (1, 2), (0, 4), FINISH_RUBBER);
+        s
+    };
+    mount(&mut b, Attach::aimed((26, 18, 30), (0, 2, 0), (-16, -6, 0)), belt(17), -1, -1, a);
+    mount(&mut b, Attach::aimed((38, 18, 30), (0, 2, 0), (16, -6, 0)), belt(17), -1, -1, a);
+    mount(&mut b, Attach::aimed((30, 18, 26), (0, 2, 0), (0, -6, -16)), belt(17), -1, -1, a);
+    mount(&mut b, Attach::aimed((30, 18, 38), (0, 2, 0), (0, -6, 16)), belt(17), -1, -1, a);
+    for &(x, z) in &[(16usize, 30usize), (46, 30), (30, 16), (30, 46)] {
+        fill_f(&mut b, (x, x + 4), (0, 14), (z, z + 4), a, FINISH_STEEL);
+    }
+    // Стрела крана с башни — вверх и в сторону, крюк на тросе.
+    rod(&mut b, (32, 26, 32), (46, 31, 32), 4, 3, -1, a, FINISH_STEEL, false);
+    rod(&mut b, (44, 31, 32), (44, 24, 32), 2, 2, -1, a, FINISH_STEEL, false);
 
-    // Наблюдательный колпак на башне и пулемётная точка на углу каре.
-    disc(&mut b, (32, 32), 9, (28, 32), Part::Sensor);
+    // Наблюдательный колпак на башне, антенна, пулемётная точка
+    // на углу каре с поднятым стволом.
+    disc(&mut b, (32, 32), 8, (28, 32), Part::Sensor);
+    antenna(&mut b, (28, 28, 28), 4, false);
     fill(&mut b, (4, 12), (20, 27), (2, 10), Part::Weapon);
+    gun(&mut b, (12, 25, 6), (20, 27, 6), 3, false, false);
     fill(&mut b, (29, 33), (4, 8), (29, 33), Part::Core);
 
     seat(b, "склад")
@@ -635,22 +825,28 @@ pub fn depot() -> UnitBody {
 
 /// **Турель.** 6.0 × 9.0 × 6.0 м, том 24×36×24.
 ///
-/// Круглое основание, тумба, голова с двумя стволами. Единственная
-/// постройка набора выше своей ширины: оборону видно поверх всего
-/// остального.
+/// Круглое основание, тумба, голова в наклонных листах с двумя
+/// поднятыми стволами. Единственная постройка набора выше своей
+/// ширины: оборону видно поверх всего остального.
 pub fn turret() -> UnitBody {
     let mut b = UnitBody::new_scaled(24, 36, 24, 3, COARSE);
-    disc(&mut b, (12, 12), 11, (0, 8), Part::Armour);
+    let a = Part::Armour;
+    disc(&mut b, (12, 12), 11, (0, 8), a);
+    mark_cyl(&mut b, 1, (7, 8), (12, 12), 11, FINISH_STEEL);
     disc(&mut b, (12, 12), 5, (2, 7), Part::Engine);
     // Погон уже основания — уступ и делает основание основанием.
-    disc(&mut b, (12, 12), 8, (8, 12), Part::Armour);
-    disc(&mut b, (12, 12), 6, (12, 20), Part::Armour);
-    fill(&mut b, (4, 20), (20, 30), (6, 18), Part::Armour);
-    fill(&mut b, (16, 22), (22, 28), (8, 16), Part::Weapon);
-    beam(&mut b, (18, 25, 10), (23, 25, 10), 4, 3, Part::Weapon);
-    beam(&mut b, (18, 25, 14), (23, 25, 14), 4, 3, Part::Weapon);
-    fill(&mut b, (8, 16), (30, 34), (8, 16), Part::Armour);
+    disc(&mut b, (12, 12), 8, (8, 12), a);
+    disc(&mut b, (12, 12), 6, (12, 20), a);
+    mark_cyl(&mut b, 1, (12, 20), (12, 12), 6, FINISH_STEEL);
+    plated_turret(&mut b, (4, 16), (20, 30), (6, 18), (5, 3), TURN / 14, 11, 2, true, a, FINISH_PLATE);
+    fill(&mut b, (10, 16), (22, 28), (8, 16), Part::Weapon);
+    for &z in &[10i32, 14] {
+        cyl_f(&mut b, 0, (16, 18), (25, z), 2, 0, a, FINISH_GUN);
+        gun(&mut b, (18, 25, z), (24, 26, z), 3, false, true);
+    }
+    fill(&mut b, (8, 16), (30, 33), (8, 16), a);
     disc(&mut b, (12, 12), 4, (33, 36), Part::Sensor);
+    antenna(&mut b, (6, 30, 8), 4, true);
     fill(&mut b, (10, 13), (13, 16), (10, 13), Part::Core);
     let mut b = seat(b, "турель");
     // Вращается всё выше погона; основание стоит.
@@ -660,9 +856,11 @@ pub fn turret() -> UnitBody {
 
 /// **Буровая.** 12.0 × 14.0 × 12.0 м, том 48×56×48.
 ///
-/// Четыре опоры, сходящиеся к кронблоку, колонна по оси и бункер
-/// сбоку. Сверху это квадрат из четырёх пятен с кругом в середине
-/// и отростком в одну сторону — ни на что в наборе не похоже.
+/// Четыре опоры-сегмента, сходящиеся к кронблоку, колонна по оси,
+/// наклонный жёлоб и бункер сбоку, вентилятор с крученными
+/// лопастями на силовом блоке. Сверху это квадрат из четырёх пятен
+/// с кругом в середине и отростком в одну сторону — ни на что
+/// в наборе не похоже.
 ///
 /// Буровая головка помечена `Weapon` намеренно: подсистем ровно три
 /// и список закрыт (ADR-095), а роль «излучатель, снимающий воксели»
@@ -671,10 +869,12 @@ pub fn turret() -> UnitBody {
 /// описывает.
 pub fn drill_rig() -> UnitBody {
     let mut b = UnitBody::new_scaled(48, 56, 48, 4, COARSE);
+    let a = Part::Armour;
 
-    // Опорные пятна и сходящиеся к середине ноги.
+    // Опорные пятна и сходящиеся к кронблоку ноги — звенья-сегменты
+    // с костью внутри.
     for &(px, pz) in &[(2usize, 2usize), (2, 34), (34, 2), (34, 34)] {
-        fill(&mut b, (px, px + 12), (0, 3), (pz, pz + 12), Part::Armour);
+        fill(&mut b, (px, px + 12), (0, 3), (pz, pz + 12), a);
     }
     for &(fx, fz, tx, tz) in &[
         (8i32, 8i32, 20i32, 20i32),
@@ -682,12 +882,13 @@ pub fn drill_rig() -> UnitBody {
         (40, 8, 28, 20),
         (40, 40, 28, 28),
     ] {
-        beam(&mut b, (fx, 3, fz), (tx, 36, tz), 6, 4, Part::Armour);
+        fill_f(&mut b, ((fx - 2) as usize, (fx + 2) as usize), (3, 5), ((fz - 2) as usize, (fz + 2) as usize), a, FINISH_STEEL);
+        rod(&mut b, (fx, 4, fz), (tx, 38, tz), 8, 6, 1, a, FINISH_PLATE, false);
     }
     // Пояса жёсткости. Радиусы взяты по тому, где в этой высоте
     // реально проходят ноги, — пояс мимо ног был бы кольцом в воздухе.
-    ring(&mut b, (24, 24), 16, 13, (17, 19), Part::Armour);
-    ring(&mut b, (24, 24), 12, 8, (27, 29), Part::Armour);
+    ring(&mut b, (24, 24), 16, 13, (17, 19), a);
+    ring(&mut b, (24, 24), 12, 8, (27, 29), a);
 
     // Колонна целиком и головка под ней — один излучатель: отрежут
     // колонну, и копать установка перестанет ровно так же, как без
@@ -698,28 +899,43 @@ pub fn drill_rig() -> UnitBody {
     // Кронблок — рама с проёмом. Сплошной он накрыл бы колонну, и
     // сверху установка стала бы ящиком на четырёх ногах: чем она
     // занята, было бы видно только сбоку.
-    fill(&mut b, (16, 32), (38, 48), (16, 20), Part::Armour);
-    fill(&mut b, (16, 32), (38, 48), (28, 32), Part::Armour);
-    fill(&mut b, (16, 20), (38, 48), (20, 28), Part::Armour);
-    fill(&mut b, (28, 32), (38, 48), (20, 28), Part::Armour);
+    fill(&mut b, (16, 32), (38, 48), (16, 20), a);
+    fill(&mut b, (16, 32), (38, 48), (28, 32), a);
+    fill(&mut b, (16, 20), (38, 48), (20, 28), a);
+    fill(&mut b, (28, 32), (38, 48), (20, 28), a);
+    rail(&mut b, (16, 48, 16), 0, 16, a);
+    rail(&mut b, (16, 48, 31), 0, 16, a);
 
-    // Жёлоб и бункер отвала.
-    beam(&mut b, (30, 34, 24), (44, 26, 24), 6, 5, Part::Armour);
-    fill(&mut b, (36, 48), (6, 26), (16, 32), Part::Armour);
+    // Наклонный жёлоб к бункеру отвала и сам бункер.
+    let chute = slab(17, 2, 6, COARSE, a, FINISH_PLATE);
+    mount(&mut b, Attach::aimed((30, 34, 24), (0, 2, 3), (14, -8, 0)), chute, -1, -1, a);
+    fill_f(&mut b, (30, 34), (26, 34), (22, 26), a, FINISH_STEEL);
+    fill(&mut b, (36, 48), (6, 26), (16, 32), a);
+    carve(&mut b, (37, 47), (25, 26), (17, 31));
 
-    // Силовой блок на раме вдоль одной из сторон.
-    fill(&mut b, (4, 12), (3, 6), (12, 36), Part::Armour);
+    // Силовой блок на раме вдоль одной из сторон, на нём вентилятор:
+    // ступица и четыре лопасти, каждая повёрнута вокруг своей оси —
+    // крен даёт закрутку, рыскание разводит их по кругу.
+    fill(&mut b, (4, 12), (3, 6), (12, 36), a);
     fill(&mut b, (2, 14), (6, 16), (18, 30), Part::Engine);
+    cyl_f(&mut b, 1, (16, 19), (8, 24), 2, 0, Part::Engine, FINISH_STEEL);
+    for k in 0..4i32 {
+        let blade = slab(5, 1, 2, COARSE, Part::Engine, FINISH_STEEL);
+        b.push_segment(
+            Attach { yaw: k * TURN / 4, roll: TURN / 10, ..Attach::flat((8, 18, 24), (0, 0, 1)) },
+            blade,
+        );
+    }
 
-    // Мачта наблюдения — на углу рамы, мимо проёма.
-    fill(&mut b, (16, 22), (48, 52), (16, 22), Part::Armour);
+    // Мачта наблюдения — на углу рамы, мимо проёма; антенна.
+    fill(&mut b, (16, 22), (48, 52), (16, 22), a);
     disc(&mut b, (19, 19), 5, (52, 56), Part::Sensor);
+    antenna(&mut b, (30, 48, 30), 6, false);
     fill(&mut b, (22, 26), (10, 14), (22, 26), Part::Core);
 
     seat(b, "буровая")
 }
 
-// ---------------------------------------------------------------------
 // Силуэт сверху. Одна реализация на отчёт и на тесты: величина,
 // посчитанная дважды, расходится молча.
 // ---------------------------------------------------------------------
