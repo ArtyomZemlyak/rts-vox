@@ -318,10 +318,10 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(DirectionalLightShadowMap { size: look::SHADOW_MAP })
+        .insert_resource(DirectionalLightShadowMap { size: look::scene().shadow_map })
         .insert_resource(GlobalAmbientLight {
-            color: srgb(look::AMBIENT_SRGB),
-            brightness: look::AMBIENT_BRIGHTNESS,
+            color: srgb(look::scene().ambient_srgb),
+            brightness: look::scene().ambient_brightness,
             ..default()
         })
         .insert_resource(Sim {
@@ -426,12 +426,12 @@ fn setup(
         })
     };
     let hull = [
-        unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Hull, &mut meshes),
-        unit_mesh(&bodies[1], look::SIDE_TINT[1], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[0], look::side_tint()[0], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[1], look::side_tint()[1], Slice::Hull, &mut meshes),
     ];
     let turret = [
-        unit_mesh(&bodies[0], look::SIDE_TINT[0], Slice::Turret, &mut meshes),
-        unit_mesh(&bodies[1], look::SIDE_TINT[1], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[0], look::side_tint()[0], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[1], look::side_tint()[1], Slice::Turret, &mut meshes),
     ];
     // **Материал говорит, из чего вещь сделана.** Цвет вершины
     // подменяет `base_color` целиком (`pbr_fragment.wgsl`), поэтому
@@ -578,7 +578,7 @@ fn setup(
         .spawn((
             Camera3d::default(),
             Camera {
-                clear_color: ClearColorConfig::Custom(srgb(look::SKY_COLOUR_SRGB)),
+                clear_color: ClearColorConfig::Custom(srgb(look::scene().sky_colour_srgb)),
                 ..default()
             },
             Tonemapping::AcesFitted,
@@ -586,7 +586,7 @@ fn setup(
             // (ADR-198) задаёт её в метрах, и окно берёт ту же
             // величину, чтобы глубина читалась одинаково в обоих.
             DistanceFog {
-                color: srgb(look::SKY_COLOUR_SRGB),
+                color: srgb(look::scene().sky_colour_srgb),
                 falloff: FogFalloff::Linear {
                     start: side * 0.35,
                     end: side * 1.6,
@@ -597,7 +597,7 @@ fn setup(
         ))
         .id();
     commands.entity(cam).insert(Bloom::NATURAL);
-    if look::SSAO {
+    if look::scene().ssao {
         commands
             .entity(cam)
             .insert((Msaa::Off, ScreenSpaceAmbientOcclusion::default(), Fxaa::default()));
@@ -605,19 +605,19 @@ fn setup(
 
     commands.spawn((
         DirectionalLight {
-            color: srgb(look::SUN_SRGB),
-            illuminance: look::SUN_LUX,
-            shadow_maps_enabled: look::SHADOW_CASCADES > 0,
+            color: srgb(look::scene().sun_srgb),
+            illuminance: look::scene().sun_lux,
+            shadow_maps_enabled: look::scene().shadow_cascades > 0,
             shadow_depth_bias: 0.06,
             shadow_normal_bias: 2.0,
             ..default()
         },
         Transform::default().looking_to(Vec3::from(look::sun_dir()).normalize(), Vec3::Y),
         CascadeShadowConfigBuilder {
-            num_cascades: look::SHADOW_CASCADES.max(1),
+            num_cascades: look::scene().shadow_cascades.max(1),
             minimum_distance: 1.0,
-            first_cascade_far_bound: side * look::SHADOW_FIRST_FRAC,
-            maximum_distance: side * look::SHADOW_MAX_FRAC,
+            first_cascade_far_bound: side * look::scene().shadow_first_frac,
+            maximum_distance: side * look::scene().shadow_max_frac,
             overlap_proportion: 0.2,
         }
         .build(),
@@ -627,8 +627,8 @@ fn setup(
     // пока без атмосферы, поэтому подсветка берётся из палитры
     // ambient, а не выдумывается заново (ADR-209).
     commands.insert_resource(GlobalAmbientLight {
-        color: srgb(look::AMBIENT_SRGB),
-        brightness: look::AMBIENT_BRIGHTNESS * 4.0,
+        color: srgb(look::scene().ambient_srgb),
+        brightness: look::scene().ambient_brightness * 4.0,
         ..default()
     });
     commands.insert_resource(art);
