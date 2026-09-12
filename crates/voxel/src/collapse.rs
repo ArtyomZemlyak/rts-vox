@@ -1033,14 +1033,14 @@ impl CollapseLayer {
     /// грязное множество, местные правки по чанкам, очередь обхода,
     /// метки эпохи, буферы проверки расщепления. Они очищаются
     /// в начале `apply` и до него не читаются.
+    ///
+    /// Потолки отвала, втягивания и переразметки, как и выключатель
+    /// локальной проверки, **не пишутся**: это правила, а не состояние
+    /// (ADR-140). Их ставит тот, кто собирает слой.
     pub fn save(&self, b: &mut fx::blob::Blob) {
         b.u32(self.nx);
         b.u32(self.ny);
         b.u32(self.nz);
-        b.usize(self.max_body_cells);
-        b.usize(self.max_promote_per_tick);
-        b.usize(self.max_relabel_per_tick);
-        b.bool(self.use_split_probe);
         b.bool(self.recheck);
         b.u32s(&self.pending);
         b.u32s(&self.frontier);
@@ -1092,10 +1092,6 @@ impl CollapseLayer {
         if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
             return false;
         }
-        self.max_body_cells = s.usize();
-        self.max_promote_per_tick = s.usize();
-        self.max_relabel_per_tick = s.usize();
-        self.use_split_probe = s.bool();
         self.recheck = s.bool();
         self.pending = s.u32s();
         self.frontier = s.u32s();

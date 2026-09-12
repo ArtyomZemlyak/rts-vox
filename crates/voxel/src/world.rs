@@ -455,12 +455,15 @@ impl World {
     /// от того, в каком порядке чанк заполняли, и не наблюдаем,
     /// а номер материала задаётся данными и обязан пережить
     /// перезагрузку пака (ADR-028).
+    /// **Потолки не пишутся.** Они не состояние партии, а правила,
+    /// по которым она идёт: приходят из `data/*.ron` и из кода
+    /// вызывающего (ADR-140). Запиши их в файл — и правка `sim.ron`
+    /// перестала бы действовать на загруженную партию, а в файле
+    /// появился бы второй источник правды.
     pub fn save(&self, b: &mut fx::blob::Blob) {
         b.u32(self.nx);
         b.u32(self.ny);
         b.u32(self.nz);
-        b.usize(self.max_edits_per_tick);
-        b.usize(self.max_materialize_per_tick);
         b.usize(self.materialized_in_tick);
         b.bool(self.in_tick);
         b.u64(self.materialized);
@@ -507,8 +510,6 @@ impl World {
         if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
             return false;
         }
-        self.max_edits_per_tick = s.usize();
-        self.max_materialize_per_tick = s.usize();
         self.materialized_in_tick = s.usize();
         self.in_tick = s.bool();
         self.materialized = s.u64();

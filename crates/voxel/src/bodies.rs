@@ -340,9 +340,11 @@ impl Bodies {
     /// `landed_log` и `spawned` живут один тик, но пишутся тоже:
     /// сохранение снимается **между** тиками, а «почти пустой список»
     /// это тоже состояние.
+    ///
+    /// Потолок тел и тяготение **не пишутся**: это игровые числа
+    /// из `data/*.ron` (ADR-140, ADR-173), а не состояние партии.
+    /// Их ставит тот, кто собирает тела, и после загрузки тоже.
     pub fn save(&self, b: &mut fx::blob::Blob) {
-        b.usize(self.max_bodies);
-        b.fx(self.gravity);
         b.usize(self.refused);
         b.u64(self.next_id);
         b.u64s(&self.spawned);
@@ -379,8 +381,6 @@ impl Bodies {
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
-        self.max_bodies = s.usize();
-        self.gravity = s.fx();
         self.refused = s.usize();
         self.next_id = s.u64();
         self.spawned = s.u64s();

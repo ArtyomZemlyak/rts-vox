@@ -138,6 +138,41 @@ fn saving_a_loaded_game_gives_the_same_bytes() {
     assert!(first == second, "запись загруженного дала другие байты");
 }
 
+/// **Числа тика в сохранении не заморожены.**
+///
+/// Потолки и тяготение — правила, по которым идёт партия, а не её
+/// состояние: они живут в `data/*.ron` (ADR-140). Запиши их в файл —
+/// и правка `sim.ron` перестала бы действовать на загруженную партию.
+/// Проверяется прямо: загрузка с изменёнными числами обязана взять
+/// изменённые.
+#[test]
+fn the_save_does_not_freeze_the_tuning() {
+    let small = worldgen::Params::sized(64, 64, 64);
+    let mut r = Reference::with_params(SEED, 200, tuning(), weapons(), small);
+    for _ in 0..20 {
+        r.tick();
+    }
+    let blob = save(&r);
+    let mut t = tuning();
+    t.max_bodies += 7;
+    t.max_materialize_per_tick += 1;
+    let back = load(&blob, t, weapons()).expect("сохранение не прочиталось");
+    let g = back.world.ground().expect("земля");
+    assert_eq!(
+        g.bodies.max_bodies, t.max_bodies,
+        "потолок тел взят из файла, а не из data/sim.ron"
+    );
+    assert_eq!(
+        g.world.max_materialize_per_tick, t.max_materialize_per_tick as usize,
+        "потолок материализаций взят из файла, а не из data/sim.ron"
+    );
+    assert_eq!(
+        g.bodies.gravity,
+        sim_core::gravity_per_tick(&t),
+        "тяготение взято из файла, а не из data/sim.ron"
+    );
+}
+
 /// Версия стоит в первых байтах и читается **до** разбора тела.
 #[test]
 fn the_version_is_in_the_first_bytes() {
