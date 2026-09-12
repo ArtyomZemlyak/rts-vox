@@ -17,5 +17,5 @@
         (4, Weapon),
         (5, Sensor),
     ],
-    core_size: 2,
+    core_size: 4,
 )

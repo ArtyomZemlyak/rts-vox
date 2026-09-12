@@ -20,6 +20,7 @@
 //! по построению. Форма обломка живёт в мировой сетке, содержимое —
 //! количество материи; реклейм — та же операция, что копка (ADR-017).
 
+use crate::shape::{ball, cyl, disc, fill, grille, hatch, limb, running_gear, seat};
 use crate::topo::unit::{core_connectivity, CoreBufs, UnitVol};
 
 /// Метка воксела. Ровно то, что перечисляет ADR-095, плюс броня и ядро.
@@ -122,12 +123,11 @@ pub struct UnitBody {
     pub core_size: u8,
     /// Ребро воксела тела в **миллиметрах**.
     ///
-    /// Канон (ADR-094) даёт телам воксель 0.25 м против 0.5 м у мира.
-    /// Он назвал число для обычной боевой машины, а не запретил другие:
-    /// ADR-019 уже разрешает миру и телам разные масштабы, и тот же
-    /// довод разрешает их между телами (ADR-178). Весь набор сегодня
-    /// использует канонические 250 — механизм есть, потому что
-    /// многомасштабность обязана быть выразимой, а не подразумеваемой.
+    /// ADR-019 разрешает миру и телам разные масштабы, и тот же довод
+    /// разрешает их между телами (ADR-178). Ребро задаётся **классом**
+    /// машины (ADR-219): обычная боевая машина — [`BODY_MM`],
+    /// экспериментальный класс и постройка — 250 мм, потому что
+    /// в колонку тела влезает не больше 255 вокселей.
     ///
     /// Миллиметры, а не `Fx`: это константа шаблона, она не участвует
     /// в арифметике тика, и целое число исключает вопрос о округлении.
@@ -150,8 +150,11 @@ impl UnitBody {
     /// числом, зашитый в код танк и он же, загруженный из данных,
     /// получали разные ядра — обе величины были верны, но разные, и
     /// расхождение не было видно ниоткуда.
+    /// Ребро — [`BODY_MM`]: это ребро обычной боевой машины, а тело,
+    /// собранное из `.vox`-модели, ею и является. Крупный класс
+    /// называет своё ребро сам, через [`UnitBody::new_scaled`].
     pub fn new(nx: u8, ny: u8, nz: u8, core_size: u8) -> UnitBody {
-        UnitBody::new_scaled(nx, ny, nz, core_size, 250)
+        UnitBody::new_scaled(nx, ny, nz, core_size, BODY_MM)
     }
 
     /// То же, но с явным ребром воксела в миллиметрах (ADR-178).
@@ -609,53 +612,97 @@ fn subsystem_slot(p: Part) -> Option<usize> {
     }
 }
 
-/// Танк по ADR-094: 6×3×3 м при вокселе тел 0.25 м — 24×12×12.
+/// Ребро воксела обычной боевой машины в миллиметрах (ADR-219).
 ///
-/// Броня по краям, ядро в центре, двигатель сзади, орудие спереди
-/// сверху, сенсоры по бокам башни. Форма условная: настоящие тома
-/// приходят `.vox`-моделями из данных (ADR-008), а эта нужна, чтобы
-/// сцена имела что разбирать.
+/// Вдесятеро мельче метра и впятеро мельче мирового воксела. Столько
+/// нужно, чтобы в ленту помещался каток, а в ногу — сустав: при 250 мм
+/// на всю ленту приходилось четыре воксела по высоте, и ничего, кроме
+/// бруска, туда не ложилось.
+pub const BODY_MM: u16 = 100;
+
+/// Танк: 6.0 × 3.0 × 3.0 м при вокселе 100 мм — том 60×30×30.
+///
+/// Габарит канонический (ADR-094) и от смены сетки не меняется:
+/// мельче стало зерно, а не машина.
+///
+/// Что в нём есть, кроме коробки: ходовая с катком за катком,
+/// надгусеничные полки поверх лент, скошенный лоб, моторная решётка
+/// и выхлопные трубы в корме, маска орудия, командирская башенка
+/// и люки на крышах. Каждая из этих деталей мельче 25 см и при
+/// прежнем вокселе не существовала (ADR-219).
+///
+/// Форма условная: настоящие тома приходят `.vox`-моделями из данных
+/// (ADR-008), а эта нужна, чтобы сцена имела что разбирать.
 pub fn tank() -> UnitBody {
-    let (nx, ny, nz) = (24u8, 12u8, 12u8);
-    let mut u = UnitBody::new(nx, ny, nz, 2);
-    for z in 0..nz as usize {
-        for y in 0..ny as usize {
-            for x in 0..nx as usize {
-                // Корпус: нижние две трети по высоте.
-                let hull = y < 8;
-                // Башня: середина сверху.
-                let turret = y >= 8 && (6..18).contains(&x) && (3..9).contains(&z);
-                // Ствол торчит вперёд из башни — он **вне** её габарита,
-                // поэтому в геометрию входит отдельно. Первая редакция
-                // этого не сделала, и орудия в танке не оказалось вовсе.
-                let barrel = (17..24).contains(&x) && (9..11).contains(&y) && (5..7).contains(&z);
-                if !hull && !turret && !barrel {
-                    continue;
-                }
-                let p = if (10..14).contains(&x) && (4..7).contains(&y) && (5..8).contains(&z) {
-                    Part::Core
-                } else if x < 5 && (2..6).contains(&y) && (3..9).contains(&z) {
-                    Part::Engine
-                } else if barrel || (turret && x >= 14 && y >= 9 && (4..8).contains(&z)) {
-                    Part::Weapon
-                } else if turret && y >= 10 && !(4..8).contains(&z) {
-                    Part::Sensor
-                } else {
-                    Part::Armour
-                };
-                u.set(x, y, z, p);
-            }
-        }
+    let mut u = UnitBody::new_scaled(60, 30, 30, 4, BODY_MM);
+
+    // Ходовая: две ленты по бортам, 1.2 м высотой. Полка над ними
+    // шире ленты на воксель с каждой стороны — отсюда и ниша.
+    running_gear(&mut u, (2, 58), 12, (1, 7), Part::Armour);
+    running_gear(&mut u, (2, 58), 12, (23, 29), Part::Armour);
+    fill(&mut u, (2, 58), (12, 14), (0, 30), Part::Armour);
+
+    // Корпус. Ниже полок он стоит между лентами, выше — расходится
+    // на них; лоб отступает на воксель с каждым слоем, и ступенька
+    // в 10 см со фаской читается наклонной плитой, а не лестницей.
+    for y in 5..18 {
+        let front = 58 - (y - 5);
+        let (z0, z1) = if y < 12 { (7, 23) } else { (1, 29) };
+        fill(&mut u, (4, front), (y, y + 1), (z0, z1), Part::Armour);
     }
-    assert!(u.seat_core(), "у танка обязано быть ядро");
-    // Башня — всё, что выше корпуса; она же граница `hull` в разметке
-    // выше. Одна величина, записанная один раз.
-    u.turret_y = 8;
+    // Кормовой лист и буксирные проушины по его краям.
+    fill(&mut u, (2, 4), (6, 17), (8, 22), Part::Armour);
+    fill(&mut u, (0, 4), (14, 16), (6, 9), Part::Armour);
+    fill(&mut u, (0, 4), (14, 16), (21, 24), Part::Armour);
+
+    // Моторный отсек: сам двигатель внутри кормы, жалюзи на его
+    // крыше, выхлоп двумя трубами назад поверх полок.
+    fill(&mut u, (6, 20), (7, 16), (9, 21), Part::Engine);
+    grille(&mut u, (7, 21), 17, (8, 22), Part::Engine);
+    cyl(&mut u, 0, (0, 10), (15, 4), 3, 0, Part::Engine);
+    cyl(&mut u, 0, (0, 10), (15, 25), 3, 0, Part::Engine);
+
+    // Ядро — в середине корпуса, под башней.
+    fill(&mut u, (28, 34), (7, 13), (12, 18), Part::Core);
+
+    // Башня: корма скруглена, лоб клином под маску. Сужается кверху
+    // ступенью на каждые четыре слоя — это скос брони, а не уступ.
+    for y in 18..27 {
+        // Один уступ на всю башню, у самой крыши: скос брони читается
+        // фаской, а три уступа подряд читаются свадебным тортом.
+        let k = ((y - 18) as i32) * 2 / 9;
+        disc(&mut u, (29, 15), 10 - k, (y, y + 1), Part::Armour);
+        fill(
+            &mut u,
+            (29, (45 - k) as usize),
+            (y, y + 1),
+            ((6 + k) as usize, (24 - k) as usize),
+            Part::Armour,
+        );
+    }
+    // Маска, ствол и дульный тормоз. Маска круглая и выступает
+    // из лба башни: по ней и видно, что орудие качается.
+    fill(&mut u, (42, 47), (19, 26), (11, 19), Part::Weapon);
+    cyl(&mut u, 0, (42, 48), (22, 15), 5, 0, Part::Weapon);
+    cyl(&mut u, 0, (46, 58), (22, 15), 2, 0, Part::Weapon);
+    cyl(&mut u, 0, (55, 60), (22, 15), 3, 1, Part::Weapon);
+
+    // Люк заряжающего, командирская башенка с приборами и прицел
+    // наводчика у лба башни.
+    hatch(&mut u, (32, 10), 3, 27, Part::Armour);
+    disc(&mut u, (24, 19), 4, (27, 29), Part::Armour);
+    disc(&mut u, (24, 19), 3, (29, 30), Part::Sensor);
+    fill(&mut u, (36, 42), (27, 29), (10, 14), Part::Sensor);
+
+    let mut u = seat(u, "танк");
+    // Башня — всё, что выше корпуса. Одна величина, записанная
+    // один раз: линия та же, на которой обрывается разметка корпуса.
+    u.turret_y = 18;
     u
 }
 
-/// Шагоход: второе ванильное тело. 4×5×4 м при вокселе тел 0.25 м —
-/// том 16×20×16.
+/// Шагоход: второе ванильное тело. 4.0 × 5.0 × 4.0 м при вокселе
+/// 100 мм — том 40×50×40.
 ///
 /// **Зачем второе тело.** Две стороны, отличающиеся только цветом, —
 /// это не две армии, а одна перекрашенная: силуэт на экране важнее
@@ -664,50 +711,76 @@ pub fn tank() -> UnitBody {
 /// длинный и низкий, шагоход узкий и высокий, и различить их можно
 /// даже по тени.
 ///
+/// **У ноги есть суставы.** Бедро идёт от бедренного шара наружу
+/// и вниз, колено — шар, голень возвращается внутрь к ступне.
+/// Прежняя нога была столбом 3×3 и читалась как ножка табурета:
+/// при вокселе 250 мм колено в неё не помещалось (ADR-219).
+///
 /// Форма условная ровно в той же мере, что у танка: настоящие тома
 /// приходят `.vox`-моделями из данных (ADR-008).
 pub fn strider() -> UnitBody {
-    let (nx, ny, nz) = (16u8, 20u8, 16u8);
-    let mut u = UnitBody::new(nx, ny, nz, 2);
-    for z in 0..nz as usize {
-        for y in 0..ny as usize {
-            for x in 0..nx as usize {
-                // Четыре ноги по углам: столбы 3×3 до восьмого слоя.
-                // Верх ноги упирается в короб корпуса — иначе нога
-                // не связана с ядром и не считается живой.
-                let leg = y < 8
-                    && ((1..4).contains(&x) || (12..15).contains(&x))
-                    && ((1..4).contains(&z) || (12..15).contains(&z));
-                // Корпус: короб посередине.
-                let hull = (8..14).contains(&y) && (3..13).contains(&x) && (3..13).contains(&z);
-                // Голова с двумя стволами. Стволы торчат вперёд и
-                // **вне** габарита головы, поэтому считаются отдельно —
-                // ровно та же ловушка, что у ствола танка.
-                let head = y >= 14 && (5..11).contains(&x) && (5..11).contains(&z);
-                let barrel = (11..16).contains(&x)
-                    && (15..18).contains(&y)
-                    && ((5..7).contains(&z) || (9..11).contains(&z));
-                if !leg && !hull && !head && !barrel {
-                    continue;
-                }
-                let p = if (7..9).contains(&x) && (10..12).contains(&y) && (7..9).contains(&z) {
-                    Part::Core
-                } else if hull && (3..6).contains(&x) {
-                    Part::Engine
-                } else if barrel || (head && x >= 9 && (15..18).contains(&y)) {
-                    Part::Weapon
-                } else if head && y >= 18 && x >= 9 && !(7..9).contains(&z) {
-                    Part::Sensor
-                } else {
-                    Part::Armour
-                };
-                u.set(x, y, z, p);
-            }
+    let mut u = UnitBody::new_scaled(40, 50, 40, 4, BODY_MM);
+
+    // Четыре ноги. Колено выносится наружу, ступня возвращается
+    // под корпус — отсюда изгиб, которого у столба не бывает.
+    for &hx in &[11i32, 29] {
+        for &hz in &[11i32, 29] {
+            let out = |v: i32, d: i32| if v < 20 { v - d } else { v + d };
+            let (kx, kz) = (out(hx, 4), out(hz, 4));
+            let (ax, az) = (out(hx, 2), out(hz, 2));
+            ball(&mut u, (hx, 28, hz), 5, Part::Armour);
+            limb(&mut u, (hx, 27, hz), (kx, 15, kz), 5, 4, 4, Part::Armour);
+            limb(&mut u, (kx, 15, kz), (ax, 4, az), 4, 3, 0, Part::Armour);
+            fill(
+                &mut u,
+                ((ax - 4) as usize, (ax + 4) as usize),
+                (0, 3),
+                ((az - 4) as usize, (az + 4) as usize),
+                Part::Armour,
+            );
         }
     }
-    assert!(u.seat_core(), "у шагохода обязано быть ядро");
+
+    // Корпус — линза: сужается и книзу, и кверху. Книзу обязательно:
+    // с плоским днищем бедренные шары сливаются с корпусом в одно
+    // пятно, и машина перестаёт читаться стоящей на ногах.
+    for y in 26..38 {
+        let k = if y < 30 {
+            (30 - y) as i32
+        } else if y < 34 {
+            0
+        } else {
+            (y - 34) as i32
+        };
+        disc(&mut u, (20, 20), 13 - k, (y, y + 1), Part::Armour);
+    }
+    // Двигатель в корме корпуса, выхлопной стакан назад.
+    fill(&mut u, (9, 16), (28, 36), (14, 26), Part::Engine);
+    cyl(&mut u, 0, (2, 10), (33, 20), 3, 0, Part::Engine);
+
+    // Шея-шар и голова. Голова вращается целиком, и шар под ней
+    // виден как сустав, а не как стык двух коробок.
+    ball(&mut u, (20, 38, 20), 6, Part::Armour);
+    for y in 40usize..48 {
+        let k = y.saturating_sub(46);
+        fill(&mut u, (12 + k, 28 - k), (y, y + 1), (12 + k, 28 - k), Part::Armour);
+    }
+    // Два ствола в общей маске.
+    fill(&mut u, (24, 28), (41, 47), (13, 27), Part::Weapon);
+    cyl(&mut u, 0, (26, 40), (44, 16), 2, 0, Part::Weapon);
+    cyl(&mut u, 0, (26, 40), (44, 24), 2, 0, Part::Weapon);
+    // Наблюдение: блок на макушке и два боковых кожуха.
+    fill(&mut u, (16, 24), (48, 50), (16, 24), Part::Sensor);
+    cyl(&mut u, 2, (9, 13), (20, 44), 3, 0, Part::Sensor);
+    cyl(&mut u, 2, (27, 31), (20, 44), 3, 0, Part::Sensor);
+
+    // Ядро ставится **последним**: шея-шар задевает середину корпуса,
+    // и один перекрашенный ею воксель ломал сплошной куб затравки.
+    fill(&mut u, (17, 23), (29, 35), (17, 23), Part::Core);
+
+    let mut u = seat(u, "шагоход");
     // Вращается всё, что выше корпуса: голова со стволами.
-    u.turret_y = 14;
+    u.turret_y = 38;
     u
 }
 
@@ -715,25 +788,49 @@ pub fn strider() -> UnitBody {
 mod tests {
     use super::*;
 
-    #[test]
-    fn tank_has_every_part_and_the_right_size() {
-        let t = tank();
-        // 6×3×3 м при вокселе 0.25 м — том 24×12×12 (ADR-094).
-        assert_eq!((t.vol.nx, t.vol.ny, t.vol.nz), (24, 12, 12));
+    /// Пересчёт ролей по всему тому. Габарит берётся у тела, а не
+    /// пишется числом: тест обязан переживать смену сетки, иначе он
+    /// сторожит не роли, а свои литералы.
+    fn roles(b: &UnitBody) -> [u32; 5] {
         let mut seen = [0u32; 5];
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..24 {
-                    if t.vol.get(x, y, z) {
-                        seen[t.part_at(x, y, z) as usize] += 1;
+        for z in 0..b.vol.nz as usize {
+            for y in 0..b.vol.ny as usize {
+                for x in 0..b.vol.nx as usize {
+                    if b.vol.get(x, y, z) {
+                        seen[b.part_at(x, y, z) as usize] += 1;
                     }
                 }
             }
         }
+        seen
+    }
+
+    /// Снять всё, что помечено ролью `p`.
+    fn strip_part(b: &mut UnitBody, p: Part) -> u32 {
+        let mut n = 0;
+        for z in 0..b.vol.nz as usize {
+            for y in 0..b.vol.ny as usize {
+                for x in 0..b.vol.nx as usize {
+                    if b.vol.get(x, y, z) && b.part_at(x, y, z) == p {
+                        n += u32::from(b.remove(x, y, z));
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn tank_has_every_part_and_the_right_size() {
+        let t = tank();
+        // 6×3×3 м при вокселе 0.1 м — том 60×30×30 (ADR-094, ADR-219).
+        assert_eq!((t.vol.nx, t.vol.ny, t.vol.nz), (60, 30, 30));
+        assert_eq!(t.extent_mm(), (6_000, 3_000, 3_000), "танк перестал быть шестиметровым");
+        let seen = roles(&t);
         for p in [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor] {
             assert!(seen[p as usize] > 0, "{} отсутствует", p.name());
         }
-        assert!(t.solid_count() > 1000, "танк подозрительно пуст");
+        assert!(t.solid_count() > 10_000, "танк подозрительно пуст");
     }
 
     /// Шагоход — второе ванильное тело, и требования к нему те же:
@@ -741,22 +838,14 @@ mod tests {
     #[test]
     fn strider_has_every_part_and_the_right_size() {
         let s = strider();
-        // 4×5×4 м при вокселе 0.25 м — том 16×20×16.
-        assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (16, 20, 16));
-        let mut seen = [0u32; 5];
-        for z in 0..16 {
-            for y in 0..20 {
-                for x in 0..16 {
-                    if s.vol.get(x, y, z) {
-                        seen[s.part_at(x, y, z) as usize] += 1;
-                    }
-                }
-            }
-        }
+        // 4×5×4 м при вокселе 0.1 м — том 40×50×40.
+        assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (40, 50, 40));
+        assert_eq!(s.extent_mm(), (4_000, 5_000, 4_000), "шагоход сменил габарит");
+        let seen = roles(&s);
         for p in [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor] {
             assert!(seen[p as usize] > 0, "{} отсутствует", p.name());
         }
-        assert!(s.solid_count() > 400, "шагоход подозрительно пуст");
+        assert!(s.solid_count() > 4_000, "шагоход подозрительно пуст");
     }
 
     /// **Целый шагоход работает весь.** Ноги, корпус и голова обязаны
@@ -831,15 +920,7 @@ mod tests {
     fn shooting_out_the_engine_stops_the_tank_but_does_not_kill_it() {
         let mut t = tank();
         let mut b = CoreBufs::new();
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..24 {
-                    if t.vol.get(x, y, z) && t.part_at(x, y, z) == Part::Engine {
-                        t.remove(x, y, z);
-                    }
-                }
-            }
-        }
+        assert!(strip_part(&mut t, Part::Engine) > 0, "двигателя не было");
         let s = t.status(&mut b);
         assert!(s.alive, "танк умер от потери двигателя");
         assert!(!s.engine, "двигатель жив после отстрела");
@@ -854,23 +935,16 @@ mod tests {
         let mut b = CoreBufs::new();
         assert!(t.status(&mut b).engine);
         // Срезаем корпус между двигателем и ядром: сам двигатель цел.
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 5..9 {
+        // Двигатель у танка в корме, ядро под башней, и поперечный
+        // пропил между ними отрезает первый от второго.
+        for z in 0..t.vol.nz as usize {
+            for y in 0..t.vol.ny as usize {
+                for x in 22..27 {
                     t.remove(x, y, z);
                 }
             }
         }
-        let mut engine_left = 0;
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..24 {
-                    if t.vol.get(x, y, z) && t.part_at(x, y, z) == Part::Engine {
-                        engine_left += 1;
-                    }
-                }
-            }
-        }
+        let engine_left = roles(&t)[Part::Engine as usize];
         assert!(engine_left > 0, "двигатель случайно снесли — тест ни о чём");
         let s = t.status(&mut b);
         assert!(s.alive, "ядро должно быть цело");
@@ -883,15 +957,7 @@ mod tests {
     fn destroying_the_core_kills() {
         let mut t = tank();
         let mut b = CoreBufs::new();
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..24 {
-                    if t.vol.get(x, y, z) && t.part_at(x, y, z) == Part::Core {
-                        t.remove(x, y, z);
-                    }
-                }
-            }
-        }
+        assert!(strip_part(&mut t, Part::Core) > 0, "ядра не было");
         let s = t.status(&mut b);
         assert!(!s.alive, "танк жив без ядра");
     }
@@ -902,9 +968,10 @@ mod tests {
     fn damage_is_positional() {
         let mut t = tank();
         let mut b = CoreBufs::new();
-        for z in 0..12 {
-            for y in 0..8 {
-                for x in 20..24 {
+        let nose = t.vol.nx as usize - 10;
+        for z in 0..t.vol.nz as usize {
+            for y in 0..16 {
+                for x in nose..t.vol.nx as usize {
                     t.remove(x, y, z);
                 }
             }
@@ -1023,9 +1090,10 @@ mod wreck_tests {
         // Снести половину длины и сложить снятое в контейнер damage.
         let mut damage = 0u64;
         let mm = t.mm as u64;
-        for z in 0..12 {
-            for y in 0..12 {
-                for x in 0..12 {
+        let half = t.vol.nx as usize / 2;
+        for z in 0..t.vol.nz as usize {
+            for y in 0..t.vol.ny as usize {
+                for x in 0..half {
                     if t.remove(x, y, z) {
                         damage += mm * mm * mm;
                     }

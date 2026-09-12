@@ -246,6 +246,20 @@ fn d2_cascade_is_deterministic() {
 use voxel::topo::unit::CoreBufs;
 use voxel::unit::{tank, Part, UnitBody};
 
+/// Радиус попадания **в вокселях тела** при заданном радиусе в мире.
+///
+/// Полметра — это полметра, сколько бы вокселей в него ни укладывалось
+/// (`CLAUDE.md`: мировые единицы, не воксели). Пока ребро тела было
+/// четвертью метра, здесь стояла двойка; после перехода на сто
+/// миллиметров (ADR-219) та же двойка означала бы вчетверо более
+/// слабый выстрел, и отстрел подсистемы переставал сходиться.
+fn blast_voxels(u: &UnitBody, mm: u32) -> i64 {
+    (mm / u.mm.max(1) as u32).max(1) as i64
+}
+
+/// Полметра — калибр, которым сцена отстреливает подсистемы.
+const BLAST_MM: u32 = 500;
+
 fn shoot(u: &mut UnitBody, x: i64, y: i64, z: i64, r: i64) -> u32 {
     let mut n = 0;
     for dz in -r..=r {
@@ -292,7 +306,10 @@ fn d3_shooting_a_subsystem_disables_only_it() {
         let mut t = tank();
         let mut shots = 0;
         while let Some((x, y, z)) = aim_at(&t, target) {
-            shoot(&mut t, x, y, z, 2);
+            {
+                let r = blast_voxels(&t, BLAST_MM);
+                shoot(&mut t, x, y, z, r)
+            };
             shots += 1;
             let s = t.status(&mut b);
             if !s.get(target) {
@@ -321,7 +338,10 @@ fn d3_core_hit_kills_but_a_subsystem_hit_does_not() {
     let mut b = CoreBufs::new();
     let mut t = tank();
     while let Some((x, y, z)) = aim_at(&t, Part::Core) {
-        shoot(&mut t, x, y, z, 2);
+        {
+                let r = blast_voxels(&t, BLAST_MM);
+                shoot(&mut t, x, y, z, r)
+            };
         if !t.status(&mut b).alive {
             break;
         }
@@ -341,7 +361,10 @@ fn d3_teardown_is_deterministic() {
             let x = r.below(t.vol.nx as u32) as i64;
             let y = r.below(t.vol.ny as u32) as i64;
             let z = r.below(t.vol.nz as u32) as i64;
-            shoot(&mut t, x, y, z, 2);
+            {
+                let r = blast_voxels(&t, BLAST_MM);
+                shoot(&mut t, x, y, z, r)
+            };
             let s = t.status(&mut b);
             trace.push((s.alive, s.engine, s.weapon, s.sensor, s.attached));
             if !s.alive {

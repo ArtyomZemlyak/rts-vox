@@ -45,9 +45,13 @@ fn from_body(b: &UnitBody) -> VoxModel {
 /// Гриб-споровик: юнит мода. Ножка, шляпка, сенсор на макушке.
 /// Строится процедурно — редактора здесь нет, а форма должна быть
 /// заметно другой, иначе сцена ничего не покажет.
+///
+/// Размер — те же 3.5 × 4.0 × 3.5 м, что и раньше, выраженные новым
+/// вокселем 100 мм (ADR-219): гриб остался прежним, сетка стала
+/// вдвое с половиной мельче.
 fn sporeling() -> VoxModel {
-    let (nx, ny, nz) = (14u8, 16u8, 14u8);
-    let (cx, cz) = (7i32, 7i32);
+    let (nx, ny, nz) = (35u8, 40u8, 35u8);
+    let (cx, cz) = (17i32, 17i32);
     let mut voxels = Vec::new();
     for z in 0..nz {
         for y in 0..ny {
@@ -55,18 +59,19 @@ fn sporeling() -> VoxModel {
                 let (dx, dz) = (x as i32 - cx, z as i32 - cz);
                 let r2 = dx * dx + dz * dz;
                 // Ножка снизу, шляпка сверху.
-                let stalk = y < 9 && r2 <= 9;
-                let cap = (9..14).contains(&y) && r2 <= 36 - (y as i32 - 9) * 6;
+                let stalk = y < 22 && r2 <= 56;
+                let cap = (22..35).contains(&y) && r2 <= 225 - (y as i32 - 22) * 12;
                 if !stalk && !cap {
                     continue;
                 }
-                let tag = if (5..9).contains(&x) && (6..9).contains(&y) && (5..9).contains(&z) {
+                let tag = if (13..22).contains(&x) && (15..22).contains(&y) && (13..22).contains(&z)
+                {
                     PartTag::Core
-                } else if y < 3 {
+                } else if y < 7 {
                     PartTag::Engine
-                } else if cap && y == 9 && r2 >= 20 {
+                } else if cap && y == 22 && r2 >= 125 {
                     PartTag::Weapon
-                } else if y >= 13 {
+                } else if y >= 32 {
                     PartTag::Sensor
                 } else {
                     PartTag::Armour
