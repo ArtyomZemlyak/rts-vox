@@ -880,7 +880,35 @@ impl World {
     /// Вернёт `None`, если типа с таким номером нет или экономика
     /// не привязана: молча ставить юнита с нулевой скоростью нельзя —
     /// это неподвижная машина, которую никто не заказывал.
+    ///
+    /// **Тело заводится уже сделанным из материи.** Машина, поставленная
+    /// на карту расстановкой, — это машина, которая из чего-то состоит,
+    /// и её стоимость входит в начальную сумму учёта: ровно так партия
+    /// с чего-то начинается (`docs/07-economy.md`, «содержимое при
+    /// заведении входит в начальную сумму»). Без этого подбитая
+    /// стартовая машина не оставляла бы обломка, а бак краулера
+    /// «наполнялся» бы стоимостью собственного корпуса.
     pub fn spawn_kind(&mut self, x: i32, z: i32, owner: u8, kind_id: u16) -> Option<u32> {
+        self.spawn_kind_inner(x, z, owner, kind_id, true)
+    }
+
+    /// То же, но **тело пустое**: материю в него ещё предстоит вложить.
+    ///
+    /// Так появляются недострой и заказ завода: их материя приходит
+    /// переводом из запаса, а не возникает вместе с ними. Заведи их
+    /// наполненными — и стройка удваивала бы материю.
+    fn spawn_kind_empty(&mut self, x: i32, z: i32, owner: u8, kind_id: u16) -> Option<u32> {
+        self.spawn_kind_inner(x, z, owner, kind_id, false)
+    }
+
+    fn spawn_kind_inner(
+        &mut self,
+        x: i32,
+        z: i32,
+        owner: u8,
+        kind_id: u16,
+        made: bool,
+    ) -> Option<u32> {
         let e = self.econ.as_ref()?;
         let ki = e.kinds.index_of(kind_id)?;
         let d = e.kinds.at(ki).clone();
@@ -901,12 +929,28 @@ impl World {
         // тело готовой машины, бак краулера, вместимость склада.
         // Контейнер на каждый из пяти тысяч слотов был бы пятью
         // тысячами пустых записей в учёте.
+        // Контейнер один на юнита: тело и бак вместе. Тело — это
+        // `cost` единиц, бак — остальное, и «сколько везёт» считается
+        // вычитанием. Два контейнера на юнита стоили бы вдвое больше
+        // записей ради одного вычитания.
         let cap = d.cost.saturating_add(d.tank);
         if let Some(e) = self.econ.as_mut() {
-            let c = e.ledger.create(matter::Kind::Body, 0, cap);
+            let held = if made { d.cost } else { 0 };
+            let c = e.ledger.create(matter::Kind::Body, held, cap);
             self.units.store[k] = c;
         }
         Some(id)
+    }
+
+    /// Сколько юнит везёт сверх собственного тела.
+    pub fn cargo(&self, i: usize) -> matter::Amount {
+        let Some(e) = self.econ.as_ref() else { return 0 };
+        let c = self.units.store[i];
+        let ki = self.units.kind[i];
+        if c == economy::NO_CONTAINER || ki == economy::NO_KIND {
+            return 0;
+        }
+        e.ledger.held(c).saturating_sub(e.kinds.at(ki as usize).cost)
     }
 
     /// Чем кончилась партия.
@@ -1405,7 +1449,7 @@ impl World {
         if e.kinds.at(bki as usize).build_rate == 0 {
             return false;
         }
-        let Some(site) = self.spawn_kind(x, z, owner, kind_id) else { return false };
+        let Some(site) = self.spawn_kind_empty(x, z, owner, kind_id) else { return false };
         let k = site as usize;
         let cost = self
             .econ
@@ -1528,6 +1572,11 @@ impl World {
                 }
                 _ => voxel::NOBODY,
             };
+            // Места не хватило на следующий воксель — это и есть
+            // «бак полон». Считать полным `room == 0` нельзя: остаток
+            // почти никогда не делится на плотность материала нацело,
+            // и копатель вставал бы с непустым остатком навсегда.
+            let mut full = false;
             'ball: for dy in -r..=r {
                 for dz in -r..=r {
                     for dx in -r..=r {
@@ -1552,6 +1601,7 @@ impl World {
                             }
                             let per = econ.as_ref().expect("экономика").per_voxel(m);
                             if per > room {
+                                full = true;
                                 break 'ball;
                             }
                             room -= per;
@@ -1559,6 +1609,14 @@ impl World {
                         g.world.queue_dig_by(x as u32, y as u32, z as u32, by);
                     }
                 }
+            }
+            if full {
+                // Слой не догрызен — забой не углубляется, и, разгрузившись,
+                // копатель вернётся ровно сюда.
+                u.stance[i] = STANCE_HAUL;
+                u.job[i] = NO_TARGET;
+                u.face[i] = (gx, gy, gz);
+                continue;
             }
             u.goal_y[i] -= 1;
             // Забой уходит вглубь вместе с приказом: отвезя груз,
@@ -3012,7 +3070,7 @@ impl World {
                 let e = self.econ.as_ref().expect("экономика");
                 e.kinds.at(ki as usize).id
             };
-            let Some(made) = self.spawn_kind(x, z, owner, id) else { continue };
+            let Some(made) = self.spawn_kind_empty(x, z, owner, id) else { continue };
             let e = self.econ.as_mut().expect("экономика");
             let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else { continue };
             let held = e.lines[li].held;
@@ -3150,6 +3208,14 @@ impl World {
         let mut live = vec![0usize; owners];
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
+            // **По `alive`, а не по списку живых.** Список пересобирает
+            // фаза `NavUpdate` в начале тика, а уборка идёт в конце:
+            // убитый этим тиком в списке ещё лежит, и исход отставал бы
+            // на тик. Отставание на тик — это разный исход у разных
+            // клиентов, если один из них на этом тике остановится.
+            if !self.units.alive[i] {
+                continue;
+            }
             let o = self.units.owner[i] as usize;
             if o < owners {
                 live[o] += 1;

@@ -344,6 +344,7 @@ impl StableRemove for Vec<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::AIR;
     use crate::Generator;
 
     struct Flat {
