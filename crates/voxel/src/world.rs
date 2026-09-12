@@ -126,6 +126,94 @@ pub struct MatCursor {
     valid: bool,
 }
 
+/// Сколько потоков строят битовый объём на старте.
+///
+/// Число зафиксировано, а не взято у ОС (`CLAUDE.md`): от него зависит
+/// только время, но не результат — каждый поток пишет свои слова,
+/// а слово это чистая функция генератора, и это проверяется тестом.
+/// Восемь — по числу ядер машины замеров (ADR-228).
+const FILL_THREADS: usize = 8;
+
+/// Меньше этого колонок объём строится в один поток: запуск потоков
+/// стоит дороже самой работы (ADR-080).
+const FILL_PARALLEL_FROM: u64 = 1 << 14;
+
+/// Построить битовый объём занятости из генератора.
+///
+/// **Колонками, а не по вокселю.** Генератор считает высоту поверхности,
+/// толщину почвы и узлы трёхмерного шума один раз на колонку (ADR-114);
+/// повоксельный обход пересчитывал их на каждый воксел и стоил
+/// 213 нс за воксел — на километре это тридцать часов (ADR-228).
+///
+/// **Параллельно по полосам `z`.** Слова полосы `[z0, z1)` при одном `y`
+/// лежат подряд, поэтому объём режется на такие отрезки и каждый поток
+/// получает свои. Слово — чистая функция генератора, и число потоков
+/// на результат не влияет: это проверяется тестом, а не подразумевается.
+///
+/// Слово собирается целиком в местном буфере и пишется в объём один
+/// раз, а не по биту: ряды разных `y` лежат далеко друг от друга,
+/// и запись по биту била бы в новую строку кэша на каждый воксел.
+fn fill_bits(
+    nx: u32,
+    ny: u32,
+    nz: u32,
+    wx: u32,
+    g: &(dyn Generator + Send + Sync),
+    threads: usize,
+) -> Vec<u64> {
+    let (wxu, nyu, nzu) = (wx as usize, ny as usize, nz as usize);
+    let mut bits = vec![0u64; wxu * nyu * nzu];
+    if nx == 0 || ny == 0 || nz == 0 {
+        return bits;
+    }
+    let threads = threads.clamp(1, nzu);
+    // Ширина полосы по `z`; последняя короче.
+    let zw = nzu.div_ceil(threads);
+    let bands = nzu.div_ceil(zw);
+    // Каждый ряд `y` режется на полосы отдельно: последняя полоса ряда
+    // короче, и сплошной `chunks_mut` по объёму съехал бы с раскладки.
+    let mut per: Vec<Vec<&mut [u64]>> = (0..bands).map(|_| Vec::with_capacity(nyu)).collect();
+    for row in bits.chunks_mut(nzu * wxu) {
+        for (b, piece) in row.chunks_mut(zw * wxu).enumerate() {
+            per[b].push(piece);
+        }
+    }
+    let fill = |b: usize, mut rows: Vec<&mut [u64]>| {
+        let z0 = (b * zw) as u32;
+        let z1 = ((b + 1) * zw).min(nzu) as u32;
+        let mut col = vec![AIR; nyu];
+        let mut word = vec![0u64; nyu];
+        for z in z0..z1 {
+            let zo = (z - z0) as usize * wxu;
+            for x0 in (0..nx).step_by(64) {
+                word.iter_mut().for_each(|v| *v = 0);
+                for x in x0..(x0 + 64).min(nx) {
+                    g.column(x, z, 0, &mut col);
+                    let sh = x & 63;
+                    for (v, &m) in word.iter_mut().zip(col.iter()) {
+                        *v |= u64::from(m != AIR) << sh;
+                    }
+                }
+                let w = zo + (x0 >> 6) as usize;
+                for (row, &v) in rows.iter_mut().zip(word.iter()) {
+                    row[w] = v;
+                }
+            }
+        }
+    };
+    if bands == 1 {
+        fill(0, per.pop().unwrap_or_default());
+    } else {
+        std::thread::scope(|sc| {
+            for (b, rows) in per.into_iter().enumerate() {
+                let fill = &fill;
+                sc.spawn(move || fill(b, rows));
+            }
+        });
+    }
+    bits
+}
+
 impl World {
     /// Создать мир и построить битовый объём из генератора.
     ///
@@ -144,32 +232,50 @@ impl World {
     /// одного столба шаг `nz * wx` слов, то есть промах кэша на каждый
     /// воксель высоты.
     pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator + Send + Sync>) -> World {
+        let wx = nx.div_ceil(64);
+        let threads = if u64::from(nx) * u64::from(nz) < FILL_PARALLEL_FROM {
+            1
+        } else {
+            FILL_THREADS
+        };
+        let bits = fill_bits(nx, ny, nz, wx, g.as_ref(), threads);
+        World::assemble(nx, ny, nz, max_edits_per_tick, g, bits)
+    }
+
+    /// Мир поверх **готового** битового объёма — из кэша карты (ADR-228).
+    ///
+    /// Объём обязан быть тем самым, что построил бы [`World::new`] от
+    /// этого же генератора: мир этого не проверяет, за ключ кэша
+    /// и выборочную сверку отвечает тот, кто объём прочитал.
+    /// Неверная длина — `None`.
+    pub fn from_bits(
+        nx: u32,
+        ny: u32,
+        nz: u32,
+        max_edits_per_tick: usize,
+        g: Box<dyn Generator + Send + Sync>,
+        bits: Vec<u64>,
+    ) -> Option<World> {
+        let wx = nx.div_ceil(64);
+        if bits.len() != wx as usize * ny as usize * nz as usize {
+            return None;
+        }
+        Some(World::assemble(nx, ny, nz, max_edits_per_tick, g, bits))
+    }
+
+    fn assemble(
+        nx: u32,
+        ny: u32,
+        nz: u32,
+        max_edits_per_tick: usize,
+        g: Box<dyn Generator + Send + Sync>,
+        bits: Vec<u64>,
+    ) -> World {
         let (cx, cy, cz) = (
             nx.div_ceil(CS as u32),
             ny.div_ceil(CS as u32),
             nz.div_ceil(CS as u32),
         );
-        let wx = nx.div_ceil(64);
-        let mut bits = vec![0u64; (wx * ny * nz) as usize];
-        let mut col = vec![AIR; ny as usize];
-        let mut slab = vec![0u64; (wx * ny) as usize];
-        for z in 0..nz {
-            slab.iter_mut().for_each(|w| *w = 0);
-            for x in 0..nx {
-                g.column(x, z, 0, &mut col);
-                let (w, m) = ((x >> 6) as usize, 1u64 << (x & 63));
-                for (y, mat) in col.iter().enumerate() {
-                    if *mat != AIR {
-                        slab[y * wx as usize + w] |= m;
-                    }
-                }
-            }
-            for y in 0..ny {
-                let dst = ((y * nz + z) * wx) as usize;
-                let src = (y * wx) as usize;
-                bits[dst..dst + wx as usize].copy_from_slice(&slab[src..src + wx as usize]);
-            }
-        }
         World {
             nx,
             ny,
@@ -187,7 +293,7 @@ impl World {
             cx,
             cy,
             bits,
-            wx,
+            wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
             applied: Vec::new(),
             defer_buf: Vec::new(),
@@ -228,10 +334,13 @@ impl World {
         ((c * self.cy + b) * self.cx + a) as usize
     }
 
+    /// Слово и маска воксела. Счёт в `usize`, а не в `u32`: на карте
+    /// в километр рядов `ny·nz` больше, чем влезает в тридцать два бита
+    /// слов (ADR-228).
     #[inline]
     fn bit_index(&self, x: u32, y: u32, z: u32) -> (usize, u64) {
         (
-            (((y * self.nz + z) * self.wx) + (x >> 6)) as usize,
+            (y as usize * self.nz as usize + z as usize) * self.wx as usize + (x >> 6) as usize,
             1u64 << (x & 63),
         )
     }
@@ -245,6 +354,36 @@ impl World {
         }
         let (w, m) = self.bit_index(x, y, z);
         self.bits[w] & m != 0
+    }
+
+    /// До 64 вокселей занятости подряд вдоль `+X`, начиная с `x`:
+    /// бит `i` — воксел `x + i`. Всё за краем мира и дальше `n` — ноль,
+    /// ровно как у [`World::solid`].
+    ///
+    /// Нужен тому, кто читает столб по многу раз. Навигация сканирует
+    /// клетку в `step` колонок и прежде спрашивала каждый их воксел
+    /// отдельно; словом она берёт весь ряд клетки разом, и обращений
+    /// к объёму становится в `step` раз меньше (ADR-228).
+    #[inline]
+    pub fn solid_bits(&self, x: u32, y: u32, z: u32, n: u32) -> u64 {
+        if x >= self.nx || y >= self.ny || z >= self.nz || n == 0 {
+            return 0;
+        }
+        let (w, _) = self.bit_index(x, y, z);
+        let sh = x & 63;
+        let lo = self.bits[w] >> sh;
+        let hi = if sh != 0 && (x >> 6) + 1 < self.wx {
+            self.bits[w + 1] << (64 - sh)
+        } else {
+            0
+        };
+        let v = lo | hi;
+        let keep = n.min(64).min(self.nx - x);
+        if keep >= 64 {
+            v
+        } else {
+            v & ((1u64 << keep) - 1)
+        }
     }
 
     /// Материал воксела. Тронутый чанк — из слоя изменений, нетронутый —
@@ -888,5 +1027,106 @@ mod tests {
         for &(x, y, z) in &inner {
             assert!(!w.solid(x, y, z), "воксель у рамки не снялся в ({x}, {y}, {z})");
         }
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::*;
+
+    /// Рельеф с пещерами: поверхность ступенями, под ней дыры. Пещеры
+    /// нужны, чтобы объём не был функцией одной высоты — иначе тест
+    /// не отличил бы колонку от повоксельного обхода.
+    struct Holey;
+
+    impl Generator for Holey {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            let h = 20 + (x / 5) % 7 + (z / 3) % 5;
+            if y >= h || (x * 7 + y * 13 + z * 3) % 11 == 0 {
+                return AIR;
+            }
+            (1 + (x + y + z) % 3) as Mat
+        }
+    }
+
+    /// Повоксельный обход — эталон: так объём строился до ADR-228.
+    fn reference(nx: u32, ny: u32, nz: u32, g: &dyn Generator) -> Vec<u64> {
+        let wx = nx.div_ceil(64);
+        let mut bits = vec![0u64; (wx * ny * nz) as usize];
+        for z in 0..nz {
+            for y in 0..ny {
+                let row = ((y * nz + z) * wx) as usize;
+                for x in 0..nx {
+                    if g.material(x, y, z) != AIR {
+                        bits[row + (x >> 6) as usize] |= 1u64 << (x & 63);
+                    }
+                }
+            }
+        }
+        bits
+    }
+
+    /// **Колоночная сборка совпадает с повоксельной до бита, при любом
+    /// числе потоков.** Размеры нарочно не кратны ни слову, ни полосе:
+    /// 150 по `x` — два слова с хвостом в 22 бита, 37 по `z` — полосы
+    /// неравной ширины, и больше потоков, чем полос, тоже бывает.
+    #[test]
+    fn the_column_fill_matches_the_voxel_walk_on_any_thread_count() {
+        let (nx, ny, nz) = (150u32, 40u32, 37u32);
+        let want = reference(nx, ny, nz, &Holey);
+        assert!(
+            want.iter().any(|&w| w != 0) && want.iter().any(|&w| w != u64::MAX),
+            "эталон однороден — сверять нечего"
+        );
+        for threads in [1usize, 2, 3, 8, 64] {
+            let got = fill_bits(nx, ny, nz, nx.div_ceil(64), &Holey, threads);
+            assert_eq!(got, want, "потоков {threads}: объём разошёлся с повоксельным");
+        }
+    }
+
+    /// **Мир из готового объёма отвечает так же, как построенный.**
+    /// Это и есть контракт кэша карты (ADR-228).
+    #[test]
+    fn a_world_from_bits_answers_like_a_generated_one() {
+        let (nx, ny, nz) = (70u32, 20u32, 33u32);
+        let a = World::new(nx, ny, nz, 16, Box::new(Holey));
+        let b = World::from_bits(nx, ny, nz, 16, Box::new(Holey), a.bits().to_vec())
+            .expect("длина объёма верна");
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in 0..nx {
+                    assert_eq!(a.solid(x, y, z), b.solid(x, y, z), "воксел {x} {y} {z}");
+                }
+            }
+        }
+        assert!(
+            World::from_bits(nx, ny, nz, 16, Box::new(Holey), vec![0; 5]).is_none(),
+            "объём не той длины принят"
+        );
+    }
+
+    /// **Слово занятости совпадает с побитовым опросом** — на стыке
+    /// слов, у края мира и при укороченном запросе.
+    #[test]
+    fn solid_bits_agree_with_solid() {
+        let (nx, ny, nz) = (150u32, 30u32, 20u32);
+        let w = World::new(nx, ny, nz, 16, Box::new(Holey));
+        for z in 0..nz {
+            for y in 0..ny {
+                for x in (0..nx).step_by(7).chain([63, 64, 127, 128, 149]) {
+                    for n in [1u32, 5, 10, 63, 64, 200] {
+                        let v = w.solid_bits(x, y, z, n);
+                        for i in 0..64u32 {
+                            let want = i < n && w.solid(x + i, y, z);
+                            assert_eq!((v >> i) & 1 != 0, want, "x {x} y {y} z {z} n {n} бит {i}");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(w.solid_bits(nx, 0, 0, 8), 0);
+        assert_eq!(w.solid_bits(0, ny, 0, 8), 0);
+        assert_eq!(w.solid_bits(0, 0, nz, 8), 0);
+        assert_eq!(w.solid_bits(0, 0, 0, 0), 0);
     }
 }

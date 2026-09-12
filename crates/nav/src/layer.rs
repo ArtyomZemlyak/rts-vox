@@ -31,6 +31,132 @@ pub const NO_FLOOR: u16 = u16::MAX;
 /// и печатается, а не умалчивается (ADR-136).
 pub const MAX_LEVELS: usize = 8;
 
+/// Сколько потоков строят слой на старте.
+///
+/// Число зафиксировано, а не взято у ОС (`CLAUDE.md`): от него зависит
+/// только время, но не результат — клетка считается от мира и ни от
+/// чего больше, потоки пишут каждый свои, и это проверяется тестом.
+/// Восемь — по числу ядер машины замеров (ADR-228).
+const BUILD_THREADS: usize = 8;
+
+/// Меньше этого клеток слой строится в один поток: запуск потоков
+/// стоит дороже самой работы (ADR-080).
+const BUILD_PARALLEL_FROM: usize = 1 << 13;
+
+/// Уровни одной клетки, посчитанные с нуля по миру.
+#[derive(Clone, Copy)]
+struct Scan {
+    levels: [u16; MAX_LEVELS],
+    n: u8,
+    top: u16,
+    over: bool,
+}
+
+impl Scan {
+    const EMPTY: Scan = Scan {
+        levels: [NO_FLOOR; MAX_LEVELS],
+        n: 0,
+        top: NO_FLOOR,
+        over: false,
+    };
+}
+
+/// Внутренности слоя — то, что кладётся в кэш карты и достаётся
+/// обратно (ADR-228). Штампов здесь нет: они не состояние, а память
+/// одного тика.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavRaw {
+    pub w: u32,
+    pub h: u32,
+    pub height: u32,
+    pub step: u32,
+    pub max_step: u32,
+    pub overflow: u64,
+    pub floor: Vec<u16>,
+    pub levels: Vec<u16>,
+    pub n_levels: Vec<u8>,
+    pub top: Vec<u16>,
+    pub stand: Vec<bool>,
+}
+
+/// Пересчитать уровни клетки — чистая функция от мира.
+///
+/// **Ряд клетки берётся словом, а не по вокселю.** Клетка — это `step`
+/// колонок, и каждый их воксел прежде спрашивался у мира отдельно:
+/// `step²·ny` обращений на клетку, а ряды разных `y` лежат в объёме
+/// далеко друг от друга, и каждое обращение — промах кэша. Слово
+/// занятости несёт все `step` колонок ряда разом: обращений
+/// становится `step·ny`, остальное — сдвиги по буферу, который целиком
+/// сидит в кэше первого уровня. На километре это разница между
+/// минутами и секундами (ADR-228).
+///
+/// Сам обход — тот же, что был: сверка с повоксельным — тестом.
+fn scan_cell(w: &World, step: u32, height: u32, cx: u32, cz: u32, words: &mut Vec<u64>) -> Scan {
+    // Собираем с запасом, а обрезаем в конце: иначе выпадали бы
+    // те уровни, что нашлись позже, то есть произвольные.
+    // Остаются **нижние** — там, где юниты и ходят (ADR-136).
+    const SCRATCH: usize = 32;
+    let mut found = [NO_FLOOR; SCRATCH];
+    let mut n = 0usize;
+    let mut over = false;
+    let ny = w.ny;
+    for dz in 0..step {
+        let (x0, z) = (cx * step, cz * step + dz);
+        words.clear();
+        words.extend((0..ny).map(|y| w.solid_bits(x0, y, z, step)));
+        for dx in 0..step {
+            let solid = |y: u32| (words[y as usize] >> dx) & 1 != 0;
+            let mut y = 1u32;
+            while y < ny {
+                if solid(y - 1) && !solid(y) {
+                    let mut clear = 0;
+                    while clear < height && y + clear < ny && !solid(y + clear) {
+                        clear += 1;
+                    }
+                    if clear >= height {
+                        // Уровни, отличающиеся на воксель, — один
+                        // и тот же: клетка шире воксела, и пол
+                        // в ней бывает неровным.
+                        let yv = y as u16;
+                        let mut merged = false;
+                        for f in found.iter_mut().take(n) {
+                            if f.abs_diff(yv) <= 1 {
+                                *f = (*f).min(yv);
+                                merged = true;
+                                break;
+                            }
+                        }
+                        if !merged {
+                            if n < SCRATCH {
+                                found[n] = yv;
+                                n += 1;
+                            } else {
+                                over = true;
+                            }
+                        }
+                        y += height;
+                        continue;
+                    }
+                }
+                y += 1;
+            }
+        }
+    }
+    found[..n].sort_unstable();
+    let top = if n == 0 { NO_FLOOR } else { found[n - 1] };
+    if n > MAX_LEVELS {
+        // Обрезка оставляет нижние — и **обязательно верхний**.
+        // Без него юнит на поверхности колонки, где уровней больше
+        // восьми, оказывался бы притянут вниз, в толщу: поверхность
+        // это не «ещё один уровень», это тот, где он стоит (ADR-138).
+        over = true;
+        found[MAX_LEVELS - 1] = top;
+        n = MAX_LEVELS;
+    }
+    let mut levels = [NO_FLOOR; MAX_LEVELS];
+    levels.copy_from_slice(&found[..MAX_LEVELS]);
+    Scan { levels, n: n as u8, top, over }
+}
 
 pub struct NavLayer {
     /// Высота пола клетки — **нижнего** её уровня.
@@ -69,15 +195,20 @@ impl NavLayer {
     /// `max_step` — какой перепад юнит перешагивает. Число игровое
     /// и приходит из данных (ADR-140), а не стоит здесь литералом.
     pub fn new(w: &World, height: u32, step: u32, max_step: u32) -> NavLayer {
+        assert!(
+            (1..=64).contains(&step),
+            "сторона нав-клетки {step} не влезает в слово занятости"
+        );
         let (nw, nh) = (w.nx / step, w.nz / step);
+        let cells = (nw * nh) as usize;
         let mut l = NavLayer {
-            floor: vec![NO_FLOOR; (nw * nh) as usize],
-            levels: vec![NO_FLOOR; (nw * nh) as usize * MAX_LEVELS],
-            n_levels: vec![0; (nw * nh) as usize],
-            top: vec![NO_FLOOR; (nw * nh) as usize],
+            floor: vec![NO_FLOOR; cells],
+            levels: vec![NO_FLOOR; cells * MAX_LEVELS],
+            n_levels: vec![0; cells],
+            top: vec![NO_FLOOR; cells],
             overflow: 0,
-            stand: vec![false; (nw * nh) as usize],
-            stamp: vec![0; (nw * nh) as usize],
+            stand: vec![false; cells],
+            stamp: vec![0; cells],
             epoch: 0,
             w: nw,
             h: nh,
@@ -85,86 +216,113 @@ impl NavLayer {
             max_step,
             step,
         };
-        for cz in 0..nh {
-            for cx in 0..nw {
-                l.refresh_cell(w, cx, cz);
+        if cells == 0 {
+            return l;
+        }
+        // Клетки считаются в общий буфер, а пишутся в слой серийно:
+        // потоки получают непересекающиеся куски буфера, а порядок
+        // записи — и счёт переполнений — остаётся порядком клеток.
+        let mut scans = vec![Scan::EMPTY; cells];
+        let threads = if cells < BUILD_PARALLEL_FROM {
+            1
+        } else {
+            BUILD_THREADS.min(nh as usize).max(1)
+        };
+        let band = (nh as usize).div_ceil(threads) * nw as usize;
+        let scan_band = |b: usize, out: &mut [Scan]| {
+            let mut words = Vec::with_capacity(w.ny as usize);
+            for (k, s) in out.iter_mut().enumerate() {
+                let i = (b * band + k) as u32;
+                *s = scan_cell(w, step, height, i % nw, i / nw, &mut words);
             }
+        };
+        if threads == 1 {
+            scan_band(0, &mut scans);
+        } else {
+            std::thread::scope(|sc| {
+                for (b, out) in scans.chunks_mut(band).enumerate() {
+                    let scan_band = &scan_band;
+                    sc.spawn(move || scan_band(b, out));
+                }
+            });
+        }
+        for (i, s) in scans.iter().enumerate() {
+            l.store(i, s);
         }
         l
     }
 
     /// Пересчитать уровни клетки. Возвращает `(пол, можно ли стоять)`.
     fn refresh_cell(&mut self, w: &World, cx: u32, cz: u32) -> (u16, bool) {
-        // Собираем с запасом, а обрезаем в конце: иначе выпадали бы
-        // те уровни, что нашлись позже, то есть произвольные.
-        // Остаются **нижние** — там, где юниты и ходят (ADR-136).
-        const SCRATCH: usize = 32;
-        let mut found = [NO_FLOOR; SCRATCH];
-        let mut n = 0usize;
-        let mut over = false;
-        for dz in 0..self.step {
-            for dx in 0..self.step {
-                let (x, z) = (cx * self.step + dx, cz * self.step + dz);
-                let mut y = 1u32;
-                while y < w.ny {
-                    if w.solid(x, y - 1, z) && !w.solid(x, y, z) {
-                        let mut clear = 0;
-                        while clear < self.height && y + clear < w.ny && !w.solid(x, y + clear, z)
-                        {
-                            clear += 1;
-                        }
-                        if clear >= self.height {
-                            // Уровни, отличающиеся на воксель, — один
-                            // и тот же: клетка шире воксела, и пол
-                            // в ней бывает неровным.
-                            let yv = y as u16;
-                            let mut merged = false;
-                            for f in found.iter_mut().take(n) {
-                                if f.abs_diff(yv) <= 1 {
-                                    *f = (*f).min(yv);
-                                    merged = true;
-                                    break;
-                                }
-                            }
-                            if !merged {
-                                if n < SCRATCH {
-                                    found[n] = yv;
-                                    n += 1;
-                                } else {
-                                    over = true;
-                                }
-                            }
-                            y += self.height;
-                            continue;
-                        }
-                    }
-                    y += 1;
-                }
-            }
-        }
-        found[..n].sort_unstable();
-        let top = if n == 0 { NO_FLOOR } else { found[n - 1] };
-        if n > MAX_LEVELS {
-            // Обрезка оставляет нижние — и **обязательно верхний**.
-            // Без него юнит на поверхности колонки, где уровней больше
-            // восьми, оказывался бы притянут вниз, в толщу: поверхность
-            // это не «ещё один уровень», это тот, где он стоит (ADR-138).
-            over = true;
-            found[MAX_LEVELS - 1] = top;
-            n = MAX_LEVELS;
-        }
+        let mut words = Vec::with_capacity(w.ny as usize);
+        let s = scan_cell(w, self.step, self.height, cx, cz, &mut words);
         let i = self.idx(cx, cz);
+        self.store(i, &s)
+    }
+
+    /// Записать посчитанные уровни в клетку `i`.
+    fn store(&mut self, i: usize, s: &Scan) -> (u16, bool) {
         let base = i * MAX_LEVELS;
-        self.levels[base..base + MAX_LEVELS].copy_from_slice(&found[..MAX_LEVELS]);
-        self.n_levels[i] = n as u8;
-        self.top[i] = top;
-        if over {
+        self.levels[base..base + MAX_LEVELS].copy_from_slice(&s.levels);
+        self.n_levels[i] = s.n;
+        self.top[i] = s.top;
+        if s.over {
             self.overflow += 1;
         }
-        let f = if n == 0 { NO_FLOOR } else { found[0] };
+        let f = if s.n == 0 { NO_FLOOR } else { s.levels[0] };
         self.floor[i] = f;
-        self.stand[i] = n > 0;
-        (f, n > 0)
+        self.stand[i] = s.n > 0;
+        (f, s.n > 0)
+    }
+
+    /// Внутренности слоя — для кэша карты (ADR-228). Копия, а не
+    /// заём: слой этого размера копируется за миллисекунды, а кэш
+    /// пишется раз на карту.
+    pub fn raw(&self) -> NavRaw {
+        NavRaw {
+            w: self.w,
+            h: self.h,
+            height: self.height,
+            step: self.step,
+            max_step: self.max_step,
+            overflow: self.overflow,
+            floor: self.floor.clone(),
+            levels: self.levels.clone(),
+            n_levels: self.n_levels.clone(),
+            top: self.top.clone(),
+            stand: self.stand.clone(),
+        }
+    }
+
+    /// Слой из внутренностей — из кэша карты (ADR-228). Длины обязаны
+    /// сойтись с размерами, иначе `None`: кэш читают с диска, а диск
+    /// врёт.
+    pub fn from_raw(r: NavRaw) -> Option<NavLayer> {
+        let cells = r.w as usize * r.h as usize;
+        if r.floor.len() != cells
+            || r.levels.len() != cells * MAX_LEVELS
+            || r.n_levels.len() != cells
+            || r.top.len() != cells
+            || r.stand.len() != cells
+            || !(1..=64).contains(&r.step)
+        {
+            return None;
+        }
+        Some(NavLayer {
+            floor: r.floor,
+            levels: r.levels,
+            n_levels: r.n_levels,
+            top: r.top,
+            overflow: r.overflow,
+            stand: r.stand,
+            stamp: vec![0; cells],
+            epoch: 0,
+            w: r.w,
+            h: r.h,
+            height: r.height,
+            max_step: r.max_step,
+            step: r.step,
+        })
     }
 
     /// Уровни клетки по возрастанию.
@@ -435,4 +593,154 @@ pub struct NavStats {
     /// Рёбер разорвано и появилось.
     pub edges_lost: u64,
     pub edges_gained: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use voxel::store::{Mat, AIR};
+
+    /// Рельеф с пещерами: уровней в колонке несколько, и у части клеток
+    /// их больше, чем слой помнит, — иначе обрезка осталась бы
+    /// непроверенной.
+    struct Caves;
+
+    impl voxel::Generator for Caves {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            let h = 24 + (x / 3) % 9 + (z / 4) % 6;
+            if y >= h || (y / 3 + x / 5 + z / 7) % 4 == 0 {
+                return AIR;
+            }
+            1
+        }
+    }
+
+    /// Повоксельный обход клетки — тот, что был до ADR-228. Оставлен
+    /// здесь целиком как эталон: словесный обход обязан давать ровно
+    /// то же, включая обрезку и слияние соседних уровней.
+    fn reference(w: &World, step: u32, height: u32, cx: u32, cz: u32) -> Scan {
+        const SCRATCH: usize = 32;
+        let mut found = [NO_FLOOR; SCRATCH];
+        let mut n = 0usize;
+        let mut over = false;
+        for dz in 0..step {
+            for dx in 0..step {
+                let (x, z) = (cx * step + dx, cz * step + dz);
+                let mut y = 1u32;
+                while y < w.ny {
+                    if w.solid(x, y - 1, z) && !w.solid(x, y, z) {
+                        let mut clear = 0;
+                        while clear < height && y + clear < w.ny && !w.solid(x, y + clear, z) {
+                            clear += 1;
+                        }
+                        if clear >= height {
+                            let yv = y as u16;
+                            let mut merged = false;
+                            for f in found.iter_mut().take(n) {
+                                if f.abs_diff(yv) <= 1 {
+                                    *f = (*f).min(yv);
+                                    merged = true;
+                                    break;
+                                }
+                            }
+                            if !merged {
+                                if n < SCRATCH {
+                                    found[n] = yv;
+                                    n += 1;
+                                } else {
+                                    over = true;
+                                }
+                            }
+                            y += height;
+                            continue;
+                        }
+                    }
+                    y += 1;
+                }
+            }
+        }
+        found[..n].sort_unstable();
+        let top = if n == 0 { NO_FLOOR } else { found[n - 1] };
+        if n > MAX_LEVELS {
+            over = true;
+            found[MAX_LEVELS - 1] = top;
+            n = MAX_LEVELS;
+        }
+        let mut levels = [NO_FLOOR; MAX_LEVELS];
+        levels.copy_from_slice(&found[..MAX_LEVELS]);
+        Scan { levels, n: n as u8, top, over }
+    }
+
+    /// **Словесный обход клетки совпадает с повоксельным** — на всех
+    /// сторонах клетки, ростах юнита, у края мира и там, где уровней
+    /// больше, чем слой помнит.
+    #[test]
+    fn the_word_scan_matches_the_voxel_scan() {
+        // Размеры не кратны стороне клетки: последняя клетка ряда
+        // упирается в край мира.
+        let w = World::new(97, 48, 61, 16, Box::new(Caves));
+        let mut words = Vec::new();
+        let (mut levels, mut over) = (0usize, 0usize);
+        for step in [1u32, 2, 3, 10] {
+            for height in [1u32, 2, 4] {
+                let (nw, nh) = (w.nx / step, w.nz / step);
+                for cz in 0..nh {
+                    for cx in 0..nw {
+                        let got = scan_cell(&w, step, height, cx, cz, &mut words);
+                        let want = reference(&w, step, height, cx, cz);
+                        assert_eq!(got.levels, want.levels, "клетка {cx},{cz}, сторона {step}, рост {height}");
+                        assert_eq!(got.n, want.n, "клетка {cx},{cz}: число уровней");
+                        assert_eq!(got.top, want.top, "клетка {cx},{cz}: поверхность");
+                        assert_eq!(got.over, want.over, "клетка {cx},{cz}: переполнение");
+                        levels += got.n as usize;
+                        over += usize::from(got.over);
+                    }
+                }
+            }
+        }
+        assert!(levels > 100, "уровней всего {levels} — сверять почти нечего");
+        assert!(over > 0, "переполнения не случилось — обрезка не проверена");
+    }
+
+    /// **Параллельная сборка даёт то же, что клетка за клеткой**, включая
+    /// счёт переполнений: он складывается по кускам в порядке клеток.
+    #[test]
+    fn the_parallel_build_equals_the_serial_scan() {
+        // 200×200 при стороне клетки 2 — 10 000 клеток, больше порога,
+        // за которым сборка делится на потоки.
+        let w = World::new(200, 40, 200, 16, Box::new(Caves));
+        let l = NavLayer::new(&w, 4, 2, 1);
+        assert!(
+            l.w as usize * l.h as usize >= BUILD_PARALLEL_FROM,
+            "мир мал — сборка шла в один поток, и тест ничего не проверил"
+        );
+        let mut words = Vec::new();
+        let mut overflow = 0u64;
+        for cz in 0..l.h {
+            for cx in 0..l.w {
+                let s = scan_cell(&w, 2, 4, cx, cz, &mut words);
+                assert_eq!(l.levels_at(cx, cz), &s.levels[..s.n as usize], "клетка {cx},{cz}");
+                assert_eq!(l.top_at(cx, cz), s.top);
+                assert_eq!(l.floor_at(cx, cz), if s.n == 0 { NO_FLOOR } else { s.levels[0] });
+                assert_eq!(l.standable(cx, cz), s.n > 0);
+                overflow += u64::from(s.over);
+            }
+        }
+        assert_eq!(l.overflow, overflow, "счёт переполнений разошёлся");
+    }
+
+    /// **Слой из внутренностей — тот же слой.** Это контракт кэша
+    /// карты, и порча длины отвергается, а не читается наугад.
+    #[test]
+    fn raw_round_trips() {
+        let w = World::new(64, 32, 48, 16, Box::new(Caves));
+        let l = NavLayer::new(&w, 4, 2, 1);
+        let r = l.raw();
+        assert!(r.floor.iter().any(|&f| f != NO_FLOOR), "слой пуст — сверять нечего");
+        let back = NavLayer::from_raw(r.clone()).expect("внутренности целы");
+        assert_eq!(back.raw(), r);
+        let mut bad = r.clone();
+        bad.floor.pop();
+        assert!(NavLayer::from_raw(bad).is_none(), "слой не той длины принят");
+    }
 }

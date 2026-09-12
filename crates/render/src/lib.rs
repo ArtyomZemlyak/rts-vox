@@ -21,6 +21,7 @@ pub mod geom;
 pub mod look;
 pub mod occlusion;
 pub mod model;
+pub mod stream;
 pub mod tex;
 
 /// Поворот вокруг вертикали, при котором нос тела — его **+X** — смотрит

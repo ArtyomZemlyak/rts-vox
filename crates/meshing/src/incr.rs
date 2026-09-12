@@ -77,10 +77,20 @@ impl IncMesher {
 
     pub fn collect_quads(&self) -> Vec<Quad> {
         let mut out = Vec::with_capacity(self.quad_count());
+        self.append_quads(&mut out);
+        out
+    }
+
+    /// Дописать квады в чужой вектор.
+    ///
+    /// То же, что `collect_quads`, но без выделения: потоковая сборка
+    /// зовёт это тысячи раз за кадр, и новый вектор на каждый чанк
+    /// мерил бы аллокатор.
+    pub fn append_quads(&self, out: &mut Vec<Quad>) {
+        out.reserve(self.quad_count());
         for v in self.slice_quads.iter() {
             out.extend_from_slice(v);
         }
-        out
     }
 
     #[inline(always)]
