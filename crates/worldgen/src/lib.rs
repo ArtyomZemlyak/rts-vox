@@ -74,6 +74,20 @@ pub struct Params {
     pub terrace_hi: u32,
     /// Толщина пласта породы в вокселях. Ноль — слоистости нет.
     pub bed: u32,
+    /// Доля карты, которая остаётся **равниной**, в тысячных.
+    ///
+    /// Карта из одних холмов играется плохо и выглядит однообразно:
+    /// армии негде строиться, и каждый склон похож на соседний.
+    /// Возвышенности обязаны быть **событием**, а не фоном, поэтому
+    /// размах рельефа умножается на маску с очень крупным шагом,
+    /// и на большей части карты она близка к нулю (ADR-226).
+    pub plains: u32,
+    /// Шаг маски равнин в вокселях. Крупнее размаха форм: иначе
+    /// равнина и холм перемешиваются, и получается та же каша.
+    pub plains_period: u32,
+    /// Насколько равнина всё-таки не стол: доля размаха, которая
+    /// остаётся даже там, где маска на нуле, в тысячных.
+    pub plains_floor: u32,
 }
 
 impl Params {
@@ -119,6 +133,9 @@ impl Default for Params {
             terrace_lo: 31_000,
             terrace_hi: 34_000,
             bed: 3,
+            plains: 620,
+            plains_period: 320,
+            plains_floor: 130,
         }
     }
 }
@@ -244,6 +261,23 @@ fn terraced(p: &Params, seed: u64, x: u32, z: u32, h: i64) -> i64 {
     (h * (65536 - w) + hard * w) / 65536
 }
 
+/// Местный размах рельефа: равнина или возвышенность.
+///
+/// Маска берётся с шагом много крупнее размаха форм и **сдвигается
+/// порогом**: доля `plains` карты уходит в равнину, остальное
+/// поднимается тем плавнее, чем дальше от порога. Плавность здесь
+/// не украшение — резкий порог дал бы стену по границе равнины.
+fn local_relief(p: &Params, seed: u64, x: u32, z: u32) -> u64 {
+    let m = value_noise(seed ^ 0x9147, x, z, p.plains_period.max(8)) as u64;
+    let cut = (p.plains.min(1000) as u64 * 65536) / 1000;
+    let floor = (p.relief as u64 * p.plains_floor.min(1000) as u64) / 1000;
+    if m <= cut {
+        return floor;
+    }
+    let span = (65536 - cut).max(1);
+    floor + ((p.relief as u64 - floor) * (m - cut)) / span
+}
+
 /// Высота поверхности в колонке. Две октавы: крупный рельеф плюс мелкий.
 /// Поверх них — обрезка по ступени (`terraced`).
 pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
@@ -251,7 +285,11 @@ pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
     let big = value_noise(seed, x, z, p.feature.max(4)) as u64;
     let small = value_noise(seed ^ 0x51ED, x, z, (p.feature / 4).max(1)) as u64;
     let n = (big * (16 - d) + small * d) / 16;
-    let h = p.base_height as i64 + (n * p.relief as u64 * 2) as i64 / 65536 - p.relief as i64;
+    // Размах рельефа — **местный**. Маска с очень крупным шагом
+    // прижимает его к `plains_floor` на большей части карты и
+    // отпускает на полную там, где поднимается (ADR-226).
+    let rel = local_relief(p, seed, x, z);
+    let h = p.base_height as i64 + (n * rel * 2) as i64 / 65536 - rel as i64;
     terraced(p, seed, x, z, h).clamp(8, p.ny as i64 - 8) as u32
 }
 
@@ -282,7 +320,7 @@ pub fn surface_height(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
 /// из шести возможных. Меньше — и гребни не оголяются; больше — и
 /// порода выходит уже на середине склона, а лощины остаются
 /// единственным местом с землёй.
-const HILL_STRIP: u32 = 3;
+const HILL_STRIP: u32 = 2;
 
 pub fn soil_depth(p: &Params, seed: u64, x: u32, z: u32) -> u32 {
     let h = surface_height(p, seed, x, z) as i64;

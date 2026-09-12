@@ -96,7 +96,11 @@ fn ridges_lose_their_soil() {
             let d = soil_depth(&p, 42, x, z) as u64;
             if h >= p.base_height + 15 {
                 high = (high.0 + d, high.1 + 1);
-            } else if h + 10 <= p.base_height {
+            } else if h <= p.base_height + 2 {
+                // **Равнина, а не лощина.** С маской равнин (ADR-226)
+                // большая часть карты лежит на базовой высоте, а ниже
+                // неё почти ничего нет: сравнивать гребень надо
+                // с равниной, иначе сравнивать не с чем.
                 low = (low.0 + d, low.1 + 1);
             }
         }

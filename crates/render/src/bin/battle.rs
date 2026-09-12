@@ -134,6 +134,10 @@ struct Fx {
     chamfer: bool,
     /// Ребро воксела тела юнита, миллиметры.
     body_mm: u16,
+    /// Сколько крупных машин на сторону. Стратегия масштабная, а строй
+    /// из одних танков разницы масштабов не даёт: паук вдесятеро выше
+    /// танка, и видно это только когда они в одном кадре.
+    bigs: usize,
     /// Трассировка лучей: 0 — растеризация, 1 — освещение Solari
     /// в реальном времени, 2 — эталонный путь-трейсер.
     ///
@@ -273,8 +277,8 @@ struct Art {
     /// Меш корпуса **по отделке**: сталь, стекло и резина идут
     /// разными материалами, а материал у меша один (ADR-211).
     /// Пустая отделка ручки не получает и сущности не заводит.
-    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
-    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
+    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 4],
+    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 4],
     /// Шар единичного радиуса: вспышка, дуло, огонь воронки. Размер
     /// задаёт масштаб, потому что размер у каждого свой и меняется
     /// каждый кадр.
@@ -465,6 +469,7 @@ fn main() {
         sky: true,
         chamfer: true,
         body_mm: 0,
+        bigs: 0,
         rt: 0,
     };
     let mut sky = Sky {
@@ -493,6 +498,7 @@ fn main() {
             "--sky" => fx.sky = v != "0",
             "--chamfer" => fx.chamfer = v != "0",
             "--mm" => fx.body_mm = v.parse().unwrap_or(fx.body_mm),
+            "--big" => fx.bigs = v.parse().unwrap_or(fx.bigs),
             "--rt" => fx.rt = v.parse().unwrap_or(fx.rt),
             "--sun" => sky.elevation = v.parse().unwrap_or(sky.elevation),
             "--sun-az" => sky.azimuth = v.parse().unwrap_or(sky.azimuth),
@@ -509,7 +515,7 @@ fn main() {
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
-[--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--rt 0|1|2] \
+[--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--big на-сторону] [--rt 0|1|2] \
 [--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100] \
 [--look {}]",
                     look::LOOK_ALL.map(look::look_name).join("|")
@@ -676,7 +682,16 @@ fn setup(
     // **Ноль значит «как нарисовано»**, и это умолчание: тело знает своё
     // ребро само (ADR-219). Ключ `--mm` пересэмплирует принудительно —
     // он остался, чтобы сравнивать разрешения не по памяти, а рядом.
-    let bodies = [voxel::unit::tank(), voxel::unit::strider()].map(|b| {
+    // Четыре тела, а не два: обычная машина стороны и крупная.
+    // Номер набора — `сторона + 2·крупная`. Разница масштабов видна
+    // только когда паук и танк стоят в одном кадре.
+    let bodies = [
+        voxel::unit::tank(),
+        voxel::unit::strider(),
+        voxel::roster::siege_walker(),
+        voxel::roster::commander(),
+    ]
+    .map(|b| {
         if mm == 0 || mm == b.mm {
             return b;
         }
@@ -738,10 +753,14 @@ fn setup(
     let hull = [
         unit_mesh(&bodies[0], tint[0], Slice::Hull, &mut meshes),
         unit_mesh(&bodies[1], tint[1], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[2], tint[0], Slice::Hull, &mut meshes),
+        unit_mesh(&bodies[3], tint[1], Slice::Hull, &mut meshes),
     ];
     let turret = [
         unit_mesh(&bodies[0], tint[0], Slice::Turret, &mut meshes),
         unit_mesh(&bodies[1], tint[1], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[2], tint[0], Slice::Turret, &mut meshes),
+        unit_mesh(&bodies[3], tint[1], Slice::Turret, &mut meshes),
     ];
     // Цвет несут вершины, и это не «умножается на базу»: в Bevy 0.19.1
     // цвет вершины **подменяет** `base_color` целиком
@@ -905,6 +924,9 @@ fn setup(
     let cap = sim.r.world.units.len().max(1);
     for i in 0..cap {
         let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
+        // Первые слоты каждой стороны отдаются крупным машинам: места
+        // в мире фиксированы, поэтому и набор тел выбирается по номеру.
+        let owner = owner + if i / 2 < fx.bigs { 2 } else { 0 };
         // По сущности на отделку. Системы движения ищут по метке
         // и обновляют их все разом одним и тем же преобразованием:
         // корпус остаётся корпусом, из скольких бы материалов он
