@@ -329,6 +329,110 @@ impl Bodies {
     pub fn index_of(&self, id: u64) -> Option<usize> {
         self.list.iter().position(|b| b.id == id)
     }
+
+    /// Записать тела в буфер (ADR-229).
+    ///
+    /// Пишется всё, включая `next_id`: номер не переиспользуется,
+    /// и загруженная партия, начавшая раздавать номера заново,
+    /// выдала бы наездникам чужое тело — ровно то, от чего лечил
+    /// ADR-118.
+    ///
+    /// `landed_log` и `spawned` живут один тик, но пишутся тоже:
+    /// сохранение снимается **между** тиками, а «почти пустой список»
+    /// это тоже состояние.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.usize(self.max_bodies);
+        b.fx(self.gravity);
+        b.usize(self.refused);
+        b.u64(self.next_id);
+        b.u64s(&self.spawned);
+        b.u32(self.list.len() as u32);
+        for bd in &self.list {
+            b.u64(bd.id);
+            b.i64(bd.ox);
+            b.i64(bd.oy);
+            b.i64(bd.oz);
+            b.u16(bd.sx);
+            b.u16(bd.sz);
+            b.u32(bd.fallen);
+            b.fx(bd.vy);
+            b.fx(bd.fy);
+            b.bool(bd.fresh);
+            b.bool(bd.resting);
+            b.u16s(&bd.floor);
+            b.u32s(&bd.riders);
+            b.u32(bd.voxels.len() as u32);
+            for v in &bd.voxels {
+                b.u16(v.x);
+                b.u16(v.y);
+                b.u16(v.z);
+                b.u16(v.mat);
+            }
+        }
+        b.u32(self.landed_log.len() as u32);
+        for l in &self.landed_log {
+            b.u64(l.id);
+            b.u32(l.fallen);
+            b.i64(l.oy);
+            b.u32s(&l.riders);
+        }
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.max_bodies = s.usize();
+        self.gravity = s.fx();
+        self.refused = s.usize();
+        self.next_id = s.u64();
+        self.spawned = s.u64s();
+        let n = s.list(48);
+        self.list.clear();
+        for _ in 0..n {
+            let id = s.u64();
+            let (ox, oy, oz) = (s.i64(), s.i64(), s.i64());
+            let (sx, sz) = (s.u16(), s.u16());
+            let fallen = s.u32();
+            let (vy, fy) = (s.fx(), s.fx());
+            let (fresh, resting) = (s.bool(), s.bool());
+            let floor = s.u16s();
+            let riders = s.u32s();
+            let nv = s.list(8);
+            let voxels = (0..nv)
+                .map(|_| BodyVoxel {
+                    x: s.u16(),
+                    y: s.u16(),
+                    z: s.u16(),
+                    mat: s.u16(),
+                })
+                .collect();
+            self.list.push(Body {
+                id,
+                ox,
+                oy,
+                oz,
+                voxels,
+                sx,
+                sz,
+                floor,
+                fallen,
+                vy,
+                fy,
+                fresh,
+                resting,
+                riders,
+            });
+        }
+        let nl = s.list(20);
+        self.landed_log.clear();
+        for _ in 0..nl {
+            self.landed_log.push(Landed {
+                id: s.u64(),
+                fallen: s.u32(),
+                oy: s.i64(),
+                riders: s.u32s(),
+            });
+        }
+        s.ok()
+    }
 }
 
 /// Удаление из списка тел — **сдвигом, а не `swap_remove`**.

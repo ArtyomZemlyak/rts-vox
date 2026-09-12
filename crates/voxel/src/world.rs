@@ -442,6 +442,167 @@ impl World {
     pub fn bit_bytes(&self) -> usize {
         self.bits.len() * 8
     }
+
+    /// Записать **слой изменений** в буфер (ADR-229).
+    ///
+    /// Процедурный слой не пишется: он чистая функция от сида, и
+    /// восстанавливается тем же генератором, которым был получен.
+    /// Пишется только то, чего в генераторе нет, — тронутые чанки
+    /// и очередь.
+    ///
+    /// Чанк пишется **номерами материалов**, повторами: номер
+    /// и длина. Не внутренностями палитры — её порядок зависит
+    /// от того, в каком порядке чанк заполняли, и не наблюдаем,
+    /// а номер материала задаётся данными и обязан пережить
+    /// перезагрузку пака (ADR-028).
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.nx);
+        b.u32(self.ny);
+        b.u32(self.nz);
+        b.usize(self.max_edits_per_tick);
+        b.usize(self.max_materialize_per_tick);
+        b.usize(self.materialized_in_tick);
+        b.bool(self.in_tick);
+        b.u64(self.materialized);
+        // Тронутые чанки — по возрастанию номера. Порядок обхода
+        // при записи фиксирован (`CLAUDE.md`), иначе один и тот же
+        // мир давал бы разные файлы.
+        let touched: Vec<u32> = (0..self.chunks.len())
+            .filter(|&i| self.chunks[i].is_some())
+            .map(|i| i as u32)
+            .collect();
+        b.u32(touched.len() as u32);
+        for &ci in &touched {
+            b.u32(ci);
+            let c = self.chunks[ci as usize].as_ref().expect("тронутый чанк");
+            // Повторы: (материал, длина). Порядок обхода — тот же,
+            // что у плотного чанка, поэтому чтение обратно однозначно.
+            let mut runs: Vec<(Mat, u16)> = Vec::new();
+            for y in 0..CS {
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let m = c.get(x, y, z);
+                        match runs.last_mut() {
+                            Some((lm, n)) if *lm == m && *n < u16::MAX => *n += 1,
+                            _ => runs.push((m, 1)),
+                        }
+                    }
+                }
+            }
+            b.u32(runs.len() as u32);
+            for &(m, n) in &runs {
+                b.u16(m);
+                b.u16(n);
+            }
+        }
+        save_edits(b, self.queue.iter().copied());
+        save_edits(b, self.applied.iter().copied());
+    }
+
+    /// Прочитать слой изменений в **уже построенный из генератора**
+    /// мир. Размеры обязаны совпасть: чужой мир — это не «немного
+    /// другой», это другой файл.
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
+            return false;
+        }
+        self.max_edits_per_tick = s.usize();
+        self.max_materialize_per_tick = s.usize();
+        self.materialized_in_tick = s.usize();
+        self.in_tick = s.bool();
+        self.materialized = s.u64();
+        let n = s.list(4);
+        for _ in 0..n {
+            let ci = s.u32() as usize;
+            if ci >= self.chunks.len() {
+                return false;
+            }
+            let runs = s.list(4);
+            let mut p = Paletted::new();
+            let mut at = 0usize;
+            for _ in 0..runs {
+                let m = s.u16();
+                let len = s.u16() as usize;
+                if at + len > CS * CS * CS {
+                    return false;
+                }
+                if m != AIR {
+                    for k in at..at + len {
+                        // Обратный ход обхода записи: y, z, x.
+                        let (x, z, y) = (k % CS, (k / CS) % CS, k / (CS * CS));
+                        p.set(x, y, z, m);
+                    }
+                }
+                at += len;
+            }
+            if at != CS * CS * CS {
+                return false;
+            }
+            p.widenings = 0;
+            self.chunks[ci] = Some(Box::new(p));
+            self.refresh_bits_of(ci);
+        }
+        self.queue = load_edits(s).into_iter().collect();
+        self.applied = load_edits(s);
+        s.ok()
+    }
+
+    /// Перестроить битовый объём по чанку слоя изменений.
+    ///
+    /// Нужен ровно при загрузке: битовый объём построен генератором,
+    /// а тронутый чанк генератор переопределяет. Правкой по одной
+    /// здесь не обойтись — правок не сохраняли, сохраняли итог.
+    fn refresh_bits_of(&mut self, ci: usize) {
+        let cs = CS as u32;
+        let a = (ci as u32) % self.cx;
+        let bq = ((ci as u32) / self.cx) % self.cy;
+        let c = (ci as u32) / (self.cx * self.cy);
+        let (ox, oy, oz) = (a * cs, bq * cs, c * cs);
+        for ly in 0..cs {
+            for lz in 0..cs {
+                for lx in 0..cs {
+                    let (x, y, z) = (ox + lx, oy + ly, oz + lz);
+                    if !self.inside(x, y, z) {
+                        continue;
+                    }
+                    let solid = self.chunks[ci]
+                        .as_ref()
+                        .expect("чанк только что поставлен")
+                        .get(lx as usize, ly as usize, lz as usize)
+                        != AIR;
+                    let (w, m) = self.bit_index(x, y, z);
+                    if solid {
+                        self.bits[w] |= m;
+                    } else {
+                        self.bits[w] &= !m;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Список правок: длина, потом записи по одиннадцать байт.
+fn save_edits(b: &mut fx::blob::Blob, it: impl ExactSizeIterator<Item = Edit>) {
+    b.u32(it.len() as u32);
+    for e in it {
+        b.u32(e.x);
+        b.u32(e.y);
+        b.u32(e.z);
+        b.u16(e.mat);
+    }
+}
+
+fn load_edits(s: &mut fx::blob::Scan) -> Vec<Edit> {
+    let n = s.list(14);
+    (0..n)
+        .map(|_| Edit {
+            x: s.u32(),
+            y: s.u32(),
+            z: s.u32(),
+            mat: s.u16(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

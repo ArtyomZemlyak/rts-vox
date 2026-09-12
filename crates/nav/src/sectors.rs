@@ -418,6 +418,105 @@ impl SectorGraph {
         self.prev = PrevGraph::default();
         true
     }
+
+    /// Записать граф секторов в буфер (ADR-229), вместе
+    /// с незаконченной пересборкой: `cursor`, корзины и прошлый граф.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.sw);
+        b.u32(self.sh);
+        b.u32(self.w);
+        b.u32(self.portals.len() as u32);
+        for p in &self.portals {
+            b.u32(p.node_a);
+            b.u32(p.node_b);
+            b.u32(p.sector_a);
+            b.u32(p.sector_b);
+            b.u16(p.width);
+            save_key(b, p.key);
+        }
+        b.u32s(&self.starts);
+        save_edges(b, &self.edges);
+        b.u32s(&self.sec_starts);
+        b.u32s(&self.sec_portals);
+        b.u32s(&self.node_sector);
+        b.u32s(&self.sec_node_starts);
+        b.u32s(&self.sec_nodes);
+        b.bools(&self.reuse);
+        b.u32(self.cursor);
+        b.u32(self.bucket.len() as u32);
+        for bk in &self.bucket {
+            save_edges(b, bk);
+        }
+        b.u32s(&self.prev.starts);
+        save_edges(b, &self.prev.edges);
+        b.u32s(&self.prev.old_of);
+        b.u32s(&self.prev.new_of);
+        b.u32s(&self.dist);
+        b.u32s(&self.touched);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) {
+        self.sw = s.u32();
+        self.sh = s.u32();
+        self.w = s.u32();
+        let n = s.list(34);
+        self.portals = (0..n)
+            .map(|_| Portal {
+                node_a: s.u32(),
+                node_b: s.u32(),
+                sector_a: s.u32(),
+                sector_b: s.u32(),
+                width: s.u16(),
+                key: load_key(s),
+            })
+            .collect();
+        self.starts = s.u32s();
+        self.edges = load_edges(s);
+        self.sec_starts = s.u32s();
+        self.sec_portals = s.u32s();
+        self.node_sector = s.u32s();
+        self.sec_node_starts = s.u32s();
+        self.sec_nodes = s.u32s();
+        self.reuse = s.bools();
+        self.cursor = s.u32();
+        let n = s.list(4);
+        self.bucket = (0..n).map(|_| load_edges(s)).collect();
+        self.prev.starts = s.u32s();
+        self.prev.edges = load_edges(s);
+        self.prev.old_of = s.u32s();
+        self.prev.new_of = s.u32s();
+        self.dist = s.u32s();
+        self.touched = s.u32s();
+    }
+}
+
+fn save_key(b: &mut fx::blob::Blob, k: Key) {
+    b.u32(k.0);
+    b.u32(k.1);
+    b.u32(k.2);
+    b.u32(k.3);
+}
+
+fn load_key(s: &mut fx::blob::Scan) -> Key {
+    (s.u32(), s.u32(), s.u32(), s.u32())
+}
+
+fn save_edges(b: &mut fx::blob::Blob, e: &[Edge]) {
+    b.u32(e.len() as u32);
+    for x in e {
+        b.u32(x.to);
+        b.u32(x.cost);
+    }
+}
+
+fn load_edges(s: &mut fx::blob::Scan) -> Vec<Edge> {
+    let n = s.list(8);
+    (0..n)
+        .map(|_| Edge {
+            to: s.u32(),
+            cost: s.u32(),
+        })
+        .collect()
 }
 
 /// Нарезать границы секторов на порталы.
@@ -701,6 +800,68 @@ impl RouteWs {
             field_st: FieldStats::default(),
         }
     }
+
+    /// Записать буферы маршрута в буфер (ADR-229).
+    ///
+    /// «Переиспользуемые буферы» — не то же самое, что «временные»:
+    /// `field_at` это место в обходе секторов, и оно переживает тик.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32s(&self.g);
+        b.u32s(&self.seen);
+        b.u32s(&self.came);
+        b.u32(self.epoch);
+        b.u32s(&self.dist);
+        b.u32s(&self.touched);
+        save_pairs32(b, &self.ends);
+        b.u32s(&self.to_t);
+        save_pairs32(b, &self.seeds);
+        b.u32(self.best.len() as u32);
+        for &(a, c) in &self.best {
+            b.u64(a);
+            b.u32(c);
+        }
+        b.u32s(&self.goals);
+        b.u32(self.field_at);
+        b.usize(self.field_st.sectors);
+        b.u64(self.field_st.updates);
+        b.usize(self.field_st.reached);
+        b.usize(self.field_st.live_ports);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) {
+        self.g = s.u32s();
+        self.seen = s.u32s();
+        self.came = s.u32s();
+        self.epoch = s.u32();
+        self.dist = s.u32s();
+        self.touched = s.u32s();
+        self.ends = load_pairs32(s);
+        self.to_t = s.u32s();
+        self.seeds = load_pairs32(s);
+        let n = s.list(12);
+        self.best = (0..n).map(|_| (s.u64(), s.u32())).collect();
+        self.goals = s.u32s();
+        self.field_at = s.u32();
+        self.field_st = FieldStats {
+            sectors: s.usize(),
+            updates: s.u64(),
+            reached: s.usize(),
+            live_ports: s.usize(),
+        };
+    }
+}
+
+fn save_pairs32(b: &mut fx::blob::Blob, v: &[(u32, u32)]) {
+    b.u32(v.len() as u32);
+    for &(a, c) in v {
+        b.u32(a);
+        b.u32(c);
+    }
+}
+
+fn load_pairs32(s: &mut fx::blob::Scan) -> Vec<(u32, u32)> {
+    let n = s.list(8);
+    (0..n).map(|_| (s.u32(), s.u32())).collect()
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -1281,6 +1442,77 @@ enum Stage {
     Field,
 }
 
+impl Stage {
+    /// Номер стадии для сохранения (ADR-229). Номером, а не местом
+    /// в перечислении: вставленная посередине стадия не имеет права
+    /// молча переименовать чужие сохранения.
+    fn code(self) -> u8 {
+        match self {
+            Stage::Idle => 0,
+            Stage::Build => 1,
+            Stage::Label => 2,
+            Stage::Sectors => 3,
+            Stage::FieldBegin => 4,
+            Stage::Field => 5,
+        }
+    }
+
+    fn from_code(c: u8) -> Option<Stage> {
+        match c {
+            0 => Some(Stage::Idle),
+            1 => Some(Stage::Build),
+            2 => Some(Stage::Label),
+            3 => Some(Stage::Sectors),
+            4 => Some(Stage::FieldBegin),
+            5 => Some(Stage::Field),
+            _ => None,
+        }
+    }
+}
+
+/// Направления по владельцам: список списков байт.
+fn save_dirs(b: &mut fx::blob::Blob, d: &[Vec<u8>]) {
+    b.u32(d.len() as u32);
+    for v in d {
+        b.u8s(v);
+    }
+}
+
+fn load_dirs(s: &mut fx::blob::Scan) -> Vec<Vec<u8>> {
+    let n = s.list(4);
+    (0..n).map(|_| s.u8s()).collect()
+}
+
+/// Подписи засева: по владельцу, по сектору, по выходу.
+fn save_sig(b: &mut fx::blob::Blob, sig: &[Vec<Vec<(Key, u32)>>]) {
+    b.u32(sig.len() as u32);
+    for owner in sig {
+        b.u32(owner.len() as u32);
+        for sec in owner {
+            b.u32(sec.len() as u32);
+            for &(k, c) in sec {
+                save_key(b, k);
+                b.u32(c);
+            }
+        }
+    }
+}
+
+fn load_sig(s: &mut fx::blob::Scan) -> Vec<Vec<Vec<(Key, u32)>>> {
+    let no = s.list(4);
+    (0..no)
+        .map(|_| {
+            let ns = s.list(4);
+            (0..ns)
+                .map(|_| {
+                    let np = s.list(20);
+                    (0..np).map(|_| (load_key(s), s.u32())).collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Поле направлений на всю партию: граф, секторы и по полю на владельца.
 ///
 /// Граф и секторы **общие** — они не зависят от того, куда кто идёт,
@@ -1350,6 +1582,114 @@ impl NavField {
     /// Есть ли что читать юниту.
     pub fn ready(&self) -> bool {
         self.published > 0
+    }
+
+    /// Записать поле направлений в буфер (ADR-229) — **целиком**,
+    /// вместе с незаконченным циклом.
+    ///
+    /// Опубликованного мало, и это замерено: зонд, сохранявший только
+    /// опубликованное и начинавший цикл заново, расходится
+    /// с непрерывным прогоном. Причина — правило `CLAUDE.md`: «где
+    /// отставание разрешено, оно считается в тиках и одинаково у всех
+    /// клиентов» (ADR-089). Место в цикле и есть это отставание.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        self.g.save(b);
+        self.sg.save(b);
+        save_dirs(b, &self.dir);
+        self.wg.save(b);
+        self.wsg.save(b);
+        self.wf.save(b);
+        self.ws.save(b);
+        save_dirs(b, &self.wdir);
+        b.u32(self.targets.len() as u32);
+        for t in &self.targets {
+            match *t {
+                Some((x, z)) => {
+                    b.bool(true);
+                    b.u32(x);
+                    b.u32(z);
+                }
+                None => b.bool(false),
+            }
+        }
+        b.u32s(&self.dirty);
+        b.u32s(&self.taken);
+        save_sig(b, &self.sig);
+        save_sig(b, &self.wsig);
+        b.u32(self.sec_at);
+        b.u32(self.w);
+        b.usize(self.solved_sectors);
+        b.usize(self.reused_sectors);
+        b.u8(self.stage.code());
+        b.usize(self.owner);
+        b.usize(self.sec_st.portals);
+        b.usize(self.sec_st.edges);
+        b.usize(self.sec_st.sector_solves);
+        b.u64(self.sec_st.visited);
+        b.usize(self.sec_st.reused_ports);
+        b.usize(self.sec_st.reused_edges);
+        b.usize(self.sec_st.solved_sectors);
+        b.u32(self.ticks);
+        b.u32(self.last_ticks);
+        b.u64(self.published);
+        b.u64(self.updates);
+        b.usize(self.nodes);
+        b.usize(self.portals);
+        b.usize(self.components);
+        b.usize(self.reached);
+    }
+
+    /// Прочитать поле. `false` — файл испорчен либо стадия неизвестна.
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.g.load(s);
+        self.sg.load(s);
+        self.dir = load_dirs(s);
+        self.wg.load(s);
+        self.wsg.load(s);
+        self.wf.load(s);
+        self.ws.load(s);
+        self.wdir = load_dirs(s);
+        let n = s.list(1);
+        self.targets = (0..n)
+            .map(|_| {
+                if s.bool() {
+                    Some((s.u32(), s.u32()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.dirty = s.u32s();
+        self.taken = s.u32s();
+        self.sig = load_sig(s);
+        self.wsig = load_sig(s);
+        self.sec_at = s.u32();
+        self.w = s.u32();
+        self.solved_sectors = s.usize();
+        self.reused_sectors = s.usize();
+        let Some(st) = Stage::from_code(s.u8()) else {
+            return false;
+        };
+        self.stage = st;
+        self.owner = s.usize();
+        self.sec_st = BuildStats {
+            portals: s.usize(),
+            edges: s.usize(),
+            sector_solves: s.usize(),
+            visited: s.u64(),
+            reused_ports: s.usize(),
+            reused_edges: s.usize(),
+            solved_sectors: s.usize(),
+        };
+        self.ticks = s.u32();
+        self.last_ticks = s.u32();
+        self.published = s.u64();
+        self.updates = s.u64();
+        self.nodes = s.usize();
+        self.portals = s.usize();
+        self.components = s.usize();
+        self.reached = s.usize();
+        s.ok()
     }
 
     /// Куда идут юниты владельца — точка в вокселях.

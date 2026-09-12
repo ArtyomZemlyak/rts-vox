@@ -300,6 +300,66 @@ impl VolGraph {
         while !self.build_step(u32::MAX) {}
         while !self.label_step(u32::MAX) {}
     }
+
+    /// Записать граф в буфер (ADR-229).
+    ///
+    /// Пишется **весь**, вместе с местом сборки (`cursor`) и местом
+    /// разметки (`lab_*`). Незаконченная сборка — это отставание
+    /// в тиках, а отставание одинаково у всех клиентов или не
+    /// одинаково вовсе (`CLAUDE.md`, ADR-089).
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.w);
+        b.u32(self.h);
+        b.u32s(&self.start);
+        b.u8s(&self.count);
+        b.u32(self.nb.len() as u32);
+        for n in &self.nb {
+            for &x in n {
+                b.u32(x);
+            }
+        }
+        b.u32(self.nbn.len() as u32);
+        for n in &self.nbn {
+            for &x in n {
+                b.u8(x);
+            }
+        }
+        b.u16s(&self.lev);
+        b.u32(self.max_step);
+        b.u32s(&self.comp);
+        b.usize(self.components);
+        b.usize(self.lab_at);
+        b.u32(self.lab_cur);
+        b.u32(self.lab_n);
+        b.u32s(&self.lab_stack);
+        b.u32s(&self.node_cell);
+        b.usize(self.nodes);
+        b.usize(self.edges);
+        b.u32(self.cursor);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) {
+        self.w = s.u32();
+        self.h = s.u32();
+        self.start = s.u32s();
+        self.count = s.u8s();
+        let n = s.list(16);
+        self.nb = (0..n).map(|_| [s.u32(), s.u32(), s.u32(), s.u32()]).collect();
+        let n = s.list(4);
+        self.nbn = (0..n).map(|_| [s.u8(), s.u8(), s.u8(), s.u8()]).collect();
+        self.lev = s.u16s();
+        self.max_step = s.u32();
+        self.comp = s.u32s();
+        self.components = s.usize();
+        self.lab_at = s.usize();
+        self.lab_cur = s.u32();
+        self.lab_n = s.u32();
+        self.lab_stack = s.u32s();
+        self.node_cell = s.u32s();
+        self.nodes = s.usize();
+        self.edges = s.usize();
+        self.cursor = s.u32();
+    }
 }
 
 /// Рабочее поле: время до цели, развёртка и её место.
@@ -661,6 +721,48 @@ impl VolField {
             self.dir[node] = best_k;
         }
         true
+    }
+
+    /// Записать поле в буфер (ADR-229). Вместе с местом развёртки,
+    /// местом засева и местом публикации: недосчитанное поле —
+    /// такое же состояние, как досчитанное.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32s(&self.t);
+        b.u8s(&self.dir);
+        b.bools(&self.active);
+        b.bools(&self.fixed);
+        b.u32s(&self.stack);
+        b.u32(self.best.len() as u32);
+        for &(a, c) in &self.best {
+            b.u64(a);
+            b.u32(c);
+        }
+        b.usize(self.sweep);
+        b.u32(self.at);
+        b.bool(self.round_changed);
+        b.u32(self.seed_at);
+        b.usize(self.pub_at);
+        b.usize(self.components);
+        b.u64(self.updates);
+        b.usize(self.reachable);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) {
+        self.t = s.u32s();
+        self.dir = s.u8s();
+        self.active = s.bools();
+        self.fixed = s.bools();
+        self.stack = s.u32s();
+        let n = s.list(12);
+        self.best = (0..n).map(|_| (s.u64(), s.u32())).collect();
+        self.sweep = s.usize();
+        self.at = s.u32();
+        self.round_changed = s.bool();
+        self.seed_at = s.u32();
+        self.pub_at = s.usize();
+        self.components = s.usize();
+        self.updates = s.u64();
+        self.reachable = s.usize();
     }
 }
 
