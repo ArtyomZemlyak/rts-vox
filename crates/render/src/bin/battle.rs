@@ -23,6 +23,8 @@ use std::time::Instant;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::Exposure;
+#[cfg(feature = "rt")]
+use bevy::camera::CameraMainTextureUsages;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::atmosphere::ScatteringMedium;
 use bevy::light::{
@@ -35,6 +37,12 @@ use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
+#[cfg(feature = "rt")]
+use bevy::render::render_resource::TextureUsages;
+#[cfg(feature = "rt")]
+use bevy::solari::pathtracer::{Pathtracer, PathtracingPlugin};
+#[cfg(feature = "rt")]
+use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins};
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use meshing::layer::MeshLayer;
@@ -121,6 +129,12 @@ struct Fx {
     chamfer: bool,
     /// Ребро воксела тела юнита, миллиметры.
     body_mm: u16,
+    /// Трассировка лучей: 0 — растеризация, 1 — освещение Solari
+    /// в реальном времени, 2 — эталонный путь-трейсер.
+    ///
+    /// **Отдельный уровень качества, а не основа.** Нужна аппаратная
+    /// трассировка; картинка обязана быть хорошей и без неё (ADR-222).
+    rt: u8,
 }
 
 /// Время суток и глубина дымки.
@@ -395,6 +409,7 @@ fn main() {
         sky: true,
         chamfer: true,
         body_mm: BODY_MM,
+        rt: 0,
     };
     let mut sky = Sky {
         elevation: look::SUN_ELEVATION,
@@ -422,6 +437,7 @@ fn main() {
             "--sky" => fx.sky = v != "0",
             "--chamfer" => fx.chamfer = v != "0",
             "--mm" => fx.body_mm = v.parse().unwrap_or(fx.body_mm),
+            "--rt" => fx.rt = v.parse().unwrap_or(fx.rt),
             "--sun" => sky.elevation = v.parse().unwrap_or(sky.elevation),
             "--sun-az" => sky.azimuth = v.parse().unwrap_or(sky.azimuth),
             "--haze" => sky.haze = v.parse().unwrap_or(sky.haze),
@@ -435,7 +451,7 @@ fn main() {
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
 [--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
-[--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] \
+[--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--rt 0|1|2] \
 [--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100]"
                 );
                 return;
@@ -501,8 +517,9 @@ fn main() {
     };
 
     let n = grid.len();
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+    let rt = fx.rt;
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "rts-vox — бой".into(),
                 present_mode: PresentMode::AutoNoVsync,
@@ -541,7 +558,21 @@ fn main() {
         })
         .add_systems(Startup, setup)
         .add_systems(Update, (step, effects, control, cull, snap))
-        .run();
+        ;
+    // Трассировка подключается **плагинами**, а не полем набора: без
+    // аппаратной поддержки их лучше не добавлять вовсе.
+    #[cfg(feature = "rt")]
+    if rt > 0 {
+        app.add_plugins(SolariPlugins);
+        if rt == 2 {
+            app.add_plugins(PathtracingPlugin);
+        }
+    }
+    #[cfg(not(feature = "rt"))]
+    if rt > 0 {
+        eprintln!("--rt просит трассировку, а собрано без неё: нужна сборка --features rt");
+    }
+    app.run();
 }
 
 /// Цвет из палитры `look` — в цвет Bevy. Одно место, чтобы нигде
@@ -586,6 +617,7 @@ fn setup(
         }
     });
     let uv = fx.chamfer;
+    let rt = fx.rt;
     let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
@@ -621,7 +653,13 @@ fn setup(
         // башня пуста целиком, и заводить под неё сущность
         // с нулевым мешем незачем.
         std::array::from_fn(|k| {
-            (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k], uv)))
+            (!ubufs[k].idx.is_empty()).then(|| {
+                let mut m = buf_to_mesh(&ubufs[k], uv);
+                if rt > 0 {
+                    pad_for_raytracing(&mut m);
+                }
+                meshes.add(m)
+            })
         })
     };
     let hull = [
@@ -667,6 +705,7 @@ fn setup(
     // земля отличалась от камня только оттенком, и оба читались
     // краской (ADR-211).
     let tiles = fx.chamfer;
+    let rt_paint = fx.rt > 0;
     let ground_mat = |c: look::Class, i: &mut Assets<Image>, m: &mut Assets<StandardMaterial>| {
         let (rough, metal) = look::surface(c);
         let (albedo, normal) = if tiles {
@@ -678,7 +717,16 @@ fn setup(
             (None, None)
         };
         m.add(StandardMaterial {
-            base_color: if painted { Color::WHITE } else { srgb(FLAT_GROUND) },
+            // Цвет вершины трассировка не видит: в её формате вершины
+            // цвета нет. Поэтому на трассированном пути класс красится
+            // своим цветом целиком (ADR-222).
+            base_color: if rt_paint {
+                srgb(look::class_srgb(c))
+            } else if painted {
+                Color::WHITE
+            } else {
+                srgb(FLAT_GROUND)
+            },
             base_color_texture: albedo,
             normal_map_texture: normal,
             // UV приходят **в вокселях**, а плитка накрывает несколько:
@@ -755,15 +803,22 @@ fn setup(
                 continue;
             }
             tris += bufs[k].idx.len() / 3;
-            let h = meshes.add(buf_to_mesh(&bufs[k], fx.chamfer));
+            let h = meshes.add(chunk_mesh(&bufs[k], fx.chamfer, fx.rt));
             slot[k] = Some(h.clone());
             let o = chunk_origin(i, grid.nx, grid.ny);
-            commands.spawn((
-                Mesh3d(h),
-                MeshMaterial3d(art.ground[k].clone()),
-                Transform::from_xyz(o[0], o[1], o[2]),
-                Chunk(i),
-            ));
+            let e = commands
+                .spawn((
+                    Mesh3d(h.clone()),
+                    MeshMaterial3d(art.ground[k].clone()),
+                    Transform::from_xyz(o[0], o[1], o[2]),
+                    Chunk(i),
+                ))
+                .id();
+            #[cfg(feature = "rt")]
+            if fx.rt > 0 {
+                commands.entity(e).insert(RaytracingMesh3d(h.clone()));
+            }
+            let _ = h;
         }
     }
     println!(
@@ -783,22 +838,36 @@ fn setup(
         // ни был собран.
         for (k, m) in art.finish.iter().enumerate() {
             if let Some(h) = art.hull[owner][k].clone() {
-                commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(m.clone()),
-                    Transform::from_xyz(0.0, -1000.0, 0.0),
-                    Visibility::Hidden,
-                    UnitMark(i),
-                ));
+                let e = commands
+                    .spawn((
+                        Mesh3d(h.clone()),
+                        MeshMaterial3d(m.clone()),
+                        Transform::from_xyz(0.0, -1000.0, 0.0),
+                        Visibility::Hidden,
+                        UnitMark(i),
+                    ))
+                    .id();
+                #[cfg(feature = "rt")]
+                if fx.rt > 0 {
+                    commands.entity(e).insert(RaytracingMesh3d(h.clone()));
+                }
+                let _ = h;
             }
             if let Some(h) = art.turret[owner][k].clone() {
-                commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(m.clone()),
-                    Transform::from_xyz(0.0, -1000.0, 0.0),
-                    Visibility::Hidden,
-                    TurretMark(i),
-                ));
+                let e = commands
+                    .spawn((
+                        Mesh3d(h.clone()),
+                        MeshMaterial3d(m.clone()),
+                        Transform::from_xyz(0.0, -1000.0, 0.0),
+                        Visibility::Hidden,
+                        TurretMark(i),
+                    ))
+                    .id();
+                #[cfg(feature = "rt")]
+                if fx.rt > 0 {
+                    commands.entity(e).insert(RaytracingMesh3d(h.clone()));
+                }
+                let _ = h;
             }
         }
     }
@@ -826,6 +895,20 @@ fn setup(
             Transform::from_xyz(eye.x, eye.y, eye.z).looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y),
         ))
         .id();
+    // Трассировка пишет в изображение кадра как в хранилище и не терпит
+    // многократной выборки — оба требования её, а не наши.
+    #[cfg(feature = "rt")]
+    if fx.rt > 0 {
+        commands.entity(cam).insert((
+            CameraMainTextureUsages::default().with(TextureUsages::STORAGE_BINDING),
+            Msaa::Off,
+        ));
+        if fx.rt == 2 {
+            commands.entity(cam).insert(Pathtracer::default());
+        } else {
+            commands.entity(cam).insert(SolariLighting::default());
+        }
+    }
     // Трассеры и лучи светятся сильнее единицы — свечение делает
     // видимым то, ради чего они и заведены. Отдельным вставлением,
     // а не полем набора: компонент либо есть, либо его нет.
@@ -886,7 +969,9 @@ fn setup(
         DirectionalLight {
             color: srgb(look::SUN_SRGB),
             illuminance: look::SUN_LUX,
-            shadow_maps_enabled: fx.cascades > 0,
+            // Трассировка **заменяет** карты теней: держать обе значит
+            // платить дважды за одну тень.
+            shadow_maps_enabled: fx.cascades > 0 && fx.rt == 0,
             // Воксельный мир — сплошные плоские грани, и на них акне
             // теней видно лучше всего. Смещение подобрано по картинке.
             shadow_depth_bias: 0.06,
@@ -968,6 +1053,37 @@ fn buf_to_mesh(b: &MeshBuf, uv: bool) -> Mesh {
     m
 }
 
+/// Привести меш к тому, что принимает трассировка.
+///
+/// **Список атрибутов обязан совпадать ровно**: позиция, нормаль, UV,
+/// касательная — и больше ничего. Проверка в `bevy_solari` буквальная
+/// (`is_mesh_raytracing_compatible`), и лишний атрибут не игнорируется,
+/// а **выбрасывает меш из трассировки целиком**: структура ускорения
+/// для него не строится, лучи проходят насквозь, и сцена выходит ровной
+/// заливкой неба. Это и случилось с нашим рельефом, у которого цвет
+/// лежит в вершине (ADR-222).
+fn pad_for_raytracing(m: &mut Mesh) {
+    let n = m.count_vertices();
+    if m.contains_attribute(Mesh::ATTRIBUTE_COLOR) {
+        m.remove_attribute(Mesh::ATTRIBUTE_COLOR);
+    }
+    if !m.contains_attribute(Mesh::ATTRIBUTE_UV_0) {
+        m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
+    }
+    if !m.contains_attribute(Mesh::ATTRIBUTE_TANGENT) {
+        m.insert_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1.0f32, 0.0, 0.0, 1.0]; n]);
+    }
+}
+
+/// Меш чанка рельефа с оглядкой на трассировку.
+fn chunk_mesh(b: &MeshBuf, uv: bool, rt: u8) -> Mesh {
+    let mut m = buf_to_mesh(b, uv || rt > 0);
+    if rt > 0 {
+        pad_for_raytracing(&mut m);
+    }
+    m
+}
+
 /// Корпуса: всё, что не башня и не снаряд. Два запроса на `Transform`
 /// в одной системе разрешены только непересекающимися множествами,
 /// и разводит их именно `TurretMark`.
@@ -1032,7 +1148,7 @@ fn step(
             t_paint += t.elapsed().as_secs_f64() * 1e3;
             let t = Instant::now();
             for k in 0..look::CLASSES {
-                let m = buf_to_mesh(&bufs[k], fx.chamfer);
+                let m = chunk_mesh(&bufs[k], fx.chamfer, fx.rt);
                 match chunks[i][k].clone() {
                     Some(h) => {
                         let _ = meshes.insert(h.id(), m);
