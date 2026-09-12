@@ -49,6 +49,7 @@ use render::geom::{
 };
 use render::look;
 use render::model::SegFrame;
+use render::occlusion::{Occlusion, OcclusionPlugin};
 use render::tex::tile_image;
 use render::{yaw_of, yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Order, Reference, SimEvent, NO_TARGET};
@@ -327,6 +328,9 @@ fn main() {
             }),
             ..default()
         }))
+        // Щелевое затенение по вокселям — тот же проход, что у окна
+        // боя: направление одно на все окна (ADR-235).
+        .add_plugins(OcclusionPlugin)
         .insert_resource(DirectionalLightShadowMap { size: look::scene().shadow_map })
         .insert_resource(GlobalAmbientLight {
             color: srgb(look::scene().ambient_srgb),
@@ -660,6 +664,14 @@ fn setup(
         commands
             .entity(cam)
             .insert((Msaa::Off, ScreenSpaceAmbientOcclusion::default(), Fxaa::default()));
+    }
+    let o = look::scene().occlusion;
+    if o.on() {
+        commands.entity(cam).insert((
+            Msaa::Off,
+            Fxaa::default(),
+            Occlusion { radius: o.radius, strength: o.strength, bias: o.bias, power: o.power },
+        ));
     }
 
     commands.spawn((

@@ -122,9 +122,20 @@ fn push_quad(
     let base = out.pos.len() as u32;
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
-    // Углы квада разнесены на `h` и `w` вокселей — столько же плиток
-    // фаски в них и укладывается.
-    out.uv.extend_from_slice(&[[0.0, 0.0], [h, 0.0], [h, w], [0.0, w]]);
+    // UV — **мировые** координаты угла в плоскости грани, а не
+    // отсчёт от угла квада (ADR-235). Плитка тем самым сидит на сетке
+    // мира: квад, который копка порезала и слила заново с другого
+    // угла, показывает на уцелевших вокселях тот же рисунок, что
+    // и до правки. От угла квада рисунок уезжал бы вместе с углом
+    // на каждой правке рядом. Углы разнесены на `h` и `w` вокселей —
+    // столько же плиток фаски в них и укладывается.
+    let (ua, va) = match axis {
+        0 => (1, 2),
+        1 => (2, 0),
+        _ => (0, 1),
+    };
+    let uv = |c: [f32; 3]| [c[ua], c[va]];
+    out.uv.extend_from_slice(&[uv(c0), uv(c1), uv(c2), uv(c3)]);
     // Касательная — направление роста U, то есть ось вектора `u`.
     // Знак развёртки положителен у лицевой стороны и отрицателен
     // у обратной: там нормаль перевёрнута, а U и V — нет.
@@ -592,6 +603,55 @@ mod tests {
         assert_eq!(zs.iter().cloned().fold(f32::MIN, f32::max), 4.0);
         assert_eq!(ys.iter().cloned().fold(f32::MAX, f32::min), 1.0);
         assert_eq!(ys.iter().cloned().fold(f32::MIN, f32::max), 4.0);
+    }
+
+    /// **Плитка сидит на сетке мира, а не на сетке квада.** UV каждой
+    /// вершины — её мировые координаты в плоскости грани, и потому
+    /// два разных разбиения одной площади дают в одной точке один
+    /// и тот же UV: квад, порезанный копкой, не сдвигает рисунок
+    /// на уцелевших вокселях (ADR-235).
+    #[test]
+    fn the_tile_sits_on_the_world_grid_not_on_the_quad() {
+        let origin = [64.0, 32.0, 96.0];
+        for face in 0..6u8 {
+            let (axis, _) = axis_dir(face);
+            let (ua, va) = match axis {
+                0 => (1, 2),
+                1 => (2, 0),
+                _ => (0, 1),
+            };
+            // Одна площадь 2×3 целиком и та же площадь двумя квадами.
+            let whole = [Quad { face, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 }];
+            let halves = [
+                Quad { face, slice: 4, a: 3, b: 2, w: 1, h: 3, mat: 1 },
+                Quad { face, slice: 4, a: 4, b: 2, w: 1, h: 3, mat: 1 },
+            ];
+            let mut one = MeshBuf::default();
+            let mut two = MeshBuf::default();
+            quads_to_mesh(&whole, origin, &mut one);
+            quads_to_mesh(&halves, origin, &mut two);
+            for buf in [&one, &two] {
+                for (p, uv) in buf.pos.iter().zip(&buf.uv) {
+                    assert_eq!(*uv, [p[ua], p[va]], "грань {face}: UV не мировые");
+                }
+                // Касательная — направление роста U: вдоль неё
+                // первая координата UV растёт, и растёт на длину квада.
+                for q in buf.pos.chunks(4).zip(buf.uv.chunks(4)).zip(buf.tan.chunks(4)) {
+                    let ((p, uv), t) = q;
+                    let d = sub(p[1], p[0]);
+                    let along = d[0] * t[0][0] + d[1] * t[0][1] + d[2] * t[0][2];
+                    assert!(along > 0.0, "грань {face}: касательная против роста U");
+                    assert!(uv[1][0] > uv[0][0] && uv[1][1] == uv[0][1], "грань {face}: U не вдоль касательной");
+                }
+            }
+            // В общей вершине разбиений UV один и тот же.
+            for (p, uv) in one.pos.iter().zip(&one.uv) {
+                let same = two.pos.iter().zip(&two.uv).find(|(q, _)| *q == p).map(|(_, u)| u);
+                if let Some(u) = same {
+                    assert_eq!(u, uv, "грань {face}: в точке {p:?} UV зависит от разбиения");
+                }
+            }
+        }
     }
 
     /// **Начало чанка совпадает с его местом в сетке.**

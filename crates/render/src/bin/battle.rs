@@ -58,6 +58,7 @@ use meshing::layer::MeshLayer;
 use meshing::{Opts, CS};
 use render::dust::{self, DustArt, DustPlugin};
 use render::edge::{EdgePlugin, Edges};
+use render::occlusion::{Occlusion, OcclusionPlugin};
 use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
@@ -133,6 +134,10 @@ struct Fx {
     /// с ним включается FXAA: без неё воксельные рёбра рассыпаются
     /// в лесенку, и затенение в складках этого не окупает.
     ssao: bool,
+    /// Щелевое затенение **по вокселям** — свой проход с радиусом
+    /// в вокселях мира (ADR-235). Ключ нужен для замера: цена
+    /// и картинка сравниваются с тем же направлением без него.
+    occl: bool,
     /// Красить рельеф материалом мира или собирать одним цветом.
     paint: bool,
     /// Процедурная атмосфера: небо, дымка по глубине и карта окружения
@@ -173,6 +178,11 @@ struct Sky {
     haze: f32,
     /// Экспозиция камеры, EV100.
     ev100: f32,
+    /// Плотность объёмного тумана и высота его слоя в долях стороны
+    /// мира. Умолчания — из направления; ключами перекрываются
+    /// для подбора, потому что слой подбирается снимком, а не числом.
+    fog: f32,
+    fog_h: f32,
 }
 
 /// Разбор кадра по работам ремешинга.
@@ -491,6 +501,7 @@ fn main() {
         cascades: sc.shadow_cascades,
         bloom: true,
         ssao: sc.ssao,
+        occl: sc.occlusion.on(),
         paint: true,
         sky: true,
         chamfer: true,
@@ -503,6 +514,8 @@ fn main() {
         azimuth: sc.sun_azimuth,
         haze: sc.haze_metres_per_voxel,
         ev100: sc.ev100,
+        fog: sc.fog.density,
+        fog_h: sc.fog.height,
     };
     let (mut yaw, mut pitch, mut dist) = (0.7f32, 0.75f32, 0.45f32);
     let mut it = std::env::args().skip(1);
@@ -520,6 +533,7 @@ fn main() {
             "--shadows" => fx.cascades = v.parse().unwrap_or(fx.cascades),
             "--bloom" => fx.bloom = v != "0",
             "--ssao" => fx.ssao = v != "0",
+            "--occl" => fx.occl = v != "0" && sc.occlusion.on(),
             "--paint" => fx.paint = v != "0",
             "--sky" => fx.sky = v != "0",
             "--chamfer" => fx.chamfer = v != "0",
@@ -530,6 +544,8 @@ fn main() {
             "--sun-az" => sky.azimuth = v.parse().unwrap_or(sky.azimuth),
             "--haze" => sky.haze = v.parse().unwrap_or(sky.haze),
             "--ev" => sky.ev100 = v.parse().unwrap_or(sky.ev100),
+            "--fog" => sky.fog = v.parse().unwrap_or(sky.fog),
+            "--fog-h" => sky.fog_h = v.parse().unwrap_or(sky.fog_h),
             "--frames" => frames = v.parse().unwrap_or(frames),
             "--yaw" => yaw = v.parse().unwrap_or(yaw),
             "--pitch" => pitch = v.parse().unwrap_or(pitch),
@@ -540,10 +556,10 @@ fn main() {
                 println!(
                     "battle [--units N] [--side N] [--relief N] [--seed N] \
 [--speed тиков-на-кадр] [--shot файл] [--shot-after сек] [--shot-frame N] [--frames N] \
-[--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--paint 0|1] \
+[--yaw] [--pitch] [--dist] [--shadows каскадов] [--bloom 0|1] [--ssao 0|1] [--occl 0|1] [--paint 0|1] \
 [--sky 0|1] [--chamfer 0|1] [--mm ребро-тела-мм] [--big на-сторону] [--rt 0|1|2] \
 [--sun высота] [--sun-az азимут] [--haze метров-на-воксель] [--ev EV100] \
-[--look {}]",
+[--fog плотность] [--fog-h доля-стороны] [--look {}]",
                     look::LOOK_ALL.map(look::look_name).join("|")
                 );
                 return;
@@ -623,6 +639,9 @@ fn main() {
         // Обводка силуэта: проход ставится всегда, а работает только
         // там, где на камере есть `Edges` (ADR-214).
         .add_plugins(EdgePlugin)
+        // Щелевое затенение по вокселям — тоже свой проход, и тоже
+        // работает только там, где на камере есть `Occlusion`.
+        .add_plugins(OcclusionPlugin)
         // Пыль, дым и искры — по событиям и по движению (ADR-235).
         .add_plugins(DustPlugin)
         .insert_resource(fx)
@@ -1111,10 +1130,19 @@ fn setup(
             },
         ));
     }
+    // Щелевое затенение по вокселям (ADR-235): свой проход, радиус
+    // в вокселях мира — туда, куда затенение Bevy не достаёт.
+    if fx.occl {
+        let o = sc.occlusion;
+        commands.entity(cam).insert((
+            Msaa::Off,
+            Occlusion { radius: o.radius, strength: o.strength, bias: o.bias, power: o.power },
+        ));
+    }
     // Сглаживание после выключенных подвыборок: FXAA либо SMAA —
     // по направлению (ADR-235). Ставится один раз на всё, что
     // выключает `Msaa`: щелевое затенение, обводку, туман.
-    if fx.ssao || sc.edge.strength > 0.0 || sc.fog.density > 0.0 {
+    if fx.ssao || sc.edge.strength > 0.0 || sky.fog > 0.0 || fx.occl {
         if sc.smaa {
             commands.entity(cam).insert((Msaa::Off, Smaa::default()));
         } else {
@@ -1124,7 +1152,7 @@ fn setup(
     // Объёмный туман: воздух, который видно, и лучи солнца сквозь
     // него (ADR-235). Слой тумана — короб от пола мира на заданную
     // долю стороны; выше него воздух чистый, и небо остаётся небом.
-    if sc.fog.density > 0.0 {
+    if sky.fog > 0.0 {
         let f = sc.fog;
         commands.entity(cam).insert((
             DepthPrepass,
@@ -1135,10 +1163,10 @@ fn setup(
                 step_count: f.steps,
             },
         ));
-        let h = side * f.height;
+        let h = side * sky.fog_h;
         commands.spawn((
             FogVolume {
-                density_factor: f.density,
+                density_factor: sky.fog,
                 absorption: f.absorption,
                 scattering: f.scattering,
                 ..default()
@@ -1277,7 +1305,7 @@ fn setup(
     .id();
     // Лучи в тумане идут от солнца: без этой метки туман светится
     // ровно, и тени в воздухе нет.
-    if sc.fog.density > 0.0 {
+    if sky.fog > 0.0 {
         commands.entity(sun).insert(VolumetricLight);
     }
     commands.insert_resource(art);
@@ -1558,12 +1586,17 @@ fn step(
         }
     }
     // Пыль из-под едущей машины (ADR-235). Не на каждом кадре
-    // и не у всех разом: машины разведены по кадрам номером, иначе
-    // весь строй пылит залпом. Скорость — из симуляции: стоящая
-    // машина не пылит, и это видно.
-    if sim.speed > 0 {
-        for i in 0..u.len() {
-            if !alive(i) || (frame.0.wrapping_add(i as u32)) % look::DUST_EVERY != 0 {
+    // и не у всех разом: за кадр опрашивается **потолок** машин,
+    // по кругу, иначе весь строй пылит залпом, а на пяти тысячах
+    // машин тысяча клубов в кадр хоронит и кадр, и картинку. Скорость
+    // — из симуляции: стоящая машина не пылит, и это видно.
+    if sim.speed > 0 && !u.is_empty() {
+        let n = u.len();
+        let per = look::DUST_PER_FRAME.min(n);
+        let start = (frame.0 as usize).wrapping_mul(per) % n;
+        for k in 0..per {
+            let i = (start + k) % n;
+            if !alive(i) {
                 continue;
             }
             let v = u.vel[i].to_f64_lossy() as f32;
@@ -1682,6 +1715,15 @@ fn step(
         core::mem::swap(was, live);
     }
 
+    // Частицы — с потолком событий на кадр (ADR-235): обломки
+    // и вспышки остаются у каждого события, пыль и искры — у первых
+    // `PUFF_EVENTS_PER_FRAME`. Залп не растит кадр.
+    let mut puffs_left = look::PUFF_EVENTS_PER_FRAME;
+    let mut puff = || {
+        let ok = puffs_left > 0;
+        puffs_left = puffs_left.saturating_sub(1);
+        ok
+    };
     for ev in sim.r.world.events() {
         match *ev {
             SimEvent::Blast { x, y, z, radius } => {
@@ -1717,7 +1759,9 @@ fn step(
                 spawn_debris(&mut commands, &art.chip, &art.dust, p, r, look::DEBRIS_BLAST, (x, y, z));
                 // Пыль и искры от воронки: обломки летят по параболе,
                 // а пыль висит и оседает — и видна с любой высоты.
-                dust::blast_dust(&mut commands, &dart, p, r, (x, y, z));
+                if puff() {
+                    dust::blast_dust(&mut commands, &dart, p, r, (x, y, z));
+                }
             }
             SimEvent::Beam { x0, y0, z0, x1, y1, z1, owner } => {
                 // Луч — вытянутый кубик от стрелка к цели, гаснущий
@@ -1746,7 +1790,9 @@ fn step(
                 ));
                 // Искры там, куда луч попал: попадание — событие
                 // не менее заметное, чем выстрел.
-                dust::sparks(&mut commands, &dart, b, 1.0, (x1, y1, z1), 6);
+                if puff() {
+                    dust::sparks(&mut commands, &dart, b, 1.0, (x1, y1, z1), 6);
+                }
             }
             SimEvent::Death { x, y, z, .. } => {
                 // Смерть событием была всегда и не показывалась ничем:
@@ -1754,8 +1800,10 @@ fn step(
                 // искры и столб дыма, который стоит ещё несколько секунд.
                 let p = Vec3::new(x as f32, y as f32, z as f32);
                 spawn_debris(&mut commands, &art.chip, &art.dust, p, 2.0, look::DEBRIS_DEATH, (x, y, z));
-                dust::sparks(&mut commands, &dart, p + Vec3::Y * 3.0, 1.6, (x, y, z), 12);
-                dust::wreck_smoke(&mut commands, p + Vec3::Y * 4.0, (x, y, z));
+                if puff() {
+                    dust::sparks(&mut commands, &dart, p + Vec3::Y * 3.0, 1.6, (x, y, z), 12);
+                    dust::wreck_smoke(&mut commands, p + Vec3::Y * 4.0, (x, y, z));
+                }
             }
         }
     }
