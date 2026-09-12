@@ -131,6 +131,18 @@ impl World {
     ///
     /// Построение — единственное место, где генератор обходится целиком;
     /// дальше мир живёт правками.
+    ///
+    /// **Колонкой, а не вокселем** (ADR-114, ADR-227). Повоксельный
+    /// обход спрашивал у генератора высоту поверхности и четыре узла
+    /// решётки шума заново на каждый воксель; колонка считает их раз
+    /// на столб. Замерено на 512×256×512: 14.3 с против 2.5 с.
+    /// Значение бит в бит то же — на этом стоит
+    /// `column_matches_per_voxel_material` в `worldgen`.
+    ///
+    /// Срез `z` собирается в отдельном буфере и переливается в объём
+    /// целыми строками. Писать прямо в `bits` нельзя по цене: у строк
+    /// одного столба шаг `nz * wx` слов, то есть промах кэша на каждый
+    /// воксель высоты.
     pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator + Send + Sync>) -> World {
         let (cx, cy, cz) = (
             nx.div_ceil(CS as u32),
@@ -139,14 +151,23 @@ impl World {
         );
         let wx = nx.div_ceil(64);
         let mut bits = vec![0u64; (wx * ny * nz) as usize];
+        let mut col = vec![AIR; ny as usize];
+        let mut slab = vec![0u64; (wx * ny) as usize];
         for z in 0..nz {
-            for y in 0..ny {
-                let row = ((y * nz + z) * wx) as usize;
-                for x in 0..nx {
-                    if g.material(x, y, z) != AIR {
-                        bits[row + (x >> 6) as usize] |= 1u64 << (x & 63);
+            slab.iter_mut().for_each(|w| *w = 0);
+            for x in 0..nx {
+                g.column(x, z, 0, &mut col);
+                let (w, m) = ((x >> 6) as usize, 1u64 << (x & 63));
+                for (y, mat) in col.iter().enumerate() {
+                    if *mat != AIR {
+                        slab[y * wx as usize + w] |= m;
                     }
                 }
+            }
+            for y in 0..ny {
+                let dst = ((y * nz + z) * wx) as usize;
+                let src = (y * wx) as usize;
+                bits[dst..dst + wx as usize].copy_from_slice(&slab[src..src + wx as usize]);
             }
         }
         World {
