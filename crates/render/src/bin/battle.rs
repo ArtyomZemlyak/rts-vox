@@ -199,16 +199,20 @@ struct Ring {
     /// Состояние каждого чанка сетки, байтом на чанк.
     ///
     /// Плотный массив, а не множество: на километре это два мегабайта,
-    /// а запрос по индексу — одно обращение. Три состояния:
-    /// [`UNSEEN`] — не осмотрен, [`BARE`] — осмотрен и пуст,
-    /// [`BUILT`] — построен и держится.
+    /// а запрос по индексу — одно обращение.
     state: Vec<u8>,
-    /// Чанки, ждущие осмотра, и чанки, ждущие сборки. **Две очереди,
-    /// а не одна**: осмотр и сборка стоят на два порядка врозь,
-    /// и общий потолок пришлось бы мерить по дорогому случаю.
+    /// **Столбы**, ждущие осмотра, и **чанки**, ждущие сборки.
+    ///
+    /// Единица осмотра — столб, а не чанк: осмотр идёт сверху вниз
+    /// и кончается на первом сплошном чанке, потому что ниже всё
+    /// закрыто породой. Иначе в очередь сборки попадают подземные
+    /// пещеры, которых не видно никогда.
+    ///
+    /// Две очереди, а не одна: осмотр чанка стоит 7–25 мкс, сборка —
+    /// 1.6 мс, и общий потолок пришлось бы мерить по дорогому случаю.
     ///
     /// FIFO: упёршаяся работа откладывается на следующий кадр,
-    /// а не отбрасывается, и один дорогой чанк не запирает за собой
+    /// а не отбрасывается, и один дорогой столб не запирает за собой
     /// очередь (`CLAUDE.md`).
     to_probe: VecDeque<u32>,
     to_build: VecDeque<u32>,
@@ -242,14 +246,17 @@ struct Ring {
 
 /// Чанк не осмотрен: неизвестно даже, есть ли у него грани.
 const UNSEEN: u8 = 0;
-/// Чанк осмотрен и пуст — сплошная порода или чистый воздух.
-/// Он не стоит ничего и остаётся таким, пока его не копнут.
-const BARE: u8 = 1;
-/// Чанк построен: у него есть буферы и сущности.
-const BUILT: u8 = 2;
+/// Чанк осмотрен и пуст — чистый воздух. Граней нет, но осмотр
+/// колонки на нём **не кончается**: ниже начнётся поверхность.
+const AIR: u8 = 1;
+/// Чанк осмотрен и сплошной — порода. Граней нет, и осмотр колонки
+/// на нём **кончается**: всё, что ниже, закрыто породой сверху.
+const ROCK: u8 = 2;
 /// Чанк осмотрен, грани у него есть, и он ждёт своей очереди
 /// на сборку. Осмотр не повторяется: он уже оплачен.
 const QUEUED: u8 = 3;
+/// Чанк построен: у него есть буферы и сущности.
+const BUILT: u8 = 4;
 
 /// Разбор кадра по работам ремешинга.
 ///
@@ -687,12 +694,10 @@ fn main() {
         t.elapsed().as_secs_f64() * 1e3
     );
     println!(
-        "кольцо: сборка {}\u{00d7}{} вокселей, удержание {}\u{00d7}{}, \
+        "кольцо: сборка {} вокселей, удержание {}, \
 за кадр осмотр {} / сборка {} / освобождение {}",
         ring_nums.build_radius,
-        ring_nums.build_height,
         ring_nums.keep_radius,
-        ring_nums.keep_height,
         ring_nums.probe_per_frame,
         ring_nums.build_per_frame,
         ring_nums.free_per_frame
@@ -1445,9 +1450,11 @@ fn step(
                 // 1920³ так не построился ни один чанк забоя: они
                 // ждали сборки и возвращались в осмотр каждый кадр,
                 // а в кадре на их месте стояли серые дыры.
-                if ring.state[i] == BARE {
+                if ring.state[i] == AIR || ring.state[i] == ROCK {
                     ring.state[i] = UNSEEN;
-                    ring.to_probe.push_back(i as u32);
+                    let (cx, cz) =
+                        (i as u32 % grid.nx, i as u32 / (grid.nx * grid.ny));
+                    ring.to_probe.push_back(render::stream::column(&grid, cx, cz));
                 }
                 continue;
             };
@@ -1966,49 +1973,72 @@ fn stream(
     let here = chunk_of(grid, centre);
     if ring.at != Some(here) {
         ring.at = Some(here);
-        let (r, h) = (ring.s.build_radius as f32, ring.s.build_height as f32);
+        let r = ring.s.build_radius as f32;
         let mut scan = core::mem::take(&mut ring.scan);
-        render::stream::ring(&grid, centre, r, h, &mut scan);
+        render::stream::ring(&grid, centre, r, &mut scan);
         ring.to_probe.clear();
         ring.to_build.clear();
-        for &i in scan.iter() {
-            match ring.state[i as usize] {
-                UNSEEN => ring.to_probe.push_back(i),
-                // Осмотр уже оплачен: повторять его — терять потолок
-                // осмотра на то, что и так известно.
-                QUEUED => ring.to_build.push_back(i),
-                _ => {}
+        // Осмотренные чанки повторно не осматриваются: обход столба
+        // проскакивает их по состоянию. А те, что уже ждали сборки,
+        // возвращаются прямо в её очередь — осмотр за них оплачен.
+        for &c in scan.iter() {
+            ring.to_probe.push_back(c);
+            let (cx, cz) = render::stream::column_at(&grid, c);
+            for cy in 0..grid.ny {
+                let k = grid.index(cx, cy, cz);
+                if ring.state[k] == QUEUED {
+                    ring.to_build.push_back(k as u32);
+                }
             }
         }
         ring.scan = scan;
     }
 
-    let (build_r, build_h) = (ring.s.build_radius as f32, ring.s.build_height as f32);
-    let (keep_r, keep_h) = (ring.s.keep_radius as f32, ring.s.keep_height as f32);
+    let (build_r, keep_r) = (ring.s.build_radius as f32, ring.s.keep_radius as f32);
     let Sim { r, mesh, chunks, bufs, painter, .. } = &mut *sim;
     let w = &r.world.ground().expect("земля").world;
 
-    // 1. Осмотр.
+    // 1. Осмотр — **столбами, сверху вниз, до первой сплошной породы**.
+    //
+    // Ниже неё смотреть не на что: всё закрыто сверху. Прокопанный
+    // столб перестаёт быть сплошным сам, и дно едет вниз вместе
+    // с забоем.
     let t = Instant::now();
-    for _ in 0..ring.s.probe_per_frame {
-        let Some(i) = ring.to_probe.pop_front() else { break };
-        let k = i as usize;
-        // Пока чанк ждал очереди, кольцо могло уехать, а сам он —
-        // смениться. Пропуск тут дешевле, чем чистка очереди.
-        if ring.state[k] != UNSEEN
-            || !render::stream::within(&grid, k, centre, build_r, build_h)
-        {
+    let mut left = ring.s.probe_per_frame as i64;
+    while left > 0 {
+        let Some(c) = ring.to_probe.pop_front() else { break };
+        // Пока столб ждал очереди, кольцо могло уехать. Пропуск тут
+        // дешевле, чем чистка очереди.
+        if !render::stream::within(&grid, c, centre, build_r) {
             continue;
         }
-        ring.probed += 1;
-        if mesh.probe(w, k) {
-            ring.state[k] = QUEUED;
-            ring.to_build.push_back(i);
-        } else {
-            ring.state[k] = BARE;
+        let (cx, cz) = render::stream::column_at(&grid, c);
+        // Столб обходится до конца, даже если потолок уже выбран:
+        // перерасход ограничен высотой сетки, а половина столба
+        // на экране — это дыра в рельефе.
+        for cy in (0..grid.ny).rev() {
+            let k = grid.index(cx, cy, cz);
+            match ring.state[k] {
+                UNSEEN => {}
+                // Дно столба: дальше вниз не смотрим.
+                ROCK => break,
+                _ => continue,
+            }
+            left -= 1;
+            ring.probed += 1;
+            match mesh.probe(w, k) {
+                meshing::layer::Fill::Air => ring.state[k] = AIR,
+                meshing::layer::Fill::Rock => {
+                    ring.state[k] = ROCK;
+                    break;
+                }
+                meshing::layer::Fill::Mixed => {
+                    ring.state[k] = QUEUED;
+                    ring.to_build.push_back(k as u32);
+                }
+            }
         }
     }
-
     ring.t_probe += t.elapsed().as_secs_f64() * 1e3;
 
     // 2. Сборка.
@@ -2018,8 +2048,9 @@ fn stream(
     while done < ring.s.build_per_frame {
         let Some(i) = ring.to_build.pop_front() else { break };
         let k = i as usize;
+        let (cx, _, cz) = (k as u32 % grid.nx, 0u32, k as u32 / (grid.nx * grid.ny));
         if ring.state[k] != QUEUED
-            || !render::stream::within(&grid, k, centre, build_r, build_h)
+            || !render::stream::within(&grid, render::stream::column(&grid, cx, cz), centre, build_r)
         {
             continue;
         }
@@ -2053,7 +2084,7 @@ fn stream(
         // которую `Opts::skip_bottom` не выпускает. Держать под это
         // запись незачем.
         if slot.mesh.iter().all(|h| h.is_none()) {
-            ring.state[k] = BARE;
+            ring.state[k] = AIR;
             continue;
         }
         ring.state[k] = BUILT;
@@ -2075,7 +2106,8 @@ fn stream(
         if stale.len() >= ring.s.free_per_frame as usize {
             break;
         }
-        if !render::stream::within(&grid, i as usize, centre, keep_r, keep_h) {
+        let (cx, cz) = (i % grid.nx, i / (grid.nx * grid.ny));
+        if !render::stream::within(&grid, render::stream::column(&grid, cx, cz), centre, keep_r) {
             stale.push(i);
         }
     }
