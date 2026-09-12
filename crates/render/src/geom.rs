@@ -317,7 +317,8 @@ pub fn quads_to_mesh_painted<F: FnMut(u32, u32, u32) -> Mat>(
                 c += run;
             }
         }
-        drop(emit);
+        // Заём `emitted` замыканием кончается на последнем вызове —
+        // явно ронять замыкание не нужно, оно ничего не держит.
         p.emitted += emitted;
     }
 }

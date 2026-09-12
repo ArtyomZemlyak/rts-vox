@@ -625,7 +625,7 @@ fn setup(
     // Заполняющий свет неба: раньше это была вторая лампа с своими
     // константами, теперь их нет — небо считается атмосферой. Окно
     // пока без атмосферы, поэтому подсветка берётся из палитры
-    // ambient, а не выдумывается заново (ADR-209).
+    // ambient, а не выдумывается заново.
     commands.insert_resource(GlobalAmbientLight {
         color: srgb(look::scene().ambient_srgb),
         brightness: look::scene().ambient_brightness * 4.0,
@@ -653,7 +653,7 @@ fn paint(
         {
             // Курсор помнит чанк между выборками: почти все воксели
             // одной грани лежат в одном чанке, и деления на его
-            // сторону не нужны вовсе (ADR-227).
+            // сторону не нужны вовсе.
             let mut cur = voxel::World::mat_cursor();
             move |x, y, z| w.material_cached(&mut cur, x, y, z)
         },

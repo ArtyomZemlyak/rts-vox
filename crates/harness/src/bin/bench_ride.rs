@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use fx::Fx;
-use phys::{step, Chassis, Ride, Support};
+use phys::{step, Chassis, Ride, Support, V3};
 
 /// Ходовая, близкая к гусеничной машине.
 fn ride() -> Ride {
@@ -65,13 +65,13 @@ fn main() {
         // Разогрев: первые тики оседают, и мерить их отдельно нечестно.
         for _ in 0..30 {
             for c in cs.iter_mut() {
-                step(c, &s, &g, (Fx::ONE, Fx::ZERO), &r, dt);
+                step(c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, dt);
             }
         }
         let t = Instant::now();
         for _ in 0..ticks {
             for c in cs.iter_mut() {
-                step(c, &s, &g, (Fx::ONE, Fx::ZERO), &r, dt);
+                step(c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, dt);
             }
         }
         let el = t.elapsed().as_secs_f64();

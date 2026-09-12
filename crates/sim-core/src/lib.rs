@@ -181,9 +181,21 @@ pub struct Units {
     /// Угловая скорость корпуса. Вертикальная составляющая не
     /// используется: поворотом заведует ход, а не подвеска.
     pub spin: Vec<phys::V3>,
-    /// Сумма нормальных реакций прошлого тика, отнесённая к массе.
+    /// Доля опор на земле по итогам прошлого тика, от нуля до единицы.
     /// Ноль — машина висит в воздухе.
     pub load: Vec<Fx>,
+    /// Продольное ускорение за прошлый тик, мировых единиц в секунду
+    /// за секунду. Считается там же, где меняется скорость, и нужно
+    /// подвеске: торможение роняет корпус носом (ADR-225).
+    ///
+    /// В хеш не входит: это производная от `vel`, а `vel` хешируется;
+    /// разойдись она — разойдётся и `vel` на том же тике.
+    pub accel: Vec<Fx>,
+    /// Изменение курса за прошлый тик, двоичный угол. Вместе со
+    /// скоростью даёт центростремительное ускорение — крен в повороте.
+    /// В хеш не входит по той же причине, что `accel`: производная
+    /// от `head`.
+    pub yaw_step: Vec<i32>,
     /// Прикреплённых к ядру вокселей — то, что у нас вместо скалярного HP.
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
@@ -314,6 +326,8 @@ impl Units {
             up: Vec::new(),
             spin: Vec::new(),
             load: Vec::new(),
+            accel: Vec::new(),
+            yaw_step: Vec::new(),
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
@@ -368,6 +382,8 @@ impl Units {
             self.up[k] = phys::V3::UP;
             self.spin[k] = phys::V3::ZERO;
             self.load[k] = Fx::ZERO;
+            self.accel[k] = Fx::ZERO;
+            self.yaw_step[k] = 0;
             self.voxels[k] = voxels;
             self.alive[k] = true;
             self.target[k] = NO_TARGET;
@@ -401,6 +417,8 @@ impl Units {
         self.up.push(phys::V3::UP);
         self.spin.push(phys::V3::ZERO);
         self.load.push(Fx::ZERO);
+        self.accel.push(Fx::ZERO);
+        self.yaw_step.push(0);
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
@@ -1417,12 +1435,21 @@ impl World {
                 }
                 *f = Fx::from_int(best);
             }
+            // Ускорение корпуса — из приращений хода за этот же тик:
+            // с ним торможение роняет носом, поворот кренит наружу.
+            let sway = ride::sway_of(
+                self.units.accel[i],
+                self.units.vel[i],
+                self.units.yaw_step[i],
+                self.units.head[i],
+            );
             ride::step_hull(
                 &mut self.units.up[i],
                 &mut self.units.spin[i],
                 &mut self.units.load[i],
                 &floors,
                 self.units.head[i],
+                sway,
                 &r,
                 &sup,
                 dt,
@@ -1650,6 +1677,12 @@ impl World {
                 &limits[kind],
                 inv_tick,
             );
+            // Приращения — подвеске (ADR-225): продольное ускорение
+            // и шаг курса за тик. Считаются здесь, где скорость и курс
+            // меняются, а не восстанавливаются из прошлого тика
+            // отдельным буфером.
+            u.accel[i] = nd.vel.sub(u.vel[i]).mul(Fx::from_int(TICKS_PER_SECOND));
+            u.yaw_step[i] = (nd.head.wrapping_sub(u.head[i])) as u16 as i16 as i32;
             u.head[i] = nd.head;
             u.vel[i] = nd.vel;
 

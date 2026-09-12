@@ -131,9 +131,50 @@ fn every_referenced_decision_exists() {
             bad.push(format!("10-decisions-full.md: ADR-{n:03}"));
         }
     }
+    // **Код и данные проверяются наравне с документами.** Первая
+    // редакция смотрела только в `docs/`, и четыре решения — 219, 221,
+    // 225, 226 — жили одними комментариями в коде и сообщениями
+    // коммитов: реестр о них не знал, и никто этого не заметил, пока
+    // не пересчитали руками. Ссылка в коде — то же обещание, что
+    // и в каноне.
+    for (path, text) in sources_and_data() {
+        for n in numbers_after(&text, "ADR-") {
+            if !known.contains(&n) {
+                bad.push(format!("{path}: ADR-{n:03}"));
+            }
+        }
+    }
     bad.sort();
     bad.dedup();
     assert!(bad.is_empty(), "ссылки на несуществующие решения:\n{}", bad.join("\n"));
+}
+
+/// Все исходники и данные: `crates/**/*.rs` и `data/**/*.ron`.
+///
+/// Каталоги сборки и чужие рабочие деревья под `.claude/` сюда
+/// не попадают: обход начинается с `crates/` и `data/`.
+fn sources_and_data() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut items: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        items.sort();
+        for p in items {
+            if p.is_dir() {
+                if p.file_name().map(|n| n == "target").unwrap_or(false) {
+                    continue;
+                }
+                walk(&p, out);
+            } else if p.extension().map(|e| e == "rs" || e == "ron").unwrap_or(false) {
+                let rel = p.strip_prefix(root()).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                out.push((rel, std::fs::read_to_string(&p).unwrap_or_default()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root().join("crates"), &mut out);
+    walk(&root().join("data"), &mut out);
+    assert!(out.len() > 20, "исходники не нашлись: {} файлов", out.len());
+    out
 }
 
 /// **В каноне нет ссылок на закрытые вопросы.**

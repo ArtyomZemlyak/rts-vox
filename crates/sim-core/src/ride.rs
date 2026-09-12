@@ -69,6 +69,35 @@ pub fn heading_of(head: i32) -> (Fx, Fx) {
     (angle::cos(head), angle::sin(head))
 }
 
+/// Полный оборот в радианах, `710/113`: ошибка `8.5e-8`, и дробь
+/// точная в `Fx` — десятичная запись `6.2831…` точной не была бы.
+const TAU: Fx = Fx::from_ratio(710, 113);
+
+/// Угловая скорость вокруг мировой вертикали из шага курса за тик.
+///
+/// **Знак.** Курс `head` растёт от `+X` к `+Z`, а это поворот
+/// **по часовой** вокруг `+Y` (правая тройка: `+X` к `+Z` есть `−Y`).
+/// Поэтому правовинтовая скорость вокруг `+Y` — это минус шаг курса.
+/// Знак не выведен, а проверен: тест `a_turn_rolls_the_hull_outwards`
+/// в `phys` и `a_left_turn_rolls_right` здесь.
+#[inline]
+pub fn yaw_rate(step: i32) -> Fx {
+    Fx::from_ratio(-step * crate::TICKS_PER_SECOND, angle::FULL).mul(TAU)
+}
+
+/// Горизонтальное ускорение корпуса в мировых осях.
+///
+/// Продольное — вдоль курса; центростремительное — `ω × v`, то есть
+/// `ω·v·(sin, −cos)` при курсе `(cos, sin)`. Оба входят в один вектор,
+/// и подвеска не знает, откуда что: ей всё равно, тормозит машина
+/// или входит в поворот, плечо у силы инерции одно.
+pub fn sway_of(accel: Fx, vel: Fx, yaw_step: i32, head: i32) -> V3 {
+    let (hc, hs) = heading_of(head);
+    let w = yaw_rate(yaw_step);
+    let lat = w.mul(vel);
+    V3::new(accel.mul(hc).add(lat.mul(hs)), Fx::ZERO, accel.mul(hs).sub(lat.mul(hc)))
+}
+
 /// Шаг подвески одной машины.
 ///
 /// `floor` — высота пола под точкой опоры, мировые единицы; её даёт
@@ -76,6 +105,10 @@ pub fn heading_of(head: i32) -> (Fx, Fx) {
 /// (ADR-121). `y` — высота корпуса, и физика её **не меняет**:
 /// после шага она возвращается на место, а наружу уходит только
 /// вращение.
+///
+/// `sway` — горизонтальное ускорение корпуса в мировых осях: с ним
+/// торможение роняет носом, а поворот кренит наружу. Считает его
+/// фаза хода из своих же приращений скорости и курса.
 #[allow(clippy::too_many_arguments)]
 pub fn step_hull(
     up: &mut V3,
@@ -83,6 +116,7 @@ pub fn step_hull(
     load: &mut Fx,
     floors: &[Fx; 4],
     head: i32,
+    sway: V3,
     r: &Ride,
     supports: &[Support; 4],
     dt: Fx,
@@ -97,7 +131,7 @@ pub fn step_hull(
         .fold(Fx::ZERO, |a, f| a.add(*f))
         .mul(Fx::from_ratio(1, floors.len() as i32));
     let mut h = Hull { y: mean.add(r.clearance), vy: Fx::ZERO, up: *up, w: *w, load: *load };
-    phys::step(&mut h, supports, floors, heading_of(head), r, dt);
+    phys::step(&mut h, supports, floors, heading_of(head), sway, r, dt);
     *up = h.up;
     *w = h.w;
     *load = h.load;
@@ -127,6 +161,13 @@ mod tests {
         }
     }
 
+    /// Та же ходовая с подвеской из данных: мягкой, чтобы динамику
+    /// было видно. На жёсткой (40) торможение даёт десятую долю градуса
+    /// — знак верен, величины нет (ADR-225).
+    fn soft_chassis() -> Chassis {
+        Chassis { stiffness: 2, damping: 1, ..chassis() }
+    }
+
     const DT: Fx = Fx::from_ratio(1, 30);
 
     /// **На ровном полу корпус стоит ровно.**
@@ -137,7 +178,7 @@ mod tests {
         let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
         let floors = [Fx::ZERO; 4];
         for _ in 0..200 {
-            step_hull(&mut up, &mut w, &mut load, &floors, 0, &r, &s, DT);
+            step_hull(&mut up, &mut w, &mut load, &floors, 0, V3::ZERO, &r, &s, DT);
         }
         assert!(up.x.abs() < Fx::from_ratio(1, 200), "завалился по тангажу: {:?}", up.x);
         assert!(up.z.abs() < Fx::from_ratio(1, 200), "завалился по крену: {:?}", up.z);
@@ -159,7 +200,7 @@ mod tests {
         let half = Fx::from_ratio(1, 2);
         let floors = [half, half, Fx::ZERO, Fx::ZERO];
         for _ in 0..400 {
-            step_hull(&mut up, &mut w, &mut load, &floors, 0, &r, &s, DT);
+            step_hull(&mut up, &mut w, &mut load, &floors, 0, V3::ZERO, &r, &s, DT);
         }
         assert!(up.x < Fx::from_ratio(-1, 20), "нос не задрался: {:?}", up.x);
         assert!(up.z.abs() < Fx::from_ratio(1, 50), "появился крен на ровном борте");
@@ -179,9 +220,61 @@ mod tests {
         // Четверть оборота: нос смотрит по +Z.
         let quarter = angle::FULL / 4;
         for _ in 0..400 {
-            step_hull(&mut up, &mut w, &mut load, &floors, quarter, &r, &s, DT);
+            step_hull(&mut up, &mut w, &mut load, &floors, quarter, V3::ZERO, &r, &s, DT);
         }
         assert!(up.z.abs() > Fx::from_ratio(1, 20), "уступ не дал крена: {:?}", up.z);
+    }
+
+    /// **Торможение роняет машину носом — и через фазу хода тоже.**
+    ///
+    /// `phys` это проверяет у себя; здесь проверяется, что фаза не
+    /// теряет ускорение по дороге: подать его в мировых осях, а не
+    /// в осях машины, и не перепутать при повороте курса.
+    #[test]
+    fn braking_dives_the_nose_through_the_phase() {
+        let c = soft_chassis();
+        let (r, s) = (ride_of(&c), supports_of(&c));
+        let floors = [Fx::ZERO; 4];
+        // Курс — четверть оборота, нос смотрит по +Z. Торможение —
+        // ускорение против хода, то есть по −Z.
+        let quarter = angle::FULL / 4;
+        let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
+        let brake = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(-6));
+        for _ in 0..300 {
+            step_hull(&mut up, &mut w, &mut load, &floors, quarter, brake, &r, &s, DT);
+        }
+        // Верх уходит к носу, то есть к +Z; по X клевка нет.
+        assert!(up.z > Fx::from_ratio(1, 40), "не клюёт по курсу: {up:?}");
+        assert!(up.x.abs() < Fx::from_ratio(1, 100), "клевок ушёл не в ту ось: {up:?}");
+        assert!(load == Fx::ONE, "на ровном полу все опоры на земле, а доля {load:?}");
+    }
+
+    /// **Поворот к `+Z` на ходу кренит корпус к `−Z` — наружу.**
+    ///
+    /// Знак угловой скорости выведен в `yaw_rate` из соглашения
+    /// о курсе; здесь он проверяется, а не принимается на веру.
+    /// Стоящая машина в повороте не кренится вовсе: центростремительное
+    /// ускорение пропорционально скорости.
+    #[test]
+    fn a_left_turn_rolls_right() {
+        let c = soft_chassis();
+        let (r, s) = (ride_of(&c), supports_of(&c));
+        let floors = [Fx::ZERO; 4];
+        // Нос по +X, курс растёт к +Z на 1/64 оборота за тик, ход
+        // шесть единиц в секунду: центр поворота слева, на +Z.
+        let step = angle::FULL / 64;
+        let run = |vel: Fx| -> V3 {
+            let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
+            for _ in 0..300 {
+                let sway = sway_of(Fx::ZERO, vel, step, 0);
+                step_hull(&mut up, &mut w, &mut load, &floors, 0, sway, &r, &s, DT);
+            }
+            up
+        };
+        let moving = run(Fx::from_int(10));
+        let still = run(Fx::ZERO);
+        assert!(moving.z < Fx::from_ratio(-1, 40), "крен не наружу: {moving:?}");
+        assert!(still.z.abs() < Fx::from_ratio(1, 200), "стоя кренится: {still:?}");
     }
 
     /// **Один и тот же ввод даёт то же состояние до бита.**
@@ -193,7 +286,7 @@ mod tests {
             let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
             let floors = [Fx::from_ratio(1, 3), Fx::ZERO, Fx::from_ratio(1, 5), Fx::ZERO];
             for _ in 0..300 {
-                step_hull(&mut up, &mut w, &mut load, &floors, 9000, &r, &s, DT);
+                step_hull(&mut up, &mut w, &mut load, &floors, 9000, V3::ZERO, &r, &s, DT);
             }
             (up, w, load)
         };

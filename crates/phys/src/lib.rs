@@ -168,10 +168,13 @@ pub struct Chassis {
     /// Угловая скорость. Вертикальная составляющая не используется:
     /// поворотом заведует фаза движения, а не физика.
     pub w: V3,
-    /// Сумма нормальных реакций прошлого шага, отнесённая к массе.
+    /// Доля опор, касающихся земли на прошлом шаге, от 0 до 1.
     ///
     /// Это и есть сцепление: тяга обязана быть не больше
-    /// `friction × load`, и машина в воздухе не разгоняется.
+    /// `friction × load`, машина в воздухе не разгоняется, а на двух
+    /// опорах над обрывом разгоняется вдвое хуже. Доля, а не сумма сил:
+    /// сумма сил у корпуса, подвешенного на среднем поле, в покое равна
+    /// нулю, и «стоит» читалось бы как «висит».
     pub load: Fx,
 }
 
@@ -183,7 +186,7 @@ impl Chassis {
             vy: Fx::ZERO,
             up: V3::UP,
             w: V3::ZERO,
-            load: r.gravity,
+            load: Fx::ONE,
         }
     }
 
@@ -199,12 +202,35 @@ impl Chassis {
 /// обязаны совпадать. `heading` — единичный вектор курса `(cos, sin)`:
 /// тригонометрия остаётся снаружи, физике нужен готовый поворот.
 ///
+/// `sway` — **горизонтальное ускорение корпуса** в мировых осях `x`, `z`
+/// (`y` не читается). Центр масс висит на клиренсе над опорами, и
+/// сила инерции, приложенная к нему, даёт момент: разгон сажает машину
+/// на корму, торможение роняет носом, поворот кренит наружу. Это не
+/// отдельные правила — один член `r × F` с плечом в клиренс.
+///
 /// Порядок обхода опор фиксирован индексом, суммы идут в нём же —
 /// иначе параллельная редукция дала бы другой результат (`CLAUDE.md`).
-pub fn step(c: &mut Chassis, supports: &[Support], ground: &[Fx], heading: (Fx, Fx), r: &Ride, dt: Fx) {
+#[allow(clippy::too_many_arguments)]
+pub fn step(
+    c: &mut Chassis,
+    supports: &[Support],
+    ground: &[Fx],
+    heading: (Fx, Fx),
+    sway: V3,
+    r: &Ride,
+    dt: Fx,
+) {
     debug_assert_eq!(supports.len(), ground.len(), "опор и высот поровну");
     let (hc, hs) = heading;
     let (mut fy, mut tx, mut tz) = (Fx::ZERO, Fx::ZERO, Fx::ZERO);
+    let mut touching = 0i32;
+
+    // Сила инерции `−a`, приложенная в центре масс на высоте клиренса:
+    // `r × F` при `r = (0, h, 0)` и `F = (−a_x, 0, −a_z)` даёт
+    // `(−h·a_z, 0, h·a_x)`. Знак проверен тестами на разгон и поворот,
+    // а не выписан по памяти.
+    tx = tx.sub(r.clearance.mul(sway.z));
+    tz = tz.add(r.clearance.mul(sway.x));
 
     for (s, g) in supports.iter().zip(ground.iter()) {
         // Местные координаты опоры — в мировые. Поворот только вокруг
@@ -220,6 +246,14 @@ pub fn step(c: &mut Chassis, supports: &[Support], ground: &[Fx], heading: (Fx, 
         // Сжатие. Пружина **только толкает**: подвеска не притягивает
         // машину к земле, и отрицательное сжатие означает «опора
         // в воздухе», а не «сила вниз».
+        // Опора **касается** земли, если пол не дальше хода подвески
+        // под ступнёй: пружина не только сжимается, но и **вытягивается**
+        // на тот же ход, и клюнувший носом танк кормой с земли не
+        // отрывается — задние катки едут, распрямив подвеску. Обрыв
+        // под опорой — это пол на метры ниже, и он не считается.
+        if g.sub(foot).raw() >= r.travel.neg().raw() {
+            touching += 1;
+        }
         let squash = g.sub(foot).max(Fx::ZERO).min(r.travel);
         if squash.raw() == 0 {
             continue;
@@ -280,7 +314,16 @@ pub fn step(c: &mut Chassis, supports: &[Support], ground: &[Fx], heading: (Fx, 
         }
     }
 
-    c.load = fy;
+    // Опора наружу отдаётся **долей касающихся точек**, а не суммой сил.
+    // Сумма сил у корпуса, подвешенного на среднем поле (так его зовёт
+    // фаза хода), в покое ровно ноль — и «стоит на земле» читалось бы
+    // как «висит в воздухе». Доля 0..1 честна в обоих случаях: четыре
+    // опоры на земле — единица, две над обрывом — половина, полёт — ноль.
+    c.load = if supports.is_empty() {
+        Fx::ZERO
+    } else {
+        Fx::from_ratio(touching, supports.len() as i32)
+    };
 
     // Позиционная поправка: ни одна опора не уходит под землю глубже
     // хода подвески. Без неё большой шаг по времени протыкает рельеф,
@@ -327,6 +370,20 @@ mod tests {
         (s, r)
     }
 
+    /// Та же ходовая с **мягкой** подвеской — для проверок динамики.
+    ///
+    /// На жёсткой (`stiffness` 40 при плече 3) торможение в 6 м/с²
+    /// наклоняет корпус на `h·a / (k·Σr²)` = 3/(40·36) ≈ 0.002 рад —
+    /// десятую долю градуса. Знак там верен, а величины нет: физика
+    /// честная, но невидимая. Мягкая подвеска даёт ту же формулу
+    /// с заметным ответом, и именно её значения ушли в данные (ADR-225).
+    fn soft() -> (Vec<Support>, Ride) {
+        let (s, mut r) = tracked();
+        r.stiffness = Fx::from_int(2);
+        r.damping = Fx::ONE;
+        (s, r)
+    }
+
     const DT: Fx = Fx::from_ratio(1, 30);
     const FLAT: Fx = Fx::ZERO;
 
@@ -347,7 +404,7 @@ mod tests {
         c.y = c.y.add(Fx::from_int(2));
         let g = level(s.len());
         for _ in 0..600 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
         }
         // Осела и стоит: скорость около нуля, наклона нет.
         assert!(c.vy.abs() < Fx::from_ratio(1, 100), "качается: vy = {:?}", c.vy);
@@ -376,7 +433,7 @@ mod tests {
         let g = vec![Fx::from_int(-100); s.len()];
         let mut prev = Fx::ZERO;
         for k in 0..60 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
             if k > 0 {
                 assert!(c.vy < prev, "падение не разгоняется: {:?} после {:?}", c.vy, prev);
             }
@@ -399,7 +456,7 @@ mod tests {
         let k = Fx::from_ratio(1, 4);
         let g: Vec<Fx> = s.iter().map(|p| p.x.mul(k)).collect();
         for _ in 0..900 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
         }
         // Нормаль склона наклонена назад по X ровно на `k`
         // (с точностью до нормировки).
@@ -426,7 +483,7 @@ mod tests {
         let k = Fx::from_ratio(1, 3);
         let g: Vec<Fx> = s.iter().map(|p| p.x.mul(k).add(p.z.mul(k))).collect();
         for _ in 0..5000 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
             let l2 = c.up.len_sq();
             assert!(
                 l2.sub(Fx::ONE).abs() < Fx::from_ratio(1, 100),
@@ -456,7 +513,7 @@ mod tests {
                 .map(|p| p.x.mul(hc).sub(p.z.mul(hs)).mul(k))
                 .collect();
             for _ in 0..900 {
-                step(&mut c, &s, &g, heading, &r, DT);
+                step(&mut c, &s, &g, heading, V3::ZERO, &r, DT);
             }
             c.up
         };
@@ -484,7 +541,7 @@ mod tests {
             let mut c = Chassis::resting(FLAT, &r);
             c.y = c.y.add(Fx::from_int(3));
             for _ in 0..400 {
-                step(&mut c, &s, &g, (Fx::from_ratio(3, 5), Fx::from_ratio(4, 5)), &r, DT);
+                step(&mut c, &s, &g, (Fx::from_ratio(3, 5), Fx::from_ratio(4, 5)), V3::ZERO, &r, DT);
             }
             c
         };
@@ -505,11 +562,56 @@ mod tests {
         c.y = c.y.add(Fx::from_int(5));
         let g = level(s.len());
         for _ in 0..900 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
             assert!(c.y.abs() < Fx::from_int(50), "улетел: {:?}", c.y);
             assert!(c.vy.abs() < Fx::from_int(100), "разогнался: {:?}", c.vy);
         }
         assert!(c.vy.abs() < Fx::from_ratio(1, 10), "не успокоился: {:?}", c.vy);
+    }
+
+    /// **Торможение роняет носом, разгон сажает на корму.**
+    ///
+    /// Сила инерции приложена в центре масс на высоте клиренса, и
+    /// плечо у неё есть. Знак здесь легко перепутать — и тогда машина
+    /// клюёт при разгоне, как будто её тянут за нос.
+    #[test]
+    fn braking_dives_the_nose_and_throttle_squats_the_tail() {
+        let (s, r) = soft();
+        let g = level(s.len());
+        // Нос смотрит по +X. Торможение — ускорение против хода.
+        let run = |ax: Fx| -> Fx {
+            let mut c = Chassis::resting(FLAT, &r);
+            for _ in 0..300 {
+                step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::new(ax, Fx::ZERO, Fx::ZERO), &r, DT);
+            }
+            c.up.x
+        };
+        let brake = run(Fx::from_int(-6));
+        let throttle = run(Fx::from_int(6));
+        // Верх при торможении уходит к носу (`up.x > 0`), при разгоне —
+        // к корме. Величина обязана быть заметной: клевок, который
+        // не виден, ничего не стоит и ничего не даёт.
+        assert!(brake > Fx::from_ratio(1, 40), "торможение не клюёт: {brake:?}");
+        assert!(throttle < Fx::from_ratio(-1, 40), "разгон не сажает на корму: {throttle:?}");
+    }
+
+    /// **В повороте корпус кренится наружу.**
+    ///
+    /// Центростремительное ускорение направлено в центр поворота,
+    /// сила инерции — наружу, и верх уходит наружу же. Мотоцикл
+    /// ложится **внутрь**, но у нас гусеницы, и это ошибка знака,
+    /// которую снимок покажет только в динамике.
+    #[test]
+    fn a_turn_rolls_the_hull_outwards() {
+        let (s, r) = soft();
+        let g = level(s.len());
+        // Ход по +X, центр поворота слева, на +Z: ускорение к нему.
+        let mut c = Chassis::resting(FLAT, &r);
+        for _ in 0..300 {
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(5)), &r, DT);
+        }
+        assert!(c.up.z < Fx::from_ratio(-1, 40), "крен не наружу: {:?}", c.up);
+        assert!(c.up.x.abs() < Fx::from_ratio(1, 100), "поворот дал клевок");
     }
 
     /// **Опора не уходит под землю глубже хода подвески.**
@@ -524,7 +626,7 @@ mod tests {
         c.y = c.y.add(Fx::from_int(30));
         let g = level(s.len());
         for _ in 0..600 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), &r, DT);
+            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
             let foot = c.y.sub(r.clearance);
             assert!(
                 foot > FLAT.sub(r.travel).sub(Fx::from_ratio(1, 100)),
