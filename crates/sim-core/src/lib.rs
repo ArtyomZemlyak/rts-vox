@@ -2683,7 +2683,6 @@ impl Reference {
         weapons: modding::weapons::Weapons,
         params: worldgen::Params,
     ) -> Reference {
-        let terrain = worldgen::Terrain { params, seed };
         // Потолок правок — из данных, как и остальные числа тика;
         // `Ground::new` поставит его же, литерала здесь нет (ADR-227).
         let vw = voxel::World::new(
