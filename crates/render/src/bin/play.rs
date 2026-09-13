@@ -686,7 +686,6 @@ fn setup(
         hull,
         turret,
         segs,
-        segs,
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
         beam: meshes.add(Cuboid::new(0.5, 1.0, 0.5)),
