@@ -18,6 +18,17 @@
 //!   **Ctrl+ПКМ** по породе — копать шахту.
 //! - **H** — стоять, **G** — снять приказ (юнит возвращается под поле
 //!   своей стороны), **Пробел** — пауза.
+//! - **B/N/T** — выбрать, что строить (склад, завод, турель), затем
+//!   **Ctrl+ПКМ** по месту — поставить; **Esc** — передумать.
+//!   Строит выделенный краулер, и строит он из запаса стороны.
+//! - **1/2/3** — заказать выделенному заводу танк, краулер, шагоход;
+//!   **X** — снять последний заказ.
+//!
+//! **Петля** (ADR-230): краулер копает → бак наполняется → краулер сам
+//! везёт его на ближайший свой склад → у стороны растёт запас →
+//! из запаса строятся постройки и собираются машины. Запас, потолок
+//! и силы печатаются в терминал раз в секунду: строка поверх кадра
+//! требует `bevy_ui`, которого нет в пине.
 //!
 //! **Рендер читает состояние и никогда в него не пишет** (`CLAUDE.md`,
 //! границы слоёв). Щелчок мышью не двигает юнита: он превращается
@@ -87,6 +98,7 @@ const RECT_COLOUR: Color = Color::srgb(0.6, 1.0, 0.7);
 const MOVE_COLOUR: Color = Color::srgb(0.35, 1.0, 0.45);
 const ATTACK_COLOUR: Color = Color::srgb(1.0, 0.35, 0.3);
 const DIG_COLOUR: Color = Color::srgb(1.0, 0.8, 0.25);
+const BUILD_COLOUR: Color = Color::srgb(0.45, 0.75, 1.0);
 
 // Ребро воксела тела здесь не задаётся: его называет **само тело**
 // (`UnitBody::mm`), а масштаб выводится делением на мировое ребро
@@ -144,6 +156,9 @@ struct Sel {
     drag: Option<Vec2>,
     /// Отметка отданного приказа: точка, цвет и сколько ей жить.
     mark: Option<(Vec3, Color, f32)>,
+    /// Что игрок собрался строить. `None` — ничего, и тогда Ctrl+ПКМ
+    /// означает «копать», как раньше.
+    build: Option<u16>,
 }
 
 /// Снимок и выход по расписанию — чтобы окно можно было запускать
@@ -170,6 +185,17 @@ struct UnitMark(usize);
 #[derive(Component)]
 struct TurretMark(usize);
 
+/// Какой вид тела нарисован в слоте сейчас.
+///
+/// Слот переиспользуется свободным списком, и в место погибшего танка
+/// встаёт склад. Без этой записи склад остался бы нарисован танком —
+/// молча, до конца партии.
+#[derive(Resource, Default)]
+struct Shown {
+    /// Вид тела и сторона на слот; `None` — сущностей у слота нет.
+    at: Vec<Option<(usize, u8)>>,
+}
+
 #[derive(Component)]
 struct ShotMark;
 
@@ -181,6 +207,12 @@ struct SegArt {
     mesh: [Option<Handle<Mesh>>; look::FINISHES],
     frame: SegFrame,
 }
+/// Меши одного вида тела: по отделке и по стороне.
+///
+/// Отделок пять (сталь, стекло, резина, ядро, свечение), и у каждой
+/// свой материал: цвет вершины подменяет `base_color` целиком, поэтому
+/// раскраска сторон остаётся при себе (ADR-211).
+type BodyMeshes = [[Option<Handle<Mesh>>; look::FINISHES]; 2];
 
 /// Общие меши и материалы.
 #[derive(Resource)]
@@ -188,10 +220,16 @@ struct Art {
     /// Меш корпуса **по отделке**: сталь, стекло и резина идут
     /// разными материалами, а материал у меша один (ADR-211).
     /// Пустая отделка ручки не получает и сущности не заводит.
-    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
-    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 2],
-    /// Повёрнутые части тела; едут с корпусом или с башней.
-    segs: [Vec<SegArt>; 2],
+    ///
+    /// Внешний индекс — **вид тела**, а не сторона: с экономикой
+    /// на карте стоят завод, склад и буровая, и рисовать их танком
+    /// значило бы, что игрок не видит, что построил (ADR-230).
+    /// Внутренний — сторона: цвет несут вершины.
+    hull: Vec<BodyMeshes>,
+    turret: Vec<BodyMeshes>,
+    /// Повёрнутые части тела, тем же индексом: вид тела, сторона
+    /// (ADR-231). Едут с корпусом или с башней — по своей рамке.
+    segs: Vec<[Vec<SegArt>; 2]>,
     shot: Handle<Mesh>,
     blast: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -211,9 +249,12 @@ fn main() {
     // меряют гейт и D-7, а не это окно; `--units` поднимает обратно.
     let mut units = 6usize;
     let mut seed = 42u64;
-    // Карта под шесть машин — соразмерная. На 384 они не встретятся
-    // за разумное время, и смотреть будет не на что.
-    let mut side = 128u32;
+    // Карта под базу, а не под шесть машин: **постройки крупные**.
+    // Завод — 24 метра, то есть 240 мировых вокселей при ребре 10 см,
+    // и на карте в 128 вокселей он один накрывает её целиком. Пятьсот
+    // двенадцать — это полсотни метров: база с заводом, складом
+    // и забоем помещается, и вторая тоже.
+    let mut side = 512u32;
     // Размах рельефа **не задаётся здесь числом**: его считает
     // `Params::sized` от высоты мира. Своё число у сцены уже дважды
     // расходилось с размером карты и давало плоский блин (ADR-157,
@@ -283,11 +324,47 @@ fn main() {
             }
         }
     };
+    let kinds = {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/kinds.ron");
+        let path = if here.exists() { here } else { std::path::PathBuf::from("data/kinds.ron") };
+        match modding::kinds::load(&path, sim_core::TICKS_PER_SECOND as u32) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("{e}");
+                return;
+            }
+        }
+    };
+    let mats = {
+        let here =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/materials.ron");
+        let path =
+            if here.exists() { here } else { std::path::PathBuf::from("data/materials.ron") };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                return;
+            }
+        };
+        match modding::data::materials_from_ron(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                return;
+            }
+        }
+    };
     let mut params = worldgen::Params::sized(side, side / 2, side);
     if relief > 0 {
         params.relief = relief;
     }
-    let r = Reference::with_params(seed, units, tuning, weapons, params);
+    let mut r = Reference::with_params(seed, units, tuning, weapons, params);
+    // **Экономика включается здесь, а не в эталонном сценарии.**
+    // Гейт её не ведёт, и его хеш от неё не сдвигается ни на бит
+    // (ADR-230): того, чего нет, в хеше нет.
+    r.world.attach_economy(kinds, mats);
+    found_bases(&mut r.world, side as i32);
     let g = r.world.ground().expect("у эталона есть земля");
     let mesh = MeshLayer::new(&g.world, Opts::default());
     let (nx, ny, nz) = mesh.dims();
@@ -305,6 +382,10 @@ fn main() {
         "ЛКМ — выделить, протяжка — рамка, Shift — добавить; \
 ПКМ — идти или атаковать, Ctrl+ПКМ — копать; H — стоять, G — снять приказ, \
 Пробел — пауза; WASD/QE/RF — камера, Esc — выход"
+    );
+    println!(
+        "B/N/T — выбрать склад, завод, турель и поставить Ctrl+ПКМ (Esc — передумать); \
+1/2/3 — заказать выделенному заводу танк, краулер, шагоход; X — снять заказ"
     );
 
     let cam = RtsCamera {
@@ -351,13 +432,57 @@ fn main() {
         .insert_resource(View { cam, side, body_mm })
         .insert_resource(Sel::default())
         .insert_resource(Shot { path: shot, after, frames, seen: 0, done: false, demo })
+        .insert_resource(Shown::default())
+        .insert_resource(Hud::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, (step, control, hands, overlay, cull, snap))
+        .add_systems(Update, (step, dress, control, hands, overlay, hud, cull, snap))
         .run();
 }
 
 fn srgb(c: [f32; 3]) -> Color {
     Color::srgb(c[0], c[1], c[2])
+}
+
+/// Номера типов из `data/kinds.ron`. Явные, а не места в реестре
+/// (ADR-028): место зависит от того, какие типы загружены, и мод,
+/// добавивший свой, молча переставил бы все.
+const KIND_TANK: u16 = 1;
+const KIND_CRAWLER: u16 = 2;
+const KIND_WALKER: u16 = 3;
+const KIND_FACTORY: u16 = 10;
+const KIND_DEPOT: u16 = 11;
+const KIND_TURRET: u16 = 12;
+
+/// База каждой стороны: завод, склад и краулеры.
+///
+/// Первый завод стоит готовым **нарочно**: строить его не из чего,
+/// а партия, которая не может начаться, — не партия. Всё остальное
+/// игрок строит сам.
+fn found_bases(w: &mut sim_core::World, side: i32) {
+    let margin = (side / 6).clamp(8, 96);
+    let bases = [(margin, margin), (side - margin, side - margin)];
+    for (owner, &(bx, bz)) in bases.iter().enumerate() {
+        let o = owner as u8;
+        w.spawn_kind(bx, bz, o, KIND_FACTORY);
+        let d = (side / 20).max(6);
+        w.spawn_kind((bx + d).clamp(0, side - 1), bz, o, KIND_DEPOT);
+        for k in 0..3i32 {
+            let x = (bx - d + k * d).clamp(0, side - 1);
+            let Some(id) = w.spawn_kind(x, (bz + d).clamp(0, side - 1), o, KIND_CRAWLER) else {
+                continue;
+            };
+            // Краулер ждёт приказа у базы, а не марширует на врага:
+            // без приказа юнит идёт по полю своей стороны, а копателю
+            // там делать нечего.
+            //
+            // Через **очередь приказов**, а не записью в состояние:
+            // рендер читает состояние и никогда в него не пишет
+            // (`CLAUDE.md`, границы слоёв). Расстановка — тот же
+            // канал, что и щелчок мыши.
+            w.push_order(sim_core::Order::Hold { unit: id });
+        }
+    }
+    w.units.refresh_live();
 }
 
 fn setup(
@@ -386,18 +511,49 @@ fn setup(
     // **Ноль значит «как нарисовано»**, и это умолчание: тело знает своё
     // ребро само (ADR-219). Ключ `--mm` пересэмплирует принудительно —
     // он остался, чтобы сравнивать разрешения не по памяти, а рядом.
-    let bodies = [voxel::unit::tank(), voxel::unit::strider()].map(|b| {
-        if mm == 0 || mm == b.mm {
-            return b;
-        }
-        match b.resampled(mm) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("тело в {mm} мм не вышло: {}", e.why());
-                b
+    //
+    // Тела берутся **по именам из данных**: `data/kinds.ron` говорит,
+    // какое тело у типа, а `voxel::roster::all()` его даёт. Угадывать
+    // тело по номеру стороны нельзя — с экономикой на карте стоят
+    // завод, склад и буровая (ADR-230).
+    //
+    // Два последних места в списке — запасные: ими рисуются юниты
+    // **без типа**, которых ставит эталонная расстановка. Они идут
+    // по стороне, как раньше.
+    let roster = voxel::roster::all();
+    let look_names: Vec<String> = {
+        let e = sim.r.world.econ.as_ref().expect("экономика");
+        e.kinds.all().iter().map(|d| d.body.clone()).collect()
+    };
+    let mut bodies: Vec<voxel::unit::UnitBody> = Vec::new();
+    for name in &look_names {
+        let b = roster
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_else(|| {
+                eprintln!("тела «{name}» нет в наборе — рисуем танком");
+                voxel::unit::tank()
+            });
+        bodies.push(b);
+    }
+    bodies.push(voxel::unit::tank());
+    bodies.push(voxel::unit::strider());
+    let bodies: Vec<voxel::unit::UnitBody> = bodies
+        .into_iter()
+        .map(|b| {
+            if mm == 0 || mm == b.mm {
+                return b;
             }
-        }
-    });
+            match b.resampled(mm) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("тело в {mm} мм не вышло: {}", e.why());
+                    b
+                }
+            }
+        })
+        .collect();
     let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
     let mut unit_mesh = |body: &voxel::unit::UnitBody,
                          tint: [f32; 3],
@@ -440,34 +596,47 @@ fn setup(
             (!ubufs[k].idx.is_empty()).then(|| meshes.add(buf_to_mesh(&ubufs[k])))
         })
     };
+    let tm = Instant::now();
     let tint = look::side_tint();
-    let hull: [_; 2] = std::array::from_fn(|o| {
-        unit_mesh(&bodies[o], tint[o], Slice::Hull, render::model::root_centre(&bodies[o]), &mut meshes)
-    });
-    let turret: [_; 2] = std::array::from_fn(|o| {
-        unit_mesh(&bodies[o], tint[o], Slice::Turret, render::model::root_centre(&bodies[o]), &mut meshes)
-    });
-    // Сегменты: у каждого свой меш вокруг шарнира и своё место
-    // в теле, сложенное по цепочке креплений (ADR-231).
     let per_mm = 1.0 / voxel::unit::WORLD_MM as f32;
-    let segs: [Vec<SegArt>; 2] = std::array::from_fn(|o| {
-        let frames = render::model::segment_frames(&bodies[o], per_mm);
-        bodies[o]
-            .segments
-            .iter()
-            .zip(frames)
-            .map(|(s, frame)| SegArt {
-                mesh: unit_mesh(
-                    &s.body,
-                    tint[o],
-                    Slice::All,
-                    render::model::pivot_centre(&s.attach),
-                    &mut meshes,
-                ),
-                frame,
-            })
-            .collect()
-    });
+    let mut hull: Vec<BodyMeshes> = Vec::new();
+    let mut turret: Vec<BodyMeshes> = Vec::new();
+    let mut segs: Vec<[Vec<SegArt>; 2]> = Vec::new();
+    for b in &bodies {
+        let root = render::model::root_centre(b);
+        hull.push([
+            unit_mesh(b, tint[0], Slice::Hull, root, &mut meshes),
+            unit_mesh(b, tint[1], Slice::Hull, root, &mut meshes),
+        ]);
+        turret.push([
+            unit_mesh(b, tint[0], Slice::Turret, root, &mut meshes),
+            unit_mesh(b, tint[1], Slice::Turret, root, &mut meshes),
+        ]);
+        // Сегменты: у каждого свой меш вокруг шарнира и своё место
+        // в теле, сложенное по цепочке креплений (ADR-231).
+        let frames = render::model::segment_frames(b, per_mm);
+        segs.push(std::array::from_fn(|o| {
+            b.segments
+                .iter()
+                .zip(frames.iter())
+                .map(|(sg, frame)| SegArt {
+                    mesh: unit_mesh(
+                        &sg.body,
+                        tint[o],
+                        Slice::All,
+                        render::model::pivot_centre(&sg.attach),
+                        &mut meshes,
+                    ),
+                    frame: *frame,
+                })
+                .collect()
+        }));
+    }
+    println!(
+        "тел собрано {}, за {:.0} мс",
+        bodies.len(),
+        tm.elapsed().as_secs_f64() * 1e3
+    );
     // **Материал говорит, из чего вещь сделана.** Цвет вершины
     // подменяет `base_color` целиком (`pbr_fragment.wgsl`), поэтому
     // раскраска сторон остаётся при себе, а шероховатость
@@ -516,6 +685,7 @@ fn setup(
     let art = Art {
         hull,
         turret,
+        segs,
         segs,
         shot: meshes.add(Cuboid::new(0.8, 0.8, 0.8)),
         blast: meshes.add(Sphere::new(2.5)),
@@ -585,54 +755,9 @@ fn setup(
         t.elapsed().as_secs_f64() * 1e3
     );
 
-    let cap = sim.r.world.units.len().max(1);
-    for i in 0..cap {
-        let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
-        // По сущности на отделку. Системы движения ищут по метке
-        // и обновляют их все разом одним и тем же преобразованием:
-        // корпус остаётся корпусом, из скольких бы материалов он
-        // ни был собран.
-        for (k, m) in art.finish.iter().enumerate() {
-            if let Some(h) = art.hull[owner][k].clone() {
-                commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(m.clone()),
-                    Transform::from_xyz(0.0, -1000.0, 0.0),
-                    Visibility::Hidden,
-                    UnitMark(i),
-                ));
-            }
-            if let Some(h) = art.turret[owner][k].clone() {
-                commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(m.clone()),
-                    Transform::from_xyz(0.0, -1000.0, 0.0),
-                    Visibility::Hidden,
-                    TurretMark(i),
-                ));
-            }
-        }
-        // Сегменты: метка корпуса или башни плюс рамка (ADR-231).
-        for seg in &art.segs[owner] {
-            for (k, m) in art.finish.iter().enumerate() {
-                let Some(h) = seg.mesh[k].clone() else {
-                    continue;
-                };
-                let mut e = commands.spawn((
-                    Mesh3d(h),
-                    MeshMaterial3d(m.clone()),
-                    Transform::from_xyz(0.0, -1000.0, 0.0),
-                    Visibility::Hidden,
-                    seg.frame,
-                ));
-                if seg.frame.turret {
-                    e.insert(TurretMark(i));
-                } else {
-                    e.insert(UnitMark(i));
-                }
-            }
-        }
-    }
+    // Сущности юнитов заводятся **по мере появления юнитов**, а не
+    // все разом на старте: завод выпускает машины, и слотов
+    // становится больше, чем было. Делает это `dress` каждый кадр.
 
     let eye = view.cam.eye();
     let t = view.cam.target;
@@ -786,7 +911,12 @@ fn step(
     sim.acc += time.delta_secs() * sim.speed as f32;
     let mut done = 0u32;
     while sim.acc >= DT && done < CATCH_UP {
-        sim.r.tick();
+        // **Тик мира, а не эталонного сценария.** У сценария свои
+        // копатели-оснастка и подкрепления струйкой: гейту они нужны,
+        // чтобы нагрузка не затухала, а игре мешают — копают мимо
+        // учёта и подсыпают машин, которых игрок не заказывал
+        // (ADR-230).
+        sim.r.world.tick();
         sim.acc -= DT;
         done += 1;
     }
@@ -862,9 +992,37 @@ fn step(
         }
     };
 
+    // Недострой растёт **снизу вверх**: доля вложенной материи —
+    // это доля высоты тома. Ровно то, что видит игрок под словами
+    // «строится воксель за вокселем» (ADR-230).
+    let grown = |i: usize| -> f32 {
+        let Some(e) = sim.r.world.econ.as_ref() else { return 1.0 };
+        let left = u.site[i];
+        if left == 0 {
+            return 1.0;
+        }
+        let ki = u.kind[i];
+        if ki == sim_core::economy::NO_KIND {
+            return 1.0;
+        }
+        let cost = e.kinds.at(ki as usize).cost.max(1);
+        let done = cost.saturating_sub(left);
+        // Не ноль: меш нулевой высоты не виден вовсе, а разметку
+        // фундамента игрок обязан увидеть сразу.
+        (done as f32 / cost as f32).clamp(0.06, 1.0)
+    };
+
     for (m, mut tr, mut vis, seg) in units.iter_mut() {
         let i = m.0;
         if !alive(i) {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        let g = grown(i);
+        // Сегмент недостроя не показывается: повёрнутая плита
+        // на половине корпуса висела бы в воздухе — по той же
+        // причине, по которой скрыта башня (ADR-230, ADR-231).
+        if seg.is_some() && g < 1.0 {
             *vis = Visibility::Hidden;
             continue;
         }
@@ -872,10 +1030,13 @@ fn step(
         if let Some(y) = hull_yaw(i) {
             render::model::place(&mut tr, at(i), Quat::from_rotation_y(y), seg);
         }
+        tr.scale = Vec3::new(1.0, g, 1.0);
     }
     for (m, mut tr, mut vis, seg) in turrets.iter_mut() {
         let i = m.0;
-        if !alive(i) {
+        // Башня недостроя не показывается: она лежит выше корпуса,
+        // и на половине высоты висела бы в воздухе.
+        if !alive(i) || u.site[i] != 0 {
             *vis = Visibility::Hidden;
             continue;
         }
@@ -934,6 +1095,117 @@ fn step(
                 ));
             }
             SimEvent::Death { .. } => {}
+        }
+    }
+}
+
+/// Какое тело рисовать в слоте: место типа в реестре либо запасное
+/// место по стороне для юнита **без типа**.
+fn look_of(w: &sim_core::World, i: usize, kinds: usize) -> usize {
+    let k = w.units.kind[i];
+    if k == sim_core::economy::NO_KIND {
+        kinds + usize::from(w.units.owner[i] == 1)
+    } else {
+        k as usize
+    }
+}
+
+/// Завести и переодеть сущности юнитов.
+///
+/// **Слот переиспользуется**, и в место погибшего танка встаёт склад.
+/// Поэтому проверяется не «есть ли сущности», а «те ли они»: иначе
+/// склад остался бы нарисован танком молча, до конца партии.
+fn dress(
+    mut commands: Commands,
+    sim: Res<Sim>,
+    art: Res<Art>,
+    mut shown: ResMut<Shown>,
+    hulls: Query<(Entity, &UnitMark)>,
+    turrets: Query<(Entity, &TurretMark)>,
+) {
+    let kinds = sim.r.world.econ.as_ref().map(|e| e.kinds.len()).unwrap_or(0);
+    let u = &sim.r.world.units;
+    let n = u.len();
+    if shown.at.len() < n {
+        shown.at.resize(n, None);
+    }
+    let mut redress: Vec<usize> = Vec::new();
+    for i in 0..n {
+        let want = if u.alive[i] { Some((look_of(&sim.r.world, i, kinds), u.owner[i])) } else { None };
+        if shown.at[i] != want {
+            redress.push(i);
+        }
+    }
+    if redress.is_empty() {
+        return;
+    }
+    for (e, m) in hulls.iter() {
+        // Двоичным поиском: список собран обходом по возрастанию,
+        // а сущностей у слота пять — линейный поиск по каждой из них
+        // дал бы квадрат на залпе, выбившем полсотни машин разом.
+        if redress.binary_search(&m.0).is_ok() {
+            commands.entity(e).despawn();
+        }
+    }
+    for (e, m) in turrets.iter() {
+        // Двоичным поиском: список собран обходом по возрастанию,
+        // а сущностей у слота пять — линейный поиск по каждой из них
+        // дал бы квадрат на залпе, выбившем полсотни машин разом.
+        if redress.binary_search(&m.0).is_ok() {
+            commands.entity(e).despawn();
+        }
+    }
+    for i in redress {
+        let want = if u.alive[i] { Some((look_of(&sim.r.world, i, kinds), u.owner[i])) } else { None };
+        shown.at[i] = want;
+        let Some((look, owner)) = want else { continue };
+        let o = usize::from(owner == 1);
+        let Some(h) = art.hull.get(look) else { continue };
+        // По сущности на отделку. Системы движения ищут по метке
+        // и обновляют их все разом одним и тем же преобразованием:
+        // корпус остаётся корпусом, из скольких бы материалов он
+        // ни был собран.
+        for (k, m) in art.finish.iter().enumerate() {
+            if let Some(mesh) = h[o][k].clone() {
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    UnitMark(i),
+                ));
+            }
+            if let Some(mesh) = art.turret[look][o][k].clone() {
+                commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    TurretMark(i),
+                ));
+            }
+        }
+        // Повёрнутые части тела: метка та же, что у корпуса или
+        // башни, плюс рамка — система движения не отличает сегмент
+        // от корня (ADR-231).
+        for sg in &art.segs[look][o] {
+            for (k, m) in art.finish.iter().enumerate() {
+                let Some(mesh) = sg.mesh[k].clone() else {
+                    continue;
+                };
+                let mut e = commands.spawn((
+                    Mesh3d(mesh),
+                    MeshMaterial3d(m.clone()),
+                    Transform::from_xyz(0.0, -1000.0, 0.0),
+                    Visibility::Hidden,
+                    sg.frame,
+                ));
+                if sg.frame.turret {
+                    e.insert(TurretMark(i));
+                } else {
+                    e.insert(UnitMark(i));
+                }
+            }
         }
     }
 }
@@ -1132,7 +1404,31 @@ fn hands(
         sel.picked = mine.clone();
         let (gx, gz) = (ex / 2, ex / 2);
         for id in mine {
-            sim.r.world.push_order(Order::MoveTo { unit: id, x: gx, z: gz });
+            let k = id as usize;
+            // Копателю — копать, остальным — идти. Мышь из терминала
+            // не нажать, а проверить, что приказ доходит до экономики,
+            // надо: без этого «материя растёт» проверяется только
+            // глазами и только в окне.
+            let digs = {
+                let w = &sim.r.world;
+                let ki = w.units.kind[k];
+                ki != sim_core::economy::NO_KIND
+                    && w.econ.as_ref().is_some_and(|e| e.kinds.at(ki as usize).dig)
+            };
+            if digs {
+                let (ux, uy, uz) = {
+                    let w = &sim.r.world;
+                    (w.units.x[k], w.units.y[k], w.units.z[k])
+                };
+                sim.r.world.push_order(Order::Dig {
+                    unit: id,
+                    x: ux,
+                    y: (uy - 1).max(2),
+                    z: uz,
+                });
+            } else {
+                sim.r.world.push_order(Order::MoveTo { unit: id, x: gx, z: gz });
+            }
         }
         sel.mark = Some((
             Vec3::new(gx as f32, gy as f32, gz as f32),
@@ -1155,6 +1451,45 @@ fn hands(
         for id in picked {
             let o = if hold { Order::Hold { unit: id } } else { Order::Release { unit: id } };
             sim.r.world.push_order(o);
+        }
+    }
+
+    // Что строить следующим Ctrl+ПКМ. Клавиша только **выбирает**;
+    // ставит постройку щелчок по месту — иначе игрок не видит, куда
+    // она встанет.
+    if keys.just_pressed(KeyCode::KeyB) {
+        sel.build = Some(KIND_DEPOT);
+    }
+    if keys.just_pressed(KeyCode::KeyN) {
+        sel.build = Some(KIND_FACTORY);
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        sel.build = Some(KIND_TURRET);
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        sel.build = None;
+    }
+
+    // Заказ заводу: цифра относится к выделенным заводам.
+    let order_kind = if keys.just_pressed(KeyCode::Digit1) {
+        Some(KIND_TANK)
+    } else if keys.just_pressed(KeyCode::Digit2) {
+        Some(KIND_CRAWLER)
+    } else if keys.just_pressed(KeyCode::Digit3) {
+        Some(KIND_WALKER)
+    } else {
+        None
+    };
+    if let Some(kind) = order_kind {
+        let picked = sel.picked.clone();
+        for id in picked {
+            sim.r.world.push_order(Order::Produce { unit: id, kind });
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        let picked = sel.picked.clone();
+        for id in picked {
+            sim.r.world.push_order(Order::Cancel { unit: id });
         }
     }
 
@@ -1247,6 +1582,22 @@ fn hands(
     let Some((solid, empty)) = hit else { return };
     let picked = sel.picked.clone();
     if ctrl {
+        if let Some(kind) = sel.build {
+            // Строить: место — **пустой** воксель перед породой,
+            // то есть поверхность, а не её нутро. Материя не
+            // списывается здесь: её льют строители, тик за тиком.
+            let p = if empty[0] >= 0 { empty } else { solid };
+            for id in picked {
+                sim.r.world.push_order(Order::Build { unit: id, kind, x: p[0], z: p[2] });
+            }
+            sel.build = None;
+            sel.mark = Some((
+                Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32),
+                BUILD_COLOUR,
+                MARK_LIFE,
+            ));
+            return;
+        }
         // Копать: приказ называет **занятый** воксель — тот, в который
         // упёрся луч. Копка это экономика, и щёлкают по породе.
         for id in picked {
@@ -1277,6 +1628,89 @@ fn hands(
     }
 }
 
+/// Строка состояния между кадрами.
+#[derive(Resource, Default)]
+struct Hud {
+    /// Что напечатали в прошлый раз: строку, которая не изменилась,
+    /// печатать снова незачем.
+    last: String,
+    /// Секунд с прошлой печати.
+    since: f32,
+}
+
+/// Строка состояния: запас, потолок, силы, исход.
+///
+/// **Печатается в терминал, а не рисуется в окне.** Настоящая строка
+/// поверх кадра требует `bevy_ui` и `bevy_text`, а пин собран
+/// с набором `3d`, где их нет: включение — правка зависимостей,
+/// а её решает владелец (`CLAUDE.md`). Терминал у этого проекта
+/// и так первый: «ни одна подсистема не считается готовой, пока
+/// не проходит headless из терминала».
+///
+/// Раз в секунду и только при изменении: строка, повторяющаяся
+/// шестьдесят раз в секунду, — это не отчёт, а шум.
+fn hud(sim: Res<Sim>, time: Res<Time>, mut hud: ResMut<Hud>) {
+    hud.since += time.delta_secs();
+    if hud.since < 1.0 {
+        return;
+    }
+    hud.since = 0.0;
+    let w = &sim.r.world;
+    let Some(e) = w.econ.as_ref() else { return };
+    let mut mine = 0usize;
+    let mut foes = 0usize;
+    let mut crawlers = 0usize;
+    let mut sites = 0usize;
+    for &i in w.units.live() {
+        let k = i as usize;
+        if w.units.owner[k] == PLAYER {
+            mine += 1;
+            if w.units.site[k] != 0 {
+                sites += 1;
+            }
+            let ki = w.units.kind[k];
+            if ki != sim_core::economy::NO_KIND && e.kinds.at(ki as usize).dig {
+                crawlers += 1;
+            }
+        } else {
+            foes += 1;
+        }
+    }
+    let queued: usize = e.lines().iter().map(|l| l.queue.len()).sum();
+    let out = match w.outcome() {
+        sim_core::Outcome::Won(o) if o == PLAYER => "  ПОБЕДА",
+        sim_core::Outcome::Won(_) => "  ПОРАЖЕНИЕ",
+        sim_core::Outcome::Draw => "  НИЧЬЯ",
+        sim_core::Outcome::Fighting => "",
+    };
+    let line = format!(
+        "материя {} / {} | краулеров {crawlers} | строек {sites} | в очереди {queued} \
+         | своих {mine} | чужих {foes} | выкопано {} | довезено {}{out}",
+        grouped(e.stock(PLAYER)),
+        grouped(e.cap(PLAYER)),
+        grouped(e.mined),
+        grouped(e.delivered),
+    );
+    if line != hud.last {
+        println!("{line}");
+        hud.last = line;
+    }
+}
+
+/// Разрядка больших чисел. Материя считается объёмом на плотность,
+/// и числа у неё шестизначные: без разрядки строка не читается.
+fn grouped(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Оверлей: кольца под выделенными, рамка и отметка приказа.
 fn overlay(
     mut giz: Gizmos,
@@ -1295,6 +1729,28 @@ fn overlay(
         }
         let p = Vec3::new(u.x[k] as f32, u.y[k] as f32 + 0.2, u.z[k] as f32);
         giz.circle(Isometry3d::new(p, flat), r, SEL_COLOUR).resolution(16);
+    }
+
+    // Недострой обведён кольцом, и кольцо растёт вместе с ним:
+    // «сколько осталось» игрок обязан видеть, не считая вокселей.
+    if let Some(e) = sim.r.world.econ.as_ref() {
+        for &i in u.live() {
+            let k = i as usize;
+            if u.site[k] == 0 {
+                continue;
+            }
+            let ki = u.kind[k];
+            if ki == sim_core::economy::NO_KIND {
+                continue;
+            }
+            let cost = e.kinds.at(ki as usize).cost.max(1);
+            let done = cost.saturating_sub(u.site[k]);
+            // Целочисленно до самого показа: доля — это уже рендер.
+            let part = (done as f64 / cost as f64) as f32;
+            let p = Vec3::new(u.x[k] as f32, u.y[k] as f32 + 0.2, u.z[k] as f32);
+            giz.circle(Isometry3d::new(p, flat), r * 2.0, BUILD_COLOUR).resolution(24);
+            giz.circle(Isometry3d::new(p, flat), r * 2.0 * part, BUILD_COLOUR).resolution(24);
+        }
     }
 
     if let Some((p, c, life)) = sel.mark {

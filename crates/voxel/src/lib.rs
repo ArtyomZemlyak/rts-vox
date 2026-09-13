@@ -25,4 +25,4 @@ pub use bodies::{Bodies, Body, BodyStats};
 pub use fleet::{Fleet, FleetStats, UnitId};
 pub use los::{line_of_sight, LosResult};
 pub use unit::{Part, Status, UnitBody};
-pub use world::{Edit, FlushStats, Generator, World};
+pub use world::{Edit, FlushStats, Generator, World, NOBODY};

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 pub mod drive;
+pub mod economy;
 pub mod energy;
 pub mod ground;
 pub mod mapcache;
@@ -27,7 +28,9 @@ use fx::rng::Rng;
 use fx::Fx;
 use index::Grid;
 pub use modding::{ChassisKind, Tuning};
-pub use order::{Order, STANCE_DIG, STANCE_FLOW, STANCE_HOLD, STANCE_MOVE};
+pub use order::{
+    Order, STANCE_BUILD, STANCE_DIG, STANCE_FLOW, STANCE_HAUL, STANCE_HOLD, STANCE_MOVE,
+};
 
 /// Сторона мира в мировых единицах. Тысяча метров при ребре
 /// воксела 0.1 м (ADR-227).
@@ -247,6 +250,34 @@ pub struct Units {
     pub goal_x: Vec<i32>,
     pub goal_y: Vec<i32>,
     pub goal_z: Vec<i32>,
+
+    // --- экономика (ADR-230)
+    //
+    /// Тип из таблицы `data/kinds.ron` — **место** в реестре, а не
+    /// номер. `docs/05-units.md` называет это поле `kind`.
+    /// [`economy::NO_KIND`] — юнит пришёл не из таблицы: так живут
+    /// стенды и эталонный сценарий, и платить за экономику они
+    /// не обязаны.
+    pub kind: Vec<u16>,
+    /// Контейнер юнита: бак краулера, вложенное в недострой, тело
+    /// готовой машины. [`economy::NO_CONTAINER`] — контейнера нет.
+    pub store: Vec<matter::ContainerId>,
+    /// Сколько материи недострою ещё не хватает. Ноль — достроен.
+    ///
+    /// Убывающая величина, а не растущая: «достроен» это ноль,
+    /// и проверять его не надо сравнивать со стоимостью типа,
+    /// которая лежит в другом месте.
+    pub site: Vec<matter::Amount>,
+    /// Забой, к которому копатель вернётся, отвезя груз. Читается
+    /// только при `STANCE_HAUL`.
+    pub face: Vec<(i32, i32, i32)>,
+    /// Над чем юнит работает: слот склада, недостроя или номер
+    /// обломка. [`NO_TARGET`] — ни над чем.
+    ///
+    /// Отдельно от `target`: цель — это по кому стрелять, и фаза боя
+    /// её перевыбирает. Работа приказом игрока не отменяется.
+    pub job: Vec<u32>,
+
     free: Vec<u32>,
     live_ids: Vec<u32>,
 }
@@ -353,6 +384,11 @@ impl Units {
             goal_x: Vec::new(),
             goal_y: Vec::new(),
             goal_z: Vec::new(),
+            kind: Vec::new(),
+            store: Vec::new(),
+            site: Vec::new(),
+            face: Vec::new(),
+            job: Vec::new(),
             free: Vec::new(),
             live_ids: Vec::new(),
         }
@@ -412,6 +448,16 @@ impl Units {
             self.goal_x[k] = 0;
             self.goal_y[k] = 0;
             self.goal_z[k] = 0;
+            // **Слот из свободного списка не наследует ни типа, ни
+            // контейнера, ни недостроя.** Наследуй он контейнер —
+            // и подкрепление получило бы полный бак покойника,
+            // то есть материю из ниоткуда. Ту же дыру закрывает
+            // правило про приказ (ADR-195).
+            self.kind[k] = economy::NO_KIND;
+            self.store[k] = economy::NO_CONTAINER;
+            self.site[k] = 0;
+            self.face[k] = (0, 0, 0);
+            self.job[k] = NO_TARGET;
             return i;
         }
         self.x.push(x);
@@ -444,6 +490,11 @@ impl Units {
         self.goal_x.push(0);
         self.goal_y.push(0);
         self.goal_z.push(0);
+        self.kind.push(economy::NO_KIND);
+        self.store.push(economy::NO_CONTAINER);
+        self.site.push(0);
+        self.face.push((0, 0, 0));
+        self.job.push(NO_TARGET);
         (self.x.len() - 1) as u32
     }
 
@@ -597,7 +648,50 @@ pub struct World {
     pub orders_applied: u64,
     pub orders_dropped: u64,
     pub orders_capped: u64,
+    /// Учёт материи: запасы сторон, очереди заводов, обломки.
+    ///
+    /// Необязателен по той же причине, что и земля: стенд, мерящий
+    /// пять тысяч юнитов, экономики не ведёт, и фазы `Logistics`
+    /// с `Economy` на пустом месте остаются заглушками, какими были.
+    /// Это не «включаемая механика», а отсутствие данных.
+    pub econ: Option<economy::Economy>,
+    /// Чем кончилась партия. Пересчитывается каждый тик в `Economy`.
+    outcome: Outcome,
+    /// Тик, на котором исход определился.
+    pub decided_at: Option<u64>,
     pub phase_ns: [u64; 16],
+}
+
+/// Чем кончилась партия.
+///
+/// **Условие простое и проверяемое:** у стороны не осталось ничего
+/// живого — ни машин, ни построек — значит она проиграла. Постройка
+/// считается живой наравне с машиной: сторона с одним складом ещё
+/// в игре, и отнять у неё победу нельзя.
+///
+/// Срок партии и победа по очкам живут выше — в матче
+/// (`demo::skirmish`): это правила состязания, а не правило мира.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Outcome {
+    /// Ещё идёт.
+    Fighting,
+    /// У всех остальных не осталось живых.
+    Won(u8),
+    /// Живых не осталось ни у кого.
+    Draw,
+}
+
+impl Outcome {
+    pub fn winner(self) -> Option<u8> {
+        match self {
+            Outcome::Won(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    pub fn over(self) -> bool {
+        self != Outcome::Fighting
+    }
 }
 
 const DIRS: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
@@ -796,6 +890,111 @@ impl World {
         self.weapons = w;
     }
 
+    /// Привязать экономику: таблицу типов и реестр материалов.
+    ///
+    /// Отдельным вызовом, как оружие и земля. Мир без неё законен —
+    /// он просто не ведёт учёта: копка снимает воксели, и материя
+    /// никуда не идёт. Так живут стенды и эталонный сценарий, и хеш
+    /// у них от появления экономики **не сдвигается ни на бит**:
+    /// то, чего нет, в хеш не входит (ADR-195, ADR-230).
+    pub fn attach_economy(&mut self, kinds: modding::Kinds, mats: modding::Registry) {
+        let owners = self.flow.len().max(1);
+        self.econ = Some(economy::Economy::new(kinds, mats, owners, &self.tuning));
+    }
+
+    /// Поставить юнита **известного типа**: числа берутся из таблицы,
+    /// а не из аргументов.
+    ///
+    /// Вернёт `None`, если типа с таким номером нет или экономика
+    /// не привязана: молча ставить юнита с нулевой скоростью нельзя —
+    /// это неподвижная машина, которую никто не заказывал.
+    ///
+    /// **Тело заводится уже сделанным из материи.** Машина, поставленная
+    /// на карту расстановкой, — это машина, которая из чего-то состоит,
+    /// и её стоимость входит в начальную сумму учёта: ровно так партия
+    /// с чего-то начинается (`docs/07-economy.md`, «содержимое при
+    /// заведении входит в начальную сумму»). Без этого подбитая
+    /// стартовая машина не оставляла бы обломка, а бак краулера
+    /// «наполнялся» бы стоимостью собственного корпуса.
+    pub fn spawn_kind(&mut self, x: i32, z: i32, owner: u8, kind_id: u16) -> Option<u32> {
+        self.spawn_kind_inner(x, z, owner, kind_id, true)
+    }
+
+    /// То же, но **тело пустое**: материю в него ещё предстоит вложить.
+    ///
+    /// Так появляются недострой и заказ завода: их материя приходит
+    /// переводом из запаса, а не возникает вместе с ними. Заведи их
+    /// наполненными — и стройка удваивала бы материю.
+    fn spawn_kind_empty(&mut self, x: i32, z: i32, owner: u8, kind_id: u16) -> Option<u32> {
+        self.spawn_kind_inner(x, z, owner, kind_id, false)
+    }
+
+    fn spawn_kind_inner(
+        &mut self,
+        x: i32,
+        z: i32,
+        owner: u8,
+        kind_id: u16,
+        made: bool,
+    ) -> Option<u32> {
+        let e = self.econ.as_ref()?;
+        let ki = e.kinds.index_of(kind_id)?;
+        let d = e.kinds.at(ki).clone();
+        let id = self.spawn_ground(x, z, owner, d.speed, d.voxels);
+        let k = id as usize;
+        self.units.kind[k] = ki as u16;
+        self.units.chassis[k] = d.chassis;
+        self.units.weapon[k] = if d.weapon == 0 {
+            0
+        } else {
+            self.weapons.index_of(d.weapon).unwrap_or(0) as u16
+        };
+        // Постройка не едет и не ходит по полю стороны: она стоит.
+        if d.is_building() {
+            self.units.stance[k] = STANCE_HOLD;
+        }
+        // Контейнер заводится **только тем, кому есть что держать**:
+        // тело готовой машины, бак краулера, вместимость склада.
+        // Контейнер на каждый из пяти тысяч слотов был бы пятью
+        // тысячами пустых записей в учёте.
+        // Контейнер один на юнита: тело и бак вместе. Тело — это
+        // `cost` единиц, бак — остальное, и «сколько везёт» считается
+        // вычитанием. Два контейнера на юнита стоили бы вдвое больше
+        // записей ради одного вычитания.
+        let cap = d.cost.saturating_add(d.tank);
+        if let Some(e) = self.econ.as_mut() {
+            let held = if made { d.cost } else { 0 };
+            let c = e.ledger.create(matter::Kind::Body, held, cap);
+            self.units.store[k] = c;
+        }
+        Some(id)
+    }
+
+    /// Сколько юнит везёт сверх собственного тела.
+    pub fn cargo(&self, i: usize) -> matter::Amount {
+        let Some(e) = self.econ.as_ref() else { return 0 };
+        let c = self.units.store[i];
+        let ki = self.units.kind[i];
+        if c == economy::NO_CONTAINER || ki == economy::NO_KIND {
+            return 0;
+        }
+        e.ledger.held(c).saturating_sub(e.kinds.at(ki as usize).cost)
+    }
+
+    /// Чем кончилась партия.
+    pub fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+
+    /// Живых у стороны, считая постройки.
+    pub fn living(&self, owner: u8) -> usize {
+        self.units
+            .live_ids
+            .iter()
+            .filter(|&&i| self.units.owner[i as usize] == owner)
+            .count()
+    }
+
     /// Привязать воксельный мир. До этого фазы земли — заглушки.
     ///
     /// Здесь же индекс соседей узнаёт **настоящий** размер мира.
@@ -939,6 +1138,9 @@ impl World {
             orders_applied: 0,
             orders_dropped: 0,
             orders_capped: 0,
+            econ: None,
+            outcome: Outcome::Fighting,
+            decided_at: None,
             phase_ns: [0; 16],
         }
     }
@@ -1090,6 +1292,8 @@ impl World {
                     self.phase_ride();
                 }
                 Phase::Combat => self.phase_combat(),
+                Phase::Logistics => self.phase_logistics(),
+                Phase::Economy => self.phase_economy(),
                 Phase::Visibility => self.phase_visibility(),
                 Phase::Cleanup => self.phase_cleanup(),
                 Phase::Hash => hash = self.phase_hash(),
@@ -1124,6 +1328,8 @@ impl World {
                     self.phase_ride();
                 }
                 Phase::Combat => self.phase_combat(),
+                Phase::Logistics => self.phase_logistics(),
+                Phase::Economy => self.phase_economy(),
                 Phase::Visibility => self.phase_visibility(),
                 Phase::Cleanup => self.phase_cleanup(),
                 Phase::Hash => hash = self.phase_hash(),
@@ -1212,9 +1418,178 @@ impl World {
                 u.goal_x[i] = x;
                 u.goal_y[i] = y;
                 u.goal_z[i] = z;
+                // Забой запоминается сразу: отвезя груз, копатель
+                // вернётся именно сюда, а не туда, где его застал
+                // полный бак.
+                u.face[i] = (x, y, z);
+                u.job[i] = NO_TARGET;
+            }
+            Order::Build { kind, x, z, .. } => {
+                if !self.place_site(i, kind, x, z) {
+                    self.orders_dropped += 1;
+                    return;
+                }
+            }
+            Order::Produce { kind, .. } => {
+                if !self.enqueue_product(i, kind) {
+                    self.orders_dropped += 1;
+                    return;
+                }
+            }
+            Order::Cancel { .. } => {
+                if !self.cancel_product(i) {
+                    self.orders_dropped += 1;
+                    return;
+                }
             }
         }
         self.orders_applied += 1;
+    }
+
+    /// Разметить недострой и послать заказчика его строить.
+    ///
+    /// Недострой — **обычное тело-контейнер с частично заполненным
+    /// томом** (`docs/07-economy.md`), то есть обычный юнит, которому
+    /// не хватает материи. Отдельной сущности «фундамент» нет, и
+    /// поэтому отмена стройки не требует ничего нового: недострой
+    /// гибнет как всякое тело.
+    ///
+    /// Материя **не списывается здесь**. Она льётся строителями,
+    /// тик за тиком: «недострой считается в потолок по уже вложенной
+    /// материи».
+    fn place_site(&mut self, by: usize, kind_id: u16, x: i32, z: i32) -> bool {
+        let owner = self.units.owner[by];
+        let Some(e) = self.econ.as_ref() else { return false };
+        let Some(ki) = e.kinds.index_of(kind_id) else { return false };
+        let d = e.kinds.at(ki);
+        // Строят только постройки. Машина выходит из завода, и класть
+        // её фундамент посреди карты значило бы два пути к одному
+        // результату — они бы разошлись.
+        if !d.is_building() {
+            return false;
+        }
+        // Строитель обязан уметь строить: иначе недострой встал бы
+        // и стоял, а приказ выглядел бы исполненным.
+        let bki = self.units.kind[by];
+        if bki == economy::NO_KIND {
+            return false;
+        }
+        if e.kinds.at(bki as usize).build_rate == 0 {
+            return false;
+        }
+        // **Недострой на этом месте уже есть — вставать к нему,
+        // а не класть второй.** Приказ отдаётся каждому выделенному
+        // юниту отдельно, и без этого щелчок по месту при двадцати
+        // выделенных краулерах разметил бы двадцать фундаментов
+        // в одной точке. Заодно это и защита от мода: цикл «размечай
+        // фундаменты» иначе становится способом занять слоты юнитов.
+        //
+        // Ничья — по **меньшему номеру слота** (`CLAUDE.md`).
+        let reach = self.tuning.work_reach;
+        let mut join = NO_TARGET;
+        {
+            // Список недостроев — свой, короткий: обходить ради этого
+            // все слоты значило бы умножить потолок приказов на их
+            // число. **Список живых тут не годится**: его пересобирает
+            // `NavUpdate` в начале тика, а недострой заводится
+            // в `ApplyCommands`, и второй приказ того же щелчка его
+            // бы не увидел.
+            let e = self.econ.as_ref().expect("экономика");
+            for &j in &e.sites {
+                let j = j as usize;
+                if !self.units.alive[j]
+                    || self.units.site[j] == 0
+                    || self.units.owner[j] != owner
+                    || self.units.kind[j] != ki as u16
+                {
+                    continue;
+                }
+                let (dx, dz) = (self.units.x[j] - x, self.units.z[j] - z);
+                if dx * dx + dz * dz <= reach * reach {
+                    join = j as u32;
+                    break;
+                }
+            }
+        }
+        if join != NO_TARGET {
+            let k = join as usize;
+            self.units.stance[by] = STANCE_BUILD;
+            self.units.goal_x[by] = self.units.x[k];
+            self.units.goal_y[by] = self.units.y[k];
+            self.units.goal_z[by] = self.units.z[k];
+            self.units.job[by] = join;
+            return true;
+        }
+        let Some(site) = self.spawn_kind_empty(x, z, owner, kind_id) else { return false };
+        let k = site as usize;
+        let cost = self
+            .econ
+            .as_ref()
+            .expect("экономика")
+            .kinds
+            .at(self.units.kind[k] as usize)
+            .cost;
+        self.units.site[k] = cost;
+        // Недострой начинается с одного воксела: ноль означал бы
+        // мёртвого при рождении, и уборка снесла бы его тем же тиком.
+        self.units.voxels[k] = 1;
+        self.econ.as_mut().expect("экономика").add_site(site);
+        self.units.stance[by] = STANCE_BUILD;
+        self.units.goal_x[by] = x;
+        self.units.goal_y[by] = self.units.y[k];
+        self.units.goal_z[by] = z;
+        self.units.job[by] = site;
+        true
+    }
+
+    /// Поставить заказ в очередь завода.
+    fn enqueue_product(&mut self, at: usize, kind_id: u16) -> bool {
+        let cap = self.tuning.max_build_queue;
+        let unit = at as u32;
+        let fki = self.units.kind[at];
+        let Some(e) = self.econ.as_mut() else { return false };
+        if fki == economy::NO_KIND {
+            return false;
+        }
+        // Завод обязан уметь делать именно это. Список лежит в данных,
+        // и проверять его здесь — единственный способ не дать очереди
+        // набраться заказами, которые никогда не выйдут.
+        if !e.kinds.at(fki as usize).produces.contains(&kind_id) {
+            return false;
+        }
+        let Some(ki) = e.kinds.index_of(kind_id) else { return false };
+        let line = e.line_mut(unit);
+        if line.queue.len() >= cap {
+            return false;
+        }
+        line.queue.push_back(ki as u16);
+        true
+    }
+
+    /// Снять с завода последний заказ. Передний снимается тоже —
+    /// вместе с возвратом уплаченного.
+    fn cancel_product(&mut self, at: usize) -> bool {
+        let unit = at as u32;
+        let owner = self.units.owner[at] as usize;
+        let Some(e) = self.econ.as_mut() else { return false };
+        let Some(stock) = e.banks.get(owner).map(|b| b.stock) else { return false };
+        let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else { return false };
+        if e.lines[li].queue.is_empty() {
+            return false;
+        }
+        // Снимается **последний**, а не передний: игрок отменяет то,
+        // что заказал по ошибке, а не то, что уже собирается. Если он
+        // один — он же и передний, и заготовка уходит обратно в запас.
+        e.lines[li].queue.pop_back();
+        if e.lines[li].queue.is_empty() {
+            // Отмена — **не сток**: вложенное возвращается в запас.
+            // Иначе цикл «заказал — отменил» стал бы способом сжигать
+            // материю мимо перечня стоков (`docs/07-economy.md`).
+            e.drop_line(unit, stock);
+        }
+        // Очередь не пуста — передний заказ продолжается, и его
+        // заготовку трогать не за что.
+        true
     }
 
     /// Работа по стоячему приказу копать.
@@ -1234,9 +1609,10 @@ impl World {
         if r <= 0 {
             return;
         }
-        let Self { units: u, ground, .. } = self;
+        let Self { units: u, ground, econ, .. } = self;
         let Some(g) = ground.as_mut() else { return };
         let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
+        let mut cur = voxel::World::mat_cursor();
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
             if !u.alive[i] || u.stance[i] != STANCE_DIG {
@@ -1248,7 +1624,32 @@ impl World {
                 // Ещё в дороге: идёт он фазой движения, как все.
                 continue;
             }
-            for dy in -r..=r {
+            // **Копатель с полным баком не копает.** Канон
+            // (`docs/07-economy.md`): «правка не применяется, работа
+            // копателя стоит и прогресс не набирается». Наивная
+            // альтернатива — снять воксель и не принять материю —
+            // была бы стоком вне перечня.
+            //
+            // Отсюда и место в баке считается **здесь**, до постановки
+            // правок: снять больше, чем влезет, нельзя, а узнать это
+            // после дренажа уже поздно.
+            let mut room = matter::Amount::MAX;
+            let by = match econ.as_ref() {
+                Some(e) if u.store[i] != economy::NO_CONTAINER => {
+                    room = e.ledger.room(u.store[i]);
+                    if room == 0 {
+                        continue;
+                    }
+                    i as u32
+                }
+                _ => voxel::NOBODY,
+            };
+            // Места не хватило на следующий воксель — это и есть
+            // «бак полон». Считать полным `room == 0` нельзя: остаток
+            // почти никогда не делится на плотность материала нацело,
+            // и копатель вставал бы с непустым остатком навсегда.
+            let mut full = false;
+            'ball: for dy in -r..=r {
                 for dz in -r..=r {
                     for dx in -r..=r {
                         if dx * dx + dy * dy + dz * dz > r * r {
@@ -1268,11 +1669,35 @@ impl World {
                         if !g.world.solid(x as u32, y as u32, z as u32) {
                             continue;
                         }
-                        g.world.queue_dig(x as u32, y as u32, z as u32);
+                        if by != voxel::NOBODY {
+                            let m =
+                                g.world.material_cached(&mut cur, x as u32, y as u32, z as u32);
+                            if m == voxel::store::AIR {
+                                continue;
+                            }
+                            let per = econ.as_ref().expect("экономика").per_voxel(m);
+                            if per > room {
+                                full = true;
+                                break 'ball;
+                            }
+                            room -= per;
+                        }
+                        g.world.queue_dig_by(x as u32, y as u32, z as u32, by);
                     }
                 }
             }
+            if full {
+                // Слой не догрызен — забой не углубляется, и, разгрузившись,
+                // копатель вернётся ровно сюда.
+                u.stance[i] = STANCE_HAUL;
+                u.job[i] = NO_TARGET;
+                u.face[i] = (gx, gy, gz);
+                continue;
+            }
             u.goal_y[i] -= 1;
+            // Забой уходит вглубь вместе с приказом: отвезя груз,
+            // копатель вернётся туда, где остановился, а не наверх.
+            u.face[i] = (gx, u.goal_y[i], gz);
             // Догрыз до дна — приказ исчерпан, юнит стоит. Вернуть его
             // под поле стороны нельзя: он ушёл бы с забоя сам, а игрок
             // этого не просил.
@@ -2382,6 +2807,501 @@ impl World {
         shots.refresh_live();
     }
 
+    /// Фаза `Logistics`: материя доходит до стороны.
+    ///
+    /// Три шага, и все три — переводы между контейнерами:
+    ///
+    /// 1. **Начисление выкопанного.** Мир сказал, что сняли и по чьей
+    ///    просьбе; земля отдаёт эту материю, бак принимает.
+    /// 2. **Реклейм обломка** — тот же перевод, что копка (ADR-017).
+    /// 3. **Разгрузка на складе.** Здесь же переработка: выход меньше
+    ///    единицы — единственный сток, доступный с первого дня
+    ///    (`docs/07-economy.md`).
+    ///
+    /// Без привязанной экономики фаза остаётся заглушкой, какой была.
+    fn phase_logistics(&mut self) {
+        if self.econ.is_none() {
+            return;
+        }
+        self.harvest();
+        self.haul();
+    }
+
+    /// Шаг 1: выкопанное — в бак заказчика.
+    ///
+    /// **Начисляется по тому, что мир действительно снял**, а не по
+    /// тому, что копатель просил: правка может упереться в потолок
+    /// и отложиться, а воксель — оказаться уже выбитым взрывом.
+    /// Начисление по просьбе создавало бы материю (ADR-031).
+    ///
+    /// Бесхозные снятия — обвал, запекание тела, воронка — в учёт
+    /// не входят вовсе: это физика карты, а не экономика. Карта
+    /// в учёте не лежит, поэтому и терять ей нечего.
+    fn harvest(&mut self) {
+        let Self { econ, ground, units, .. } = self;
+        let Some(e) = econ.as_mut() else { return };
+        let Some(g) = ground.as_ref() else { return };
+        for &(by, mat) in g.taken() {
+            if by == voxel::NOBODY {
+                continue;
+            }
+            let i = by as usize;
+            if i >= units.alive.len() || !units.alive[i] {
+                continue;
+            }
+            let c = units.store[i];
+            if c == economy::NO_CONTAINER {
+                continue;
+            }
+            let per = e.per_voxel(mat);
+            // **Больше, чем влезет, не принимаем.** Наивная
+            // альтернатива — воксель снят, материя не принята —
+            // была бы стоком вне перечня (`docs/07-economy.md`),
+            // поэтому копатель с полным баком и не копает вовсе:
+            // `dig_work` считает место заранее.
+            let take = per.min(e.ledger.room(c));
+            if take == 0 {
+                continue;
+            }
+            e.ledger.reveal(e.ground, take);
+            e.mined += e.ledger.transfer(e.ground, c, take);
+        }
+    }
+
+    /// Шаги 2 и 3: реклейм обломков, поездка на склад и разгрузка.
+    fn haul(&mut self) {
+        let reach = self.tuning.work_reach;
+        let cap = self.tuning.max_dock_searches;
+        let (rn, rd) = (self.tuning.refine_num, self.tuning.refine_den);
+        let mut searches = 0u32;
+        let mut capped = false;
+        for k in 0..self.units.live_ids.len() {
+            let i = self.units.live_ids[k] as usize;
+            let ki = self.units.kind[i];
+            if ki == economy::NO_KIND {
+                continue;
+            }
+            let c = self.units.store[i];
+            if c == economy::NO_CONTAINER {
+                continue;
+            }
+            let e = self.econ.as_mut().expect("экономика");
+            let d = e.kinds.at(ki as usize);
+            if d.tank == 0 {
+                continue;
+            }
+            let owner = self.units.owner[i];
+
+            // --- бак полон: везти на склад. Проверяется **до**
+            //     реклейма: полному копателю обломок ни к чему,
+            //     и просматривать их ему незачем.
+            if self.units.stance[i] == STANCE_DIG && e.ledger.room(c) == 0 {
+                self.units.stance[i] = STANCE_HAUL;
+                self.units.job[i] = NO_TARGET;
+            }
+
+            // --- реклейм: копатель, чей забой пришёлся на обломок,
+            //     сливает его тем же переводом, что и породу.
+            //
+            // Просмотр обломков идёт из **того же бюджета**, что поиск
+            // склада: и там, и там копатель ищет, к чему приткнуться,
+            // а число пар «копатель × обломок» в плотном случае растёт
+            // квадратично (ADR-114). Упёршийся просмотр откладывается
+            // на следующий тик: обломок никуда не денется.
+            if self.units.stance[i] == STANCE_DIG && !e.wrecks.is_empty() {
+                if searches >= cap {
+                    capped = true;
+                    continue;
+                }
+                searches += 1;
+                let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
+                // Ничья — по **меньшему номеру обломка**, а не по
+                // порядку обхода (`CLAUDE.md`).
+                let mut best: Option<usize> = None;
+                let mut bd = i64::MAX;
+                for (wi, w) in e.wrecks.iter().enumerate() {
+                    if e.ledger.held(w.held) == 0 {
+                        continue;
+                    }
+                    let (dx, dz) = ((w.x - gx) as i64, (w.z - gz) as i64);
+                    let dd = dx * dx + dz * dz;
+                    if dd > (reach as i64) * (reach as i64) {
+                        continue;
+                    }
+                    if dd < bd {
+                        bd = dd;
+                        best = Some(wi);
+                    }
+                }
+                if let Some(wi) = best {
+                    let from = e.wrecks[wi].held;
+                    let room = e.ledger.room(c);
+                    let n = e.ledger.transfer(from, c, room);
+                    e.reclaimed += n;
+                    // Набрал полный бак с обломка — тоже везти.
+                    if e.ledger.room(c) == 0 {
+                        self.units.stance[i] = STANCE_HAUL;
+                        self.units.job[i] = NO_TARGET;
+                    }
+                }
+            }
+
+            if self.units.stance[i] != STANCE_HAUL {
+                continue;
+            }
+
+            // --- выбрать склад, если его нет или он погиб.
+            let mut dock = self.units.job[i];
+            let ok = (dock as usize) < self.units.alive.len()
+                && dock != NO_TARGET
+                && self.units.alive[dock as usize]
+                && self.units.owner[dock as usize] == owner
+                && self.units.site[dock as usize] == 0
+                && self.units.kind[dock as usize] != economy::NO_KIND
+                && e.kinds.at(self.units.kind[dock as usize] as usize).store > 0;
+            if !ok {
+                if searches >= cap {
+                    // Упёршийся поиск **откладывается**, а не теряется:
+                    // краулер ждёт тик и остаётся с грузом (ADR-114).
+                    capped = true;
+                    continue;
+                }
+                searches += 1;
+                dock = self.nearest_dock(i);
+                self.units.job[i] = dock;
+                let e = self.econ.as_mut().expect("экономика");
+                e.dock_searches += 1;
+                if dock == NO_TARGET {
+                    // Склада нет вовсе — копать дальше некуда, но
+                    // и ехать некуда: юнит стоит при забое с полным
+                    // баком. Это видно игроку и лечится складом.
+                    continue;
+                }
+            }
+            let (dx, dz) = (
+                self.units.x[dock as usize] - self.units.x[i],
+                self.units.z[dock as usize] - self.units.z[i],
+            );
+            self.units.goal_x[i] = self.units.x[dock as usize];
+            self.units.goal_y[i] = self.units.y[dock as usize];
+            self.units.goal_z[i] = self.units.z[dock as usize];
+            if dx * dx + dz * dz > reach * reach {
+                continue;
+            }
+
+            // --- разгрузка. Переработка с выходом меньше единицы —
+            //     тот самый сток, без которого партия не кончается.
+            let e = self.econ.as_mut().expect("экономика");
+            let body = e.kinds.at(ki as usize).cost;
+            let cargo = e.ledger.held(c).saturating_sub(body);
+            if cargo > 0 {
+                let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+                // **Больше, чем влезет в запас, не перерабатывается.**
+                // Переработка списывает в сток всё взятое, что не ушло
+                // приёмнику: сдай полный бак в полный склад — и груз
+                // целиком уйдёт в «выход переработки < 1». Это был бы
+                // не сток, а уничтожение груза полным складом, и
+                // выглядело бы оно как работающая переработка.
+                //
+                // Отсюда: сколько руды брать, считается **от места**
+                // в запасе, а не от того, сколько её в баке.
+                let room = e.ledger.room(bank.stock);
+                let fits = room.saturating_mul(rd) / rn.max(1);
+                let want = cargo.min(fits);
+                if want > 0 {
+                    let got = e.ledger.refine(c, bank.stock, want, rn, rd);
+                    e.delivered += got;
+                }
+            }
+            // Разгрузился — обратно к забою. Забой запомнен приказом,
+            // а не тем местом, где кончился бак.
+            if e.ledger.held(c) <= body {
+                let (fx, fy, fz) = self.units.face[i];
+                if fy > 1 {
+                    self.units.stance[i] = STANCE_DIG;
+                    self.units.goal_x[i] = fx;
+                    self.units.goal_y[i] = fy;
+                    self.units.goal_z[i] = fz;
+                } else {
+                    self.units.stance[i] = STANCE_HOLD;
+                }
+                self.units.job[i] = NO_TARGET;
+            }
+        }
+        if capped {
+            if let Some(e) = self.econ.as_mut() {
+                e.dock_capped += 1;
+            }
+        }
+    }
+
+    /// Ближайший достроенный склад своей стороны.
+    ///
+    /// Ничья — по **меньшему номеру слота**, а не по порядку обхода
+    /// (`CLAUDE.md`): иначе два одинаково близких склада выбирались бы
+    /// по истории списка живых.
+    fn nearest_dock(&self, i: usize) -> u32 {
+        let Some(e) = self.econ.as_ref() else { return NO_TARGET };
+        let owner = self.units.owner[i];
+        let (ux, uz) = (self.units.x[i], self.units.z[i]);
+        let mut best = NO_TARGET;
+        let mut bd = i64::MAX;
+        for k in 0..self.units.live_ids.len() {
+            let j = self.units.live_ids[k] as usize;
+            if self.units.owner[j] != owner || self.units.site[j] != 0 {
+                continue;
+            }
+            let kj = self.units.kind[j];
+            if kj == economy::NO_KIND || e.kinds.at(kj as usize).store == 0 {
+                continue;
+            }
+            let (dx, dz) = ((self.units.x[j] - ux) as i64, (self.units.z[j] - uz) as i64);
+            let d = dx * dx + dz * dz;
+            if d < bd {
+                bd = d;
+                best = j as u32;
+            }
+        }
+        best
+    }
+
+    /// Фаза `Economy`: стройка, производство, потолки, исход.
+    fn phase_economy(&mut self) {
+        if self.econ.is_none() {
+            return;
+        }
+        self.build_work();
+        self.produce_work();
+        self.recount_caps();
+        self.sweep_wrecks();
+    }
+
+    /// Убрать выбранные обломки.
+    ///
+    /// Раз за тик и по всему списку, а не на каждом реклейме: список
+    /// читает каждый копатель, и пустая запись в нём — это работа
+    /// на каждом из них плюс запись в хеше.
+    ///
+    /// Порядок сохраняется: `retain`, а не `swap_remove`. Перестановка
+    /// соседей молча меняет исход ничьей в выборе ближайшего обломка
+    /// (`CLAUDE.md`).
+    fn sweep_wrecks(&mut self) {
+        let Some(e) = self.econ.as_mut() else { return };
+        if e.wrecks.is_empty() {
+            return;
+        }
+        let mut empty: Vec<matter::ContainerId> = Vec::new();
+        let ledger = &e.ledger;
+        e.wrecks.retain(|w| {
+            if ledger.held(w.held) == 0 {
+                empty.push(w.held);
+                false
+            } else {
+                true
+            }
+        });
+        for id in empty {
+            e.ledger.release(id);
+        }
+    }
+
+    /// Строители льют материю в недострой.
+    ///
+    /// Недострой растёт **вокселями**: вложенная материя переводится
+    /// в прикреплённые к ядру воксели по доле от стоимости. Растёт
+    /// прибавкой, а не пересчётом: пересчёт лечил бы повреждения,
+    /// и недострой стал бы неуязвимым.
+    fn build_work(&mut self) {
+        let reach = self.tuning.work_reach;
+        for k in 0..self.units.live_ids.len() {
+            let i = self.units.live_ids[k] as usize;
+            if self.units.stance[i] != STANCE_BUILD {
+                continue;
+            }
+            let s = self.units.job[i];
+            let alive = s != NO_TARGET
+                && (s as usize) < self.units.alive.len()
+                && self.units.alive[s as usize]
+                && self.units.site[s as usize] > 0;
+            if !alive {
+                self.units.stance[i] = STANCE_HOLD;
+                self.units.job[i] = NO_TARGET;
+                continue;
+            }
+            let s = s as usize;
+            let (dx, dz) = (self.units.x[s] - self.units.x[i], self.units.z[s] - self.units.z[i]);
+            self.units.goal_x[i] = self.units.x[s];
+            self.units.goal_y[i] = self.units.y[s];
+            self.units.goal_z[i] = self.units.z[s];
+            if dx * dx + dz * dz > reach * reach {
+                continue;
+            }
+            let owner = self.units.owner[i];
+            let ki = self.units.kind[i];
+            let si = self.units.kind[s];
+            if ki == economy::NO_KIND || si == economy::NO_KIND {
+                continue;
+            }
+            let e = self.econ.as_mut().expect("экономика");
+            let rate = e.kinds.at(ki as usize).build_rate;
+            let (cost, full) = {
+                let d = e.kinds.at(si as usize);
+                (d.cost, d.voxels as u64)
+            };
+            let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+            let want = rate.min(self.units.site[s]);
+            let moved = e.ledger.transfer(bank.stock, self.units.store[s], want);
+            if moved == 0 {
+                continue;
+            }
+            e.spent += moved;
+            let before = full * (cost - self.units.site[s]) / cost.max(1);
+            self.units.site[s] -= moved;
+            let after = full * (cost - self.units.site[s]) / cost.max(1);
+            self.units.voxels[s] = self.units.voxels[s]
+                .saturating_add((after - before).min(u16::MAX as u64) as u16);
+            if self.units.site[s] == 0 {
+                e.built += 1;
+                e.drop_site(s as u32);
+                self.units.voxels[s] = full.min(u16::MAX as u64) as u16;
+                self.units.stance[i] = STANCE_HOLD;
+                self.units.job[i] = NO_TARGET;
+            }
+        }
+    }
+
+    /// Заводы собирают машины.
+    ///
+    /// Заказ готов, когда **и уплачено, и отстояло**: деньги вперёд
+    /// времени не двигают, и наоборот. Иначе богатая сторона получала
+    /// бы армию мгновенно.
+    fn produce_work(&mut self) {
+        let mut out: Vec<(u32, u16, u8)> = Vec::new();
+        {
+            let Some(e) = self.econ.as_mut() else { return };
+            let mut dead: Vec<u32> = Vec::new();
+            for li in 0..e.lines.len() {
+                let unit = e.lines[li].unit;
+                let u = unit as usize;
+                let ok = u < self.units.alive.len()
+                    && self.units.alive[u]
+                    && self.units.site[u] == 0
+                    && self.units.kind[u] != economy::NO_KIND;
+                if !ok {
+                    dead.push(unit);
+                    continue;
+                }
+                let Some(&ki) = e.lines[li].queue.front() else {
+                    dead.push(unit);
+                    continue;
+                };
+                let (cost, ticks_need) = {
+                    let d = e.kinds.at(ki as usize);
+                    (d.cost, d.build_ticks.max(1))
+                };
+                let owner = self.units.owner[u];
+                let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+                let held = e.lines[li].held;
+                let paid = e.ledger.held(held);
+                // Порция за тик — вверх: при делении вниз последний
+                // грош не платился бы никогда, и заказ висел бы вечно.
+                let per_tick = cost.div_ceil(ticks_need as u64);
+                let want = per_tick.min(cost.saturating_sub(paid));
+                if want > 0 {
+                    let moved = e.ledger.transfer(bank.stock, held, want);
+                    e.spent += moved;
+                }
+                e.lines[li].ticks = e.lines[li].ticks.saturating_add(1);
+                if e.ledger.held(held) >= cost && e.lines[li].ticks >= ticks_need {
+                    out.push((unit, ki, owner));
+                }
+            }
+            for unit in dead {
+                let owner = {
+                    let u = unit as usize;
+                    if u < self.units.owner.len() {
+                        self.units.owner[u]
+                    } else {
+                        0
+                    }
+                };
+                let stock = e.banks.get(owner as usize).map(|b| b.stock);
+                match stock {
+                    Some(s) => e.drop_line(unit, s),
+                    None => e.drop_line(unit, e.ground),
+                }
+            }
+        }
+
+        // Выпуск — **после** обхода: заселение берёт весь мир, а
+        // порядок остаётся порядком в списке очередей, а не обхода.
+        for (unit, ki, owner) in out {
+            let u = unit as usize;
+            let gap = self.tuning.separation;
+            let (ex, ez) = self.ground.as_ref().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+            // Машина выходит на расстояние расталкивания от завода:
+            // ближе она физически стоять не может, и место это уже
+            // задано данными.
+            let x = (self.units.x[u] + gap).clamp(0, ex - 1);
+            let z = self.units.z[u].clamp(0, ez - 1);
+            let id = {
+                let e = self.econ.as_ref().expect("экономика");
+                e.kinds.at(ki as usize).id
+            };
+            let Some(made) = self.spawn_kind_empty(x, z, owner, id) else { continue };
+            let e = self.econ.as_mut().expect("экономика");
+            let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else { continue };
+            let held = e.lines[li].held;
+            let cost = e.kinds.at(ki as usize).cost;
+            // Материя заказа **переезжает в тело машины**: тело юнита
+            // это контейнер (`docs/07-economy.md`), и подбитая машина
+            // отдаёт её обломком.
+            e.ledger.transfer(held, self.units.store[made as usize], cost);
+            e.lines[li].queue.pop_front();
+            e.lines[li].ticks = 0;
+            e.produced += 1;
+            self.units.refresh_live();
+        }
+    }
+
+    /// Пересчёт потолков запаса.
+    ///
+    /// Потолок стороны — база из данных плюс вместимость её
+    /// **достроенных** складов (ADR-043). Недострой вместимости
+    /// не даёт: иначе «начал стройку» выводило бы материю из-под
+    /// потолка через бесконечные фундаменты (`docs/07-economy.md`).
+    ///
+    /// Упавший потолок сбрасывает излишек в объявленный сток. Порядок
+    /// фиксирован каноном, и он здесь: доля при разрушении уже снята
+    /// фазой уборки, потолок пересчитывается после неё.
+    fn recount_caps(&mut self) {
+        let base = self.tuning.base_store;
+        let owners = self.econ.as_ref().map(|e| e.banks.len()).unwrap_or(0);
+        let mut caps = vec![base; owners];
+        for k in 0..self.units.live_ids.len() {
+            let i = self.units.live_ids[k] as usize;
+            if self.units.site[i] != 0 {
+                continue;
+            }
+            let ki = self.units.kind[i];
+            if ki == economy::NO_KIND {
+                continue;
+            }
+            let o = self.units.owner[i] as usize;
+            if o >= owners {
+                continue;
+            }
+            let e = self.econ.as_ref().expect("экономика");
+            caps[o] = caps[o].saturating_add(e.kinds.at(ki as usize).store);
+        }
+        let e = self.econ.as_mut().expect("экономика");
+        for (o, cap) in caps.into_iter().enumerate() {
+            e.banks[o].cap = cap;
+            let stock = e.banks[o].stock;
+            e.ledger.lower_cap(stock, cap);
+        }
+    }
+
     /// Видимость: здесь заглушка с реалистичной формой доступа —
     /// настоящая мерилась отдельно (ADR-070, ADR-072).
     fn phase_visibility(&mut self) {}
@@ -2404,7 +3324,96 @@ impl World {
                 y: self.units.y[k],
                 z: self.units.z[k],
             });
+            self.wreck(k);
             self.units.kill(i);
+        }
+        self.recount_outcome();
+    }
+
+    /// Разрушенная машина оставляет обломок.
+    ///
+    /// Порядок канонический (`docs/07-economy.md`): доля содержимого
+    /// теряется по данным, остаток переходит в обломок с нейтральным
+    /// владельцем (ADR-047), потолок игрока пересчитывается фазой
+    /// `Economy` следующего тика.
+    ///
+    /// Обломок лежит **там, где погибла машина**, и реклеймится тем же
+    /// приказом «копать», что и порода (ADR-017).
+    fn wreck(&mut self, k: usize) {
+        let c = self.units.store[k];
+        if c == economy::NO_CONTAINER {
+            return;
+        }
+        let (num, den) = (self.tuning.breach_loss_num, self.tuning.breach_loss_den);
+        let (x, y, z) = (self.units.x[k], self.units.y[k], self.units.z[k]);
+        let unit = k as u32;
+        let Some(e) = self.econ.as_mut() else { return };
+        // Недострой погиб — снять его из списка: иначе к покойнику
+        // будут пристраиваться следующие приказы «строить».
+        e.drop_site(unit);
+        let (debris, _lost, rest) = e.ledger.breach(c, num, den);
+        // Заготовка погибшего завода разделяет его судьбу — и ложится
+        // в тот же обломок.
+        e.wreck_line(unit, debris);
+        if e.ledger.held(debris) > 0 {
+            e.wrecks.push(economy::Wreck { held: debris, x, y, z });
+        } else {
+            let _ = rest;
+            e.ledger.release(debris);
+        }
+        // Слот контейнера возвращается в свободный список: партия
+        // на десять тысяч тиков иначе копит по записи на каждую
+        // погибшую машину.
+        e.ledger.release(c);
+        self.units.store[k] = economy::NO_CONTAINER;
+        // Выбранные обломки убирает `sweep_wrecks` — раз за тик
+        // и в одном месте.
+    }
+
+    /// Пересчёт исхода: у стороны не осталось живых — она проиграла.
+    fn recount_outcome(&mut self) {
+        // Массив на стеке, а не `Vec`: фаза идёт каждый тик, в том
+        // числе на прогоне гейта, которому исход не нужен вовсе.
+        // Выделение на тик ради двух чисел — это цена, которую платят
+        // все, включая тех, кто за неё ничего не получает.
+        const MAX_OWNERS: usize = 8;
+        let owners = self.flow.len().clamp(1, MAX_OWNERS);
+        let mut live = [0usize; MAX_OWNERS];
+        for k in 0..self.units.live_ids.len() {
+            let i = self.units.live_ids[k] as usize;
+            // **По `alive`, а не по списку живых.** Список пересобирает
+            // фаза `NavUpdate` в начале тика, а уборка идёт в конце:
+            // убитый этим тиком в списке ещё лежит, и исход отставал бы
+            // на тик. Отставание на тик — это разный исход у разных
+            // клиентов, если один из них на этом тике остановится.
+            if !self.units.alive[i] {
+                continue;
+            }
+            let o = self.units.owner[i] as usize;
+            if o < owners {
+                live[o] += 1;
+            }
+        }
+        let mut standing = 0usize;
+        let mut who = 0u8;
+        for (o, n) in live.iter().enumerate().take(owners) {
+            if *n > 0 {
+                standing += 1;
+                // Первый по номеру, а не по порядку обхода: ничьи
+                // разрешаются линейным индексом (`CLAUDE.md`).
+                if standing == 1 {
+                    who = o as u8;
+                }
+            }
+        }
+        let was = self.outcome;
+        self.outcome = match standing {
+            0 => Outcome::Draw,
+            1 => Outcome::Won(who),
+            _ => Outcome::Fighting,
+        };
+        if was == Outcome::Fighting && self.outcome.over() && self.decided_at.is_none() {
+            self.decided_at = Some(self.tick);
         }
     }
 
@@ -2458,6 +3467,30 @@ impl World {
                 w = w.wrapping_mul(31).wrapping_add(self.units.goal_y[i] as u32 as u64);
                 w = w.wrapping_mul(31).wrapping_add(self.units.goal_z[i] as u32 as u64);
             }
+            // Экономика юнита входит в хеш **только когда она есть**
+            // (ADR-230). У юнита без типа поля экономики не значат
+            // ничего, и прогон, который её не ведёт, хеширует ровно
+            // то же, что хешировал до её появления: эталонный хеш
+            // от неё не сдвинулся ни на бит. Правило то же, по
+            // которому в хеш входит приказ (ADR-195).
+            if self.units.kind[i] != economy::NO_KIND {
+                w = w.wrapping_mul(31).wrapping_add(self.units.kind[i] as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.site[i]);
+                w = w.wrapping_mul(31).wrapping_add(self.units.job[i] as u64);
+                // Забой входит **целиком**, с высотой: пока копатель
+                // везёт груз, его `goal_y` — это высота склада,
+                // а глубина забоя живёт только здесь. Не войди она —
+                // копатель вернулся бы на другую глубину, и хеш
+                // этого не заметил бы.
+                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].0 as u32 as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].1 as u32 as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].2 as u32 as u64);
+                if let Some(e) = &self.econ {
+                    if self.units.store[i] != economy::NO_CONTAINER {
+                        w = w.wrapping_mul(31).wrapping_add(e.ledger.held(self.units.store[i]));
+                    }
+                }
+            }
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         // Снаряды — состояние, а не украшение: не войди они в хеш,
@@ -2484,6 +3517,12 @@ impl World {
         }
         if let Some(g) = &self.ground {
             h = h.wrapping_add(g.hash());
+        }
+        // Запас стороны, очереди заводов и обломки переживают тик —
+        // значит входят в хеш. Не войди они, запас можно было бы
+        // переписать целиком и увидеть тот же хеш до бита (ADR-116).
+        if let Some(e) = &self.econ {
+            h = h.wrapping_add(e.hash());
         }
         h
     }

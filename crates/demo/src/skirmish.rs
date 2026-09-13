@@ -40,6 +40,25 @@ pub struct Setup {
     /// Через сколько тиков стороны перенацеливают поле направлений
     /// на **живого** противника. Ноль — не перенацеливать.
     pub hunt_period: u64,
+    /// Вести ли экономику: запас стороны, стройка, производство
+    /// (ADR-230).
+    ///
+    /// Когда она включена, `diggers` — это **настоящие краулеры**,
+    /// а не оснастка, выедающая карту мимо учёта: копка это экономика,
+    /// а не спецэффект (`CLAUDE.md`).
+    pub economy: bool,
+    /// Через сколько тиков бот раздаёт приказы. Ноль — не раздавать:
+    /// приказы отдаёт игрок.
+    pub bot_period: u64,
+}
+
+/// База стороны: где стоит завод и куда ходят копать.
+#[derive(Clone, Copy)]
+pub struct Base {
+    pub x: i32,
+    pub z: i32,
+    /// Слот завода; [`sim_core::NO_TARGET`] — завода нет.
+    pub factory: u32,
 }
 
 impl Default for Setup {
@@ -55,6 +74,11 @@ impl Default for Setup {
             // значило бы решать его вхолостую, поэтому раз в десять
             // секунд игрового времени — 300 тиков при 30 Гц.
             hunt_period: 300,
+            economy: true,
+            // Бот думает раз в секунду. Чаще незачем: приказ копать
+            // занимает копателя на сотни тиков, а очередь завода —
+            // на сотни тиков сборки.
+            bot_period: 30,
         }
     }
 }
@@ -88,14 +112,29 @@ impl Outcome {
 pub struct Skirmish {
     pub world: World,
     pub terrain: Terrain,
-    dig: crate::dig::Dig,
+    /// Оснастка, выедающая карту, — только когда экономики нет.
+    /// С экономикой копают настоящие краулеры.
+    dig: Option<crate::dig::Dig>,
     setup: Setup,
+    /// Базы сторон.
+    pub bases: [Base; 2],
     /// Живых по сторонам после последнего тика.
     pub alive: [usize; 2],
     pub tick: u64,
     /// Тик, на котором исход определился.
     pub decided_at: Option<u64>,
+    /// Свой генератор у бота: приказы не имеют права зависеть
+    /// от того, сколько раз к генератору мира обратился кто-то ещё.
+    bot_rng: Rng,
 }
+
+/// Номера типов из `data/kinds.ron`. Явные, а не места в реестре
+/// (ADR-028): место зависит от того, какие типы загружены.
+pub const KIND_TANK: u16 = 1;
+pub const KIND_CRAWLER: u16 = 2;
+pub const KIND_WALKER: u16 = 3;
+pub const KIND_FACTORY: u16 = 10;
+pub const KIND_DEPOT: u16 = 11;
 
 impl Skirmish {
     pub fn new(setup: Setup) -> Skirmish {
@@ -109,17 +148,28 @@ impl Skirmish {
             1 << 16,
             Box::new(Terrain { params, seed: setup.seed }),
         );
-        let dig = crate::dig::Dig::clustered(
-            &vw,
-            |x, z| terrain.surface(x, z),
-            setup.diggers,
-            2,
-            4,
-            setup.seed ^ 0x5C1,
-        );
-        let mut world = World::new(2, setup.per_side * 2 + 8, t);
+        // Оснастка, выедающая карту, нужна только когда экономики нет.
+        // С экономикой копают настоящие краулеры: копка это экономика,
+        // а не спецэффект (`CLAUDE.md`), и две копки в одной сцене
+        // означали бы, что половина выработки идёт мимо учёта.
+        let dig = if setup.economy {
+            None
+        } else {
+            Some(crate::dig::Dig::clustered(
+                &vw,
+                |x, z| terrain.surface(x, z),
+                setup.diggers,
+                2,
+                4,
+                setup.seed ^ 0x5C1,
+            ))
+        };
+        let mut world = World::new(2, setup.per_side * 2 + setup.diggers * 2 + 16, t);
         world.attach_ground(Ground::new(vw, &t));
         world.attach_weapons(crate::weapons());
+        if setup.economy {
+            world.attach_economy(crate::kinds(), crate::materials());
+        }
 
         // Базы по углам: одна в ближнем, другая в дальнем. Не по
         // середине сторон — так между ними лежит диагональ, то есть
@@ -130,29 +180,53 @@ impl Skirmish {
         let bases = [(margin, margin), (ex - margin, ez - margin)];
         let mut r = Rng::new(setup.seed, 0x5A1D);
         let spread = (ex / 12).clamp(3, 40);
+        let mut built: [Base; 2] = [Base { x: 0, z: 0, factory: sim_core::NO_TARGET }; 2];
         for (owner, &(bx, bz)) in bases.iter().enumerate() {
-            for _ in 0..setup.per_side {
+            built[owner] = Base { x: bx, z: bz, factory: sim_core::NO_TARGET };
+            if setup.economy {
+                // База: завод и склад стоят готовыми. Строить первый
+                // завод не из чего, а партия, которая не может
+                // начаться, — не партия.
+                let f = world.spawn_kind(bx, bz, owner as u8, KIND_FACTORY);
+                built[owner].factory = f.unwrap_or(sim_core::NO_TARGET);
+                let dx = (spread / 2).max(2);
+                world.spawn_kind((bx + dx).clamp(0, ex - 1), bz, owner as u8, KIND_DEPOT);
+                for k in 0..setup.diggers {
+                    let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
+                    let z = (bz + r.range(-spread, spread)).clamp(0, ez - 1);
+                    let _ = k;
+                    world.spawn_kind(x, z, owner as u8, KIND_CRAWLER);
+                }
+            }
+            for k in 0..setup.per_side {
                 let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
                 let z = (bz + r.range(-spread, spread)).clamp(0, ez - 1);
-                world.spawn_ground(x, z, owner as u8, r.range(2, 6), 300);
+                if setup.economy {
+                    // Смесь **внутри** стороны: замерено, что сторона
+                    // с одним лучом теряет всех шестьдесят против
+                    // двенадцати потерь у стороны с болтом — луч
+                    // требует чистой прямой, а карту всё время копают
+                    // (ADR-205). Тип несёт оружие сам (ADR-230).
+                    let kind = if k % 2 == 0 { KIND_TANK } else { KIND_WALKER };
+                    world.spawn_kind(x, z, owner as u8, kind);
+                } else {
+                    world.spawn_ground(x, z, owner as u8, r.range(2, 6), 300);
+                }
             }
         }
-        // Оружие раздаётся **явным номером вида**, как в эталонном
-        // сценарии (ADR-192): без этого все остаются со слотом ноль,
-        // то есть с болтом, и луч в матче не стреляет ни разу.
-        //
-        // Смесь **внутри** стороны, а не по сторонам. Гейт раздаёт
-        // по владельцу, и это верно для нагрузки: так оба вида
-        // работают под нагрузкой. Игре так нельзя — замерено, что
-        // сторона с одним лучом теряет всех шестьдесят против
-        // двенадцати потерь у стороны с болтом: луч требует чистой
-        // прямой, а карту всё время копают (ADR-205).
-        for k in 0..world.units.len() {
-            let id = sim_core::REF_WEAPON_IDS[k % 2];
-            world.units.weapon[k] = world
-                .weapons
-                .index_of(id)
-                .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16;
+        if !setup.economy {
+            // Оружие раздаётся **явным номером вида**, как в эталонном
+            // сценарии (ADR-192): без этого все остаются со слотом ноль,
+            // то есть с болтом, и луч в матче не стреляет ни разу.
+            // С экономикой оружие приходит из типа, и раздавать его
+            // руками значило бы два источника одной величины.
+            for k in 0..world.units.len() {
+                let id = sim_core::REF_WEAPON_IDS[k % 2];
+                world.units.weapon[k] = world
+                    .weapons
+                    .index_of(id)
+                    .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16;
+            }
         }
 
         // Каждый идёт к чужой базе.
@@ -165,9 +239,11 @@ impl Skirmish {
             terrain,
             dig,
             setup,
+            bases: built,
             alive: [setup.per_side; 2],
             tick: 0,
             decided_at: None,
+            bot_rng: Rng::new(setup.seed, 0xB07),
         };
         m.count();
         m
@@ -175,10 +251,13 @@ impl Skirmish {
 
     /// Один тик матча. Возвращает хеш тика.
     pub fn step(&mut self) -> u64 {
-        {
+        if let Some(dig) = self.dig.as_mut() {
             let g = self.world.ground_mut().expect("земля");
             let terrain = &self.terrain;
-            self.dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+            dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
+        }
+        if self.setup.bot_period != 0 && self.tick % self.setup.bot_period == 0 {
+            self.bot();
         }
         let h = self.world.tick();
         self.tick += 1;
@@ -224,6 +303,121 @@ impl Skirmish {
             }
             let (tx, tz) = ((sum[foe].0 / n[foe]) as i32, (sum[foe].1 / n[foe]) as i32);
             self.world.fill_flow_towards(me, tx, tz);
+        }
+    }
+
+    /// Бот: занять простаивающих копателей и загрузить завод.
+    ///
+    /// **Собран целиком на канале приказов** — ни одной правки
+    /// состояния напрямую. То же правило, что у мода и у окна
+    /// (ADR-195): бот отличается от игрока только тем, что не щёлкает
+    /// мышью.
+    ///
+    /// Порядок обхода — по возрастанию номера юнита, а жребий берётся
+    /// из **своего** генератора: приказы не имеют права зависеть
+    /// от того, сколько раз к генератору мира обратился кто-то ещё.
+    fn bot(&mut self) {
+        if !self.setup.economy {
+            return;
+        }
+        let (ex, ez) = (self.setup.side as i32, self.setup.side as i32);
+        let spread = (ex / 10).clamp(4, 48);
+        let mut orders: Vec<sim_core::Order> = Vec::new();
+
+        // Запас подпирает потолок — значит пора строить склад.
+        // Это единственное, что бот строит, и строит он по нужде,
+        // а не по расписанию: постройка, которая ставится «просто так»,
+        // не проверяет, что стройка вообще связана с экономикой.
+        let mut want_depot = [false; 2];
+        {
+            let Some(e) = self.world.econ.as_ref() else { return };
+            // Недострой уже размечен — второй не нужен: класть
+            // фундаменты пачкой это и есть отмывание материи,
+            // от которого предостерегает `docs/07-economy.md`.
+            let mut building = [false; 2];
+            for &i in self.world.units.live() {
+                let k = i as usize;
+                if self.world.units.site[k] != 0 && (self.world.units.owner[k] as usize) < 2 {
+                    building[self.world.units.owner[k] as usize] = true;
+                }
+            }
+            for owner in 0..2usize {
+                let cap = e.cap(owner as u8);
+                let full = e.stock(owner as u8) >= cap / 4 * 3;
+                want_depot[owner] = full && !building[owner];
+            }
+        }
+        let mut placed = [false; 2];
+
+        for &i in self.world.units.live() {
+            let k = i as usize;
+            let owner = self.world.units.owner[k] as usize;
+            if owner >= 2 {
+                continue;
+            }
+            let Some(e) = self.world.econ.as_ref() else { continue };
+            let ki = self.world.units.kind[k];
+            if ki == sim_core::economy::NO_KIND {
+                continue;
+            }
+            let d = e.kinds.at(ki as usize);
+            // Простаивающий копатель идёт грызть забой у своей базы.
+            // «Простаивающий» это без приказа и не в работе: копку,
+            // возку и стройку бот не перебивает — иначе копатель
+            // с полным баком разворачивался бы на полпути каждую
+            // секунду.
+            let idle = matches!(
+                self.world.units.stance[k],
+                sim_core::STANCE_FLOW | sim_core::STANCE_HOLD
+            );
+            // Свободный строитель ставит склад — по одному за раз.
+            if idle && d.build_rate > 0 && want_depot[owner] && !placed[owner] {
+                let b = self.bases[owner];
+                let off = (spread / 2).max(3);
+                let sign = if owner == 0 { 1 } else { -1 };
+                let x = (b.x + sign * off).clamp(1, ex - 2);
+                let z = (b.z + sign * off).clamp(1, ez - 2);
+                orders.push(sim_core::Order::Build { unit: i, kind: KIND_DEPOT, x, z });
+                placed[owner] = true;
+                continue;
+            }
+            if d.dig && idle {
+                let b = self.bases[owner];
+                let x = (b.x + self.bot_rng.range(-spread, spread)).clamp(1, ex - 2);
+                let z = (b.z + self.bot_rng.range(-spread, spread)).clamp(1, ez - 2);
+                // Забой — воксель **под** поверхностью: шар, снятый
+                // с воздуха, не даёт ничего.
+                let y = self.terrain.surface(x as u32, z as u32).saturating_sub(1) as i32;
+                if y > 2 {
+                    orders.push(sim_core::Order::Dig { unit: i, x, y, z });
+                }
+            }
+        }
+        // Завод: держать очередь непустой, пока запас позволяет.
+        for owner in 0..2usize {
+            let f = self.bases[owner].factory;
+            if f == sim_core::NO_TARGET {
+                continue;
+            }
+            let k = f as usize;
+            if !self.world.units.alive[k] || self.world.units.site[k] != 0 {
+                continue;
+            }
+            let Some(e) = self.world.econ.as_ref() else { continue };
+            let queued = e.line(f).map(|l| l.queue.len()).unwrap_or(0);
+            if queued >= 2 {
+                continue;
+            }
+            // Заказывать впритык нельзя: сборка тянет из того же
+            // запаса, что стройка, и очередь встала бы, съев всё.
+            let kind = if self.tick % 2 == 0 { KIND_TANK } else { KIND_WALKER };
+            let Some(def) = e.kinds.get(kind) else { continue };
+            if e.stock(owner as u8) >= def.cost.saturating_mul(2) {
+                orders.push(sim_core::Order::Produce { unit: f, kind });
+            }
+        }
+        for o in orders {
+            self.world.push_order(o);
         }
     }
 

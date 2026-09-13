@@ -16,7 +16,7 @@
 //! а остаётся в мире: это заметно игроку, но детерминировано, а
 //! «иногда падает, иногда нет» — десинк.
 
-use crate::store::{Mat, AIR};
+use crate::store::Mat;
 use crate::World;
 use fx::Fx;
 
@@ -240,7 +240,7 @@ impl Bodies {
         self.next_id += 1;
         self.spawned.push(b.id);
         for &(x, y, z) in cells {
-            w.queue_edit(crate::Edit { x, y, z, mat: AIR });
+            w.queue_edit(crate::Edit::dig(x, y, z));
         }
         self.list.push(b);
         true
@@ -308,12 +308,7 @@ impl Bodies {
                 for v in &b.voxels {
                     let (x, y, z) = b.world_of(*v);
                     if x >= 0 && y >= 0 && z >= 0 {
-                        w.queue_edit(crate::Edit {
-                            x: x as u32,
-                            y: y as u32,
-                            z: z as u32,
-                            mat: v.mat,
-                        });
+                        w.queue_edit(crate::Edit::put(x as u32, y as u32, z as u32, v.mat));
                     }
                 }
                 st.landed += 1;
@@ -349,6 +344,7 @@ impl StableRemove for Vec<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::AIR;
     use crate::Generator;
 
     struct Flat {
@@ -377,7 +373,7 @@ mod tests {
         for z in 10..12 {
             for y in 10..12 {
                 for x in 10..12 {
-                    w.queue_edit(crate::Edit { x, y, z, mat: 3 });
+                    w.queue_edit(crate::Edit::put(x, y, z, 3));
                 }
             }
         }
@@ -421,7 +417,7 @@ mod tests {
         let mut w = world();
         let cells: Vec<(u32, u32, u32)> = vec![(5, 4, 5), (6, 4, 5)];
         for &(x, y, z) in &cells {
-            w.queue_edit(crate::Edit { x, y, z, mat: 3 });
+            w.queue_edit(crate::Edit::put(x, y, z, 3));
         }
         w.flush();
         let mut bodies = Bodies::new(64, test_gravity());
@@ -446,7 +442,7 @@ mod tests {
         let mut bodies = Bodies::new(2, test_gravity());
         for k in 0..5u32 {
             let cells = vec![(5 + k, 10, 5)];
-            w.queue_edit(crate::Edit { x: 5 + k, y: 10, z: 5, mat: 3 });
+            w.queue_edit(crate::Edit::put(5 + k, 10, 5, 3));
             w.flush();
             let ok = bodies.detach(&mut w, &cells);
             w.flush();
@@ -472,7 +468,7 @@ mod tests {
             .flat_map(|z| (at..at + 2).flat_map(move |y| (10..12).map(move |x| (x, y, z))))
             .collect();
         for &(x, y, z) in &cells {
-            w.queue_edit(crate::Edit { x, y, z, mat: 3 });
+            w.queue_edit(crate::Edit::put(x, y, z, 3));
         }
         w.flush();
         assert!(bodies.detach(w, &cells), "кусок не оторвался");
@@ -570,7 +566,7 @@ mod tests {
                 let cells: Vec<(u32, u32, u32)> =
                     vec![(4 + k, 12 + k, 4), (5 + k, 12 + k, 4)];
                 for &(x, y, z) in &cells {
-                    w.queue_edit(crate::Edit { x, y, z, mat: 3 });
+                    w.queue_edit(crate::Edit::put(x, y, z, 3));
                 }
                 w.flush();
                 bodies.detach(&mut w, &cells);

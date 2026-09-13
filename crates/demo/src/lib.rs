@@ -42,6 +42,39 @@ pub fn weapons() -> modding::weapons::Weapons {
     }
 }
 
+/// Таблица типов — из `data/kinds.ron`, как и в игре (ADR-230).
+///
+/// Секунды переводятся в тики **здесь**, частотой симуляции: число
+/// баланса не должно молча зависеть от частоты тика
+/// (`docs/07-economy.md`).
+pub fn kinds() -> modding::Kinds {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/kinds.ron");
+    let path = if here.exists() { here } else { std::path::PathBuf::from("data/kinds.ron") };
+    match modding::kinds::load(&path, sim_core::TICKS_PER_SECOND as u32) {
+        Ok(k) => k,
+        Err(e) => panic!("{e}"),
+    }
+}
+
+/// Реестр материалов — из `data/materials.ron`.
+///
+/// Экономике он нужен затем же, зачем мешингу: плотность материала
+/// решает, сколько материи в вокселе (`CLAUDE.md`, «ресурс = объём ×
+/// плотность»).
+pub fn materials() -> modding::Registry {
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/materials.ron");
+    let path =
+        if here.exists() { here } else { std::path::PathBuf::from("data/materials.ron") };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => panic!("{}: {e}", path.display()),
+    };
+    match modding::data::materials_from_ron(&text) {
+        Ok(r) => r,
+        Err(e) => panic!("{}: {e}", path.display()),
+    }
+}
+
 /// Генератор мира. Живёт в `worldgen`; здесь реэкспорт, чтобы сцены
 /// не тянули имя из двух мест.
 pub use worldgen::Terrain;

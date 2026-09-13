@@ -19,6 +19,10 @@
 
 use crate::store::{Mat, Paletted, AIR, CS};
 
+/// Никто не заказывал: обвал, запекание приземлившегося тела, воронка
+/// от попадания. Экономика такую правку в чей-то бак не начисляет.
+pub const NOBODY: u32 = u32::MAX;
+
 /// Правка: воксель и материал, который в нём оказался.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Edit {
@@ -27,6 +31,29 @@ pub struct Edit {
     pub z: u32,
     /// Материал **после** правки. `AIR` — снятие.
     pub mat: Mat,
+    /// Кто заказал правку: слот юнита либо [`NOBODY`].
+    ///
+    /// Нужно экономике, и только ей: выкопанное начисляется тому, кто
+    /// копал, а распылённое воронкой уходит в объявленный сток
+    /// (`docs/07-economy.md`). Без этого поля начисление пришлось бы
+    /// делать по соседству правки с копателем, то есть угадывать.
+    ///
+    /// В хеш **не входит**: хеш сводит то, что стало с миром, а не
+    /// того, кто об этом попросил. Начисленная материя в хеш входит
+    /// отдельно и своей величиной.
+    pub by: u32,
+}
+
+impl Edit {
+    /// Снятие воксела без заказчика — обвал, воронка, оснастка теста.
+    pub fn dig(x: u32, y: u32, z: u32) -> Edit {
+        Edit { x, y, z, mat: AIR, by: NOBODY }
+    }
+
+    /// Укладка материала без заказчика.
+    pub fn put(x: u32, y: u32, z: u32, mat: Mat) -> Edit {
+        Edit { x, y, z, mat, by: NOBODY }
+    }
 }
 
 /// Процедурный слой. Обязан быть чистой функцией от координат: значение
@@ -108,6 +135,14 @@ pub struct World {
     /// Правки, применённые в текущем тике. Это и есть поток для рендера
     /// (ADR-103) и вход связности с навигацией.
     applied: Vec<Edit>,
+    /// Что **снято** последним дренажем: заказчик и материал, который
+    /// в вокселе был. Только настоящие снятия — укладка и пустая правка
+    /// сюда не попадают.
+    ///
+    /// Отдельным списком, а не полем правки: материал «до» известен
+    /// только в момент применения, и класть его в очередь значило бы
+    /// хранить в ней поле, которое до дренажа не значит ничего.
+    taken: Vec<(u32, Mat)>,
     /// Переиспользуемый буфер отложенного: дренаж идёт каждый тик,
     /// и выделять его заново незачем.
     defer_buf: Vec<Edit>,
@@ -296,6 +331,7 @@ impl World {
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
             applied: Vec::new(),
+            taken: Vec::new(),
             defer_buf: Vec::new(),
             materialized: 0,
         }
@@ -486,7 +522,14 @@ impl World {
     }
 
     pub fn queue_dig(&mut self, x: u32, y: u32, z: u32) {
-        self.queue_edit(Edit { x, y, z, mat: AIR });
+        self.queue_edit(Edit::dig(x, y, z));
+    }
+
+    /// Снять воксель **за счёт названного слота**. Материал, который
+    /// там был, попадёт в [`World::taken`], и экономика начислит его
+    /// заказчику.
+    pub fn queue_dig_by(&mut self, x: u32, y: u32, z: u32, by: u32) {
+        self.queue_edit(Edit { x, y, z, mat: AIR, by });
     }
 
     pub fn queued(&self) -> usize {
@@ -506,6 +549,7 @@ impl World {
             self.materialized_in_tick = 0;
         }
         self.applied.clear();
+        self.taken.clear();
         let mut st = FlushStats::default();
         // Потолок материализаций — второй потолок дренажа, и он нужен
         // по той же причине, что первый: без него тик, в котором забой
@@ -549,10 +593,15 @@ impl World {
                 deferred.push(e);
                 continue;
             }
-            if self.apply(e) {
+            if let Some(was) = self.apply(e) {
                 if fresh {
                     st.materialized += 1;
                     self.materialized_in_tick += 1;
+                }
+                // Снятое — в список изъятого: экономика начислит его
+                // заказчику, а бесхозное отправит в объявленный сток.
+                if e.mat == AIR && was != AIR {
+                    self.taken.push((e.by, was));
                 }
                 self.applied.push(e);
                 st.applied += 1;
@@ -571,12 +620,17 @@ impl World {
         st
     }
 
-    /// Применить одну правку. Возвращает `false`, если она ничего
-    /// не изменила.
-    fn apply(&mut self, e: Edit) -> bool {
+    /// Применить одну правку. Возвращает материал, **который в вокселе
+    /// был**, либо `None`, если правка ничего не изменила.
+    ///
+    /// Материал «до» возвращается, а не выбрасывается, потому что он
+    /// нужен экономике: выкопанное начисляется по тому, что сняли,
+    /// а не по тому, что осталось (`docs/07-economy.md`). Читается он
+    /// здесь всё равно.
+    fn apply(&mut self, e: Edit) -> Option<Mat> {
         let was = self.material(e.x, e.y, e.z);
         if was == e.mat {
-            return false;
+            return None;
         }
         let ci = self.chunk_index(e.x, e.y, e.z);
         self.materialize(ci);
@@ -594,13 +648,19 @@ impl World {
         } else {
             self.bits[w] |= m;
         }
-        true
+        Some(was)
     }
 
     /// Правки, применённые в последнем дренаже. Поток для рендера
     /// (ADR-103), вход связности и переворотов нав-клеток.
     pub fn edits(&self) -> &[Edit] {
         &self.applied
+    }
+
+    /// Что снято последним дренажем: заказчик и материал, который
+    /// в вокселе был. Вход экономики (`docs/07-economy.md`).
+    pub fn taken(&self) -> &[(u32, Mat)] {
+        &self.taken
     }
 
     /// Битовый объём целиком — для пирамиды и марша.
@@ -678,12 +738,7 @@ mod tests {
                     // попадали многократно.
                     let slot = r.below(4);
                     let (ox, oy, oz) = (5 + (slot & 1) * 9, 5 + (slot >> 1) * 7, 6);
-                    Edit {
-                        x: cx * 32 + ox,
-                        y: oy,
-                        z: cz * 32 + oz,
-                        mat: r.below(4) as Mat,
-                    }
+                    Edit::put(cx * 32 + ox, oy, cz * 32 + oz, r.below(4) as Mat)
                 })
                 .collect()
         };
@@ -889,7 +944,7 @@ mod tests {
         assert_eq!(st.applied, 1);
         assert_eq!(w.material(10, 5, 10), AIR);
         assert!(!w.solid(10, 5, 10));
-        assert_eq!(w.edits(), &[Edit { x: 10, y: 5, z: 10, mat: AIR }]);
+        assert_eq!(w.edits(), &[Edit::dig(10, 5, 10)]);
         assert_eq!(w.touched_chunks(), 1, "тронут ровно один чанк");
     }
 
