@@ -117,14 +117,54 @@ fn an_aimed_attachment_faces_its_direction() {
     let fwd = Attach::aimed((0, 0, 0), (0, 0, 0), (7, 0, 0));
     assert_eq!((fwd.yaw, fwd.pitch), (0, 0));
     // Ноги шагохода наведены вниз и наружу: тангаж отрицательный
-    // у всех, рыскание — по четырём четвертям.
+    // у звеньев, рыскание — по четырём четвертям.
     let s = voxel::unit::strider();
-    assert!(s.segments.len() >= 8, "у шагохода не восемь звеньев ног");
+    assert_eq!(s.legs.len(), 4, "у шагохода не четыре ноги");
     let mut quads = [false; 4];
-    for seg in &s.segments {
-        assert!(seg.attach.pitch < 0, "звено ноги смотрит вверх");
-        let y = seg.attach.yaw.rem_euclid(TURN);
-        quads[(y * 4 / TURN) as usize] = true;
+    for l in &s.legs {
+        for k in [l.thigh, l.shin] {
+            let seg = &s.segments[k as usize];
+            assert!(seg.attach.pitch < 0, "звено ноги смотрит вверх");
+            let y = seg.attach.yaw.rem_euclid(TURN);
+            quads[(y * 4 / TURN) as usize] = true;
+        }
     }
     assert!(quads.iter().all(|&q| q), "ноги не разведены по четырём сторонам: {quads:?}");
+}
+
+/// **Нога описана цепочкой, и цепочка сходится.** Бедро наведено
+/// от бедренного шарнира к колену, голень — от колена к лодыжке;
+/// колено, лодыжка и ступня посажены в свои шарниры. Разойдись
+/// шарниры ноги с креплениями звеньев — походка гнула бы одно,
+/// а рисовалось бы другое (ADR-234).
+#[test]
+fn a_leg_is_a_chain_from_hip_to_foot() {
+    let s = voxel::unit::strider();
+    let mut supports = [false; 4];
+    for l in &s.legs {
+        let thigh = &s.segments[l.thigh as usize].attach;
+        let shin = &s.segments[l.shin as usize].attach;
+        assert_eq!(thigh.at, l.hip, "бедро не в бедренном шарнире");
+        assert_eq!(shin.at, l.knee, "голень не в колене");
+        for (name, part, at) in [
+            ("колено", l.knee_ball, l.knee),
+            ("лодыжка", l.ankle_ball, l.ankle),
+            ("ступня", l.foot, l.ankle),
+        ] {
+            let k = part.unwrap_or_else(|| panic!("у ноги нет части: {name}"));
+            assert_eq!(s.segments[k as usize].attach.at, at, "{name} не в своём шарнире");
+        }
+        assert!(l.knee.1 < l.hip.1 && l.ankle.1 < l.knee.1, "нога идёт не вниз: {l:?}");
+        supports[l.support as usize] = true;
+    }
+    assert!(supports.iter().all(|&s| s), "ноги не разобраны по опорам: {supports:?}");
+    // Смена сетки пересчитывает шарниры тем же отношением, что
+    // и крепления, а номера звеньев не трогает.
+    let coarse = s.resampled(200).expect("шагоход при 200 мм");
+    assert_eq!(coarse.legs.len(), 4);
+    for (a, b) in s.legs.iter().zip(&coarse.legs) {
+        assert_eq!(b.hip.1 as i32, a.hip.1 as i32 / 2, "шарнир не пересчитан");
+        assert_eq!((a.thigh, a.shin, a.support), (b.thigh, b.shin, b.support));
+        assert_eq!(coarse.segments[b.thigh as usize].attach.at, b.hip);
+    }
 }

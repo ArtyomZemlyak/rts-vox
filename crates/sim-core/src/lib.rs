@@ -202,6 +202,19 @@ pub struct Units {
     /// В хеш не входит по той же причине, что `accel`: производная
     /// от `head`.
     pub yaw_step: Vec<i32>,
+    /// Угловая скорость: двоичный угол за тик (ADR-234).
+    ///
+    /// **Состояние, а не производная.** Машина доворачивает не мгновенно:
+    /// угловая скорость разгоняется к желаемой с угловым ускорением
+    /// из тяги на плече борта. Потеряй её между тиками — и разворот
+    /// начинался бы заново каждый тик, то есть рывком.
+    pub yaw_rate: Vec<i32>,
+    /// Фаза шага, двоичный угол по кольцу цикла (ADR-234).
+    ///
+    /// Растёт пройденным путём, а не временем: шагоход, которого
+    /// держат на месте, ногами не перебирает. Ноль у всего, что
+    /// не шагает.
+    pub gait: Vec<i32>,
     /// Прикреплённых к ядру вокселей — то, что у нас вместо скалярного HP.
     pub voxels: Vec<u16>,
     pub alive: Vec<bool>,
@@ -370,6 +383,8 @@ impl Units {
             load: Vec::new(),
             accel: Vec::new(),
             yaw_step: Vec::new(),
+            yaw_rate: Vec::new(),
+            gait: Vec::new(),
             voxels: Vec::new(),
             alive: Vec::new(),
             target: Vec::new(),
@@ -439,6 +454,8 @@ impl Units {
             self.fall_from[k] = NOT_FALLING;
             self.fall_v[k] = Fx::ZERO;
             self.fall_f[k] = Fx::ZERO;
+            self.yaw_rate[k] = 0;
+            self.gait[k] = 0;
             self.next_search[k] = 0;
             self.next_shot[k] = 0;
             self.weapon[k] = 0;
@@ -476,6 +493,8 @@ impl Units {
         self.load.push(Fx::ZERO);
         self.accel.push(Fx::ZERO);
         self.yaw_step.push(0);
+        self.yaw_rate.push(0);
+        self.gait.push(0);
         self.voxels.push(voxels);
         self.alive.push(true);
         self.target.push(NO_TARGET);
@@ -2076,7 +2095,15 @@ impl World {
             [self.tuning.tracked.climb, self.tuning.walking.climb],
             [self.tuning.tracked.descend, self.tuning.walking.descend],
         );
-        let Self { units: u, delta, ground, blocked_moves, .. } = self;
+        // Циклов шага на мировую единицу пути — по виду ходовой.
+        // `None` у гусеничной: у неё нет походки, и фаза шага стоит.
+        let stride = [&self.tuning.tracked, &self.tuning.walking].map(|c| {
+            c.gait.as_ref().map(|g| {
+                let cm_per_unit = (voxel::unit::WORLD_MM as i32 / 10).max(1);
+                Fx::from_ratio(angle::FULL * cm_per_unit, g.stride_cm.max(1))
+            })
+        });
+        let Self { units: u, delta, ground, econ, blocked_moves, .. } = self;
         // Счётчики падения — те же, что у наездников: правило одно,
         // значит и отчёт один.
         let (mut fall_damage_acc, mut max_fall_acc) = (0u64, 0u32);
@@ -2085,6 +2112,12 @@ impl World {
         // свойство ребра (ADR-121), поэтому спрашивается переход,
         // а не клетка.
         let terrain = ground.as_ref().map(|g| (&g.nav, g.extent()));
+        // Множители по массе — из учёта; без экономики их нет вовсе,
+        // и все идут номиналом.
+        let drive_by_mass: &[Fx] = match econ.as_ref() {
+            Some(e) => &e.drive,
+            None => &[],
+        };
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
             let want = delta[i];
@@ -2113,12 +2146,22 @@ impl World {
             }
 
             // Трансмиссия: курс доворачивается, скорость меняется,
-            // и только из них получается шаг.
+            // и только из них получается шаг. Множитель — по массе
+            // тела (ADR-234): крупная машина того же вида разгоняется
+            // и доворачивает медленнее. Юнит без типа идёт номиналом
+            // вида: так живут стенды и эталонный сценарий.
+            let ki = u.kind[i];
+            let factor = if ki == economy::NO_KIND {
+                Fx::ONE
+            } else {
+                drive_by_mass.get(ki as usize).copied().unwrap_or(Fx::ONE)
+            };
             let (nd, mv) = drive::advance(
-                Drive { head: u.head[i], vel: u.vel[i] },
+                Drive { head: u.head[i], vel: u.vel[i], yaw_rate: u.yaw_rate[i] },
                 want.way,
                 vmax,
                 &limits[kind],
+                factor,
                 inv_tick,
             );
             // Приращения — подвеске (ADR-225): продольное ускорение
@@ -2127,8 +2170,18 @@ impl World {
             // отдельным буфером.
             u.accel[i] = nd.vel.sub(u.vel[i]).mul(Fx::from_int(TICKS_PER_SECOND));
             u.yaw_step[i] = (nd.head.wrapping_sub(u.head[i])) as u16 as i16 as i32;
+            u.yaw_rate[i] = nd.yaw_rate;
             u.head[i] = nd.head;
             u.vel[i] = nd.vel;
+            // Фаза шага растёт **путём**, а не временем: шагоход,
+            // упёршийся в скалу, ногами не перебирает. Цикл — `stride`
+            // мировых единиц; у видов без походки фаза стоит на нуле.
+            if let Some(st) = stride[kind] {
+                let step = nd.vel.mul(inv_tick).abs();
+                u.gait[i] = u.gait[i]
+                    .wrapping_add(step.mul(st).to_int_trunc())
+                    & (fx::angle::FULL - 1);
+            }
 
             // Толчок соседей прибавляется **к шагу**, а не к тяге:
             // это контакт тел, и разворачиваться ради него машина
@@ -3453,6 +3506,13 @@ impl World {
             w = w.wrapping_mul(31).wrapping_add(self.units.head[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.vel[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.chassis[i].code() as u64);
+            // Угловая скорость и фаза шага — тоже состояние (ADR-234):
+            // первая переживает тик и задаёт доворот, вторая растёт
+            // путём и решает, какая нога поднята. Обе входят всегда:
+            // у стоящей машины они нулевые, и хеш прогона без хода
+            // от их появления не сдвинулся.
+            w = w.wrapping_mul(31).wrapping_add(self.units.yaw_rate[i] as u32 as u64);
+            w = w.wrapping_mul(31).wrapping_add(self.units.gait[i] as u32 as u64);
             // Приказ — состояние: он переживает тик и задаёт движение,
             // а состояние, не входящее в хеш, можно переписать целиком
             // и увидеть тот же хеш до бита (ADR-116).
@@ -5127,10 +5187,13 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             free.units.x[i]
         );
 
-        // С приказом: юнит идёт на юг, к точке приказа.
+        // С приказом: юнит идёт на юг, к точке приказа. Тиков вдвое
+        // больше, чем на проверку поля: с ходом по массе (ADR-234)
+        // машина разгоняется и доворачивает не мгновенно, и дорога
+        // в двести вокселей занимает секунд пятнадцать.
         let (mut w, id) = lone_walker(t);
         w.push_order(Order::MoveTo { unit: id, x: 80, z: 400 });
-        for _ in 0..240 {
+        for _ in 0..600 {
             w.tick();
         }
         let (x, z) = (w.units.x[i], w.units.z[i]);

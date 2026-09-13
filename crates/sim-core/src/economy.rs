@@ -88,6 +88,32 @@ pub struct Wreck {
 /// порядок заказов, заготовка и сколько тиков идёт передний.
 pub type LinePart = (u32, Vec<u16>, ContainerId, u32);
 
+/// Множители хода по массе — по месту типа в реестре.
+///
+/// **Масса берётся у тела, а не у вида ходовой**: танк и крепость
+/// обе гусеничные, и разгоняться одинаково им не положено (ADR-234).
+/// Тело ищется по имени в наборе — тому же, которым его рисует
+/// рендер; типа без тела в наборе быть не должно, и такой получает
+/// номинал вида, а не молчаливый ноль.
+fn drive_factors(kinds: &Kinds, t: &Tuning) -> Vec<fx::Fx> {
+    let bodies = voxel::roster::all();
+    kinds
+        .all()
+        .iter()
+        .map(|k| {
+            let c = t.chassis(k.chassis);
+            let nominal = (c.mass.max(1) as i64) * 1000;
+            let Some((_, b)) = bodies.iter().find(|(n, _)| *n == k.body) else {
+                return fx::Fx::ONE;
+            };
+            // Объём в кубических миллиметрах на плотность в кг/м³:
+            // миллиард кубических миллиметров в кубометре.
+            let kg = (b.volume_mm3() as i64 * c.density.max(1) as i64) / 1_000_000_000;
+            crate::drive::drive_factor(nominal, kg.max(1))
+        })
+        .collect()
+}
+
 /// Учёт партии целиком.
 pub struct Economy {
     /// Таблица типов из `data/kinds.ron`.
@@ -100,6 +126,13 @@ pub struct Economy {
     pub banks: Vec<Bank>,
     pub(crate) lines: Vec<Line>,
     pub wrecks: Vec<Wreck>,
+    /// Множитель хода по массе, по месту типа в реестре (ADR-234).
+    ///
+    /// Считается один раз: масса типа — объём его тела на плотность
+    /// вида ходовой, и от тика к тику не меняется. Урон массу
+    /// не убавляет — это было бы лишним кубическим корнем на юнита
+    /// в каждом тике ради разницы, которой не видно.
+    pub(crate) drive: Vec<fx::Fx>,
     /// Слоты **недостроенных** построек, по возрастанию номера.
     ///
     /// Отдельный список, а не обход всех юнитов: приказ «строить»
@@ -189,7 +222,7 @@ impl Economy {
                 Bank { stock, cap: t.base_store }
             })
             .collect();
-        Economy {
+        let mut e = Economy {
             kinds,
             mats,
             ledger,
@@ -206,7 +239,10 @@ impl Economy {
             produced: 0,
             dock_searches: 0,
             dock_capped: 0,
-        }
+            drive: Vec::new(),
+        };
+        e.drive = drive_factors(&e.kinds, t);
+        e
     }
 
     /// Запас стороны.

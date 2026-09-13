@@ -21,7 +21,7 @@
 //! количество материи; реклейм — та же операция, что копка (ADR-017).
 
 use crate::shape::{
-    ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid, limb,
+    ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid,
     link, link_pivot, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat,
     slab,
 };
@@ -153,6 +153,10 @@ pub struct UnitBody {
     /// в корневом томе. Это оговорено, а не забыто: позиционный урон
     /// по сегментам — отдельное решение поверх ADR-016.
     pub segments: Vec<Segment>,
+    /// Ноги: какие сегменты — звенья и где их шарниры (ADR-234).
+    /// Описание кинематики, а не формы: по нему рендер ставит ногу
+    /// на пол, симуляция сюда не смотрит.
+    pub legs: Vec<Leg>,
     /// Слой, с которого начинается **вращающаяся часть** тела: всё
     /// от него и выше смотрит в цель, а не по движению.
     ///
@@ -250,6 +254,30 @@ pub struct Segment {
     pub body: UnitBody,
 }
 
+/// Нога: двухзвенная цепочка бедро → голень с шарнирами в вокселях
+/// корня и сегментами, которые с ней едут (ADR-234).
+///
+/// Шарниры — положения **покоя**: так нога нарисована. Где она
+/// на кадре, решает походка рендера по фазе шага из симуляции;
+/// длины звеньев берутся из расстояний между шарнирами. Номера —
+/// места в `segments`. Опора — которой из четырёх опор подвески
+/// нога отвечает: по ней ступня получает сдвиг фазы.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Leg {
+    pub hip: (i16, i16, i16),
+    pub knee: (i16, i16, i16),
+    pub ankle: (i16, i16, i16),
+    pub thigh: u8,
+    pub shin: u8,
+    /// Шар колена — едет с концом бедра.
+    pub knee_ball: Option<u8>,
+    /// Шар лодыжки — едет с концом голени.
+    pub ankle_ball: Option<u8>,
+    /// Ступня — на конце голени, плоско по миру.
+    pub foot: Option<u8>,
+    pub support: u8,
+}
+
 impl UnitBody {
     /// Пустой том. Положение ядра здесь **не задаётся**: оно выводится
     /// из разметки вызовом `seat_core` после того, как воксели
@@ -282,8 +310,23 @@ impl UnitBody {
             mm,
             finish: std::sync::Arc::new(vec![FINISH_BY_PART; n]),
             segments: Vec::new(),
+            legs: Vec::new(),
             turret_y: 0,
         }
+    }
+
+    /// Объявить ногу. Звенья обязаны существовать: нога, ссылающаяся
+    /// на несуществующий сегмент, молча стояла бы столбом.
+    pub fn push_leg(&mut self, leg: Leg) {
+        let n = self.segments.len();
+        for s in [Some(leg.thigh), Some(leg.shin), leg.knee_ball, leg.ankle_ball, leg.foot]
+            .into_iter()
+            .flatten()
+        {
+            assert!((s as usize) < n, "нога ссылается на сегмент {s}, а их {n}");
+        }
+        assert!(leg.support < 4, "опора {} — их четыре", leg.support);
+        self.legs.push(leg);
     }
 
     /// Назначить вокселю отделку. Ничего не делает у пустого воксела:
@@ -446,6 +489,16 @@ impl UnitBody {
                 ..s.attach
             };
             out.segments.push(Segment { attach, body });
+        }
+        // Ноги: шарниры — размеры в вокселях, пересчитываются тем же
+        // отношением; номера звеньев те же, сегменты идут в том же
+        // порядке.
+        for l in &self.legs {
+            let k = |v: i16| -> i16 {
+                ((v as i32 * src as i32) / mm as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            };
+            let p = |v: (i16, i16, i16)| (k(v.0), k(v.1), k(v.2));
+            out.legs.push(Leg { hip: p(l.hip), knee: p(l.knee), ankle: p(l.ankle), ..*l });
         }
         // Наибольший куб ядра, который сядет. Убывающим перебором,
         // а не формулой: `seat_core` требует, чтобы куб был сплошным
@@ -1041,10 +1094,16 @@ pub fn strider() -> UnitBody {
     // под корпус — отсюда изгиб, которого у столба не бывает.
     //
     // **Нога — повёрнутые бруски, а не лесенка** (ADR-231): бедро
-    // и голень — сегменты, наведённые от сустава к суставу; суставы —
-    // стальные шары в корневом томе. Внутри каждого бруска идёт
-    // тонкая кость из осевых вокселей: она держит связность тома
-    // и объём под урон, а глазу не видна — брусок её накрывает.
+    // и голень — сегменты, наведённые от сустава к суставу. Бедренный
+    // шар — в корневом томе, он неподвижен относительно корпуса.
+    // Колено, лодыжка и ступня — **тоже сегменты** (ADR-234): нога
+    // переставляется походкой, и всё, что на ней, обязано ехать
+    // с ней. Кости из корня убраны: при качании ноги они торчали бы
+    // из бруска; объём ноги под урон — вид, как и сам сегмент.
+    //
+    // Все звенья крепятся к корпусу, а не друг к другу: рамки покоя
+    // складывает тело, рамки шага считает рендер по шарнирам ноги,
+    // и родитель ему не нужен.
     for &hx in &[11i32, 29] {
         for &hz in &[11i32, 29] {
             let out = |v: i32, d: i32| if v < 20 { v - d } else { v + d };
@@ -1052,18 +1111,8 @@ pub fn strider() -> UnitBody {
             let (ax, az) = (out(hx, 2), out(hz, 2));
             ball(&mut u, (hx, 28, hz), 5, Part::Armour);
             mark_ball(&mut u, (hx, 28, hz), 5, FINISH_STEEL);
-            limb(&mut u, (hx, 27, hz), (kx, 15, kz), 2, 2, 4, Part::Armour);
-            mark_ball(&mut u, (kx, 15, kz), 4, FINISH_STEEL);
-            limb(&mut u, (kx, 15, kz), (ax, 4, az), 1, 1, 3, Part::Armour);
-            mark_ball(&mut u, (ax, 4, az), 3, FINISH_STEEL);
-            fill(
-                &mut u,
-                ((ax - 4) as usize, (ax + 4) as usize),
-                (0, 3),
-                ((az - 4) as usize, (az + 4) as usize),
-                Part::Armour,
-            );
 
+            let first = u.segments.len() as u8;
             let mut thigh = UnitBody::new_scaled(13, 8, 8, 1, BODY_MM);
             fill(&mut thigh, (0, 13), (0, 8), (0, 8), Part::Armour);
             u.push_segment(
@@ -1076,6 +1125,33 @@ pub fn strider() -> UnitBody {
                 Attach::aimed((kx as i16, 15, kz as i16), (0, 3, 3), (ax - kx, 4 - 15, az - kz)),
                 shin,
             );
+            let mut knee = UnitBody::new_scaled(9, 9, 9, 1, BODY_MM);
+            ball(&mut knee, (4, 4, 4), 4, Part::Armour);
+            mark_ball(&mut knee, (4, 4, 4), 4, FINISH_STEEL);
+            u.push_segment(Attach::flat((kx as i16, 15, kz as i16), (4, 4, 4)), knee);
+            let mut ankle = UnitBody::new_scaled(7, 7, 7, 1, BODY_MM);
+            ball(&mut ankle, (3, 3, 3), 3, Part::Armour);
+            mark_ball(&mut ankle, (3, 3, 3), 3, FINISH_STEEL);
+            u.push_segment(Attach::flat((ax as i16, 4, az as i16), (3, 3, 3)), ankle);
+            // Ступня — плита под лодыжкой: верх плиты на воксель ниже
+            // её центра, как и было в корне.
+            let mut foot = UnitBody::new_scaled(9, 3, 9, 1, BODY_MM);
+            fill(&mut foot, (0, 9), (0, 3), (0, 9), Part::Armour);
+            u.push_segment(Attach::flat((ax as i16, 4, az as i16), (4, 4, 4)), foot);
+            // Опоры подвески идут «нос по +Z, нос по −Z, корма по +Z,
+            // корма по −Z»; нос корпуса — +X.
+            let support = u8::from(hx < 20) * 2 + u8::from(hz < 20);
+            u.push_leg(Leg {
+                hip: (hx as i16, 27, hz as i16),
+                knee: (kx as i16, 15, kz as i16),
+                ankle: (ax as i16, 4, az as i16),
+                thigh: first,
+                shin: first + 1,
+                knee_ball: Some(first + 2),
+                ankle_ball: Some(first + 3),
+                foot: Some(first + 4),
+                support,
+            });
         }
     }
 

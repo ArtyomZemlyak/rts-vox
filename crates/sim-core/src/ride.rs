@@ -20,12 +20,15 @@ use fx::Fx;
 use modding::tuning::Chassis;
 use phys::{Chassis as Hull, Ride, Support, V3};
 
-/// Сантиметры в мировые единицы: ребро воксела мира — полметра.
+/// Сантиметры в мировые единицы: ребро воксела мира — десять
+/// сантиметров (ADR-227).
 ///
 /// Числа опоры и клиренса задаются в данных сантиметрами, потому что
 /// это размеры машины, а машина меряется в метрах, а не в вокселях
-/// (`CLAUDE.md`: мировые единицы, не воксели).
-const CM_PER_UNIT: i32 = 50;
+/// (`CLAUDE.md`: мировые единицы, не воксели). Выводится из ребра,
+/// а не пишется числом: ребро уже менялось однажды, и переживший
+/// смену литерал делал подвеску впятеро мельче машины.
+const CM_PER_UNIT: i32 = voxel::unit::WORLD_MM as i32 / 10;
 
 #[inline]
 fn cm(v: i32) -> Fx {
@@ -42,6 +45,10 @@ pub fn ride_of(c: &Chassis) -> Ride {
         inertia: Fx::from_int(c.inertia.max(1)),
         // Тяготение — общее число тика, а не свойство ходовой.
         gravity: Fx::ZERO,
+        // Натяг ставится вместе с тяготением: вес машины держит он,
+        // а не жёсткость (ADR-234). Здесь тяготения ещё нет — значит
+        // нет и натяга.
+        preload: Fx::ZERO,
         angular_damping: Fx::from_int(c.ang_damp),
         min_up: Fx::from_ratio(c.max_tilt_pct.clamp(0, 100), 100),
     }
@@ -143,10 +150,13 @@ mod tests {
 
     fn chassis() -> Chassis {
         Chassis {
-            accel: 12,
-            brake: 24,
+            mass: 60,
+            density: 2400,
+            thrust: 180,
+            brake: 240,
             turn: 180,
             pivot: 105,
+            pivot_speed: 40,
             climb: 60,
             descend: 125,
             stiffness: 40,
@@ -158,6 +168,7 @@ mod tests {
             support_x_cm: 250,
             support_z_cm: 120,
             max_tilt_pct: 91,
+            gait: None,
         }
     }
 

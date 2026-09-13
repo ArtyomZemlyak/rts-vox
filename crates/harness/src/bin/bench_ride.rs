@@ -8,15 +8,18 @@ use std::time::Instant;
 use fx::Fx;
 use phys::{step, Chassis, Ride, Support, V3};
 
-/// Ходовая, близкая к гусеничной машине.
-fn ride() -> Ride {
+/// Ходовая, близкая к гусеничной машине. Натяг — под вес на опору,
+/// как в фазе хода (ADR-234).
+fn ride(supports: usize) -> Ride {
+    let gravity = Fx::from_ratio(98, 10);
     Ride {
         stiffness: Fx::from_int(40),
         damping: Fx::from_int(8),
         travel: Fx::from_ratio(1, 2),
         clearance: Fx::from_ratio(1, 2),
         inertia: Fx::from_int(4),
-        gravity: Fx::from_ratio(98, 10),
+        gravity,
+        preload: gravity.div(Fx::from_int(supports.max(1) as i32)),
         angular_damping: Fx::from_int(3),
         min_up: Fx::from_ratio(91, 100),
     }
@@ -48,13 +51,13 @@ fn main() {
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
-    let r = ride();
     let dt = Fx::from_ratio(1, 30);
 
     println!("физика корпуса: {units} машин, {ticks} тиков");
     println!("{:>6} {:>12} {:>14} {:>14}", "опор", "фаза, мс", "на машину, нс", "на опору, нс");
 
     for n in [2usize, 4, 6, 8, 12] {
+        let r = ride(n);
         let s = supports(n);
         // Рельеф под опорами: небольшой уклон, чтобы работали все ветки.
         let g: Vec<Fx> = s
