@@ -1,14 +1,22 @@
 //! Крупный план моделей: как выглядит тело юнита вблизи.
 //!
 //! ```text
-//! models --shot модели.png --shot-after 4
-//! models --bevel 0 --shot кубики.png     # для сравнения
+//! models --pick танк,паук --shot модели.png --shot-after 4
+//! models --pick 1 --shot4 танк.png              # четыре стороны
+//! models --pick all --still --yaw 45 --elev 35   # вид сверху-сбоку
+//! models --bevel 0 --shot кубики.png             # для сравнения
 //! ```
 //!
 //! Плац (`parade`) показывает **соотношение размеров** и потому
-//! смотрит издали. Здесь наоборот: три машины крупно, чтобы было
-//! видно фаску, роль воксела в цвете и то, как ложится свет
+//! смотрит издали. Здесь наоборот: несколько машин крупно, чтобы было
+//! видно фаску, отделку воксела в материале и то, как ложится свет
 //! на скруглённое ребро.
+//!
+//! Тела выбираются номером в `voxel::roster::all()` (шагоход —
+//! последним) **или подстрокой имени**: `--pick 1,14` и
+//! `--pick танк,шагоход` — одно и то же. Рамка кадра считается
+//! от самой высокой машины в ряду, а не только от ширины ряда: иначе
+//! осадному шагоходу резало голову.
 //!
 //! Направление картинки — ключом `--look` и тем же набором чисел,
 //! что и у боя (ADR-214): смотреть модели при другом свете значит
@@ -39,11 +47,19 @@ use render::occlusion::{Occlusion, OcclusionPlugin};
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019).
 const MM_PER_UNIT: f32 = 500.0;
 
+/// Очередь снимков: каждый — со своим поворотом ряда. Снимок
+/// делается **не в тот же кадр**, в котором ряд повёрнут: поворот
+/// ставится системой `turn` и попадает в кадр только следующим
+/// проходом, а снимок пустого или старого кадра — это снимок ни о чём.
 #[derive(Resource)]
 struct Shot {
-    path: Option<String>,
-    after: f32,
-    done: bool,
+    /// Имя файла и поворот ряда в градусах для каждого снимка.
+    queue: Vec<(String, i32)>,
+    next: usize,
+    /// Ряд уже повёрнут под очередной снимок — осталось снять.
+    turned: bool,
+    /// Когда делать следующий шаг, секунды от старта.
+    at: f32,
     left: u32,
     seen: u32,
 }
@@ -53,7 +69,11 @@ struct Scene {
     bevel: f32,
     mm: Option<u16>,
     spin: bool,
-    pick: Vec<usize>,
+    /// Поворот ряда, когда вращение выключено, градусы.
+    yaw: i32,
+    /// Высота камеры над горизонтом, градусы.
+    elev: f32,
+    pick: Vec<String>,
 }
 
 /// Что крутится на подиуме: корень тела в `base`, сегмент — на своём
@@ -103,31 +123,82 @@ fn grading(g: look::Grade) -> ColorGrading {
     }
 }
 
+/// Имя файла снимка с поворотом: `танк.png` → `танк_090.png`.
+fn shot_name(base: &str, yaw: i32) -> String {
+    match base.rfind('.') {
+        Some(i) if i > base.rfind(['/', '\\']).map_or(0, |k| k + 1) => {
+            format!("{}_{:03}{}", &base[..i], yaw.rem_euclid(360), &base[i..])
+        }
+        _ => format!("{base}_{:03}", yaw.rem_euclid(360)),
+    }
+}
+
+/// Номера выбранных тел: число — номер, иначе подстрока имени
+/// без учёта регистра; `all` — все.
+fn resolve(pick: &[String], names: &[&str]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    for p in pick {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if p == "all" {
+            out.extend(0..names.len());
+            continue;
+        }
+        if let Ok(i) = p.parse::<usize>() {
+            if i < names.len() {
+                out.push(i);
+            } else {
+                eprintln!("--pick {i}: тел всего {}", names.len());
+            }
+            continue;
+        }
+        let low = p.to_lowercase();
+        let hits: Vec<usize> = names
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.to_lowercase().contains(&low))
+            .map(|(i, _)| i)
+            .collect();
+        if hits.is_empty() {
+            eprintln!("--pick {p}: нет такого тела; есть: {}", names.join(", "));
+        }
+        out.extend(hits);
+    }
+    out.dedup();
+    out
+}
+
 fn main() {
     let mut shot: Option<String> = None;
+    let mut shot4: Option<String> = None;
     let mut after = 4.0f32;
     let mut bevel = BEVEL;
     let mut spin = true;
+    let mut yaw = 0i32;
+    let mut elev = 22.0f32;
     // Пересобрать тела в другой воксельной сетке (ADR-208).
     let mut mm: Option<u16> = None;
     // По умолчанию — танк, бот и командная машина: разные силуэты
     // при сравнимом размере, то есть видно и форму, и детали.
-    let mut pick = vec![0usize, 1, 3];
+    let mut pick: Vec<String> = vec!["0".into(), "1".into(), "3".into()];
     let mut args = std::env::args().skip(1);
     while let Some(k) = args.next() {
         let mut v = || args.next().unwrap_or_default();
         match k.as_str() {
             "--shot" => shot = Some(v()),
+            "--shot4" => shot4 = Some(v()),
             "--shot-after" => after = v().parse().unwrap_or(after),
             "--bevel" => bevel = v().parse().unwrap_or(bevel),
             "--still" => spin = false,
-            "--mm" => mm = v().parse().ok(),
-            "--pick" => {
-                pick = v()
-                    .split(',')
-                    .filter_map(|s| s.trim().parse().ok())
-                    .collect();
+            "--yaw" => {
+                yaw = v().parse().unwrap_or(yaw);
+                spin = false;
             }
+            "--elev" => elev = v().parse().unwrap_or(elev),
+            "--mm" => mm = v().parse().ok(),
+            "--pick" => pick = v().split(',').map(|s| s.trim().to_string()).collect(),
             "--look" => match look::parse_look(&v()) {
                 Some(l) => look::set(l),
                 None => {
@@ -140,8 +211,8 @@ fn main() {
             },
             "--help" | "-h" => {
                 println!(
-                    "models [--pick 0,1,3] [--bevel 0.5] [--mm 100] [--still] \
-[--shot файл] [--shot-after сек] [--look {}]",
+                    "models [--pick 0,1,3 | --pick танк,паук | --pick all] [--bevel 0.5] [--mm 100] \
+[--still] [--yaw град] [--elev град] [--shot файл | --shot4 файл] [--shot-after сек] [--look {}]",
                     look::LOOK_ALL.map(look::look_name).join("|")
                 );
                 return;
@@ -152,7 +223,17 @@ fn main() {
     // Снимок — по **прошедшему времени**, а не по номеру кадра:
     // пайплайны компилируются асинхронно, и пустые кадры идут
     // быстрее, то есть счётчик кадров ловит пустой экран (ADR-172).
-    let left = if shot.is_some() { u32::MAX } else { 0 };
+    let mut queue: Vec<(String, i32)> = Vec::new();
+    if let Some(p) = shot {
+        queue.push((p, yaw));
+    }
+    if let Some(p) = shot4 {
+        // Четыре стороны одним ключом: вращение выключается, ряд
+        // поворачивается на четверть оборота между снимками.
+        spin = false;
+        queue.extend([0, 90, 180, 270].map(|q| (shot_name(&p, yaw + q), yaw + q)));
+    }
+    let left = if queue.is_empty() { 0 } else { u32::MAX };
 
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
@@ -170,8 +251,8 @@ fn main() {
         // И то же щелевое затенение по вокселям (ADR-235).
         .add_plugins(OcclusionPlugin)
         .insert_resource(ClearColor(Color::srgb(0.14, 0.16, 0.20)))
-        .insert_resource(Shot { path: shot, after, done: false, left, seen: 0 })
-        .insert_resource(Scene { bevel, mm, spin, pick })
+        .insert_resource(Shot { queue, next: 0, turned: false, at: after, left, seen: 0 })
+        .insert_resource(Scene { bevel, mm, spin, yaw, elev, pick })
         .add_systems(Startup, setup)
         .add_systems(Update, (turn, snap))
         .run();
@@ -220,12 +301,11 @@ fn setup(
         })
     });
 
-    let picked: Vec<usize> = scene
-        .pick
-        .iter()
-        .copied()
-        .filter(|&i| i < all.len())
-        .collect();
+    let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
+    let picked = resolve(&scene.pick, &names);
+    if picked.is_empty() {
+        println!("ничего не выбрано");
+    }
     let widths: Vec<f32> = picked
         .iter()
         .map(|&i| all[i].1.extent_mm().0 as f32 / MM_PER_UNIT)
@@ -296,19 +376,34 @@ fn setup(
         Transform::from_xyz(0.0, -0.5, 0.0),
     ));
 
-    // Рамка от габарита шеренги, а не на глаз. Высота цели — по
-    // самой высокой машине: иначе кадр уезжает вниз, и половину
-    // занимает пустой подиум.
+    // **Рамка от габарита ряда, а не на глаз.** Ряд обязан влезть
+    // и по ширине, и по высоте: расстояние берётся большим из двух —
+    // от ширины через горизонтальный угол обзора, от высоты через
+    // вертикальный. Прежняя рамка считалась от ширины, и высоким
+    // машинам резало голову. Угол обзора — умолчание Bevy (45°
+    // по вертикали), кадр 16:9.
     let tall = picked
         .iter()
         .map(|&i| all[i].1.extent_mm().1 as f32 / MM_PER_UNIT)
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let deep = picked
+        .iter()
+        .map(|&i| all[i].1.extent_mm().2 as f32 / MM_PER_UNIT)
         .fold(0.0f32, f32::max);
-    // Расстояние от **наибольшего** габарита, а не от ширины шеренги:
-    // на одной машине ширина мала, и камера утыкалась ей в борт.
-    // Множитель — про то, ради чего смотровая заведена: разглядеть
-    // фаску и материал. На 1.7 машины занимали пятую часть кадра,
-    // и разница между сталью и стеклом на снимке терялась.
-    let dist = span.max(tall) * 1.05;
+    // Повёрнутый ряд занимает по ширине до длины машины, по глубине
+    // тоже. Расстояние считается **до ближней грани**, а не до
+    // середины: перспектива раздувает то, что ближе, и ряд, рамка
+    // которого сошлась на середине, вылезал из кадра носом.
+    let long = widths.iter().copied().fold(0.0f32, f32::max);
+    let wide = span.max(deep) * 1.3;
+    let half_v = (std::f32::consts::FRAC_PI_4 / 2.0).tan();
+    let half_h = half_v * 16.0 / 9.0;
+    let dist = (wide / 2.0 / half_h).max(tall * 1.3 / 2.0 / half_v) + deep.max(long) / 2.0;
+    let elev = scene.elev.to_radians();
+    let az = 17.0f32.to_radians();
+    let target = Vec3::new(0.0, tall * 0.45, 0.0);
+    let eye = target + dist * Vec3::new(az.sin() * elev.cos(), elev.sin(), az.cos() * elev.cos());
     // **Смотровая светит тем же небом, что и бой.** Без карты
     // окружения металлу нечего отражать, и он выходит плоской краской
     // — то есть ровно тем, от чего отделки и заводились (ADR-211).
@@ -330,8 +425,7 @@ fn setup(
                 size: UVec2::splat(sc.sky_ibl_size),
                 ..default()
             },
-            Transform::from_xyz(dist * 0.30, tall * 0.85, dist)
-                .looking_at(Vec3::new(0.0, tall * 0.45, 0.0), Vec3::Y),
+            Transform::from_translation(eye).looking_at(target, Vec3::Y),
         ))
         .id();
     if sc.vignette.intensity > 0.0 {
@@ -406,11 +500,10 @@ fn setup(
 /// в бою: центр сферы обязан лежать под сценой, а не в ней.
 const EARTH_RADIUS_M: f32 = 6_360_000.0;
 
+/// Поворот ряда: по времени, если вращение включено, иначе — заданный.
 fn turn(time: Res<Time>, scene: Res<Scene>, mut q: Query<(&mut Transform, &Spin)>) {
-    if !scene.spin {
-        return;
-    }
-    let rot = Quat::from_rotation_y(time.elapsed_secs() * 0.35);
+    let angle = if scene.spin { time.elapsed_secs() * 0.35 } else { (scene.yaw as f32).to_radians() };
+    let rot = Quat::from_rotation_y(angle);
     for (mut t, s) in &mut q {
         render::model::place(&mut t, s.base, rot, s.seg.as_ref());
     }
@@ -420,20 +513,59 @@ fn snap(
     mut commands: Commands,
     time: Res<Time>,
     mut s: ResMut<Shot>,
+    mut scene: ResMut<Scene>,
     mut exit: MessageWriter<AppExit>,
 ) {
     s.seen += 1;
-    if !s.done && time.elapsed_secs() >= s.after {
-        if let Some(p) = s.path.clone() {
-            println!("снимок на {:.1} с: {p}", time.elapsed_secs());
+    let now = time.elapsed_secs();
+    if s.next < s.queue.len() && now >= s.at {
+        if !s.turned {
+            // Сначала повернуть ряд, снять — следующим шагом: поворот
+            // попадает в кадр только после прохода `turn`.
+            scene.yaw = s.queue[s.next].1;
+            s.turned = true;
+            s.at = now + 0.4;
+        } else {
+            let p = s.queue[s.next].0.clone();
+            println!("снимок на {now:.1} с: {p}");
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+            s.next += 1;
+            s.turned = false;
+            s.at = now + 0.4;
+            if s.next == s.queue.len() {
+                // Выход не в тот же кадр: запись снимка идёт позже, и
+                // мгновенный выход оставляет пустой файл.
+                s.left = s.seen + 30;
+            }
         }
-        s.done = true;
-        // Выход не в тот же кадр: запись снимка идёт позже, и
-        // мгновенный выход оставляет пустой файл.
-        s.left = s.seen + 30;
     }
     if s.left != 0 && s.left != u32::MAX && s.seen >= s.left {
         exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Имя снимка получает поворот перед расширением, а точка
+    /// в каталоге за расширение не принимается.
+    #[test]
+    fn shot_names_carry_the_turn() {
+        assert_eq!(shot_name("танк.png", 90), "танк_090.png");
+        assert_eq!(shot_name("a.b/танк", 270), "a.b/танк_270");
+        assert_eq!(shot_name("танк.png", -90), "танк_270.png");
+    }
+
+    /// Выбор — номером, подстрокой имени или всем набором.
+    #[test]
+    fn picks_resolve_by_number_or_name() {
+        let names = ["гусеничный разведчик", "танк", "паук"];
+        let p = |s: &str| resolve(&[s.to_string()], &names);
+        assert_eq!(p("1"), vec![1]);
+        assert_eq!(p("Паук"), vec![2]);
+        assert_eq!(p("разведчик"), vec![0]);
+        assert_eq!(p("all"), vec![0, 1, 2]);
+        assert!(p("9").is_empty());
     }
 }
