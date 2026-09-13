@@ -1028,6 +1028,132 @@ impl CollapseLayer {
     pub fn known_chunks(&self) -> usize {
         self.known.len()
     }
+
+    /// Записать состояние каскада в буфер (ADR-229).
+    ///
+    /// **Пересобрать его из мира нельзя, и это замерено.** Битовая
+    /// карта чанка отстаёт от мира ровно на перенесённые правки
+    /// запекания (ADR-129), метки граней правятся без переразметки
+    /// (`drop_removed_from_faces`), а очередь переразметки и фронтир
+    /// втягивания — это отставание в тиках, то есть состояние
+    /// (`CLAUDE.md`, ADR-089). Зонд на эталонном сценарии: пересборка
+    /// каскада расходится с непрерывным прогоном на **первом же тике**.
+    ///
+    /// Не пишется то, что живёт внутри одного вызова `apply`:
+    /// грязное множество, местные правки по чанкам, очередь обхода,
+    /// метки эпохи, буферы проверки расщепления. Они очищаются
+    /// в начале `apply` и до него не читаются.
+    ///
+    /// Потолки отвала, втягивания и переразметки, как и выключатель
+    /// локальной проверки, **не пишутся**: это правила, а не состояние
+    /// (ADR-140). Их ставит тот, кто собирает слой.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.nx);
+        b.u32(self.ny);
+        b.u32(self.nz);
+        b.bool(self.recheck);
+        b.u32s(&self.pending);
+        b.u32s(&self.frontier);
+        b.u32s(&self.known);
+        b.u32s(&self.base);
+        b.bools(&self.stale);
+        // Чанки — по возрастанию номера: порядок записи фиксирован.
+        let touched: Vec<u32> = (0..self.chunks.len())
+            .filter(|&i| self.chunks[i].is_some() || self.nodes[i].is_some())
+            .map(|i| i as u32)
+            .collect();
+        b.u32(touched.len() as u32);
+        for &ci in &touched {
+            let i = ci as usize;
+            b.u32(ci);
+            match &self.chunks[i] {
+                Some(c) => {
+                    b.bool(true);
+                    b.u32s(&c.cols);
+                }
+                None => b.bool(false),
+            }
+            match &self.nodes[i] {
+                Some(nd) => {
+                    b.bool(true);
+                    b.usize(nd.n);
+                    b.bools(&nd.bedrock);
+                    for f in 0..FACES {
+                        b.u32(nd.faces[f].len() as u32);
+                        for &(a, l, lab) in &nd.faces[f] {
+                            b.u16(a);
+                            b.u16(l);
+                            b.u16(lab);
+                        }
+                        b.u32(nd.edges[f].len() as u32);
+                        for &(a, c) in &nd.edges[f] {
+                            b.u16(a);
+                            b.u16(c);
+                        }
+                        b.u16s(&nd.ground[f]);
+                    }
+                }
+                None => b.bool(false),
+            }
+        }
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
+            return false;
+        }
+        self.recheck = s.bool();
+        self.pending = s.u32s();
+        self.frontier = s.u32s();
+        self.known = s.u32s();
+        self.base = s.u32s();
+        self.stale = s.bools();
+        if self.base.len() != self.chunks.len() || self.stale.len() != self.chunks.len() {
+            return false;
+        }
+        let n = s.list(6);
+        for _ in 0..n {
+            let ci = s.u32() as usize;
+            if ci >= self.chunks.len() {
+                return false;
+            }
+            self.chunks[ci] = if s.bool() {
+                let cols = s.u32s();
+                if cols.len() != crate::topo::COLS {
+                    return false;
+                }
+                Some(Box::new(TopoChunk { cols }))
+            } else {
+                None
+            };
+            self.nodes[ci] = if s.bool() {
+                let mut nd = Box::new(ChunkNodes::new());
+                nd.n = s.usize();
+                nd.bedrock = s.bools();
+                for f in 0..FACES {
+                    let nf = s.list(6);
+                    nd.faces[f] = (0..nf).map(|_| (s.u16(), s.u16(), s.u16())).collect();
+                    let ne = s.list(4);
+                    nd.edges[f] = (0..ne).map(|_| (s.u16(), s.u16())).collect();
+                    nd.ground[f] = s.u16s();
+                }
+                Some(nd)
+            } else {
+                None
+            };
+        }
+        // Достижимость — рабочий буфер обхода, но её длина задана
+        // нумерацией узлов, а не обходом: восстанавливается по ней.
+        let total: usize = self
+            .known
+            .iter()
+            .filter_map(|&i| self.nodes[i as usize].as_ref())
+            .map(|nd| nd.n)
+            .sum();
+        self.reached.clear();
+        self.reached.resize(total, false);
+        s.ok()
+    }
 }
 
 /// Поиск корня с укорачиванием пути. Свободная функция, потому что

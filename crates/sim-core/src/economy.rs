@@ -84,6 +84,10 @@ pub struct Wreck {
     pub z: i32,
 }
 
+/// Очередь завода в том виде, в каком её пишет сохранение: слот,
+/// порядок заказов, заготовка и сколько тиков идёт передний.
+pub type LinePart = (u32, Vec<u16>, ContainerId, u32);
+
 /// Учёт партии целиком.
 pub struct Economy {
     /// Таблица типов из `data/kinds.ron`.
@@ -122,6 +126,58 @@ pub struct Economy {
 }
 
 impl Economy {
+
+    /// Части учёта, которые пишет сохранение (ADR-229). Очередь
+    /// завода отдаётся вектором: `VecDeque` — это её порядок,
+    /// а не способ хранения на диске.
+    pub fn parts(&self) -> (&[Bank], Vec<LinePart>, &[Wreck], &[u32]) {
+        let lines = self
+            .lines
+            .iter()
+            .map(|l| (l.unit, l.queue.iter().copied().collect(), l.held, l.ticks))
+            .collect();
+        (&self.banks, lines, &self.wrecks, &self.sites)
+    }
+
+    /// Поставить прочитанные части на место. Порядок списков —
+    /// тот же, что при сохранении: очереди заводов отсортированы
+    /// по слоту, и сортировать их заново значило бы разрешать ничью
+    /// не линейным индексом (`CLAUDE.md`).
+    pub fn set_parts(
+        &mut self,
+        banks: Vec<Bank>,
+        lines: Vec<LinePart>,
+        wrecks: Vec<Wreck>,
+        sites: Vec<u32>,
+    ) {
+        self.banks = banks;
+        self.lines = lines
+            .into_iter()
+            .map(|(unit, q, held, ticks)| Line {
+                unit,
+                queue: q.into_iter().collect(),
+                held,
+                ticks,
+            })
+            .collect();
+        self.wrecks = wrecks;
+        self.sites = sites;
+    }
+
+    /// Счётчики замера: в симуляцию не входят, но отчёт после
+    /// загрузки обязан продолжаться, а не начинаться с нуля.
+    pub fn counters(&self) -> [u64; 6] {
+        [self.mined, self.delivered, self.spent, self.reclaimed, self.built, self.produced]
+    }
+
+    pub fn set_counters(&mut self, c: [u64; 6]) {
+        self.mined = c[0];
+        self.delivered = c[1];
+        self.spent = c[2];
+        self.reclaimed = c[3];
+        self.built = c[4];
+        self.produced = c[5];
+    }
     /// Завести учёт. Земля заводится **пустой**: её содержимое войдёт
     /// в сумму по мере того, как его выкопают.
     pub fn new(kinds: Kinds, mats: Registry, owners: usize, t: &Tuning) -> Economy {

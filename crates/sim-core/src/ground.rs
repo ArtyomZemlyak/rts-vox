@@ -47,7 +47,7 @@ pub struct Ground {
     pub topo: TopoLayer,
     pub nav: NavLayer,
     /// Все правки тика подряд, в порядке применения.
-    edits: Vec<Edit>,
+    pub(crate) edits: Vec<Edit>,
     /// Что **снято** за тик: заказчик и материал, который в вокселе
     /// был. Вход экономики (`docs/07-economy.md`): выкопанное идёт
     /// заказчику в бак, бесхозное — в объявленный сток.
@@ -59,7 +59,7 @@ pub struct Ground {
     /// Правки, применённые **после** каскада: запекание приземлившихся
     /// тел. Каскад в этом тике их уже не увидит, поэтому они переносятся
     /// в следующий — иначе его чанки разошлись бы с миром (ADR-129).
-    carry: Vec<Edit>,
+    pub(crate) carry: Vec<Edit>,
     pub stats: GroundStats,
 }
 
@@ -181,6 +181,42 @@ impl Ground {
         self.stats.topo_survived = survived;
         self.stats.nav = self.nav.apply(&self.world, &edits);
         self.edits = edits;
+    }
+
+    /// Записать землю в буфер (ADR-229).
+    ///
+    /// Связность и проходимость **не пишутся**: обе — чистые функции
+    /// мира, и восстанавливаются из него `TopoLayer::new`
+    /// и `NavLayer::new`. Это замерено зондом, а не предположено:
+    /// пересобранные слои дают тот же хеш, пересобранный каскад —
+    /// нет. Каскад отстаёт от мира на перенесённые правки (ADR-129),
+    /// потому и пишется.
+    ///
+    /// `carry` — те самые перенесённые правки. Не запиши их,
+    /// и следующий тик не показал бы каскаду запекание тела.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        self.world.save(b);
+        self.bodies.save(b);
+        self.collapse.save(b);
+        let (nx, nz) = (self.world.nx, self.world.nz);
+        voxel::world::save_edits(b, nx, nz, &self.edits);
+        voxel::world::save_edits(b, nx, nz, &self.carry);
+    }
+
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        if !self.world.load(s) {
+            return false;
+        }
+        if !self.bodies.load(s) {
+            return false;
+        }
+        if !self.collapse.load(s) {
+            return false;
+        }
+        let (nx, nz) = (self.world.nx, self.world.nz);
+        self.edits = voxel::world::load_edits(s, nx, nz);
+        self.carry = voxel::world::load_edits(s, nx, nz);
+        s.ok()
     }
 
     /// Подмешать состояние земли в хеш тика.

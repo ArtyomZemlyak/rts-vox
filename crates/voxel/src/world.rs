@@ -689,6 +689,359 @@ impl World {
     pub fn bit_bytes(&self) -> usize {
         self.bits.len() * 8
     }
+
+    /// Записать **слой изменений** в буфер (ADR-229).
+    ///
+    /// Процедурный слой не пишется: он чистая функция от сида, и
+    /// восстанавливается тем же генератором, которым был получен.
+    /// Пишется только то, чего в генераторе нет, — тронутые чанки
+    /// и очередь.
+    ///
+    /// Чанк пишется **номерами материалов**, повторами: номер
+    /// и длина. Не внутренностями палитры — её порядок зависит
+    /// от того, в каком порядке чанк заполняли, и не наблюдаем,
+    /// а номер материала задаётся данными и обязан пережить
+    /// перезагрузку пака (ADR-028).
+    /// **Потолки не пишутся.** Они не состояние партии, а правила,
+    /// по которым она идёт: приходят из `data/*.ron` и из кода
+    /// вызывающего (ADR-140). Запиши их в файл — и правка `sim.ron`
+    /// перестала бы действовать на загруженную партию, а в файле
+    /// появился бы второй источник правды.
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.nx);
+        b.u32(self.ny);
+        b.u32(self.nz);
+        b.usize(self.materialized_in_tick);
+        b.bool(self.in_tick);
+        b.u64(self.materialized);
+        // Тронутые чанки — по возрастанию номера. Порядок обхода
+        // при записи фиксирован (`CLAUDE.md`), иначе один и тот же
+        // мир давал бы разные файлы.
+        let touched: Vec<u32> = (0..self.chunks.len())
+            .filter(|&i| self.chunks[i].is_some())
+            .map(|i| i as u32)
+            .collect();
+        b.u32(touched.len() as u32);
+        for &ci in &touched {
+            b.u32(ci);
+            let c = self.chunks[ci as usize].as_ref().expect("тронутый чанк");
+            // Повторы: (материал, длина). Порядок обхода — тот же,
+            // что у плотного чанка, поэтому чтение обратно однозначно.
+            let mut runs: Vec<(Mat, u16)> = Vec::new();
+            for y in 0..CS {
+                for z in 0..CS {
+                    for x in 0..CS {
+                        let m = c.get(x, y, z);
+                        match runs.last_mut() {
+                            Some((lm, n)) if *lm == m && *n < u16::MAX => *n += 1,
+                            _ => runs.push((m, 1)),
+                        }
+                    }
+                }
+            }
+            b.u32(runs.len() as u32);
+            for &(m, n) in &runs {
+                b.u16(m);
+                b.u16(n);
+            }
+        }
+        let q: Vec<Edit> = self.queue.iter().copied().collect();
+        save_edits(b, self.nx, self.nz, &q);
+        save_edits(b, self.nx, self.nz, &self.applied);
+    }
+
+    /// Прочитать слой изменений в **уже построенный из генератора**
+    /// мир. Размеры обязаны совпасть: чужой мир — это не «немного
+    /// другой», это другой файл.
+    pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
+            return false;
+        }
+        self.materialized_in_tick = s.usize();
+        self.in_tick = s.bool();
+        self.materialized = s.u64();
+        let n = s.list(4);
+        for _ in 0..n {
+            let ci = s.u32() as usize;
+            if ci >= self.chunks.len() {
+                return false;
+            }
+            let runs = s.list(4);
+            let mut p = Paletted::new();
+            let mut at = 0usize;
+            for _ in 0..runs {
+                let m = s.u16();
+                let len = s.u16() as usize;
+                if at + len > CS * CS * CS {
+                    return false;
+                }
+                if m != AIR {
+                    for k in at..at + len {
+                        // Обратный ход обхода записи: y, z, x.
+                        let (x, z, y) = (k % CS, (k / CS) % CS, k / (CS * CS));
+                        p.set(x, y, z, m);
+                    }
+                }
+                at += len;
+            }
+            if at != CS * CS * CS {
+                return false;
+            }
+            p.widenings = 0;
+            self.chunks[ci] = Some(Box::new(p));
+            self.refresh_bits_of(ci);
+        }
+        self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
+        self.applied = load_edits(s, self.nx, self.nz);
+        s.ok()
+    }
+
+    /// Перестроить битовый объём по чанку слоя изменений.
+    ///
+    /// Нужен ровно при загрузке: битовый объём построен генератором,
+    /// а тронутый чанк генератор переопределяет. Правкой по одной
+    /// здесь не обойтись — правок не сохраняли, сохраняли итог.
+    fn refresh_bits_of(&mut self, ci: usize) {
+        let cs = CS as u32;
+        let a = (ci as u32) % self.cx;
+        let bq = ((ci as u32) / self.cx) % self.cy;
+        let c = (ci as u32) / (self.cx * self.cy);
+        let (ox, oy, oz) = (a * cs, bq * cs, c * cs);
+        for ly in 0..cs {
+            for lz in 0..cs {
+                for lx in 0..cs {
+                    let (x, y, z) = (ox + lx, oy + ly, oz + lz);
+                    if !self.inside(x, y, z) {
+                        continue;
+                    }
+                    let solid = self.chunks[ci]
+                        .as_ref()
+                        .expect("чанк только что поставлен")
+                        .get(lx as usize, ly as usize, lz as usize)
+                        != AIR;
+                    let (w, m) = self.bit_index(x, y, z);
+                    if solid {
+                        self.bits[w] |= m;
+                    } else {
+                        self.bits[w] &= !m;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Список правок — **отрезками по линейному номеру воксела**.
+///
+/// Замер (ADR-229): очередь эталонного сценария на трёхсотом тике
+/// весит 48 МБ из пятидесяти, если писать каждую правку четырьмя
+/// полями. Причина не в формате, а в самой очереди: копатель ставит
+/// в неё шар вокселей, а потолок дренажа меньше, и хвост растёт
+/// каждый тик.
+///
+/// Шар обходится по `x` внутри, значит подряд идущие правки —
+/// это подряд идущие номера с одним материалом и одним заказчиком.
+/// Отрезок пишется разностью от конца прошлого (зигзаг), материалом,
+/// заказчиком и длиной, всё переменной длиной.
+///
+/// **Заказчик входит в отрезок, а не теряется** (ADR-230): выкопанное
+/// начисляется тому, кто копал, и правка без заказчика ушла бы в сток.
+/// Отрезки от этого не мельчают: шар копателя заказан целиком одним.
+///
+/// **Порядок сохраняется точно.** Очередь FIFO, и отрезок — это
+/// запись о подряд идущих её элементах, а не их пересортировка.
+pub fn save_edits(b: &mut fx::blob::Blob, nx: u32, nz: u32, e: &[Edit]) {
+    let at = |x: u32, y: u32, z: u32| (y as u64 * nz as u64 + z as u64) * nx as u64 + x as u64;
+    b.u32(e.len() as u32);
+    let mut runs: Vec<(u64, Mat, u32, u32)> = Vec::new();
+    for x in e {
+        let i = at(x.x, x.y, x.z);
+        match runs.last_mut() {
+            Some((s, m, n, by)) if *m == x.mat && *by == x.by && *s + u64::from(*n) == i => *n += 1,
+            _ => runs.push((i, x.mat, 1, x.by)),
+        }
+    }
+    b.u32(runs.len() as u32);
+    let mut prev = 0i64;
+    for &(i, m, n, by) in &runs {
+        b.ivar(i as i64 - prev);
+        b.uvar(u64::from(m));
+        b.uvar(u64::from(n));
+        b.uvar(u64::from(by));
+        prev = i as i64 + i64::from(n);
+    }
+}
+
+pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
+    let total = s.u32() as usize;
+    let nruns = s.list(4);
+    let mut out = Vec::with_capacity(total.min(1 << 24));
+    let mut prev = 0i64;
+    for _ in 0..nruns {
+        let start = prev + s.ivar();
+        let m = s.uvar() as Mat;
+        let n = s.uvar();
+        let by = s.uvar() as u32;
+        // Бессмыслица **по смыслу**, а не по длине: отрицательное
+        // начало отрезка или отрезок длиннее всего списка. Молча
+        // вернуть пустоту нельзя — обрезанный файл прочитался бы
+        // как пустая очередь, то есть как другая партия.
+        if start < 0 || n > total as u64 || out.len() as u64 + n > total as u64 {
+            s.spoil();
+            return Vec::new();
+        }
+        for k in 0..n {
+            let i = start as u64 + k;
+            let x = (i % nx as u64) as u32;
+            let z = ((i / nx as u64) % nz as u64) as u32;
+            let y = (i / (nx as u64 * nz as u64)) as u32;
+            out.push(Edit { x, y, z, mat: m, by });
+        }
+        prev = start + n as i64;
+    }
+    if out.len() != total {
+        s.spoil();
+        return Vec::new();
+    }
+    out
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use fx::blob::{Blob, Scan};
+    use fx::rng::Rng;
+
+    /// **Сжатие отрезками не имеет права менять ни состав, ни порядок.**
+    ///
+    /// Очередь правок — FIFO, и её порядок задаёт, что окажется в мире
+    /// при столкновении двух правок в один воксель. Перестановка
+    /// молча изменила бы исход, а счётчик длины остался бы верным —
+    /// ровно та ловушка, из-за которой в этом файле проверяют мир,
+    /// а не число применённых правок.
+    #[test]
+    fn packing_edits_keeps_both_order_and_content() {
+        let (nx, ny, nz) = (256u32, 128u32, 256u32);
+        let mut r = Rng::new(9, 0x3D1);
+        for case in 0..8u64 {
+            let mut want: Vec<Edit> = Vec::new();
+            // Смесь трёх видов: шар копателя (подряд идущие номера
+            // от одного заказчика), одиночные правки вразброс
+            // от разных и повтор одного воксела разным материалом —
+            // сжатие обязано пережить все три.
+            for who in 0..4u32 {
+                let (cx, cy, cz) = (
+                    r.range(12, nx as i32 - 12),
+                    r.range(12, ny as i32 - 12),
+                    r.range(12, nz as i32 - 12),
+                );
+                for dy in -3..=3i32 {
+                    for dz in -3..=3i32 {
+                        for dx in -3..=3i32 {
+                            want.push(Edit {
+                                x: (cx + dx) as u32,
+                                y: (cy + dy) as u32,
+                                z: (cz + dz) as u32,
+                                mat: AIR,
+                                by: who,
+                            });
+                        }
+                    }
+                }
+            }
+            for _ in 0..200 {
+                want.push(Edit {
+                    x: r.below(nx),
+                    y: r.below(ny),
+                    z: r.below(nz),
+                    mat: (r.below(5) + case as u32) as Mat,
+                    by: r.below(7),
+                });
+            }
+            // Тот же воксель, тот же материал, разные заказчики:
+            // заказчик обязан разрывать отрезок, иначе выкопанное
+            // после загрузки пошло бы не тому (ADR-230).
+            for m in 0..6u16 {
+                want.push(Edit { x: 7, y: 7, z: 7, mat: m, by: m as u32 });
+            }
+            for who in 0..4u32 {
+                want.push(Edit { x: 9, y: 9, z: 9, mat: AIR, by: who });
+            }
+            let mut b = Blob::new();
+            save_edits(&mut b, nx, nz, &want);
+            let mut s = Scan::new(&b.v);
+            let got = load_edits(&mut s, nx, nz);
+            assert!(s.ok());
+            assert_eq!(got, want, "случай {case}");
+        }
+    }
+
+    /// Пустой список — это список, а не отсутствие поля.
+    #[test]
+    fn an_empty_edit_list_round_trips() {
+        let mut b = Blob::new();
+        save_edits(&mut b, 64, 64, &[]);
+        let mut s = Scan::new(&b.v);
+        assert!(load_edits(&mut s, 64, 64).is_empty());
+        assert!(s.ok());
+    }
+
+    /// **Обрезанный список правок — порча, а не пустая очередь.**
+    ///
+    /// Разница существенная: пустая очередь это законное состояние,
+    /// и вернув её молча, читатель отдал бы другую партию вместо
+    /// отказа.
+    #[test]
+    fn a_truncated_edit_list_is_spoiled_not_empty() {
+        let want: Vec<Edit> = (0..50)
+            .map(|k| Edit { x: k, y: 3, z: 5, mat: 2, by: k % 3 })
+            .collect();
+        let mut b = Blob::new();
+        save_edits(&mut b, 64, 64, &want);
+        for cut in 0..b.v.len() {
+            let mut s = Scan::new(&b.v[..cut]);
+            let got = load_edits(&mut s, 64, 64);
+            assert!(
+                !s.ok() || got == want,
+                "обрезка на {cut} байте дала {} правок и не пожаловалась",
+                got.len()
+            );
+        }
+    }
+
+    /// Шар копателя обязан лечь **отрезками**, а не по правке на запись.
+    /// Замер, ради которого сжатие и появилось: очередь эталонного
+    /// сценария весила 48 МБ из пятидесяти.
+    #[test]
+    fn a_diggers_ball_packs_into_runs() {
+        let (nx, nz) = (256u32, 256u32);
+        let mut ball = Vec::new();
+        for dy in -10..=10i32 {
+            for dz in -10..=10i32 {
+                for dx in -10..=10i32 {
+                    if dx * dx + dy * dy + dz * dz > 100 {
+                        continue;
+                    }
+                    ball.push(Edit {
+                        x: (60 + dx) as u32,
+                        y: (60 + dy) as u32,
+                        z: (60 + dz) as u32,
+                        mat: AIR,
+                        by: 17,
+                    });
+                }
+            }
+        }
+        let mut b = Blob::new();
+        save_edits(&mut b, nx, nz, &ball);
+        // Четырнадцать байт на правку — то, с чего начинали.
+        assert!(
+            b.len() * 6 < ball.len() * 14,
+            "шар из {} правок лёг в {} байт — сжатия нет",
+            ball.len(),
+            b.len()
+        );
+    }
 }
 
 #[cfg(test)]

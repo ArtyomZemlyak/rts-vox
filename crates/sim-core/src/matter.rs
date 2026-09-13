@@ -82,6 +82,34 @@ pub enum Kind {
     Body,
 }
 
+impl Kind {
+    /// Номер вида контейнера в файле сохранения. Задаётся **явно**,
+    /// а не порядком в перечислении: порядок переставят, и старые
+    /// файлы прочитаются как другие контейнеры (ADR-028, ADR-229).
+    pub fn code(self) -> u8 {
+        match self {
+            Kind::Ground => 0,
+            Kind::Hauler => 1,
+            Kind::Debris => 2,
+            Kind::Depot => 3,
+            Kind::Body => 4,
+        }
+    }
+
+    /// Вид по номеру. Неизвестный — не паника: испорченный файл
+    /// ловится проверкой целостности, а не разбором каждого поля.
+    pub fn from_code(c: u8) -> Option<Kind> {
+        match c {
+            0 => Some(Kind::Ground),
+            1 => Some(Kind::Hauler),
+            2 => Some(Kind::Debris),
+            3 => Some(Kind::Depot),
+            4 => Some(Kind::Body),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Container {
     pub kind: Kind,
@@ -332,6 +360,46 @@ impl Ledger {
     /// Разница, если инвариант нарушен, — для сообщения об ошибке.
     pub fn imbalance(&self) -> i128 {
         (self.in_containers() as i128 + self.sunk_total() as i128) - self.initial as i128
+    }
+
+    /// Снимок учёта для сохранения (ADR-229): контейнеры, стоки,
+    /// начальная сумма и свободный список — всё, из чего он состоит.
+    ///
+    /// Наружу отдаётся **копией**, а не ссылкой на поля: учёт хранит
+    /// инвариант «начальное == в контейнерах + по стокам», и место,
+    /// где его можно править по кусочкам, было бы дырой в нём.
+    pub fn snapshot(&self) -> (Vec<Container>, Vec<Amount>, Amount, u32, Vec<u32>) {
+        (
+            self.containers.clone(),
+            self.sunk.to_vec(),
+            self.initial,
+            self.free_head,
+            self.free.clone(),
+        )
+    }
+
+    /// Учёт из снимка. Отказ — если снимок не сходится сам с собой:
+    /// испорченный файл не должен становиться партией, в которой
+    /// материя не сохраняется.
+    pub fn from_snapshot(
+        containers: Vec<Container>,
+        sunk: Vec<Amount>,
+        initial: Amount,
+        free_head: u32,
+        free: Vec<u32>,
+    ) -> Option<Ledger> {
+        if sunk.len() != SINKS.len() {
+            return None;
+        }
+        let mut l = Ledger {
+            containers,
+            sunk: [0; SINKS.len()],
+            initial,
+            free_head,
+            free,
+        };
+        l.sunk.copy_from_slice(&sunk);
+        l.balanced().then_some(l)
     }
 
     pub fn live_containers(&self) -> usize {
