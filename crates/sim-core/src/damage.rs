@@ -10,6 +10,7 @@ use voxel::topo::unit::CoreBufs;
 use voxel::{Status, UnitBody};
 #[path = "detach.rs"]
 mod detach;
+pub(crate) use detach::Job as SectionJob;
 pub use detach::Separated;
 
 /// Orthonormal hull frame, computed once per unit/phase. Root origin and scale

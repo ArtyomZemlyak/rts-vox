@@ -725,6 +725,15 @@ impl Bursts {
         self.body_removed += f.count as u64;
         self.fragments.push(f);
     }
+    /// A whole section inherits the parent's motion. That energy was already
+    /// present in the vehicle and is not counted as new blast kinetic energy.
+    pub(crate) fn emit_section(&mut self, mut f: Fragment) {
+        assert!(f.chunk.is_some());
+        self.next_id += 1;
+        f.id = self.next_id;
+        self.body_removed += u64::from(f.count);
+        self.fragments.push(f);
+    }
     pub fn ready(&self, t: &Blast) -> bool {
         self.jobs.len() < t.max_pending as usize
     }

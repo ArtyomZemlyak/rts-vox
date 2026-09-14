@@ -41,6 +41,7 @@ pub struct RangeUnit {
     pub revision: u64,
     pub status: Status,
     connectivity: CoreBufs,
+    section: Option<crate::damage::SectionJob>,
 }
 impl RangeUnit {
     pub fn new(at: [i32; 3]) -> Self {
@@ -67,6 +68,19 @@ impl RangeUnit {
             revision: 0,
             status,
             connectivity,
+            section: None,
+        }
+    }
+    fn refresh_damage(&mut self, id: usize) {
+        self.status = self.body.status(&mut self.connectivity);
+        if !self.status.alive {
+            self.section = None;
+        } else if self.status.detached > 0 && self.section.is_none() {
+            let mut mask = self.body.vol.clone();
+            for (w, r) in mask.cols.iter_mut().zip(self.connectivity.reached_cols()) {
+                *w &= !r;
+            }
+            self.section = Some(crate::damage::SectionJob::new(id as u32, 0, mask));
         }
     }
     pub fn update_pose(&mut self) {
@@ -458,6 +472,11 @@ impl Explosion {
                     if let Some(cell) = u.local_at(q, &self.poses[actor]) {
                         let [x, y, z] = cell;
                         if u.body.vol.get(x, y, z) {
+                            // Shared extraction owns a frozen source until its
+                            // next whole section has a paid fragment slot.
+                            if u.section.is_some() {
+                                return;
+                            }
                             let need = unit_work(&u.body, cell, c).saturating_sub(
                                 u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
                             );
@@ -725,7 +744,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(8);
+        b.u32(9);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -792,6 +811,10 @@ impl BlastRange {
                     b.u8(*v);
                 }
             }
+            b.bool(u.section.is_some());
+            if let Some(j) = &u.section {
+                j.save_cut(&mut b);
+            }
         }
         self.world.save(&mut b);
         self.matter.save(&mut b);
@@ -833,7 +856,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 8 {
+        if s.u32() != 9 {
             return None;
         }
         let extended = s.bool();
@@ -902,7 +925,7 @@ impl BlastRange {
         if s.u32() as usize != r.units.len() {
             return None;
         }
-        for u in &mut r.units {
+        for (id, u) in r.units.iter_mut().enumerate() {
             let at = std::array::from_fn(|_| s.i32());
             if !u.motion.load(&mut s) {
                 return None;
@@ -954,6 +977,18 @@ impl BlastRange {
             }
             u.revision = revision;
             u.status = u.body.status(&mut u.connectivity);
+            if s.bool() {
+                u.section = Some(crate::damage::SectionJob::load_cut(
+                    id as u32,
+                    0,
+                    &mut s,
+                    &u.body,
+                    &mut u.connectivity,
+                )?);
+            }
+            if u.status.alive && u.status.detached > 0 && u.section.is_none() {
+                return None;
+            }
         }
         if !r.world.load(&mut s) {
             return None;
@@ -1058,13 +1093,16 @@ impl BlastRange {
 
     /// Charge another round against the current, already damaged world.
     pub fn ready(&self) -> bool {
-        self.shell.is_none()
+        self.gun.status.alive
+            && self.gun.status.weapon
+            && self.shell.is_none()
             && (self.fire_tick == u32::MAX || self.tick > self.fire_tick)
             && self
                 .explosion
                 .as_ref()
                 .is_none_or(|e| e.wave.finished() && e.pending.is_empty())
             && self.world.queued() == 0
+            && self.units.iter().all(|u| u.section.is_none())
     }
     pub fn refire(&mut self) -> bool {
         if !self.ready() {
@@ -1140,8 +1178,8 @@ impl BlastRange {
         self.gun.motion.step(
             &self.world,
             &self.gun.body,
-            true,
-            true,
+            self.gun.status.alive,
+            self.gun.status.engine,
             &positions,
             self.tick,
             self.config.gravity,
@@ -1168,7 +1206,7 @@ impl BlastRange {
             ProjectileMotion::Ballistic => self.config.gravity,
             ProjectileMotion::Direct => 0,
         };
-        if self.tick == self.fire_tick {
+        if self.tick == self.fire_tick && self.gun.status.alive && self.gun.status.weapon {
             let from = self.muzzle();
             let target = self.target();
             let dx = Fx::from_int(target[0]).sub(from[0]);
@@ -1249,11 +1287,12 @@ impl BlastRange {
                     if self.config.material_energy_j == 0 {
                         self.matter.annihilate_body(id, u.removed.len() - n);
                     }
-                    u.status = u.body.status(&mut u.connectivity);
+                    u.refresh_damage(id);
                 }
             }
         }
         self.world.flush();
+        self.matter.step_sections(&mut self.units);
         self.matter.flush(
             &self.world,
             self.config.material_energy_j > 0,
@@ -1278,6 +1317,104 @@ impl BlastRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_severed_barrel_stops_an_already_charged_range_shot() {
+        let c = config();
+        let mut r = BlastRange::new(c);
+        for z in 0..30 {
+            for y in 0..30 {
+                r.gun.body.remove(54, y, z);
+            }
+        }
+        r.gun.status = r.gun.body.status(&mut r.gun.connectivity);
+        assert!(r.gun.status.alive && !r.gun.status.weapon);
+        r.fire_tick = 0;
+        r.step();
+        assert!(r.shell.is_none() && r.impact.is_none());
+        assert!(!r.refire());
+    }
+
+    #[test]
+    fn range_sections_wait_atomically_resume_and_keep_mass_and_pose() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        let initial = a.units[0].body.solid_count();
+        let u = &mut a.units[0];
+        // Cut the protruding barrel while retaining the core and turret.
+        for z in 0..30 {
+            for y in 0..30 {
+                if u.body.remove(54, y, z) {
+                    u.removed.push([54, y as u8, z as u8]);
+                }
+            }
+        }
+        u.revision = u.removed.len() as u64;
+        a.matter.annihilate_body(0, u.removed.len());
+        u.refresh_damage(0);
+        assert!(u.status.alive && u.status.detached > 8);
+        let detached = u.status.detached;
+        let after_cut = u.body.solid_count();
+        let sink = a.matter.economy.ledger.sunk_total();
+        for mut budget in [1, 40, 100] {
+            let u = &mut a.units[0];
+            u.section.as_mut().unwrap().advance(&u.body, &mut budget);
+            let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+            assert_eq!(a.state_hash(), restored.state_hash(), "partial extraction");
+        }
+        a.matter.tuning.max_flying = 0;
+        for _ in 0..30 {
+            a.matter.step_sections(&mut a.units);
+        }
+        assert_eq!(a.units[0].body.solid_count(), after_cut);
+        assert!(a.matter.debris.fragments.is_empty());
+        assert!(a.units[0].section.as_ref().unwrap().ready());
+        let snapshot = a.snapshot();
+        let mut b = BlastRange::restore(c, &snapshot).unwrap();
+        a.matter.tuning.max_flying = b.matter.tuning.max_flying;
+        assert_eq!(a.state_hash(), b.state_hash());
+        for _ in 0..40 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert!(a.units[0].section.is_none());
+        assert_eq!(a.units[0].body.solid_count(), after_cut - detached);
+        assert_eq!(a.units[0].status.detached, 0);
+        assert_eq!(a.matter.economy.ledger.sunk_total(), sink);
+        assert!(a.matter.economy.ledger.balanced());
+        let fragments = &a.matter.debris.fragments;
+        assert!(
+            fragments.iter().any(|f| f.count > 8),
+            "barrel was reduced to crumbs"
+        );
+        assert_eq!(fragments.iter().map(|f| f.count).sum::<u32>(), detached);
+        assert_eq!(
+            fragments.iter().map(|f| f.mass_g).sum::<u64>(),
+            u64::from(detached) * 7850
+        );
+        let mut cells = std::collections::BTreeSet::new();
+        for f in fragments {
+            let chunk = f.chunk.as_ref().unwrap();
+            assert_eq!(chunk.cells.len(), f.count as usize);
+            assert_eq!(chunk.frames[0].base, a.units[0].pose.base);
+            for c in &chunk.cells {
+                assert!(cells.insert(*c));
+            }
+        }
+        assert_eq!(
+            initial,
+            a.units[0].body.solid_count() + a.units[0].removed.len() as u32
+        );
+        let restored = BlastRange::restore(b.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(
+            a.state_hash(),
+            restored.state_hash(),
+            "saved whole fragment"
+        );
+    }
     #[test]
     fn material_shell_transfers_ground_and_armour_with_finite_energy_and_exact_resume() {
         let c = config();
@@ -1415,6 +1552,7 @@ mod tests {
             .iter()
             .map(|f| u64::from(f.count))
             .sum::<u64>();
+        let detached_before = r.units.iter().map(|u| u.detached as u64).sum::<u64>();
         r.config =
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         r.aim = Some([359, 28, 312]);
@@ -1429,7 +1567,7 @@ mod tests {
                 .iter()
                 .map(|f| u64::from(f.count))
                 .sum::<u64>(),
-            count
+            count + r.units.iter().map(|u| u.detached as u64).sum::<u64>() - detached_before
         );
         assert!(r.matter.economy.ledger.sunk_total() > 0 && r.matter.economy.ledger.balanced());
         assert_eq!(
@@ -1489,10 +1627,12 @@ mod tests {
         assert!((a.gun.at[0] - 245).abs() < 8, "gun {:?}", a.gun.at);
         assert!(a.order_attack(2));
         let removed = a.units[2].removed.len();
+        let mut impacted = false;
         for _ in 0..240 {
             a.step();
+            impacted |= a.impact.is_some();
         }
-        assert!(a.impact.is_some());
+        assert!(impacted, "attack never produced an impact");
         assert!(
             a.units[2].removed.len() > removed,
             "moving target must take spatial damage"
@@ -1795,7 +1935,7 @@ mod tests {
         );
         let mm3 = u64::from(u.body.mm).pow(3);
         assert_eq!(
-            u.body.solid_count() as u64 * mm3 + u.annihilated_mm3(),
+            (u.body.solid_count() as u64 + u.detached as u64) * mm3 + u.annihilated_mm3(),
             voxel::unit::tank().solid_count() as u64 * mm3
         );
     }

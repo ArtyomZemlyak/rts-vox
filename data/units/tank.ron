@@ -18,4 +18,5 @@
         (5, Sensor),
     ],
     core_size: 4,
+    weapon_paths: [((34, 21, 13), (60, 26, 18), 0)],
 )

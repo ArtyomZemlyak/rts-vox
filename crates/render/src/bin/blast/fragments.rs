@@ -2,30 +2,37 @@
 use super::*;
 use std::collections::BTreeMap;
 #[derive(Component)]
-pub struct Piece(u64);
+pub struct Piece(u64, u64);
 #[derive(Default)]
 pub struct Cache {
     meshes: BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
+    chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
 }
 pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(v.map(|a| a.to_f64_lossy() as f32))
 }
+#[allow(clippy::too_many_arguments)]
 pub fn draw(
     mut commands: Commands,
     scene: Res<Scene>,
     visual: Res<moving::Visual>,
+    art: Res<WitnessArt>,
     mut cache: Local<Cache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut old: Query<(Entity, &Piece, &mut Transform)>,
 ) {
     let fragments = &scene.sim.matter.debris.fragments;
-    let ids: BTreeSet<_> = fragments.iter().map(|f| f.id).collect();
+    let ids: BTreeMap<_, _> = fragments
+        .iter()
+        .map(|f| (f.id, f.chunk.as_ref().map_or(0, |c| c.hash())))
+        .collect();
     let mut entities = BTreeMap::new();
     for (e, p, _) in &mut old {
-        if !ids.contains(&p.0) {
+        if ids.get(&p.0) != Some(&p.1) {
             commands.entity(e).despawn();
+            cache.chunks.remove(&p.0);
         } else {
             entities.insert(p.0, e);
         }
@@ -35,6 +42,7 @@ pub fn draw(
     } else {
         1.0
     };
+    let mut chunk_builds = 0;
     for f in fragments {
         let current = pos([f.position.x, f.position.y, f.position.z]);
         let position = visual
@@ -45,8 +53,12 @@ pub fn draw(
             .lerp(current, alpha);
         let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
         let rotation = Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
-        let scale = (f.count as f32 / f.shape.count_ones() as f32).cbrt() * f.mm as f32
-            / voxel::unit::WORLD_MM as f32;
+        let scale = if f.chunk.is_some() {
+            1.0
+        } else {
+            (f.count as f32 / f.shape.count_ones() as f32).cbrt() * f.mm as f32
+                / voxel::unit::WORLD_MM as f32
+        };
         let transform = Transform::from_translation(position)
             .with_rotation(rotation)
             .with_scale(Vec3::splat(scale));
@@ -54,6 +66,30 @@ pub fn draw(
             if let Ok((_, _, mut tr)) = old.get_mut(entity) {
                 *tr = transform;
             }
+            continue;
+        }
+        if let Some(chunk) = &f.chunk {
+            if chunk_builds >= 2 {
+                continue;
+            }
+            chunk_builds += 1;
+            let kind = scene.sim.units[chunk.template as usize].kind;
+            let template = &art.pristine[usize::from(kind == RangeUnitKind::Strider)];
+            let mut handles = Vec::new();
+            commands
+                .spawn((Piece(f.id, chunk.hash()), transform, Visibility::default()))
+                .with_children(|parent| {
+                    for (finish, buf) in render::model::section_to_mesh(template, chunk) {
+                        let handle = meshes.add(super::mesh(&buf));
+                        handles.push(handle.clone());
+                        parent.spawn((
+                            Mesh3d(handle),
+                            MeshMaterial3d(art.materials[finish].clone()),
+                            Transform::default(),
+                        ));
+                    }
+                });
+            cache.chunks.insert(f.id, handles);
             continue;
         }
         let colour = if let Some(p) = f.paint {
@@ -120,7 +156,7 @@ pub fn draw(
             })
             .clone();
         commands.spawn((
-            Piece(f.id),
+            Piece(f.id, 0),
             Mesh3d(mesh),
             MeshMaterial3d(material),
             transform,

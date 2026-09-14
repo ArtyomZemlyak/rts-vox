@@ -99,6 +99,9 @@ fn body_of(m: &UnitModel) -> Result<UnitBody, String> {
     if !b.seat_core() {
         return Err(format!("{}: ядро не садится на разметку", m.name));
     }
+    for &(min, max, axis) in &m.weapon_paths {
+        b.push_weapon_path(voxel::unit::WeaponPath { min, max, axis });
+    }
     Ok(b)
 }
 
@@ -108,6 +111,9 @@ fn same_body(a: &UnitBody, b: &UnitBody) -> bool {
         return false;
     }
     if (a.core, a.core_size) != (b.core, b.core_size) {
+        return false;
+    }
+    if a.weapon_paths() != b.weapon_paths() {
         return false;
     }
     for z in 0..a.vol.nz as usize {

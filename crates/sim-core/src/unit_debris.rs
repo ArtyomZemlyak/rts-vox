@@ -177,11 +177,7 @@ impl crate::World {
             };
             // Inherited velocity belongs to the separated mass. Detachment adds
             // no launch energy; gravity does the subsequent work.
-            self.bursts.next_id += 1;
-            let mut f = f;
-            f.id = self.bursts.next_id;
-            self.bursts.body_removed += count as u64;
-            self.bursts.fragments.push(f);
+            self.bursts.emit_section(f);
         }
     }
 }

@@ -9,7 +9,7 @@ pub struct Separated {
     pub cells: Vec<Cell>,
     pub shape: crate::burst::chunk::Shape,
 }
-pub(super) struct Job {
+pub(crate) struct Job {
     pub unit: u32,
     generation: u32,
     scan: UnitComponents,
@@ -19,7 +19,7 @@ pub(super) struct Job {
     shape: crate::burst::chunk::Shape,
 }
 impl Job {
-    pub(super) fn new(unit: u32, generation: u32, mask: UnitVol) -> Self {
+    pub(crate) fn new(unit: u32, generation: u32, mask: UnitVol) -> Self {
         Self {
             unit,
             generation,
@@ -29,6 +29,120 @@ impl Job {
             staged: None,
             shape: crate::burst::chunk::Shape::default(),
         }
+    }
+
+    /// Shared bounded extraction. The caller keeps the source unchanged until
+    /// commit; staging is private and cannot remove unpaid material from it.
+    pub(crate) fn advance(&mut self, source: &UnitBody, budget: &mut u32) {
+        while *budget > 0 {
+            if self.cells.is_empty() {
+                let mut token = 1;
+                let found = self.scan.advance(&mut token);
+                *budget -= 1;
+                if let Some(cells) = found.into_iter().next() {
+                    self.cells = cells;
+                    self.staged = Some(Arc::new(source.clone()));
+                } else if self.scan.finished() {
+                    break;
+                }
+            } else if self.cursor < self.cells.len() {
+                *budget -= 1;
+                let c = self.cells[self.cursor];
+                let [x, y, z] = c.map(usize::from);
+                assert!(Arc::make_mut(self.staged.as_mut().unwrap()).remove(x, y, z));
+                self.shape.add(c, source.turret_y);
+                self.cursor += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    pub(crate) fn ready(&self) -> bool {
+        !self.cells.is_empty() && self.cursor == self.cells.len()
+    }
+    pub(crate) fn finished(&self) -> bool {
+        self.scan.finished() && self.cells.is_empty()
+    }
+    pub(crate) fn commit(&mut self) -> (Arc<UnitBody>, Separated) {
+        assert!(self.ready());
+        self.cursor = 0;
+        (
+            self.staged.take().unwrap(),
+            Separated {
+                unit: self.unit,
+                cells: std::mem::take(&mut self.cells),
+                shape: std::mem::take(&mut self.shape),
+            },
+        )
+    }
+    pub(crate) fn save_cut(&self, b: &mut Blob) {
+        self.scan.save(b);
+        b.usize(self.cursor);
+        b.u32(self.cells.len() as u32);
+        for c in &self.cells {
+            for v in c {
+                b.u8(*v);
+            }
+        }
+    }
+    pub(crate) fn load_cut(
+        unit: u32,
+        generation: u32,
+        s: &mut Scan,
+        source: &UnitBody,
+        core: &mut CoreBufs,
+    ) -> Option<Self> {
+        let scan = UnitComponents::load(s)?;
+        let cursor = s.usize();
+        let count = s.list(3);
+        let status = source.status(core);
+        if !status.alive
+            || scan.dims() != [source.vol.nx, source.vol.ny, source.vol.nz]
+            || count > status.detached as usize
+            || cursor > count
+        {
+            return None;
+        }
+        let mut uncommitted = source.vol.clone();
+        for (w, r) in uncommitted.cols.iter_mut().zip(core.reached_cols()) {
+            *w &= !r;
+        }
+        if !scan.contained_in(&uncommitted) {
+            return None;
+        }
+        let mut j = Self {
+            unit,
+            generation,
+            scan,
+            cells: Vec::new(),
+            cursor,
+            staged: (count > 0).then(|| Arc::new(source.clone())),
+            shape: crate::burst::chunk::Shape::default(),
+        };
+        let mut cells = BTreeSet::new();
+        for i in 0..count {
+            let c = [s.u8(), s.u8(), s.u8()];
+            if !cells.insert(c)
+                || c[0] >= source.vol.nx
+                || c[1] >= source.vol.ny
+                || c[2] >= source.vol.nz
+                || !uncommitted.get(c[0] as usize, c[1] as usize, c[2] as usize)
+                || j.scan.contains(c)
+            {
+                return None;
+            }
+            if i < cursor {
+                Arc::make_mut(j.staged.as_mut().unwrap()).remove(
+                    c[0] as usize,
+                    c[1] as usize,
+                    c[2] as usize,
+                );
+                j.shape.add(c, source.turret_y);
+            }
+            j.cells.push(c);
+        }
+        (s.ok() && j.scan.pending_count() + count == status.detached as usize && !j.finished())
+            .then_some(j)
     }
 }
 impl Bodies {
@@ -69,42 +183,22 @@ impl Bodies {
                 .unwrap_or(&self.templates[state.template as usize]);
             let mut budget = left.div_ceil((n - k) as u32);
             let start = budget;
-            while budget > 0 {
-                if job.cells.is_empty() {
-                    let mut token = 1;
-                    let found = job.scan.advance(&mut token);
-                    budget -= 1;
-                    if let Some(cells) = found.into_iter().next() {
-                        job.cells = cells;
-                        job.staged = Some(Arc::clone(source));
-                    } else if job.scan.finished() {
-                        break;
-                    }
-                } else if job.cursor < job.cells.len() {
-                    budget -= 1;
-                    let c = job.cells[job.cursor];
-                    let [x, y, z] = c.map(|v| v as usize);
-                    assert!(Arc::make_mut(job.staged.as_mut().unwrap()).remove(x, y, z));
-                    job.shape.add(c, source.turret_y);
-                    job.cursor += 1;
-                } else {
-                    break;
-                }
-            }
+            job.advance(source, &mut budget);
             left -= start - budget;
-            if !job.cells.is_empty() && job.cursor == job.cells.len() && room > 0 {
+            if job.ready() && room > 0 {
                 room -= 1;
-                let count = job.cells.len() as u32;
-                state.own = job.staged.take();
-                for c in &job.cells {
+                let (body, part) = job.commit();
+                let count = part.cells.len() as u32;
+                state.own = Some(body);
+                for c in &part.cells {
                     state.dents.remove(c);
                 }
-                for c in &job.cells {
+                for c in &part.cells {
                     state
                         .shape
                         .remove(*c, self.templates[state.template as usize].turret_y);
                 }
-                state.removed.extend_from_slice(&job.cells);
+                state.removed.extend_from_slice(&part.cells);
                 state.removed_mm3 +=
                     count as u64 * (self.templates[state.template as usize].mm as u64).pow(3);
                 state.status.detached -= count;
@@ -116,12 +210,7 @@ impl Bodies {
                     state.mobility.engine,
                 );
                 state.revision = state.revision.wrapping_add(count as u64);
-                out.push(Separated {
-                    unit: job.unit,
-                    cells: std::mem::take(&mut job.cells),
-                    shape: std::mem::take(&mut job.shape),
-                });
-                job.cursor = 0;
+                out.push(part);
             }
             if job.scan.finished() && job.cells.is_empty() {
                 state.separating = false;
@@ -136,14 +225,7 @@ impl Bodies {
         for j in &self.detach {
             b.u32(j.unit);
             b.u32(j.generation);
-            j.scan.save(b);
-            b.usize(j.cursor);
-            b.u32(j.cells.len() as u32);
-            for c in &j.cells {
-                for v in c {
-                    b.u8(*v);
-                }
-            }
+            j.save_cut(b);
         }
     }
     pub(super) fn load_detach(&mut self, s: &mut Scan) -> bool {
@@ -156,11 +238,6 @@ impl Bodies {
         for _ in 0..n {
             let unit = s.u32();
             let generation = s.u32();
-            let Some(scan) = UnitComponents::load(s) else {
-                return false;
-            };
-            let cursor = s.usize();
-            let count = s.list(3);
             let Some(state) = self.slots.get_mut(unit as usize).and_then(Option::as_mut) else {
                 return false;
             };
@@ -168,61 +245,12 @@ impl Bodies {
                 .own
                 .as_ref()
                 .unwrap_or(&self.templates[state.template as usize]);
-            if !seen.insert(unit)
-                || generation != state.generation
-                || !state.status.alive
-                || scan.dims() != [source.vol.nx, source.vol.ny, source.vol.nz]
-                || count > state.status.detached as usize
-                || cursor > count
-            {
+            if !seen.insert(unit) || generation != state.generation || !state.status.alive {
                 return false;
             }
-            // The current source still contains every uncommitted cell.
-            source.status(&mut self.core);
-            let mut uncommitted = source.vol.clone();
-            for (w, r) in uncommitted.cols.iter_mut().zip(self.core.reached_cols()) {
-                *w &= !r;
-            }
-            if !scan.contained_in(&uncommitted) {
+            let Some(j) = Job::load_cut(unit, generation, s, source, &mut self.core) else {
                 return false;
-            }
-            let mut j = Job {
-                unit,
-                generation,
-                scan,
-                cells: Vec::new(),
-                cursor,
-                staged: (count > 0).then(|| Arc::clone(source)),
-                shape: crate::burst::chunk::Shape::default(),
             };
-            let mut cells = BTreeSet::new();
-            for i in 0..count {
-                let c = [s.u8(), s.u8(), s.u8()];
-                if !cells.insert(c)
-                    || c[0] >= source.vol.nx
-                    || c[1] >= source.vol.ny
-                    || c[2] >= source.vol.nz
-                    || !uncommitted.get(c[0] as usize, c[1] as usize, c[2] as usize)
-                    || j.scan.contains(c)
-                {
-                    return false;
-                }
-                if i < cursor {
-                    Arc::make_mut(j.staged.as_mut().unwrap()).remove(
-                        c[0] as usize,
-                        c[1] as usize,
-                        c[2] as usize,
-                    );
-                    j.shape.add(c, source.turret_y);
-                }
-                j.cells.push(c);
-            }
-            if j.scan.pending_count() + count != state.status.detached as usize {
-                return false;
-            }
-            if j.scan.finished() && count == 0 {
-                return false;
-            }
             state.separating = true;
             self.detach.push_back(j);
         }

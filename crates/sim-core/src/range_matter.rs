@@ -27,6 +27,9 @@ pub struct Matter {
     pub supplied_mj: u64,
     pub spent_mj: u64,
     bodies: Vec<u32>,
+    section_work: u32,
+    section_jobs: u32,
+    section_cursor: usize,
 }
 impl Matter {
     pub fn new(units: &[RangeUnit]) -> Self {
@@ -52,6 +55,9 @@ impl Matter {
             supplied_mj: 0,
             spent_mj: 0,
             bodies,
+            section_work: t.impact.detach_work_per_tick,
+            section_jobs: t.impact.detach_jobs_per_tick,
+            section_cursor: 0,
         }
     }
     pub fn begin(&mut self, joules: u32) {
@@ -154,6 +160,106 @@ impl Matter {
             amount
         );
     }
+    /// Same extractor and physical chunks as the game World. Disconnection
+    /// was already paid for at the cut; the remaining section is transferred,
+    /// never charged or annihilated a second time.
+    pub fn step_sections(&mut self, units: &mut [RangeUnit]) {
+        let n = units.len();
+        if n == 0 {
+            return;
+        }
+        let mut left = self.section_work;
+        let mut jobs = units
+            .iter()
+            .filter(|u| u.section.is_some())
+            .count()
+            .min(self.section_jobs as usize);
+        for _ in 0..n {
+            if jobs == 0 {
+                break;
+            }
+            let id = self.section_cursor % n;
+            self.section_cursor = (id + 1) % n;
+            let u = &mut units[id];
+            let Some(mut job) = u.section.take() else {
+                continue;
+            };
+            let mut budget = left.div_ceil(jobs as u32);
+            let start = budget;
+            job.advance(&u.body, &mut budget);
+            left -= start - budget;
+            jobs -= 1;
+            if job.ready() && self.debris.fragment_room(&self.tuning) > 0 {
+                let (body, part) = job.commit();
+                let count = part.cells.len() as u32;
+                let amount = u64::from(count) * self.economy.per_voxel(3);
+                let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+                assert_eq!(
+                    self.economy.ledger.transfer(self.bodies[id], held, amount),
+                    amount
+                );
+                let chunk = crate::burst::chunk::Chunk::new(
+                    id as u16,
+                    1,
+                    part.cells,
+                    [u.pose; 2],
+                    part.shape,
+                );
+                for c in &chunk.cells {
+                    u.dents.remove(c);
+                }
+                u.removed.extend_from_slice(&chunk.cells);
+                u.detached += count as usize;
+                u.revision += u64::from(count);
+                u.status.detached -= count;
+                u.body = std::sync::Arc::unwrap_or_clone(body);
+                let speed = u
+                    .motion
+                    .drive
+                    .vel
+                    .div(Fx::from_int(crate::TICKS_PER_SECOND));
+                let mut velocity = V3::new(
+                    fx::angle::cos(u.motion.drive.head).mul(speed),
+                    u.motion.hull.vy.div(Fx::from_int(crate::TICKS_PER_SECOND)),
+                    fx::angle::sin(u.motion.drive.head).mul(speed),
+                );
+                let vmax = Fx::from_ratio(
+                    self.tuning.max_speed_mm_s as i32,
+                    voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+                );
+                if velocity.len_sq() > vmax.mul(vmax) {
+                    velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
+                }
+                let density = self.economy.mats.get(3).unwrap().density;
+                self.debris.emit_section(Fragment {
+                    id: 0,
+                    position: chunk.centre,
+                    velocity,
+                    material: 3,
+                    paint: Some([1, 0, 0]),
+                    mm: u.body.mm,
+                    basis: [
+                        V3::new(Fx::ONE, Fx::ZERO, Fx::ZERO),
+                        V3::new(Fx::ZERO, Fx::ONE, Fx::ZERO),
+                        V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
+                    ],
+                    mass_g: u64::from(density)
+                        * u64::from(self.tuning.density_kg_m3_per_density)
+                        * u64::from(u.body.mm).pow(3)
+                        / 1_000_000
+                        * u64::from(count),
+                    count,
+                    shape: 1,
+                    chunk: Some(chunk),
+                    held,
+                    resting: false,
+                });
+            }
+            if !job.finished() {
+                u.section = Some(job);
+            }
+        }
+    }
     pub fn flush(&mut self, w: &World, material: bool, gravity: i32) {
         self.debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
@@ -177,6 +283,7 @@ impl Matter {
         b.u64(self.remaining_mj);
         b.u64(self.supplied_mj);
         b.u64(self.spent_mj);
+        b.usize(self.section_cursor);
         self.debris.save(b);
         let (containers, sunk, initial, head, free) = self.economy.ledger.snapshot();
         b.usize(containers.len());
@@ -197,11 +304,24 @@ impl Matter {
         self.remaining_mj = s.u64();
         self.supplied_mj = s.u64();
         self.spent_mj = s.u64();
+        self.section_cursor = s.usize();
+        if self.section_cursor >= units.len().max(1) {
+            return None;
+        }
         if self.spent_mj > self.supplied_mj || self.remaining_mj > self.supplied_mj - self.spent_mj
         {
             return None;
         }
-        self.debris = Bursts::load(s, Some(w), &self.tuning)?;
+        let templates = crate::damage::Bodies::new(
+            units
+                .iter()
+                .map(|u| match u.kind {
+                    modding::range::RangeUnitKind::Tank => voxel::unit::tank(),
+                    modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
+                })
+                .collect(),
+        );
+        self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0)?;
         let n = s.usize();
         if n > self.tuning.max_fragments as usize + units.len() + 2 {
             return None;

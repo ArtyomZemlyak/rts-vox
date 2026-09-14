@@ -8,7 +8,8 @@
 //! орудие, сенсор. Метка — поле воксела, а не отдельная сущность:
 //! никаких списков компонентов на юнита. Подсистема жива, пока жив
 //! **хоть один её воксель, связанный с ядром**, — отрезанная от ядра
-//! не работает, даже если цела.
+//! не работает, даже если цела. Для описанного ствола дополнительно
+//! требуется целое сечение на всём пути от казённика до дула (ADR-259).
 //!
 //! **Отказ булев, а не градиентный.** Двигатель либо есть, либо нет.
 //! Частичная скорость от доли уцелевших вокселей потребовала бы
@@ -165,7 +166,22 @@ pub struct UnitBody {
     /// в рендере, по той же причине, по которой здесь живёт ядро
     /// (D-8): величина, заданная дважды, расходится молча.
     pub turret_y: u8,
+    /// Alternative functional barrels, shared by damaged copies. A barrel
+    /// needs a core-connected solid cell in every transverse slice. Armour
+    /// may bridge the mantlet; unrelated surviving weapon cells cannot bridge
+    /// a missing breech or muzzle. Empty means legacy subsystem semantics.
+    weapon_paths: std::sync::Arc<Vec<WeaponPath>>,
 }
+
+/// Half-open local box along a barrel axis. This is authored geometry, not HP.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeaponPath {
+    pub min: [u8; 3],
+    pub max: [u8; 3],
+    pub axis: u8,
+}
+
+pub const MAX_WEAPON_PATHS: usize = 8;
 
 /// Отделка воксела: ноль — по роли, остальные — явно. Коды идут
 /// в том же порядке, что отделки рендера (`render::look::Finish`),
@@ -327,7 +343,40 @@ impl UnitBody {
             segments: Vec::new(),
             legs: Vec::new(),
             turret_y: 0,
+            weapon_paths: std::sync::Arc::new(Vec::new()),
         }
+    }
+
+    pub fn weapon_paths(&self) -> &[WeaponPath] {
+        &self.weapon_paths
+    }
+
+    pub fn push_weapon_path(&mut self, path: WeaponPath) {
+        let size = [self.vol.nx, self.vol.ny, self.vol.nz];
+        assert!(self.weapon_paths.len() < MAX_WEAPON_PATHS);
+        assert!(path.axis < 3);
+        assert!((0..3).all(|a| path.min[a] < path.max[a] && path.max[a] <= size[a]));
+        std::sync::Arc::make_mut(&mut self.weapon_paths).push(path);
+    }
+
+    fn barrel_connected(&self, path: &WeaponPath, reached: &[u64]) -> bool {
+        let axis = usize::from(path.axis);
+        if (0..3).any(|a| path.min[a] >= path.max[a]) {
+            return false;
+        }
+        let a = (axis + 1) % 3;
+        let b = (axis + 2) % 3;
+        (path.min[axis]..path.max[axis]).all(|slice| {
+            (path.min[b]..path.max[b]).any(|j| {
+                (path.min[a]..path.max[a]).any(|i| {
+                    let mut p = [0usize; 3];
+                    p[axis] = usize::from(slice);
+                    p[a] = usize::from(i);
+                    p[b] = usize::from(j);
+                    reached[self.col(p[1], p[2]) + (p[0] >> 6)] & (1 << (p[0] & 63)) != 0
+                })
+            })
+        })
     }
 
     /// Объявить ногу. Звенья обязаны существовать: нога, ссылающаяся
@@ -479,6 +528,25 @@ impl UnitBody {
                 }
             }
         }
+        // Match the same centre-sample rule used for occupancy. An empty
+        // resampled path stays present and disabled, never enables fallback.
+        let bound = |v: u8, limit: u8| {
+            (u32::from(v) * src)
+                .saturating_sub(u32::from(mm) / 2)
+                .div_ceil(u32::from(mm))
+                .min(u32::from(limit)) as u8
+        };
+        let size = [nx, ny, nz];
+        out.weapon_paths = std::sync::Arc::new(
+            self.weapon_paths
+                .iter()
+                .map(|p| WeaponPath {
+                    min: std::array::from_fn(|a| bound(p.min[a], size[a])),
+                    max: std::array::from_fn(|a| bound(p.max[a], size[a])),
+                    axis: p.axis,
+                })
+                .collect(),
+        );
         Ok(out)
     }
 
@@ -662,7 +730,13 @@ impl UnitBody {
         Status {
             alive: rep.core_alive,
             engine: rep.core_alive && live(0),
-            weapon: rep.core_alive && live(1),
+            weapon: rep.core_alive
+                && live(1)
+                && (self.weapon_paths.is_empty()
+                    || self
+                        .weapon_paths
+                        .iter()
+                        .any(|p| self.barrel_connected(p, reached))),
             sensor: rep.core_alive && live(2),
             attached: rep.attached,
             detached: rep.detached,
@@ -701,7 +775,10 @@ impl UnitBody {
     /// Весь том, включая разделяемые метки. Для шаблона это его
     /// полный размер.
     pub fn bytes(&self) -> usize {
-        self.bytes_private() + self.part.len()
+        self.bytes_private()
+            + self.part.len()
+            + self.finish.len()
+            + self.weapon_paths.len() * std::mem::size_of::<WeaponPath>()
     }
 
     /// Только собственная память тома. У копии метки общие с шаблоном,
@@ -1139,6 +1216,11 @@ pub fn tank() -> UnitBody {
     // Башня — всё, что выше погона. Одна величина, записанная
     // один раз: линия та же, на которой обрывается разметка корпуса.
     u.turret_y = 18;
+    u.push_weapon_path(WeaponPath {
+        min: [34, 21, 13],
+        max: [60, 26, 18],
+        axis: 0,
+    });
     u
 }
 
@@ -1281,6 +1363,13 @@ pub fn strider() -> UnitBody {
     let mut u = seat(u, "шагоход");
     // Вращается всё, что выше корпуса: голова со стволами.
     u.turret_y = 38;
+    for z in [16, 24] {
+        u.push_weapon_path(WeaponPath {
+            min: [24, 42, z - 2],
+            max: [40, 47, z + 3],
+            axis: 0,
+        });
+    }
     u
 }
 
@@ -1341,6 +1430,94 @@ mod tests {
             assert!(seen[p as usize] > 0, "{} отсутствует", p.name());
         }
         assert!(t.solid_count() > 10_000, "танк подозрительно пуст");
+    }
+
+    #[test]
+    fn a_chipped_barrel_works_but_a_severed_breech_or_muzzle_does_not() {
+        let original = tank();
+        let mut core = CoreBufs::new();
+        assert!(original.status(&mut core).weapon);
+        let mut chipped = original.clone();
+        assert!(chipped.remove(54, 22, 14));
+        assert!(chipped.status(&mut core).weapon);
+        for x in [35, 48, 54, 59] {
+            let mut damaged = original.clone();
+            for z in 0..damaged.vol.nz as usize {
+                for y in 21..27 {
+                    damaged.remove(x, y, z);
+                }
+            }
+            let status = damaged.status(&mut core);
+            assert!(status.alive && status.engine, "cut {x}: {status:?}");
+            assert!(damaged.subsystem_count(Part::Weapon) > 0);
+            assert!(!status.weapon, "cut {x}: {status:?}");
+        }
+        assert!(
+            original.status(&mut core).weapon,
+            "damage mutated shared metadata"
+        );
+    }
+
+    #[test]
+    fn twin_barrels_are_independent_and_resampling_preserves_the_rule() {
+        let mut body = strider();
+        let mut core = CoreBufs::new();
+        assert!(body.status(&mut core).weapon);
+        for (barrel, z) in [16usize, 24].into_iter().enumerate() {
+            for y in 40..49 {
+                for pz in z - 2..z + 3 {
+                    body.remove(35, y, pz);
+                }
+            }
+            assert_eq!(body.status(&mut core).weapon, barrel == 0);
+        }
+        for mm in [50, 100] {
+            let mut t = tank().resampled(mm).unwrap();
+            assert!(t.status(&mut core).weapon, "intact {mm}mm");
+            let p = t.weapon_paths()[0];
+            let x = usize::from(p.max[0] - 1);
+            for z in 0..t.vol.nz as usize {
+                for y in 0..t.vol.ny as usize {
+                    t.remove(x, y, z);
+                }
+            }
+            assert!(!t.status(&mut core).weapon, "severed {mm}mm");
+        }
+        // At 200 mm centre sampling removes the bridge to the muzzle ring.
+        // Metadata must not make that disconnected geometry operational.
+        let coarse = tank().resampled(200).unwrap();
+        let status = coarse.status(&mut core);
+        assert!(status.alive && status.detached > 0);
+        assert!(!status.weapon);
+    }
+
+    #[test]
+    fn functional_paths_support_all_axes_and_do_not_accept_detached_slices() {
+        for axis in 0..3 {
+            let mut b = UnitBody::new(6, 6, 6, 1);
+            fill(&mut b, (0, 6), (0, 6), (0, 6), Part::Weapon);
+            b.set(0, 0, 0, Part::Core);
+            assert!(b.seat_core());
+            b.push_weapon_path(WeaponPath {
+                min: [0; 3],
+                max: [6; 3],
+                axis,
+            });
+            let mut core = CoreBufs::new();
+            assert!(b.status(&mut core).weapon);
+            for a in 0..6 {
+                for c in 0..6 {
+                    let mut p = [0; 3];
+                    p[usize::from(axis)] = 2;
+                    p[(usize::from(axis) + 1) % 3] = a;
+                    p[(usize::from(axis) + 2) % 3] = c;
+                    b.remove(p[0], p[1], p[2]);
+                }
+            }
+            let status = b.status(&mut core);
+            assert!(status.alive && status.detached > 0);
+            assert!(!status.weapon);
+        }
     }
 
     /// Шагоход — второе ванильное тело, и требования к нему те же:

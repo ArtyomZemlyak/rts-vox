@@ -26,6 +26,7 @@ pub enum LoadError {
     CoreOutside(String),
     /// В томе нет ни одного воксела ядра.
     NoCore(String),
+    WeaponPath(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -38,6 +39,7 @@ impl std::fmt::Display for LoadError {
             LoadError::Escape(w) => write!(f, "{w}: путь выходит за пределы пака"),
             LoadError::CoreOutside(w) => write!(f, "{w}: ядро вне тома"),
             LoadError::NoCore(w) => write!(f, "{w}: в томе нет ядра"),
+            LoadError::WeaponPath(w) => write!(f, "{w}: неверный путь орудия"),
         }
     }
 }
@@ -60,6 +62,10 @@ pub struct UnitDef {
     /// Размер куба ядра в вокселях. Само положение ядра берётся из
     /// модели: это воксели, помеченные `Core`.
     pub core_size: u8,
+    /// Up to eight alternative barrels: (local min, exclusive max, axis).
+    /// Old packs keep the role-only subsystem rule when omitted.
+    #[serde(default)]
+    pub weapon_paths: Vec<([u8; 3], [u8; 3], u8)>,
 }
 
 /// Юнит, готовый к сборке в движковый том.
@@ -70,6 +76,7 @@ pub struct UnitModel {
     pub ny: u8,
     pub nz: u8,
     pub core_size: u8,
+    pub weapon_paths: Vec<([u8; 3], [u8; 3], u8)>,
     /// `(x, y, z, метка)`. Пустые воксели отсутствуют.
     pub voxels: Vec<(u8, u8, u8, PartTag)>,
 }
@@ -180,6 +187,14 @@ fn build_unit(
         ));
     }
     let mut voxels = Vec::with_capacity(vm.voxels.len());
+    let size = [vm.nx, vm.ny, vm.nz];
+    if def.weapon_paths.len() > 8
+        || def.weapon_paths.iter().any(|(min, max, axis)| {
+            *axis >= 3 || (0..3).any(|a| min[a] >= max[a] || u32::from(max[a]) > size[a])
+        })
+    {
+        return Err(LoadError::WeaponPath(where_.to_string()));
+    }
     let mut has_core = false;
     for &(x, y, z, colour) in &vm.voxels {
         let tag = crate::vox::tag_at(&def.palette, colour);
@@ -202,6 +217,7 @@ fn build_unit(
         ny: vm.ny as u8,
         nz: vm.nz as u8,
         core_size: cs,
+        weapon_paths: def.weapon_paths,
         voxels,
     })
 }
@@ -236,4 +252,34 @@ pub fn merge_materials(packs: &[Pack]) -> Result<Registry, LoadError> {
         }
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weapon_paths_load_from_data_and_invalid_geometry_is_refused() {
+        let text = include_str!("../../../data/units/tank.ron");
+        let model = crate::vox::read(include_bytes!("../../../data/units/tank.vox")).unwrap();
+        let def: UnitDef = ron::from_str(text).unwrap();
+        let built = build_unit("tank", def, model.clone()).unwrap();
+        assert_eq!(built.weapon_paths, vec![([34, 21, 13], [60, 26, 18], 0)]);
+        for bad in [
+            ([0; 3], [1; 3], 3),
+            ([0; 3], [255; 3], 0),
+            ([2; 3], [1; 3], 0),
+        ] {
+            let mut def: UnitDef = ron::from_str(text).unwrap();
+            def.weapon_paths = vec![bad];
+            assert!(matches!(
+                build_unit("bad", def, model.clone()),
+                Err(LoadError::WeaponPath(_))
+            ));
+        }
+        let legacy: UnitDef =
+            ron::from_str(r#"(name: "legacy", model: "x.vox", palette: [], core_size: 1)"#)
+                .unwrap();
+        assert!(legacy.weapon_paths.is_empty());
+    }
 }

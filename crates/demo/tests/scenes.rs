@@ -816,6 +816,9 @@ mod d8 {
             b.set(x as usize, y as usize, z as usize, part_of(tag));
         }
         assert!(b.seat_core(), "{}: ядро не садится", m.name);
+        for &(min, max, axis) in &m.weapon_paths {
+            b.push_weapon_path(voxel::unit::WeaponPath { min, max, axis });
+        }
         b
     }
 
@@ -833,6 +836,7 @@ mod d8 {
             (b.vol.nx, b.vol.ny, b.vol.nz)
         );
         assert_eq!((a.core, a.core_size), (b.core, b.core_size));
+        assert_eq!(a.weapon_paths(), b.weapon_paths());
         for z in 0..a.vol.nz as usize {
             for y in 0..a.vol.ny as usize {
                 for x in 0..a.vol.nx as usize {
