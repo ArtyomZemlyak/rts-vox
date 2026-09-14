@@ -439,7 +439,6 @@ pub fn actions(
         let origin = gas.params.origin;
         configure_gas(&scene.sim, e, &mut gas);
         gas.params.origin = origin;
-        gas.generation += 1;
     }
 }
 pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCode>>) {

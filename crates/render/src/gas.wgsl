@@ -5,7 +5,7 @@ struct Params {
     camera: vec4<f32>,
     origin: vec4<f32>, // xyz world origin, w cell edge
     source: vec4<f32>, // xyz world impact, w injection radius
-    control: vec4<f32>, // dt, step, active, reset generation
+    control: vec4<f32>, // dt, step, opacity, additive injection
     chemistry: vec4<f32>, // reaction, cooling, buoyancy, temperature/1000
     charge: vec4<f32>, // fuel, pressure, display voxel size, unused
     terrain: vec4<f32>,
@@ -65,6 +65,14 @@ fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
         let w=(1.0-smoothstep(0.95,1.5,r))*(0.5+0.5*rng(vec3<f32>(gid)));
         c.matter.w+=w*0.9;
         c.flow=vec4(c.flow.xyz+normalize(vec3(offset.x,0.08,offset.z)+vec3(0.001))*w*8.0,c.flow.w);
+    }
+    if p.control.w>0.5 && !wall(q) {
+        // A new source adds heat, fuel, soot and impulse to surviving gas.
+        // Oxygen is consumed, never reset to fresh air by another explosion.
+        let previous=old[i];
+        c.flow=vec4(clamp(previous.flow.xyz+c.flow.xyz,vec3(-12.0),vec3(12.0)),clamp(previous.flow.w+c.flow.w,-1.0,4.0));
+        c.matter=vec4(min(4.0,previous.matter.x+c.matter.x),previous.matter.y+c.matter.y,
+            min(previous.matter.z,c.matter.z),previous.matter.w+c.matter.w);
     }
     next[i]=c;
 }

@@ -213,6 +213,7 @@ impl Matter {
                 u.revision += u64::from(count);
                 u.status.detached -= count;
                 u.body = std::sync::Arc::unwrap_or_clone(body);
+                u.update_response();
                 let speed = u
                     .motion
                     .drive

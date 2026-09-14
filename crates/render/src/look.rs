@@ -1474,7 +1474,7 @@ pub fn props_tile_of(l: Look, c: Class) -> Tile {
 ///
 /// `px` даёт **линейное** значение трёх каналов; уровни усредняются
 /// в нём же, и только байты кодируются через `encode`.
-fn build_tile(mut px: impl FnMut(f32, f32) -> [f32; 3], encode: fn(f32) -> f32) -> Tile {
+pub(crate) fn build_tile(mut px: impl FnMut(f32, f32) -> [f32; 3], encode: fn(f32) -> f32) -> Tile {
     let n = TILE as usize;
     let mut cur: Vec<[f32; 3]> = vec![[0.0; 3]; n * n];
     for y in 0..n {
@@ -1532,13 +1532,17 @@ pub fn normal_tile(c: Class) -> Tile {
 
 /// То же для заданного направления.
 pub fn normal_tile_of(l: Look, c: Class) -> Tile {
+    build_normal_tile(|u, v| normal_at(l, c, u, v))
+}
+
+pub(crate) fn build_normal_tile(px: impl Fn(f32, f32) -> [f32; 3]) -> Tile {
     let n = TILE as usize;
     let mut cur: Vec<[f32; 3]> = vec![[0.0; 3]; n * n];
     for y in 0..n {
         for x in 0..n {
             let u = (x as f32 + 0.5) / TILE as f32;
             let v = (y as f32 + 0.5) / TILE as f32;
-            cur[y * n + x] = normal_at(l, c, u, v);
+            cur[y * n + x] = px(u, v);
         }
     }
     let mut rgba = Vec::new();

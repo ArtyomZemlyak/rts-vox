@@ -30,6 +30,7 @@ pub mod recording;
 pub mod stream;
 pub mod terrain_scene;
 pub mod tex;
+pub mod unit_surface;
 
 /// Поворот вокруг вертикали, при котором нос тела — его **+X** — смотрит
 /// в направление `(dx, dz)` мировых осей.

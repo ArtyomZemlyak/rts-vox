@@ -1,0 +1,6 @@
+// Traversal of the range's heavy cannon. Shared controller, degrees/second.
+(
+    speed_deg_s: 60,
+    accel_deg_s2: 180,
+    aim_millidegrees: 500,
+)

@@ -70,7 +70,7 @@ fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
     return c*select(0.73,1.0,normal.y>0.5);
 }
 fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
-    if p.control.z<0.5 {return 1.0;}
+    if p.control.z<0.001 {return 1.0;}
     var density=0.0;
     for(var j=1;j<=7;j++) {density+=field((pos+sun*f32(j)*9.0-p.origin.xyz)/p.origin.w).w;}
     return exp(-density*0.46);
@@ -90,7 +90,12 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     let m=raw_material(vec3<i32>(floor(world_pos-world_normal*0.08)));
     let ground=TerrainHit(maxdist,world_normal,m);
     let sun=normalize(p.sun.xyz);
-    if d>0.0 && ground.material>0u && ground.material!=15u {
+    if p.control.w>0.5 && d>0.0 {
+        // Every surviving region contributes a soft cloud shadow. Retiring
+        // regions fade their shadow together with their visible density.
+        bg=vec4(bg.rgb*mix(1.0,0.4+0.6*gas_shadow(world_pos,sun),p.control.z),bg.a);
+    }
+    if p.control.w<0.5 && d>0.0 && ground.material>0u && ground.material!=15u {
         maxdist=ground.t;let pos=ro+rd*ground.t;
         let surface_offset=select(0.12,0.45,ground.material>=9u && ground.material<=11u);
         let shadow=trace_terrain(pos+ground.normal*surface_offset,sun,240.0,true).material>0u;
@@ -106,12 +111,18 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
                 *max(0.06,dot(ground.normal,normalize(delta)))*select(0.04,1.0,visible);
         }
-        if p.control.z>0.5 {
+        let fog=1.0-exp(-ground.t*p.sky.w);
+        bg=vec4(mix(lit,p.sky.rgb,fog),1.0);
+    }
+    if p.control.w>0.5 && p.control.z>0.001 && d>0.0 && m>0u && m!=15u {
+        let pos=world_pos;
+        let surface_offset=0.45;
+        var lit=vec3(0.0);
             let age=p.control.y/60.0;
             let delta=p.source.xyz-pos;let r=length(delta.xz);
             let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
             let soot=(1.0-smoothstep(16.0,37.0,r))*(0.62+0.30*noise(pos*0.31))*smoothstep(0.0,0.5,age);
-            if ground.material!=4u && visible {lit*=1.0-soot*0.85;}
+            if ground.material!=4u && visible {bg=vec4(bg.rgb*(1.0-soot*0.85*p.control.z),bg.a);}
             let flash=select(vec3(5.0,0.75,0.065),vec3(1.2,1.65,2.7),p.weapon.x>0.5);
             let decay=select(1.15,4.0,p.weapon.x>0.5);
             lit+=flash*exp(-age*decay)*950.0/(110.0+dot(delta,delta))
@@ -121,24 +132,22 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 let residual=select(vec3(1.5,0.10,0.002),vec3(0.22,0.32,0.5),p.weapon.x>0.5);
                 lit+=residual*fissure*exp(-age*0.38)*(1.0-r/24.0);
             }
-        }
-        let fog=1.0-exp(-ground.t*p.sky.w);
-        bg=vec4(mix(lit,p.sky.rgb,fog),1.0);
+        bg=vec4(bg.rgb+lit*p.control.z*exp(-ground.t*p.sky.w),bg.a);
     }
     // The PBR shadow maps do not include the raymarched wall. Add the range's
     // transient direct light here, using the same wall visibility as terrain.
     if p.weapon.z>0.5 && d>0.0 && (m==0u || m==15u) {
-        let deposited=p.control.z>0.5;
+        let deposited=p.control.w>0.5;
         let centre=select(select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0),p.source.xyz,deposited);
         let delta=centre-world_pos;let dist=length(delta);
         let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;
         let charging=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
-        let pulse=select(charging,5.0*exp(-p.control.y/60.0*4.0),deposited);
+        let pulse=select(charging,5.0*exp(-p.control.y/60.0*select(1.15,4.0,p.weapon.x>0.5))*p.control.z,deposited);
         let tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
         if visible {bg=vec4(bg.rgb*(vec3(1.0)+tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)))),1.0);}
     }
-    bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);
-    if p.control.z<0.5 {return bg;}
+    if p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);}
+    if p.control.w<0.0 || p.control.z<0.001 {return bg;}
     let inv=1.0/(rd+vec3(0.0000001));
     let lo=(p.origin.xyz-ro)*inv;let hi=(p.origin.xyz+vec3(f32(N)*p.origin.w)-ro)*inv;
     let a=min(lo,hi);let b=max(lo,hi);
@@ -156,7 +165,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let gas_pos=centre/p.origin.w;let m=field(gas_pos);
         // Subcell detail rides upward with the plume. The coarse field owns
         // transport, silhouette, heat and constituent mass.
-        let detail=noise(gas_pos*1.15-vec3(0.0,age*0.9,0.0));
+        let detail=noise(gas_pos*1.15-vec3(0.0,p.weapon.y*0.9,0.0));
         let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
         let grain=hash(vi);
         let face=select(vec3<f32>(vi),vec3<f32>(vi)+vec3(1.0),rd>vec3(0.0))*edge+p.origin.xyz;
@@ -172,7 +181,10 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
             let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
             let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
-            let opacity=select(0.97,clamp(1.0-exp(-occupancy*dt*1.4),0.08,0.92),p.weapon.x>0.5);
+            // Beer-Lambert extinction: a thin smoky edge stays transparent.
+            // A fixed 97% per display cell made smoke look like solid bricks.
+            let density=max(0.0,occupancy-(0.12+grain*0.15));
+            let opacity=1.0-exp(-density*dt*p.control.z*select(0.55,0.75,p.weapon.x>0.5));
             light+=transmit*colour*opacity;transmit*=1.0-opacity;
         }
         normal=vec3(0.0);

@@ -13,7 +13,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use modding::explosion::ExplosionConfig;
 use modding::range::{RangeLayout, RangeUnitKind};
-use render::gas::{GasCamera, GasInput, GasPlugin, GAS_CELLS, GAS_N};
+use render::gas::{GasCamera, GasInput, GasPlugin};
 use render::geom::MeshBuf;
 use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
@@ -142,6 +142,16 @@ fn range_sim(
 fn gun_rotation(sim: &BlastRange) -> Quat {
     let d = sim.heading();
     Quat::from_rotation_y(-(d[2].to_f64_lossy() as f32).atan2(d[0].to_f64_lossy() as f32))
+}
+fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
+    let old = visual.turret.unwrap_or(scene.sim.turret.angle);
+    let fraction = if scene.realtime && !scene.paused {
+        (scene.acc * 30.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let turn = old as f32 + fx::angle::diff(scene.sim.turret.angle, old) as f32 * fraction;
+    Quat::from_rotation_y(-turn * std::f32::consts::TAU / fx::angle::FULL as f32)
 }
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
@@ -307,7 +317,6 @@ fn main() {
         0.0,
     );
     configure_gas(&sim, energy, &mut gas);
-    update_mask(&sim, &mut gas);
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -460,9 +469,6 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     }
     let words = Arc::make_mut(&mut gas.terrain_words);
     let mut dirty = BTreeSet::new();
-    let mut gas_dirty = BTreeSet::new();
-    let origin = gas.params.origin.truncate().as_ivec3();
-    let edge = gas.params.origin.w as i32;
     let edits = sim
         .world
         .edits()
@@ -490,15 +496,6 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         };
         words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
         dirty.insert(i / 8);
-        let v = IVec3::from(p) - origin;
-        let q = IVec3::new(
-            v.x.div_euclid(edge),
-            v.y.div_euclid(edge),
-            v.z.div_euclid(edge),
-        );
-        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::splat(GAS_N as i32)).all() {
-            gas_dirty.insert(q.x as usize + GAS_N * (q.y as usize + GAS_N * q.z as usize));
-        }
     }
     let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
     for i in dirty {
@@ -512,61 +509,21 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     }
     gas.terrain_dirty.extend(spans);
     gas.terrain_revision += 1;
-    let mask = Arc::make_mut(&mut gas.mask);
-    for i in gas_dirty {
-        let q = IVec3::new(
-            (i % GAS_N) as i32,
-            (i / GAS_N % GAS_N) as i32,
-            (i / GAS_N / GAS_N) as i32,
-        );
-        mask[i] = solid_cell(words, origin + q * edge, edge);
-    }
-    gas.mask_revision += 1;
-}
-fn solid_cell(words: &[u32], base: IVec3, edge: i32) -> u32 {
-    // The packed world already contains current actor occupancy. A dense mask
-    // rebuild must not repeat inverse body transforms for every empty sample.
-    for z in base.z.max(0)..(base.z + edge).min(SIZE[2] as i32) {
-        for y in base.y.max(0)..(base.y + edge).min(SIZE[1] as i32) {
-            let row = SIZE[0] as usize * (y as usize + SIZE[1] as usize * z as usize);
-            for x in base.x.max(0)..(base.x + edge).min(SIZE[0] as i32) {
-                let i = row + x as usize;
-                if (words[i / 8] >> ((i % 8) * 4)) & 15 != 0 {
-                    return 1;
-                }
-            }
-        }
-    }
-    0
-}
-fn update_mask(_sim: &BlastRange, gas: &mut GasInput) {
-    let o = gas.params.origin.truncate();
-    let edge = gas.params.origin.w as i32;
-    let mut mask = vec![0; GAS_CELLS];
-    for z in 0..GAS_N {
-        for y in 0..GAS_N {
-            for x in 0..GAS_N {
-                let base = IVec3::new(
-                    o.x as i32 + x as i32 * edge,
-                    o.y as i32 + y as i32 * edge,
-                    o.z as i32 + z as i32 * edge,
-                );
-                mask[x + GAS_N * (y + GAS_N * z)] = solid_cell(&gas.terrain_words, base, edge);
-            }
-        }
-    }
-    gas.mask = Arc::new(mask);
-    gas.mask_revision += 1;
 }
 fn mesh(b: &MeshBuf) -> Mesh {
-    Mesh::new(
+    let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.pos.clone())
     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm.clone())
     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, b.col.clone())
-    .with_inserted_indices(Indices::U32(b.idx.clone()))
+    .with_inserted_indices(Indices::U32(b.idx.clone()));
+    if b.uv.len() == b.pos.len() && !b.uv.is_empty() {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, b.uv.clone());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, b.tan.clone());
+    }
+    mesh
 }
 // Small finish variation breaks up pristine toy-like plates. This affects only
 // reflected colour, not occupancy, armour resistance or the damage ledger.
@@ -599,19 +556,13 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     scene: Res<Scene>,
 ) {
+    let finishes = render::unit_surface::materials(&mut images, &mut materials);
     commands.insert_resource(WitnessArt {
-        materials: std::array::from_fn(|k| {
-            let (rough, metal) = look::finish_surface(look::FINISH_ALL[k]);
-            materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                metallic: metal * 0.75,
-                perceptual_roughness: rough.max(0.4),
-                ..default()
-            })
-        }),
+        materials: finishes.clone(),
         skins: [
             SkinBindings::new(&voxel::unit::tank()),
             SkinBindings::new(&voxel::unit::strider()),
@@ -644,20 +595,13 @@ fn setup(
                 continue;
             }
             weather(buf, k);
-            let (rough, metal) = look::finish_surface(look::FINISH_ALL[k]);
-            let mat = materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                metallic: metal,
-                perceptual_roughness: rough,
-                ..default()
-            });
             let base = Transform::from_translation(
                 Vec3::new(GUN[0] as f32, GUN[1] as f32, GUN[2] as f32) + pos,
             )
             .with_rotation(rot);
             commands.spawn((
                 Mesh3d(meshes.add(mesh(buf))),
-                MeshMaterial3d(mat),
+                MeshMaterial3d(finishes[k].clone()),
                 base,
                 Gun { base, turret },
             ));
@@ -792,27 +736,35 @@ fn setup(
         ))
         .id();
     presentation::camera(&mut commands, camera, 366.0);
-    if scene.energy {
-        commands
-            .entity(camera)
-            .insert((
-                bevy::core_pipeline::tonemapping::Tonemapping::AgX,
-                bevy::render::view::ColorGrading {
-                    global: bevy::render::view::ColorGradingGlobal {
-                        post_saturation: 1.02,
-                        ..default()
-                    },
+    // One live-range grade for both weapons. Changing the projectile must not
+    // silently replace the established camera stack with default grading.
+    commands
+        .entity(camera)
+        .insert((
+            bevy::core_pipeline::tonemapping::Tonemapping::AgX,
+            bevy::render::view::ColorGrading {
+                global: bevy::render::view::ColorGradingGlobal {
+                    post_saturation: 1.04,
                     ..default()
                 },
-                render::occlusion::Occlusion {
-                    radius: 4.0,
-                    strength: 0.32,
-                    bias: 0.06,
-                    power: 1.2,
+                shadows: bevy::render::view::ColorGradingSection {
+                    contrast: 1.04,
+                    ..default()
                 },
-            ))
-            .remove::<bevy::post_process::dof::DepthOfField>();
-    }
+                midtones: bevy::render::view::ColorGradingSection {
+                    contrast: 1.10,
+                    ..default()
+                },
+                ..default()
+            },
+            render::occlusion::Occlusion {
+                radius: 4.0,
+                strength: 0.32,
+                bias: 0.06,
+                power: 1.2,
+            },
+        ))
+        .remove::<bevy::post_process::dof::DepthOfField>();
 }
 
 /// Rebuild only after authoritative geometry changes, including its exposed cuts.
@@ -1078,9 +1030,6 @@ fn advance(
     }
     if !workshop.editing && keys.just_pressed(KeyCode::KeyF) && scene.sim.refire() {
         scene.paused = false;
-        gas.generation += 1;
-        gas.params.control.z = 0.0;
-        gas.params.control.y = 0.0;
         scene.notice.clear();
         println!(
             "REFIRE tick={} fire={}",
@@ -1187,10 +1136,9 @@ fn advance(
         scene.last_capture = 0;
         scene.skip_delta = true;
         gas.params.control.z = 0.0;
-        gas.generation += 1;
+        gas.atmosphere.clear();
         configure_gas(&scene.sim, scene.energy, &mut gas);
         fill_terrain(&scene.sim, &mut gas);
-        update_mask(&scene.sim, &mut gas);
         let rotation = gun_rotation(&scene.sim);
         let pivot = Vec3::from(GUN.map(|v| v as f32));
         for (g, mut tr) in &mut gun {
@@ -1258,32 +1206,12 @@ fn advance(
                 scene.sim.order_attack(2);
             }
         }
-        let old_fire = scene.sim.fire_tick;
         scene.sim.step();
-        if scene.sim.fire_tick != old_fire {
-            gas.generation += 1;
-            gas.params.control.z = 0.0;
-            gas.params.control.y = 0.0;
-        }
         scene.frame += 1;
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
         if before.is_none() {
             if let Some(at) = scene.sim.impact {
-                // A newly placed wall may stop a shot far short of the aim
-                // point. Keep the one gas volume around the actual collision.
-                let centre = gas.params.origin.truncate() + Vec3::new(120.0, 0.0, 120.0);
-                if (centre.x - at[0] as f32)
-                    .abs()
-                    .max((centre.z - at[2] as f32).abs())
-                    > 60.0
-                {
-                    gas.params.origin.x = at[0] as f32 - 120.0;
-                    gas.params.origin.z = at[2] as f32 - 120.0;
-                    update_mask(&scene.sim, &mut gas);
-                    println!("gas region follows early impact at {at:?}");
-                }
-                gas.generation += 1;
                 gas.params.control.z = 1.0;
                 gas.params.source = Vec4::new(
                     at[0] as f32 - 3.0,
@@ -1291,12 +1219,15 @@ fn advance(
                     at[2] as f32,
                     scene.sim.config.gas_source_radius as f32,
                 );
+                let params = gas.params;
+                gas.atmosphere.emit_at(params, scene.sim.impact_tick * 2);
                 println!("IMPACT tick={} at={at:?}", scene.sim.impact_tick);
             }
         }
         if scene.sim.impact.is_some() {
             gas.params.control.y = (scene.sim.tick - scene.sim.impact_tick) as f32 * 2.0;
         }
+        gas.advance(scene.sim.tick * 2);
         let age = if scene.sim.impact.is_some() {
             (scene.sim.tick - scene.sim.impact_tick) as f32 / 30.0
         } else {
@@ -1488,7 +1419,7 @@ fn orient_gun(
     let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
     let pivot = pose.pos;
     let origin = Vec3::from(GUN.map(|v| v as f32));
-    let aim = gun_rotation(&scene.sim);
+    let aim = visible_gun_rotation(&scene, &visual);
     let hull = render::realtime::hull_rotation(pose.up, pose.yaw);
     let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32 / 30.0;
     let recoil = if (0.0..0.6).contains(&age) {
@@ -1539,20 +1470,12 @@ fn weapon_art(
 }
 fn animate_energy(
     mut scene: ResMut<Scene>,
+    visual: Res<moving::Visual>,
     workshop: Res<Workshop>,
     mut gas: ResMut<GasInput>,
     time: Res<Time<Real>>,
     mut windows: Query<&mut Window>,
-    mut observed: Local<Option<u32>>,
 ) {
-    if *observed != Some(scene.sim.fire_tick) {
-        *observed = Some(scene.sim.fire_tick);
-        if scene.sim.impact.is_none() {
-            gas.params.control.z = 0.0;
-            gas.params.control.y = 0.0;
-            gas.generation += 1;
-        }
-    }
     if !gas.ready.load(Ordering::Relaxed) {
         return;
     }
@@ -1565,7 +1488,9 @@ fn animate_energy(
     };
     let visual_tick = scene.sim.tick.saturating_sub(1) as f32 + fraction;
     gas.params.weapon.y = visual_tick / 30.0;
-    let emitter = muzzle_vec(&scene.sim) + gun_rotation(&scene.sim) * Vec3::X * 2.0;
+    let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
+    let emitter =
+        pose.pos + Vec3::Y * 23.0 + visible_gun_rotation(&scene, &visual) * Vec3::X * 32.0;
     gas.params.beam = emitter.extend(gas.params.beam.w);
     if let (Some(a), Some(b)) = (scene.previous_shell, scene.sim.shell) {
         let next = Vec3::from(b.map(|v| v.raw() as f32 / 4294967296.0));

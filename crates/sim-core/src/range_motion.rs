@@ -71,9 +71,12 @@ pub struct Motion {
     pub arrival: i32,
     pub alignment: i32,
     pub replan: u32,
+    // Installed engine sizing is based on the pristine machine. Losing armour
+    // must not silently resize the motor each movement tick.
+    drive_scale: Fx,
 }
 impl Motion {
-    pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind) -> Self {
+    pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
         let t = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning");
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank => t.tracked,
@@ -112,6 +115,11 @@ impl Motion {
             arrival: c.arrival,
             alignment: c.turn_alignment_pct,
             replan: c.replan_ticks,
+            drive_scale: drive::drive_factor(
+                i64::from(chassis.mass) * 1000,
+                (u128::from(body.volume_mm3()) * chassis.density as u128 / 1_000_000_000).max(1)
+                    as i64,
+            ),
         }
     }
     pub fn frame(&self, b: &UnitBody) -> crate::damage::Frame {
@@ -147,6 +155,7 @@ impl Motion {
         b: &UnitBody,
         alive: bool,
         engine: bool,
+        response: crate::mobility::Mobility,
         others: &[Obstacle],
         tick: u32,
         gravity: i32,
@@ -187,7 +196,9 @@ impl Motion {
                 }
             } else {
                 want = angle::atan2(dz.raw(), dx.raw());
-                speed = Fx::from_int(self.speed).min(dx.abs().max(dz.abs()).mul(Fx::from_int(2)));
+                speed = Fx::from_int(self.speed)
+                    .mul(response.engine)
+                    .min(dx.abs().max(dz.abs()).mul(Fx::from_int(2)));
                 let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
                 speed = speed.mul(if alignment > Fx::from_ratio(self.alignment, 100) {
                     alignment
@@ -196,17 +207,14 @@ impl Motion {
                 });
             }
         }
-        let lim = Limits::of(&self.chassis, 30);
-        let mass =
-            (b.volume_mm3() as u128 * self.chassis.density as u128 / 1_000_000_000).max(1) as i64;
-        let factor = drive::drive_factor(self.chassis.mass as i64 * 1000, mass);
+        let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
         let (next, delta) = drive::advance(
             old,
             want,
             speed,
             &lim,
-            factor.mul(self.hull.load),
+            self.drive_scale.mul(self.hull.load),
             Fx::from_ratio(1, 30),
         );
         self.drive = next;
@@ -263,6 +271,7 @@ impl Motion {
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
+        let r = response.ride(r);
         let sway = crate::ride::sway_of(
             next.vel.sub(old.vel).mul(Fx::from_int(30)),
             next.vel,

@@ -40,6 +40,9 @@ pub struct RangeUnit {
     pub dents: BTreeMap<[u8; 3], u32>,
     pub revision: u64,
     pub status: Status,
+    pub mobility: crate::mobility::Mobility,
+    original_shape: crate::burst::chunk::Shape,
+    original_engine: u32,
     connectivity: CoreBufs,
     section: Option<crate::damage::SectionJob>,
 }
@@ -54,8 +57,10 @@ impl RangeUnit {
         };
         let mut connectivity = CoreBufs::new();
         let status = body.status(&mut connectivity);
-        let motion = Motion::new(at, kind);
+        let motion = Motion::new(at, kind, &body);
         let pose = motion.frame(&body);
+        let original_shape = crate::burst::chunk::Shape::from_body(&body);
+        let original_engine = body.subsystem_count(voxel::Part::Engine);
         Self {
             motion,
             pose,
@@ -67,12 +72,15 @@ impl RangeUnit {
             dents: BTreeMap::new(),
             revision: 0,
             status,
+            mobility: crate::mobility::Mobility::intact(status.engine),
+            original_shape,
+            original_engine,
             connectivity,
             section: None,
         }
     }
     fn refresh_damage(&mut self, id: usize) {
-        self.status = self.body.status(&mut self.connectivity);
+        self.update_response();
         if !self.status.alive {
             self.section = None;
         } else if self.status.detached > 0 && self.section.is_none() {
@@ -82,6 +90,24 @@ impl RangeUnit {
             }
             self.section = Some(crate::damage::SectionJob::new(id as u32, 0, mask));
         }
+    }
+    fn update_response(&mut self) {
+        self.status = self.body.status(&mut self.connectivity);
+        let engine = if self.status.alive && self.status.engine {
+            crate::mobility::Mobility::engine_fraction(
+                self.body
+                    .connected_subsystem_count(voxel::Part::Engine, &self.connectivity),
+                self.original_engine,
+            )
+        } else {
+            Fx::ZERO
+        };
+        self.mobility = crate::mobility::Mobility::from_shapes(
+            &self.original_shape,
+            &crate::burst::chunk::Shape::from_body(&self.body),
+            [self.body.vol.nx, self.body.vol.ny, self.body.vol.nz],
+            engine,
+        );
     }
     pub fn update_pose(&mut self) {
         self.at = self.motion.pos.map(|v| v.to_int_trunc());
@@ -573,6 +599,8 @@ pub struct BlastRange {
     pub patrols_running: bool,
     pub attack: Option<usize>,
     pub aim: Option<[i32; 3]>,
+    pub turret: crate::turret::Traverse,
+    turret_limits: crate::turret::Limits,
 }
 
 impl BlastRange {
@@ -615,12 +643,16 @@ impl BlastRange {
         )
     }
 
-    /// Traverse the gun on its existing pad. The muzzle, flight and renderer
-    /// share this integer direction; choosing an off-axis target adds no speed.
-    pub fn heading(&self) -> [Fx; 3] {
+    pub fn aim_angle(&self) -> i32 {
         let target = self.target();
         let x = Fx::from_int(target[0]).sub(self.gun.motion.pos[0]);
         let z = Fx::from_int(target[2]).sub(self.gun.motion.pos[2]);
+        fx::angle::atan2(z.raw(), x.raw())
+    }
+    /// Actual actuator direction, shared by muzzle, flight and presentation.
+    pub fn heading(&self) -> [Fx; 3] {
+        let x = fx::angle::cos(self.turret.angle);
+        let z = fx::angle::sin(self.turret.angle);
         let length = x.mul(x).add(z.mul(z)).sqrt();
         if length == Fx::ZERO {
             return [Fx::ONE, Fx::ZERO, Fx::ZERO];
@@ -714,7 +746,7 @@ impl BlastRange {
             }
         }
         let matter = matter::Matter::new(&units);
-        Self {
+        let mut result = Self {
             matter,
             gun,
             player: false,
@@ -738,13 +770,21 @@ impl BlastRange {
             removed_materials: [0; 16],
             surface_work: SurfaceWork::new(),
             surface_changed: Vec::new(),
-        }
+            turret: crate::turret::Traverse::new(0),
+            turret_limits: crate::turret::Limits::of(
+                modding::turret::Turret::from_ron(include_str!("../../../data/turret.ron"))
+                    .expect("turret limits"),
+                crate::TICKS_PER_SECOND,
+            ),
+        };
+        result.turret = crate::turret::Traverse::new(result.aim_angle());
+        result
     }
 
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(9);
+        b.u32(10);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -753,6 +793,7 @@ impl BlastRange {
             b.u8s(r.to_ron().expect("validated layout").as_bytes());
         }
         self.gun.motion.save(&mut b);
+        self.turret.save(&mut b);
         b.bool(self.player);
         b.bool(self.patrols_running);
         b.usize(self.attack.unwrap_or(usize::MAX));
@@ -856,7 +897,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 9 {
+        if s.u32() != 10 {
             return None;
         }
         let extended = s.bool();
@@ -882,6 +923,7 @@ impl BlastRange {
         if !r.gun.motion.load(&mut s) {
             return None;
         }
+        r.turret = crate::turret::Traverse::load(&mut s, r.turret_limits)?;
         r.gun.update_pose();
         r.player = s.bool();
         r.patrols_running = s.bool();
@@ -976,7 +1018,7 @@ impl BlastRange {
                 u.removed.push(p);
             }
             u.revision = revision;
-            u.status = u.body.status(&mut u.connectivity);
+            u.update_response();
             if s.bool() {
                 u.section = Some(crate::damage::SectionJob::load_cut(
                     id as u32,
@@ -1168,6 +1210,7 @@ impl BlastRange {
                     &u.body,
                     u.status.alive,
                     u.status.engine,
+                    u.mobility,
                     &others,
                     self.tick,
                     self.config.gravity,
@@ -1180,11 +1223,14 @@ impl BlastRange {
             &self.gun.body,
             self.gun.status.alive,
             self.gun.status.engine,
+            self.gun.mobility,
             &positions,
             self.tick,
             self.config.gravity,
         );
         self.gun.update_pose();
+        let target_angle = self.aim_angle();
+        self.turret.step(target_angle, self.turret_limits);
         if let Some(id) = self.attack {
             if !self.units[id].status.alive {
                 self.attack = None;
@@ -1206,6 +1252,10 @@ impl BlastRange {
             ProjectileMotion::Ballistic => self.config.gravity,
             ProjectileMotion::Direct => 0,
         };
+        if self.tick == self.fire_tick && !self.turret.aligned(target_angle, self.turret_limits) {
+            // Keep the charged round until the actual barrel has traversed.
+            self.fire_tick = self.fire_tick.saturating_add(1);
+        }
         if self.tick == self.fire_tick && self.gun.status.alive && self.gun.status.weapon {
             let from = self.muzzle();
             let target = self.target();
@@ -1218,12 +1268,12 @@ impl BlastRange {
                 .div(Fx::from_int(self.config.shell_speed))
                 .max(Fx::from_ratio(1, 1000));
             self.velocity = [
-                dx.div(time),
+                self.heading()[0].mul(Fx::from_int(self.config.shell_speed)),
                 Fx::from_int(target[1])
                     .sub(from[1])
                     .div(time)
                     .add(Fx::from_int(gravity).mul(time).mul(Fx::from_ratio(1, 2))),
-                dz.div(time),
+                self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
             ];
             self.shell = Some(from);
         }
@@ -1318,6 +1368,51 @@ impl BlastRange {
 mod tests {
     use super::*;
     #[test]
+    fn range_engine_damage_uses_the_shared_physical_mobility_response() {
+        let r = BlastRange::new(config());
+        let mut intact = RangeUnit::new(GUN);
+        let mut damaged = RangeUnit::new(GUN);
+        for z in 0..30 {
+            for y in 0..30 {
+                for x in 0..16 {
+                    if damaged.body.vol.get(x, y, z)
+                        && damaged.body.part_at(x, y, z) == voxel::Part::Engine
+                    {
+                        damaged.body.remove(x, y, z);
+                    }
+                }
+            }
+        }
+        damaged.update_response();
+        assert!(damaged.status.alive && damaged.status.engine);
+        assert!(
+            damaged.mobility.engine > Fx::ZERO && damaged.mobility.engine < Fx::from_ratio(1, 2)
+        );
+        for u in [&mut intact, &mut damaged] {
+            assert!(u.motion.move_to(&r.world, [205, 336], &u.body, &[]));
+        }
+        for tick in 0..30 {
+            for u in [&mut intact, &mut damaged] {
+                u.motion.step(
+                    &r.world,
+                    &u.body,
+                    u.status.alive,
+                    u.status.engine,
+                    u.mobility,
+                    &[],
+                    tick,
+                    r.config.gravity,
+                );
+            }
+        }
+        assert!(damaged.motion.drive.vel < intact.motion.drive.vel);
+        assert!(damaged.motion.pos[0] < intact.motion.pos[0]);
+        assert!(
+            damaged.motion.pos[0] > Fx::from_int(GUN[0]),
+            "damaged engine still has some thrust"
+        );
+    }
+    #[test]
     fn a_severed_barrel_stops_an_already_charged_range_shot() {
         let c = config();
         let mut r = BlastRange::new(c);
@@ -1332,6 +1427,41 @@ mod tests {
         r.step();
         assert!(r.shell.is_none() && r.impact.is_none());
         assert!(!r.refire());
+    }
+    #[test]
+    fn changing_aim_traverses_before_firing_and_resumes_mid_turn() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut a = BlastRange::new(c.clone());
+        a.control();
+        let start = a.muzzle();
+        a.aim = Some([128, 30, 520]);
+        assert_eq!(start, a.muzzle(), "new aim teleported the barrel");
+        assert!(a.refire());
+        for _ in 0..10 {
+            a.step();
+        }
+        assert!(a.shell.is_none());
+        assert!(a.turret.rate > 0 && a.turret.angle != 0);
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
+        let mut fired = false;
+        for _ in 0..200 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+            if a.shell.is_some() {
+                assert!(a.turret.aligned(a.aim_angle(), a.turret_limits));
+                let speed = a.velocity[0]
+                    .mul(a.velocity[0])
+                    .add(a.velocity[2].mul(a.velocity[2]))
+                    .sqrt();
+                assert!(
+                    speed.sub(Fx::from_int(a.config.shell_speed)).abs() < Fx::from_ratio(1, 1000)
+                );
+                fired = true;
+                break;
+            }
+        }
+        assert!(fired);
     }
 
     #[test]
@@ -1831,6 +1961,7 @@ mod tests {
             &b.gun.body,
             true,
             true,
+            b.gun.mobility,
             &[],
             b.gun.motion.replan,
             b.config.gravity,
@@ -1842,6 +1973,7 @@ mod tests {
             &a.gun.body,
             true,
             true,
+            a.gun.mobility,
             &[],
             a.gun.motion.replan,
             a.config.gravity,

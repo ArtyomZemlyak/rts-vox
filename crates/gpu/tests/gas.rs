@@ -231,4 +231,48 @@ fn check_field(energy: bool, wide: bool) {
             assert_eq!(c[7], 0.0, "soot crossed sealed wall");
         }
     }
+    // Another detonation in the same field must preserve all old gas outside
+    // its source, while adding heat/dust near the new source. No blank frame.
+    p[26] = 38.0;
+    p[31] = 1.0; // additive init, same binding layout as the runtime
+    let bits: Vec<u32> = p.iter().map(|v| v.to_bits()).collect();
+    g.queue.write_buffer(&params, 0, gpu::as_bytes(&bits));
+    let mut e = g.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = e.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&init);
+        pass.set_bind_group(0, &groups[1], &[]);
+        pass.dispatch_workgroups(12, 12, 12);
+    }
+    g.queue.submit([e.finish()]);
+    let repeated: Vec<f32> = g
+        .read_u32(&states[0], CELLS * 8)
+        .into_iter()
+        .map(f32::from_bits)
+        .collect();
+    let mut retained = 0;
+    for (i, (old, new)) in last
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(repeated.as_chunks::<8>().0)
+        .enumerate()
+    {
+        let pos = [
+            (i % N) as f32 + 0.5,
+            (i / N % N) as f32 + 0.5,
+            (i / N / N) as f32 + 0.5,
+        ];
+        let d2 = (0..3).map(|a| (pos[a] - p[24 + a]).powi(2)).sum::<f32>();
+        if d2 > (p[27] * 1.5).powi(2) && old[7] > 0.001 {
+            assert_eq!(&old[4..], &new[4..], "new impact cleared an older plume");
+            retained += 1;
+        }
+        if i % N >= 18 || solid[i] != 0 {
+            assert_eq!(new[4], 0.0, "repeat seeded heat behind cover");
+            assert_eq!(new[7], 0.0, "repeat seeded soot behind cover");
+        }
+    }
+    assert!(retained > 20, "test did not exercise an older plume");
+    assert!(stats(&repeated).1 > b.1 + 1.0, "repeat did not add gas");
 }

@@ -1,8 +1,9 @@
-//! A bounded GPU atmosphere volume: 48³ cells, two 32-byte state buffers,
-//! an obstacle mask and one compositing pass. No readback, per-cell entities
-//! or meshes. Each generation injects one detonation into a fresh field.
-//! This first backend has one active region; shared sources and sparse scheduling are a
-//! separate extension, not an allocation of a dense world-sized atmosphere.
+//! Bounded GPU atmosphere regions. Nearby compatible sources share a field;
+//! distant impacts retain independent fields and clocks. No field readback.
+
+mod regions;
+pub use regions::Atmosphere;
+use regions::REGIONS;
 
 use bevy::core_pipeline::prepass::{
     DepthPrepass, NormalPrepass, ViewPrepassTextures, NORMAL_PREPASS_FORMAT,
@@ -68,9 +69,7 @@ impl Default for GasParams {
 #[derive(Resource, Clone, ExtractResource)]
 pub struct GasInput {
     pub params: GasParams,
-    pub mask: Arc<Vec<u32>>,
-    pub mask_revision: u64,
-    pub generation: u32,
+    pub atmosphere: Atmosphere,
     pub terrain_words: Arc<Vec<u32>>,
     pub terrain_revision: u64,
     pub terrain_dirty: Vec<std::ops::Range<usize>>,
@@ -81,14 +80,22 @@ impl Default for GasInput {
     fn default() -> Self {
         Self {
             params: GasParams::default(),
-            mask: Arc::new(vec![0; GAS_CELLS]),
-            mask_revision: 1,
-            generation: 0,
+            atmosphere: Atmosphere::default(),
             terrain_words: Arc::new(vec![]),
             terrain_revision: 0,
             terrain_dirty: vec![],
             ready: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+impl GasInput {
+    pub fn advance(&mut self, step: u32) {
+        self.atmosphere.advance(
+            step,
+            &self.terrain_words,
+            self.params.terrain.truncate().as_uvec3(),
+            &self.terrain_dirty,
+        );
     }
 }
 
@@ -182,19 +189,60 @@ struct Pipeline {
     step: CachedComputePipelineId,
     draws: Variants<RenderPipeline, GasSpecializer>,
     sampler: Sampler,
-    buffers: [Buffer; 2],
-    mask: Buffer,
     uniform: UniformBuffer<GasParams>,
-    groups: Option<[BindGroup; 2]>,
-    read: usize,
-    generation: Option<u32>,
-    mask_revision: u64,
-    simulated: u32,
+    empty: Buffer,
+    regions: [Option<GpuRegion>; REGIONS],
     terrain: Buffer,
     terrain_revision: u64,
     ready_frames: u32,
     terrain_layout: BindGroupLayoutDescriptor,
     terrain_prepass: CachedRenderPipelineId,
+}
+struct GpuRegion {
+    id: u64,
+    buffers: [Buffer; 2],
+    mask: Buffer,
+    mask_revision: u64,
+    uniform: UniformBuffer<GasParams>,
+    groups: [BindGroup; 2],
+    deposits: Vec<GpuDeposit>,
+    read: usize,
+    simulated: u32,
+    applied: u64,
+}
+struct GpuDeposit {
+    serial: u64,
+    step: u32,
+    _uniform: UniformBuffer<GasParams>,
+    groups: [BindGroup; 2],
+}
+fn state_buffer(device: &RenderDevice) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("gas state"),
+        size: (GAS_CELLS * 32) as u64,
+        usage: BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    })
+}
+fn compute_groups(
+    device: &RenderDevice,
+    layout: &BindGroupLayout,
+    uniform: &UniformBuffer<GasParams>,
+    buffers: &[Buffer; 2],
+    mask: &Buffer,
+) -> [BindGroup; 2] {
+    std::array::from_fn(|i| {
+        device.create_bind_group(
+            "gas state ping pong",
+            layout,
+            &BindGroupEntries::sequential((
+                uniform.binding().unwrap(),
+                buffers[i].as_entire_binding(),
+                buffers[1 - i].as_entire_binding(),
+                mask.as_entire_binding(),
+            )),
+        )
+    })
 }
 struct GasSpecializer;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, SpecializerKey)]
@@ -284,14 +332,6 @@ fn init(
         }),
         ..default()
     };
-    let buffers = std::array::from_fn(|_| {
-        device.create_buffer(&BufferDescriptor {
-            label: Some("gas state"),
-            size: (GAS_CELLS * 32) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        })
-    });
     let terrain_layout = BindGroupLayoutDescriptor::new(
         "terrain prepass",
         &BindGroupLayoutEntries::with_indices(
@@ -324,12 +364,6 @@ fn init(
         }),
         ..default()
     });
-    let mask = device.create_buffer(&BufferDescriptor {
-        label: Some("gas solid geometry"),
-        size: (GAS_CELLS * 4) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let terrain = device.create_buffer(&BufferDescriptor {
         label: Some("packed terrain materials"),
         size: (TERRAIN_WORDS * 4) as u64,
@@ -343,14 +377,9 @@ fn init(
         step,
         draws: Variants::new(GasSpecializer, desc),
         sampler: device.create_sampler(&SamplerDescriptor::default()),
-        buffers,
-        mask,
         uniform: UniformBuffer::from(GasParams::default()),
-        groups: None,
-        read: 0,
-        generation: None,
-        mask_revision: 0,
-        simulated: 0,
+        empty: state_buffer(&device),
+        regions: std::array::from_fn(|_| None),
         terrain,
         terrain_revision: 0,
         ready_frames: 0,
@@ -381,6 +410,8 @@ fn prepare(
         )?;
         commands.entity(entity).insert(DrawId(id));
     }
+    params.control.z = 0.0;
+    params.control.w = -1.0; // base pass, without raymarching a plume
     pipeline.uniform.set(params);
     pipeline.uniform.write_buffer(&device, &queue);
     if pipeline.terrain_revision != input.terrain_revision {
@@ -400,28 +431,74 @@ fn prepare(
         }
         pipeline.terrain_revision = input.terrain_revision;
     }
-    if pipeline.mask_revision != input.mask_revision {
-        assert_eq!(input.mask.len(), GAS_CELLS);
-        let bytes: Vec<u8> = input.mask.iter().flat_map(|v| v.to_le_bytes()).collect();
-        queue.write_buffer(&pipeline.mask, 0, &bytes);
-        pipeline.mask_revision = input.mask_revision;
-    }
-    if cache.get_compute_pipeline(pipeline.init).is_some()
-        && cache.get_compute_pipeline(pipeline.step).is_some()
-    {
-        let uniform = pipeline.uniform.binding().expect("gas uniform");
-        pipeline.groups = Some(std::array::from_fn(|i| {
-            device.create_bind_group(
-                "gas state ping pong",
-                &cache.get_bind_group_layout(&pipeline.compute_layout),
-                &BindGroupEntries::sequential((
-                    uniform.clone(),
-                    pipeline.buffers[i].as_entire_binding(),
-                    pipeline.buffers[1 - i].as_entire_binding(),
-                    pipeline.mask.as_entire_binding(),
-                )),
-            )
-        }));
+    let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
+    for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
+        let Some(source) = source else {
+            *slot = None;
+            continue;
+        };
+        let mut p = source.params;
+        p.world_from_clip = params.world_from_clip;
+        p.clip_from_world = params.clip_from_world;
+        p.camera = params.camera;
+        p.sun = params.sun;
+        p.sky = params.sky;
+        p.terrain = params.terrain;
+        p.weapon.y = params.weapon.y;
+        p.control.y = input.atmosphere.clock.saturating_sub(source.last) as f32;
+        p.control.z = source.opacity(input.atmosphere.clock);
+        p.control.w = 1.0; // overlay: the terrain and beam have already been drawn
+        if slot.as_ref().is_none_or(|r| r.id != source.id) {
+            let buffers = std::array::from_fn(|_| state_buffer(&device));
+            let mask = device.create_buffer(&BufferDescriptor {
+                label: Some("gas solid geometry"),
+                size: (GAS_CELLS * 4) as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let mut uniform = UniformBuffer::from(p);
+            uniform.write_buffer(&device, &queue);
+            let groups = compute_groups(&device, &layout, &uniform, &buffers, &mask);
+            *slot = Some(GpuRegion {
+                id: source.id,
+                buffers,
+                mask,
+                mask_revision: 0,
+                uniform,
+                groups,
+                deposits: vec![],
+                read: 0,
+                simulated: 0,
+                applied: 0,
+            });
+        }
+        let r = slot.as_mut().unwrap();
+        r.uniform.set(p);
+        r.uniform.write_buffer(&device, &queue);
+        if r.mask_revision != source.mask_revision {
+            let bytes: Vec<u8> = source.mask.iter().flat_map(|v| v.to_le_bytes()).collect();
+            queue.write_buffer(&r.mask, 0, &bytes);
+            r.mask_revision = source.mask_revision;
+        }
+        r.deposits.clear();
+        for deposit in source.deposits.iter().filter(|d| d.serial > r.applied) {
+            let mut p = deposit.params;
+            p.control.z = 1.0;
+            p.control.w = if deposit.serial == source.id {
+                0.0
+            } else {
+                1.0
+            };
+            let mut uniform = UniformBuffer::from(p);
+            uniform.write_buffer(&device, &queue);
+            let groups = compute_groups(&device, &layout, &uniform, &r.buffers, &r.mask);
+            r.deposits.push(GpuDeposit {
+                serial: deposit.serial,
+                step: deposit.step,
+                _uniform: uniform,
+                groups,
+            });
+        }
     }
     Ok(())
 }
@@ -493,11 +570,10 @@ fn draw_gas(
     mut ctx: RenderContext,
 ) {
     let (target, prepass, id) = view.into_inner();
-    let (Some(draw), Some(init), Some(step), Some(groups), Some(depth), Some(normals)) = (
+    let (Some(draw), Some(init), Some(step), Some(depth), Some(normals)) = (
         cache.get_render_pipeline(id.0),
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
-        pipeline.groups.clone(),
         prepass.depth_view(),
         prepass.normal_view(),
     ) else {
@@ -516,61 +592,96 @@ fn draw_gas(
             input.ready.store(true, Ordering::Relaxed);
         }
     }
-    if input.params.control.z > 0.5 {
+    for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
+        let (Some(r), Some(source)) = (slot, source) else {
+            continue;
+        };
         let mut pass = ctx
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor {
                 label: Some("gas physics"),
                 timestamp_writes: None,
             });
-        if pipeline.generation != Some(input.generation) {
-            pass.set_pipeline(init);
-            pass.set_bind_group(0, &groups[0], &[]);
+        let wanted = input.atmosphere.clock.saturating_sub(source.born);
+        // At most 16 substeps per region per frame, matching the scene's eight
+        // 30 Hz ticks. Pending deposits stay ordered until the GPU catches up.
+        let end = wanted.min(r.simulated + 16);
+        loop {
+            for d in &r.deposits {
+                if d.serial > r.applied && d.step <= r.simulated {
+                    pass.set_pipeline(init);
+                    pass.set_bind_group(0, &d.groups[r.read], &[]);
+                    pass.dispatch_workgroups(12, 12, 12);
+                    r.read = 1 - r.read;
+                    r.applied = d.serial;
+                }
+            }
+            if r.simulated >= end {
+                break;
+            }
+            pass.set_pipeline(step);
+            pass.set_bind_group(0, &r.groups[r.read], &[]);
             pass.dispatch_workgroups(12, 12, 12);
-            pipeline.read = 1;
-            pipeline.simulated = 0;
-            pipeline.generation = Some(input.generation);
+            r.read = 1 - r.read;
+            r.simulated += 1;
         }
-        pass.set_pipeline(step);
-        let wanted = input.params.control.y as u32;
-        // Fixed 60 Hz substeps. Pause and capture do not depend on GPU frame time.
-        for _ in pipeline.simulated..wanted.min(pipeline.simulated + 8) {
-            pass.set_bind_group(0, &groups[pipeline.read], &[]);
-            pass.dispatch_workgroups(12, 12, 12);
-            pipeline.read = 1 - pipeline.read;
-            pipeline.simulated += 1;
-        }
+        source.applied.store(r.applied, Ordering::Relaxed);
     }
-    let post = target.post_process_write();
-    let group = ctx.render_device().create_bind_group(
-        "gas draw",
-        &cache.get_bind_group_layout(&pipeline.draw_layout),
-        &BindGroupEntries::sequential((
-            post.source,
-            &pipeline.sampler,
-            depth,
-            pipeline.uniform.binding().unwrap(),
-            pipeline.buffers[pipeline.read].as_entire_binding(),
-            pipeline.terrain.as_entire_binding(),
-            normals,
-        )),
-    );
-    let mut pass = ctx
-        .command_encoder()
-        .begin_render_pass(&RenderPassDescriptor {
-            label: Some("voxel gas composite"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: post.destination,
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations::default(),
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-    pass.set_pipeline(draw);
-    pass.set_bind_group(0, &group, &[]);
-    pass.draw(0..3, 0..1);
+    // Shade terrain/charging effects exactly once. Overlay plumes cannot
+    // overwrite an earlier plume's colour with a fresh terrain calculation.
+    let mut order: Vec<_> = input
+        .atmosphere
+        .regions
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            r.as_ref().map(|r| {
+                let centre = r.params.origin.truncate()
+                    + Vec3::splat(GAS_N as f32 * r.params.origin.w * 0.5);
+                let distance = centre.distance_squared(pipeline.uniform.get().camera.truncate());
+                (i, distance)
+            })
+        })
+        .collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    for slot in std::iter::once(None).chain(order.into_iter().map(|(i, _)| Some(i))) {
+        let (uniform, buffer) = if let Some(i) = slot {
+            let r = pipeline.regions[i].as_ref().unwrap();
+            (&r.uniform, &r.buffers[r.read])
+        } else {
+            (&pipeline.uniform, &pipeline.empty)
+        };
+        let post = target.post_process_write();
+        let group = ctx.render_device().create_bind_group(
+            "gas draw",
+            &cache.get_bind_group_layout(&pipeline.draw_layout),
+            &BindGroupEntries::sequential((
+                post.source,
+                &pipeline.sampler,
+                depth,
+                uniform.binding().unwrap(),
+                buffer.as_entire_binding(),
+                pipeline.terrain.as_entire_binding(),
+                normals,
+            )),
+        );
+        let mut pass = ctx
+            .command_encoder()
+            .begin_render_pass(&RenderPassDescriptor {
+                label: Some("voxel gas composite"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: post.destination,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations::default(),
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        pass.set_pipeline(draw);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }

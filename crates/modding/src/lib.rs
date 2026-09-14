@@ -18,6 +18,7 @@ pub mod kinds;
 pub mod range;
 pub mod skirmish;
 pub mod tuning;
+pub mod turret;
 pub mod vox;
 pub mod weapons;
 

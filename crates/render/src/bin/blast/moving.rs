@@ -7,6 +7,7 @@ use sim_core::blast::RangeUnit;
 pub struct Visual {
     pub previous: Vec<Pose>,
     pub fragments: std::collections::BTreeMap<u64, Vec3>,
+    pub turret: Option<i32>,
     occupied: Vec<usize>,
     feet: Vec<Vec<FootPlant>>,
     rigs: Vec<LegRig>,
@@ -35,6 +36,7 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
     previous.map_or(current, |p| gait::lerp(p, &current, t))
 }
 pub fn before(sim: &BlastRange, v: &mut Visual) {
+    v.turret = Some(sim.turret.angle);
     v.fragments = sim
         .matter
         .debris
@@ -91,9 +93,6 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
         return;
     }
     let mut dirty = Vec::new();
-    let mut masks = Vec::new();
-    let origin = gas.params.origin.truncate().as_ivec3();
-    let edge = gas.params.origin.w as i32;
     let words = Arc::make_mut(&mut gas.terrain_words);
     let mut set = |i: usize, m: u32| {
         let shift = (i % 8) * 4;
@@ -104,19 +103,6 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
         }
         *word = new;
         dirty.push(i / 8);
-        let p = IVec3::new(
-            (i % 640) as i32,
-            (i / 640 % 192) as i32,
-            (i / 640 / 192) as i32,
-        ) - origin;
-        let q = IVec3::new(
-            p.x.div_euclid(edge),
-            p.y.div_euclid(edge),
-            p.z.div_euclid(edge),
-        );
-        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::splat(GAS_N as i32)).all() {
-            masks.push(q.x as usize + GAS_N * (q.y as usize + GAS_N * q.z as usize));
-        }
     };
     for &i in &v.occupied {
         let p = [
@@ -146,34 +132,6 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     }
     gas.terrain_dirty.extend(spans);
     gas.terrain_revision += 1;
-    masks.sort_unstable();
-    masks.dedup();
-    let mask = Arc::make_mut(&mut gas.mask);
-    for i in masks {
-        let base = origin
-            + IVec3::new(
-                (i % GAS_N) as i32,
-                (i / GAS_N % GAS_N) as i32,
-                (i / GAS_N / GAS_N) as i32,
-            ) * edge;
-        let mut solid = false;
-        'scan: for z in 0..edge {
-            for y in 0..edge {
-                for x in 0..edge {
-                    let q = base + IVec3::new(x, y, z);
-                    if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::new(640, 192, 640)).all() {
-                        let j = (q.x + 640 * (q.y + 192 * q.z)) as usize;
-                        if (words[j / 8] >> ((j % 8) * 4)) & 15 != 0 {
-                            solid = true;
-                            break 'scan;
-                        }
-                    }
-                }
-            }
-        }
-        mask[i] = u32::from(solid);
-    }
-    gas.mask_revision += 1;
     v.occupied = next;
 }
 pub fn animate(

@@ -93,6 +93,7 @@ pub fn body_to_mesh(
     centre: [f32; 3],
     outs: &mut [MeshBuf; crate::look::FINISHES],
 ) {
+    let starts = outs.each_ref().map(|buf| buf.pos.len());
     let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
     let bevel = bevel.clamp(0.0, 0.5);
     let half = centre;
@@ -140,6 +141,9 @@ pub fn body_to_mesh(
                 corners(bevel, c, &free, &put, out);
             }
         }
+    }
+    for (buf, start) in outs.iter_mut().zip(starts) {
+        crate::unit_surface::map(buf, start, b.mm as f32 / (1000.0 * scale));
     }
 }
 
