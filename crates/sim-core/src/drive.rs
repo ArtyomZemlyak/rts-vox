@@ -267,14 +267,28 @@ pub fn advance(
     };
     // Разгон и торможение — разные числа, и это не украшение:
     // машина, тормозящая с ускорением разгона, вкатывается в цель.
-    let vel = if aim.raw() > d.vel.raw() {
+    let vel = if aim < Fx::ZERO || d.vel < Fx::ZERO {
+        // Reverse uses the same installed motor and brakes. A gear change
+        // first brakes to rest; it never flips the old momentum's sign.
+        if d.vel > Fx::ZERO && aim < Fx::ZERO {
+            d.vel.sub(brake).max(Fx::ZERO)
+        } else if d.vel < Fx::ZERO && aim > Fx::ZERO {
+            d.vel.add(brake).min(Fx::ZERO)
+        } else {
+            let change = if aim.abs() > d.vel.abs() {
+                accel
+            } else {
+                brake
+            };
+            d.vel.add(aim.sub(d.vel).max(change.neg()).min(change))
+        }
+    } else if aim.raw() > d.vel.raw() {
         Fx::min(aim, d.vel.add(accel))
     } else {
         Fx::max(aim, d.vel.sub(brake))
     };
     // A lower powered speed (slope or engine damage) is a braking target,
     // not an impulse that erases momentum in one tick.
-    let vel = Fx::max(Fx::ZERO, vel);
     let step = vel.mul(inv_tick);
     (
         Drive {
@@ -615,6 +629,33 @@ mod tests {
                     assert!(n.vel > target);
                 }
                 d = n;
+            }
+            assert_eq!(d.vel, target);
+        }
+    }
+
+    #[test]
+    fn changing_gears_brakes_to_rest_before_accelerating_in_reverse() {
+        let l = limits();
+        for sign in [-1, 1] {
+            let mut d = Drive {
+                head: 0,
+                vel: Fx::from_int(30 * sign),
+                yaw_rate: 0,
+            };
+            let target = Fx::from_int(-12 * sign);
+            let mut stopped = false;
+            for _ in 0..200 {
+                let (next, movement) = advance(d, 0, target, &l, Fx::ONE, inv_tick());
+                assert!(next.vel.sub(d.vel).abs() <= l.brake.max(accel_per_tick(&tracked())));
+                if next.vel == Fx::ZERO {
+                    stopped = true;
+                }
+                if next.vel.mul(target) > Fx::ZERO {
+                    assert!(stopped, "gear change reversed momentum without braking");
+                }
+                assert_eq!(movement.dx, next.vel.mul(inv_tick()));
+                d = next;
             }
             assert_eq!(d.vel, target);
         }

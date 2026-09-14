@@ -5,6 +5,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod vehicle;
+
 pub mod godunov;
 pub mod layer;
 pub mod portals;

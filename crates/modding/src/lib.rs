@@ -15,6 +15,7 @@
 pub mod data;
 pub mod explosion;
 pub mod kinds;
+pub mod navigation;
 pub mod range;
 pub mod skirmish;
 pub mod tuning;

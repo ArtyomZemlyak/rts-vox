@@ -1,0 +1,8 @@
+(
+    cell_units: 8,
+    search_nodes: 6400,
+    recovery_ticks: 36,
+    reverse_ticks: 42,
+    reverse_speed_pct: 30,
+    recovery_turn_deg: 25,
+)

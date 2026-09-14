@@ -7,8 +7,6 @@ use fx::{
     Fx,
 };
 use phys::{Chassis, V3};
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
 use voxel::{UnitBody, World};
 
 #[derive(Clone, Copy)]
@@ -23,12 +21,18 @@ impl Obstacle {
             pos: m.pos,
             head: m.drive.head,
             half: [
-                Fx::from_ratio(b.vol.nx as i32, 2),
-                Fx::from_ratio(b.vol.nz as i32, 2),
+                Fx::from_ratio(
+                    b.vol.nx as i32 * b.mm as i32,
+                    2 * voxel::unit::WORLD_MM as i32,
+                ),
+                Fx::from_ratio(
+                    b.vol.nz as i32 * b.mm as i32,
+                    2 * voxel::unit::WORLD_MM as i32,
+                ),
             ],
         }
     }
-    fn overlaps(&self, other: &Self) -> bool {
+    fn penetration(&self, other: &Self) -> Fx {
         let axes = |head: i32| {
             let c = angle::cos(head);
             let s = angle::sin(head);
@@ -38,17 +42,24 @@ impl Obstacle {
         let b = axes(other.head);
         let dot = |u: [Fx; 2], v: [Fx; 2]| u[0].mul(v[0]).add(u[1].mul(v[1]));
         let delta = [other.pos[0].sub(self.pos[0]), other.pos[2].sub(self.pos[2])];
-        a.iter().chain(&b).all(|n| {
-            let ra = dot(*n, a[0])
-                .abs()
-                .mul(self.half[0])
-                .add(dot(*n, a[1]).abs().mul(self.half[1]));
-            let rb = dot(*n, b[0])
-                .abs()
-                .mul(other.half[0])
-                .add(dot(*n, b[1]).abs().mul(other.half[1]));
-            dot(delta, *n).abs() < ra.add(rb)
-        })
+        a.iter()
+            .chain(&b)
+            .map(|n| {
+                let ra = dot(*n, a[0])
+                    .abs()
+                    .mul(self.half[0])
+                    .add(dot(*n, a[1]).abs().mul(self.half[1]));
+                let rb = dot(*n, b[0])
+                    .abs()
+                    .mul(other.half[0])
+                    .add(dot(*n, b[1]).abs().mul(other.half[1]));
+                ra.add(rb).sub(dot(delta, *n).abs()).max(Fx::ZERO)
+            })
+            .min()
+            .unwrap_or(Fx::ZERO)
+    }
+    fn overlaps(&self, other: &Self) -> bool {
+        self.penetration(other) > Fx::ZERO
     }
 }
 #[derive(Clone, Debug)]
@@ -74,6 +85,11 @@ pub struct Motion {
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
+    navigation: modding::navigation::Navigation,
+    blocked_ticks: u32,
+    reverse_left: u32,
+    recovery_head: i32,
+    next_plan: u32,
 }
 impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
@@ -115,6 +131,14 @@ impl Motion {
             arrival: c.arrival,
             alignment: c.turn_alignment_pct,
             replan: c.replan_ticks,
+            navigation: modding::navigation::Navigation::from_ron(include_str!(
+                "../../../data/range-navigation.ron"
+            ))
+            .expect("navigation"),
+            blocked_ticks: 0,
+            reverse_left: 0,
+            recovery_head: 0,
+            next_plan: 0,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
                 (u128::from(body.volume_mm3()) * chassis.density as u128 / 1_000_000_000).max(1)
@@ -131,9 +155,31 @@ impl Motion {
         )
     }
     pub fn move_to(&mut self, w: &World, to: [i32; 2], b: &UnitBody, others: &[Obstacle]) -> bool {
-        let from = [self.pos[0].to_int_trunc(), self.pos[2].to_int_trunc()];
-        let radius = (b.vol.nz as i32 / 2).max(10);
-        let path = route(w, from, to, self.step, radius, others);
+        let from = [self.pos[0], self.pos[2]];
+        let shape = self.shape(b);
+        let half = shape.half.map(Fx::from_int);
+        let path = nav::vehicle::route(
+            nav::vehicle::Probe::new(w),
+            shape,
+            from,
+            self.drive.head,
+            to,
+            nav::vehicle::Search {
+                cell: self.navigation.cell_units,
+                min: [40; 2],
+                max: [600; 2],
+                nodes: self.navigation.search_nodes,
+            },
+            |p, head| {
+                !others.iter().any(|o| {
+                    o.overlaps(&Obstacle {
+                        pos: [p[0], Fx::ZERO, p[1]],
+                        head,
+                        half,
+                    })
+                })
+            },
+        );
         self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
         self.blocked = path.is_empty();
         self.path = path;
@@ -146,6 +192,25 @@ impl Motion {
         self.cursor = 0;
         self.destination = None;
         self.blocked = false;
+        self.blocked_ticks = 0;
+        self.reverse_left = 0;
+        self.next_plan = 0;
+    }
+    fn shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
+        let units = voxel::unit::WORLD_MM as i32;
+        nav::vehicle::Shape {
+            half: [
+                b.vol.nx as i32 * b.mm as i32 / units / 2,
+                b.vol.nz as i32 * b.mm as i32 / units / 2,
+            ],
+            support: [
+                self.chassis.support_x_cm * 10 / units,
+                self.chassis.support_z_cm * 10 / units,
+            ],
+            clearance: Fx::from_ratio(self.chassis.clearance_cm * 10, units),
+            step: self.step,
+            min_up: Fx::from_ratio(self.chassis.max_tilt_pct, 100),
+        }
     }
     // Drive phase takes explicit body, world, clock and contact inputs.
     #[allow(clippy::too_many_arguments)]
@@ -163,12 +228,17 @@ impl Motion {
         if !self.enabled {
             return;
         }
-        if (self.blocked || self.path.is_empty()) && tick.is_multiple_of(self.replan) {
+        if self.reverse_left == 0
+            && (self.blocked || self.path.is_empty())
+            && tick >= self.next_plan
+        {
             if let Some(goal) = self.destination {
                 self.move_to(w, goal, b, others);
+                self.next_plan = tick.saturating_add(self.replan);
             }
         }
         if self.cursor == self.path.len()
+            && self.reverse_left == 0
             && !self.route.is_empty()
             && alive
             && engine
@@ -179,7 +249,7 @@ impl Motion {
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
-        if alive && engine && self.cursor < self.path.len() {
+        if alive && engine && self.reverse_left == 0 && self.cursor < self.path.len() {
             let goal = self.path[self.cursor];
             let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
             let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
@@ -207,6 +277,26 @@ impl Motion {
                 });
             }
         }
+        if alive
+            && engine
+            && self.blocked_ticks >= self.navigation.recovery_ticks
+            && self.reverse_left == 0
+        {
+            self.reverse_left = self.navigation.reverse_ticks;
+            self.recovery_head = self.drive.head;
+            self.blocked_ticks = 0;
+        }
+        if self.reverse_left > 0 && alive && engine {
+            let turn = if self.reverse_left > self.navigation.reverse_ticks / 2 {
+                0
+            } else {
+                self.navigation.recovery_turn_deg * angle::FULL / 360
+            };
+            want = angle::norm(self.recovery_head + turn);
+            speed = Fx::from_int(self.speed)
+                .mul(response.engine)
+                .mul(Fx::from_ratio(-self.navigation.reverse_speed_pct, 100));
+        }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
         let (next, delta) = drive::advance(
@@ -217,29 +307,29 @@ impl Motion {
             self.drive_scale.mul(self.hull.load),
             Fx::from_ratio(1, 30),
         );
+        let previous = Obstacle::of(self, b);
         self.drive = next;
         let nx = self.pos[0].add(delta.dx);
         let nz = self.pos[2].add(delta.dz);
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
-        let current = floor(w, self.pos[0].to_int_trunc(), self.pos[2].to_int_trunc());
-        let target = floor(w, x, z);
+        let mut ground = nav::vehicle::Probe::new(w);
+        let shape = self.shape(b);
+        let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
+        let target = ground.pose([nx, nz], next.head, shape);
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().any(|p| candidate.overlaps(p));
-        let (hc, hs) = crate::ride::heading_of(next.head);
-        let support = crate::ride::supports_of(&self.chassis);
-        let clear = support.iter().all(|s| {
-            let px = nx.add(s.x.mul(hc)).sub(s.z.mul(hs)).to_int_trunc();
-            let pz = nz.add(s.x.mul(hs)).add(s.z.mul(hc)).to_int_trunc();
-            floor(w, px, pz) - target <= self.step + (b.vol.nx as i32 / 8)
+        let collision = others.iter().any(|p| {
+            let penetration = candidate.penetration(p);
+            penetration > Fx::ZERO && penetration >= previous.penetration(p)
         });
+        let clear = target.blocked == 0 || target.blocked < current.blocked;
         let allowed = clear
             && x >= 40
             && z >= 40
             && x < 600
             && z < 600
-            && target - current <= self.step
+            && target.height.sub(current.height) <= Fx::from_int(self.step)
             && !collision;
         let path = if allowed {
             self.blocked = false;
@@ -248,13 +338,23 @@ impl Motion {
             next.vel.div(Fx::from_int(30))
         } else {
             self.drive.vel = Fx::ZERO;
-            if collision {
-                self.drive.head = old.head;
-                self.drive.yaw_rate = 0;
-            }
+            self.drive.head = old.head;
+            self.drive.yaw_rate = 0;
             self.blocked = true;
             Fx::ZERO
         };
+        if self.reverse_left > 0 {
+            self.reverse_left -= 1;
+            if self.reverse_left == 0 {
+                self.path.clear();
+                self.cursor = 0;
+                self.next_plan = tick.saturating_add(1);
+            }
+        } else if self.blocked {
+            self.blocked_ticks = self.blocked_ticks.saturating_add(1);
+        } else {
+            self.blocked_ticks = 0;
+        }
         if let Some(c) = drive::StepCycle::of(&self.chassis) {
             self.phase = angle::norm(
                 self.phase
@@ -263,20 +363,21 @@ impl Motion {
         }
         let support = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
-        let floors = support.map(|s| {
-            let x = self.pos[0].add(s.x.mul(hc)).sub(s.z.mul(hs)).to_int_trunc();
-            let z = self.pos[2].add(s.x.mul(hs)).add(s.z.mul(hc)).to_int_trunc();
-            Fx::from_int(floor(w, x, z))
-        });
+        let f = if allowed {
+            target.floors
+        } else {
+            current.floors
+        };
+        let floors = [f[3], f[1], f[2], f[0]];
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
         let r = response.ride(r);
         let sway = crate::ride::sway_of(
-            next.vel.sub(old.vel).mul(Fx::from_int(30)),
-            next.vel,
-            angle::diff(next.head, old.head),
-            next.head,
+            self.drive.vel.sub(old.vel).mul(Fx::from_int(30)),
+            self.drive.vel,
+            angle::diff(self.drive.head, old.head),
+            self.drive.head,
         );
         phys::step(
             &mut self.hull,
@@ -321,6 +422,10 @@ impl Motion {
         b.u32(self.laps);
         b.bool(self.enabled);
         b.bool(self.blocked);
+        b.u32(self.blocked_ticks);
+        b.u32(self.reverse_left);
+        b.i32(self.recovery_head);
+        b.u32(self.next_plan);
         for list in [&self.path, &self.route] {
             b.u32(list.len() as u32);
             for p in list {
@@ -350,6 +455,10 @@ impl Motion {
         self.laps = s.u32();
         self.enabled = s.bool();
         self.blocked = s.bool();
+        self.blocked_ticks = s.u32();
+        self.reverse_left = s.u32();
+        self.recovery_head = s.i32();
+        self.next_plan = s.u32();
         for list in [&mut self.path, &mut self.route] {
             list.clear();
             let n = s.u32();
@@ -361,6 +470,8 @@ impl Motion {
             }
         }
         s.ok()
+            && self.reverse_left <= self.navigation.reverse_ticks
+            && (0..angle::FULL).contains(&self.recovery_head)
             && self.pos[0] >= Fx::ZERO
             && self.pos[0] < Fx::from_int(640)
             && self.pos[2] >= Fx::ZERO
@@ -389,124 +500,156 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
         return 192;
     }
     for y in (0..w.ny).rev() {
-        if w.material(x as u32, y, z as u32) != 0 {
+        if w.solid(x as u32, y, z as u32) {
             return y as i32 + 1;
         }
     }
     0
 }
-fn route(
-    w: &World,
-    from: [i32; 2],
-    to: [i32; 2],
-    step: i32,
-    radius: i32,
-    others: &[Obstacle],
-) -> Vec<[i32; 2]> {
-    const N: usize = 80;
-    const EDGE: i32 = 8;
-    if to.iter().any(|v| *v < 40 || *v >= 600) {
-        return Vec::new();
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use modding::range::RangeUnitKind;
+    struct Ground {
+        depth: i32,
     }
-    let start = from[0].div_euclid(EDGE) as usize + N * from[1].div_euclid(EDGE) as usize;
-    let end = to[0].div_euclid(EDGE) as usize + N * to[1].div_euclid(EDGE) as usize;
-    let point = |i: usize| {
-        [
-            (i % N) as i32 * EDGE + EDGE / 2,
-            (i / N) as i32 * EDGE + EDGE / 2,
-        ]
-    };
-    let mut height = BTreeMap::new();
-    let mut sample = |i: usize| -> (i32, bool) {
-        *height.entry(i).or_insert_with(|| {
-            let p = point(i);
-            let h = floor(w, p[0], p[1]);
-            let ok = [[-radius, 0], [radius, 0], [0, -radius], [0, radius]]
-                .iter()
-                .all(|d| (floor(w, p[0] + d[0], p[1] + d[1]) - h).abs() <= step + radius / 4);
-            let candidate = Obstacle {
-                pos: [Fx::from_int(p[0]), Fx::from_int(h), Fx::from_int(p[1])],
-                head: 0,
-                half: [Fx::from_int(radius); 2],
-            };
-            (h, ok && !others.iter().any(|o| candidate.overlaps(o)))
-        })
-    };
-    let mut dist = vec![u32::MAX; N * N];
-    let mut previous = vec![usize::MAX; N * N];
-    let mut open = BinaryHeap::new();
-    dist[start] = 0;
-    open.push(Reverse((0u32, start)));
-    for _ in 0..N * N {
-        let Some(Reverse((_, i))) = open.pop() else {
-            break;
+    impl voxel::Generator for Ground {
+        fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+            let height = 16 - (self.depth - (x as i32 - 320).abs() / 3).max(0);
+            if y < height as u32 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+    fn ground(depth: i32) -> World {
+        World::new(640, 64, 640, 100, Box::new(Ground { depth }))
+    }
+    fn step(m: &mut Motion, w: &World, b: &UnitBody, others: &[Obstacle], tick: u32) {
+        m.step(
+            w,
+            b,
+            true,
+            true,
+            crate::mobility::Mobility::intact(true),
+            others,
+            tick,
+            98,
+        );
+    }
+    #[test]
+    fn opposing_tanks_recover_and_do_not_reenter_each_other() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut a = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        let mut b = Motion::new([250, 16, 300], RangeUnitKind::Tank, &body);
+        a.enabled = true;
+        a.destination = Some([430, 300]);
+        a.path = vec![[430, 300]];
+        b.enabled = true;
+        b.drive.head = angle::FULL / 2;
+        b.destination = Some([70, 300]);
+        b.path = vec![[70, 300]];
+        let mut old = Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body));
+        let mut reversed = false;
+        for tick in 0..1600 {
+            step(&mut a, &w, &body, &[Obstacle::of(&b, &body)], tick);
+            step(&mut b, &w, &body, &[Obstacle::of(&a, &body)], tick);
+            reversed |= a.drive.vel < Fx::ZERO || b.drive.vel < Fx::ZERO;
+            let overlap = Obstacle::of(&a, &body).penetration(&Obstacle::of(&b, &body));
+            assert!(overlap <= old, "penetration increased at {tick}");
+            old = overlap;
+            if a.destination.is_none() && b.destination.is_none() {
+                break;
+            }
+        }
+        assert!(reversed, "recovery never reversed");
+        assert_eq!(old, Fx::ZERO);
+        assert!(
+            a.destination.is_none() && b.destination.is_none(),
+            "a {:?} path {:?}; b {:?} path {:?}",
+            a.pos,
+            a.path,
+            b.pos,
+            b.path
+        );
+    }
+    #[test]
+    fn recovery_resumes_from_a_save_without_a_velocity_flip() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut a = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        a.enabled = true;
+        a.destination = Some([430, 300]);
+        a.path = vec![[430, 300]];
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(250), Fx::from_int(16), Fx::from_int(300)],
+            head: 0,
+            half: [Fx::from_int(30), Fx::from_int(15)],
         };
-        if i == end {
-            break;
+        let mut tick = 0;
+        while a.reverse_left == 0 && tick < 100 {
+            step(&mut a, &w, &body, &[obstacle], tick);
+            tick += 1;
         }
-        let (h, _) = sample(i);
-        for (dx, dz) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (-1, 1),
-            (1, -1),
-            (1, 1),
-        ] {
-            let x = i as i32 % N as i32 + dx;
-            let z = i as i32 / N as i32 + dz;
-            if x < 5 || z < 5 || x >= 75 || z >= 75 {
-                continue;
-            }
-            let j = x as usize + N * z as usize;
-            let (nh, ok) = sample(j);
-            if !ok || (nh - h).abs() > step {
-                continue;
-            }
-            if dx != 0
-                && dz != 0
-                && (!sample((x as usize) + N * (i / N)).1 || !sample(i % N + N * z as usize).1)
-            {
-                continue;
-            }
-            let cost = dist[i].saturating_add(if dx == 0 || dz == 0 { 10 } else { 14 });
-            if cost < dist[j] {
-                dist[j] = cost;
-                previous[j] = i;
-                let q = point(j);
-                let heuristic = ((q[0] - to[0]).abs().max((q[1] - to[1]).abs()) / EDGE * 10) as u32;
-                open.push(Reverse((cost + heuristic, j)));
-            }
+        assert!(a.reverse_left > 0);
+        let mut blob = Blob::new();
+        a.save(&mut blob);
+        let mut b = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        assert!(b.load(&mut Scan::new(&blob.v)));
+        for tick in tick..tick + 180 {
+            step(&mut a, &w, &body, &[obstacle], tick);
+            step(&mut b, &w, &body, &[obstacle], tick);
+            let mut x = Blob::new();
+            let mut y = Blob::new();
+            a.save(&mut x);
+            b.save(&mut y);
+            assert_eq!(x.v, y.v);
         }
     }
-    if dist[end] == u32::MAX {
-        return Vec::new();
-    }
-    let mut ids = vec![end];
-    while *ids.last().unwrap() != start {
-        let i = previous[*ids.last().unwrap()];
-        if i == usize::MAX {
-            return Vec::new();
+    #[test]
+    fn tanks_and_walkers_cross_several_craters_in_both_directions() {
+        for depth in [4, 8, 12] {
+            for reverse in [false, true] {
+                for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+                    let w = ground(depth);
+                    let body = match kind {
+                        RangeUnitKind::Tank => voxel::unit::tank(),
+                        RangeUnitKind::Strider => voxel::unit::strider(),
+                    };
+                    let (start, end) = if reverse { (410, 230) } else { (230, 410) };
+                    let mut m = Motion::new([start, 16, 300], kind, &body);
+                    m.drive.head = if reverse { angle::FULL / 2 } else { 0 };
+                    assert!(
+                        m.move_to(&w, [end, 300], &body, &[]),
+                        "no path {depth} {kind:?}"
+                    );
+                    let mut low = Fx::from_int(16);
+                    let mut old = m.pos[1];
+                    for tick in 0..750 {
+                        step(&mut m, &w, &body, &[], tick);
+                        assert!(
+                            m.pos[1].sub(old).abs() < Fx::ONE,
+                            "height jump {depth} {kind:?}"
+                        );
+                        old = m.pos[1];
+                        low = low.min(old);
+                        if m.destination.is_none() {
+                            break;
+                        }
+                    }
+                    assert!(
+                        m.destination.is_none(),
+                        "stuck {kind:?} depth {depth} at {:?}",
+                        m.pos
+                    );
+                    if depth == 12 {
+                        assert!(low < Fx::from_int(15), "never entered crater");
+                    }
+                }
+            }
         }
-        ids.push(i);
     }
-    ids.reverse();
-    let all: Vec<_> = ids.into_iter().map(point).collect();
-    let mut out = Vec::new();
-    for i in 1..all.len() {
-        if i + 1 == all.len()
-            || [all[i][0] - all[i - 1][0], all[i][1] - all[i - 1][1]]
-                != [all[i + 1][0] - all[i][0], all[i + 1][1] - all[i][1]]
-        {
-            out.push(all[i]);
-        }
-    }
-    if out.is_empty() {
-        out.push(to);
-    } else {
-        *out.last_mut().unwrap() = to;
-    }
-    out
 }

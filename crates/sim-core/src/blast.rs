@@ -784,7 +784,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(10);
+        b.u32(11);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -897,7 +897,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 10 {
+        if s.u32() != 11 {
             return None;
         }
         let extended = s.bool();
@@ -1188,7 +1188,10 @@ impl BlastRange {
     }
     pub fn step(&mut self) {
         self.surface_changed.clear();
-        let positions: Vec<_> = self
+        // This small range commits motion in stable slot order. Later actors
+        // see accepted positions, so two approaching tanks cannot each consume
+        // the same free gap between the beginning and end of the tick.
+        let mut positions: Vec<_> = self
             .units
             .iter()
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
@@ -1216,6 +1219,7 @@ impl BlastRange {
                     self.config.gravity,
                 );
                 u.update_pose();
+                positions[id] = motion::Obstacle::of(&u.motion, &u.body);
             }
         }
         self.gun.motion.step(
@@ -1730,14 +1734,16 @@ mod tests {
         for u in &a.units[2..] {
             assert!(
                 u.motion.laps >= 2,
-                "kind {:?} at {:?} laps {} blocked {} waypoint {} cursor {}/{}",
+                "kind {:?} at {:?} laps {} blocked {} waypoint {} cursor {}/{} head {} path {:?}",
                 u.kind,
                 u.at,
                 u.motion.laps,
                 u.motion.blocked,
                 u.motion.waypoint,
                 u.motion.cursor,
-                u.motion.path.len()
+                u.motion.path.len(),
+                u.motion.drive.head,
+                u.motion.path
             );
         }
         assert!(
@@ -1754,7 +1760,12 @@ mod tests {
         for _ in 0..300 {
             a.step();
         }
-        assert!((a.gun.at[0] - 245).abs() < 8, "gun {:?}", a.gun.at);
+        assert!(
+            (a.gun.at[0] - 245).abs() < 8,
+            "gun {:?} motion {:?}",
+            a.gun.at,
+            a.gun.motion
+        );
         assert!(a.order_attack(2));
         let removed = a.units[2].removed.len();
         let mut impacted = false;
