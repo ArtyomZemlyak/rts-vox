@@ -27,6 +27,7 @@ pub enum LoadError {
     /// В томе нет ни одного воксела ядра.
     NoCore(String),
     WeaponPath(String),
+    LoadPath(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -40,6 +41,7 @@ impl std::fmt::Display for LoadError {
             LoadError::CoreOutside(w) => write!(f, "{w}: ядро вне тома"),
             LoadError::NoCore(w) => write!(f, "{w}: в томе нет ядра"),
             LoadError::WeaponPath(w) => write!(f, "{w}: неверный путь орудия"),
+            LoadError::LoadPath(w) => write!(f, "{w}: неверная геометрия ходовой"),
         }
     }
 }
@@ -66,6 +68,8 @@ pub struct UnitDef {
     /// Old packs keep the role-only subsystem rule when omitted.
     #[serde(default)]
     pub weapon_paths: Vec<([u8; 3], [u8; 3], u8)>,
+    #[serde(default)]
+    pub load_paths: Vec<([u8; 3], [u8; 3], u8)>,
 }
 
 /// Юнит, готовый к сборке в движковый том.
@@ -77,6 +81,7 @@ pub struct UnitModel {
     pub nz: u8,
     pub core_size: u8,
     pub weapon_paths: Vec<([u8; 3], [u8; 3], u8)>,
+    pub load_paths: Vec<([u8; 3], [u8; 3], u8)>,
     /// `(x, y, z, метка)`. Пустые воксели отсутствуют.
     pub voxels: Vec<(u8, u8, u8, PartTag)>,
 }
@@ -188,12 +193,18 @@ fn build_unit(
     }
     let mut voxels = Vec::with_capacity(vm.voxels.len());
     let size = [vm.nx, vm.ny, vm.nz];
-    if def.weapon_paths.len() > 8
-        || def.weapon_paths.iter().any(|(min, max, axis)| {
-            *axis >= 3 || (0..3).any(|a| min[a] >= max[a] || u32::from(max[a]) > size[a])
-        })
-    {
-        return Err(LoadError::WeaponPath(where_.to_string()));
+    for (paths, load) in [(&def.weapon_paths, false), (&def.load_paths, true)] {
+        if paths.len() > 8
+            || paths.iter().any(|(min, max, axis)| {
+                *axis >= 3 || (0..3).any(|a| min[a] >= max[a] || u32::from(max[a]) > size[a])
+            })
+        {
+            return Err(if load {
+                LoadError::LoadPath(where_.to_string())
+            } else {
+                LoadError::WeaponPath(where_.to_string())
+            });
+        }
     }
     let mut has_core = false;
     for &(x, y, z, colour) in &vm.voxels {
@@ -218,6 +229,7 @@ fn build_unit(
         nz: vm.nz as u8,
         core_size: cs,
         weapon_paths: def.weapon_paths,
+        load_paths: def.load_paths,
         voxels,
     })
 }
@@ -265,6 +277,7 @@ mod tests {
         let def: UnitDef = ron::from_str(text).unwrap();
         let built = build_unit("tank", def, model.clone()).unwrap();
         assert_eq!(built.weapon_paths, vec![([34, 21, 13], [60, 26, 18], 0)]);
+        assert_eq!(built.load_paths.len(), 2);
         for bad in [
             ([0; 3], [1; 3], 3),
             ([0; 3], [255; 3], 0),
@@ -276,10 +289,17 @@ mod tests {
                 build_unit("bad", def, model.clone()),
                 Err(LoadError::WeaponPath(_))
             ));
+            let mut def: UnitDef = ron::from_str(text).unwrap();
+            def.load_paths = vec![bad];
+            assert!(matches!(
+                build_unit("bad", def, model.clone()),
+                Err(LoadError::LoadPath(_))
+            ));
         }
         let legacy: UnitDef =
             ron::from_str(r#"(name: "legacy", model: "x.vox", palette: [], core_size: 1)"#)
                 .unwrap();
         assert!(legacy.weapon_paths.is_empty());
+        assert!(legacy.load_paths.is_empty());
     }
 }

@@ -41,8 +41,9 @@ pub struct RangeUnit {
     pub revision: u64,
     pub status: Status,
     pub mobility: crate::mobility::Mobility,
+    pub integrity: crate::integrity::Report,
     original_shape: crate::burst::chunk::Shape,
-    original_engine: u32,
+    integrity_model: crate::integrity::Model,
     connectivity: CoreBufs,
     section: Option<crate::damage::SectionJob>,
 }
@@ -56,11 +57,11 @@ impl RangeUnit {
             RangeUnitKind::Strider => voxel::unit::strider(),
         };
         let mut connectivity = CoreBufs::new();
-        let status = body.status(&mut connectivity);
+        let integrity_model = crate::integrity::Model::new(&body);
+        let (status, integrity) = integrity_model.evaluate(&body, &mut connectivity);
         let motion = Motion::new(at, kind, &body);
         let pose = motion.frame(&body);
         let original_shape = crate::burst::chunk::Shape::from_body(&body);
-        let original_engine = body.subsystem_count(voxel::Part::Engine);
         Self {
             motion,
             pose,
@@ -72,9 +73,11 @@ impl RangeUnit {
             dents: BTreeMap::new(),
             revision: 0,
             status,
-            mobility: crate::mobility::Mobility::intact(status.engine),
+            mobility: crate::mobility::Mobility::intact(status.engine)
+                .with_traction(integrity.drive),
+            integrity,
             original_shape,
-            original_engine,
+            integrity_model,
             connectivity,
             section: None,
         }
@@ -92,13 +95,11 @@ impl RangeUnit {
         }
     }
     fn update_response(&mut self) {
-        self.status = self.body.status(&mut self.connectivity);
+        (self.status, self.integrity) = self
+            .integrity_model
+            .evaluate(&self.body, &mut self.connectivity);
         let engine = if self.status.alive && self.status.engine {
-            crate::mobility::Mobility::engine_fraction(
-                self.body
-                    .connected_subsystem_count(voxel::Part::Engine, &self.connectivity),
-                self.original_engine,
-            )
+            self.integrity.engine
         } else {
             Fx::ZERO
         };
@@ -107,7 +108,8 @@ impl RangeUnit {
             &crate::burst::chunk::Shape::from_body(&self.body),
             [self.body.vol.nx, self.body.vol.ny, self.body.vol.nz],
             engine,
-        );
+        )
+        .with_traction(self.integrity.drive);
     }
     pub fn update_pose(&mut self) {
         self.at = self.motion.pos.map(|v| v.to_int_trunc());
@@ -784,7 +786,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(11);
+        b.u32(12);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -792,7 +794,6 @@ impl BlastRange {
         if let Some(r) = &self.layout {
             b.u8s(r.to_ron().expect("validated layout").as_bytes());
         }
-        self.gun.motion.save(&mut b);
         self.turret.save(&mut b);
         b.bool(self.player);
         b.bool(self.patrols_running);
@@ -831,8 +832,8 @@ impl BlastRange {
             }
             b.u32(*work);
         }
-        b.u32(self.units.len() as u32);
-        for u in &self.units {
+        b.u32(self.units.len() as u32 + 1);
+        for u in self.units.iter().chain(std::iter::once(&self.gun)) {
             for v in u.at {
                 b.i32(v);
             }
@@ -897,7 +898,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 11 {
+        if s.u32() != 12 {
             return None;
         }
         let extended = s.bool();
@@ -920,11 +921,7 @@ impl BlastRange {
             return None;
         }
         r.witness = witness;
-        if !r.gun.motion.load(&mut s) {
-            return None;
-        }
         r.turret = crate::turret::Traverse::load(&mut s, r.turret_limits)?;
-        r.gun.update_pose();
         r.player = s.bool();
         r.patrols_running = s.bool();
         let attack = s.usize();
@@ -964,10 +961,15 @@ impl BlastRange {
                 return None;
             }
         }
-        if s.u32() as usize != r.units.len() {
+        if s.u32() as usize != r.units.len() + 1 {
             return None;
         }
-        for (id, u) in r.units.iter_mut().enumerate() {
+        for (id, u) in r
+            .units
+            .iter_mut()
+            .chain(std::iter::once(&mut r.gun))
+            .enumerate()
+        {
             let at = std::array::from_fn(|_| s.i32());
             if !u.motion.load(&mut s) {
                 return None;
@@ -1431,6 +1433,39 @@ mod tests {
         r.step();
         assert!(r.shell.is_none() && r.impact.is_none());
         assert!(!r.refire());
+    }
+
+    #[test]
+    fn a_track_break_brakes_the_range_tank_and_resumes_without_powered_turning() {
+        let c = config();
+        let mut a = BlastRange::new(c.clone());
+        a.control();
+        a.gun.motion.drive.vel = Fx::from_int(30);
+        for y in 0..10 {
+            for z in 1..7 {
+                if a.gun.body.remove(30, y, z) {
+                    a.gun.removed.push([30, y as u8, z as u8]);
+                }
+            }
+        }
+        a.gun.refresh_damage(a.units.len());
+        assert!(a.gun.status.alive && a.gun.status.engine && a.gun.status.weapon);
+        assert_eq!(a.gun.mobility.traction, Fx::ZERO);
+        a.order_move([205, 336]);
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
+        let mut first = Fx::ZERO;
+        for i in 0..120 {
+            a.step();
+            b.step();
+            if i == 0 {
+                first = a.gun.motion.drive.vel;
+            }
+            assert_eq!(a.state_hash(), b.state_hash());
+            assert_eq!(a.gun.motion.drive.head, 0);
+        }
+        assert!(first > Fx::ZERO && first < Fx::from_int(30));
+        assert_eq!(a.gun.motion.drive.vel, Fx::ZERO);
+        assert!(a.gun.motion.pos[0] < Fx::from_int(205));
     }
     #[test]
     fn changing_aim_traverses_before_firing_and_resumes_mid_turn() {

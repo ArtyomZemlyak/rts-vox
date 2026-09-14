@@ -102,6 +102,9 @@ fn body_of(m: &UnitModel) -> Result<UnitBody, String> {
     for &(min, max, axis) in &m.weapon_paths {
         b.push_weapon_path(voxel::unit::WeaponPath { min, max, axis });
     }
+    for &(min, max, axis) in &m.load_paths {
+        b.push_load_path(voxel::unit::WeaponPath { min, max, axis });
+    }
     Ok(b)
 }
 
@@ -113,7 +116,7 @@ fn same_body(a: &UnitBody, b: &UnitBody) -> bool {
     if (a.core, a.core_size) != (b.core, b.core_size) {
         return false;
     }
-    if a.weapon_paths() != b.weapon_paths() {
+    if a.weapon_paths() != b.weapon_paths() || a.load_paths() != b.load_paths() {
         return false;
     }
     for z in 0..a.vol.nz as usize {

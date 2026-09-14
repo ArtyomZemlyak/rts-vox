@@ -13,6 +13,8 @@ pub struct Mobility {
     pub tilt_radius_ratio: Fx,
     /// Fraction of original engine cells still connected to the core.
     pub engine: Fx,
+    /// Remaining transmission/load paths. Zero prevents powered movement.
+    pub traction: Fx,
 }
 
 fn ratio(n: u64, d: u64) -> Fx {
@@ -51,6 +53,7 @@ impl Mobility {
             inverse_tilt_inertia: Fx::ONE,
             tilt_radius_ratio: Fx::ONE,
             engine: if powered { Fx::ONE } else { Fx::ZERO },
+            traction: Fx::ONE,
         }
     }
 
@@ -65,6 +68,7 @@ impl Mobility {
             inverse_tilt_inertia,
             tilt_radius_ratio: inverse_mass.div(inverse_tilt_inertia),
             engine,
+            traction: Fx::ONE,
         }
     }
 
@@ -78,15 +82,24 @@ impl Mobility {
 
     pub fn limits(self, original: &Limits, braking: bool) -> Limits {
         let mut out = *original;
-        out.accel = out.accel.mul(self.inverse_mass).mul(self.engine);
+        out.accel = out
+            .accel
+            .mul(self.inverse_mass)
+            .mul(self.engine)
+            .mul(self.traction);
         out.brake = out.brake.mul(self.inverse_mass);
         // Motor failure removes active turning torque, not the mechanical brake.
         out.turn_acc = out.turn_acc.mul(self.inverse_yaw_inertia).mul(if braking {
             Fx::ONE
         } else {
-            self.engine
+            self.engine.mul(self.traction)
         });
         out
+    }
+
+    pub fn with_traction(mut self, traction: Fx) -> Self {
+        self.traction = traction;
+        self
     }
 
     pub fn ride(self, mut original: phys::Ride) -> phys::Ride {

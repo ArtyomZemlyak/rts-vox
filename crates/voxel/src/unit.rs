@@ -171,6 +171,8 @@ pub struct UnitBody {
     /// may bridge the mantlet; unrelated surviving weapon cells cannot bridge
     /// a missing breech or muzzle. Empty means legacy subsystem semantics.
     weapon_paths: std::sync::Arc<Vec<WeaponPath>>,
+    /// Independent load-bearing tracks or leg roots, authored in body space.
+    load_paths: std::sync::Arc<Vec<WeaponPath>>,
 }
 
 /// Half-open local box along a barrel axis. This is authored geometry, not HP.
@@ -344,11 +346,24 @@ impl UnitBody {
             legs: Vec::new(),
             turret_y: 0,
             weapon_paths: std::sync::Arc::new(Vec::new()),
+            load_paths: std::sync::Arc::new(Vec::new()),
         }
     }
 
     pub fn weapon_paths(&self) -> &[WeaponPath] {
         &self.weapon_paths
+    }
+
+    pub fn load_paths(&self) -> &[WeaponPath] {
+        &self.load_paths
+    }
+
+    pub fn push_load_path(&mut self, path: WeaponPath) {
+        let size = [self.vol.nx, self.vol.ny, self.vol.nz];
+        assert!(self.load_paths.len() < MAX_WEAPON_PATHS);
+        assert!(path.axis < 3);
+        assert!((0..3).all(|a| path.min[a] < path.max[a] && path.max[a] <= size[a]));
+        std::sync::Arc::make_mut(&mut self.load_paths).push(path);
     }
 
     pub fn push_weapon_path(&mut self, path: WeaponPath) {
@@ -537,16 +552,20 @@ impl UnitBody {
                 .min(u32::from(limit)) as u8
         };
         let size = [nx, ny, nz];
-        out.weapon_paths = std::sync::Arc::new(
-            self.weapon_paths
-                .iter()
-                .map(|p| WeaponPath {
-                    min: std::array::from_fn(|a| bound(p.min[a], size[a])),
-                    max: std::array::from_fn(|a| bound(p.max[a], size[a])),
-                    axis: p.axis,
-                })
-                .collect(),
-        );
+        let resample_paths = |paths: &[WeaponPath]| {
+            std::sync::Arc::new(
+                paths
+                    .iter()
+                    .map(|p| WeaponPath {
+                        min: std::array::from_fn(|a| bound(p.min[a], size[a])),
+                        max: std::array::from_fn(|a| bound(p.max[a], size[a])),
+                        axis: p.axis,
+                    })
+                    .collect(),
+            )
+        };
+        out.weapon_paths = resample_paths(&self.weapon_paths);
+        out.load_paths = resample_paths(&self.load_paths);
         Ok(out)
     }
 
@@ -713,7 +732,9 @@ impl UnitBody {
         true
     }
 
-    /// Состояние после урона: что связано с ядром и какие подсистемы живы.
+    /// Геометрическое состояние после урона: что связано с затравкой ядра.
+    /// Игровую жизнеспособность ядра, мотора и ходовой проверяет общий
+    /// sim-core::integrity; эта низкоуровневая операция не знает баланс.
     ///
     /// Один флуд от ядра на весь запрос, а не по флуду на подсистему:
     /// маска прикреплённого считается один раз, а подсистемы читаются
@@ -779,6 +800,7 @@ impl UnitBody {
             + self.part.len()
             + self.finish.len()
             + self.weapon_paths.len() * std::mem::size_of::<WeaponPath>()
+            + self.load_paths.len() * std::mem::size_of::<WeaponPath>()
     }
 
     /// Только собственная память тома. У копии метки общие с шаблоном,
@@ -1313,6 +1335,13 @@ pub fn strider() -> UnitBody {
                 ankle_ball: Some(first + 3),
                 foot: Some(first + 4),
                 support,
+            });
+            // Root joint is material in the body; animated leg links are
+            // separate geometry and do not substitute for this attachment.
+            u.push_load_path(WeaponPath {
+                min: [(hx - 3) as u8, 25, (hz - 3) as u8],
+                max: [(hx + 4) as u8, 32, (hz + 4) as u8],
+                axis: 1,
             });
         }
     }

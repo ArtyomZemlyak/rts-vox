@@ -14,6 +14,7 @@
 
 pub mod data;
 pub mod explosion;
+pub mod integrity;
 pub mod kinds;
 pub mod navigation;
 pub mod range;

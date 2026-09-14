@@ -208,7 +208,8 @@ impl Bodies {
                     &state.shape,
                     [t.vol.nx, t.vol.ny, t.vol.nz],
                     state.mobility.engine,
-                );
+                )
+                .with_traction(state.integrity.drive);
                 state.revision = state.revision.wrapping_add(count as u64);
                 out.push(part);
             }

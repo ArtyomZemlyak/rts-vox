@@ -819,6 +819,9 @@ mod d8 {
         for &(min, max, axis) in &m.weapon_paths {
             b.push_weapon_path(voxel::unit::WeaponPath { min, max, axis });
         }
+        for &(min, max, axis) in &m.load_paths {
+            b.push_load_path(voxel::unit::WeaponPath { min, max, axis });
+        }
         b
     }
 
@@ -837,6 +840,7 @@ mod d8 {
         );
         assert_eq!((a.core, a.core_size), (b.core, b.core_size));
         assert_eq!(a.weapon_paths(), b.weapon_paths());
+        assert_eq!(a.load_paths(), b.load_paths());
         for z in 0..a.vol.nz as usize {
             for y in 0..a.vol.ny as usize {
                 for x in 0..a.vol.nx as usize {

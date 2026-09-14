@@ -228,6 +228,7 @@ impl Motion {
         if !self.enabled {
             return;
         }
+        let engine = engine && response.traction > Fx::ZERO;
         if self.reverse_left == 0
             && (self.blocked || self.path.is_empty())
             && tick >= self.next_plan
@@ -268,6 +269,7 @@ impl Motion {
                 want = angle::atan2(dz.raw(), dx.raw());
                 speed = Fx::from_int(self.speed)
                     .mul(response.engine)
+                    .mul(response.traction)
                     .min(dx.abs().max(dz.abs()).mul(Fx::from_int(2)));
                 let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
                 speed = speed.mul(if alignment > Fx::from_ratio(self.alignment, 100) {
@@ -295,6 +297,7 @@ impl Motion {
             want = angle::norm(self.recovery_head + turn);
             speed = Fx::from_int(self.speed)
                 .mul(response.engine)
+                .mul(response.traction)
                 .mul(Fx::from_ratio(-self.navigation.reverse_speed_pct, 100));
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);

@@ -305,14 +305,14 @@ fn the_version_is_in_the_first_bytes() {
     assert_eq!(&blob[..8], b"RTSVOXSV");
     assert_eq!(
         u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]),
-        10
+        sim_core::save::VERSION
     );
     blob[8] = 99;
     assert!(matches!(
         load(&blob, tuning(), weapons()),
         Err(LoadError::Version {
             found: 99,
-            want: 10
+            want: sim_core::save::VERSION
         })
     ));
 }
@@ -742,6 +742,12 @@ fn damaged_mass_and_partial_engine_resume_the_same_manoeuvre() {
     assert!(response.engine > fx::Fx::ZERO && response.engine < fx::Fx::ONE);
     assert!(r.world.units.alive[id as usize]);
     let bytes = save(&r);
+    let mut old_rules = bytes.clone();
+    old_rules[8..12].copy_from_slice(&10u32.to_le_bytes());
+    assert!(matches!(
+        load_with(&old_rules, t, weapons(), Some((kinds(), mats()))),
+        Err(sim_core::save::LoadError::Version { found: 10, .. })
+    ));
     let mut back = load_with(&bytes, t, weapons(), Some((kinds(), mats()))).unwrap();
     assert_eq!(bytes, save(&back));
     assert_eq!(

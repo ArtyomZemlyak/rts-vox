@@ -16,6 +16,7 @@ pub mod economy;
 pub mod energy;
 pub mod ground;
 pub mod index;
+pub mod integrity;
 pub mod mapcache;
 pub mod matter;
 pub mod mobility;
@@ -2310,8 +2311,10 @@ impl World {
             // (`max_step`, ADR-121) — туда машина просто не едет,
             // и отдельного правила для этого не нужно.
             let state = material_bodies.as_ref().and_then(|b| b.state(i as u32));
-            let powered = state.is_none_or(|s| s.status.engine && s.status.alive);
-            let engine = state.map_or(Fx::ONE, |s| s.mobility.engine);
+            let powered = state.is_none_or(|s| {
+                s.status.engine && s.status.alive && s.mobility.traction > Fx::ZERO
+            });
+            let engine = state.map_or(Fx::ONE, |s| s.mobility.engine.mul(s.mobility.traction));
             let mut vmax = if powered {
                 Fx::from_int(u.speed[i]).mul(engine)
             } else {

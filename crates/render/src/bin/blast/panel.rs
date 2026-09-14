@@ -497,19 +497,35 @@ pub fn refresh(
         .and_then(|i| {
             scene.sim.units.get(i).map(|u| {
                 format!(
-                    "Мишень {} · срезано {}\nЯдро {} · привод {}",
+                    "Мишень {} · {}\nЯдро {}% · двигатель {}\nХодовая {} · орудие {}",
                     i + 1,
-                    u.removed.len(),
                     if u.status.alive {
-                        "цел"
+                        "активна"
                     } else {
-                        "разрушено"
+                        "уничтожена"
                     },
+                    u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc(),
                     if u.status.engine {
-                        "работает"
+                        format!(
+                            "{}%",
+                            u.integrity.engine.mul(fx::Fx::from_int(100)).to_int_trunc()
+                        )
+                    } else {
+                        "отказ".into()
+                    },
+                    if u.status.alive && u.integrity.drive > fx::Fx::ZERO {
+                        format!(
+                            "{}%",
+                            u.integrity.drive.mul(fx::Fx::from_int(100)).to_int_trunc()
+                        )
+                    } else {
+                        "обездвижена".into()
+                    },
+                    if u.status.weapon {
+                        "готово"
                     } else {
                         "отказ"
-                    }
+                    },
                 )
             })
         })

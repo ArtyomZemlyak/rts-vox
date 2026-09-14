@@ -114,6 +114,7 @@ pub struct BodyState {
     pub shape: crate::burst::chunk::Shape,
     /// Derived at confirmed geometry changes and reconstructed on load.
     pub mobility: crate::mobility::Mobility,
+    pub integrity: crate::integrity::Report,
     pub revision: u64,
     pub removed: Vec<Cell>,
     separating: bool,
@@ -141,6 +142,8 @@ pub struct Change {
 pub struct Bodies {
     pub templates: Vec<Arc<UnitBody>>,
     template_status: Vec<Status>,
+    template_integrity: Vec<crate::integrity::Report>,
+    integrity_models: Vec<crate::integrity::Model>,
     template_shapes: Vec<crate::burst::chunk::Shape>,
     pub slots: Vec<Option<BodyState>>,
     pub generations: Vec<u32>,
@@ -257,11 +260,13 @@ impl Bodies {
                     return false;
                 }
             }
-            let status = body
-                .as_ref()
-                .map_or(self.template_status[template as usize], |b| {
-                    b.status(&mut self.core)
-                });
+            let (status, integrity) = body.as_ref().map_or(
+                (
+                    self.template_status[template as usize],
+                    self.template_integrity[template as usize],
+                ),
+                |b| self.integrity_models[template as usize].evaluate(b, &mut self.core),
+            );
             if debris_mm3 > removed_n as u64 * (t.mm as u64).pow(3) {
                 return false;
             }
@@ -286,7 +291,8 @@ impl Bodies {
                 debris_mm3,
                 status,
                 shape,
-                mobility,
+                mobility: mobility.with_traction(integrity.drive),
+                integrity,
                 revision,
                 removed,
                 separating: false,
@@ -441,7 +447,12 @@ impl Bodies {
     }
     pub fn new(templates: Vec<UnitBody>) -> Self {
         let mut core = CoreBufs::new();
-        let template_status = templates.iter().map(|b| b.status(&mut core)).collect();
+        let integrity_models: Vec<_> = templates.iter().map(crate::integrity::Model::new).collect();
+        let (template_status, template_integrity) = templates
+            .iter()
+            .zip(&integrity_models)
+            .map(|(b, model)| model.evaluate(b, &mut core))
+            .unzip();
         let template_shapes = templates
             .iter()
             .map(crate::burst::chunk::Shape::from_body)
@@ -449,6 +460,8 @@ impl Bodies {
         Self {
             templates: templates.into_iter().map(Arc::new).collect(),
             template_status,
+            template_integrity,
+            integrity_models,
             template_shapes,
             slots: Vec::new(),
             generations: Vec::new(),
@@ -474,7 +487,9 @@ impl Bodies {
             shape: self.template_shapes[template as usize].clone(),
             mobility: crate::mobility::Mobility::intact(
                 self.template_status[template as usize].engine,
-            ),
+            )
+            .with_traction(self.template_integrity[template as usize].drive),
+            integrity: self.template_integrity[template as usize],
             revision: 0,
             removed: Vec::new(),
             separating: false,
@@ -679,7 +694,8 @@ impl Bodies {
         for id in changed {
             let state = self.slots[id as usize].as_mut().unwrap();
             let body = state.own.as_ref().unwrap();
-            state.status = body.status(&mut self.core);
+            (state.status, state.integrity) =
+                self.integrity_models[state.template as usize].evaluate(body, &mut self.core);
             state.mobility = crate::mobility::Mobility::after_damage(
                 &self.template_shapes[state.template as usize],
                 &state.shape,
@@ -687,7 +703,8 @@ impl Bodies {
                 body,
                 &self.core,
                 state.status,
-            );
+            )
+            .with_traction(state.integrity.drive);
             if state.status.alive && state.status.detached > 0 && !state.separating {
                 let mut mask = body.vol.clone();
                 for (word, reached) in mask.cols.iter_mut().zip(self.core.reached_cols()) {

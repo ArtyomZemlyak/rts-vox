@@ -1,0 +1,8 @@
+// Operating limits of installed machinery, independent of exterior armour.
+(
+    core_volume_pct: 60,
+    core_section_pct: 30,
+    engine_volume_pct: 20,
+    gear_section_pct: 30,
+    required_gears_pct: 75,
+)

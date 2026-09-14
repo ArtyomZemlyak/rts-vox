@@ -1345,6 +1345,11 @@ pub(crate) fn running_gear(
     zs: (usize, usize),
     p: Part,
 ) {
+    b.push_load_path(crate::unit::WeaponPath {
+        min: [xs.0 as u8, 0, zs.0 as u8],
+        max: [xs.1 as u8, h as u8, zs.1 as u8],
+        axis: 0,
+    });
     if h < 10 {
         tracks(b, xs, h, zs, p);
         return;

@@ -36,8 +36,9 @@
 //!
 //! **Версия растёт при любом изменении раскладки.** Незнакомую версию
 //! читатель отвергает с внятным сообщением, а не разбирает наугад.
-//! Версия 10 читает версии 8 и 9, перенося старую скорость/дробную
-//! высоту полёта подвижного корпуса в состояние подвески (ADR-253).
+//! Версия 11 читает версии 8–10 без материальных тел; скорость/дробная
+//! высота старого полёта переносится в подвеску (ADR-253). Сохранения
+//! материального боя до версии 11 отклоняются: правила отказов изменены.
 
 use crate::{ground, shot, Order, Reference, Tuning, Units, World};
 use fx::blob::{Blob, Scan};
@@ -47,7 +48,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +153,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && v != 8 && v != 9 {
+    if v != VERSION && v != 8 && v != 9 && v != 10 {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -517,6 +518,12 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
     }
     load_econ(s, w)?;
     if s.bool() {
+        if version < 11 {
+            return Err(LoadError::Version {
+                found: version,
+                want: VERSION,
+            });
+        }
         let Some(bodies) = w.material_bodies.as_mut() else {
             return Err(LoadError::WorldMismatch);
         };
