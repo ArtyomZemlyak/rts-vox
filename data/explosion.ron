@@ -1,0 +1,26 @@
+// World unit = 100 mm. Impulse units are a gameplay envelope, not pascals.
+// The GPU gas is presentation; it cannot issue damage or terrain edits.
+(
+    half_cells: 20,
+    cell_units: 2,
+    energy: 2300,
+    material_energy_j: 18000000,
+    air_cost: 100,
+    soil_resistance: 165,
+    concrete_resistance: 380,
+    steel_resistance: 10000,
+    unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
+    wave_work_per_tick: 2048,
+    edits_per_tick: 8192,
+    fire_tick: 45,
+    shell_speed: 150,
+    gravity: 98,
+    gas_cell_units: 5,
+    gas_source_radius: 32,
+    gas_temperature_k: 2900,
+    gas_fuel_milli: 1800,
+    gas_pressure_milli: 2200,
+    reaction_milli: 1800,
+    cooling_milli: 650,
+    buoyancy_milli: 1600,
+)

@@ -217,12 +217,29 @@ impl Solver {
             label: None,
             layout: &pipe.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: cost.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: field.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: cost.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: field.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params.as_entire_binding(),
+                },
             ],
         });
-        Solver { pipe, cost, field, params, bind, max_sectors, cost_words: cw }
+        Solver {
+            pipe,
+            cost,
+            field,
+            params,
+            bind,
+            max_sectors,
+            cost_words: cw,
+        }
     }
 
     /// Закодировать один диспатч в переданный кодировщик.

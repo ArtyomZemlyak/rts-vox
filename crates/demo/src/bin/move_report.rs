@@ -71,7 +71,9 @@ fn parse() -> Result<Args, String> {
 }
 
 fn data(name: &str) -> std::path::PathBuf {
-    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data").join(name);
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data")
+        .join(name);
     if here.exists() {
         here
     } else {
@@ -261,9 +263,22 @@ fn main() -> ExitCode {
             per(t.dv[k])
         );
     }
-    println!("{:<44} {:>10.2}", "наибольший скачок скорости, ед/с", t.dv_max);
-    println!("{:<44} {:>10} {:>12.2}", "скорость есть, шага нет (упор)", t.stalls, per(t.stalls));
-    println!("{:<44} {:>10} {:>12.2}", "шагов упёрлось в породу", blocked, blocked as f64 / a.ticks as f64);
+    println!(
+        "{:<44} {:>10.2}",
+        "наибольший скачок скорости, ед/с", t.dv_max
+    );
+    println!(
+        "{:<44} {:>10} {:>12.2}",
+        "скорость есть, шага нет (упор)",
+        t.stalls,
+        per(t.stalls)
+    );
+    println!(
+        "{:<44} {:>10} {:>12.2}",
+        "шагов упёрлось в породу",
+        blocked,
+        blocked as f64 / a.ticks as f64
+    );
     for (k, deg) in [3, 6, 12].iter().enumerate() {
         println!(
             "{:<44} {:>10} {:>12.2}",
@@ -285,6 +300,9 @@ fn main() -> ExitCode {
             per(t.dy[k])
         );
     }
-    println!("{:<44} {:>10}", "наибольший перенос высоты, вокс.", t.dy_max);
+    println!(
+        "{:<44} {:>10}",
+        "наибольший перенос высоты, вокс.", t.dy_max
+    );
     ExitCode::SUCCESS
 }

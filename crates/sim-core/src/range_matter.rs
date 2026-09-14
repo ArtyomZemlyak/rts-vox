@@ -1,0 +1,264 @@
+//! Adapter from the range's occluded pressure envelope to shared, persistent
+//! material fragments. Geometry is removed only after reserving energy + room.
+use super::{material, RangeUnit};
+use crate::{
+    burst::{Bursts, Fragment},
+    economy::{Economy, Wreck},
+    matter::{Container, Kind, Ledger, Sink},
+};
+use fx::{
+    blob::{Blob, Scan},
+    Fx,
+};
+use phys::V3;
+use voxel::World;
+
+pub enum ClaimResult {
+    Applied,
+    Unaffordable,
+    Deferred,
+}
+
+pub struct Matter {
+    pub debris: Bursts,
+    pub economy: Economy,
+    pub tuning: modding::tuning::Blast,
+    pub remaining_mj: u64,
+    pub supplied_mj: u64,
+    pub spent_mj: u64,
+    bodies: Vec<u32>,
+}
+impl Matter {
+    pub fn new(units: &[RangeUnit]) -> Self {
+        let t =
+            crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
+        let mats =
+            modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron"))
+                .expect("range material IDs");
+        let mut economy = Economy::new(modding::Kinds::new(), mats, 1, &t);
+        let amount = economy.per_voxel(3);
+        let bodies = units
+            .iter()
+            .map(|u| {
+                let n = u.body.solid_count() as u64 * amount;
+                economy.ledger.create(Kind::Body, n, n)
+            })
+            .collect();
+        Self {
+            debris: Bursts::default(),
+            economy,
+            tuning: t.blast,
+            remaining_mj: 0,
+            supplied_mj: 0,
+            spent_mj: 0,
+            bodies,
+        }
+    }
+    pub fn begin(&mut self, joules: u32) {
+        self.remaining_mj = u64::from(joules) * 1000;
+        self.supplied_mj += self.remaining_mj;
+    }
+    fn cost(&self, mat: u16) -> (u64, u64) {
+        let d = self.economy.mats.get(mat).expect("range material");
+        crate::burst::fracture_cost_mj(d.strength, voxel::unit::WORLD_MM, &self.tuning)
+    }
+
+    fn pay(&mut self, cost: u64) {
+        self.remaining_mj -= cost;
+        self.spent_mj += cost;
+    }
+    pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
+        let m = material(w, p);
+        let (cost, motion) = self.cost(m);
+        if cost > self.remaining_mj {
+            return ClaimResult::Unaffordable;
+        }
+        if !self
+            .debris
+            .claim_voxel(w, p.map(|v| v as u32), m, at, motion, &self.tuning)
+        {
+            return ClaimResult::Deferred;
+        }
+        self.pay(cost);
+        ClaimResult::Applied
+    }
+    pub fn body(
+        &mut self,
+        id: usize,
+        u: &RangeUnit,
+        cell: [usize; 3],
+        pose: &crate::damage::Frame,
+        at: [i32; 3],
+    ) -> ClaimResult {
+        let (cost, motion) = self.cost(3);
+        if cost > self.remaining_mj {
+            return ClaimResult::Unaffordable;
+        }
+        if self.debris.fragment_room(&self.tuning) == 0 {
+            return ClaimResult::Deferred;
+        }
+        let position = pose.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        let mut direction = position.sub(V3::new(
+            Fx::from_int(at[0]),
+            Fx::from_int(at[1]),
+            Fx::from_int(at[2]),
+        ));
+        direction.y = direction.y.add(
+            Fx::from_ratio(self.tuning.lift_pct as i32, 100)
+                .mul(direction.x.abs().add(direction.z.abs())),
+        );
+        if direction.len_sq() == Fx::ZERO {
+            direction = pose.y;
+        }
+        let amount = self.economy.per_voxel(3);
+        let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+        assert_eq!(
+            self.economy.ledger.transfer(self.bodies[id], held, amount),
+            amount
+        );
+        let d = self.economy.mats.get(3).unwrap();
+        let mass_g = u64::from(d.density)
+            * u64::from(self.tuning.density_kg_m3_per_density)
+            * u64::from(u.body.mm).pow(3)
+            / 1_000_000;
+        let [x, y, z] = cell;
+        self.debris.emit_body_fragment(
+            Fragment {
+                id: 0,
+                position,
+                velocity: V3::ZERO,
+                material: 3,
+                paint: Some([1, u.body.finish_at(x, y, z), u.body.part_at(x, y, z) as u8]),
+                mm: u.body.mm,
+                basis: [pose.x, pose.y, pose.z],
+                mass_g,
+                count: 1,
+                shape: 1,
+                chunk: None,
+                held,
+                resting: false,
+            },
+            direction,
+            motion,
+            &self.tuning,
+        );
+        self.pay(cost);
+        ClaimResult::Applied
+    }
+    pub fn annihilate_body(&mut self, id: usize, count: usize) {
+        let amount = count as u64 * self.economy.per_voxel(3);
+        assert_eq!(
+            self.economy
+                .ledger
+                .sink(self.bodies[id], amount, Sink::Annihilation),
+            amount
+        );
+    }
+    pub fn flush(&mut self, w: &World, material: bool, gravity: i32) {
+        self.debris
+            .confirm(w.completed(), &mut self.economy, &self.tuning);
+        if !material {
+            for &(_, mat) in w.taken() {
+                let amount = self.economy.per_voxel(mat);
+                self.economy.ledger.reveal(self.economy.ground, amount);
+                self.economy
+                    .ledger
+                    .sink(self.economy.ground, amount, Sink::Annihilation);
+            }
+        }
+        self.debris.step_fragments(
+            w,
+            &mut self.economy,
+            &self.tuning,
+            Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)),
+        );
+    }
+    pub fn save(&self, b: &mut Blob) {
+        b.u64(self.remaining_mj);
+        b.u64(self.supplied_mj);
+        b.u64(self.spent_mj);
+        self.debris.save(b);
+        let (containers, sunk, initial, head, free) = self.economy.ledger.snapshot();
+        b.usize(containers.len());
+        for c in containers {
+            b.u8(c.kind.code());
+            b.u64(c.held);
+            b.u64(c.cap);
+            b.bool(c.alive);
+        }
+        for v in sunk {
+            b.u64(v);
+        }
+        b.u64(initial);
+        b.u32(head);
+        b.u32s(&free);
+    }
+    pub fn load(&mut self, s: &mut Scan, w: &World, units: &[RangeUnit]) -> Option<()> {
+        self.remaining_mj = s.u64();
+        self.supplied_mj = s.u64();
+        self.spent_mj = s.u64();
+        if self.spent_mj > self.supplied_mj || self.remaining_mj > self.supplied_mj - self.spent_mj
+        {
+            return None;
+        }
+        self.debris = Bursts::load(s, Some(w), &self.tuning)?;
+        let n = s.usize();
+        if n > self.tuning.max_fragments as usize + units.len() + 2 {
+            return None;
+        }
+        let mut containers = Vec::with_capacity(n);
+        for _ in 0..n {
+            let c = Container {
+                kind: Kind::from_code(s.u8())?,
+                held: s.u64(),
+                cap: s.u64(),
+                alive: s.bool(),
+            };
+            if c.held > c.cap {
+                return None;
+            }
+            containers.push(c);
+        }
+        let sunk = (0..crate::matter::SINKS.len()).map(|_| s.u64()).collect();
+        let initial = s.u64();
+        let head = s.u32();
+        let free = s.u32s();
+        if free.len() != n
+            || (head != u32::MAX && head as usize >= n)
+            || free.iter().any(|&v| v != u32::MAX && v as usize >= n)
+        {
+            return None;
+        }
+        self.economy.ledger = Ledger::from_snapshot(containers, sunk, initial, head, free)?;
+        let l = &self.economy.ledger;
+        for (u, id) in units.iter().zip(&self.bodies) {
+            let c = l.try_get(*id)?;
+            if !c.alive
+                || c.kind != Kind::Body
+                || c.held != u.body.solid_count() as u64 * self.economy.per_voxel(3)
+            {
+                return None;
+            }
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for f in &self.debris.fragments {
+            let c = l.try_get(f.held)?;
+            if !c.alive
+                || c.kind != Kind::Debris
+                || !ids.insert(f.held)
+                || c.held != u64::from(f.count) * self.economy.per_voxel(f.material)
+            {
+                return None;
+            }
+            if f.resting {
+                self.economy.wrecks.push(Wreck {
+                    held: f.held,
+                    x: f.position.x.to_int_trunc(),
+                    y: f.position.y.to_int_trunc(),
+                    z: f.position.z.to_int_trunc(),
+                });
+            }
+        }
+        Some(())
+    }
+}

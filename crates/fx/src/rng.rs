@@ -41,7 +41,10 @@ impl Rng {
     /// по построению PCG, и нечётность проверяется здесь, а не
     /// оставляется вызывающему — чётный `inc` даёт вырожденный поток.
     pub const fn from_state(state: u64, inc: u64) -> Rng {
-        Rng { state, inc: inc | 1 }
+        Rng {
+            state,
+            inc: inc | 1,
+        }
     }
 
     #[inline]

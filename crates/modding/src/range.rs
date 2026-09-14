@@ -1,0 +1,153 @@
+//! Bounded, integer-only fixtures for the live weapons proving ground.
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RangeUnitKind {
+    Tank,
+    Strider,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeUnitDef {
+    pub kind: RangeUnitKind,
+    pub at: [i32; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeBlock {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+    pub material: u16,
+}
+impl RangeBlock {
+    pub fn contains(&self, p: [i32; 3]) -> bool {
+        (0..3).all(|a| p[a] >= self.min[a] && p[a] < self.max[a])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeLayout {
+    #[serde(default)]
+    pub course: Option<RangeCourse>,
+    pub target: [i32; 3],
+    /// Target-plane fuse makes the with/without-cover comparison reproducible.
+    pub airburst_on_target: bool,
+    pub clear_min: [i32; 2],
+    pub clear_max: [i32; 2],
+    pub units: Vec<RangeUnitDef>,
+    /// Later blocks override earlier blocks, allowing cladding and cutouts.
+    pub blocks: Vec<RangeBlock>,
+    pub power_milli: Vec<u32>,
+    pub unit_resistance: u32,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeRamp {
+    pub min: [i32; 3],
+    pub max: [i32; 3],
+    pub axis: usize,
+    pub reverse: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Patrol {
+    pub unit: usize,
+    pub points: Vec<[i32; 2]>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeCourse {
+    pub min: [i32; 2],
+    pub max: [i32; 2],
+    pub ramps: Vec<RangeRamp>,
+    pub patrols: Vec<Patrol>,
+    pub tank_speed: i32,
+    pub walker_speed: i32,
+    pub step_height: i32,
+    pub arrival: i32,
+    pub reload_ticks: u32,
+    #[serde(default = "default_turn_alignment")]
+    pub turn_alignment_pct: i32,
+    #[serde(default = "default_replan")]
+    pub replan_ticks: u32,
+}
+fn default_turn_alignment() -> i32 {
+    97
+}
+fn default_replan() -> u32 {
+    90
+}
+impl RangeLayout {
+    pub fn to_ron(&self) -> Result<String, String> {
+        self.validate()?;
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+            .map_err(|e| e.to_string())
+    }
+    pub fn from_ron(text: &str) -> Result<Self, String> {
+        let r: Self = ron::from_str(text).map_err(|e| e.to_string())?;
+        r.validate()?;
+        Ok(r)
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        let r = self;
+        let size = [640, 192, 640];
+        if r.unit_resistance == 0
+            || r.unit_resistance > 1_000_000
+            || r.units.len() > 8
+            || r.blocks.len() > 32
+            || r.power_milli.is_empty()
+            || r.power_milli.len() > 8
+            || r.power_milli.iter().any(|p| !(100..=4000).contains(p))
+            || r.target[0] <= 160
+            || (0..3).any(|a| r.target[a] < 0 || r.target[a] >= size[a])
+            || (0..2).any(|a| {
+                r.clear_min[a] < 0 || r.clear_max[a] > 640 || r.clear_min[a] >= r.clear_max[a]
+            })
+            || r.blocks.iter().any(|b| {
+                ![0, 1, 2, 3, 6].contains(&b.material)
+                    || (0..3).any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
+            })
+            || r.units.iter().any(|u| {
+                u.at[0] < 80
+                    || u.at[0] > 560
+                    || u.at[1] < 0
+                    || u.at[1] > 96
+                    || u.at[2] < 80
+                    || u.at[2] > 560
+            })
+        {
+            return Err("range layout exceeds supported bounds".into());
+        }
+        if let Some(c) = &r.course {
+            if c.patrols
+                .iter()
+                .enumerate()
+                .any(|(i, p)| c.patrols[..i].iter().any(|q| q.unit == p.unit))
+                || c.ramps.len() > 16
+                || c.patrols.len() > 8
+                || !(1..=100).contains(&c.tank_speed)
+                || !(1..=100).contains(&c.walker_speed)
+                || !(1..=8).contains(&c.step_height)
+                || !(1..=16).contains(&c.arrival)
+                || c.reload_ticks > 1800
+                || c.replan_ticks == 0
+                || c.replan_ticks > 1800
+                || !(1..=99).contains(&c.turn_alignment_pct)
+                || (0..2).any(|a| c.min[a] < 0 || c.max[a] > 640 || c.min[a] >= c.max[a])
+                || c.patrols.iter().any(|p| {
+                    p.unit >= r.units.len()
+                        || p.points.len() < 2
+                        || p.points.len() > 32
+                        || p.points
+                            .iter()
+                            .any(|p| (0..2).any(|a| p[a] < c.min[a] + 32 || p[a] >= c.max[a] - 32))
+                })
+                || c.ramps.iter().any(|b| {
+                    ![0, 2].contains(&b.axis)
+                        || (0..3)
+                            .any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
+                })
+            {
+                return Err("course exceeds supported bounds".into());
+            }
+        }
+        Ok(())
+    }
+}

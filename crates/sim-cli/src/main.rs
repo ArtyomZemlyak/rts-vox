@@ -12,7 +12,7 @@
 //! Он же сравнивается между Windows и Linux и между числом воркеров.
 
 use std::process::ExitCode;
-
+mod timing;
 
 struct Args {
     seed: u64,
@@ -29,6 +29,7 @@ struct Args {
     load: Option<std::path::PathBuf>,
     /// Печатать размер файла и время записи-чтения.
     save_stats: bool,
+    profile_csv: Option<std::path::PathBuf>,
 }
 
 impl Default for Args {
@@ -45,6 +46,7 @@ impl Default for Args {
             save: None,
             load: None,
             save_stats: false,
+            profile_csv: None,
         }
     }
 }
@@ -65,6 +67,7 @@ sim-cli — headless-прогон симуляции
   --save ФАЙЛ     записать состояние после прогона (ADR-229)
   --load ФАЙЛ     продолжить с записанного состояния, а не с нуля;
                   сид и заселение при этом берутся из файла
+  --profile-csv FILE  записать время каждого тика/фазы и нагрузку в CSV
   --save-stats    напечатать размер файла и время записи-чтения
   --help          это сообщение
 "
@@ -90,14 +93,22 @@ fn parse() -> Result<Args, String> {
             "--world-hash" => a.world_hash = true,
             "--stats" => a.stats = true,
             "--save-stats" => a.save_stats = true,
+            "--profile-csv" => {
+                a.profile_csv = Some(std::path::PathBuf::from(
+                    it.next()
+                        .ok_or_else(|| "--profile-csv: missing path".to_string())?,
+                ))
+            }
             "--save" => {
                 a.save = Some(std::path::PathBuf::from(
-                    it.next().ok_or_else(|| "--save: нет имени файла".to_string())?,
+                    it.next()
+                        .ok_or_else(|| "--save: нет имени файла".to_string())?,
                 ))
             }
             "--load" => {
                 a.load = Some(std::path::PathBuf::from(
-                    it.next().ok_or_else(|| "--load: нет имени файла".to_string())?,
+                    it.next()
+                        .ok_or_else(|| "--load: нет имени файла".to_string())?,
                 ))
             }
             "--help" | "-h" => {
@@ -139,7 +150,11 @@ fn main() -> ExitCode {
     // ищется рядом с корнем репозитория, потом в текущем каталоге:
     // headless-прогон запускают и оттуда, и отсюда.
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
-    let path = if here.exists() { here } else { std::path::PathBuf::from("data/sim.ron") };
+    let path = if here.exists() {
+        here
+    } else {
+        std::path::PathBuf::from("data/sim.ron")
+    };
     let tuning = match modding::load_tuning(&path) {
         Ok(t) => t,
         Err(e) => {
@@ -151,7 +166,11 @@ fn main() -> ExitCode {
     // обязаны гонять ровно то, на чём стоит хеш (ADR-157).
     let weapons = {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
-        let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+        let path = if here.exists() {
+            here
+        } else {
+            std::path::PathBuf::from("data/weapons.ron")
+        };
         match modding::weapons::load(&path) {
             Ok(w) => w,
             Err(e) => {
@@ -221,12 +240,18 @@ fn main() -> ExitCode {
     // Это конечная проверка навигации — не «есть ли направление»,
     // а «дошёл ли кто-нибудь куда-нибудь».
     let mut snap: Vec<(u32, i32, i32)> = Vec::new();
+    let mut timing = timing::Timings::default();
+    let profiling = a.stats || a.profile_csv.is_some();
     for t in 1..=a.ticks {
+        let stamp = profiling.then(|| timing::start(&r.world));
         hash = if a.threads > 1 {
             r.tick_par(a.threads)
         } else {
             r.tick()
         };
+        if let Some(stamp) = stamp {
+            timing.record(&r.world, stamp);
+        }
         if let Some(g) = r.world.ground() {
             edits += g.stats.edits as u64;
             topo += g.stats.topo_dirty as u64;
@@ -260,6 +285,12 @@ fn main() -> ExitCode {
         }
     }
 
+    if profiling {
+        if let Err(e) = timing.report(a.profile_csv.as_deref()) {
+            eprintln!("timing report: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     if a.stats {
         // Что сценарий на самом деле нагружает. Хеш, совпавший точно
         // после правки боя, обязан быть объяснён, а не принят на веру
@@ -267,7 +298,42 @@ fn main() -> ExitCode {
         // Что из земли сценарий трогает, а что стоит: фаза, у которой
         // ноль и работы, и времени, в хеш не входит (ADR-116, ADR-157).
         for p in sim_core::PHASES {
-            println!("  фаза {:<14} {:>10} мкс", p.name(), r.world.phase_ns_of(p) / 1000);
+            println!(
+                "  фаза {:<14} {:>10} мкс",
+                p.name(),
+                r.world.phase_ns_of(p) / 1000
+            );
+        }
+        let mut occupancy = std::collections::BTreeMap::<(i32, i32), usize>::new();
+        for &i in r.world.units.live() {
+            *occupancy
+                .entry((r.world.units.x[i as usize], r.world.units.z[i as usize]))
+                .or_default() += 1;
+        }
+        println!(
+            "  distinct centres {} max occupancy {} examined move {}",
+            occupancy.len(),
+            occupancy.values().copied().max().unwrap_or(0),
+            r.world.examined_move
+        );
+        println!("  contact group pairs {}", r.world.contact_group_pairs);
+        for (name, ns) in ["projectiles", "targeting", "fire", "materials"]
+            .iter()
+            .zip(r.world.combat_ns)
+        {
+            println!("    combat/{name:<11} {:>10} мкс", ns / 1000);
+        }
+        for (name, ns) in ["topology", "terrain", "fields", "indices"]
+            .iter()
+            .zip(r.world.navigation_ns)
+        {
+            println!("    navigation/{name:<10} {:>10} мкс", ns / 1000);
+        }
+        for (name, ns) in ["requests", "drive", "suspension"]
+            .iter()
+            .zip(r.world.movement_ns)
+        {
+            println!("    movement/{name:<10} {:>10} мкс", ns / 1000);
         }
         // Рельеф сценария: плоская карта не нагружает навигацию по объёму,
         // а плоской она становится молча — обрезкой высоты (ADR-157).
@@ -291,7 +357,11 @@ fn main() -> ExitCode {
             );
         }
         if r.world.ground().is_some() {
-            let cap = r.world.ground().map(|g| g.world.max_edits_per_tick).unwrap_or(0);
+            let cap = r
+                .world
+                .ground()
+                .map(|g| g.world.max_edits_per_tick)
+                .unwrap_or(0);
             println!(
                 "  земля за прогон: правок {edits}, чанков связности {topo}, урона от падения {falls}, поездок {rides}, самое долгое падение {max_fall}"
             );
@@ -352,8 +422,61 @@ fn main() -> ExitCode {
         // численность держится ровной, и выбитый строй по ней
         // неотличим от нетронутого (ADR-164). Мерило силы боя — это.
         println!("  смертей за прогон: {}", r.world.deaths);
+        let u = &r.world.units;
+        let mut heave = Vec::new();
+        let mut peak_v = 0.0f64;
+        for &id in u.live() {
+            let i = id as usize;
+            heave.push(u.heave[i].to_f64_lossy());
+            peak_v = peak_v.max(u.body_vy(i).to_f64_lossy().abs());
+        }
+        heave.sort_by(f64::total_cmp);
+        if !heave.is_empty() {
+            println!(
+                "  suspension: offset_min={:.6} median={:.6} max={:.6} max_vertical_speed={:.6}",
+                heave[0],
+                heave[heave.len() / 2],
+                heave[heave.len() - 1],
+                peak_v
+            );
+            let mut extreme = u.live().to_vec();
+            extreme.sort_by_key(|&id| std::cmp::Reverse(u.heave[id as usize].abs().raw()));
+            for id in extreme.into_iter().take(5) {
+                let i = id as usize;
+                println!("    suspension unit={id} kind={} xyz={},{},{} offset={:.4} vy={:.4} fall={} riding={} load={:.4}",
+                    u.kind[i],u.x[i],u.y[i],u.z[i],u.heave[i].to_f64_lossy(),u.body_vy(i).to_f64_lossy(),
+                    u.fall_from[i],u.riding[i],u.load[i].to_f64_lossy());
+                if let Some(g) = r.world.ground() {
+                    let (nw, nh) = g.nav.dims();
+                    let (ex, ez) = g.extent();
+                    let (hc, hs) = sim_core::ride::heading_of(u.head[i]);
+                    let floors = sim_core::ride::supports_of(r.world.tuning.chassis(u.chassis[i]))
+                        .map(|s| {
+                            let x = (u.x[i] + s.x.mul(hc).sub(s.z.mul(hs)).to_int_trunc())
+                                .clamp(0, ex - 1) as u32;
+                            let z = (u.z[i] + s.x.mul(hs).add(s.z.mul(hc)).to_int_trunc())
+                                .clamp(0, ez - 1) as u32;
+                            let (cx, cz) = (
+                                (x * nw / ex as u32).min(nw - 1),
+                                (z * nh / ez as u32).min(nh - 1),
+                            );
+                            g.nav
+                                .levels_at(cx, cz)
+                                .iter()
+                                .copied()
+                                .min_by_key(|&y| (y as i32 - u.body_cell_y(i)).abs())
+                                .unwrap_or(g.nav.floor_at(cx, cz))
+                        });
+                    println!(
+                        "      support floors={floors:?} body_y={:.4}",
+                        u.body_y(i).to_f64_lossy()
+                    );
+                }
+            }
+        }
         let live = r.world.units.live().len();
-        let with_target = r.world
+        let with_target = r
+            .world
             .units
             .live()
             .iter()

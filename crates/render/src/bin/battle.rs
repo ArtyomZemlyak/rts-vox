@@ -22,22 +22,22 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
+use bevy::anti_alias::fxaa::Fxaa;
+use bevy::anti_alias::smaa::Smaa;
 use bevy::asset::RenderAssetUsages;
-use bevy::camera::Exposure;
 #[cfg(feature = "rt")]
 use bevy::camera::CameraMainTextureUsages;
+use bevy::camera::Exposure;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::diagnostic::FrameCount;
 use bevy::light::atmosphere::ScatteringMedium;
 use bevy::light::{
     Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder,
     DirectionalLightShadowMap, SunDisk,
 };
-use bevy::mesh::Indices;
-use bevy::anti_alias::fxaa::Fxaa;
-use bevy::anti_alias::smaa::Smaa;
-use bevy::core_pipeline::prepass::DepthPrepass;
-use bevy::diagnostic::FrameCount;
 use bevy::light::{FogVolume, VolumetricFog, VolumetricLight};
+use bevy::mesh::Indices;
 use bevy::pbr::{
     AtmosphereSettings, ScreenSpaceAmbientOcclusion, ScreenSpaceAmbientOcclusionQualityLevel,
 };
@@ -48,23 +48,23 @@ use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 #[cfg(feature = "rt")]
 use bevy::render::render_resource::TextureUsages;
+use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 #[cfg(feature = "rt")]
 use bevy::solari::pathtracer::{Pathtracer, PathtracingPlugin};
 #[cfg(feature = "rt")]
 use bevy::solari::prelude::{RaytracingMesh3d, SolariLighting, SolariPlugins};
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::window::PresentMode;
 use meshing::layer::MeshLayer;
 use meshing::{Opts, CS};
 use render::dust::{self, DustArt, DustPlugin};
 use render::edge::{EdgePlugin, Edges};
-use render::occlusion::{Occlusion, OcclusionPlugin};
 use render::geom::{
     chunk_at, chunk_origin, class_bufs, quads_to_mesh_painted, MeshBuf, Painter, Slice,
 };
 use render::look;
 use render::model::SegFrame;
+use render::occlusion::{Occlusion, OcclusionPlugin};
 use render::tex::tile_image;
 use render::{yaw_of, yaw_to, Camera as RtsCamera, ChunkGrid, V3};
 use sim_core::{Reference, SimEvent, NO_TARGET};
@@ -173,6 +173,8 @@ struct Fx {
     /// Выключенная снимает и текстуру, и её UV с вершин — иначе
     /// в замер попала бы только половина цены.
     chamfer: bool,
+    /// Ставить на поле весь набор тел, по номеру юнита.
+    kinds: bool,
     /// Ребро воксела тела юнита, миллиметры.
     body_mm: u16,
     /// Сколько крупных машин на сторону. Стратегия масштабная, а строй
@@ -408,11 +410,11 @@ struct Art {
     /// Меш корпуса **по отделке**: сталь, стекло и резина идут
     /// разными материалами, а материал у меша один (ADR-211).
     /// Пустая отделка ручки не получает и сущности не заводит.
-    hull: [[Option<Handle<Mesh>>; look::FINISHES]; 4],
-    turret: [[Option<Handle<Mesh>>; look::FINISHES]; 4],
+    hull: Vec<[Option<Handle<Mesh>>; look::FINISHES]>,
+    turret: Vec<[Option<Handle<Mesh>>; look::FINISHES]>,
     /// Повёрнутые части тела — наклонные листы, звенья ног. У каждой
     /// свой меш и своё место в теле; едут с корпусом или с башней.
-    segs: [Vec<SegArt>; 4],
+    segs: Vec<Vec<SegArt>>,
     /// Шар единичного радиуса: вспышка, дуло, огонь воронки. Размер
     /// задаёт масштаб, потому что размер у каждого свой и меняется
     /// каждый кадр.
@@ -441,7 +443,7 @@ struct Art {
     ground: [Handle<StandardMaterial>; look::CLASSES],
     /// Длина тела каждого набора в мировых единицах: пыль из-под
     /// машины соразмерна машине, а не постоянной.
-    len: [f32; 4],
+    len: Vec<f32>,
 }
 
 /// Светящийся материал: цвет **за пределами единицы** прямо
@@ -482,7 +484,11 @@ fn ramp(
 ) -> Vec<Handle<StandardMaterial>> {
     (0..n)
         .map(|i| {
-            let t = if n <= 1 { 0.0 } else { i as f32 / (n - 1) as f32 };
+            let t = if n <= 1 {
+                0.0
+            } else {
+                i as f32 / (n - 1) as f32
+            };
             // Остывание по квадрату: пик виден один кадр, а не треть
             // всей жизни.
             let k = (1.0 - t) * (1.0 - t);
@@ -627,6 +633,7 @@ fn main() {
         paint: true,
         sky: true,
         chamfer: true,
+        kinds: false,
         body_mm: 0,
         bigs: 0,
         rt: 0,
@@ -662,6 +669,7 @@ fn main() {
             "--paint" => fx.paint = v != "0",
             "--sky" => fx.sky = v != "0",
             "--chamfer" => fx.chamfer = v != "0",
+            "--kinds" => fx.kinds = v != "0",
             "--mm" => fx.body_mm = v.parse().unwrap_or(fx.body_mm),
             "--big" => fx.bigs = v.parse().unwrap_or(fx.bigs),
             "--rt" => fx.rt = v.parse().unwrap_or(fx.rt),
@@ -700,7 +708,11 @@ fn main() {
     let t0 = Instant::now();
     let tuning = {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
-        let path = if here.exists() { here } else { std::path::PathBuf::from("data/sim.ron") };
+        let path = if here.exists() {
+            here
+        } else {
+            std::path::PathBuf::from("data/sim.ron")
+        };
         match modding::load_tuning(&path) {
             Ok(t) => t,
             Err(e) => {
@@ -711,7 +723,11 @@ fn main() {
     };
     let weapons = {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
-        let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+        let path = if here.exists() {
+            here
+        } else {
+            std::path::PathBuf::from("data/weapons.ron")
+        };
         match modding::weapons::load(&path) {
             Ok(w) => w,
             Err(e) => {
@@ -722,7 +738,11 @@ fn main() {
     };
     let ring_nums = {
         let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/render.ron");
-        let path = if here.exists() { here } else { std::path::PathBuf::from("data/render.ron") };
+        let path = if here.exists() {
+            here
+        } else {
+            std::path::PathBuf::from("data/render.ron")
+        };
         match render::stream::Stream::load(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -758,7 +778,9 @@ fn main() {
     // как землю получит сценарий.
     let g = {
         let key = sim_core::mapcache::key(&params, seed, &tuning);
-        let path = cache_dir.as_ref().map(|d| d.join(format!("map-{key:016x}.bin")));
+        let path = cache_dir
+            .as_ref()
+            .map(|d| d.join(format!("map-{key:016x}.bin")));
         let cached = path.as_ref().and_then(|p| {
             let t = Instant::now();
             let bytes = match std::fs::read(p) {
@@ -836,7 +858,12 @@ fn main() {
     let t = Instant::now();
     let mesh = MeshLayer::new(&g.world, Opts::default());
     let (nx, ny, nz) = mesh.dims();
-    let grid = ChunkGrid { nx, ny, nz, cs: CS as u32 };
+    let grid = ChunkGrid {
+        nx,
+        ny,
+        nz,
+        cs: CS as u32,
+    };
     let side = side as f32;
     println!(
         "мир {}×{}×{}, чанков {}, юнитов {units}, направление «{}»; \
@@ -886,75 +913,81 @@ fn main() {
     let rt = fx.rt;
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "rts-vox — бой".into(),
-                present_mode: PresentMode::AutoNoVsync,
-                ..default()
-            }),
+        primary_window: Some(Window {
+            title: "rts-vox — бой".into(),
+            present_mode: PresentMode::AutoNoVsync,
             ..default()
-        }))
-        // Обводка силуэта: проход ставится всегда, а работает только
-        // там, где на камере есть `Edges` (ADR-214).
-        .add_plugins(EdgePlugin)
-        // Щелевое затенение по вокселям — тоже свой проход, и тоже
-        // работает только там, где на камере есть `Occlusion`.
-        .add_plugins(OcclusionPlugin)
-        // Пыль, дым и искры — по событиям и по движению (ADR-235).
-        .add_plugins(DustPlugin)
-        .insert_resource(fx)
-        .insert_resource(sky)
-        .insert_resource(Prof::default())
-        .insert_resource(Seen::default())
-        .insert_resource(DirectionalLightShadowMap { size: sc.shadow_map })
-        .insert_resource(GlobalAmbientLight {
-            color: srgb(sc.ambient_srgb),
-            brightness: sc.ambient_brightness,
-            ..default()
-        })
-        .insert_resource(Sim {
-            r,
-            mesh,
-            grid,
-            chunks: BTreeMap::new(),
-            bufs: class_bufs(),
-            painter: Painter::default(),
-            speed,
-        })
-        .insert_resource(Ring {
-            s: ring_nums,
-            state: vec![UNSEEN; n],
-            to_probe: VecDeque::new(),
-            to_build: VecDeque::new(),
-            at: None,
-            scan: Vec::new(),
-            capped: 0,
-            frames: 0,
-            probed: 0,
-            built: 0,
-            freed: 0,
-            t_probe: 0.0,
-            t_build: 0.0,
-            t_free: 0.0,
-        })
-        .insert_resource(View { cam, visible: 0, pan, vista })
-        .insert_resource(Shot {
-            path: shot,
-            after,
-            at_frame,
-            done: false,
-            at: 0,
-            frames,
-            seen: 0,
-            hist: Vec::new(),
-        })
-        .add_systems(Startup, setup)
-        .add_systems(Update, (step, effects, control, cull, snap))
-        // Порядок здесь не косметика: кольцо считается от камеры,
-        // которую только что подвинул `control`, а отсекает
-        // построенное уже `cull`. Перепутанный порядок даёт кольцо
-        // от прошлого кадра и чанк, видимый на кадр позже.
-        .add_systems(Update, stream.after(control).before(cull))
-        ;
+        }),
+        ..default()
+    }))
+    // Обводка силуэта: проход ставится всегда, а работает только
+    // там, где на камере есть `Edges` (ADR-214).
+    .add_plugins(EdgePlugin)
+    // Щелевое затенение по вокселям — тоже свой проход, и тоже
+    // работает только там, где на камере есть `Occlusion`.
+    .add_plugins(OcclusionPlugin)
+    // Пыль, дым и искры — по событиям и по движению (ADR-235).
+    .add_plugins(DustPlugin)
+    .insert_resource(fx)
+    .insert_resource(sky)
+    .insert_resource(Prof::default())
+    .insert_resource(Seen::default())
+    .insert_resource(DirectionalLightShadowMap {
+        size: sc.shadow_map,
+    })
+    .insert_resource(GlobalAmbientLight {
+        color: srgb(sc.ambient_srgb),
+        brightness: sc.ambient_brightness,
+        ..default()
+    })
+    .insert_resource(Sim {
+        r,
+        mesh,
+        grid,
+        chunks: BTreeMap::new(),
+        bufs: class_bufs(),
+        painter: Painter::default(),
+        speed,
+    })
+    .insert_resource(Ring {
+        s: ring_nums,
+        state: vec![UNSEEN; n],
+        to_probe: VecDeque::new(),
+        to_build: VecDeque::new(),
+        at: None,
+        scan: Vec::new(),
+        capped: 0,
+        frames: 0,
+        probed: 0,
+        built: 0,
+        freed: 0,
+        t_probe: 0.0,
+        t_build: 0.0,
+        t_free: 0.0,
+    })
+    .insert_resource(View {
+        cam,
+        visible: 0,
+        pan,
+        vista,
+    })
+    .insert_resource(Shot {
+        path: shot,
+        after,
+        at_frame,
+        done: false,
+        at: 0,
+        frames,
+        seen: 0,
+        hist: Vec::new(),
+    })
+    .add_systems(Startup, setup)
+    .add_systems(Update, (step, effects, control, cull, snap))
+    // Порядок здесь не косметика: кольцо считается от камеры,
+    // которую только что подвинул `control`, а отсекает
+    // построенное уже `cull`. Перепутанный порядок даёт кольцо
+    // от прошлого кадра и чанк, видимый на кадр позже.
+    .add_systems(Update, stream.after(control).before(cull));
     // Трассировка подключается **плагинами**, а не полем набора: без
     // аппаратной поддержки их лучше не добавлять вовсе.
     #[cfg(feature = "rt")]
@@ -1013,24 +1046,38 @@ fn setup(
     // Четыре тела, а не два: обычная машина стороны и крупная.
     // Номер набора — `сторона + 2·крупная`. Разница масштабов видна
     // только когда паук и танк стоят в одном кадре.
-    let bodies = [
-        voxel::unit::tank(),
-        voxel::unit::strider(),
-        voxel::roster::siege_walker(),
-        voxel::roster::commander(),
-    ]
-    .map(|b| {
-        if mm == 0 || mm == b.mm {
-            return b;
-        }
-        match b.resampled(mm) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("тело в {mm} мм не вышло: {}", e.why());
-                b
+    // Ключ `--kinds` ставит на поле **весь набор**: тело достаётся
+    // юниту по его номеру, и в кадре оказывается по нескольку машин
+    // каждого вида. Без ключа — прежние четыре: обычная машина
+    // стороны и крупная.
+    let bodies: Vec<voxel::unit::UnitBody> = if fx.kinds {
+        let mut v: Vec<voxel::unit::UnitBody> =
+            voxel::roster::all().into_iter().map(|(_, b)| b).collect();
+        v.push(voxel::unit::strider());
+        v
+    } else {
+        vec![
+            voxel::unit::tank(),
+            voxel::unit::strider(),
+            voxel::roster::siege_walker(),
+            voxel::roster::commander(),
+        ]
+    };
+    let bodies: Vec<voxel::unit::UnitBody> = bodies
+        .into_iter()
+        .map(|b| {
+            if mm == 0 || mm == b.mm {
+                return b;
             }
-        }
-    });
+            match b.resampled(mm) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("тело в {mm} мм не вышло: {}", e.why());
+                    b
+                }
+            }
+        })
+        .collect();
     let uv = fx.chamfer;
     let rt = fx.rt;
     let mut ubufs: [MeshBuf; look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
@@ -1081,33 +1128,51 @@ fn setup(
     };
     let tint = look::side_tint();
     // Чётные тела — первой стороне, нечётные — второй.
-    let hull: [_; 4] = std::array::from_fn(|o| {
-        unit_mesh(&bodies[o], tint[o % 2], Slice::Hull, render::model::root_centre(&bodies[o]), &mut meshes)
-    });
-    let turret: [_; 4] = std::array::from_fn(|o| {
-        unit_mesh(&bodies[o], tint[o % 2], Slice::Turret, render::model::root_centre(&bodies[o]), &mut meshes)
-    });
+    let hull: Vec<_> = (0..bodies.len())
+        .map(|o| {
+            unit_mesh(
+                &bodies[o],
+                tint[o % 2],
+                Slice::Hull,
+                render::model::root_centre(&bodies[o]),
+                &mut meshes,
+            )
+        })
+        .collect();
+    let turret: Vec<_> = (0..bodies.len())
+        .map(|o| {
+            unit_mesh(
+                &bodies[o],
+                tint[o % 2],
+                Slice::Turret,
+                render::model::root_centre(&bodies[o]),
+                &mut meshes,
+            )
+        })
+        .collect();
     // Сегменты: у каждого свой меш вокруг шарнира и своё место
     // в теле, сложенное по цепочке креплений (ADR-231).
     let per_mm = 1.0 / voxel::unit::WORLD_MM as f32;
-    let segs: [Vec<SegArt>; 4] = std::array::from_fn(|o| {
-        let frames = render::model::segment_frames(&bodies[o], per_mm);
-        bodies[o]
-            .segments
-            .iter()
-            .zip(frames)
-            .map(|(s, frame)| SegArt {
-                mesh: unit_mesh(
-                    &s.body,
-                    tint[o % 2],
-                    Slice::All,
-                    render::model::pivot_centre(&s.attach),
-                    &mut meshes,
-                ),
-                frame,
-            })
-            .collect()
-    });
+    let segs: Vec<Vec<SegArt>> = (0..bodies.len())
+        .map(|o| {
+            let frames = render::model::segment_frames(&bodies[o], per_mm);
+            bodies[o]
+                .segments
+                .iter()
+                .zip(frames)
+                .map(|(s, frame)| SegArt {
+                    mesh: unit_mesh(
+                        &s.body,
+                        tint[o % 2],
+                        Slice::All,
+                        render::model::pivot_centre(&s.attach),
+                        &mut meshes,
+                    ),
+                    frame,
+                })
+                .collect()
+        })
+        .collect();
     // Цвет несут вершины, и это не «умножается на базу»: в Bevy 0.19.1
     // цвет вершины **подменяет** `base_color` целиком
     // (`pbr_fragment.wgsl`). База здесь не значит ничего, а
@@ -1190,8 +1255,7 @@ fn setup(
         hull,
         turret,
         segs,
-        ball: meshes.add(Sphere::new(1.0).mesh().ico(2).expect("шар вспышки"))
-            ,
+        ball: meshes.add(Sphere::new(1.0).mesh().ico(2).expect("шар вспышки")),
         bar: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         chip: meshes.add(Cuboid::new(
             look::DEBRIS_SIZE,
@@ -1211,8 +1275,20 @@ fn setup(
             0.15,
         ),
         ray: [
-            ramp(&mut materials, look::BEAM_FRAMES as usize, [1.0, 2.6, 4.2], [0.10, 0.26, 0.42], 0.2),
-            ramp(&mut materials, look::BEAM_FRAMES as usize, [4.2, 1.5, 0.45], [0.42, 0.15, 0.05], 0.2),
+            ramp(
+                &mut materials,
+                look::BEAM_FRAMES as usize,
+                [1.0, 2.6, 4.2],
+                [0.10, 0.26, 0.42],
+                0.2,
+            ),
+            ramp(
+                &mut materials,
+                look::BEAM_FRAMES as usize,
+                [4.2, 1.5, 0.45],
+                [0.42, 0.15, 0.05],
+                0.2,
+            ),
         ],
         muzzle: ramp(
             &mut materials,
@@ -1232,7 +1308,10 @@ fn setup(
             ground_mat(look::Class::Ore, &mut images, &mut materials),
         ],
         // Длина по носу тела, в мировых вокселях.
-        len: std::array::from_fn(|o| bodies[o].extent_mm().0 as f32 / voxel::unit::WORLD_MM as f32),
+        len: bodies
+            .iter()
+            .map(|b| b.extent_mm().0 as f32 / voxel::unit::WORLD_MM as f32)
+            .collect(),
     };
 
     // Рельефа здесь нет вовсе, и это главное в ADR-228: он подгружается
@@ -1248,7 +1327,13 @@ fn setup(
         let owner = usize::from(sim.r.world.units.owner.get(i).copied().unwrap_or(0) == 1);
         // Первые слоты каждой стороны отдаются крупным машинам: места
         // в мире фиксированы, поэтому и набор тел выбирается по номеру.
-        let owner = owner + if i / 2 < fx.bigs { 2 } else { 0 };
+        // С ключом `--kinds` тело берётся по номеру юнита из всего
+        // набора: на поле оказывается по нескольку машин каждого вида.
+        let owner = if fx.kinds {
+            i % art.hull.len()
+        } else {
+            owner + if i / 2 < fx.bigs { 2 } else { 0 }
+        };
         // По сущности на отделку. Системы движения ищут по метке
         // и обновляют их все разом одним и тем же преобразованием:
         // корпус остаётся корпусом, из скольких бы материалов он
@@ -1367,7 +1452,10 @@ fn setup(
     // видимым то, ради чего они и заведены. Отдельным вставлением,
     // а не полем набора: компонент либо есть, либо его нет.
     if fx.bloom && sc.bloom > 0.0 {
-        commands.entity(cam).insert(Bloom { intensity: sc.bloom, ..Bloom::NATURAL });
+        commands.entity(cam).insert(Bloom {
+            intensity: sc.bloom,
+            ..Bloom::NATURAL
+        });
     }
     if fx.ssao {
         commands.entity(cam).insert((
@@ -1384,7 +1472,12 @@ fn setup(
         let o = sc.occlusion;
         commands.entity(cam).insert((
             Msaa::Off,
-            Occlusion { radius: o.radius, strength: o.strength, bias: o.bias, power: o.power },
+            Occlusion {
+                radius: o.radius,
+                strength: o.strength,
+                bias: o.bias,
+                power: o.power,
+            },
         ));
     }
     // Сглаживание после выключенных подвыборок: FXAA либо SMAA —
@@ -1419,8 +1512,11 @@ fn setup(
                 scattering: f.scattering,
                 ..default()
             },
-            Transform::from_xyz(side * 0.5, h * 0.5, side * 0.5)
-                .with_scale(Vec3::new(side * 1.5, h, side * 1.5)),
+            Transform::from_xyz(side * 0.5, h * 0.5, side * 0.5).with_scale(Vec3::new(
+                side * 1.5,
+                h,
+                side * 1.5,
+            )),
         ));
     }
     if sc.vignette.intensity > 0.0 {
@@ -1504,15 +1600,21 @@ fn setup(
         // Компонента `Transform` здесь нет намеренно: была бы —
         // распространение преобразований переписало бы это значение.
         commands.entity(atmo).insert(GlobalTransform::from(
-            Transform::from_scale(Vec3::splat(k))
-                .with_translation(Vec3::new(0.0, ground - EARTH_RADIUS_M * k, 0.0)),
+            Transform::from_scale(Vec3::splat(k)).with_translation(Vec3::new(
+                0.0,
+                ground - EARTH_RADIUS_M * k,
+                0.0,
+            )),
         ));
     } else {
         // Старая картинка целиком, чтобы было с чем сравнивать: плоская
         // заливка неба и линейный туман того же цвета.
         commands.entity(cam).insert(DistanceFog {
             color: srgb(sc.sky_colour_srgb),
-            falloff: FogFalloff::Linear { start: side * 0.35, end: side * 1.15 },
+            falloff: FogFalloff::Linear {
+                start: side * 0.35,
+                end: side * 1.15,
+            },
             ..default()
         });
     }
@@ -1520,37 +1622,40 @@ fn setup(
     // Солнце: белое, с каскадными тенями и видимым диском. Тень здесь
     // не эффект — без неё рельеф читается как плоская заливка, а юнит
     // не стоит на земле, а висит над ней.
-    let sun = commands.spawn((
-        DirectionalLight {
-            color: srgb(sc.sun_srgb),
-            illuminance: sc.sun_lux,
-            // Трассировка **заменяет** карты теней: держать обе значит
-            // платить дважды за одну тень.
-            shadow_maps_enabled: fx.cascades > 0 && fx.rt == 0,
-            // Воксельный мир — сплошные плоские грани, и на них акне
-            // теней видно лучше всего. Смещение подобрано по картинке.
-            shadow_depth_bias: 0.06,
-            shadow_normal_bias: 2.0,
-            ..default()
-        },
-        // Диск солнца рисует атмосфера; без неё компонент не значит
-        // ничего и потому ставится всегда.
-        SunDisk {
-            angular_size: sc.sun_disk_size,
-            intensity: sc.sun_disk_intensity,
-        },
-        Transform::default()
-            .looking_to(Vec3::from(look::sun_dir_at(sky.elevation, sky.azimuth)), Vec3::Y),
-        CascadeShadowConfigBuilder {
-            num_cascades: fx.cascades.max(1),
-            minimum_distance: 1.0,
-            first_cascade_far_bound: side * sc.shadow_first_frac,
-            maximum_distance: side * sc.shadow_max_frac,
-            overlap_proportion: 0.2,
-        }
-        .build(),
-    ))
-    .id();
+    let sun = commands
+        .spawn((
+            DirectionalLight {
+                color: srgb(sc.sun_srgb),
+                illuminance: sc.sun_lux,
+                // Трассировка **заменяет** карты теней: держать обе значит
+                // платить дважды за одну тень.
+                shadow_maps_enabled: fx.cascades > 0 && fx.rt == 0,
+                // Воксельный мир — сплошные плоские грани, и на них акне
+                // теней видно лучше всего. Смещение подобрано по картинке.
+                shadow_depth_bias: 0.06,
+                shadow_normal_bias: 2.0,
+                ..default()
+            },
+            // Диск солнца рисует атмосфера; без неё компонент не значит
+            // ничего и потому ставится всегда.
+            SunDisk {
+                angular_size: sc.sun_disk_size,
+                intensity: sc.sun_disk_intensity,
+            },
+            Transform::default().looking_to(
+                Vec3::from(look::sun_dir_at(sky.elevation, sky.azimuth)),
+                Vec3::Y,
+            ),
+            CascadeShadowConfigBuilder {
+                num_cascades: fx.cascades.max(1),
+                minimum_distance: 1.0,
+                first_cascade_far_bound: side * sc.shadow_first_frac,
+                maximum_distance: side * sc.shadow_max_frac,
+                overlap_proportion: 0.2,
+            }
+            .build(),
+        ))
+        .id();
     // Лучи в тумане идут от солнца: без этой метки туман светится
     // ровно, и тени в воздухе нет.
     if sky.fog > 0.0 {
@@ -1599,10 +1704,13 @@ fn paint(
 }
 
 fn buf_to_mesh(b: &MeshBuf, uv: bool) -> Mesh {
-    let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.pos.clone())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm.clone())
-        .with_inserted_indices(Indices::U32(b.idx.clone()));
+    let mut m = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, b.pos.clone())
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, b.nrm.clone())
+    .with_inserted_indices(Indices::U32(b.idx.clone()));
     if !b.col.is_empty() && b.col.len() == b.pos.len() {
         m.insert_attribute(Mesh::ATTRIBUTE_COLOR, b.col.clone());
     }
@@ -1705,7 +1813,15 @@ fn step(
     // Рельеф: только грязные чанки. Список берётся у мешинга, а не
     // угадывается по правкам.
     {
-        let Sim { r, mesh, grid, chunks, bufs, painter, .. } = &mut *sim;
+        let Sim {
+            r,
+            mesh,
+            grid,
+            chunks,
+            bufs,
+            painter,
+            ..
+        } = &mut *sim;
         let grid = *grid;
         let g = r.world.ground().expect("земля");
         // Правки копируются: мешеру нужен и мир, и они, а лежат оба
@@ -1746,9 +1862,9 @@ fn step(
                 // а в кадре на их месте стояли серые дыры.
                 if ring.state[i] == AIR || ring.state[i] == ROCK {
                     ring.state[i] = UNSEEN;
-                    let (cx, cz) =
-                        (i as u32 % grid.nx, i as u32 / (grid.nx * grid.ny));
-                    ring.to_probe.push_back(render::stream::column(&grid, cx, cz));
+                    let (cx, cz) = (i as u32 % grid.nx, i as u32 / (grid.nx * grid.ny));
+                    ring.to_probe
+                        .push_back(render::stream::column(&grid, cx, cz));
                 }
                 continue;
             };
@@ -1793,7 +1909,7 @@ fn step(
         }
         prof.quads.push(t_quads);
         prof.paint.push(t_paint);
-        if prof.paint.len() % 120 == 0 {
+        if prof.paint.len().is_multiple_of(120) {
             println!(
                 "раскраска: квадов {}, из них резаных {}, выборок {}, выпущено {}",
                 painter.quads, painter.split, painter.samples, painter.emitted
@@ -1894,8 +2010,19 @@ fn step(
             }
             let y = yaw_of(u.head[i]);
             let f = Vec3::new(y.cos(), 0.0, -y.sin()) * v.signum();
-            let owner = usize::from(u.owner[i] == 1) + if i / 2 < fx.bigs { 2 } else { 0 };
-            dust::track_dust(&mut commands, &dart, at(i), -f, art.len[owner], frame.0 ^ (i as u32 * 7919));
+            let owner = if fx.kinds {
+                i % art.len.len()
+            } else {
+                usize::from(u.owner[i] == 1) + if i / 2 < fx.bigs { 2 } else { 0 }
+            };
+            dust::track_dust(
+                &mut commands,
+                &dart,
+                at(i),
+                -f,
+                art.len[owner],
+                frame.0 ^ (i as u32 * 7919),
+            );
         }
     }
     for (m, mut tr, mut vis, seg) in turrets.iter_mut() {
@@ -1986,7 +2113,12 @@ fn step(
                 Mesh3d(art.ball.clone()),
                 MeshMaterial3d(art.muzzle[0].clone()),
                 Transform::from_translation(p).with_scale(Vec3::splat(look::MUZZLE_R)),
-                Fade { age: 0, life: look::MUZZLE_FRAMES, kind: Kind::Muzzle, size: look::MUZZLE_R },
+                Fade {
+                    age: 0,
+                    life: look::MUZZLE_FRAMES,
+                    kind: Kind::Muzzle,
+                    size: look::MUZZLE_R,
+                },
             ));
             commands.spawn((
                 PointLight {
@@ -1997,7 +2129,12 @@ fn step(
                     ..default()
                 },
                 Transform::from_translation(p),
-                Fade { age: 0, life: 2, kind: Kind::Light, size: look::MUZZLE_LIGHT_CD },
+                Fade {
+                    age: 0,
+                    life: 2,
+                    kind: Kind::Light,
+                    size: look::MUZZLE_LIGHT_CD,
+                },
             ));
         }
         let Seen { was, live } = &mut *seen;
@@ -2027,7 +2164,12 @@ fn step(
                     Mesh3d(art.ball.clone()),
                     MeshMaterial3d(art.boom[0].clone()),
                     Transform::from_translation(p).with_scale(Vec3::splat(r * look::BLAST_R0)),
-                    Fade { age: 0, life: look::BLAST_FRAMES, kind: Kind::Blast, size: r },
+                    Fade {
+                        age: 0,
+                        life: look::BLAST_FRAMES,
+                        kind: Kind::Blast,
+                        size: r,
+                    },
                 ));
                 commands.spawn((
                     PointLight {
@@ -2045,14 +2187,30 @@ fn step(
                         size: look::BLAST_LIGHT_CD * r,
                     },
                 ));
-                spawn_debris(&mut commands, &art.chip, &art.dust, p, r, look::DEBRIS_BLAST, (x, y, z));
+                spawn_debris(
+                    &mut commands,
+                    &art.chip,
+                    &art.dust,
+                    p,
+                    r,
+                    look::DEBRIS_BLAST,
+                    (x, y, z),
+                );
                 // Пыль и искры от воронки: обломки летят по параболе,
                 // а пыль висит и оседает — и видна с любой высоты.
                 if puff() {
                     dust::blast_dust(&mut commands, &dart, p, r, (x, y, z));
                 }
             }
-            SimEvent::Beam { x0, y0, z0, x1, y1, z1, owner } => {
+            SimEvent::Beam {
+                x0,
+                y0,
+                z0,
+                x1,
+                y1,
+                z1,
+                owner,
+            } => {
                 // Луч — вытянутый кубик от стрелка к цели, гаснущий
                 // за несколько кадров: событие приходит один раз,
                 // а увидеть его надо дольше.
@@ -2067,7 +2225,12 @@ fn step(
                     Transform::from_translation((a + b) * 0.5)
                         .with_rotation(Quat::from_rotation_arc(Vec3::Y, d / len))
                         .with_scale(Vec3::new(look::BEAM_W, len, look::BEAM_W)),
-                    Fade { age: 0, life: look::BEAM_FRAMES, kind: Kind::Beam, size: side as f32 },
+                    Fade {
+                        age: 0,
+                        life: look::BEAM_FRAMES,
+                        kind: Kind::Beam,
+                        size: side as f32,
+                    },
                 ));
                 // Вспышка у дула луча — та же, что у ствола: стреляет
                 // и тот и другой, и видно это одинаково.
@@ -2075,7 +2238,12 @@ fn step(
                     Mesh3d(art.ball.clone()),
                     MeshMaterial3d(art.muzzle[0].clone()),
                     Transform::from_translation(a).with_scale(Vec3::splat(look::MUZZLE_R)),
-                    Fade { age: 0, life: look::MUZZLE_FRAMES, kind: Kind::Muzzle, size: look::MUZZLE_R },
+                    Fade {
+                        age: 0,
+                        life: look::MUZZLE_FRAMES,
+                        kind: Kind::Muzzle,
+                        size: look::MUZZLE_R,
+                    },
                 ));
                 // Искры там, куда луч попал: попадание — событие
                 // не менее заметное, чем выстрел.
@@ -2088,7 +2256,15 @@ fn step(
                 // юнит просто исчезал. Теперь от него остаются обломки,
                 // искры и столб дыма, который стоит ещё несколько секунд.
                 let p = Vec3::new(x as f32, y as f32, z as f32);
-                spawn_debris(&mut commands, &art.chip, &art.dust, p, 2.0, look::DEBRIS_DEATH, (x, y, z));
+                spawn_debris(
+                    &mut commands,
+                    &art.chip,
+                    &art.dust,
+                    p,
+                    2.0,
+                    look::DEBRIS_DEATH,
+                    (x, y, z),
+                );
                 if puff() {
                     dust::sparks(&mut commands, &dart, p + Vec3::Y * 3.0, 1.6, (x, y, z), 12);
                     dust::wreck_smoke(&mut commands, p + Vec3::Y * 4.0, (x, y, z));
@@ -2121,11 +2297,7 @@ fn spawn_debris(
             Transform::from_translation(at + vel * 2.0),
             Debris {
                 vel,
-                spin: Vec3::new(
-                    frac(h >> 3) - 0.5,
-                    frac(h >> 9) - 0.5,
-                    frac(h >> 17) - 0.5,
-                ) * 0.35,
+                spin: Vec3::new(frac(h >> 3) - 0.5, frac(h >> 9) - 0.5, frac(h >> 17) - 0.5) * 0.35,
                 age: 0,
             },
         ));
@@ -2342,7 +2514,14 @@ fn stream(
     }
 
     let (build_r, keep_r) = (ring.s.build_radius as f32, ring.s.keep_radius as f32);
-    let Sim { r, mesh, chunks, bufs, painter, .. } = &mut *sim;
+    let Sim {
+        r,
+        mesh,
+        chunks,
+        bufs,
+        painter,
+        ..
+    } = &mut *sim;
     let w = &r.world.ground().expect("земля").world;
 
     // 1. Осмотр — **столбами, сверху вниз, до первой сплошной породы**.
@@ -2353,7 +2532,9 @@ fn stream(
     let t = Instant::now();
     let mut left = ring.s.probe_per_frame as i64;
     while left > 0 {
-        let Some(c) = ring.to_probe.pop_front() else { break };
+        let Some(c) = ring.to_probe.pop_front() else {
+            break;
+        };
         // Пока столб ждал очереди, кольцо могло уехать. Пропуск тут
         // дешевле, чем чистка очереди.
         if !render::stream::within(&grid, c, centre, build_r) {
@@ -2393,11 +2574,18 @@ fn stream(
     let want = ring.to_build.len();
     let mut done = 0u32;
     while done < ring.s.build_per_frame {
-        let Some(i) = ring.to_build.pop_front() else { break };
+        let Some(i) = ring.to_build.pop_front() else {
+            break;
+        };
         let k = i as usize;
         let (cx, _, cz) = (k as u32 % grid.nx, 0u32, k as u32 / (grid.nx * grid.ny));
         if ring.state[k] != QUEUED
-            || !render::stream::within(&grid, render::stream::column(&grid, cx, cz), centre, build_r)
+            || !render::stream::within(
+                &grid,
+                render::stream::column(&grid, cx, cz),
+                centre,
+                build_r,
+            )
         {
             continue;
         }
@@ -2459,7 +2647,9 @@ fn stream(
         }
     }
     for i in stale {
-        let Some(slot) = chunks.remove(&i) else { continue };
+        let Some(slot) = chunks.remove(&i) else {
+            continue;
+        };
         for e in slot.ent.into_iter().flatten() {
             commands.entity(e).despawn();
         }
@@ -2491,7 +2681,11 @@ fn cull(
     for (c, mut vis) in chunks.iter_mut() {
         let (lo, hi) = sim.grid.aabb(c.0);
         let on = f.intersects_aabb(lo, hi);
-        *vis = if on { Visibility::Inherited } else { Visibility::Hidden };
+        *vis = if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         seen += usize::from(on);
     }
     view.visible = seen;
@@ -2526,7 +2720,9 @@ fn snap(
                 ring.to_probe.len(),
                 ring.to_build.len()
             );
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(p));
         }
         shot.done = true;
         shot.at = shot.seen;
@@ -2574,9 +2770,15 @@ fn snap(
                         .collect();
                     let total: f64 = d.iter().map(|x| x.0).sum();
                     d.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
-                    let top: Vec<String> =
-                        d.iter().take(5).map(|(t, n)| format!("{n} {t:.2}")).collect();
-                    println!("  фазы тика за кадр: всего {total:.2} мс; {}", top.join(", "));
+                    let top: Vec<String> = d
+                        .iter()
+                        .take(5)
+                        .map(|(t, n)| format!("{n} {t:.2}"))
+                        .collect();
+                    println!(
+                        "  фазы тика за кадр: всего {total:.2} мс; {}",
+                        top.join(", ")
+                    );
                 }
                 prof.phase_ns = now;
             }

@@ -118,7 +118,14 @@ fn encode(
 
 /// Полный оборот: закодировать, отправить, дождаться. Возвращает
 /// (кодирование, отправка, ожидание) в наносекундах.
-fn round(g: &Gpu, kit: &Kit, passes: usize, per_pass: usize, groups: u32, distinct: bool) -> [f64; 3] {
+fn round(
+    g: &Gpu,
+    kit: &Kit,
+    passes: usize,
+    per_pass: usize,
+    groups: u32,
+    distinct: bool,
+) -> [f64; 3] {
     let t0 = Instant::now();
     let cb = encode(g, kit, passes, per_pass, groups, distinct);
     let t1 = Instant::now();
@@ -133,7 +140,14 @@ fn round(g: &Gpu, kit: &Kit, passes: usize, per_pass: usize, groups: u32, distin
     ]
 }
 
-fn measure(g: &Gpu, kit: &Kit, passes: usize, per_pass: usize, groups: u32, distinct: bool) -> [f64; 4] {
+fn measure(
+    g: &Gpu,
+    kit: &Kit,
+    passes: usize,
+    per_pass: usize,
+    groups: u32,
+    distinct: bool,
+) -> [f64; 4] {
     for _ in 0..5 {
         round(g, kit, passes, per_pass, groups, distinct);
     }
@@ -204,16 +218,14 @@ fn main() {
 
     section("3. Разные операции против одной и той же");
     println!("восемь разных конвейеров и групп привязок в одном буфере.\n");
-    println!("{:>5} {:>14} {:>14} {:>10}", "N", "одна и та же", "разные", "дороже");
+    println!(
+        "{:>5} {:>14} {:>14} {:>10}",
+        "N", "одна и та же", "разные", "дороже"
+    );
     for n in [8usize, 16, 32, 64, 128] {
         let a = measure(&g, &kit, 1, n, 1, false);
         let b = measure(&g, &kit, 1, n, 1, true);
-        println!(
-            "{n:>5} {:>14.0} {:>14.0} {:>9.2}x",
-            a[3],
-            b[3],
-            b[3] / a[3]
-        );
+        println!("{n:>5} {:>14.0} {:>14.0} {:>9.2}x", a[3], b[3], b[3] / a[3]);
     }
 
     section("4. Барьеры: один проход против прохода на фазу");
@@ -289,9 +301,8 @@ fn main() {
         let d2 = done.clone();
         let t0 = Instant::now();
         g.queue.submit([cb]);
-        g.queue.on_submitted_work_done(move || {
-            d2.store(true, std::sync::atomic::Ordering::Release)
-        });
+        g.queue
+            .on_submitted_work_done(move || d2.store(true, std::sync::atomic::Ordering::Release));
         // `PollType::Poll` всегда возвращает `Poll`, а не «очередь пуста»:
         // единственный честный признак готовности — обратный вызов.
         while !done.load(std::sync::atomic::Ordering::Acquire) {
@@ -304,7 +315,10 @@ fn main() {
     let spin = stat(v);
     let blk = measure(&g, &kit, 1, 1, 1, false);
     println!("усыпить поток (`Wait`):  {:>9.0} нс", blk[1] + blk[2]);
-    println!("крутиться (`Poll`):      {:>9.0} нс (мин {:.0})", spin.0, spin.1);
+    println!(
+        "крутиться (`Poll`):      {:>9.0} нс (мин {:.0})",
+        spin.0, spin.1
+    );
 
     section("8. Забрать результат обратно");
     println!("здесь и живёт «readback стоит два-три кадра» из ADR-087.\n");
@@ -383,7 +397,10 @@ fn main() {
     section("9. Загрузка правок в буфер");
     println!("список правок тика: индекс и материал, восемь байт на воксель.\n");
     let up = g.storage(64 * 1024 * 1024, "upload");
-    println!("{:>10} {:>12} {:>14} {:>14}", "правок", "байт", "нс", "ГиБ/с");
+    println!(
+        "{:>10} {:>12} {:>14} {:>14}",
+        "правок", "байт", "нс", "ГиБ/с"
+    );
     for edits in [256usize, 1024, 4096, 16384, 65536, 262144] {
         let data: Vec<u32> = (0..edits * 2).map(|i| i as u32).collect();
         let bytes = gpu::as_bytes(&data);

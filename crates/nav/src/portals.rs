@@ -72,16 +72,35 @@ impl PortalGraph {
         let sy = (h - 2).div_ceil(SEC);
         let portals = cut_portals(g, sx, sy);
         let (sec_starts, sec_portals) = group(&portals, sx * sy);
-        let mut st = BuildStats { portals: portals.len(), ..Default::default() };
+        let mut st = BuildStats {
+            portals: portals.len(),
+            ..Default::default()
+        };
         // Полная сборка — та же инкрементальная, у которой пересчитывается
         // всё: ни один сектор не переиспользуется.
         let reuse = vec![false; sx * sy];
         let (starts, edges) = solve(
-            g, &portals, &sec_starts, &sec_portals, sx, &reuse, None, &mut st,
+            g,
+            &portals,
+            &sec_starts,
+            &sec_portals,
+            sx,
+            &reuse,
+            None,
+            &mut st,
         );
         st.edges = edges.len();
         (
-            PortalGraph { portals, starts, edges, sec_starts, sec_portals, sx, sy, w },
+            PortalGraph {
+                portals,
+                starts,
+                edges,
+                sec_starts,
+                sec_portals,
+                sx,
+                sy,
+                w,
+            },
             st,
         )
     }
@@ -145,13 +164,18 @@ impl PortalGraph {
         key.sort_unstable();
         let old_of: Vec<u32> = portals
             .iter()
-            .map(|p| match key.binary_search_by(|probe| probe.0.cmp(&(p.cell_a, p.cell_b))) {
-                Ok(k) => key[k].1,
-                Err(_) => u32::MAX,
-            })
+            .map(
+                |p| match key.binary_search_by(|probe| probe.0.cmp(&(p.cell_a, p.cell_b))) {
+                    Ok(k) => key[k].1,
+                    Err(_) => u32::MAX,
+                },
+            )
             .collect();
 
-        let mut st = BuildStats { portals: portals.len(), ..Default::default() };
+        let mut st = BuildStats {
+            portals: portals.len(),
+            ..Default::default()
+        };
         let (starts, edges) = solve(
             g,
             &portals,
@@ -193,8 +217,8 @@ fn dijkstra_in_box(
     touched: &mut Vec<usize>,
 ) {
     let [ox, oy, ex, ey] = bx;
-    use std::collections::BinaryHeap;
     use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
     let w = g.w;
     let mut heap: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
     dist[start] = 0;
@@ -269,13 +293,7 @@ pub struct RouteStats {
 ///
 /// Возвращает статистику, а не путь: бенчмарк меряет цену поиска,
 /// а список порталов юнит получает тем же обходом `came`.
-pub fn route(
-    pg: &PortalGraph,
-    g: &Grid,
-    ws: &mut RouteWs,
-    from: usize,
-    to: usize,
-) -> RouteStats {
+pub fn route(pg: &PortalGraph, g: &Grid, ws: &mut RouteWs, from: usize, to: usize) -> RouteStats {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
@@ -300,7 +318,11 @@ pub fn route(
     let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
     for &p in pg.portals_of(sa) {
         let pt = pg.portals[p as usize];
-        let cell = if pt.sector_a == sa { pt.cell_a } else { pt.cell_b } as usize;
+        let cell = if pt.sector_a == sa {
+            pt.cell_a
+        } else {
+            pt.cell_b
+        } as usize;
         let (px, py) = ((cell % w) as i64, (cell / w) as i64);
         let (fx, fy) = ((from % w) as i64, (from / w) as i64);
         let d = (px.abs_diff(fx) + py.abs_diff(fy)) as u32 * g.cost[cell].max(1) as u32;
@@ -329,7 +351,10 @@ pub fn route(
             }
             return st;
         }
-        let (s, e) = (pg.starts[p as usize] as usize, pg.starts[p as usize + 1] as usize);
+        let (s, e) = (
+            pg.starts[p as usize] as usize,
+            pg.starts[p as usize + 1] as usize,
+        );
         for ed in &pg.edges[s..e] {
             let ng = ws.g[p as usize] + ed.cost;
             let t = ed.to as usize;
@@ -646,9 +671,7 @@ fn solve(
         .enumerate()
         .map(|(pi, p)| match old {
             Some((_, old_of)) => {
-                reuse[p.sector_a as usize]
-                    && reuse[p.sector_b as usize]
-                    && old_of[pi] != u32::MAX
+                reuse[p.sector_a as usize] && reuse[p.sector_b as usize] && old_of[pi] != u32::MAX
             }
             None => false,
         })
@@ -667,14 +690,22 @@ fn solve(
             }
             st.sector_solves += 1;
             let p = portals[pi as usize];
-            let start = if p.sector_a as usize == s { p.cell_a } else { p.cell_b } as usize;
+            let start = if p.sector_a as usize == s {
+                p.cell_a
+            } else {
+                p.cell_b
+            } as usize;
             dijkstra_in_box(g, start, [ox, oy, ex, ey], &mut dist, &mut touched);
             for &qi in list.iter() {
                 if qi == pi {
                     continue;
                 }
                 let q = portals[qi as usize];
-                let goal = if q.sector_a as usize == s { q.cell_a } else { q.cell_b } as usize;
+                let goal = if q.sector_a as usize == s {
+                    q.cell_a
+                } else {
+                    q.cell_b
+                } as usize;
                 let d = dist[goal];
                 if d != u32::MAX {
                     per_portal[pi as usize].push(Edge { to: qi, cost: d });
@@ -697,10 +728,17 @@ fn solve(
                 continue;
             }
             let o = old_of[pi];
-            let (a, b) = (pg.starts[o as usize] as usize, pg.starts[o as usize + 1] as usize);
+            let (a, b) = (
+                pg.starts[o as usize] as usize,
+                pg.starts[o as usize + 1] as usize,
+            );
             for e in &pg.edges[a..b] {
                 // Ребро «пересечь портал» указывает на себя.
-                let to = if e.to == o { pi as u32 } else { new_of[e.to as usize] };
+                let to = if e.to == o {
+                    pi as u32
+                } else {
+                    new_of[e.to as usize]
+                };
                 if to != u32::MAX {
                     per_portal[pi].push(Edge { to, cost: e.cost });
                 }
@@ -716,7 +754,10 @@ fn solve(
             continue;
         }
         let c = g.cost[p.cell_b as usize] as u32;
-        per_portal[pi].push(Edge { to: pi as u32, cost: c });
+        per_portal[pi].push(Edge {
+            to: pi as u32,
+            cost: c,
+        });
     }
     for (i, v) in per_portal.iter().enumerate() {
         starts[i + 1] = starts[i] + v.len() as u32;
@@ -748,7 +789,11 @@ mod rebuild_tests {
 
     fn same(a: &PortalGraph, b: &PortalGraph) -> Result<(), String> {
         if a.portals.len() != b.portals.len() {
-            return Err(format!("порталов {} против {}", a.portals.len(), b.portals.len()));
+            return Err(format!(
+                "порталов {} против {}",
+                a.portals.len(),
+                b.portals.len()
+            ));
         }
         for (i, (p, q)) in a.portals.iter().zip(&b.portals).enumerate() {
             if (p.cell_a, p.cell_b, p.sector_a, p.sector_b, p.width)
@@ -762,7 +807,11 @@ mod rebuild_tests {
         }
         for (i, (e, f)) in a.edges.iter().zip(&b.edges).enumerate() {
             if (e.to, e.cost) != (f.to, f.cost) {
-                return Err(format!("ребро {i}: {:?} против {:?}", (e.to, e.cost), (f.to, f.cost)));
+                return Err(format!(
+                    "ребро {i}: {:?} против {:?}",
+                    (e.to, e.cost),
+                    (f.to, f.cost)
+                ));
             }
         }
         Ok(())

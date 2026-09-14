@@ -88,14 +88,55 @@ impl Grid {
     /// по ведру, внутри ведра по индексу сущности.
     #[inline]
     pub fn for_each_near(&self, x: i32, z: i32, mut f: impl FnMut(u32)) {
+        self.for_each_bucket_near(x, z, |b| {
+            for &j in self.bucket_items(b) {
+                f(j);
+            }
+        });
+    }
+
+    pub(crate) fn bucket_items(&self, b: usize) -> &[u32] {
+        &self.items[self.starts[b] as usize..self.starts[b + 1] as usize]
+    }
+
+    #[inline]
+    pub(crate) fn for_each_bucket_near(&self, x: i32, z: i32, mut f: impl FnMut(usize)) {
         let bx = (x / self.cell).clamp(0, self.w as i32 - 1);
         let bz = (z / self.cell).clamp(0, self.h as i32 - 1);
         for gz in (bz - 1).max(0)..=(bz + 1).min(self.h as i32 - 1) {
             for gx in (bx - 1).max(0)..=(bx + 1).min(self.w as i32 - 1) {
                 let b = gz as usize * self.w + gx as usize;
-                let (lo, hi) = (self.starts[b] as usize, self.starts[b + 1] as usize);
-                for &j in &self.items[lo..hi] {
-                    f(j);
+                f(b);
+            }
+        }
+    }
+
+    /// Superset of every 3x3 query along a monotone swept segment. The
+    /// caller still checks membership at each sample; corner buckets may
+    /// never be visited by the exact walk. Clamped edge buckets are retained.
+    pub(crate) fn for_each_bucket_swept(&self, a: [i32; 2], b: [i32; 2], mut f: impl FnMut(usize)) {
+        let a = self.bucket_of(a[0], a[1]);
+        let b = self.bucket_of(b[0], b[1]);
+        let (ax, az, bx, bz) = (a % self.w, a / self.w, b % self.w, b / self.w);
+        for z in az.min(bz).saturating_sub(1)..=(az.max(bz) + 1).min(self.h - 1) {
+            for x in ax.min(bx).saturating_sub(1)..=(ax.max(bx) + 1).min(self.w - 1) {
+                f(z * self.w + x);
+            }
+        }
+    }
+
+    /// Candidate centres in a swept box expanded by the largest body radius.
+    /// Buckets are visited once; exact geometry and ties are the caller's job.
+    pub fn for_each_rect(&self, lo: [i32; 2], hi: [i32; 2], mut f: impl FnMut(u32)) {
+        let x0 = (lo[0] / self.cell).clamp(0, self.w as i32 - 1) as usize;
+        let x1 = (hi[0] / self.cell).clamp(0, self.w as i32 - 1) as usize;
+        let z0 = (lo[1] / self.cell).clamp(0, self.h as i32 - 1) as usize;
+        let z1 = (hi[1] / self.cell).clamp(0, self.h as i32 - 1) as usize;
+        for z in z0..=z1 {
+            for x in x0..=x1 {
+                let b = z * self.w + x;
+                for k in self.starts[b]..self.starts[b + 1] {
+                    f(self.items[k as usize]);
                 }
             }
         }
@@ -105,7 +146,7 @@ impl Grid {
     #[inline]
     pub fn near_count(&self, x: i32, z: i32) -> usize {
         let mut n = 0;
-        self.for_each_near(x, z, |_| n += 1);
+        self.for_each_bucket_near(x, z, |b| n += self.bucket_items(b).len());
         n
     }
 }

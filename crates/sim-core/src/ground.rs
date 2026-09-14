@@ -56,6 +56,7 @@ pub struct Ground {
     /// только в момент применения, а список короче потока правок —
     /// укладка и пустая правка сюда не попадают.
     taken: Vec<(u32, voxel::store::Mat)>,
+    pub(crate) completed: Vec<(Edit, voxel::store::Mat)>,
     /// Правки, применённые **после** каскада: запекание приземлившихся
     /// тел. Каскад в этом тике их уже не увидит, поэтому они переносятся
     /// в следующий — иначе его чанки разошлись бы с миром (ADR-129).
@@ -96,6 +97,7 @@ impl Ground {
             nav,
             edits: Vec::new(),
             taken: Vec::new(),
+            completed: Vec::new(),
             carry: Vec::new(),
             stats: GroundStats::default(),
         }
@@ -126,6 +128,7 @@ impl Ground {
         self.stats = GroundStats::default();
         self.edits.clear();
         self.taken.clear();
+        self.completed.clear();
         // Перенесённое с прошлого тика идёт первым: каскад обязан
         // увидеть запекание тела как обычную правку.
         self.edits.append(&mut self.carry);
@@ -137,6 +140,7 @@ impl Ground {
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
         self.taken.extend_from_slice(self.world.taken());
+        self.completed.extend_from_slice(self.world.completed());
     }
 
     /// Фаза `Destruction`: каскад отделения. Отрывы ставят свои правки
@@ -145,13 +149,16 @@ impl Ground {
     pub(crate) fn phase_destruction(&mut self) {
         self.bodies.spawned.clear();
         let edits = std::mem::take(&mut self.edits);
-        self.stats.collapse = self.collapse.apply(&mut self.world, &edits, &mut self.bodies);
+        self.stats.collapse = self
+            .collapse
+            .apply(&mut self.world, &edits, &mut self.bodies);
         self.edits = edits;
         let st = self.world.flush();
         self.stats.edits += st.applied;
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
         self.taken.extend_from_slice(self.world.taken());
+        self.completed.extend_from_slice(self.world.completed());
     }
 
     /// Фаза `Bodies`: шаг падения. Приземлившиеся запекаются обратно
@@ -163,6 +170,7 @@ impl Ground {
         self.stats.queued = st.queued;
         self.edits.extend_from_slice(self.world.edits());
         self.taken.extend_from_slice(self.world.taken());
+        self.completed.extend_from_slice(self.world.completed());
         // Каскад в этом тике уже отработал, а запекание тела — такая же
         // правка мира, как копка. Переносим её ему на следующий тик.
         //
@@ -174,13 +182,19 @@ impl Ground {
     }
 
     /// Фаза `NavUpdate`: связность и проходимость по потоку правок тика.
-    pub(crate) fn phase_nav(&mut self) {
+    pub(crate) fn phase_nav(&mut self) -> [u64; 2] {
+        use std::time::Instant;
+        let t0 = Instant::now();
         let edits = std::mem::take(&mut self.edits);
         let (dirty, survived) = self.topo.apply(&self.world, &edits);
         self.stats.topo_dirty = dirty;
         self.stats.topo_survived = survived;
+        let topology_ns = t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
         self.stats.nav = self.nav.apply(&self.world, &edits);
+        let walkability_ns = t0.elapsed().as_nanos() as u64;
         self.edits = edits;
+        [topology_ns, walkability_ns]
     }
 
     /// Записать землю в буфер (ADR-229).
@@ -523,8 +537,15 @@ mod tests {
         // воксель под собой, висел бы над собственной ямой девять тиков
         // (ADR-174). Потолок в один тик — и есть проверка правила.
         w.tick();
-        assert_eq!(w.units.y[id], GY as i32 - 1, "юнит не шагнул вниз за один тик");
-        assert_eq!(w.units.voxels[id], hp0, "шаг вниз на воксель стоил здоровья");
+        assert_eq!(
+            w.units.y[id],
+            GY as i32 - 1,
+            "юнит не шагнул вниз за один тик"
+        );
+        assert_eq!(
+            w.units.voxels[id], hp0,
+            "шаг вниз на воксель стоил здоровья"
+        );
     }
 
     /// **Критерий этапа 4** (`docs/11-roadmap.md`): до взрыва пути нет,

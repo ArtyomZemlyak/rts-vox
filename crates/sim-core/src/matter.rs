@@ -132,6 +132,8 @@ pub struct Ledger {
     initial: Amount,
     free_head: u32,
     free: Vec<u32>,
+    /// Derived membership cache; the serialized linked list is authoritative.
+    free_slots: Vec<bool>,
 }
 
 const NIL: u32 = u32::MAX;
@@ -150,6 +152,7 @@ impl Ledger {
             initial: 0,
             free_head: NIL,
             free: Vec::new(),
+            free_slots: Vec::new(),
         }
     }
 
@@ -158,15 +161,22 @@ impl Ledger {
     /// нужно, чтобы мир вообще с чего-то начался.
     pub fn create(&mut self, kind: Kind, held: Amount, cap: Amount) -> ContainerId {
         self.initial += held;
-        let c = Container { kind, held, cap, alive: true };
+        let c = Container {
+            kind,
+            held,
+            cap,
+            alive: true,
+        };
         if self.free_head != NIL {
             let id = self.free_head;
             self.free_head = self.free[id as usize];
+            self.free_slots[id as usize] = false;
             self.containers[id as usize] = c;
             return id;
         }
         self.containers.push(c);
         self.free.push(NIL);
+        self.free_slots.push(false);
         (self.containers.len() - 1) as ContainerId
     }
 
@@ -204,13 +214,30 @@ impl Ledger {
     /// из суммы мимо всех стоков. Это та же дыра, что ловил
     /// property-тест у перевода в мёртвого.
     pub fn release(&mut self, id: ContainerId) -> bool {
-        let c = &self.containers[id as usize];
-        if c.alive || c.held != 0 {
+        let Some(c) = self.containers.get(id as usize) else {
+            return false;
+        };
+        if c.alive || c.held != 0 || self.free_slots[id as usize] {
             return false;
         }
+        self.free_slots[id as usize] = true;
         self.free[id as usize] = self.free_head;
         self.free_head = id;
         true
+    }
+
+    pub fn retire_empty_debris(&mut self, id: ContainerId) -> bool {
+        let Some(c) = self.containers.get_mut(id as usize) else {
+            return false;
+        };
+        if !c.alive || c.held != 0 || c.kind != Kind::Debris {
+            return false;
+        }
+        c.alive = false;
+        self.release(id)
+    }
+    pub fn try_get(&self, id: ContainerId) -> Option<&Container> {
+        self.containers.get(id as usize)
     }
 
     pub fn get(&self, id: ContainerId) -> &Container {
@@ -388,7 +415,36 @@ impl Ledger {
         free_head: u32,
         free: Vec<u32>,
     ) -> Option<Ledger> {
-        if sunk.len() != SINKS.len() {
+        if sunk.len() != SINKS.len()
+            || free.len() != containers.len()
+            || containers
+                .iter()
+                .any(|c| c.held > c.cap || (!c.alive && c.held != 0))
+            || free
+                .iter()
+                .any(|&id| id != NIL && id as usize >= containers.len())
+        {
+            return None;
+        }
+        let mut free_slots = vec![false; containers.len()];
+        let mut cursor = free_head;
+        while cursor != NIL {
+            let c = containers.get(cursor as usize)?;
+            if c.alive || c.held != 0 || free_slots[cursor as usize] {
+                return None;
+            }
+            free_slots[cursor as usize] = true;
+            cursor = free[cursor as usize];
+        }
+        // Validate in a wider type: corrupt totals must return None, not overflow
+        // a release build before the save can be rejected.
+        let total = containers
+            .iter()
+            .filter(|c| c.alive)
+            .map(|c| u128::from(c.held))
+            .sum::<u128>()
+            + sunk.iter().map(|&n| u128::from(n)).sum::<u128>();
+        if total != u128::from(initial) {
             return None;
         }
         let mut l = Ledger {
@@ -397,6 +453,7 @@ impl Ledger {
             initial,
             free_head,
             free,
+            free_slots,
         };
         l.sunk.copy_from_slice(&sunk);
         l.balanced().then_some(l)
@@ -417,6 +474,44 @@ pub fn resource_of(voxels: Amount, density: u32) -> Amount {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn releasing_a_slot_twice_cannot_reuse_a_live_container() {
+        let mut l = Ledger::new();
+        let id = l.create(Kind::Debris, 0, 100);
+        assert!(l.retire_empty_debris(id));
+        assert!(!l.release(id));
+        let (c, s, i, h, f) = l.snapshot();
+        let mut l = Ledger::from_snapshot(c, s, i, h, f).unwrap();
+        assert!(!l.release(id));
+        assert_eq!(l.create(Kind::Body, 11, 100), id);
+        assert_ne!(l.create(Kind::Body, 19, 100), id);
+        assert_eq!(l.held(id), 11);
+        assert!(l.balanced());
+    }
+    #[test]
+    fn corrupt_free_lists_and_overflowing_totals_are_rejected() {
+        let empty = Container {
+            kind: Kind::Debris,
+            held: 0,
+            cap: 100,
+            alive: false,
+        };
+        let sunk = vec![0; SINKS.len()];
+        assert!(Ledger::from_snapshot(vec![empty], sunk.clone(), 0, 0, vec![0]).is_none());
+        assert!(Ledger::from_snapshot(vec![empty], sunk.clone(), 0, 1, vec![NIL]).is_none());
+        assert!(Ledger::from_snapshot(vec![empty], sunk.clone(), 0, NIL, vec![]).is_none());
+        let live = Container {
+            alive: true,
+            ..empty
+        };
+        assert!(Ledger::from_snapshot(vec![live], sunk.clone(), 0, 0, vec![NIL]).is_none());
+        let huge = Container {
+            held: u64::MAX,
+            cap: u64::MAX,
+            ..live
+        };
+        assert!(Ledger::from_snapshot(vec![huge, huge], sunk, 0, NIL, vec![NIL; 2]).is_none());
+    }
 
     /// **Таблица стоков в каноне и перечень в коде — один список.**
     ///
@@ -563,7 +658,11 @@ mod tests {
         assert!(!l.get(h).alive);
         assert_eq!(l.transfer(g, h, 100), 0, "мёртвый принял материю");
         assert_eq!(l.transfer(h, g, 100), 0, "мёртвый отдал материю");
-        assert_eq!(l.sink(h, 100, Sink::Annihilation), 0, "мёртвый списал материю");
+        assert_eq!(
+            l.sink(h, 100, Sink::Annihilation),
+            0,
+            "мёртвый списал материю"
+        );
         assert!(l.balanced(), "расхождение {}", l.imbalance());
     }
 
@@ -609,11 +708,7 @@ mod tests {
                         l.transfer(a, b, n);
                     }
                 }
-                assert!(
-                    l.balanced(),
-                    "раунд {round}: расхождение {}",
-                    l.imbalance()
-                );
+                assert!(l.balanced(), "раунд {round}: расхождение {}", l.imbalance());
             }
         }
     }

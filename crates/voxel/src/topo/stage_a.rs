@@ -175,7 +175,6 @@ impl Adjacency {
     }
 }
 
-
 // Маски граней куба 3×3×3 в упаковке `i = dx + 3*dy + 9*dz`.
 // Нужны, чтобы сдвиг не переносил биты через грань.
 const fn plane(axis: usize, at: usize) -> u32 {
@@ -324,7 +323,11 @@ mod tests {
                     k += 1;
                 }
             }
-            assert_eq!(adj.cannot_split(m), adj.cannot_split_reference(m), "осевые {bits:#08b}");
+            assert_eq!(
+                adj.cannot_split(m),
+                adj.cannot_split_reference(m),
+                "осевые {bits:#08b}"
+            );
         }
     }
 

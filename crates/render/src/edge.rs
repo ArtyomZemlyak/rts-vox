@@ -74,7 +74,10 @@ impl Plugin for EdgePlugin {
         let shader = app
             .world_mut()
             .resource_mut::<Assets<Shader>>()
-            .add(Shader::from_wgsl(include_str!("edge.wgsl"), "render/src/edge.wgsl"));
+            .add(Shader::from_wgsl(
+                include_str!("edge.wgsl"),
+                "render/src/edge.wgsl",
+            ));
         app.add_plugins((
             ExtractComponentPlugin::<Edges>::default(),
             UniformComponentPlugin::<Edges>::default(),
@@ -92,7 +95,9 @@ impl Plugin for EdgePlugin {
             // ровные ступени ступенями не выглядят.
             .add_systems(
                 Core3d,
-                draw_edges.in_set(Core3dSystems::PostProcess).after(tonemapping),
+                draw_edges
+                    .in_set(Core3dSystems::PostProcess)
+                    .after(tonemapping),
             );
     }
 }
@@ -122,7 +127,11 @@ impl Specializer<RenderPipeline> for EdgeSpecializer {
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.fragment_mut()?.set_target(
             0,
-            ColorTargetState { format: key.target_format, blend: None, write_mask: ColorWrites::ALL },
+            ColorTargetState {
+                format: key.target_format,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            },
         );
         Ok(key)
     }
@@ -190,9 +199,12 @@ fn prepare_pipeline(
             commands.entity(entity).remove::<EdgePipelineId>();
             continue;
         }
-        let id = pipeline
-            .variants
-            .specialize(&pipeline_cache, EdgeKey { target_format: view.target_format })?;
+        let id = pipeline.variants.specialize(
+            &pipeline_cache,
+            EdgeKey {
+                target_format: view.target_format,
+            },
+        )?;
         commands.entity(entity).insert(EdgePipelineId(id));
     }
     Ok(())
@@ -247,19 +259,21 @@ fn draw_edges(
         )),
     );
 
-    let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
-        label: Some("edge_pass"),
-        color_attachments: &[Some(RenderPassColorAttachment {
-            view: post.destination,
-            depth_slice: None,
-            resolve_target: None,
-            ops: Operations::default(),
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("edge_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: post.destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
     pass.set_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[index.index()]);
     pass.draw(0..3, 0..1);

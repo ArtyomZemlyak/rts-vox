@@ -1,6 +1,6 @@
 //! Масштабирование фазы движения на **постоянном** пуле.
 //!
-//! Запуск: `cargo run --release -p sim --bin bench_movement_pool`
+//! Запуск: `cargo run --release -p sim-core --bin bench_movement_pool`
 //!
 //! Замер через `thread::scope` на каждый тик показал, что параллелизм
 //! убыточен: создание потоков Windows дороже самой фазы. Здесь пул
@@ -18,9 +18,13 @@ fn tuning() -> sim_core::Tuning {
 }
 
 fn main() {
-    let cores = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1);
     println!("логических ядер: {cores}");
-    println!("фаза движения: снимок положений, расталкивание, поле направлений\n");
+    println!(
+        "direction/clamp workers over prepared contacts; preparation is measured separately\n"
+    );
 
     for n in [2500usize, 5000, 10000] {
         let mut w = World::with_cells(2, n * 2, tuning().separation, tuning().range, tuning());
@@ -28,7 +32,15 @@ fn main() {
         for _ in 0..5 {
             w.tick();
         }
-        w.prepare_movement();
+        // tick() has already moved the units past its beginning-of-phase grid.
+        // Build the index for the fixed benchmark snapshot before reusing it.
+        w.units.refresh_live();
+        w.grid_near.rebuild(&w.units.x, &w.units.z, w.units.live());
+        let t0 = Instant::now();
+        for _ in 0..100 {
+            w.prepare_movement();
+        }
+        let preparation = t0.elapsed().as_secs_f64() * 1e6 / 100.0;
         let slots = w.slots();
 
         // Однопоточно, без всякой синхронизации.
@@ -48,8 +60,16 @@ fn main() {
             serial = serial.min(t0.elapsed().as_secs_f64() * 1e6 / reps as f64);
         }
         println!("=== {n} сущностей ===");
-        println!("однопоточно: {serial:.1} мкс");
-        println!("{:>8} {:>12} {:>12} {:>12}", "потоков", "мкс", "ускорение", "эффективн.");
+        println!("snapshot + exact contacts (serial): {preparation:.1} us");
+        println!(
+            "direction + clamp (serial): {serial:.1} us; combined {:.1} us",
+            preparation + serial
+        );
+        println!("workers: direction/clamp only; total also includes serial preparation above");
+        println!(
+            "{:>8} {:>12} {:>12} {:>12}",
+            "потоков", "мкс", "ускорение", "эффективн."
+        );
 
         for threads in [1usize, 2, 4, 6, 7, 8] {
             if threads > cores {
@@ -109,5 +129,7 @@ fn main() {
         buf = w.take_delta();
         black_box(buf.len());
     }
-    println!("(для сравнения: тот же счёт через thread::scope на каждый тик давал 0.52x на восьми)");
+    println!(
+        "(для сравнения: тот же счёт через thread::scope на каждый тик давал 0.52x на восьми)"
+    );
 }

@@ -236,7 +236,7 @@ impl SectorGraph {
     #[inline]
     pub fn node_of_port(&self, port: u32) -> u32 {
         let p = &self.portals[(port / 2) as usize];
-        if port % 2 == 0 {
+        if port.is_multiple_of(2) {
             p.node_a
         } else {
             p.node_b
@@ -335,12 +335,12 @@ impl SectorGraph {
         let old_of: Vec<u32> = self
             .portals
             .iter()
-            .map(|p| {
-                match old_key.binary_search_by(|probe| probe.0.cmp(&p.key)) {
+            .map(
+                |p| match old_key.binary_search_by(|probe| probe.0.cmp(&p.key)) {
                     Ok(i) => old_key[i].1,
                     Err(_) => u32::MAX,
-                }
-            })
+                },
+            )
             .collect();
 
         // Теперь, когда границы нарезаны заново, видно, у кого набор
@@ -361,7 +361,10 @@ impl SectorGraph {
             }
         }
 
-        let st = BuildStats { portals: self.portals.len(), ..Default::default() };
+        let st = BuildStats {
+            portals: self.portals.len(),
+            ..Default::default()
+        };
         let mut new_of = vec![u32::MAX; old_portals.len()];
         for (n, &o) in old_of.iter().enumerate() {
             if o != u32::MAX {
@@ -384,8 +387,14 @@ impl SectorGraph {
         self.dist.resize(g.nodes, u32::MAX);
         // Переход на ту сторону — обычное ребро в один шаг.
         for pi in 0..self.portals.len() as u32 {
-            self.bucket[(pi * 2) as usize].push(Edge { to: pi * 2 + 1, cost: STEP });
-            self.bucket[(pi * 2 + 1) as usize].push(Edge { to: pi * 2, cost: STEP });
+            self.bucket[(pi * 2) as usize].push(Edge {
+                to: pi * 2 + 1,
+                cost: STEP,
+            });
+            self.bucket[(pi * 2 + 1) as usize].push(Edge {
+                to: pi * 2,
+                cost: STEP,
+            });
         }
         st
     }
@@ -562,7 +571,11 @@ fn run_boundary(
     cell: impl Fn(u32, u32) -> usize,
 ) {
     // Сторона перехода: поперёк границы; сторона соседства: вдоль неё.
-    let (cross, along) = if vertical { (SIDE_PX, SIDE_PZ) } else { (SIDE_PZ, SIDE_PX) };
+    let (cross, along) = if vertical {
+        (SIDE_PX, SIDE_PZ)
+    } else {
+        (SIDE_PZ, SIDE_PX)
+    };
     // Крайние узлы предыдущего шага вдоль границы — чтобы понять,
     // продолжается отрезок или начинается новый. Хранится **пара**:
     // отрезок обязан быть связным с обеих сторон, иначе представитель
@@ -572,7 +585,11 @@ fn run_boundary(
     // Открытый отрезок: представитель и ширина.
     let mut open: Option<(u32, u32, u16)> = None;
     for t in from..to {
-        let c = if vertical { cell(at - 1, t) } else { cell(t, at - 1) };
+        let c = if vertical {
+            cell(at - 1, t)
+        } else {
+            cell(t, at - 1)
+        };
         cur.clear();
         let n0 = g.first_node(c);
         for li in 0..g.levels_in(c) {
@@ -628,7 +645,14 @@ fn push_portal(sg: &mut SectorGraph, g: &VolGraph, node_a: u32, node_b: u32, wid
         return;
     }
     let key = key_of(g, node_a, node_b);
-    sg.portals.push(Portal { node_a, node_b, sector_a, sector_b, width, key });
+    sg.portals.push(Portal {
+        node_a,
+        node_b,
+        sector_a,
+        sector_b,
+        width,
+        key,
+    });
 }
 
 /// Разложить порталы по секторам (CSR).
@@ -709,7 +733,10 @@ fn solve_sector(sg: &mut SectorGraph, g: &VolGraph, s: u32, st: &mut BuildStats)
             let port_j = sg.port_of(pj, s);
             let d = dist[sg.node_of_port(port_j) as usize];
             if d != u32::MAX {
-                sg.bucket[port_i as usize].push(Edge { to: port_j, cost: d });
+                sg.bucket[port_i as usize].push(Edge {
+                    to: port_j,
+                    cost: d,
+                });
             }
         }
         for &t in touched.iter() {
@@ -881,13 +908,7 @@ pub struct RouteStats {
 /// **Разные компоненты — пути нет, и это одно сравнение** (ADR-106):
 /// перебирать порталы, чтобы выяснить то, что известно из разметки,
 /// незачем.
-pub fn route(
-    sg: &SectorGraph,
-    g: &VolGraph,
-    ws: &mut RouteWs,
-    from: u32,
-    to: u32,
-) -> RouteStats {
+pub fn route(sg: &SectorGraph, g: &VolGraph, ws: &mut RouteWs, from: u32, to: u32) -> RouteStats {
     let mut st = RouteStats::default();
     if from == to {
         st.found = true;
@@ -1081,7 +1102,8 @@ pub fn field_begin(sg: &SectorGraph, g: &VolGraph, ws: &mut RouteWs, target: u32
     let tcell = g.cell_of(target as usize);
     let (tx, tz) = ((tcell % tw) as i64, (tcell / tw) as i64);
     ws.best.clear();
-    ws.best.resize(g.components.max(1), (u64::MAX, NO_NODE_LOCAL));
+    ws.best
+        .resize(g.components.max(1), (u64::MAX, NO_NODE_LOCAL));
     for n in 0..g.nodes {
         let c = g.comp_of(n) as usize;
         let cell = g.cell_of(n);
@@ -1301,7 +1323,10 @@ pub struct Coverage {
 }
 
 pub fn coverage(sg: &SectorGraph, g: &VolGraph, f: &VolField, ws: &RouteWs) -> Coverage {
-    let mut c = Coverage { nodes: g.nodes, ..Default::default() };
+    let mut c = Coverage {
+        nodes: g.nodes,
+        ..Default::default()
+    };
     let nsec = sg.sec_starts.len().saturating_sub(1);
     // Куски: связные части сектора по **внутренним** рёбрам. Компонента
     // графа тут не годится — граница сектора режет её на части, и засев
@@ -1368,7 +1393,10 @@ pub fn coverage(sg: &SectorGraph, g: &VolGraph, f: &VolField, ws: &RouteWs) -> C
             .portals_of(sec)
             .iter()
             .any(|&p| ws.to_t[sg.port_of(p, sec) as usize] != u32::MAX);
-        let goal_inside = ws.goals.iter().any(|&gl| sg.node_sector[gl as usize] == sec);
+        let goal_inside = ws
+            .goals
+            .iter()
+            .any(|&gl| sg.node_sector[gl as usize] == sec);
         *d = !live && !goal_inside;
     }
     for n in 0..g.nodes {
@@ -2105,7 +2133,10 @@ mod tests {
             c.holes,
             c.pieces_unseeded
         );
-        println!("  кусков {}, из них без засева {}", c.pieces, c.pieces_unseeded);
+        println!(
+            "  кусков {}, из них без засева {}",
+            c.pieces, c.pieces_unseeded
+        );
         // Сцена обязана нагружать то, что заявляет: много уровней
         // и не один кусок на сектор.
         assert!(c.nodes > 8_000, "мир слишком беден: узлов {}", c.nodes);
@@ -2185,7 +2216,12 @@ mod tests {
         let (ca, cb) = (g.cell_of(a as usize), g.cell_of(b as usize));
         let d = (ca % w).abs_diff(cb % w) + (ca / w).abs_diff(cb / w);
         assert!(r.found);
-        assert!(r.cost >= d * STEP, "цена {} меньше прямой {}", r.cost, d * STEP);
+        assert!(
+            r.cost >= d * STEP,
+            "цена {} меньше прямой {}",
+            r.cost,
+            d * STEP
+        );
     }
 
     /// **Инкрементальная пересборка обязана дать то же, что полная.**
@@ -2226,7 +2262,11 @@ mod tests {
         let mut full = SectorGraph::new();
         full.build(&g);
 
-        assert_eq!(dump(&inc), dump(&full), "инкремент разошёлся с полной сборкой");
+        assert_eq!(
+            dump(&inc),
+            dump(&full),
+            "инкремент разошёлся с полной сборкой"
+        );
     }
 
     /// Ребро в каноническом виде: имя портала, сторона, цена.
@@ -2319,7 +2359,11 @@ mod tests {
             assert!(rounds < 10_000, "порционная сборка не сошлась");
         }
         assert!(rounds > 1, "порция оказалась не порцией");
-        assert_eq!(dump(&piece), dump(&whole), "порции разошлись с разовой сборкой");
+        assert_eq!(
+            dump(&piece),
+            dump(&whole),
+            "порции разошлись с разовой сборкой"
+        );
     }
 
     /// **Переиспользованный сектор равен пересчитанному.**
@@ -2360,7 +2404,10 @@ mod tests {
             guard += 1;
             assert!(guard < 100_000);
         }
-        assert!(inc.reused_sectors > before, "не переиспользовано ни одного сектора");
+        assert!(
+            inc.reused_sectors > before,
+            "не переиспользовано ни одного сектора"
+        );
 
         let mut fresh = NavField::new(1);
         fresh.set_target(0, 80, 32);
@@ -2369,7 +2416,10 @@ mod tests {
             guard += 1;
             assert!(guard < 100_000);
         }
-        assert_eq!(fresh.reused_sectors, 0, "свежее поле что-то переиспользовало");
+        assert_eq!(
+            fresh.reused_sectors, 0,
+            "свежее поле что-то переиспользовало"
+        );
 
         let (w2, h2) = fresh.g.dims();
         let mut diff = 0;
@@ -2386,7 +2436,11 @@ mod tests {
     }
 
     fn budget() -> FieldBudget {
-        FieldBudget { cells: 64, scan: 512, sectors: 2 }
+        FieldBudget {
+            cells: 64,
+            scan: 512,
+            sectors: 2,
+        }
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.

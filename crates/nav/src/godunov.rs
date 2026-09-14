@@ -330,11 +330,7 @@ mod tests {
                     for k in (0..span).step_by(step as usize) {
                         let (a, b, c) = (base + i, base + j, base + k);
                         let t = update3d(a, b, c, f);
-                        for bump in [
-                            (a + 1, b, c),
-                            (a, b + 1, c),
-                            (a, b, c + 1),
-                        ] {
+                        for bump in [(a + 1, b, c), (a, b + 1, c), (a, b, c + 1)] {
                             let t2 = update3d(bump.0, bump.1, bump.2, f);
                             assert!(
                                 t2 >= t,

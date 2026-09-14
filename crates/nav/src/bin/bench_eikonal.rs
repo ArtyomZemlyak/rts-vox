@@ -107,8 +107,12 @@ fn bench_h_variants() {
     let base = run("isqrt, флор", &pairs, reps, h_exact_floor);
     run("isqrt, к ближайшему", &pairs, reps, h_exact_round);
     let t12 = run("таблица корня 12 бит", &pairs, reps, |f, d| sqrt12.h(f, d));
-    let th = run("таблица h(f,d), 64 КБ", &pairs, reps, |f, d| htab.h(f, d));
-    let ths = run("таблица h(f,d), 4 КБ", &pairs, reps, |f, d| htab_small.h(f.min(63), d));
+    let th = run("таблица h(f,d), 64 КБ", &pairs, reps, |f, d| {
+        htab.h(f, d)
+    });
+    let ths = run("таблица h(f,d), 4 КБ", &pairs, reps, |f, d| {
+        htab_small.h(f.min(63), d)
+    });
     let tu = run("равномерная, 1D", &pairs, reps, |_f, d| uni.h(d));
     println!(
         "  ускорение к isqrt: sqrt12 x{:.2}, h64K x{:.2}, h4K x{:.2}, uniform x{:.2}",
@@ -271,7 +275,13 @@ fn bench_bit_width() {
             let (t, _) = fmm(&g, &goals, &h);
             let m = max_finite(&t);
             let (ties, total) = tie_fraction(&g, &t);
-            let cmin = g.cost.iter().copied().filter(|&c| c != BLOCKED).min().unwrap_or(0);
+            let cmin = g
+                .cost
+                .iter()
+                .copied()
+                .filter(|&c| c != BLOCKED)
+                .min()
+                .unwrap_or(0);
             let cmax = g.cost.iter().copied().max().unwrap_or(0);
             println!(
                 "{:<10} {:>5} {:>10} {:>7} {:>11.1}% {:>10}",
@@ -292,7 +302,10 @@ fn bench_bit_width() {
     ] {
         for span in [2000u32, 4000] {
             let worst = span * cost;
-            println!("  {label:<32} карта {span} м: max T = {worst:>9}, {} бит", bits(worst));
+            println!(
+                "  {label:<32} карта {span} м: max T = {worst:>9}, {} бит",
+                bits(worst)
+            );
         }
     }
     println!("\nчто нужно полю, если оно секторное (значения хранятся от минимума сектора):");
@@ -324,7 +337,13 @@ fn bench_direction_stability() {
         print!(" {:>18}", lbl);
     }
     println!();
-    for scene in [Scene::Surface, Scene::Craters, Scene::Road, Scene::Tunnels, Scene::Maze] {
+    for scene in [
+        Scene::Surface,
+        Scene::Craters,
+        Scene::Road,
+        Scene::Tunnels,
+        Scene::Maze,
+    ] {
         for n in [64usize, 128] {
             let g = build(scene, n, 7);
             let goals = goals_center(&g);
@@ -347,7 +366,9 @@ fn bench_direction_stability() {
 /// 6. Смещение вдоль пути: флор против округления к ближайшему и к чётному.
 fn bench_rounding_bias() {
     section("6. Смещение вдоль пути: режим округления против разрядности");
-    println!("отклонение max T от почти точного решения (стоимости x128), в процентах длины пути.\n");
+    println!(
+        "отклонение max T от почти точного решения (стоимости x128), в процентах длины пути.\n"
+    );
     println!(
         "{:<10} {:>5} {:>7} {:>10} {:>10} {:>10}",
         "сцена", "n", "масштаб", "флор", "к ближ.", "к чётн."
@@ -378,7 +399,6 @@ fn bench_rounding_bias() {
         }
     }
 }
-
 
 /// Цена дробных бит. Дробные биты у стоимости чинят направление (раздел 5),
 /// но выбивают стоимость из диапазона таблицы, и обновление возвращается

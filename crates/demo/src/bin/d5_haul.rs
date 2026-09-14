@@ -49,7 +49,12 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, ticks: 600, haulers: 60, dump_hash: false }
+        Args {
+            seed: 42,
+            ticks: 600,
+            haulers: 60,
+            dump_hash: false,
+        }
     }
 }
 
@@ -226,11 +231,7 @@ fn main() -> ExitCode {
         }
     }
     println!("{:<32} {:>16}", "в стоках всего", l.sunk_total());
-    println!(
-        "{:<32} {:>16}",
-        "контейнеров живых",
-        l.live_containers()
-    );
+    println!("{:<32} {:>16}", "контейнеров живых", l.live_containers());
 
     let ok = l.balanced() && worst_imbalance == 0;
     println!("\nхеш прогона: {:016x}", hash.get());
@@ -239,9 +240,18 @@ fn main() -> ExitCode {
     }
     println!(
         "сохранение материи: {} — {}",
-        if ok { "сходится" } else { "РАСХОЖДЕНИЕ" },
         if ok {
-            format!("{} = {} + {}", l.initial(), l.in_containers(), l.sunk_total())
+            "сходится"
+        } else {
+            "РАСХОЖДЕНИЕ"
+        },
+        if ok {
+            format!(
+                "{} = {} + {}",
+                l.initial(),
+                l.in_containers(),
+                l.sunk_total()
+            )
         } else {
             format!("расхождение {}", l.imbalance())
         }

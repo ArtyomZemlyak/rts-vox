@@ -89,11 +89,7 @@ pub fn walk(
 /// Свободна ли прямая между двумя вокселями.
 ///
 /// Оба конца **исключены**: стрелок и цель сами себя не заслоняют.
-pub fn line_of_sight(
-    w: &World,
-    from: (i32, i32, i32),
-    to: (i32, i32, i32),
-) -> LosResult {
+pub fn line_of_sight(w: &World, from: (i32, i32, i32), to: (i32, i32, i32)) -> LosResult {
     // **Направление канонизируется.** Брезенхэм несимметричен:
     // при равной накопленной ошибке он округляет в одну сторону,
     // и путь из A в B не совпадает с путём из B в A. В игре это
@@ -113,7 +109,11 @@ pub fn line_of_sight(
             true
         }
     });
-    LosResult { clear, steps, blocked_at }
+    LosResult {
+        clear,
+        steps,
+        blocked_at,
+    }
 }
 
 #[cfg(test)]
@@ -202,16 +202,8 @@ mod tests {
         w.flush();
         let mut checked = 0;
         for _ in 0..500 {
-            let a = (
-                r.below(64) as i32,
-                r.below(64) as i32,
-                r.below(64) as i32,
-            );
-            let b = (
-                r.below(64) as i32,
-                r.below(64) as i32,
-                r.below(64) as i32,
-            );
+            let a = (r.below(64) as i32, r.below(64) as i32, r.below(64) as i32);
+            let b = (r.below(64) as i32, r.below(64) as i32, r.below(64) as i32);
             if w.solid(a.0 as u32, a.1 as u32, a.2 as u32)
                 || w.solid(b.0 as u32, b.1 as u32, b.2 as u32)
             {

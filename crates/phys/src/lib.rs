@@ -30,6 +30,8 @@
 
 use fx::Fx;
 
+pub mod blast;
+
 /// Вектор в мировых единицах.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct V3 {
@@ -45,9 +47,17 @@ impl Default for V3 {
 }
 
 impl V3 {
-    pub const ZERO: V3 = V3 { x: Fx::ZERO, y: Fx::ZERO, z: Fx::ZERO };
+    pub const ZERO: V3 = V3 {
+        x: Fx::ZERO,
+        y: Fx::ZERO,
+        z: Fx::ZERO,
+    };
     /// Вертикаль: «верх» у невозмущённого корпуса.
-    pub const UP: V3 = V3 { x: Fx::ZERO, y: Fx::ONE, z: Fx::ZERO };
+    pub const UP: V3 = V3 {
+        x: Fx::ZERO,
+        y: Fx::ONE,
+        z: Fx::ZERO,
+    };
 
     pub const fn new(x: Fx, y: Fx, z: Fx) -> V3 {
         V3 { x, y, z }
@@ -282,7 +292,10 @@ pub fn step(
         // хватит ровно того, чтобы погасить скорость точки в ноль.
         // На опору приходится доля всей массы, отсюда деление
         // на число опор.
-        let cap = vp.abs().div(dt).div(Fx::from_int(supports.len().max(1) as i32));
+        let cap = vp
+            .abs()
+            .div(dt)
+            .div(Fx::from_int(supports.len().max(1) as i32));
         // Предел **по модулю**, а не только вниз: несимметричный
         // демпфер гасит подъём сильнее, чем падение, и подвеска
         // входит в незатухающий цикл вместо покоя.
@@ -363,7 +376,15 @@ pub fn step(
         sink = sink.max(g.sub(r.travel).sub(foot));
     }
     if sink.raw() > 0 {
-        c.y = c.y.add(sink.min(r.travel));
+        // A falling body sweeps the floor within this tick. Limiting this
+        // correction to suspension travel lets a fast descent tunnel through
+        // it. A supported body climbing laterally still extends gradually.
+        let correction = if touching == 0 && c.vy < Fx::ZERO {
+            sink
+        } else {
+            sink.min(r.travel)
+        };
+        c.y = c.y.add(correction);
         c.vy = c.vy.max(Fx::ZERO);
     }
 }
@@ -424,6 +445,30 @@ mod tests {
     const DT: Fx = Fx::from_ratio(1, 30);
     const FLAT: Fx = Fx::ZERO;
 
+    #[test]
+    fn an_airborne_body_cannot_step_through_the_floor_at_high_speed() {
+        let (sup, r) = preloaded();
+        let mut c = Chassis::resting(Fx::ZERO, &r);
+        c.y = Fx::from_int(2);
+        c.vy = Fx::from_int(-180);
+        c.load = Fx::ZERO;
+        step(
+            &mut c,
+            &sup,
+            &[Fx::ZERO; 4],
+            (Fx::ONE, Fx::ZERO),
+            V3::ZERO,
+            &r,
+            DT,
+        );
+        assert!(
+            c.y >= r.clearance.sub(r.travel),
+            "fast descent passed through the floor: {:?}",
+            c.y
+        );
+        assert!(c.vy >= Fx::ZERO);
+    }
+
     fn level(n: usize) -> Vec<Fx> {
         vec![FLAT; n]
     }
@@ -444,7 +489,11 @@ mod tests {
             step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
         }
         // Осела и стоит: скорость около нуля, наклона нет.
-        assert!(c.vy.abs() < Fx::from_ratio(1, 100), "качается: vy = {:?}", c.vy);
+        assert!(
+            c.vy.abs() < Fx::from_ratio(1, 100),
+            "качается: vy = {:?}",
+            c.vy
+        );
         assert!(c.w.x.abs() < Fx::from_ratio(1, 100), "качается по тангажу");
         assert!(c.w.z.abs() < Fx::from_ratio(1, 100), "качается по крену");
         // Стоит **на** земле, а не в ней и не над ней: центр масс
@@ -472,13 +521,22 @@ mod tests {
         for k in 0..60 {
             step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
             if k > 0 {
-                assert!(c.vy < prev, "падение не разгоняется: {:?} после {:?}", c.vy, prev);
+                assert!(
+                    c.vy < prev,
+                    "падение не разгоняется: {:?} после {:?}",
+                    c.vy,
+                    prev
+                );
             }
             prev = c.vy;
         }
         assert!(!c.grounded(), "в воздухе нашлась опора");
         // За две секунды свободного падения — около `g·t²/2`.
-        assert!(c.y < Fx::from_int(-15), "падает слишком медленно: {:?}", c.y);
+        assert!(
+            c.y < Fx::from_int(-15),
+            "падает слишком медленно: {:?}",
+            c.y
+        );
     }
 
     /// **На склоне корпус ложится по склону.**
@@ -558,7 +616,10 @@ mod tests {
         let across = run((Fx::ZERO, Fx::ONE));
         // Вдоль курса — наклон по X; поперёк — тот же наклон, но
         // мировая нормаль обязана остаться той же самой: склон-то один.
-        assert!(along.x < Fx::from_ratio(-1, 10), "не наклонился вдоль: {along:?}");
+        assert!(
+            along.x < Fx::from_ratio(-1, 10),
+            "не наклонился вдоль: {along:?}"
+        );
         assert!(
             across.x.sub(along.x).abs() < Fx::from_ratio(1, 10),
             "развернули машину — сменился склон: {across:?} против {along:?}"
@@ -578,7 +639,15 @@ mod tests {
             let mut c = Chassis::resting(FLAT, &r);
             c.y = c.y.add(Fx::from_int(3));
             for _ in 0..400 {
-                step(&mut c, &s, &g, (Fx::from_ratio(3, 5), Fx::from_ratio(4, 5)), V3::ZERO, &r, DT);
+                step(
+                    &mut c,
+                    &s,
+                    &g,
+                    (Fx::from_ratio(3, 5), Fx::from_ratio(4, 5)),
+                    V3::ZERO,
+                    &r,
+                    DT,
+                );
             }
             c
         };
@@ -603,7 +672,11 @@ mod tests {
             assert!(c.y.abs() < Fx::from_int(50), "улетел: {:?}", c.y);
             assert!(c.vy.abs() < Fx::from_int(100), "разогнался: {:?}", c.vy);
         }
-        assert!(c.vy.abs() < Fx::from_ratio(1, 10), "не успокоился: {:?}", c.vy);
+        assert!(
+            c.vy.abs() < Fx::from_ratio(1, 10),
+            "не успокоился: {:?}",
+            c.vy
+        );
     }
 
     /// **Торможение роняет носом, разгон сажает на корму.**
@@ -619,7 +692,15 @@ mod tests {
         let run = |ax: Fx| -> Fx {
             let mut c = Chassis::resting(FLAT, &r);
             for _ in 0..300 {
-                step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::new(ax, Fx::ZERO, Fx::ZERO), &r, DT);
+                step(
+                    &mut c,
+                    &s,
+                    &g,
+                    (Fx::ONE, Fx::ZERO),
+                    V3::new(ax, Fx::ZERO, Fx::ZERO),
+                    &r,
+                    DT,
+                );
             }
             c.up.x
         };
@@ -628,8 +709,14 @@ mod tests {
         // Верх при торможении уходит к носу (`up.x > 0`), при разгоне —
         // к корме. Величина обязана быть заметной: клевок, который
         // не виден, ничего не стоит и ничего не даёт.
-        assert!(brake > Fx::from_ratio(1, 40), "торможение не клюёт: {brake:?}");
-        assert!(throttle < Fx::from_ratio(-1, 40), "разгон не сажает на корму: {throttle:?}");
+        assert!(
+            brake > Fx::from_ratio(1, 40),
+            "торможение не клюёт: {brake:?}"
+        );
+        assert!(
+            throttle < Fx::from_ratio(-1, 40),
+            "разгон не сажает на корму: {throttle:?}"
+        );
     }
 
     /// **В повороте корпус кренится наружу.**
@@ -645,9 +732,21 @@ mod tests {
         // Ход по +X, центр поворота слева, на +Z: ускорение к нему.
         let mut c = Chassis::resting(FLAT, &r);
         for _ in 0..300 {
-            step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(5)), &r, DT);
+            step(
+                &mut c,
+                &s,
+                &g,
+                (Fx::ONE, Fx::ZERO),
+                V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(5)),
+                &r,
+                DT,
+            );
         }
-        assert!(c.up.z < Fx::from_ratio(-1, 40), "крен не наружу: {:?}", c.up);
+        assert!(
+            c.up.z < Fx::from_ratio(-1, 40),
+            "крен не наружу: {:?}",
+            c.up
+        );
         assert!(c.up.x.abs() < Fx::from_ratio(1, 100), "поворот дал клевок");
     }
 
@@ -662,7 +761,11 @@ mod tests {
         for _ in 0..900 {
             step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
         }
-        assert!(c.vy.abs() < Fx::from_ratio(1, 100), "качается: vy = {:?}", c.vy);
+        assert!(
+            c.vy.abs() < Fx::from_ratio(1, 100),
+            "качается: vy = {:?}",
+            c.vy
+        );
         let want = FLAT.add(r.clearance);
         assert!(
             c.y.sub(want).abs() < Fx::from_ratio(1, 50),
@@ -679,7 +782,11 @@ mod tests {
         for _ in 0..900 {
             step(&mut c, &s, &g, (Fx::ONE, Fx::ZERO), V3::ZERO, &soft, DT);
         }
-        assert!(c.y < want.sub(soft.travel).add(Fx::from_ratio(1, 10)), "мягкая без натяга не просела: {:?}", c.y);
+        assert!(
+            c.y < want.sub(soft.travel).add(Fx::from_ratio(1, 10)),
+            "мягкая без натяга не просела: {:?}",
+            c.y
+        );
     }
 
     /// **Уступ берётся без прыжка.** Пол под всеми опорами поднялся

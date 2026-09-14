@@ -35,7 +35,13 @@ impl Grid {
                 cost[y * w + x] = fill;
             }
         }
-        Grid { w, h, cost, floor: vec![0; w * h], max_step: u16::MAX }
+        Grid {
+            w,
+            h,
+            cost,
+            floor: vec![0; w * h],
+            max_step: u16::MAX,
+        }
     }
 
     /// Есть ли переход между соседними клетками.
@@ -194,7 +200,11 @@ fn tunnels(n: usize, r: &mut Rng) -> Grid {
     let steps = n * 12;
     for e in 0..entrances {
         let mut x = (r.below(n as u32) as usize + 1).clamp(1, g.w - 2);
-        let mut y = if e == 0 { 1 } else { r.below(n as u32) as usize + 1 };
+        let mut y = if e == 0 {
+            1
+        } else {
+            r.below(n as u32) as usize + 1
+        };
         for _ in 0..steps {
             // Коридор шириной 2 — юнит должен пролезать.
             for dy in 0..2 {

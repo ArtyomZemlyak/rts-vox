@@ -107,7 +107,10 @@ fn main() {
         black_box(idx.pairs(&shields, &points, &mut out));
         best = best.min(t0.elapsed().as_secs_f64() * 1e6);
     }
-    println!("64 щита, 2000 снарядов, индексом: {best:.1} мкс — {:.2}% тика", 100.0 * best / 1e4);
+    println!(
+        "64 щита, 2000 снарядов, индексом: {best:.1} мкс — {:.2}% тика",
+        100.0 * best / 1e4
+    );
 
     section("4. Сеть энергии: полное обновление");
     println!(
@@ -124,9 +127,15 @@ fn main() {
         let nodes: Vec<Node> = (0..n)
             .map(|i| {
                 if i % 20 == 0 {
-                    Node { produce: r.range(50, 200), demand: 0 }
+                    Node {
+                        produce: r.range(50, 200),
+                        demand: 0,
+                    }
                 } else {
-                    Node { produce: 0, demand: r.range(1, 12) }
+                    Node {
+                        produce: 0,
+                        demand: r.range(1, 12),
+                    }
                 }
             })
             .collect();
@@ -161,9 +170,15 @@ fn main() {
     let nodes: Vec<Node> = (0..n)
         .map(|i| {
             if i % 20 == 0 {
-                Node { produce: r.range(50, 200), demand: 0 }
+                Node {
+                    produce: r.range(50, 200),
+                    demand: 0,
+                }
             } else {
-                Node { produce: 0, demand: r.range(1, 12) }
+                Node {
+                    produce: 0,
+                    demand: r.range(1, 12),
+                }
             }
         })
         .collect();
@@ -190,7 +205,10 @@ fn main() {
     println!("5000 узлов: перерезать связь и пересчитать — {best:.1} мкс");
     println!("компонент до разреза: {base}");
     println!();
-    println!("{:>16} {:>14} {:>16}", "разрезов за тик", "мс", "доля бюджета");
+    println!(
+        "{:>16} {:>14} {:>16}",
+        "разрезов за тик", "мс", "доля бюджета"
+    );
     for cuts in [1usize, 10, 50] {
         println!(
             "{cuts:>16} {:>14.3} {:>15.2}%",

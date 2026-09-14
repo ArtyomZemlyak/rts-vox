@@ -10,18 +10,21 @@
 
 #![forbid(unsafe_code)]
 
+mod contacts;
 pub mod drive;
 pub mod economy;
 pub mod energy;
 pub mod ground;
-pub mod mapcache;
-pub mod shot;
 pub mod index;
+pub mod mapcache;
 pub mod matter;
+pub mod mobility;
 pub mod order;
 pub mod ride;
 pub mod save;
 pub mod shield;
+pub mod shot;
+mod shot_probe;
 
 use drive::{Drive, Limits, NO_WAY};
 use fx::angle;
@@ -30,7 +33,8 @@ use fx::Fx;
 use index::Grid;
 pub use modding::{ChassisKind, Tuning};
 pub use order::{
-    Order, STANCE_BUILD, STANCE_DIG, STANCE_FLOW, STANCE_HAUL, STANCE_HOLD, STANCE_MOVE,
+    Order, STANCE_ATTACK_MOVE, STANCE_BUILD, STANCE_DIG, STANCE_ENGAGED, STANCE_FLOW, STANCE_HAUL,
+    STANCE_HOLD, STANCE_MOVE,
 };
 
 /// Сторона мира в мировых единицах. Тысяча метров при ребре
@@ -47,6 +51,13 @@ pub const NAV: usize = (WORLD / NAV_CELL) as usize;
 /// стороны на расстояние, которое они не проходили за прогон (ADR-116).
 pub const TICKS_PER_SECOND: i32 = 30;
 
+pub mod blast;
+mod body_wave;
+pub mod burst;
+pub mod damage;
+mod damage_combat;
+mod engagement;
+pub mod skirmish;
 
 /// Событие тика — то, что рендеру надо показать, а симуляции знать
 /// незачем.
@@ -190,6 +201,10 @@ pub struct Units {
     /// Доля опор на земле по итогам прошлого тика, от нуля до единицы.
     /// Ноль — машина висит в воздухе.
     pub load: Vec<Fx>,
+    /// Physical root height relative to the navigation floor, and vertical
+    /// velocity in world units per second. Kept across ticks and saves.
+    pub heave: Vec<Fx>,
+    pub heave_v: Vec<Fx>,
     /// Продольное ускорение за прошлый тик, мировых единиц в секунду
     /// за секунду. Считается там же, где меняется скорость, и нужно
     /// подвеске: торможение роняет корпус носом (ADR-225).
@@ -226,14 +241,11 @@ pub struct Units {
     pub ride_off: Vec<(i32, i32, i32)>,
     /// Высота, с которой юнит падает; `NOT_FALLING` — стоит на опоре.
     ///
-    /// Как и `ride_off`, в хеш не входит: хеш ловит расхождение по `y`
-    /// и по вокселям, а они меняются тем же падением на том же тике.
+    /// У подвижного корпуса это наивысшая физическая высота полёта.
+    /// Состояние посадки входит в хеш (ADR-253).
     pub fall_from: Vec<i32>,
-    /// Вертикальная скорость падения, вокселей **за тик**. Растёт
-    /// на тяготение каждый тик полёта (ADR-174).
-    ///
-    /// В хеш не входит по той же причине, что `fall_from`: разошедшаяся
-    /// скорость разводит `y`, а `y` хешируется.
+    /// Скорость вниз за тик: у подвижных тел выводится из heave_v,
+    /// у неподвижных типов интегрируется прежним путём (ADR-174).
     pub fall_v: Vec<Fx>,
     /// Дробная часть высоты, пока юнит падает. Без неё падение шло бы
     /// только целыми вокселями за тик, то есть не ускорялось бы
@@ -311,8 +323,7 @@ pub(crate) fn test_tuning() -> Tuning {
 /// Реестр оружия для тестов — из тех же данных, что у игры.
 #[cfg(test)]
 pub(crate) fn test_weapons() -> modding::weapons::Weapons {
-    modding::weapons::from_ron(include_str!("../../../data/weapons.ron"))
-        .expect("data/weapons.ron")
+    modding::weapons::from_ron(include_str!("../../../data/weapons.ron")).expect("data/weapons.ron")
 }
 
 /// Юнит стоит на опоре, а не падает.
@@ -381,6 +392,8 @@ impl Units {
             up: Vec::new(),
             spin: Vec::new(),
             load: Vec::new(),
+            heave: Vec::new(),
+            heave_v: Vec::new(),
             accel: Vec::new(),
             yaw_step: Vec::new(),
             yaw_rate: Vec::new(),
@@ -422,6 +435,39 @@ impl Units {
         &self.live_ids
     }
 
+    /// Authoritative body origin, shared by rendering and material collision.
+    /// `y` itself remains the discrete navigation level.
+    pub fn body_y(&self, i: usize) -> Fx {
+        Fx::from_int(self.y[i])
+            .add(self.heave[i])
+            .sub(if self.fall_from[i] == NOT_FALLING {
+                Fx::ZERO
+            } else {
+                self.fall_f[i]
+            })
+    }
+
+    pub fn body_vy(&self, i: usize) -> Fx {
+        if self.speed[i] > 0 || self.fall_from[i] == NOT_FALLING {
+            self.heave_v[i]
+        } else {
+            self.fall_v[i].neg().mul(Fx::from_int(TICKS_PER_SECOND))
+        }
+    }
+
+    /// Integer-only legacy rays use the nearest cell-height coordinate.
+    /// Truncation would turn a submillimetre spring residual into a whole
+    /// voxel drop and put a ground-level laser inside otherwise level ground.
+    pub fn body_cell_y(&self, i: usize) -> i32 {
+        let y = self.body_y(i);
+        let half = Fx::from_ratio(1, 2);
+        if y.raw() >= 0 {
+            y.add(half).to_int_trunc()
+        } else {
+            y.sub(half).to_int_trunc()
+        }
+    }
+
     pub fn spawn(&mut self, x: i32, z: i32, owner: u8, speed: i32, voxels: u16) -> u32 {
         if let Some(i) = self.free.pop() {
             let k = i as usize;
@@ -444,6 +490,8 @@ impl Units {
             self.up[k] = phys::V3::UP;
             self.spin[k] = phys::V3::ZERO;
             self.load[k] = Fx::ZERO;
+            self.heave[k] = Fx::ZERO;
+            self.heave_v[k] = Fx::ZERO;
             self.accel[k] = Fx::ZERO;
             self.yaw_step[k] = 0;
             self.voxels[k] = voxels;
@@ -491,6 +539,8 @@ impl Units {
         self.up.push(phys::V3::UP);
         self.spin.push(phys::V3::ZERO);
         self.load.push(Fx::ZERO);
+        self.heave.push(Fx::ZERO);
+        self.heave_v.push(Fx::ZERO);
         self.accel.push(Fx::ZERO);
         self.yaw_step.push(0);
         self.yaw_rate.push(0);
@@ -575,6 +625,9 @@ pub struct World {
     /// и параллелить его нельзя ни при каком разбиении.
     snap_x: Vec<i32>,
     snap_z: Vec<i32>,
+    contacts: contacts::Contacts,
+    pub contact_group_pairs: u64,
+    shot_probe: shot_probe::Probe,
     /// Желания, посчитанные параллельно и применяемые одной серийной
     /// фазой (`CLAUDE.md`: клэмп применяется один раз, в конце).
     ///
@@ -675,11 +728,20 @@ pub struct World {
     /// с `Economy` на пустом месте остаются заглушками, какими были.
     /// Это не «включаемая механика», а отсутствие данных.
     pub econ: Option<economy::Economy>,
+    pub material_bodies: Option<damage::Bodies>,
+    pub bursts: burst::Bursts,
     /// Чем кончилась партия. Пересчитывается каждый тик в `Economy`.
     outcome: Outcome,
     /// Тик, на котором исход определился.
     pub decided_at: Option<u64>,
     pub phase_ns: [u64; 16],
+    /// Diagnostic nanoseconds: neighbour requests, drive/contact, suspension.
+    /// Never read by the simulation, saved, or hashed.
+    pub movement_ns: [u64; 3],
+    /// Diagnostic nanoseconds: topology, walkability, fields, unit indices.
+    pub navigation_ns: [u64; 4],
+    /// Diagnostic nanoseconds: projectiles, targeting, fire, material damage.
+    pub combat_ns: [u64; 4],
 }
 
 /// Чем кончилась партия.
@@ -790,7 +852,7 @@ fn want_way(
                 NO_WAY
             }
         }
-        STANCE_HOLD => NO_WAY,
+        STANCE_HOLD | STANCE_ENGAGED => NO_WAY,
         _ => order::goal_way(ux, uz, u.goal_x[i], u.goal_z[i], arrive),
     }
 }
@@ -853,49 +915,6 @@ fn slope_percent(
     }
 }
 
-/// Толчок соседей, мировых единиц в секунду по осям.
-///
-/// **Не тяга, а контакт тел**, поэтому через трансмиссию не идёт
-/// и курса не спрашивает: подпёртая в бок машина сдвигается вбок.
-/// Но и толкать быстрее, чем машина умеет ехать, контакт не может —
-/// отсюда клэмп по осям на предельную скорость (ADR-220). Без него
-/// зажатый в толпе юнит получал восьмикратную свою скорость,
-/// и это и была та самая «телепортация по клеткам».
-#[inline]
-fn separation_push(near: Near<'_>, i: usize, ux: i32, uz: i32, cap: i32) -> (i32, i32) {
-    let Near { sx, sz, grid, r2 } = near;
-    let (mut px, mut pz) = (0i32, 0i32);
-    grid.for_each_near(ux, uz, |j| {
-        let j = j as usize;
-        if j == i {
-            return;
-        }
-        let (dx, dz) = (ux - sx[j], uz - sz[j]);
-        let d2 = dx * dx + dz * dz;
-        if d2 == 0 || d2 >= r2 {
-            return;
-        }
-        let w = (r2 - d2) * 64 / r2;
-        px += dx * w / 16;
-        pz += dz * w / 16;
-    });
-    (px.clamp(-cap, cap), pz.clamp(-cap, cap))
-}
-
-/// Снимок соседей на начало фазы движения плюс квадрат радиуса
-/// расталкивания — всё, что нужно, чтобы спросить «кто рядом».
-///
-/// Собрано в одно нарочно: снимок и индекс осмысленны только вместе,
-/// и передавать их порознь значит однажды передать снимок от одной
-/// фазы с индексом от другой.
-#[derive(Clone, Copy)]
-struct Near<'a> {
-    sx: &'a [i32],
-    sz: &'a [i32],
-    grid: &'a Grid,
-    r2: i32,
-}
-
 impl World {
     pub fn new(owners: usize, capacity: usize, tuning: Tuning) -> World {
         World::with_cells(owners, capacity, tuning.separation, tuning.range, tuning)
@@ -919,6 +938,20 @@ impl World {
     /// то, чего нет, в хеш не входит (ADR-195, ADR-230).
     pub fn attach_economy(&mut self, kinds: modding::Kinds, mats: modding::Registry) {
         let owners = self.flow.len().max(1);
+        let roster = voxel::roster::all();
+        let templates = kinds
+            .all()
+            .iter()
+            .map(|k| {
+                roster
+                    .iter()
+                    .find(|(name, _)| *name == k.body)
+                    .unwrap_or_else(|| panic!("unknown body {}", k.body))
+                    .1
+                    .clone()
+            })
+            .collect();
+        self.material_bodies = Some(damage::Bodies::new(templates));
         self.econ = Some(economy::Economy::new(kinds, mats, owners, &self.tuning));
     }
 
@@ -963,6 +996,9 @@ impl World {
         let id = self.spawn_ground(x, z, owner, d.speed, d.voxels);
         let k = id as usize;
         self.units.kind[k] = ki as u16;
+        if let Some(bodies) = self.material_bodies.as_mut() {
+            bodies.spawn_at(id, ki as u16);
+        }
         self.units.chassis[k] = d.chassis;
         self.units.weapon[k] = if d.weapon == 0 {
             0
@@ -992,13 +1028,20 @@ impl World {
 
     /// Сколько юнит везёт сверх собственного тела.
     pub fn cargo(&self, i: usize) -> matter::Amount {
-        let Some(e) = self.econ.as_ref() else { return 0 };
+        let Some(e) = self.econ.as_ref() else {
+            return 0;
+        };
         let c = self.units.store[i];
         let ki = self.units.kind[i];
         if c == economy::NO_CONTAINER || ki == economy::NO_KIND {
             return 0;
         }
-        e.ledger.held(c).saturating_sub(e.kinds.at(ki as usize).cost)
+        let cost = e.kinds.at(ki as usize).cost;
+        let body = self
+            .material_bodies
+            .as_ref()
+            .map_or(cost, |b| b.remaining_matter(i as u32, cost));
+        e.ledger.held(c).saturating_sub(body)
     }
 
     /// Чем кончилась партия.
@@ -1046,15 +1089,22 @@ impl World {
     /// движение читает поле само. Нужно, чтобы отличить «юниту некуда
     /// идти» от «юнит стоит в толпе»: без этого «застрял» — не диагноз.
     pub fn dir_under(&self, i: usize) -> u8 {
-        let Some(g) = self.ground.as_ref() else { return 255 };
+        let Some(g) = self.ground.as_ref() else {
+            return 255;
+        };
         let st = g.nav.step() as i32;
         let (gw, gh) = g.nav.dims();
-        let (cx, cz) = ((self.units.x[i] / st).max(0) as u32, (self.units.z[i] / st).max(0) as u32);
+        let (cx, cz) = (
+            (self.units.x[i] / st).max(0) as u32,
+            (self.units.z[i] / st).max(0) as u32,
+        );
         if cx >= gw || cz >= gh {
             return 255;
         }
         match g.nav.level_index_near(cx, cz, self.units.y[i]) {
-            Some(li) => self.nav_field.dir_at(self.units.owner[i] as usize % 2, cx, cz, li),
+            Some(li) => self
+                .nav_field
+                .dir_at(self.units.owner[i] as usize % 2, cx, cz, li),
             None => 255,
         }
     }
@@ -1119,6 +1169,9 @@ impl World {
             snap_x: Vec::new(),
             ground: None,
             snap_z: Vec::new(),
+            contacts: contacts::Contacts::default(),
+            contact_group_pairs: 0,
+            shot_probe: shot_probe::Probe::default(),
             delta: Vec::new(),
             tick: 0,
             examined_move: 0,
@@ -1159,9 +1212,14 @@ impl World {
             orders_dropped: 0,
             orders_capped: 0,
             econ: None,
+            material_bodies: None,
+            bursts: burst::Bursts::default(),
             outcome: Outcome::Fighting,
             decided_at: None,
             phase_ns: [0; 16],
+            movement_ns: [0; 3],
+            navigation_ns: [0; 4],
+            combat_ns: [0; 4],
         }
     }
 
@@ -1200,10 +1258,7 @@ impl World {
         let f = &mut self.flow[owner];
         for cz in 0..NAV {
             for cx in 0..NAV {
-                let (dx, dz) = (
-                    tx - (cx as i32 * NAV_CELL),
-                    tz - (cz as i32 * NAV_CELL),
-                );
+                let (dx, dz) = (tx - (cx as i32 * NAV_CELL), tz - (cz as i32 * NAV_CELL));
                 let d = if dx.abs() >= dz.abs() {
                     if dx > 0 {
                         2
@@ -1248,7 +1303,9 @@ impl World {
             scan: self.tuning.flow_scan_per_tick,
             sectors: self.tuning.flow_sectors_per_tick,
         };
-        let Some(g) = self.ground.as_ref() else { return };
+        let Some(g) = self.ground.as_ref() else {
+            return;
+        };
         // Правки тика метят секторы: пересобирать надо задетые.
         let (gw, _) = g.nav.dims();
         let step = g.nav.step();
@@ -1299,17 +1356,10 @@ impl World {
                 Phase::Destruction => self.phase_ground_destruction(),
                 Phase::Bodies => self.phase_ground_bodies(),
                 Phase::NavUpdate => {
-                    self.phase_ground_nav();
-                    self.phase_flow();
-                    self.phase_nav_update();
+                    self.profile_navigation();
                 }
                 Phase::Movement => {
-                    self.movement_deltas(threads);
-                    self.apply_deltas();
-                    // Подвеска идёт и здесь: фаза, выполняемая только
-                    // в серийном пути, — это разный мир при разном
-                    // числе воркеров, то есть десинк.
-                    self.phase_ride();
+                    self.profile_movement(threads);
                 }
                 Phase::Combat => self.phase_combat(),
                 Phase::Logistics => self.phase_logistics(),
@@ -1339,13 +1389,10 @@ impl World {
                 Phase::Destruction => self.phase_ground_destruction(),
                 Phase::Bodies => self.phase_ground_bodies(),
                 Phase::NavUpdate => {
-                    self.phase_ground_nav();
-                    self.phase_flow();
-                    self.phase_nav_update();
+                    self.profile_navigation();
                 }
                 Phase::Movement => {
-                    self.phase_movement();
-                    self.phase_ride();
+                    self.profile_movement(1);
                 }
                 Phase::Combat => self.phase_combat(),
                 Phase::Logistics => self.phase_logistics(),
@@ -1378,14 +1425,25 @@ impl World {
         let cap = self.tuning.max_orders_per_tick.max(1);
         let mut n = 0usize;
         while n < cap {
-            let Some(o) = self.orders.pop_front() else { break };
+            let Some(o) = self.orders.pop_front() else {
+                break;
+            };
             n += 1;
             self.apply_order(o);
         }
         if !self.orders.is_empty() {
             self.orders_capped += 1;
         }
+        self.update_engagements();
         self.dig_work();
+        if let (Some(g), Some(e)) = (self.ground.as_mut(), self.econ.as_ref()) {
+            self.bursts.advance_material(
+                &mut g.world,
+                &e.mats,
+                self.material_bodies.as_mut(),
+                &self.tuning,
+            );
+        }
     }
 
     /// Применить один приказ.
@@ -1411,6 +1469,12 @@ impl World {
                 u.goal_y[i] = 0;
                 u.goal_z[i] = z;
             }
+            Order::AttackMove { x, z, .. } => {
+                u.stance[i] = STANCE_ATTACK_MOVE;
+                u.goal_x[i] = x;
+                u.goal_y[i] = 0;
+                u.goal_z[i] = z;
+            }
             Order::Hold { .. } => u.stance[i] = STANCE_HOLD,
             Order::Release { .. } => u.stance[i] = STANCE_FLOW,
             Order::Attack { target, .. } => {
@@ -1428,7 +1492,7 @@ impl World {
                 // И идти к ней. Точка — та, где цель **сейчас**:
                 // преследование сделало бы приказ вечным, а игрок
                 // щёлкает заново, и это дешевле (ADR-195).
-                u.stance[i] = STANCE_MOVE;
+                u.stance[i] = STANCE_ATTACK_MOVE;
                 u.goal_x[i] = u.x[t];
                 u.goal_y[i] = 0;
                 u.goal_z[i] = u.z[t];
@@ -1479,8 +1543,12 @@ impl World {
     /// материи».
     fn place_site(&mut self, by: usize, kind_id: u16, x: i32, z: i32) -> bool {
         let owner = self.units.owner[by];
-        let Some(e) = self.econ.as_ref() else { return false };
-        let Some(ki) = e.kinds.index_of(kind_id) else { return false };
+        let Some(e) = self.econ.as_ref() else {
+            return false;
+        };
+        let Some(ki) = e.kinds.index_of(kind_id) else {
+            return false;
+        };
         let d = e.kinds.at(ki);
         // Строят только постройки. Машина выходит из завода, и класть
         // её фундамент посреди карты значило бы два пути к одному
@@ -1540,7 +1608,9 @@ impl World {
             self.units.job[by] = join;
             return true;
         }
-        let Some(site) = self.spawn_kind_empty(x, z, owner, kind_id) else { return false };
+        let Some(site) = self.spawn_kind_empty(x, z, owner, kind_id) else {
+            return false;
+        };
         let k = site as usize;
         let cost = self
             .econ
@@ -1567,7 +1637,9 @@ impl World {
         let cap = self.tuning.max_build_queue;
         let unit = at as u32;
         let fki = self.units.kind[at];
-        let Some(e) = self.econ.as_mut() else { return false };
+        let Some(e) = self.econ.as_mut() else {
+            return false;
+        };
         if fki == economy::NO_KIND {
             return false;
         }
@@ -1577,7 +1649,9 @@ impl World {
         if !e.kinds.at(fki as usize).produces.contains(&kind_id) {
             return false;
         }
-        let Some(ki) = e.kinds.index_of(kind_id) else { return false };
+        let Some(ki) = e.kinds.index_of(kind_id) else {
+            return false;
+        };
         let line = e.line_mut(unit);
         if line.queue.len() >= cap {
             return false;
@@ -1591,9 +1665,15 @@ impl World {
     fn cancel_product(&mut self, at: usize) -> bool {
         let unit = at as u32;
         let owner = self.units.owner[at] as usize;
-        let Some(e) = self.econ.as_mut() else { return false };
-        let Some(stock) = e.banks.get(owner).map(|b| b.stock) else { return false };
-        let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else { return false };
+        let Some(e) = self.econ.as_mut() else {
+            return false;
+        };
+        let Some(stock) = e.banks.get(owner).map(|b| b.stock) else {
+            return false;
+        };
+        let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else {
+            return false;
+        };
         if e.lines[li].queue.is_empty() {
             return false;
         }
@@ -1629,7 +1709,12 @@ impl World {
         if r <= 0 {
             return;
         }
-        let Self { units: u, ground, econ, .. } = self;
+        let Self {
+            units: u,
+            ground,
+            econ,
+            ..
+        } = self;
         let Some(g) = ground.as_mut() else { return };
         let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
         let mut cur = voxel::World::mat_cursor();
@@ -1690,8 +1775,9 @@ impl World {
                             continue;
                         }
                         if by != voxel::NOBODY {
-                            let m =
-                                g.world.material_cached(&mut cur, x as u32, y as u32, z as u32);
+                            let m = g
+                                .world
+                                .material_cached(&mut cur, x as u32, y as u32, z as u32);
                             if m == voxel::store::AIR {
                                 continue;
                             }
@@ -1749,14 +1835,18 @@ impl World {
     fn phase_ground_bodies(&mut self) {
         let dmg = self.tuning.fall_damage_per_voxel;
         let free = self.tuning.max_step;
-        let Self { ground, units: u, .. } = self;
+        let Self {
+            ground, units: u, ..
+        } = self;
         let Some(g) = ground.as_mut() else { return };
 
         // 1. Посадка на свежие тела: кто оказался над куском, едет
         //    на нём (ADR-099).
         for si in 0..g.bodies.spawned.len() {
             let id = g.bodies.spawned[si];
-            let Some(bi) = g.bodies.index_of(id) else { continue };
+            let Some(bi) = g.bodies.index_of(id) else {
+                continue;
+            };
             let b = &g.bodies.list[bi];
             let (ox, oy, oz) = (b.ox, b.oy, b.oz);
             let (sx, sz) = (b.sx as i64, b.sz as i64);
@@ -1811,6 +1901,15 @@ impl World {
             g.stats.max_fall = g.stats.max_fall.max(fallen);
             u.riding[i] = 0;
         }
+        if let (Some(g), Some(e)) = (self.ground.as_ref(), self.econ.as_mut()) {
+            self.bursts.confirm(&g.completed, e, &self.tuning.blast);
+            self.bursts.step_fragments(
+                &g.world,
+                e,
+                &self.tuning.blast,
+                gravity_per_tick(&self.tuning),
+            );
+        }
     }
 
     /// Пересчёт поля по расписанию. Период — из данных, а не «когда
@@ -1824,7 +1923,9 @@ impl World {
 
     fn phase_ground_nav(&mut self) {
         if let Some(g) = self.ground.as_mut() {
-            g.phase_nav();
+            let measured = g.phase_nav();
+            self.navigation_ns[0] += measured[0];
+            self.navigation_ns[1] += measured[1];
         }
     }
 
@@ -1837,34 +1938,62 @@ impl World {
             .rebuild(&self.units.x, &self.units.z, &self.units.live_ids);
     }
 
-    /// Движение: чтение направления из поля плюс расталкивание соседей.
-    ///
-    /// Расталкивание — единственное место фазы, где стоимость нелинейна
-    /// по числу юнитов: она линейна по числу **пар в радиусе**, а это
-    /// плотность, а не количество.
-    fn phase_movement(&mut self) {
-        self.movement_deltas(1);
+    fn profile_navigation(&mut self) {
+        use std::time::Instant;
+        self.phase_ground_nav();
+        let t0 = Instant::now();
+        self.phase_flow();
+        self.navigation_ns[2] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
+        self.phase_nav_update();
+        self.navigation_ns[3] += t0.elapsed().as_nanos() as u64;
+    }
+
+    fn profile_movement(&mut self, threads: usize) {
+        use std::time::Instant;
+        let t0 = Instant::now();
+        self.movement_deltas(threads);
+        self.movement_ns[0] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
         self.apply_deltas();
+        self.movement_ns[1] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
+        self.phase_ride();
+        self.movement_ns[2] += t0.elapsed().as_nanos() as u64;
     }
 
     /// Подвеска: наклон корпуса от высот пола под точками опоры.
     ///
     /// Идёт **после** хода: наклон отвечает на то, где машина
-    /// оказалась, а не на то, где была. Высоту фаза не трогает
-    /// (ADR-225).
+    /// оказалась, а не на то, где была. Навигационный уровень остаётся
+    /// дискретным, физическая высота корпуса интегрируется отдельно.
     fn phase_ride(&mut self) {
-        let Some(g) = self.ground.as_ref() else { return };
+        let Some(g) = self.ground.as_ref() else {
+            return;
+        };
         let nav = &g.nav;
         let (ex, ez) = g.extent();
         let (nw, nh) = nav.dims();
         let dt = Fx::from_ratio(1, TICKS_PER_SECOND);
+        let (mut impact_damage, mut longest_fall) = (0u64, 0u32);
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
             let kind = self.units.chassis[i];
             let c = self.tuning.chassis(kind);
-            let r = ride::ride_of(c);
+            let mut r = ride::ride_of(c);
+            if self.units.speed[i] > 0 {
+                r.gravity = Fx::from_int(self.tuning.gravity);
+                r.preload = r.gravity.mul(Fx::from_ratio(1, 4));
+            }
+            let r = self
+                .material_bodies
+                .as_ref()
+                .and_then(|b| b.state(i as u32))
+                .map_or(r, |s| s.mobility.ride(r));
             let sup = ride::supports_of(c);
             let (hc, hs) = ride::heading_of(self.units.head[i]);
+            let body_before = self.units.body_y(i);
+            let near = self.units.body_cell_y(i);
             let mut floors = [Fx::ZERO; 4];
             for (f, sp) in floors.iter_mut().zip(sup.iter()) {
                 // Местная опора — в мировые координаты. Поворот только
@@ -1885,9 +2014,9 @@ impl World {
                 // может стоять на крыше, и пол под ней — не пол ямы
                 // (ADR-136).
                 let mut best = nav.floor_at(cx, cz) as i32;
-                let mut gap = (best - self.units.y[i]).abs();
+                let mut gap = (best - near).abs();
                 for &l in nav.levels_at(cx, cz) {
-                    let d = (l as i32 - self.units.y[i]).abs();
+                    let d = (l as i32 - near).abs();
                     if d < gap {
                         gap = d;
                         best = l as i32;
@@ -1903,32 +2032,93 @@ impl World {
                 self.units.yaw_step[i],
                 self.units.head[i],
             );
-            ride::step_hull(
-                &mut self.units.up[i],
-                &mut self.units.spin[i],
-                &mut self.units.load[i],
-                &floors,
-                self.units.head[i],
-                sway,
-                &r,
-                &sup,
-                dt,
-            );
+            if self.units.speed[i] == 0 {
+                ride::step_hull(
+                    &mut self.units.up[i],
+                    &mut self.units.spin[i],
+                    &mut self.units.load[i],
+                    &floors,
+                    self.units.head[i],
+                    sway,
+                    &r,
+                    &sup,
+                    dt,
+                );
+            } else if self.units.riding[i] != 0 {
+                // Only moving platforms own a separate vertical path.
+                self.units.heave_v[i] = Fx::ZERO;
+                self.units.load[i] = Fx::ONE;
+            } else {
+                let level = Fx::from_int(self.units.y[i]);
+                let mut h = phys::Chassis {
+                    y: body_before.add(r.clearance),
+                    vy: self.units.heave_v[i],
+                    up: self.units.up[i],
+                    w: self.units.spin[i],
+                    load: self.units.load[i],
+                };
+                phys::step(&mut h, &sup, &floors, (hc, hs), sway, &r, dt);
+                self.units.heave[i] = h.y.sub(r.clearance).sub(level);
+                self.units.heave_v[i] = h.vy;
+                self.units.up[i] = h.up;
+                self.units.spin[i] = h.w;
+                self.units.load[i] = h.load;
+                self.units.fall_f[i] = Fx::ZERO;
+                // Contact, not a missing floor under the centre, owns flight.
+                // Track the highest body position; a navigation rebase cannot
+                // manufacture a drop or landing damage (ADR-253).
+                if h.grounded() {
+                    if self.units.fall_from[i] != NOT_FALLING {
+                        let fallen =
+                            (self.units.fall_from[i] - self.units.body_cell_y(i)).max(0) as u32;
+                        let hit = fall_damage(
+                            fallen,
+                            self.tuning.max_step,
+                            self.tuning.fall_damage_per_voxel,
+                        );
+                        self.units.voxels[i] =
+                            self.units.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
+                        impact_damage += hit as u64;
+                        longest_fall = longest_fall.max(fallen);
+                    }
+                    self.units.fall_from[i] = NOT_FALLING;
+                    self.units.fall_v[i] = Fx::ZERO;
+                } else {
+                    let apex = body_before.max(self.units.body_y(i)).to_int_trunc();
+                    self.units.fall_from[i] = self.units.fall_from[i].max(apex);
+                    self.units.fall_v[i] =
+                        h.vy.neg().max(Fx::ZERO).div(Fx::from_int(TICKS_PER_SECOND));
+                }
+            }
+        }
+        if let Some(g) = self.ground.as_mut() {
+            g.stats.fall_damage += impact_damage;
+            g.stats.max_fall = g.stats.max_fall.max(longest_fall);
         }
     }
 
-    /// Подготовить снимок к фазе движения. Отделено от счёта, чтобы
-    /// постоянный пул мог звать счёт много раз без пересборки снимка.
+    /// Prepare the phase snapshot AND its exact contact sums. This serial
+    /// work is part of movement; a benchmark timing only movement_kernel
+    /// measures direction lookup and clamp, not the full contact workload.
+    /// The caller must first refresh live ids and rebuild grid_near from the
+    /// same current positions, as phase_nav_update does in the actual tick.
     pub fn prepare_movement(&mut self) {
         self.snap_x.clear();
         self.snap_x.extend_from_slice(&self.units.x);
         self.snap_z.clear();
         self.snap_z.extend_from_slice(&self.units.z);
+        self.contacts.prepare(
+            &self.grid_near,
+            &self.snap_x,
+            &self.snap_z,
+            self.tuning.separation * self.tuning.separation,
+        );
         self.delta.clear();
-        self.delta.resize(self.units.x.len(), drive::Want::default());
+        self.delta
+            .resize(self.units.x.len(), drive::Want::default());
     }
 
-    /// Чего хочет один юнит. Читает только снимок, поле и индекс —
+    /// Чего хочет один юнит. Читает снимок, поле и готовую сумму контактов —
     /// значит вызов из любого потока даёт то же самое.
     ///
     /// **Это желание, а не смещение** (ADR-220): куда ехать и куда
@@ -1953,14 +2143,12 @@ impl World {
             &self.flow,
             self.tuning.order_arrive,
         );
-        let near = Near {
-            sx: &self.snap_x,
-            sz: &self.snap_z,
-            grid: &self.grid_near,
-            r2: self.tuning.separation * self.tuning.separation,
-        };
-        let (px, pz) = separation_push(near, i, ux, uz, self.units.speed[i]);
-        drive::Want { way, push_x: px, push_z: pz }
+        let (px, pz) = self.contacts.push(i, self.units.speed[i]);
+        drive::Want {
+            way,
+            push_x: px,
+            push_z: pz,
+        }
     }
 
     /// Живые ли слот. Нужен пулу, чтобы не считать дырки free-list.
@@ -1986,18 +2174,13 @@ impl World {
     /// в свой слот `delta` — значит фаза делится на потоки по слотам
     /// и результат от разбиения не зависит.
     fn movement_deltas(&mut self, threads: usize) {
+        self.prepare_movement();
+        self.examined_move += self.contacts.equivalent_pairs;
+        self.contact_group_pairs += self.contacts.group_pairs;
         let u = &self.units;
-        self.snap_x.clear();
-        self.snap_x.extend_from_slice(&u.x);
-        self.snap_z.clear();
-        self.snap_z.extend_from_slice(&u.z);
-        self.delta.clear();
-        self.delta.resize(u.x.len(), drive::Want::default());
-
         let (sx, sz) = (&self.snap_x, &self.snap_z);
-        let grid = &self.grid_near;
+        let contacts = &self.contacts;
         let flow = &self.flow;
-        let near = Near { sx, sz, grid, r2: self.tuning.separation * self.tuning.separation };
         // Земля есть — направление берётся из **объёмного** поля по узлу
         // «клетка и уровень»: юнит на крыше идёт по крышам, юнит
         // в туннеле — по туннелю (ADR-138). Без земли поле прежнее,
@@ -2012,19 +2195,20 @@ impl World {
         let compute = |i: usize| -> drive::Want {
             let (ux, uz) = (sx[i], sz[i]);
             let way = want_way(u, i, ux, uz, vol, flow, arrive);
-            let (px, pz) = separation_push(near, i, ux, uz, u.speed[i]);
-            drive::Want { way, push_x: px, push_z: pz }
+            let (px, pz) = contacts.push(i, u.speed[i]);
+            drive::Want {
+                way,
+                push_x: px,
+                push_z: pz,
+            }
         };
 
         let live = &u.live_ids;
         if threads <= 1 {
-            let mut examined = 0u64;
             for &i in live.iter() {
                 let i = i as usize;
-                examined += grid.near_count(sx[i], sz[i]) as u64;
                 self.delta[i] = compute(i);
             }
-            self.examined_move += examined;
             return;
         }
 
@@ -2042,31 +2226,20 @@ impl World {
             base += take;
             rest = tail;
         }
-        // Счётчик осмотра собирается **по кускам и складывается
-        // в порядке кусков**: он не входит в хеш, но отчёт, который
-        // на воркерах показывает ноль, — это ноль, выданный за замер.
-        // Так уже было с годуновскими обновлениями (ADR-190, ADR-192).
-        let mut seen: Vec<u64> = vec![0; parts.len()];
         std::thread::scope(|sc| {
-            for ((offset, part), out) in parts.into_iter().zip(seen.iter_mut()) {
+            for (offset, part) in parts {
                 let compute = &compute;
                 sc.spawn(move || {
-                    let mut examined = 0u64;
                     for (k, slot) in part.iter_mut().enumerate() {
                         let i = offset + k;
                         if !u.alive[i] {
                             continue;
                         }
-                        examined += grid.near_count(sx[i], sz[i]) as u64;
                         *slot = compute(i);
                     }
-                    *out = examined;
                 });
             }
         });
-        for v in seen {
-            self.examined_move += v;
-        }
     }
 
     /// Применить желания. Серийная фаза: трансмиссия, интегрирование
@@ -2097,13 +2270,16 @@ impl World {
         );
         // Циклов шага на мировую единицу пути — по виду ходовой.
         // `None` у гусеничной: у неё нет походки, и фаза шага стоит.
-        let stride = [&self.tuning.tracked, &self.tuning.walking].map(|c| {
-            c.gait.as_ref().map(|g| {
-                let cm_per_unit = (voxel::unit::WORLD_MM as i32 / 10).max(1);
-                Fx::from_ratio(angle::FULL * cm_per_unit, g.stride_cm.max(1))
-            })
-        });
-        let Self { units: u, delta, ground, econ, blocked_moves, .. } = self;
+        let stride = [&self.tuning.tracked, &self.tuning.walking].map(drive::StepCycle::of);
+        let Self {
+            units: u,
+            delta,
+            ground,
+            econ,
+            material_bodies,
+            blocked_moves,
+            ..
+        } = self;
         // Счётчики падения — те же, что у наездников: правило одно,
         // значит и отчёт один.
         let (mut fall_damage_acc, mut max_fall_acc) = (0u64, 0u32);
@@ -2122,6 +2298,9 @@ impl World {
             let i = u.live_ids[k] as usize;
             let want = delta[i];
             let (x0, z0) = (u.x[i], u.z[i]);
+            let y0 = u.y[i];
+            let was_falling = u.fall_from[i] != NOT_FALLING;
+            let mut placed = false;
             let kind = u.chassis[i].code() as usize;
 
             // **Предельная скорость с учётом уклона.** Смотрится
@@ -2129,18 +2308,18 @@ impl World {
             // быстрее. Слишком крутой перепад ребра не имеет вовсе
             // (`max_step`, ADR-121) — туда машина просто не едет,
             // и отдельного правила для этого не нужно.
-            let mut vmax = Fx::from_int(u.speed[i]);
+            let state = material_bodies.as_ref().and_then(|b| b.state(i as u32));
+            let powered = state.is_none_or(|s| s.status.engine && s.status.alive);
+            let engine = state.map_or(Fx::ONE, |s| s.mobility.engine);
+            let mut vmax = if powered {
+                Fx::from_int(u.speed[i]).mul(engine)
+            } else {
+                Fx::ZERO
+            };
             if u.riding[i] == 0 {
                 if let Some((nav, _)) = terrain {
-                    let pct = slope_percent(
-                        nav,
-                        x0,
-                        z0,
-                        u.y[i],
-                        u.head[i],
-                        climb[kind],
-                        descend[kind],
-                    );
+                    let pct =
+                        slope_percent(nav, x0, z0, u.y[i], u.head[i], climb[kind], descend[kind]);
                     vmax = vmax.mul(Fx::from_ratio(pct, 100));
                 }
             }
@@ -2156,11 +2335,19 @@ impl World {
             } else {
                 drive_by_mass.get(ki as usize).copied().unwrap_or(Fx::ONE)
             };
+            let want_way = if powered { want.way } else { NO_WAY };
+            let response = state.map_or(limits[kind], |s| {
+                s.mobility.limits(&limits[kind], want_way == NO_WAY)
+            });
             let (nd, mv) = drive::advance(
-                Drive { head: u.head[i], vel: u.vel[i], yaw_rate: u.yaw_rate[i] },
-                want.way,
+                Drive {
+                    head: u.head[i],
+                    vel: u.vel[i],
+                    yaw_rate: u.yaw_rate[i],
+                },
+                want_way,
                 vmax,
-                &limits[kind],
+                &response,
                 factor,
                 inv_tick,
             );
@@ -2173,21 +2360,14 @@ impl World {
             u.yaw_rate[i] = nd.yaw_rate;
             u.head[i] = nd.head;
             u.vel[i] = nd.vel;
-            // Фаза шага растёт **путём**, а не временем: шагоход,
-            // упёршийся в скалу, ногами не перебирает. Цикл — `stride`
-            // мировых единиц; у видов без походки фаза стоит на нуле.
-            if let Some(st) = stride[kind] {
-                let step = nd.vel.mul(inv_tick).abs();
-                u.gait[i] = u.gait[i]
-                    .wrapping_add(step.mul(st).to_int_trunc())
-                    & (fx::angle::FULL - 1);
-            }
 
             // Толчок соседей прибавляется **к шагу**, а не к тяге:
             // это контакт тел, и разворачиваться ради него машина
             // не обязана (ADR-220).
             let step_x = mv.dx.add(Fx::from_ratio(want.push_x, TICKS_PER_SECOND));
             let step_z = mv.dz.add(Fx::from_ratio(want.push_z, TICKS_PER_SECOND));
+            let (fx0, fz0) = (u.fx[i], u.fz[i]);
+            let mut drop_horizontal = false;
             let nx = u.fx[i].add(step_x);
             let nz = u.fz[i].add(step_z);
             let carry_x = nx.to_int_trunc();
@@ -2196,6 +2376,11 @@ impl World {
             u.fz[i] = nz.sub(Fx::from_int(carry_z));
             let mut x1 = (x0 + carry_x).clamp(0, WORLD - 1);
             let mut z1 = (z0 + carry_z).clamp(0, WORLD - 1);
+            if was_falling && u.speed[i] > 0 && u.riding[i] == 0 {
+                x1 = x0;
+                z1 = z0;
+                drop_horizontal = true;
+            }
             if let Some((nav, (ex, ez))) = terrain {
                 let st = nav.step() as i32;
                 let (gw, gh) = nav.dims();
@@ -2219,79 +2404,104 @@ impl World {
                 // Раньше высота просто притягивалась к ближайшему уровню,
                 // то есть юнит над свежей ямой оказывался на её дне тем же
                 // тиком и без урона (ADR-139).
-                let unsupported = u.riding[i] == 0
-                    && here.is_some_and(|c| !nav.has_level(c.0, c.1, y));
+                let unsupported =
+                    u.riding[i] == 0 && here.is_some_and(|c| !nav.has_level(c.0, c.1, y));
                 if unsupported {
+                    drop_horizontal = true;
                     let c = here.expect("клетка есть");
-                    match nav.level_below(c.0, c.1, y) {
-                        Some(l) => {
-                            let l = l as i32;
-                            // Падает по вертикали: горизонтальный шаг
-                            // на этом тике отменяется.
-                            x1 = x0;
-                            z1 = z0;
-                            if y - l <= free as i32 && u.fall_from[i] == NOT_FALLING {
-                                // **Уступ — шаг вниз, а не падение**
-                                // (ADR-036: «читается как шаг вниз»).
-                                // Копатель снимает воксель под собой всю
-                                // игру, и заставлять его треть секунды
-                                // висеть над собственной ямой — это
-                                // не физика, а заикание (ADR-174).
-                                // Уступ — `max_step` из данных, а не
-                                // воксель: на ребре 0.1 м воксель —
-                                // десять сантиметров, а навигация
-                                // считает проходимым полуметровый
-                                // перепад (ADR-227).
-                                y = l;
-                            } else {
-                                if u.fall_from[i] == NOT_FALLING {
-                                    u.fall_from[i] = y;
-                                    u.fall_v[i] = Fx::ZERO;
-                                    u.fall_f[i] = Fx::ZERO;
-                                }
-                                // Скорость растёт на тяготение, высота —
-                                // на скорость. Первые тики скорость
-                                // меньше воксела, поэтому дробная часть
-                                // копится отдельно.
-                                u.fall_v[i] = u.fall_v[i].add(g_tick);
-                                let nf = u.fall_f[i].add(u.fall_v[i]);
-                                let drop = nf.to_int_trunc();
-                                u.fall_f[i] = nf.sub(Fx::from_int(drop));
-                                // **Опора не проскакивается.** `level_below`
-                                // даёт ближайший уровень снизу, и клэмп
-                                // по нему сажает юнита ровно на него,
-                                // какой бы ни была скорость. Проверка
-                                // `has_level` на конечной высоте
-                                // пропустила бы пол (ADR-174).
-                                y = (y - drop).max(l);
-                                if y == l {
-                                    let fallen = (u.fall_from[i] - y).max(0) as u32;
-                                    let hit = fall_damage(fallen, free, fall_dmg);
-                                    u.voxels[i] =
-                                        u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
-                                    *dmg_acc += hit as u64;
-                                    *max_acc = (*max_acc).max(fallen);
-                                    u.fall_from[i] = NOT_FALLING;
-                                    u.fall_v[i] = Fx::ZERO;
-                                    u.fall_f[i] = Fx::ZERO;
-                                }
-                            }
-                        }
-                        None => {
-                            // Ниже юнита уровней нет: он либо ещё не
-                            // поставлен на землю (высота ноль), либо его
-                            // завалило оседающей материей. Выталкивается
-                            // на нижний уровень клетки — вверх, без урона:
-                            // урон берётся с высоты падения, а падения
-                            // не было.
-                            if let Some(&l) = nav.levels_at(c.0, c.1).first() {
-                                y = l as i32;
-                            }
+                    if u.speed[i] > 0 {
+                        // Rebase navigation only. The same ride solver handles
+                        // both supported motion and free flight for mobile bodies.
+                        if let Some(l) = nav.level_below(c.0, c.1, y) {
+                            y = l as i32;
+                        } else if let Some(&l) = nav.levels_at(c.0, c.1).first() {
+                            y = l as i32;
+                            placed = true;
+                            u.heave[i] = Fx::ZERO;
+                            u.heave_v[i] = Fx::ZERO;
                             u.fall_from[i] = NOT_FALLING;
                             u.fall_v[i] = Fx::ZERO;
                             u.fall_f[i] = Fx::ZERO;
-                            x1 = x0;
-                            z1 = z0;
+                        }
+                        x1 = x0;
+                        z1 = z0;
+                    } else {
+                        match nav.level_below(c.0, c.1, y) {
+                            Some(l) => {
+                                let l = l as i32;
+                                // Падает по вертикали: горизонтальный шаг
+                                // на этом тике отменяется.
+                                x1 = x0;
+                                z1 = z0;
+                                if y - l <= free as i32 && u.fall_from[i] == NOT_FALLING {
+                                    // **Уступ — шаг вниз, а не падение**
+                                    // (ADR-036: «читается как шаг вниз»).
+                                    // Копатель снимает воксель под собой всю
+                                    // игру, и заставлять его треть секунды
+                                    // висеть над собственной ямой — это
+                                    // не физика, а заикание (ADR-174).
+                                    // Уступ — `max_step` из данных, а не
+                                    // воксель: на ребре 0.1 м воксель —
+                                    // десять сантиметров, а навигация
+                                    // считает проходимым полуметровый
+                                    // перепад (ADR-227).
+                                    y = l;
+                                } else {
+                                    if u.fall_from[i] == NOT_FALLING {
+                                        u.fall_from[i] = y;
+                                        u.fall_v[i] =
+                                            u.heave_v[i].neg().mul(inv_tick).max(Fx::ZERO);
+                                        u.fall_f[i] = Fx::ZERO;
+                                    }
+                                    // Скорость растёт на тяготение, высота —
+                                    // на скорость. Первые тики скорость
+                                    // меньше воксела, поэтому дробная часть
+                                    // копится отдельно.
+                                    u.fall_v[i] = u.fall_v[i].add(g_tick);
+                                    let nf = u.fall_f[i].add(u.fall_v[i]);
+                                    let drop = nf.to_int_trunc();
+                                    u.fall_f[i] = nf.sub(Fx::from_int(drop));
+                                    // **Опора не проскакивается.** `level_below`
+                                    // даёт ближайший уровень снизу, и клэмп
+                                    // по нему сажает юнита ровно на него,
+                                    // какой бы ни была скорость. Проверка
+                                    // `has_level` на конечной высоте
+                                    // пропустила бы пол (ADR-174).
+                                    y = (y - drop).max(l);
+                                    if y == l {
+                                        let fallen = (u.fall_from[i] - y).max(0) as u32;
+                                        let hit = fall_damage(fallen, free, fall_dmg);
+                                        u.voxels[i] = u.voxels[i]
+                                            .saturating_sub(hit.min(u16::MAX as u32) as u16);
+                                        *dmg_acc += hit as u64;
+                                        *max_acc = (*max_acc).max(fallen);
+                                        u.fall_from[i] = NOT_FALLING;
+                                        u.heave_v[i] =
+                                            u.fall_v[i].neg().mul(Fx::from_int(TICKS_PER_SECOND));
+                                        u.fall_v[i] = Fx::ZERO;
+                                        u.fall_f[i] = Fx::ZERO;
+                                    }
+                                }
+                            }
+                            None => {
+                                // Ниже юнита уровней нет: он либо ещё не
+                                // поставлен на землю (высота ноль), либо его
+                                // завалило оседающей материей. Выталкивается
+                                // на нижний уровень клетки — вверх, без урона:
+                                // урон берётся с высоты падения, а падения
+                                // не было.
+                                if let Some(&l) = nav.levels_at(c.0, c.1).first() {
+                                    y = l as i32;
+                                }
+                                placed = true;
+                                u.heave[i] = Fx::ZERO;
+                                u.heave_v[i] = Fx::ZERO;
+                                u.fall_from[i] = NOT_FALLING;
+                                u.fall_v[i] = Fx::ZERO;
+                                u.fall_f[i] = Fx::ZERO;
+                                x1 = x0;
+                                z1 = z0;
+                            }
                         }
                     }
                     u.y[i] = y;
@@ -2330,6 +2540,36 @@ impl World {
                     }
                 }
             }
+            // A rejected axis must reject its fractional motion too. Otherwise
+            // the rendered pose oscillates through the wall between whole cells.
+            let ax = !drop_horizontal && x1 == x0 + carry_x;
+            // Crossing a walkable step changes the navigation level, not
+            // the physical height instantaneously, including during flight.
+            // Initial placement is an explicit teleport.
+            if !placed && u.riding[i] == 0 && u.speed[i] > 0 {
+                u.heave[i] = u.heave[i].sub(Fx::from_int(u.y[i] - y0));
+            }
+            let az = !drop_horizontal && z1 == z0 + carry_z;
+            if !ax {
+                u.fx[i] = fx0;
+            }
+            if !az {
+                u.fz[i] = fz0;
+            }
+            // Only accepted drive motion advances the gait. Contact pushes do
+            // not become an extra stride. A single accepted axis needs abs,
+            // both axes use the already known speed; no square root per unit.
+            if let Some(st) = stride[kind] {
+                let path = match (ax, az) {
+                    (true, true) => nd.vel.mul(inv_tick).abs(),
+                    (true, false) => mv.dx.abs(),
+                    (false, true) => mv.dz.abs(),
+                    (false, false) => Fx::ZERO,
+                };
+                u.gait[i] = u.gait[i].wrapping_add(
+                    st.advance(path, if drop_horizontal { 0 } else { u.yaw_step[i] }),
+                ) & (fx::angle::FULL - 1);
+            }
             u.x[i] = x1;
             u.z[i] = z1;
         }
@@ -2346,13 +2586,31 @@ impl World {
     /// Урон пишет в **чужие** слоты, поэтому идёт серийно; накопитель
     /// складывается обычным сложением, потому что фаза серийная.
     fn phase_combat(&mut self) {
+        use std::time::Instant;
+        let t0 = Instant::now();
         // Сначала летят те, кто уже в воздухе, потом стреляют новые:
         // иначе снаряд успевал бы родиться и попасть в одном тике,
         // то есть время полёта было бы нулевым у первого шага.
         self.step_shots();
+        self.combat_ns[0] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
         let u = &mut self.units;
         let mut examined = 0u64;
-        let r2 = self.tuning.range * self.tuning.range;
+        let ranges: Vec<i32> = (0..u.len())
+            .map(|i| {
+                if self.weapons.is_empty() {
+                    return self.tuning.range;
+                }
+                let w = self
+                    .weapons
+                    .at((u.weapon[i] as usize).min(self.weapons.len() - 1));
+                if w.range > 0 {
+                    w.range
+                } else {
+                    self.tuning.range
+                }
+            })
+            .collect();
 
         // Часть первая: проверка уже выбранной цели. O(1) на юнита.
         //
@@ -2366,12 +2624,21 @@ impl World {
         need.clear();
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
+            if self
+                .material_bodies
+                .as_ref()
+                .and_then(|b| b.state(i as u32))
+                .is_some_and(|s| !s.status.sensor || !s.status.alive)
+            {
+                u.target[i] = NO_TARGET;
+                continue;
+            }
+            let r2 = ranges[i] * ranges[i];
             let t = u.target[i];
             if t != NO_TARGET {
                 let tt = t as usize;
                 let (dx, dz) = (u.x[i] - u.x[tt], u.z[i] - u.z[tt]);
-                let valid =
-                    u.alive[tt] && u.owner[tt] != u.owner[i] && dx * dx + dz * dz <= r2;
+                let valid = u.alive[tt] && u.owner[tt] != u.owner[i] && dx * dx + dz * dz <= r2;
                 if !valid {
                     // Цель была и пропала — этот ищет вне очереди.
                     u.target[i] = NO_TARGET;
@@ -2408,26 +2675,29 @@ impl World {
         for step in 0..take {
             let i = need[(start + step) % n] as usize;
             let (ux, uz, mine) = (u.x[i], u.z[i], u.owner[i]);
+            let range = ranges[i];
+            let r2 = range * range;
             let mut best = i32::MAX;
             let mut best_j = NO_TARGET;
-            self.grid_far.for_each_near(ux, uz, |j| {
-                examined += 1;
-                let jj = j as usize;
-                if u.owner[jj] == mine || !u.alive[jj] {
-                    return;
-                }
-                let (dx, dz) = (ux - u.x[jj], uz - u.z[jj]);
-                let d2 = dx * dx + dz * dz;
-                if d2 > r2 {
-                    return;
-                }
-                // Ничья разрешается **линейным индексом**, а не порядком
-                // обхода (`CLAUDE.md`).
-                if d2 < best || (d2 == best && j < best_j) {
-                    best = d2;
-                    best_j = j;
-                }
-            });
+            self.grid_far
+                .for_each_rect([ux - range, uz - range], [ux + range, uz + range], |j| {
+                    examined += 1;
+                    let jj = j as usize;
+                    if u.owner[jj] == mine || !u.alive[jj] {
+                        return;
+                    }
+                    let (dx, dz) = (ux - u.x[jj], uz - u.z[jj]);
+                    let d2 = dx * dx + dz * dz;
+                    if d2 > r2 {
+                        return;
+                    }
+                    // Ничья разрешается **линейным индексом**, а не порядком
+                    // обхода (`CLAUDE.md`).
+                    if d2 < best || (d2 == best && j < best_j) {
+                        best = d2;
+                        best_j = j;
+                    }
+                });
             u.target[i] = best_j;
             // Срок следующего пересмотра разводится по юнитам, иначе
             // они собираются в когорты и фаза снова становится пиковой
@@ -2439,7 +2709,13 @@ impl World {
         self.need_search = need;
         self.examined_combat += examined;
 
+        self.combat_ns[1] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
         self.fire();
+        self.combat_ns[2] += t0.elapsed().as_nanos() as u64;
+        let t0 = Instant::now();
+        self.apply_material_damage();
+        self.combat_ns[3] += t0.elapsed().as_nanos() as u64;
     }
 
     /// Выстрелы: у кого есть цель и кто перезарядился.
@@ -2466,9 +2742,15 @@ impl World {
         // ему нечем, и линия огня у него своя (ADR-170).
         let muzzle = self.tuning.unit_height as i32 / 2;
         let tick = self.tick as u32;
+        let frames = self.material_bodies.as_ref().map(|b| b.frames(&self.units));
+        let impact_cap = self.tuning.impact.max_pending;
+        let impact_motion = self.tuning.impact.motion_pct;
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
         let Self {
+            econ,
+            material_bodies,
+            grid_far,
             units: u,
             shots,
             weapons,
@@ -2484,15 +2766,40 @@ impl World {
         } = self;
         for k in 0..u.live_ids.len() {
             let i = u.live_ids[k] as usize;
+            if u.site[i] != 0
+                || econ.as_ref().is_some_and(|e| {
+                    u.kind[i] != economy::NO_KIND && e.kinds.at(u.kind[i] as usize).weapon == 0
+                })
+            {
+                continue;
+            }
+            if material_bodies
+                .as_ref()
+                .and_then(|b| b.state(i as u32))
+                .is_some_and(|s| !s.status.alive || !s.status.weapon || !s.status.sensor)
+            {
+                continue;
+            }
             let tgt = u.target[i];
             if tgt == NO_TARGET || tick < u.next_shot[i] {
                 continue;
             }
             let wi = (u.weapon[i] as usize).min(weapons.len() - 1);
             let w = *weapons.at(wi);
+            let range = if w.range > 0 { w.range } else { range };
             let tt = tgt as usize;
-            let from = (u.x[i], u.y[i], u.z[i]);
-            let to = (u.x[tt], u.y[tt], u.z[tt]);
+            let height_of = |id: usize| {
+                material_bodies
+                    .as_ref()
+                    .and_then(|b| b.body(id as u32))
+                    .map(|b| b.vol.ny as i32 * b.mm as i32 / voxel::unit::WORLD_MM as i32 / 2)
+            };
+            let from = (u.x[i], u.body_cell_y(i) + height_of(i).unwrap_or(0), u.z[i]);
+            let to = (
+                u.x[tt],
+                u.body_cell_y(tt) + height_of(tt).unwrap_or(0),
+                u.z[tt],
+            );
 
             match w.kind {
                 WeaponKind::Laser => {
@@ -2512,24 +2819,61 @@ impl World {
                         *beams_blocked += 1;
                         continue;
                     }
+                    let mut endpoint = to;
+                    if let (Some(bodies), Some(frames)) =
+                        (material_bodies.as_mut(), frames.as_ref())
+                    {
+                        if bodies.pending.len() >= impact_cap as usize {
+                            continue;
+                        }
+                        let a = damage_combat::point(from);
+                        let b = damage_combat::point(to);
+                        if let Some(hit) =
+                            damage_combat::trace(bodies, frames, u, grid_far, a, b, i as u32)
+                        {
+                            damage_combat::queue(
+                                bodies,
+                                hit,
+                                a,
+                                b,
+                                w.impact_energy_j as u64 * 1000,
+                                impact_cap,
+                                impact_motion,
+                            );
+                            endpoint = damage_combat::cell(a.add(b.sub(a).scale(hit.t)));
+                            *beams_hit += 1;
+                        } else if bodies.body(tgt).is_none() {
+                            dmg_acc[tt] += w.damage as u32;
+                            *beams_hit += 1;
+                        }
+                    } else {
+                        dmg_acc[tt] += w.damage as u32;
+                        *beams_hit += 1;
+                    }
                     *beams_fired += 1;
-                    dmg_acc[tt] += w.damage as u32;
-                    *beams_hit += 1;
                     events.push(SimEvent::Beam {
                         x0: from.0,
                         y0: from.1,
                         z0: from.2,
-                        x1: to.0,
-                        y1: to.1,
-                        z1: to.2,
+                        x1: endpoint.0,
+                        y1: endpoint.1,
+                        z1: endpoint.2,
                         owner: u.owner[i],
                     });
                     u.next_shot[i] = tick + w.reload;
                 }
                 WeaponKind::Bolt => {
                     let (from, to) = (
-                        (from.0, from.1 + muzzle, from.2),
-                        (to.0, to.1 + muzzle, to.2),
+                        (
+                            from.0,
+                            from.1 + if height_of(i).is_some() { 0 } else { muzzle },
+                            from.2,
+                        ),
+                        (
+                            to.0,
+                            to.1 + if height_of(tt).is_some() { 0 } else { muzzle },
+                            to.2,
+                        ),
                     );
                     // Потолок на снаряды в воздухе. Упёршийся выстрел
                     // **не тратит перезарядку**: иначе юнит терял бы
@@ -2539,8 +2883,7 @@ impl World {
                         continue;
                     }
                     // Тиков ровно столько, чтобы пересечь дальность.
-                    let life = ((range as i64 * TICKS_PER_SECOND as i64)
-                        / w.speed.max(1) as i64
+                    let life = ((range as i64 * TICKS_PER_SECOND as i64) / w.speed.max(1) as i64
                         + 2)
                     .clamp(1, u16::MAX as i64) as u16;
                     let step = Fx::from_ratio(w.speed, TICKS_PER_SECOND);
@@ -2597,15 +2940,25 @@ impl World {
                     // Воронка — свойство **снаряда**, а не общей
                     // настройки: она задана оружием, а снаряд летит
                     // и переживает того, кто его выпустил.
-                    shots.spawn(
+                    let shot = shots.spawn(
                         from,
                         (Fx::ZERO, Fx::ZERO, Fx::ZERO),
-                        (dx.div(len).mul(step), ay.div(len).mul(step), dz.div(len).mul(step)),
+                        (
+                            dx.div(len).mul(step),
+                            ay.div(len).mul(step),
+                            dz.div(len).mul(step),
+                        ),
                         u.owner[i],
                         w.damage,
                         life,
                         (w.blast_radius, w.blast_damage),
                     );
+                    shots.weapon_id[shot as usize] = w.id;
+                    shots.source[shot as usize] = i as u32;
+                    shots.source_generation[shot as usize] = material_bodies
+                        .as_ref()
+                        .and_then(|b| b.state(i as u32))
+                        .map_or(0, |b| b.generation);
                     *shots_fired += 1;
                     u.next_shot[i] = tick + w.reload;
                 }
@@ -2631,17 +2984,25 @@ impl World {
     /// (ADR-113). Иначе снаряд пролетал бы там, где стрелок цели
     /// не видит.
     fn step_shots(&mut self) {
-        let r2 = self.tuning.shot_hit_radius * self.tuning.shot_hit_radius;
+        let radius = self.tuning.shot_hit_radius;
         let height = self.tuning.unit_height as i32;
         // **Снаряд подчиняется тяготению** (ADR-173). Луча здесь нет
         // вовсе: он не летит, а приходит в тот же тик, и ускорять
         // у него нечего.
         let g_tick = gravity_per_tick(&self.tuning);
+        let frames = self.material_bodies.as_ref().map(|b| b.frames(&self.units));
+        let impact_cap = self.tuning.impact.max_pending;
+        let impact_motion = self.tuning.impact.motion_pct;
+        let burst_tuning = self.tuning.blast;
         self.dmg_acc.clear();
         self.dmg_acc.resize(self.units.x.len(), 0);
         let Self {
+            material_bodies,
+            bursts,
+            weapons,
             units: u,
             shots,
+            shot_probe,
             ground,
             grid_far,
             shots_hit,
@@ -2663,9 +3024,29 @@ impl World {
                 shots.kill(si);
                 continue;
             }
+            // Backpressure retains the projectile at the start of this step.
+            if material_bodies
+                .as_ref()
+                .is_some_and(|b| b.pending.len() >= impact_cap as usize)
+            {
+                continue;
+            }
+            if material_bodies.is_some()
+                && weapons
+                    .get(shots.weapon_id[s])
+                    .is_some_and(|w| w.blast_energy_j > 0)
+                && !bursts.ready(&burst_tuning)
+            {
+                continue;
+            }
             shots.life[s] -= 1;
 
             let from = (shots.x[s], shots.y[s], shots.z[s]);
+            let ray_from = phys::V3::new(
+                Fx::from_int(from.0).add(shots.fx[s]),
+                Fx::from_int(from.1).add(shots.fy[s]),
+                Fx::from_int(from.2).add(shots.fz[s]),
+            );
             // Сначала тяготение меняет скорость, потом скорость —
             // положение. Порядок фиксирован: обратный даёт другую
             // траекторию, то есть другой хеш.
@@ -2683,20 +3064,47 @@ impl World {
             shots.fy[s] = ny.sub(Fx::from_int(cy));
             shots.fz[s] = nz.sub(Fx::from_int(cz));
             let to = (from.0 + cx, from.1 + cy, from.2 + cz);
+            let ray_to = ray_from.add(phys::V3::new(shots.vx[s], shots.vy[s], shots.vz[s]));
 
             // Где рванёт, если рванёт.
             let mut hit_at: Option<(i32, i32, i32)> = None;
             // Порода на пути. Оба конца исключены, поэтому стрелок
             // не заслоняет сам себя на первом тике.
             let mut wall: Option<(i32, i32, i32)> = None;
+            let mut exits_world = false;
             if let Some(g) = ground.as_ref() {
                 let (ex, ez) = g.extent();
                 let ey = g.world.ny as i32;
                 if to.0 < 0 || to.2 < 0 || to.0 >= ex || to.2 >= ez || to.1 < 0 || to.1 >= ey {
-                    shots.kill(si);
-                    continue;
+                    if material_bodies.is_none() {
+                        shots.kill(si);
+                        continue;
+                    }
+                    exits_world = true;
                 }
-                let los = voxel::los::line_of_sight(&g.world, from, to);
+                let los = if material_bodies.is_some() {
+                    // Collision must follow flight order; visibility's canonical
+                    // endpoint order would choose the far wall on reverse shots.
+                    let mut result = voxel::los::LosResult {
+                        clear: true,
+                        blocked_at: to,
+                        steps: 0,
+                    };
+                    result.steps = voxel::los::walk(from, to, |x, y, z| {
+                        if g.world
+                            .solid(x.max(0) as u32, y.max(0) as u32, z.max(0) as u32)
+                        {
+                            result.clear = false;
+                            result.blocked_at = (x, y, z);
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    result
+                } else {
+                    voxel::los::line_of_sight(&g.world, from, to)
+                };
                 if !los.clear {
                     wall = Some(los.blocked_at);
                 } else if g.world.solid(to.0 as u32, to.1 as u32, to.2 as u32) {
@@ -2726,31 +3134,19 @@ impl World {
             let mine = shots.owner[s];
             let end = wall.unwrap_or(to);
             let (mut hit_unit, mut hit_point) = (NO_TARGET, None);
-            {
-                let probe = |px: i32, py: i32, pz: i32| -> u32 {
-                    let (mut best, mut best_j) = (i32::MAX, NO_TARGET);
-                    grid_far.for_each_near(px, pz, |j| {
-                        let jj = j as usize;
-                        if !u.alive[jj] || u.owner[jj] == mine {
-                            return;
-                        }
-                        if (u.y[jj] - py).abs() > height {
-                            return;
-                        }
-                        let (dx, dz) = (u.x[jj] - px, u.z[jj] - pz);
-                        let d2 = dx * dx + dz * dz;
-                        if d2 > r2 {
-                            return;
-                        }
-                        if d2 < best || (d2 == best && j < best_j) {
-                            best = d2;
-                            best_j = j;
-                        }
-                    });
-                    best_j
-                };
+            shot_probe.prepare(
+                grid_far,
+                u,
+                material_bodies.as_ref(),
+                from,
+                end,
+                radius,
+                height,
+                mine,
+            );
+            if !shot_probe.is_empty() {
                 voxel::los::walk(from, end, |px, py, pz| {
-                    let j = probe(px, py, pz);
+                    let j = shot_probe.at(grid_far, px, py, pz);
                     if j == NO_TARGET {
                         return true;
                     }
@@ -2758,10 +3154,9 @@ impl World {
                     hit_point = Some((px, py, pz));
                     false
                 });
-                // Конец отрезка обход исключает, а попасть в него можно.
-                // Упёршийся конец — это порода, и там никого нет.
+                // Walk excludes the endpoint. A terrain endpoint still blocks it.
                 if hit_unit == NO_TARGET && wall.is_none() {
-                    let j = probe(to.0, to.1, to.2);
+                    let j = shot_probe.at(grid_far, to.0, to.1, to.2);
                     if j != NO_TARGET {
                         hit_unit = j;
                         hit_point = Some(to);
@@ -2769,8 +3164,63 @@ impl World {
                 }
             }
 
+            let physical_hit =
+                if let (Some(bodies), Some(frames)) = (material_bodies.as_ref(), frames.as_ref()) {
+                    damage_combat::trace(
+                        bodies,
+                        frames,
+                        u,
+                        grid_far,
+                        ray_from,
+                        ray_to,
+                        if bodies
+                            .state(shots.source[s])
+                            .is_some_and(|b| b.generation == shots.source_generation[s])
+                        {
+                            shots.source[s]
+                        } else {
+                            NO_TARGET
+                        },
+                    )
+                    .filter(|hit| {
+                        wall.is_none_or(|p| hit.t < damage_combat::cell_entry(ray_from, ray_to, p))
+                    })
+                    .filter(|hit| {
+                        hit_point
+                            .is_none_or(|p| hit.t <= damage_combat::cell_entry(ray_from, ray_to, p))
+                    })
+                } else {
+                    None
+                };
+            if let Some(hit) = physical_hit {
+                hit_unit = hit.unit;
+                hit_point = Some(damage_combat::cell(
+                    ray_from.add(ray_to.sub(ray_from).scale(hit.t)),
+                ));
+                let energy = weapons.get(shots.weapon_id[s]).map_or(0, |w| {
+                    let velocity = [shots.vx[s], shots.vy[s], shots.vz[s]].map(|v| {
+                        v.mul(Fx::from_int(
+                            TICKS_PER_SECOND * voxel::unit::WORLD_MM as i32,
+                        ))
+                        .to_int_trunc() as i64
+                    });
+                    (w.impact_energy_j as u64 * 1000)
+                        .saturating_add(voxel::impact::kinetic_mj(w.mass_g, velocity))
+                });
+                damage_combat::queue(
+                    material_bodies.as_mut().unwrap(),
+                    hit,
+                    ray_from,
+                    ray_to,
+                    energy,
+                    impact_cap,
+                    impact_motion,
+                );
+            }
             if let Some(p) = hit_point {
-                dmg_acc[hit_unit as usize] += shots.damage[s] as u32;
+                if physical_hit.is_none() {
+                    dmg_acc[hit_unit as usize] += shots.damage[s] as u32;
+                }
                 *shots_hit += 1;
                 shots.x[s] = p.0;
                 shots.y[s] = p.1;
@@ -2788,6 +3238,9 @@ impl World {
                 shots.x[s] = to.0;
                 shots.y[s] = to.1;
                 shots.z[s] = to.2;
+                if exits_world {
+                    shots.kill(si);
+                }
             }
 
             // Взрыв. Воронка идёт в **ту же очередь правок**, что копка:
@@ -2800,7 +3253,32 @@ impl World {
                 continue;
             }
             *blasts += 1;
-            events.push(SimEvent::Blast { x: at.0, y: at.1, z: at.2, radius: br });
+            events.push(SimEvent::Blast {
+                x: at.0,
+                y: at.1,
+                z: at.2,
+                radius: br,
+            });
+            if material_bodies.is_some() {
+                if let (Some(g), Some(w)) = (ground.as_ref(), weapons.get(shots.weapon_id[s])) {
+                    if w.blast_energy_j > 0 {
+                        let accepted = bursts.enqueue(
+                            &g.world,
+                            [at.0, at.1, at.2],
+                            br,
+                            w.blast_energy_j,
+                            &burst_tuning,
+                        );
+                        debug_assert!(accepted, "validated blast retained by shot backpressure");
+                        if let (Some(bodies), Some(frames)) =
+                            (material_bodies.as_ref(), frames.as_ref())
+                        {
+                            bursts.capture_last(bodies, frames, &burst_tuning);
+                        }
+                    }
+                }
+                continue;
+            }
             if let Some(g) = ground.as_mut() {
                 let (ex, ey, ez) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
                 for dy in -br..=br {
@@ -2840,8 +3318,13 @@ impl World {
                     return;
                 }
                 let (dx, dz) = (u.x[jj] - at.0, u.z[jj] - at.2);
-                let dy = u.y[jj] - at.1;
+                let dy = u.body_cell_y(jj) - at.1;
                 if dx * dx + dy * dy + dz * dz > br2 {
+                    return;
+                }
+                // Material units accept only spatial requests. The old radial
+                // counter is retained solely for the scalar benchmark fixtures.
+                if material_bodies.as_ref().and_then(|b| b.body(j)).is_some() {
                     return;
                 }
                 dmg_acc[jj] += blast_dmg as u32;
@@ -2892,7 +3375,12 @@ impl World {
     /// не входят вовсе: это физика карты, а не экономика. Карта
     /// в учёте не лежит, поэтому и терять ей нечего.
     fn harvest(&mut self) {
-        let Self { econ, ground, units, .. } = self;
+        let Self {
+            econ,
+            ground,
+            units,
+            ..
+        } = self;
         let Some(e) = econ.as_mut() else { return };
         let Some(g) = ground.as_ref() else { return };
         for &(by, mat) in g.taken() {
@@ -3046,10 +3534,16 @@ impl World {
             // --- разгрузка. Переработка с выходом меньше единицы —
             //     тот самый сток, без которого партия не кончается.
             let e = self.econ.as_mut().expect("экономика");
-            let body = e.kinds.at(ki as usize).cost;
+            let cost = e.kinds.at(ki as usize).cost;
+            let body = self
+                .material_bodies
+                .as_ref()
+                .map_or(cost, |b| b.remaining_matter(i as u32, cost));
             let cargo = e.ledger.held(c).saturating_sub(body);
             if cargo > 0 {
-                let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+                let Some(bank) = e.banks.get(owner as usize).copied() else {
+                    continue;
+                };
                 // **Больше, чем влезет в запас, не перерабатывается.**
                 // Переработка списывает в сток всё взятое, что не ушло
                 // приёмнику: сдай полный бак в полный склад — и груз
@@ -3095,7 +3589,9 @@ impl World {
     /// (`CLAUDE.md`): иначе два одинаково близких склада выбирались бы
     /// по истории списка живых.
     fn nearest_dock(&self, i: usize) -> u32 {
-        let Some(e) = self.econ.as_ref() else { return NO_TARGET };
+        let Some(e) = self.econ.as_ref() else {
+            return NO_TARGET;
+        };
         let owner = self.units.owner[i];
         let (ux, uz) = (self.units.x[i], self.units.z[i]);
         let mut best = NO_TARGET;
@@ -3141,6 +3637,7 @@ impl World {
     /// (`CLAUDE.md`).
     fn sweep_wrecks(&mut self) {
         let Some(e) = self.econ.as_mut() else { return };
+        self.bursts.sweep(e);
         if e.wrecks.is_empty() {
             return;
         }
@@ -3155,7 +3652,7 @@ impl World {
             }
         });
         for id in empty {
-            e.ledger.release(id);
+            e.ledger.retire_empty_debris(id);
         }
     }
 
@@ -3183,7 +3680,10 @@ impl World {
                 continue;
             }
             let s = s as usize;
-            let (dx, dz) = (self.units.x[s] - self.units.x[i], self.units.z[s] - self.units.z[i]);
+            let (dx, dz) = (
+                self.units.x[s] - self.units.x[i],
+                self.units.z[s] - self.units.z[i],
+            );
             self.units.goal_x[i] = self.units.x[s];
             self.units.goal_y[i] = self.units.y[s];
             self.units.goal_z[i] = self.units.z[s];
@@ -3202,7 +3702,9 @@ impl World {
                 let d = e.kinds.at(si as usize);
                 (d.cost, d.voxels as u64)
             };
-            let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+            let Some(bank) = e.banks.get(owner as usize).copied() else {
+                continue;
+            };
             let want = rate.min(self.units.site[s]);
             let moved = e.ledger.transfer(bank.stock, self.units.store[s], want);
             if moved == 0 {
@@ -3212,8 +3714,8 @@ impl World {
             let before = full * (cost - self.units.site[s]) / cost.max(1);
             self.units.site[s] -= moved;
             let after = full * (cost - self.units.site[s]) / cost.max(1);
-            self.units.voxels[s] = self.units.voxels[s]
-                .saturating_add((after - before).min(u16::MAX as u64) as u16);
+            self.units.voxels[s] =
+                self.units.voxels[s].saturating_add((after - before).min(u16::MAX as u64) as u16);
             if self.units.site[s] == 0 {
                 e.built += 1;
                 e.drop_site(s as u32);
@@ -3254,7 +3756,9 @@ impl World {
                     (d.cost, d.build_ticks.max(1))
                 };
                 let owner = self.units.owner[u];
-                let Some(bank) = e.banks.get(owner as usize).copied() else { continue };
+                let Some(bank) = e.banks.get(owner as usize).copied() else {
+                    continue;
+                };
                 let held = e.lines[li].held;
                 let paid = e.ledger.held(held);
                 // Порция за тик — вверх: при делении вниз последний
@@ -3292,7 +3796,11 @@ impl World {
         for (unit, ki, owner) in out {
             let u = unit as usize;
             let gap = self.tuning.separation;
-            let (ex, ez) = self.ground.as_ref().map(|g| g.extent()).unwrap_or((WORLD, WORLD));
+            let (ex, ez) = self
+                .ground
+                .as_ref()
+                .map(|g| g.extent())
+                .unwrap_or((WORLD, WORLD));
             // Машина выходит на расстояние расталкивания от завода:
             // ближе она физически стоять не может, и место это уже
             // задано данными.
@@ -3302,15 +3810,20 @@ impl World {
                 let e = self.econ.as_ref().expect("экономика");
                 e.kinds.at(ki as usize).id
             };
-            let Some(made) = self.spawn_kind_empty(x, z, owner, id) else { continue };
+            let Some(made) = self.spawn_kind_empty(x, z, owner, id) else {
+                continue;
+            };
             let e = self.econ.as_mut().expect("экономика");
-            let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else { continue };
+            let Ok(li) = e.lines.binary_search_by_key(&unit, |l| l.unit) else {
+                continue;
+            };
             let held = e.lines[li].held;
             let cost = e.kinds.at(ki as usize).cost;
             // Материя заказа **переезжает в тело машины**: тело юнита
             // это контейнер (`docs/07-economy.md`), и подбитая машина
             // отдаёт её обломком.
-            e.ledger.transfer(held, self.units.store[made as usize], cost);
+            e.ledger
+                .transfer(held, self.units.store[made as usize], cost);
             e.lines[li].queue.pop_front();
             e.lines[li].ticks = 0;
             e.produced += 1;
@@ -3370,15 +3883,18 @@ impl World {
             }
         }
         self.deaths += dead.len() as u64;
+        let frames = (!dead.is_empty())
+            .then(|| self.material_bodies.as_ref().map(|b| b.frames(&self.units)))
+            .flatten();
         for i in dead {
             let k = i as usize;
             self.events.push(SimEvent::Death {
                 unit: i,
                 x: self.units.x[k],
-                y: self.units.y[k],
+                y: self.units.body_cell_y(k),
                 z: self.units.z[k],
             });
-            self.wreck(k);
+            self.wreck(k, frames.as_ref().and_then(|f| f[k]));
             self.units.kill(i);
         }
         self.recount_outcome();
@@ -3393,13 +3909,13 @@ impl World {
     ///
     /// Обломок лежит **там, где погибла машина**, и реклеймится тем же
     /// приказом «копать», что и порода (ADR-017).
-    fn wreck(&mut self, k: usize) {
+    fn wreck(&mut self, k: usize, frames: Option<[damage::Frame; 2]>) {
         let c = self.units.store[k];
         if c == economy::NO_CONTAINER {
             return;
         }
         let (num, den) = (self.tuning.breach_loss_num, self.tuning.breach_loss_den);
-        let (x, y, z) = (self.units.x[k], self.units.y[k], self.units.z[k]);
+        let (x, y, z) = (self.units.x[k], self.units.body_cell_y(k), self.units.z[k]);
         let unit = k as u32;
         let Some(e) = self.econ.as_mut() else { return };
         // Недострой погиб — снять его из списка: иначе к покойнику
@@ -3409,17 +3925,26 @@ impl World {
         // Заготовка погибшего завода разделяет его судьбу — и ложится
         // в тот же обломок.
         e.wreck_line(unit, debris);
-        if e.ledger.held(debris) > 0 {
-            e.wrecks.push(economy::Wreck { held: debris, x, y, z });
+        let has_matter = e.ledger.held(debris) > 0;
+        if has_matter {
+            e.wrecks.push(economy::Wreck {
+                held: debris,
+                x,
+                y,
+                z,
+            });
         } else {
             let _ = rest;
-            e.ledger.release(debris);
+            e.ledger.retire_empty_debris(debris);
         }
         // Слот контейнера возвращается в свободный список: партия
         // на десять тысяч тиков иначе копит по записи на каждую
         // погибшую машину.
         e.ledger.release(c);
         self.units.store[k] = economy::NO_CONTAINER;
+        if has_matter {
+            self.remember_corpse(k, debris, frames);
+        }
         // Выбранные обломки убирает `sweep_wrecks` — раз за тик
         // и в одном месте.
     }
@@ -3479,21 +4004,48 @@ impl World {
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
             let mut w = 0u64;
-            w = w.wrapping_mul(31).wrapping_add(self.units.x[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.z[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.fx[i].raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.fz[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.x[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.z[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.fx[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.fz[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.voxels[i] as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.y[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.y[i] as u32 as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.riding[i]);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.fall_from[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.fall_v[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.fall_f[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.units.target[i] as u64);
             // Наклон корпуса переживает тик, значит входит в хеш:
             // не войди он — подвеску можно было бы переписать целиком
             // и увидеть тот же хеш до бита (ADR-116, ADR-225).
-            w = w.wrapping_mul(31).wrapping_add(self.units.up[i].x.raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.up[i].z.raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.spin[i].x.raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.spin[i].z.raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.up[i].x.raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.up[i].z.raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.spin[i].x.raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.spin[i].z.raw() as u64);
             // **Ход — состояние.** Курс и скорость переживают тик
             // и задают, куда юнит поедет дальше; не войди они в хеш,
             // трансмиссию можно было бы переписать целиком и увидеть
@@ -3503,16 +4055,32 @@ impl World {
             // Курс входит **всегда**, а не только на ходу: стоящая
             // машина носом куда-то смотрит, и по положению этого
             // не видно.
-            w = w.wrapping_mul(31).wrapping_add(self.units.head[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.vel[i].raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.chassis[i].code() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.head[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.vel[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.chassis[i].code() as u64);
             // Угловая скорость и фаза шага — тоже состояние (ADR-234):
             // первая переживает тик и задаёт доворот, вторая растёт
             // путём и решает, какая нога поднята. Обе входят всегда:
             // у стоящей машины они нулевые, и хеш прогона без хода
             // от их появления не сдвинулся.
-            w = w.wrapping_mul(31).wrapping_add(self.units.yaw_rate[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.units.gait[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.yaw_rate[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.gait[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.heave[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.units.heave_v[i].raw() as u64);
             // Приказ — состояние: он переживает тик и задаёт движение,
             // а состояние, не входящее в хеш, можно переписать целиком
             // и увидеть тот же хеш до бита (ADR-116).
@@ -3524,9 +4092,15 @@ impl World {
             // ни на бит (ADR-195).
             if self.units.stance[i] != STANCE_FLOW {
                 w = w.wrapping_mul(31).wrapping_add(self.units.stance[i] as u64);
-                w = w.wrapping_mul(31).wrapping_add(self.units.goal_x[i] as u32 as u64);
-                w = w.wrapping_mul(31).wrapping_add(self.units.goal_y[i] as u32 as u64);
-                w = w.wrapping_mul(31).wrapping_add(self.units.goal_z[i] as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.goal_x[i] as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.goal_y[i] as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.goal_z[i] as u32 as u64);
             }
             // Экономика юнита входит в хеш **только когда она есть**
             // (ADR-230). У юнита без типа поля экономики не значат
@@ -3543,12 +4117,20 @@ impl World {
                 // а глубина забоя живёт только здесь. Не войди она —
                 // копатель вернулся бы на другую глубину, и хеш
                 // этого не заметил бы.
-                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].0 as u32 as u64);
-                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].1 as u32 as u64);
-                w = w.wrapping_mul(31).wrapping_add(self.units.face[i].2 as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.face[i].0 as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.face[i].1 as u32 as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.units.face[i].2 as u32 as u64);
                 if let Some(e) = &self.econ {
                     if self.units.store[i] != economy::NO_CONTAINER {
-                        w = w.wrapping_mul(31).wrapping_add(e.ledger.held(self.units.store[i]));
+                        w = w
+                            .wrapping_mul(31)
+                            .wrapping_add(e.ledger.held(self.units.store[i]));
                     }
                 }
             }
@@ -3560,20 +4142,43 @@ impl World {
         for k in 0..self.shots.live_ids.len() {
             let i = self.shots.live_ids[k] as usize;
             let mut w = 0u64;
-            w = w.wrapping_mul(31).wrapping_add(self.shots.x[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.shots.y[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.shots.z[i] as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.shots.fx[i].raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.shots.fz[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.x[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.y[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.z[i] as u32 as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.fx[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.fz[i].raw() as u64);
             // Вертикаль хешируется наравне с горизонталью: пока снаряд
             // летел по прямой, `fy` не менялась и её отсутствие ничего
             // не стоило. С тяготением вертикальная скорость — состояние,
             // которое эволюционирует само, и не войди она в хеш,
             // интегрирование можно было бы переписать и увидеть тот же
             // хеш до бита (ADR-116, ADR-173).
-            w = w.wrapping_mul(31).wrapping_add(self.shots.fy[i].raw() as u64);
-            w = w.wrapping_mul(31).wrapping_add(self.shots.vy[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.fy[i].raw() as u64);
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(self.shots.vy[i].raw() as u64);
             w = w.wrapping_mul(31).wrapping_add(self.shots.life[i] as u64);
+            if self.material_bodies.is_some() {
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.shots.weapon_id[i] as u64);
+                w = w.wrapping_mul(31).wrapping_add(self.shots.source[i] as u64);
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add(self.shots.source_generation[i] as u64);
+            }
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         if let Some(g) = &self.ground {
@@ -3585,6 +4190,10 @@ impl World {
         if let Some(e) = &self.econ {
             h = h.wrapping_add(e.hash());
         }
+        if let Some(b) = &self.material_bodies {
+            h = h.wrapping_add(b.hash());
+        }
+        h = h.wrapping_add(self.bursts.hash());
         h
     }
 }
@@ -3827,7 +4436,8 @@ impl Reference {
             world.units.weapon[k] = world
                 .weapons
                 .index_of(id)
-                .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16;
+                .unwrap_or_else(|| panic!("вид оружия {id} не загружен"))
+                as u16;
         }
 
         // Копатели ставятся на поверхность, вразнос по карте: копка
@@ -3838,7 +4448,12 @@ impl Reference {
             let x = rng.below(params.nx) as i32;
             let z = rng.below(params.nz) as i32;
             let y = terrain.surface(x as u32, z as u32) as i32;
-            diggers.push(Digger { x, y, z, fresh: true });
+            diggers.push(Digger {
+                x,
+                y,
+                z,
+                fresh: true,
+            });
         }
         Reference {
             world,
@@ -3919,7 +4534,9 @@ impl Reference {
     /// потолке в 65 536, то есть очередь росла бы каждый тик
     /// без предела.
     fn dig(&mut self) {
-        let Some(g) = self.world.ground_mut() else { return };
+        let Some(g) = self.world.ground_mut() else {
+            return;
+        };
         let (nx, ny, nz) = (g.world.nx as i32, g.world.ny as i32, g.world.nz as i32);
         let r = REF_RADIUS;
         let mut moved: Vec<usize> = Vec::new();
@@ -3959,7 +4576,12 @@ impl Reference {
             let x = self.rng.below(self.side) as i32;
             let z = self.rng.below(self.side) as i32;
             let y = self.terrain.surface(x as u32, z as u32) as i32;
-            self.diggers[k] = Digger { x, y, z, fresh: true };
+            self.diggers[k] = Digger {
+                x,
+                y,
+                z,
+                fresh: true,
+            };
         }
     }
 }
@@ -3967,6 +4589,66 @@ impl Reference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blocked_walker_does_not_advance_its_gait_or_fractional_position() {
+        let mut w = World::new(42, 0, test_tuning());
+        let id = w.units.spawn(WORLD - 1, WORLD / 2, 0, 60, 100) as usize;
+        w.units.chassis[id] = modding::tuning::ChassisKind::Walking;
+        w.units.vel[id] = Fx::from_int(60);
+        w.units.head[id] = 0;
+        w.units.fx[id] = Fx::from_ratio(1, 4);
+        w.units.refresh_live();
+        w.delta.resize(w.units.len(), drive::Want::default());
+        w.delta[id] = drive::Want {
+            way: 0,
+            ..drive::Want::default()
+        };
+        for _ in 0..60 {
+            w.apply_deltas();
+        }
+        assert_eq!(w.units.x[id], WORLD - 1);
+        assert_eq!(w.units.fx[id], Fx::from_ratio(1, 4));
+        assert_eq!(w.units.gait[id], 0);
+        // The same drive away from the boundary must actually walk.
+        w.units.x[id] -= 100;
+        w.apply_deltas();
+        assert!(w.units.x[id] > WORLD - 101);
+        assert_ne!(w.units.gait[id], 0);
+    }
+
+    #[test]
+    fn a_stationary_pivot_advances_steps_in_both_directions_then_settles() {
+        let run = |way| {
+            let mut w = World::new(249, 0, test_tuning());
+            let id = w.units.spawn(400, 400, 0, 28, 100) as usize;
+            w.units.chassis[id] = modding::tuning::ChassisKind::Walking;
+            w.units.refresh_live();
+            w.delta.resize(w.units.len(), drive::Want::default());
+            w.delta[id].way = way;
+            w.apply_deltas();
+            assert_eq!((w.units.x[id], w.units.z[id]), (400, 400));
+            assert_eq!(
+                (w.units.fx[id], w.units.fz[id], w.units.vel[id]),
+                (Fx::ZERO, Fx::ZERO, Fx::ZERO)
+            );
+            assert!(w.units.gait[id] > 0, "turning without moving must step");
+            let phase = w.units.gait[id];
+            w.delta[id].way = NO_WAY;
+            for _ in 0..100 {
+                w.apply_deltas();
+            }
+            assert_eq!(w.units.yaw_rate[id], 0);
+            let stopped = w.units.gait[id];
+            for _ in 0..60 {
+                w.apply_deltas();
+            }
+            assert_eq!(w.units.gait[id], stopped, "idle feet must stop stepping");
+            phase
+        };
+        assert_eq!(run(angle::FULL * 5 / 12), run(-angle::FULL * 5 / 12));
+        assert!(drive::StepCycle::of(&test_tuning().tracked).is_none());
+    }
 
     /// Эталонный сценарий обязан **действительно воевать**.
     ///
@@ -4049,7 +4731,11 @@ mod tests {
             populate(&mut w, 2000, 7);
             let mut h = 0;
             for _ in 0..120 {
-                h = if threads > 1 { w.tick_par(threads) } else { w.tick() };
+                h = if threads > 1 {
+                    w.tick_par(threads)
+                } else {
+                    w.tick()
+                };
             }
             (h, w.searches, w.units.live().len())
         };
@@ -4199,7 +4885,10 @@ mod tests {
         }
         let late = r.world.examined_combat - mid;
         let alive_end = r.world.units.live().len();
-        assert!(mid > 0 && late > 0, "боя не было: {mid} и {late} осмотров по половинам");
+        assert!(
+            mid > 0 && late > 0,
+            "боя не было: {mid} и {late} осмотров по половинам"
+        );
         // Настоящий признак затухания — **численность**, а не число
         // осмотров: на коротком прогоне редеющий строй ищет цели даже
         // усерднее, и по осмотрам затухание неотличимо от боя.
@@ -4355,7 +5044,10 @@ blast_radius: 0, blast_damage: 0 ) ] )",
         };
         let earth = run(test_tuning().gravity);
         let heavy = run(test_tuning().gravity * 100);
-        assert!(earth.2 > 0, "лучи не попадали ни разу — сцена ничего не проверяет");
+        assert!(
+            earth.2 > 0,
+            "лучи не попадали ни разу — сцена ничего не проверяет"
+        );
         assert_eq!(
             earth, heavy,
             "стократное тяготение изменило сцену из одних лучей: \
@@ -4587,9 +5279,8 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
             // Стена обязана достоять: иначе «ноль попаданий» значит
             // лишь «не успели пробить».
             let g = w.ground().expect("земля");
-            let intact = !tunnel
-                && g.world.solid(WALL, GY + 5, 160)
-                && g.world.solid(WALL, GY + 15, 160);
+            let intact =
+                !tunnel && g.world.solid(WALL, GY + 5, 160) && g.world.solid(WALL, GY + 15, 160);
             (w.shots_fired, w.shots_hit, w.shots_blocked, intact)
         };
 
@@ -4597,7 +5288,10 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
         // пробить стену.
         let (fired_wall, hit_wall, blocked_wall, intact) = run(false, 0);
         assert!(fired_wall > 0, "со стеной никто не стрелял вовсе");
-        assert!(intact, "стена не устояла без воронок — тест проверяет не то");
+        assert!(
+            intact,
+            "стена не устояла без воронок — тест проверяет не то"
+        );
         assert_eq!(
             hit_wall, 0,
             "сквозь стену прошло {hit_wall} попаданий из {fired_wall} выстрелов"
@@ -4754,7 +5448,12 @@ blast_radius: {blast}, blast_damage: 10 ) ] )"
                 .iter()
                 .map(|&i| {
                     let k = i as usize;
-                    (i, r.world.units.x[k], r.world.units.y[k], r.world.units.z[k])
+                    (
+                        i,
+                        r.world.units.x[k],
+                        r.world.units.y[k],
+                        r.world.units.z[k],
+                    )
                 })
                 .collect();
             r.tick();
@@ -4843,7 +5542,10 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         assert!(solid, "луч проел стену — воронки у него быть не должно");
 
         let (fired_open, hit_open, _, _) = run(false);
-        assert!(hit_open > 0, "без стены луч не попал ни разу — проверять нечего");
+        assert!(
+            hit_open > 0,
+            "без стены луч не попал ни разу — проверять нечего"
+        );
         // **Луч не мажет.** Линия проверяется до выстрела, поэтому
         // выстрел и попадание — одно и то же событие (ADR-170).
         assert_eq!(
@@ -5006,7 +5708,11 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let ids: Vec<u32> = r.world.units.live().to_vec();
         for (k, &i) in ids.iter().enumerate() {
             match k % 3 {
-                0 => r.world.push_order(Order::MoveTo { unit: i, x: 50, z: 400 }),
+                0 => r.world.push_order(Order::MoveTo {
+                    unit: i,
+                    x: 50,
+                    z: 400,
+                }),
                 1 => r.world.push_order(Order::Hold { unit: i }),
                 _ => {}
             }
@@ -5014,13 +5720,20 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         r.tick();
         let w = &mut r.world;
         assert!(
-            w.units.live().iter().any(|&i| w.units.stance[i as usize] == STANCE_MOVE),
+            w.units
+                .live()
+                .iter()
+                .any(|&i| w.units.stance[i as usize] == STANCE_MOVE),
             "приказы не применились — проверяется одна ветка из трёх"
         );
+        w.phase_nav_update();
         w.prepare_movement();
         w.movement_deltas(1);
         let live: Vec<u32> = w.units.live().to_vec();
-        assert!(live.len() > 20, "юнитов слишком мало, тест ничего не проверит");
+        assert!(
+            live.len() > 20,
+            "юнитов слишком мало, тест ничего не проверит"
+        );
         let mut differ = 0usize;
         for &i in &live {
             let i = i as usize;
@@ -5029,7 +5742,8 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             }
         }
         assert_eq!(
-            differ, 0,
+            differ,
+            0,
             "{differ} из {} юнитов: ядро и фаза разошлись",
             live.len()
         );
@@ -5047,7 +5761,10 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         for t in 1..=150 {
             let ha = a.tick();
             let hb = b.tick();
-            assert_eq!(ha, hb, "миры разошлись на тике {t}: {ha:016x} против {hb:016x}");
+            assert_eq!(
+                ha, hb,
+                "миры разошлись на тике {t}: {ha:016x} против {hb:016x}"
+            );
         }
     }
 
@@ -5133,7 +5850,11 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let n = w.units.len();
         let id = w.units.spawn(999, 999, 1, 1, 100);
         assert_eq!(id, 4);
-        assert_eq!(w.units.len(), n, "хранилище выросло вместо переиспользования");
+        assert_eq!(
+            w.units.len(),
+            n,
+            "хранилище выросло вместо переиспользования"
+        );
     }
 
     /// Выбор цели не зависит от порядка обхода: при равном расстоянии
@@ -5148,7 +5869,10 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         assert!(a < b);
         w.units.refresh_live();
         w.tick();
-        assert_eq!(w.units.target[me as usize], a, "ничья ушла не меньшему индексу");
+        assert_eq!(
+            w.units.target[me as usize], a,
+            "ничья ушла не меньшему индексу"
+        );
     }
 
     // --- канал приказов (ADR-195)
@@ -5192,7 +5916,11 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         // машина разгоняется и доворачивает не мгновенно, и дорога
         // в двести вокселей занимает секунд пятнадцать.
         let (mut w, id) = lone_walker(t);
-        w.push_order(Order::MoveTo { unit: id, x: 80, z: 400 });
+        w.push_order(Order::MoveTo {
+            unit: id,
+            x: 80,
+            z: 400,
+        });
         for _ in 0..600 {
             w.tick();
         }
@@ -5218,13 +5946,24 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let t = test_tuning();
         let (mut w, id) = lone_walker(t);
         let i = id as usize;
-        w.push_order(Order::MoveTo { unit: id, x: 80, z: 400 });
+        w.push_order(Order::MoveTo {
+            unit: id,
+            x: 80,
+            z: 400,
+        });
         for _ in 0..90 {
             w.tick();
         }
         let midway = w.units.z[i];
-        assert!(midway > 120, "юнит не тронулся по первому приказу: z={midway}");
-        w.push_order(Order::MoveTo { unit: id, x: 80, z: 40 });
+        assert!(
+            midway > 120,
+            "юнит не тронулся по первому приказу: z={midway}"
+        );
+        w.push_order(Order::MoveTo {
+            unit: id,
+            x: 80,
+            z: 40,
+        });
         for _ in 0..300 {
             w.tick();
         }
@@ -5257,7 +5996,10 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         for _ in 0..120 {
             w.tick();
         }
-        assert!(w.units.x[i] > x0, "отменённый приказ не вернул юнита под поле");
+        assert!(
+            w.units.x[i] > x0,
+            "отменённый приказ не вернул юнита под поле"
+        );
     }
 
     /// **Приказ входит в хеш — через движение, которое он задаёт.**
@@ -5271,14 +6013,22 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let t = test_tuning();
         let run = |gx: i32, gz: i32| -> u64 {
             let (mut w, id) = lone_walker(t);
-            w.push_order(Order::MoveTo { unit: id, x: gx, z: gz });
+            w.push_order(Order::MoveTo {
+                unit: id,
+                x: gx,
+                z: gz,
+            });
             let mut h = 0u64;
             for _ in 0..40 {
                 h = w.tick();
             }
             h
         };
-        assert_eq!(run(80, 400), run(80, 400), "одинаковые приказы разошлись по хешу");
+        assert_eq!(
+            run(80, 400),
+            run(80, 400),
+            "одинаковые приказы разошлись по хешу"
+        );
         assert_ne!(run(80, 400), run(400, 80), "разные приказы дали один хеш");
     }
 
@@ -5291,7 +6041,9 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let mut t = test_tuning();
         t.max_orders_per_tick = 4;
         let mut w = World::new(2, 32, t);
-        let ids: Vec<u32> = (0..10).map(|k| w.units.spawn(k * 4, 0, 0, 1, 100)).collect();
+        let ids: Vec<u32> = (0..10)
+            .map(|k| w.units.spawn(k * 4, 0, 0, 1, 100))
+            .collect();
         w.units.refresh_live();
         for &id in &ids {
             w.push_order(Order::Hold { unit: id });
@@ -5320,16 +6072,30 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let mut w = World::new(2, 8, test_tuning());
         let id = w.units.spawn(10, 10, 0, 1, 100);
         w.units.refresh_live();
-        w.push_order(Order::Dig { unit: id, x: 10, y: 5, z: 10 });
+        w.push_order(Order::Dig {
+            unit: id,
+            x: 10,
+            y: 5,
+            z: 10,
+        });
         w.tick();
         assert_eq!(w.units.stance[id as usize], STANCE_DIG);
         w.units.kill(id);
         w.units.refresh_live();
         let again = w.units.spawn(20, 20, 1, 1, 100);
-        assert_eq!(again, id, "слот не переиспользован — тест ничего не проверяет");
-        assert_eq!(w.units.stance[again as usize], STANCE_FLOW, "приказ пережил смерть");
         assert_eq!(
-            (w.units.goal_x[again as usize], w.units.goal_y[again as usize]),
+            again, id,
+            "слот не переиспользован — тест ничего не проверяет"
+        );
+        assert_eq!(
+            w.units.stance[again as usize], STANCE_FLOW,
+            "приказ пережил смерть"
+        );
+        assert_eq!(
+            (
+                w.units.goal_x[again as usize],
+                w.units.goal_y[again as usize]
+            ),
             (0, 0),
             "точка приказа пережила смерть"
         );
@@ -5343,8 +6109,16 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         w.units.refresh_live();
         w.units.kill(id);
         w.units.refresh_live();
-        w.push_order(Order::MoveTo { unit: id, x: 1, z: 1 });
-        w.push_order(Order::MoveTo { unit: 999, x: 1, z: 1 });
+        w.push_order(Order::MoveTo {
+            unit: id,
+            x: 1,
+            z: 1,
+        });
+        w.push_order(Order::MoveTo {
+            unit: 999,
+            x: 1,
+            z: 1,
+        });
         w.tick();
         assert_eq!(w.orders_dropped, 2);
         assert_eq!(w.orders_applied, 0);
@@ -5361,14 +6135,20 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         let near = w.units.spawn(42, 32, 1, 0, 300);
         let far = w.units.spawn(52, 32, 1, 0, 300);
         w.units.refresh_live();
-        w.push_order(Order::Attack { unit: me, target: far });
+        w.push_order(Order::Attack {
+            unit: me,
+            target: far,
+        });
         w.tick();
         assert_eq!(
             w.units.target[me as usize], far,
             "цель перевыбрана на ближайшую: приказ игрока не удержался"
         );
         // Свой своему не цель: такой приказ отбрасывается.
-        w.push_order(Order::Attack { unit: near, target: far });
+        w.push_order(Order::Attack {
+            unit: near,
+            target: far,
+        });
         w.tick();
         assert_eq!(w.orders_dropped, 1, "приказ бить своего прошёл");
     }
@@ -5396,12 +6176,20 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             w.ground().expect("земля").world.solid(165, at as u32, 165),
             "под юнитом не порода — копать нечего"
         );
-        w.push_order(Order::Dig { unit: id, x: 165, y: at, z: 165 });
+        w.push_order(Order::Dig {
+            unit: id,
+            x: 165,
+            y: at,
+            z: 165,
+        });
         for _ in 0..30 {
             w.tick();
         }
         let g = w.ground().expect("земля");
-        assert!(!g.world.solid(165, at as u32, 165), "порода на месте: приказ не копал");
+        assert!(
+            !g.world.solid(165, at as u32, 165),
+            "порода на месте: приказ не копал"
+        );
         // Копатель уходит в собственную шахту: опора исчезла у него
         // под ногами, и падение по ADR-036 — тот же код, что у всех.
         assert!(

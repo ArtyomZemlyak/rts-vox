@@ -171,7 +171,18 @@ pub fn shadowcast(g: &Grid, s: Sensor, out: &mut VisMask) -> u64 {
     let mut visits = 1u64;
     out.set(s.x as usize, s.y as usize);
     for &(xx, xy, yx, yy) in OCTANTS.iter() {
-        visits += cast(g, s, 1, Slope::new(1, 1), Slope::new(0, 1), xx, xy, yx, yy, out);
+        visits += cast(
+            g,
+            s,
+            1,
+            Slope::new(1, 1),
+            Slope::new(0, 1),
+            xx,
+            xy,
+            yx,
+            yy,
+            out,
+        );
     }
     visits
 }

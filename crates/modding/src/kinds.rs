@@ -161,7 +161,10 @@ impl Kinds {
             return Err(KindError::Clash(d.id));
         }
         if d.voxels == 0 {
-            return Err(KindError::Nonsense(d.id, "ноль вокселей у ядра — юнит мёртв при рождении"));
+            return Err(KindError::Nonsense(
+                d.id,
+                "ноль вокселей у ядра — юнит мёртв при рождении",
+            ));
         }
         if d.cost == 0 {
             return Err(KindError::Nonsense(d.id, "бесплатный тип ломает экономику"));
@@ -173,10 +176,16 @@ impl Kinds {
             ));
         }
         if !d.is_building() && d.build_ticks == 0 {
-            return Err(KindError::Nonsense(d.id, "машина без времени сборки выходит мгновенно"));
+            return Err(KindError::Nonsense(
+                d.id,
+                "машина без времени сборки выходит мгновенно",
+            ));
         }
         if d.dig && d.tank == 0 {
-            return Err(KindError::Nonsense(d.id, "копает, а везти некуда: бак нулевой"));
+            return Err(KindError::Nonsense(
+                d.id,
+                "копает, а везти некуда: бак нулевой",
+            ));
         }
         self.defs.push(d);
         // Порядок по номеру: обход реестра не должен зависеть от того,

@@ -13,7 +13,6 @@ use crate::incr::IncMesher;
 use crate::{Opts, CS as MCS, CSP};
 use voxel::{Edit, World};
 
-
 /// Слой мешинга: битовый объём чанка плюс его инкрементальный мешер.
 struct MeshChunk {
     bits: BitVolume,
@@ -81,8 +80,16 @@ fn fill_bits(w: &World, cx: u32, cy: u32, cz: u32, b: &mut BitVolume) -> Fill {
             } else {
                 let base = (wy * nz + wz) * wpr;
                 let lo = if wi < 0 { 0 } else { src[(base + wi) as usize] };
-                let hi = if wi + 1 >= wpr { 0 } else { src[(base + wi + 1) as usize] };
-                let v = if sh == 0 { lo } else { (lo >> sh) | (hi << (64 - sh)) };
+                let hi = if wi + 1 >= wpr {
+                    0
+                } else {
+                    src[(base + wi + 1) as usize]
+                };
+                let v = if sh == 0 {
+                    lo
+                } else {
+                    (lo >> sh) | (hi << (64 - sh))
+                };
                 v & mask
             };
             b[ly * CSP + lz] = word;
@@ -176,24 +183,21 @@ impl MeshLayer {
     #[inline]
     fn coords(&self, i: usize) -> (u32, u32, u32) {
         let i = i as u32;
-        (i % self.nx, (i / self.nx) % self.ny, i / (self.nx * self.ny))
+        (
+            i % self.nx,
+            (i / self.nx) % self.ny,
+            i / (self.nx * self.ny),
+        )
     }
 
     /// Собрать битовый объём чанка из мира, включая паддинг соседей.
     fn build_bits(w: &World, cx: u32, cy: u32, cz: u32) -> BitVolume {
         let mut b: BitVolume = [0u64; CSP * CSP];
-        let (ox, oy, oz) = (
-            cx * MCS as u32,
-            cy * MCS as u32,
-            cz * MCS as u32,
-        );
+        let (ox, oy, oz) = (cx * MCS as u32, cy * MCS as u32, cz * MCS as u32);
         // Локальные 0 и 63 — паддинг: воксели соседнего чанка.
         for ly in 0..CSP {
             for lz in 0..CSP {
-                let (wy, wz) = (
-                    oy as i64 + ly as i64 - 1,
-                    oz as i64 + lz as i64 - 1,
-                );
+                let (wy, wz) = (oy as i64 + ly as i64 - 1, oz as i64 + lz as i64 - 1);
                 if wy < 0 || wz < 0 {
                     continue;
                 }
@@ -277,11 +281,7 @@ impl MeshLayer {
         self.epoch += 1;
         self.dirty.clear();
         for e in edits {
-            let (cx, cy, cz) = (
-                e.x / MCS as u32,
-                e.y / MCS as u32,
-                e.z / MCS as u32,
-            );
+            let (cx, cy, cz) = (e.x / MCS as u32, e.y / MCS as u32, e.z / MCS as u32);
             let (lx, ly, lz) = (
                 e.x % MCS as u32 + 1,
                 e.y % MCS as u32 + 1,
@@ -349,7 +349,12 @@ impl MeshLayer {
     /// и тут же забывался, и так каждый тик заново: на километре
     /// с двумя дюжинами копателей это три десятка сборок за кадр
     /// впустую.
-    pub fn apply_where(&mut self, w: &World, edits: &[Edit], keep: impl Fn(usize) -> bool) -> usize {
+    pub fn apply_where(
+        &mut self,
+        w: &World,
+        edits: &[Edit],
+        keep: impl Fn(usize) -> bool,
+    ) -> usize {
         self.scatter(edits);
         for k in 0..self.dirty.len() {
             let i = self.dirty[k] as usize;
@@ -547,9 +552,8 @@ mod tests {
         let mut layer = MeshLayer::new(&w, Opts::default());
         let edits = dig(
             &mut w,
-            (14..24u32).flat_map(|y| {
-                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
-            }),
+            (14..24u32)
+                .flat_map(|y| (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))),
         );
         assert!(!edits.is_empty(), "яма не выкопалась");
         assert_eq!(layer.apply(&w, &edits), 1, "яма задела не один чанк");
@@ -596,9 +600,8 @@ mod tests {
         let mut w = voxel::World::new(320, 192, 320, 1 << 16, Box::new(Steps));
         dig(
             &mut w,
-            (14..26u32).flat_map(|y| {
-                (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))
-            }),
+            (14..26u32)
+                .flat_map(|y| (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))),
         );
         let layer = MeshLayer::new(&w, Opts::default());
         let (nx, ny, nz) = layer.dims();
@@ -635,7 +638,10 @@ mod tests {
         assert!(checked > 100, "проверка ничего не проверила");
         // Оба случая обязаны встретиться: без однородных нечего было бы
         // пропускать, без смешанных — нечего сверять.
-        assert!(uniform > 0 && mixed > 0, "однородных {uniform}, смешанных {mixed}");
+        assert!(
+            uniform > 0 && mixed > 0,
+            "однородных {uniform}, смешанных {mixed}"
+        );
     }
 
     /// **Однородный чанк граней не даёт, смешанный даёт.** Ровно на этом
@@ -653,7 +659,11 @@ mod tests {
         let (nx, ny, nz) = layer.dims();
         // Не нулевой слой: под ним край мира, то есть воздух, и грань
         // на нём видна — сплошным такой чанк не считается.
-        assert_eq!(layer.probe(&w, layer.index(1, 1, 1)), Fill::Rock, "глубина не порода");
+        assert_eq!(
+            layer.probe(&w, layer.index(1, 1, 1)),
+            Fill::Rock,
+            "глубина не порода"
+        );
         assert_eq!(
             layer.probe(&w, layer.index(1, ny - 1, 1)),
             Fill::Air,
@@ -676,7 +686,10 @@ mod tests {
                 skipped += 1;
             }
         }
-        assert!(skipped > 0 && built > 0, "пропущено {skipped}, собрано {built}");
+        assert!(
+            skipped > 0 && built > 0,
+            "пропущено {skipped}, собрано {built}"
+        );
     }
 
     /// **Разовая сборка даёт ту же геометрию, что полная пересборка.**
@@ -687,9 +700,8 @@ mod tests {
         let mut w = voxel::World::new(200, 128, 200, 1 << 16, Box::new(Steps));
         dig(
             &mut w,
-            (14..26u32).flat_map(|y| {
-                (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))
-            }),
+            (14..26u32)
+                .flat_map(|y| (55..70u32).flat_map(move |z| (55..70u32).map(move |x| (x, y, z)))),
         );
         let mut layer = MeshLayer::new(&w, Opts::default());
         let (nx, ny, nz) = layer.dims();
@@ -700,7 +712,10 @@ mod tests {
             assert_eq!(want, got, "чанк {i}: разовая сборка разошлась с полной");
             seen += usize::from(!want.is_empty());
         }
-        assert!(seen > 5, "непустых чанков всего {seen} — сверять почти нечего");
+        assert!(
+            seen > 5,
+            "непустых чанков всего {seen} — сверять почти нечего"
+        );
     }
 
     /// **Забытый чанк перестаёт стоить память и собирается заново.**
@@ -712,9 +727,8 @@ mod tests {
         let mut layer = MeshLayer::new(&w, Opts::default());
         let edits = dig(
             &mut w,
-            (14..24u32).flat_map(|y| {
-                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
-            }),
+            (14..24u32)
+                .flat_map(|y| (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))),
         );
         layer.apply(&w, &edits);
         let i = layer.dirty()[0] as usize;
@@ -723,12 +737,19 @@ mod tests {
         assert!(layer.is_live(i));
         assert!(layer.forget(i), "чанк не забылся");
         assert!(!layer.is_live(i));
-        assert!(layer.quads(i).is_empty(), "забытый чанк всё ещё отдаёт квады");
+        assert!(
+            layer.quads(i).is_empty(),
+            "забытый чанк всё ещё отдаёт квады"
+        );
         assert!(!layer.forget(i), "забыть дважды удалось");
         // Возвращается — тем же, каким был.
         assert_eq!(before, sorted(layer.scratch_quads(&w, i).to_vec()));
         layer.apply(&w, &edits);
-        assert_eq!(before, sorted(layer.quads(i)), "после возврата геометрия другая");
+        assert_eq!(
+            before,
+            sorted(layer.quads(i)),
+            "после возврата геометрия другая"
+        );
     }
 
     /// **Правка за кольцом ничего не строит.** Чанк попадает в грязные,
@@ -742,15 +763,17 @@ mod tests {
         let mut layer = MeshLayer::new(&w, Opts::default());
         let edits = dig(
             &mut w,
-            (14..20u32).flat_map(|y| {
-                (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))
-            }),
+            (14..20u32)
+                .flat_map(|y| (30..40u32).flat_map(move |z| (30..40u32).map(move |x| (x, y, z)))),
         );
         let n = layer.apply_where(&w, &edits, |_| false);
         assert!(n > 0, "правки никого не запачкали");
         assert_eq!(layer.live_chunks(), 0, "чанк за кольцом построился");
         assert_eq!(layer.state_bytes(), 0, "чанк за кольцом стоит память");
-        assert!(!layer.dirty().is_empty(), "грязных нет — рендеру нечего сбрасывать");
+        assert!(
+            !layer.dirty().is_empty(),
+            "грязных нет — рендеру нечего сбрасывать"
+        );
         for &i in layer.dirty() {
             assert!(!layer.is_live(i as usize), "чанк {i} осел в слое");
         }
@@ -758,7 +781,10 @@ mod tests {
         assert_eq!(layer.live_chunks(), n, "с разрешением построились не все");
         let i = layer.dirty()[0] as usize;
         assert!(!layer.quads(i).is_empty(), "построенный чанк пуст");
-        assert_eq!(sorted(layer.quads(i)), sorted(layer.scratch_quads(&w, i).to_vec()));
+        assert_eq!(
+            sorted(layer.quads(i)),
+            sorted(layer.scratch_quads(&w, i).to_vec())
+        );
     }
 
     /// **Нетронутый чанк квадов не отдаёт.** Слой ленивый, и выдумать
@@ -771,4 +797,3 @@ mod tests {
         assert!(!layer.rebuilt_quads(&w, 0).is_empty(), "чанк и правда пуст");
     }
 }
-

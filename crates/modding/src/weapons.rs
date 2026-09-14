@@ -37,6 +37,18 @@ pub struct WeaponDef {
     pub blast_radius: i32,
     /// Урон всем в радиусе воронки.
     pub blast_damage: u16,
+    /// Physical projectile mass and directed energy released on impact.
+    /// Zero denotes a legacy, non-material benchmark weapon.
+    #[serde(default)]
+    pub mass_g: u32,
+    #[serde(default)]
+    pub impact_energy_j: u32,
+    /// Chemical/field energy for fracture and debris, separate from direct impact.
+    #[serde(default)]
+    pub blast_energy_j: u32,
+    /// Weapon reach in world units. Zero uses the benchmark's global range.
+    #[serde(default)]
+    pub range: i32,
 }
 
 #[derive(Deserialize)]
@@ -92,7 +104,12 @@ impl Weapons {
         if self.defs.iter().any(|x| x.id == d.id) {
             return Err(WeaponError::Clash(d.id));
         }
-        if d.damage == 0 || d.reload == 0 || d.blast_radius < 0 {
+        if d.damage == 0 || d.reload == 0 || d.blast_radius < 0 || d.range < 0 || d.range > 10000 {
+            return Err(WeaponError::Nonsense(d.id));
+        }
+        if d.blast_energy_j > 0
+            && (!(1..=128).contains(&d.blast_radius) || d.kind != WeaponKind::Bolt)
+        {
             return Err(WeaponError::Nonsense(d.id));
         }
         if d.kind == WeaponKind::Bolt && d.speed <= 0 {

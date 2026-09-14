@@ -62,7 +62,10 @@ impl SensorIndex {
 
     #[inline(always)]
     fn bucket(&self, x: usize, y: usize) -> usize {
-        let (bx, by) = ((x / self.cell).min(self.w - 1), (y / self.cell).min(self.h - 1));
+        let (bx, by) = (
+            (x / self.cell).min(self.w - 1),
+            (y / self.cell).min(self.h - 1),
+        );
         by * self.w + bx
     }
 

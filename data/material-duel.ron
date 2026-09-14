@@ -1,0 +1,12 @@
+// Two firing lanes, enough room to inspect each damaged vehicle.
+(
+    size: (768, 128, 768),
+    seed: 42,
+    focus: (390, 390),
+    units: [
+        (kind: 1, owner: 0, at: (185, 300), move_to: None),
+        (kind: 1, owner: 1, at: (590, 300), move_to: None),
+        (kind: 3, owner: 0, at: (190, 495), move_to: None),
+        (kind: 3, owner: 1, at: (585, 495), move_to: None),
+    ],
+)

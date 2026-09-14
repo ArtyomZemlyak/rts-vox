@@ -33,8 +33,12 @@ fn main() {
     let mut r = Rng::new(1, 1);
     // Значения в разумном игровом диапазоне: координаты до километра,
     // скорости единицы метров в секунду.
-    let ax: Vec<i64> = (0..n).map(|_| (r.range(-2000, 2000) as i64) << 16).collect();
-    let bx: Vec<i64> = (0..n).map(|_| (r.range(-2000, 2000) as i64) << 16).collect();
+    let ax: Vec<i64> = (0..n)
+        .map(|_| (r.range(-2000, 2000) as i64) << 16)
+        .collect();
+    let bx: Vec<i64> = (0..n)
+        .map(|_| (r.range(-2000, 2000) as i64) << 16)
+        .collect();
     let af: Vec<f64> = ax.iter().map(|&v| v as f64 / 4294967296.0).collect();
     let bf: Vec<f64> = bx.iter().map(|&v| v as f64 / 4294967296.0).collect();
     let a32: Vec<f32> = af.iter().map(|&v| v as f32).collect();
@@ -65,7 +69,11 @@ fn main() {
         }
         s as u64
     });
-    println!("  Fx против f64 x{:.2}, против f32 x{:.2}", fx_add / f64_add, fx_add / f32_add);
+    println!(
+        "  Fx против f64 x{:.2}, против f32 x{:.2}",
+        fx_add / f64_add,
+        fx_add / f32_add
+    );
 
     section("2. Умножение (у Fx — через i128)");
     let f64_mul = bench("f64", n, reps, || {
@@ -89,7 +97,11 @@ fn main() {
         }
         s as u64
     });
-    println!("  Fx против f64 x{:.2}, против f32 x{:.2}", fx_mul / f64_mul, fx_mul / f32_mul);
+    println!(
+        "  Fx против f64 x{:.2}, против f32 x{:.2}",
+        fx_mul / f64_mul,
+        fx_mul / f32_mul
+    );
 
     section("3. Длина вектора: sqrt(x*x + y*y) — то, что делает движение");
     let f64_len = bench("f64", n, reps / 2, || {
@@ -122,7 +134,11 @@ fn main() {
         }
         s as u64
     });
-    println!("  Fx против f64 x{:.2}, против f32 x{:.2}", fx_len / f64_len, fx_len / f32_len);
+    println!(
+        "  Fx против f64 x{:.2}, против f32 x{:.2}",
+        fx_len / f64_len,
+        fx_len / f32_len
+    );
     println!(
         "  sqrt_fast против f64 x{:.2}, против точного Fx x{:.2} быстрее",
         fx_len_fast / f64_len,

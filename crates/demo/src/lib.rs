@@ -21,7 +21,11 @@ pub mod skirmish;
 /// и заведён.
 pub fn tuning() -> sim_core::Tuning {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/sim.ron");
-    let path = if here.exists() { here } else { std::path::PathBuf::from("data/sim.ron") };
+    let path = if here.exists() {
+        here
+    } else {
+        std::path::PathBuf::from("data/sim.ron")
+    };
     match modding::load_tuning(&path) {
         Ok(t) => t,
         Err(e) => panic!("{}: {e}", path.display()),
@@ -35,7 +39,11 @@ pub fn tuning() -> sim_core::Tuning {
 /// смерти от боя в ней не случается. Молча (ADR-187).
 pub fn weapons() -> modding::weapons::Weapons {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/weapons.ron");
-    let path = if here.exists() { here } else { std::path::PathBuf::from("data/weapons.ron") };
+    let path = if here.exists() {
+        here
+    } else {
+        std::path::PathBuf::from("data/weapons.ron")
+    };
     match modding::weapons::load(&path) {
         Ok(w) => w,
         Err(e) => panic!("{}: {e}", path.display()),
@@ -49,7 +57,11 @@ pub fn weapons() -> modding::weapons::Weapons {
 /// (`docs/07-economy.md`).
 pub fn kinds() -> modding::Kinds {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/kinds.ron");
-    let path = if here.exists() { here } else { std::path::PathBuf::from("data/kinds.ron") };
+    let path = if here.exists() {
+        here
+    } else {
+        std::path::PathBuf::from("data/kinds.ron")
+    };
     match modding::kinds::load(&path, sim_core::TICKS_PER_SECOND as u32) {
         Ok(k) => k,
         Err(e) => panic!("{e}"),
@@ -63,8 +75,11 @@ pub fn kinds() -> modding::Kinds {
 /// плотность»).
 pub fn materials() -> modding::Registry {
     let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/materials.ron");
-    let path =
-        if here.exists() { here } else { std::path::PathBuf::from("data/materials.ron") };
+    let path = if here.exists() {
+        here
+    } else {
+        std::path::PathBuf::from("data/materials.ron")
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) => panic!("{}: {e}", path.display()),

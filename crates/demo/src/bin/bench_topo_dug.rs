@@ -37,7 +37,12 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
-    let params = worldgen::Params { nx: 256, ny: 128, nz: 256, ..Default::default() };
+    let params = worldgen::Params {
+        nx: 256,
+        ny: 128,
+        nz: 256,
+        ..Default::default()
+    };
     let terrain = Terrain { params, seed: 42 };
     let mut w = World::new(
         params.nx,

@@ -38,6 +38,9 @@
 //! **Цвет и материал — по отделке воксела**, а не по роли: трак
 //! и корпус оба броня, но один резина, другой краска.
 
+/// Material, occupied mini-volume shape and optional owner/finish/part paint.
+pub type FragmentMeshKey = (u16, u8, Option<[u8; 3]>);
+
 use bevy::prelude::{Component, Quat, Transform, Vec3};
 use voxel::unit::{Attach, UnitBody, TURN};
 
@@ -140,6 +143,145 @@ pub fn body_to_mesh(
     }
 }
 
+/// Original finish and silhouette of a detached section, relative to its mass
+/// centre. The captured hull/turret frames stop following the parent machine.
+pub fn section_to_mesh(
+    template: &UnitBody,
+    chunk: &sim_core::burst::chunk::Chunk,
+) -> Vec<(usize, MeshBuf)> {
+    let f32v = |v: [fx::Fx; 3]| Vec3::from_array(v.map(|v| v.raw() as f32 / fx::ONE_RAW as f32));
+    let mut out = Vec::new();
+    let corpse = chunk.body.as_deref();
+    let source = corpse.unwrap_or(template);
+    let mut removed = std::collections::BTreeSet::new();
+    if corpse.is_some() {
+        for z in 0..source.vol.nz {
+            for y in 0..source.vol.ny {
+                for x in 0..source.vol.nx {
+                    if template.vol.get(x as usize, y as usize, z as usize)
+                        && !source.vol.get(x as usize, y as usize, z as usize)
+                    {
+                        removed.insert([x, y, z]);
+                    }
+                }
+            }
+        }
+    }
+    let frame_parts = chunk.frames.map(|frame| {
+        let basis = bevy::math::Mat3::from_cols(
+            f32v([frame.x.x, frame.x.y, frame.x.z]),
+            f32v([frame.y.x, frame.y.y, frame.y.z]),
+            f32v([frame.z.x, frame.z.y, frame.z.z]),
+        );
+        let d = frame.base.sub(chunk.centre);
+        (basis, f32v([d.x, d.y, d.z]))
+    });
+    let transform = |buf: &mut MeshBuf, basis: bevy::math::Mat3, offset: Vec3| {
+        for p in &mut buf.pos {
+            *p = (basis * Vec3::from_array(*p) + offset).to_array();
+        }
+        for n in &mut buf.nrm {
+            *n = (basis * Vec3::from_array(*n)).to_array();
+        }
+        for t in &mut buf.tan {
+            let v = basis * Vec3::new(t[0], t[1], t[2]);
+            t[0] = v.x;
+            t[1] = v.y;
+            t[2] = v.z;
+        }
+    };
+    for (layer, &(basis, offset)) in frame_parts.iter().enumerate() {
+        let mut part = source.clone();
+        if corpse.is_some() {
+            for (i, col) in part.vol.cols.iter_mut().enumerate() {
+                let y = (i / part.vol.words as usize) % part.vol.ny as usize;
+                if usize::from(part.turret_y > 0 && y >= part.turret_y as usize) != layer {
+                    *col = 0;
+                }
+            }
+        } else {
+            part.vol.cols.fill(0);
+            for c in &chunk.cells {
+                if usize::from(template.turret_y > 0 && c[1] >= template.turret_y) == layer {
+                    part.vol
+                        .set(c[0] as usize, c[1] as usize, c[2] as usize, true);
+                }
+            }
+        }
+        let mut buffers: [MeshBuf; crate::look::FINISHES] =
+            std::array::from_fn(|_| MeshBuf::default());
+        let centre = chunk.frames[layer]
+            .centre
+            .map(|v| v.raw() as f32 / fx::ONE_RAW as f32);
+        let scale = part.mm as f32 / voxel::unit::WORLD_MM as f32;
+        body_to_mesh(
+            &part,
+            crate::look::side_tint()[chunk.owner as usize % 2],
+            scale,
+            (0, part.vol.ny as usize),
+            BEVEL,
+            centre,
+            &mut buffers,
+        );
+        for (finish, mut buf) in buffers.into_iter().enumerate() {
+            if buf.is_empty() {
+                continue;
+            }
+            weather(&mut buf, finish);
+            if corpse.is_some() {
+                damage_marks(&mut buf, source, &chunk.dents, &removed, scale, centre);
+            }
+            transform(&mut buf, basis, offset);
+            out.push((finish, buf));
+        }
+    }
+    // Static attached volumes keep the original model silhouette. Articulated
+    // locomotion poses are not authoritative yet; these use attachment frames.
+    if corpse.is_some() {
+        let segments = segment_frames(source, 1.0 / voxel::unit::WORLD_MM as f32);
+        for (segment, sg) in source.segments.iter().zip(segments) {
+            let anchor = (sg.pos * (voxel::unit::WORLD_MM as f32 / source.mm as f32)
+                + Vec3::from(root_centre(source)))
+            .floor()
+            .as_ivec3();
+            let [x, y, z] = anchor.to_array();
+            if x >= 0
+                && y >= 0
+                && z >= 0
+                && x < source.vol.nx as i32
+                && y < source.vol.ny as i32
+                && z < source.vol.nz as i32
+                && removed.contains(&[x as u8, y as u8, z as u8])
+            {
+                continue;
+            }
+            let mut buffers: [MeshBuf; crate::look::FINISHES] =
+                std::array::from_fn(|_| MeshBuf::default());
+            body_to_mesh(
+                &segment.body,
+                crate::look::side_tint()[chunk.owner as usize % 2],
+                segment.body.mm as f32 / voxel::unit::WORLD_MM as f32,
+                (0, segment.body.vol.ny as usize),
+                BEVEL,
+                pivot_centre(&segment.attach),
+                &mut buffers,
+            );
+            let (parent, offset) = frame_parts[usize::from(sg.turret)];
+            let basis = parent * bevy::math::Mat3::from_quat(sg.rot);
+            let offset = offset + parent * sg.pos;
+            for (finish, mut buf) in buffers.into_iter().enumerate() {
+                if buf.is_empty() {
+                    continue;
+                }
+                weather(&mut buf, finish);
+                transform(&mut buf, basis, offset);
+                out.push((finish, buf));
+            }
+        }
+    }
+    out
+}
+
 /// Середина основания корневого тома: юнит вращается вокруг себя,
 /// а не вокруг угла, и стоит низом на земле.
 pub fn root_centre(b: &UnitBody) -> [f32; 3] {
@@ -191,13 +333,25 @@ pub fn segment_frames(b: &UnitBody, per_mm: f32) -> Vec<SegFrame> {
     for s in &b.segments {
         let a = &s.attach;
         let (pos, rot, centre, scale, turret) = if a.parent == 0 {
-            (Vec3::ZERO, Quat::IDENTITY, root_centre(b), b.mm as f32 * per_mm, false)
+            (
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                root_centre(b),
+                b.mm as f32 * per_mm,
+                false,
+            )
         } else {
             // Родитель добавлен раньше — это сторожит `push_segment`.
             let k = a.parent as usize - 1;
             let p = &frames[k];
             let ps = &b.segments[k];
-            (p.pos, p.rot, pivot_centre(&ps.attach), ps.body.mm as f32 * per_mm, p.turret)
+            (
+                p.pos,
+                p.rot,
+                pivot_centre(&ps.attach),
+                ps.body.mm as f32 * per_mm,
+                p.turret,
+            )
         };
         let off = Vec3::new(
             (a.at.0 as f32 - centre[0]) * scale,
@@ -276,12 +430,7 @@ fn face(
     let mut n = [0.0f32; 3];
     n[axis] = if positive { 1.0 } else { -1.0 };
     quad(
-        [
-            pt(u0, v0, a),
-            pt(u1, v0, a),
-            pt(u1, v1, a),
-            pt(u0, v1, a),
-        ],
+        [pt(u0, v0, a), pt(u1, v0, a), pt(u1, v1, a), pt(u0, v1, a)],
         n,
         c,
         out,
@@ -359,7 +508,11 @@ fn corners(
         for (k, slot) in p.iter_mut().enumerate() {
             for a in 0..3 {
                 slot[a] = if a == k {
-                    if s[a] { 1.0 } else { 0.0 }
+                    if s[a] {
+                        1.0
+                    } else {
+                        0.0
+                    }
                 } else {
                     edge(s[a], true, bevel)
                 };
@@ -401,8 +554,190 @@ fn tri(p: [[f32; 3]; 3], n: [f32; 3], c: [f32; 4], out: &mut MeshBuf) {
     }
 }
 
+/// Surface wear shared by the live battlefield and the energy range.
+pub fn weather(buf: &mut MeshBuf, finish: usize) {
+    for j in 0..buf.pos.len() {
+        let p = Vec3::from(buf.pos[j]) - Vec3::from(buf.nrm[j]) * 0.08;
+        let q = p.floor();
+        let grain = (q.dot(Vec3::new(17.1, 7.7, 23.3)).sin() * 437.1)
+            .fract()
+            .abs();
+        let patch = (p.x * 0.27 + (p.z * 0.32).sin() * 1.8 + p.y * 0.19).sin();
+        let dust = (1.0 - p.y.max(0.0) / 18.0).clamp(0.0, 1.0);
+        let shade = (0.69 + grain * 0.19 + patch * 0.11) * if finish == 5 { 0.52 } else { 1.0 };
+        for a in 0..3 {
+            buf.col[j][a] *= shade;
+        }
+        if finish == 0 {
+            for (a, tint) in [0.05, 0.035, 0.017].into_iter().enumerate() {
+                buf.col[j][a] = buf.col[j][a] * (1.0 - dust * 0.22) + tint * dust * 0.22;
+            }
+        }
+        if finish == 2 {
+            buf.col[j][0] *= 0.035;
+            buf.col[j][1] *= 0.07;
+            buf.col[j][2] *= 0.1;
+        }
+    }
+}
+
+/// Scuffed material is driven by the authoritative local damage journal.
+/// A removed neighbour exposes bare steel; a surviving dent darkens only its
+/// own voxel. This never invents a hole from a scalar health percentage.
+pub fn damage_marks(
+    buf: &mut MeshBuf,
+    body: &UnitBody,
+    dents: &voxel::impact::Dents,
+    removed: &std::collections::BTreeSet<voxel::impact::Cell>,
+    scale: f32,
+    centre: [f32; 3],
+) {
+    for i in 0..buf.pos.len() {
+        let p = Vec3::from(buf.pos[i]) / scale + Vec3::from(centre) - Vec3::from(buf.nrm[i]) * 0.12;
+        let at = p.floor().as_ivec3().to_array();
+        if at.iter().any(|v| *v < 0 || *v > 254) {
+            continue;
+        }
+        let c = at.map(|v| v as u8);
+        let dent = dents.contains_key(&c);
+        let cut = SIDES.iter().any(|(d, _, _)| {
+            let n = std::array::from_fn::<_, 3, _>(|a| at[a] + d[a]);
+            n.iter().all(|v| *v >= 0 && *v <= 254) && removed.contains(&n.map(|v| v as u8))
+        });
+        if !dent && !cut {
+            continue;
+        }
+        let [x, y, z] = c.map(|v| v as usize);
+        if x >= body.vol.nx as usize || y >= body.vol.ny as usize || z >= body.vol.nz as usize {
+            continue;
+        }
+        // Keep core emission identifiable; the finish material handles its glow.
+        if body.part_at(x, y, z) == voxel::Part::Core {
+            continue;
+        }
+        let grain = ((p.x * 13.7 + p.y * 29.1 + p.z * 7.3).sin() * 127.3)
+            .fract()
+            .abs();
+        let steel = if cut {
+            0.075 + grain * 0.08
+        } else {
+            0.025 + grain * 0.035
+        };
+        for a in 0..3 {
+            buf.col[i][a] = buf.col[i][a] * 0.2 + steel * 0.8;
+        }
+        if dent {
+            for a in 0..3 {
+                buf.pos[i][a] -= buf.nrm[i][a] * scale * 0.08;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_persistent_corpse_mesh_keeps_the_hole_through_its_hull() {
+        let mut template = voxel::unit::tank();
+        // The cut is in the root volume. Attached, rotated volumes have their
+        // own occupancy and do not yet participate in root penetration.
+        template.segments.clear();
+        let mut source = template.clone();
+        let c = template.core;
+        let lo = [0, c.1, c.2];
+        let hi = [template.vol.nx, c.1 + 2, c.2 + 2];
+        let mut shape = sim_core::burst::chunk::Shape::from_body(&template);
+        for z in lo[2]..hi[2] {
+            for y in lo[1]..hi[1] {
+                for x in lo[0]..hi[0] {
+                    if source.remove(x as usize, y as usize, z as usize) {
+                        shape.remove([x, y, z], source.turret_y);
+                    }
+                }
+            }
+        }
+        let mut bodies = sim_core::damage::Bodies::new(vec![template.clone()]);
+        bodies.spawn_at(0, 0);
+        let t = sim_core::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+        let mut w = sim_core::World::new(42, 16, t);
+        w.units.spawn(0, 0, 0, 0, 100);
+        let frames = bodies.frames(&w.units)[0].unwrap();
+        let chunk = sim_core::burst::chunk::Chunk::from_body(
+            0,
+            0,
+            std::sync::Arc::new(source),
+            frames,
+            shape,
+        );
+        let mesh = super::section_to_mesh(&template, &chunk);
+        assert!(!mesh.is_empty());
+        let offset = [chunk.centre.x, chunk.centre.y, chunk.centre.z]
+            .map(|v| v.raw() as f32 / fx::ONE_RAW as f32);
+        let scale = template.mm as f32 / voxel::unit::WORLD_MM as f32;
+        for (_, buf) in mesh {
+            for p in buf.pos {
+                let local = std::array::from_fn::<_, 3, _>(|a| {
+                    (p[a] + offset[a]) / scale + super::root_centre(&template)[a]
+                });
+                assert!(
+                    !(0..3).all(|a| local[a] > lo[a] as f32 + 0.001 && local[a] < hi[a] as f32 - 0.001),
+                    "vertex {local:?}, cut {lo:?}..{hi:?}, frames {:?}",
+                    frames.map(|f| [f.base, f.x, f.y, f.z])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn detached_geometry_matches_the_captured_pose_and_collision_envelope() {
+        let body = voxel::unit::tank();
+        let mut bodies = sim_core::damage::Bodies::new(vec![body.clone()]);
+        bodies.spawn_at(0, 0);
+        let t = sim_core::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+        let mut w = sim_core::World::new(42, 16, t);
+        let id = w.units.spawn(300, 300, 0, 0, 100);
+        assert_eq!(id, 0);
+        w.units.y[0] = 20;
+        w.units.head[0] = fx::angle::FULL / 7;
+        let target = w.units.spawn(300, 500, 1, 0, 100);
+        w.units.target[0] = target;
+        let frames = bodies.frames(&w.units)[0].unwrap();
+        let mut shape = sim_core::burst::chunk::Shape::default();
+        let mut cells = Vec::new();
+        for z in 0..body.vol.nz {
+            for y in 0..body.vol.ny {
+                for x in 0..body.vol.nx {
+                    if body.vol.get(x as usize, y as usize, z as usize) && x > body.vol.nx / 2 {
+                        let c = [x, y, z];
+                        shape.add(c, body.turret_y);
+                        cells.push(c);
+                    }
+                }
+            }
+        }
+        let chunk = sim_core::burst::chunk::Chunk::new(0, 0, cells, frames, shape);
+        let mesh = super::section_to_mesh(&body, &chunk);
+        assert!(!mesh.is_empty());
+        let lo = chunk.bounds.0.map(|v| v.raw() as f32 / fx::ONE_RAW as f32);
+        let hi = chunk.bounds.1.map(|v| v.raw() as f32 / fx::ONE_RAW as f32);
+        for (_, buf) in &mesh {
+            assert_eq!(buf.pos.len(), buf.nrm.len());
+            assert_eq!(buf.pos.len(), buf.col.len());
+            for p in &buf.pos {
+                for k in 0..3 {
+                    assert!(p[k] >= lo[k] - 0.001 && p[k] <= hi[k] + 0.001);
+                }
+            }
+            for tri in buf.idx.as_chunks::<3>().0 {
+                let a = Vec3::from_array(buf.pos[tri[0] as usize]);
+                let b = Vec3::from_array(buf.pos[tri[1] as usize]);
+                let c = Vec3::from_array(buf.pos[tri[2] as usize]);
+                let n = Vec3::from_array(buf.nrm[tri[0] as usize]);
+                assert!((b - a).cross(c - a).dot(n) > 0.0);
+            }
+        }
+    }
+
     use super::*;
     use voxel::unit::Part;
 
@@ -430,8 +765,17 @@ mod tests {
     }
 
     fn split(b: &UnitBody, bevel: f32) -> [MeshBuf; crate::look::FINISHES] {
-        let mut bufs: [MeshBuf; crate::look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
-        body_to_mesh(b, [0.3, 0.5, 0.9], 1.0, (0, 255), bevel, root_centre(b), &mut bufs);
+        let mut bufs: [MeshBuf; crate::look::FINISHES] =
+            std::array::from_fn(|_| MeshBuf::default());
+        body_to_mesh(
+            b,
+            [0.3, 0.5, 0.9],
+            1.0,
+            (0, 255),
+            bevel,
+            root_centre(b),
+            &mut bufs,
+        );
         bufs
     }
 
@@ -448,19 +792,49 @@ mod tests {
     fn attachment_angles_turn_the_way_the_body_says() {
         let flat = Attach::flat((0, 0, 0), (0, 0, 0));
         let x = |a: Attach| attach_rotation(&a) * Vec3::X;
-        assert!(near(x(Attach { pitch: TURN / 4, ..flat }), Vec3::Y), "тангаж не поднимает нос");
-        assert!(near(x(Attach { yaw: TURN / 4, ..flat }), -Vec3::Z), "рыскание не туда");
         assert!(
-            near(attach_rotation(&Attach { roll: TURN / 4, ..flat }) * Vec3::Y, Vec3::Z),
+            near(
+                x(Attach {
+                    pitch: TURN / 4,
+                    ..flat
+                }),
+                Vec3::Y
+            ),
+            "тангаж не поднимает нос"
+        );
+        assert!(
+            near(
+                x(Attach {
+                    yaw: TURN / 4,
+                    ..flat
+                }),
+                -Vec3::Z
+            ),
+            "рыскание не туда"
+        );
+        assert!(
+            near(
+                attach_rotation(&Attach {
+                    roll: TURN / 4,
+                    ..flat
+                }) * Vec3::Y,
+                Vec3::Z
+            ),
             "крен не туда"
         );
         // Наведённое крепление смотрит туда, куда просили, и в
         // плоскости, и с наклоном.
         let d = x(Attach::aimed((0, 0, 0), (0, 0, 0), (3, -4, 0)));
-        assert!(near(d, Vec3::new(0.6, -0.8, 0.0)), "наведение в плоскости: {d:?}");
+        assert!(
+            near(d, Vec3::new(0.6, -0.8, 0.0)),
+            "наведение в плоскости: {d:?}"
+        );
         let want = Vec3::new(-2.0, -2.0, -1.0).normalize();
         let d = x(Attach::aimed((0, 0, 0), (0, 0, 0), (-2, -2, -1)));
-        assert!(near(d, want), "наведение с рысканием: {d:?} вместо {want:?}");
+        assert!(
+            near(d, want),
+            "наведение с рысканием: {d:?} вместо {want:?}"
+        );
     }
 
     /// **Сегмент стоит там, где сказано крепление, и едет
@@ -471,12 +845,19 @@ mod tests {
         let mut root = cube(4);
         // Лист на переднем нижнем ребре, носом вверх на сорок пять.
         root.push_segment(
-            Attach { pitch: TURN / 8, ..Attach::flat((4, 0, 2), (0, 0, 1)) },
+            Attach {
+                pitch: TURN / 8,
+                ..Attach::flat((4, 0, 2), (0, 0, 1))
+            },
             cube(2),
         );
         // Потомок на дальнем конце листа, башенный.
         root.push_segment(
-            Attach { parent: 1, turret: true, ..Attach::flat((2, 0, 1), (0, 0, 1)) },
+            Attach {
+                parent: 1,
+                turret: true,
+                ..Attach::flat((2, 0, 1), (0, 0, 1))
+            },
             cube(1),
         );
         let f = segment_frames(&root, 1.0 / root.mm as f32);
@@ -488,18 +869,33 @@ mod tests {
         let r = std::f32::consts::FRAC_1_SQRT_2 * 2.0;
         assert!(near(f[1].pos, Vec3::new(2.0 + r, r, 0.0)), "{:?}", f[1].pos);
         assert!(f[1].turret, "потомок башенного сегмента едет с башней");
-        assert!(f[1].rot.dot(f[0].rot).abs() > 0.9999, "потомок без своего поворота повёрнут иначе");
+        assert!(
+            f[1].rot.dot(f[0].rot).abs() > 0.9999,
+            "потомок без своего поворота повёрнут иначе"
+        );
 
         // Меш сегмента — вокруг шарнира: у листа 2×2×2 с шарниром
         // (0, 0, 1) координаты лежат в [0, 2]×[0, 2]×[−1, 1].
         let seg = &root.segments[0];
-        let mut bufs: [MeshBuf; crate::look::FINISHES] = std::array::from_fn(|_| MeshBuf::default());
-        body_to_mesh(&seg.body, [0.5; 3], 1.0, (0, 255), 0.0, pivot_centre(&seg.attach), &mut bufs);
+        let mut bufs: [MeshBuf; crate::look::FINISHES] =
+            std::array::from_fn(|_| MeshBuf::default());
+        body_to_mesh(
+            &seg.body,
+            [0.5; 3],
+            1.0,
+            (0, 255),
+            0.0,
+            pivot_centre(&seg.attach),
+            &mut bufs,
+        );
         let pos = &bufs[crate::look::Finish::Plate as usize].pos;
         assert!(!pos.is_empty());
         for p in pos {
             assert!((0.0..=2.0).contains(&p[0]) && (0.0..=2.0).contains(&p[1]));
-            assert!((-1.0..=1.0).contains(&p[2]), "сегмент не вокруг шарнира: {p:?}");
+            assert!(
+                (-1.0..=1.0).contains(&p[2]),
+                "сегмент не вокруг шарнира: {p:?}"
+            );
         }
 
         // Постановка: корень в базе, сегмент — в базе плюс повёрнутое
@@ -507,7 +903,11 @@ mod tests {
         let mut tr = Transform::IDENTITY;
         let rot = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         place(&mut tr, Vec3::new(10.0, 0.0, 0.0), rot, Some(&f[0]));
-        assert!(near(tr.translation, Vec3::new(10.0, 0.0, -2.0)), "{:?}", tr.translation);
+        assert!(
+            near(tr.translation, Vec3::new(10.0, 0.0, -2.0)),
+            "{:?}",
+            tr.translation
+        );
         place(&mut tr, Vec3::new(10.0, 0.0, 0.0), rot, None);
         assert!(near(tr.translation, Vec3::new(10.0, 0.0, 0.0)));
     }
@@ -522,8 +922,14 @@ mod tests {
             !bufs[crate::look::Finish::Rubber as usize].idx.is_empty(),
             "траки не резина"
         );
-        assert!(!bufs[crate::look::Finish::Steel as usize].idx.is_empty(), "катки не сталь");
-        assert!(!bufs[crate::look::Finish::Gun as usize].idx.is_empty(), "ствол не воронёный");
+        assert!(
+            !bufs[crate::look::Finish::Steel as usize].idx.is_empty(),
+            "катки не сталь"
+        );
+        assert!(
+            !bufs[crate::look::Finish::Gun as usize].idx.is_empty(),
+            "ствол не воронёный"
+        );
         // Сегменты в корневой меш не попадают: у них свой.
         assert!(!tank.segments.is_empty(), "у танка нет наклонных листов");
     }
@@ -630,7 +1036,13 @@ mod tests {
         let mut corners: Vec<[i32; 3]> = buf
             .pos
             .iter()
-            .map(|p| [(p[0] * 64.0) as i32, (p[1] * 64.0) as i32, (p[2] * 64.0) as i32])
+            .map(|p| {
+                [
+                    (p[0] * 64.0) as i32,
+                    (p[1] * 64.0) as i32,
+                    (p[2] * 64.0) as i32,
+                ]
+            })
             .collect();
         corners.sort_unstable();
         corners.dedup();

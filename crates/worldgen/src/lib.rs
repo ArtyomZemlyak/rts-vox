@@ -183,7 +183,10 @@ fn value_noise(seed: u64, x: u32, z: u32, period: u32) -> u32 {
     let (gx, gz) = (x as i64 / p, z as i64 / p);
     let (fx, fz) = ((x as i64 % p) as u64, (z as i64 % p) as u64);
     let (fx, fz) = (smooth(fx, p as u64), smooth(fz, p as u64));
-    let (a, b) = (lattice(seed, gx, gz) as u64, lattice(seed, gx + 1, gz) as u64);
+    let (a, b) = (
+        lattice(seed, gx, gz) as u64,
+        lattice(seed, gx + 1, gz) as u64,
+    );
     let (c, d) = (
         lattice(seed, gx, gz + 1) as u64,
         lattice(seed, gx + 1, gz + 1) as u64,
@@ -517,7 +520,7 @@ fn pale_bed(p: &Params, seed: u64, y: u32) -> bool {
     }
     // Каждый третий: реже — полос не видно; чаще — светлой становится
     // стенка, а тёмная порода в ней прослойкой.
-    (hash3(seed ^ 0xBED0, (y / p.bed) as i64, 0, 0) >> 32) % 3 == 0
+    (hash3(seed ^ 0xBED0, (y / p.bed) as i64, 0, 0) >> 32).is_multiple_of(3)
 }
 
 /// Насколько ниже поверхности начинаются пещеры, вокселей.
@@ -605,7 +608,11 @@ pub fn column(p: &Params, seed: u64, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
     let mut n = Column::new(seed, x, z);
     for (i, o) in out.iter_mut().enumerate() {
         let y = y0 + i as u32;
-        *o = if y >= p.ny { mat::AIR } else { at_depth(p, seed, &mut n, y, h, soil) };
+        *o = if y >= p.ny {
+            mat::AIR
+        } else {
+            at_depth(p, seed, &mut n, y, h, soil)
+        };
     }
 }
 

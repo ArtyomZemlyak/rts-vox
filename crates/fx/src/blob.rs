@@ -173,7 +173,11 @@ pub struct Scan<'a> {
 
 impl<'a> Scan<'a> {
     pub fn new(b: &'a [u8]) -> Scan<'a> {
-        Scan { b, at: 0, bad: false }
+        Scan {
+            b,
+            at: 0,
+            bad: false,
+        }
     }
 
     /// Целы ли данные. Единственная проверка, которая нужна: всё,

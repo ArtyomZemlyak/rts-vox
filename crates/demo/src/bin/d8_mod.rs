@@ -27,10 +27,10 @@ use std::process::ExitCode;
 
 use demo::RunHash;
 use modding::{load_pack, merge_materials, Pack, PartTag, UnitModel};
+use voxel::store::Mat;
 use voxel::topo::unit::CoreBufs;
 use voxel::unit::{tank, Part, UnitBody};
-use voxel::{World, Generator};
-use voxel::store::Mat;
+use voxel::{Generator, World};
 
 struct Args {
     seed: u64,
@@ -40,7 +40,11 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, root: PathBuf::from("."), dump_hash: false }
+        Args {
+            seed: 42,
+            root: PathBuf::from("."),
+            dump_hash: false,
+        }
     }
 }
 
@@ -190,7 +194,11 @@ fn run() -> Result<bool, String> {
     println!("{:<44} {:>21}", "  с модом, материалов", both.len());
     println!("{:<44} {:>21x}", "  хеш без мода", h_plain);
     println!("{:<44} {:>21x}", "  хеш с модом", h_both);
-    println!("{:<44} {:>21}", "  мод меняет хеш партии", ok(mod_changes_hash));
+    println!(
+        "{:<44} {:>21}",
+        "  мод меняет хеш партии",
+        ok(mod_changes_hash)
+    );
 
     // Порядок загрузки паков не влияет на хеш.
     let v2 = load(&vanilla_dir)?;
@@ -220,8 +228,14 @@ fn run() -> Result<bool, String> {
     println!(
         "{:<44} {:>10} {:>10}",
         "  размер",
-        format!("{}×{}×{}", from_data.vol.nx, from_data.vol.ny, from_data.vol.nz),
-        format!("{}×{}×{}", from_code.vol.nx, from_code.vol.ny, from_code.vol.nz)
+        format!(
+            "{}×{}×{}",
+            from_data.vol.nx, from_data.vol.ny, from_data.vol.nz
+        ),
+        format!(
+            "{}×{}×{}",
+            from_code.vol.nx, from_code.vol.ny, from_code.vol.nz
+        )
     );
     println!(
         "{:<44} {:>10} {:>10}",
@@ -235,7 +249,11 @@ fn run() -> Result<bool, String> {
         format!("{:?}", from_data.core),
         format!("{:?}", from_code.core)
     );
-    println!("{:<44} {:>21}", "  совпадают воксель в воксель", ok(identical));
+    println!(
+        "{:<44} {:>21}",
+        "  совпадают воксель в воксель",
+        ok(identical)
+    );
 
     // --- 4. Юнит мода воюет наравне.
     let spore_model = packs[1]
@@ -246,10 +264,7 @@ fn run() -> Result<bool, String> {
     let spore = body_of(spore_model)?;
     let mut bufs = CoreBufs::default();
 
-    println!(
-        "\n{:<44} {:>21}",
-        "юнит мода", spore_model.name
-    );
+    println!("\n{:<44} {:>21}", "юнит мода", spore_model.name);
     println!(
         "{:<44} {:>21}",
         "  размер",
@@ -380,27 +395,15 @@ fn run() -> Result<bool, String> {
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(tmp.join("units")).map_err(|e| e.to_string())?;
     std::fs::write(tmp.join("units/x.ron"), escape).map_err(|e| e.to_string())?;
-    let escaped = matches!(
-        modding::load_pack(&tmp),
-        Err(modding::LoadError::Escape(_))
-    );
+    let escaped = matches!(modding::load_pack(&tmp), Err(modding::LoadError::Escape(_)));
     let _ = std::fs::remove_dir_all(&tmp);
 
     println!("\n{:<44} {:>21x}", "хеш прогона", h1);
     println!("{:<44} {:>21}", "  воспроизводим", ok(reproducible));
-    println!(
-        "{:<44} {:>21}",
-        "путь наружу пака отвергнут",
-        ok(escaped)
-    );
+    println!("{:<44} {:>21}", "путь наружу пака отвергнут", ok(escaped));
 
     if a.dump_hash {
-        println!(
-            "seed={} registry={:016x} hash={:016x}",
-            a.seed,
-            h_both,
-            h1
-        );
+        println!("seed={} registry={:016x} hash={:016x}", a.seed, h_both, h1);
     }
 
     let all = mod_changes_hash

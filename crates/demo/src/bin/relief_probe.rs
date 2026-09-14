@@ -12,8 +12,7 @@ fn main() {
     let mut seed = 42u64;
     let mut sized = true;
     let d = Params::default();
-    let (mut terr, mut tlo, mut thi, mut bed) =
-        (d.terrace, d.terrace_lo, d.terrace_hi, d.bed);
+    let (mut terr, mut tlo, mut thi, mut bed) = (d.terrace, d.terrace_lo, d.terrace_hi, d.bed);
     let (mut feature, mut detail) = (d.feature, d.detail);
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -43,7 +42,12 @@ fn main() {
         ..if sized {
             Params::sized(side, side / 2, side)
         } else {
-            Params { nx: side, ny: side / 2, nz: side, ..Params::default() }
+            Params {
+                nx: side,
+                ny: side / 2,
+                nz: side,
+                ..Params::default()
+            }
         }
     };
     println!(
@@ -96,14 +100,23 @@ fn main() {
 
     // --- мир и навигация
     let t = Instant::now();
-    let w = World::new(p.nx, p.ny, p.nz, 1 << 16, Box::new(Terrain { params: p, seed }));
+    let w = World::new(
+        p.nx,
+        p.ny,
+        p.nz,
+        1 << 16,
+        Box::new(Terrain { params: p, seed }),
+    );
     let gen = t.elapsed().as_secs_f64() * 1e3;
     let tu = demo::tuning();
     let t = Instant::now();
     let nav = NavLayer::new(&w, tu.unit_height, tu.nav_cell, tu.max_step);
     let nav_ms = t.elapsed().as_secs_f64() * 1e3;
     let (gw, gh) = nav.dims();
-    println!("мир создан {gen:.0} мс, нав-слой {nav_ms:.0} мс, клеток {}×{}", gw, gh);
+    println!(
+        "мир создан {gen:.0} мс, нав-слой {nav_ms:.0} мс, клеток {}×{}",
+        gw, gh
+    );
 
     // компоненты объёмного графа «клетка и уровень» — как в nav_report
     let mut g = VolGraph::new();
@@ -129,7 +142,10 @@ fn main() {
     );
     let top: Vec<u32> = sizes.iter().take(6).copied().collect();
     println!("  крупнейшие {top:?}");
-    println!("  из одного узла {}", sizes.iter().filter(|s| **s == 1).count());
+    println!(
+        "  из одного узла {}",
+        sizes.iter().filter(|s| **s == 1).count()
+    );
 
     // поверхностная связность: только верхний уровень клетки
     let cells = (gw * gh) as usize;

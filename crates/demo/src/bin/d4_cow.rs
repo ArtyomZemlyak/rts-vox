@@ -34,7 +34,11 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, units: 1000, dump_hash: false }
+        Args {
+            seed: 42,
+            units: 1000,
+            dump_hash: false,
+        }
     }
 }
 
@@ -79,7 +83,11 @@ fn main() -> ExitCode {
     let one = tank().bytes();
 
     println!("D-4 «Копирование при записи» — общий шаблонный том");
-    println!("танк: том {} КиБ, {} твёрдых вокселей\n", one / 1024, tank().solid_count());
+    println!(
+        "танк: том {} КиБ, {} твёрдых вокселей\n",
+        one / 1024,
+        tank().solid_count()
+    );
 
     // --- 1. Память: целые против повреждённых.
     //
@@ -162,7 +170,11 @@ fn main() -> ExitCode {
     println!("\n{:<34} {:>12}", "цена попадания, мкс", "");
     println!("{:<34} {:>12.3}", "первое (копия тома)", first_us);
     println!("{:<34} {:>12.3}", "второе (запись байта)", second_us);
-    println!("{:<34} {:>11.1}x", "первое дороже второго в", first_us / second_us.max(1e-9));
+    println!(
+        "{:<34} {:>11.1}x",
+        "первое дороже второго в",
+        first_us / second_us.max(1e-9)
+    );
 
     // --- 3. Сколько первых попаданий помещается в тик.
     println!(
@@ -187,7 +199,10 @@ fn main() -> ExitCode {
     hash.feed(f.stats().copies);
     hash.feed(damaged as u64);
 
-    println!("\n{:<34} {:>12} {:>12}", "состояние", "целый", "повреждённый");
+    println!(
+        "\n{:<34} {:>12} {:>12}",
+        "состояние", "целый", "повреждённый"
+    );
     println!(
         "{:<34} {:>12} {:>12}",
         "прикреплено к ядру", s_clean.attached, s_dirty.attached
@@ -210,14 +225,21 @@ fn main() -> ExitCode {
     let gain = no_cow as f64 / pristine as f64;
     println!(
         "выигрыш на целом флоте: {gain:.0}x — {}",
-        if gain > 100.0 { "держится" } else { "СЛИШКОМ МАЛ" }
+        if gain > 100.0 {
+            "держится"
+        } else {
+            "СЛИШКОМ МАЛ"
+        }
     );
     if gain <= 100.0 {
         ok = false;
     }
     // Порог 2: копий ровно столько, сколько юнитов — ни больше.
     if st.copies != a.units as u64 {
-        println!("копий {} при {} юнитах — COW копирует лишнее", st.copies, a.units);
+        println!(
+            "копий {} при {} юнитах — COW копирует лишнее",
+            st.copies, a.units
+        );
         ok = false;
     }
     // Порог 3: накладные расходы COW в худшем случае — шаблон плюс
@@ -236,7 +258,11 @@ fn main() -> ExitCode {
     println!(
         "COW против отдельного тома на юнита: {:+.2}% — {}",
         100.0 * (damaged as f64 - no_cow as f64) / no_cow as f64,
-        if damaged <= no_cow + pristine { "в пределах" } else { "ПРЕВЫШЕНЫ" }
+        if damaged <= no_cow + pristine {
+            "в пределах"
+        } else {
+            "ПРЕВЫШЕНЫ"
+        }
     );
 
     // Риск, который эти числа делают видимым: залп по свежему флоту.

@@ -10,9 +10,9 @@
 //! ровно то, что видно сверху, вместе с его ролью.
 
 use std::time::Instant;
+use voxel::roster::{courtyards, footprint_permille, silhouette, silhouette_distance, top_view};
 use voxel::topo::unit::CoreBufs;
 use voxel::unit::Part;
-use voxel::roster::{courtyards, footprint_permille, silhouette, silhouette_distance, top_view};
 use voxel::UnitBody;
 
 fn glyph(p: Option<Part>) -> char {
@@ -46,7 +46,10 @@ fn print_top(body: &UnitBody, view: &[Option<Part>], w: usize) {
                     if view[dz * nx + dx].is_none() {
                         continue;
                     }
-                    let h = (0..ny).rev().find(|&y| body.vol.get(dx, y, dz)).unwrap_or(0);
+                    let h = (0..ny)
+                        .rev()
+                        .find(|&y| body.vol.get(dx, y, dz))
+                        .unwrap_or(0);
                     if best.is_none() || h >= top {
                         best = view[dz * nx + dx];
                         top = h;
@@ -183,9 +186,11 @@ fn main() {
 
     // Обломки. Куча вдвое грубее машины по сетке и обязана держать
     // её материю до кубического миллиметра.
-    println!("
+    println!(
+        "
 ОБЛОМКИ (машина оседает, материя сохраняется)
-");
+"
+    );
     println!(
         "{:<28} {:>12} {:>9} {:>8} {:>10} {:>11} {:>7} {:>8}",
         "машина", "куча", "вокселей", "высота", "материя м3", "вместимость", "байт", "сборка"
@@ -206,7 +211,11 @@ fn main() {
         let w = body.wreck(0);
         let (_, wy, _) = w.extent_mm();
         let (_, by, _) = body.extent_mm();
-        assert_eq!(w.matter_mm3(), body.volume_mm3(), "{name}: материя не сошлась");
+        assert_eq!(
+            w.matter_mm3(),
+            body.volume_mm3(),
+            "{name}: материя не сошлась"
+        );
         println!(
             "{:<28} {:>3}x{:<3}x{:<4} {:>9} {:>4.1}/{:<3.1} {:>10.1} {:>11.1} {:>7} {:>7.2}",
             name,
@@ -226,16 +235,21 @@ fn main() {
     // Насколько силуэты **не совпадают** как формы: общая сетка 16x16,
     // 256 клеток. Размер и так различает постройки; вопрос в форме.
     let base = voxel::roster::buildings();
-    println!("
+    println!(
+        "
 РАЗЛИЧИЕ СИЛУЭТОВ (клеток из 256, сетка 16x16)
-");
+"
+    );
     for i in 0..base.len() {
         for j in i + 1..base.len() {
             println!(
                 "{:<10} / {:<10} {:>4}",
                 base[i].0,
                 base[j].0,
-                silhouette_distance(&silhouette(&base[i].1.vol, 16), &silhouette(&base[j].1.vol, 16))
+                silhouette_distance(
+                    &silhouette(&base[i].1.vol, 16),
+                    &silhouette(&base[j].1.vol, 16)
+                )
             );
         }
     }

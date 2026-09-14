@@ -3,13 +3,13 @@
 //! (`docs/14-demo-scenes.md`).
 
 use demo::dig::Dig;
-use meshing::layer::MeshLayer;
-use nav::layer::NavLayer;
-use voxel::topo::layer::TopoLayer;
 use demo::{RunHash, Terrain};
+use meshing::layer::MeshLayer;
 use meshing::Opts;
+use nav::layer::NavLayer;
 use sim_core::ground::Ground;
 use sim_core::{populate, World as SimWorld};
+use voxel::topo::layer::TopoLayer;
 use voxel::World;
 
 struct Run {
@@ -20,7 +20,12 @@ struct Run {
 }
 
 fn run_mine(seed: u64, ticks: u64, diggers: usize, side: u32, verify: bool) -> Run {
-    let params = worldgen::Params { nx: side, ny: side / 2, nz: side, ..Default::default() };
+    let params = worldgen::Params {
+        nx: side,
+        ny: side / 2,
+        nz: side,
+        ..Default::default()
+    };
     let terrain = Terrain { params, seed };
     let mut world = World::new(
         params.nx,
@@ -61,7 +66,12 @@ fn run_mine(seed: u64, ticks: u64, diggers: usize, side: u32, verify: bool) -> R
     } else {
         0
     };
-    Run { hash: hash.get(), edits, quads: mesh.quad_total(), seam_mismatches }
+    Run {
+        hash: hash.get(),
+        edits,
+        quads: mesh.quad_total(),
+        seam_mismatches,
+    }
 }
 
 /// Тот же сид — тот же прогон. Без этого сцена не может быть порогом:
@@ -84,7 +94,11 @@ fn d1_is_deterministic() {
 #[test]
 fn d1_incremental_remesh_matches_full_rebuild() {
     let r = run_mine(7, 120, 80, 128, true);
-    assert_eq!(r.seam_mismatches, 0, "швы разошлись на {} чанках", r.seam_mismatches);
+    assert_eq!(
+        r.seam_mismatches, 0,
+        "швы разошлись на {} чанках",
+        r.seam_mismatches
+    );
     assert!(r.edits > 1000, "копка почти ничего не сняла: {}", r.edits);
 }
 
@@ -92,7 +106,12 @@ fn d1_incremental_remesh_matches_full_rebuild() {
 /// ничего не выкопал, проходил бы все остальные проверки.
 #[test]
 fn d1_actually_digs() {
-    let params = worldgen::Params { nx: 128, ny: 64, nz: 128, ..Default::default() };
+    let params = worldgen::Params {
+        nx: 128,
+        ny: 64,
+        nz: 128,
+        ..Default::default()
+    };
     let terrain = Terrain { params, seed: 11 };
     let mut world = World::new(
         params.nx,
@@ -134,8 +153,7 @@ use voxel::bodies::Bodies;
 /// Тяготение сцены — то же, что у игры: из `data/sim.ron` (ADR-173).
 /// Литерала здесь нет нарочно: сцена обязана падать так же, как партия.
 fn scene_gravity() -> fx::Fx {
-    let t = modding::Tuning::from_ron(include_str!("../../../data/sim.ron"))
-        .expect("data/sim.ron");
+    let t = modding::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron");
     sim_core::gravity_per_tick(&t)
 }
 use voxel::store::{Mat, AIR};
@@ -313,7 +331,11 @@ fn d3_shooting_a_subsystem_disables_only_it() {
             shots += 1;
             let s = t.status(&mut b);
             if !s.get(target) {
-                assert!(s.alive, "{}: танк умер, а целились не в ядро", target.name());
+                assert!(
+                    s.alive,
+                    "{}: танк умер, а целились не в ядро",
+                    target.name()
+                );
                 for other in [Part::Engine, Part::Weapon, Part::Sensor] {
                     if other != target {
                         assert!(
@@ -339,9 +361,9 @@ fn d3_core_hit_kills_but_a_subsystem_hit_does_not() {
     let mut t = tank();
     while let Some((x, y, z)) = aim_at(&t, Part::Core) {
         {
-                let r = blast_voxels(&t, BLAST_MM);
-                shoot(&mut t, x, y, z, r)
-            };
+            let r = blast_voxels(&t, BLAST_MM);
+            shoot(&mut t, x, y, z, r)
+        };
         if !t.status(&mut b).alive {
             break;
         }
@@ -433,7 +455,11 @@ fn d4_pristine_unit_reads_like_a_fresh_one() {
     let sa = f.status(a, &mut b);
     let sc = f.status(c, &mut b);
     assert!(f.is_pristine(a));
-    assert_eq!(sa.attached, tank().solid_count(), "целый юнит читается неверно");
+    assert_eq!(
+        sa.attached,
+        tank().solid_count(),
+        "целый юнит читается неверно"
+    );
     assert!(sc.attached < sa.attached, "повреждение не отразилось");
 }
 
@@ -530,6 +556,9 @@ fn small_match(seed: u64, hunt: u64) -> demo::skirmish::Skirmish {
         diggers: 12,
         patience: 1500,
         hunt_period: hunt,
+        // This fixture tests a match with finite forces. Setup's interactive
+        // default enables factories; the economy has separate small_base tests.
+        economy: false,
         ..demo::skirmish::Setup::default()
     })
 }
@@ -625,9 +654,18 @@ fn d5_matter_is_conserved_every_tick() {
 #[test]
 fn d5_actually_exercises_the_sinks() {
     let (_, sunk, _) = run_haul(42, 400);
-    assert!(sunk[Sink::RefiningLoss as usize] > 0, "переработка не сработала");
-    assert!(sunk[Sink::ContainerBreach as usize] > 0, "разрушений не было");
-    assert!(sunk[Sink::OverCap as usize] > 0, "потолок ни разу не срезал");
+    assert!(
+        sunk[Sink::RefiningLoss as usize] > 0,
+        "переработка не сработала"
+    );
+    assert!(
+        sunk[Sink::ContainerBreach as usize] > 0,
+        "разрушений не было"
+    );
+    assert!(
+        sunk[Sink::OverCap as usize] > 0,
+        "потолок ни разу не срезал"
+    );
 }
 
 /// **Хеш обязан различать прогоны.** Первая редакция хешировала
@@ -732,11 +770,17 @@ fn d6_one_voxel_changes_the_answer() {
         w.queue_dig(x, 20, 64);
     }
     w.flush();
-    assert!(line_of_sight(&w, a, b).clear, "сквозная дыра не открыла линию");
+    assert!(
+        line_of_sight(&w, a, b).clear,
+        "сквозная дыра не открыла линию"
+    );
     // И обратно: один воксель закрывает.
     w.queue_edit(voxel::Edit::put(64, 20, 64, 3));
     w.flush();
-    assert!(!line_of_sight(&w, a, b).clear, "один воксель не закрыл линию");
+    assert!(
+        !line_of_sight(&w, a, b).clear,
+        "один воксель не закрыл линию"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -784,7 +828,10 @@ mod d8 {
         let m = pack.units.iter().find(|u| u.name == "Танк").expect("танк");
         let a = body_of(m);
         let b = tank();
-        assert_eq!((a.vol.nx, a.vol.ny, a.vol.nz), (b.vol.nx, b.vol.ny, b.vol.nz));
+        assert_eq!(
+            (a.vol.nx, a.vol.ny, a.vol.nz),
+            (b.vol.nx, b.vol.ny, b.vol.nz)
+        );
         assert_eq!((a.core, a.core_size), (b.core, b.core_size));
         for z in 0..a.vol.nz as usize {
             for y in 0..a.vol.ny as usize {
@@ -893,7 +940,12 @@ struct Scale {
 }
 
 fn run_scale(seed: u64, ticks: u64, units: usize, diggers: usize, side: u32) -> Scale {
-    let params = worldgen::Params { nx: side, ny: side / 2, nz: side, ..Default::default() };
+    let params = worldgen::Params {
+        nx: side,
+        ny: side / 2,
+        nz: side,
+        ..Default::default()
+    };
     let terrain = Terrain { params, seed };
     let world = World::new(
         params.nx,
@@ -998,7 +1050,11 @@ fn d7_loads_every_subsystem_at_once() {
         r.edits, r.dirty_mesh, r.live, r.with_target, r.shots, r.hits, 0, 0
     );
     assert!(r.edits > 1000, "копка почти ничего не сняла: {}", r.edits);
-    assert!(r.dirty_mesh > 100, "ремеш почти не вызывался: {}", r.dirty_mesh);
+    assert!(
+        r.dirty_mesh > 100,
+        "ремеш почти не вызывался: {}",
+        r.dirty_mesh
+    );
     assert!(r.live > 0, "юниты кончились");
     assert!(
         r.with_target > 20,
@@ -1013,7 +1069,10 @@ fn d7_loads_every_subsystem_at_once() {
     //
     // Требуется **результат, и во второй половине прогона**:
     // подсистема, отработавшая вначале и затухшая, — не нагрузка.
-    assert!(r.shots > 0, "за вторую половину прогона не выпущено ни снаряда");
+    assert!(
+        r.shots > 0,
+        "за вторую половину прогона не выпущено ни снаряда"
+    );
     assert!(r.hits > 0, "ни одного попадания за вторую половину");
     assert!(r.blasts > 0, "ни одной воронки за вторую половину");
     assert!(
@@ -1077,7 +1136,11 @@ fn matter_balances_on_every_tick_of_a_match() {
     for t in 0..900u64 {
         m.step();
         let e = m.world.econ.as_ref().expect("учёт");
-        assert!(e.balanced(), "тик {t}: расхождение {}", e.ledger.imbalance());
+        assert!(
+            e.balanced(),
+            "тик {t}: расхождение {}",
+            e.ledger.imbalance()
+        );
         if m.outcome().over() {
             break;
         }

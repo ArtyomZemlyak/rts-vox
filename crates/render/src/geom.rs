@@ -59,7 +59,7 @@ impl MeshBuf {
 /// положительная сторона (`meshing`).
 #[inline]
 fn axis_dir(face: u8) -> (usize, bool) {
-    ((face / 2) as usize, face % 2 == 0)
+    ((face / 2) as usize, face.is_multiple_of(2))
 }
 
 /// Воксель, которому принадлежит грань, в паддинговой системе чанка
@@ -147,10 +147,12 @@ fn push_quad(
         out.col.extend_from_slice(&[c, c, c, c]);
     }
     if positive {
-        out.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        out.idx
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     } else {
         // Та же четвёрка, обход наоборот: иначе грань смотрит внутрь.
-        out.idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        out.idx
+            .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 }
 
@@ -486,12 +488,15 @@ fn push_face(
     out.pos.extend_from_slice(&[c0, c1, c2, c3]);
     out.nrm.extend_from_slice(&[n, n, n, n]);
     // Грань тела — ровно один воксель, значит ровно одна плитка.
-    out.uv.extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+    out.uv
+        .extend_from_slice(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
     out.col.extend_from_slice(&[c, c, c, c]);
     if positive {
-        out.idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        out.idx
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     } else {
-        out.idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        out.idx
+            .extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 }
 
@@ -547,10 +552,22 @@ mod tests {
     fn every_triangle_faces_outwards() {
         let mut buf = MeshBuf::default();
         let quads: Vec<Quad> = (0..6)
-            .map(|face| Quad { face, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 })
+            .map(|face| Quad {
+                face,
+                slice: 4,
+                a: 3,
+                b: 2,
+                w: 2,
+                h: 3,
+                mat: 1,
+            })
             .collect();
         quads_to_mesh(&quads, [0.0, 0.0, 0.0], &mut buf);
-        assert_eq!(buf.idx.len(), 6 * 6, "на грань должно быть два треугольника");
+        assert_eq!(
+            buf.idx.len(),
+            6 * 6,
+            "на грань должно быть два треугольника"
+        );
 
         for t in buf.idx.chunks(3) {
             let (a, b, c) = (
@@ -576,24 +593,56 @@ mod tests {
         let mut buf = MeshBuf::default();
         // +X у воксела со срезом 4: плоскость x = 4.
         quads_to_mesh(
-            &[Quad { face: 0, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 }],
+            &[Quad {
+                face: 0,
+                slice: 4,
+                a: 3,
+                b: 2,
+                w: 2,
+                h: 3,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             &mut buf,
         );
-        assert!(buf.pos.iter().all(|p| p[0] == 4.0), "плоскость не та: {:?}", buf.pos);
+        assert!(
+            buf.pos.iter().all(|p| p[0] == 4.0),
+            "плоскость не та: {:?}",
+            buf.pos
+        );
         // −X того же среза: плоскость x = 3.
         buf.clear();
         quads_to_mesh(
-            &[Quad { face: 1, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 }],
+            &[Quad {
+                face: 1,
+                slice: 4,
+                a: 3,
+                b: 2,
+                w: 2,
+                h: 3,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             &mut buf,
         );
-        assert!(buf.pos.iter().all(|p| p[0] == 3.0), "плоскость не та: {:?}", buf.pos);
+        assert!(
+            buf.pos.iter().all(|p| p[0] == 3.0),
+            "плоскость не та: {:?}",
+            buf.pos
+        );
 
         // Прямоугольник: по `a` ширина `w`, по `b` высота `h`.
         buf.clear();
         quads_to_mesh(
-            &[Quad { face: 0, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 }],
+            &[Quad {
+                face: 0,
+                slice: 4,
+                a: 3,
+                b: 2,
+                w: 2,
+                h: 3,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             &mut buf,
         );
@@ -621,10 +670,34 @@ mod tests {
                 _ => (0, 1),
             };
             // Одна площадь 2×3 целиком и та же площадь двумя квадами.
-            let whole = [Quad { face, slice: 4, a: 3, b: 2, w: 2, h: 3, mat: 1 }];
+            let whole = [Quad {
+                face,
+                slice: 4,
+                a: 3,
+                b: 2,
+                w: 2,
+                h: 3,
+                mat: 1,
+            }];
             let halves = [
-                Quad { face, slice: 4, a: 3, b: 2, w: 1, h: 3, mat: 1 },
-                Quad { face, slice: 4, a: 4, b: 2, w: 1, h: 3, mat: 1 },
+                Quad {
+                    face,
+                    slice: 4,
+                    a: 3,
+                    b: 2,
+                    w: 1,
+                    h: 3,
+                    mat: 1,
+                },
+                Quad {
+                    face,
+                    slice: 4,
+                    a: 4,
+                    b: 2,
+                    w: 1,
+                    h: 3,
+                    mat: 1,
+                },
             ];
             let mut one = MeshBuf::default();
             let mut two = MeshBuf::default();
@@ -636,17 +709,30 @@ mod tests {
                 }
                 // Касательная — направление роста U: вдоль неё
                 // первая координата UV растёт, и растёт на длину квада.
-                for q in buf.pos.chunks(4).zip(buf.uv.chunks(4)).zip(buf.tan.chunks(4)) {
+                for q in buf
+                    .pos
+                    .chunks(4)
+                    .zip(buf.uv.chunks(4))
+                    .zip(buf.tan.chunks(4))
+                {
                     let ((p, uv), t) = q;
                     let d = sub(p[1], p[0]);
                     let along = d[0] * t[0][0] + d[1] * t[0][1] + d[2] * t[0][2];
                     assert!(along > 0.0, "грань {face}: касательная против роста U");
-                    assert!(uv[1][0] > uv[0][0] && uv[1][1] == uv[0][1], "грань {face}: U не вдоль касательной");
+                    assert!(
+                        uv[1][0] > uv[0][0] && uv[1][1] == uv[0][1],
+                        "грань {face}: U не вдоль касательной"
+                    );
                 }
             }
             // В общей вершине разбиений UV один и тот же.
             for (p, uv) in one.pos.iter().zip(&one.uv) {
-                let same = two.pos.iter().zip(&two.uv).find(|(q, _)| *q == p).map(|(_, u)| u);
+                let same = two
+                    .pos
+                    .iter()
+                    .zip(&two.uv)
+                    .find(|(q, _)| *q == p)
+                    .map(|(_, u)| u);
                 if let Some(u) = same {
                     assert_eq!(u, uv, "грань {face}: в точке {p:?} UV зависит от разбиения");
                 }
@@ -772,7 +858,11 @@ mod tests {
         let mut turret = MeshBuf::default();
         volume_to_mesh(&tank, [0.5, 0.5, 0.5], 0.5, Slice::Hull, &mut hull);
         volume_to_mesh(&tank, [0.5, 0.5, 0.5], 0.5, Slice::Turret, &mut turret);
-        assert_eq!(hull.col.iter().filter(|&&c| c == gun).count(), 0, "орудие в корпусе");
+        assert_eq!(
+            hull.col.iter().filter(|&&c| c == gun).count(),
+            0,
+            "орудие в корпусе"
+        );
         assert!(turret.col.contains(&gun), "в башне нет орудия");
     }
 
@@ -799,7 +889,11 @@ mod tests {
                 return voxel::store::AIR;
             }
             if y + 2 >= h {
-                return if (x / 3 + z / 2) % 3 == 0 { 17 } else { 1 };
+                return if (x / 3 + z / 2).is_multiple_of(3) {
+                    17
+                } else {
+                    1
+                };
             }
             if y >= 6 {
                 2
@@ -886,8 +980,14 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 5_000, "проверка почти ничего не проверила: {checked}");
-        assert!(seen[ROCK] > 0 && seen[ORE] > 0, "один из классов пуст: {seen:?}");
+        assert!(
+            checked > 5_000,
+            "проверка почти ничего не проверила: {checked}"
+        );
+        assert!(
+            seen[ROCK] > 0 && seen[ORE] > 0,
+            "один из классов пуст: {seen:?}"
+        );
     }
 
     /// **Воздух под гранью не красится фуксией.**
@@ -903,11 +1003,25 @@ mod tests {
         let mut p = Painter::default();
         let mut bufs = class_bufs();
         quads_to_mesh_painted(
-            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 8, h: 8, mat: 1 }],
+            &[Quad {
+                face: 2,
+                slice: 4,
+                a: 1,
+                b: 1,
+                w: 8,
+                h: 8,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             [0, 0, 0],
             // Шахматка из породы и дыр.
-            |x, _, z| if (x + z) % 2 == 0 { 2 } else { voxel::store::AIR },
+            |x, _, z| {
+                if (x + z) % 2 == 0 {
+                    2
+                } else {
+                    voxel::store::AIR
+                }
+            },
             &mut p,
             &mut bufs,
         );
@@ -930,7 +1044,15 @@ mod tests {
             b.clear();
         }
         quads_to_mesh_painted(
-            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 4, h: 4, mat: 1 }],
+            &[Quad {
+                face: 2,
+                slice: 4,
+                a: 1,
+                b: 1,
+                w: 4,
+                h: 4,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             [0, 0, 0],
             |_, _, _| voxel::store::AIR,
@@ -1010,7 +1132,10 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 200, "проверка почти ничего не проверила: {checked}");
+        assert!(
+            checked > 200,
+            "проверка почти ничего не проверила: {checked}"
+        );
     }
 
     /// **Однородный квад не режется.** Быстрый путь — это не
@@ -1021,7 +1146,15 @@ mod tests {
         let mut p = Painter::default();
         let mut bufs = class_bufs();
         quads_to_mesh_painted(
-            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 40, h: 40, mat: 1 }],
+            &[Quad {
+                face: 2,
+                slice: 4,
+                a: 1,
+                b: 1,
+                w: 40,
+                h: 40,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             [0, 0, 0],
             |_, _, _| 2,
@@ -1042,7 +1175,15 @@ mod tests {
         let mut bufs = class_bufs();
         // Грань +Y: owner = (a, s, b), то есть `a` это x, `b` это z.
         quads_to_mesh_painted(
-            &[Quad { face: 2, slice: 4, a: 1, b: 1, w: 40, h: 40, mat: 1 }],
+            &[Quad {
+                face: 2,
+                slice: 4,
+                a: 1,
+                b: 1,
+                w: 40,
+                h: 40,
+                mat: 1,
+            }],
             [0.0, 0.0, 0.0],
             [0, 0, 0],
             |x, _, _| if x < 20 { 2 } else { 17 },

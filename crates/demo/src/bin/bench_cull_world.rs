@@ -26,7 +26,11 @@ struct Args {
 }
 
 fn parse() -> Result<Args, String> {
-    let mut a = Args { side: 384, height: 256, seed: 42 };
+    let mut a = Args {
+        side: 384,
+        height: 256,
+        seed: 42,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut num = |name: &str| -> Result<u64, String> {
@@ -77,13 +81,19 @@ fn main() -> ExitCode {
         nz: a.side,
         ..Default::default()
     };
-    let terrain = Terrain { params, seed: a.seed };
+    let terrain = Terrain {
+        params,
+        seed: a.seed,
+    };
     let world = World::new(
         params.nx,
         params.ny,
         params.nz,
         1 << 20,
-        Box::new(Terrain { params, seed: a.seed }),
+        Box::new(Terrain {
+            params,
+            seed: a.seed,
+        }),
     );
     let mesh = MeshLayer::new(&world, Opts::default());
     let g = ChunkGrid {
@@ -93,13 +103,18 @@ fn main() -> ExitCode {
         cs: CS as u32,
     };
 
-    println!("отсечение против геометрии — мир {}×{}×{}", a.side, a.height, a.side);
+    println!(
+        "отсечение против геометрии — мир {}×{}×{}",
+        a.side, a.height, a.side
+    );
     println!("чанк мешинга {CS}³, всего {} чанков\n", g.len());
 
     // Квады каждого чанка. Дорого — чанк собирается с нуля, — но это
     // эталон, а не рабочий путь.
     let t = Instant::now();
-    let quads: Vec<usize> = (0..g.len()).map(|i| mesh.rebuilt_quad_count(&world, i)).collect();
+    let quads: Vec<usize> = (0..g.len())
+        .map(|i| mesh.rebuilt_quad_count(&world, i))
+        .collect();
     let build_ms = t.elapsed().as_secs_f64() * 1e3;
     let with_geometry = quads.iter().filter(|&&q| q > 0).count();
     let total_quads: usize = quads.iter().sum();
@@ -116,7 +131,11 @@ fn main() -> ExitCode {
         "{:<20} {:>8} {:>10} {:>10} {:>12}",
         "дальность", "в обзоре", "с геометрией", "доля", "квадов"
     );
-    let mid = V3::new(a.side as f32 * 0.5, terrain.surface(a.side / 2, a.side / 2) as f32, a.side as f32 * 0.5);
+    let mid = V3::new(
+        a.side as f32 * 0.5,
+        terrain.surface(a.side / 2, a.side / 2) as f32,
+        a.side as f32 * 0.5,
+    );
     let mut vis = Vec::new();
     // Углы обзора берутся по кругу: одно направление ничего не говорит
     // о карте, у которой рельеф разный с разных сторон.

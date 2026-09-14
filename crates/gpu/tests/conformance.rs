@@ -32,8 +32,7 @@ const SECTORS: u32 = 8;
 const ITERS: u32 = 48;
 
 fn golden_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/golden/eikonal-v1.txt")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/golden/eikonal-v1.txt")
 }
 
 /// Текстом, а не байтами: расхождение обязано читаться в диффе.
@@ -41,7 +40,9 @@ fn render(fields: &[Vec<u16>]) -> String {
     let mut s = String::new();
     s.push_str("# conformance-вектор: эйконал, портируемое подмножество\n");
     s.push_str("# ADR-092, docs/13-gpu.md. Перегенерация — REGEN_GOLDEN=1.\n");
-    s.push_str(&format!("сектор 16x16, секторов {SECTORS}, итераций {ITERS}\n"));
+    s.push_str(&format!(
+        "сектор 16x16, секторов {SECTORS}, итераций {ITERS}\n"
+    ));
     s.push_str("стоимости: cost_words(), детерминированы от индекса\n");
     s.push_str("поле: 16 бит на клетку, строка = ряд сектора, hex\n");
     for (k, f) in fields.iter().enumerate() {
@@ -82,7 +83,10 @@ fn cpu_reference_reproduces_the_vector() {
     }
     let have = std::fs::read_to_string(&p).unwrap().replace("\r\n", "\n");
     if have != want {
-        let (a, b) = (have.lines().collect::<Vec<_>>(), want.lines().collect::<Vec<_>>());
+        let (a, b) = (
+            have.lines().collect::<Vec<_>>(),
+            want.lines().collect::<Vec<_>>(),
+        );
         let at = a.iter().zip(&b).position(|(x, y)| x != y);
         panic!(
             "эталон разошёлся с вектором на строке {:?}:\n  вектор: {:?}\n  эталон: {:?}\n\
@@ -115,7 +119,8 @@ fn gpu_reproduces_the_vector() {
     for sec in 0..SECTORS as usize {
         for i in 0..N {
             assert_eq!(
-                got[sec][i], want[sec][i],
+                got[sec][i],
+                want[sec][i],
                 "сектор {sec}, ячейка {i} ({}, {}): видеокарта {}, вектор {} — \
                  портируемое подмножество на этой машине не работает, \
                  сверяемый путь выключается целиком",

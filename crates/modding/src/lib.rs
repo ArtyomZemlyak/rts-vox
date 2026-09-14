@@ -13,10 +13,13 @@
 #![forbid(unsafe_code)]
 
 pub mod data;
+pub mod explosion;
 pub mod kinds;
+pub mod range;
+pub mod skirmish;
 pub mod tuning;
-pub mod weapons;
 pub mod vox;
+pub mod weapons;
 
 pub use data::{load_pack, merge_materials, LoadError, Pack, UnitDef, UnitModel};
 pub use kinds::{KindDef, Kinds};
@@ -130,7 +133,12 @@ mod tests {
     use super::*;
 
     fn d(id: Mat, density: u32) -> MatDef {
-        MatDef { id, density, strength: 10, harmful: false }
+        MatDef {
+            id,
+            density,
+            strength: 10,
+            harmful: false,
+        }
     }
 
     #[test]

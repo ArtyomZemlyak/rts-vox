@@ -117,12 +117,20 @@ impl Fx {
 
     #[inline]
     pub const fn min(self, o: Fx) -> Fx {
-        if self.0 < o.0 { self } else { o }
+        if self.0 < o.0 {
+            self
+        } else {
+            o
+        }
     }
 
     #[inline]
     pub const fn max(self, o: Fx) -> Fx {
-        if self.0 > o.0 { self } else { o }
+        if self.0 > o.0 {
+            self
+        } else {
+            o
+        }
     }
 
     /// Только для диагностики и рендера. В симуляции запрещено.
@@ -203,7 +211,10 @@ mod tests {
     #[test]
     fn sqrt_fast_exact_on_squares() {
         for v in [0i32, 1, 4, 9, 144, 10_000, 1_000_000] {
-            assert_eq!(Fx::from_int(v).sqrt_fast().to_int_trunc(), (v as f64).sqrt() as i32);
+            assert_eq!(
+                Fx::from_int(v).sqrt_fast().to_int_trunc(),
+                (v as f64).sqrt() as i32
+            );
         }
     }
 

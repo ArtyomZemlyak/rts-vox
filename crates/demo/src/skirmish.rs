@@ -139,14 +139,20 @@ pub const KIND_DEPOT: u16 = 11;
 impl Skirmish {
     pub fn new(setup: Setup) -> Skirmish {
         let params = Params::sized(setup.side, setup.side / 2, setup.side);
-        let terrain = Terrain { params, seed: setup.seed };
+        let terrain = Terrain {
+            params,
+            seed: setup.seed,
+        };
         let t = crate::tuning();
         let vw = VoxelWorld::new(
             params.nx,
             params.ny,
             params.nz,
             1 << 16,
-            Box::new(Terrain { params, seed: setup.seed }),
+            Box::new(Terrain {
+                params,
+                seed: setup.seed,
+            }),
         );
         // Оснастка, выедающая карту, нужна только когда экономики нет.
         // С экономикой копают настоящие краулеры: копка это экономика,
@@ -180,9 +186,17 @@ impl Skirmish {
         let bases = [(margin, margin), (ex - margin, ez - margin)];
         let mut r = Rng::new(setup.seed, 0x5A1D);
         let spread = (ex / 12).clamp(3, 40);
-        let mut built: [Base; 2] = [Base { x: 0, z: 0, factory: sim_core::NO_TARGET }; 2];
+        let mut built: [Base; 2] = [Base {
+            x: 0,
+            z: 0,
+            factory: sim_core::NO_TARGET,
+        }; 2];
         for (owner, &(bx, bz)) in bases.iter().enumerate() {
-            built[owner] = Base { x: bx, z: bz, factory: sim_core::NO_TARGET };
+            built[owner] = Base {
+                x: bx,
+                z: bz,
+                factory: sim_core::NO_TARGET,
+            };
             if setup.economy {
                 // База: завод и склад стоят готовыми. Строить первый
                 // завод не из чего, а партия, которая не может
@@ -225,7 +239,8 @@ impl Skirmish {
                 world.units.weapon[k] = world
                     .weapons
                     .index_of(id)
-                    .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16;
+                    .unwrap_or_else(|| panic!("вид оружия {id} не загружен"))
+                    as u16;
             }
         }
 
@@ -256,13 +271,13 @@ impl Skirmish {
             let terrain = &self.terrain;
             dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
         }
-        if self.setup.bot_period != 0 && self.tick % self.setup.bot_period == 0 {
+        if self.setup.bot_period != 0 && self.tick.is_multiple_of(self.setup.bot_period) {
             self.bot();
         }
         let h = self.world.tick();
         self.tick += 1;
         self.count();
-        if self.setup.hunt_period != 0 && self.tick % self.setup.hunt_period == 0 {
+        if self.setup.hunt_period != 0 && self.tick.is_multiple_of(self.setup.hunt_period) {
             self.hunt();
         }
         if self.decided_at.is_none() && self.outcome().over() {
@@ -330,7 +345,9 @@ impl Skirmish {
         // не проверяет, что стройка вообще связана с экономикой.
         let mut want_depot = [false; 2];
         {
-            let Some(e) = self.world.econ.as_ref() else { return };
+            let Some(e) = self.world.econ.as_ref() else {
+                return;
+            };
             // Недострой уже размечен — второй не нужен: класть
             // фундаменты пачкой это и есть отмывание материи,
             // от которого предостерегает `docs/07-economy.md`.
@@ -355,7 +372,9 @@ impl Skirmish {
             if owner >= 2 {
                 continue;
             }
-            let Some(e) = self.world.econ.as_ref() else { continue };
+            let Some(e) = self.world.econ.as_ref() else {
+                continue;
+            };
             let ki = self.world.units.kind[k];
             if ki == sim_core::economy::NO_KIND {
                 continue;
@@ -377,7 +396,12 @@ impl Skirmish {
                 let sign = if owner == 0 { 1 } else { -1 };
                 let x = (b.x + sign * off).clamp(1, ex - 2);
                 let z = (b.z + sign * off).clamp(1, ez - 2);
-                orders.push(sim_core::Order::Build { unit: i, kind: KIND_DEPOT, x, z });
+                orders.push(sim_core::Order::Build {
+                    unit: i,
+                    kind: KIND_DEPOT,
+                    x,
+                    z,
+                });
                 placed[owner] = true;
                 continue;
             }
@@ -403,15 +427,23 @@ impl Skirmish {
             if !self.world.units.alive[k] || self.world.units.site[k] != 0 {
                 continue;
             }
-            let Some(e) = self.world.econ.as_ref() else { continue };
+            let Some(e) = self.world.econ.as_ref() else {
+                continue;
+            };
             let queued = e.line(f).map(|l| l.queue.len()).unwrap_or(0);
             if queued >= 2 {
                 continue;
             }
             // Заказывать впритык нельзя: сборка тянет из того же
             // запаса, что стройка, и очередь встала бы, съев всё.
-            let kind = if self.tick % 2 == 0 { KIND_TANK } else { KIND_WALKER };
-            let Some(def) = e.kinds.get(kind) else { continue };
+            let kind = if self.tick.is_multiple_of(2) {
+                KIND_TANK
+            } else {
+                KIND_WALKER
+            };
+            let Some(def) = e.kinds.get(kind) else {
+                continue;
+            };
             if e.stock(owner as u8) >= def.cost.saturating_mul(2) {
                 orders.push(sim_core::Order::Produce { unit: f, kind });
             }

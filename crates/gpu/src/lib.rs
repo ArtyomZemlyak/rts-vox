@@ -11,8 +11,8 @@
 //! submit и платить фиксированную часть один раз.
 
 pub mod edits;
-pub mod march;
 pub mod eikonal;
+pub mod march;
 
 use std::future::Future;
 use std::sync::Arc;
@@ -101,12 +101,21 @@ impl Gpu {
         let ts_period = features
             .contains(wgpu::Features::TIMESTAMP_QUERY)
             .then(|| queue.get_timestamp_period());
-        Some(Gpu { device, queue, info, features, limits, ts_period })
+        Some(Gpu {
+            device,
+            queue,
+            info,
+            features,
+            limits,
+            ts_period,
+        })
     }
 
     /// Блокирует, пока видеокарта не доработает всё отправленное.
     pub fn wait(&self) {
-        self.device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
     }
 
     pub fn storage(&self, bytes: u64, label: &str) -> wgpu::Buffer {
@@ -130,10 +139,12 @@ impl Gpu {
     }
 
     pub fn pipeline(&self, wgsl: &str, entry: &str, label: &str) -> wgpu::ComputePipeline {
-        let m = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
+        let m = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+            });
         self.device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(label),
@@ -166,7 +177,9 @@ impl Gpu {
         rx.recv().expect("map").expect("map ok");
         let v = dst.get_mapped_range(..);
         let out = v
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         drop(v);

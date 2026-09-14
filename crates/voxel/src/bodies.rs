@@ -95,7 +95,12 @@ impl Body {
         let mut voxels = Vec::with_capacity(cells.len());
         for &(x, y, z) in cells {
             let (lx, ly, lz) = ((x - x0) as u16, (y - y0) as u16, (z - z0) as u16);
-            voxels.push(BodyVoxel { x: lx, y: ly, z: lz, mat: w.material(x, y, z) });
+            voxels.push(BodyVoxel {
+                x: lx,
+                y: ly,
+                z: lz,
+                mat: w.material(x, y, z),
+            });
             let c = &mut floor[lz as usize * sx as usize + lx as usize];
             *c = (*c).min(ly);
         }
@@ -150,7 +155,11 @@ impl Body {
 
     /// Мировые координаты воксела тела.
     pub fn world_of(&self, v: BodyVoxel) -> (i64, i64, i64) {
-        (self.ox + v.x as i64, self.oy + v.y as i64, self.oz + v.z as i64)
+        (
+            self.ox + v.x as i64,
+            self.oy + v.y as i64,
+            self.oz + v.z as i64,
+        )
     }
 }
 
@@ -608,7 +617,10 @@ mod tests {
             }
         }
         let second = total - first;
-        assert!(first > 0 && second > 0, "тело не падало: {first} и {second} тиков");
+        assert!(
+            first > 0 && second > 0,
+            "тело не падало: {first} и {second} тиков"
+        );
         assert!(
             first > second * 2,
             "первая половина высоты занята {first} шагов, вторая {second}: падение не ускоряется"
@@ -633,8 +645,14 @@ mod tests {
             w.flush();
             steps += 1;
         }
-        assert!(bodies.list.is_empty(), "тело не приземлилось за {steps} шагов");
-        assert!(steps < 20, "падение заняло {steps} шагов — тело не разогналось");
+        assert!(
+            bodies.list.is_empty(),
+            "тело не приземлилось за {steps} шагов"
+        );
+        assert!(
+            steps < 20,
+            "падение заняло {steps} шагов — тело не разогналось"
+        );
         // Пол на высоте 4: низ кубика обязан встать ровно на него,
         // а не внутрь породы.
         let mut solid = 0;
@@ -667,8 +685,7 @@ mod tests {
             let mut w = world();
             let mut bodies = Bodies::new(64, test_gravity());
             for k in 0..6u32 {
-                let cells: Vec<(u32, u32, u32)> =
-                    vec![(4 + k, 12 + k, 4), (5 + k, 12 + k, 4)];
+                let cells: Vec<(u32, u32, u32)> = vec![(4 + k, 12 + k, 4), (5 + k, 12 + k, 4)];
                 for &(x, y, z) in &cells {
                     w.queue_edit(crate::Edit::put(x, y, z, 3));
                 }

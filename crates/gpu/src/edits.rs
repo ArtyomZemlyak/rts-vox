@@ -73,12 +73,27 @@ impl EditApply {
             label: None,
             layout: &pipe.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: bits.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: edits.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: count.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bits.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: edits.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: count.as_entire_binding(),
+                },
             ],
         });
-        EditApply { pipe, bits, edits, count, bind }
+        EditApply {
+            pipe,
+            bits,
+            edits,
+            count,
+            bind,
+        }
     }
 
     /// Загрузить список и закодировать применение. Загрузка и диспатч
@@ -86,8 +101,11 @@ impl EditApply {
     /// (`analysis/04-optimization.md`).
     pub fn encode(&self, g: &Gpu, e: &mut wgpu::CommandEncoder, list: &[u32]) {
         g.queue.write_buffer(&self.edits, 0, crate::as_bytes(list));
-        g.queue
-            .write_buffer(&self.count, 0, crate::as_bytes(&[list.len() as u32, 0, 0, 0]));
+        g.queue.write_buffer(
+            &self.count,
+            0,
+            crate::as_bytes(&[list.len() as u32, 0, 0, 0]),
+        );
         let mut p = e.begin_compute_pass(&Default::default());
         p.set_pipeline(&self.pipe);
         p.set_bind_group(0, &self.bind, &[]);

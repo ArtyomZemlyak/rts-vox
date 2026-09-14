@@ -15,10 +15,10 @@
 //! не подтверждается.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::mesh::Indices;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
-use bevy::light::CascadeShadowConfigBuilder;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use render::geom::{volume_to_mesh, MeshBuf, Slice};
@@ -83,7 +83,13 @@ fn main() {
             ..default()
         }))
         .insert_resource(ClearColor(Color::srgb(0.55, 0.68, 0.82)))
-        .insert_resource(Snap { path: shot, after, done: false, frames, seen: 0 })
+        .insert_resource(Snap {
+            path: shot,
+            after,
+            done: false,
+            frames,
+            seen: 0,
+        })
         .insert_resource(Scene { group, span: 0.0 })
         .add_systems(Startup, setup)
         .add_systems(Update, snap)
@@ -144,11 +150,14 @@ fn setup(
         // ей не в кого целиться.
         volume_to_mesh(body, TINTS[i % TINTS.len()], s, Slice::All, &mut buf);
         let mesh = meshes.add(
-            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-                .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
-                .with_inserted_indices(Indices::U32(buf.idx.clone())),
+            Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            )
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
+            .with_inserted_indices(Indices::U32(buf.idx.clone())),
         );
         // `volume_to_mesh` ставит том серединой в начало координат
         // по горизонтали и низом — по высоте.
@@ -249,7 +258,9 @@ fn snap(
     if !s.done && time.elapsed_secs() >= s.after {
         if let Some(p) = s.path.clone() {
             println!("снимок на {:.1} с: {p}", time.elapsed_secs());
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(p));
         }
         s.done = true;
     }

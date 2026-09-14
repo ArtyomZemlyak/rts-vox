@@ -129,7 +129,12 @@ fn glow_ladder(
             let t = i as f32 / steps as f32;
             let k = (1.0 - t) * (1.0 - t);
             m.add(StandardMaterial {
-                base_color: Color::LinearRgba(LinearRgba::new(hot[0] * k, hot[1] * k, hot[2] * k, 1.0)),
+                base_color: Color::LinearRgba(LinearRgba::new(
+                    hot[0] * k,
+                    hot[1] * k,
+                    hot[2] * k,
+                    1.0,
+                )),
                 alpha_mode: AlphaMode::Add,
                 unlit: true,
                 ..default()
@@ -150,7 +155,12 @@ fn setup(
         ball: meshes.add(Sphere::new(1.0).mesh().ico(1).expect("шар пыли")),
         chip: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
         dust: ladder(&mut materials, d.dust_srgb, d.dust_alpha, look::PUFF_STEPS),
-        smoke: ladder(&mut materials, d.smoke_srgb, d.smoke_alpha, look::PUFF_STEPS),
+        smoke: ladder(
+            &mut materials,
+            d.smoke_srgb,
+            d.smoke_alpha,
+            look::PUFF_STEPS,
+        ),
         spark: glow_ladder(&mut materials, look::SPARK_GLOW, look::PUFF_STEPS),
     });
 }
@@ -201,7 +211,14 @@ pub fn puff(
         Mesh3d(mesh),
         MeshMaterial3d(mat),
         Transform::from_translation(at).with_scale(Vec3::splat(size0.max(0.01))),
-        Puff { kind, age: 0, life: life.max(1), vel, size0, size1 },
+        Puff {
+            kind,
+            age: 0,
+            life: life.max(1),
+            vel,
+            size0,
+            size1,
+        },
     ));
 }
 
@@ -210,7 +227,14 @@ pub fn puff(
 /// `at` — положение машины, `back` — единичный вектор **против** хода,
 /// `len` — длина машины в вокселях: клуб рождается за кормой
 /// и разлетается в стороны шириной с машину.
-pub fn track_dust(commands: &mut Commands, art: &DustArt, at: Vec3, back: Vec3, len: f32, seed: u32) {
+pub fn track_dust(
+    commands: &mut Commands,
+    art: &DustArt,
+    at: Vec3,
+    back: Vec3,
+    len: f32,
+    seed: u32,
+) {
     let d = look::dust();
     let side = Vec3::new(-back.z, 0.0, back.x);
     let h = hash(at.x as i32, at.z as i32, len as i32, seed);
@@ -218,8 +242,19 @@ pub fn track_dust(commands: &mut Commands, art: &DustArt, at: Vec3, back: Vec3, 
     let p = at + back * (len * 0.45) + side * s + Vec3::Y * (len * 0.04);
     // Клуб отстаёт от машины и чуть поднимается: пыль поднята
     // и оседает, а не висит.
-    let vel = back * (len * d.dust_drift) + Vec3::Y * (len * d.dust_rise) + side * (signed(h >> 9) * len * 0.004);
-    puff(commands, art, PuffKind::Dust, p, vel, len * d.dust_size.0, len * d.dust_size.1, d.dust_frames);
+    let vel = back * (len * d.dust_drift)
+        + Vec3::Y * (len * d.dust_rise)
+        + side * (signed(h >> 9) * len * 0.004);
+    puff(
+        commands,
+        art,
+        PuffKind::Dust,
+        p,
+        vel,
+        len * d.dust_size.0,
+        len * d.dust_size.1,
+        d.dust_frames,
+    );
 }
 
 /// Пыль от взрыва: несколько клубов вокруг воронки радиуса `r`.
@@ -246,13 +281,21 @@ pub fn blast_dust(commands: &mut Commands, art: &DustArt, at: Vec3, r: f32, key:
 }
 
 /// Искры из точки: `n` кубиков разлетаются веером и падают.
-pub fn sparks(commands: &mut Commands, art: &DustArt, at: Vec3, scale: f32, key: (i32, i32, i32), n: usize) {
+pub fn sparks(
+    commands: &mut Commands,
+    art: &DustArt,
+    at: Vec3,
+    scale: f32,
+    key: (i32, i32, i32),
+    n: usize,
+) {
     let d = look::dust();
     for k in 0..n {
         let h = hash(key.0, key.1, key.2, 0x5A00 + k as u32);
         let ang = frac(h) * core::f32::consts::TAU;
         let up = 0.3 + 0.9 * frac(h >> 11);
-        let vel = Vec3::new(ang.cos(), up, ang.sin()).normalize() * (d.spark_speed * scale * (0.6 + 0.6 * frac(h >> 17)));
+        let vel = Vec3::new(ang.cos(), up, ang.sin()).normalize()
+            * (d.spark_speed * scale * (0.6 + 0.6 * frac(h >> 17)));
         puff(
             commands,
             art,
@@ -269,7 +312,12 @@ pub fn sparks(commands: &mut Commands, art: &DustArt, at: Vec3, scale: f32, key:
 /// Подбитая машина дымит: источник, который выпускает клубы по одному.
 pub fn wreck_smoke(commands: &mut Commands, at: Vec3, key: (i32, i32, i32)) {
     let d = look::dust();
-    commands.spawn(Smoker { at, left: d.smoke_puffs, wait: 0, seed: hash(key.0, key.1, key.2, 0x5E0) });
+    commands.spawn(Smoker {
+        at,
+        left: d.smoke_puffs,
+        wait: 0,
+        seed: hash(key.0, key.1, key.2, 0x5E0),
+    });
 }
 
 /// Старение: клубы растут, плывут и гаснут; источники дыма выпускают
@@ -277,7 +325,12 @@ pub fn wreck_smoke(commands: &mut Commands, at: Vec3, key: (i32, i32, i32)) {
 fn age(
     mut commands: Commands,
     art: Res<DustArt>,
-    mut puffs: Query<(Entity, &mut Puff, &mut Transform, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut puffs: Query<(
+        Entity,
+        &mut Puff,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
     mut smokers: Query<(Entity, &mut Smoker)>,
 ) {
     let d = look::dust();
@@ -305,7 +358,8 @@ fn age(
             PuffKind::Spark => {
                 p.vel.y -= d.spark_g * p.size0.max(0.05);
                 let h = hash(p.age as i32, e.index_u32() as i32, 0, 0x9);
-                tr.rotation *= Quat::from_euler(EulerRot::XYZ, 0.3 * signed(h), 0.2, 0.3 * signed(h >> 5));
+                tr.rotation *=
+                    Quat::from_euler(EulerRot::XYZ, 0.3 * signed(h), 0.2, 0.3 * signed(h >> 5));
             }
         }
         let steps = match p.kind {
@@ -336,7 +390,16 @@ fn age(
         // сторону на всю жизнь источника.
         let drift = Vec3::new(signed(s.seed) * 0.5, 1.0, signed(s.seed >> 9) * 0.5).normalize();
         let vel = drift * d.smoke_speed * (0.7 + 0.6 * frac(h >> 13));
-        puff(&mut commands, &art, PuffKind::Smoke, at, vel, d.smoke_size.0, d.smoke_size.1, d.smoke_frames);
+        puff(
+            &mut commands,
+            &art,
+            PuffKind::Smoke,
+            at,
+            vel,
+            d.smoke_size.0,
+            d.smoke_size.1,
+            d.smoke_frames,
+        );
         s.left -= 1;
         s.wait = d.smoke_every;
     }

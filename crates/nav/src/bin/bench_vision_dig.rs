@@ -42,7 +42,13 @@ fn make_sensors(g: &Grid, n: usize, radius: u16, seed: u64) -> Vec<Sensor> {
 
 /// Клетки, перевёрнутые копкой за тик. Копают не по всей карте: правки
 /// кучкуются вокруг забоев, и каждый копатель сам является сенсором.
-fn flipped_cells(g: &Grid, sensors: &[Sensor], diggers: usize, per_digger: usize, seed: u64) -> Vec<(usize, usize)> {
+fn flipped_cells(
+    g: &Grid,
+    sensors: &[Sensor],
+    diggers: usize,
+    per_digger: usize,
+    seed: u64,
+) -> Vec<(usize, usize)> {
     let mut r = Rng::new(seed, 0xD16);
     let mut out = Vec::with_capacity(diggers * per_digger);
     for k in 0..diggers {
@@ -64,7 +70,10 @@ fn main() {
     let sensors = make_sensors(&g, 5000, radius, 11);
     let mut idx = SensorIndex::new(g.w, g.h, radius as usize, sensors.len());
 
-    println!("нав-сетка {}×{}, 5000 сенсоров, радиус {radius} клеток", g.w, g.h);
+    println!(
+        "нав-сетка {}×{}, 5000 сенсоров, радиус {radius} клеток",
+        g.w, g.h
+    );
 
     section("1. Пересборка индекса сенсоров");
     let mut best = f64::MAX;
@@ -73,9 +82,7 @@ fn main() {
         idx.rebuild(&sensors);
         best = best.min(t0.elapsed().as_secs_f64() * 1e3);
     }
-    println!(
-        "полная пересборка на 5000 сенсоров: {best:.4} мс на тик (счётная сортировка, CSR)"
-    );
+    println!("полная пересборка на 5000 сенсоров: {best:.4} мс на тик (счётная сортировка, CSR)");
 
     section("2. Цена как функция числа перевёрнутых клеток");
     println!("это устойчивая часть замера: она не зависит от модели копки.\n");
@@ -202,9 +209,7 @@ fn main() {
         insert(&g, s, &mut masks[i], &mut cg);
     }
     let build_ms = t0.elapsed().as_secs_f64() * 1e3;
-    println!(
-        "первичная вставка всех 5000: {build_ms:.2} мс (делается один раз, не каждый тик)"
-    );
+    println!("первичная вставка всех 5000: {build_ms:.2} мс (делается один раз, не каждый тик)");
     println!("видимых клеток у группы: {}", cg.count_visible());
 
     println!(
@@ -233,10 +238,7 @@ fn main() {
             black_box(acc);
             b = b.min(t0.elapsed().as_secs_f64() * 1e3);
         }
-        println!(
-            "{k:>12} {a:>16.3} {b:>16.3} {:>11.2}x",
-            b / a
-        );
+        println!("{k:>12} {a:>16.3} {b:>16.3} {:>11.2}x", b / a);
     }
     println!("(«наивно» — каст в общую маску: быстрее, но снимать видимость не умеет,");
     println!(" то есть архитектурой быть не может)");

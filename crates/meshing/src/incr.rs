@@ -68,7 +68,11 @@ impl IncMesher {
             + self.planes.len() * 8
             + self.col_stamp.len() * 4
             + self.dirty.len() * 8
-            + self.slice_quads.iter().map(|v| v.capacity() * 8).sum::<usize>()
+            + self
+                .slice_quads
+                .iter()
+                .map(|v| v.capacity() * 8)
+                .sum::<usize>()
     }
 
     pub fn quad_count(&self) -> usize {

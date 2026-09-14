@@ -49,8 +49,7 @@ pub fn brute(shields: &[Shield], points: &[Point], out: &mut Vec<(u32, u32)>) ->
             }
         }
     }
-    out
-        .sort_unstable();
+    out.sort_unstable();
     tested
 }
 
@@ -176,9 +175,26 @@ mod tests {
     /// Щит не ловит своих и не ловит с нулевым зарядом.
     #[test]
     fn shield_ignores_own_and_empty() {
-        let s = Shield { x: 0, z: 0, y: 0, r: 100, owner: 1, charge: 10 };
-        let mine = Point { x: 1, y: 1, z: 1, owner: 1 };
-        let theirs = Point { x: 1, y: 1, z: 1, owner: 0 };
+        let s = Shield {
+            x: 0,
+            z: 0,
+            y: 0,
+            r: 100,
+            owner: 1,
+            charge: 10,
+        };
+        let mine = Point {
+            x: 1,
+            y: 1,
+            z: 1,
+            owner: 1,
+        };
+        let theirs = Point {
+            x: 1,
+            y: 1,
+            z: 1,
+            owner: 0,
+        };
         assert!(!inside(&s, &mine));
         assert!(inside(&s, &theirs));
         let empty = Shield { charge: 0, ..s };
@@ -188,12 +204,29 @@ mod tests {
     /// Граница включительная и симметричная: точка ровно на радиусе внутри.
     #[test]
     fn boundary_is_inclusive() {
-        let s = Shield { x: 100, z: 100, y: 0, r: 10, owner: 0, charge: 1 };
+        let s = Shield {
+            x: 100,
+            z: 100,
+            y: 0,
+            r: 10,
+            owner: 0,
+            charge: 1,
+        };
         for (dx, dy, dz) in [(10, 0, 0), (-10, 0, 0), (0, 10, 0), (0, 0, 10), (6, 8, 0)] {
-            let p = Point { x: 100 + dx, y: dy, z: 100 + dz, owner: 1 };
+            let p = Point {
+                x: 100 + dx,
+                y: dy,
+                z: 100 + dz,
+                owner: 1,
+            };
             assert!(inside(&s, &p), "({dx},{dy},{dz}) снаружи");
         }
-        let p = Point { x: 111, y: 0, z: 100, owner: 1 };
+        let p = Point {
+            x: 111,
+            y: 0,
+            z: 100,
+            owner: 1,
+        };
         assert!(!inside(&s, &p));
     }
 }

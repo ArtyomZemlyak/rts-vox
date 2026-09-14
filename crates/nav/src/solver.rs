@@ -46,10 +46,7 @@ fn axis_mins(g: &Grid, t: &[Time], i: usize) -> (Time, Time) {
         return (t[i - 1].min(t[i + 1]), t[i - w].min(t[i + w]));
     }
     let pick = |nb: usize| if g.linked(i, nb) { t[nb] } else { INF };
-    (
-        pick(i - 1).min(pick(i + 1)),
-        pick(i - w).min(pick(i + w)),
-    )
+    (pick(i - 1).min(pick(i + 1)), pick(i - w).min(pick(i + w)))
 }
 
 fn init(g: &Grid, goals: &[usize]) -> Vec<Time> {

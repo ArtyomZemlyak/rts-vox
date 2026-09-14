@@ -20,12 +20,12 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use demo::dig::Dig;
-use meshing::layer::MeshLayer;
-use sim_core::ground::Ground;
-use sim_core::Phase as SimPhase;
 use demo::{RunHash, Terrain};
 use fx::rng::Rng;
+use meshing::layer::MeshLayer;
 use meshing::Opts;
+use sim_core::ground::Ground;
+use sim_core::Phase as SimPhase;
 use sim_core::{populate, World as SimWorld, WORLD};
 use voxel::World;
 
@@ -133,7 +133,10 @@ fn main() -> ExitCode {
         nz: a.side,
         ..Default::default()
     };
-    let terrain = Terrain { params, seed: a.seed };
+    let terrain = Terrain {
+        params,
+        seed: a.seed,
+    };
 
     println!("D-7 «Масштаб» — всё вместе в одном тике");
     println!(
@@ -144,7 +147,11 @@ fn main() -> ExitCode {
         a.units,
         a.diggers,
         a.threads,
-        if a.dense { ", ВСЕ В ОДНУ ТОЧКУ" } else { "" }
+        if a.dense {
+            ", ВСЕ В ОДНУ ТОЧКУ"
+        } else {
+            ""
+        }
     );
 
     let t_gen = Instant::now();
@@ -153,7 +160,10 @@ fn main() -> ExitCode {
         params.ny,
         params.nz,
         4096,
-        Box::new(Terrain { params, seed: a.seed }),
+        Box::new(Terrain {
+            params,
+            seed: a.seed,
+        }),
     );
     world.max_materialize_per_tick = a.mat_cap;
     let gen_ms = t_gen.elapsed().as_secs_f64() * 1e3;
@@ -180,7 +190,6 @@ fn main() -> ExitCode {
     } else {
         populate(&mut sim, a.units, a.seed);
     }
-
 
     let mut hash = RunHash::new();
 
@@ -234,10 +243,10 @@ fn main() -> ExitCode {
     }
 
     let measure = |sim: &mut SimWorld,
-                       mesh: &mut MeshLayer,
-                       dig: &mut Dig,
-                       hash: &mut RunHash,
-                       ticks: u64|
+                   mesh: &mut MeshLayer,
+                   dig: &mut Dig,
+                   hash: &mut RunHash,
+                   ticks: u64|
      -> Phase {
         let mut p = Phase {
             ms_units: 0.0,
@@ -271,7 +280,11 @@ fn main() -> ExitCode {
                 let g = sim.ground.as_mut().expect("земля");
                 dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
             }
-            let h = if a.threads > 1 { sim.tick_par(a.threads) } else { sim.tick() };
+            let h = if a.threads > 1 {
+                sim.tick_par(a.threads)
+            } else {
+                sim.tick()
+            };
             let ns1 = phase_split(sim);
             let s_dig = (ns1[0] - ns0[0]) as f64 / 1e6;
             let s_topo = (ns1[1] - ns0[1]) as f64 / 1e6;
@@ -299,8 +312,7 @@ fn main() -> ExitCode {
                 p.worst = ms;
                 p.worst_at = tick;
                 p.worst_split = [s_units, s_dig, s_mesh, s_topo];
-                p.worst_materialized =
-                    sim.ground().expect("земля").world.materialized - before_mat;
+                p.worst_materialized = sim.ground().expect("земля").world.materialized - before_mat;
             }
             hash.feed(h);
             hash.feed_edits(tick, sim.ground().expect("земля").edits());
@@ -344,11 +356,34 @@ fn main() -> ExitCode {
     let tot = |p: &Phase| (p.ms_units + p.ms_dig + p.ms_mesh + p.ms_topo) / n;
     let (t_fresh, t_worn) = (tot(&fresh), tot(&worn));
 
-    println!("{:<34} {:>14} {:>14}", "тик под нагрузкой, мс", "свежая карта", "выработанная");
-    println!("{:<34} {:>14.3} {:>14.3}", "юниты", fresh.ms_units / n, worn.ms_units / n);
-    println!("{:<34} {:>14.3} {:>14.3}", "копка и дренаж", fresh.ms_dig / n, worn.ms_dig / n);
-    println!("{:<34} {:>14.3} {:>14.3}", "ремеш", fresh.ms_mesh / n, worn.ms_mesh / n);
-    println!("{:<34} {:>14.3} {:>14.3}", "связность", fresh.ms_topo / n, worn.ms_topo / n);
+    println!(
+        "{:<34} {:>14} {:>14}",
+        "тик под нагрузкой, мс", "свежая карта", "выработанная"
+    );
+    println!(
+        "{:<34} {:>14.3} {:>14.3}",
+        "юниты",
+        fresh.ms_units / n,
+        worn.ms_units / n
+    );
+    println!(
+        "{:<34} {:>14.3} {:>14.3}",
+        "копка и дренаж",
+        fresh.ms_dig / n,
+        worn.ms_dig / n
+    );
+    println!(
+        "{:<34} {:>14.3} {:>14.3}",
+        "ремеш",
+        fresh.ms_mesh / n,
+        worn.ms_mesh / n
+    );
+    println!(
+        "{:<34} {:>14.3} {:>14.3}",
+        "связность",
+        fresh.ms_topo / n,
+        worn.ms_topo / n
+    );
     println!("{:<34} {:>14.3} {:>14.3}", "итого средний", t_fresh, t_worn);
     println!(
         "{:<34} {:>14.3} {:>14.3}",
@@ -392,7 +427,10 @@ fn main() -> ExitCode {
         );
     }
 
-    println!("\n{:<34} {:>14} {:>14}", "нагрузка за тик", "свежая", "выработанная");
+    println!(
+        "\n{:<34} {:>14} {:>14}",
+        "нагрузка за тик", "свежая", "выработанная"
+    );
     println!(
         "{:<34} {:>14.1} {:>14.1}",
         "правок",
@@ -441,7 +479,11 @@ fn main() -> ExitCode {
     {
         let t = Instant::now();
         sim.solve_flow();
-        println!("{:<34} {:>11.3} мс", "поле направлений целиком", t.elapsed().as_secs_f64() * 1e3);
+        println!(
+            "{:<34} {:>11.3} мс",
+            "поле направлений целиком",
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
     // Падает ли здесь вообще кто-нибудь: копатели снимают породу
     // из-под своих же, и юнит на исчезнувшей опоре обязан лететь вниз
@@ -458,17 +500,32 @@ fn main() -> ExitCode {
         fresh.max_fall.max(worn.max_fall)
     );
     println!("{:<34} {:>14}", "решений поля направлений", sim.flow_solves);
-    println!("{:<34} {:>14}", "  узлов «клетка и уровень»", sim.flow_nodes);
+    println!(
+        "{:<34} {:>14}",
+        "  узлов «клетка и уровень»", sim.flow_nodes
+    );
     println!("{:<34} {:>14}", "  рёбер", sim.flow_edges);
-    println!("{:<34} {:>14}", "  компонент связности", sim.flow_components);
+    println!(
+        "{:<34} {:>14}",
+        "  компонент связности", sim.flow_components
+    );
     // Достижимо считается по обоим владельцам, поэтому вдвое больше
     // узлов. Меньше — значит часть карты приказа не получила,
     // и фаза движения там пустая (ADR-138).
     println!("{:<34} {:>14}", "  узлов достижимо", sim.flow_reachable);
-    println!("{:<34} {:>14}", "  годуновских обновлений", sim.flow_updates);
+    println!(
+        "{:<34} {:>14}",
+        "  годуновских обновлений", sim.flow_updates
+    );
     println!("{:<34} {:>14}", "  тиков на одно поле", sim.flow_ticks);
-    println!("{:<34} {:>14}", "  секторов пересчитано", sim.flow_solved_sectors);
-    println!("{:<34} {:>14}", "  секторов взято готовыми", sim.flow_reused_sectors);
+    println!(
+        "{:<34} {:>14}",
+        "  секторов пересчитано", sim.flow_solved_sectors
+    );
+    println!(
+        "{:<34} {:>14}",
+        "  секторов взято готовыми", sim.flow_reused_sectors
+    );
     println!(
         "{:<34} {:>14.1}",
         "шагов упёрлось в породу",
@@ -507,7 +564,11 @@ fn main() -> ExitCode {
     let worst_avg = t_fresh.max(t_worn);
     let worst_tick = fresh.worst.max(worn.worst);
     let worst_cold = fresh.worst_cold.max(worn.worst_cold);
-    let verdict = if worst_avg <= BUDGET_MS { "ДЕРЖИТСЯ" } else { "ПРЕВЫШЕН" };
+    let verdict = if worst_avg <= BUDGET_MS {
+        "ДЕРЖИТСЯ"
+    } else {
+        "ПРЕВЫШЕН"
+    };
     println!("порог {BUDGET_MS} мс на тик: худший средний {worst_avg:.3} мс — {verdict}");
     println!("худший отдельный тик без первых сборок: {worst_tick:.3} мс");
     println!(
@@ -522,7 +583,11 @@ fn main() -> ExitCode {
         ("связность и проходимость", nav_ms, NAV_BUDGET_MS),
         ("ремеш", mesh_ms, MESH_BUDGET_MS),
     ] {
-        let v = if got <= budget { "держится" } else { "ПРЕВЫШЕН" };
+        let v = if got <= budget {
+            "держится"
+        } else {
+            "ПРЕВЫШЕН"
+        };
         println!("  порог {budget} мс на «{name}»: {got:.3} мс — {v}");
     }
 

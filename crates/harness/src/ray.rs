@@ -116,9 +116,26 @@ pub fn dda(w: &World, ox: i32, oy: i32, oz: i32, d: Dir, max_steps: u32) -> Hit 
 /// То же самое в `f64` — только чтобы знать цену детерминизма на этой
 /// нагрузке. В симуляции запрещено.
 #[allow(clippy::too_many_arguments)]
-pub fn dda_f64(w: &World, ox: i32, oy: i32, oz: i32, dxf: f64, dyf: f64, dzf: f64, max_steps: u32) -> Hit {
+pub fn dda_f64(
+    w: &World,
+    ox: i32,
+    oy: i32,
+    oz: i32,
+    dxf: f64,
+    dyf: f64,
+    dzf: f64,
+    max_steps: u32,
+) -> Hit {
     let (mut x, mut y, mut z) = (ox, oy, oz);
-    let sgn = |v: f64| if v > 0.0 { 1 } else if v < 0.0 { -1 } else { 0 };
+    let sgn = |v: f64| {
+        if v > 0.0 {
+            1
+        } else if v < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
     let (sx, sy, sz) = (sgn(dxf), sgn(dyf), sgn(dzf));
     let inf = f64::INFINITY;
     let del = |v: f64| if v == 0.0 { inf } else { 1.0 / v.abs() };
@@ -128,7 +145,14 @@ pub fn dda_f64(w: &World, ox: i32, oy: i32, oz: i32, dxf: f64, dyf: f64, dzf: f6
     for steps in 0..max_steps {
         reads += 1;
         if w.get_i(x, y, z) {
-            return Hit { hit: true, x, y, z, steps, reads };
+            return Hit {
+                hit: true,
+                x,
+                y,
+                z,
+                steps,
+                reads,
+            };
         }
         if tx <= ty && tx <= tz {
             x += sx;
@@ -141,10 +165,24 @@ pub fn dda_f64(w: &World, ox: i32, oy: i32, oz: i32, dxf: f64, dyf: f64, dzf: f6
             tz += dz;
         }
         if !w.inside(x, y, z) {
-            return Hit { hit: false, x, y, z, steps, reads };
+            return Hit {
+                hit: false,
+                x,
+                y,
+                z,
+                steps,
+                reads,
+            };
         }
     }
-    Hit { hit: false, x, y, z, steps: max_steps, reads }
+    Hit {
+        hit: false,
+        x,
+        y,
+        z,
+        steps: max_steps,
+        reads,
+    }
 }
 
 /// DDA с пропуском пустого участка колонки.

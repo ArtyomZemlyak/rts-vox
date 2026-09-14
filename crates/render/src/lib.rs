@@ -17,11 +17,18 @@
 
 pub mod dust;
 pub mod edge;
+pub mod footing;
+pub mod gait;
+pub mod gas;
 pub mod geom;
 pub mod look;
-pub mod occlusion;
 pub mod model;
+pub mod occlusion;
+pub mod presentation;
+pub mod realtime;
+pub mod recording;
 pub mod stream;
+pub mod terrain_scene;
 pub mod tex;
 
 /// Поворот вокруг вертикали, при котором нос тела — его **+X** — смотрит
@@ -255,7 +262,12 @@ impl Frustum {
         let mk = |v: [f32; 4]| {
             let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
             let k = if n == 0.0 { 1.0 } else { 1.0 / n };
-            Plane { a: v[0] * k, b: v[1] * k, c: v[2] * k, d: v[3] * k }
+            Plane {
+                a: v[0] * k,
+                b: v[1] * k,
+                c: v[2] * k,
+                d: v[3] * k,
+            }
         };
         let row_add = |i: usize, j: usize| {
             [
@@ -394,8 +406,14 @@ mod tests {
         let dir = (c.target - c.eye()).norm();
         let just_in = c.eye() + dir * (c.near + 0.5);
         let just_out = c.eye() + dir * (c.near - 0.5);
-        assert!(f.planes[4].distance(just_in) > 0.0, "точка за ближней снаружи");
-        assert!(f.planes[4].distance(just_out) < 0.0, "точка перед ближней внутри");
+        assert!(
+            f.planes[4].distance(just_in) > 0.0,
+            "точка за ближней снаружи"
+        );
+        assert!(
+            f.planes[4].distance(just_out) < 0.0,
+            "точка перед ближней внутри"
+        );
     }
 
     /// **Плоскости нормированы**: расстояние до точки — настоящее
@@ -414,7 +432,12 @@ mod tests {
     /// повернуться.
     #[test]
     fn turning_around_flips_what_is_visible() {
-        let g = ChunkGrid { nx: 16, ny: 4, nz: 16, cs: 62 };
+        let g = ChunkGrid {
+            nx: 16,
+            ny: 4,
+            nz: 16,
+            cs: 62,
+        };
         let mut c = cam();
         c.target = V3::new(496.0, 0.0, 496.0);
         let mut a = Vec::new();
@@ -422,24 +445,38 @@ mod tests {
         c.yaw += std::f32::consts::PI;
         let mut b = Vec::new();
         visible_chunks(&g, &c.frustum(), &mut b);
-        assert!(!a.is_empty() && !b.is_empty(), "не видно ничего ни там, ни там");
+        assert!(
+            !a.is_empty() && !b.is_empty(),
+            "не видно ничего ни там, ни там"
+        );
         assert_ne!(a, b, "поворот на сто восемьдесят ничего не изменил");
         // Обзор у RTS-камеры узкий: весь мир целиком в него не влезает.
-        assert!(a.len() < g.len(), "видно вообще всё — отсечение не работает");
+        assert!(
+            a.len() < g.len(),
+            "видно вообще всё — отсечение не работает"
+        );
     }
 
     /// **Дальняя плоскость режет.** Уменьшив дальность, обязаны увидеть
     /// не больше прежнего.
     #[test]
     fn the_far_plane_cuts() {
-        let g = ChunkGrid { nx: 16, ny: 4, nz: 16, cs: 62 };
+        let g = ChunkGrid {
+            nx: 16,
+            ny: 4,
+            nz: 16,
+            cs: 62,
+        };
         let mut c = cam();
         let mut far = Vec::new();
         visible_chunks(&g, &c.frustum(), &mut far);
         c.far = 400.0;
         let mut near = Vec::new();
         visible_chunks(&g, &c.frustum(), &mut near);
-        assert!(near.len() < far.len(), "дальняя плоскость ничего не отсекла");
+        assert!(
+            near.len() < far.len(),
+            "дальняя плоскость ничего не отсекла"
+        );
         for i in near.iter() {
             assert!(far.contains(i), "чанк {i} виден вблизи и не виден вдали");
         }
@@ -453,7 +490,12 @@ mod tests {
     /// консервативен, лишние чанки он пропускает нарочно.
     #[test]
     fn no_visible_chunk_is_missed() {
-        let g = ChunkGrid { nx: 12, ny: 4, nz: 12, cs: 62 };
+        let g = ChunkGrid {
+            nx: 12,
+            ny: 4,
+            nz: 12,
+            cs: 62,
+        };
         let mut seen = 0;
         let mut vis = Vec::new();
         // Детерминированный перебор камер вместо случайных: воспроизвести
@@ -560,7 +602,12 @@ mod tests {
     /// Индекс и координаты — обратные друг другу.
     #[test]
     fn index_and_coords_agree() {
-        let g = ChunkGrid { nx: 5, ny: 3, nz: 7, cs: 62 };
+        let g = ChunkGrid {
+            nx: 5,
+            ny: 3,
+            nz: 7,
+            cs: 62,
+        };
         for i in 0..g.len() {
             let (cx, cy, cz) = g.coords(i);
             assert_eq!(g.index(cx, cy, cz), i);

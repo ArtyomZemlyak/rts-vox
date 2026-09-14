@@ -7,12 +7,13 @@
 //! в точках опоры дают тангаж, крен и раскачку, а не поворот
 //! по одной нормали.
 //!
-//! **Высоту фаза не двигает.** Ею заведует ход и падение (ADR-135,
-//! ADR-174), и переносить их сюда значило бы переписывать навигацию
-//! ради наклона. Физике высота подаётся как есть, и она считает
-//! **только вращение** — то, чего в симуляции не было вовсе.
+//! Навигационный уровень остаётся дискретным. У подвижной машины
+//! фаза интегрирует смещение корпуса над ним и вертикальную скорость
+//! (ADR-252). При переходе уступа сохраняется мировая высота.
+//! Опора и свободный полёт используют один шаг; только движущаяся
+//! платформа владеет отдельным перемещением (ADR-253).
 //!
-//! Всё состояние фазы — нормаль корпуса и угловая скорость —
+//! Всё состояние фазы — высота, скорость, нормаль и вращение —
 //! переживает тик, поэтому входит в хеш (ADR-116).
 
 use fx::angle;
@@ -102,7 +103,11 @@ pub fn sway_of(accel: Fx, vel: Fx, yaw_step: i32, head: i32) -> V3 {
     let (hc, hs) = heading_of(head);
     let w = yaw_rate(yaw_step);
     let lat = w.mul(vel);
-    V3::new(accel.mul(hc).add(lat.mul(hs)), Fx::ZERO, accel.mul(hs).sub(lat.mul(hc)))
+    V3::new(
+        accel.mul(hc).add(lat.mul(hs)),
+        Fx::ZERO,
+        accel.mul(hs).sub(lat.mul(hc)),
+    )
 }
 
 /// Шаг подвески одной машины.
@@ -137,7 +142,13 @@ pub fn step_hull(
         .iter()
         .fold(Fx::ZERO, |a, f| a.add(*f))
         .mul(Fx::from_ratio(1, floors.len() as i32));
-    let mut h = Hull { y: mean.add(r.clearance), vy: Fx::ZERO, up: *up, w: *w, load: *load };
+    let mut h = Hull {
+        y: mean.add(r.clearance),
+        vy: Fx::ZERO,
+        up: *up,
+        w: *w,
+        load: *load,
+    };
     phys::step(&mut h, supports, floors, heading_of(head), sway, r, dt);
     *up = h.up;
     *w = h.w;
@@ -147,6 +158,28 @@ pub fn step_hull(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn airborne_history_changes_the_hash_before_the_landing() {
+        let tuning = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+        let mut w = crate::World::new(2, 1, tuning);
+        let i = w.units.spawn(10, 10, 0, 30, 300) as usize;
+        w.units.refresh_live();
+        w.units.fall_from[i] = 100;
+        let before = w.phase_hash();
+        w.units.fall_from[i] = 101;
+        assert_ne!(
+            before,
+            w.phase_hash(),
+            "landing energy history was invisible to the hash"
+        );
+        let before = w.phase_hash();
+        w.units.fall_v[i] = Fx::ONE;
+        assert_ne!(before, w.phase_hash());
+        let before = w.phase_hash();
+        w.units.fall_f[i] = Fx::from_ratio(1, 2);
+        assert_ne!(before, w.phase_hash());
+    }
 
     fn chassis() -> Chassis {
         Chassis {
@@ -176,10 +209,34 @@ mod tests {
     /// было видно. На жёсткой (40) торможение даёт десятую долю градуса
     /// — знак верен, величины нет (ADR-225).
     fn soft_chassis() -> Chassis {
-        Chassis { stiffness: 2, damping: 1, ..chassis() }
+        Chassis {
+            stiffness: 2,
+            damping: 1,
+            ..chassis()
+        }
     }
 
     const DT: Fx = Fx::from_ratio(1, 30);
+
+    #[test]
+    fn tiny_spring_residuals_do_not_drop_legacy_rays_into_the_ground() {
+        let mut units = crate::Units::new();
+        let i = units.spawn(0, 0, 0, 30, 100) as usize;
+        units.y[i] = 80;
+        for residual in [
+            Fx(-1),
+            Fx(1),
+            Fx::from_ratio(-49, 100),
+            Fx::from_ratio(49, 100),
+        ] {
+            units.heave[i] = residual;
+            assert_eq!(units.body_cell_y(i), 80);
+        }
+        units.heave[i] = Fx::from_ratio(-3, 4);
+        assert_eq!(units.body_cell_y(i), 79);
+        units.heave[i] = Fx::from_ratio(3, 4);
+        assert_eq!(units.body_cell_y(i), 81);
+    }
 
     /// **На ровном полу корпус стоит ровно.**
     #[test]
@@ -191,8 +248,16 @@ mod tests {
         for _ in 0..200 {
             step_hull(&mut up, &mut w, &mut load, &floors, 0, V3::ZERO, &r, &s, DT);
         }
-        assert!(up.x.abs() < Fx::from_ratio(1, 200), "завалился по тангажу: {:?}", up.x);
-        assert!(up.z.abs() < Fx::from_ratio(1, 200), "завалился по крену: {:?}", up.z);
+        assert!(
+            up.x.abs() < Fx::from_ratio(1, 200),
+            "завалился по тангажу: {:?}",
+            up.x
+        );
+        assert!(
+            up.z.abs() < Fx::from_ratio(1, 200),
+            "завалился по крену: {:?}",
+            up.z
+        );
         assert!(up.y > Fx::from_ratio(9, 10));
     }
 
@@ -214,7 +279,10 @@ mod tests {
             step_hull(&mut up, &mut w, &mut load, &floors, 0, V3::ZERO, &r, &s, DT);
         }
         assert!(up.x < Fx::from_ratio(-1, 20), "нос не задрался: {:?}", up.x);
-        assert!(up.z.abs() < Fx::from_ratio(1, 50), "появился крен на ровном борте");
+        assert!(
+            up.z.abs() < Fx::from_ratio(1, 50),
+            "появился крен на ровном борте"
+        );
     }
 
     /// **Развернули машину — тот же уступ даёт крен, а не тангаж.**
@@ -231,9 +299,23 @@ mod tests {
         // Четверть оборота: нос смотрит по +Z.
         let quarter = angle::FULL / 4;
         for _ in 0..400 {
-            step_hull(&mut up, &mut w, &mut load, &floors, quarter, V3::ZERO, &r, &s, DT);
+            step_hull(
+                &mut up,
+                &mut w,
+                &mut load,
+                &floors,
+                quarter,
+                V3::ZERO,
+                &r,
+                &s,
+                DT,
+            );
         }
-        assert!(up.z.abs() > Fx::from_ratio(1, 20), "уступ не дал крена: {:?}", up.z);
+        assert!(
+            up.z.abs() > Fx::from_ratio(1, 20),
+            "уступ не дал крена: {:?}",
+            up.z
+        );
     }
 
     /// **Торможение роняет машину носом — и через фазу хода тоже.**
@@ -252,12 +334,20 @@ mod tests {
         let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
         let brake = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(-6));
         for _ in 0..300 {
-            step_hull(&mut up, &mut w, &mut load, &floors, quarter, brake, &r, &s, DT);
+            step_hull(
+                &mut up, &mut w, &mut load, &floors, quarter, brake, &r, &s, DT,
+            );
         }
         // Верх уходит к носу, то есть к +Z; по X клевка нет.
         assert!(up.z > Fx::from_ratio(1, 40), "не клюёт по курсу: {up:?}");
-        assert!(up.x.abs() < Fx::from_ratio(1, 100), "клевок ушёл не в ту ось: {up:?}");
-        assert!(load == Fx::ONE, "на ровном полу все опоры на земле, а доля {load:?}");
+        assert!(
+            up.x.abs() < Fx::from_ratio(1, 100),
+            "клевок ушёл не в ту ось: {up:?}"
+        );
+        assert!(
+            load == Fx::ONE,
+            "на ровном полу все опоры на земле, а доля {load:?}"
+        );
     }
 
     /// **Поворот к `+Z` на ходу кренит корпус к `−Z` — наружу.**
@@ -284,8 +374,14 @@ mod tests {
         };
         let moving = run(Fx::from_int(10));
         let still = run(Fx::ZERO);
-        assert!(moving.z < Fx::from_ratio(-1, 40), "крен не наружу: {moving:?}");
-        assert!(still.z.abs() < Fx::from_ratio(1, 200), "стоя кренится: {still:?}");
+        assert!(
+            moving.z < Fx::from_ratio(-1, 40),
+            "крен не наружу: {moving:?}"
+        );
+        assert!(
+            still.z.abs() < Fx::from_ratio(1, 200),
+            "стоя кренится: {still:?}"
+        );
     }
 
     /// **Один и тот же ввод даёт то же состояние до бита.**
@@ -295,9 +391,24 @@ mod tests {
         let (r, s) = (ride_of(&c), supports_of(&c));
         let run = || {
             let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
-            let floors = [Fx::from_ratio(1, 3), Fx::ZERO, Fx::from_ratio(1, 5), Fx::ZERO];
+            let floors = [
+                Fx::from_ratio(1, 3),
+                Fx::ZERO,
+                Fx::from_ratio(1, 5),
+                Fx::ZERO,
+            ];
             for _ in 0..300 {
-                step_hull(&mut up, &mut w, &mut load, &floors, 9000, V3::ZERO, &r, &s, DT);
+                step_hull(
+                    &mut up,
+                    &mut w,
+                    &mut load,
+                    &floors,
+                    9000,
+                    V3::ZERO,
+                    &r,
+                    &s,
+                    DT,
+                );
             }
             (up, w, load)
         };

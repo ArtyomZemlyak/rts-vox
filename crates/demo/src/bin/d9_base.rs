@@ -41,7 +41,14 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, side: 192, ticks: 4000, per_side: 24, diggers: 6, dump_hash: false }
+        Args {
+            seed: 42,
+            side: 192,
+            ticks: 4000,
+            per_side: 24,
+            diggers: 6,
+            dump_hash: false,
+        }
     }
 }
 
@@ -80,7 +87,7 @@ fn grouped(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(' ');
         }
         out.push(c);
@@ -154,9 +161,17 @@ fn main() -> ExitCode {
 
     println!("\n{:<34} {:>16}", "звено петли", "единиц");
     println!("{:<34} {:>16}", "выкопано из земли", grouped(e.mined));
-    println!("{:<34} {:>16}", "реклеймлено из обломков", grouped(e.reclaimed));
+    println!(
+        "{:<34} {:>16}",
+        "реклеймлено из обломков",
+        grouped(e.reclaimed)
+    );
     println!("{:<34} {:>16}", "довезено на склады", grouped(e.delivered));
-    println!("{:<34} {:>16}", "потрачено на стройку и сборку", grouped(e.spent));
+    println!(
+        "{:<34} {:>16}",
+        "потрачено на стройку и сборку",
+        grouped(e.spent)
+    );
     println!("{:<34} {:>16}", "построек достроено", e.built);
     println!("{:<34} {:>16}", "машин выпущено", e.produced);
     println!("{:<34} {:>16}", "обломков на карте", e.wrecks.len());
@@ -177,8 +192,16 @@ fn main() -> ExitCode {
     println!("{:<34} {:>16} {:>16}", "живых", m.alive[0], m.alive[1]);
 
     println!("\n{:<34} {:>16}", "баланс материи", "единиц");
-    println!("{:<34} {:>16}", "вошло в экономику", grouped(e.ledger.initial()));
-    println!("{:<34} {:>16}", "в живых контейнерах", grouped(e.ledger.in_containers()));
+    println!(
+        "{:<34} {:>16}",
+        "вошло в экономику",
+        grouped(e.ledger.initial())
+    );
+    println!(
+        "{:<34} {:>16}",
+        "в живых контейнерах",
+        grouped(e.ledger.in_containers())
+    );
     for s in SINKS {
         let n = e.sunk(s);
         if n > 0 {
@@ -187,8 +210,16 @@ fn main() -> ExitCode {
     }
 
     println!("\n{:<34} {:>16}", "когда звено заработало", "тик");
-    println!("{:<34} {:>16}", "первая разгрузка на складе", show(hauled_at));
-    println!("{:<34} {:>16}", "первая достроенная постройка", show(built_at));
+    println!(
+        "{:<34} {:>16}",
+        "первая разгрузка на складе",
+        show(hauled_at)
+    );
+    println!(
+        "{:<34} {:>16}",
+        "первая достроенная постройка",
+        show(built_at)
+    );
     println!("{:<34} {:>16}", "первая выпущенная машина", show(made_at));
 
     let what = match out {
@@ -224,7 +255,10 @@ fn main() -> ExitCode {
         good = false;
     };
     if worst != 0 || !e.balanced() {
-        fail(format!("материя не сошлась: расхождение {}", e.ledger.imbalance()));
+        fail(format!(
+            "материя не сошлась: расхождение {}",
+            e.ledger.imbalance()
+        ));
     }
     if e.mined == 0 {
         fail("копка не дала ничего: первое звено петли не работает".into());
@@ -242,7 +276,9 @@ fn main() -> ExitCode {
         fail("переработка не списала ничего — выход равен единице, стока нет".into());
     }
     if per_tick > BUDGET_MS {
-        fail(format!("тик {per_tick:.3} мс при бюджете {BUDGET_MS:.0} мс"));
+        fail(format!(
+            "тик {per_tick:.3} мс при бюджете {BUDGET_MS:.0} мс"
+        ));
     }
     if good {
         println!("порог выдержан");

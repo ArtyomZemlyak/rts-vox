@@ -204,7 +204,11 @@ fn main() {
             println!(
                 "{:<10} {:>10} {:>12} {:>12} {:>12.3} {:>9.0}%",
                 dirty.len(),
-                if clustered { "забой" } else { "россыпь" },
+                if clustered {
+                    "забой"
+                } else {
+                    "россыпь"
+                },
                 solves,
                 reused,
                 inc * 1e3,

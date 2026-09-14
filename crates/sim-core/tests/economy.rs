@@ -84,19 +84,39 @@ fn digging_fills_the_tank() {
     assert_ne!(c, NO_CONTAINER, "у краулера нет контейнера");
     // Тело уже сделано из материи: машина, поставленная на карту,
     // из чего-то состоит. Везёт она то, что сверх тела.
-    let body = w.econ.as_ref().expect("учёт").kinds.get(CRAWLER).expect("краулер").cost;
+    let body = w
+        .econ
+        .as_ref()
+        .expect("учёт")
+        .kinds
+        .get(CRAWLER)
+        .expect("краулер")
+        .cost;
     assert_eq!(w.econ.as_ref().expect("учёт").ledger.held(c), body);
     assert_eq!(w.cargo(d as usize), 0, "новый краулер уже с грузом");
-    w.push_order(Order::Dig { unit: d, x: 30, y: TOP as i32 - 1, z: 30 });
+    w.push_order(Order::Dig {
+        unit: d,
+        x: 30,
+        y: TOP as i32 - 1,
+        z: 30,
+    });
     for t in 0..8 {
         w.tick();
         let e = w.econ.as_ref().expect("учёт");
-        println!("тик {t}: выкопано {} везёт {}", e.mined, w.cargo(d as usize));
+        println!(
+            "тик {t}: выкопано {} везёт {}",
+            e.mined,
+            w.cargo(d as usize)
+        );
     }
     let e = w.econ.as_ref().expect("учёт");
     assert!(e.mined > 0, "копатель не набрал ничего");
     assert!(w.cargo(d as usize) > 0, "бак пуст");
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **Полный бак едет на склад, и у стороны растёт запас.**
@@ -116,7 +136,12 @@ fn a_full_tank_is_hauled_to_a_depot_and_the_side_gets_richer() {
     assert_eq!(w.units.site[dep as usize], 0, "склад обязан быть достроен");
     // Забой в стороне от копателя: шар снимает породу у него из-под
     // ног, если целиться себе под гусеницы.
-    w.push_order(Order::Dig { unit: d, x: 100, y: TOP as i32 - 1, z: 40 });
+    w.push_order(Order::Dig {
+        unit: d,
+        x: 100,
+        y: TOP as i32 - 1,
+        z: 40,
+    });
     let before = w.econ.as_ref().expect("учёт").stock(0);
     let start = (w.units.x[d as usize], w.units.z[d as usize]);
     let mut hauled = false;
@@ -145,7 +170,11 @@ fn a_full_tank_is_hauled_to_a_depot_and_the_side_gets_richer() {
         e.sunk(Sink::RefiningLoss) > 0,
         "переработка не списала ничего — выход равен единице, стока нет"
     );
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **Полный склад не уничтожает груз.**
@@ -172,7 +201,12 @@ fn a_full_stock_does_not_eat_the_cargo() {
     }
     let lost_before = w.econ.as_ref().expect("учёт").sunk(Sink::RefiningLoss);
     // Забой рядом: копатель наберёт бак и приедет к складу.
-    w.push_order(Order::Dig { unit: d, x: 60, y: TOP as i32 - 1, z: 30 });
+    w.push_order(Order::Dig {
+        unit: d,
+        x: 60,
+        y: TOP as i32 - 1,
+        z: 30,
+    });
     for _ in 0..600 {
         w.tick();
     }
@@ -186,7 +220,11 @@ fn a_full_stock_does_not_eat_the_cargo() {
         lost_before,
         "полный склад списал груз в сток переработки"
     );
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **Постройка растёт из запаса, воксель за вокселем.**
@@ -203,7 +241,12 @@ fn a_building_grows_out_of_the_stock_voxel_by_voxel() {
         e.ledger.reveal(e.ground, 2_000_000);
         e.ledger.transfer(e.ground, stock, 2_000_000);
     }
-    w.push_order(Order::Build { unit: b, kind: FACTORY, x: 44, z: 40 });
+    w.push_order(Order::Build {
+        unit: b,
+        kind: FACTORY,
+        x: 44,
+        z: 40,
+    });
     w.tick();
     let site = w.units.job[b as usize];
     assert_ne!(site, sim_core::NO_TARGET, "недострой не появился");
@@ -235,13 +278,23 @@ fn a_building_grows_out_of_the_stock_voxel_by_voxel() {
         }
     }
     assert_eq!(w.units.site[s], 0, "завод так и не достроился");
-    assert!(grew > 4, "том рос не постепенно, а рывком: приростов {grew}");
+    assert!(
+        grew > 4,
+        "том рос не постепенно, а рывком: приростов {grew}"
+    );
     let e = w.econ.as_ref().expect("учёт");
     assert_eq!(e.built, 1);
     assert!(e.spent > 0, "на стройку ничего не потрачено");
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
     // Вложенное лежит **в теле постройки**: тело юнита — контейнер.
-    assert!(e.ledger.held(w.units.store[s]) > 0, "в постройке нет материи");
+    assert!(
+        e.ledger.held(w.units.store[s]) > 0,
+        "в постройке нет материи"
+    );
 }
 
 /// **Группа строит одну постройку, а не по одной на каждого.**
@@ -269,7 +322,12 @@ fn a_group_builds_one_thing_not_one_each() {
     }
     let before = w.units.live().len();
     for &id in &crew {
-        w.push_order(Order::Build { unit: id, kind: DEPOT, x: 60, z: 40 });
+        w.push_order(Order::Build {
+            unit: id,
+            kind: DEPOT,
+            x: 60,
+            z: 40,
+        });
     }
     w.tick();
     assert_eq!(
@@ -315,10 +373,17 @@ fn a_factory_turns_matter_and_time_into_a_machine() {
         e.ledger.transfer(e.ground, stock, 4_000_000);
     }
     let before = w.units.live().len();
-    w.push_order(Order::Produce { unit: f, kind: TANK });
+    w.push_order(Order::Produce {
+        unit: f,
+        kind: TANK,
+    });
     w.tick();
     assert_eq!(
-        w.econ.as_ref().expect("учёт").line(f).map(|l| l.queue.len()),
+        w.econ
+            .as_ref()
+            .expect("учёт")
+            .line(f)
+            .map(|l| l.queue.len()),
         Some(1),
         "заказ не встал в очередь"
     );
@@ -340,7 +405,11 @@ fn a_factory_turns_matter_and_time_into_a_machine() {
     let e = w.econ.as_ref().expect("учёт");
     assert_eq!(e.produced, 1, "завод не выпустил машину");
     assert!(w.units.live().len() > before, "машины нет среди живых");
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
     // Машина вышла **под управление**: у неё свой тип, своё оружие
     // и свой контейнер-тело.
     let made = *w.units.live().iter().find(|&&i| i != f).expect("машина");
@@ -363,7 +432,10 @@ fn an_empty_stock_stops_production() {
     let f = w.spawn_kind(40, 40, 0, FACTORY).expect("завод");
     w.units.refresh_live();
     let before = w.units.live().len();
-    w.push_order(Order::Produce { unit: f, kind: TANK });
+    w.push_order(Order::Produce {
+        unit: f,
+        kind: TANK,
+    });
     for _ in 0..600 {
         w.tick();
     }
@@ -386,7 +458,10 @@ fn cancelling_an_order_returns_the_matter() {
         e.ledger.transfer(e.ground, stock, 4_000_000);
     }
     let full = w.econ.as_ref().expect("учёт").stock(0);
-    w.push_order(Order::Produce { unit: f, kind: TANK });
+    w.push_order(Order::Produce {
+        unit: f,
+        kind: TANK,
+    });
     for _ in 0..40 {
         w.tick();
     }
@@ -397,7 +472,11 @@ fn cancelling_an_order_returns_the_matter() {
     let e = w.econ.as_ref().expect("учёт");
     assert_eq!(e.stock(0), full, "уплаченное не вернулось в запас");
     assert!(e.line(f).is_none(), "пустая очередь осталась висеть");
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **Склад поднимает потолок, а его гибель — роняет** (ADR-043).
@@ -433,7 +512,11 @@ fn a_depot_raises_the_cap_and_its_death_lowers_it() {
         e.sunk(sim_core::matter::Sink::OverCap) > 0,
         "излишек над упавшим потолком пропал мимо стока"
     );
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **Подбитая машина оставляет обломок, и его можно реклеймить.**
@@ -466,7 +549,12 @@ fn a_dead_machine_leaves_a_wreck_that_is_reclaimed_by_digging() {
     assert!(in_wreck > 0);
     // Копать в точку обломка — и он перельётся в бак.
     let (wx, wy, wz) = (e.wrecks[0].x, e.wrecks[0].y, e.wrecks[0].z);
-    w.push_order(Order::Dig { unit: taker, x: wx, y: wy, z: wz });
+    w.push_order(Order::Dig {
+        unit: taker,
+        x: wx,
+        y: wy,
+        z: wz,
+    });
     for _ in 0..40 {
         w.tick();
         if w.econ.as_ref().expect("учёт").reclaimed > 0 {
@@ -475,7 +563,11 @@ fn a_dead_machine_leaves_a_wreck_that_is_reclaimed_by_digging() {
     }
     let e = w.econ.as_ref().expect("учёт");
     assert!(e.reclaimed > 0, "обломок не реклеймится копкой");
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }
 
 /// **У стороны не осталось живых — она проиграла.**
@@ -489,12 +581,20 @@ fn a_side_with_nothing_alive_has_lost() {
     let theirs = w.spawn_kind(100, 100, 1, DEPOT).expect("склад");
     w.units.refresh_live();
     w.tick();
-    assert_eq!(w.outcome(), Outcome::Fighting, "партия кончилась, не начавшись");
+    assert_eq!(
+        w.outcome(),
+        Outcome::Fighting,
+        "партия кончилась, не начавшись"
+    );
     // Склад — не машина, но он живой: сторона ещё в игре.
     assert_eq!(w.living(1), 1);
     w.units.voxels[theirs as usize] = 0;
     w.tick();
-    assert_eq!(w.outcome(), Outcome::Won(0), "потерявшая всё сторона не проиграла");
+    assert_eq!(
+        w.outcome(),
+        Outcome::Won(0),
+        "потерявшая всё сторона не проиграла"
+    );
     assert_eq!(w.outcome().winner(), Some(0));
     assert!(w.decided_at.is_some(), "тик исхода не записан");
     // Ничья — законный исход, а не отсутствие исхода.
@@ -514,7 +614,12 @@ fn a_full_tank_stops_the_digging() {
     let d = w.spawn_kind(30, 30, 0, CRAWLER).expect("краулер");
     w.units.refresh_live();
     // Склада нет: разгрузиться некуда, и бак останется полным.
-    w.push_order(Order::Dig { unit: d, x: 30, y: TOP as i32 - 1, z: 30 });
+    w.push_order(Order::Dig {
+        unit: d,
+        x: 30,
+        y: TOP as i32 - 1,
+        z: 30,
+    });
     let mut full_at = None;
     for t in 0..200u32 {
         w.tick();
@@ -530,5 +635,9 @@ fn a_full_tank_stops_the_digging() {
         "выкопано {} при баке {tank} — материя снята и не принята",
         e.mined
     );
-    assert!(e.balanced(), "материя не сходится: {}", e.ledger.imbalance());
+    assert!(
+        e.balanced(),
+        "материя не сходится: {}",
+        e.ledger.imbalance()
+    );
 }

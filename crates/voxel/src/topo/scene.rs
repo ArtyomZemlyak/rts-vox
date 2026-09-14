@@ -86,7 +86,12 @@ fn carve_tunnel(c: &mut Chunk, r: &mut Rng, seed: u64) {
             for dz in -1i32..=1 {
                 for dy in -1i32..=1 {
                     let (xx, yy, zz) = (x + dx, y + dy, z + dz);
-                    if xx < 0 || yy < 0 || zz < 0 || xx >= CS as i32 || yy >= CS as i32 || zz >= CS as i32
+                    if xx < 0
+                        || yy < 0
+                        || zz < 0
+                        || xx >= CS as i32
+                        || yy >= CS as i32
+                        || zz >= CS as i32
                     {
                         continue;
                     }

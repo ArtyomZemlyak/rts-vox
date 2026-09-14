@@ -21,9 +21,8 @@
 //! количество материи; реклейм — та же операция, что копка (ADR-017).
 
 use crate::shape::{
-    ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid,
-    link, link_pivot, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat,
-    slab,
+    ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid, link,
+    link_pivot, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat, slab,
 };
 use crate::topo::unit::{core_connectivity, CoreBufs, UnitVol};
 
@@ -217,7 +216,15 @@ pub struct Attach {
 impl Attach {
     /// Крепление без поворота к корпусу.
     pub const fn flat(at: (i16, i16, i16), pivot: (u8, u8, u8)) -> Attach {
-        Attach { parent: 0, pivot, at, roll: 0, yaw: 0, pitch: 0, turret: false }
+        Attach {
+            parent: 0,
+            pivot,
+            at,
+            roll: 0,
+            yaw: 0,
+            pitch: 0,
+            turret: false,
+        }
     }
 
     /// Крепление, повёрнутое **по направлению**: местная ось `X`
@@ -243,7 +250,15 @@ impl Attach {
         const K: i64 = 1 << 10;
         let flat = ((dx * dx + dz * dz) * K * K).isqrt();
         let pitch = fx::angle::diff(fx::angle::atan2(dy * K, flat), 0);
-        Attach { parent: 0, pivot, at, roll: 0, yaw, pitch, turret: false }
+        Attach {
+            parent: 0,
+            pivot,
+            at,
+            roll: 0,
+            yaw,
+            pitch,
+            turret: false,
+        }
     }
 }
 
@@ -319,9 +334,15 @@ impl UnitBody {
     /// на несуществующий сегмент, молча стояла бы столбом.
     pub fn push_leg(&mut self, leg: Leg) {
         let n = self.segments.len();
-        for s in [Some(leg.thigh), Some(leg.shin), leg.knee_ball, leg.ankle_ball, leg.foot]
-            .into_iter()
-            .flatten()
+        for s in [
+            Some(leg.thigh),
+            Some(leg.shin),
+            leg.knee_ball,
+            leg.ankle_ball,
+            leg.foot,
+        ]
+        .into_iter()
+        .flatten()
         {
             assert!((s as usize) < n, "нога ссылается на сегмент {s}, а их {n}");
         }
@@ -401,11 +422,7 @@ impl UnitBody {
     /// не имеют, и требовать его от них значило бы отказывать каждому.
     fn resample_shape(&self, mm: u16) -> Result<UnitBody, ResampleFail> {
         assert!(mm > 0, "воксель нулевого размера");
-        let (sx, sy, sz) = (
-            self.vol.nx as u32,
-            self.vol.ny as u32,
-            self.vol.nz as u32,
-        );
+        let (sx, sy, sz) = (self.vol.nx as u32, self.vol.ny as u32, self.vol.nz as u32);
         let src = self.mm as u32;
         // Габарит в миллиметрах делится на новое ребро, с округлением
         // вверх: обрезать машину на воксель хуже, чем дать ей лишний.
@@ -442,8 +459,7 @@ impl UnitBody {
                             None
                         }
                     };
-                    let (Some(ix), Some(iy), Some(iz)) =
-                        (pick(x, sx), pick(y, sy), pick(z, sz))
+                    let (Some(ix), Some(iy), Some(iz)) = (pick(x, sx), pick(y, sy), pick(z, sz))
                     else {
                         continue;
                     };
@@ -454,7 +470,12 @@ impl UnitBody {
                     out.set(x as usize, y as usize, z as usize, self.part_at(ix, iy, iz));
                     // Отделка едет вместе с ролью: трак остаётся резиной
                     // при любом ребре.
-                    out.set_finish(x as usize, y as usize, z as usize, self.finish_at(ix, iy, iz));
+                    out.set_finish(
+                        x as usize,
+                        y as usize,
+                        z as usize,
+                        self.finish_at(ix, iy, iz),
+                    );
                 }
             }
         }
@@ -498,7 +519,12 @@ impl UnitBody {
                 ((v as i32 * src as i32) / mm as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
             };
             let p = |v: (i16, i16, i16)| (k(v.0), k(v.1), k(v.2));
-            out.legs.push(Leg { hip: p(l.hip), knee: p(l.knee), ankle: p(l.ankle), ..*l });
+            out.legs.push(Leg {
+                hip: p(l.hip),
+                knee: p(l.knee),
+                ankle: p(l.ankle),
+                ..*l
+            });
         }
         // Наибольший куб ядра, который сядет. Убывающим перебором,
         // а не формулой: `seat_core` требует, чтобы куб был сплошным
@@ -641,6 +667,29 @@ impl UnitBody {
             attached: rep.attached,
             detached: rep.detached,
         }
+    }
+
+    /// Remaining cells of a subsystem; masks are cleared with occupancy.
+    pub fn subsystem_count(&self, part: Part) -> u32 {
+        let Some(k) = SUBSYSTEMS.iter().position(|&p| p == part) else {
+            return 0;
+        };
+        self.masks[k * self.mstride..(k + 1) * self.mstride]
+            .iter()
+            .map(|w| w.count_ones())
+            .sum()
+    }
+
+    /// Call after `status` for this body with the same scratch buffer.
+    pub fn connected_subsystem_count(&self, part: Part, core: &CoreBufs) -> u32 {
+        let Some(k) = SUBSYSTEMS.iter().position(|&p| p == part) else {
+            return 0;
+        };
+        self.masks[k * self.mstride..(k + 1) * self.mstride]
+            .iter()
+            .zip(core.reached_cols())
+            .map(|(a, b)| (a & b).count_ones())
+            .sum()
     }
 
     pub fn solid_count(&self) -> u32 {
@@ -922,7 +971,10 @@ pub fn tank() -> UnitBody {
     let glacis = slab(8, 3, 22, BODY_MM, a, FINISH_PLATE);
     mount(
         &mut u,
-        Attach { pitch: -TURN / 12, ..Attach::flat((48, 17, 15), (0, 3, 11)) },
+        Attach {
+            pitch: -TURN / 12,
+            ..Attach::flat((48, 17, 15), (0, 3, 11))
+        },
         glacis,
         12,
         0,
@@ -934,7 +986,10 @@ pub fn tank() -> UnitBody {
     let lower = slab(13, 2, 16, BODY_MM, a, FINISH_PLATE);
     mount(
         &mut u,
-        Attach { pitch: TURN / 8, ..Attach::flat((49, 2, 15), (0, 0, 8)) },
+        Attach {
+            pitch: TURN / 8,
+            ..Attach::flat((49, 2, 15), (0, 0, 8))
+        },
         lower,
         0,
         10,
@@ -970,7 +1025,14 @@ pub fn tank() -> UnitBody {
             let x0 = 8 + k * 12;
             fill_f(&mut u, (x0, x0 + 8), (15, 16), (z, z + 1), a, FINISH_STEEL);
             fill_f(&mut u, (x0, x0 + 1), (14, 15), (z, z + 1), a, FINISH_STEEL);
-            fill_f(&mut u, (x0 + 7, x0 + 8), (14, 15), (z, z + 1), a, FINISH_STEEL);
+            fill_f(
+                &mut u,
+                (x0 + 7, x0 + 8),
+                (14, 15),
+                (z, z + 1),
+                a,
+                FINISH_STEEL,
+            );
         }
     }
 
@@ -1061,7 +1123,17 @@ pub fn tank() -> UnitBody {
     fill_f(&mut u, (42, 43), (28, 30), (15, 17), a, FINISH_OPTIC);
     // Антенна — с кормы ниши назад и вверх; основание в корне.
     fill_f(&mut u, (14, 16), (24, 26), (17, 19), a, FINISH_STEEL);
-    rod(&mut u, (14, 25, 18), (7, 30, 18), 2, 2, -1, a, FINISH_STEEL, true);
+    rod(
+        &mut u,
+        (14, 25, 18),
+        (7, 30, 18),
+        2,
+        2,
+        -1,
+        a,
+        FINISH_STEEL,
+        true,
+    );
 
     let mut u = seat(u, "танк");
     // Башня — всё, что выше погона. Одна величина, записанная
@@ -1116,13 +1188,21 @@ pub fn strider() -> UnitBody {
             let mut thigh = UnitBody::new_scaled(13, 8, 8, 1, BODY_MM);
             fill(&mut thigh, (0, 13), (0, 8), (0, 8), Part::Armour);
             u.push_segment(
-                Attach::aimed((hx as i16, 27, hz as i16), (0, 4, 4), (kx - hx, 15 - 27, kz - hz)),
+                Attach::aimed(
+                    (hx as i16, 27, hz as i16),
+                    (0, 4, 4),
+                    (kx - hx, 15 - 27, kz - hz),
+                ),
                 thigh,
             );
             let mut shin = UnitBody::new_scaled(11, 6, 6, 1, BODY_MM);
             fill(&mut shin, (0, 11), (0, 6), (0, 6), Part::Armour);
             u.push_segment(
-                Attach::aimed((kx as i16, 15, kz as i16), (0, 3, 3), (ax - kx, 4 - 15, az - kz)),
+                Attach::aimed(
+                    (kx as i16, 15, kz as i16),
+                    (0, 3, 3),
+                    (ax - kx, 4 - 15, az - kz),
+                ),
                 shin,
             );
             let mut knee = UnitBody::new_scaled(9, 9, 9, 1, BODY_MM);
@@ -1177,7 +1257,13 @@ pub fn strider() -> UnitBody {
     ball(&mut u, (20, 38, 20), 6, Part::Armour);
     for y in 40usize..48 {
         let k = y.saturating_sub(46);
-        fill(&mut u, (12 + k, 28 - k), (y, y + 1), (12 + k, 28 - k), Part::Armour);
+        fill(
+            &mut u,
+            (12 + k, 28 - k),
+            (y, y + 1),
+            (12 + k, 28 - k),
+            Part::Armour,
+        );
     }
     // Два ствола в общей маске.
     fill(&mut u, (24, 28), (41, 47), (13, 27), Part::Weapon);
@@ -1239,9 +1325,19 @@ mod tests {
         let t = tank();
         // 6×3×3 м при вокселе 0.1 м — том 60×30×30 (ADR-094, ADR-219).
         assert_eq!((t.vol.nx, t.vol.ny, t.vol.nz), (60, 30, 30));
-        assert_eq!(t.extent_mm(), (6_000, 3_000, 3_000), "танк перестал быть шестиметровым");
+        assert_eq!(
+            t.extent_mm(),
+            (6_000, 3_000, 3_000),
+            "танк перестал быть шестиметровым"
+        );
         let seen = roles(&t);
-        for p in [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor] {
+        for p in [
+            Part::Armour,
+            Part::Core,
+            Part::Engine,
+            Part::Weapon,
+            Part::Sensor,
+        ] {
             assert!(seen[p as usize] > 0, "{} отсутствует", p.name());
         }
         assert!(t.solid_count() > 10_000, "танк подозрительно пуст");
@@ -1254,9 +1350,19 @@ mod tests {
         let s = strider();
         // 4×5×4 м при вокселе 0.1 м — том 40×50×40.
         assert_eq!((s.vol.nx, s.vol.ny, s.vol.nz), (40, 50, 40));
-        assert_eq!(s.extent_mm(), (4_000, 5_000, 4_000), "шагоход сменил габарит");
+        assert_eq!(
+            s.extent_mm(),
+            (4_000, 5_000, 4_000),
+            "шагоход сменил габарит"
+        );
         let seen = roles(&s);
-        for p in [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor] {
+        for p in [
+            Part::Armour,
+            Part::Core,
+            Part::Engine,
+            Part::Weapon,
+            Part::Sensor,
+        ] {
             assert!(seen[p as usize] > 0, "{} отсутствует", p.name());
         }
         assert!(s.solid_count() > 4_000, "шагоход подозрительно пуст");
@@ -1296,7 +1402,10 @@ mod tests {
     fn the_turret_line_cuts_something_off() {
         for b in [tank(), strider()] {
             let ty = b.turret_y as usize;
-            assert!(ty > 0 && ty < b.vol.ny as usize, "линия башни {ty} вне тома");
+            assert!(
+                ty > 0 && ty < b.vol.ny as usize,
+                "линия башни {ty} вне тома"
+            );
             let mut above = 0u32;
             let mut below = 0u32;
             for z in 0..b.vol.nz as usize {

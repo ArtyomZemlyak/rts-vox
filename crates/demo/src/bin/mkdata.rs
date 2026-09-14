@@ -39,7 +39,12 @@ fn from_body(b: &UnitBody) -> VoxModel {
             }
         }
     }
-    VoxModel { nx: nx as u32, ny: ny as u32, nz: nz as u32, voxels }
+    VoxModel {
+        nx: nx as u32,
+        ny: ny as u32,
+        nz: nz as u32,
+        voxels,
+    }
 }
 
 /// Гриб-споровик: юнит мода. Ножка, шляпка, сенсор на макушке.
@@ -87,7 +92,12 @@ fn sporeling() -> VoxModel {
             }
         }
     }
-    VoxModel { nx: nx as u32, ny: ny as u32, nz: nz as u32, voxels }
+    VoxModel {
+        nx: nx as u32,
+        ny: ny as u32,
+        nz: nz as u32,
+        voxels,
+    }
 }
 
 fn put(path: &str, bytes: &[u8]) {

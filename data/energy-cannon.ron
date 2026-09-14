@@ -1,0 +1,28 @@
+// Fictional directed-energy projectile. CPU impulse is authoritative;
+// the blue discharge is presentation and does not model real plasma confinement.
+(
+    motion: Direct,
+    charge_ticks: 45,
+    half_cells: 20,
+    cell_units: 2,
+    energy: 2700,
+    air_cost: 100,
+    soil_resistance: 165,
+    concrete_resistance: 380,
+    steel_resistance: 10000,
+    unit_ablation_resistance: 180,
+    unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
+    wave_work_per_tick: 2048,
+    edits_per_tick: 8192,
+    fire_tick: 75,
+    shell_speed: 1200,
+    gravity: 98,
+    gas_cell_units: 5,
+    gas_source_radius: 27,
+    gas_temperature_k: 3400,
+    gas_fuel_milli: 0,
+    gas_pressure_milli: 3200,
+    reaction_milli: 0,
+    cooling_milli: 1250,
+    buoyancy_milli: 1000,
+)

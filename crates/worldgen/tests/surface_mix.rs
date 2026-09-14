@@ -12,7 +12,10 @@ use worldgen::{material, soil_depth, surface_height, Params};
 /// Карта показа: её и смотрит владелец. 192 м в стороне при ребре
 /// воксела 0.1 м — те же метры, что были при 0.5 м (ADR-227).
 fn show_map() -> Params {
-    Params { relief: 150, ..Params::sized(1920, 960, 1920) }
+    Params {
+        relief: 150,
+        ..Params::sized(1920, 960, 1920)
+    }
 }
 
 /// Шаг выборки: **метр**, а не воксель.
@@ -78,7 +81,8 @@ fn no_single_material_owns_the_surface() {
 fn rock_and_ore_reach_the_surface() {
     let p = show_map();
     let (mix, _) = surface_mix(&p, 42);
-    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
+    let rock =
+        mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
     let ore: f64 = [
         mat::IRON_POOR,
         mat::IRON,
@@ -122,9 +126,17 @@ fn ridges_lose_their_soil() {
             }
         }
     }
-    assert!(high.1 > 500 && low.1 > 500, "клеток мало: гребней {}, лощин {}", high.1, low.1);
+    assert!(
+        high.1 > 500 && low.1 > 500,
+        "клеток мало: гребней {}, лощин {}",
+        high.1,
+        low.1
+    );
     let (a, b) = (high.0 as f64 / high.1 as f64, low.0 as f64 / low.1 as f64);
-    assert!(a < b * 0.6, "на гребне почвы {a:.2}, в лощине {b:.2} — разницы нет");
+    assert!(
+        a < b * 0.6,
+        "на гребне почвы {a:.2}, в лощине {b:.2} — разницы нет"
+    );
 }
 
 /// **Карта эталонного прогона перемешана так же.**
@@ -142,7 +154,8 @@ fn the_reference_map_is_mixed_too() {
     let p = Params::sized(640, 320, 640);
     let (mix, _) = surface_mix(&p, 42);
     let soil = mix[mat::SOIL as usize];
-    let rock = mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
+    let rock =
+        mix[mat::ROCK as usize] + mix[mat::DEEP_ROCK as usize] + mix[mat::ROCK_PALE as usize];
     println!("эталон: почва {soil:.1}%, порода {rock:.1}%");
     // Порог здесь мягче, чем у карты показа: эталонная карта меньше
     // и ровнее — размах рельефа считается от высоты мира, а она вдвое
@@ -153,6 +166,9 @@ fn the_reference_map_is_mixed_too() {
     // порода 21.1%; на карте в 128 м было 65.4% и 33.2% (ADR-227).
     // Пороги сняты с этого замера с тем же запасом, что у карты показа,
     // и ловят возврат к одному цвету, а не караулят текущее значение.
-    assert!(soil <= 85.0, "почвы {soil:.1}% — эталонная карта одного цвета");
+    assert!(
+        soil <= 85.0,
+        "почвы {soil:.1}% — эталонная карта одного цвета"
+    );
     assert!(rock >= 15.0, "голой породы {rock:.1}%");
 }

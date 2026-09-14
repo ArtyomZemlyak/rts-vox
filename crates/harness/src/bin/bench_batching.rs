@@ -106,7 +106,12 @@ fn trace(staggered: bool) -> Trace {
         chunks.push(c);
         w.flush_mesh();
     }
-    Trace { sectors, chunks, n_sectors, n_chunks }
+    Trace {
+        sectors,
+        chunks,
+        n_sectors,
+        n_chunks,
+    }
 }
 
 fn main() {
@@ -155,7 +160,10 @@ fn main() {
         );
     }
     println!();
-    println!("{:>5} {:>26} {:>26}", "окно", "экономия по секторам", "экономия по чанкам");
+    println!(
+        "{:>5} {:>26} {:>26}",
+        "окно", "экономия по секторам", "экономия по чанкам"
+    );
     for win in [2usize, 4, 8, 16, 32] {
         let v = [
             per_tick_union(&sync.sectors, win, sync.n_sectors),

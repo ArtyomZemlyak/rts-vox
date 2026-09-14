@@ -80,7 +80,14 @@ impl Dig {
                 idle: 0,
             });
         }
-        Dig { diggers, radius, centres, idle_limit: 8, restarts: 0, rng }
+        Dig {
+            diggers,
+            radius,
+            centres,
+            idle_limit: 8,
+            restarts: 0,
+            rng,
+        }
     }
 
     /// Один тик копки: поставить правки в очередь мира.
@@ -134,10 +141,10 @@ impl Dig {
             d.idle = if dug_now { 0 } else { d.idle + 1 };
             if d.idle > self.idle_limit {
                 let (cx, cz) = self.centres[self.rng.below(self.centres.len() as u32) as usize];
-                let x = (cx as i64 + self.rng.range(-24, 24) as i64)
-                    .clamp(1, w.nx as i64 - 2) as u32;
-                let z = (cz as i64 + self.rng.range(-24, 24) as i64)
-                    .clamp(1, w.nz as i64 - 2) as u32;
+                let x =
+                    (cx as i64 + self.rng.range(-24, 24) as i64).clamp(1, w.nx as i64 - 2) as u32;
+                let z =
+                    (cz as i64 + self.rng.range(-24, 24) as i64).clamp(1, w.nz as i64 - 2) as u32;
                 let y = surface(x, z);
                 let d = &mut self.diggers[i];
                 d.x = x;
@@ -150,14 +157,14 @@ impl Dig {
             }
             let d = &mut self.diggers[i];
             d.age += 1;
-            if d.age % 3 == 0 {
+            if d.age.is_multiple_of(3) {
                 let nx = d.x as i64 + d.dx as i64;
                 let nz = d.z as i64 + d.dz as i64;
                 if nx >= 1 && nz >= 1 && (nx as u32) < w.nx - 1 && (nz as u32) < w.nz - 1 {
                     d.x = nx as u32;
                     d.z = nz as u32;
                 }
-                if d.y > 3 && d.age % 6 == 0 {
+                if d.y > 3 && d.age.is_multiple_of(6) {
                     d.y -= 1;
                 }
             }

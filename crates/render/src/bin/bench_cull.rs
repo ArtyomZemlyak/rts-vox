@@ -120,7 +120,11 @@ fn main() {
         }
 
         // Цена самого прохода: перебор всех чанков.
-        let c = cam(V3::new(side as f32 * 0.5, 0.0, side as f32 * 0.5), 400.0, 0.0);
+        let c = cam(
+            V3::new(side as f32 * 0.5, 0.0, side as f32 * 0.5),
+            400.0,
+            0.0,
+        );
         let f = c.frustum();
         let mut v = Vec::new();
         let t = Instant::now();

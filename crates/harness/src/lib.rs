@@ -283,10 +283,7 @@ fn make_terrain(seed: u64, cx: usize, cz: usize) -> MeshChunk {
     let mut c = MeshChunk::new();
     for lz in 0..=MCS + 1 {
         for lx in 0..=MCS + 1 {
-            let (wx, wz) = (
-                (cx * MCS + lx) as i32 - 1,
-                (cz * MCS + lz) as i32 - 1,
-            );
+            let (wx, wz) = ((cx * MCS + lx) as i32 - 1, (cz * MCS + lz) as i32 - 1);
             let h = height(seed, wx, wz);
             for y in 1..=h.min(MCS) {
                 c.set(lx, y, lz, 1);
@@ -390,9 +387,21 @@ impl Dig {
                 2 => (0, 1),
                 _ => (0, -1),
             };
-            diggers.push(Digger { x, y, z, dx, dz, age: rng.below(3) });
+            diggers.push(Digger {
+                x,
+                y,
+                z,
+                dx,
+                dz,
+                age: rng.below(3),
+            });
         }
-        Dig { diggers, radius, cut: Cut::Sphere, rng }
+        Dig {
+            diggers,
+            radius,
+            cut: Cut::Sphere,
+            rng,
+        }
     }
 
     pub fn new(w: &World, n: usize, radius: i32, seed: u64) -> Dig {
@@ -483,16 +492,19 @@ impl Dig {
             // Продвижение: вниз-вперёд, с редким поворотом.
             let d = &mut self.diggers[i];
             d.age += 1;
-            let step = if d.age % 3 == 0 { 1 } else { 0 };
+            let step = if d.age.is_multiple_of(3) { 1 } else { 0 };
             if step == 1 {
                 let nx = d.x as i64 + d.dx as i64;
                 let nz = d.z as i64 + d.dz as i64;
-                if nx >= 0 && nz >= 0 && (nx as usize) < w.voxels_x() && (nz as usize) < w.voxels_z()
+                if nx >= 0
+                    && nz >= 0
+                    && (nx as usize) < w.voxels_x()
+                    && (nz as usize) < w.voxels_z()
                 {
                     d.x = nx as usize;
                     d.z = nz as usize;
                 }
-                if d.y > 2 && d.age % 6 == 0 {
+                if d.y > 2 && d.age.is_multiple_of(6) {
                     d.y -= 1;
                 }
             }
@@ -585,7 +597,10 @@ impl TopoLayer {
             // Ступень A считается **до** снятия соседей по списку: она
             // корректна только по одному вокселю за раз (ADR-074).
             self.chunks[ci].set(lx, ly, lz, false);
-            if !self.adj.cannot_split(self.adj.gather(&self.chunks[ci], lx, ly, lz)) {
+            if !self
+                .adj
+                .cannot_split(self.adj.gather(&self.chunks[ci], lx, ly, lz))
+            {
                 survivors += 1;
             }
             if !self.dirty[ci] {

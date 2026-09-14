@@ -1,0 +1,25 @@
+// One kilometre at a 100 mm world voxel; height is independent of width.
+// Small opposing detachments. Friendly units await orders; the enemy advances.
+(
+    size: (10000, 128, 10000),
+    seed: 42,
+    focus: (4950, 5030),
+    units: [
+        (kind: 10, owner: 0, at: (4200, 4750), move_to: None),
+        (kind: 11, owner: 0, at: (4510, 4750), move_to: None),
+        (kind: 2, owner: 0, at: (4510, 4880), move_to: None),
+        (kind: 2, owner: 0, at: (4430, 4880), move_to: None),
+        (kind: 1, owner: 0, at: (4750, 4930), move_to: None),
+        (kind: 1, owner: 0, at: (4750, 5050), move_to: None),
+        (kind: 1, owner: 0, at: (4660, 4990), move_to: None),
+        (kind: 3, owner: 0, at: (4660, 5120), move_to: None),
+        (kind: 12, owner: 0, at: (4480, 5240), move_to: None),
+        (kind: 10, owner: 1, at: (5920, 5340), move_to: None),
+        (kind: 11, owner: 1, at: (5610, 5340), move_to: None),
+        (kind: 2, owner: 1, at: (5730, 5200), move_to: None),
+        (kind: 1, owner: 1, at: (5210, 4930), attack_move: Some((4690, 4930))),
+        (kind: 1, owner: 1, at: (5210, 5080), attack_move: Some((4690, 5080))),
+        (kind: 3, owner: 1, at: (5360, 4960), attack_move: Some((4730, 4960))),
+        (kind: 3, owner: 1, at: (5360, 5120), attack_move: Some((4730, 5120))),
+    ],
+)

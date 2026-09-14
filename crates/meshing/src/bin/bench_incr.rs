@@ -125,7 +125,14 @@ fn main() {
     println!("всего пар «грань, слой» — 372.\n");
     println!(
         "{:<18} {:>7} {:>8} {:>8} {:>10} {:>14} {:>13} {:>10}",
-        "сцена", "радиус", "правок", "слоёв", "доля слоёв", "инкремент, мкс", "полная, мкс", "выигрыш"
+        "сцена",
+        "радиус",
+        "правок",
+        "слоёв",
+        "доля слоёв",
+        "инкремент, мкс",
+        "полная, мкс",
+        "выигрыш"
     );
     let mut inc = IncMesher::new();
     for scene in [Scene::Smooth, Scene::Cavern, Scene::CavernAndScatter] {
@@ -159,7 +166,10 @@ fn main() {
 состояние мешера на чанк: {} КиБ — это и есть цена инкрементальности",
         inc.state_bytes() / 1024
     );
-    println!("при 115 горячих чанках — {} МиБ", inc.state_bytes() * 115 / 1024 / 1024);
+    println!(
+        "при 115 горячих чанках — {} МиБ",
+        inc.state_bytes() * 115 / 1024 / 1024
+    );
 
     section("2. Порог: когда полная пересборка дешевле");
     println!("правки рассеяны по всему чанку — худший случай для инкремента.\n");
@@ -183,7 +193,11 @@ fn main() {
         println!(
             "{:>10} {slices:>10} {fast:>14.2} {fullm:>14.2} {:>14}",
             edits.len(),
-            if fast < fullm { "инкремент" } else { "полная" }
+            if fast < fullm {
+                "инкремент"
+            } else {
+                "полная"
+            }
         );
     }
 
@@ -193,7 +207,9 @@ fn main() {
         .map(|s| build(Scene::CavernAndScatter, 1000 + s))
         .collect();
     let volumes: Vec<BitVolume> = chunks.iter().map(bits_from_chunk).collect();
-    let cores = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1);
 
     let mut serial = f64::MAX;
     {

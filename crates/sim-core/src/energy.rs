@@ -146,9 +146,15 @@ mod tests {
         let nodes: Vec<Node> = (0..n)
             .map(|i| {
                 if i == 0 {
-                    Node { produce: 1000, demand: 0 }
+                    Node {
+                        produce: 1000,
+                        demand: 0,
+                    }
                 } else {
-                    Node { produce: 0, demand: 10 }
+                    Node {
+                        produce: 0,
+                        demand: 10,
+                    }
                 }
             })
             .collect();
@@ -179,7 +185,10 @@ mod tests {
             assert_eq!(net.delivered[i], 10, "ближняя половина голодает: {i}");
         }
         for i in 25..50 {
-            assert_eq!(net.delivered[i], 0, "дальняя половина всё ещё питается: {i}");
+            assert_eq!(
+                net.delivered[i], 0,
+                "дальняя половина всё ещё питается: {i}"
+            );
         }
         net.restore(24);
         net.update();
@@ -191,9 +200,18 @@ mod tests {
     #[test]
     fn shortage_is_shared_by_demand() {
         let nodes = vec![
-            Node { produce: 100, demand: 0 },
-            Node { produce: 0, demand: 100 },
-            Node { produce: 0, demand: 300 },
+            Node {
+                produce: 100,
+                demand: 0,
+            },
+            Node {
+                produce: 0,
+                demand: 100,
+            },
+            Node {
+                produce: 0,
+                demand: 300,
+            },
         ];
         let mut net = Network::new(nodes, vec![(0, 1), (1, 2)]);
         net.update();
@@ -207,7 +225,12 @@ mod tests {
     fn labels_do_not_depend_on_link_order() {
         let mut r = Rng::new(6, 6);
         let n = 200usize;
-        let nodes: Vec<Node> = (0..n).map(|_| Node { produce: 1, demand: 1 }).collect();
+        let nodes: Vec<Node> = (0..n)
+            .map(|_| Node {
+                produce: 1,
+                demand: 1,
+            })
+            .collect();
         let mut links: Vec<(u32, u32)> = (0..400)
             .map(|_| (r.below(n as u32), r.below(n as u32)))
             .collect();

@@ -19,11 +19,11 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use demo::dig::Dig;
+use demo::{RunHash, Terrain};
 use meshing::layer::MeshLayer;
+use meshing::Opts;
 use sim_core::ground::Ground;
 use sim_core::{Phase, World as SimWorld};
-use demo::{RunHash, Terrain};
-use meshing::Opts;
 use voxel::World;
 
 /// Порог сцены: три подсистемы вместе, миллисекунд на тик.
@@ -68,7 +68,8 @@ impl Default for Args {
             diggers: 300,
             clusters: 8,
             side: 256,
-            dump_hash: false, relabel_cap: 64,
+            dump_hash: false,
+            relabel_cap: 64,
             verify_seams: true,
         }
     }
@@ -121,7 +122,10 @@ fn main() -> ExitCode {
         nz: a.side,
         ..Default::default()
     };
-    let terrain = Terrain { params, seed: a.seed };
+    let terrain = Terrain {
+        params,
+        seed: a.seed,
+    };
 
     let t0 = Instant::now();
     // Потолок правок за тик (ADR-013, ADR-045). Триста копателей дают
@@ -132,7 +136,10 @@ fn main() -> ExitCode {
         params.ny,
         params.nz,
         4096,
-        Box::new(Terrain { params, seed: a.seed }),
+        Box::new(Terrain {
+            params,
+            seed: a.seed,
+        }),
     );
     let gen_ms = t0.elapsed().as_secs_f64() * 1e3;
 
@@ -235,19 +242,47 @@ fn main() -> ExitCode {
     );
 
     println!("{:<28} {:>14}", "за тик", "значение");
-    println!("{:<28} {:>14.1}", "правок применено", edits_total as f64 / n);
+    println!(
+        "{:<28} {:>14.1}",
+        "правок применено",
+        edits_total as f64 / n
+    );
     println!("{:<28} {:>14}", "пик очереди", queued_peak);
-    println!("{:<28} {:>14.1}", "грязных чанков мешинга", dirty_mesh as f64 / n);
-    println!("{:<28} {:>14.1}", "грязных чанков связности", dirty_topo as f64 / n);
+    println!(
+        "{:<28} {:>14.1}",
+        "грязных чанков мешинга",
+        dirty_mesh as f64 / n
+    );
+    println!(
+        "{:<28} {:>14.1}",
+        "грязных чанков связности",
+        dirty_topo as f64 / n
+    );
     println!(
         "{:<28} {:>13.2}%",
         "правок выжило после A",
         100.0 * survived as f64 / edits_total.max(1) as f64
     );
-    println!("{:<28} {:>14.1}", "нав-клеток пересчитано", nav_seen as f64 / n);
-    println!("{:<28} {:>14.1}", "  у них сдвинулся пол", nav_moved as f64 / n);
-    println!("{:<28} {:>14.2}", "  пол опустился, вокселей", nav_drop as f64 / n);
-    println!("{:<28} {:>14.1}", "  стало нельзя стоять", nav_flips as f64 / n);
+    println!(
+        "{:<28} {:>14.1}",
+        "нав-клеток пересчитано",
+        nav_seen as f64 / n
+    );
+    println!(
+        "{:<28} {:>14.1}",
+        "  у них сдвинулся пол",
+        nav_moved as f64 / n
+    );
+    println!(
+        "{:<28} {:>14.2}",
+        "  пол опустился, вокселей",
+        nav_drop as f64 / n
+    );
+    println!(
+        "{:<28} {:>14.1}",
+        "  стало нельзя стоять",
+        nav_flips as f64 / n
+    );
     let (cells_with, cells_multi, levels) = {
         let g = sim.ground().expect("земля");
         g.nav.level_census(&g.world)
@@ -256,15 +291,24 @@ fn main() -> ExitCode {
     println!("{:<28} {:>14.1}", "рёбер появилось", nav_gained as f64 / n);
     // Насколько неверна одноуровневая навигация на этой карте.
     println!();
-    println!("{:<28} {:>14} {:>14}", "уровни в колонке", "до копки", "после");
-    println!("{:<28} {:>14} {:>14}", "клеток с полом", census0.0, cells_with);
+    println!(
+        "{:<28} {:>14} {:>14}",
+        "уровни в колонке", "до копки", "после"
+    );
+    println!(
+        "{:<28} {:>14} {:>14}",
+        "клеток с полом", census0.0, cells_with
+    );
     println!(
         "{:<28} {:>13.1}% {:>13.1}%",
         "  из них многоуровневых",
         100.0 * census0.1 as f64 / census0.0.max(1) as f64,
         100.0 * cells_multi as f64 / cells_with.max(1) as f64
     );
-    println!("{:<28} {:>14} {:>14}", "уровней в подколонках", census0.2, levels);
+    println!(
+        "{:<28} {:>14} {:>14}",
+        "уровней в подколонках", census0.2, levels
+    );
     // Слой помнит восемь уровней на клетку; сколько раз не хватило —
     // видно, а не умолчано (ADR-136).
     println!(
@@ -274,13 +318,33 @@ fn main() -> ExitCode {
     );
 
     println!("\n{:<28} {:>14}", "время, мс на тик", "");
-    println!("{:<28} {:>14.3}", "дренаж очереди", ph(Phase::VoxelEdits) / n);
-    println!("{:<28} {:>14.3}", "каскад отделения", ph(Phase::Destruction) / n);
+    println!(
+        "{:<28} {:>14.3}",
+        "дренаж очереди",
+        ph(Phase::VoxelEdits) / n
+    );
+    println!(
+        "{:<28} {:>14.3}",
+        "каскад отделения",
+        ph(Phase::Destruction) / n
+    );
     {
         let c = &sim.ground().expect("земля").stats.collapse;
-        println!("{:<28} {:>14.1}", "  чанков размечено", cas_relabel as f64 / n);
-        println!("{:<28} {:>14.1}", "  пропущено проверкой", cas_skip as f64 / n);
-        println!("{:<28} {:>14.1}", "  граней пересчитано", cas_faces as f64 / n);
+        println!(
+            "{:<28} {:>14.1}",
+            "  чанков размечено",
+            cas_relabel as f64 / n
+        );
+        println!(
+            "{:<28} {:>14.1}",
+            "  пропущено проверкой",
+            cas_skip as f64 / n
+        );
+        println!(
+            "{:<28} {:>14.1}",
+            "  граней пересчитано",
+            cas_faces as f64 / n
+        );
         println!("{:<28} {:>14}", "  собрано составов", c.gathered);
         println!("{:<28} {:>14}", "  узлов в графе", c.nodes);
         println!("{:<28} {:>14}", "  рёбер в графе", c.edges);
@@ -330,11 +394,7 @@ fn main() -> ExitCode {
                 bad += 1;
             }
         }
-        println!(
-            "\nшвы: сверено {} чанков, расхождений {}",
-            live.len(),
-            bad
-        );
+        println!("\nшвы: сверено {} чанков, расхождений {}", live.len(), bad);
         if bad != 0 {
             ok = false;
         }
@@ -345,7 +405,11 @@ fn main() -> ExitCode {
         println!("seed={} ticks={} hash={:016x}", a.seed, a.ticks, hash.get());
     }
 
-    let verdict = if total <= BUDGET_MS { "ПОРОГ ДЕРЖИТСЯ" } else { "ПОРОГ ПРЕВЫШЕН" };
+    let verdict = if total <= BUDGET_MS {
+        "ПОРОГ ДЕРЖИТСЯ"
+    } else {
+        "ПОРОГ ПРЕВЫШЕН"
+    };
     println!("порог {BUDGET_MS} мс на тик: {total:.3} мс — {verdict}");
     if total > BUDGET_MS {
         ok = false;
@@ -359,7 +423,11 @@ fn main() -> ExitCode {
         ms_mesh / n,
     ];
     for (&(name, budget), got) in PART_BUDGETS.iter().zip(parts) {
-        let v = if got <= budget { "держится" } else { "ПРЕВЫШЕН" };
+        let v = if got <= budget {
+            "держится"
+        } else {
+            "ПРЕВЫШЕН"
+        };
         println!("  порог {budget} мс на «{name}»: {got:.3} мс — {v}");
         if got > budget {
             ok = false;

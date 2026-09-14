@@ -11,6 +11,7 @@
 # Скриншоты и дампы агентных прогонов
 /.agent-out/
 /screenshots/
+/.codex-remote-attachments/
 
 # Golden-файлы, помеченные как временные
 *.golden.tmp

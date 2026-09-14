@@ -89,7 +89,10 @@ impl Plugin for OcclusionPlugin {
         let shader = app
             .world_mut()
             .resource_mut::<Assets<Shader>>()
-            .add(Shader::from_wgsl(include_str!("occlusion.wgsl"), "render/src/occlusion.wgsl"));
+            .add(Shader::from_wgsl(
+                include_str!("occlusion.wgsl"),
+                "render/src/occlusion.wgsl",
+            ));
         app.add_plugins(ExtractComponentPlugin::<Occlusion>::default());
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
@@ -107,7 +110,12 @@ impl Plugin for OcclusionPlugin {
             )
             // **До свечения и тонмаппинга**: затенение умножает линейный
             // свет, а не готовую картинку.
-            .add_systems(Core3d, draw_occlusion.in_set(Core3dSystems::PostProcess).before(bloom));
+            .add_systems(
+                Core3d,
+                draw_occlusion
+                    .in_set(Core3dSystems::PostProcess)
+                    .before(bloom),
+            );
     }
 }
 
@@ -136,7 +144,11 @@ impl Specializer<RenderPipeline> for OcclusionSpecializer {
     ) -> Result<Canonical<Self::Key>, BevyError> {
         descriptor.fragment_mut()?.set_target(
             0,
-            ColorTargetState { format: key.target_format, blend: None, write_mask: ColorWrites::ALL },
+            ColorTargetState {
+                format: key.target_format,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            },
         );
         Ok(key)
     }
@@ -201,9 +213,12 @@ fn prepare_pipeline(
             commands.entity(entity).remove::<OcclusionPipelineId>();
             continue;
         }
-        let id = pipeline
-            .variants
-            .specialize(&pipeline_cache, OcclusionKey { target_format: view.target_format })?;
+        let id = pipeline.variants.specialize(
+            &pipeline_cache,
+            OcclusionKey {
+                target_format: view.target_format,
+            },
+        )?;
         commands.entity(entity).insert(OcclusionPipelineId(id));
     }
     Ok(())
@@ -239,7 +254,12 @@ fn prepare_uniforms(
 /// меняет источник с приёмником местами, и раньше не узнать, какая
 /// из двух текстур сейчас источник.
 fn draw_occlusion(
-    view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &OcclusionOffset, &OcclusionPipelineId)>,
+    view: ViewQuery<(
+        &ViewTarget,
+        &ViewPrepassTextures,
+        &OcclusionOffset,
+        &OcclusionPipelineId,
+    )>,
     pipeline: Option<Res<OcclusionPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     uniforms: Res<OcclusionUniforms>,
@@ -265,22 +285,30 @@ fn draw_occlusion(
     let bind_group = ctx.render_device().create_bind_group(
         "occlusion_bind_group",
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((post.source, &pipeline.sampler, &depth, &normal, binding.clone())),
+        &BindGroupEntries::sequential((
+            post.source,
+            &pipeline.sampler,
+            &depth,
+            &normal,
+            binding.clone(),
+        )),
     );
 
-    let mut pass = ctx.command_encoder().begin_render_pass(&RenderPassDescriptor {
-        label: Some("occlusion_pass"),
-        color_attachments: &[Some(RenderPassColorAttachment {
-            view: post.destination,
-            depth_slice: None,
-            resolve_target: None,
-            ops: Operations::default(),
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("occlusion_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: post.destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
     pass.set_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[offset.0]);
     pass.draw(0..3, 0..1);

@@ -128,10 +128,9 @@ pub struct Economy {
     pub wrecks: Vec<Wreck>,
     /// Множитель хода по массе, по месту типа в реестре (ADR-234).
     ///
-    /// Считается один раз: масса типа — объём его тела на плотность
-    /// вида ходовой, и от тика к тику не меняется. Урон массу
-    /// не убавляет — это было бы лишним кубическим корнем на юнита
-    /// в каждом тике ради разницы, которой не видно.
+    /// Размер установленной ходовой определяется один раз по исходному телу.
+    /// Повреждения отдельно меняют отношение силы к оставшейся массе
+    /// через кэш material_bodies; двигатель при потере брони не уменьшается.
     pub(crate) drive: Vec<fx::Fx>,
     /// Слоты **недостроенных** построек, по возрастанию номера.
     ///
@@ -159,7 +158,6 @@ pub struct Economy {
 }
 
 impl Economy {
-
     /// Части учёта, которые пишет сохранение (ADR-229). Очередь
     /// завода отдаётся вектором: `VecDeque` — это её порядок,
     /// а не способ хранения на диске.
@@ -200,7 +198,14 @@ impl Economy {
     /// Счётчики замера: в симуляцию не входят, но отчёт после
     /// загрузки обязан продолжаться, а не начинаться с нуля.
     pub fn counters(&self) -> [u64; 6] {
-        [self.mined, self.delivered, self.spent, self.reclaimed, self.built, self.produced]
+        [
+            self.mined,
+            self.delivered,
+            self.spent,
+            self.reclaimed,
+            self.built,
+            self.produced,
+        ]
     }
 
     pub fn set_counters(&mut self, c: [u64; 6]) {
@@ -219,7 +224,10 @@ impl Economy {
         let banks = (0..owners.max(1))
             .map(|_| {
                 let stock = ledger.create(Kind::Depot, 0, t.base_store);
-                Bank { stock, cap: t.base_store }
+                Bank {
+                    stock,
+                    cap: t.base_store,
+                }
             })
             .collect();
         let mut e = Economy {
@@ -311,7 +319,12 @@ impl Economy {
                 let held = self.ledger.create(Kind::Body, 0, Amount::MAX);
                 self.lines.insert(
                     i,
-                    Line { unit, queue: std::collections::VecDeque::new(), held, ticks: 0 },
+                    Line {
+                        unit,
+                        queue: std::collections::VecDeque::new(),
+                        held,
+                        ticks: 0,
+                    },
                 );
                 &mut self.lines[i]
             }
@@ -320,7 +333,9 @@ impl Economy {
 
     /// Уплачено за передний заказ завода.
     pub fn line_paid(&self, unit: u32) -> Amount {
-        self.line(unit).map(|l| self.ledger.held(l.held)).unwrap_or(0)
+        self.line(unit)
+            .map(|l| self.ledger.held(l.held))
+            .unwrap_or(0)
     }
 
     /// Снять очередь завода, вернув заготовку в запас.
@@ -329,7 +344,9 @@ impl Economy {
     /// путём — [`Economy::wreck_line`]: там заготовка не возвращается,
     /// а гибнет вместе с ним.
     pub fn drop_line(&mut self, unit: u32, stock: ContainerId) {
-        let Ok(i) = self.lines.binary_search_by_key(&unit, |l| l.unit) else { return };
+        let Ok(i) = self.lines.binary_search_by_key(&unit, |l| l.unit) else {
+            return;
+        };
         let held = self.lines[i].held;
         self.ledger.transfer(held, stock, self.ledger.held(held));
         // Остаток, не влезший в запас, — излишек над потолком:
@@ -347,7 +364,9 @@ impl Economy {
     /// у завода уже есть, свой. Заготовка **уходит в него**, поэтому
     /// здесь только потеря доли и перевод.
     pub fn wreck_line(&mut self, unit: u32, into: ContainerId) {
-        let Ok(i) = self.lines.binary_search_by_key(&unit, |l| l.unit) else { return };
+        let Ok(i) = self.lines.binary_search_by_key(&unit, |l| l.unit) else {
+            return;
+        };
         let held = self.lines[i].held;
         self.ledger.transfer(held, into, self.ledger.held(held));
         let rest = self.ledger.held(held);
@@ -382,7 +401,9 @@ impl Economy {
             w = w.wrapping_mul(31).wrapping_add(self.ledger.held(l.held));
             w = w.wrapping_mul(31).wrapping_add(l.ticks as u64);
             for (k, q) in l.queue.iter().enumerate() {
-                w = w.wrapping_mul(31).wrapping_add((*q as u64).wrapping_add(k as u64));
+                w = w
+                    .wrapping_mul(31)
+                    .wrapping_add((*q as u64).wrapping_add(k as u64));
             }
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
@@ -437,7 +458,11 @@ mod tests {
         e.ledger.reveal(e.ground, 600);
         assert_eq!(e.ledger.transfer(e.ground, tank, 600), 600);
         assert!(e.balanced(), "расхождение {}", e.ledger.imbalance());
-        assert_eq!(e.ledger.initial(), 600, "в экономику вошло не то, что выкопали");
+        assert_eq!(
+            e.ledger.initial(),
+            600,
+            "в экономику вошло не то, что выкопали"
+        );
     }
 
     /// **Очереди заводов лежат по возрастанию слота.** Два завода,

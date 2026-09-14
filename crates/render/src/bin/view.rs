@@ -132,7 +132,12 @@ fn main() {
     );
     let mesh = MeshLayer::new(&w, Opts::default());
     let (nx, ny, nz) = mesh.dims();
-    let grid = ChunkGrid { nx, ny, nz, cs: CS as u32 };
+    let grid = ChunkGrid {
+        nx,
+        ny,
+        nz,
+        cs: CS as u32,
+    };
 
     let t = Instant::now();
     let mut chunks: Vec<(usize, MeshBuf)> = Vec::new();
@@ -148,7 +153,12 @@ fn main() {
     let build_ms = t.elapsed().as_secs_f64() * 1e3;
 
     let tris: usize = chunks.iter().map(|(_, b)| b.idx.len() / 3).sum();
-    println!("мир {side}×{}×{side}, чанков {} из {}", params.ny, chunks.len(), grid.len());
+    println!(
+        "мир {side}×{}×{side}, чанков {} из {}",
+        params.ny,
+        chunks.len(),
+        grid.len()
+    );
     println!("треугольников {tris}, сборка буферов {build_ms:.0} мс");
 
     let mid = side as f32 * 0.5;
@@ -175,7 +185,11 @@ fn main() {
             }),
             ..default()
         }))
-        .insert_resource(World { grid, chunks, build_ms })
+        .insert_resource(World {
+            grid,
+            chunks,
+            build_ms,
+        })
         .insert_resource(View { cam, visible: 0 })
         .insert_resource(Bench {
             churn,
@@ -225,10 +239,13 @@ fn setup(
         .chunks
         .iter()
         .map(|(_, buf)| {
-            Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-                .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-                .with_inserted_indices(Indices::U32(buf.idx.clone()))
+            Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::RENDER_WORLD,
+            )
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+            .with_inserted_indices(Indices::U32(buf.idx.clone()))
         })
         .collect();
     let make_ms = t.elapsed().as_secs_f64() * 1e3;
@@ -251,7 +268,11 @@ fn setup(
             ms / built.len().max(1) as f64
         );
     }
-    println!("вершинных байт {} ({:.1} МиБ)", bytes, bytes as f64 / (1 << 20) as f64);
+    println!(
+        "вершинных байт {} ({:.1} МиБ)",
+        bytes,
+        bytes as f64 / (1 << 20) as f64
+    );
 
     let t = Instant::now();
     for ((i, _), m) in world.chunks.iter().zip(built) {
@@ -282,7 +303,10 @@ fn setup(
         Transform::from_xyz(eye.x, eye.y, eye.z).looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y),
     ));
     commands.spawn((
-        DirectionalLight { shadow_maps_enabled: false, ..default() },
+        DirectionalLight {
+            shadow_maps_enabled: false,
+            ..default()
+        },
         Transform::from_xyz(1.0, 2.0, 0.6).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 }
@@ -336,8 +360,8 @@ fn control(
     let eye = view.cam.eye();
     let t = view.cam.target;
     for mut tr in cams.iter_mut() {
-        *tr = Transform::from_xyz(eye.x, eye.y, eye.z)
-            .looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y);
+        *tr =
+            Transform::from_xyz(eye.x, eye.y, eye.z).looking_at(Vec3::new(t.x, t.y, t.z), Vec3::Y);
     }
 }
 
@@ -360,7 +384,11 @@ fn cull(
     for (c, mut vis) in chunks.iter_mut() {
         let (lo, hi) = world.grid.aabb(c.0);
         let on = f.intersects_aabb(lo, hi);
-        *vis = if on { Visibility::Inherited } else { Visibility::Hidden };
+        *vis = if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         seen += usize::from(on);
     }
     view.visible = seen;
@@ -383,10 +411,13 @@ fn churn_chunks(mut bench: ResMut<Bench>, world: Res<World>, mut meshes: ResMut<
     for k in 0..bench.churn.min(n) {
         let i = (bench.cursor + k) % n;
         let buf = &world.chunks[i].1;
-        let m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-            .with_inserted_indices(Indices::U32(buf.idx.clone()));
+        let m = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+        .with_inserted_indices(Indices::U32(buf.idx.clone()));
         let id = bench.handles[i].id();
         present += u64::from(meshes.get(id).is_some());
         let _ = meshes.insert(id, m);
@@ -412,7 +443,9 @@ fn stats(
     if !bench.shot_done && time.elapsed_secs() >= bench.shot_after {
         if let Some(path) = bench.shot.clone() {
             println!("снимок на {:.1} с: {path}", time.elapsed_secs());
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
         }
         bench.shot_done = true;
     }

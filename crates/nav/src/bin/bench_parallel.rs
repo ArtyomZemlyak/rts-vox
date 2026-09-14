@@ -98,8 +98,9 @@ fn run_serial(sectors: &[Sector], htab: &HTable, reps: usize, trials: usize) -> 
         for _ in 0..reps {
             let mut acc = 0u64;
             for sec in sectors {
-                acc = acc
-                    .wrapping_add(fim_ws(&mut ws, &sec.g, &sec.seeds, &|f, d| htab.h(f, d)).updates);
+                acc = acc.wrapping_add(
+                    fim_ws(&mut ws, &sec.g, &sec.seeds, &|f, d| htab.h(f, d)).updates,
+                );
             }
             black_box(acc);
         }
@@ -177,7 +178,9 @@ fn barrier_overhead(threads: usize, reps: usize) -> f64 {
 
 fn main() {
     let htab = HTable::new(255);
-    let cores = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|v| v.get())
+        .unwrap_or(1);
     println!("логических ядер: {cores}");
 
     println!("\nцена одного барьера на тик, без всякой работы:");

@@ -16,15 +16,14 @@
 use std::process::ExitCode;
 use std::time::Instant;
 
-use meshing::layer::MeshLayer;
-use sim_core::ground::Ground;
-use sim_core::World as SimWorld;
 use demo::RunHash;
 use fx::rng::Rng;
+use meshing::layer::MeshLayer;
 use meshing::Opts;
+use sim_core::ground::Ground;
+use sim_core::World as SimWorld;
 use voxel::store::{Mat, AIR};
 use voxel::{Generator, World};
-
 
 /// Грибной рельеф: земля, ножка, шляпка. Подкоп ножки роняет шляпку.
 ///
@@ -112,7 +111,16 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, ticks: 400, side: 192, diggers: 24, units: 40, dump_hash: false, burst: false, max_bodies: None }
+        Args {
+            seed: 42,
+            ticks: 400,
+            side: 192,
+            diggers: 24,
+            units: 40,
+            dump_hash: false,
+            burst: false,
+            max_bodies: None,
+        }
     }
 }
 
@@ -176,10 +184,23 @@ struct Outcome {
 }
 
 fn run(a: &Args) -> Outcome {
-    let g = Mushrooms { nx: a.side, ny: 64, nz: a.side };
-    let world = World::new(a.side, 64, a.side, 8192, Box::new(Mushrooms { nx: a.side, ny: 64, nz: a.side }));
+    let g = Mushrooms {
+        nx: a.side,
+        ny: 64,
+        nz: a.side,
+    };
+    let world = World::new(
+        a.side,
+        64,
+        a.side,
+        8192,
+        Box::new(Mushrooms {
+            nx: a.side,
+            ny: 64,
+            nz: a.side,
+        }),
+    );
     let mut mesh = MeshLayer::new(&world, Opts::default());
-
 
     // Порядок фаз задаёт движок (ADR-125): сцена только копает
     // и смотрит, что получилось.
@@ -301,7 +322,10 @@ fn run(a: &Args) -> Outcome {
         hash.feed(g.bodies.refused as u64);
     }
 
-    let killed = ids.iter().filter(|&&i| !sim.units.alive[i as usize]).count();
+    let killed = ids
+        .iter()
+        .filter(|&&i| !sim.units.alive[i as usize])
+        .count();
 
     Outcome {
         hash: hash.get(),
@@ -359,7 +383,10 @@ fn main() -> ExitCode {
     let n = a.ticks as f64;
 
     println!("D-2 «Обрушение» — разрушаемость как механика");
-    println!("мир {}×64×{}, {} копателей, {} юнитов, {} тиков\n", a.side, a.side, a.diggers, a.units, a.ticks);
+    println!(
+        "мир {}×64×{}, {} копателей, {} юнитов, {} тиков\n",
+        a.side, a.side, a.diggers, a.units, a.ticks
+    );
 
     println!("{:<30} {:>14}", "каскад отделения", "");
     println!("{:<30} {:>14}", "кусков отвалилось", o.detached);
@@ -369,8 +396,15 @@ fn main() -> ExitCode {
     println!("{:<30} {:>14}", "рёбер в графе", o.graph_edges);
     println!("{:<30} {:>14}", "чанков в графе", o.graph_chunks);
     println!("{:<30} {:>14}", "  втянуто за прогон", o.promoted_total);
-    println!("{:<30} {:>14}", "  ждало втягивания, максимум", o.frontier_max);
-    println!("{:<30} {:>11.2} МиБ", "память графа", o.graph_bytes as f64 / 1024.0 / 1024.0);
+    println!(
+        "{:<30} {:>14}",
+        "  ждало втягивания, максимум", o.frontier_max
+    );
+    println!(
+        "{:<30} {:>11.2} МиБ",
+        "память графа",
+        o.graph_bytes as f64 / 1024.0 / 1024.0
+    );
     println!("{:<30} {:>14}", "раундов разбора, максимум", o.rounds_max);
     println!(
         "{:<30} {:>14}",
@@ -387,14 +421,13 @@ fn main() -> ExitCode {
     // три из сорока: он брал в колонке нижний уровень, а шляпка висит
     // над пустотой (ADR-135). Объёмный видит все (ADR-136), и число
     // печатается дальше — потому что именно на нём стоит вся сцена.
-    println!(
-        "{:<30} {:>14}",
-        "  видит навигация",
-        o.units_on_nav_floor
-    );
+    println!("{:<30} {:>14}", "  видит навигация", o.units_on_nav_floor);
     println!("{:<30} {:>14}", "поездок", o.riders_total);
     println!("{:<30} {:>14}", "погибло при падении", o.killed);
-    println!("{:<30} {:>14}", "самое долгое падение, вокселей", o.max_fall);
+    println!(
+        "{:<30} {:>14}",
+        "самое долгое падение, вокселей", o.max_fall
+    );
     println!("{:<30} {:>14}", "урона от падения всего", o.damage_total);
     // Ноль погибших здесь — арифметика, а не умолчание, и её надо видеть.
     println!(
@@ -402,11 +435,7 @@ fn main() -> ExitCode {
         "смертельное падение, вокселей",
         100u32.div_ceil(o.fall_per_voxel.max(1))
     );
-    println!(
-        "{:<30} {:>14}",
-        "  а в чанк помещается",
-        voxel::topo::CS
-    );
+    println!("{:<30} {:>14}", "  а в чанк помещается", voxel::topo::CS);
 
     println!("\n{:<30} {:>14}", "время, мс на тик", "");
     println!("{:<30} {:>14.3}", "тик движка", o.ms_collapse / n);
@@ -417,8 +446,16 @@ fn main() -> ExitCode {
     // Порог 1: реплей воспроизводится бит-в-бит.
     let again = run(&a);
     let replay_ok = again.hash == o.hash;
-    println!("\nреплей: {:016x} против {:016x} — {}", o.hash, again.hash,
-             if replay_ok { "совпал" } else { "РАЗОШЁЛСЯ" });
+    println!(
+        "\nреплей: {:016x} против {:016x} — {}",
+        o.hash,
+        again.hash,
+        if replay_ok {
+            "совпал"
+        } else {
+            "РАЗОШЁЛСЯ"
+        }
+    );
     if !replay_ok {
         ok = false;
     }
@@ -429,7 +466,11 @@ fn main() -> ExitCode {
         "лимит тел: пик {} из {} — {}",
         o.peak_bodies,
         o.max_bodies,
-        if limit_ok { "держится" } else { "ПРЕВЫШЕН" }
+        if limit_ok {
+            "держится"
+        } else {
+            "ПРЕВЫШЕН"
+        }
     );
     if !limit_ok {
         ok = false;
@@ -472,4 +513,3 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     }
 }
-

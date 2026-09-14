@@ -73,7 +73,10 @@ fn main() {
         p.bytes_l0() / 1024 / 1024,
         p.bytes_upper() / 1024
     );
-    println!("экран {PIX_W}×{PIX_H} = {:.2} млн пикселей\n", (PIX_W * PIX_H) as f64 / 1e6);
+    println!(
+        "экран {PIX_W}×{PIX_H} = {:.2} млн пикселей\n",
+        (PIX_W * PIX_H) as f64 / 1e6
+    );
 
     let pts = surface_points(&w, 20000, 5);
     let mut r = Rng::new(7, 7);
@@ -95,7 +98,10 @@ fn main() {
             pyr += b.iters as u64;
             hit += a.hit as usize;
         }
-        let (f, q) = (flat as f64 / pts.len() as f64, pyr as f64 / pts.len() as f64);
+        let (f, q) = (
+            flat as f64 / pts.len() as f64,
+            pyr as f64 / pts.len() as f64,
+        );
         if radius == 4.0 {
             ao_iters_4 = q;
         }
@@ -115,7 +121,11 @@ fn main() {
     let mut sun_iters = 0.0f64;
     for elev in [15i32, 30, 45, 60] {
         let e = (elev as f32).to_radians();
-        let d = [e.cos() * std::f32::consts::FRAC_1_SQRT_2, e.sin(), e.cos() * std::f32::consts::FRAC_1_SQRT_2];
+        let d = [
+            e.cos() * std::f32::consts::FRAC_1_SQRT_2,
+            e.sin(),
+            e.cos() * std::f32::consts::FRAC_1_SQRT_2,
+        ];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
         let d = [d[0] / len, d[1] / len, d[2] / len];
         let (mut flat, mut pyr, mut hit) = (0u64, 0u64, 0usize);
@@ -126,7 +136,10 @@ fn main() {
             pyr += b.iters as u64;
             hit += a.hit as usize;
         }
-        let (f, q) = (flat as f64 / pts.len() as f64, pyr as f64 / pts.len() as f64);
+        let (f, q) = (
+            flat as f64 / pts.len() as f64,
+            pyr as f64 / pts.len() as f64,
+        );
         if elev == 45 {
             sun_iters = q;
         }
@@ -152,10 +165,17 @@ fn main() {
         "{:<18} {:>16} {:>16} {:>12}",
         "нагрузка", "итераций плоско", "итераций пирам.", "выигрыш"
     );
-    for (name, radius, dir_sun) in [("затенение 4 м", 4.0f32, false), ("солнце 45°", 600.0, true)] {
+    for (name, radius, dir_sun) in [
+        ("затенение 4 м", 4.0f32, false),
+        ("солнце 45°", 600.0, true),
+    ] {
         let e = 45f32.to_radians();
         let sd = {
-            let d = [e.cos() * std::f32::consts::FRAC_1_SQRT_2, e.sin(), e.cos() * std::f32::consts::FRAC_1_SQRT_2];
+            let d = [
+                e.cos() * std::f32::consts::FRAC_1_SQRT_2,
+                e.sin(),
+                e.cos() * std::f32::consts::FRAC_1_SQRT_2,
+            ];
             let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
             [d[0] / l, d[1] / l, d[2] / l]
         };
@@ -165,7 +185,10 @@ fn main() {
             flat += march_flat(&dug, o, d, radius).iters as u64;
             pyr += march_pyramid(&pd, &dug, o, d, radius).iters as u64;
         }
-        let (f, q) = (flat as f64 / pts_d.len() as f64, pyr as f64 / pts_d.len() as f64);
+        let (f, q) = (
+            flat as f64 / pts_d.len() as f64,
+            pyr as f64 / pts_d.len() as f64,
+        );
         println!("{name:<18} {f:>16.1} {q:>16.1} {:>11.2}x", f / q);
     }
 
@@ -173,9 +196,21 @@ fn main() {
     println!("три конфигурации из ADR-063, теперь с измеренными итерациями на луч.\n");
     let px = (PIX_W * PIX_H) as f64;
     let rows: [(&str, f64, f64); 3] = [
-        ("затенение 2 луча полного разрешения плюс солнце маршем", 2.0 * px, px),
-        ("затенение 1 луч половинного плюс солнце маршем", px / 4.0, px),
-        ("затенение 1 луч половинного, солнце из каскадных карт", px / 4.0, 0.0),
+        (
+            "затенение 2 луча полного разрешения плюс солнце маршем",
+            2.0 * px,
+            px,
+        ),
+        (
+            "затенение 1 луч половинного плюс солнце маршем",
+            px / 4.0,
+            px,
+        ),
+        (
+            "затенение 1 луч половинного, солнце из каскадных карт",
+            px / 4.0,
+            0.0,
+        ),
     ];
     println!(
         "{:<56} {:>16} {:>14}",
@@ -187,9 +222,7 @@ fn main() {
         println!("{name:<56} {:>13.1} млн {:>14}", total / 1e6, recorded[i]);
     }
     println!();
-    println!(
-        "измерено: затенение {ao_iters_4:.1} итераций на луч, солнце {sun_iters:.1}"
-    );
+    println!("измерено: затенение {ao_iters_4:.1} итераций на луч, солнце {sun_iters:.1}");
     println!(
         "доля солнца в первой конфигурации: {:.0}%",
         100.0 * px * sun_iters / (2.0 * px * ao_iters_4 + px * sun_iters)

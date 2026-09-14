@@ -186,7 +186,10 @@ fn main() {
         ) * probes.len() as f64
             / (CS * CS * CS) as f64
     };
-    println!("подряд по строкам: плотный {dense_row:.2} нс, упакованный {packed_row:.2} нс — x{:.2}", packed_row / dense_row);
+    println!(
+        "подряд по строкам: плотный {dense_row:.2} нс, упакованный {packed_row:.2} нс — x{:.2}",
+        packed_row / dense_row
+    );
 
     section("3. Запись — то, ради чего этот замер и делался");
     println!(
@@ -291,9 +294,18 @@ fn main() {
         }
         best_q = best_q.min(t0.elapsed().as_secs_f64() * 1e6 / reps as f64);
     }
-    println!("копия плотного чанка ({} КиБ): {best:.2} мкс", src.bytes() / 1024);
-    println!("копия построчного ({} КиБ): {best_p:.2} мкс — тысяча аллокаций на чанк", packed.bytes() / 1024);
-    println!("копия с палитрой чанка ({} КиБ): {best_q:.2} мкс", pal.bytes() / 1024);
+    println!(
+        "копия плотного чанка ({} КиБ): {best:.2} мкс",
+        src.bytes() / 1024
+    );
+    println!(
+        "копия построчного ({} КиБ): {best_p:.2} мкс — тысяча аллокаций на чанк",
+        packed.bytes() / 1024
+    );
+    println!(
+        "копия с палитрой чанка ({} КиБ): {best_q:.2} мкс",
+        pal.bytes() / 1024
+    );
     println!();
     println!(
         "{:>16} {:>16} {:>16} {:>16}",

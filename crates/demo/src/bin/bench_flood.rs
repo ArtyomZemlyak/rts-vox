@@ -34,7 +34,14 @@ struct Args {
 }
 
 fn parse() -> Result<Args, String> {
-    let mut a = Args { side: 256, height: 128, diggers: 300, ticks: 2000, seed: 42, rate: 1 };
+    let mut a = Args {
+        side: 256,
+        height: 128,
+        diggers: 300,
+        ticks: 2000,
+        seed: 42,
+        rate: 1,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut num = |name: &str| -> Result<u64, String> {
@@ -51,7 +58,9 @@ fn parse() -> Result<Args, String> {
             "--seed" => a.seed = num("--seed")?,
             "--rate" => a.rate = num("--rate")? as u32,
             "--help" => {
-                println!("bench_flood [--side N] [--height N] [--diggers N] [--ticks N] [--rate N]");
+                println!(
+                    "bench_flood [--side N] [--height N] [--diggers N] [--ticks N] [--rate N]"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("неизвестный ключ {other}")),
@@ -92,21 +101,37 @@ fn main() -> ExitCode {
         nz: a.side,
         ..Default::default()
     };
-    let terrain = Terrain { params, seed: a.seed };
+    let terrain = Terrain {
+        params,
+        seed: a.seed,
+    };
     let mut w = World::new(
         params.nx,
         params.ny,
         params.nz,
         1 << 16,
-        Box::new(Terrain { params, seed: a.seed }),
+        Box::new(Terrain {
+            params,
+            seed: a.seed,
+        }),
     );
 
     println!("прорыв озера по выработанной карте (ADR-145)");
-    println!("мир {}×{}×{}, {} копателей, {} тиков копки\n", a.side, a.height, a.side, a.diggers, a.ticks);
+    println!(
+        "мир {}×{}×{}, {} копателей, {} тиков копки\n",
+        a.side, a.height, a.side, a.diggers, a.ticks
+    );
 
     // --- 1. Выработать карту.
     let t = Instant::now();
-    let mut dig = Dig::clustered(&w, |x, z| terrain.surface(x, z), a.diggers, 2, 12, a.seed ^ 0xF10);
+    let mut dig = Dig::clustered(
+        &w,
+        |x, z| terrain.surface(x, z),
+        a.diggers,
+        2,
+        12,
+        a.seed ^ 0xF10,
+    );
     let mut edits = 0u64;
     for _ in 0..a.ticks {
         dig.step(&mut w, &|x, z| terrain.surface(x, z));
@@ -270,24 +295,29 @@ fn main() -> ExitCode {
     println!("{:<38} {:>9.1} мс", "весь подъём", sweep_ms);
     println!(
         "{:<38} {:>12} {}",
-        "пик: пробегов вошло за шаг", peak_add.1,
+        "пик: пробегов вошло за шаг",
+        peak_add.1,
         format_args!("(уровень {})", peak_add.0)
     );
     println!(
         "{:<38} {:>12} {}",
-        "пик: слияний за шаг", peak_merge.2,
+        "пик: слияний за шаг",
+        peak_merge.2,
         format_args!("(уровень {})", peak_merge.0)
     );
     println!(
         "{:<38} {:>9.1} мкс {}",
-        "пик: время шага", peak_us.4,
+        "пик: время шага",
+        peak_us.4,
         format_args!("(уровень {})", peak_us.0)
     );
     {
         let mut by_us = per_level.clone();
         by_us.sort_by(|a, b| b.4.partial_cmp(&a.4).unwrap());
-        println!("
-самые дорогие шаги (уровень, вошло, слияний, компонент, мкс):");
+        println!(
+            "
+самые дорогие шаги (уровень, вошло, слияний, компонент, мкс):"
+        );
         for r in by_us.iter().take(6) {
             println!("  {:>4} {:>8} {:>8} {:>8} {:>9.1}", r.0, r.1, r.2, r.3, r.4);
         }
@@ -301,7 +331,8 @@ fn main() -> ExitCode {
     println!("{:<38} {:>12}", "максимум живых компонент", max_alive);
     println!(
         "{:<38} {:>12} {}",
-        "пик площади пустот на слое", peak_area.1,
+        "пик площади пустот на слое",
+        peak_area.1,
         format_args!("(слой {})", peak_area.0)
     );
 
@@ -322,10 +353,7 @@ fn main() -> ExitCode {
         "\nпри догоне {} воксел(я/ей) уровня за тик худший тик:",
         a.rate
     );
-    println!(
-        "{:<38} {:>12}",
-        "  пробегов вошло", worst_tick.1
-    );
+    println!("{:<38} {:>12}", "  пробегов вошло", worst_tick.1);
     println!("{:<38} {:>12}", "  слияний", worst_tick.2);
     println!("{:<38} {:>9.1} мкс", "  время", worst_tick.3);
     println!("{:<38} {:>12}", "  на уровне", worst_tick.0);

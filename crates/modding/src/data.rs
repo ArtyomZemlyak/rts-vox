@@ -153,7 +153,11 @@ pub fn load_pack(dir: &Path) -> Result<Pack, LoadError> {
         units.push(build_unit(&where_, def, vm)?);
     }
 
-    Ok(Pack { name, materials, units })
+    Ok(Pack {
+        name,
+        materials,
+        units,
+    })
 }
 
 /// Собрать модель юнита из описания и `.vox`.
@@ -164,7 +168,11 @@ pub fn load_pack(dir: &Path) -> Result<Pack, LoadError> {
 /// в данных, — зашитый танк и загруженный получали разные ядра, оба
 /// верные и разные (ADR-115). Загрузчик проверяет только, что ядро
 /// вообще есть: юнит без ядра неубиваем.
-fn build_unit(where_: &str, def: UnitDef, vm: crate::vox::VoxModel) -> Result<UnitModel, LoadError> {
+fn build_unit(
+    where_: &str,
+    def: UnitDef,
+    vm: crate::vox::VoxModel,
+) -> Result<UnitModel, LoadError> {
     if vm.nx > u8::MAX as u32 || vm.ny > u8::MAX as u32 || vm.nz > u8::MAX as u32 {
         return Err(LoadError::Vox(
             where_.to_string(),

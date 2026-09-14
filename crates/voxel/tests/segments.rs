@@ -7,6 +7,41 @@
 
 use voxel::unit::{Attach, Part, UnitBody, FINISH_BY_PART, FINISH_RUBBER, FINISH_STEEL, TURN};
 
+#[test]
+fn battlefield_walkers_move_every_part_of_the_leg() {
+    for (body, n) in [
+        (voxel::roster::assault_bot(), 2),
+        (voxel::roster::siege_walker(), 4),
+        (voxel::roster::commander(), 2),
+        (voxel::roster::scout_walking(), 2),
+    ] {
+        assert_eq!(body.legs.len(), n);
+        for leg in &body.legs {
+            for (id, at) in [
+                (Some(leg.thigh), leg.hip),
+                (Some(leg.shin), leg.knee),
+                (leg.knee_ball, leg.knee),
+                (leg.ankle_ball, leg.ankle),
+                (leg.foot, leg.ankle),
+            ] {
+                let seg = &body.segments[id.expect("missing moving part") as usize];
+                assert_eq!(seg.attach.at, at);
+                assert!(seg.body.solid_count() > 0);
+            }
+            let foot = &body.segments[leg.foot.unwrap() as usize];
+            assert_eq!(
+                foot.attach.at.1 - foot.attach.pivot.1 as i16,
+                0,
+                "sole must stand on the ground"
+            );
+            assert!(
+                !body.vol.get(leg.ankle.0 as usize, 0, leg.ankle.2 as usize),
+                "static sole left behind in the root"
+            );
+        }
+    }
+}
+
 fn slab(nx: u8, ny: u8, nz: u8) -> UnitBody {
     let mut b = UnitBody::new(nx, ny, nz, 1);
     for z in 0..nz as usize {
@@ -28,14 +63,26 @@ fn a_segment_keeps_its_attachment_through_resampling() {
     let tank = voxel::unit::tank();
     assert!(!tank.segments.is_empty(), "у танка нет наклонных листов");
     let coarse = tank.resampled(200).expect("танк при 200 мм");
-    assert_eq!(coarse.segments.len(), tank.segments.len(), "сегменты потерялись");
+    assert_eq!(
+        coarse.segments.len(),
+        tank.segments.len(),
+        "сегменты потерялись"
+    );
     for (a, b) in tank.segments.iter().zip(&coarse.segments) {
         let (fa, fb) = (a.attach, b.attach);
-        assert_eq!((fa.pitch, fa.yaw, fa.roll), (fb.pitch, fb.yaw, fb.roll), "угол зависит от сетки");
+        assert_eq!(
+            (fa.pitch, fa.yaw, fa.roll),
+            (fb.pitch, fb.yaw, fb.roll),
+            "угол зависит от сетки"
+        );
         assert_eq!(fa.parent, fb.parent);
         assert_eq!(fa.turret, fb.turret);
         assert_eq!(fb.at.0 as i32, fa.at.0 as i32 / 2, "посадка не пересчитана");
-        assert_eq!(fb.pivot.2 as i32, fa.pivot.2 as i32 / 2, "шарнир не пересчитан");
+        assert_eq!(
+            fb.pivot.2 as i32,
+            fa.pivot.2 as i32 / 2,
+            "шарнир не пересчитан"
+        );
         // Габарит сегмента в метрах тот же: вокселей вдвое меньше,
         // с округлением вверх.
         assert_eq!(b.body.vol.nx as u32, (a.body.vol.nx as u32).div_ceil(2));
@@ -64,7 +111,10 @@ fn finish_survives_resampling() {
     assert!(count(&tank, FINISH_RUBBER) > 0, "траки не резина");
     assert!(count(&tank, FINISH_STEEL) > 0, "катки не сталь");
     let coarse = tank.resampled(200).expect("танк при 200 мм");
-    assert!(count(&coarse, FINISH_RUBBER) > 0, "резина пропала при 200 мм");
+    assert!(
+        count(&coarse, FINISH_RUBBER) > 0,
+        "резина пропала при 200 мм"
+    );
     assert!(count(&coarse, FINISH_STEEL) > 0, "сталь пропала при 200 мм");
 }
 
@@ -76,13 +126,21 @@ fn air_takes_no_finish() {
     b.set(1, 1, 1, Part::Armour);
     b.set_finish(0, 0, 0, FINISH_RUBBER);
     b.set_finish(1, 1, 1, FINISH_RUBBER);
-    assert_eq!(b.finish_at(0, 0, 0), FINISH_BY_PART, "воздух получил отделку");
+    assert_eq!(
+        b.finish_at(0, 0, 0),
+        FINISH_BY_PART,
+        "воздух получил отделку"
+    );
     assert_eq!(b.finish_at(1, 1, 1), FINISH_RUBBER);
     // Снятый и поставленный заново воксель помнит отделку: ремонт
     // возвращает машине её вид, а не красит трак краской корпуса.
     assert!(b.remove(1, 1, 1));
     b.set(1, 1, 1, Part::Armour);
-    assert_eq!(b.finish_at(1, 1, 1), FINISH_RUBBER, "ремонт потерял отделку");
+    assert_eq!(
+        b.finish_at(1, 1, 1),
+        FINISH_RUBBER,
+        "ремонт потерял отделку"
+    );
 }
 
 /// **Родитель обязан существовать.** Сегмент, прикреплённый
@@ -91,7 +149,13 @@ fn air_takes_no_finish() {
 #[should_panic(expected = "родитель")]
 fn a_parent_must_exist() {
     let mut b = slab(2, 2, 2);
-    b.push_segment(Attach { parent: 3, ..Attach::flat((0, 0, 0), (0, 0, 0)) }, slab(1, 1, 1));
+    b.push_segment(
+        Attach {
+            parent: 3,
+            ..Attach::flat((0, 0, 0), (0, 0, 0))
+        },
+        slab(1, 1, 1),
+    );
 }
 
 /// Цепочка: сегмент на сегменте разрешён, если родитель добавлен
@@ -99,8 +163,20 @@ fn a_parent_must_exist() {
 #[test]
 fn a_segment_may_hang_on_a_segment() {
     let mut b = slab(2, 2, 2);
-    b.push_segment(Attach { pitch: TURN / 8, ..Attach::flat((2, 0, 1), (0, 0, 0)) }, slab(3, 1, 1));
-    b.push_segment(Attach { parent: 1, ..Attach::flat((3, 0, 0), (0, 0, 0)) }, slab(1, 1, 1));
+    b.push_segment(
+        Attach {
+            pitch: TURN / 8,
+            ..Attach::flat((2, 0, 1), (0, 0, 0))
+        },
+        slab(3, 1, 1),
+    );
+    b.push_segment(
+        Attach {
+            parent: 1,
+            ..Attach::flat((3, 0, 0), (0, 0, 0))
+        },
+        slab(1, 1, 1),
+    );
     assert_eq!(b.segments.len(), 2);
     assert_eq!(b.segments[1].attach.parent, 1);
 }
@@ -129,7 +205,10 @@ fn an_aimed_attachment_faces_its_direction() {
             quads[(y * 4 / TURN) as usize] = true;
         }
     }
-    assert!(quads.iter().all(|&q| q), "ноги не разведены по четырём сторонам: {quads:?}");
+    assert!(
+        quads.iter().all(|&q| q),
+        "ноги не разведены по четырём сторонам: {quads:?}"
+    );
 }
 
 /// **Нога описана цепочкой, и цепочка сходится.** Бедро наведено
@@ -152,12 +231,21 @@ fn a_leg_is_a_chain_from_hip_to_foot() {
             ("ступня", l.foot, l.ankle),
         ] {
             let k = part.unwrap_or_else(|| panic!("у ноги нет части: {name}"));
-            assert_eq!(s.segments[k as usize].attach.at, at, "{name} не в своём шарнире");
+            assert_eq!(
+                s.segments[k as usize].attach.at, at,
+                "{name} не в своём шарнире"
+            );
         }
-        assert!(l.knee.1 < l.hip.1 && l.ankle.1 < l.knee.1, "нога идёт не вниз: {l:?}");
+        assert!(
+            l.knee.1 < l.hip.1 && l.ankle.1 < l.knee.1,
+            "нога идёт не вниз: {l:?}"
+        );
         supports[l.support as usize] = true;
     }
-    assert!(supports.iter().all(|&s| s), "ноги не разобраны по опорам: {supports:?}");
+    assert!(
+        supports.iter().all(|&s| s),
+        "ноги не разобраны по опорам: {supports:?}"
+    );
     // Смена сетки пересчитывает шарниры тем же отношением, что
     // и крепления, а номера звеньев не трогает.
     let coarse = s.resampled(200).expect("шагоход при 200 мм");

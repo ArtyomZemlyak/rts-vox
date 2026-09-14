@@ -64,7 +64,8 @@ mod tests {
                     ("fim", fim(&g, &goals, &h).0),
                 ] {
                     assert_eq!(
-                        field, reference,
+                        field,
+                        reference,
                         "{name} разошёлся с эталоном: {} n={n}",
                         scene.name()
                     );
@@ -115,6 +116,9 @@ mod tests {
         let (t, _) = fmm(&g, &goals, &h_exact_floor);
         assert_eq!(t[goals[0]], 0);
         assert!(max_finite(&t) > 100, "поле подозрительно плоское");
-        assert_eq!(t.iter().filter(|&&v| v == INF).count(), g.w * g.h - g.inner_area());
+        assert_eq!(
+            t.iter().filter(|&&v| v == INF).count(),
+            g.w * g.h - g.inner_area()
+        );
     }
 }

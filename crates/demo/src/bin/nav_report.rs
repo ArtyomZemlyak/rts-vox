@@ -24,7 +24,13 @@ struct Args {
 }
 
 fn parse() -> Result<Args, String> {
-    let mut a = Args { side: 256, height: 128, diggers: 300, ticks: 2000, seed: 42 };
+    let mut a = Args {
+        side: 256,
+        height: 128,
+        diggers: 300,
+        ticks: 2000,
+        seed: 42,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut num = |name: &str| -> Result<u64, String> {
@@ -75,15 +81,28 @@ fn main() -> ExitCode {
         nz: a.side,
         ..Default::default()
     };
-    let terrain = Terrain { params, seed: a.seed };
+    let terrain = Terrain {
+        params,
+        seed: a.seed,
+    };
     let mut w = World::new(
         params.nx,
         params.ny,
         params.nz,
         1 << 16,
-        Box::new(Terrain { params, seed: a.seed }),
+        Box::new(Terrain {
+            params,
+            seed: a.seed,
+        }),
     );
-    let mut dig = Dig::clustered(&w, |x, z| terrain.surface(x, z), a.diggers, 2, 12, a.seed ^ 0xF10);
+    let mut dig = Dig::clustered(
+        &w,
+        |x, z| terrain.surface(x, z),
+        a.diggers,
+        2,
+        12,
+        a.seed ^ 0xF10,
+    );
     let mut edits = 0u64;
     for _ in 0..a.ticks {
         dig.step(&mut w, &|x, z| terrain.surface(x, z));
@@ -96,8 +115,14 @@ fn main() -> ExitCode {
     let g_ms = best_ms(|| g.build(&nav), 3);
     let (gw, gh) = nav.dims();
 
-    println!("граф секторов по объёму — мир {}×{}×{}", a.side, a.height, a.side);
-    println!("{} копателей, {} тиков, {edits} правок\n", a.diggers, a.ticks);
+    println!(
+        "граф секторов по объёму — мир {}×{}×{}",
+        a.side, a.height, a.side
+    );
+    println!(
+        "{} копателей, {} тиков, {edits} правок\n",
+        a.diggers, a.ticks
+    );
     println!("{:<34} {:>12}", "нав-клеток", gw * gh);
     println!("{:<34} {:>12}", "узлов «клетка и уровень»", g.nodes);
     println!("{:<34} {:>12}", "рёбер", g.edges);
@@ -112,7 +137,10 @@ fn main() -> ExitCode {
     println!("{:<34} {:>12}", "  сторона сектора, клеток", SEC);
     println!("{:<34} {:>12}", "порталов", st.portals);
     println!("{:<34} {:>12}", "рёбер между порталами", st.edges);
-    println!("{:<34} {:>12}", "решений «внутри сектора»", st.sector_solves);
+    println!(
+        "{:<34} {:>12}",
+        "решений «внутри сектора»", st.sector_solves
+    );
     println!("{:<34} {:>12}", "  узлов посещено ими", st.visited);
     println!("{:<34} {:>9.1} мс", "сборка графа секторов", sg_ms);
     println!(
@@ -158,8 +186,16 @@ fn main() -> ExitCode {
         .filter(|&n| g.comp_of(n as usize) == big)
         .collect();
     let cell_of = |n: u32| g.cell_of(n as usize);
-    let first = in_big.iter().copied().min_by_key(|&n| cell_of(n)).unwrap_or(NO_NODE);
-    let last = in_big.iter().copied().max_by_key(|&n| cell_of(n)).unwrap_or(NO_NODE);
+    let first = in_big
+        .iter()
+        .copied()
+        .min_by_key(|&n| cell_of(n))
+        .unwrap_or(NO_NODE);
+    let last = in_big
+        .iter()
+        .copied()
+        .max_by_key(|&n| cell_of(n))
+        .unwrap_or(NO_NODE);
     let mid = in_big.get(in_big.len() / 2).copied().unwrap_or(NO_NODE);
     let picks: [(u32, u32, &str); 3] = [
         (first, last, "через всю компоненту"),
@@ -201,13 +237,29 @@ fn main() -> ExitCode {
         let mut each: Vec<f64> = Vec::new();
         for _ in 0..5 {
             let t0 = Instant::now();
-            fs = nav::sectors::solve_field(&sg, &g, &mut f, &mut ws2, target, &nav::godunov::h_exact_floor);
+            fs = nav::sectors::solve_field(
+                &sg,
+                &g,
+                &mut f,
+                &mut ws2,
+                target,
+                &nav::godunov::h_exact_floor,
+            );
             each.push(t0.elapsed().as_secs_f64() * 1e3);
         }
         let ms = each.iter().cloned().fold(f64::MAX, f64::min);
-        println!("{:<34} {:>12?}", "поле, каждый прогон, мс", each.iter().map(|v| (v * 10.0).round() / 10.0).collect::<Vec<_>>());
-        println!("
-{:<34} {:>12}", "поле по секторам: решено секторов", fs.sectors);
+        println!(
+            "{:<34} {:>12?}",
+            "поле, каждый прогон, мс",
+            each.iter()
+                .map(|v| (v * 10.0).round() / 10.0)
+                .collect::<Vec<_>>()
+        );
+        println!(
+            "
+{:<34} {:>12}",
+            "поле по секторам: решено секторов", fs.sectors
+        );
         println!("{:<34} {:>12}", "  годуновских обновлений", fs.updates);
         println!("{:<34} {:>12}", "  узлов получило направление", fs.reached);
         // Кто остался без направления. Доля важнее факта: «часть узлов
@@ -215,42 +267,50 @@ fn main() -> ExitCode {
         let cov = nav::sectors::coverage(&sg, &g, &f, &ws2);
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "  из них цели компонент", cov.goals,
+            "  из них цели компонент",
+            cov.goals,
             100.0 * cov.goals as f64 / cov.nodes as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "  в глухих секторах", cov.dead,
+            "  в глухих секторах",
+            cov.dead,
             100.0 * cov.dead as f64 / cov.nodes as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "  ДЫР (дойти было куда)", cov.holes,
+            "  ДЫР (дойти было куда)",
+            cov.holes,
             100.0 * cov.holes as f64 / cov.nodes as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "    из них у границы сектора", cov.holes_touching,
+            "    из них у границы сектора",
+            cov.holes_touching,
             100.0 * cov.holes_touching as f64 / cov.holes.max(1) as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "    кусок сектора без засева", cov.holes_unseeded,
+            "    кусок сектора без засева",
+            cov.holes_unseeded,
             100.0 * cov.holes_unseeded as f64 / cov.holes.max(1) as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "    засев в куске есть, не дошло", cov.holes_unreached,
+            "    засев в куске есть, не дошло",
+            cov.holes_unreached,
             100.0 * cov.holes_unreached as f64 / cov.holes.max(1) as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "  кусков в секторах без засева", cov.pieces_unseeded,
+            "  кусков в секторах без засева",
+            cov.pieces_unseeded,
             100.0 * cov.pieces_unseeded as f64 / cov.pieces.max(1) as f64
         );
         println!(
             "{:<34} {:>12} {:>7.1}%",
-            "    из них у границы (есть выход)", cov.pieces_unseeded_touching,
+            "    из них у границы (есть выход)",
+            cov.pieces_unseeded_touching,
             100.0 * cov.pieces_unseeded_touching as f64 / cov.pieces_unseeded.max(1) as f64
         );
         println!("{:<34} {:>12}", "  сторон порталов живых", fs.live_ports);
@@ -276,7 +336,10 @@ fn main() -> ExitCode {
             params.ny,
             params.nz,
             1 << 16,
-            Box::new(Terrain { params, seed: a.seed }),
+            Box::new(Terrain {
+                params,
+                seed: a.seed,
+            }),
         );
         let mut d2 = Dig::clustered(
             &w2,
@@ -332,7 +395,10 @@ fn main() -> ExitCode {
             params.ny,
             params.nz,
             1 << 16,
-            Box::new(Terrain { params, seed: a.seed }),
+            Box::new(Terrain {
+                params,
+                seed: a.seed,
+            }),
         );
         let mut d3 = Dig::clustered(
             &w3,
@@ -382,13 +448,18 @@ fn main() -> ExitCode {
             }
             ticks += 1;
         }
-        println!("\n{:<34} {:>12} {:>12}", "секторов поля за 4 цикла", "пересчёт", "готовыми");
+        println!(
+            "\n{:<34} {:>12} {:>12}",
+            "секторов поля за 4 цикла", "пересчёт", "готовыми"
+        );
         println!("{:<34} {:>12} {:>12}", "", solved, reused);
         println!("{:<34} {:>12}", "  тиков на цикл", nf.last_ticks);
         println!(
             "{:<34} {:>12?}",
             "  цикл целиком, мс",
-            each.iter().map(|v| (v * 10.0).round() / 10.0).collect::<Vec<_>>()
+            each.iter()
+                .map(|v| (v * 10.0).round() / 10.0)
+                .collect::<Vec<_>>()
         );
         if let Some(last) = each.last() {
             println!(
@@ -405,8 +476,13 @@ fn main() -> ExitCode {
     }
 
     println!("\nЦена иерархии — сборка графа секторов; цена запроса — таблица выше.");
-    println!("Поле по всей карте стоит 40 мс (ADR-138); сектор — это {:.0} узлов",
-             g.nodes as f64 / (sw * sh).max(1) as f64);
-    println!("вместо {}, то есть во столько же раз меньше работы на одно поле.", g.nodes);
+    println!(
+        "Поле по всей карте стоит 40 мс (ADR-138); сектор — это {:.0} узлов",
+        g.nodes as f64 / (sw * sh).max(1) as f64
+    );
+    println!(
+        "вместо {}, то есть во столько же раз меньше работы на одно поле.",
+        g.nodes
+    );
     ExitCode::SUCCESS
 }

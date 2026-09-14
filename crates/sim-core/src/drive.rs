@@ -51,7 +51,11 @@ impl Default for Want {
     /// Умолчание — «ехать некуда», а не «на восток». Ноль здесь
     /// значил бы, что свежий слот буфера трогается сам.
     fn default() -> Want {
-        Want { way: NO_WAY, push_x: 0, push_z: 0 }
+        Want {
+            way: NO_WAY,
+            push_x: 0,
+            push_z: 0,
+        }
     }
 }
 
@@ -103,6 +107,35 @@ fn units_per_metre() -> i32 {
 /// Полный оборот в радианах, `710/113`: ошибка `8.5e-8`, и дробь
 /// точная в `Fx` — десятичная запись `6.2831…` точной не была бы.
 const TAU: Fx = Fx::from_ratio(710, 113);
+
+/// Cadence from accepted translation plus support travel along a turning arc.
+/// Derived once per chassis/phase. No per-unit square root or new state.
+#[derive(Clone, Copy)]
+pub(crate) struct StepCycle {
+    linear: Fx,
+    turn: Fx,
+}
+impl StepCycle {
+    pub fn of(c: &Chassis) -> Option<Self> {
+        c.gait.map(|g| {
+            let cm_per_unit = (voxel::unit::WORLD_MM as i32 / 10).max(1);
+            let x = Fx::from_int(c.support_x_cm);
+            let z = Fx::from_int(c.support_z_cm);
+            let radius_cm = x.mul(x).add(z.mul(z)).sqrt();
+            Self {
+                linear: Fx::from_ratio(angle::FULL * cm_per_unit, g.stride_cm.max(1)),
+                // Both heading and phase use the same binary full turn.
+                turn: TAU.mul(radius_cm).div(Fx::from_int(g.stride_cm.max(1))),
+            }
+        })
+    }
+    pub fn advance(self, path: Fx, yaw_step: i32) -> i32 {
+        path.abs()
+            .mul(self.linear)
+            .add(Fx::from_int(yaw_step.abs()).mul(self.turn))
+            .to_int_trunc()
+    }
+}
 
 impl Limits {
     /// Перевести числа ходовой в пределы за тик.
@@ -190,7 +223,14 @@ pub struct Move {
 /// чтобы не делить на каждом юните.
 ///
 /// Возвращает новое состояние хода и шаг за этот тик.
-pub fn advance(d: Drive, want: i32, vmax: Fx, l: &Limits, factor: Fx, inv_tick: Fx) -> (Drive, Move) {
+pub fn advance(
+    d: Drive,
+    want: i32,
+    vmax: Fx,
+    l: &Limits,
+    factor: Fx,
+    inv_tick: Fx,
+) -> (Drive, Move) {
     let accel = l.accel.mul(factor);
     let brake = l.brake.mul(factor);
     let alpha = l.turn_acc.mul(factor).to_int_trunc().max(1);
@@ -232,14 +272,20 @@ pub fn advance(d: Drive, want: i32, vmax: Fx, l: &Limits, factor: Fx, inv_tick: 
     } else {
         Fx::max(aim, d.vel.sub(brake))
     };
-    // Клэмп сверху обязателен отдельно: предельная скорость падает
-    // от уклона, и машина, въехавшая в гору на полном ходу, обязана
-    // сбросить до горного предела, а не ползти с прежней.
-    let vel = Fx::max(Fx::ZERO, Fx::min(vel, vmax));
+    // A lower powered speed (slope or engine damage) is a braking target,
+    // not an impulse that erases momentum in one tick.
+    let vel = Fx::max(Fx::ZERO, vel);
     let step = vel.mul(inv_tick);
     (
-        Drive { head, vel, yaw_rate: rate },
-        Move { dx: step.mul(angle::cos(head)), dz: step.mul(angle::sin(head)) },
+        Drive {
+            head,
+            vel,
+            yaw_rate: rate,
+        },
+        Move {
+            dx: step.mul(angle::cos(head)),
+            dz: step.mul(angle::sin(head)),
+        },
     )
 }
 
@@ -268,7 +314,10 @@ mod tests {
     /// тяга на массу — метры в секунду за секунду, дальше в единицы
     /// и на тик.
     fn accel_per_tick(c: &Chassis) -> Fx {
-        Fx::from_ratio(c.thrust * (1000 / voxel::unit::WORLD_MM as i32), c.mass * TICKS_PER_SECOND)
+        Fx::from_ratio(
+            c.thrust * (1000 / voxel::unit::WORLD_MM as i32),
+            c.mass * TICKS_PER_SECOND,
+        )
     }
 
     /// **Машина разгоняется, а не прыгает.** Первый тик не даёт
@@ -281,7 +330,10 @@ mod tests {
         let mut d = Drive::default();
         let (first, _) = advance(d, 0, vmax, &l, Fx::ONE, inv_tick());
         assert!(first.vel.raw() > 0, "машина не тронулась вовсе");
-        assert!(first.vel.raw() < vmax.raw(), "первый же тик дал предельную скорость");
+        assert!(
+            first.vel.raw() < vmax.raw(),
+            "первый же тик дал предельную скорость"
+        );
         let mut ticks = 0;
         while d.vel.raw() < vmax.raw() && ticks < 1000 {
             let (n, _) = advance(d, 0, vmax, &l, Fx::ONE, inv_tick());
@@ -313,7 +365,11 @@ mod tests {
             heavy.sub(Fx::from_ratio(1, 2)).abs() < Fx::from_ratio(1, 100),
             "множитель восьмикратной массы {heavy:?}, ждали половину"
         );
-        assert_eq!(drive_factor(nominal, nominal), Fx::ONE, "номинал не единица");
+        assert_eq!(
+            drive_factor(nominal, nominal),
+            Fx::ONE,
+            "номинал не единица"
+        );
         let run = |factor: Fx| -> i32 {
             let mut d = Drive::default();
             let mut ticks = 0;
@@ -337,14 +393,25 @@ mod tests {
         let l = limits();
         let vmax = Fx::from_int(30);
         let mut d = Drive::default();
-        let plan = [(0, 40), (angle::HALF, 40), (NO_WAY, 20), (angle::QUARTER, 40)];
+        let plan = [
+            (0, 40),
+            (angle::HALF, 40),
+            (NO_WAY, 20),
+            (angle::QUARTER, 40),
+        ];
         let (acc, brk) = (accel_per_tick(&tracked()), l.brake);
         for (want, n) in plan {
             for _ in 0..n {
                 let (nd, _) = advance(d, want, vmax, &l, Fx::ONE, inv_tick());
                 let dv = nd.vel.sub(d.vel);
-                assert!(dv.raw() <= acc.raw() + 1, "разгон за тик {dv:?} больше предела {acc:?}");
-                assert!(dv.raw() >= -brk.raw() - 1, "торможение за тик {dv:?} больше предела {brk:?}");
+                assert!(
+                    dv.raw() <= acc.raw() + 1,
+                    "разгон за тик {dv:?} больше предела {acc:?}"
+                );
+                assert!(
+                    dv.raw() >= -brk.raw() - 1,
+                    "торможение за тик {dv:?} больше предела {brk:?}"
+                );
                 assert!(
                     (nd.yaw_rate - d.yaw_rate).abs() <= l.turn_acc.to_int_trunc().max(1),
                     "доворот сменился рывком: {} → {}",
@@ -371,7 +438,11 @@ mod tests {
         // выйдет в створ порога.
         let run = |c: &Chassis| -> (Fx, Fx, i32) {
             let l = Limits::of(c, TICKS_PER_SECOND);
-            let mut d = Drive { head: 0, vel: vmax, yaw_rate: 0 };
+            let mut d = Drive {
+                head: 0,
+                vel: vmax,
+                yaw_rate: 0,
+            };
             let mut moved = Fx::ZERO;
             let mut ticks = 0;
             // **Наименьшая** скорость за разворот: шагающая обязана
@@ -394,13 +465,26 @@ mod tests {
         let (arc, vel_arc, t_arc) = run(&tracked());
         let (spot, vel_spot, t_spot) = run(&walking());
 
-        assert!(arc > Fx::from_int(5), "гусеничная развернулась не двигаясь: путь {arc:?}");
+        assert!(
+            arc > Fx::from_int(5),
+            "гусеничная развернулась не двигаясь: путь {arc:?}"
+        );
         assert!(vel_arc.raw() > 0, "гусеничная встала в развороте");
         // Шагающая гасит ход и стоит; путь — только выбег торможения.
-        let stop = vmax.mul(vmax).div(Fx::from_int(2)).div(Limits::of(&walking(), TICKS_PER_SECOND).brake.mul(Fx::from_int(TICKS_PER_SECOND)));
-        assert!(spot < stop.add(Fx::ONE), "шагающая шла в развороте: путь {spot:?}");
+        let stop = vmax.mul(vmax).div(Fx::from_int(2)).div(
+            Limits::of(&walking(), TICKS_PER_SECOND)
+                .brake
+                .mul(Fx::from_int(TICKS_PER_SECOND)),
+        );
+        assert!(
+            spot < stop.add(Fx::ONE),
+            "шагающая шла в развороте: путь {spot:?}"
+        );
         assert_eq!(vel_spot, Fx::ZERO, "шагающая не встала в развороте");
-        assert!(t_arc > 5 && t_spot > 5, "разворот занял {t_arc} и {t_spot} тиков");
+        assert!(
+            t_arc > 5 && t_spot > 5,
+            "разворот занял {t_arc} и {t_spot} тиков"
+        );
     }
 
     /// **Доворот ограничен.** За тик курс не меняется больше, чем
@@ -409,7 +493,11 @@ mod tests {
     fn the_turn_rate_is_a_limit() {
         let l = limits();
         for want in [1, 1000, angle::QUARTER, angle::HALF, angle::FULL - 1] {
-            let mut d = Drive { head: 0, vel: Fx::ZERO, yaw_rate: 0 };
+            let mut d = Drive {
+                head: 0,
+                vel: Fx::ZERO,
+                yaw_rate: 0,
+            };
             for _ in 0..100 {
                 let (n, _) = advance(d, want, Fx::from_int(6), &l, Fx::ONE, inv_tick());
                 assert!(
@@ -429,7 +517,11 @@ mod tests {
     fn the_heading_settles_without_overshoot() {
         let l = limits();
         for want in [300, angle::QUARTER, angle::HALF, -angle::QUARTER] {
-            let mut d = Drive { head: 0, vel: Fx::ZERO, yaw_rate: 0 };
+            let mut d = Drive {
+                head: 0,
+                vel: Fx::ZERO,
+                yaw_rate: 0,
+            };
             let sign = angle::diff(want, 0).signum();
             for tick in 0..400 {
                 let (n, _) = advance(d, want, Fx::from_int(6), &l, Fx::ONE, inv_tick());
@@ -455,7 +547,11 @@ mod tests {
     fn with_nowhere_to_go_the_machine_brakes_and_keeps_its_heading() {
         let l = limits();
         let head = 12345;
-        let mut d = Drive { head, vel: Fx::from_int(30), yaw_rate: 0 };
+        let mut d = Drive {
+            head,
+            vel: Fx::from_int(30),
+            yaw_rate: 0,
+        };
         let (first, _) = advance(d, NO_WAY, Fx::from_int(30), &l, Fx::ONE, inv_tick());
         assert!(first.vel.raw() > 0, "машина встала за один тик");
         let mut ticks = 0;
@@ -481,7 +577,11 @@ mod tests {
         let vmax = Fx::from_int(6);
         // Курс на юг, цель на восток, но за один тик машина
         // доворачивает лишь малость — значит и едет почти на юг.
-        let d = Drive { head: angle::QUARTER, vel: vmax, yaw_rate: 0 };
+        let d = Drive {
+            head: angle::QUARTER,
+            vel: vmax,
+            yaw_rate: 0,
+        };
         let (n, m) = advance(d, 0, vmax, &l, Fx::ONE, inv_tick());
         assert!(m.dz.raw() > 0, "шаг не по курсу");
         assert!(
@@ -490,23 +590,34 @@ mod tests {
             m.dx,
             m.dz
         );
-        assert!(angle::diff(n.head, angle::QUARTER) < 0, "доворот пошёл не в ту сторону");
+        assert!(
+            angle::diff(n.head, angle::QUARTER) < 0,
+            "доворот пошёл не в ту сторону"
+        );
     }
 
-    /// **Предельная скорость соблюдается.** Уклон её опускает,
-    /// и машина обязана сбросить, а не ехать с прежней.
+    /// A new speed target must be reached by finite braking, including zero.
     #[test]
-    fn the_speed_limit_holds_when_the_slope_lowers_it() {
+    fn a_lower_speed_target_brakes_without_erasing_momentum() {
         let l = limits();
-        let mut d = Drive { head: 0, vel: Fx::from_int(6), yaw_rate: 0 };
-        let uphill = Fx::from_int(6).mul(Fx::from_ratio(60, 100));
-        for _ in 0..60 {
-            let (n, m) = advance(d, 0, uphill, &l, Fx::ONE, inv_tick());
-            d = n;
-            assert!(d.vel.raw() <= uphill.raw(), "скорость выше предела на подъёме");
-            assert!(m.dx.raw() <= uphill.mul(inv_tick()).raw() + 1);
+        for target in [Fx::from_int(3), Fx::ZERO] {
+            let mut d = Drive {
+                head: 0,
+                vel: Fx::from_int(60),
+                yaw_rate: 0,
+            };
+            for tick in 0..120 {
+                let (n, m) = advance(d, 0, target, &l, Fx::ONE, inv_tick());
+                assert!(d.vel.sub(n.vel) <= l.brake);
+                assert!(n.vel >= target);
+                assert_eq!(m.dx, n.vel.mul(inv_tick()));
+                if tick == 0 {
+                    assert!(n.vel > target);
+                }
+                d = n;
+            }
+            assert_eq!(d.vel, target);
         }
-        assert_eq!(d.vel, uphill, "машина не вышла на горный предел");
     }
 
     /// **Виды ходовой отличаются не на словах.** Гусеничная тяжелее
@@ -520,14 +631,28 @@ mod tests {
         );
         assert_ne!(a, b, "пределы видов совпали");
         assert!(a.pivot_speed.raw() > 0 && b.pivot_speed == Fx::ZERO);
-        assert!(a.turn_acc.raw() > 0 && b.turn_acc.raw() > 0, "без углового ускорения нет доворота");
+        assert!(
+            a.turn_acc.raw() > 0 && b.turn_acc.raw() > 0,
+            "без углового ускорения нет доворота"
+        );
     }
 
     /// **Кубический корень честный.** Целочисленный, вниз, на всём
     /// диапазоне, который сюда приходит.
     #[test]
     fn the_integer_cube_root_is_exact() {
-        for v in [0u128, 1, 7, 8, 9, 26, 27, 1_000_000_000, 999_999_999_999, 1u128 << 90] {
+        for v in [
+            0u128,
+            1,
+            7,
+            8,
+            9,
+            26,
+            27,
+            1_000_000_000,
+            999_999_999_999,
+            1u128 << 90,
+        ] {
             let r = icbrt(v);
             assert!(r * r * r <= v, "корень {r} из {v} велик");
             assert!((r + 1) * (r + 1) * (r + 1) > v, "корень {r} из {v} мал");

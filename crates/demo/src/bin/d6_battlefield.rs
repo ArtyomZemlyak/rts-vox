@@ -65,7 +65,11 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, side: 256, dump_hash: false }
+        Args {
+            seed: 42,
+            side: 256,
+            dump_hash: false,
+        }
     }
 }
 
@@ -176,13 +180,27 @@ fn main() -> ExitCode {
     };
 
     let side = a.side;
-    let ridge = Ridge { nx: side, ny: 64, nz: side, at: side / 2, half: 5, top: 40 };
+    let ridge = Ridge {
+        nx: side,
+        ny: 64,
+        nz: side,
+        at: side / 2,
+        half: 5,
+        top: 40,
+    };
     let mut w = World::new(
         side,
         64,
         side,
         20_000,
-        Box::new(Ridge { nx: side, ny: 64, nz: side, at: side / 2, half: 5, top: 40 }),
+        Box::new(Ridge {
+            nx: side,
+            ny: 64,
+            nz: side,
+            at: side / 2,
+            half: 5,
+            top: 40,
+        }),
     );
     let mut hash = RunHash::new();
 
@@ -271,15 +289,11 @@ fn main() -> ExitCode {
 
     println!(
         "{:<40} {:>10} {:>10}",
-        "линия огня на уровне пола",
-        los0.clear,
-        los2.clear
+        "линия огня на уровне пола", los0.clear, los2.clear
     );
     println!(
         "{:<40} {:>10} {:>10}",
-        "линия огня над гребнем",
-        los_hi0.clear,
-        los_hi1.clear
+        "линия огня над гребнем", los_hi0.clear, los_hi1.clear
     );
     println!("{:<40} {:>10} {:>10}", "маршрут найден", r0.found, r1.found);
     // Снос гребня открывает линию огня и маршрута не даёт: дно выемки
@@ -287,11 +301,12 @@ fn main() -> ExitCode {
     // коридор — и стоит он **минус два** перехода (ADR-143).
     println!(
         "{:<40} {:>10} {:>10}",
-        "  после одного лишь сноса гребня",
-        "",
-        route_crest
+        "  после одного лишь сноса гребня", "", route_crest
     );
-    println!("{:<40} {:>10} {:>10}", "порталов в графе", st0.portals, st1.portals);
+    println!(
+        "{:<40} {:>10} {:>10}",
+        "порталов в графе", st0.portals, st1.portals
+    );
     // Не булева проходимость, а **рёбра**: над грядой небо, и клетка
     // на её гребне проходима что до подрыва, что после. Сцена, мерившая
     // клетки, показывала одно и то же число дважды (ADR-117, ADR-143).
@@ -309,9 +324,7 @@ fn main() -> ExitCode {
     );
     println!(
         "{:<40} {:>10} {:>10}",
-        "  из них после сноса гребня",
-        "",
-        links_crest
+        "  из них после сноса гребня", "", links_crest
     );
 
     println!("\n{:<40} {:>12}", "работа", "");
@@ -367,7 +380,11 @@ fn main() -> ExitCode {
     // Порог берётся по ХУДШЕЙ из двух сборок: на нетронутой карте
     // граф не дешевле, а проверять надо обе.
     let worst_build = build0_ms.max(build1_ms);
-    let verdict = if worst_build <= BUDGET_MS { "держится" } else { "ПРЕВЫШЕН" };
+    let verdict = if worst_build <= BUDGET_MS {
+        "держится"
+    } else {
+        "ПРЕВЫШЕН"
+    };
     println!("порог {BUDGET_MS} мс на перестройку графа: {worst_build:.3} мс — {verdict}");
     if worst_build > BUDGET_MS {
         ok = false;

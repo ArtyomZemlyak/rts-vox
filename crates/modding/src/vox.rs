@@ -123,12 +123,7 @@ pub fn read(bytes: &[u8]) -> Result<VoxModel, VoxError> {
                 let (a, b, d) = (c.u32()?, c.u32()?, c.u32()?);
                 // Файл держит вверх z, движок — y.
                 let (nx, ny, nz) = (a, d, b);
-                if nx == 0
-                    || ny == 0
-                    || nz == 0
-                    || nx > MAX_SIDE
-                    || ny > MAX_SIDE
-                    || nz > MAX_SIDE
+                if nx == 0 || ny == 0 || nz == 0 || nx > MAX_SIDE || ny > MAX_SIDE || nz > MAX_SIDE
                 {
                     return Err(VoxError::Size(nx, ny, nz));
                 }
@@ -231,7 +226,12 @@ mod tests {
                 }
             }
         }
-        VoxModel { nx: 5, ny: 4, nz: 3, voxels }
+        VoxModel {
+            nx: 5,
+            ny: 4,
+            nz: 3,
+            voxels,
+        }
     }
 
     #[test]
@@ -244,7 +244,12 @@ mod tests {
     /// модели: на кубе перестановка осей не видна.
     #[test]
     fn axes_are_swapped_exactly_once() {
-        let m = VoxModel { nx: 7, ny: 3, nz: 5, voxels: vec![(6, 2, 4, 9)] };
+        let m = VoxModel {
+            nx: 7,
+            ny: 3,
+            nz: 5,
+            voxels: vec![(6, 2, 4, 9)],
+        };
         let bytes = write(&m);
         // В файле стороны лежат как (x, z, y) = (7, 5, 3).
         let back = read(&bytes).unwrap();
@@ -286,7 +291,12 @@ mod tests {
 
     #[test]
     fn a_voxel_outside_the_declared_size_is_an_error() {
-        let m = VoxModel { nx: 2, ny: 2, nz: 2, voxels: vec![(0, 0, 0, 1)] };
+        let m = VoxModel {
+            nx: 2,
+            ny: 2,
+            nz: 2,
+            voxels: vec![(0, 0, 0, 1)],
+        };
         let mut b = write(&m);
         let at = b.windows(4).position(|w| w == b"XYZI").unwrap();
         b[at + 16] = 200; // x = 200 при nx = 2

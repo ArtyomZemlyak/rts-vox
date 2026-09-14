@@ -64,7 +64,10 @@ impl Fleet {
     }
 
     pub fn spawn(&mut self, template: u16) -> UnitId {
-        assert!((template as usize) < self.templates.len(), "нет такого шаблона");
+        assert!(
+            (template as usize) < self.templates.len(),
+            "нет такого шаблона"
+        );
         self.live += 1;
         if self.free_head != NIL {
             let id = self.free_head;
@@ -72,10 +75,16 @@ impl Fleet {
                 unreachable!("free-list указывает на живой слот")
             };
             self.free_head = next;
-            self.slots[id as usize] = Slot::Live { template, own: None };
+            self.slots[id as usize] = Slot::Live {
+                template,
+                own: None,
+            };
             return id;
         }
-        self.slots.push(Slot::Live { template, own: None });
+        self.slots.push(Slot::Live {
+            template,
+            own: None,
+        });
         (self.slots.len() - 1) as UnitId
     }
 
@@ -124,7 +133,11 @@ impl Fleet {
     }
 
     pub fn stats(&self) -> FleetStats {
-        FleetStats { live: self.live, damaged: self.damaged, copies: self.copies }
+        FleetStats {
+            live: self.live,
+            damaged: self.damaged,
+            copies: self.copies,
+        }
     }
 
     /// Байты флота: шаблоны плюс собственные тома повреждённых.
@@ -237,7 +250,10 @@ mod tests {
         }
         assert!(!f.status(ids[0], &mut b).alive);
         for &id in &ids[1..] {
-            assert!(f.status(id, &mut b).alive, "чужой юнит умер вместе с первым");
+            assert!(
+                f.status(id, &mut b).alive,
+                "чужой юнит умер вместе с первым"
+            );
         }
     }
 

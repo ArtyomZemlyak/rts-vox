@@ -8,7 +8,9 @@ use std::time::Instant;
 
 use fx::rng::Rng;
 use voxel::topo::stage_a::Adjacency;
-use voxel::topo::unit::{cannot_detach, core_connectivity, core_connectivity_reference, CoreBufs, UnitVol};
+use voxel::topo::unit::{
+    cannot_detach, core_connectivity, core_connectivity_reference, CoreBufs, UnitVol,
+};
 use voxel::topo::unit_scene::{apply_hit, apply_hit_at, build_unit, UnitShape};
 
 fn section(t: &str) {
@@ -31,7 +33,9 @@ fn time_us(mut f: impl FnMut() -> u64, reps: usize) -> f64 {
 }
 
 fn main() {
-    println!("тома юнитов при отношении масштабов k=2 (ADR-019): воксель тела вдвое мельче мирового");
+    println!(
+        "тома юнитов при отношении масштабов k=2 (ADR-019): воксель тела вдвое мельче мирового"
+    );
 
     let mut b = CoreBufs::new();
 
@@ -45,7 +49,10 @@ fn main() {
         let core = shape.core();
         let rep = core_connectivity(&v, &mut b, core, 2);
         assert!(rep.core_alive, "{}: ядро в пустоте", shape.name());
-        let fast = time_us(|| core_connectivity(&v, &mut b, core, 2).attached as u64, 20_000);
+        let fast = time_us(
+            || core_connectivity(&v, &mut b, core, 2).attached as u64,
+            20_000,
+        );
         let slow = time_us(|| core_connectivity_reference(&v, core, 2).0 as u64, 2_000);
         println!(
             "{:<20} {:>10} {:>9} {:>10} {:>12.3} {:>14.2} {:>8.1}x",
@@ -76,10 +83,16 @@ fn main() {
             }
             let rep = core_connectivity(&v, &mut b, core, 2);
             if !rep.core_alive {
-                println!("{:<20} {hits:>10}   ядро разрушено — связность не нужна", shape.name());
+                println!(
+                    "{:<20} {hits:>10}   ядро разрушено — связность не нужна",
+                    shape.name()
+                );
                 continue;
             }
-            let us = time_us(|| core_connectivity(&v, &mut b, core, 2).attached as u64, 20_000);
+            let us = time_us(
+                || core_connectivity(&v, &mut b, core, 2).attached as u64,
+                20_000,
+            );
             println!(
                 "{:<20} {hits:>10} {:>10} {:>10} {:>12} {:>12.3}",
                 shape.name(),
@@ -107,7 +120,10 @@ fn main() {
         let mut removed = Vec::new();
         let n = apply_hit_at(&mut v, tx, ty, tz, 2, &mut removed);
         let rep = core_connectivity(&v, &mut b, core, 2);
-        let us = time_us(|| core_connectivity(&v, &mut b, core, 2).attached as u64, 20_000);
+        let us = time_us(
+            || core_connectivity(&v, &mut b, core, 2).attached as u64,
+            20_000,
+        );
         println!(
             "{:<20} {n:>12} {:>10} {:>10} {:>14.3}",
             shape.name(),
@@ -187,7 +203,10 @@ fn main() {
     section("5. Смета боя");
     let v = build_unit(UnitShape::Tank, 1);
     let core = UnitShape::Tank.core();
-    let per_unit = time_us(|| core_connectivity(&v, &mut b, core, 2).attached as u64, 20_000);
+    let per_unit = time_us(
+        || core_connectivity(&v, &mut b, core, 2).attached as u64,
+        20_000,
+    );
     println!("проверка одного танка целиком: {per_unit:.3} мкс\n");
     println!(
         "{:>18} {:>14} {:>16} {:>16}",

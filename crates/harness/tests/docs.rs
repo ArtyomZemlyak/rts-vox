@@ -102,7 +102,10 @@ fn every_decision_is_in_both_files() {
     assert!(dup(&reg).is_empty(), "дубли в реестре: {:?}", dup(&reg));
     assert!(dup(&full).is_empty(), "дубли в тексте: {:?}", dup(&full));
 
-    let (rs, fs): (BTreeSet<u32>, BTreeSet<u32>) = (reg.iter().copied().collect(), full.iter().copied().collect());
+    let (rs, fs): (BTreeSet<u32>, BTreeSet<u32>) = (
+        reg.iter().copied().collect(),
+        full.iter().copied().collect(),
+    );
     let only_reg: Vec<u32> = rs.difference(&fs).copied().collect();
     let only_full: Vec<u32> = fs.difference(&rs).copied().collect();
     assert!(
@@ -146,7 +149,11 @@ fn every_referenced_decision_exists() {
     }
     bad.sort();
     bad.dedup();
-    assert!(bad.is_empty(), "ссылки на несуществующие решения:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "ссылки на несуществующие решения:\n{}",
+        bad.join("\n")
+    );
 }
 
 /// Все исходники и данные: `crates/**/*.rs` и `data/**/*.ron`.
@@ -155,7 +162,9 @@ fn every_referenced_decision_exists() {
 /// не попадают: обход начинается с `crates/` и `data/`.
 fn sources_and_data() -> Vec<(String, String)> {
     fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         let mut items: Vec<PathBuf> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
         items.sort();
         for p in items {
@@ -164,8 +173,16 @@ fn sources_and_data() -> Vec<(String, String)> {
                     continue;
                 }
                 walk(&p, out);
-            } else if p.extension().map(|e| e == "rs" || e == "ron").unwrap_or(false) {
-                let rel = p.strip_prefix(root()).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+            } else if p
+                .extension()
+                .map(|e| e == "rs" || e == "ron")
+                .unwrap_or(false)
+            {
+                let rel = p
+                    .strip_prefix(root())
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 out.push((rel, std::fs::read_to_string(&p).unwrap_or_default()));
             }
         }
@@ -196,7 +213,10 @@ fn the_canon_never_points_at_a_closed_question() {
             open.insert(n);
         }
     }
-    assert!(!open.is_empty(), "ни одной пометки не нашлось — разбор сломан");
+    assert!(
+        !open.is_empty(),
+        "ни одной пометки не нашлось — разбор сломан"
+    );
 
     let mut bad: Vec<String> = Vec::new();
     for (name, text) in &files {

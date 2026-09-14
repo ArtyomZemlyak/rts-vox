@@ -171,11 +171,7 @@ pub fn apply_hit_at(
 
 pub fn apply_hit(v: &mut UnitVol, r: &mut Rng, radius: i32) -> u32 {
     let (nx, ny, nz) = (v.nx as i32, v.ny as i32, v.nz as i32);
-    let (cx, cy, cz) = (
-        r.range(0, nx - 1),
-        r.range(0, ny - 1),
-        r.range(0, nz - 1),
-    );
+    let (cx, cy, cz) = (r.range(0, nx - 1), r.range(0, ny - 1), r.range(0, nz - 1));
     let mut removed = 0;
     for dz in -radius..=radius {
         for dy in -radius..=radius {

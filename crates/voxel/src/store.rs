@@ -295,7 +295,6 @@ impl RowPacked {
     }
 }
 
-
 /// Палитра на **чанк**, индекс фиксированной ширины, один массив на всё.
 ///
 /// Это классическая раскладка «палитра плюс битовый массив», и от построчной
@@ -309,6 +308,8 @@ pub struct Paletted {
     bits: u8,
     /// Сколько раз чанк пришлось расширить.
     pub widenings: u64,
+    /// Order-independent content fingerprint; palette insertion order is not state.
+    content_hash: u64,
 }
 
 impl Default for Paletted {
@@ -324,6 +325,7 @@ impl Paletted {
             data: vec![0u32; CS * CS * CS / 8],
             bits: 4,
             widenings: 0,
+            content_hash: 0,
         }
     }
 
@@ -339,6 +341,12 @@ impl Paletted {
 
     #[inline(always)]
     pub fn set(&mut self, x: usize, y: usize, z: usize, m: Mat) {
+        let was = self.get(x, y, z);
+        if was == m {
+            return;
+        }
+        let index = Dense::idx(x, y, z);
+        self.content_hash ^= Self::cell_hash(index, was) ^ Self::cell_hash(index, m);
         let pi = match self.palette.iter().position(|&p| p == m) {
             Some(k) => k,
             None => {
@@ -377,6 +385,19 @@ impl Paletted {
 
     pub fn bytes(&self) -> usize {
         self.palette.len() + self.data.len() * 4
+    }
+
+    fn cell_hash(index: usize, material: Mat) -> u64 {
+        if material == AIR {
+            return 0;
+        }
+        let mut v = ((index as u64) << 16 | material as u64).wrapping_add(0x9e3779b97f4a7c15);
+        v = (v ^ (v >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        v = (v ^ (v >> 27)).wrapping_mul(0x94d049bb133111eb);
+        v ^ (v >> 31)
+    }
+    pub fn content_hash(&self) -> u64 {
+        self.content_hash
     }
 
     pub fn from_dense(d: &Dense) -> Paletted {
@@ -463,7 +484,10 @@ mod tests {
                 }
             }
         }
-        assert!(p.repacks > 0, "перепаковки не случилось — тест не проверил её");
+        assert!(
+            p.repacks > 0,
+            "перепаковки не случилось — тест не проверил её"
+        );
     }
 
     /// **Палитра на записи только растёт.** Строка, снова ставшая
@@ -502,7 +526,10 @@ mod tests {
             d.set(x, y, z, m);
             p.set(x, y, z, m);
         }
-        assert!(p.widenings > 0, "расширение не случилось — тест его не проверил");
+        assert!(
+            p.widenings > 0,
+            "расширение не случилось — тест его не проверил"
+        );
         for y in 0..CS {
             for z in 0..CS {
                 for x in 0..CS {

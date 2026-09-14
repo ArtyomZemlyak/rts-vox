@@ -34,6 +34,10 @@ pub const STANCE_DIG: u8 = 3;
 pub const STANCE_HAUL: u8 = 4;
 /// Юнит идёт к недострою и льёт в него материю.
 pub const STANCE_BUILD: u8 = 5;
+/// Advance to the ordered point, braking for a valid firing contact.
+pub const STANCE_ATTACK_MOVE: u8 = 6;
+/// Same order held inside its firing band; outer radius resumes movement.
+pub const STANCE_ENGAGED: u8 = 7;
 
 /// Приказ юниту.
 ///
@@ -43,6 +47,8 @@ pub const STANCE_BUILD: u8 = 5;
 pub enum Order {
     /// Идти в точку и остаться при ней.
     MoveTo { unit: u32, x: i32, z: i32 },
+    /// Move to a point with combat stops at the equipped weapon's range.
+    AttackMove { unit: u32, x: i32, z: i32 },
     /// Стоять на месте. Отмена любого другого приказа.
     Hold { unit: u32 },
     /// Вернуться под поле своей стороны — снять приказ вовсе.
@@ -60,7 +66,12 @@ pub enum Order {
     /// Недострой заводится тем же приказом: отдельного «разметить
     /// фундамент» нет, потому что фундамент это и есть тело
     /// с частично заполненным томом (`docs/07-economy.md`).
-    Build { unit: u32, kind: u16, x: i32, z: i32 },
+    Build {
+        unit: u32,
+        kind: u16,
+        x: i32,
+        z: i32,
+    },
     /// Заказать заводу машину названного типа.
     Produce { unit: u32, kind: u16 },
     /// Снять с завода последний заказ. Уплаченное за него
@@ -74,6 +85,7 @@ impl Order {
     pub fn unit(self) -> u32 {
         match self {
             Order::MoveTo { unit, .. }
+            | Order::AttackMove { unit, .. }
             | Order::Hold { unit }
             | Order::Release { unit }
             | Order::Attack { unit, .. }

@@ -59,8 +59,13 @@ pub const LOOKS: usize = 5;
 
 /// Все направления по порядку номеров. Номер — это индекс в таблицах,
 /// и перечень обязан идти тем же порядком.
-pub const LOOK_ALL: [Look; LOOKS] =
-    [Look::Base, Look::Diorama, Look::Graphic, Look::Techno, Look::Vangers];
+pub const LOOK_ALL: [Look; LOOKS] = [
+    Look::Base,
+    Look::Diorama,
+    Look::Graphic,
+    Look::Techno,
+    Look::Vangers,
+];
 
 /// Имя направления для ключа командной строки и для отчёта.
 pub fn look_name(l: Look) -> &'static str {
@@ -167,17 +172,61 @@ struct MatLook {
 /// за вещество, а не как оно нарисовано. Перекрасить почву можно,
 /// сделать её породой — нет.
 const PALETTE: &[MatLook] = &[
-    MatLook { id: 1, srgb: [0.47, 0.37, 0.24], class: Class::Soil }, // почва
-    MatLook { id: 2, srgb: [0.33, 0.32, 0.30], class: Class::Rock }, // порода
-    MatLook { id: 3, srgb: [0.20, 0.21, 0.23], class: Class::Rock }, // глубинная
-    MatLook { id: 4, srgb: [0.50, 0.46, 0.39], class: Class::Rock }, // светлый пласт
-    MatLook { id: 16, srgb: [0.52, 0.40, 0.31], class: Class::Ore }, // железо бедное
-    MatLook { id: 17, srgb: [0.68, 0.47, 0.30], class: Class::Ore }, // железо
-    MatLook { id: 18, srgb: [0.85, 0.55, 0.27], class: Class::Ore }, // железо богатое
-    MatLook { id: 24, srgb: [0.33, 0.47, 0.44], class: Class::Ore }, // медь бедная
-    MatLook { id: 25, srgb: [0.25, 0.62, 0.55], class: Class::Ore }, // медь
-    MatLook { id: 26, srgb: [0.20, 0.78, 0.63], class: Class::Ore }, // медь богатая
-    MatLook { id: 40, srgb: [1.00, 0.42, 0.10], class: Class::Ore }, // лава
+    MatLook {
+        id: 1,
+        srgb: [0.47, 0.37, 0.24],
+        class: Class::Soil,
+    }, // почва
+    MatLook {
+        id: 2,
+        srgb: [0.33, 0.32, 0.30],
+        class: Class::Rock,
+    }, // порода
+    MatLook {
+        id: 3,
+        srgb: [0.20, 0.21, 0.23],
+        class: Class::Rock,
+    }, // глубинная
+    MatLook {
+        id: 4,
+        srgb: [0.50, 0.46, 0.39],
+        class: Class::Rock,
+    }, // светлый пласт
+    MatLook {
+        id: 16,
+        srgb: [0.52, 0.40, 0.31],
+        class: Class::Ore,
+    }, // железо бедное
+    MatLook {
+        id: 17,
+        srgb: [0.68, 0.47, 0.30],
+        class: Class::Ore,
+    }, // железо
+    MatLook {
+        id: 18,
+        srgb: [0.85, 0.55, 0.27],
+        class: Class::Ore,
+    }, // железо богатое
+    MatLook {
+        id: 24,
+        srgb: [0.33, 0.47, 0.44],
+        class: Class::Ore,
+    }, // медь бедная
+    MatLook {
+        id: 25,
+        srgb: [0.25, 0.62, 0.55],
+        class: Class::Ore,
+    }, // медь
+    MatLook {
+        id: 26,
+        srgb: [0.20, 0.78, 0.63],
+        class: Class::Ore,
+    }, // медь богатая
+    MatLook {
+        id: 40,
+        srgb: [1.00, 0.42, 0.10],
+        class: Class::Ore,
+    }, // лава
 ];
 
 /// Диорама: та же земля, но крашеная. Теплее и насыщеннее базовой —
@@ -454,22 +503,55 @@ pub fn surf_of(l: Look, c: Class) -> Surf {
         // земля — это охра и сырая серая глина вперемешку. Склон
         // темнее и теплее верха: сверху пыль, сбоку срез земли.
         (Look::Base, Class::Soil) => Surf {
-            rough: 0.97, metal: 0.0, cells: 7.0, grain: 0.17, dome: 0.22, bump: 0.34, speck: 0.03,
-            speck_srgb: PEBBLE, edge: 0.94, hue: 0.55, patch: 0.10, rough_var: 0.10, matrix_metal: 1.0,
+            rough: 0.97,
+            metal: 0.0,
+            cells: 7.0,
+            grain: 0.17,
+            dome: 0.22,
+            bump: 0.34,
+            speck: 0.03,
+            speck_srgb: PEBBLE,
+            edge: 0.94,
+            hue: 0.55,
+            patch: 0.10,
+            rough_var: 0.10,
+            matrix_metal: 1.0,
             side: [0.88, 0.82, 0.74],
         },
         // Порода: зерно вдвое крупнее и глубже, выгиб сильнее —
         // отсюда ощущение скола, а не насыпи. Скол глаже матовой
         // грани, и блик ложится пятнами.
         (Look::Base, Class::Rock) => Surf {
-            rough: 0.84, metal: 0.0, cells: 2.5, grain: 0.24, dome: 0.50, bump: 0.26, speck: 0.05,
-            speck_srgb: CHIP, edge: 0.84, hue: 0.40, patch: 0.12, rough_var: 0.20, matrix_metal: 1.0,
+            rough: 0.84,
+            metal: 0.0,
+            cells: 2.5,
+            grain: 0.24,
+            dome: 0.50,
+            bump: 0.26,
+            speck: 0.05,
+            speck_srgb: CHIP,
+            edge: 0.84,
+            hue: 0.40,
+            patch: 0.12,
+            rough_var: 0.20,
+            matrix_metal: 1.0,
             side: [0.95, 0.95, 0.97],
         },
         // Руда: вкрапления блестят крупинками, основа — тусклая порода.
         (Look::Base, Class::Ore) => Surf {
-            rough: 0.72, metal: 0.85, cells: 3.0, grain: 0.11, dome: 0.42, bump: 0.40, speck: 0.16,
-            speck_srgb: GRAIN, edge: 0.88, hue: 0.30, patch: 0.08, rough_var: 0.20, matrix_metal: 0.20,
+            rough: 0.72,
+            metal: 0.85,
+            cells: 3.0,
+            grain: 0.11,
+            dome: 0.42,
+            bump: 0.40,
+            speck: 0.16,
+            speck_srgb: GRAIN,
+            edge: 0.88,
+            hue: 0.30,
+            patch: 0.08,
+            rough_var: 0.20,
+            matrix_metal: 0.20,
             side: [0.93, 0.92, 0.92],
         },
 
@@ -479,18 +561,51 @@ pub fn surf_of(l: Look, c: Class) -> Surf {
         // и на нём разброс цвета — это признак ручной работы. Склон
         // холоднее — тень макета освещена небом.
         (Look::Diorama, Class::Soil) => Surf {
-            rough: 0.93, metal: 0.0, cells: 6.0, grain: 0.21, dome: 0.26, bump: 0.36, speck: 0.03,
-            speck_srgb: PEBBLE, edge: 0.90, hue: 0.65, patch: 0.13, rough_var: 0.10, matrix_metal: 1.0,
+            rough: 0.93,
+            metal: 0.0,
+            cells: 6.0,
+            grain: 0.21,
+            dome: 0.26,
+            bump: 0.36,
+            speck: 0.03,
+            speck_srgb: PEBBLE,
+            edge: 0.90,
+            hue: 0.65,
+            patch: 0.13,
+            rough_var: 0.10,
+            matrix_metal: 1.0,
             side: [0.84, 0.76, 0.70],
         },
         (Look::Diorama, Class::Rock) => Surf {
-            rough: 0.72, metal: 0.05, cells: 2.2, grain: 0.27, dome: 0.55, bump: 0.30, speck: 0.05,
-            speck_srgb: CHIP, edge: 0.78, hue: 0.45, patch: 0.14, rough_var: 0.22, matrix_metal: 1.0,
+            rough: 0.72,
+            metal: 0.05,
+            cells: 2.2,
+            grain: 0.27,
+            dome: 0.55,
+            bump: 0.30,
+            speck: 0.05,
+            speck_srgb: CHIP,
+            edge: 0.78,
+            hue: 0.45,
+            patch: 0.14,
+            rough_var: 0.22,
+            matrix_metal: 1.0,
             side: [0.92, 0.90, 0.97],
         },
         (Look::Diorama, Class::Ore) => Surf {
-            rough: 0.70, metal: 0.90, cells: 3.0, grain: 0.12, dome: 0.44, bump: 0.42, speck: 0.20,
-            speck_srgb: GRAIN, edge: 0.86, hue: 0.35, patch: 0.08, rough_var: 0.22, matrix_metal: 0.20,
+            rough: 0.70,
+            metal: 0.90,
+            cells: 3.0,
+            grain: 0.12,
+            dome: 0.44,
+            bump: 0.42,
+            speck: 0.20,
+            speck_srgb: GRAIN,
+            edge: 0.86,
+            hue: 0.35,
+            patch: 0.08,
+            rough_var: 0.22,
+            matrix_metal: 0.20,
             side: [0.92, 0.90, 0.94],
         },
 
@@ -502,20 +617,53 @@ pub fn surf_of(l: Look, c: Class) -> Surf {
         // причине: плакат печатают плашками. Склон — тот же цвет:
         // ступени яркости грани делают всю работу.
         (Look::Graphic, Class::Soil) => Surf {
-            rough: 1.00, metal: 0.0, cells: 4.0, grain: 0.05, dome: 0.06, bump: 0.08, speck: 0.0,
-            speck_srgb: [1.0; 3], edge: 0.74, hue: 0.12, patch: 0.03, rough_var: 0.0, matrix_metal: 1.0,
+            rough: 1.00,
+            metal: 0.0,
+            cells: 4.0,
+            grain: 0.05,
+            dome: 0.06,
+            bump: 0.08,
+            speck: 0.0,
+            speck_srgb: [1.0; 3],
+            edge: 0.74,
+            hue: 0.12,
+            patch: 0.03,
+            rough_var: 0.0,
+            matrix_metal: 1.0,
             side: [1.0; 3],
         },
         (Look::Graphic, Class::Rock) => Surf {
-            rough: 0.92, metal: 0.0, cells: 2.0, grain: 0.07, dome: 0.10, bump: 0.10, speck: 0.0,
-            speck_srgb: [1.0; 3], edge: 0.66, hue: 0.12, patch: 0.04, rough_var: 0.0, matrix_metal: 1.0,
+            rough: 0.92,
+            metal: 0.0,
+            cells: 2.0,
+            grain: 0.07,
+            dome: 0.10,
+            bump: 0.10,
+            speck: 0.0,
+            speck_srgb: [1.0; 3],
+            edge: 0.66,
+            hue: 0.12,
+            patch: 0.04,
+            rough_var: 0.0,
+            matrix_metal: 1.0,
             side: [1.0; 3],
         },
         // Руде оставлены вкрапления: на сжатой палитре это единственное,
         // чем она отличается от породы, кроме цвета.
         (Look::Graphic, Class::Ore) => Surf {
-            rough: 0.70, metal: 0.10, cells: 2.0, grain: 0.06, dome: 0.10, bump: 0.12, speck: 0.24,
-            speck_srgb: [1.45; 3], edge: 0.70, hue: 0.10, patch: 0.03, rough_var: 0.0, matrix_metal: 1.0,
+            rough: 0.70,
+            metal: 0.10,
+            cells: 2.0,
+            grain: 0.06,
+            dome: 0.10,
+            bump: 0.12,
+            speck: 0.24,
+            speck_srgb: [1.45; 3],
+            edge: 0.70,
+            hue: 0.10,
+            patch: 0.03,
+            rough_var: 0.0,
+            matrix_metal: 1.0,
             side: [1.0; 3],
         },
 
@@ -524,19 +672,52 @@ pub fn surf_of(l: Look, c: Class) -> Surf {
         // отделяет их от пыли. Оттенка мало: направление серое.
         // Склон холодный.
         (Look::Techno, Class::Soil) => Surf {
-            rough: 0.90, metal: 0.02, cells: 8.0, grain: 0.15, dome: 0.20, bump: 0.38, speck: 0.02,
-            speck_srgb: [0.70; 3], edge: 0.90, hue: 0.25, patch: 0.08, rough_var: 0.12, matrix_metal: 1.0,
+            rough: 0.90,
+            metal: 0.02,
+            cells: 8.0,
+            grain: 0.15,
+            dome: 0.20,
+            bump: 0.38,
+            speck: 0.02,
+            speck_srgb: [0.70; 3],
+            edge: 0.90,
+            hue: 0.25,
+            patch: 0.08,
+            rough_var: 0.12,
+            matrix_metal: 1.0,
             side: [0.92, 0.93, 0.95],
         },
         (Look::Techno, Class::Rock) => Surf {
-            rough: 0.55, metal: 0.30, cells: 2.2, grain: 0.20, dome: 0.48, bump: 0.30, speck: 0.03,
-            speck_srgb: [1.25, 1.26, 1.28], edge: 0.80, hue: 0.30, patch: 0.10, rough_var: 0.25,
-            matrix_metal: 1.0, side: [0.90, 0.92, 0.96],
+            rough: 0.55,
+            metal: 0.30,
+            cells: 2.2,
+            grain: 0.20,
+            dome: 0.48,
+            bump: 0.30,
+            speck: 0.03,
+            speck_srgb: [1.25, 1.26, 1.28],
+            edge: 0.80,
+            hue: 0.30,
+            patch: 0.10,
+            rough_var: 0.25,
+            matrix_metal: 1.0,
+            side: [0.90, 0.92, 0.96],
         },
         (Look::Techno, Class::Ore) => Surf {
-            rough: 0.60, metal: 0.95, cells: 3.2, grain: 0.10, dome: 0.40, bump: 0.44, speck: 0.24,
-            speck_srgb: [1.45, 1.42, 1.35], edge: 0.86, hue: 0.25, patch: 0.06, rough_var: 0.25,
-            matrix_metal: 0.25, side: [0.92, 0.93, 0.95],
+            rough: 0.60,
+            metal: 0.95,
+            cells: 3.2,
+            grain: 0.10,
+            dome: 0.40,
+            bump: 0.44,
+            speck: 0.24,
+            speck_srgb: [1.45, 1.42, 1.35],
+            edge: 0.86,
+            hue: 0.25,
+            patch: 0.06,
+            rough_var: 0.25,
+            matrix_metal: 0.25,
+            side: [0.92, 0.93, 0.95],
         },
 
         // Вангеры: цвет несёт всё. Оттенок и пятна сильнее всех,
@@ -544,19 +725,52 @@ pub fn surf_of(l: Look, c: Class) -> Surf {
         // Это лестница освещённости типа поверхности из игры 1998
         // года, записанная в две грани воксела.
         (Look::Vangers, Class::Soil) => Surf {
-            rough: 0.95, metal: 0.0, cells: 5.0, grain: 0.16, dome: 0.24, bump: 0.30, speck: 0.03,
-            speck_srgb: [0.70, 0.58, 0.44], edge: 0.93, hue: 0.80, patch: 0.16, rough_var: 0.10,
-            matrix_metal: 1.0, side: [0.74, 0.62, 0.72],
+            rough: 0.95,
+            metal: 0.0,
+            cells: 5.0,
+            grain: 0.16,
+            dome: 0.24,
+            bump: 0.30,
+            speck: 0.03,
+            speck_srgb: [0.70, 0.58, 0.44],
+            edge: 0.93,
+            hue: 0.80,
+            patch: 0.16,
+            rough_var: 0.10,
+            matrix_metal: 1.0,
+            side: [0.74, 0.62, 0.72],
         },
         (Look::Vangers, Class::Rock) => Surf {
-            rough: 0.78, metal: 0.03, cells: 2.4, grain: 0.24, dome: 0.50, bump: 0.28, speck: 0.05,
-            speck_srgb: [1.30, 1.24, 1.34], edge: 0.82, hue: 0.55, patch: 0.14, rough_var: 0.22,
-            matrix_metal: 1.0, side: [0.84, 0.78, 0.96],
+            rough: 0.78,
+            metal: 0.03,
+            cells: 2.4,
+            grain: 0.24,
+            dome: 0.50,
+            bump: 0.28,
+            speck: 0.05,
+            speck_srgb: [1.30, 1.24, 1.34],
+            edge: 0.82,
+            hue: 0.55,
+            patch: 0.14,
+            rough_var: 0.22,
+            matrix_metal: 1.0,
+            side: [0.84, 0.78, 0.96],
         },
         (Look::Vangers, Class::Ore) => Surf {
-            rough: 0.70, metal: 0.88, cells: 3.0, grain: 0.12, dome: 0.42, bump: 0.40, speck: 0.18,
-            speck_srgb: [1.50, 1.40, 1.20], edge: 0.86, hue: 0.40, patch: 0.08, rough_var: 0.22,
-            matrix_metal: 0.20, side: [0.88, 0.84, 0.96],
+            rough: 0.70,
+            metal: 0.88,
+            cells: 3.0,
+            grain: 0.12,
+            dome: 0.42,
+            bump: 0.40,
+            speck: 0.18,
+            speck_srgb: [1.50, 1.40, 1.20],
+            edge: 0.86,
+            hue: 0.40,
+            patch: 0.08,
+            rough_var: 0.22,
+            matrix_metal: 0.20,
+            side: [0.88, 0.84, 0.96],
         },
     }
 }
@@ -937,7 +1151,12 @@ pub fn dust_of(l: Look) -> Dust {
     };
     match l {
         // Графика: пыль плотнее и короче — пятно, а не марево.
-        Look::Graphic => Dust { dust_alpha: 0.45, dust_frames: 26, smoke_alpha: 0.55, ..d },
+        Look::Graphic => Dust {
+            dust_alpha: 0.45,
+            dust_frames: 26,
+            smoke_alpha: 0.55,
+            ..d
+        },
         _ => d,
     }
 }
@@ -1062,7 +1281,9 @@ pub struct Tile {
 /// здесь свой генератор незачем, а разные — верный способ развести
 /// цвет и нормаль.
 fn cell_hash(a: i64, b: i64, salt: i64) -> f32 {
-    let mut h = (a.wrapping_mul(374_761_393) ^ b.wrapping_mul(668_265_263) ^ salt.wrapping_mul(2_654_435_761)) as u64;
+    let mut h = (a.wrapping_mul(374_761_393)
+        ^ b.wrapping_mul(668_265_263)
+        ^ salt.wrapping_mul(2_654_435_761)) as u64;
     h ^= h >> 13;
     h = h.wrapping_mul(1_274_126_177);
     h ^= h >> 16;
@@ -1083,7 +1304,6 @@ fn chamfer_at(u: f32, v: f32, dark: f32) -> f32 {
     let r = ((d - EDGE).abs() / RIM_WIDTH).clamp(0.0, 1.0);
     base + RIM_LIGHT * (1.0 - r) * (1.0 - r)
 }
-
 
 /// Местные координаты: номер воксела внутри плитки и точка внутри него.
 fn split(u: f32, v: f32) -> (i64, i64, f32, f32) {
@@ -1131,7 +1351,10 @@ fn grain_at(s: &Surf, vx: i64, vz: i64, fu: f32, fv: f32) -> Grain {
     let g = cell_hash(gu, gv, salt);
     // Пятно в центре воксела: узлов на плитку — по одному на четыре
     // и на два воксела.
-    let (cu, cv) = ((vx as f32 + 0.5) / TILE_VOXELS, (vz as f32 + 0.5) / TILE_VOXELS);
+    let (cu, cv) = (
+        (vx as f32 + 0.5) / TILE_VOXELS,
+        (vz as f32 + 0.5) / TILE_VOXELS,
+    );
     let n = TILE_VOXELS as i64;
     let p = 0.6 * patch_at(cu, cv, n / 4, 0x9A7) + 0.4 * patch_at(cu, cv, n / 2, 0x9A8);
     let voxel = cell_hash(vx, vz, 0x5EED);
@@ -1189,7 +1412,11 @@ fn props_at(l: Look, c: Class, u: f32, v: f32) -> [f32; 3] {
     // уходит в затенение, чтобы ребро держалось и в тени, где
     // цветовую плитку уже не видно.
     let occ = 1.0 - 0.5 * (1.0 - chamfer_at(fu, fv, s.edge).min(1.0));
-    [occ.clamp(0.0, 1.0), rough.clamp(0.04, 1.0), metal.clamp(0.0, 1.0)]
+    [
+        occ.clamp(0.0, 1.0),
+        rough.clamp(0.04, 1.0),
+        metal.clamp(0.0, 1.0),
+    ]
 }
 
 /// Касательная нормаль в точке плитки. Единичная, `z` наружу.
@@ -1274,7 +1501,12 @@ fn build_tile(mut px: impl FnMut(f32, f32) -> [f32; 3], encode: fn(f32) -> f32) 
             for x in 0..ns {
                 let i = |yy: usize, xx: usize| cur[yy * cs + xx];
                 let mut a = [0.0f32; 3];
-                for q in [i(2 * y, 2 * x), i(2 * y, 2 * x + 1), i(2 * y + 1, 2 * x), i(2 * y + 1, 2 * x + 1)] {
+                for q in [
+                    i(2 * y, 2 * x),
+                    i(2 * y, 2 * x + 1),
+                    i(2 * y + 1, 2 * x),
+                    i(2 * y + 1, 2 * x + 1),
+                ] {
                     for k in 0..3 {
                         a[k] += q[k] * 0.25;
                     }
@@ -1285,7 +1517,11 @@ fn build_tile(mut px: impl FnMut(f32, f32) -> [f32; 3], encode: fn(f32) -> f32) 
         cur = next;
         cs = ns;
     }
-    Tile { size: TILE, mips, rgba }
+    Tile {
+        size: TILE,
+        mips,
+        rgba,
+    }
 }
 
 /// Плитка нормалей класса. **Линейная**, не sRGB: это вектор,
@@ -1320,7 +1556,12 @@ pub fn normal_tile_of(l: Look, c: Class) -> Tile {
             for x in 0..ns {
                 let i = |yy: usize, xx: usize| cur[yy * cs + xx];
                 let mut a = [0.0f32; 3];
-                for q in [i(2 * y, 2 * x), i(2 * y, 2 * x + 1), i(2 * y + 1, 2 * x), i(2 * y + 1, 2 * x + 1)] {
+                for q in [
+                    i(2 * y, 2 * x),
+                    i(2 * y, 2 * x + 1),
+                    i(2 * y + 1, 2 * x),
+                    i(2 * y + 1, 2 * x + 1),
+                ] {
                     for k in 0..3 {
                         a[k] += q[k] * 0.25;
                     }
@@ -1335,7 +1576,11 @@ pub fn normal_tile_of(l: Look, c: Class) -> Tile {
         cur = next;
         cs = ns;
     }
-    Tile { size: TILE, mips, rgba }
+    Tile {
+        size: TILE,
+        mips,
+        rgba,
+    }
 }
 
 /// Уровень из нормалей — в байты, со сдвигом из −1..1 в 0..1.
@@ -1433,8 +1678,13 @@ pub struct Section {
 
 impl Section {
     /// Секция, которая ничего не делает.
-    pub const NEUTRAL: Section =
-        Section { saturation: 1.0, contrast: 1.0, gamma: 1.0, gain: 1.0, lift: 0.0 };
+    pub const NEUTRAL: Section = Section {
+        saturation: 1.0,
+        contrast: 1.0,
+        gamma: 1.0,
+        gain: 1.0,
+        lift: 0.0,
+    };
 }
 
 /// Цветокоррекция кадра.
@@ -1484,8 +1734,13 @@ pub struct Vignette {
 }
 
 impl Vignette {
-    pub const NONE: Vignette =
-        Vignette { intensity: 0.0, radius: 1.0, smoothness: 1.0, roundness: 1.0, srgb: [0.0; 3] };
+    pub const NONE: Vignette = Vignette {
+        intensity: 0.0,
+        radius: 1.0,
+        smoothness: 1.0,
+        roundness: 1.0,
+        srgb: [0.0; 3],
+    };
 }
 
 /// Обводка силуэта и ступени яркости: постпроцесс по глубине
@@ -1664,7 +1919,12 @@ pub struct Occl {
 }
 
 impl Occl {
-    pub const NONE: Occl = Occl { radius: 0.0, strength: 0.0, bias: 0.1, power: 1.0 };
+    pub const NONE: Occl = Occl {
+        radius: 0.0,
+        strength: 0.0,
+        bias: 0.1,
+        power: 1.0,
+    };
 
     /// Есть ли что ставить на камеру.
     pub fn on(&self) -> bool {
@@ -1700,8 +1960,14 @@ pub struct Fog {
 }
 
 impl Fog {
-    pub const NONE: Fog =
-        Fog { density: 0.0, absorption: 0.3, scattering: 0.3, ambient: 0.1, height: 0.5, steps: 32 };
+    pub const NONE: Fog = Fog {
+        density: 0.0,
+        absorption: 0.3,
+        scattering: 0.3,
+        ambient: 0.1,
+        height: 0.5,
+        steps: 32,
+    };
 }
 
 /// Набор чисел выбранного направления.
@@ -1775,9 +2041,21 @@ pub fn scene_of(l: Look) -> Scene {
                 temperature: 0.0,
                 tint: 0.01,
                 post_saturation: 1.22,
-                shadows: Section { saturation: 1.18, lift: 0.015, ..Section::NEUTRAL },
-                midtones: Section { saturation: 1.04, contrast: 1.05, ..Section::NEUTRAL },
-                highlights: Section { saturation: 1.05, gain: 1.02, ..Section::NEUTRAL },
+                shadows: Section {
+                    saturation: 1.18,
+                    lift: 0.015,
+                    ..Section::NEUTRAL
+                },
+                midtones: Section {
+                    saturation: 1.04,
+                    contrast: 1.05,
+                    ..Section::NEUTRAL
+                },
+                highlights: Section {
+                    saturation: 1.05,
+                    gain: 1.02,
+                    ..Section::NEUTRAL
+                },
                 ..Grade::NEUTRAL
             },
             vignette: Vignette {
@@ -1802,7 +2080,12 @@ pub fn scene_of(l: Look) -> Scene {
             // референсов делает дымка по глубине, и она уже есть.
             ssao_thickness: 1.0,
             smaa: true,
-            occlusion: Occl { radius: 6.0, strength: 0.6, bias: 0.15, power: 1.5 },
+            occlusion: Occl {
+                radius: 6.0,
+                strength: 0.6,
+                bias: 0.15,
+                power: 1.5,
+            },
             ..base
         },
 
@@ -1821,8 +2104,16 @@ pub fn scene_of(l: Look) -> Scene {
             grade: Grade {
                 temperature: 0.02,
                 post_saturation: 1.16,
-                shadows: Section { saturation: 1.10, contrast: 1.45, lift: 0.030, ..Section::NEUTRAL },
-                midtones: Section { contrast: 1.30, ..Section::NEUTRAL },
+                shadows: Section {
+                    saturation: 1.10,
+                    contrast: 1.45,
+                    lift: 0.030,
+                    ..Section::NEUTRAL
+                },
+                midtones: Section {
+                    contrast: 1.30,
+                    ..Section::NEUTRAL
+                },
                 // Насыщенность в светах — это небо: оно занимает верх
                 // кадра и на плакате обязано быть цветом, а не бумагой.
                 highlights: Section {
@@ -1878,9 +2169,23 @@ pub fn scene_of(l: Look) -> Scene {
                 // а не холод.
                 tint: 0.01,
                 post_saturation: 0.66,
-                shadows: Section { saturation: 0.85, contrast: 1.30, lift: 0.022, ..Section::NEUTRAL },
-                midtones: Section { saturation: 0.95, contrast: 1.30, ..Section::NEUTRAL },
-                highlights: Section { saturation: 0.80, contrast: 1.10, gain: 0.92, ..Section::NEUTRAL },
+                shadows: Section {
+                    saturation: 0.85,
+                    contrast: 1.30,
+                    lift: 0.022,
+                    ..Section::NEUTRAL
+                },
+                midtones: Section {
+                    saturation: 0.95,
+                    contrast: 1.30,
+                    ..Section::NEUTRAL
+                },
+                highlights: Section {
+                    saturation: 0.80,
+                    contrast: 1.10,
+                    gain: 0.92,
+                    ..Section::NEUTRAL
+                },
                 ..Grade::NEUTRAL
             },
             vignette: Vignette {
@@ -1924,9 +2229,22 @@ pub fn scene_of(l: Look) -> Scene {
                 temperature: 0.02,
                 tint: 0.01,
                 post_saturation: 1.30,
-                shadows: Section { saturation: 1.25, contrast: 1.10, lift: 0.020, ..Section::NEUTRAL },
-                midtones: Section { saturation: 1.05, contrast: 1.08, ..Section::NEUTRAL },
-                highlights: Section { saturation: 1.10, gain: 1.02, ..Section::NEUTRAL },
+                shadows: Section {
+                    saturation: 1.25,
+                    contrast: 1.10,
+                    lift: 0.020,
+                    ..Section::NEUTRAL
+                },
+                midtones: Section {
+                    saturation: 1.05,
+                    contrast: 1.08,
+                    ..Section::NEUTRAL
+                },
+                highlights: Section {
+                    saturation: 1.10,
+                    gain: 1.02,
+                    ..Section::NEUTRAL
+                },
                 ..Grade::NEUTRAL
             },
             vignette: Vignette {
@@ -1941,7 +2259,12 @@ pub fn scene_of(l: Look) -> Scene {
             haze_metres_per_voxel: 2.4,
             ssao_thickness: 1.0,
             smaa: true,
-            occlusion: Occl { radius: 8.0, strength: 0.65, bias: 0.15, power: 1.6 },
+            occlusion: Occl {
+                radius: 8.0,
+                strength: 0.65,
+                bias: 0.15,
+                power: 1.6,
+            },
             ..base
         },
     }
@@ -1972,7 +2295,11 @@ mod tests {
         }
         assert_eq!(parse_look("Диорама"), Some(Look::Diorama));
         assert_eq!(parse_look("techno"), Some(Look::Techno));
-        assert_eq!(parse_look("сепия"), None, "неизвестное имя обязано быть ошибкой");
+        assert_eq!(
+            parse_look("сепия"),
+            None,
+            "неизвестное имя обязано быть ошибкой"
+        );
     }
 
     /// **У каждого материала пака свой цвет — в каждом направлении.**
@@ -2008,20 +2335,34 @@ mod tests {
         // Воздух не рисуется никогда, поэтому его в палитре нет.
         let mut want: Vec<Mat> = Vec::new();
         for line in ron.lines() {
-            let Some(rest) = line.split_once("id:") else { continue };
-            let num: String = rest.1.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            let Some(rest) = line.split_once("id:") else {
+                continue;
+            };
+            let num: String = rest
+                .1
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
             if let Ok(id) = num.parse::<Mat>() {
                 if id != voxel::store::AIR {
                     want.push(id);
                 }
             }
         }
-        assert!(want.len() >= 10, "материалы из пака не разобрались: {want:?}");
+        assert!(
+            want.len() >= 10,
+            "материалы из пака не разобрались: {want:?}"
+        );
         for id in want {
             assert!(look(id).is_some(), "материал {id} из пака не покрашен");
         }
         for extra in [PALETTE_DIORAMA, PALETTE_GRAPHIC, PALETTE_TECHNO] {
-            assert_eq!(extra.len(), PALETTE.len(), "палитра направления короче базовой");
+            assert_eq!(
+                extra.len(),
+                PALETTE.len(),
+                "палитра направления короче базовой"
+            );
         }
     }
 
@@ -2074,12 +2415,18 @@ mod tests {
         );
         assert!(s[0] > r[0] + 0.2 && s[0] > g[0] + 0.2, "сталь не светлее");
         // Ноль — по роли: сенсор без явного кода остаётся стеклом.
-        assert_eq!(finish_of(voxel::unit::FINISH_BY_PART, Part::Sensor), Finish::Optic);
+        assert_eq!(
+            finish_of(voxel::unit::FINISH_BY_PART, Part::Sensor),
+            Finish::Optic
+        );
         // Резина темнее любой краски стороны: иначе трак сольётся
         // с корпусом.
         for t in side_tint() {
             let r = finish_srgb(Finish::Rubber, t);
-            assert!(r[0] + r[1] + r[2] < t[0] + t[1] + t[2], "резина светлее краски");
+            assert!(
+                r[0] + r[1] + r[2] < t[0] + t[1] + t[2],
+                "резина светлее краски"
+            );
         }
     }
 
@@ -2124,7 +2471,13 @@ mod tests {
     #[test]
     fn every_part_has_a_finish_within_range() {
         use voxel::unit::Part;
-        let parts = [Part::Armour, Part::Core, Part::Engine, Part::Weapon, Part::Sensor];
+        let parts = [
+            Part::Armour,
+            Part::Core,
+            Part::Engine,
+            Part::Weapon,
+            Part::Sensor,
+        ];
         let mut seen = [false; FINISHES];
         for p in parts {
             let k = finish(p) as usize;
@@ -2136,7 +2489,11 @@ mod tests {
         // даёт код тела (ADR-231).
         for (k, s) in seen.iter().enumerate() {
             if !s {
-                assert_eq!(FINISH_ALL[k], Finish::Steel, "отделка {k} без роли — лишний материал");
+                assert_eq!(
+                    FINISH_ALL[k],
+                    Finish::Steel,
+                    "отделка {k} без роли — лишний материал"
+                );
                 assert_eq!(finish_of(k as u8 + 1, Part::Armour), Finish::Steel);
             }
         }
@@ -2161,8 +2518,16 @@ mod tests {
     fn the_face_steps_go_down_and_stay_apart() {
         for l in LOOK_ALL {
             let s = face_steps(l);
-            assert!((s[0] - 1.0).abs() < 1e-6, "{}: верх не единица", look_name(l));
-            assert!(s[0] > s[1] && s[1] > s[2], "{}: ступени не по порядку: {s:?}", look_name(l));
+            assert!(
+                (s[0] - 1.0).abs() < 1e-6,
+                "{}: верх не единица",
+                look_name(l)
+            );
+            assert!(
+                s[0] > s[1] && s[1] > s[2],
+                "{}: ступени не по порядку: {s:?}",
+                look_name(l)
+            );
             assert!(s[1] - s[2] > 0.05, "{}: бок и низ сливаются", look_name(l));
         }
     }
@@ -2270,7 +2635,12 @@ mod tests {
             // это перекрашенный один материал, а не три.
             let soil = normal_tile_of(l, Class::Soil).rgba;
             let rock = normal_tile_of(l, Class::Rock).rgba;
-            assert_ne!(soil, rock, "{}: у грунта и породы один рельеф", look_name(l));
+            assert_ne!(
+                soil,
+                rock,
+                "{}: у грунта и породы один рельеф",
+                look_name(l)
+            );
         }
     }
 
@@ -2279,11 +2649,17 @@ mod tests {
     /// сводится к перекраске вершины.
     #[test]
     fn no_two_looks_share_a_surface_tile() {
-        let tiles: Vec<Vec<u8>> =
-            LOOK_ALL.iter().map(|l| surface_tile_of(*l, Class::Soil).rgba).collect();
+        let tiles: Vec<Vec<u8>> = LOOK_ALL
+            .iter()
+            .map(|l| surface_tile_of(*l, Class::Soil).rgba)
+            .collect();
         for (i, a) in tiles.iter().enumerate() {
             for (j, b) in tiles.iter().enumerate().skip(i + 1) {
-                assert_ne!(a, b, "{:?} и {:?} — одна плитка почвы", LOOK_ALL[i], LOOK_ALL[j]);
+                assert_ne!(
+                    a, b,
+                    "{:?} и {:?} — одна плитка почвы",
+                    LOOK_ALL[i], LOOK_ALL[j]
+                );
             }
         }
     }
@@ -2379,7 +2755,10 @@ mod tests {
                 for (k, total) in sum.iter().enumerate() {
                     let want = (lin_to_srgb((total / (n * n) as f64) as f32) * 255.0 + 0.5) as i32;
                     let got = t.rgba[t.rgba.len() - 4 + k] as i32;
-                    assert!((got - want).abs() <= 1, "мельчайший уровень {got}, ждали {want}");
+                    assert!(
+                        (got - want).abs() <= 1,
+                        "мельчайший уровень {got}, ждали {want}"
+                    );
                     assert!(got < 255, "плитка не темнеет вовсе");
                 }
             }
@@ -2411,7 +2790,11 @@ mod tests {
             );
             // Среднее не уезжает: тёплые и холодные воксели друг друга
             // уравновешивают.
-            assert!((r - b).abs() / (n as f64) < 6.0, "{}: плитка в среднем цветная", look_name(l));
+            assert!(
+                (r - b).abs() / (n as f64) < 6.0,
+                "{}: плитка в среднем цветная",
+                look_name(l)
+            );
         }
     }
 
@@ -2426,14 +2809,27 @@ mod tests {
             let peak = ore.rgba[..n * 4].chunks(4).filter(|p| p[2] >= 200).count();
             let s = surf_of(l, Class::Ore);
             if s.matrix_metal < 0.9 {
-                assert!(peak > n / 100, "{}: металл руды нигде не пиковый", look_name(l));
+                assert!(
+                    peak > n / 100,
+                    "{}: металл руды нигде не пиковый",
+                    look_name(l)
+                );
                 assert!(peak < n / 2, "{}: руда металлическая целиком", look_name(l));
             }
             let soil = props_tile_of(l, Class::Soil);
-            assert!(soil.rgba[..n * 4].chunks(4).all(|p| p[2] < 40), "{}: земля металлическая", look_name(l));
+            assert!(
+                soil.rgba[..n * 4].chunks(4).all(|p| p[2] < 40),
+                "{}: земля металлическая",
+                look_name(l)
+            );
             // Шероховатость не выше своей: плитка только снимает её.
-            let rough_max = ore.rgba[..n * 4].chunks(4).map(|p| p[1]).max().unwrap_or(0) as f32 / 255.0;
-            assert!(rough_max <= s.rough + 0.01, "{}: плитка грубее класса", look_name(l));
+            let rough_max =
+                ore.rgba[..n * 4].chunks(4).map(|p| p[1]).max().unwrap_or(0) as f32 / 255.0;
+            assert!(
+                rough_max <= s.rough + 0.01,
+                "{}: плитка грубее класса",
+                look_name(l)
+            );
         }
     }
 
@@ -2455,10 +2851,17 @@ mod tests {
         // здесь не переключается: тесты идут параллельно, и раскраска
         // из `geom` читает то же глобальное направление.
         let t = &tables()[Look::Vangers as usize];
-        assert_ne!(t.colour[1], t.side[1], "у Вангеров склон не отличается от верха");
+        assert_ne!(
+            t.colour[1], t.side[1],
+            "у Вангеров склон не отличается от верха"
+        );
         let s = colour_side(1);
         assert_eq!(colour_face(1, 0, true)[0], s[0] * face_steps(active())[1]);
-        assert_eq!(colour_face(1, 1, true), colour(1), "верх красится не цветом материала");
+        assert_eq!(
+            colour_face(1, 1, true),
+            colour(1),
+            "верх красится не цветом материала"
+        );
     }
 
     /// **Пятна сходятся на краю плитки.** Плитка повторяется каждые

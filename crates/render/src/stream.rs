@@ -90,8 +90,12 @@ fn field(text: &str, key: &'static str) -> Result<u32, StreamError> {
         if t.starts_with("//") {
             continue;
         }
-        let Some(rest) = t.strip_prefix(key) else { continue };
-        let Some(rest) = rest.trim_start().strip_prefix(':') else { continue };
+        let Some(rest) = t.strip_prefix(key) else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix(':') else {
+            continue;
+        };
         let num: String = rest
             .trim_start()
             .chars()
@@ -200,7 +204,10 @@ pub fn ring(g: &ChunkGrid, p: V3, radius: f32, out: &mut Vec<u32>) {
                 (k as u32).min(n.saturating_sub(1))
             }
         };
-        (cut(((v - radius) / cs).floor()), cut(((v + radius) / cs).floor()))
+        (
+            cut(((v - radius) / cs).floor()),
+            cut(((v + radius) / cs).floor()),
+        )
     };
     let (x0, x1) = span(p.x, g.nx);
     let (z0, z1) = span(p.z, g.nz);
@@ -232,7 +239,12 @@ mod tests {
     const FILE: &str = include_str!("../../../data/render.ron");
 
     fn grid() -> ChunkGrid {
-        ChunkGrid { nx: 32, ny: 16, nz: 32, cs: 62 }
+        ChunkGrid {
+            nx: 32,
+            ny: 16,
+            nz: 32,
+            cs: 62,
+        }
     }
 
     /// **Файл в репозитории читается.** Разбор, который не проверен
@@ -315,10 +327,13 @@ mod tests {
         ] {
             for r in [40.0f32, 130.0, 400.0] {
                 ring(&g, p, r, &mut got);
-                let mut want: Vec<u32> = (0..g.nx * g.nz)
-                    .filter(|&c| within(&g, c, p, r))
-                    .collect();
-                assert_eq!(got.len(), want.len(), "точка {p:?}, радиус {r}: не тот размер");
+                let mut want: Vec<u32> =
+                    (0..g.nx * g.nz).filter(|&c| within(&g, c, p, r)).collect();
+                assert_eq!(
+                    got.len(),
+                    want.len(),
+                    "точка {p:?}, радиус {r}: не тот размер"
+                );
                 let mut have = got.clone();
                 have.sort_unstable();
                 want.sort_unstable();
@@ -343,7 +358,11 @@ mod tests {
             let d2 = column_dist2(&g, cx, cz, p);
             assert!(d2 >= prev.0 - 1e-3, "порядок сбит: {d2} после {}", prev.0);
             if (d2 - prev.0).abs() < 1e-6 {
-                assert!(c > prev.1, "ничья разрешена не номером: {c} после {}", prev.1);
+                assert!(
+                    c > prev.1,
+                    "ничья разрешена не номером: {c} после {}",
+                    prev.1
+                );
             }
             prev = (d2, c);
         }
@@ -376,8 +395,18 @@ mod tests {
     /// кольцо — иначе километр упирался бы в собственную толщину.
     #[test]
     fn the_ring_does_not_grow_with_depth() {
-        let shallow = ChunkGrid { nx: 162, ny: 4, nz: 162, cs: 62 };
-        let deep = ChunkGrid { nx: 162, ny: 81, nz: 162, cs: 62 };
+        let shallow = ChunkGrid {
+            nx: 162,
+            ny: 4,
+            nz: 162,
+            cs: 62,
+        };
+        let deep = ChunkGrid {
+            nx: 162,
+            ny: 81,
+            nz: 162,
+            cs: 62,
+        };
         let p = V3::new(5000.0, 120.0, 5000.0);
         let (mut a, mut b) = (Vec::new(), Vec::new());
         ring(&shallow, p, 1100.0, &mut a);
@@ -393,8 +422,18 @@ mod tests {
     /// зависит от ширины сетки и совпасть не может.
     #[test]
     fn the_ring_does_not_grow_with_the_map() {
-        let small = ChunkGrid { nx: 32, ny: 16, nz: 32, cs: 62 };
-        let huge = ChunkGrid { nx: 162, ny: 81, nz: 162, cs: 62 };
+        let small = ChunkGrid {
+            nx: 32,
+            ny: 16,
+            nz: 32,
+            cs: 62,
+        };
+        let huge = ChunkGrid {
+            nx: 162,
+            ny: 81,
+            nz: 162,
+            cs: 62,
+        };
         let p = V3::new(600.0, 400.0, 600.0);
         let (mut a, mut b) = (Vec::new(), Vec::new());
         ring(&small, p, 250.0, &mut a);

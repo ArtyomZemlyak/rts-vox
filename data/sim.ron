@@ -9,6 +9,14 @@
 // Пропущенное поле — ошибка разбора, а не ноль: умолчание означало бы,
 // что число всё-таки живёт в коде.
 (
+    blast: (
+        cell: 2, samples_per_tick: 131072, wave_pops_per_tick: 16384,
+        edits_per_tick: 16384, max_pending: 16, max_claims: 4096, max_fragments: 32768, max_flying: 4096, pile_cell: 8,
+        resistance_per_strength: 2, fracture_kj_m3_per_strength: 100,
+        density_kg_m3_per_density: 10, motion_pct: 15, body_energy_pct: 40, body_resistance_ppm: 5000, lift_pct: 70,
+        max_speed_mm_s: 30000, drag_pct: 99, bounce_pct: 20,
+        friction_pct: 60, sleep_mm_s: 400,
+    ),
     // --- бой и падение
     //
     // Урона за воксель высоты падения (ADR-036) сверх бесплатного
@@ -60,6 +68,7 @@
     // в одну точку, физически не может встать ближе, чем расходятся
     // её соседи, и меньший радиус означал бы, что дошедших нет.
     order_arrive: 80,
+    engagement_pct: (85, 95),
     // Радиус шара породы, снимаемого копателем за тик, в вокселях:
     // метр. Тот же, что у копателей эталонного сценария.
     dig_radius: 10,
@@ -272,4 +281,13 @@
     // Жёсткий потолок живых динамических тел (ADR-015). Упёршийся
     // отвал схлопывается на месте, а не встаёт в очередь.
     max_bodies: 256,
+    impact: (
+        // Work to deform/fracture material; these are gameplay material models.
+        // Armour, core, engine, weapon, sensor: kJ per cubic metre.
+        detach_work_per_tick: 8192, detach_jobs_per_tick: 32,
+        work_kj_m3: (160000, 20000, 60000, 180000, 8000), motion_pct: 10,
+        cells_per_tick: 16384,
+        jobs_per_tick: 32,
+        max_pending: 4096,
+    ),
 )

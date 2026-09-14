@@ -131,7 +131,12 @@ pub struct Levels {
 }
 
 /// Собрать уровни из произвольного предиката занятости.
-pub fn build_levels(nx: usize, ny: usize, nz: usize, solid: impl Fn(usize, usize, usize) -> bool) -> Levels {
+pub fn build_levels(
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    solid: impl Fn(usize, usize, usize) -> bool,
+) -> Levels {
     let lvl = |sx: usize, sy: usize, sz: usize| (sx.div_ceil(32), sx.div_ceil(32) * sy * sz);
     let (wx0, n0) = lvl(nx, ny, nz);
     let (bx, by, bz) = (nx.div_ceil(4), ny.div_ceil(4), nz.div_ceil(4));
@@ -159,9 +164,8 @@ pub fn build_levels(nx: usize, ny: usize, nz: usize, solid: impl Fn(usize, usize
         l1,
         l2,
         dims: [
-            nx as u32, ny as u32, nz as u32, wx0 as u32,
-            bx as u32, by as u32, bz as u32, wx1 as u32,
-            tx as u32, ty as u32, tz as u32, wx2 as u32,
+            nx as u32, ny as u32, nz as u32, wx0 as u32, bx as u32, by as u32, bz as u32,
+            wx1 as u32, tx as u32, ty as u32, tz as u32, wx2 as u32,
         ],
     }
 }
@@ -269,18 +273,46 @@ impl Marcher {
             label: None,
             layout: &pipe.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: l0.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: l1.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: l2.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: jobs.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: outs.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: dims.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: count.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: l0.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: l1.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: l2.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: jobs.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: outs.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: dims.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: count.as_entire_binding(),
+                },
             ],
         });
         // Буферы уровней держим живыми через замыкание bind group.
         std::mem::forget((l0, l1, l2, dims));
-        Marcher { pipe, jobs, outs, count, bind, cap }
+        Marcher {
+            pipe,
+            jobs,
+            outs,
+            count,
+            bind,
+            cap,
+        }
     }
 
     /// `jobs` — по восемь `f32` на луч: начало и дальность, направление.
@@ -290,8 +322,11 @@ impl Marcher {
             core::slice::from_raw_parts(jobs.as_ptr().cast::<u8>(), core::mem::size_of_val(jobs))
         };
         g.queue.write_buffer(&self.jobs, 0, bytes);
-        g.queue
-            .write_buffer(&self.count, 0, crate::as_bytes(&[(jobs.len() / 8) as u32, 0, 0, 0]));
+        g.queue.write_buffer(
+            &self.count,
+            0,
+            crate::as_bytes(&[(jobs.len() / 8) as u32, 0, 0, 0]),
+        );
     }
 
     pub fn encode(&self, e: &mut wgpu::CommandEncoder, rays: usize) {
@@ -367,8 +402,14 @@ mod tests {
                 bad_it += 1;
             }
         }
-        assert!(hits > n / 10, "почти ничего не попало — сцена подозрительна");
+        assert!(
+            hits > n / 10,
+            "почти ничего не попало — сцена подозрительна"
+        );
         assert_eq!(bad_hit, 0, "вердикт разошёлся на {bad_hit} лучах из {n}");
-        assert_eq!(bad_it, 0, "число итераций разошлось на {bad_it} лучах из {n}");
+        assert_eq!(
+            bad_it, 0,
+            "число итераций разошлось на {bad_it} лучах из {n}"
+        );
     }
 }

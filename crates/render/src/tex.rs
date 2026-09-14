@@ -5,8 +5,8 @@
 //! headless и покрыт тестами, а этот файл без окна не проверить вовсе.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::image::Image;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::look;
@@ -21,9 +21,17 @@ use crate::look;
 /// нормаль — линейно, потому что это вектор, и гамма его искривит.
 pub fn tile_image(t: look::Tile, srgb: bool) -> Image {
     let mut img = Image::new_uninit(
-        Extent3d { width: t.size, height: t.size, depth_or_array_layers: 1 },
+        Extent3d {
+            width: t.size,
+            height: t.size,
+            depth_or_array_layers: 1,
+        },
         TextureDimension::D2,
-        if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm },
+        if srgb {
+            TextureFormat::Rgba8UnormSrgb
+        } else {
+            TextureFormat::Rgba8Unorm
+        },
         RenderAssetUsages::RENDER_WORLD,
     );
     img.texture_descriptor.mip_level_count = t.mips;

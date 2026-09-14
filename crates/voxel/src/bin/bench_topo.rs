@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use fx::rng::Rng;
 use voxel::topo::scene::{build, Scene};
-use voxel::topo::stage_a::{Adjacency};
+use voxel::topo::stage_a::Adjacency;
 use voxel::topo::stage_b::{probe, probe_layered, FloodBufs, Verdict};
 use voxel::topo::{reference_labels, Chunk, Components, CS};
 
@@ -149,7 +149,9 @@ fn main() {
         let survivors: Vec<(u8, u8, u8)> = cells
             .iter()
             .copied()
-            .filter(|&(x, y, z)| !adj.cannot_split(adj.gather(&c, x as usize, y as usize, z as usize)))
+            .filter(|&(x, y, z)| {
+                !adj.cannot_split(adj.gather(&c, x as usize, y as usize, z as usize))
+            })
             .collect();
         if survivors.is_empty() {
             println!("{:<18} {:>10}", scene.name(), 0);

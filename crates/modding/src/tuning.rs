@@ -145,11 +145,52 @@ pub struct Chassis {
     pub gait: Option<Gait>,
 }
 
+/// Bounded gameplay blast field; envelope strength is distinct from joules.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct Blast {
+    pub cell: u32,
+    pub samples_per_tick: u32,
+    pub wave_pops_per_tick: u32,
+    pub edits_per_tick: u32,
+    pub max_pending: u32,
+    pub max_claims: u32,
+    pub max_fragments: u32,
+    pub max_flying: u32,
+    pub pile_cell: u32,
+    pub resistance_per_strength: u32,
+    pub fracture_kj_m3_per_strength: u32,
+    pub density_kg_m3_per_density: u32,
+    pub motion_pct: u32,
+    pub body_energy_pct: u32,
+    pub body_resistance_ppm: u32,
+    pub lift_pct: u32,
+    pub max_speed_mm_s: u32,
+    pub drag_pct: u32,
+    pub bounce_pct: u32,
+    pub friction_pct: u32,
+    pub sleep_mm_s: u32,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct Impact {
+    pub detach_work_per_tick: u32,
+    pub detach_jobs_per_tick: u32,
+    /// Armour, core, engine, weapon, sensor. Work density in kJ/m³.
+    pub work_kj_m3: [u32; 5],
+    pub motion_pct: u32,
+    pub cells_per_tick: u32,
+    pub jobs_per_tick: u32,
+    pub max_pending: u32,
+}
+
 /// Настройки тика. Полями обязаны быть заполнены все: `serde` без
 /// `default` не простит пропуска, и это нарочно — забытое поле
 /// не должно молча стать нулём.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub struct Tuning {
+    /// Material penetration and queue budgets for real unit volumes.
+    pub impact: Impact,
+    pub blast: Blast,
     /// Урона за воксель высоты падения (ADR-036). Первый воксель
     /// бесплатен — это правило, а не число, и живёт в коде (ADR-139).
     pub fall_damage_per_voxel: u16,
@@ -206,6 +247,8 @@ pub struct Tuning {
     /// Обязан быть больше радиуса расталкивания: толпа, идущая
     /// в одну точку, не встаёт ближе, чем расходятся её соседи.
     pub order_arrive: i32,
+    /// Fractions of equipped weapon range: enter / leave the firing stop.
+    pub engagement_pct: [u32; 2],
     /// Радиус шара породы, снимаемого копателем за тик, в вокселях.
     pub dig_radius: i32,
 
@@ -319,7 +362,56 @@ impl Tuning {
     /// Разобрать из текста. Без ввода-вывода — этим пользуется и тест,
     /// и загрузчик.
     pub fn from_ron(s: &str) -> Result<Tuning, TuningError> {
-        ron::from_str(s).map_err(|e| TuningError::Ron(e.to_string()))
+        let t: Tuning = ron::from_str(s).map_err(|e| TuningError::Ron(e.to_string()))?;
+        if t.engagement_pct[0] == 0
+            || t.engagement_pct[0] >= t.engagement_pct[1]
+            || t.engagement_pct[1] > 100
+        {
+            return Err(TuningError::Ron("invalid engagement range band".into()));
+        }
+        if t.impact.cells_per_tick == 0
+            || t.impact.jobs_per_tick == 0
+            || t.impact.max_pending == 0
+            || t.impact.detach_work_per_tick == 0
+            || t.impact.detach_jobs_per_tick == 0
+            || t.impact.motion_pct >= 100
+            || t.impact.work_kj_m3.contains(&0)
+        {
+            return Err(TuningError::Ron(
+                "impact work and budgets must be positive".into(),
+            ));
+        }
+        let b = &t.blast;
+        if !(1..=4).contains(&b.cell)
+            || b.samples_per_tick == 0
+            || b.wave_pops_per_tick == 0
+            || b.edits_per_tick == 0
+            || b.max_pending == 0
+            || b.max_pending > 64
+            || b.max_claims == 0
+            || b.max_fragments == 0
+            || b.max_flying == 0
+            || b.max_flying > b.max_fragments
+            || b.pile_cell == 0
+            || b.resistance_per_strength == 0
+            || b.fracture_kj_m3_per_strength == 0
+            || b.density_kg_m3_per_density == 0
+            || b.body_energy_pct > 100
+            || b.body_resistance_ppm == 0
+            || b.motion_pct >= 100
+            || b.lift_pct > 100
+            || b.max_speed_mm_s == 0
+            || b.max_speed_mm_s > 120000
+            || b.drag_pct > 100
+            || b.bounce_pct >= 100
+            || b.friction_pct > 100
+            || b.sleep_mm_s == 0
+        {
+            return Err(TuningError::Ron(
+                "invalid blast domain, energy or work budgets".into(),
+            ));
+        }
+        Ok(t)
     }
 
     /// Пределы хода по виду ходовой.
@@ -348,7 +440,10 @@ mod tests {
         let full = include_str!("../../../data/sim.ron");
         assert!(Tuning::from_ron(full).is_ok(), "полный файл не разобрался");
         let cut = full.replace("max_step:", "// max_step:");
-        assert!(cut != full, "в файле нет поля max_step — тест ничего не режет");
+        assert!(
+            cut != full,
+            "в файле нет поля max_step — тест ничего не режет"
+        );
         assert!(
             Tuning::from_ron(&cut).is_err(),
             "файл без max_step разобрался: у поля есть умолчание"
@@ -371,7 +466,10 @@ mod tests {
         assert!(t.flow_sectors_per_tick > 0);
         assert!(t.max_materialize_per_tick > 0);
         assert!(t.max_body_cells > 0);
-        assert!(t.max_orders_per_tick > 0, "нулевой потолок приказов — приказы не применяются");
+        assert!(
+            t.max_orders_per_tick > 0,
+            "нулевой потолок приказов — приказы не применяются"
+        );
         assert!(
             t.order_arrive > t.separation,
             "радиус прихода не больше расталкивания: дошедших не будет"
@@ -389,7 +487,10 @@ mod tests {
     #[test]
     fn the_economy_numbers_are_sane_and_the_day_one_sink_is_on() {
         let t = Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron");
-        assert!(t.base_store > 0, "без начального потолка выкопанное некуда класть");
+        assert!(
+            t.base_store > 0,
+            "без начального потолка выкопанное некуда класть"
+        );
         assert!(
             t.work_reach > t.order_arrive,
             "до склада надо подъехать ближе, чем юнит вообще умеет подходить"
@@ -406,8 +507,14 @@ mod tests {
             t.breach_loss_num < t.breach_loss_den,
             "при разрушении теряется всё содержимое — реклеймить нечего"
         );
-        assert!(t.max_dock_searches > 0, "нулевой потолок поисков — краулер не найдёт склад");
-        assert!(t.max_build_queue > 0, "нулевая очередь завода — заказать нечего");
+        assert!(
+            t.max_dock_searches > 0,
+            "нулевой потолок поисков — краулер не найдёт склад"
+        );
+        assert!(
+            t.max_build_queue > 0,
+            "нулевая очередь завода — заказать нечего"
+        );
     }
 
     /// **Числа хода осмысленны, и виды ходовой различаются.**
@@ -420,10 +527,17 @@ mod tests {
         let t = Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron");
         for (name, c) in [("гусеничная", t.tracked), ("шагающая", t.walking)] {
             assert!(c.mass > 0, "{name}: машина без массы");
-            assert!(c.density > 0, "{name}: плотность ноль — тело ничего не весит");
+            assert!(
+                c.density > 0,
+                "{name}: плотность ноль — тело ничего не весит"
+            );
             assert!(c.thrust > 0, "{name}: без тяги машина не трогается");
             assert!(c.brake > 0, "{name}: без торможения машина не встаёт");
-            assert!(c.turn > 0 && c.turn <= 3600, "{name}: угловая скорость {}", c.turn);
+            assert!(
+                c.turn > 0 && c.turn <= 3600,
+                "{name}: угловая скорость {}",
+                c.turn
+            );
             assert!(
                 c.pivot > 90 && c.pivot < 180,
                 "{name}: порог разворота {} — при девяноста и меньше диагональ поля \
@@ -437,10 +551,17 @@ mod tests {
             );
             assert!(c.climb > 0 && c.climb <= 100, "{name}: подъём {}", c.climb);
             assert!(c.descend >= 100, "{name}: под гору не медленнее ровного");
-            assert!(c.inertia > 0 && c.support_z_cm > 0, "{name}: доворот без плеча");
+            assert!(
+                c.inertia > 0 && c.support_z_cm > 0,
+                "{name}: доворот без плеча"
+            );
             if let Some(g) = c.gait {
                 assert!(g.stride_cm > 0, "{name}: шаг нулевой длины");
-                assert!(g.duty_pct > 0 && g.duty_pct <= 100, "{name}: доля опоры {}", g.duty_pct);
+                assert!(
+                    g.duty_pct > 0 && g.duty_pct <= 100,
+                    "{name}: доля опоры {}",
+                    g.duty_pct
+                );
                 assert!(g.lift_cm >= 0);
                 assert!(
                     g.offset_pct.iter().all(|o| (0..100).contains(o)),
@@ -455,8 +576,14 @@ mod tests {
         );
         // Гусеничная идёт дугой, шагающая крутится на месте — и только
         // у шагающей есть походка. Это разница видов, а не оформление.
-        assert!(t.tracked.pivot_speed > 0, "гусеничная разворачивается на месте");
+        assert!(
+            t.tracked.pivot_speed > 0,
+            "гусеничная разворачивается на месте"
+        );
         assert_eq!(t.walking.pivot_speed, 0, "шагающая не крутится на месте");
-        assert!(t.tracked.gait.is_none() && t.walking.gait.is_some(), "походка не у той ходовой");
+        assert!(
+            t.tracked.gait.is_none() && t.walking.gait.is_some(),
+            "походка не у той ходовой"
+        );
     }
 }

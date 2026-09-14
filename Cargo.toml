@@ -4,7 +4,7 @@ members = ["crates/demo", "crates/fx", "crates/gpu", "crates/harness", "crates/m
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.95"
 
 [profile.bench]
 opt-level = 3

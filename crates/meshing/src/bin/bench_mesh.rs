@@ -176,7 +176,9 @@ fn budget() {
     section("5. Что это значит для бюджета кадра");
     let mut m = Mesher::new();
     let c = build(Scene::CavernAndScatter, 42);
-    let chunks: Vec<Chunk> = (0..64u64).map(|s| build(Scene::CavernAndScatter, 1000 + s)).collect();
+    let chunks: Vec<Chunk> = (0..64u64)
+        .map(|s| build(Scene::CavernAndScatter, 1000 + s))
+        .collect();
     let mut best = f64::MAX;
     for _ in 0..5 {
         let t0 = Instant::now();
@@ -187,7 +189,8 @@ fn budget() {
         black_box(acc);
         best = best.min(t0.elapsed().as_secs_f64() * 1e6 / chunks.len() as f64);
     }
-    let bits: Vec<meshing::bits::BitVolume> = chunks.iter().map(meshing::bits::bits_from_chunk).collect();
+    let bits: Vec<meshing::bits::BitVolume> =
+        chunks.iter().map(meshing::bits::bits_from_chunk).collect();
     let mut fast = f64::MAX;
     for _ in 0..5 {
         let t0 = Instant::now();
@@ -199,7 +202,10 @@ fn budget() {
         fast = fast.min(t0.elapsed().as_secs_f64() * 1e6 / chunks.len() as f64);
     }
     let st = m.mesh(&c, Opts::default());
-    println!("рабочая сцена — забой с обстрелом, {} квадов на чанк", st.quads);
+    println!(
+        "рабочая сцена — забой с обстрелом, {} квадов на чанк",
+        st.quads
+    );
     println!("честное время на чанк в потоке: {best:.1} мкс обходом байтов, {fast:.1} мкс из битового объёма");
     println!(
         "{:>10} {:>13} {:>13} {:>14} {:>14}",
@@ -214,7 +220,9 @@ fn budget() {
             100.0 * par / 16.7
         );
     }
-    println!("(множитель 5, а не 7: измеренная эффективность пула — см. analysis/11-eikonal-bench.md)");
+    println!(
+        "(множитель 5, а не 7: измеренная эффективность пула — см. analysis/11-eikonal-bench.md)"
+    );
 }
 
 /// 6. Маски из битового объёма вместо обхода байтов.

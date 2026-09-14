@@ -24,7 +24,9 @@
 //! в двух местах, оба при сборке шаблона: длина звена в [`rod`] и
 //! наведение крепления в `Attach::aimed`.
 
-use crate::unit::{Attach, Part, UnitBody, FINISH_BY_PART, FINISH_PLATE, FINISH_RUBBER, FINISH_STEEL};
+use crate::unit::{
+    Attach, Part, UnitBody, FINISH_BY_PART, FINISH_PLATE, FINISH_RUBBER, FINISH_STEEL,
+};
 use fx::Fx;
 
 /// Назначить отделку всем твёрдым вокселям параллелепипеда.
@@ -52,9 +54,12 @@ pub(crate) fn mark(
 /// Назначить отделку твёрдым вокселям шара — тем же условием, каким
 /// шар рисуется, чтобы сустав красился сталью целиком и только он.
 pub(crate) fn mark_ball(b: &mut UnitBody, c: (i32, i32, i32), r: i32, code: u8) {
-    ball_h(b, (2 * c.0 + 1, 2 * c.1 + 1, 2 * c.2 + 1), 2 * r + 1, |b, x, y, z| {
-        b.set_finish(x, y, z, code)
-    });
+    ball_h(
+        b,
+        (2 * c.0 + 1, 2 * c.1 + 1, 2 * c.2 + 1),
+        2 * r + 1,
+        |b, x, y, z| b.set_finish(x, y, z, code),
+    );
 }
 
 /// Отделка цилиндру — тем же кругом, каким он рисуется.
@@ -66,9 +71,15 @@ pub(crate) fn mark_cyl(
     r: i32,
     code: u8,
 ) {
-    cyl_h(b, axis, span, (2 * c.0 + 1, 2 * c.1 + 1), 2 * r + 1, 0, |b, x, y, z| {
-        b.set_finish(x, y, z, code)
-    });
+    cyl_h(
+        b,
+        axis,
+        span,
+        (2 * c.0 + 1, 2 * c.1 + 1),
+        2 * r + 1,
+        0,
+        |b, x, y, z| b.set_finish(x, y, z, code),
+    );
 }
 
 /// Заполнить параллелепипед. Диапазоны полуоткрытые, выход за габарит
@@ -206,9 +217,15 @@ pub(crate) fn cyl(
     hole: i32,
     p: Part,
 ) {
-    cyl_h(b, axis, span, (2 * c.0 + 1, 2 * c.1 + 1), 2 * r + 1, 2 * hole, |b, x, y, z| {
-        b.set(x, y, z, p)
-    });
+    cyl_h(
+        b,
+        axis,
+        span,
+        (2 * c.0 + 1, 2 * c.1 + 1),
+        2 * r + 1,
+        2 * hole,
+        |b, x, y, z| b.set(x, y, z, p),
+    );
 }
 
 /// Цилиндр с отделкой: форма и материал одним вызовом.
@@ -227,12 +244,19 @@ pub(crate) fn cyl_f(
     p: Part,
     code: u8,
 ) {
-    cyl_h(b, axis, span, (2 * c.0 + 1, 2 * c.1 + 1), 2 * r + 1, 2 * hole, |b, x, y, z| {
-        b.set(x, y, z, p);
-        b.set_finish(x, y, z, code);
-    });
+    cyl_h(
+        b,
+        axis,
+        span,
+        (2 * c.0 + 1, 2 * c.1 + 1),
+        2 * r + 1,
+        2 * hole,
+        |b, x, y, z| {
+            b.set(x, y, z, p);
+            b.set_finish(x, y, z, code);
+        },
+    );
 }
-
 
 /// **Восьмигранник** вдоль оси `axis` с осью на узле `c`: квадрат
 /// полуширины `r2` полувокселей с углами, срезанными на треть.
@@ -334,9 +358,12 @@ fn ball_h(
 /// с шаром в нём читается как сустав, и разница видна с боевой камеры
 /// (ADR-219).
 pub(crate) fn ball(b: &mut UnitBody, c: (i32, i32, i32), r: i32, p: Part) {
-    ball_h(b, (2 * c.0 + 1, 2 * c.1 + 1, 2 * c.2 + 1), 2 * r + 1, |b, x, y, z| {
-        b.set(x, y, z, p)
-    });
+    ball_h(
+        b,
+        (2 * c.0 + 1, 2 * c.1 + 1, 2 * c.2 + 1),
+        2 * r + 1,
+        |b, x, y, z| b.set(x, y, z, p),
+    );
 }
 
 /// Шар с центром **на узле решётки** `c` и отделкой — сустав,
@@ -347,7 +374,6 @@ pub(crate) fn joint(b: &mut UnitBody, c: (i32, i32, i32), r: i32, p: Part, code:
         b.set_finish(x, y, z, code);
     });
 }
-
 
 /// **Звено конечности с шарниром на дальнем конце** — в корневом томе.
 ///
@@ -378,11 +404,7 @@ pub(crate) fn limb(
     joint: i32,
     p: Part,
 ) {
-    let d = [
-        (e.0 - a.0) as i64,
-        (e.1 - a.1) as i64,
-        (e.2 - a.2) as i64,
-    ];
+    let d = [(e.0 - a.0) as i64, (e.1 - a.1) as i64, (e.2 - a.2) as i64];
     let den = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
     let rmax = r0.max(r1).max(joint);
     if den == 0 {
@@ -514,7 +536,10 @@ fn mat_mul(a: &[[Fx; 3]; 3], b: &[[Fx; 3]; 3]) -> [[Fx; 3]; 3] {
     let mut m = [[Fx::ZERO; 3]; 3];
     for (i, row) in m.iter_mut().enumerate() {
         for (j, cell) in row.iter_mut().enumerate() {
-            *cell = a[i][0].mul(b[0][j]).add(a[i][1].mul(b[1][j])).add(a[i][2].mul(b[2][j]));
+            *cell = a[i][0]
+                .mul(b[0][j])
+                .add(a[i][1].mul(b[1][j]))
+                .add(a[i][2].mul(b[2][j]));
         }
     }
     m
@@ -542,7 +567,10 @@ fn transposed(m: &[[Fx; 3]; 3]) -> [[Fx; 3]; 3] {
 fn frame(b: &UnitBody, seg: usize) -> ([Fx; 3], [[Fx; 3]; 3]) {
     let s = &b.segments[seg];
     let a = &s.attach;
-    assert_eq!(s.body.mm, b.mm, "сегмент {seg}: ребро воксела не как у корня");
+    assert_eq!(
+        s.body.mm, b.mm,
+        "сегмент {seg}: ребро воксела не как у корня"
+    );
     let r = rotation(a);
     let pivot = [
         Fx::from_int(a.pivot.0 as i32),
@@ -562,7 +590,10 @@ fn frame(b: &UnitBody, seg: usize) -> ([Fx; 3], [[Fx; 3]; 3]) {
     }
     let (tp, rpar) = frame(b, a.parent as usize - 1);
     let rt = mat_vec(&rpar, t_local);
-    ([tp[0].add(rt[0]), tp[1].add(rt[1]), tp[2].add(rt[2])], mat_mul(&rpar, &r))
+    (
+        [tp[0].add(rt[0]), tp[1].add(rt[1]), tp[2].add(rt[2])],
+        mat_mul(&rpar, &r),
+    )
 }
 
 /// **Скрытый объём под сегментом**: заполнить в корневом томе все
@@ -581,7 +612,13 @@ fn frame(b: &UnitBody, seg: usize) -> ([Fx; 3], [[Fx; 3]; 3]) {
 /// в теле. Допуск в одну шестьдесят четвёртую воксела принимает угол,
 /// лежащий ровно на грани коробки: без него ступень под листом
 /// на сорок пять градусов теряла каждый второй ряд.
-pub(crate) fn shadow(b: &mut UnitBody, seg: usize, lo: (i32, i32, i32), hi: (i32, i32, i32), p: Part) {
+pub(crate) fn shadow(
+    b: &mut UnitBody,
+    seg: usize,
+    lo: (i32, i32, i32),
+    hi: (i32, i32, i32),
+    p: Part,
+) {
     let (t, r) = frame(b, seg);
     let rt = transposed(&r);
     let n = [b.vol.nx as i32, b.vol.ny as i32, b.vol.nz as i32];
@@ -629,15 +666,34 @@ pub(crate) fn shadow(b: &mut UnitBody, seg: usize, lo: (i32, i32, i32), hi: (i32
 /// по `Z`, сплошной, с отделкой. Наружная грань — верхняя (`y = thick`).
 pub(crate) fn slab(len: u8, thick: u8, wide: u8, mm: u16, p: Part, code: u8) -> UnitBody {
     let mut s = UnitBody::new_scaled(len.max(1), thick.max(1), wide.max(1), 1, mm);
-    fill(&mut s, (0, len as usize), (0, thick as usize), (0, wide as usize), p);
-    mark(&mut s, (0, len as usize), (0, thick as usize), (0, wide as usize), code);
+    fill(
+        &mut s,
+        (0, len as usize),
+        (0, thick as usize),
+        (0, wide as usize),
+        p,
+    );
+    mark(
+        &mut s,
+        (0, len as usize),
+        (0, thick as usize),
+        (0, wide as usize),
+        code,
+    );
     s
 }
 
 /// Посадить сегмент на тело и положить под него скрытый объём:
 /// коробка сегмента, продлённая на `below` вокселей в его `−Y`
 /// и на `above` в `+Y`. Возвращает номер сегмента — для потомков.
-pub(crate) fn mount(b: &mut UnitBody, a: Attach, seg: UnitBody, below: i32, above: i32, p: Part) -> u8 {
+pub(crate) fn mount(
+    b: &mut UnitBody,
+    a: Attach,
+    seg: UnitBody,
+    below: i32,
+    above: i32,
+    p: Part,
+) -> u8 {
     let (nx, ny, nz) = (seg.vol.nx as i32, seg.vol.ny as i32, seg.vol.nz as i32);
     b.push_segment(a, seg);
     let k = b.segments.len() - 1;
@@ -704,7 +760,10 @@ pub(crate) fn rod(
     let r = link_pivot(r2a, r2e);
     let at = (a.0 as i16, a.1 as i16, a.2 as i16);
     let d = (e.0 - a.0, e.1 - a.1, e.2 - a.2);
-    let attach = Attach { turret, ..Attach::aimed(at, (0, r, r), d) };
+    let attach = Attach {
+        turret,
+        ..Attach::aimed(at, (0, r, r), d)
+    };
     // Кость идёт по вокселям, лежащим **впереди** узла `a` и позади
     // узла `e` вдоль хода звена: узел — угол воксела, и воксель, чей
     // угол это узел, по каждой оси выбирается с той стороны, куда
@@ -736,14 +795,41 @@ pub(crate) fn leg(
     rs: i32,
     p: Part,
 ) {
-    // Шар шире звена на воксель: он накрывает торец звена целиком.
+    // Moving pieces are segments, just like the original strider. No static
+    // bone is left in the root to protrude when a joint bends (ADR-234).
     let (jt, jk, ja) = (rt / 2 + 1, (rt - 2).max(rs) / 2 + 1, (rs / 2).max(1));
     joint(b, hip, jt, p, FINISH_STEEL);
-    joint(b, knee, jk, p, FINISH_STEEL);
-    joint(b, ankle, ja, p, FINISH_STEEL);
-    // Кость — по тонкому концу звена: там ей теснее всего.
-    rod(b, hip, knee, rt, rt - 2, ((rt - 2) / 2 - 2).max(0), p, FINISH_BY_PART, false);
-    rod(b, knee, ankle, rs, rs - 2, ((rs - 2) / 2 - 2).max(0), p, FINISH_BY_PART, false);
+    let thigh = rod(b, hip, knee, rt, rt - 2, -1, p, FINISH_BY_PART, false) - 1;
+    let shin = rod(b, knee, ankle, rs, rs - 2, -1, p, FINISH_BY_PART, false) - 1;
+    let mut ball = |at: (i32, i32, i32), radius: i32| {
+        let n = (radius * 2 + 1) as u8;
+        let mut part = UnitBody::new_scaled(n, n, n, 1, b.mm);
+        joint(&mut part, (radius, radius, radius), radius, p, FINISH_STEEL);
+        let index = b.segments.len() as u8;
+        b.push_segment(
+            Attach::flat(
+                (at.0 as i16, at.1 as i16, at.2 as i16),
+                (radius as u8, radius as u8, radius as u8),
+            ),
+            part,
+        );
+        index
+    };
+    let knee_ball = ball(knee, jk);
+    let ankle_ball = ball(ankle, ja);
+    let point = |v: (i32, i32, i32)| (v.0 as i16, v.1 as i16, v.2 as i16);
+    let support = u8::from(hip.0 < b.vol.nx as i32 / 2) * 2 + u8::from(hip.2 < b.vol.nz as i32 / 2);
+    b.push_leg(crate::unit::Leg {
+        hip: point(hip),
+        knee: point(knee),
+        ankle: point(ankle),
+        thigh,
+        shin,
+        knee_ball: Some(knee_ball),
+        ankle_ball: Some(ankle_ball),
+        foot: None,
+        support,
+    });
 }
 
 /// **Трапециевидный лист**: верхняя кромка `top` вдоль `X`, нижняя
@@ -769,9 +855,21 @@ pub(crate) fn trapezoid(
         // центрируется на середине тома.
         let width = top + (bot - top) * (2 * z + 1) / (2 * slant);
         let x0 = (w - width) / 2;
-        fill(&mut s, (x0.max(0) as usize, (x0 + width).max(0) as usize), (0, thick as usize), (z as usize, z as usize + 1), p);
+        fill(
+            &mut s,
+            (x0.max(0) as usize, (x0 + width).max(0) as usize),
+            (0, thick as usize),
+            (z as usize, z as usize + 1),
+            p,
+        );
     }
-    mark(&mut s, (0, w as usize), (0, thick as usize), (0, slant as usize), code);
+    mark(
+        &mut s,
+        (0, w as usize),
+        (0, thick as usize),
+        (0, slant as usize),
+        code,
+    );
     (s, off)
 }
 
@@ -814,8 +912,18 @@ pub(crate) fn plate_ring(
         )
     };
     // Длина ребра и апофема — от радиуса, одни на все листы.
-    let edge = |r: i32| fx::angle::sin(step / 2).mul(Fx::from_int(2 * r)).add(half).to_int_trunc();
-    let apo = |r: i32| fx::angle::cos(step / 2).mul(Fx::from_int(r)).add(half).to_int_trunc();
+    let edge = |r: i32| {
+        fx::angle::sin(step / 2)
+            .mul(Fx::from_int(2 * r))
+            .add(half)
+            .to_int_trunc()
+    };
+    let apo = |r: i32| {
+        fx::angle::cos(step / 2)
+            .mul(Fx::from_int(r))
+            .add(half)
+            .to_int_trunc()
+    };
     let (top, bot) = (edge(r_top).max(1), edge(r_bot).max(1));
     let (h, da) = (y_top - y_bot, apo(r_bot) - apo(r_top));
     let slant = span((0, 0, 0), (da, h, 0)) as i32;
@@ -829,7 +937,11 @@ pub(crate) fn plate_ring(
         let attach = Attach {
             roll,
             turret,
-            ..Attach::aimed((x0 as i16, y_top as i16, z0 as i16), (off, thick, 0), (x1 - x0, 0, z1 - z0))
+            ..Attach::aimed(
+                (x0 as i16, y_top as i16, z0 as i16),
+                (off, thick, 0),
+                (x1 - x0, 0, z1 - z0),
+            )
         };
         mount(b, attach, seg, deep, 0, p);
     }
@@ -868,7 +980,13 @@ pub(crate) fn plated_turret(
         } else {
             x1
         };
-        fill(b, (x0 as usize, xr.max(x0) as usize), ys, (z as usize, z as usize + 1), p);
+        fill(
+            b,
+            (x0 as usize, xr.max(x0) as usize),
+            ys,
+            (z as usize, z as usize + 1),
+            p,
+        );
     }
     let (y, mm) = (ys.1 as i16, b.mm);
     let hang = |at: (i16, i16, i16), dir: (i32, i32, i32)| Attach {
@@ -880,13 +998,41 @@ pub(crate) fn plated_turret(
     let deep = slant as i32;
     // Борта: `+Z` от кормы к скуле, `−Z` от скулы к корме.
     let sl = x1 - cx - x0;
-    mount(b, hang((x0 as i16, y, z1 as i16), (sl, 0, 0)), side(sl), deep, 0, p);
-    mount(b, hang(((x1 - cx) as i16, y, z0 as i16), (-sl, 0, 0)), side(sl), deep, 0, p);
+    mount(
+        b,
+        hang((x0 as i16, y, z1 as i16), (sl, 0, 0)),
+        side(sl),
+        deep,
+        0,
+        p,
+    );
+    mount(
+        b,
+        hang(((x1 - cx) as i16, y, z0 as i16), (-sl, 0, 0)),
+        side(sl),
+        deep,
+        0,
+        p,
+    );
     // Скулы: `−Z` от лба к борту, `+Z` от борта ко лбу. Номера
     // возвращаются: на скулы вешают потомков — гранатомёты, фары.
     let cl = span((0, 0, 0), (cx, 0, cz)) as i32;
-    let l = mount(b, hang((x1 as i16, y, (z0 + cz) as i16), (-cx, 0, -cz)), side(cl), deep, 0, p);
-    let r = mount(b, hang(((x1 - cx) as i16, y, z1 as i16), (cx, 0, -cz)), side(cl), deep, 0, p);
+    let l = mount(
+        b,
+        hang((x1 as i16, y, (z0 + cz) as i16), (-cx, 0, -cz)),
+        side(cl),
+        deep,
+        0,
+        p,
+    );
+    let r = mount(
+        b,
+        hang(((x1 - cx) as i16, y, z1 as i16), (cx, 0, -cz)),
+        side(cl),
+        deep,
+        0,
+        p,
+    );
     (l, r)
 }
 
@@ -946,7 +1092,17 @@ pub(crate) fn ram(b: &mut UnitBody, a: (i32, i32, i32), e: (i32, i32, i32), r2: 
         a.2 + (e.2 - a.2) * 2 / 3,
     );
     rod(b, a, m, r2, r2, -1, p, FINISH_STEEL, false);
-    rod(b, m, e, (r2 - 2).max(2), (r2 - 2).max(2), -1, p, FINISH_RUBBER, false);
+    rod(
+        b,
+        m,
+        e,
+        (r2 - 2).max(2),
+        (r2 - 2).max(2),
+        -1,
+        p,
+        FINISH_RUBBER,
+        false,
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1124,7 +1280,16 @@ fn sprocket(
 /// дальше нельзя: в плоскости, где нет ничего, кроме него, фаска
 /// делает из колпака пуговицу.
 fn hub(b: &mut UnitBody, zw: (usize, usize), c: (i32, i32), r: i32, p: Part) {
-    cyl_f(b, 2, (zw.0.saturating_sub(1), zw.1 + 1), c, r, 0, p, FINISH_STEEL);
+    cyl_f(
+        b,
+        2,
+        (zw.0.saturating_sub(1), zw.1 + 1),
+        c,
+        r,
+        0,
+        p,
+        FINISH_STEEL,
+    );
 }
 
 /// Опустить кусок ветви на воксель: каждый твёрдый воксель окна
@@ -1186,7 +1351,11 @@ pub(crate) fn running_gear(
     }
     let nz = b.vol.nz as usize;
     let out_low = zs.0 <= nz.saturating_sub(zs.1);
-    let zw = if out_low { (zs.0 + 1, zs.1) } else { (zs.0, zs.1 - 1) };
+    let zw = if out_low {
+        (zs.0 + 1, zs.1)
+    } else {
+        (zs.0, zs.1 - 1)
+    };
     // Наружный радиус ленты, её толщина, радиус катка. Ось ленты
     // поднята на воксель над днищем: трак растёт наружу, а у нижней
     // ветви наружу — вниз, и лежащей на нуле ленте расти было некуда.
@@ -1248,7 +1417,14 @@ pub(crate) fn hatch(b: &mut UnitBody, c: (usize, usize), r: i32, y: usize, p: Pa
     ring(b, c, r + 1, r, (y, y + 1), p);
     // Ручка-скоба поперёк крышки — сталью, чтобы люк не сливался
     // с крышей в одно пятно краски.
-    fill_f(b, (c.0 - 1, c.0 + 1), (y + 1, y + 2), (c.1 - r as usize / 2, c.1 + r as usize / 2 + 1), p, FINISH_STEEL);
+    fill_f(
+        b,
+        (c.0 - 1, c.0 + 1),
+        (y + 1, y + 2),
+        (c.1 - r as usize / 2, c.1 + r as usize / 2 + 1),
+        p,
+        FINISH_STEEL,
+    );
 }
 
 /// **Люк без скобы** — крышка вровень с петлёй, там, где над ним
@@ -1256,10 +1432,23 @@ pub(crate) fn hatch(b: &mut UnitBody, c: (usize, usize), r: i32, y: usize, p: Pa
 pub(crate) fn lid(b: &mut UnitBody, c: (usize, usize), r: i32, y: usize, p: Part) {
     disc(b, c, r, (y, y + 1), p);
     ring(b, c, r + 1, r, (y, y + 1), p);
-    mark_cyl(b, 1, (y, y + 1), (c.0 as i32, c.1 as i32), r + 1, FINISH_STEEL);
-    mark_cyl(b, 1, (y, y + 1), (c.0 as i32, c.1 as i32), r - 1, FINISH_PLATE);
+    mark_cyl(
+        b,
+        1,
+        (y, y + 1),
+        (c.0 as i32, c.1 as i32),
+        r + 1,
+        FINISH_STEEL,
+    );
+    mark_cyl(
+        b,
+        1,
+        (y, y + 1),
+        (c.0 as i32, c.1 as i32),
+        r - 1,
+        FINISH_PLATE,
+    );
 }
-
 
 /// **Поручень** вдоль оси `axis` от `a` длиной `len`: стальной прут
 /// на воксель над поверхностью и стойки к ней через четыре воксела.
@@ -1298,25 +1487,64 @@ pub(crate) fn crate_box(
 ) {
     fill(b, xs, ys, zs, p);
     if xs.1 > xs.0 + 2 && zs.1 > zs.0 + 2 && ys.1 > ys.0 + 1 {
-        carve(b, (xs.0 + 1, xs.1 - 1), (ys.1 - 1, ys.1), (zs.0 + 1, zs.1 - 1));
+        carve(
+            b,
+            (xs.0 + 1, xs.1 - 1),
+            (ys.1 - 1, ys.1),
+            (zs.0 + 1, zs.1 - 1),
+        );
         let mx = (xs.0 + xs.1) / 2;
-        fill_f(b, (mx, mx + 1), (ys.1 - 1, ys.1), (zs.0 + 1, zs.1 - 1), p, FINISH_STEEL);
+        fill_f(
+            b,
+            (mx, mx + 1),
+            (ys.1 - 1, ys.1),
+            (zs.0 + 1, zs.1 - 1),
+            p,
+            FINISH_STEEL,
+        );
     }
 }
 
 /// **Фара**: стекло в стальной оправе на носовой грани, смотрит по `+X`.
 /// `at` — нижний ближний угол оправы, `w` — ширина по `Z`.
 pub(crate) fn headlight(b: &mut UnitBody, at: (usize, usize, usize), w: usize, p: Part) {
-    fill_f(b, (at.0, at.0 + 2), (at.1, at.1 + 3), (at.2, at.2 + w), p, FINISH_STEEL);
-    fill_f(b, (at.0 + 1, at.0 + 2), (at.1 + 1, at.1 + 2), (at.2 + 1, at.2 + w - 1), p, crate::unit::FINISH_OPTIC);
+    fill_f(
+        b,
+        (at.0, at.0 + 2),
+        (at.1, at.1 + 3),
+        (at.2, at.2 + w),
+        p,
+        FINISH_STEEL,
+    );
+    fill_f(
+        b,
+        (at.0 + 1, at.0 + 2),
+        (at.1 + 1, at.1 + 2),
+        (at.2 + 1, at.2 + w - 1),
+        p,
+        crate::unit::FINISH_OPTIC,
+    );
     // Козырёк над стеклом.
-    fill(b, (at.0, at.0 + 3), (at.1 + 3, at.1 + 4), (at.2, at.2 + w), p);
+    fill(
+        b,
+        (at.0, at.0 + 3),
+        (at.1 + 3, at.1 + 4),
+        (at.2, at.2 + w),
+        p,
+    );
 }
 
 /// **Заклёпки** вдоль оси `axis` от `a`: стальные шляпки в воксель
 /// через `step`, сидят **на** поверхности. Ряд, а не одиночки: одна
 /// заклёпка на плите читается сором, ряд — швом.
-pub(crate) fn rivets(b: &mut UnitBody, a: (usize, usize, usize), axis: usize, len: usize, step: usize, p: Part) {
+pub(crate) fn rivets(
+    b: &mut UnitBody,
+    a: (usize, usize, usize),
+    axis: usize,
+    len: usize,
+    step: usize,
+    p: Part,
+) {
     let mut q = [a.0, a.1, a.2];
     let mut i = 0;
     while i < len {
@@ -1331,9 +1559,23 @@ pub(crate) fn rivets(b: &mut UnitBody, a: (usize, usize, usize), axis: usize, le
 /// у корпуса и тёмный срез. Труба — воронёная, кожух — краска.
 pub(crate) fn exhaust(b: &mut UnitBody, x: (usize, usize), c: (i32, i32), r: i32, p: Part) {
     cyl_f(b, 0, x, c, r, 0, p, crate::unit::FINISH_GUN);
-    cyl_f(b, 0, (x.1.saturating_sub(2), x.1), c, r + 1, r, p, crate::unit::FINISH_PLATE);
+    cyl_f(
+        b,
+        0,
+        (x.1.saturating_sub(2), x.1),
+        c,
+        r + 1,
+        r,
+        p,
+        crate::unit::FINISH_PLATE,
+    );
     // Срез трубы полый: середина снята, кромка тёмная.
-    carve(b, (x.0, x.0 + 1), (c.0 as usize, c.0 as usize + 1), (c.1 as usize, c.1 as usize + 1));
+    carve(
+        b,
+        (x.0, x.0 + 1),
+        (c.0 as usize, c.0 as usize + 1),
+        (c.1 as usize, c.1 as usize + 1),
+    );
     mark_cyl(b, 0, (x.0, x.0 + 1), c, r, FINISH_RUBBER);
 }
 
@@ -1374,7 +1616,11 @@ mod tests {
         oct_at(&mut e, 1, (0, 1), (8, 8), 6, Part::Armour, FINISH_BY_PART);
         for z in 0..16 {
             for x in 0..16 {
-                assert_eq!(e.vol.get(x, 0, z), e.vol.get(15 - x, 0, 15 - z), "круг несимметричен");
+                assert_eq!(
+                    e.vol.get(x, 0, z),
+                    e.vol.get(15 - x, 0, 15 - z),
+                    "круг несимметричен"
+                );
             }
         }
         assert_eq!(count(&e), 32, "сечение звена радиуса три вокруг узла");
@@ -1410,7 +1656,10 @@ mod tests {
                     continue;
                 }
                 let has = cells.iter().any(|&(a, c, d)| {
-                    (a as i32 - x as i32).abs() + (c as i32 - y as i32).abs() + (d as i32 - z as i32).abs() == 1
+                    (a as i32 - x as i32).abs()
+                        + (c as i32 - y as i32).abs()
+                        + (d as i32 - z as i32).abs()
+                        == 1
                 });
                 assert!(has, "воксель {x} {y} {z} без соседа по грани");
             }
@@ -1428,7 +1677,10 @@ mod tests {
         let s = slab(6, 3, 8, BODY_MM, Part::Armour, FINISH_BY_PART);
         mount(
             &mut b,
-            Attach { pitch: -TURN / 8, ..Attach::flat((46, 18, 4), (0, 3, 4)) },
+            Attach {
+                pitch: -TURN / 8,
+                ..Attach::flat((46, 18, 4), (0, 3, 4))
+            },
             s,
             12,
             0,
@@ -1461,10 +1713,24 @@ mod tests {
     /// звена, иначе он выглядывает наружу заусенцем.
     #[test]
     fn the_bone_hides_inside_its_rod() {
-        for (a, e) in [((6, 25, 8), (20, 6, 21)), ((4, 4, 4), (26, 5, 25)), ((15, 28, 15), (15, 3, 16))] {
+        for (a, e) in [
+            ((6, 25, 8), (20, 6, 21)),
+            ((4, 4, 4), (26, 5, 25)),
+            ((15, 28, 15), (15, 3, 16)),
+        ] {
             let mut b = UnitBody::new_scaled(30, 30, 30, 1, BODY_MM);
             let (r2a, r2e) = (8, 6);
-            rod(&mut b, a, e, r2a, r2e, 1, Part::Armour, FINISH_BY_PART, false);
+            rod(
+                &mut b,
+                a,
+                e,
+                r2a,
+                r2e,
+                1,
+                Part::Armour,
+                FINISH_BY_PART,
+                false,
+            );
             let k = b.segments.len() - 1;
             let (t, r) = frame(&b, k);
             let rt = transposed(&r);
@@ -1487,13 +1753,19 @@ mod tests {
                         ];
                         let q = mat_vec(&rt, c);
                         let along = q[0].to_int_trunc();
-                        assert!(q[0] >= Fx::ZERO && along < len, "кость {x} {y} {z} за торцом звена");
+                        assert!(
+                            q[0] >= Fx::ZERO && along < len,
+                            "кость {x} {y} {z} за торцом звена"
+                        );
                         let r2 = r2a + (r2e - r2a) * along / (len - 1).max(1);
                         // Радиус звена плюс полвоксела цифрового круга.
                         let lim = Fx::from_ratio(r2, 2).add(half);
                         let (dy, dz) = (q[1].sub(piv), q[2].sub(piv));
                         let d2 = dy.mul(dy).add(dz.mul(dz));
-                        assert!(d2 <= lim.mul(lim), "кость {x} {y} {z} торчит из звена {a:?}→{e:?}");
+                        assert!(
+                            d2 <= lim.mul(lim),
+                            "кость {x} {y} {z} торчит из звена {a:?}→{e:?}"
+                        );
                     }
                 }
             }

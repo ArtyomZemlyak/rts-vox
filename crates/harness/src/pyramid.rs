@@ -99,7 +99,14 @@ impl Pyramid {
             l2.push(t);
         }
 
-        Pyramid { bx, by, bz, l0, l1, l2 }
+        Pyramid {
+            bx,
+            by,
+            bz,
+            l0,
+            l1,
+            l2,
+        }
     }
 
     #[inline(always)]
@@ -158,9 +165,21 @@ impl Ray {
             o,
             d,
             inv: [
-                if d[0] != 0.0 { 1.0 / d[0] } else { f32::INFINITY },
-                if d[1] != 0.0 { 1.0 / d[1] } else { f32::INFINITY },
-                if d[2] != 0.0 { 1.0 / d[2] } else { f32::INFINITY },
+                if d[0] != 0.0 {
+                    1.0 / d[0]
+                } else {
+                    f32::INFINITY
+                },
+                if d[1] != 0.0 {
+                    1.0 / d[1]
+                } else {
+                    f32::INFINITY
+                },
+                if d[2] != 0.0 {
+                    1.0 / d[2]
+                } else {
+                    f32::INFINITY
+                },
             ],
         }
     }
@@ -217,7 +236,13 @@ pub fn march_flat(w: &World, o: [f32; 3], d: [f32; 3], max_dist: f32) -> MarchSt
 }
 
 /// Марш по пирамиде: пустая крупная ячейка проглатывается одним шагом.
-pub fn march_pyramid(p: &Pyramid, w: &World, o: [f32; 3], d: [f32; 3], max_dist: f32) -> MarchStats {
+pub fn march_pyramid(
+    p: &Pyramid,
+    w: &World,
+    o: [f32; 3],
+    d: [f32; 3],
+    max_dist: f32,
+) -> MarchStats {
     let r = Ray::new(o, d);
     let mut st = MarchStats::default();
     let mut t = 0.0f32;

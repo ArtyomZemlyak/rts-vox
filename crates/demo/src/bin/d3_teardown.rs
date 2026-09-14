@@ -35,7 +35,12 @@ struct Args {
 
 impl Default for Args {
     fn default() -> Args {
-        Args { seed: 42, shots: 400, radius: 2, dump_hash: false }
+        Args {
+            seed: 42,
+            shots: 400,
+            radius: 2,
+            dump_hash: false,
+        }
     }
 }
 
@@ -128,7 +133,10 @@ fn main() -> ExitCode {
     );
 
     // --- 1. Прицельный отстрел: каждая подсистема по очереди.
-    println!("{:<22} {:>8} {:>8} {:>8} {:>8} {:>10}", "выстрел", "жив", "двиг.", "оруд.", "сенс.", "снято");
+    println!(
+        "{:<22} {:>8} {:>8} {:>8} {:>8} {:>10}",
+        "выстрел", "жив", "двиг.", "оруд.", "сенс.", "снято"
+    );
     let mut ok = true;
     for target in [Part::Engine, Part::Weapon, Part::Sensor, Part::Core] {
         let mut t = tank();
@@ -136,7 +144,9 @@ fn main() -> ExitCode {
         // Бьём в одну точку, пока подсистема не откажет.
         let mut shots = 0;
         let s = loop {
-            let Some((x, y, z)) = aim(&t, target) else { break t.status(&mut bufs) };
+            let Some((x, y, z)) = aim(&t, target) else {
+                break t.status(&mut bufs);
+            };
             removed += hit(&mut t, x, y, z, a.radius);
             shots += 1;
             let s = t.status(&mut bufs);
@@ -167,7 +177,10 @@ fn main() -> ExitCode {
                 ok = false;
             }
             if !s.alive {
-                println!("  танк умер от потери {} — это не пробитие ядра", target.name());
+                println!(
+                    "  танк умер от потери {} — это не пробитие ядра",
+                    target.name()
+                );
                 ok = false;
             }
         }
@@ -240,9 +253,16 @@ fn main() -> ExitCode {
     println!(
         "{:<30} {:>14}",
         "  а боеспособность потеряна на",
-        if crippled_at == 0 { "не потеряна".to_string() } else { crippled_at.to_string() }
+        if crippled_at == 0 {
+            "не потеряна".to_string()
+        } else {
+            crippled_at.to_string()
+        }
     );
-    println!("{:<30} {:>14}", "  тем же выстрелом отвалилось", crippled_detached);
+    println!(
+        "{:<30} {:>14}",
+        "  тем же выстрелом отвалилось", crippled_detached
+    );
     println!("{:<30} {:>14}", "снято вокселей", removed);
     println!("{:<30} {:>14}", "пик отвалившегося от ядра", detached_peak);
     for p in [Part::Engine, Part::Weapon, Part::Sensor, Part::Core] {
@@ -250,7 +270,11 @@ fn main() -> ExitCode {
         println!(
             "{:<30} {:>14}",
             format!("{} отказал на выстреле", p.name()),
-            if n == 0 { "не отказал".to_string() } else { n.to_string() }
+            if n == 0 {
+                "не отказал".to_string()
+            } else {
+                n.to_string()
+            }
         );
     }
 
@@ -316,7 +340,11 @@ fn main() -> ExitCode {
         println!("seed={} shots={} hash={:016x}", a.seed, a.shots, hash.get());
     }
 
-    let verdict = if best <= BUDGET_US { "ПОРОГ ДЕРЖИТСЯ" } else { "ПОРОГ ПРЕВЫШЕН" };
+    let verdict = if best <= BUDGET_US {
+        "ПОРОГ ДЕРЖИТСЯ"
+    } else {
+        "ПОРОГ ПРЕВЫШЕН"
+    };
     println!("порог {BUDGET_US} мкс на пересчёт: {best:.3} мкс — {verdict}");
     if best > BUDGET_US {
         ok = false;

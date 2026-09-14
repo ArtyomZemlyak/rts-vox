@@ -79,83 +79,106 @@ pub struct NavRaw {
     pub stand: Vec<bool>,
 }
 
-/// Пересчитать уровни клетки — чистая функция от мира.
+/// Reusable scratch, independent of navigation state and save data.
+#[derive(Default)]
+struct ScanScratch {
+    rows: Vec<u64>,
+    floors: Vec<u64>,
+}
+
+/// Exact clearance for up to 64 columns at once (ADR-247).
 ///
-/// **Ряд клетки берётся словом, а не по вокселю.** Клетка — это `step`
-/// колонок, и каждый их воксел прежде спрашивался у мира отдельно:
-/// `step²·ny` обращений на клетку, а ряды разных `y` лежат в объёме
-/// далеко друг от друга, и каждое обращение — промах кэша. Слово
-/// занятости несёт все `step` колонок ряда разом: обращений
-/// становится `step·ny`, остальное — сдвиги по буферу, который целиком
-/// сидит в кэше первого уровня. На километре это разница между
-/// минутами и секундами (ADR-228).
-///
-/// Сам обход — тот же, что был: сверка с повоксельным — тестом.
-fn scan_cell(w: &World, step: u32, height: u32, cx: u32, cz: u32, words: &mut Vec<u64>) -> Scan {
-    // Собираем с запасом, а обрезаем в конце: иначе выпадали бы
-    // те уровни, что нашлись позже, то есть произвольные.
-    // Остаются **нижние** — там, где юниты и ходят (ADR-136).
+/// Only solid-to-air transitions can be floors. Test their clearance in
+/// parallel across the X bits, stopping as soon as every candidate hits a
+/// ceiling. Air runs from different floors of one column cannot overlap:
+/// the total clearance work stays bounded by step * ny, independently of
+/// height. Vertical floor bitsets restore the original z/x/y traversal,
+/// including merging and overflow. Cave/roof geometry is unchanged.
+fn scan_cell(
+    w: &World,
+    step: u32,
+    height: u32,
+    cx: u32,
+    cz: u32,
+    scratch: &mut ScanScratch,
+) -> Scan {
+    assert!(height > 0, "navigation clearance must be positive");
+    if height >= w.ny {
+        return Scan::EMPTY;
+    }
     const SCRATCH: usize = 32;
     let mut found = [NO_FLOOR; SCRATCH];
     let mut n = 0usize;
     let mut over = false;
-    let ny = w.ny;
+    let ny = w.ny as usize;
+    let h = height as usize;
+    let blocks = ny.div_ceil(64);
+    scratch.rows.resize(ny, 0);
+    scratch.floors.resize(step as usize * blocks, 0);
     for dz in 0..step {
         let (x0, z) = (cx * step, cz * step + dz);
-        words.clear();
-        words.extend((0..ny).map(|y| w.solid_bits(x0, y, z, step)));
-        for dx in 0..step {
-            let solid = |y: u32| (words[y as usize] >> dx) & 1 != 0;
-            let mut y = 1u32;
-            while y < ny {
-                if solid(y - 1) && !solid(y) {
-                    let mut clear = 0;
-                    while clear < height && y + clear < ny && !solid(y + clear) {
-                        clear += 1;
+        for (y, row) in scratch.rows.iter_mut().enumerate() {
+            *row = w.solid_bits(x0, y as u32, z, step);
+        }
+        scratch.floors.fill(0);
+        for y in 1..=ny - h {
+            let mut standing = scratch.rows[y - 1] & !scratch.rows[y];
+            if standing == 0 {
+                continue;
+            }
+            for &occupied in &scratch.rows[y + 1..y + h] {
+                standing &= !occupied;
+                if standing == 0 {
+                    break;
+                }
+            }
+            while standing != 0 {
+                let dx = standing.trailing_zeros() as usize;
+                standing &= standing - 1;
+                scratch.floors[dx * blocks + y / 64] |= 1u64 << (y % 64);
+            }
+        }
+        for dx in 0..step as usize {
+            for word in 0..blocks {
+                let mut candidates = scratch.floors[dx * blocks + word];
+                while candidates != 0 {
+                    let yv = (word * 64 + candidates.trailing_zeros() as usize) as u16;
+                    candidates &= candidates - 1;
+                    let mut merged = false;
+                    for f in found.iter_mut().take(n) {
+                        if f.abs_diff(yv) <= 1 {
+                            *f = (*f).min(yv);
+                            merged = true;
+                            break;
+                        }
                     }
-                    if clear >= height {
-                        // Уровни, отличающиеся на воксель, — один
-                        // и тот же: клетка шире воксела, и пол
-                        // в ней бывает неровным.
-                        let yv = y as u16;
-                        let mut merged = false;
-                        for f in found.iter_mut().take(n) {
-                            if f.abs_diff(yv) <= 1 {
-                                *f = (*f).min(yv);
-                                merged = true;
-                                break;
-                            }
+                    if !merged {
+                        if n < SCRATCH {
+                            found[n] = yv;
+                            n += 1;
+                        } else {
+                            over = true;
                         }
-                        if !merged {
-                            if n < SCRATCH {
-                                found[n] = yv;
-                                n += 1;
-                            } else {
-                                over = true;
-                            }
-                        }
-                        y += height;
-                        continue;
                     }
                 }
-                y += 1;
             }
         }
     }
     found[..n].sort_unstable();
     let top = if n == 0 { NO_FLOOR } else { found[n - 1] };
     if n > MAX_LEVELS {
-        // Обрезка оставляет нижние — и **обязательно верхний**.
-        // Без него юнит на поверхности колонки, где уровней больше
-        // восьми, оказывался бы притянут вниз, в толщу: поверхность
-        // это не «ещё один уровень», это тот, где он стоит (ADR-138).
         over = true;
         found[MAX_LEVELS - 1] = top;
         n = MAX_LEVELS;
     }
     let mut levels = [NO_FLOOR; MAX_LEVELS];
     levels.copy_from_slice(&found[..MAX_LEVELS]);
-    Scan { levels, n: n as u8, top, over }
+    Scan {
+        levels,
+        n: n as u8,
+        top,
+        over,
+    }
 }
 
 pub struct NavLayer {
@@ -189,6 +212,7 @@ pub struct NavLayer {
     /// Какой перепад юнит перешагивает. Больше — обрыв, ребра нет.
     pub max_step: u32,
     step: u32,
+    scan: ScanScratch,
 }
 
 impl NavLayer {
@@ -215,6 +239,7 @@ impl NavLayer {
             height,
             max_step,
             step,
+            scan: ScanScratch::default(),
         };
         if cells == 0 {
             return l;
@@ -230,10 +255,10 @@ impl NavLayer {
         };
         let band = (nh as usize).div_ceil(threads) * nw as usize;
         let scan_band = |b: usize, out: &mut [Scan]| {
-            let mut words = Vec::with_capacity(w.ny as usize);
+            let mut scratch = ScanScratch::default();
             for (k, s) in out.iter_mut().enumerate() {
                 let i = (b * band + k) as u32;
-                *s = scan_cell(w, step, height, i % nw, i / nw, &mut words);
+                *s = scan_cell(w, step, height, i % nw, i / nw, &mut scratch);
             }
         };
         if threads == 1 {
@@ -254,8 +279,7 @@ impl NavLayer {
 
     /// Пересчитать уровни клетки. Возвращает `(пол, можно ли стоять)`.
     fn refresh_cell(&mut self, w: &World, cx: u32, cz: u32) -> (u16, bool) {
-        let mut words = Vec::with_capacity(w.ny as usize);
-        let s = scan_cell(w, self.step, self.height, cx, cz, &mut words);
+        let s = scan_cell(w, self.step, self.height, cx, cz, &mut self.scan);
         let i = self.idx(cx, cz);
         self.store(i, &s)
     }
@@ -322,6 +346,7 @@ impl NavLayer {
             height: r.height,
             max_step: r.max_step,
             step: r.step,
+            scan: ScanScratch::default(),
         })
     }
 
@@ -395,7 +420,6 @@ impl NavLayer {
         let _ = a;
         best
     }
-
 
     #[inline]
     fn idx(&self, cx: u32, cz: u32) -> usize {
@@ -498,7 +522,8 @@ impl NavLayer {
             }
             if self.floor[ci] != f0 {
                 st.floor_moved += 1;
-                st.floor_drop += (f0.min(NO_FLOOR - 1) as i32 - self.floor[ci].min(NO_FLOOR - 1) as i32)
+                st.floor_drop += (f0.min(NO_FLOOR - 1) as i32
+                    - self.floor[ci].min(NO_FLOOR - 1) as i32)
                     .max(0) as u64;
             }
             let d1 = self.degree(cx, cz);
@@ -608,7 +633,7 @@ mod tests {
     impl voxel::Generator for Caves {
         fn material(&self, x: u32, y: u32, z: u32) -> Mat {
             let h = 24 + (x / 3) % 9 + (z / 4) % 6;
-            if y >= h || (y / 3 + x / 5 + z / 7) % 4 == 0 {
+            if y >= h || (y / 3 + x / 5 + z / 7).is_multiple_of(4) {
                 return AIR;
             }
             1
@@ -668,7 +693,12 @@ mod tests {
         }
         let mut levels = [NO_FLOOR; MAX_LEVELS];
         levels.copy_from_slice(&found[..MAX_LEVELS]);
-        Scan { levels, n: n as u8, top, over }
+        Scan {
+            levels,
+            n: n as u8,
+            top,
+            over,
+        }
     }
 
     /// **Словесный обход клетки совпадает с повоксельным** — на всех
@@ -679,16 +709,19 @@ mod tests {
         // Размеры не кратны стороне клетки: последняя клетка ряда
         // упирается в край мира.
         let w = World::new(97, 48, 61, 16, Box::new(Caves));
-        let mut words = Vec::new();
+        let mut scratch = ScanScratch::default();
         let (mut levels, mut over) = (0usize, 0usize);
         for step in [1u32, 2, 3, 10] {
             for height in [1u32, 2, 4] {
                 let (nw, nh) = (w.nx / step, w.nz / step);
                 for cz in 0..nh {
                     for cx in 0..nw {
-                        let got = scan_cell(&w, step, height, cx, cz, &mut words);
+                        let got = scan_cell(&w, step, height, cx, cz, &mut scratch);
                         let want = reference(&w, step, height, cx, cz);
-                        assert_eq!(got.levels, want.levels, "клетка {cx},{cz}, сторона {step}, рост {height}");
+                        assert_eq!(
+                            got.levels, want.levels,
+                            "клетка {cx},{cz}, сторона {step}, рост {height}"
+                        );
                         assert_eq!(got.n, want.n, "клетка {cx},{cz}: число уровней");
                         assert_eq!(got.top, want.top, "клетка {cx},{cz}: поверхность");
                         assert_eq!(got.over, want.over, "клетка {cx},{cz}: переполнение");
@@ -698,8 +731,80 @@ mod tests {
                 }
             }
         }
-        assert!(levels > 100, "уровней всего {levels} — сверять почти нечего");
+        assert!(
+            levels > 100,
+            "уровней всего {levels} — сверять почти нечего"
+        );
         assert!(over > 0, "переполнения не случилось — обрезка не проверена");
+    }
+
+    #[test]
+    fn clearance_windows_preserve_word_edges_tall_gaps_and_merge_order() {
+        struct Shelves;
+        impl voxel::Generator for Shelves {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                let solid = y == 0
+                    || match x % 3 {
+                        0 => y < 130 && (y + z % 5) % 17 < 5,
+                        1 => y < 130 && y.is_multiple_of(2),
+                        _ => y < 63 + (x + z) % 3,
+                    };
+                if solid {
+                    1
+                } else {
+                    AIR
+                }
+            }
+        }
+        let w = World::new(97, 193, 67, 16, Box::new(Shelves));
+        let mut scratch = ScanScratch::default();
+        let (mut populated, mut overflowed) = (0, 0);
+        for step in [1, 2, 3, 10, 31, 32, 63, 64] {
+            for height in [1, 2, 3, 20, 31, 32, 63, 64, 65, 128, 192, 193, 194] {
+                for cz in [0, 1, (w.nz - 1) / step] {
+                    for cx in [0, 1, (w.nx - 1) / step] {
+                        let a = scan_cell(&w, step, height, cx, cz, &mut scratch);
+                        let b = reference(&w, step, height, cx, cz);
+                        assert_eq!(
+                            (a.levels, a.n, a.top, a.over),
+                            (b.levels, b.n, b.top, b.over),
+                            "step {step}, height {height}, cell {cx},{cz}"
+                        );
+                        populated += usize::from(a.n != 0);
+                        overflowed += usize::from(a.over);
+                    }
+                }
+            }
+        }
+        assert!(populated > 100);
+        assert!(overflowed > 0);
+    }
+
+    #[test]
+    fn changed_columns_publish_the_same_levels_as_a_fresh_scan_in_the_same_tick() {
+        let mut w = World::new(70, 80, 66, 4096, Box::new(Caves));
+        let mut layer = NavLayer::new(&w, 20, 10, 5);
+        let mut rng = fx::rng::Rng::new(247, 7);
+        let mut changes = 0;
+        for _ in 0..12 {
+            for _ in 0..1000 {
+                let (x, y, z) = (rng.below(70), rng.below(80), rng.below(66));
+                w.queue_edit(Edit::put(x, y, z, if w.solid(x, y, z) { AIR } else { 1 }));
+            }
+            w.flush();
+            let before = layer.raw();
+            let stats = layer.apply(&w, w.edits());
+            assert!(stats.seen > 0);
+            let fresh = NavLayer::new(&w, 20, 10, 5).raw();
+            let got = layer.raw();
+            changes += usize::from(got.levels != before.levels);
+            assert_eq!(got.levels, fresh.levels);
+            assert_eq!(got.n_levels, fresh.n_levels);
+            assert_eq!(got.floor, fresh.floor);
+            assert_eq!(got.stand, fresh.stand);
+            assert_eq!(got.top, fresh.top);
+        }
+        assert!(changes > 0, "the edit stream never changed navigation");
     }
 
     /// **Параллельная сборка даёт то же, что клетка за клеткой**, включая
@@ -714,14 +819,21 @@ mod tests {
             l.w as usize * l.h as usize >= BUILD_PARALLEL_FROM,
             "мир мал — сборка шла в один поток, и тест ничего не проверил"
         );
-        let mut words = Vec::new();
+        let mut scratch = ScanScratch::default();
         let mut overflow = 0u64;
         for cz in 0..l.h {
             for cx in 0..l.w {
-                let s = scan_cell(&w, 2, 4, cx, cz, &mut words);
-                assert_eq!(l.levels_at(cx, cz), &s.levels[..s.n as usize], "клетка {cx},{cz}");
+                let s = scan_cell(&w, 2, 4, cx, cz, &mut scratch);
+                assert_eq!(
+                    l.levels_at(cx, cz),
+                    &s.levels[..s.n as usize],
+                    "клетка {cx},{cz}"
+                );
                 assert_eq!(l.top_at(cx, cz), s.top);
-                assert_eq!(l.floor_at(cx, cz), if s.n == 0 { NO_FLOOR } else { s.levels[0] });
+                assert_eq!(
+                    l.floor_at(cx, cz),
+                    if s.n == 0 { NO_FLOOR } else { s.levels[0] }
+                );
                 assert_eq!(l.standable(cx, cz), s.n > 0);
                 overflow += u64::from(s.over);
             }
@@ -736,11 +848,17 @@ mod tests {
         let w = World::new(64, 32, 48, 16, Box::new(Caves));
         let l = NavLayer::new(&w, 4, 2, 1);
         let r = l.raw();
-        assert!(r.floor.iter().any(|&f| f != NO_FLOOR), "слой пуст — сверять нечего");
+        assert!(
+            r.floor.iter().any(|&f| f != NO_FLOOR),
+            "слой пуст — сверять нечего"
+        );
         let back = NavLayer::from_raw(r.clone()).expect("внутренности целы");
         assert_eq!(back.raw(), r);
         let mut bad = r.clone();
         bad.floor.pop();
-        assert!(NavLayer::from_raw(bad).is_none(), "слой не той длины принят");
+        assert!(
+            NavLayer::from_raw(bad).is_none(),
+            "слой не той длины принят"
+        );
     }
 }

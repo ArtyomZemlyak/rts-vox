@@ -46,7 +46,9 @@ fn read_manifest(dir: &Path) -> Manifest {
             }
             continue;
         }
-        let Some((k, v)) = t.split_once('=') else { continue };
+        let Some((k, v)) = t.split_once('=') else {
+            continue;
+        };
         let (k, v) = (k.trim(), v.trim());
         if k.is_empty() || k.starts_with('#') {
             continue;
@@ -57,7 +59,11 @@ fn read_manifest(dir: &Path) -> Manifest {
             external.push((k.to_string(), v.to_string()));
         }
     }
-    Manifest { name, local, external }
+    Manifest {
+        name,
+        local,
+        external,
+    }
 }
 
 fn all_manifests() -> BTreeMap<String, Manifest> {
@@ -115,7 +121,9 @@ fn the_simulation_never_reaches_a_render_dependency() {
         let m = &ms[&c];
         for (dep, _) in &m.external {
             assert!(
-                !banned.iter().any(|b| dep == b || dep.starts_with(&format!("{b}-"))),
+                !banned
+                    .iter()
+                    .any(|b| dep == b || dep.starts_with(&format!("{b}-"))),
                 "крейт {c} зависит от {dep}, а от него зависит sim-core"
             );
         }
@@ -402,10 +410,17 @@ fn the_render_layer_never_writes_into_the_simulation() {
                 continue;
             }
             if let Some(call) = BANNED.iter().find(|b| line.contains(**b)) {
-                bad.push(format!("{}:{}: {call} — {}", f.display(), n + 1, line.trim()));
+                bad.push(format!(
+                    "{}:{}: {call} — {}",
+                    f.display(),
+                    n + 1,
+                    line.trim()
+                ));
                 continue;
             }
-            let Some(lhs) = assigned_path(line) else { continue };
+            let Some(lhs) = assigned_path(line) else {
+                continue;
+            };
             if let Some(path) = STATE.iter().find(|p| lhs.contains(**p)) {
                 bad.push(format!(
                     "{}:{}: присваивание в {path} — {}",
@@ -490,7 +505,11 @@ fn the_simulation_has_no_hash_containers() {
             }
         }
     }
-    assert!(bad.is_empty(), "хеш-контейнер в симуляции:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "хеш-контейнер в симуляции:\n{}",
+        bad.join("\n")
+    );
 }
 
 /// **Симуляция не смотрит на часы.**
@@ -515,7 +534,10 @@ fn the_simulation_never_reads_the_clock() {
     let allow: &[(&str, &str)] = &[
         ("sim-core", "use std::time::Instant;"),
         ("sim-core", "let t0 = Instant::now();"),
-        ("sim-core", "self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;"),
+        (
+            "sim-core",
+            "self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;",
+        ),
     ];
     let ms = all_manifests();
     let mut bad: Vec<String> = Vec::new();

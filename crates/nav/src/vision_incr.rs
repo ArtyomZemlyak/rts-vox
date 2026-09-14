@@ -14,10 +14,10 @@
 //! Счётчик, а не бит, потому что снятие вклада одного сенсора не должно
 //! гасить клетку, которую видит другой.
 
-use crate::vision::Sensor;
 use crate::godunov::BLOCKED;
-use crate::vision::Slope;
 use crate::scene::Grid;
+use crate::vision::Sensor;
+use crate::vision::Slope;
 
 /// Маска одного сенсора в его собственных координатах.
 #[derive(Clone)]
@@ -137,7 +137,18 @@ pub fn shadowcast_local(g: &Grid, s: Sensor, m: &mut LocalMask) -> u64 {
     let mut visits = 1u64;
     m.set_local(m.r, m.r);
     for &(xx, xy, yx, yy) in OCTANTS.iter() {
-        visits += cast_local(g, s, 1, Slope::new(1, 1), Slope::new(0, 1), xx, xy, yx, yy, m);
+        visits += cast_local(
+            g,
+            s,
+            1,
+            Slope::new(1, 1),
+            Slope::new(0, 1),
+            xx,
+            xy,
+            yx,
+            yy,
+            m,
+        );
     }
     visits
 }
@@ -251,7 +262,10 @@ mod tests {
             crate::vision::shadowcast(&g, s, &mut global);
         }
         let mut cg = CountGrid::new(g.w, g.h);
-        let mut masks: Vec<LocalMask> = sensors.iter().map(|s| LocalMask::new(s.radius as usize)).collect();
+        let mut masks: Vec<LocalMask> = sensors
+            .iter()
+            .map(|s| LocalMask::new(s.radius as usize))
+            .collect();
         for (i, &s) in sensors.iter().enumerate() {
             insert(&g, s, &mut masks[i], &mut cg);
         }
@@ -290,7 +304,10 @@ mod tests {
             })
             .collect();
         let mut cg = CountGrid::new(g.w, g.h);
-        let mut masks: Vec<LocalMask> = sensors.iter().map(|s| LocalMask::new(s.radius as usize)).collect();
+        let mut masks: Vec<LocalMask> = sensors
+            .iter()
+            .map(|s| LocalMask::new(s.radius as usize))
+            .collect();
         for (i, &s) in sensors.iter().enumerate() {
             insert(&g, s, &mut masks[i], &mut cg);
         }
@@ -309,10 +326,18 @@ mod tests {
         let g = build(Scene::Open, 96, 3);
         let mut cg = CountGrid::new(g.w, g.h);
         let mut m = LocalMask::new(10);
-        let a = Sensor { x: 20, y: 20, radius: 10 };
+        let a = Sensor {
+            x: 20,
+            y: 20,
+            radius: 10,
+        };
         insert(&g, a, &mut m, &mut cg);
         assert!(cg.visible(20, 20));
-        let b = Sensor { x: 70, y: 70, radius: 10 };
+        let b = Sensor {
+            x: 70,
+            y: 70,
+            radius: 10,
+        };
         refresh(&g, b, &mut m, &mut cg);
         assert!(!cg.visible(20, 20), "старый вклад остался");
         assert!(cg.visible(70, 70), "новый вклад не появился");
@@ -329,14 +354,26 @@ mod tests {
     fn overlap_is_counted_not_flagged() {
         let g = build(Scene::Open, 64, 3);
         let mut cg = CountGrid::new(g.w, g.h);
-        let a = Sensor { x: 30, y: 30, radius: 8 };
-        let b = Sensor { x: 32, y: 30, radius: 8 };
+        let a = Sensor {
+            x: 30,
+            y: 30,
+            radius: 8,
+        };
+        let b = Sensor {
+            x: 32,
+            y: 30,
+            radius: 8,
+        };
         let mut ma = LocalMask::new(8);
         let mut mb = LocalMask::new(8);
         insert(&g, a, &mut ma, &mut cg);
         insert(&g, b, &mut mb, &mut cg);
         assert!(cg.c[30 * cg.w + 31] >= 2, "перекрытие не сосчитано");
-        let far = Sensor { x: 55, y: 55, radius: 8 };
+        let far = Sensor {
+            x: 55,
+            y: 55,
+            radius: 8,
+        };
         refresh(&g, far, &mut ma, &mut cg);
         assert!(cg.visible(31, 30), "клетку погасил уход соседа");
     }

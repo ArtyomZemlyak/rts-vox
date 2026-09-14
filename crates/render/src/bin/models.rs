@@ -22,24 +22,24 @@
 //! что и у боя (ADR-214): смотреть модели при другом свете значит
 //! подгонять их под свет, которого в игре нет.
 
-use bevy::asset::RenderAssetUsages;
-use bevy::light::CascadeShadowConfigBuilder;
-use bevy::mesh::Indices;
-use bevy::prelude::*;
-use bevy::render::render_resource::PrimitiveTopology;
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy::window::PresentMode;
-use render::geom::MeshBuf;
 use bevy::anti_alias::fxaa::Fxaa;
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::Exposure;
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::atmosphere::ScatteringMedium;
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::light::{Atmosphere, AtmosphereEnvironmentMapLight, SunDisk};
+use bevy::mesh::Indices;
 use bevy::pbr::{AtmosphereSettings, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::bloom::Bloom;
 use bevy::post_process::effect_stack::Vignette;
+use bevy::prelude::*;
+use bevy::render::render_resource::PrimitiveTopology;
+use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
+use bevy::window::PresentMode;
 use render::edge::{EdgePlugin, Edges};
+use render::geom::MeshBuf;
 use render::look;
 use render::model::{body_to_mesh, SegFrame, BEVEL};
 use render::occlusion::{Occlusion, OcclusionPlugin};
@@ -251,8 +251,22 @@ fn main() {
         // И то же щелевое затенение по вокселям (ADR-235).
         .add_plugins(OcclusionPlugin)
         .insert_resource(ClearColor(Color::srgb(0.14, 0.16, 0.20)))
-        .insert_resource(Shot { queue, next: 0, turned: false, at: after, left, seen: 0 })
-        .insert_resource(Scene { bevel, mm, spin, yaw, elev, pick })
+        .insert_resource(Shot {
+            queue,
+            next: 0,
+            turned: false,
+            at: after,
+            left,
+            seen: 0,
+        })
+        .insert_resource(Scene {
+            bevel,
+            mm,
+            spin,
+            yaw,
+            elev,
+            pick,
+        })
         .add_systems(Startup, setup)
         .add_systems(Update, (turn, snap))
         .run();
@@ -334,7 +348,15 @@ fn setup(
             for buf in bufs.iter_mut() {
                 buf.clear();
             }
-            body_to_mesh(b, tint, b.mm as f32 / MM_PER_UNIT, (0, 255), scene.bevel, centre, &mut bufs);
+            body_to_mesh(
+                b,
+                tint,
+                b.mm as f32 / MM_PER_UNIT,
+                (0, 255),
+                scene.bevel,
+                centre,
+                &mut bufs,
+            );
             tris += bufs.iter().map(|b| b.idx.len() / 3).sum::<usize>();
             let mut tr = Transform::IDENTITY;
             render::model::place(&mut tr, base, Quat::IDENTITY, seg.as_ref());
@@ -343,11 +365,14 @@ fn setup(
                     continue;
                 }
                 let mesh = meshes.add(
-                    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD)
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
-                        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
-                        .with_inserted_indices(Indices::U32(buf.idx.clone())),
+                    Mesh::new(
+                        PrimitiveTopology::TriangleList,
+                        RenderAssetUsages::RENDER_WORLD,
+                    )
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
+                    .with_inserted_indices(Indices::U32(buf.idx.clone())),
                 );
                 commands.spawn((
                     Mesh3d(mesh),
@@ -415,11 +440,17 @@ fn setup(
             tonemapping(sc.tonemap),
             grading(sc.grade),
             Exposure { ev100: sc.ev100 },
-            Bloom { intensity: sc.bloom.max(0.02), ..Bloom::NATURAL },
+            Bloom {
+                intensity: sc.bloom.max(0.02),
+                ..Bloom::NATURAL
+            },
             Msaa::Off,
             ScreenSpaceAmbientOcclusion::default(),
             Fxaa::default(),
-            AtmosphereSettings { aerial_view_lut_max_distance: sc.haze_range_m, ..default() },
+            AtmosphereSettings {
+                aerial_view_lut_max_distance: sc.haze_range_m,
+                ..default()
+            },
             AtmosphereEnvironmentMapLight {
                 intensity: sc.sky_ibl,
                 size: UVec2::splat(sc.sky_ibl_size),
@@ -441,9 +472,12 @@ fn setup(
     }
     if sc.occlusion.on() {
         let o = sc.occlusion;
-        commands
-            .entity(cam)
-            .insert(Occlusion { radius: o.radius, strength: o.strength, bias: o.bias, power: o.power });
+        commands.entity(cam).insert(Occlusion {
+            radius: o.radius,
+            strength: o.strength,
+            bias: o.bias,
+            power: o.power,
+        });
     }
     if sc.edge.strength > 0.0 {
         let e = sc.edge;
@@ -469,7 +503,11 @@ fn setup(
     let medium = mediums.add(ScatteringMedium::earth(256, 256));
     let atmo = commands.spawn(Atmosphere::earth(medium)).id();
     commands.entity(atmo).insert(GlobalTransform::from(
-        Transform::from_scale(Vec3::splat(k)).with_translation(Vec3::new(0.0, -EARTH_RADIUS_M * k, 0.0)),
+        Transform::from_scale(Vec3::splat(k)).with_translation(Vec3::new(
+            0.0,
+            -EARTH_RADIUS_M * k,
+            0.0,
+        )),
     ));
 
     // Свет — из общей палитры (`look`), чтобы модели выглядели так же,
@@ -485,7 +523,10 @@ fn setup(
             ..default()
         },
         Transform::from_xyz(-d[0], -d[1], -d[2]).looking_at(Vec3::ZERO, Vec3::Y),
-        SunDisk { angular_size: sc.sun_disk_size, intensity: sc.sun_disk_intensity },
+        SunDisk {
+            angular_size: sc.sun_disk_size,
+            intensity: sc.sun_disk_intensity,
+        },
         CascadeShadowConfigBuilder {
             num_cascades: 2,
             first_cascade_far_bound: span * 0.5,
@@ -502,7 +543,11 @@ const EARTH_RADIUS_M: f32 = 6_360_000.0;
 
 /// Поворот ряда: по времени, если вращение включено, иначе — заданный.
 fn turn(time: Res<Time>, scene: Res<Scene>, mut q: Query<(&mut Transform, &Spin)>) {
-    let angle = if scene.spin { time.elapsed_secs() * 0.35 } else { (scene.yaw as f32).to_radians() };
+    let angle = if scene.spin {
+        time.elapsed_secs() * 0.35
+    } else {
+        (scene.yaw as f32).to_radians()
+    };
     let rot = Quat::from_rotation_y(angle);
     for (mut t, s) in &mut q {
         render::model::place(&mut t, s.base, rot, s.seg.as_ref());
@@ -528,7 +573,9 @@ fn snap(
         } else {
             let p = s.queue[s.next].0.clone();
             println!("снимок на {now:.1} с: {p}");
-            commands.spawn(Screenshot::primary_window()).observe(save_to_disk(p));
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(p));
             s.next += 1;
             s.turned = false;
             s.at = now + 0.4;

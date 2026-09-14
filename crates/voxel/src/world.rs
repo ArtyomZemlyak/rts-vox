@@ -17,6 +17,11 @@
 //! **затронутые воксели**, в любом масштабе: он защищает тик, а не
 //! экономику. Очередь детерминирована — FIFO, дренаж строго по порядку.
 
+use std::sync::Arc;
+
+#[path = "snapshot.rs"]
+pub mod snapshot;
+
 use crate::store::{Mat, Paletted, AIR, CS};
 
 /// Никто не заказывал: обвал, запекание приземлившегося тела, воронка
@@ -45,14 +50,42 @@ pub struct Edit {
 }
 
 impl Edit {
+    /// Unowned compare-and-remove. The reserved requester range encodes the
+    /// expected material, preserving the existing fixed-width edit wire format.
+    /// Unit requester IDs must stay below 0xfffe0000.
+    pub fn dig_if(x: u32, y: u32, z: u32, expected: Mat) -> Edit {
+        Edit {
+            x,
+            y,
+            z,
+            mat: AIR,
+            by: 0xfffe0000 | expected as u32,
+        }
+    }
+    pub fn expected_material(self) -> Option<Mat> {
+        (self.mat == AIR && self.by & 0xffff0000 == 0xfffe0000).then_some(self.by as Mat)
+    }
+
     /// Снятие воксела без заказчика — обвал, воронка, оснастка теста.
     pub fn dig(x: u32, y: u32, z: u32) -> Edit {
-        Edit { x, y, z, mat: AIR, by: NOBODY }
+        Edit {
+            x,
+            y,
+            z,
+            mat: AIR,
+            by: NOBODY,
+        }
     }
 
     /// Укладка материала без заказчика.
     pub fn put(x: u32, y: u32, z: u32, mat: Mat) -> Edit {
-        Edit { x, y, z, mat, by: NOBODY }
+        Edit {
+            x,
+            y,
+            z,
+            mat,
+            by: NOBODY,
+        }
     }
 }
 
@@ -122,9 +155,9 @@ pub struct World {
     /// Идёт ли тик. Тот, кто зовёт `flush` напрямую, тика не
     /// объявляет, и для него потолок остаётся на дренаж.
     in_tick: bool,
-    gen: Box<dyn Generator + Send + Sync>,
+    gen: Arc<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
-    chunks: Vec<Option<Box<Paletted>>>,
+    chunks: Vec<Option<Arc<Paletted>>>,
     cx: u32,
     cy: u32,
     /// Битовый объём занятости, плотный. Слово на 64 воксела по X.
@@ -143,6 +176,8 @@ pub struct World {
     /// только в момент применения, и класть его в очередь значило бы
     /// хранить в ней поле, которое до дренажа не значит ничего.
     taken: Vec<(u32, Mat)>,
+    /// Completed requests, including no-ops, with the material before the edit.
+    completed: Vec<(Edit, Mat)>,
     /// Переиспользуемый буфер отложенного: дренаж идёт каждый тик,
     /// и выделять его заново незачем.
     defer_buf: Vec<Edit>,
@@ -266,7 +301,13 @@ impl World {
     /// целыми строками. Писать прямо в `bits` нельзя по цене: у строк
     /// одного столба шаг `nz * wx` слов, то есть промах кэша на каждый
     /// воксель высоты.
-    pub fn new(nx: u32, ny: u32, nz: u32, max_edits_per_tick: usize, g: Box<dyn Generator + Send + Sync>) -> World {
+    pub fn new(
+        nx: u32,
+        ny: u32,
+        nz: u32,
+        max_edits_per_tick: usize,
+        g: Box<dyn Generator + Send + Sync>,
+    ) -> World {
         let wx = nx.div_ceil(64);
         let threads = if u64::from(nx) * u64::from(nz) < FILL_PARALLEL_FROM {
             1
@@ -323,7 +364,7 @@ impl World {
             max_materialize_per_tick: 4,
             materialized_in_tick: 0,
             in_tick: false,
-            gen: g,
+            gen: Arc::from(g),
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
             cx,
             cy,
@@ -332,6 +373,7 @@ impl World {
             queue: std::collections::VecDeque::new(),
             applied: Vec::new(),
             taken: Vec::new(),
+            completed: Vec::new(),
             defer_buf: Vec::new(),
             materialized: 0,
         }
@@ -435,7 +477,13 @@ impl World {
     /// границы. Замер, правда, показал, что не деления были дороги —
     /// но курсор ничего не стоит и остался.
     pub fn mat_cursor() -> MatCursor {
-        MatCursor { ci: 0, ox: 0, oy: 0, oz: 0, valid: false }
+        MatCursor {
+            ci: 0,
+            ox: 0,
+            oy: 0,
+            oz: 0,
+            valid: false,
+        }
     }
 
     /// Материал с курсором. Ответ **тот же до бита**, что у
@@ -445,7 +493,13 @@ impl World {
             return AIR;
         }
         let cs = CS as u32;
-        if !c.valid || x < c.ox || x - c.ox >= cs || y < c.oy || y - c.oy >= cs || z < c.oz || z - c.oz >= cs
+        if !c.valid
+            || x < c.ox
+            || x - c.ox >= cs
+            || y < c.oy
+            || y - c.oy >= cs
+            || z < c.oz
+            || z - c.oz >= cs
         {
             let (a, b, d) = (x / cs, y / cs, z / cs);
             c.ci = ((d * self.cy + b) * self.cx + a) as usize;
@@ -455,7 +509,11 @@ impl World {
             c.valid = true;
         }
         match &self.chunks[c.ci] {
-            Some(k) => k.get((x - c.ox) as usize, (y - c.oy) as usize, (z - c.oz) as usize),
+            Some(k) => k.get(
+                (x - c.ox) as usize,
+                (y - c.oy) as usize,
+                (z - c.oz) as usize,
+            ),
             None => self.gen.material(x, y, z),
         }
     }
@@ -504,7 +562,7 @@ impl World {
                 }
             }
         }
-        self.chunks[ci] = Some(Box::new(p));
+        self.chunks[ci] = Some(Arc::new(p));
         self.materialized += 1;
     }
 
@@ -529,7 +587,13 @@ impl World {
     /// там был, попадёт в [`World::taken`], и экономика начислит его
     /// заказчику.
     pub fn queue_dig_by(&mut self, x: u32, y: u32, z: u32, by: u32) {
-        self.queue_edit(Edit { x, y, z, mat: AIR, by });
+        self.queue_edit(Edit {
+            x,
+            y,
+            z,
+            mat: AIR,
+            by,
+        });
     }
 
     pub fn queued(&self) -> usize {
@@ -550,6 +614,7 @@ impl World {
         }
         self.applied.clear();
         self.taken.clear();
+        self.completed.clear();
         let mut st = FlushStats::default();
         // Потолок материализаций — второй потолок дренажа, и он нужен
         // по той же причине, что первый: без него тик, в котором забой
@@ -584,13 +649,23 @@ impl World {
             && deferred.len() < self.max_edits_per_tick
             && st.examined < self.max_edits_per_tick
         {
-            let Some(e) = self.queue.pop_front() else { break };
+            let Some(e) = self.queue.pop_front() else {
+                break;
+            };
             st.examined += 1;
             let ci = self.chunk_index(e.x, e.y, e.z);
             let fresh = self.chunks[ci].is_none();
             if fresh && self.materialized_in_tick >= self.max_materialize_per_tick {
                 st.materialize_capped = true;
                 deferred.push(e);
+                continue;
+            }
+            let previous = self.material(e.x, e.y, e.z);
+            self.completed.push((e, previous));
+            if e.expected_material()
+                .is_some_and(|expected| expected != previous)
+            {
+                st.noop += 1;
                 continue;
             }
             if let Some(was) = self.apply(e) {
@@ -635,7 +710,7 @@ impl World {
         let ci = self.chunk_index(e.x, e.y, e.z);
         self.materialize(ci);
         if let Some(c) = &mut self.chunks[ci] {
-            c.set(
+            Arc::make_mut(c).set(
                 (e.x % CS as u32) as usize,
                 (e.y % CS as u32) as usize,
                 (e.z % CS as u32) as usize,
@@ -659,6 +734,10 @@ impl World {
 
     /// Что снято последним дренажем: заказчик и материал, который
     /// в вокселе был. Вход экономики (`docs/07-economy.md`).
+    pub fn completed(&self) -> &[(Edit, Mat)] {
+        &self.completed
+    }
+
     pub fn taken(&self) -> &[(u32, Mat)] {
         &self.taken
     }
@@ -788,7 +867,7 @@ impl World {
                 return false;
             }
             p.widenings = 0;
-            self.chunks[ci] = Some(Box::new(p));
+            self.chunks[ci] = Some(Arc::new(p));
             self.refresh_bits_of(ci);
         }
         self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
@@ -895,7 +974,13 @@ pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
             let x = (i % nx as u64) as u32;
             let z = ((i / nx as u64) % nz as u64) as u32;
             let y = (i / (nx as u64 * nz as u64)) as u32;
-            out.push(Edit { x, y, z, mat: m, by });
+            out.push(Edit {
+                x,
+                y,
+                z,
+                mat: m,
+                by,
+            });
         }
         prev = start + n as i64;
     }
@@ -962,10 +1047,22 @@ mod codec_tests {
             // заказчик обязан разрывать отрезок, иначе выкопанное
             // после загрузки пошло бы не тому (ADR-230).
             for m in 0..6u16 {
-                want.push(Edit { x: 7, y: 7, z: 7, mat: m, by: m as u32 });
+                want.push(Edit {
+                    x: 7,
+                    y: 7,
+                    z: 7,
+                    mat: m,
+                    by: m as u32,
+                });
             }
             for who in 0..4u32 {
-                want.push(Edit { x: 9, y: 9, z: 9, mat: AIR, by: who });
+                want.push(Edit {
+                    x: 9,
+                    y: 9,
+                    z: 9,
+                    mat: AIR,
+                    by: who,
+                });
             }
             let mut b = Blob::new();
             save_edits(&mut b, nx, nz, &want);
@@ -994,7 +1091,13 @@ mod codec_tests {
     #[test]
     fn a_truncated_edit_list_is_spoiled_not_empty() {
         let want: Vec<Edit> = (0..50)
-            .map(|k| Edit { x: k, y: 3, z: 5, mat: 2, by: k % 3 })
+            .map(|k| Edit {
+                x: k,
+                y: 3,
+                z: 5,
+                mat: 2,
+                by: k % 3,
+            })
             .collect();
         let mut b = Blob::new();
         save_edits(&mut b, 64, 64, &want);
@@ -1108,7 +1211,11 @@ mod tests {
                 w.begin_tick();
                 w.flush();
                 guard += 1;
-                assert!(guard < 10_000, "очередь не сходится: {} осталось", w.queued());
+                assert!(
+                    guard < 10_000,
+                    "очередь не сходится: {} осталось",
+                    w.queued()
+                );
             }
             // Хеш мира целиком: только он доказывает совпадение, и он же
             // дешевле снимка. Сложение заворачиванием — ассоциативно.
@@ -1117,8 +1224,7 @@ mod tests {
                 for y in 0..dims.1 {
                     for x in 0..dims.0 {
                         let v = w.material(x, y, z) as u64;
-                        h = h
-                            .wrapping_mul(0x100_0000_01b3)
+                        h = h.wrapping_mul(0x100_0000_01b3)
                             ^ v.wrapping_add((x as u64) << 20)
                             ^ ((y as u64) << 10)
                             ^ (z as u64);
@@ -1225,7 +1331,11 @@ mod tests {
                 let h = 4 + (x * 7 + z * 13) % 19;
                 for (i, o) in out.iter_mut().enumerate() {
                     let y = y0 + i as u32;
-                    *o = if y < h { ((x ^ y ^ z) % 5 + 1) as Mat } else { AIR };
+                    *o = if y < h {
+                        ((x ^ y ^ z) % 5 + 1) as Mat
+                    } else {
+                        AIR
+                    };
                 }
             }
         }
@@ -1255,7 +1365,7 @@ mod tests {
         fn material(&self, x: u32, y: u32, z: u32) -> Mat {
             if y >= self.h {
                 AIR
-            } else if (x / 4 + z / 4) % 5 == 0 && y > self.h / 2 {
+            } else if (x / 4 + z / 4).is_multiple_of(5) && y > self.h / 2 {
                 7
             } else {
                 2
@@ -1283,7 +1393,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(w.touched_chunks(), 0, "нетронутый мир не должен ничего хранить");
+        assert_eq!(
+            w.touched_chunks(),
+            0,
+            "нетронутый мир не должен ничего хранить"
+        );
     }
 
     /// Правка видна **в тот же дренаж** и в материале, и в битах
@@ -1414,7 +1528,13 @@ mod tests {
     fn the_frame_does_not_dig() {
         let mut w = world();
         let (nx, nz) = (w.nx, w.nz);
-        let frame = [(5, 0, 5), (0, 5, 5), (5, 5, 0), (nx - 1, 5, 5), (5, 5, nz - 1)];
+        let frame = [
+            (5, 0, 5),
+            (0, 5, 5),
+            (5, 5, 0),
+            (nx - 1, 5, 5),
+            (5, 5, nz - 1),
+        ];
         for &(x, y, z) in &frame {
             assert!(w.on_frame(x, y, z));
             assert!(w.solid(x, y, z), "сцена: ({x}, {y}, {z}) не порода");
@@ -1426,14 +1546,23 @@ mod tests {
             assert!(w.solid(x, y, z), "рамка снята в ({x}, {y}, {z})");
         }
         // Соседний с рамкой воксель — обычный.
-        let inner = [(5, 1, 5), (1, 5, 5), (5, 5, 1), (nx - 2, 5, 5), (5, 5, nz - 2)];
+        let inner = [
+            (5, 1, 5),
+            (1, 5, 5),
+            (5, 5, 1),
+            (nx - 2, 5, 5),
+            (5, 5, nz - 2),
+        ];
         for &(x, y, z) in &inner {
             assert!(!w.on_frame(x, y, z));
             w.queue_dig(x, y, z);
         }
         w.flush();
         for &(x, y, z) in &inner {
-            assert!(!w.solid(x, y, z), "воксель у рамки не снялся в ({x}, {y}, {z})");
+            assert!(
+                !w.solid(x, y, z),
+                "воксель у рамки не снялся в ({x}, {y}, {z})"
+            );
         }
     }
 }
@@ -1450,7 +1579,7 @@ mod fill_tests {
     impl Generator for Holey {
         fn material(&self, x: u32, y: u32, z: u32) -> Mat {
             let h = 20 + (x / 5) % 7 + (z / 3) % 5;
-            if y >= h || (x * 7 + y * 13 + z * 3) % 11 == 0 {
+            if y >= h || (x * 7 + y * 13 + z * 3).is_multiple_of(11) {
                 return AIR;
             }
             (1 + (x + y + z) % 3) as Mat
@@ -1488,7 +1617,10 @@ mod fill_tests {
         );
         for threads in [1usize, 2, 3, 8, 64] {
             let got = fill_bits(nx, ny, nz, nx.div_ceil(64), &Holey, threads);
-            assert_eq!(got, want, "потоков {threads}: объём разошёлся с повоксельным");
+            assert_eq!(
+                got, want,
+                "потоков {threads}: объём разошёлся с повоксельным"
+            );
         }
     }
 

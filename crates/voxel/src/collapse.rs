@@ -293,7 +293,11 @@ impl CollapseLayer {
     #[inline]
     fn coords(&self, i: usize) -> (u32, u32, u32) {
         let i = i as u32;
-        (i % self.nx, (i / self.nx) % self.ny, i / (self.nx * self.ny))
+        (
+            i % self.nx,
+            (i / self.nx) % self.ny,
+            i / (self.nx * self.ny),
+        )
     }
 
     fn neighbour(&self, i: usize, f: usize) -> Option<usize> {
@@ -542,7 +546,9 @@ impl CollapseLayer {
         let c = self.chunks[i].take().expect("chunk present");
         self.relabelled += 1;
         let n = self.comps.build(&c);
-        let mut nd = self.nodes[i].take().unwrap_or_else(|| Box::new(ChunkNodes::new()));
+        let mut nd = self.nodes[i]
+            .take()
+            .unwrap_or_else(|| Box::new(ChunkNodes::new()));
         for f in 0..FACES {
             self.face_prev[f].clear();
             self.face_prev[f].extend_from_slice(&nd.faces[f]);
@@ -835,7 +841,9 @@ impl CollapseLayer {
             let lab = (id - self.base[i]) as u16;
             debug_assert!((lab as usize) < self.nodes[i].as_ref().expect("known").n);
             for f in 0..FACES {
-                let Some(j) = self.neighbour(i, f) else { continue };
+                let Some(j) = self.neighbour(i, f) else {
+                    continue;
+                };
                 if self.nodes[j].is_none() {
                     continue;
                 }
@@ -882,7 +890,9 @@ impl CollapseLayer {
             let i = self.known[k] as usize;
             let base = self.base[i];
             for f in 0..FACES {
-                let Some(j) = self.neighbour(i, f) else { continue };
+                let Some(j) = self.neighbour(i, f) else {
+                    continue;
+                };
                 if self.nodes[j].as_ref().map(|d| d.n).unwrap_or(0) == 0 {
                     continue;
                 }
@@ -1166,7 +1176,6 @@ fn uf_find(p: &mut [u32], mut a: u32) -> u32 {
     a
 }
 
-
 /// Дописать ячейку в отрезки грани.
 ///
 /// Индексы приходят **по возрастанию**: пробеги идут по колонкам
@@ -1231,7 +1240,10 @@ mod tests {
         let edits: Vec<Edit> = w.edits().to_vec();
         let st = c.apply(&mut w, &edits, &mut b);
         assert!(st.detached > 0, "мост не обрушился");
-        assert_eq!(st.detached, 1, "мост обязан упасть одним телом, а не по чанкам");
+        assert_eq!(
+            st.detached, 1,
+            "мост обязан упасть одним телом, а не по чанкам"
+        );
         assert!(st.nodes >= 3, "граф слишком мал: {st:?}");
         assert!(st.promoted >= 1, "соседей не втянули: {st:?}");
         w.flush();
@@ -1274,7 +1286,11 @@ mod tests {
         let st = c.apply(&mut w, &edits, &mut b);
         // Опора выше подреза плюс весь настил — одно тело.
         let expect = (DECK - 5) as usize + (60 - PIER) as usize;
-        assert_eq!(st.cells, expect, "состав тела: {} против {expect}", st.cells);
+        assert_eq!(
+            st.cells, expect,
+            "состав тела: {} против {expect}",
+            st.cells
+        );
         // Разбор будет повторён следующим тиком: в этом оторвалось.
         assert!(st.rounds_capped);
     }
@@ -1290,7 +1306,10 @@ mod tests {
             w.flush();
             let edits: Vec<Edit> = w.edits().to_vec();
             c.apply(&mut w, &edits, &mut b);
-            b.list.iter().map(|x| (x.ox, x.oy, x.oz, x.voxels.len())).collect()
+            b.list
+                .iter()
+                .map(|x| (x.ox, x.oy, x.oz, x.voxels.len()))
+                .collect()
         };
         assert_eq!(run(), run());
     }
@@ -1299,10 +1318,7 @@ mod tests {
 /// Убрать одну ячейку из отрезков грани. Отрезок при этом может
 /// распасться надвое.
 fn drop_face_cell(seg: &mut Vec<(u16, u16, u16)>, idx: u16) -> bool {
-    let Some(k) = seg
-        .iter()
-        .position(|&(s, l, _)| idx >= s && idx < s + l)
-    else {
+    let Some(k) = seg.iter().position(|&(s, l, _)| idx >= s && idx < s + l) else {
         return false;
     };
     let (s0, l0, lab) = seg[k];
@@ -1400,7 +1416,10 @@ mod probe_equivalence {
     fn the_probe_does_not_change_what_falls() {
         let (with, fired) = run(true, 120);
         let (without, none) = run(false, 120);
-        assert!(fired > 0, "проверка не сработала ни разу — сравнивать нечего");
+        assert!(
+            fired > 0,
+            "проверка не сработала ни разу — сравнивать нечего"
+        );
         assert_eq!(none, 0, "проверка сработала при выключенной");
         assert_eq!(with, without);
     }

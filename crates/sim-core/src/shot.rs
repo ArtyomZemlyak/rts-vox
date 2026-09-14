@@ -34,6 +34,10 @@ pub struct Shots {
     pub vz: Vec<Fx>,
     pub owner: Vec<u8>,
     pub damage: Vec<u16>,
+    /// Registry ID of the physical projectile, independent of its shooter.
+    pub weapon_id: Vec<u16>,
+    pub source: Vec<u32>,
+    pub source_generation: Vec<u32>,
     /// Воронка этого снаряда: радиус и урон волны. Свойство снаряда,
     /// а не общей настройки — оружие у стрелков разное, а снаряд
     /// переживает того, кто его выпустил (ADR-169).
@@ -104,6 +108,9 @@ impl Shots {
             self.vz[k] = vel.2;
             self.owner[k] = owner;
             self.damage[k] = damage;
+            self.weapon_id[k] = 0;
+            self.source[k] = crate::NO_TARGET;
+            self.source_generation[k] = 0;
             self.blast_r[k] = blast.0;
             self.blast_d[k] = blast.1;
             self.life[k] = life;
@@ -121,6 +128,9 @@ impl Shots {
         self.vz.push(vel.2);
         self.owner.push(owner);
         self.damage.push(damage);
+        self.weapon_id.push(0);
+        self.source.push(crate::NO_TARGET);
+        self.source_generation.push(0);
         self.blast_r.push(blast.0);
         self.blast_d.push(blast.1);
         self.life.push(life);

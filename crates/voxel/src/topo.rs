@@ -8,8 +8,9 @@
 //! индексируется `z * 32 + y`. Тридцать два бита ровно в слово,
 //! и это единственная причина, по которой чанк именно 32.
 
-pub mod scene;
+pub mod components;
 pub mod layer;
+pub mod scene;
 pub mod stage_a;
 pub mod stage_b;
 pub mod unit;
@@ -296,8 +297,16 @@ pub fn batch_cannot_split(c: &Chunk, removed: &[(u8, u8, u8)], b: &mut SplitBufs
         y1 = y1.max(y);
         z1 = z1.max(z);
     }
-    let (x0, y0, z0) = (x0.saturating_sub(1), y0.saturating_sub(1), z0.saturating_sub(1));
-    let (x1, y1, z1) = ((x1 + 1).min(CS - 1), (y1 + 1).min(CS - 1), (z1 + 1).min(CS - 1));
+    let (x0, y0, z0) = (
+        x0.saturating_sub(1),
+        y0.saturating_sub(1),
+        z0.saturating_sub(1),
+    );
+    let (x1, y1, z1) = (
+        (x1 + 1).min(CS - 1),
+        (y1 + 1).min(CS - 1),
+        (z1 + 1).min(CS - 1),
+    );
     let vol = (x1 - x0 + 1) * (y1 - y0 + 1) * (z1 - z0 + 1);
     if vol > SPLIT_PROBE_CAP {
         return false;
@@ -444,7 +453,12 @@ mod tests {
                 let c = build(scene, seed);
                 let n = comp.build(&c);
                 let reference = reference_labels(&c);
-                let ref_count = reference.iter().copied().filter(|&v| v >= 0).max().map_or(0, |m| m + 1) as usize;
+                let ref_count = reference
+                    .iter()
+                    .copied()
+                    .filter(|&v| v >= 0)
+                    .max()
+                    .map_or(0, |m| m + 1) as usize;
                 assert_eq!(
                     n,
                     ref_count,
@@ -494,10 +508,18 @@ mod tests {
     #[test]
     fn void_is_the_complement() {
         let mut comp = Components::new();
-        assert_eq!(comp.build_void(&Chunk::new()), 1, "у пустого чанка нет пустоты");
+        assert_eq!(
+            comp.build_void(&Chunk::new()),
+            1,
+            "у пустого чанка нет пустоты"
+        );
         let mut full = Chunk::new();
         full.cols.iter_mut().for_each(|c| *c = u32::MAX);
-        assert_eq!(comp.build_void(&full), 0, "у сплошного чанка нашлась пустота");
+        assert_eq!(
+            comp.build_void(&full),
+            0,
+            "у сплошного чанка нашлась пустота"
+        );
 
         // Две несвязанные полости в сплошной породе — две компоненты пустоты.
         let mut c = full.clone();
@@ -525,7 +547,12 @@ mod tests {
                 cols: c.cols.iter().map(|w| !w).collect(),
             };
             let reference = reference_labels(&inv);
-            let want = reference.iter().copied().filter(|&v| v >= 0).max().map_or(0, |m| m + 1) as usize;
+            let want = reference
+                .iter()
+                .copied()
+                .filter(|&v| v >= 0)
+                .max()
+                .map_or(0, |m| m + 1) as usize;
             assert_eq!(n, want, "{}", scene.name());
         }
     }
@@ -653,11 +680,19 @@ mod split_probe_tests {
                 .collect();
             let mut expect: Vec<Vec<usize>> = before
                 .iter()
-                .map(|v| v.iter().copied().filter(|i| !gone.contains(i)).collect::<Vec<_>>())
+                .map(|v| {
+                    v.iter()
+                        .copied()
+                        .filter(|i| !gone.contains(i))
+                        .collect::<Vec<_>>()
+                })
                 .filter(|v: &Vec<usize>| !v.is_empty())
                 .collect();
             expect.sort();
-            assert_eq!(after, expect, "сид {seed}: сказала «не расщепило», а расщепило");
+            assert_eq!(
+                after, expect,
+                "сид {seed}: сказала «не расщепило», а расщепило"
+            );
         }
         // Стенд обязан нагружать обе ветки, иначе он ничего не проверил.
         assert!(said_yes > 0, "положительных ответов не было вовсе");
@@ -676,7 +711,8 @@ mod split_probe_tests {
             for y in 0..CS {
                 for x in 0..CS {
                     let slab = !(10..=21).contains(&x);
-                    let neck = (10..=21).contains(&x) && (15..17).contains(&y) && (15..17).contains(&z);
+                    let neck =
+                        (10..=21).contains(&x) && (15..17).contains(&y) && (15..17).contains(&z);
                     if slab || neck {
                         c.set(x, y, z, true);
                     }
@@ -690,7 +726,10 @@ mod split_probe_tests {
                 removed.push((16u8, y as u8, z as u8));
             }
         }
-        assert!(!batch_cannot_split(&c, &removed, &mut b), "перемычка названа безопасной");
+        assert!(
+            !batch_cannot_split(&c, &removed, &mut b),
+            "перемычка названа безопасной"
+        );
     }
 
     /// Вырез в сплошной породе ничего не расщепляет, и проверка
@@ -719,6 +758,9 @@ mod split_probe_tests {
                 }
             }
         }
-        assert!(batch_cannot_split(&c, &removed, &mut b), "вырез в сплошном назван опасным");
+        assert!(
+            batch_cannot_split(&c, &removed, &mut b),
+            "вырез в сплошном назван опасным"
+        );
     }
 }

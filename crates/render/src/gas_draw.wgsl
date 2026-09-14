@@ -1,0 +1,184 @@
+// Params and terrain DDA are prepended from terrain_common.wgsl.
+struct Cell { flow:vec4<f32>, matter:vec4<f32> };
+@group(0) @binding(0) var scene:texture_2d<f32>;
+@group(0) @binding(1) var scene_sampler:sampler;
+@group(0) @binding(2) var depth:texture_depth_2d;
+@group(0) @binding(4) var<storage,read> gas:array<Cell>;
+@group(0) @binding(6) var normals:texture_2d<f32>;
+const N:i32=48;
+fn mat(q:vec3<i32>)->vec4<f32> {
+    if any(q<vec3(0)) || any(q>=vec3(N)) {return vec4(0.0);}
+    return gas[u32(q.x+N*(q.y+N*q.z))].matter;
+}
+fn field(v:vec3<f32>)->vec4<f32> {
+    let u=v-vec3(0.5);let b=vec3<i32>(floor(u));let f=fract(u);
+    return mix(mix(mix(mat(b),mat(b+vec3(1,0,0)),f.x),mix(mat(b+vec3(0,1,0)),mat(b+vec3(1,1,0)),f.x),f.y),
+        mix(mix(mat(b+vec3(0,0,1)),mat(b+vec3(1,0,1)),f.x),mix(mat(b+vec3(0,1,1)),mat(b+vec3(1,1,1)),f.x),f.y),f.z);
+}
+fn hash(q:vec3<i32>)->f32 {
+    var h=u32(q.x)*73856093u^u32(q.y)*19349663u^u32(q.z)*83492791u;
+    h=(h^(h>>13u))*1274126177u;return f32(h&65535u)/65535.0;
+}
+fn noise(v:vec3<f32>)->f32 {
+    let q=vec3<i32>(floor(v));let a=fract(v);let f=a*a*(vec3(3.0)-2.0*a);
+    return mix(mix(mix(hash(q),hash(q+vec3(1,0,0)),f.x),mix(hash(q+vec3(0,1,0)),hash(q+vec3(1,1,0)),f.x),f.y),
+        mix(mix(hash(q+vec3(0,0,1)),hash(q+vec3(1,0,1)),f.x),mix(hash(q+vec3(0,1,1)),hash(q+vec3(1,1,1)),f.x),f.y),f.z);
+}
+fn hot(t:f32)->vec3<f32> {
+    if p.weapon.x>0.5 {
+        return mix(mix(vec3(0.07,0.11,0.18),vec3(0.45,0.8,1.8),smoothstep(0.9,1.7,t)),
+            vec3(9.0,11.0,14.0),smoothstep(1.8,2.9,t));
+    }
+    let red=vec3(1.8,0.035,0.001);let orange=vec3(6.5,1.2,0.008);
+    let gold=vec3(8.0,3.7,0.18);let white=vec3(11.0,9.0,4.0);
+    return mix(mix(red,orange,smoothstep(0.7,1.4,t)),mix(gold,white,smoothstep(2.5,3.1,t)),smoothstep(1.6,2.4,t));
+}
+fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
+    let steel_damage=code>=9u && code<=11u;
+    let concrete_damage=code>=12u && code<=14u;
+    let m=select(select(code,3u,steel_damage),2u,concrete_damage);
+    let grain=hash(vec3<i32>(floor(pos-normal*0.04)));
+    let variation=noise(pos*0.09)+0.45*noise(pos*0.027);
+    var c=vec3(0.14,0.082,0.038);
+    if m==2u {c=vec3(0.22,0.23,0.21);}
+    if m==3u {
+        c=vec3(0.105,0.14,0.13);
+        let panel=fract(pos.zy/vec2(12.0,10.0));
+        if min(panel.x,panel.y)<0.09 {c*=0.48;}
+        c=mix(c,vec3(0.18,0.095,0.04),smoothstep(0.7,0.95,variation)*0.65);
+    }
+    if m==4u {c=mix(vec3(0.032,0.063,0.018),vec3(0.13,0.19,0.035),grain*0.65+variation*0.22);}
+    if m==5u {c=vec3(0.11,0.065,0.025);}
+    if m==6u {c=mix(vec3(0.15,0.16,0.145),vec3(0.30,0.27,0.21),variation*0.6);}
+    if m==7u {c=mix(vec3(0.055,0.081,0.024),vec3(0.19,0.165,0.058),smoothstep(0.40,1.05,variation));}
+    if m==8u {
+        c=mix(vec3(0.14,0.113,0.075),vec3(0.26,0.225,0.155),variation*0.5);
+        let rut=min(abs(pos.z-324.5),abs(pos.z-347.5));
+        if rut<3.0 && pos.x<158.0 {c*=0.51+0.18*step(0.5,fract(pos.x*0.58));}
+    }
+    if steel_damage {
+        let severity=f32(code-8u)/3.0;
+        let pits=noise(pos*0.22)+noise(pos*1.2)*0.14;
+        let exposed=vec3(0.19,0.21,0.22)*(0.8+grain*0.2);
+        let oxide=vec3(0.043,0.038,0.032);
+        c=mix(exposed,oxide,smoothstep(0.32,0.88,pits+severity*0.2));
+        let scratch=pow(abs(sin(pos.y*5.7+noise(pos*0.25)*14.0)),24.0);
+        c+=vec3(0.022,0.023,0.02)*scratch*(1.0-severity*0.45);
+    }
+    if concrete_damage { c=mix(vec3(0.29,0.265,0.22),vec3(0.065,0.062,0.053),grain*0.45+f32(code-11u)*0.13); }
+    c*=0.70+grain*0.38+variation*0.14;
+    return c*select(0.73,1.0,normal.y>0.5);
+}
+fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
+    if p.control.z<0.5 {return 1.0;}
+    var density=0.0;
+    for(var j=1;j<=7;j++) {density+=field((pos+sun*f32(j)*9.0-p.origin.xyz)/p.origin.w).w;}
+    return exp(-density*0.46);
+}
+@fragment fn fragment(input:In)->@location(0) vec4<f32> {
+    var bg=textureSampleLevel(scene,scene_sampler,input.uv,0.0);
+    let ndc=vec2(input.uv.x*2.0-1.0,1.0-input.uv.y*2.0);
+    let near=p.world_from_clip*vec4(ndc,1.0,1.0);
+    let far=p.world_from_clip*vec4(ndc,0.00001,1.0);
+    let ro=near.xyz/near.w;let rd=normalize(far.xyz/far.w-ro);
+    let d=textureLoad(depth,vec2<i32>(input.position.xy),0);
+    let opaque=p.world_from_clip*vec4(ndc,max(d,0.00001),1.0);
+    var maxdist=length(opaque.xyz/opaque.w-ro);
+    // Reuse the voxel prepass instead of tracing the camera ray twice.
+    let world_pos=opaque.xyz/opaque.w;
+    let world_normal=textureLoad(normals,vec2<i32>(input.position.xy),0).xyz*2.0-vec3(1.0);
+    let m=raw_material(vec3<i32>(floor(world_pos-world_normal*0.08)));
+    let ground=TerrainHit(maxdist,world_normal,m);
+    let sun=normalize(p.sun.xyz);
+    if d>0.0 && ground.material>0u && ground.material!=15u {
+        maxdist=ground.t;let pos=ro+rd*ground.t;
+        let surface_offset=select(0.12,0.45,ground.material>=9u && ground.material<=11u);
+        let shadow=trace_terrain(pos+ground.normal*surface_offset,sun,240.0,true).material>0u;
+        let diffuse=max(0.0,dot(ground.normal,sun))*select(1.0,0.025,shadow)*gas_shadow(pos,sun);
+        let c=surface_colour(ground.material,pos,ground.normal);
+        let ambient=vec3(0.26,0.34,0.44)*(0.4+0.6*max(0.0,ground.normal.y));
+        var lit=c*(ambient+vec3(1.0,0.81,0.54)*diffuse*p.sun.w);
+        if p.weapon.x>0.5 && (p.energy.w>0.0 || p.beam.w>0.0) {
+            let centre=select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0);
+            let delta=centre-pos;
+            let strength=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
+            let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-3.0),true).material==0u;
+            lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
+                *max(0.06,dot(ground.normal,normalize(delta)))*select(0.04,1.0,visible);
+        }
+        if p.control.z>0.5 {
+            let age=p.control.y/60.0;
+            let delta=p.source.xyz-pos;let r=length(delta.xz);
+            let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
+            let soot=(1.0-smoothstep(16.0,37.0,r))*(0.62+0.30*noise(pos*0.31))*smoothstep(0.0,0.5,age);
+            if ground.material!=4u && visible {lit*=1.0-soot*0.85;}
+            let flash=select(vec3(5.0,0.75,0.065),vec3(1.2,1.65,2.7),p.weapon.x>0.5);
+            let decay=select(1.15,4.0,p.weapon.x>0.5);
+            lit+=flash*exp(-age*decay)*950.0/(110.0+dot(delta,delta))
+                *max(0.05,dot(ground.normal,normalize(delta)))*select(0.06,1.0,visible);
+            if ground.material==1u && age>0.25 && r<24.0 {
+                let fissure=smoothstep(0.73,0.82,noise(pos*0.6));
+                let residual=select(vec3(1.5,0.10,0.002),vec3(0.22,0.32,0.5),p.weapon.x>0.5);
+                lit+=residual*fissure*exp(-age*0.38)*(1.0-r/24.0);
+            }
+        }
+        let fog=1.0-exp(-ground.t*p.sky.w);
+        bg=vec4(mix(lit,p.sky.rgb,fog),1.0);
+    }
+    // The PBR shadow maps do not include the raymarched wall. Add the range's
+    // transient direct light here, using the same wall visibility as terrain.
+    if p.weapon.z>0.5 && d>0.0 && (m==0u || m==15u) {
+        let deposited=p.control.z>0.5;
+        let centre=select(select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0),p.source.xyz,deposited);
+        let delta=centre-world_pos;let dist=length(delta);
+        let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;
+        let charging=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
+        let pulse=select(charging,5.0*exp(-p.control.y/60.0*4.0),deposited);
+        let tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
+        if visible {bg=vec4(bg.rgb*(vec3(1.0)+tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)))),1.0);}
+    }
+    bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);
+    if p.control.z<0.5 {return bg;}
+    let inv=1.0/(rd+vec3(0.0000001));
+    let lo=(p.origin.xyz-ro)*inv;let hi=(p.origin.xyz+vec3(f32(N)*p.origin.w)-ro)*inv;
+    let a=min(lo,hi);let b=max(lo,hi);
+    var t=max(0.0,max(a.x,max(a.y,a.z)));let end=min(maxdist,min(b.x,min(b.y,b.z)));
+    if end<=t {return bg;}
+    var light=vec3(0.0);var transmit=1.0;
+    let edge=p.charge.z;
+    var normal=vec3(0.0,1.0,0.0);
+    let age=p.control.y/60.0;
+    for(var step_i=0;step_i<360;step_i++) {
+        if t>=end || transmit<0.012 {break;}
+        let pos=ro+rd*(t+0.002);
+        let vi=vec3<i32>(floor((pos-p.origin.xyz)/edge));
+        let centre=(vec3<f32>(vi)+vec3(0.5))*edge;
+        let gas_pos=centre/p.origin.w;let m=field(gas_pos);
+        // Subcell detail rides upward with the plume. The coarse field owns
+        // transport, silhouette, heat and constituent mass.
+        let detail=noise(gas_pos*1.15-vec3(0.0,age*0.9,0.0));
+        let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
+        let grain=hash(vi);
+        let face=select(vec3<f32>(vi),vec3<f32>(vi)+vec3(1.0),rd>vec3(0.0))*edge+p.origin.xyz;
+        let distance=(face-pos)*inv;let dt=max(0.005,min(distance.x,min(distance.y,distance.z)));
+        if occupancy>0.12+grain*0.15 {
+            let shade=0.37+0.63*max(0.0,dot(normal,sun));
+            let self_shadow=exp(-(field(gas_pos+sun*1.5).w+field(gas_pos+sun*3.5).w)*0.64);
+            let dust=1.0-smoothstep(26.0,49.0,p.origin.y+centre.y);
+            let base=mix(vec3(0.105,0.12,0.135),vec3(0.21,0.16,0.095),dust);
+            let interior_glow=field(gas_pos+rd*2.5).x;
+            let inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
+            let smoke=base*(0.23+shade*self_shadow*1.55)+inner_colour*interior_glow*exp(-age*0.45);
+            let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
+            let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
+            let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
+            let opacity=select(0.97,clamp(1.0-exp(-occupancy*dt*1.4),0.08,0.92),p.weapon.x>0.5);
+            light+=transmit*colour*opacity;transmit*=1.0-opacity;
+        }
+        normal=vec3(0.0);
+        if distance.x<=distance.y && distance.x<=distance.z {normal.x=-sign(rd.x);}
+        else if distance.y<=distance.z {normal.y=-sign(rd.y);} else {normal.z=-sign(rd.z);}
+        t+=dt+0.004;
+    }
+    return vec4(light+bg.rgb*transmit,1.0);
+}

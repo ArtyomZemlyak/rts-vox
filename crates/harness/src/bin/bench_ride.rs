@@ -54,7 +54,10 @@ fn main() {
     let dt = Fx::from_ratio(1, 30);
 
     println!("физика корпуса: {units} машин, {ticks} тиков");
-    println!("{:>6} {:>12} {:>14} {:>14}", "опор", "фаза, мс", "на машину, нс", "на опору, нс");
+    println!(
+        "{:>6} {:>12} {:>14} {:>14}",
+        "опор", "фаза, мс", "на машину, нс", "на опору, нс"
+    );
 
     for n in [2usize, 4, 6, 8, 12] {
         let r = ride(n);
@@ -62,7 +65,10 @@ fn main() {
         // Рельеф под опорами: небольшой уклон, чтобы работали все ветки.
         let g: Vec<Fx> = s
             .iter()
-            .map(|p| p.x.mul(Fx::from_ratio(1, 8)).sub(p.z.mul(Fx::from_ratio(1, 16))))
+            .map(|p| {
+                p.x.mul(Fx::from_ratio(1, 8))
+                    .sub(p.z.mul(Fx::from_ratio(1, 16)))
+            })
             .collect();
         let mut cs: Vec<Chassis> = (0..units).map(|_| Chassis::resting(Fx::ZERO, &r)).collect();
         // Разогрев: первые тики оседают, и мерить их отдельно нечестно.

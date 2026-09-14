@@ -164,7 +164,8 @@ pub fn encode(world: &voxel::World, nav: &NavLayer, key: u64) -> Vec<u8> {
     let bits = world.bits();
     let r = nav.raw();
     let cells = r.floor.len();
-    let mut out = Vec::with_capacity(72 + bits.len() * 8 + cells * (2 + 2 * MAX_LEVELS + 1 + 2 + 1));
+    let mut out =
+        Vec::with_capacity(72 + bits.len() * 8 + cells * (2 + 2 * MAX_LEVELS + 1 + 2 + 1));
     out.extend_from_slice(&MAGIC);
     put_u32(&mut out, VERSION);
     put_u64(&mut out, key);
@@ -231,13 +232,18 @@ impl<'a> Cursor<'a> {
 
     fn u16s(&mut self, n: usize) -> Result<Vec<u16>, CacheError> {
         let s = self.take(n.checked_mul(2).ok_or(CacheError::Truncated)?)?;
-        Ok(s.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+        Ok(s.as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect())
     }
 
     fn u64s(&mut self, n: usize) -> Result<Vec<u64>, CacheError> {
         let s = self.take(n.checked_mul(8).ok_or(CacheError::Truncated)?)?;
-        Ok(s
-            .chunks_exact(8)
+        Ok(s.as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| {
                 let mut a = [0u8; 8];
                 a.copy_from_slice(c);
@@ -260,10 +266,16 @@ pub fn decode(
     if bytes.len() < MAGIC.len() || bytes[..MAGIC.len()] != MAGIC {
         return Err(CacheError::NotACache);
     }
-    let mut s = Cursor { b: &bytes[MAGIC.len()..], at: 0 };
+    let mut s = Cursor {
+        b: &bytes[MAGIC.len()..],
+        at: 0,
+    };
     let v = s.u32()?;
     if v != VERSION {
-        return Err(CacheError::Version { found: v, want: VERSION });
+        return Err(CacheError::Version {
+            found: v,
+            want: VERSION,
+        });
     }
     let want = key(p, seed, t);
     let found = s.u64()?;
@@ -356,7 +368,13 @@ mod tests {
     fn built(seed: u64) -> (voxel::World, NavLayer) {
         let p = params();
         let t = test_tuning();
-        let w = voxel::World::new(p.nx, p.ny, p.nz, REF_MAX_EDITS, Box::new(worldgen::Terrain { params: p, seed }));
+        let w = voxel::World::new(
+            p.nx,
+            p.ny,
+            p.nz,
+            REF_MAX_EDITS,
+            Box::new(worldgen::Terrain { params: p, seed }),
+        );
         let nav = NavLayer::new(&w, t.unit_height, t.nav_cell, t.max_step);
         (w, nav)
     }
@@ -372,7 +390,10 @@ mod tests {
         let (w2, nav2) = decode(&bytes, &p, seed, &t, REF_MAX_EDITS).expect("кэш читается");
         assert_eq!(w2.bits(), w.bits(), "объём разошёлся");
         assert_eq!(nav2.raw(), nav.raw(), "навигация разошлась");
-        assert!(w.bits().iter().any(|&v| v != 0), "мир пуст — сверять нечего");
+        assert!(
+            w.bits().iter().any(|&v| v != 0),
+            "мир пуст — сверять нечего"
+        );
     }
 
     /// **Партия на карте из кэша — та же партия.** Хеш тика через
@@ -436,10 +457,19 @@ mod tests {
         // от дна и от неба.
         let p = worldgen::Params::sized(16, 24, 8);
         let (t, seed) = (test_tuning(), 2u64);
-        let w = voxel::World::new(p.nx, p.ny, p.nz, REF_MAX_EDITS, Box::new(worldgen::Terrain { params: p, seed }));
+        let w = voxel::World::new(
+            p.nx,
+            p.ny,
+            p.nz,
+            REF_MAX_EDITS,
+            Box::new(worldgen::Terrain { params: p, seed }),
+        );
         let nav = NavLayer::new(&w, t.unit_height, t.nav_cell, t.max_step);
         let bytes = encode(&w, &nav, key(&p, seed, &t));
-        assert!(decode(&bytes, &p, seed, &t, REF_MAX_EDITS).is_ok(), "целый кэш не читается");
+        assert!(
+            decode(&bytes, &p, seed, &t, REF_MAX_EDITS).is_ok(),
+            "целый кэш не читается"
+        );
         for cut in 0..bytes.len() {
             let r = decode(&bytes[..cut], &p, seed, &t, REF_MAX_EDITS).map(|_| ());
             assert!(

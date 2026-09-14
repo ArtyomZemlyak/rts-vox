@@ -448,9 +448,18 @@ mod tests {
         for scene in crate::scene::Scene::ALL {
             for &opt in &[
                 Opts::default(),
-                Opts { skip_bottom: true, ..Opts::default() },
-                Opts { max_run: 16, ..Opts::default() },
-                Opts { per_material: true, ..Opts::default() },
+                Opts {
+                    skip_bottom: true,
+                    ..Opts::default()
+                },
+                Opts {
+                    max_run: 16,
+                    ..Opts::default()
+                },
+                Opts {
+                    per_material: true,
+                    ..Opts::default()
+                },
             ] {
                 let c = crate::scene::build(scene, 7);
                 let slow = m.mesh(&c, opt).quads;

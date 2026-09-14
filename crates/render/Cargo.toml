@@ -7,7 +7,7 @@ rust-version.workspace = true
 # Bevy живёт только здесь (`docs/02-architecture.md`) и пинится точно:
 # не пин — это молчаливое обновление, которое сдвинет всё разом.
 [dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["3d"] }
+bevy = { version = "=0.19.1", default-features = false, features = ["3d", "ui_bevy_render"] }
 # Мешинг тоже рендер-слой (`docs/02-architecture.md`), мир и генератор
 # нужны, чтобы было что показать.
 meshing = { path = "../meshing" }

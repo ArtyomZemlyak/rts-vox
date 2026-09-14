@@ -107,8 +107,11 @@ impl TopoLayer {
             } else {
                 let c = self.chunks[i].as_mut().expect("chunk checked");
                 for &(lx, ly, lz) in &self.local[i] {
-                    let solid =
-                        w.solid(cx * cs + lx as u32, cy * cs + ly as u32, cz * cs + lz as u32);
+                    let solid = w.solid(
+                        cx * cs + lx as u32,
+                        cy * cs + ly as u32,
+                        cz * cs + lz as u32,
+                    );
                     c.set(lx as usize, ly as usize, lz as usize, solid);
                 }
             }
@@ -124,4 +127,3 @@ impl TopoLayer {
         self.chunks.iter().filter(|c| c.is_some()).count()
     }
 }
-

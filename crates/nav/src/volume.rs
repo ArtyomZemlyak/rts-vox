@@ -344,7 +344,9 @@ impl VolGraph {
         self.start = s.u32s();
         self.count = s.u8s();
         let n = s.list(16);
-        self.nb = (0..n).map(|_| [s.u32(), s.u32(), s.u32(), s.u32()]).collect();
+        self.nb = (0..n)
+            .map(|_| [s.u32(), s.u32(), s.u32(), s.u32()])
+            .collect();
         let n = s.list(4);
         self.nbn = (0..n).map(|_| [s.u8(), s.u8(), s.u8(), s.u8()]).collect();
         self.lev = s.u16s();
@@ -525,14 +527,8 @@ impl VolField {
     /// Обходов два, вперёд и назад по списку узлов, а не четыре: список
     /// уже в растровом порядке, и две его стороны — это те же две оси,
     /// пройденные в обе стороны.
-    pub fn sweep_zone<F>(
-        &mut self,
-        g: &VolGraph,
-        nodes: &[u32],
-        zone: &[u32],
-        zone_id: u32,
-        h: &F,
-    ) where
+    pub fn sweep_zone<F>(&mut self, g: &VolGraph, nodes: &[u32], zone: &[u32], zone_id: u32, h: &F)
+    where
         F: Fn(u32, u32) -> u32,
     {
         loop {
@@ -875,11 +871,7 @@ mod tests {
         let (g, _f, nav) = field(true);
         let near = floor_node(&g, &nav, 8, 16);
         let far = floor_node(&g, &nav, 24, 16);
-        assert_eq!(
-            g.comp_of(near),
-            g.comp_of(far),
-            "туннель не связал стороны"
-        );
+        assert_eq!(g.comp_of(near), g.comp_of(far), "туннель не связал стороны");
     }
 
     /// **Без туннеля стены не обойти**, и поле это знает: стороны
@@ -922,13 +914,17 @@ mod tests {
         for tunnel in [true, false] {
             let (g, f, _) = field(tunnel);
             assert_eq!(
-                f.reachable, g.nodes,
+                f.reachable,
+                g.nodes,
                 "узлов без времени: {}",
                 g.nodes - f.reachable
             );
             let blind = (0..g.nodes).filter(|&n| f.dir[n] == 255).count();
             // Без направления остаются только сами цели: идти им некуда.
-            assert_eq!(blind, g.components, "узлов без направления больше, чем целей");
+            assert_eq!(
+                blind, g.components,
+                "узлов без направления больше, чем целей"
+            );
         }
     }
 
@@ -951,5 +947,4 @@ mod tests {
             }
         }
     }
-
 }

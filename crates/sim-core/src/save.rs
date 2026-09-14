@@ -36,6 +36,8 @@
 //!
 //! **Версия растёт при любом изменении раскладки.** Незнакомую версию
 //! читатель отвергает с внятным сообщением, а не разбирает наугад.
+//! Версия 10 читает версии 8 и 9, перенося старую скорость/дробную
+//! высоту полёта подвижного корпуса в состояние подвески (ADR-253).
 
 use crate::{ground, shot, Order, Reference, Tuning, Units, World};
 use fx::blob::{Blob, Scan};
@@ -45,7 +47,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 10;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +74,9 @@ impl std::fmt::Display for LoadError {
                  формат менялся, старый файл не подходит"
             ),
             LoadError::Truncated => write!(f, "сохранение обрезано или испорчено"),
-            LoadError::WorldMismatch => write!(
-                f,
-                "мир в сохранении не совпал с миром из сида и параметров"
-            ),
+            LoadError::WorldMismatch => {
+                write!(f, "мир в сохранении не совпал с миром из сида и параметров")
+            }
             LoadError::UnknownChassis(c) => {
                 write!(f, "в сохранении вид ходовой {c}, которого в коде нет")
             }
@@ -151,7 +152,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION {
+    if v != VERSION && v != 8 && v != 9 {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -164,7 +165,12 @@ pub fn load_with(
     let per_side = s.usize();
     let nd = s.list(16);
     let diggers: Vec<crate::Digger> = (0..nd)
-        .map(|_| crate::Digger { x: s.i32(), y: s.i32(), z: s.i32(), fresh: s.u32() != 0 })
+        .map(|_| crate::Digger {
+            x: s.i32(),
+            y: s.i32(),
+            z: s.i32(),
+            fresh: s.u32() != 0,
+        })
         .collect();
     let rng = Rng::from_state(s.u64(), s.u64());
     if !s.ok() {
@@ -192,7 +198,7 @@ pub fn load_with(
     if let Some((kinds, mats)) = econ {
         world.attach_economy(kinds, mats);
     }
-    load_world(&mut s, &mut world, &tuning)?;
+    load_world(&mut s, &mut world, &tuning, v)?;
 
     Ok(Reference {
         world,
@@ -315,6 +321,11 @@ fn save_world(b: &mut Blob, w: &World) {
         b.u64(v);
     }
     save_econ(b, w.econ.as_ref());
+    b.bool(w.material_bodies.is_some());
+    if let Some(bodies) = &w.material_bodies {
+        bodies.save(b);
+    }
+    w.bursts.save(b);
 }
 
 /// Учёт партии: контейнеры, склады, очереди заводов, обломки,
@@ -408,13 +419,23 @@ fn load_econ(s: &mut Scan, w: &mut World) -> Result<(), LoadError> {
     e.ground = s.u32();
     let nb = s.list(12);
     let banks = (0..nb)
-        .map(|_| crate::economy::Bank { stock: s.u32(), cap: s.u64() })
+        .map(|_| crate::economy::Bank {
+            stock: s.u32(),
+            cap: s.u64(),
+        })
         .collect();
     let nl = s.list(13);
-    let lines = (0..nl).map(|_| (s.u32(), s.u16s(), s.u32(), s.u32())).collect();
+    let lines = (0..nl)
+        .map(|_| (s.u32(), s.u16s(), s.u32(), s.u32()))
+        .collect();
     let nw = s.list(16);
     let wrecks = (0..nw)
-        .map(|_| crate::economy::Wreck { held: s.u32(), x: s.i32(), y: s.i32(), z: s.i32() })
+        .map(|_| crate::economy::Wreck {
+            held: s.u32(),
+            x: s.i32(),
+            y: s.i32(),
+            z: s.i32(),
+        })
         .collect();
     let sites = s.u32s();
     if !s.ok() {
@@ -432,10 +453,10 @@ fn load_econ(s: &mut Scan, w: &mut World) -> Result<(), LoadError> {
     Ok(())
 }
 
-fn load_world(s: &mut Scan, w: &mut World, t: &Tuning) -> Result<(), LoadError> {
+fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(), LoadError> {
     w.tick = s.u64();
-    load_units(s, &mut w.units)?;
-    load_shots(s, &mut w.shots);
+    load_units(s, &mut w.units, version)?;
+    load_shots(s, &mut w.shots)?;
     if s.bool() {
         let Some(g) = w.ground.as_mut() else {
             return Err(LoadError::WorldMismatch);
@@ -494,7 +515,48 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning) -> Result<(), LoadError> 
     if !s.ok() {
         return Err(LoadError::Truncated);
     }
-    load_econ(s, w)
+    load_econ(s, w)?;
+    if s.bool() {
+        let Some(bodies) = w.material_bodies.as_mut() else {
+            return Err(LoadError::WorldMismatch);
+        };
+        if !bodies.load(s, w.units.len(), t.impact.max_pending) {
+            return Err(LoadError::WorldMismatch);
+        }
+    } else {
+        w.material_bodies = None;
+    }
+    w.bursts = crate::burst::Bursts::load_material(
+        s,
+        w.ground.as_ref().map(|g| &g.world),
+        &t.blast,
+        w.material_bodies.as_ref(),
+        w.units.len(),
+    )
+    .ok_or(LoadError::WorldMismatch)?;
+    if !w.bursts.fragments.is_empty() || !w.bursts.corpses.is_empty() {
+        let Some(e) = &w.econ else {
+            return Err(LoadError::WorldMismatch);
+        };
+        let wrecks: std::collections::BTreeSet<_> = e.wrecks.iter().map(|w| w.held).collect();
+        for f in w.bursts.fragments.iter().chain(w.bursts.corpses.values()) {
+            let Some(c) = e.ledger.try_get(f.held) else {
+                return Err(LoadError::WorldMismatch);
+            };
+            let corpse = f.chunk.as_ref().is_some_and(|c| c.body.is_some());
+            if !c.alive
+                || c.kind != crate::matter::Kind::Debris
+                || ((f.resting || corpse) && !wrecks.contains(&f.held))
+                || (corpse && c.held == 0)
+            {
+                return Err(LoadError::WorldMismatch);
+            }
+        }
+    }
+    if !s.ok() {
+        return Err(LoadError::Truncated);
+    }
+    Ok(())
 }
 
 /// Приказ — видом и полями, а не номером варианта в перечислении.
@@ -502,6 +564,12 @@ fn save_order(b: &mut Blob, o: Order) {
     match o {
         Order::MoveTo { unit, x, z } => {
             b.u8(0);
+            b.u32(unit);
+            b.i32(x);
+            b.i32(z);
+        }
+        Order::AttackMove { unit, x, z } => {
+            b.u8(8);
             b.u32(unit);
             b.i32(x);
             b.i32(z);
@@ -582,6 +650,11 @@ fn load_order(s: &mut Scan) -> Order {
             kind: s.u32() as u16,
         },
         7 => Order::Cancel { unit: s.u32() },
+        8 => Order::AttackMove {
+            unit: s.u32(),
+            x: s.i32(),
+            z: s.i32(),
+        },
         _ => Order::Hold { unit: u32::MAX },
     }
 }
@@ -639,6 +712,8 @@ fn save_units(b: &mut Blob, u: &Units) {
     // доворот заново, а шагоход — с ноги, которой не поднимал.
     b.i32s(&u.yaw_rate);
     b.i32s(&u.gait);
+    b.fxs(&u.heave);
+    b.fxs(&u.heave_v);
     // Экономика (ADR-230). Пишется всегда: «поля ничего не значат
     // без типа» — это про хеш, а не про сохранение, и партия
     // без экономики отдаёт здесь нули.
@@ -654,7 +729,7 @@ fn save_units(b: &mut Blob, u: &Units) {
     b.u32s(&u.job);
 }
 
-fn load_units(s: &mut Scan, u: &mut Units) -> Result<(), LoadError> {
+fn load_units(s: &mut Scan, u: &mut Units, version: u32) -> Result<(), LoadError> {
     let n = s.u32() as usize;
     u.x = s.i32s();
     u.y = s.i32s();
@@ -698,14 +773,43 @@ fn load_units(s: &mut Scan, u: &mut Units) -> Result<(), LoadError> {
     u.yaw_step = s.i32s();
     u.yaw_rate = s.i32s();
     u.gait = s.i32s();
+    u.heave = if version >= 9 {
+        s.fxs()
+    } else {
+        vec![fx::Fx::ZERO; n]
+    };
+    u.heave_v = if version >= 9 {
+        s.fxs()
+    } else {
+        vec![fx::Fx::ZERO; n]
+    };
     u.kind = s.u16s();
     u.store = s.u32s();
     u.site = s.u64s();
     let nf = s.list(12);
     u.face = (0..nf).map(|_| (s.i32(), s.i32(), s.i32())).collect();
     u.job = s.u32s();
-    if !s.ok() || u.x.len() != n {
+    if !s.ok()
+        || u.x.len() != n
+        || u.heave.len() != n
+        || u.heave_v.len() != n
+        || u.speed.len() != n
+        || u.fall_from.len() != n
+        || u.fall_f.len() != n
+        || u.fall_v.len() != n
+    {
         return Err(LoadError::Truncated);
+    }
+    if version < 10 {
+        for i in 0..n {
+            if u.speed[i] > 0 && u.fall_from[i] != crate::NOT_FALLING {
+                u.heave[i] = u.heave[i].sub(u.fall_f[i]);
+                u.heave_v[i] = u.fall_v[i]
+                    .neg()
+                    .mul(fx::Fx::from_int(crate::TICKS_PER_SECOND));
+                u.fall_f[i] = fx::Fx::ZERO;
+            }
+        }
     }
     Ok(())
 }
@@ -722,6 +826,9 @@ fn save_shots(b: &mut Blob, sh: &shot::Shots) {
     b.fxs(&sh.vz);
     b.u8s(&sh.owner);
     b.u16s(&sh.damage);
+    b.u16s(&sh.weapon_id);
+    b.u32s(&sh.source);
+    b.u32s(&sh.source_generation);
     b.i32s(&sh.blast_r);
     b.u16s(&sh.blast_d);
     b.u16s(&sh.life);
@@ -731,7 +838,7 @@ fn save_shots(b: &mut Blob, sh: &shot::Shots) {
     b.usize(sh.alive_n);
 }
 
-fn load_shots(s: &mut Scan, sh: &mut shot::Shots) {
+fn load_shots(s: &mut Scan, sh: &mut shot::Shots) -> Result<(), LoadError> {
     sh.x = s.i32s();
     sh.y = s.i32s();
     sh.z = s.i32s();
@@ -743,6 +850,9 @@ fn load_shots(s: &mut Scan, sh: &mut shot::Shots) {
     sh.vz = s.fxs();
     sh.owner = s.u8s();
     sh.damage = s.u16s();
+    sh.weapon_id = s.u16s();
+    sh.source = s.u32s();
+    sh.source_generation = s.u32s();
     sh.blast_r = s.i32s();
     sh.blast_d = s.u16s();
     sh.life = s.u16s();
@@ -750,6 +860,36 @@ fn load_shots(s: &mut Scan, sh: &mut shot::Shots) {
     sh.free = s.u32s();
     sh.live_ids = s.u32s();
     sh.alive_n = s.usize();
+    let n = sh.x.len();
+    if !s.ok()
+        || [
+            sh.y.len(),
+            sh.z.len(),
+            sh.fx.len(),
+            sh.fy.len(),
+            sh.fz.len(),
+            sh.vx.len(),
+            sh.vy.len(),
+            sh.vz.len(),
+            sh.owner.len(),
+            sh.damage.len(),
+            sh.weapon_id.len(),
+            sh.source.len(),
+            sh.source_generation.len(),
+            sh.blast_r.len(),
+            sh.blast_d.len(),
+            sh.life.len(),
+            sh.alive.len(),
+        ]
+        .iter()
+        .any(|v| *v != n)
+        || sh.live_ids.iter().chain(&sh.free).any(|i| *i as usize >= n)
+        || sh.live_ids.windows(2).any(|p| p[0] >= p[1])
+        || sh.alive_n != sh.alive.iter().filter(|v| **v).count()
+    {
+        return Err(LoadError::Truncated);
+    }
+    Ok(())
 }
 
 /// Вектор — тремя сырыми `i64`. Иначе и нельзя: `Fx` это `i64`,

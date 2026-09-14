@@ -16,7 +16,14 @@ fn section(t: &str) {
 
 /// Прогон N тиков, возвращает миллисекунды на тик и разбивку по фазам.
 fn run(n_units: usize, ticks: usize, seed: u64, spread: i32) -> (f64, [u64; 16], u64, u64, usize) {
-    run_cells(n_units, ticks, seed, spread, tuning().separation, tuning().range)
+    run_cells(
+        n_units,
+        ticks,
+        seed,
+        spread,
+        tuning().separation,
+        tuning().range,
+    )
 }
 
 fn run_cells(
@@ -144,7 +151,6 @@ fn main() {
         );
     }
 
-
     section("5. Размер ведра индекса: обмен между пересборкой и запросом");
     println!("5000 сущностей, разброс 150. Ведро дальнего индекса — 24.\n");
     println!(
@@ -181,24 +187,39 @@ fn main() {
 
     section("7. Масштабирование по воркерам");
     println!("фаза движения читает снимок, поэтому делится по слотам;");
-    println!("бой и урон остаются серийными.
-");
-    println!("{:>10} {:>12} {:>12} {:>14} {:>14}", "сущностей", "воркеров", "мс на тик", "ускорение", "движение мкс");
+    println!(
+        "бой и урон остаются серийными.
+"
+    );
+    println!(
+        "{:>10} {:>12} {:>12} {:>14} {:>14}",
+        "сущностей", "воркеров", "мс на тик", "ускорение", "движение мкс"
+    );
     for n in [5000usize, 10000] {
         let mut base = 0.0f64;
         for threads in [1usize, 2, 4, 7, 8] {
             let mut w = World::with_cells(2, n * 2, tuning().separation, tuning().range, tuning());
             populate_spread(&mut w, n, 42, 150);
-            for _ in 0..5 { w.tick_par(threads); }
+            for _ in 0..5 {
+                w.tick_par(threads);
+            }
             w.phase_ns = [0; 16];
             let ticks = 100usize;
             let t0 = Instant::now();
             let mut h = 0u64;
-            for _ in 0..ticks { h = w.tick_par(threads); }
+            for _ in 0..ticks {
+                h = w.tick_par(threads);
+            }
             black_box(h);
             let ms = t0.elapsed().as_secs_f64() * 1e3 / ticks as f64;
-            if threads == 1 { base = ms; }
-            println!("{n:>10} {threads:>12} {ms:>12.3} {:>13.2}x {:>14.1}", base / ms, w.phase_ns[7] as f64 / ticks as f64 / 1000.0);
+            if threads == 1 {
+                base = ms;
+            }
+            println!(
+                "{n:>10} {threads:>12} {ms:>12.3} {:>13.2}x {:>14.1}",
+                base / ms,
+                w.phase_ns[7] as f64 / ticks as f64 / 1000.0
+            );
         }
     }
 
@@ -221,6 +242,12 @@ fn main() {
         }
         h
     };
-    println!("два прогона одного сида на 120 тиков: {a:#018x} и {b:#018x} — {}",
-        if a == b { "совпали" } else { "РАЗОШЛИСЬ" });
+    println!(
+        "два прогона одного сида на 120 тиков: {a:#018x} и {b:#018x} — {}",
+        if a == b {
+            "совпали"
+        } else {
+            "РАЗОШЛИСЬ"
+        }
+    );
 }
