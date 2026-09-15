@@ -1606,6 +1606,59 @@ mod tests {
             "saved whole fragment"
         );
     }
+    /// The owner's report: craters came out square (ADR-272). A shell into
+    /// flat soil must dig a crater whose rim reaches as far along the
+    /// diagonals as along the axes.
+    #[test]
+    fn a_shell_crater_in_flat_soil_is_round() {
+        let mut r = BlastRange::new(config());
+        // Flat lane soil short of the concrete target and the steel revetment.
+        r.aim = Some([200, FLOOR, 336]);
+        for _ in 0..600 {
+            r.step();
+            if r.impact.is_some() && r.ready() {
+                break;
+            }
+        }
+        let at = r.impact.expect("the shell never landed");
+        let column: Vec<u16> = (0..=FLOOR + 2)
+            .map(|y| material(&r.world, [at[0], y, at[2]]))
+            .collect();
+        eprintln!("impact {at:?} removed {} column {column:?}", r.removed);
+        let reach_at = |layer: i32, dx: i32, dz: i32| {
+            (1..40)
+                .take_while(|&k| material(&r.world, [at[0] + dx * k, layer, at[2] + dz * k]) == 0)
+                .count() as i64
+        };
+        // The widest layer: the rim. Across the lane the rock-strewn shoulders
+        // clip the bowl, so the lane axis and the four diagonals are compared;
+        // the diagonals stay inside the lane at this radius.
+        let layer = (at[1] - 8..=at[1].min(FLOOR - 1))
+            .max_by_key(|&y| reach_at(y, 1, 0) + reach_at(y, -1, 0))
+            .unwrap();
+        let reach = |dx: i32, dz: i32| reach_at(layer, dx, dz);
+        let axes = [(1, 0), (-1, 0)].map(|(dx, dz)| reach(dx, dz) * 1000);
+        let diagonals = [(1, 1), (1, -1), (-1, 1), (-1, -1)].map(|(dx, dz)| reach(dx, dz) * 1414);
+        let radii: Vec<i64> = axes.into_iter().chain(diagonals).collect();
+        let (low, high) = (
+            radii.iter().copied().min().unwrap(),
+            radii.iter().copied().max().unwrap(),
+        );
+        eprintln!(
+            "crater layer {layer} radii (thousandths): axes {axes:?} diagonals {diagonals:?}"
+        );
+        assert!(low >= 3000, "no crater to speak of: {radii:?}");
+        // One diagonal cell is 1.41 units, so single rays quantise coarsely;
+        // the means must agree closely, every ray roughly. Before ADR-272
+        // the diagonals ran a quarter longer than the axes.
+        let axis = axes.iter().sum::<i64>() / axes.len() as i64;
+        let diagonal = diagonals.iter().sum::<i64>() / diagonals.len() as i64;
+        assert!(
+            (axis - diagonal).abs() * 100 <= axis * 12,
+            "the crater is not round: axes {axis} diagonals {diagonal}"
+        );
+        assert!(high * 100 <= low * 125, "a ray is far off: {radii:?}");
+    }
     /// Trees are matter a tracked hull pushes over (ADR-269): the cut is paid
     /// by the vehicle, the crown falls for free, and nothing is erased.
     #[test]

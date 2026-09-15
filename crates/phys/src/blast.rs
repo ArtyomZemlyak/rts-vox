@@ -185,7 +185,14 @@ impl Wave {
                             continue;
                         }
                         let j = (q[0] + n * (q[1] + n * q[2])) as usize;
-                        let next = left.saturating_sub(cost);
+                        // A cell's material is paid once when the wave leaves
+                        // it, whatever the direction. A diagonal step is longer
+                        // than an axis step, so the target's material is also
+                        // charged for the extra length: otherwise soil is 18 %
+                        // cheaper per metre along diagonals and every crater
+                        // comes out square (ADR-272).
+                        let extra = self.resistance[j].saturating_mul(cost - 100) / 100;
+                        let next = left.saturating_sub(cost).saturating_sub(extra);
                         if next > self.pressure[j] && !self.settled[j] {
                             self.pressure[j] = next;
                             self.frontier.push((next, Reverse(j)));
@@ -267,6 +274,31 @@ mod tests {
         assert_eq!(h.pressure, 800);
         assert!(!h.broken);
         assert_eq!(w.pressure_at([6, 4, 4]), 0);
+    }
+    /// Uniform soil worked from the centre: the reach along an axis and
+    /// along a floor diagonal must agree within a few percent, or every
+    /// crater comes out square (ADR-272).
+    #[test]
+    fn soil_is_worked_isotropically_not_square() {
+        let n = 41;
+        let c = 20i32;
+        let w = solve(Wave::new(n, 2300, vec![165; n * n * n]).unwrap(), 4096);
+        let reach = |dx: i32, dz: i32| {
+            (1..=c)
+                .take_while(|&k| {
+                    w.pressure_at([(c + dx * k) as usize, c as usize, (c + dz * k) as usize]) > 0
+                })
+                .count() as i64
+        };
+        let axis = reach(1, 0);
+        let diagonal = reach(1, 1);
+        assert!(axis >= 5, "the wave barely left the centre: {axis}");
+        // Cells along each axis of the diagonal, times sqrt 2, in thousandths.
+        let ratio = diagonal * 1414 / axis;
+        assert!(
+            (900..=1100).contains(&ratio),
+            "axis {axis} cells, diagonal {diagonal}: ratio {ratio} of 1000"
+        );
     }
     #[test]
     fn invalid_grids_are_rejected() {
