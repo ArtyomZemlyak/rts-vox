@@ -22,14 +22,19 @@ Bevy 0.19.1). Все проверки и тесты выполняются в п
 включены в общий рендер с контактным затенением, bloom и цветокоррекцией.
 
 ```powershell
-.\scripts\cargo-local.ps1 build --release -p render --bin blast
-.\scripts\play-range.ps1
-.\scripts\capture-range.ps1 -Seconds 14
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\cargo-local.ps1 build --release -p render --bin blast
+.\scripts\play-range.cmd
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 -Seconds 14
 ```
 
 Первый скрипт собирает программу с локальным MSVC, второй открывает карту,
 третий записывает итоговый GPU-рендер в MP4 со скоростью 1×.
 Для MP4 используется ffmpeg из PATH или `cache/video-tools`.
+
+Уже собранный полигон открывается двойным щелчком по `scripts/play-range.cmd`.
+Из PowerShell в папке `scripts` запустите `.\play-range.cmd`.
+Обёртка задаёт `ExecutionPolicy Bypass` только для своего процесса PowerShell;
+настройки пользователя и системы остаются прежними.
 
 Для итераций по шейдерам можно перед запуском установить
 `$env:RTS_VOX_SHADER_DIR = "$PWD/crates/render/src"`: файлы читаются при старте.
@@ -45,11 +50,11 @@ Bevy 0.19.1). Все проверки и тесты выполняются в п
 режим аннигиляции. Уже выпавшие обломки остаются при смене оружия.
 
 Основная карта для дальнейшей работы — **тот же лесной полигон с танком**:
-`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/play-range.ps1`.
+`.\scripts\play-range.cmd`.
 Старый `play-energy.ps1` открывает его же. Начальная расстановка из
 `data/range-cover.ron`: прочная слоистая стена, открытый танк, танк за ней
 и две ходовые мишени — танк и шагоход на замкнутых маршрутах с подъёмами.
-Свою расстановку можно открыть через `play-range.ps1 -LayoutPath out/range-layout.ron`.
+Свою расстановку можно открыть через `.\scripts\play-range.cmd -LayoutPath out/range-layout.ron`.
 
 Карта открывается в живом режиме управления своим танком. **ПКМ по земле —
 ехать, ПКМ по юниту — атаковать его до уничтожения или нового приказа**.
@@ -70,7 +75,7 @@ Bevy 0.19.1). Все проверки и тесты выполняются в п
 Старые **W/P** переключают оружие/мощность с восстановлением опыта;
 кнопки панели сохраняют повреждения. Башня наводится независимо от движения
 корпуса; горизонтальная скорость снаряда не растёт от угла.
-`play-range.ps1 -AutoFire` сохраняет режим автоматического первого выстрела.
+`.\scripts\play-range.cmd -AutoFire` сохраняет режим автоматического первого выстрела.
 
 В редакторе: **1** выделение, **2** танк, **3** шагоход, **4** бетонная стена,
 **5** стальная стена, **6** земляной блок, **7** точка прицеливания.
