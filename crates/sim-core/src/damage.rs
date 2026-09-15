@@ -504,6 +504,10 @@ impl Bodies {
     pub fn state(&self, id: u32) -> Option<&BodyState> {
         self.slots.get(id as usize)?.as_ref()
     }
+    /// Damage requests still waiting for their cell budget.
+    pub fn pending_damage(&self) -> usize {
+        self.pending.len()
+    }
     pub fn body(&self, id: u32) -> Option<&UnitBody> {
         let s = self.state(id)?;
         Some(

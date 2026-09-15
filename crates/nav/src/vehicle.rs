@@ -40,10 +40,19 @@ pub struct Pose {
     pub crush: usize,
 }
 /// Query-local height cache. No cached result survives a world edit.
+///
+/// The cache is a window of columns: the whole map for a route search, a
+/// few hull lengths around the vehicle for the per-tick pose checks, so
+/// that clearing it every tick costs kilobytes rather than megabytes.
 pub struct Probe<'a> {
     world: &'a World,
+    x0: i32,
+    z0: i32,
+    w: usize,
+    h: usize,
     heights: Vec<u16>,
     /// Lowest and highest yielding cell above the floor; `[MAX, 0]` is none.
+    /// Empty when nothing yields.
     yields: Vec<[u16; 2]>,
     yielding: Vec<Mat>,
 }
@@ -53,52 +62,94 @@ impl<'a> Probe<'a> {
     }
     /// `yielding` materials never count as floor or obstacle.
     pub fn with_yield(world: &'a World, yielding: &[Mat]) -> Self {
+        Self::window(world, yielding, [0, 0], [world.nx as i32, world.nz as i32])
+    }
+    /// A cache covering `radius` columns around `centre`. Columns outside
+    /// it are still answered, just recomputed on every call.
+    pub fn around(world: &'a World, yielding: &[Mat], centre: [Fx; 2], radius: i32) -> Self {
+        let c = centre.map(Fx::to_int_trunc);
+        Self::window(
+            world,
+            yielding,
+            [(c[0] - radius).max(0), (c[1] - radius).max(0)],
+            [
+                (c[0] + radius + 1).min(world.nx as i32),
+                (c[1] + radius + 1).min(world.nz as i32),
+            ],
+        )
+    }
+    fn window(world: &'a World, yielding: &[Mat], lo: [i32; 2], hi: [i32; 2]) -> Self {
+        let w = (hi[0] - lo[0]).max(0) as usize;
+        let h = (hi[1] - lo[1]).max(0) as usize;
         Self {
             world,
-            heights: vec![u16::MAX; (world.nx * world.nz) as usize],
-            yields: vec![[u16::MAX, 0]; (world.nx * world.nz) as usize],
+            x0: lo[0],
+            z0: lo[1],
+            w,
+            h,
+            heights: vec![u16::MAX; w * h],
+            yields: if yielding.is_empty() {
+                Vec::new()
+            } else {
+                vec![[u16::MAX, 0]; w * h]
+            },
             yielding: yielding.to_vec(),
         }
     }
     pub fn yields(&self, m: Mat) -> bool {
         self.yielding.contains(&m)
     }
-    fn column(&mut self, x: i32, z: i32) -> Option<usize> {
+    fn scan(&self, x: i32, z: i32) -> (u16, [u16; 2]) {
+        let mut floor = 0;
+        let mut span = [u16::MAX, 0];
+        for y in (0..self.world.ny).rev() {
+            if !self.world.solid(x as u32, y, z as u32) {
+                continue;
+            }
+            if !self.yielding.is_empty() && self.yields(self.world.material(x as u32, y, z as u32))
+            {
+                span = [span[0].min(y as u16), span[1].max(y as u16)];
+                continue;
+            }
+            floor = y as u16 + 1;
+            break;
+        }
+        (floor, span)
+    }
+    /// Floor and yielding span of a column; `None` outside the world.
+    fn column(&mut self, x: i32, z: i32) -> Option<(u16, [u16; 2])> {
         if x < 0 || z < 0 || x >= self.world.nx as i32 || z >= self.world.nz as i32 {
             return None;
         }
-        let i = (x as u32 + self.world.nx * z as u32) as usize;
-        if self.heights[i] == u16::MAX {
-            let mut floor = 0;
-            let mut span = [u16::MAX, 0];
-            for y in (0..self.world.ny).rev() {
-                if !self.world.solid(x as u32, y, z as u32) {
-                    continue;
-                }
-                if !self.yielding.is_empty()
-                    && self.yields(self.world.material(x as u32, y, z as u32))
-                {
-                    span = [span[0].min(y as u16), span[1].max(y as u16)];
-                    continue;
-                }
-                floor = y as u16 + 1;
-                break;
-            }
-            self.heights[i] = floor;
-            self.yields[i] = span;
+        let (dx, dz) = (x - self.x0, z - self.z0);
+        if dx < 0 || dz < 0 || dx as usize >= self.w || dz as usize >= self.h {
+            return Some(self.scan(x, z));
         }
-        Some(i)
+        let i = dx as usize + self.w * dz as usize;
+        if self.heights[i] == u16::MAX {
+            let (floor, span) = self.scan(x, z);
+            self.heights[i] = floor;
+            if !self.yields.is_empty() {
+                self.yields[i] = span;
+            }
+        }
+        let span = if self.yields.is_empty() {
+            [u16::MAX, 0]
+        } else {
+            self.yields[i]
+        };
+        Some((self.heights[i], span))
     }
     pub fn floor(&mut self, x: i32, z: i32) -> i32 {
         match self.column(x, z) {
-            Some(i) => self.heights[i] as i32,
+            Some((floor, _)) => floor as i32,
             None => self.world.ny as i32,
         }
     }
     /// Lowest yielding cell of the column, if any lies above its floor.
     fn yield_low(&mut self, x: i32, z: i32) -> Option<i32> {
-        let i = self.column(x, z)?;
-        (self.yields[i][0] != u16::MAX).then_some(self.yields[i][0] as i32)
+        let (_, span) = self.column(x, z)?;
+        (span[0] != u16::MAX).then_some(span[0] as i32)
     }
     /// Every yielding cell inside the hull at this pose, in column order.
     /// This is the cut a tracked hull makes when it stands here.
@@ -114,11 +165,10 @@ impl<'a> Probe<'a> {
                 if !self.inside(pos, c, sin, s, x, z) {
                     continue;
                 }
-                let Some(i) = self.column(x, z) else {
+                let Some((floor, [low, high])) = self.column(x, z) else {
                     continue;
                 };
-                let top = (self.heights[i] as i32 + s.height).min(self.world.ny as i32);
-                let [low, high] = self.yields[i];
+                let top = (floor as i32 + s.height).min(self.world.ny as i32);
                 if low == u16::MAX {
                     continue;
                 }

@@ -7,7 +7,8 @@ param(
     [ValidateSet('auto','overview','exposed','sheltered','gun','target')][string]$View = '',
     [switch]$Edit,
     [switch]$DriveDemo,
-    [switch]$Close
+    [switch]$Close,
+    [string]$Move = ''
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
@@ -33,6 +34,7 @@ $captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $seco
     '--weapon', $Weapon, '--power', $Power.ToString($culture), '--range', ('"{0}"' -f $RangePath))
 if ($Edit) { $captureArgs += '--edit' }
 if ($DriveDemo) { $captureArgs += '--drive-demo' }
+if ($Move) { $captureArgs += @('--move', $Move) }
 if ($Close) { $captureArgs += '--close' }
 if ($View) { $captureArgs += @('--view', $View) }
 $process = Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -Wait `

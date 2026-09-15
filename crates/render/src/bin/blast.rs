@@ -206,6 +206,7 @@ fn main() {
     let mut edit = false;
     let mut drive = false;
     let mut demo = false;
+    let mut go: Option<[i32; 2]> = None;
     let mut record_dir = None;
     let mut record_seconds = 10.0;
     let args: Vec<String> = std::env::args().collect();
@@ -214,6 +215,14 @@ fn main() {
         match args[i].as_str() {
             "--edit" => edit = true,
             "--drive" => drive = true,
+            // Order the player's tank to a point at start, for scripted
+            // captures such as a run through the woods (ADR-269).
+            "--move" => {
+                i += 1;
+                let (x, z) = args[i].split_once(',').expect("--move x,z");
+                go = Some([x.trim().parse().expect("x"), z.trim().parse().expect("z")]);
+                drive = true;
+            }
             "--drive-demo" => {
                 drive = true;
                 demo = true;
@@ -293,6 +302,9 @@ fn main() {
     if drive {
         sim.control();
         view = 1;
+    }
+    if let Some(p) = go {
+        assert!(sim.order_move(p), "--move: no route to {p:?}");
     }
     if edit {
         repeat = false;

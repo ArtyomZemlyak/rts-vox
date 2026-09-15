@@ -329,7 +329,10 @@ impl Motion {
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
-        let mut ground = nav::vehicle::Probe::with_yield(w, &self.yielding);
+        // Two poses and the cut lie within a hull length of the vehicle; a
+        // whole-map cache would cost more to clear than the poses to compute.
+        let mut ground =
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
         let shape = self.shape(b);
         let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
         // Pushing through a tree is slower than open ground.

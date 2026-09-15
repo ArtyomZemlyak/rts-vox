@@ -33,6 +33,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 
 Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
 `-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`.
+`-Move 96,540` отдаёт управляемому танку приказ ехать в точку при старте
+(например, в лес — с валкой деревьев); без `-DriveDemo`, иначе демо
+перепишет приказ.
 Параметры `-Weapon shell -Power 4000` включают фугас мощности 4×;
 скорость записи остаётся реальной 1× для любого оружия и ракурса.
 
