@@ -31,6 +31,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 третий записывает итоговый GPU-рендер в MP4 со скоростью 1×.
 Для MP4 используется ffmpeg из PATH или `cache/video-tools`.
 
+Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
+`-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`.
+Параметры `-Weapon shell -Power 4000` включают фугас мощности 4×;
+скорость записи остаётся реальной 1× для любого оружия и ракурса.
+
 Уже собранный полигон открывается двойным щелчком по `scripts/play-range.cmd`.
 Из PowerShell в папке `scripts` запустите `.\play-range.cmd`.
 Обёртка задаёт `ExecutionPolicy Bypass` только для своего процесса PowerShell;

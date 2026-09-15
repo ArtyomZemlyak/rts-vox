@@ -198,6 +198,7 @@ fn main() {
     let mut energy = false;
     let mut repeat = false;
     let mut view = 0;
+    let mut requested_view = None;
     let mut realtime = false;
     let mut layout_file = None;
     let mut power = 1000;
@@ -237,6 +238,18 @@ fn main() {
             "--open" => uncovered = true,
             "--loop" => repeat = true,
             "--close" => view = 2,
+            "--view" => {
+                i += 1;
+                requested_view = Some(match args.get(i).map(String::as_str) {
+                    Some("auto") => 0,
+                    Some("overview") => 1,
+                    Some("exposed") => 2,
+                    Some("sheltered") => 3,
+                    Some("gun") => 4,
+                    Some("target") => 5,
+                    _ => panic!("--view expects auto, overview, exposed, sheltered, gun or target"),
+                });
+            }
             "--realtime" => realtime = true,
             "--weapon" => {
                 i += 1;
@@ -285,6 +298,7 @@ fn main() {
         repeat = false;
         view = 1;
     }
+    view = requested_view.unwrap_or(view);
     let finish = finish.unwrap_or(if energy { 420 } else { 330 });
     let mut gas = GasInput::default();
     fill_terrain(&sim, &mut gas);
@@ -744,7 +758,7 @@ fn setup(
             bevy::core_pipeline::tonemapping::Tonemapping::AgX,
             bevy::render::view::ColorGrading {
                 global: bevy::render::view::ColorGradingGlobal {
-                    post_saturation: 1.04,
+                    post_saturation: 1.24,
                     ..default()
                 },
                 shadows: bevy::render::view::ColorGradingSection {
@@ -752,6 +766,7 @@ fn setup(
                     ..default()
                 },
                 midtones: bevy::render::view::ColorGradingSection {
+                    saturation: 1.08,
                     contrast: 1.10,
                     ..default()
                 },

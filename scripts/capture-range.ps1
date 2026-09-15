@@ -4,6 +4,7 @@ param(
     [ValidateRange(100,4000)][int]$Power = 1000,
     [string]$OutputDir = '',
     [ValidateRange(0.1,3600)][double]$Seconds = 10,
+    [ValidateSet('auto','overview','exposed','sheltered','gun','target')][string]$View = '',
     [switch]$Edit,
     [switch]$DriveDemo,
     [switch]$Close
@@ -33,6 +34,7 @@ $captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $seco
 if ($Edit) { $captureArgs += '--edit' }
 if ($DriveDemo) { $captureArgs += '--drive-demo' }
 if ($Close) { $captureArgs += '--close' }
+if ($View) { $captureArgs += @('--view', $View) }
 $process = Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -Wait `
     -ArgumentList $captureArgs `
     -RedirectStandardOutput (Join-Path $destination 'capture.log') `
