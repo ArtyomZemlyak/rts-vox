@@ -82,10 +82,15 @@ pub struct Motion {
     pub arrival: i32,
     pub alignment: i32,
     pub replan: u32,
+    /// Yielding cells the hull stood in after this tick's move: the cut the
+    /// range turns into debris. Transient; recomputed every step.
+    pub cut: Vec<[u32; 3]>,
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
     navigation: modding::navigation::Navigation,
+    /// Materials this hull crushes instead of avoiding; empty for walkers.
+    yielding: Vec<voxel::store::Mat>,
     blocked_ticks: u32,
     reverse_left: u32,
     recovery_head: i32,
@@ -104,6 +109,15 @@ impl Motion {
                 .expect("range tuning")
                 .course
                 .expect("course tuning");
+        let navigation = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .expect("navigation");
+        let yielding = if kind == modding::range::RangeUnitKind::Tank {
+            navigation.fell.materials.to_vec()
+        } else {
+            Vec::new()
+        };
         Self {
             pos: at.map(Fx::from_int),
             drive: Drive {
@@ -131,10 +145,9 @@ impl Motion {
             arrival: c.arrival,
             alignment: c.turn_alignment_pct,
             replan: c.replan_ticks,
-            navigation: modding::navigation::Navigation::from_ron(include_str!(
-                "../../../data/range-navigation.ron"
-            ))
-            .expect("navigation"),
+            cut: Vec::new(),
+            navigation,
+            yielding,
             blocked_ticks: 0,
             reverse_left: 0,
             recovery_head: 0,
@@ -159,7 +172,7 @@ impl Motion {
         let shape = self.shape(b);
         let half = shape.half.map(Fx::from_int);
         let path = nav::vehicle::route(
-            nav::vehicle::Probe::new(w),
+            nav::vehicle::Probe::with_yield(w, &self.yielding),
             shape,
             from,
             self.drive.head,
@@ -169,6 +182,8 @@ impl Motion {
                 min: [40; 2],
                 max: [600; 2],
                 nodes: self.navigation.search_nodes,
+                crush_cost: self.navigation.fell.cost_per_column,
+                crush_cap: self.navigation.fell.cost_cap,
             },
             |p, head| {
                 !others.iter().any(|o| {
@@ -196,7 +211,7 @@ impl Motion {
         self.reverse_left = 0;
         self.next_plan = 0;
     }
-    fn shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
+    pub(crate) fn shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
         let units = voxel::unit::WORLD_MM as i32;
         nav::vehicle::Shape {
             half: [
@@ -210,6 +225,7 @@ impl Motion {
             clearance: Fx::from_ratio(self.chassis.clearance_cm * 10, units),
             step: self.step,
             min_up: Fx::from_ratio(self.chassis.max_tilt_pct, 100),
+            height: b.vol.ny as i32 * b.mm as i32 / units,
         }
     }
     // Drive phase takes explicit body, world, clock and contact inputs.
@@ -225,6 +241,7 @@ impl Motion {
         tick: u32,
         gravity: i32,
     ) {
+        self.cut.clear();
         if !self.enabled {
             return;
         }
@@ -302,6 +319,13 @@ impl Motion {
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
+        let mut ground = nav::vehicle::Probe::with_yield(w, &self.yielding);
+        let shape = self.shape(b);
+        let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
+        // Pushing through a tree is slower than open ground.
+        if current.crush > 0 {
+            speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
+        }
         let (next, delta) = drive::advance(
             old,
             want,
@@ -315,9 +339,6 @@ impl Motion {
         let nx = self.pos[0].add(delta.dx);
         let nz = self.pos[2].add(delta.dz);
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
-        let mut ground = nav::vehicle::Probe::new(w);
-        let shape = self.shape(b);
-        let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
         let target = ground.pose([nx, nz], next.head, shape);
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
@@ -346,6 +367,9 @@ impl Motion {
             self.blocked = true;
             Fx::ZERO
         };
+        if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
+            self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
+        }
         if self.reverse_left > 0 {
             self.reverse_left -= 1;
             if self.reverse_left == 0 {

@@ -605,6 +605,7 @@ pub struct BlastRange {
     pub aim: Option<[i32; 3]>,
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
+    navigation: modding::navigation::Navigation,
 }
 
 impl BlastRange {
@@ -780,6 +781,10 @@ impl BlastRange {
                     .expect("turret limits"),
                 crate::TICKS_PER_SECOND,
             ),
+            navigation: modding::navigation::Navigation::from_ron(include_str!(
+                "../../../data/range-navigation.ron"
+            ))
+            .expect("navigation"),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result
@@ -788,7 +793,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(12);
+        b.u32(13);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -900,7 +905,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 12 {
+        if s.u32() != 13 {
             return None;
         }
         let extended = s.bool();
@@ -1237,6 +1242,21 @@ impl BlastRange {
             self.config.gravity,
         );
         self.gun.update_pose();
+        // Tracked hulls cut the yielding matter they stand in; the crown that
+        // hung from those cells follows over the next ticks.
+        let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .filter(|u| u.kind == RangeUnitKind::Tank && u.status.alive && !u.motion.cut.is_empty())
+            .map(|u| (u.motion.cut.clone(), u.at))
+            .collect();
+        for (cut, at) in cuts {
+            self.matter
+                .fell(&mut self.world, &cut, at, &self.navigation.fell);
+        }
+        self.matter
+            .step_felling(&mut self.world, &self.navigation.fell);
         let target_angle = self.aim_angle();
         self.turret.step(target_angle, self.turret_limits);
         if let Some(id) = self.attack {
@@ -1585,6 +1605,145 @@ mod tests {
             restored.state_hash(),
             "saved whole fragment"
         );
+    }
+    /// Trees are matter a tracked hull pushes over (ADR-269): the cut is paid
+    /// by the vehicle, the crown falls for free, and nothing is erased.
+    #[test]
+    fn a_tank_pushes_through_the_forest_and_the_trees_fall_as_debris() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        assert!(
+            a.order_move([128, 470]),
+            "no route into the woods from {:?}",
+            a.gun.motion.pos
+        );
+        let mut b: Option<BlastRange> = None;
+        let mut cut_ticks = 0;
+        let mut released = 0;
+        let mut blocked_ticks = 0;
+        let mut reversed = false;
+        let mut travelled = Fx::ZERO;
+        let mut arrived = None;
+        for tick in 0..1200 {
+            let before = a.gun.motion.pos;
+            a.step();
+            if let Some(r) = b.as_mut() {
+                r.step();
+                assert_eq!(a.state_hash(), r.state_hash(), "tick {tick}");
+            }
+            let m = &a.gun.motion;
+            let dx = m.pos[0].sub(before[0]);
+            let dz = m.pos[2].sub(before[2]);
+            travelled = travelled.add(dx.mul(dx).add(dz.mul(dz)).sqrt());
+            blocked_ticks += usize::from(m.blocked);
+            reversed |= m.drive.vel < Fx::ZERO;
+            if !m.cut.is_empty() {
+                cut_ticks += 1;
+                if b.is_none() {
+                    b = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+                }
+            }
+            released = released.max(a.matter.felling_pending());
+            assert!(a.matter.economy.ledger.balanced());
+            if m.destination.is_none() {
+                arrived.get_or_insert(tick);
+                if a.matter.felling_pending() == 0 {
+                    break;
+                }
+            }
+        }
+        let wood = a.removed_materials[4] + a.removed_materials[5];
+        eprintln!(
+            "arrived {arrived:?} ticks {} travelled {} blocked {blocked_ticks} reversed {reversed} \
+             cut_ticks {cut_ticks} frontier_max {released} foliage {} trunk {} spent_mj {} fragments {}",
+            a.tick,
+            travelled.to_int_trunc(),
+            a.removed_materials[4],
+            a.removed_materials[5],
+            a.matter.spent_mj,
+            a.matter.debris.fragments.len()
+        );
+        assert!(
+            a.gun.motion.destination.is_none(),
+            "stuck at {:?} blocked {}",
+            a.gun.motion.pos,
+            a.gun.motion.blocked
+        );
+        assert!(!reversed, "the hull backed off a tree");
+        assert!(
+            cut_ticks > 0 && released > 0,
+            "cut {cut_ticks} released {released}"
+        );
+        assert!(wood > 200 && a.removed_materials[5] > 0, "felled {wood}");
+        assert_eq!(a.matter.economy.ledger.sunk_total(), 0);
+        let m = &a.matter;
+        assert_eq!(
+            m.debris
+                .fragments
+                .iter()
+                .map(|f| u64::from(f.count))
+                .sum::<u64>(),
+            a.removed as u64
+        );
+        assert!(m.spent_mj <= m.supplied_mj && m.spent_mj > 0);
+        // Nothing yielding is left standing inside the hull where it stopped.
+        let shape = a.gun.motion.shape(&a.gun.body);
+        let mut probe = nav::vehicle::Probe::with_yield(&a.world, &a.navigation.fell.materials);
+        assert!(probe
+            .crushed(
+                [a.gun.motion.pos[0], a.gun.motion.pos[2]],
+                a.gun.motion.drive.head,
+                shape
+            )
+            .is_empty());
+        assert_eq!(
+            a.state_hash(),
+            BlastRange::restore(c, &a.snapshot()).unwrap().state_hash()
+        );
+    }
+    #[test]
+    fn a_walker_still_treats_trees_as_walls() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        a.patrols_running = false;
+        let id = a
+            .units
+            .iter()
+            .position(|u| u.kind == RangeUnitKind::Strider)
+            .expect("a strider on the range");
+        let body = a.units[id].body.clone();
+        let others: Vec<_> = a
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != id)
+            .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+            .collect();
+        a.units[id].motion.route.clear();
+        a.units[id]
+            .motion
+            .move_to(&a.world, [128, 470], &body, &others);
+        for _ in 0..600 {
+            a.step();
+            let u = &a.units[id];
+            let mut probe = nav::vehicle::Probe::with_yield(&a.world, &a.navigation.fell.materials);
+            assert!(
+                probe
+                    .crushed(
+                        [u.motion.pos[0], u.motion.pos[2]],
+                        u.motion.drive.head,
+                        u.motion.shape(&body)
+                    )
+                    .is_empty(),
+                "the walker stands inside a tree at {:?}",
+                u.motion.pos
+            );
+        }
+        assert_eq!(a.removed_materials[4] + a.removed_materials[5], 0);
     }
     #[test]
     fn a_waiting_section_does_not_freeze_damage_elsewhere_on_the_body() {

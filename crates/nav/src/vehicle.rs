@@ -1,9 +1,17 @@
 //! Oriented vehicle clearance and routes against the current voxel surface.
 //! The same footprint query serves planning and accepted movement. This
 //! surface adapter does not replace the multi-level navigation graph.
+//!
+//! Yielding materials (a tree over a tracked hull) are not obstacles: the
+//! floor is the terrain beneath them, and the pose reports how many footprint
+//! columns hold such matter inside the hull height, so the caller can crush
+//! it and the planner can price the detour.
 use fx::{angle, Fx};
 use std::{cmp::Reverse, collections::BinaryHeap};
-use voxel::World;
+use voxel::{
+    store::{Mat, AIR},
+    World,
+};
 
 #[derive(Clone, Copy)]
 pub struct Shape {
@@ -12,37 +20,141 @@ pub struct Shape {
     pub clearance: Fx,
     pub step: i32,
     pub min_up: Fx,
+    /// Hull height above its floor, in world units. Yielding matter below
+    /// the hull top is crushed; matter above it is passed under.
+    pub height: i32,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
     pub height: Fx,
     pub floors: [Fx; 4],
     pub blocked: usize,
+    /// Footprint columns holding yielding matter inside the hull height.
+    pub crush: usize,
 }
 /// Query-local height cache. No cached result survives a world edit.
 pub struct Probe<'a> {
     world: &'a World,
     heights: Vec<u16>,
+    /// Lowest and highest yielding cell above the floor; `[MAX, 0]` is none.
+    yields: Vec<[u16; 2]>,
+    yielding: Vec<Mat>,
 }
 impl<'a> Probe<'a> {
     pub fn new(world: &'a World) -> Self {
+        Self::with_yield(world, &[])
+    }
+    /// `yielding` materials never count as floor or obstacle.
+    pub fn with_yield(world: &'a World, yielding: &[Mat]) -> Self {
         Self {
             world,
             heights: vec![u16::MAX; (world.nx * world.nz) as usize],
+            yields: vec![[u16::MAX, 0]; (world.nx * world.nz) as usize],
+            yielding: yielding.to_vec(),
         }
     }
-    pub fn floor(&mut self, x: i32, z: i32) -> i32 {
+    pub fn yields(&self, m: Mat) -> bool {
+        self.yielding.contains(&m)
+    }
+    fn column(&mut self, x: i32, z: i32) -> Option<usize> {
         if x < 0 || z < 0 || x >= self.world.nx as i32 || z >= self.world.nz as i32 {
-            return self.world.ny as i32;
+            return None;
         }
         let i = (x as u32 + self.world.nx * z as u32) as usize;
         if self.heights[i] == u16::MAX {
-            self.heights[i] = (0..self.world.ny)
-                .rev()
-                .find(|y| self.world.solid(x as u32, *y, z as u32))
-                .map_or(0, |y| y as u16 + 1);
+            let mut floor = 0;
+            let mut span = [u16::MAX, 0];
+            for y in (0..self.world.ny).rev() {
+                if !self.world.solid(x as u32, y, z as u32) {
+                    continue;
+                }
+                if !self.yielding.is_empty()
+                    && self.yields(self.world.material(x as u32, y, z as u32))
+                {
+                    span = [span[0].min(y as u16), span[1].max(y as u16)];
+                    continue;
+                }
+                floor = y as u16 + 1;
+                break;
+            }
+            self.heights[i] = floor;
+            self.yields[i] = span;
         }
-        self.heights[i] as i32
+        Some(i)
+    }
+    pub fn floor(&mut self, x: i32, z: i32) -> i32 {
+        match self.column(x, z) {
+            Some(i) => self.heights[i] as i32,
+            None => self.world.ny as i32,
+        }
+    }
+    /// Lowest yielding cell of the column, if any lies above its floor.
+    fn yield_low(&mut self, x: i32, z: i32) -> Option<i32> {
+        let i = self.column(x, z)?;
+        (self.yields[i][0] != u16::MAX).then_some(self.yields[i][0] as i32)
+    }
+    /// Every yielding cell inside the hull at this pose, in column order.
+    /// This is the cut a tracked hull makes when it stands here.
+    pub fn crushed(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Vec<[u32; 3]> {
+        let mut out = Vec::new();
+        if self.yielding.is_empty() {
+            return out;
+        }
+        let (c, sin) = (angle::cos(head), angle::sin(head));
+        let (lo, hi) = self.extent(pos, head, s);
+        for z in lo[1]..=hi[1] {
+            for x in lo[0]..=hi[0] {
+                if !self.inside(pos, c, sin, s, x, z) {
+                    continue;
+                }
+                let Some(i) = self.column(x, z) else {
+                    continue;
+                };
+                let top = (self.heights[i] as i32 + s.height).min(self.world.ny as i32);
+                let [low, high] = self.yields[i];
+                if low == u16::MAX {
+                    continue;
+                }
+                for y in low as i32..=(high as i32).min(top - 1) {
+                    let m = self.world.material(x as u32, y as u32, z as u32);
+                    if m != AIR && self.yields(m) {
+                        out.push([x as u32, y as u32, z as u32]);
+                    }
+                }
+            }
+        }
+        out
+    }
+    fn extent(&self, pos: [Fx; 2], head: i32, s: Shape) -> ([i32; 2], [i32; 2]) {
+        let (c, sin) = (angle::cos(head), angle::sin(head));
+        let ext = [
+            c.abs()
+                .mul(Fx::from_int(s.half[0]))
+                .add(sin.abs().mul(Fx::from_int(s.half[1]))),
+            sin.abs()
+                .mul(Fx::from_int(s.half[0]))
+                .add(c.abs().mul(Fx::from_int(s.half[1]))),
+        ];
+        (
+            [
+                pos[0].sub(ext[0]).to_int_trunc() - 1,
+                pos[1].sub(ext[1]).to_int_trunc() - 1,
+            ],
+            [
+                pos[0].add(ext[0]).to_int_trunc() + 1,
+                pos[1].add(ext[1]).to_int_trunc() + 1,
+            ],
+        )
+    }
+    // Include a half-cell halo so a one-voxel rock cannot hide between
+    // the four nominal supports or between diagonally sampled cells.
+    fn inside(&self, pos: [Fx; 2], c: Fx, sin: Fx, s: Shape, x: i32, z: i32) -> bool {
+        let dx = Fx::from_int(x).add(Fx::from_ratio(1, 2)).sub(pos[0]);
+        let dz = Fx::from_int(z).add(Fx::from_ratio(1, 2)).sub(pos[1]);
+        let u = dx.mul(c).add(dz.mul(sin));
+        let v = dz.mul(c).sub(dx.mul(sin));
+        u.abs() <= Fx::from_int(s.half[0]).add(Fx::from_ratio(1, 2))
+            && v.abs() <= Fx::from_int(s.half[1]).add(Fx::from_ratio(1, 2))
     }
     fn surface(&mut self, p: [Fx; 2]) -> Fx {
         // A support has a finite contact patch. Blend the four neighbouring
@@ -116,42 +228,27 @@ impl<'a> Probe<'a> {
         } else {
             0
         };
-        let ext = [
-            c.abs()
-                .mul(Fx::from_int(s.half[0]))
-                .add(sin.abs().mul(Fx::from_int(s.half[1]))),
-            sin.abs()
-                .mul(Fx::from_int(s.half[0]))
-                .add(c.abs().mul(Fx::from_int(s.half[1]))),
-        ];
-        let lo = [
-            pos[0].sub(ext[0]).to_int_trunc() - 1,
-            pos[1].sub(ext[1]).to_int_trunc() - 1,
-        ];
-        let hi = [
-            pos[0].add(ext[0]).to_int_trunc() + 1,
-            pos[1].add(ext[1]).to_int_trunc() + 1,
-        ];
+        let (lo, hi) = self.extent(pos, head, s);
+        let mut crush = 0;
         for z in lo[1]..=hi[1] {
             for x in lo[0]..=hi[0] {
+                if !self.inside(pos, c, sin, s, x, z) {
+                    continue;
+                }
                 let dx = Fx::from_int(x).add(Fx::from_ratio(1, 2)).sub(pos[0]);
                 let dz = Fx::from_int(z).add(Fx::from_ratio(1, 2)).sub(pos[1]);
                 let u = dx.mul(c).add(dz.mul(sin));
                 let v = dz.mul(c).sub(dx.mul(sin));
-                // Include a half-cell halo so a one-voxel rock cannot hide between
-                // the four nominal supports or between diagonally sampled cells.
-                if u.abs() > Fx::from_int(s.half[0]).add(Fx::from_ratio(1, 2))
-                    || v.abs() > Fx::from_int(s.half[1]).add(Fx::from_ratio(1, 2))
-                {
-                    continue;
-                }
                 let ground = Fx::from_int(self.floor(x, z));
-                let belly = height
-                    .add(pitch.mul(u))
-                    .add(roll.mul(v))
-                    .add(s.clearance.max(Fx::from_int(s.step)));
+                let local = height.add(pitch.mul(u)).add(roll.mul(v));
+                let belly = local.add(s.clearance.max(Fx::from_int(s.step)));
                 if ground > belly {
                     blocked += 1;
+                }
+                if let Some(low) = self.yield_low(x, z) {
+                    if Fx::from_int(low) < local.add(Fx::from_int(s.height)) {
+                        crush += 1;
+                    }
                 }
             }
         }
@@ -159,6 +256,7 @@ impl<'a> Probe<'a> {
             height,
             floors,
             blocked,
+            crush,
         }
     }
 }
@@ -169,6 +267,11 @@ pub struct Search {
     pub min: [i32; 2],
     pub max: [i32; 2],
     pub nodes: usize,
+    /// Planner price of one crushed footprint column; a straight move costs 10.
+    pub crush_cost: u32,
+    /// Ceiling of that price per node, so a dense crown is a detour of a few
+    /// cells, not an impassable field that exhausts the search.
+    pub crush_cap: u32,
 }
 const DIR: [[i32; 2]; 8] = [
     [1, 0],
@@ -180,6 +283,7 @@ const DIR: [[i32; 2]; 8] = [
     [0, -1],
     [1, -1],
 ];
+/// Whether the straight move is open, and how many yielding columns it crushes.
 fn connects(
     ground: &mut Probe<'_>,
     shape: Shape,
@@ -187,7 +291,7 @@ fn connects(
     head: i32,
     to: [Fx; 2],
     clear: &impl Fn([Fx; 2], i32) -> bool,
-) -> bool {
+) -> Option<usize> {
     let delta = [to[0].sub(from[0]), to[1].sub(from[1])];
     let yaw = if delta == [Fx::ZERO; 2] {
         head
@@ -197,6 +301,7 @@ fn connects(
     let turn = angle::diff(yaw, head);
     let turns = (turn.abs() / (angle::FULL / 16) + 1).max(1);
     let mut old = ground.pose(from, head, shape);
+    let mut crush = 0;
     for i in 1..=turns {
         let h = angle::norm(head + turn * i / turns);
         let next = ground.pose(from, h, shape);
@@ -204,8 +309,9 @@ fn connects(
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(from, h)
         {
-            return false;
+            return None;
         }
+        crush = crush.max(next.crush);
         old = next;
     }
     let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
@@ -217,11 +323,12 @@ fn connects(
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(p, yaw)
         {
-            return false;
+            return None;
         }
+        crush += next.crush;
         old = next;
     }
-    true
+    Some(crush)
 }
 /// An oriented A*: translations keep heading, turns reserve their swept
 /// footprint. It cannot choose a narrow corridor and then rotate through it.
@@ -247,7 +354,9 @@ pub fn route(
     {
         return vec![];
     }
-    if connects(&mut ground, shape, from, head, to.map(Fx::from_int), &clear) {
+    // A straight run through yielding matter is legal but not free: let the
+    // search look for cheaper open ground first.
+    if connects(&mut ground, shape, from, head, to.map(Fx::from_int), &clear) == Some(0) {
         return vec![to];
     }
     let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
@@ -293,7 +402,7 @@ pub fn route(
             || i / 8 == end)
             && pose.blocked == 0
             && clear(at, yaw)
-            && connects(&mut ground, shape, at, yaw, to.map(Fx::from_int), &clear)
+            && connects(&mut ground, shape, at, yaw, to.map(Fx::from_int), &clear).is_some()
         {
             found = Some(i);
             break;
@@ -316,8 +425,9 @@ pub fn route(
                 continue;
             }
             let j = cell * 8 + d;
-            let next_cost = cost
-                + if turn == 0 {
+            let next = *poses[j].get_or_insert_with(|| ground.pose(q, next_yaw, shape));
+            let next_cost =
+                cost + if turn == 0 {
                     if d.is_multiple_of(2) {
                         10
                     } else {
@@ -325,11 +435,12 @@ pub fn route(
                     }
                 } else {
                     6
-                };
+                } + (next.crush as u32)
+                    .saturating_mul(cfg.crush_cost)
+                    .min(cfg.crush_cap);
             if next_cost >= distance[j] {
                 continue;
             }
-            let next = *poses[j].get_or_insert_with(|| ground.pose(q, next_yaw, shape));
             if next.blocked != 0
                 || !clear(q, next_yaw)
                 || next.height.sub(pose.height).abs() > Fx::from_int(shape.step)
@@ -432,7 +543,79 @@ mod tests {
             clearance: Fx::from_ratio(45, 10),
             step: 4,
             min_up: Fx::from_ratio(91, 100),
+            height: 30,
         }
+    }
+    fn search() -> Search {
+        Search {
+            cell: 8,
+            min: [32; 2],
+            max: [224; 2],
+            nodes: 6400,
+            crush_cost: 1,
+            crush_cap: 20,
+        }
+    }
+    /// A soil floor with a wall of trees (trunk 7, crown 8) across x = 120..126.
+    struct Forest;
+    impl voxel::Generator for Forest {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            if y < 16 {
+                return 1;
+            }
+            let trunk = (120..126).contains(&x) && z % 9 < 3 && y < 40;
+            let crown = (116..130).contains(&x) && (24..46).contains(&y);
+            if trunk {
+                7
+            } else if crown {
+                8
+            } else {
+                0
+            }
+        }
+    }
+    #[test]
+    fn yielding_trees_are_crushed_by_a_tracked_hull_and_avoided_by_others() {
+        let w = World::new(256, 64, 256, 100, Box::new(Forest));
+        let at = [Fx::from_int(123), Fx::from_int(100)];
+        let mut hard = Probe::new(&w);
+        assert!(hard.pose(at, 0, tank()).blocked > 0);
+        assert_eq!(hard.floor(123, 100), 46, "crown top is the hard floor");
+        assert!(hard.crushed(at, 0, tank()).is_empty());
+        let mut soft = Probe::with_yield(&w, &[7, 8]);
+        let pose = soft.pose(at, 0, tank());
+        assert_eq!(pose.blocked, 0);
+        assert_eq!(soft.floor(123, 100), 16, "trees are not floor");
+        assert!(pose.crush > 0);
+        let cut = soft.crushed(at, 0, tank());
+        assert!(cut.iter().all(|c| c[1] < 16 + 30), "cut above the hull top");
+        assert!(cut.iter().any(|c| w.material(c[0], c[1], c[2]) == 7));
+        assert!(cut.iter().any(|c| w.material(c[0], c[1], c[2]) == 8));
+        assert!(
+            cut.windows(2)
+                .all(|p| (p[0][2], p[0][0], p[0][1]) < (p[1][2], p[1][0], p[1][1])),
+            "cut order is not column order"
+        );
+        let open = route(
+            Probe::with_yield(&w, &[7, 8]),
+            tank(),
+            [Fx::from_int(60), Fx::from_int(100)],
+            0,
+            [200, 100],
+            search(),
+            |_, _| true,
+        );
+        assert_eq!(open.last(), Some(&[200, 100]), "no route through the trees");
+        let walker = route(
+            Probe::new(&w),
+            tank(),
+            [Fx::from_int(60), Fx::from_int(100)],
+            0,
+            [200, 100],
+            search(),
+            |_, _| true,
+        );
+        assert!(walker.is_empty(), "a hard hull passed through the wall");
     }
     #[test]
     fn narrow_opening_uses_width_and_forbids_a_turn_inside_it() {
@@ -447,12 +630,7 @@ mod tests {
             [Fx::from_int(40), Fx::from_int(70)],
             0,
             [200, 70],
-            Search {
-                cell: 8,
-                min: [32; 2],
-                max: [224; 2],
-                nodes: 6400,
-            },
+            search(),
             |_, _| true,
         );
         assert!(!route.is_empty());

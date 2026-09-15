@@ -10,8 +10,10 @@ use fx::{
     blob::{Blob, Scan},
     Fx,
 };
+use modding::navigation::Felling;
 use phys::V3;
-use voxel::World;
+use std::collections::BTreeSet;
+use voxel::{store::AIR, World};
 
 pub enum ClaimResult {
     Applied,
@@ -30,6 +32,9 @@ pub struct Matter {
     section_work: u32,
     section_jobs: u32,
     section_cursor: usize,
+    /// Yielding cells still to be released after a cut, each with the cut
+    /// cell it hangs from. Ordered, bounded per tick, saved whole.
+    felling: BTreeSet<([i32; 3], [i32; 3])>,
 }
 impl Matter {
     pub fn new(units: &[RangeUnit]) -> Self {
@@ -58,6 +63,77 @@ impl Matter {
             section_work: t.impact.detach_work_per_tick,
             section_jobs: t.impact.detach_jobs_per_tick,
             section_cursor: 0,
+            felling: BTreeSet::new(),
+        }
+    }
+    pub fn felling_pending(&self) -> usize {
+        self.felling.len()
+    }
+    /// What hangs from a cut falls: connected yielding matter no lower than
+    /// the cut and within the radius. Below the cut a stump keeps standing.
+    fn spread(&mut self, p: [i32; 3], seed: [i32; 3], radius: i32) {
+        for a in 0..3 {
+            for d in [-1, 1] {
+                let mut q = p;
+                q[a] += d;
+                let far = (0..3).map(|k| (q[k] - seed[k]).pow(2)).sum::<i32>() > radius * radius;
+                if !far && q[1] >= seed[1] {
+                    self.felling.insert((q, seed));
+                }
+            }
+        }
+    }
+    /// Cut every listed cell now: the hull stands in them. The fracture work
+    /// is the vehicle's, supplied and spent in the same call; the kinetic
+    /// share throws the pieces away from the hull. A full pool stops the cut
+    /// where it is, and the hull keeps standing in the rest.
+    pub fn fell(&mut self, w: &mut World, cells: &[[u32; 3]], at: [i32; 3], f: &Felling) -> usize {
+        let mut cut = 0;
+        for &p in cells {
+            let m = w.material(p[0], p[1], p[2]);
+            if m == AIR || !f.materials.contains(&m) || self.debris.claimed(p) {
+                continue;
+            }
+            let (cost, motion) = self.cost(m);
+            if !self.debris.claim_voxel(w, p, m, at, motion, &self.tuning) {
+                break;
+            }
+            self.supplied_mj += cost;
+            self.spent_mj += cost;
+            cut += 1;
+            self.spread(p.map(|v| v as i32), p.map(|v| v as i32), f.radius);
+        }
+        cut
+    }
+    /// Release the crown hanging from earlier cuts: connected yielding cells
+    /// within the radius leave as unpowered debris and fall. Nothing is paid
+    /// twice, and a full pool only postpones the rest.
+    pub fn step_felling(&mut self, w: &mut World, f: &Felling) {
+        let mut left = f.cells_per_tick;
+        while left > 0 {
+            let Some((p, seed)) = self.felling.pop_first() else {
+                break;
+            };
+            left -= 1;
+            if p[0] < 0
+                || p[1] < 0
+                || p[2] < 0
+                || p[0] >= w.nx as i32
+                || p[1] >= w.ny as i32
+                || p[2] >= w.nz as i32
+            {
+                continue;
+            }
+            let q = p.map(|v| v as u32);
+            let m = w.material(q[0], q[1], q[2]);
+            if m == AIR || !f.materials.contains(&m) || self.debris.claimed(q) {
+                continue;
+            }
+            if !self.debris.claim_voxel(w, q, m, seed, 0, &self.tuning) {
+                self.felling.insert((p, seed));
+                break;
+            }
+            self.spread(p, seed, f.radius);
         }
     }
     pub fn begin(&mut self, joules: u32) {
@@ -297,6 +373,12 @@ impl Matter {
         b.u64(self.supplied_mj);
         b.u64(self.spent_mj);
         b.usize(self.section_cursor);
+        b.u32(self.felling.len() as u32);
+        for (p, seed) in &self.felling {
+            for v in p.iter().chain(seed) {
+                b.i32(*v);
+            }
+        }
         self.debris.save(b);
         let (containers, sunk, initial, head, free) = self.economy.ledger.snapshot();
         b.usize(containers.len());
@@ -324,6 +406,22 @@ impl Matter {
         if self.spent_mj > self.supplied_mj || self.remaining_mj > self.supplied_mj - self.spent_mj
         {
             return None;
+        }
+        let n = s.u32() as usize;
+        if n > 1 << 16 {
+            return None;
+        }
+        self.felling.clear();
+        for _ in 0..n {
+            let p: [i32; 3] = std::array::from_fn(|_| s.i32());
+            let seed: [i32; 3] = std::array::from_fn(|_| s.i32());
+            let dims = [w.nx, w.ny, w.nz];
+            if (0..3).any(|a| {
+                p[a] < -1 || p[a] > dims[a] as i32 || seed[a] < 0 || seed[a] >= dims[a] as i32
+            }) || !self.felling.insert((p, seed))
+            {
+                return None;
+            }
         }
         let templates = crate::damage::Bodies::new(
             units

@@ -679,6 +679,9 @@ impl Bursts {
     pub fn claims(&self) -> usize {
         self.claims.len()
     }
+    pub fn claimed(&self, p: [u32; 3]) -> bool {
+        self.claims.contains_key(&p)
+    }
     pub fn fragment_room(&self, t: &Blast) -> u32 {
         let moving = self.fragments.iter().filter(|f| !f.resting).count();
         (t.max_flying as usize)
