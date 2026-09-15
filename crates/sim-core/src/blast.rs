@@ -499,12 +499,14 @@ impl Explosion {
                 if let Some(u) = units.get_mut(actor) {
                     if let Some(cell) = u.local_at(q, &self.poses[actor]) {
                         let [x, y, z] = cell;
-                        if u.body.vol.get(x, y, z) {
-                            // Shared extraction owns a frozen source until its
-                            // next whole section has a paid fragment slot.
-                            if u.section.is_some() {
-                                return;
-                            }
+                        // A cell already cut loose leaves with its whole
+                        // section; the wave neither ablates it nor waits for
+                        // it. Every other cell takes the impulse as it arrives.
+                        let leaving = u
+                            .section
+                            .as_ref()
+                            .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
+                        if u.body.vol.get(x, y, z) && !leaving {
                             let need = unit_work(&u.body, cell, c).saturating_sub(
                                 u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
                             );
@@ -1583,6 +1585,168 @@ mod tests {
             restored.state_hash(),
             "saved whole fragment"
         );
+    }
+    #[test]
+    fn a_waiting_section_does_not_freeze_damage_elsewhere_on_the_body() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        let u = &mut a.units[0];
+        for z in 0..30 {
+            for y in 0..30 {
+                if u.body.remove(54, y, z) {
+                    u.removed.push([54, y as u8, z as u8]);
+                }
+            }
+        }
+        u.revision = u.removed.len() as u64;
+        a.matter.annihilate_body(0, u.removed.len());
+        u.refresh_damage(0);
+        let detached = u.status.detached;
+        assert!(u.status.alive && detached > 8);
+        a.matter.tuning.max_flying = 0;
+        a.matter.step_sections(&mut a.units);
+        assert!(a.units[0].section.as_ref().unwrap().ready());
+        // A hull cell outside the pending section still takes the impulse.
+        let u = &a.units[0];
+        let job = u.section.as_ref().unwrap();
+        let hull = (0..u.body.vol.nx as usize)
+            .flat_map(|x| (0..u.body.vol.ny as usize).map(move |y| [x, y, 15]))
+            .find(|&[x, y, z]| {
+                u.body.vol.get(x, y, z)
+                    && !job.holds([x as u8, y as u8, z as u8])
+                    && u.body.part_at(x, y, z) == voxel::Part::Armour
+            })
+            .expect("an armour cell that stays with the hull");
+        let after_cut = u.body.solid_count();
+        a.units[0].receive_cell(hull, 1_000_000, &c);
+        a.matter.annihilate_body(0, 1);
+        a.units[0].refresh_damage(0);
+        assert_eq!(a.units[0].body.solid_count(), after_cut - 1);
+        assert!(a.units[0].status.alive && a.units[0].section.is_some());
+        let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), restored.state_hash());
+        a.matter.tuning.max_flying = restored.matter.tuning.max_flying;
+        for _ in 0..40 {
+            a.step();
+            if a.units[0].section.is_none() {
+                break;
+            }
+        }
+        let u = &a.units[0];
+        assert!(u.section.is_none());
+        assert!(
+            !u.body.vol.get(hull[0], hull[1], hull[2]),
+            "commit resurrected the hull cell"
+        );
+        assert_eq!(u.body.solid_count(), after_cut - 1 - detached);
+        assert_eq!(u.status.detached, 0);
+        assert_eq!(
+            a.matter
+                .debris
+                .fragments
+                .iter()
+                .map(|f| f.count)
+                .sum::<u32>(),
+            detached
+        );
+        assert!(a.matter.economy.ledger.balanced());
+        assert_eq!(
+            a.state_hash(),
+            BlastRange::restore(c, &a.snapshot()).unwrap().state_hash()
+        );
+    }
+    /// The owner's report: a directed-energy hit on a moving tank kept eating
+    /// it for almost three seconds after the flash. The pieces cut loose were
+    /// leaving one per tick while the wave waited on them (ADR-268).
+    #[test]
+    fn damage_arrives_with_the_wave_while_sections_are_still_leaving() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.control();
+        let mut b: Option<BlastRange> = None;
+        // The opening round lands on the default target; `hit` is the impact
+        // of the round that actually struck the moving tank.
+        let mut current = None;
+        let mut hit = None;
+        let mut first = None;
+        let mut last = None;
+        let mut death = None;
+        let mut carried = 0;
+        let mut stalled = 0;
+        let mut previous_examined = 0;
+        let mut last_removed = 0;
+        for tick in 0..600u32 {
+            if tick == 20 {
+                a.order_move([235, 365]);
+            }
+            if tick == 220 {
+                assert!(a.order_attack(2));
+            }
+            // One round only: the reload would otherwise land a second hit.
+            if hit.is_some_and(|t| tick == t + 50) {
+                break;
+            }
+            if hit.is_some() {
+                carried += usize::from(a.units[2].section.is_some());
+            }
+            a.step();
+            if let Some(r) = b.as_mut() {
+                r.step();
+                assert_eq!(a.state_hash(), r.state_hash(), "tick {tick}");
+            }
+            if a.impact.is_some() && current != Some(a.impact_tick) {
+                current = Some(a.impact_tick);
+                previous_examined = 0;
+            }
+            let u = &a.units[2];
+            if u.removed.len() > last_removed {
+                if hit.is_none() {
+                    hit = current;
+                    first = Some(tick);
+                }
+                last = Some(tick);
+                last_removed = u.removed.len();
+            }
+            if !u.status.alive {
+                death.get_or_insert(tick);
+            }
+            let examined = a.explosion.as_ref().map_or(0, |e| e.wave.examined);
+            let finished = a.explosion.as_ref().is_none_or(|e| e.wave.finished());
+            if hit.is_some() && !finished && examined == previous_examined {
+                stalled += 1;
+            }
+            previous_examined = examined;
+            if b.is_none() && hit.is_some_and(|t| tick == t + 2) {
+                b = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+            }
+            assert!(a.matter.economy.ledger.balanced());
+        }
+        let (impact, first, last) = (hit.unwrap(), first.unwrap(), last.unwrap());
+        let death = death.expect("the round must reach the core");
+        let u = &a.units[2];
+        eprintln!(
+            "impact {impact} first {first} death {death} last {last} stalled {stalled} \
+             carried {carried} removed {} detached {} finished {}",
+            u.removed.len(),
+            u.detached,
+            a.explosion.as_ref().is_none_or(|e| e.wave.finished())
+        );
+        assert!(b.is_some(), "the replay never forked");
+        assert_eq!(stalled, 0, "the wave paused for debris preparation");
+        assert_eq!(first, impact);
+        // Eight ticks is 0.27 s: the wave budget in energy-cannon.ron sweeps
+        // the whole body within that, and nothing else may add to it.
+        assert!(
+            last - impact <= 8 && death - impact <= 8,
+            "impact {impact} first {first} death {death} last {last}: destruction lagged the flash"
+        );
+        assert!(u.detached > 0 && u.annihilated_mm3() > 0);
+        // Pieces cut loose leave in the tick that frees them; nothing lingers.
+        assert!(carried <= 2, "sections waited {carried} ticks");
     }
     #[test]
     fn material_shell_transfers_ground_and_armour_with_finite_energy_and_exact_resume() {

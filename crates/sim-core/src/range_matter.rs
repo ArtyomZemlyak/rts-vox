@@ -162,7 +162,9 @@ impl Matter {
     }
     /// Same extractor and physical chunks as the game World. Disconnection
     /// was already paid for at the cut; the remaining section is transferred,
-    /// never charged or annihilated a second time.
+    /// never charged or annihilated a second time. A body shattered into many
+    /// pieces sheds as many of them per tick as work and room allow, so the
+    /// wave never waits a tick per piece.
     pub fn step_sections(&mut self, units: &mut [RangeUnit]) {
         let n = units.len();
         if n == 0 {
@@ -186,11 +188,15 @@ impl Matter {
             };
             let mut budget = left.div_ceil(jobs as u32);
             let start = budget;
-            job.advance(&u.body, &mut budget);
-            left -= start - budget;
             jobs -= 1;
-            if job.ready() && self.debris.fragment_room(&self.tuning) > 0 {
-                let (body, part) = job.commit();
+            let mut committed = false;
+            loop {
+                job.advance(&u.body, &mut budget);
+                if !job.ready() || self.debris.fragment_room(&self.tuning) == 0 {
+                    break;
+                }
+                committed = true;
+                let (body, part) = job.commit(&u.body);
                 let count = part.cells.len() as u32;
                 let amount = u64::from(count) * self.economy.per_voxel(3);
                 let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
@@ -213,7 +219,6 @@ impl Matter {
                 u.revision += u64::from(count);
                 u.status.detached -= count;
                 u.body = std::sync::Arc::unwrap_or_clone(body);
-                u.update_response();
                 let speed = u
                     .motion
                     .drive
@@ -255,6 +260,13 @@ impl Matter {
                     held,
                     resting: false,
                 });
+                if budget == 0 {
+                    break;
+                }
+            }
+            left -= start - budget;
+            if committed {
+                u.update_response();
             }
             if !job.finished() {
                 u.section = Some(job);

@@ -1,5 +1,7 @@
 //! Whole root components leave atomically after bounded extraction and staging.
-//! Queued damage waits for the affected body; other bodies keep their FIFO turns.
+//! The job owns only the cells of its domain; damage elsewhere on the same body
+//! does not wait for it. As many ready sections leave per tick as the shared
+//! budget and the fragment pool allow.
 use super::*;
 use fx::blob::{Blob, Scan};
 use voxel::topo::{components::UnitComponents, unit::UnitVol};
@@ -15,24 +17,27 @@ pub(crate) struct Job {
     scan: UnitComponents,
     cells: Vec<Cell>,
     cursor: usize,
-    staged: Option<Arc<UnitBody>>,
     shape: crate::burst::chunk::Shape,
+    /// Cells reserved for whole sections. Only the job removes them; every
+    /// other cell of the body stays open to ordinary damage meanwhile.
+    domain: UnitVol,
 }
 impl Job {
     pub(crate) fn new(unit: u32, generation: u32, mask: UnitVol) -> Self {
         Self {
             unit,
             generation,
+            domain: mask.clone(),
             scan: UnitComponents::new(mask),
             cells: Vec::new(),
             cursor: 0,
-            staged: None,
             shape: crate::burst::chunk::Shape::default(),
         }
     }
 
-    /// Shared bounded extraction. The caller keeps the source unchanged until
-    /// commit; staging is private and cannot remove unpaid material from it.
+    /// Shared bounded extraction. Staging only accumulates the section's
+    /// statistics; the cut itself is taken from the source as it is at commit,
+    /// so damage outside the domain applied meanwhile is never undone.
     pub(crate) fn advance(&mut self, source: &UnitBody, budget: &mut u32) {
         while *budget > 0 {
             if self.cells.is_empty() {
@@ -41,21 +46,21 @@ impl Job {
                 *budget -= 1;
                 if let Some(cells) = found.into_iter().next() {
                     self.cells = cells;
-                    self.staged = Some(Arc::new(source.clone()));
                 } else if self.scan.finished() {
                     break;
                 }
             } else if self.cursor < self.cells.len() {
                 *budget -= 1;
-                let c = self.cells[self.cursor];
-                let [x, y, z] = c.map(usize::from);
-                assert!(Arc::make_mut(self.staged.as_mut().unwrap()).remove(x, y, z));
-                self.shape.add(c, source.turret_y);
+                self.shape.add(self.cells[self.cursor], source.turret_y);
                 self.cursor += 1;
             } else {
                 break;
             }
         }
+    }
+    /// True for a cell that a pending whole section will carry away.
+    pub(crate) fn holds(&self, c: Cell) -> bool {
+        self.domain.get(c[0] as usize, c[1] as usize, c[2] as usize)
     }
     pub(crate) fn ready(&self) -> bool {
         !self.cells.is_empty() && self.cursor == self.cells.len()
@@ -63,11 +68,19 @@ impl Job {
     pub(crate) fn finished(&self) -> bool {
         self.scan.finished() && self.cells.is_empty()
     }
-    pub(crate) fn commit(&mut self) -> (Arc<UnitBody>, Separated) {
+    /// Cut the ready section out of the current source. Domain cells are
+    /// untouched by anyone else, so every one of them is still present.
+    pub(crate) fn commit(&mut self, source: &UnitBody) -> (Arc<UnitBody>, Separated) {
         assert!(self.ready());
         self.cursor = 0;
+        let mut body = source.clone();
+        for c in &self.cells {
+            let [x, y, z] = c.map(usize::from);
+            assert!(body.remove(x, y, z));
+            self.domain.set(x, y, z, false);
+        }
         (
-            self.staged.take().unwrap(),
+            Arc::new(body),
             Separated {
                 unit: self.unit,
                 cells: std::mem::take(&mut self.cells),
@@ -110,14 +123,15 @@ impl Job {
         if !scan.contained_in(&uncommitted) {
             return None;
         }
+        let domain = scan.mask();
         let mut j = Self {
             unit,
             generation,
             scan,
             cells: Vec::new(),
             cursor,
-            staged: (count > 0).then(|| Arc::new(source.clone())),
             shape: crate::burst::chunk::Shape::default(),
+            domain,
         };
         let mut cells = BTreeSet::new();
         for i in 0..count {
@@ -131,17 +145,16 @@ impl Job {
             {
                 return None;
             }
+            j.domain
+                .set(c[0] as usize, c[1] as usize, c[2] as usize, true);
             if i < cursor {
-                Arc::make_mut(j.staged.as_mut().unwrap()).remove(
-                    c[0] as usize,
-                    c[1] as usize,
-                    c[2] as usize,
-                );
                 j.shape.add(c, source.turret_y);
             }
             j.cells.push(c);
         }
-        (s.ok() && j.scan.pending_count() + count == status.detached as usize && !j.finished())
+        // Damage outside the domain may have cut more cells loose since the
+        // job began; those wait for the next job, so the count is a floor.
+        (s.ok() && j.scan.pending_count() + count <= status.detached as usize && !j.finished())
             .then_some(j)
     }
 }
@@ -149,8 +162,9 @@ impl Bodies {
     pub fn detach_pending(&self) -> usize {
         self.detach.len()
     }
-    /// One job per affected slot. A staging copy stays invisible until its whole
-    /// section has a physical fragment slot. No partially cut / unpaid section.
+    /// One job per affected slot. A section becomes visible only whole and only
+    /// with a physical fragment slot; within one tick a job keeps cutting
+    /// further ready sections while its work share and the room last.
     pub fn step_detach(
         &mut self,
         work: u32,
@@ -177,17 +191,19 @@ impl Bodies {
                 state.separating = false;
                 continue;
             }
-            let source = state
-                .own
-                .as_ref()
-                .unwrap_or(&self.templates[state.template as usize]);
             let mut budget = left.div_ceil((n - k) as u32);
             let start = budget;
-            job.advance(source, &mut budget);
-            left -= start - budget;
-            if job.ready() && room > 0 {
+            loop {
+                let source = state
+                    .own
+                    .as_ref()
+                    .unwrap_or(&self.templates[state.template as usize]);
+                job.advance(source, &mut budget);
+                if !job.ready() || room == 0 {
+                    break;
+                }
                 room -= 1;
-                let (body, part) = job.commit();
+                let (body, part) = job.commit(source);
                 let count = part.cells.len() as u32;
                 state.own = Some(body);
                 for c in &part.cells {
@@ -212,7 +228,11 @@ impl Bodies {
                 .with_traction(state.integrity.drive);
                 state.revision = state.revision.wrapping_add(count as u64);
                 out.push(part);
+                if budget == 0 {
+                    break;
+                }
             }
+            left -= start - budget;
             if job.scan.finished() && job.cells.is_empty() {
                 state.separating = false;
             } else {
@@ -353,6 +373,71 @@ mod tests {
         }
         assert_eq!(a.detach_pending(), 0);
         assert_eq!(a.step(&[1; 5], 8, 2)[0].removed, [[2, 2, 2]]);
+    }
+    fn shattered() -> Bodies {
+        // A spine holding the core, plus three islands that the first cut frees.
+        let mut body = UnitBody::new_scaled(80, 5, 5, 1, 100);
+        for x in 0..4 {
+            body.set(x, 2, 2, voxel::Part::Armour);
+        }
+        body.set(0, 2, 2, voxel::Part::Core);
+        for x0 in [10, 20, 30] {
+            for x in x0..x0 + 3 {
+                body.set(x, 2, 2, voxel::Part::Armour);
+            }
+        }
+        for x in 4..10 {
+            body.set(x, 2, 2, voxel::Part::Armour);
+        }
+        body.seat_core();
+        let mut b = Bodies::new(vec![body]);
+        b.spawn_at(0, 0);
+        b.queue_cells(0, b.generations[0], vec![[3, 2, 2]], 1000, 0, V3::ZERO, 16);
+        assert_eq!(b.step(&[1; 5], 8, 8)[0].removed, [[3, 2, 2]]);
+        assert_eq!(b.detach_pending(), 1);
+        b
+    }
+    #[test]
+    fn a_shattered_body_sheds_every_ready_section_within_one_tick() {
+        let mut b = shattered();
+        let sections = b.step_detach(1000, 8, 8, &[true]);
+        assert_eq!(sections.len(), 3, "one tick, one job, all free pieces");
+        assert_eq!(
+            sections.iter().map(|s| s.cells.len()).collect::<Vec<_>>(),
+            [9, 3, 3]
+        );
+        assert_eq!(b.body(0).unwrap().solid_count(), 3);
+        assert_eq!(b.state(0).unwrap().status.detached, 0);
+        assert_eq!(b.detach_pending(), 0);
+        assert_eq!(b.state(0).unwrap().removed.len(), 1 + 9 + 3 + 3);
+        // Room is still the ceiling: one slot, one section, the rest wait whole.
+        let mut b = shattered();
+        assert_eq!(b.step_detach(1000, 8, 1, &[true]).len(), 1);
+        assert_eq!(b.detach_pending(), 1);
+        assert_eq!(b.step_detach(1000, 8, 0, &[true]).len(), 0);
+        assert_eq!(b.step_detach(1000, 8, 8, &[true]).len(), 2);
+        assert_eq!(b.body(0).unwrap().solid_count(), 3);
+    }
+    #[test]
+    fn a_section_is_cut_from_the_source_as_it_is_at_commit() {
+        let b = shattered();
+        let mut body = b.body(0).unwrap().clone();
+        let mut mask = body.vol.clone();
+        for (w, r) in mask.cols.iter_mut().zip(b.core.reached_cols()) {
+            *w &= !r;
+        }
+        let mut job = Job::new(0, 0, mask);
+        job.advance(&body, &mut 1000);
+        assert!(job.ready());
+        assert!(job.holds([10, 2, 2]) && !job.holds([1, 2, 2]));
+        // Ordinary damage outside the domain lands while the section waits.
+        assert!(body.remove(1, 2, 2));
+        let (cut, part) = job.commit(&body);
+        assert_eq!(part.cells.len(), 9);
+        assert!(!cut.vol.get(1, 2, 2), "staged copy resurrected damage");
+        assert!(part.cells.iter().all(|c| !cut.vol.get(c[0] as usize, 2, 2)));
+        assert!(!job.holds([10, 2, 2]) && job.holds([20, 2, 2]));
+        assert_eq!(cut.solid_count(), body.solid_count() - 9);
     }
     #[test]
     fn cancelled_or_reused_slots_keep_uncommitted_matter_in_the_body() {

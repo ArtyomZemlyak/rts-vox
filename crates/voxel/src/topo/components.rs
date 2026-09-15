@@ -50,6 +50,15 @@ impl UnitComponents {
             .get(c[0] as usize, c[1] as usize, c[2] as usize)
             || self.queue.contains(&c)
     }
+    /// Every cell this scan still owns: unscanned bits plus the component
+    /// being expanded. Nothing outside it is touched by the extraction.
+    pub fn mask(&self) -> UnitVol {
+        let mut m = self.remaining.clone();
+        for c in &self.queue {
+            m.set(c[0] as usize, c[1] as usize, c[2] as usize, true);
+        }
+        m
+    }
     pub fn contained_in(&self, mask: &UnitVol) -> bool {
         self.dims() == [mask.nx, mask.ny, mask.nz]
             && self
@@ -276,6 +285,30 @@ mod tests {
             }
             assert!(a.finished() && b.finished());
         }
+    }
+    #[test]
+    fn the_mask_covers_unscanned_bits_and_the_half_expanded_component() {
+        let mut a = UnitComponents::new(shape());
+        assert_eq!(a.mask().cols, shape().cols);
+        // Stop inside the twelve-cell component, after its first expansion.
+        let mut left = 0;
+        while a.queue.len() < 2 && !a.finished() {
+            left += a.advance(&mut 1).into_iter().flatten().count();
+        }
+        assert!(a.queue.len() >= 2 && !a.finished());
+        let m = a.mask();
+        assert_eq!(
+            m.solid_count() as usize + left,
+            shape().solid_count() as usize
+        );
+        for c in &a.queue {
+            assert!(!a.remaining.get(c[0] as usize, c[1] as usize, c[2] as usize));
+            assert!(m.get(c[0] as usize, c[1] as usize, c[2] as usize));
+        }
+        while !a.finished() {
+            a.advance(&mut 1000);
+        }
+        assert_eq!(a.mask().solid_count(), 0);
     }
     #[test]
     fn zero_work_and_truncated_inputs_are_safe() {
