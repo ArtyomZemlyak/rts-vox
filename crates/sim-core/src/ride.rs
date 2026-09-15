@@ -52,6 +52,7 @@ pub fn ride_of(c: &Chassis) -> Ride {
         preload: Fx::ZERO,
         angular_damping: Fx::from_int(c.ang_damp),
         min_up: Fx::from_ratio(c.max_tilt_pct.clamp(0, 100), 100),
+        settle: cm(c.travel_cm).mul(Fx::from_ratio(c.settle_pct.clamp(1, 100), 100)),
     }
 }
 
@@ -201,6 +202,9 @@ mod tests {
             support_x_cm: 250,
             support_z_cm: 120,
             max_tilt_pct: 91,
+            contact_cm: 120,
+            approach_pct: 60,
+            settle_pct: 35,
             gait: None,
         }
     }

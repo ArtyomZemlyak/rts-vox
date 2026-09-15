@@ -22,6 +22,7 @@ fn ride(supports: usize) -> Ride {
         preload: gravity.div(Fx::from_int(supports.max(1) as i32)),
         angular_damping: Fx::from_int(3),
         min_up: Fx::from_ratio(91, 100),
+        settle: Fx::from_ratio(1, 2),
     }
 }
 

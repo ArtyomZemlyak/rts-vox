@@ -23,6 +23,13 @@ pub struct Shape {
     /// Hull height above its floor, in world units. Yielding matter below
     /// the hull top is crushed; matter above it is passed under.
     pub height: i32,
+    /// Contact length of a support along the heading, both ways, in world
+    /// units. A track bridges a gap shorter than this; zero is a point.
+    pub span: i32,
+    /// Approach slope: a rise seen `k` units along the span counts as
+    /// `rise - ramp * k`, so the hull climbs a step over its run-up instead
+    /// of snapping onto it, and settles off a ledge the same way.
+    pub ramp: Fx,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
@@ -172,15 +179,70 @@ impl<'a> Probe<'a> {
         let b = h01.add(h11.sub(h01).mul(u));
         a.add(b.sub(a).mul(v))
     }
-    fn contact(&mut self, p: [Fx; 2], radius: Fx) -> Fx {
-        let mut height = self.surface(p);
+    /// Support height at `p`, and whether the ground along its contact
+    /// span rises steeper than the hull may climb.
+    ///
+    /// Three things a belt does that a point does not: it lies across a
+    /// gap on the ground either side of it, it rides up a rise over the
+    /// run-up rather than at the instant of contact, and it cannot grip a
+    /// grade steeper than the tilt limit however level the hull sits.
+    fn contact(&mut self, p: [Fx; 2], radius: Fx, dir: [Fx; 2], s: Shape, grade: Fx) -> (Fx, bool) {
+        let base = self.surface(p);
+        let mut height = base;
+        // The contact patch: nearby ground counts with the same approach
+        // slope as ground ahead, or a corner sample would lift the support
+        // onto a ledge at once and undo the run-up.
         for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-            height = height.max(self.surface([
+            let corner = self.surface([
                 p[0].add(radius.mul(Fx::from_int(x))),
                 p[1].add(radius.mul(Fx::from_int(z))),
-            ]));
+            ]);
+            height = height.max(corner.sub(s.ramp.mul(radius)));
         }
-        height
+        if s.span < 2 {
+            return (height, false);
+        }
+        let (nx, nz) = (
+            Fx::from_int(self.world.nx as i32 - 1),
+            Fx::from_int(self.world.nz as i32 - 1),
+        );
+        let mut samples = Vec::with_capacity(2 * s.span as usize);
+        let mut level = base;
+        for k in 1..=s.span {
+            let d = Fx::from_int(k);
+            let mut pair = [None; 2];
+            for (i, sign) in [-1, 1].into_iter().enumerate() {
+                let q = [
+                    p[0].add(dir[0].mul(d).mul(Fx::from_int(sign))),
+                    p[1].add(dir[1].mul(d).mul(Fx::from_int(sign))),
+                ];
+                // The map edge is not a cliff; the hull check keeps it out.
+                if q[0] < Fx::ZERO || q[1] < Fx::ZERO || q[0] >= nx || q[1] >= nz {
+                    continue;
+                }
+                let there = self.surface(q);
+                pair[i] = Some(there);
+                samples.push((d, there));
+            }
+            // Bridging: the belt between neighbouring wheels lies on the
+            // ground either side of a hollow narrower than half the contact.
+            // A wider hollow is followed, the wheel drops into it.
+            if let (Some(a), Some(b), true) = (pair[0], pair[1], 2 * k <= s.span) {
+                level = level.max(a.min(b));
+            }
+        }
+        height = height.max(level);
+        let mut steep = false;
+        let step = Fx::from_int(s.step);
+        for (d, there) in samples {
+            height = height.max(there.sub(s.ramp.mul(d)));
+            // One obstacle up to the step height is climbed; a longer rise
+            // must stay within the grade the belt can hold.
+            if there.sub(level) > step.max(grade.mul(d)) {
+                steep = true;
+            }
+        }
+        (height, steep)
     }
     pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
         let (c, sin) = (angle::cos(head), angle::sin(head));
@@ -200,10 +262,50 @@ impl<'a> Probe<'a> {
                 .min(s.step)
                 .max(1),
         );
-        let floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
+        // tan of the tilt limit: the steepest grade the contact may climb.
+        let m = s.min_up.max(Fx::from_ratio(1, 100));
+        let grade = Fx::ONE.sub(m.mul(m)).max(Fx::ZERO).sqrt().div(m);
+        let mut steep = false;
+        let mut floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
             let p = point(x * s.support[0], z * s.support[1]);
-            self.contact(p, radius)
+            let (h, too_steep) = self.contact(p, radius, [c, sin], s, grade);
+            steep |= too_steep;
+            h
         });
+        // A belt rests on a hump between its wheels: ground above the line
+        // joining the two supports of a side lifts both of them, so the hull
+        // rides over a summit instead of grounding its belly on it.
+        if s.span >= 2 {
+            // The lift fades in over this many units as a hump enters the
+            // belt at one wheel and out as it leaves at the other, so the
+            // hull rides onto and off a summit instead of jumping.
+            let fade = (s.span / 2).max(1);
+            for (rear, front, z) in [(0, 1, -1), (2, 3, 1)] {
+                let mut lift = Fx::ZERO;
+                let mut top = Fx::ZERO;
+                let mut u = -s.support[0] + 1;
+                while u < s.support[0] {
+                    let g = self.surface(point(u, z * s.support[1]));
+                    let t =
+                        Fx::from_int(u + s.support[0]).div(Fx::from_int(2 * s.support[0].max(1)));
+                    let line = floors[rear].add(floors[front].sub(floors[rear]).mul(t));
+                    let w =
+                        Fx::from_int((s.support[0] - u.abs()).min(fade)).div(Fx::from_int(fade));
+                    let excess = g.sub(line).mul(w);
+                    if excess > lift {
+                        lift = excess;
+                        top = g;
+                    }
+                    u += 1;
+                }
+                if lift > Fx::ZERO {
+                    // Both wheels rise together, and neither above the hump.
+                    for i in [rear, front] {
+                        floors[i] = floors[i].max(floors[i].add(lift).min(top));
+                    }
+                }
+            }
+        }
         let height = floors
             .iter()
             .fold(Fx::ZERO, |a, b| a.add(*b))
@@ -218,11 +320,11 @@ impl<'a> Probe<'a> {
             .sub(floors[0])
             .sub(floors[1])
             .div(Fx::from_int(4 * s.support[1].max(1)));
-        let mut blocked = if s
-            .min_up
-            .mul(s.min_up)
-            .mul(Fx::ONE.add(pitch.mul(pitch)).add(roll.mul(roll)))
-            > Fx::ONE
+        let mut blocked = if steep
+            || s.min_up
+                .mul(s.min_up)
+                .mul(Fx::ONE.add(pitch.mul(pitch)).add(roll.mul(roll)))
+                > Fx::ONE
         {
             1_000_000
         } else {
@@ -272,6 +374,10 @@ pub struct Search {
     /// Ceiling of that price per node, so a dense crown is a detour of a few
     /// cells, not an impassable field that exhausts the search.
     pub crush_cap: u32,
+    /// Extra contact length the planner probes with. Its "too steep" zone
+    /// is that much wider than the executor's, so a hull following the plan
+    /// never meets a refusal the plan did not see between two samples.
+    pub margin: i32,
 }
 const DIR: [[i32; 2]; 8] = [
     [1, 0],
@@ -341,6 +447,14 @@ pub fn route(
     cfg: Search,
     clear: impl Fn([Fx; 2], i32) -> bool,
 ) -> Vec<[i32; 2]> {
+    let shape = Shape {
+        span: if shape.span >= 2 {
+            shape.span + cfg.margin.max(0)
+        } else {
+            shape.span
+        },
+        ..shape
+    };
     if cfg.cell <= 0
         || cfg.nodes == 0
         || (0..2).any(|a| {
@@ -544,7 +658,80 @@ mod tests {
             step: 4,
             min_up: Fx::from_ratio(91, 100),
             height: 30,
+            span: 25,
+            ramp: Fx::from_ratio(3, 5),
         }
+    }
+    /// Flat soil with a one-metre ditch across x = 118..128 and a 30 cm
+    /// ledge at x = 180.
+    struct Cut;
+    impl voxel::Generator for Cut {
+        fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+            let h = if (118..128).contains(&x) {
+                10
+            } else if x >= 180 {
+                19
+            } else {
+                16
+            };
+            u16::from(y < h)
+        }
+    }
+    #[test]
+    fn a_track_bridges_a_narrow_ditch_and_climbs_a_ledge_over_its_run_up() {
+        let w = World::new(256, 64, 256, 100, Box::new(Cut));
+        let mut p = Probe::new(&w);
+        let mut point = tank();
+        point.span = 0;
+        let over = [Fx::from_int(123), Fx::from_int(100)];
+        let front_over = [Fx::from_int(98), Fx::from_int(100)];
+        // A point support drops into the ditch; the track spans it.
+        assert!(p.pose(front_over, 0, point).height < Fx::from_int(16));
+        assert_eq!(p.pose(front_over, 0, tank()).height, Fx::from_int(16));
+        assert_eq!(p.pose(over, 0, tank()).height, Fx::from_int(16));
+        // The ledge lifts the front supports gradually, three units over five.
+        let mut last = Fx::from_int(16);
+        for x in 140..=160 {
+            let h = p
+                .pose([Fx::from_int(x), Fx::from_int(100)], 0, tank())
+                .height;
+            assert!(h >= last && h.sub(last) <= Fx::from_ratio(61, 100), "x {x}");
+            last = h;
+        }
+        assert!(last > Fx::from_int(16));
+        // A point support takes the step within its own patch: two units
+        // of travel lift the hull more than the belt's whole run-up does.
+        let before = p
+            .pose([Fx::from_int(154), Fx::from_int(100)], 0, point)
+            .height;
+        let after = p
+            .pose([Fx::from_int(156), Fx::from_int(100)], 0, point)
+            .height;
+        assert!(after.sub(before) > Fx::from_ratio(1, 2));
+    }
+    #[test]
+    fn a_grade_steeper_than_the_tilt_limit_blocks_even_a_level_hull() {
+        struct Rim;
+        impl voxel::Generator for Rim {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                // A 45-degree bank ten units long between two flats.
+                let h = 16 + (x as i32 - 120).clamp(0, 10);
+                u16::from((y as i32) < h)
+            }
+        }
+        let w = World::new(256, 64, 256, 100, Box::new(Rim));
+        let mut p = Probe::new(&w);
+        // Front supports two units short of the bank: the chord over the
+        // wheelbase is level, the belt ahead sees 45 degrees, and 45 is
+        // more than the 24-degree limit.
+        let at = [Fx::from_int(93), Fx::from_int(100)];
+        assert!(p.pose(at, 0, tank()).blocked > 0, "the bank was accepted");
+        let mut gentle = tank();
+        gentle.min_up = Fx::from_ratio(1, 2);
+        assert_eq!(p.pose(at, 0, gentle).blocked, 0);
+        let mut point = tank();
+        point.span = 0;
+        assert_eq!(p.pose(at, 0, point).blocked, 0, "a point sees no grade");
     }
     fn search() -> Search {
         Search {
@@ -554,6 +741,7 @@ mod tests {
             nodes: 6400,
             crush_cost: 1,
             crush_cap: 20,
+            margin: 2,
         }
     }
     /// A soil floor with a wall of trees (trunk 7, crown 8) across x = 120..126.

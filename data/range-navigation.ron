@@ -5,6 +5,9 @@
     reverse_ticks: 42,
     reverse_speed_pct: 30,
     recovery_turn_deg: 25,
+    // The planner probes two units more contact than the hull: a plan never
+    // leads into a grade the executor refuses between two search samples.
+    plan_margin: 2,
     // Foliage and trunk of range-materials.ron. A tracked hull cuts what it
     // overlaps; the connected crown within the radius falls without a cut.
     fell: (materials: (4, 5), radius: 14, cells_per_tick: 4096, cost_per_column: 1, cost_cap: 20, speed_pct: 60),

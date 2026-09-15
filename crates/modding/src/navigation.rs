@@ -8,6 +8,9 @@ pub struct Navigation {
     pub reverse_ticks: u32,
     pub reverse_speed_pct: i32,
     pub recovery_turn_deg: i32,
+    /// Extra contact length the planner probes with, world units: its
+    /// refusals are wider than the executor's by this much.
+    pub plan_margin: i32,
     pub fell: Felling,
 }
 /// What a tracked hull pushes over instead of driving around.
@@ -37,6 +40,7 @@ impl Navigation {
             || !(1..=300).contains(&n.reverse_ticks)
             || !(1..=60).contains(&n.reverse_speed_pct)
             || !(0..=60).contains(&n.recovery_turn_deg)
+            || !(0..=16).contains(&n.plan_margin)
             || n.fell.materials.contains(&0)
             || !(1..=32).contains(&n.fell.radius)
             || !(1..=8192).contains(&n.fell.cells_per_tick)

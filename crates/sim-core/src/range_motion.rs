@@ -85,6 +85,8 @@ pub struct Motion {
     /// Yielding cells the hull stood in after this tick's move: the cut the
     /// range turns into debris. Transient; recomputed every step.
     pub cut: Vec<[u32; 3]>,
+    /// Support floors used by the last suspension step, for diagnostics.
+    pub floors: [Fx; 4],
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
@@ -146,6 +148,7 @@ impl Motion {
             alignment: c.turn_alignment_pct,
             replan: c.replan_ticks,
             cut: Vec::new(),
+            floors: [Fx::ZERO; 4],
             navigation,
             yielding,
             blocked_ticks: 0,
@@ -184,6 +187,7 @@ impl Motion {
                 nodes: self.navigation.search_nodes,
                 crush_cost: self.navigation.fell.cost_per_column,
                 crush_cap: self.navigation.fell.cost_cap,
+                margin: self.navigation.plan_margin,
             },
             |p, head| {
                 !others.iter().any(|o| {
@@ -211,6 +215,10 @@ impl Motion {
         self.reverse_left = 0;
         self.next_plan = 0;
     }
+    /// The footprint the range probes with, for diagnostics and tests.
+    pub fn probe_shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
+        self.shape(b)
+    }
     pub(crate) fn shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
         let units = voxel::unit::WORLD_MM as i32;
         nav::vehicle::Shape {
@@ -226,6 +234,8 @@ impl Motion {
             step: self.step,
             min_up: Fx::from_ratio(self.chassis.max_tilt_pct, 100),
             height: b.vol.ny as i32 * b.mm as i32 / units,
+            span: self.chassis.contact_cm * 10 / units,
+            ramp: Fx::from_ratio(self.chassis.approach_pct, 100),
         }
     }
     // Drive phase takes explicit body, world, clock and contact inputs.
@@ -396,6 +406,7 @@ impl Motion {
             current.floors
         };
         let floors = [f[3], f[1], f[2], f[0]];
+        self.floors = floors;
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));

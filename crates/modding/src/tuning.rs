@@ -141,6 +141,19 @@ pub struct Chassis {
     /// всегда горизонтален, восемьдесят семь — около тридцати
     /// градусов.
     pub max_tilt_pct: i32,
+    /// Длина контакта опоры вдоль курса в обе стороны, сантиметры
+    /// (ADR-270). Гусеница перекрывает ров короче этой длины; ноль —
+    /// точечная опора.
+    pub contact_cm: i32,
+    /// Угол наезда: подъём, который опора видит на расстоянии, считается
+    /// меньше на эту долю расстояния, в процентах. Корпус поднимается на
+    /// уступ за разбег, а не скачком, и так же сходит с него.
+    pub approach_pct: i32,
+    /// Доля хода подвески, на которую опирающийся корпус может догнать
+    /// ушедший вверх пол за один тик, в процентах (ADR-270). Мягкая
+    /// пружина за полом не успевает, и без предела подъём шёл рывками
+    /// до полного хода.
+    pub settle_pct: i32,
     /// Походка: есть у шагающей, нет у гусеничной (ADR-234).
     pub gait: Option<Gait>,
 }
@@ -380,6 +393,16 @@ impl Tuning {
             return Err(TuningError::Ron(
                 "impact work and budgets must be positive".into(),
             ));
+        }
+        for c in [&t.tracked, &t.walking] {
+            if !(0..=1000).contains(&c.contact_cm)
+                || !(1..=300).contains(&c.approach_pct)
+                || !(1..=100).contains(&c.settle_pct)
+            {
+                return Err(TuningError::Ron(
+                    "contact length and approach slope out of range".into(),
+                ));
+            }
         }
         let b = &t.blast;
         if !(1..=4).contains(&b.cell)
