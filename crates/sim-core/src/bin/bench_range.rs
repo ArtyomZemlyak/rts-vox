@@ -23,6 +23,15 @@ fn main() {
             scene.step();
             samples.push(start.elapsed().as_micros());
         }
+        // The slowest ticks by number: a spike names its moment.
+        let mut top: Vec<(u128, usize)> = samples.iter().copied().zip(0..).collect();
+        top.sort_unstable_by(|a, b| b.cmp(a));
+        let top: Vec<String> = top
+            .iter()
+            .take(5)
+            .map(|(us, tick)| format!("{tick}:{us}"))
+            .collect();
+        println!("firing={firing} slowest_ticks_us={}", top.join(","));
         samples.sort_unstable();
         let laps: Vec<_> = scene
             .units

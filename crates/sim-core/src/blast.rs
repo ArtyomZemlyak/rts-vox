@@ -361,6 +361,60 @@ impl RangeUnit {
     pub fn solid(&self, p: [i32; 3]) -> bool {
         self.hit(p).is_some()
     }
+    /// The world box every cell of the body and of its segments lies in,
+    /// a unit of margin around it (ADR-296): a point outside it hits
+    /// nothing, and the pose-mapped lookups need not be asked.
+    pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
+        let mut lo = [i32::MAX; 3];
+        let mut hi = [i32::MIN; 3];
+        let mut take = |v: phys::V3| {
+            let p = [v.x, v.y, v.z].map(|c| c.to_int_trunc());
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a] - 1);
+                hi[a] = hi[a].max(p[a] + 1);
+            }
+        };
+        let corners = |n: [i32; 3]| {
+            (0..8).map(move |k| {
+                [
+                    if k & 1 != 0 { n[0] } else { 0 },
+                    if k & 2 != 0 { n[1] } else { 0 },
+                    if k & 4 != 0 { n[2] } else { 0 },
+                ]
+            })
+        };
+        let size = |b: &UnitBody| {
+            [
+                i32::from(b.vol.nx),
+                i32::from(b.vol.ny),
+                i32::from(b.vol.nz),
+            ]
+        };
+        if self.motion.enabled {
+            for l in corners(size(&self.body)) {
+                take(self.pose.world(l.map(Fx::from_int)));
+            }
+        } else {
+            let o = self.world_pos([0; 3]);
+            let n = size(&self.body);
+            take(phys::V3::new(
+                Fx::from_int(o[0]),
+                Fx::from_int(o[1]),
+                Fx::from_int(o[2]),
+            ));
+            take(phys::V3::new(
+                Fx::from_int(o[0] + n[0]),
+                Fx::from_int(o[1] + n[1]),
+                Fx::from_int(o[2] + n[2]),
+            ));
+        }
+        for (seg, frame) in self.body.segments.iter().zip(&self.seg_frames) {
+            for l in corners(size(&seg.body)) {
+                take(frame.world(l.map(Fx::from_int)));
+            }
+        }
+        (lo, hi)
+    }
     pub fn resistance(&self, p: [i32; 3], c: &ExplosionConfig) -> u32 {
         match self.hit(p) {
             Some((0, cell)) => unit_work(&self.body, cell, c)
@@ -657,6 +711,10 @@ impl Explosion {
         let n = c.half_cells * 2 + 1;
         let h = c.half_cells as i32 * c.cell_units;
         let origin = at.map(|v| v - h);
+        // Bodies are asked only where they can be (ADR-296): one box test
+        // per body instead of a pose-mapped lookup for every voxel of the
+        // domain, and dents are looked up only where there is material.
+        let boxes: Vec<([i32; 3], [i32; 3])> = units.iter().map(|u| u.bounds()).collect();
         let mut resistance = Vec::with_capacity(n * n * n);
         for z in 0..n {
             for y in 0..n {
@@ -672,13 +730,17 @@ impl Explosion {
                             for dx in 0..c.cell_units {
                                 let q = [p[0] + dx, p[1] + dy, p[2] + dz];
                                 let m = material(w, q);
-                                for u in units {
-                                    r = r.max(u.resistance(q, c));
+                                for (u, (lo, hi)) in units.iter().zip(&boxes) {
+                                    if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
+                                        r = r.max(u.resistance(q, c));
+                                    }
                                 }
-                                r = r.max(
-                                    material_work(m, c)
-                                        .saturating_sub(dents.get(&q).copied().unwrap_or(0)),
-                                );
+                                let work = material_work(m, c);
+                                if work > 0 {
+                                    r = r.max(
+                                        work.saturating_sub(dents.get(&q).copied().unwrap_or(0)),
+                                    );
+                                }
                             }
                         }
                     }
@@ -3381,6 +3443,36 @@ mod tests {
             low < roof.sub(Fx::from_int(2)),
             "the piece never fell: {low:?}"
         );
+    }
+    /// A unit's box holds every cell the wave can hit, on a driving unit
+    /// with its pose and on a parked one, segments included (ADR-296).
+    #[test]
+    fn a_units_box_holds_every_cell_the_wave_can_hit() {
+        let a = BlastRange::new(config());
+        for u in a.units.iter().chain(std::iter::once(&a.gun)) {
+            let (lo, hi) = u.bounds();
+            let mut hits = 0;
+            for x in (lo[0] - 3)..=(hi[0] + 3) {
+                for y in (lo[1] - 3)..=(hi[1] + 3) {
+                    for z in (lo[2] - 3)..=(hi[2] + 3) {
+                        if u.solid([x, y, z]) {
+                            hits += 1;
+                            assert!(
+                                x >= lo[0]
+                                    && x <= hi[0]
+                                    && y >= lo[1]
+                                    && y <= hi[1]
+                                    && z >= lo[2]
+                                    && z <= hi[2],
+                                "cell {:?} outside the box {lo:?}..{hi:?}",
+                                [x, y, z]
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(hits > 0, "no cells found in the box");
+        }
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
