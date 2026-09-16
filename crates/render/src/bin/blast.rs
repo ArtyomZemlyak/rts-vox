@@ -192,6 +192,7 @@ fn configure_gas(sim: &BlastRange, energy: bool, gas: &mut GasInput) {
     gas.params.control.y = 0.0;
     gas.params.weapon.x = if energy { 1.0 } else { 0.0 };
     gas.params.weapon.z = if sim.layout.is_some() { 1.0 } else { 0.0 };
+    gas.params.weapon.w = look::scene().smoke_extinction;
 }
 fn main() {
     let mut out = None;
@@ -374,6 +375,7 @@ fn main() {
     gas.params.sun = (-Vec3::from(look::sun_dir())).extend(1.8);
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
     gas.params.weapon.x = if energy { 1.0 } else { 0.0 };
+    gas.params.weapon.w = look::scene().smoke_extinction;
     gas.params.beam = Vec4::new(
         MUZZLE[0] as f32 + 2.0,
         MUZZLE[1] as f32,

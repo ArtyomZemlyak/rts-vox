@@ -183,8 +183,9 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
             // Beer-Lambert extinction: a thin smoky edge stays transparent.
             // A fixed 97% per display cell made smoke look like solid bricks.
+            // The look scales the extinction (ADR-283): p.weapon.w.
             let density=max(0.0,occupancy-(0.12+grain*0.15));
-            let opacity=1.0-exp(-density*dt*p.control.z*select(0.55,0.75,p.weapon.x>0.5));
+            let opacity=1.0-exp(-density*dt*p.control.z*select(0.55,0.75,p.weapon.x>0.5)*p.weapon.w);
             light+=transmit*colour*opacity;transmit*=1.0-opacity;
         }
         normal=vec3(0.0);

@@ -445,6 +445,7 @@ fn prepare(
         p.sky = params.sky;
         p.terrain = params.terrain;
         p.weapon.y = params.weapon.y;
+        p.weapon.w = params.weapon.w;
         p.control.y = input.atmosphere.clock.saturating_sub(source.last) as f32;
         p.control.z = source.opacity(input.atmosphere.clock);
         p.control.w = 1.0; // overlay: the terrain and beam have already been drawn

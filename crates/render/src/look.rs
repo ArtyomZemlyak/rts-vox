@@ -1850,6 +1850,10 @@ pub struct Scene {
     /// Берём крупнее: солнце здесь опора композиции, а не астрономия.
     pub sun_disk_size: f32,
     pub sun_disk_intensity: f32,
+    /// Множитель поглощения дыма при отрисовке газа (ADR-283): единица —
+    /// плотность до решения, меньше — облако прозрачнее, и бой читается
+    /// сквозь его края.
+    pub smoke_extinction: f32,
 
     /// Экспозиция камеры, EV100. Держится в паре с `sun_lux`: яркость
     /// источника и экспозиция — одна настройка, разнесённая по двум
@@ -2025,6 +2029,7 @@ pub fn scene_of(l: Look) -> Scene {
         sun_lux: 130_000.0,
         sun_disk_size: 0.028,
         sun_disk_intensity: 1.0,
+        smoke_extinction: 0.55,
         ev100: 13.1,
         tonemap: Tonemap::Aces,
         grade: Grade::NEUTRAL,
