@@ -32,7 +32,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 Для MP4 используется ffmpeg из PATH или `cache/video-tools`.
 
 Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
-`-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`.
+`-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`;
+`gun` — своя машина, `target` — ходовая мишень раскладки. Ключ имеет приоритет
+над `-Close` и над камерой режима; без ключа ракурс выбирает режим, а `auto` —
+это отдельная сценарная камера, а не «как было». `sheltered`, `gun` и `target`
+требуют раскладки и без неё отклоняются.
 `-Move 96,540` отдаёт управляемому танку приказ ехать в точку при старте
 (например, в лес — с валкой деревьев); без `-DriveDemo`, иначе демо
 перепишет приказ.
