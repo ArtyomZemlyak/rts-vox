@@ -27,6 +27,26 @@ fn section(s: look::Section) -> ColorGradingSection {
         lift: s.lift,
     }
 }
+/// Перевод набора `look` в компонент Bevy.
+///
+/// Публичный, потому что стенды строят свой грейд поверх общей камеры:
+/// без него они собирали компонент литералом и молча теряли поля, которых
+/// в литерале не оказалось (ADR-268).
+pub fn grading(g: look::Grade) -> ColorGrading {
+    ColorGrading {
+        global: ColorGradingGlobal {
+            exposure: g.exposure,
+            temperature: g.temperature,
+            tint: g.tint,
+            hue: 0.0,
+            post_saturation: g.post_saturation,
+            midtones_range: g.midtones_range.0..g.midtones_range.1,
+        },
+        shadows: section(g.shadows),
+        midtones: section(g.midtones),
+        highlights: section(g.highlights),
+    }
+}
 pub fn camera(commands: &mut Commands, entity: Entity, focus: f32) {
     let sc = look::scene();
     let g = sc.grade;
@@ -41,19 +61,7 @@ pub fn camera(commands: &mut Commands, entity: Entity, focus: f32) {
     commands.entity(entity).insert((
         tone,
         Exposure { ev100: sc.ev100 },
-        ColorGrading {
-            global: ColorGradingGlobal {
-                exposure: g.exposure,
-                temperature: g.temperature,
-                tint: g.tint,
-                hue: 0.0,
-                post_saturation: g.post_saturation,
-                midtones_range: g.midtones_range.0..g.midtones_range.1,
-            },
-            shadows: section(g.shadows),
-            midtones: section(g.midtones),
-            highlights: section(g.highlights),
-        },
+        grading(g),
         Bloom {
             intensity: sc.bloom,
             ..Bloom::NATURAL

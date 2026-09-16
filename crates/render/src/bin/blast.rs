@@ -199,6 +199,7 @@ fn main() {
     let mut repeat = false;
     let mut view = 0;
     let mut requested_view = None;
+    let mut close_view = None;
     let mut realtime = false;
     let mut layout_file = None;
     let mut power = 1000;
@@ -237,7 +238,7 @@ fn main() {
             }
             "--open" => uncovered = true,
             "--loop" => repeat = true,
-            "--close" => view = 2,
+            "--close" => close_view = Some(2),
             "--view" => {
                 i += 1;
                 requested_view = Some(match args.get(i).map(String::as_str) {
@@ -298,7 +299,17 @@ fn main() {
         repeat = false;
         view = 1;
     }
-    view = requested_view.unwrap_or(view);
+    // Один ярус приоритета на оба написания камеры: `--close` — то же, что
+    // `--view exposed`, и оба сильнее камеры режима. Порядок ключей в строке
+    // ничего не решает; при обоих побеждает явный `--view` (ADR-268).
+    view = requested_view.or(close_view).unwrap_or(view);
+    // Укрытый танк, орудие и мишень существуют только внутри разложенного
+    // полигона. Без `--range` ключ разбирался и молча ничего не делал —
+    // запись уходила с автоматической камеры и кодом возврата 0 (ADR-268).
+    assert!(
+        !(3..=5).contains(&view) || workshop.layout.is_some(),
+        "--view sheltered/gun/target needs --range"
+    );
     let finish = finish.unwrap_or(if energy { 420 } else { 330 });
     let mut gas = GasInput::default();
     fill_terrain(&sim, &mut gas);
@@ -756,22 +767,7 @@ fn setup(
         .entity(camera)
         .insert((
             bevy::core_pipeline::tonemapping::Tonemapping::AgX,
-            bevy::render::view::ColorGrading {
-                global: bevy::render::view::ColorGradingGlobal {
-                    post_saturation: 1.24,
-                    ..default()
-                },
-                shadows: bevy::render::view::ColorGradingSection {
-                    contrast: 1.04,
-                    ..default()
-                },
-                midtones: bevy::render::view::ColorGradingSection {
-                    saturation: 1.08,
-                    contrast: 1.10,
-                    ..default()
-                },
-                ..default()
-            },
+            presentation::grading(look::live_range_grade()),
             render::occlusion::Occlusion {
                 radius: 4.0,
                 strength: 0.32,
@@ -1606,6 +1602,7 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
 fn framing(
     scene: Res<Scene>,
     workshop: Res<Workshop>,
+    visual: Res<moving::Visual>,
     mut camera: Query<(&mut Transform, &mut Projection, &Camera), With<GasCamera>>,
 ) {
     let age = if scene.sim.impact.is_some() {
@@ -1679,22 +1676,48 @@ fn framing(
                     height -= zoom * 88.0;
                 }
                 if scene.view == 4 {
-                    aim = moving::pose(&scene.sim.gun).pos + Vec3::Y * 14.0;
+                    // Камера обязана смотреть туда, где тело **нарисовано**:
+                    // `animate` рисует по `visible`, интерполируя между тиками,
+                    // и прицел по `pose` отставал бы на кадр (ADR-268).
+                    aim = moving::visible(
+                        &scene.sim.gun,
+                        visual.previous.get(scene.sim.units.len()),
+                        &scene,
+                    )
+                    .pos + Vec3::Y * 14.0;
                     height = 150.0;
                 }
                 if scene.view == 5 {
+                    // Ходовую мишень называет сама раскладка. Прежний
+                    // `unwrap_or(2)` держался на порядке юнитов в
+                    // range-cover.ron и на чужой раскладке снимал не то.
+                    //
+                    // Выбор редактора участвует только если выбрано **ходовое**
+                    // тело: `Workshop::new` заранее ставит `Unit(0)` при
+                    // `--edit`, и без этого условия `--edit --view target`
+                    // всегда снимал неподвижный танк (ADR-268).
+                    let patrol = |i: usize| {
+                        layout
+                            .course
+                            .as_ref()
+                            .is_some_and(|c| c.patrols.iter().any(|p| p.unit == i))
+                    };
                     let id = scene
                         .sim
                         .attack
                         .or_else(|| match workshop.selected {
-                            Some(workbench::Selection::Unit(i)) => Some(i),
+                            Some(workbench::Selection::Unit(i)) if patrol(i) => Some(i),
                             _ => None,
                         })
-                        .unwrap_or(2);
-                    if let Some(u) = scene.sim.units.get(id) {
-                        aim = moving::pose(u).pos + Vec3::Y * 14.0;
+                        .or_else(|| Some(layout.course.as_ref()?.patrols.first()?.unit));
+                    // Мишени может не быть вовсе: сохранённая раскладка
+                    // допускает ноль тел. Тогда остаётся общий план, а не
+                    // кроп в 150 единиц по пустому рельефу.
+                    if let Some((i, u)) = id.and_then(|i| Some((i, scene.sim.units.get(i)?))) {
+                        aim =
+                            moving::visible(u, visual.previous.get(i), &scene).pos + Vec3::Y * 14.0;
+                        height = 150.0;
                     }
-                    height = 150.0;
                 }
                 // Reserve the sidebar's width in the fitted overview.
                 let panel_fraction = camera.logical_viewport_size().map_or(0.2, |v| {

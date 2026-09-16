@@ -1727,6 +1727,29 @@ impl Grade {
     };
 }
 
+/// Коррекция живого полигона: один AgX-грейд на оба оружия.
+///
+/// Стенд не переключается ключом `--look` — он снимается на видео, и его
+/// картинка обязана быть одинаковой между дублями. Поэтому грейд стоит
+/// отдельным набором, а не пятым направлением в `scene_of`. Но стоит он
+/// **здесь**: числа картинки живут в `look` и только в нём (ADR-175),
+/// иначе подбор превращается в поиск по бинарям.
+pub fn live_range_grade() -> Grade {
+    Grade {
+        post_saturation: 1.24,
+        shadows: Section {
+            contrast: 1.04,
+            ..Section::NEUTRAL
+        },
+        midtones: Section {
+            saturation: 1.08,
+            contrast: 1.10,
+            ..Section::NEUTRAL
+        },
+        ..Grade::NEUTRAL
+    }
+}
+
 /// Виньетка: затемнение по краю кадра. Нулевая сила — её нет.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vignette {
