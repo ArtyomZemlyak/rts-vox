@@ -88,7 +88,8 @@ mod tests {
             &t.blast,
             crate::gravity_per_tick(&t),
             0,
-            Surroundings::NONE);
+            Surroundings::NONE,
+        );
         assert!(b.fragments[0].position.x < start.x.sub(Fx::ONE));
         assert!(!b.fragments[0].resting);
         for _ in 0..300 {
@@ -98,7 +99,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 0,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
         }
         assert!(b.fragments[0].resting);
         assert!(b.fragments[0].position.y < Fx::from_int(14));
@@ -138,7 +140,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
             tick += 1;
             assert!(tick < 300, "never rested");
         }
@@ -155,7 +158,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
             tick += 1;
         }
         assert!(b.fragments[0].resting);
@@ -172,7 +176,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
             tick += 1;
             woke |= !b.fragments[0].resting;
             if woke && b.fragments[0].resting {
@@ -226,7 +231,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
         }
         assert_eq!(b.fragments.len(), 1, "the pieces did not merge");
         let f = &b.fragments[0];
@@ -305,7 +311,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
             tick += 1;
             woke |= !b.fragments[0].resting;
             if woke && b.fragments[0].resting {
@@ -574,7 +581,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 0,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
             assert!(b.fragments[0].position.x < Fx::from_int(52));
         }
     }
@@ -887,7 +895,8 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 0,
-                Surroundings::NONE);
+                Surroundings::NONE,
+            );
         }
         assert!(n > 0);
         assert!(b.fragments.iter().all(|f| f.resting));
