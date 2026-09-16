@@ -5,8 +5,8 @@ pub struct Navigation {
     pub cell_units: i32,
     pub search_nodes: usize,
     pub recovery_ticks: u32,
-    pub reverse_ticks: u32,
-    pub reverse_speed_pct: i32,
+    pub escape_ticks: u32,
+    pub escape_speed_pct: i32,
     pub recovery_turn_deg: i32,
     /// Extra contact length the planner probes with, world units: its
     /// refusals are wider than the executor's by this much.
@@ -37,8 +37,8 @@ impl Navigation {
             || 640 % n.cell_units != 0
             || !(64..=51200).contains(&n.search_nodes)
             || !(1..=300).contains(&n.recovery_ticks)
-            || !(1..=300).contains(&n.reverse_ticks)
-            || !(1..=60).contains(&n.reverse_speed_pct)
+            || !(1..=300).contains(&n.escape_ticks)
+            || !(1..=60).contains(&n.escape_speed_pct)
             || !(0..=60).contains(&n.recovery_turn_deg)
             || !(0..=16).contains(&n.plan_margin)
             || n.fell.materials.contains(&0)

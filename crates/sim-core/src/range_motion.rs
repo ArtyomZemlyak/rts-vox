@@ -62,6 +62,8 @@ impl Obstacle {
         self.penetration(other) > Fx::ZERO
     }
 }
+/// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
+const ESCAPES: u32 = 6;
 #[derive(Clone, Debug)]
 pub struct Motion {
     pub pos: [Fx; 3],
@@ -94,7 +96,15 @@ pub struct Motion {
     /// Materials this hull crushes instead of avoiding; empty for walkers.
     yielding: Vec<voxel::store::Mat>,
     blocked_ticks: u32,
-    reverse_left: u32,
+    /// Ticks left in the current escape manoeuvre; zero while following
+    /// the plan.
+    escape_left: u32,
+    /// Escape manoeuvres begun since the last waypoint. The next one to
+    /// try cycles astern, ahead, then astern and ahead turning each way
+    /// (ADR-273).
+    escape: u32,
+    /// The last search could not leave the start pose (ADR-273).
+    stranded: bool,
     recovery_head: i32,
     next_plan: u32,
 }
@@ -152,7 +162,9 @@ impl Motion {
             navigation,
             yielding,
             blocked_ticks: 0,
-            reverse_left: 0,
+            escape_left: 0,
+            escape: 0,
+            stranded: false,
             recovery_head: 0,
             next_plan: 0,
             drive_scale: drive::drive_factor(
@@ -174,7 +186,7 @@ impl Motion {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
         let half = shape.half.map(Fx::from_int);
-        let path = nav::vehicle::route(
+        let plan = nav::vehicle::plan(
             nav::vehicle::Probe::with_yield(w, &self.yielding),
             shape,
             from,
@@ -200,8 +212,9 @@ impl Motion {
             },
         );
         self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
-        self.blocked = path.is_empty();
-        self.path = path;
+        self.blocked = plan.path.is_empty();
+        self.stranded = plan.stranded;
+        self.path = plan.path;
         self.cursor = 0;
         self.enabled = true;
         !self.blocked
@@ -212,7 +225,9 @@ impl Motion {
         self.destination = None;
         self.blocked = false;
         self.blocked_ticks = 0;
-        self.reverse_left = 0;
+        self.escape_left = 0;
+        self.escape = 0;
+        self.stranded = false;
         self.next_plan = 0;
     }
     /// The footprint the range probes with, for diagnostics and tests.
@@ -256,9 +271,7 @@ impl Motion {
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
-        if self.reverse_left == 0
-            && (self.blocked || self.path.is_empty())
-            && tick >= self.next_plan
+        if self.escape_left == 0 && (self.blocked || self.path.is_empty()) && tick >= self.next_plan
         {
             if let Some(goal) = self.destination {
                 self.move_to(w, goal, b, others);
@@ -266,7 +279,7 @@ impl Motion {
             }
         }
         if self.cursor == self.path.len()
-            && self.reverse_left == 0
+            && self.escape_left == 0
             && !self.route.is_empty()
             && alive
             && engine
@@ -277,12 +290,13 @@ impl Motion {
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
-        if alive && engine && self.reverse_left == 0 && self.cursor < self.path.len() {
+        if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
             let goal = self.path[self.cursor];
             let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
             let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
             if dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(self.arrival * self.arrival) {
                 self.cursor += 1;
+                self.escape = 0;
                 if self.cursor == self.path.len() {
                     self.destination = None;
                 }
@@ -306,26 +320,38 @@ impl Motion {
                 });
             }
         }
+        // One cycle of manoeuvres per waypoint: a hull that none of them
+        // freed waits for the world to change rather than pacing forever.
         if alive
             && engine
             && self.blocked_ticks >= self.navigation.recovery_ticks
-            && self.reverse_left == 0
+            && self.escape_left == 0
+            && self.escape < ESCAPES
         {
-            self.reverse_left = self.navigation.reverse_ticks;
+            self.escape_left = self.navigation.escape_ticks;
             self.recovery_head = self.drive.head;
             self.blocked_ticks = 0;
+            self.escape = self.escape.wrapping_add(1);
         }
-        if self.reverse_left > 0 && alive && engine {
-            let turn = if self.reverse_left > self.navigation.reverse_ticks / 2 {
-                0
-            } else {
-                self.navigation.recovery_turn_deg * angle::FULL / 360
+        if self.escape_left > 0 && alive && engine {
+            // Astern, ahead, then astern and ahead turning each way, the
+            // turn from the first tick: a hull wedged on one side leaves by
+            // the other, and one whose every turn is refused where it
+            // stands turns while it moves.
+            let attempt = self.escape.wrapping_sub(1) % ESCAPES;
+            let astern = attempt.is_multiple_of(2);
+            let sign = match attempt {
+                0 | 1 => 0,
+                2 | 5 => 1,
+                _ => -1,
             };
+            let turn = sign * self.navigation.recovery_turn_deg * angle::FULL / 360;
             want = angle::norm(self.recovery_head + turn);
+            let pct = self.navigation.escape_speed_pct * if astern { -1 } else { 1 };
             speed = Fx::from_int(self.speed)
                 .mul(response.engine)
                 .mul(response.traction)
-                .mul(Fx::from_ratio(-self.navigation.reverse_speed_pct, 100));
+                .mul(Fx::from_ratio(pct, 100));
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
@@ -360,7 +386,15 @@ impl Motion {
             let penetration = candidate.penetration(p);
             penetration > Fx::ZERO && penetration >= previous.penetration(p)
         });
-        let clear = target.blocked == 0 || target.blocked < current.blocked;
+        // A hull never enters a pose that leans it past its limit or
+        // grounds more of its belly. The contact grade is a softer rule: a
+        // rise the hull already stands in may be left through another such
+        // pose, and an escape manoeuvre disregards it altogether, since it
+        // exists to leave a spot where every planned move met exactly that
+        // refusal. Belly, tilt, bounds and collisions still hold.
+        let clear = (target.blocked == 0 || target.blocked < current.blocked)
+            && !target.tilt
+            && (self.escape_left > 0 || !target.steep || current.steep);
         let allowed = clear
             && x >= 40
             && z >= 40
@@ -383,12 +417,22 @@ impl Motion {
         if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
             self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
         }
-        if self.reverse_left > 0 {
-            self.reverse_left -= 1;
-            if self.reverse_left == 0 {
+        // A search that could not leave this pose is a block like any
+        // other: only a manoeuvre will change what the next search sees.
+        if self.stranded && self.destination.is_some() && self.path.is_empty() {
+            self.blocked = true;
+        }
+        if self.escape_left > 0 {
+            // A refused manoeuvre is over: the next one begins at once
+            // instead of counting down against the same wall.
+            self.escape_left = if allowed { self.escape_left - 1 } else { 0 };
+            if self.escape_left == 0 {
                 self.path.clear();
                 self.cursor = 0;
                 self.next_plan = tick.saturating_add(1);
+                if !allowed {
+                    self.blocked_ticks = self.navigation.recovery_ticks;
+                }
             }
         } else if self.blocked {
             self.blocked_ticks = self.blocked_ticks.saturating_add(1);
@@ -464,7 +508,9 @@ impl Motion {
         b.bool(self.enabled);
         b.bool(self.blocked);
         b.u32(self.blocked_ticks);
-        b.u32(self.reverse_left);
+        b.u32(self.escape_left);
+        b.u32(self.escape);
+        b.bool(self.stranded);
         b.i32(self.recovery_head);
         b.u32(self.next_plan);
         for list in [&self.path, &self.route] {
@@ -497,7 +543,9 @@ impl Motion {
         self.enabled = s.bool();
         self.blocked = s.bool();
         self.blocked_ticks = s.u32();
-        self.reverse_left = s.u32();
+        self.escape_left = s.u32();
+        self.escape = s.u32();
+        self.stranded = s.bool();
         self.recovery_head = s.i32();
         self.next_plan = s.u32();
         for list in [&mut self.path, &mut self.route] {
@@ -511,7 +559,7 @@ impl Motion {
             }
         }
         s.ok()
-            && self.reverse_left <= self.navigation.reverse_ticks
+            && self.escape_left <= self.navigation.escape_ticks
             && (0..angle::FULL).contains(&self.recovery_head)
             && self.pos[0] >= Fx::ZERO
             && self.pos[0] < Fx::from_int(640)
@@ -631,11 +679,11 @@ mod tests {
             half: [Fx::from_int(30), Fx::from_int(15)],
         };
         let mut tick = 0;
-        while a.reverse_left == 0 && tick < 100 {
+        while a.escape_left == 0 && tick < 100 {
             step(&mut a, &w, &body, &[obstacle], tick);
             tick += 1;
         }
-        assert!(a.reverse_left > 0);
+        assert!(a.escape_left > 0);
         let mut blob = Blob::new();
         a.save(&mut blob);
         let mut b = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
@@ -649,6 +697,65 @@ mod tests {
             b.save(&mut y);
             assert_eq!(x.v, y.v);
         }
+    }
+    /// Flat ground with a post either side of the stern of a hull parked
+    /// at (200, 300) facing +x: the posts stand at x = 160..176 beyond the
+    /// hull's own width.
+    struct Posts;
+    impl voxel::Generator for Posts {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            let post = (160..=176).contains(&x) && !(284..=316).contains(&z) && y < 46;
+            u16::from(y < 16 || post)
+        }
+    }
+    #[test]
+    fn a_hull_refused_astern_escapes_ahead() {
+        let w = World::new(640, 64, 640, 100, Box::new(Posts));
+        let body = voxel::unit::tank();
+        let mut a = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        // Between the posts with another hull one unit astern and a
+        // waypoint straight behind: any turn grounds a stern corner on a
+        // post, backing off meets the neighbour within a few ticks. The
+        // escape astern is abandoned the tick it is refused and the next
+        // goes ahead, clear of both. No destination, so no search
+        // intervenes: this is the manoeuvre cycle alone.
+        let neighbour = Obstacle {
+            pos: [Fx::from_int(139), Fx::from_int(16), Fx::from_int(300)],
+            head: 0,
+            half: [Fx::from_int(30), Fx::from_int(15)],
+        };
+        a.enabled = true;
+        a.path = vec![[50, 300]];
+        let mut ahead = false;
+        let mut astern = false;
+        let mut attempts = 0;
+        for tick in 0..300 {
+            step(&mut a, &w, &body, &[neighbour], tick);
+            if a.escape_left > 0 {
+                ahead |= a.drive.vel > Fx::ZERO;
+                astern |= a.drive.vel < Fx::ZERO;
+            }
+            attempts = attempts.max(a.escape);
+            assert_eq!(
+                Obstacle::of(&a, &body).penetration(&neighbour),
+                Fx::ZERO,
+                "entered the neighbour at {tick}"
+            );
+            if attempts >= 2 && a.escape_left == 0 {
+                break;
+            }
+        }
+        assert!(
+            astern && ahead,
+            "escapes: {attempts}, astern {astern}, ahead {ahead}"
+        );
+        assert_eq!(attempts, 2);
+        assert!(
+            a.pos[0] > Fx::from_int(210),
+            "never drove out ahead: {:?}",
+            a.pos
+        );
+        assert!(a.path.is_empty(), "the refused plan survived the escape");
     }
     #[test]
     fn tanks_and_walkers_cross_several_craters_in_both_directions() {

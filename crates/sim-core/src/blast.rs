@@ -381,14 +381,16 @@ impl Generator for RangeTerrain {
                 }
             }
         }
-        // Small broken rocks on the shoulders, out of the firing lane.
+        // Small broken rocks on the shoulders, out of the firing lane. No
+        // taller than the course step: a hull climbs a shoulder rock rather
+        // than steering round it (ADR-273).
         if !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)) {
             let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
             let dx = x as i32 % 13 - 6;
             let dz = z as i32 % 13 - 6;
             if stone.is_multiple_of(7)
                 && y >= h
-                && y < h + 2 + stone % 5
+                && y < h + 2 + stone % 3
                 && dx * dx + dz * dz < (5 - (y - h).min(4)) as i32 * 3
             {
                 return 6;
@@ -793,7 +795,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(13);
+        b.u32(14);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -905,7 +907,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 13 {
+        if s.u32() != 14 {
             return None;
         }
         let extended = s.bool();
@@ -1661,6 +1663,46 @@ mod tests {
     }
     /// Trees are matter a tracked hull pushes over (ADR-269): the cut is paid
     /// by the vehicle, the crown falls for free, and nothing is erased.
+    /// The default range as the capture script drives it: the player's
+    /// tank is sent from its start into the far woods with the patrols
+    /// running. Its first turn happens beside two boulders that no planner
+    /// sample sees at the heading the executor reaches; it must leave that
+    /// spot on its own and arrive (ADR-273).
+    #[test]
+    fn the_player_tank_reaches_the_far_woods_from_the_start() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        a.control();
+        assert!(a.order_move([96, 540]));
+        let mut still = 0;
+        let mut longest_still = 0;
+        let mut last = [a.gun.motion.pos[0], a.gun.motion.pos[2]];
+        let mut arrived = None;
+        for tick in 0..1500 {
+            a.step();
+            let m = &a.gun.motion;
+            let here = [m.pos[0], m.pos[2]];
+            if here == last {
+                still += 1;
+                longest_still = longest_still.max(still);
+            } else {
+                still = 0;
+            }
+            last = here;
+            if m.destination.is_none() {
+                arrived = Some(tick);
+                break;
+            }
+        }
+        eprintln!("arrived {arrived:?} longest stand {longest_still} ticks");
+        assert!(
+            arrived.is_some(),
+            "stuck at {:?} for {longest_still} ticks",
+            a.gun.motion.pos
+        );
+        assert!(longest_still <= 90, "stood {longest_still} ticks");
+    }
     #[test]
     fn a_tank_pushes_through_the_forest_and_the_trees_fall_as_debris() {
         let c = config();

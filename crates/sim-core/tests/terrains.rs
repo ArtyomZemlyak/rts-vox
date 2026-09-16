@@ -272,7 +272,7 @@ fn probe_poses_along_the_run() {
         eprintln!("== {t:?} {kind:?}");
         for x in (210..=430).step_by(2) {
             let pose = probe.pose([Fx::from_int(x), Fx::from_int(320)], 0, shape);
-            if pose.blocked > 0 || x % 16 == 0 {
+            if pose.refused() || x % 16 == 0 {
                 eprintln!(
                     "x={x} ground={} blocked={} height={} floors={:?}",
                     Ground(t).height(x, 320),
@@ -293,12 +293,14 @@ fn probe_poses_along_the_run() {
                 let mut p = nav::vehicle::Probe::new(&w);
                 let here = p.pose([m.pos[0], m.pos[2]], m.drive.head, shape);
                 eprintln!(
-                    "tick={tick} pos=({},{},{}) head={} blocked_cols={} height={} floors={:?} cursor={}/{}",
+                    "tick={tick} pos=({},{},{}) head={} blocked_cols={} steep={} tilt={} height={} floors={:?} cursor={}/{}",
                     milli(m.pos[0]),
                     milli(m.pos[1]),
                     milli(m.pos[2]),
                     m.drive.head,
                     here.blocked,
+                    here.steep,
+                    here.tilt,
                     milli(here.height),
                     here.floors.map(milli),
                     m.cursor,

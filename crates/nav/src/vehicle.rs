@@ -35,9 +35,20 @@ pub struct Shape {
 pub struct Pose {
     pub height: Fx,
     pub floors: [Fx; 4],
+    /// Footprint columns whose ground stands above the hull belly.
     pub blocked: usize,
+    /// A support's contact sees a rise its belt cannot grip.
+    pub steep: bool,
+    /// The hull would lean past its tilt limit.
+    pub tilt: bool,
     /// Footprint columns holding yielding matter inside the hull height.
     pub crush: usize,
+}
+impl Pose {
+    /// Whether a hull may not stand here at all.
+    pub fn refused(&self) -> bool {
+        self.blocked != 0 || self.steep || self.tilt
+    }
 }
 /// Query-local height cache. No cached result survives a world edit.
 ///
@@ -239,26 +250,15 @@ impl<'a> Probe<'a> {
     fn contact(&mut self, p: [Fx; 2], radius: Fx, dir: [Fx; 2], s: Shape, grade: Fx) -> (Fx, bool) {
         let base = self.surface(p);
         let mut height = base;
-        // The contact patch: nearby ground counts with the same approach
-        // slope as ground ahead, or a corner sample would lift the support
-        // onto a ledge at once and undo the run-up.
-        for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
-            let corner = self.surface([
-                p[0].add(radius.mul(Fx::from_int(x))),
-                p[1].add(radius.mul(Fx::from_int(z))),
-            ]);
-            height = height.max(corner.sub(s.ramp.mul(radius)));
-        }
-        if s.span < 2 {
-            return (height, false);
-        }
         let (nx, nz) = (
             Fx::from_int(self.world.nx as i32 - 1),
             Fx::from_int(self.world.nz as i32 - 1),
         );
-        let mut samples = Vec::with_capacity(2 * s.span as usize);
+        let mut samples = Vec::with_capacity(2 * s.span.max(0) as usize);
         let mut level = base;
-        for k in 1..=s.span {
+        // A point support sees no grade: a belt shorter than two units has
+        // no line to sample.
+        for k in 1..=(if s.span >= 2 { s.span } else { 0 }) {
             let d = Fx::from_int(k);
             let mut pair = [None; 2];
             for (i, sign) in [-1, 1].into_iter().enumerate() {
@@ -284,6 +284,28 @@ impl<'a> Probe<'a> {
         height = height.max(level);
         let mut steep = false;
         let step = Fx::from_int(s.step);
+        // The contact patch: nearby ground counts with the same approach
+        // slope as ground ahead, or a corner sample would lift the support
+        // onto a ledge at once and undo the run-up. A step under the edge
+        // of the patch, higher than the step limit within half the patch,
+        // is refused like one under the belt: a boulder under one track
+        // edge is not ridden by the corner and refused by the belt a
+        // degree later. A slope across the patch is left to the tilt limit.
+        let half = radius.div(Fx::from_int(2));
+        for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            let corner = self.surface([
+                p[0].add(radius.mul(Fx::from_int(x))),
+                p[1].add(radius.mul(Fx::from_int(z))),
+            ]);
+            height = height.max(corner.sub(s.ramp.mul(radius)));
+            let mid = self.surface([
+                p[0].add(half.mul(Fx::from_int(x))),
+                p[1].add(half.mul(Fx::from_int(z))),
+            ]);
+            if s.span >= 2 && corner.sub(mid) > step {
+                steep = true;
+            }
+        }
         for (d, there) in samples {
             height = height.max(there.sub(s.ramp.mul(d)));
             // One obstacle up to the step height is climbed; a longer rise
@@ -370,16 +392,12 @@ impl<'a> Probe<'a> {
             .sub(floors[0])
             .sub(floors[1])
             .div(Fx::from_int(4 * s.support[1].max(1)));
-        let mut blocked = if steep
-            || s.min_up
-                .mul(s.min_up)
-                .mul(Fx::ONE.add(pitch.mul(pitch)).add(roll.mul(roll)))
-                > Fx::ONE
-        {
-            1_000_000
-        } else {
-            0
-        };
+        let tilt = s
+            .min_up
+            .mul(s.min_up)
+            .mul(Fx::ONE.add(pitch.mul(pitch)).add(roll.mul(roll)))
+            > Fx::ONE;
+        let mut blocked = 0;
         let (lo, hi) = self.extent(pos, head, s);
         let mut crush = 0;
         for z in lo[1]..=hi[1] {
@@ -408,6 +426,8 @@ impl<'a> Probe<'a> {
             height,
             floors,
             blocked,
+            steep,
+            tilt,
             crush,
         }
     }
@@ -461,7 +481,7 @@ fn connects(
     for i in 1..=turns {
         let h = angle::norm(head + turn * i / turns);
         let next = ground.pose(from, h, shape);
-        if next.blocked != 0
+        if next.refused()
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(from, h)
         {
@@ -475,7 +495,7 @@ fn connects(
         let f = Fx::from_ratio(i, steps);
         let p = [from[0].add(delta[0].mul(f)), from[1].add(delta[1].mul(f))];
         let next = ground.pose(p, yaw, shape);
-        if next.blocked != 0
+        if next.refused()
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(p, yaw)
         {
@@ -486,10 +506,18 @@ fn connects(
     }
     Some(crush)
 }
+/// The outcome of a route search.
+pub struct Route {
+    /// Turn points to the goal; empty when there is none.
+    pub path: Vec<[i32; 2]>,
+    /// No move at all was open from the start pose: the hull stands where
+    /// the search cannot begin, and only moving will change that.
+    pub stranded: bool,
+}
 /// An oriented A*: translations keep heading, turns reserve their swept
 /// footprint. It cannot choose a narrow corridor and then rotate through it.
 pub fn route(
-    mut ground: Probe<'_>,
+    ground: Probe<'_>,
     shape: Shape,
     from: [Fx; 2],
     head: i32,
@@ -497,6 +525,22 @@ pub fn route(
     cfg: Search,
     clear: impl Fn([Fx; 2], i32) -> bool,
 ) -> Vec<[i32; 2]> {
+    plan(ground, shape, from, head, to, cfg, clear).path
+}
+/// [`route`], also reporting a start the search could not leave.
+pub fn plan(
+    mut ground: Probe<'_>,
+    shape: Shape,
+    from: [Fx; 2],
+    head: i32,
+    to: [i32; 2],
+    cfg: Search,
+    clear: impl Fn([Fx; 2], i32) -> bool,
+) -> Route {
+    let none = |stranded| Route {
+        path: vec![],
+        stranded,
+    };
     let shape = Shape {
         span: if shape.span >= 2 {
             shape.span + cfg.margin.max(0)
@@ -516,12 +560,15 @@ pub fn route(
         || ground.world.nx as i32 % cfg.cell != 0
         || ground.world.nz as i32 % cfg.cell != 0
     {
-        return vec![];
+        return none(false);
     }
     // A straight run through yielding matter is legal but not free: let the
     // search look for cheaper open ground first.
     if connects(&mut ground, shape, from, head, to.map(Fx::from_int), &clear) == Some(0) {
-        return vec![to];
+        return Route {
+            path: vec![to],
+            stranded: false,
+        };
     }
     let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
     let rows = (ground.world.nz as i32).div_euclid(cfg.cell) as usize;
@@ -548,6 +595,7 @@ pub fn route(
     distance[initial] = 0;
     open.push(Reverse((0, 0, initial)));
     let mut found = None;
+    let mut left_start = false;
     for _ in 0..cfg.nodes {
         let Some(Reverse((_, cost, i))) = open.pop() else {
             break;
@@ -564,7 +612,7 @@ pub fn route(
             .max((at[1].to_int_trunc() - to[1]).abs())
             <= cfg.cell * 4
             || i / 8 == end)
-            && pose.blocked == 0
+            && !pose.refused()
             && clear(at, yaw)
             && connects(&mut ground, shape, at, yaw, to.map(Fx::from_int), &clear).is_some()
         {
@@ -605,7 +653,7 @@ pub fn route(
             if next_cost >= distance[j] {
                 continue;
             }
-            if next.blocked != 0
+            if next.refused()
                 || !clear(q, next_yaw)
                 || next.height.sub(pose.height).abs() > Fx::from_int(shape.step)
             {
@@ -616,11 +664,12 @@ pub fn route(
                 at[1].add(q[1]).div(Fx::from_int(2)),
             ];
             let mid_yaw = angle::norm(yaw + angle::diff(next_yaw, yaw) / 2);
-            if ground.pose(mid, mid_yaw, shape).blocked != 0 || !clear(mid, mid_yaw) {
+            if ground.pose(mid, mid_yaw, shape).refused() || !clear(mid, mid_yaw) {
                 continue;
             }
             distance[j] = next_cost;
             previous[j] = i;
+            left_start = true;
             let heuristic = q[0]
                 .sub(Fx::from_int(to[0]))
                 .abs()
@@ -632,7 +681,7 @@ pub fn route(
         }
     }
     let Some(mut i) = found else {
-        return vec![];
+        return none(!left_start);
     };
     let mut all = vec![];
     while i != initial {
@@ -659,7 +708,10 @@ pub fn route(
         }
         before = *p;
     }
-    out
+    Route {
+        path: out,
+        stranded: false,
+    }
 }
 
 #[cfg(test)]
@@ -775,13 +827,39 @@ mod tests {
         // wheelbase is level, the belt ahead sees 45 degrees, and 45 is
         // more than the 24-degree limit.
         let at = [Fx::from_int(93), Fx::from_int(100)];
-        assert!(p.pose(at, 0, tank()).blocked > 0, "the bank was accepted");
+        assert!(p.pose(at, 0, tank()).steep, "the bank was accepted");
         let mut gentle = tank();
         gentle.min_up = Fx::from_ratio(1, 2);
-        assert_eq!(p.pose(at, 0, gentle).blocked, 0);
+        assert!(!p.pose(at, 0, gentle).refused());
         let mut point = tank();
         point.span = 0;
-        assert_eq!(p.pose(at, 0, point).blocked, 0, "a point sees no grade");
+        assert!(!p.pose(at, 0, point).refused(), "a point sees no grade");
+    }
+    /// Flat soil with a 60 cm boulder, seven columns square.
+    struct Boulder;
+    impl voxel::Generator for Boulder {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            let h = if (150..157).contains(&x) && (120..127).contains(&z) {
+                22
+            } else {
+                16
+            };
+            u16::from(y < h)
+        }
+    }
+    #[test]
+    fn a_boulder_under_a_contact_corner_is_refused_like_one_under_the_belt() {
+        let w = World::new(256, 64, 256, 100, Box::new(Boulder));
+        let mut p = Probe::new(&w);
+        // The rear-right support stands at (148, 118): its belt line along
+        // x misses the boulder, its diagonal corner sample two units away
+        // lands on it. Six units is more than the step; refused.
+        let on = p.pose([Fx::from_int(173), Fx::from_int(108)], 0, tank());
+        assert!(on.steep, "the corner rode the boulder: {:?}", on.floors);
+        // Four units further from the boulder the same pose is open.
+        let off = p.pose([Fx::from_int(173), Fx::from_int(104)], 0, tank());
+        assert!(!off.refused(), "{:?}", off.floors);
+        assert_eq!(off.floors, [Fx::from_int(16); 4]);
     }
     fn search() -> Search {
         Search {
@@ -817,12 +895,12 @@ mod tests {
         let w = World::new(256, 64, 256, 100, Box::new(Forest));
         let at = [Fx::from_int(123), Fx::from_int(100)];
         let mut hard = Probe::new(&w);
-        assert!(hard.pose(at, 0, tank()).blocked > 0);
+        assert!(hard.pose(at, 0, tank()).refused());
         assert_eq!(hard.floor(123, 100), 46, "crown top is the hard floor");
         assert!(hard.crushed(at, 0, tank()).is_empty());
         let mut soft = Probe::with_yield(&w, &[7, 8]);
         let pose = soft.pose(at, 0, tank());
-        assert_eq!(pose.blocked, 0);
+        assert!(!pose.refused());
         assert_eq!(soft.floor(123, 100), 16, "trees are not floor");
         assert!(pose.crush > 0);
         let cut = soft.crushed(at, 0, tank());
@@ -860,8 +938,8 @@ mod tests {
         let w = world(false, true, false);
         let mut p = Probe::new(&w);
         let at = [Fx::from_int(70); 2];
-        assert_eq!(p.pose(at, 0, tank()).blocked, 0);
-        assert!(p.pose(at, angle::FULL / 8, tank()).blocked > 0);
+        assert!(!p.pose(at, 0, tank()).refused());
+        assert!(p.pose(at, angle::FULL / 8, tank()).refused());
         let route = route(
             Probe::new(&w),
             tank(),
@@ -886,7 +964,7 @@ mod tests {
             w.queue_dig(90, y, 72);
         }
         w.flush();
-        assert_eq!(Probe::new(&w).pose(at, 0, tank()).blocked, 0);
+        assert!(!Probe::new(&w).pose(at, 0, tank()).refused());
     }
     #[test]
     fn rounded_crest_and_gradual_slopes_fit_the_vehicle_clearance() {
@@ -894,10 +972,9 @@ mod tests {
         let mut p = Probe::new(&w);
         for x in 90..168 {
             let at = [Fx::from_int(x), Fx::from_int(128)];
-            assert_eq!(p.pose(at, 0, tank()).blocked, 0, "crest at {x}");
-            assert_eq!(
-                p.pose(at, angle::FULL / 2, tank()).blocked,
-                0,
+            assert!(!p.pose(at, 0, tank()).refused(), "crest at {x}");
+            assert!(
+                !p.pose(at, angle::FULL / 2, tank()).refused(),
                 "reverse crest at {x}"
             );
         }
