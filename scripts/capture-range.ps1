@@ -1,6 +1,6 @@
 param(
     [string]$RangePath = '',
-    [ValidateSet('energy','shell')][string]$Weapon = 'energy',
+    [ValidateSet('energy','shell','anni')][string]$Weapon = 'energy',
     [ValidateRange(100,4000)][int]$Power = 1000,
     [string]$OutputDir = '',
     [ValidateRange(0.1,3600)][double]$Seconds = 10,

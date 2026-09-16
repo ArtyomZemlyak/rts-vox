@@ -3012,6 +3012,34 @@ mod tests {
         let b = BlastRange::restore(shell.config.clone(), &shell.snapshot()).unwrap();
         assert_eq!(shell.state_hash(), b.state_hash());
     }
+    /// The annihilation bolt (ADR-285) takes matter whatever its strength
+    /// and leaves no debris: everything it removes goes to the annihilation
+    /// sink, and the ledger still balances.
+    #[test]
+    fn the_annihilation_bolt_leaves_no_debris_and_sinks_what_it_takes() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/anni-cannon.ron")).unwrap();
+        assert_eq!(c.material_energy_j, 0);
+        assert_eq!(c.heat_units, 0);
+        assert_eq!(c.soil_resistance, c.steel_resistance);
+        let mut a = BlastRange::new(c);
+        for _ in 0..300 {
+            a.step();
+        }
+        assert!(a.impact.is_some(), "the bolt never landed");
+        assert!(a.removed > 0, "the bolt took nothing");
+        assert!(
+            a.matter
+                .economy
+                .ledger
+                .sunk(crate::matter::Sink::Annihilation)
+                > 0
+        );
+        assert!(
+            a.matter.debris.fragments.iter().all(|f| f.chunk.is_some()),
+            "an annihilating bolt threw loose pieces"
+        );
+        assert!(a.matter.economy.ledger.balanced());
+    }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
     fn segment_damage_is_saved_and_hashed() {

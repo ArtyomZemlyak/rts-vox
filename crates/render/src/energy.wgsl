@@ -62,6 +62,26 @@ fn energy_ball(ro:vec3<f32>,rd:vec3<f32>,centre:vec3<f32>,radius:f32,limit:f32,t
     }
     return result;
 }
+// Annihilation bolt (ADR-285): the picture bends around the bolt and, for
+// a moment, around the point it struck. Presentation only: the offset is
+// applied to the already-drawn scene before any light is added.
+fn anni_warp(uv:vec2<f32>)->vec2<f32> {
+    var centre=vec3(0.0);var strength=0.0;var radius=0.0;
+    if p.energy.w>0.0 {
+        centre=p.energy.xyz;strength=0.05;radius=0.12;
+    } else if p.control.z>0.5 {
+        let age=p.control.y/60.0;
+        if age<0.9 {centre=p.energy.xyz;strength=0.10*(1.0-age/0.9);radius=0.12+age*0.25;}
+    }
+    if strength<=0.0 {return vec2(0.0);}
+    let clip=p.clip_from_world*vec4(centre,1.0);
+    if clip.w<=0.0 {return vec2(0.0);}
+    let cuv=vec2(clip.x/clip.w*0.5+0.5,0.5-clip.y/clip.w*0.5);
+    let d=uv-cuv;let r=length(d);
+    if r>=radius || r<1e-4 {return vec2(0.0);}
+    let ring=sin(r/radius*9.42-p.weapon.y*30.0)*0.5+0.5;
+    return d/r*strength*(1.0-r/radius)*(0.6+0.4*ring);
+}
 fn energy_effect(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->vec3<f32> {
     if p.weapon.x<0.5 {return vec3(0.0);}
     var colour=vec3(0.0);let time=p.weapon.y;

@@ -302,7 +302,14 @@ pub fn input(
         scene.notice.clear();
         if edit.editing {
             edit.selected = None;
-            match range_sim(scene.energy, scene.power, edit.layout.as_ref(), false, None) {
+            match range_sim(
+                scene.energy,
+                scene.anni,
+                scene.power,
+                edit.layout.as_ref(),
+                false,
+                None,
+            ) {
                 Ok(sim) => edit.pending = Some(sim),
                 Err(e) => scene.notice = e,
             }
@@ -396,7 +403,7 @@ pub fn input(
         edit.rotate = !edit.rotate;
     }
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let cfg = scaled_config(scene.energy, scene.power);
+    let cfg = scaled_config(scene.energy, scene.anni, scene.power);
     if ctrl && (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyY)) {
         let redo = keys.just_pressed(KeyCode::KeyY);
         if let Err(e) = edit.undo(cfg, redo) {
@@ -783,7 +790,7 @@ mod tests {
                 ),
                 true,
             ),
-            scaled_config(true, 1000),
+            scaled_config(true, false, 1000),
         )
     }
     #[test]
@@ -837,7 +844,9 @@ mod tests {
         while too_many.units.len() <= 8 {
             too_many.units.push(too_many.units[0].clone());
         }
-        assert!(w.commit(too_many, scaled_config(true, 1000)).is_err());
+        assert!(w
+            .commit(too_many, scaled_config(true, false, 1000))
+            .is_err());
     }
 
     #[test]
@@ -849,6 +858,7 @@ mod tests {
         let scene = Scene {
             sim,
             energy: true,
+            anni: false,
             paused: true,
             frame: 0,
             finish: 420,

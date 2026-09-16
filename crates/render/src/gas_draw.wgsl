@@ -77,6 +77,19 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
 }
 @fragment fn fragment(input:In)->@location(0) vec4<f32> {
     var bg=textureSampleLevel(scene,scene_sampler,input.uv,0.0);
+    if p.weapon.x>1.5 && p.control.w<0.5 {
+        // The annihilation bolt refracts what is behind it, each channel a
+        // little differently (ADR-285).
+        let warp=anni_warp(input.uv);
+        if dot(warp,warp)>0.0 {
+            let lo=vec2(0.0);let hi=vec2(1.0);
+            bg=vec4(
+                textureSampleLevel(scene,scene_sampler,clamp(input.uv-warp*1.15,lo,hi),0.0).r,
+                textureSampleLevel(scene,scene_sampler,clamp(input.uv-warp,lo,hi),0.0).g,
+                textureSampleLevel(scene,scene_sampler,clamp(input.uv-warp*0.85,lo,hi),0.0).b,
+                bg.a);
+        }
+    }
     let ndc=vec2(input.uv.x*2.0-1.0,1.0-input.uv.y*2.0);
     let near=p.world_from_clip*vec4(ndc,1.0,1.0);
     let far=p.world_from_clip*vec4(ndc,0.00001,1.0);

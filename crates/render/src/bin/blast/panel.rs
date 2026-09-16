@@ -10,7 +10,7 @@ pub struct Panel {
     pub blocked: bool,
     pub routes: bool,
     keys: Vec<KeyCode>,
-    pending: Option<(bool, u32)>,
+    pending: Option<(u8, u32)>,
 }
 impl Panel {
     pub fn new(drive: bool, demo: bool) -> Self {
@@ -35,7 +35,8 @@ pub enum Action {
     Reset,
     Patrol,
     Routes,
-    Weapon(bool),
+    /// Shell 0, energy bolt 1, annihilation bolt 2 (ADR-285).
+    Weapon(u8),
     Power(u32),
     Tool(Tool),
     Delete,
@@ -143,8 +144,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
-                    ("Энергопушка", Action::Weapon(true)),
-                    ("Фугас", Action::Weapon(false)),
+                    ("Энергопушка", Action::Weapon(1)),
+                    ("Фугас", Action::Weapon(0)),
+                    ("Анипушка", Action::Weapon(2)),
                 ],
             ),
             (
@@ -340,7 +342,7 @@ pub fn actions(
                 panel.pending = Some((e, p));
             }
             Action::Power(p) => {
-                let e = panel.pending.map_or(scene.energy, |v| v.0);
+                let e = panel.pending.map_or(weapon_of(&scene), |v| v.0);
                 panel.pending = Some((e, p));
             }
             Action::Tool(t) => {
@@ -392,7 +394,9 @@ pub fn actions(
                             }
                         }
                     }
-                    if let Err(e) = edit.commit(layout, scaled_config(scene.energy, scene.power)) {
+                    if let Err(e) =
+                        edit.commit(layout, scaled_config(scene.energy, scene.anni, scene.power))
+                    {
                         scene.notice = e;
                     }
                 }
@@ -427,13 +431,26 @@ pub fn actions(
         }
     }
     if (edit.editing || scene.sim.ready()) && panel.pending.is_some() {
-        let (e, p) = panel.pending.take().unwrap();
-        scene.energy = e;
+        let (w, p) = panel.pending.take().unwrap();
+        scene.energy = w >= 1;
+        scene.anni = w == 2;
         scene.power = p;
-        scene.sim.reconfigure(scaled_config(e, p));
+        let cfg = scaled_config(scene.energy, scene.anni, p);
+        scene.sim.reconfigure(cfg);
         let origin = gas.params.origin;
-        configure_gas(&scene.sim, e, &mut gas);
+        configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
         gas.params.origin = origin;
+    }
+}
+/// The scene's weapon as the panel counts them: shell 0, energy bolt 1,
+/// annihilation bolt 2.
+fn weapon_of(scene: &Scene) -> u8 {
+    if scene.anni {
+        2
+    } else if scene.energy {
+        1
+    } else {
+        0
     }
 }
 pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCode>>) {
@@ -462,7 +479,7 @@ pub fn refresh(
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
             Action::Fire => panel.ground_fire,
-            Action::Weapon(e) => e == panel.pending.map_or(scene.energy, |v| v.0),
+            Action::Weapon(w) => w == panel.pending.map_or(weapon_of(&scene), |v| v.0),
             Action::Power(p) => p == panel.pending.map_or(scene.power, |v| v.1),
             Action::Tool(t) => edit.tool == t,
             Action::Patrol => scene.sim.patrols_running,

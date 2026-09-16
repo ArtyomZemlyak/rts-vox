@@ -38,6 +38,9 @@ use workbench::Workshop;
 struct Scene {
     sim: BlastRange,
     energy: bool,
+    /// The annihilation bolt: an energy weapon for the picture, its own
+    /// preset for the simulation (ADR-285).
+    anni: bool,
     paused: bool,
     frame: u32,
     finish: u32,
@@ -96,21 +99,35 @@ struct Art {
     ember: Handle<StandardMaterial>,
 }
 
-fn config(energy: bool) -> ExplosionConfig {
-    ExplosionConfig::from_ron(if energy {
+fn config(energy: bool, anni: bool) -> ExplosionConfig {
+    ExplosionConfig::from_ron(if anni {
+        include_str!("../../../../data/anni-cannon.ron")
+    } else if energy {
         include_str!("../../../../data/energy-cannon.ron")
     } else {
         include_str!("../../../../data/explosion.ron")
     })
     .expect("weapon RON")
 }
-fn scaled_config(energy: bool, power: u32) -> ExplosionConfig {
-    let mut c = config(energy);
+fn scaled_config(energy: bool, anni: bool, power: u32) -> ExplosionConfig {
+    let mut c = config(energy, anni);
     c.energy = c.energy * power / 1000;
     c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
     c.gas_pressure_milli = (c.gas_pressure_milli * power as i32 / 1000).min(10000);
     c.gas_source_radius = c.gas_source_radius * (1000 + power as i32) / 2000;
     c
+}
+/// What the gas shader reads as the weapon: shell 0, energy bolt 1, the
+/// annihilation bolt 2 (ADR-285), which the shader treats as an energy bolt
+/// that also bends the picture.
+fn weapon_code(energy: bool, anni: bool) -> f32 {
+    if anni {
+        2.0
+    } else if energy {
+        1.0
+    } else {
+        0.0
+    }
 }
 fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
     file.map(|file| {
@@ -120,12 +137,13 @@ fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
 }
 fn range_sim(
     energy: bool,
+    anni: bool,
     power: u32,
     layout: Option<&RangeLayout>,
     uncovered: bool,
     kind: Option<RangeUnitKind>,
 ) -> Result<BlastRange, String> {
-    let c = scaled_config(energy, power);
+    let c = scaled_config(energy, anni, power);
     if let Some(layout) = layout {
         let mut layout = layout.clone();
         if uncovered {
@@ -158,7 +176,7 @@ fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
 }
-fn configure_gas(sim: &BlastRange, energy: bool, gas: &mut GasInput) {
+fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput) {
     let c = &sim.config;
     let target = sim.layout.as_ref().map_or(
         if energy {
@@ -190,7 +208,7 @@ fn configure_gas(sim: &BlastRange, energy: bool, gas: &mut GasInput) {
     gas.params.energy = Vec4::ZERO;
     gas.params.source = Vec4::ZERO;
     gas.params.control.y = 0.0;
-    gas.params.weapon.x = if energy { 1.0 } else { 0.0 };
+    gas.params.weapon.x = weapon_code(energy, anni);
     gas.params.weapon.z = if sim.layout.is_some() { 1.0 } else { 0.0 };
     gas.params.weapon.w = look::scene().smoke_extinction;
 }
@@ -199,6 +217,7 @@ fn main() {
     let mut all_frames = false;
     let mut finish = None;
     let mut energy = false;
+    let mut anni = false;
     let mut repeat = false;
     let mut view = 0;
     let mut requested_view = None;
@@ -272,10 +291,11 @@ fn main() {
             "--realtime" => realtime = true,
             "--weapon" => {
                 i += 1;
-                energy = match args.get(i).map(String::as_str) {
-                    Some("energy") => true,
-                    Some("shell") => false,
-                    _ => panic!("--weapon expects shell or energy"),
+                (energy, anni) = match args.get(i).map(String::as_str) {
+                    Some("energy") => (true, false),
+                    Some("anni") => (true, true),
+                    Some("shell") => (false, false),
+                    _ => panic!("--weapon expects shell, energy or anni"),
                 };
             }
             "--capture" | "--shots" => {
@@ -311,8 +331,15 @@ fn main() {
     let layout = read_layout(layout_file.as_deref()).expect("range file");
     assert!(!edit || layout.is_some(), "--edit needs --range");
     let workshop = Workshop::new(layout, edit);
-    let mut sim =
-        range_sim(energy, power, workshop.layout.as_ref(), uncovered, None).expect("valid range");
+    let mut sim = range_sim(
+        energy,
+        anni,
+        power,
+        workshop.layout.as_ref(),
+        uncovered,
+        None,
+    )
+    .expect("valid range");
     if drive {
         sim.control();
         view = 1;
@@ -374,7 +401,7 @@ fn main() {
     );
     gas.params.sun = (-Vec3::from(look::sun_dir())).extend(1.8);
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
-    gas.params.weapon.x = if energy { 1.0 } else { 0.0 };
+    gas.params.weapon.x = weapon_code(energy, anni);
     gas.params.weapon.w = look::scene().smoke_extinction;
     gas.params.beam = Vec4::new(
         MUZZLE[0] as f32 + 2.0,
@@ -382,7 +409,7 @@ fn main() {
         MUZZLE[2] as f32,
         0.0,
     );
-    configure_gas(&sim, energy, &mut gas);
+    configure_gas(&sim, energy, anni, &mut gas);
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
@@ -410,6 +437,7 @@ fn main() {
         .insert_resource(Scene {
             sim,
             energy,
+            anni,
             paused: edit,
             frame: 0,
             finish,
@@ -1095,12 +1123,18 @@ fn advance(
         scene.view = 0;
     }
     let mut energy = scene.energy;
+    let mut anni = scene.anni;
     let mut power = scene.power;
     let mut uncovered = scene.uncovered;
     let mut kind = scene.unit_override;
     let mut changed = keys.just_pressed(KeyCode::F5);
     if keys.just_pressed(KeyCode::KeyW) {
-        energy = !energy;
+        // Shell, energy bolt, annihilation bolt, and round again.
+        (energy, anni) = match (energy, anni) {
+            (false, _) => (true, false),
+            (true, false) => (true, true),
+            (true, true) => (false, false),
+        };
         changed = true;
     }
     if keys.just_pressed(KeyCode::KeyP) {
@@ -1147,7 +1181,7 @@ fn advance(
         let next = if let Some(sim) = authored.filter(|_| !changed) {
             Ok(sim)
         } else {
-            range_sim(energy, power, reloaded.as_ref(), uncovered, kind)
+            range_sim(energy, anni, power, reloaded.as_ref(), uncovered, kind)
         };
         let Ok(sim) = next else {
             scene.notice = format!("Layout rejected: {}", next.err().unwrap());
@@ -1167,6 +1201,7 @@ fn advance(
         }
         *visual = moving::Visual::default();
         scene.energy = energy;
+        scene.anni = anni;
         scene.power = power;
         scene.uncovered = uncovered;
         scene.unit_override = kind;
@@ -1180,7 +1215,7 @@ fn advance(
         scene.skip_delta = true;
         gas.params.control.z = 0.0;
         gas.atmosphere.clear();
-        configure_gas(&scene.sim, scene.energy, &mut gas);
+        configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
         fill_terrain(&scene.sim, &mut gas);
         let rotation = gun_rotation(&scene.sim);
         let pivot = Vec3::from(GUN.map(|v| v as f32));
