@@ -164,6 +164,21 @@ impl Matter {
         self.remaining_mj -= cost;
         self.spent_mj += cost;
     }
+    /// Terrain the world let go of (ADR-299): pieces when the weapon
+    /// leaves debris, nothing when it annihilates — the dig then sinks
+    /// the cells like any other. Returns pieces made and cells put back.
+    pub fn collapse(
+        &mut self,
+        w: &mut World,
+        cells: &[([u32; 3], voxel::store::Mat)],
+        material: bool,
+    ) -> (usize, usize) {
+        if !material {
+            return (0, 0);
+        }
+        self.debris
+            .pieces_from_cells(w, cells, &mut self.economy, &self.tuning, self.fragment_box)
+    }
     /// A voxel that melted (ADR-290): it runs off as debris of its own
     /// material, its matter moving from the ground to the piece, with no
     /// throw. `false` when the pool has no room; it then stays hot.

@@ -416,6 +416,33 @@ mod tests {
         assert!(e.balanced());
     }
 
+    /// Cells the world let go of become pieces at zero speed; with no
+    /// room in the pool the whole shape goes back into the world, so no
+    /// matter is lost (ADR-299).
+    #[test]
+    fn unsupported_cells_become_pieces_or_go_back_when_the_pool_is_full() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let mut t = tuning().blast;
+        w.flush();
+        let cells: Vec<([u32; 3], Mat)> = (0..8u32)
+            .map(|i| ([48 + i % 2, 20 + i / 2 % 2, 48 + i / 4], 1))
+            .collect();
+        let (made, returned) = b.pieces_from_cells(&mut w, &cells, &mut e, &t, 2);
+        assert_eq!((made, returned), (1, 0));
+        assert_eq!(b.fragments[0].count, 8);
+        assert_eq!(b.fragments[0].velocity, V3::ZERO);
+        assert_eq!(e.ledger.held(b.fragments[0].held), 8 * e.per_voxel(1));
+        assert!(e.balanced());
+        t.max_fragments = 1;
+        let more: Vec<([u32; 3], Mat)> = vec![([60, 20, 60], 1)];
+        let (made, returned) = b.pieces_from_cells(&mut w, &more, &mut e, &t, 2);
+        assert_eq!((made, returned), (0, 1));
+        w.begin_tick();
+        w.flush();
+        assert!(w.solid(60, 20, 60), "the cell did not go back");
+        assert!(e.balanced());
+    }
+
     struct Ground;
     impl voxel::world::Generator for Ground {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
@@ -1508,72 +1535,142 @@ impl Bursts {
             for shape in shape_components(whole, side) {
                 let count = shape.count_ones();
                 let motion_mj = total_motion_mj * count as u64 / whole.count_ones() as u64;
-                let Some(d) = e.mats.get(old) else {
-                    continue;
-                };
-                let mass_g = (d.density as u64 * t.density_kg_m3_per_density as u64)
-                    .saturating_mul((voxel::unit::WORLD_MM as u64).pow(3))
-                    / 1_000_000
-                    * count as u64;
-                let position = centre(key).add(shape_centre(shape, side));
-                let mut direction = position.sub(v3(at.map(Fx::from_int)));
-                // Ground reflection lifts ejecta. This redirects, without adding to,
-                // the assigned kinetic energy; no renderer randomness enters physics.
-                direction.y = direction
-                    .y
-                    .abs()
-                    .add(
-                        Fx::from_ratio(t.lift_pct as i32, 100)
-                            .mul(direction.x.abs().add(direction.z.abs())),
-                    )
-                    .add(Fx::ONE);
-                let norm = direction.len_sq().sqrt();
-                // speed² in (world units/tick)², computed before Fx to avoid overflow.
-                let denom = mass_g.max(1) as u128
-                    * (voxel::unit::WORLD_MM as u128).pow(2)
-                    * (crate::TICKS_PER_SECOND as u128).pow(2);
-                let v2_raw = ((motion_mj as u128 * 2_000_000) << 32) / denom;
-                let speed = Fx(v2_raw.min(i64::MAX as u128) as i64)
-                    .sqrt()
-                    .min(Fx::from_ratio(
-                        t.max_speed_mm_s as i32,
-                        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-                    ));
-                let velocity = direction.scale(speed.div(norm));
-                let mm_s = arr(velocity).map(|v| {
-                    v.mul(Fx::from_int(
-                        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-                    ))
-                    .to_int_trunc() as i64
-                });
-                self.motion_mj = self.motion_mj.saturating_add(voxel::impact::kinetic_mj(
-                    mass_g.min(u32::MAX as u64) as u32,
-                    mm_s,
-                ));
-                let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
-                let amount = e.per_voxel(old) * count as u64;
-                e.ledger.reveal(e.ground, amount);
-                e.ledger.transfer(e.ground, held, amount);
-                self.next_id += 1;
-                self.removed += count as u64;
-                self.fragments.push(Fragment {
-                    id: self.next_id,
-                    position,
-                    velocity,
-                    material: old,
-                    paint: None,
-                    mm: voxel::unit::WORLD_MM,
-                    basis: IDENTITY,
-                    mass_g,
-                    count,
-                    shape,
-                    side,
-                    chunk: None,
-                    held,
-                    resting: false,
-                });
+                self.spawn(key, old, at, side, shape, motion_mj, e, t);
             }
         }
+    }
+
+    /// One piece: the `shape` cells of `old` in the `side`-box at `key`,
+    /// thrown from `at` with `motion_mj` of kinetic energy, its matter
+    /// revealed from the ground into a container of its own. `false` for
+    /// a material the registry does not know.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        &mut self,
+        key: [u32; 3],
+        old: Mat,
+        at: [i32; 3],
+        side: u8,
+        shape: u64,
+        motion_mj: u64,
+        e: &mut Economy,
+        t: &Blast,
+    ) -> bool {
+        let count = shape.count_ones();
+        let Some(d) = e.mats.get(old) else {
+            return false;
+        };
+        let mass_g = (d.density as u64 * t.density_kg_m3_per_density as u64)
+            .saturating_mul((voxel::unit::WORLD_MM as u64).pow(3))
+            / 1_000_000
+            * count as u64;
+        let position = centre(key).add(shape_centre(shape, side));
+        let mut direction = position.sub(v3(at.map(Fx::from_int)));
+        // Ground reflection lifts ejecta. This redirects, without adding to,
+        // the assigned kinetic energy; no renderer randomness enters physics.
+        direction.y = direction
+            .y
+            .abs()
+            .add(
+                Fx::from_ratio(t.lift_pct as i32, 100)
+                    .mul(direction.x.abs().add(direction.z.abs())),
+            )
+            .add(Fx::ONE);
+        let norm = direction.len_sq().sqrt();
+        // speed² in (world units/tick)², computed before Fx to avoid overflow.
+        let denom = mass_g.max(1) as u128
+            * (voxel::unit::WORLD_MM as u128).pow(2)
+            * (crate::TICKS_PER_SECOND as u128).pow(2);
+        let v2_raw = ((motion_mj as u128 * 2_000_000) << 32) / denom;
+        let speed = Fx(v2_raw.min(i64::MAX as u128) as i64)
+            .sqrt()
+            .min(Fx::from_ratio(
+                t.max_speed_mm_s as i32,
+                voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+            ));
+        let velocity = direction.scale(speed.div(norm));
+        let mm_s = arr(velocity).map(|v| {
+            v.mul(Fx::from_int(
+                voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+            ))
+            .to_int_trunc() as i64
+        });
+        self.motion_mj = self.motion_mj.saturating_add(voxel::impact::kinetic_mj(
+            mass_g.min(u32::MAX as u64) as u32,
+            mm_s,
+        ));
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        let amount = e.per_voxel(old) * count as u64;
+        e.ledger.reveal(e.ground, amount);
+        e.ledger.transfer(e.ground, held, amount);
+        self.next_id += 1;
+        self.removed += count as u64;
+        self.fragments.push(Fragment {
+            id: self.next_id,
+            position,
+            velocity,
+            material: old,
+            paint: None,
+            mm: voxel::unit::WORLD_MM,
+            basis: IDENTITY,
+            mass_g,
+            count,
+            shape,
+            side,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        true
+    }
+
+    /// Cells the world let go of (ADR-299: terrain left without support)
+    /// become pieces at zero speed, grouped by box and material like burst
+    /// debris. A shape the pool has no room for goes back into the world
+    /// cell by cell, so that no matter is lost; it will be found hanging
+    /// again. Returns pieces made and cells put back.
+    pub fn pieces_from_cells(
+        &mut self,
+        world: &mut voxel::World,
+        cells: &[([u32; 3], Mat)],
+        e: &mut Economy,
+        t: &Blast,
+        side: u8,
+    ) -> (usize, usize) {
+        let side = side.clamp(1, 4);
+        let s = u32::from(side);
+        let mut groups: BTreeMap<([u32; 3], Mat), u64> = BTreeMap::new();
+        for &(p, m) in cells {
+            if m == AIR {
+                continue;
+            }
+            let origin = p.map(|v| v / s * s);
+            let sub = (p[0] - origin[0]) + s * (p[1] - origin[1]) + s * s * (p[2] - origin[2]);
+            *groups.entry((origin, m)).or_default() |= 1u64 << sub;
+        }
+        let (mut made, mut returned) = (0, 0);
+        for ((key, m), whole) in groups {
+            let at = key.map(|v| v as i32 + i32::from(side) / 2);
+            for shape in shape_components(whole, side) {
+                if self.fragment_room(t) > 0 && self.spawn(key, m, at, side, shape, 0, e, t) {
+                    made += 1;
+                    continue;
+                }
+                for i in 0..box_cells(side) {
+                    if shape & (1 << i) != 0 {
+                        let c = shape_cell(i, side);
+                        world.queue_edit(Edit::put(
+                            key[0] + c[0] as u32,
+                            key[1] + c[1] as u32,
+                            key[2] + c[2] as u32,
+                            m,
+                        ));
+                        returned += 1;
+                    }
+                }
+            }
+        }
+        (made, returned)
     }
 
     pub fn step_fragments(

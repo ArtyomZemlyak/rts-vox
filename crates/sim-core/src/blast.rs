@@ -14,6 +14,8 @@ use modding::range::{RangeLayout, RangeShieldDef, RangeUnitKind};
 use motion::Motion;
 use phys::blast::Wave;
 use std::collections::BTreeMap;
+use voxel::bodies::Bodies;
+use voxel::collapse::CollapseLayer;
 use voxel::topo::unit::CoreBufs;
 use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
@@ -1002,6 +1004,21 @@ pub struct BlastRange {
     /// Columns of resting debris and their tops, rebuilt each tick from
     /// the pieces (ADR-292); derived, not saved.
     pub rubble: nav::vehicle::Rubble,
+    /// The batch's support graph over the range's world (ADR-299): what
+    /// the tick's edits leave hanging is dug out and becomes pieces.
+    collapse: CollapseLayer,
+    /// The layer's outlet, drained every tick: the range never lets a
+    /// body fall as a body.
+    bodies: Bodies,
+    /// Cells that fell for want of support. In the snapshot and the hash.
+    pub collapsed_cells: u64,
+    /// Edits the layer has not seen yet: it waits for the wave's claims
+    /// to clear and for room in the piece pool, and takes them in a batch.
+    /// The latest edit per cell. In the snapshot.
+    collapse_backlog: BTreeMap<[u32; 3], voxel::world::Edit>,
+    /// The data ceiling on one fallen body; the room in the pool caps it
+    /// further tick by tick.
+    collapse_cap: usize,
 }
 
 impl BlastRange {
@@ -1117,6 +1134,11 @@ impl BlastRange {
                 layout: layout.clone(),
             }),
         );
+        let stock =
+            crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
+        let mut collapse = CollapseLayer::new(&world);
+        collapse.set_max_body_cells(stock.max_body_cells as usize);
+        let bodies = Bodies::new(stock.max_bodies, Fx::ZERO);
         let mut units: Vec<RangeUnit> = if let Some(r) = &layout {
             r.units
                 .iter()
@@ -1199,6 +1221,11 @@ impl BlastRange {
             ))
             .expect("heat tuning"),
             rubble: nav::vehicle::Rubble::new(),
+            collapse,
+            bodies,
+            collapsed_cells: 0,
+            collapse_backlog: BTreeMap::new(),
+            collapse_cap: stock.max_body_cells as usize,
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result
@@ -1242,7 +1269,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(23);
+        b.u32(24);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1393,12 +1420,21 @@ impl BlastRange {
             b.u32(s.hits);
         }
         self.heat.save(&mut b);
+        self.collapse.save(&mut b);
+        b.u64(self.collapsed_cells);
+        b.u32(self.collapse_backlog.len() as u32);
+        for (p, e) in &self.collapse_backlog {
+            for v in p {
+                b.u32(*v);
+            }
+            b.u32(u32::from(e.mat));
+        }
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 23 {
+        if s.u32() != 24 {
             return None;
         }
         let extended = s.bool();
@@ -1758,6 +1794,27 @@ impl BlastRange {
             }
         }
         r.heat = Heat::load(&mut s, &r.world, &r.heat_tuning)?;
+        if !r.collapse.load(&mut s) {
+            return None;
+        }
+        r.collapsed_cells = s.u64();
+        let backlog = s.u32();
+        if backlog > 1 << 20 {
+            return None;
+        }
+        for _ in 0..backlog {
+            let (x, y, z) = (s.u32(), s.u32(), s.u32());
+            let mat = s.u32();
+            if mat > u32::from(u16::MAX) {
+                return None;
+            }
+            let e = if mat == 0 {
+                voxel::world::Edit::dig(x, y, z)
+            } else {
+                voxel::world::Edit::put(x, y, z, mat as u16)
+            };
+            r.collapse_backlog.insert([x, y, z], e);
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2111,6 +2168,52 @@ impl BlastRange {
             }
         }
         self.world.flush();
+        // Everything without support falls (ADR-299): the batch's collapse
+        // layer finds what the edits left hanging and digs it out as
+        // bodies; the range turns those into debris pieces at once, and the
+        // annihilation bolt's digs sink them like any other. The layer
+        // waits for the wave's claims to clear, so that it never takes a
+        // claimed cell from under the wave, and takes bodies no larger
+        // than the room in the piece pool, so that no cell has to go back.
+        for e in self.world.edits() {
+            self.collapse_backlog.insert([e.x, e.y, e.z], *e);
+        }
+        let room = self.matter.debris.fragment_room(&self.matter.tuning) as usize;
+        let mut fallen = Vec::new();
+        if !self.collapse_backlog.is_empty() && self.matter.debris.claims() == 0 && room > 0 {
+            self.collapse
+                .set_max_body_cells(self.collapse_cap.min(room));
+            let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
+            let stats = self
+                .collapse
+                .apply(&mut self.world, &edits, &mut self.bodies);
+            // A body held back for room is tried again when room grows;
+            // one over the data ceiling is left where it hangs.
+            if stats.too_big == 0 || room >= self.collapse_cap {
+                self.collapse_backlog.clear();
+            }
+            fallen = std::mem::take(&mut self.bodies.list);
+            self.bodies.spawned.clear();
+        }
+        for body in &fallen {
+            let cells: Vec<([u32; 3], u16)> = body
+                .voxels
+                .iter()
+                .map(|v| {
+                    (
+                        [
+                            (body.ox + i64::from(v.x)) as u32,
+                            (body.oy + i64::from(v.y)) as u32,
+                            (body.oz + i64::from(v.z)) as u32,
+                        ],
+                        v.mat,
+                    )
+                })
+                .collect();
+            self.collapsed_cells += cells.len() as u64;
+            self.matter
+                .collapse(&mut self.world, &cells, self.config.material_energy_j > 0);
+        }
         self.matter.step_sections(&mut self.units);
         self.matter.shed_segments(&mut self.units);
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
@@ -2150,8 +2253,21 @@ impl BlastRange {
                     .remove(&[e.x as i32, e.y as i32, e.z as i32]);
             }
         }
-        self.removed += self.world.edits().iter().filter(|e| e.mat == 0).count();
-        for &(_, mat) in self.world.taken() {
+        // What left the world for good this tick: a cell dug and put back
+        // within one drain (ADR-299) was not removed.
+        let mut dug: BTreeMap<[u32; 3], u16> = BTreeMap::new();
+        for &(e, previous) in self.world.completed() {
+            let p = [e.x, e.y, e.z];
+            if e.mat == 0 {
+                if previous != 0 && e.expected_material().is_none_or(|x| x == previous) {
+                    dug.insert(p, previous);
+                }
+            } else {
+                dug.remove(&p);
+            }
+        }
+        self.removed += dug.len();
+        for &mat in dug.values() {
             if let Some(n) = self.removed_materials.get_mut(mat as usize) {
                 *n += 1;
             }
@@ -3489,6 +3605,78 @@ mod tests {
             assert!(hits > 0, "no cells found in the box");
         }
     }
+    /// A block of concrete left in the air falls (ADR-299): the collapse
+    /// layer digs it out, the range turns it into pieces of the same
+    /// matter, they settle on the ground, the ledger balances, and the
+    /// snapshot carries the support graph and the count.
+    #[test]
+    fn an_unsupported_block_falls_as_pieces_of_its_own_matter() {
+        let mut a = BlastRange::new(config());
+        a.patrols_running = false;
+        a.fire_tick = u32::MAX;
+        let base = [GUN[0] - 40, FLOOR + 8, GUN[2] + 20];
+        let mut cells = Vec::new();
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    let p = [base[0] + x, base[1] + y, base[2] + z];
+                    a.world.queue_edit(voxel::world::Edit::put(
+                        p[0] as u32,
+                        p[1] as u32,
+                        p[2] as u32,
+                        2,
+                    ));
+                    cells.push(p);
+                }
+            }
+        }
+        // The range's own flush applies the block, the collapse layer sees
+        // those edits the same tick, and the pieces appear at once; the
+        // cells themselves go with the next tick's edits.
+        let pieces_before = a.matter.debris.fragments.len();
+        a.step();
+        assert!(cells.iter().all(|p| material(&a.world, *p) == 2));
+        let mut gone = None;
+        for _ in 0..30 {
+            a.step();
+            if cells.iter().all(|p| material(&a.world, *p) == 0) {
+                gone = Some(a.tick);
+                break;
+            }
+        }
+        gone.expect("the block never fell");
+        assert_eq!(a.collapsed_cells, 64);
+        let held: u64 = a.matter.debris.fragments[pieces_before..]
+            .iter()
+            .filter(|f| f.material == 2)
+            .map(|f| u64::from(f.count))
+            .sum();
+        assert_eq!(held, 64, "the pieces do not hold the block's cells");
+        assert!(a.matter.economy.ledger.balanced());
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(b.collapsed_cells, 64);
+        for _ in 0..300 {
+            a.step();
+        }
+        let concrete: Vec<_> = a
+            .matter
+            .debris
+            .fragments
+            .iter()
+            .filter(|f| f.material == 2 && f.chunk.is_none())
+            .collect();
+        assert!(
+            !concrete.is_empty() && concrete.iter().all(|f| f.resting),
+            "pieces still in the air"
+        );
+        assert!(
+            concrete
+                .iter()
+                .all(|f| f.position.y < Fx::from_int(FLOOR + 8)),
+            "the pieces did not come down"
+        );
+    }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
     fn segment_damage_is_saved_and_hashed() {
@@ -3877,6 +4065,12 @@ mod tests {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.patrols_running = false;
+        // Crowns the pad's clearing left hanging fall first (ADR-299); the
+        // walker itself must fell nothing.
+        for _ in 0..60 {
+            a.step();
+        }
+        let felled_before = a.removed_materials[4] + a.removed_materials[5];
         let id = a
             .units
             .iter()
@@ -3910,7 +4104,10 @@ mod tests {
                 u.motion.pos
             );
         }
-        assert_eq!(a.removed_materials[4] + a.removed_materials[5], 0);
+        assert_eq!(
+            a.removed_materials[4] + a.removed_materials[5],
+            felled_before
+        );
     }
     #[test]
     fn a_waiting_section_does_not_freeze_damage_elsewhere_on_the_body() {
