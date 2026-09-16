@@ -170,6 +170,9 @@ pub struct Blast {
     pub max_fragments: u32,
     pub max_flying: u32,
     pub pile_cell: u32,
+    /// Cells per side of the box a burst's debris pieces are grouped in,
+    /// `1..=4` (ADR-284): the batch's weapons. A range weapon names its own.
+    pub fragment_box: u32,
     pub resistance_per_strength: u32,
     pub fracture_kj_m3_per_strength: u32,
     pub density_kg_m3_per_density: u32,
@@ -416,6 +419,7 @@ impl Tuning {
             || b.max_flying == 0
             || b.max_flying > b.max_fragments
             || b.pile_cell == 0
+            || !(1..=4).contains(&b.fragment_box)
             || b.resistance_per_strength == 0
             || b.fracture_kj_m3_per_strength == 0
             || b.density_kg_m3_per_density == 0

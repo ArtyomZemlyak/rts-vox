@@ -1170,7 +1170,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(20);
+        b.u32(21);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1326,7 +1326,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 20 {
+        if s.u32() != 21 {
             return None;
         }
         let extended = s.bool();
@@ -1949,7 +1949,8 @@ impl BlastRange {
                     self.config.heat_units,
                     self.config.heat_per_cell,
                 );
-                self.matter.begin(self.config.material_energy_j);
+                self.matter
+                    .begin(self.config.material_energy_j, self.config.fragment_box);
                 self.explosion = Some(Explosion::with_damage(
                     &self.world,
                     at,
@@ -2981,6 +2982,35 @@ mod tests {
             a.units[0].motion.legs_buckled
         );
         assert!(a.matter.economy.ledger.balanced());
+    }
+    /// A shell's debris comes in pieces up to three cells a side, a bolt's
+    /// within two (ADR-284): the weapon names the box.
+    #[test]
+    fn a_shell_throws_bigger_pieces_than_a_bolt() {
+        let mut shell = BlastRange::new(config());
+        assert_eq!(shell.config.fragment_box, 3);
+        for _ in 0..400 {
+            shell.step();
+        }
+        let pieces = &shell.matter.debris.fragments;
+        assert!(pieces.iter().any(|f| f.side == 3), "no three-cell pieces");
+        assert!(
+            pieces.iter().any(|f| f.side == 3 && f.count > 8),
+            "no piece bigger than a two-cell box could hold"
+        );
+        assert!(pieces
+            .iter()
+            .all(|f| f.chunk.is_some() || f.side == 3 || f.material == 3));
+        let mut bolt = BlastRange::new(
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        );
+        assert_eq!(bolt.config.fragment_box, 2);
+        for _ in 0..400 {
+            bolt.step();
+        }
+        assert!(bolt.matter.debris.fragments.iter().all(|f| f.side == 2));
+        let b = BlastRange::restore(shell.config.clone(), &shell.snapshot()).unwrap();
+        assert_eq!(shell.state_hash(), b.state_hash());
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]

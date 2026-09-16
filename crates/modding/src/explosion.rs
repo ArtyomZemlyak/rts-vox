@@ -50,8 +50,15 @@ pub struct ExplosionConfig {
     pub reaction_milli: i32,
     pub cooling_milli: i32,
     pub buoyancy_milli: i32,
+    /// Cells per side of the box this weapon's debris pieces are grouped
+    /// in, `1..=4` (ADR-284). Older presets keep the two-cell box.
+    #[serde(default = "two_cells")]
+    pub fragment_box: u32,
 }
 
+fn two_cells() -> u32 {
+    2
+}
 fn unit_roles() -> [u32; 5] {
     [1000; 5]
 }
@@ -88,6 +95,7 @@ impl ExplosionConfig {
             || !(0..=10000).contains(&c.buoyancy_milli)
             || !(0..=32).contains(&c.heat_units)
             || c.heat_per_cell > 100_000
+            || !(1..=4).contains(&c.fragment_box)
         {
             return Err("explosion parameters exceed supported bounds".into());
         }

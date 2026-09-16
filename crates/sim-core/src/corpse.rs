@@ -61,6 +61,7 @@ impl crate::World {
             mass_g: (density * (mm as u64).pow(3) / 1_000_000).max(1) * count as u64,
             count,
             shape: 1,
+            side: 2,
             chunk: Some(chunk),
             held,
             resting: false,

@@ -115,19 +115,22 @@ pub fn draw(
                 _ => [0.33, 0.33, 0.29],
             })
         };
-        let key = (f.material, f.shape, f.paint);
+        let key = (f.material, f.shape, f.side, f.paint);
         let mesh = cache
             .meshes
             .entry(key)
             .or_insert_with(|| {
-                let c = sim_core::burst::shape_centre(f.shape);
+                let c = sim_core::burst::shape_centre(f.shape, f.side);
                 let centre = pos([c.x, c.y, c.z]);
                 let mut combined: Option<Mesh> = None;
-                for i in 0..8 {
+                let side = u32::from(f.side.clamp(1, 4));
+                for i in 0..side * side * side {
                     if f.shape & (1 << i) != 0 {
-                        let offset =
-                            Vec3::new((i & 1) as f32, ((i >> 1) & 1) as f32, ((i >> 2) & 1) as f32)
-                                - centre;
+                        let offset = Vec3::new(
+                            (i % side) as f32,
+                            ((i / side) % side) as f32,
+                            (i / (side * side)) as f32,
+                        ) - centre;
                         let mut cube =
                             Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
                         cube.insert_attribute(

@@ -39,7 +39,7 @@
 //! и корпус оба броня, но один резина, другой краска.
 
 /// Material, occupied mini-volume shape and optional owner/finish/part paint.
-pub type FragmentMeshKey = (u16, u8, Option<[u8; 3]>);
+pub type FragmentMeshKey = (u16, u64, u8, Option<[u8; 3]>);
 
 use bevy::prelude::{Component, Quat, Transform, Vec3};
 use voxel::unit::{Attach, UnitBody, TURN};

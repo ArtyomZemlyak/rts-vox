@@ -23,6 +23,8 @@ pub enum ClaimResult {
 
 pub struct Matter {
     pub debris: Bursts,
+    /// Cells per side of the current weapon's debris pieces (ADR-284).
+    fragment_box: u8,
     pub economy: Economy,
     pub tuning: modding::tuning::Blast,
     pub remaining_mj: u64,
@@ -61,6 +63,7 @@ impl Matter {
             .collect();
         Self {
             debris: Bursts::default(),
+            fragment_box: 2,
             economy,
             tuning: t.blast,
             remaining_mj: 0,
@@ -102,7 +105,10 @@ impl Matter {
                 continue;
             }
             let (cost, motion) = self.cost(m);
-            if !self.debris.claim_voxel(w, p, m, at, motion, &self.tuning) {
+            if !self
+                .debris
+                .claim_voxel(w, p, m, at, motion, self.fragment_box, &self.tuning)
+            {
                 break;
             }
             self.supplied_mj += cost;
@@ -136,14 +142,16 @@ impl Matter {
             if m == AIR || !f.materials.contains(&m) || self.debris.claimed(q) {
                 continue;
             }
-            if !self.debris.claim_voxel(w, q, m, seed, 0, &self.tuning) {
+            // Felled wood crumbles in two-cell pieces whatever the weapon.
+            if !self.debris.claim_voxel(w, q, m, seed, 0, 2, &self.tuning) {
                 self.felling.insert((p, seed));
                 break;
             }
             self.spread(p, seed, f.radius);
         }
     }
-    pub fn begin(&mut self, joules: u32) {
+    pub fn begin(&mut self, joules: u32, fragment_box: u32) {
+        self.fragment_box = fragment_box.clamp(1, 4) as u8;
         self.remaining_mj = u64::from(joules) * 1000;
         self.supplied_mj += self.remaining_mj;
     }
@@ -162,10 +170,15 @@ impl Matter {
         if cost > self.remaining_mj {
             return ClaimResult::Unaffordable;
         }
-        if !self
-            .debris
-            .claim_voxel(w, p.map(|v| v as u32), m, at, motion, &self.tuning)
-        {
+        if !self.debris.claim_voxel(
+            w,
+            p.map(|v| v as u32),
+            m,
+            at,
+            motion,
+            self.fragment_box,
+            &self.tuning,
+        ) {
             return ClaimResult::Deferred;
         }
         self.pay(cost);
@@ -223,6 +236,7 @@ impl Matter {
                 mass_g,
                 count: 1,
                 shape: 1,
+                side: 2,
                 chunk: None,
                 held,
                 resting: false,
@@ -293,6 +307,7 @@ impl Matter {
                 mass_g,
                 count: 1,
                 shape: 1,
+                side: 2,
                 chunk: None,
                 held,
                 resting: false,
@@ -374,6 +389,7 @@ impl Matter {
                         * u64::from(count),
                     count,
                     shape: 1,
+                    side: 2,
                     chunk: Some(chunk),
                     held,
                     resting: false,
@@ -496,6 +512,7 @@ impl Matter {
                         * u64::from(count),
                     count,
                     shape: 1,
+                    side: 2,
                     chunk: Some(chunk),
                     held,
                     resting: false,
@@ -538,6 +555,7 @@ impl Matter {
         );
     }
     pub fn save(&self, b: &mut Blob) {
+        b.u8(self.fragment_box);
         b.u64(self.remaining_mj);
         b.u64(self.supplied_mj);
         b.u64(self.spent_mj);
@@ -565,6 +583,10 @@ impl Matter {
         b.u32s(&free);
     }
     pub fn load(&mut self, s: &mut Scan, w: &World, units: &[RangeUnit]) -> Option<()> {
+        self.fragment_box = s.u8();
+        if !(1..=4).contains(&self.fragment_box) {
+            return None;
+        }
         self.remaining_mj = s.u64();
         self.supplied_mj = s.u64();
         self.spent_mj = s.u64();
@@ -601,7 +623,7 @@ impl Matter {
                 })
                 .collect(),
         );
-        self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0)?;
+        self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0, false)?;
         let n = s.usize();
         if n > self.tuning.max_fragments as usize + units.len() + 2 {
             return None;

@@ -46,7 +46,7 @@ impl crate::World {
             }
             let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
             for ((origin, paint, layer), whole) in groups {
-                for shape in shape_components(whole) {
+                for shape in shape_components(u64::from(whole), 2) {
                     let count = shape.count_ones();
                     let before = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
                     state.debris_mm3 += count as u64 * cell_volume;
@@ -62,7 +62,7 @@ impl crate::World {
                     let cap = e.ledger.get(held).cap;
                     assert_eq!(e.ledger.lower_cap(held, cap.saturating_sub(amount)), 0);
                     let frame = frames[layer];
-                    let local = arr(shape_centre(shape));
+                    let local = arr(shape_centre(shape, 2));
                     let position = frame.world(std::array::from_fn(|a| {
                         Fx::from_int(origin[a] as i32)
                             .add(Fx::from_ratio(1, 2))
@@ -79,6 +79,7 @@ impl crate::World {
                         mass_g: (density * cell_volume / 1_000_000).max(1) * count as u64,
                         count,
                         shape,
+                        side: 2,
                         chunk: None,
                         held: container,
                         resting: false,
@@ -171,6 +172,7 @@ impl crate::World {
                 mass_g: (density * cell_volume / 1_000_000).max(1) * count as u64,
                 count,
                 shape: 1,
+                side: 2,
                 chunk: Some(chunk),
                 held: container,
                 resting: false,

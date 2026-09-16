@@ -64,7 +64,7 @@ mod tests {
         w.queue_edit(Edit::put(49, 14, 48, 2));
         w.flush();
         let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
-        let start = centre([48, 13, 48]).add(shape_centre(7));
+        let start = centre([48, 13, 48]).add(shape_centre(7, 2));
         b.fragments.push(Fragment {
             id: 1,
             position: start,
@@ -76,6 +76,7 @@ mod tests {
             mass_g: 3600,
             count: 3,
             shape: 7,
+            side: 2,
             chunk: None,
             held,
             resting: false,
@@ -155,6 +156,7 @@ mod tests {
             Claim {
                 at: [48, 13, 48],
                 motion_mj: 999,
+                side: 2,
             },
         );
         w.queue_edit(Edit::dig_if(p[0], p[1], p[2], 1));
@@ -175,6 +177,7 @@ mod tests {
             Claim {
                 at: [48, 13, 48],
                 motion_mj: 999,
+                side: 2,
             },
         );
         w.queue_edit(Edit::dig_if(48, 11, 48, 1));
@@ -241,6 +244,7 @@ mod tests {
             mass_g: 1200,
             count: 1,
             shape: 1,
+            side: 2,
             chunk: None,
             held,
             resting: false,
@@ -252,21 +256,58 @@ mod tests {
     }
     #[test]
     fn grouping_keeps_every_cell_once_and_never_glues_disconnected_corners() {
-        for shape in 1u8..=255 {
-            let pieces = shape_components(shape);
-            let mut seen = 0u8;
+        for shape in 1u64..=255 {
+            let pieces = shape_components(shape, 2);
+            let mut seen = 0u64;
             for piece in pieces {
                 assert_eq!(seen & piece, 0);
                 seen |= piece;
-                assert_eq!(shape_components(piece), [piece]);
-                let (lo, hi) = shape_bounds(piece);
+                assert_eq!(shape_components(piece, 2), [piece]);
+                let (lo, hi) = shape_bounds(piece, 2);
                 for a in 0..3 {
                     assert!(lo[a] < hi[a]);
                 }
             }
             assert_eq!(seen, shape);
         }
-        assert_eq!(shape_components(0b10000001), [1, 128]);
+        assert_eq!(shape_components(0b10000001, 2), [1, 128]);
+    }
+    /// A three-cell box groups the same way: face neighbours only, every
+    /// cell once, and a row across the box is one piece (ADR-284).
+    #[test]
+    fn a_wider_box_groups_by_faces_and_keeps_every_cell_once() {
+        // A full row along x at y = z = 0, and the far corner alone.
+        let row = 0b111u64;
+        let corner = 1u64 << 26;
+        assert_eq!(shape_components(row | corner, 3), [row, corner]);
+        // Cells 2 and 3 are x = 2, y = 0 and x = 0, y = 1: not neighbours.
+        assert_eq!(shape_components(0b1100, 3), [0b100, 0b1000]);
+        // A column along z: strides of nine.
+        let column = 1 | (1 << 9) | (1 << 18);
+        assert_eq!(shape_components(column, 3), [column]);
+        let c = arr(shape_centre(column, 3));
+        assert_eq!(c, [Fx::ZERO, Fx::ZERO, Fx::ONE]);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..200 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let shape = seed & ((1u64 << 27) - 1);
+            if shape == 0 {
+                continue;
+            }
+            let mut seen = 0u64;
+            for piece in shape_components(shape, 3) {
+                assert_eq!(seen & piece, 0);
+                seen |= piece;
+                assert_eq!(shape_components(piece, 3), [piece]);
+            }
+            assert_eq!(seen, shape);
+        }
+        // Four cells a side uses every bit of the mask.
+        let all = u64::MAX;
+        assert_eq!(shape_components(all, 4), [all]);
+        assert!(shape_bounds(all, 4).1[0] > Fx::from_int(1));
     }
     #[test]
     fn a_sealed_strong_wall_protects_soil_behind_it() {
@@ -408,6 +449,7 @@ mod tests {
                 &t.blast,
                 Some(&bodies),
                 2,
+                false,
             )
             .unwrap();
             assert_eq!(b.hash(), back.hash());
@@ -488,6 +530,8 @@ mod tests {
 struct Claim {
     at: [i32; 3],
     motion_mj: u64,
+    /// Cells per side of the box this cell's piece is grouped in (ADR-284).
+    side: u8,
 }
 
 /// A real removed world voxel, or a settled local pile of them. Coordinates and
@@ -503,8 +547,11 @@ pub struct Fragment {
     pub basis: [V3; 3],
     pub mass_g: u64,
     pub count: u32,
-    /// Occupied cells of a two-world-voxel box (x + 2*y + 4*z).
-    pub shape: u8,
+    /// Occupied cells of the piece's box, bit `x + side*y + side*side*z`
+    /// (ADR-284).
+    pub shape: u64,
+    /// Cells per side of that box, `1..=4`.
+    pub side: u8,
     pub chunk: Option<chunk::Chunk>,
     pub held: u32,
     pub resting: bool,
@@ -534,7 +581,7 @@ impl Fragment {
         if let Some(chunk) = &self.chunk {
             return chunk.bounds;
         }
-        let (lo, hi) = shape_bounds(self.shape);
+        let (lo, hi) = shape_bounds(self.shape, self.side);
         let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
         let mut low = [Fx::MAX; 3];
         let mut high = [Fx::MIN; 3];
@@ -567,27 +614,49 @@ fn arr(v: V3) -> [Fx; 3] {
 fn v3(a: [Fx; 3]) -> V3 {
     V3::new(a[0], a[1], a[2])
 }
-pub fn shape_centre(shape: u8) -> V3 {
+/// Cells of a piece's box.
+fn box_cells(side: u8) -> u32 {
+    u32::from(side.clamp(1, 4)).pow(3)
+}
+/// The cell a bit of a piece's mask names, in box coordinates.
+fn shape_cell(i: u32, side: u8) -> [i32; 3] {
+    let s = i32::from(side.clamp(1, 4));
+    let i = i as i32;
+    [i % s, (i / s) % s, i / (s * s)]
+}
+/// Centre of mass of a piece in its box, cell units.
+pub fn shape_centre(shape: u64, side: u8) -> V3 {
     let mut sum = [0i32; 3];
-    for i in 0..8 {
+    for i in 0..box_cells(side) {
         if shape & (1 << i) != 0 {
-            sum[0] += i & 1;
-            sum[1] += (i >> 1) & 1;
-            sum[2] += (i >> 2) & 1;
+            let p = shape_cell(i, side);
+            for a in 0..3 {
+                sum[a] += p[a];
+            }
         }
     }
     v3(sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32)))
 }
-fn shape_components(mut left: u8) -> Vec<u8> {
+/// Face-connected components of a mask, each a piece of its own.
+fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
+    let s = u32::from(side.clamp(1, 4));
+    let strides = [1, s, s * s];
+    let n = box_cells(side);
     let mut out = Vec::new();
     while left != 0 {
-        let mut component = 1u8 << left.trailing_zeros();
+        let mut component = 1u64 << left.trailing_zeros();
         loop {
             let before = component;
-            for i in 0..8 {
+            for i in 0..n {
                 if component & (1 << i) != 0 {
-                    for axis in [1, 2, 4] {
-                        component |= left & (1 << (i ^ axis));
+                    let p = shape_cell(i, side);
+                    for a in 0..3 {
+                        if p[a] + 1 < s as i32 {
+                            component |= left & (1 << (i + strides[a]));
+                        }
+                        if p[a] > 0 {
+                            component |= left & (1 << (i - strides[a]));
+                        }
                     }
                 }
             }
@@ -600,13 +669,13 @@ fn shape_components(mut left: u8) -> Vec<u8> {
     }
     out
 }
-fn shape_bounds(shape: u8) -> ([Fx; 3], [Fx; 3]) {
-    let centre = arr(shape_centre(shape));
-    let mut lo = [1; 3];
+fn shape_bounds(shape: u64, side: u8) -> ([Fx; 3], [Fx; 3]) {
+    let centre = arr(shape_centre(shape, side));
+    let mut lo = [i32::from(side.clamp(1, 4)) - 1; 3];
     let mut hi = [0; 3];
-    for i in 0..8 {
+    for i in 0..box_cells(side) {
         if shape & (1 << i) != 0 {
-            let p = [i & 1, (i >> 1) & 1, (i >> 2) & 1];
+            let p = shape_cell(i, side);
             for a in 0..3 {
                 lo[a] = lo[a].min(p[a]);
                 hi[a] = hi[a].max(p[a]);
@@ -658,6 +727,7 @@ impl Bursts {
     /// Reserve one conditional terrain edit for an external spatial envelope.
     /// The caller pays fracture work; confirmation remains the only source of
     /// terrain fragments and uses the same bounded claim pool as ordinary combat.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn claim_voxel(
         &mut self,
         world: &mut voxel::World,
@@ -665,6 +735,7 @@ impl Bursts {
         mat: Mat,
         at: [i32; 3],
         motion_mj: u64,
+        side: u8,
         t: &Blast,
     ) -> bool {
         if self.fragment_room(t) == 0
@@ -673,7 +744,14 @@ impl Bursts {
         {
             return false;
         }
-        self.claims.insert(p, Claim { at, motion_mj });
+        self.claims.insert(
+            p,
+            Claim {
+                at,
+                motion_mj,
+                side,
+            },
+        );
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
         true
     }
@@ -961,6 +1039,7 @@ impl Bursts {
                         Claim {
                             at: j.at,
                             motion_mj: motion,
+                            side: t.fragment_box as u8,
                         },
                     );
                     world.queue_edit(Edit::dig_if(key[0], key[1], key[2], material));
@@ -975,8 +1054,8 @@ impl Bursts {
 
     /// A no-op consumes its reservation too. Only solid -> air creates debris.
     pub fn confirm(&mut self, completed: &[(Edit, Mat)], e: &mut Economy, t: &Blast) {
-        type GroundGroup = ([u32; 3], Mat, [i32; 3]);
-        let mut groups: BTreeMap<GroundGroup, (u8, u64)> = BTreeMap::new();
+        type GroundGroup = ([u32; 3], Mat, [i32; 3], u8);
+        let mut groups: BTreeMap<GroundGroup, (u64, u64)> = BTreeMap::new();
         for &(edit, old) in completed {
             let Some(expected) = edit.expected_material() else {
                 continue;
@@ -988,14 +1067,19 @@ impl Bursts {
             if old == AIR || old != expected {
                 continue;
             }
-            let origin = key.map(|v| v / 2 * 2);
-            let sub = (key[0] - origin[0]) + 2 * (key[1] - origin[1]) + 4 * (key[2] - origin[2]);
-            let group = groups.entry((origin, old, claim.at)).or_default();
-            group.0 |= 1u8 << sub;
+            let side = u32::from(claim.side.clamp(1, 4));
+            let origin = key.map(|v| v / side * side);
+            let sub = (key[0] - origin[0])
+                + side * (key[1] - origin[1])
+                + side * side * (key[2] - origin[2]);
+            let group = groups
+                .entry((origin, old, claim.at, side as u8))
+                .or_default();
+            group.0 |= 1u64 << sub;
             group.1 = group.1.saturating_add(claim.motion_mj);
         }
-        for ((key, old, at), (whole, total_motion_mj)) in groups {
-            for shape in shape_components(whole) {
+        for ((key, old, at, side), (whole, total_motion_mj)) in groups {
+            for shape in shape_components(whole, side) {
                 let count = shape.count_ones();
                 let motion_mj = total_motion_mj * count as u64 / whole.count_ones() as u64;
                 let Some(d) = e.mats.get(old) else {
@@ -1005,7 +1089,7 @@ impl Bursts {
                     .saturating_mul((voxel::unit::WORLD_MM as u64).pow(3))
                     / 1_000_000
                     * count as u64;
-                let position = centre(key).add(shape_centre(shape));
+                let position = centre(key).add(shape_centre(shape, side));
                 let mut direction = position.sub(v3(at.map(Fx::from_int)));
                 // Ground reflection lifts ejecta. This redirects, without adding to,
                 // the assigned kinetic energy; no renderer randomness enters physics.
@@ -1057,6 +1141,7 @@ impl Bursts {
                     mass_g,
                     count,
                     shape,
+                    side,
                     chunk: None,
                     held,
                     resting: false,
@@ -1190,6 +1275,7 @@ impl Bursts {
                 mix(&mut h, v as u64);
             }
             mix(&mut h, c.motion_mj);
+            mix(&mut h, u64::from(c.side));
         }
         mix(&mut h, self.fragments.len() as u64);
         if !self.corpses.is_empty() {
@@ -1205,7 +1291,8 @@ impl Bursts {
                 }),
                 f.mass_g,
                 f.count as u64,
-                f.shape as u64,
+                f.shape,
+                u64::from(f.side),
                 f.held as u64,
                 f.resting as u64,
             ] {
@@ -1273,6 +1360,7 @@ impl Bursts {
                 b.i32(v);
             }
             b.u64(c.motion_mj);
+            b.u8(c.side);
         }
         b.usize(self.fragments.len());
         b.usize(self.corpses.len());
@@ -1293,7 +1381,8 @@ impl Bursts {
             }
             b.u64(f.mass_g);
             b.u32(f.count);
-            b.u8(f.shape);
+            b.u64(f.shape);
+            b.u8(f.side);
             b.u32(f.held);
             b.bool(f.resting);
             b.bool(f.chunk.is_some());
@@ -1303,14 +1392,17 @@ impl Bursts {
         }
     }
     pub fn load(s: &mut Scan, world: Option<&voxel::World>, t: &Blast) -> Option<Self> {
-        Self::load_material(s, world, t, None, 0)
+        Self::load_material(s, world, t, None, 0, false)
     }
+    /// `two_cell_masks`: the save predates ADR-284 and holds eight-bit
+    /// masks without a box side; every piece is read as a two-cell box.
     pub fn load_material(
         s: &mut Scan,
         world: Option<&voxel::World>,
         t: &Blast,
         bodies: Option<&crate::damage::Bodies>,
         units: usize,
+        two_cell_masks: bool,
     ) -> Option<Self> {
         let mut out = Self {
             next_id: s.u64(),
@@ -1410,11 +1502,23 @@ impl Bursts {
             let p: [u32; 3] = std::array::from_fn(|_| s.u32());
             let at = std::array::from_fn(|_| s.i32());
             let motion_mj = s.u64();
+            let side = if two_cell_masks { 2 } else { s.u8() };
             let w = world?;
             if p[0] >= w.nx
                 || p[1] >= w.ny
                 || p[2] >= w.nz
-                || out.claims.insert(p, Claim { at, motion_mj }).is_some()
+                || !(1..=4).contains(&side)
+                || out
+                    .claims
+                    .insert(
+                        p,
+                        Claim {
+                            at,
+                            motion_mj,
+                            side,
+                        },
+                    )
+                    .is_some()
             {
                 return None;
             }
@@ -1441,7 +1545,12 @@ impl Bursts {
                 basis: std::array::from_fn(|_| load_v(s)),
                 mass_g: s.u64(),
                 count: s.u32(),
-                shape: s.u8(),
+                shape: if two_cell_masks {
+                    u64::from(s.u8())
+                } else {
+                    s.u64()
+                },
+                side: if two_cell_masks { 2 } else { s.u8() },
                 chunk: None,
                 held: s.u32(),
                 resting: s.bool(),
@@ -1455,6 +1564,8 @@ impl Bursts {
                 || !helds.insert(f.held)
                 || f.count == 0
                 || f.shape == 0
+                || !(1..=4).contains(&f.side)
+                || (f.side < 4 && f.shape >> box_cells(f.side) != 0)
                 || (f.chunk.is_none() && !f.resting && f.count != f.shape.count_ones())
                 || (f.material == AIR && f.paint.is_none())
                 || f.mm == 0
@@ -1615,10 +1726,10 @@ fn fragment_contact(
             .add(arr(f.basis[2])[a].abs())
             .mul(half)
     });
-    let centre = arr(shape_centre(f.shape));
-    for i in 0..8 {
+    let centre = arr(shape_centre(f.shape, f.side));
+    for i in 0..box_cells(f.side) {
         if f.shape & (1 << i) != 0 {
-            let q = [i & 1, (i >> 1) & 1, (i >> 2) & 1];
+            let q = shape_cell(i, f.side);
             let mut offset = V3::ZERO;
             for a in 0..3 {
                 offset = offset.add(f.basis[a].scale(Fx::from_int(q[a]).sub(centre[a]).mul(scale)));

@@ -48,7 +48,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 13;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && !(8..=11).contains(&v) {
+    if v != VERSION && !(8..=12).contains(&v) {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -543,6 +543,7 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
         &t.blast,
         w.material_bodies.as_ref(),
         w.units.len(),
+        version < 13,
     )
     .ok_or(LoadError::WorldMismatch)?;
     if !w.bursts.fragments.is_empty() || !w.bursts.corpses.is_empty() {

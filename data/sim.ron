@@ -11,7 +11,7 @@
 (
     blast: (
         cell: 2, samples_per_tick: 131072, wave_pops_per_tick: 16384,
-        edits_per_tick: 16384, max_pending: 16, max_claims: 4096, max_fragments: 32768, max_flying: 4096, pile_cell: 8,
+        edits_per_tick: 16384, max_pending: 16, max_claims: 4096, max_fragments: 32768, max_flying: 4096, pile_cell: 8, fragment_box: 2,
         resistance_per_strength: 2, fracture_kj_m3_per_strength: 100,
         density_kg_m3_per_density: 10, motion_pct: 15, body_energy_pct: 40, body_resistance_ppm: 5000, lift_pct: 70,
         max_speed_mm_s: 30000, drag_pct: 99, bounce_pct: 20,

@@ -14,6 +14,8 @@
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 4096,
     edits_per_tick: 8192,
+    // A bolt ablates finely: pieces within a two-cell box (ADR-284).
+    fragment_box: 2,
     fire_tick: 75,
     shell_speed: 1200,
     // A bolt heats a small spot hard (ADR-277).
