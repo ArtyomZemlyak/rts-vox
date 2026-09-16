@@ -5,4 +5,7 @@
     engine_volume_pct: 20,
     gear_section_pct: 30,
     required_gears_pct: 75,
+    // A walker's leg that lost more than this share of its thigh and shin
+    // cells buckles: it folds under the hip and carries nothing (ADR-281).
+    leg_buckle_pct: 50,
 )

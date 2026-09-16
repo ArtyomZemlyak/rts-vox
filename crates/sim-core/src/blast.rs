@@ -165,6 +165,20 @@ impl RangeUnit {
     }
     fn refresh_damage(&mut self, id: usize) {
         self.update_response();
+        // A leg that lost more than the buckling share of its links folds
+        // and stays folded (ADR-281).
+        for (li, buckled) in self
+            .integrity_model
+            .buckled(&self.body)
+            .into_iter()
+            .enumerate()
+        {
+            if buckled {
+                if let Some(flag) = self.motion.legs_buckled.get_mut(li) {
+                    *flag = true;
+                }
+            }
+        }
         // A segment whose mount in the root is gone leaves whole, and
         // everything hanging from it goes with it (ADR-278).
         for i in 0..self.body.segments.len() {
@@ -1156,7 +1170,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(19);
+        b.u32(20);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1312,7 +1326,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 19 {
+        if s.u32() != 20 {
             return None;
         }
         let extended = s.bool();
@@ -1521,9 +1535,15 @@ impl BlastRange {
             }
             u.seg_detached = s.usize();
             // A lost leg is a shed thigh, and the motion's own record of it
-            // must agree.
+            // must agree; a buckled leg is one whose links lost the buckling
+            // share, unless it is gone altogether.
+            let buckled = u.integrity_model.buckled(&u.body);
             for (li, leg) in u.body.legs.iter().enumerate() {
-                if u.motion.legs_lost.get(li).copied() != Some(u.seg_gone[leg.thigh as usize]) {
+                let lost = u.seg_gone[leg.thigh as usize];
+                if u.motion.legs_lost.get(li).copied() != Some(lost) {
+                    return None;
+                }
+                if !lost && u.motion.legs_buckled.get(li).copied() != buckled.get(li).copied() {
                     return None;
                 }
             }
@@ -2870,6 +2890,97 @@ mod tests {
         let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
+    }
+    /// A leg whose thigh and shin lost more than half their cells buckles
+    /// (ADR-281): it folds under the hip, carries nothing, the walker sinks
+    /// and leans over it, and the snapshot keeps the fold.
+    #[test]
+    fn a_leg_that_lost_more_than_half_its_cells_buckles() {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.control();
+        for _ in 0..30 {
+            a.step();
+        }
+        let level = a.units[0].motion.hull;
+        let leg = a.units[0].body.legs[0];
+        let thigh = leg.thigh as usize;
+        let shin = leg.shin as usize;
+        // Take every second cell of both links: over half, mounts untouched.
+        let mut taken = 0;
+        for seg in [thigh, shin] {
+            let cells: Vec<[usize; 3]> = {
+                let b = &a.units[0].body.segments[seg].body;
+                let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
+                let mut cells = Vec::new();
+                for z in 0..nz {
+                    for y in 0..ny {
+                        for x in 0..nx {
+                            if b.vol.get(x, y, z) {
+                                cells.push([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                cells
+            };
+            for (i, c) in cells.iter().enumerate() {
+                if i % 5 != 4 {
+                    assert!(a.units[0].body.segments[seg].body.remove(c[0], c[1], c[2]));
+                    a.units[0].seg_removed.push((seg as u8, c.map(|v| v as u8)));
+                    taken += 1;
+                }
+            }
+        }
+        a.matter.annihilate_body(0, taken);
+        a.units[0].refresh_damage(0);
+        let u = &a.units[0];
+        assert!(!u.seg_gone[thigh], "the leg fell off instead of buckling");
+        assert_eq!(u.motion.legs_buckled, [true, false, false, false]);
+        assert_eq!(u.motion.legs_lost, [false; 4]);
+        for _ in 0..90 {
+            a.step();
+        }
+        let u = &a.units[0];
+        let hull = u.motion.hull;
+        assert!(
+            hull.y < level.y.sub(Fx::from_ratio(1, 10)),
+            "did not sink: {hull:?}"
+        );
+        assert!(
+            hull.up.x < Fx::from_ratio(-1, 200) && hull.up.z < Fx::from_ratio(-1, 200),
+            "did not lean over the buckled leg: {:?}",
+            hull.up
+        );
+        let c = u.motion.feet[0].contact.unwrap();
+        let hip = u.pose.world([
+            Fx::from_int(i32::from(leg.hip.0)),
+            Fx::from_int(i32::from(leg.hip.1)),
+            Fx::from_int(i32::from(leg.hip.2)),
+        ]);
+        assert!(
+            hip.y.sub(c.pos.y) < Fx::from_int(4),
+            "not folded: {c:?} under {hip:?}"
+        );
+        // The folded leg's frames follow the fold: the shin's base sits at the
+        // bent knee, far from the rest knee.
+        let rest = crate::damage::segment_frames(
+            &u.pose,
+            &u.body,
+            u.motion.drive.head,
+            u.motion.drive.head,
+        );
+        let moved = u.seg_frames[shin].base.sub(rest[shin].base).len_sq().sqrt();
+        assert!(
+            moved > Fx::from_int(4),
+            "the shin stayed at rest: moved {moved:?}"
+        );
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(
+            b.units[0].motion.legs_buckled,
+            a.units[0].motion.legs_buckled
+        );
+        assert!(a.matter.economy.ledger.balanced());
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]

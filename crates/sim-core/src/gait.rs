@@ -508,6 +508,24 @@ impl Foot {
         self.anchor.is_some() && (!self.swing || self.progress == ZERO)
     }
 
+    /// A buckled leg (ADR-281): the ankle tucked under the hip as close as
+    /// the links allow, so the two-link solve folds the knee out; no
+    /// anchor, no step.
+    pub fn fold(&mut self, rig: &LegRig, root: &Frame, head: i32) -> Contact {
+        let reach = rig.l1.sub(rig.l2).abs().add(ONE);
+        let c = Contact {
+            pos: to_world(root, rig.hip).sub(V3::UP.scale(reach)),
+            head,
+            normal: V3::UP,
+        };
+        self.anchor = None;
+        self.swing = false;
+        self.progress = ZERO;
+        self.local = None;
+        self.contact = Some(c);
+        c
+    }
+
     /// Advance one tick and return the ankle's contact.
     pub fn step(&mut self, rig: &LegRig, s: &Stance<'_>) -> Contact {
         let root = s.root;
@@ -1017,6 +1035,28 @@ mod tests {
             "{c:?}"
         );
         assert!(c.pos.x > root.base.x.add(r.ankle.x), "{c:?}");
+    }
+
+    #[test]
+    fn a_folded_leg_tucks_its_foot_under_the_hip_and_bends_the_knee_out() {
+        let r = rig();
+        let mut foot = Foot::default();
+        let root = hull(v(3.0, 0.0, -2.0), radians(0.4));
+        let c = foot.fold(&r, &root, radians(0.4));
+        let hip = to_world(&root, r.hip);
+        assert!(
+            near(V3::new(c.pos.x, hip.y, c.pos.z), hip, 1e-6),
+            "not under the hip"
+        );
+        assert!(hip.y.sub(c.pos.y) < r.l1.sub(r.l2).abs().add(fx(1.001)));
+        assert!(!foot.planted());
+        let pose = r.solve(to_local(&root, c.pos));
+        // The knee is out to the side, far from the hip-ankle line.
+        let side = pose.knee.sub(r.hip);
+        assert!(
+            V3::new(side.x, ZERO, side.z).len_sq().sqrt() > r.l1.mul(fx(0.5)),
+            "{pose:?}"
+        );
     }
 
     #[test]

@@ -95,6 +95,9 @@ pub struct Motion {
     /// Legs that left the body whole (ADR-278): they neither step nor
     /// carry (ADR-280). Saved.
     pub legs_lost: Vec<bool>,
+    /// Legs that lost more than the buckling share of their links
+    /// (ADR-281): folded under the hip, carrying nothing. Saved.
+    pub legs_buckled: Vec<bool>,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
     // Installed engine sizing is based on the pristine machine. Losing armour
@@ -141,6 +144,7 @@ impl Motion {
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
         let legs_lost = vec![false; rigs.len()];
+        let legs_buckled = vec![false; rigs.len()];
         Self {
             pos: at.map(Fx::from_int),
             drive: Drive {
@@ -172,6 +176,7 @@ impl Motion {
             floors: [Fx::ZERO; 4],
             feet,
             legs_lost,
+            legs_buckled,
             rigs,
             navigation,
             yielding,
@@ -202,7 +207,7 @@ impl Motion {
     }
     /// Supports of a walker (ADR-280): the chassis' nominal point of every
     /// leg it still has, over the probed floor of that point. A lost leg
-    /// carries nothing. A foot in the air keeps its leg's support: the
+    /// carries nothing, and neither does a buckled one (ADR-281). A foot in the air keeps its leg's support: the
     /// gait stabilises the hull actively, and a passive spring that let go
     /// of the swinging leg rocked the hull to fourteen degrees on flat
     /// ground. The point of application stays nominal and the floor the
@@ -228,8 +233,8 @@ impl Motion {
             let carried = self
                 .rigs
                 .iter()
-                .zip(&self.legs_lost)
-                .any(|(rig, lost)| rig.support.min(3) == i && !*lost);
+                .zip(self.legs_lost.iter().zip(&self.legs_buckled))
+                .any(|(rig, (lost, buckled))| rig.support.min(3) == i && !*lost && !*buckled);
             if carried {
                 support.push(nominal[i]);
                 ground.push(floors[i]);
@@ -311,8 +316,19 @@ impl Motion {
             gait: &gait,
             floor: &floor,
         };
-        for ((rig, foot), lost) in self.rigs.iter().zip(&mut self.feet).zip(&self.legs_lost) {
-            if !*lost {
+        for (((rig, foot), lost), buckled) in self
+            .rigs
+            .iter()
+            .zip(&mut self.feet)
+            .zip(&self.legs_lost)
+            .zip(&self.legs_buckled)
+        {
+            if *lost {
+                continue;
+            }
+            if *buckled {
+                foot.fold(rig, &root, self.drive.head);
+            } else {
                 foot.step(rig, &stance);
             }
         }
@@ -682,6 +698,9 @@ impl Motion {
         for lost in &self.legs_lost {
             b.bool(*lost);
         }
+        for buckled in &self.legs_buckled {
+            b.bool(*buckled);
+        }
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
         self.pos = std::array::from_fn(|_| s.fx());
@@ -731,6 +750,9 @@ impl Motion {
         }
         for lost in &mut self.legs_lost {
             *lost = s.bool();
+        }
+        for buckled in &mut self.legs_buckled {
+            *buckled = s.bool();
         }
         s.ok()
             && self.escape_left <= self.navigation.escape_ticks
@@ -875,6 +897,42 @@ mod tests {
             m.hull.up.x < Fx::ZERO && m.hull.up.z < Fx::ZERO,
             "did not lean over the lost leg: {:?}",
             m.hull.up
+        );
+        assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
+    }
+    /// A buckled leg carries nothing and folds under its hip (ADR-281): the
+    /// walker sinks and leans over it and still walks.
+    #[test]
+    fn a_buckled_leg_carries_nothing_and_folds_under_the_hip() {
+        let w = ground(0);
+        let body = voxel::unit::strider();
+        let mut m = Motion::new([200, 16, 300], RangeUnitKind::Strider, &body);
+        let nominal = crate::ride::supports_of(&m.chassis);
+        m.legs_buckled[1] = true;
+        m.enabled = true;
+        m.destination = Some([430, 300]);
+        m.path = vec![[430, 300]];
+        let gone = nominal[usize::from(body.legs[1].support)];
+        for tick in 0..300 {
+            step(&mut m, &w, &body, &[], tick);
+            let (support, _) = m.foot_supports(&nominal, &m.floors).unwrap();
+            assert_eq!(support.len(), 3);
+            assert!(!support.contains(&gone));
+            let c = m.feet[1].contact.expect("the folded leg has a contact");
+            let hip = m.frame(&body).world([
+                Fx::from_int(i32::from(body.legs[1].hip.0)),
+                Fx::from_int(i32::from(body.legs[1].hip.1)),
+                Fx::from_int(i32::from(body.legs[1].hip.2)),
+            ]);
+            assert!(
+                hip.y.sub(c.pos.y) < Fx::from_int(4),
+                "not folded at tick {tick}: {c:?}"
+            );
+            assert!(!m.feet[1].planted());
+        }
+        assert!(
+            m.pos[1] < Fx::from_int(16).sub(Fx::from_ratio(1, 10)),
+            "did not sink"
         );
         assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
     }

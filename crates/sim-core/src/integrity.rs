@@ -20,6 +20,17 @@ pub struct Model {
     rules: modding::integrity::Integrity,
     engine: u32,
     paths: Vec<(WeaponPath, Vec<u32>)>,
+    /// Cells of each leg's thigh and shin in the template (ADR-281).
+    legs: Vec<u32>,
+}
+
+/// Cells of a leg's thigh and shin in a body.
+fn leg_cells(body: &UnitBody, leg: &voxel::unit::Leg) -> u32 {
+    [leg.thigh, leg.shin]
+        .iter()
+        .filter_map(|i| body.segments.get(usize::from(*i)))
+        .map(|s| s.body.solid_count())
+        .sum()
 }
 
 fn fraction(current: u32, original: u32) -> Fx {
@@ -66,7 +77,27 @@ impl Model {
                 .iter()
                 .map(|p| (*p, sections(template, *p, &template.vol.cols)))
                 .collect(),
+            legs: template
+                .legs
+                .iter()
+                .map(|l| leg_cells(template, l))
+                .collect(),
         }
+    }
+
+    /// Which legs have lost more than the buckling share of their thigh and
+    /// shin cells (ADR-281), in leg order. A leg with no cells in the
+    /// template never buckles.
+    pub fn buckled(&self, body: &UnitBody) -> Vec<bool> {
+        body.legs
+            .iter()
+            .zip(&self.legs)
+            .map(|(leg, original)| {
+                let lost = original.saturating_sub(leg_cells(body, leg));
+                *original > 0
+                    && lost as u64 * 100 > u64::from(*original) * self.rules.leg_buckle_pct as u64
+            })
+            .collect()
     }
 
     pub fn evaluate(&self, body: &UnitBody, scratch: &mut CoreBufs) -> (Status, Report) {
