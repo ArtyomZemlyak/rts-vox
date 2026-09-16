@@ -5,7 +5,8 @@ param(
     [string]$OutputDir = '',
     [ValidateRange(0.1,3600)][double]$Seconds = 10,
     [ValidateSet('','auto','overview','exposed','sheltered','gun','target')][string]$View = '',
-    [switch]$Edit,
+    [ValidateRange(1,8)][int]$Patrol = 0,
+    [switch]$Open,
     [switch]$DriveDemo,
     [switch]$Close,
     [string]$Move = ''
@@ -32,11 +33,12 @@ $culture = [System.Globalization.CultureInfo]::InvariantCulture
 $secondsText = $Seconds.ToString($culture)
 $captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $secondsText,
     '--weapon', $Weapon.ToLowerInvariant(), '--power', $Power.ToString($culture), '--range', ('"{0}"' -f $RangePath))
-if ($Edit) { $captureArgs += '--edit' }
+if ($Open) { $captureArgs += '--open' }
 if ($DriveDemo) { $captureArgs += '--drive-demo' }
 if ($Move) { $captureArgs += @('--move', $Move) }
 if ($Close) { $captureArgs += '--close' }
 if ($View) { $captureArgs += @('--view', $View.ToLowerInvariant()) }
+if ($Patrol) { $captureArgs += @('--patrol', $Patrol.ToString($culture)) }
 $process = Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -Wait `
     -ArgumentList $captureArgs `
     -RedirectStandardOutput (Join-Path $destination 'capture.log') `

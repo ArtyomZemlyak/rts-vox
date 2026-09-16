@@ -1712,6 +1712,34 @@ impl BlastRange {
         self.gun.motion.stop();
         true
     }
+    /// Отмена приказа: цель снята, машина останавливается.
+    pub fn order_stop(&mut self) {
+        self.attack = None;
+        self.gun.motion.stop();
+    }
+    /// Пуск и остановка маршрутов мишеней.
+    pub fn toggle_patrols(&mut self) {
+        self.patrols_running = !self.patrols_running;
+    }
+    /// Выстрел по точке земли вместо тела: прежняя цель снимается.
+    /// Возвращает `false`, если орудие ещё занято.
+    pub fn order_ground_fire(&mut self, at: [i32; 3]) -> bool {
+        self.attack = None;
+        self.aim = Some(at);
+        self.refire()
+    }
+    /// Замена пресета оружия.
+    ///
+    /// Стойкость тел задаёт **раскладка**, а не пресет: она пришла из
+    /// `range.ron` и переживает смену оружия. Правило живёт здесь, потому
+    /// что забыть его на стороне вызывающего — значит молча обнулить
+    /// стойкость мишеней при каждом переключении.
+    pub fn reconfigure(&mut self, config: ExplosionConfig) {
+        self.config = config;
+        if let Some(r) = &self.layout {
+            self.config.unit_ablation_resistance = r.unit_resistance;
+        }
+    }
     pub fn step(&mut self) {
         self.surface_changed.clear();
         self.shield_hits.clear();
@@ -3263,6 +3291,28 @@ mod tests {
                 .unwrap()
                 .state_hash()
         );
+    }
+    /// Стойкость мишеней принадлежит раскладке, а не пресету оружия.
+    ///
+    /// `with_layout` ставит её при сборке; смена оружия заменяет
+    /// конфигурацию целиком и обязана вернуть её на место. Раньше это
+    /// помнило окно, и проверить это было нечем (ADR-269).
+    #[test]
+    fn reconfigure_keeps_the_layout_resistance_when_the_weapon_changes() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let wanted = layout.unit_resistance;
+        let mut r = BlastRange::with_layout(
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+            layout,
+        )
+        .unwrap();
+        assert_eq!(r.config.unit_ablation_resistance, wanted);
+        let shell = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        // Проверка имеет смысл только пока пресет сам по себе даёт другое
+        // число: иначе она пройдёт и без единой строки `reconfigure`.
+        assert_ne!(shell.unit_ablation_resistance, wanted);
+        r.reconfigure(shell);
+        assert_eq!(r.config.unit_ablation_resistance, wanted);
     }
     #[test]
     fn patrols_complete_two_laps_and_movement_resumes_exactly() {

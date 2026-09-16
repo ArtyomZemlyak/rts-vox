@@ -361,9 +361,7 @@ pub fn input(
                             scene.sim.control();
                             scene.paused = false;
                             if fire {
-                                scene.sim.attack = None;
-                                scene.sim.aim = Some(hit);
-                                if !scene.sim.refire() {
+                                if !scene.sim.order_ground_fire(hit) {
                                     scene.notice = "Орудие ещё занято".into();
                                 }
                             } else if let Some(Selection::Unit(id)) = selection {
@@ -861,6 +859,7 @@ mod tests {
             acc: 0.0,
             repeat: false,
             view: 1,
+            patrol: 1,
             previous_shell: None,
             fps: 60.0,
             realtime: true,

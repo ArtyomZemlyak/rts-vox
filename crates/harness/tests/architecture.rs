@@ -393,7 +393,13 @@ fn the_render_layer_never_writes_into_the_simulation() {
     // Прямые ходы в мир мимо симуляции — запрещены целиком.
     const BANNED: [&str; 3] = ["ground_mut", "queue_dig", "queue_edit"];
     // Пути состояния симуляции: присваивание в них — нарушение.
-    const STATE: [&str; 4] = [".units.", ".shots.", ".bodies.", ".world."];
+    //
+    // `.sim.` держит **поля стенда**: `BlastRange` отдаёт `attack`, `aim`,
+    // `patrols_running` и `config` наружу, и ни одно из них не совпадает
+    // с путями выше — окно правило их напрямую, а проверка молчала
+    // (ADR-269). Намерения выражаются методами: `order_stop`,
+    // `toggle_patrols`, `order_ground_fire`, `reconfigure`.
+    const STATE: [&str; 5] = [".units.", ".shots.", ".bodies.", ".world.", ".sim."];
 
     let mut bad: Vec<String> = Vec::new();
     // **Вместе с `src/bin`**: там и лежит весь код окна. Смотри
@@ -454,6 +460,20 @@ fn the_render_layer_never_writes_into_the_simulation() {
     assert!(
         assigned_path("if a.units.x[i] == b { }").is_none(),
         "сравнение принято за присваивание"
+    );
+    // Поля стенда: имя `sim` без точки после него — не путь состояния,
+    // иначе проверка ловила бы любое поле, начинающееся на `sim`.
+    assert!(
+        assigned_path("scene.sim.attack = None;")
+            .expect("присваивание есть")
+            .contains(".sim."),
+        "запись в поле стенда не распознана"
+    );
+    assert!(
+        !assigned_path("scene.simple = 1;")
+            .expect("присваивание есть")
+            .contains(".sim."),
+        "соседнее имя принято за состояние"
     );
 }
 
