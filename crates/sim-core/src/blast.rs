@@ -61,6 +61,12 @@ pub struct RangeUnit {
     seg_shed: Vec<u8>,
     /// Root cells a segment hangs from, from the template; empty never sheds.
     seg_mounts: Vec<Vec<[u8; 3]>>,
+    /// Legs computed once from the body (ADR-279); empty for tracked hulls.
+    rigs: Vec<crate::gait::LegRig>,
+    /// Planting state of each leg, in leg order. Saved.
+    pub feet: Vec<crate::gait::Foot>,
+    /// Hull position, heading and phase the feet last saw. Saved.
+    gait_last: Option<(phys::V3, i32, i32)>,
 }
 /// Root cells within one voxel of each root-mounted segment's attachment
 /// point: the mount it hangs from. A segment mounted on another segment
@@ -136,6 +142,8 @@ impl RangeUnit {
             crate::damage::segment_frames(&pose, &body, motion.drive.head, motion.drive.head);
         let seg_mounts = mounts_of(&body);
         let seg_gone = vec![false; body.segments.len()];
+        let rigs = crate::gait::rigs_of(&body);
+        let feet = vec![crate::gait::Foot::default(); rigs.len()];
         Self {
             motion,
             pose,
@@ -161,6 +169,9 @@ impl RangeUnit {
             seg_gone,
             seg_shed: Vec::new(),
             seg_mounts,
+            rigs,
+            feet,
+            gait_last: None,
         }
     }
     fn refresh_damage(&mut self, id: usize) {
@@ -251,6 +262,63 @@ impl RangeUnit {
             turret_yaw,
             self.motion.drive.head,
         );
+        // Legs stand where their feet are, not where the template rests
+        // them (ADR-279).
+        for (rig, foot) in self.rigs.iter().zip(&self.feet) {
+            if let Some(c) = &foot.contact {
+                crate::gait::leg_frames(rig, &self.pose, c, &mut self.seg_frames);
+            }
+        }
+    }
+    /// Advance a walker's feet one tick from the motion just accepted
+    /// (ADR-279): the displacement, yaw step and phase advance since the
+    /// last call, the terrain under each sole, and whether the hull
+    /// carries load.
+    pub fn step_feet(&mut self, w: &World) {
+        let Some(g) = self.motion.chassis.gait.as_ref() else {
+            return;
+        };
+        if self.rigs.is_empty() {
+            return;
+        }
+        let gait = crate::gait::Gait::of(g);
+        let root = self.motion.frame(&self.body);
+        let head = self.motion.drive.head;
+        let phase = self.motion.phase;
+        let pos = phys::V3::new(self.motion.pos[0], self.motion.pos[1], self.motion.pos[2]);
+        let (linear, angular, cycles) = match self.gait_last {
+            Some((p, h, ph)) => (
+                phys::V3::new(pos.x.sub(p.x), Fx::ZERO, pos.z.sub(p.z)),
+                fx::angle::diff(head, h),
+                Fx::from_ratio(fx::angle::norm(phase.wrapping_sub(ph)), fx::angle::FULL),
+            ),
+            None => (phys::V3::ZERO, 0, Fx::ZERO),
+        };
+        self.gait_last = Some((pos, head, phase));
+        // A slow walk lifts less: the picture's rule, in per-second terms.
+        let lift_scale = cycles
+            .mul(Fx::from_int(crate::TICKS_PER_SECOND))
+            .mul(gait.stride)
+            .mul(Fx::from_int(4))
+            .div(Fx::from_int(self.motion.speed.max(1)))
+            .min(Fx::ONE);
+        let floor =
+            |x: Fx, z: Fx| Fx::from_int(motion::floor(w, x.to_int_trunc(), z.to_int_trunc()));
+        let stance = crate::gait::Stance {
+            grounded: self.motion.hull.grounded(),
+            root: &root,
+            head,
+            phase,
+            lift_scale,
+            linear,
+            angular,
+            cycles,
+            gait: &gait,
+            floor: &floor,
+        };
+        for (rig, foot) in self.rigs.iter().zip(&mut self.feet) {
+            foot.step(rig, &stance);
+        }
     }
     /// Where a world point lands on this body: `0` the root, `i + 1` the
     /// segment `i`, with the cell there. Segments are tested in the given
@@ -1145,7 +1213,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(17);
+        b.u32(18);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1239,6 +1307,18 @@ impl BlastRange {
                 b.u8(*seg);
             }
             b.usize(u.seg_detached);
+            b.u32(u.feet.len() as u32);
+            for f in &u.feet {
+                f.save(&mut b);
+            }
+            b.bool(u.gait_last.is_some());
+            if let Some((p, h, ph)) = &u.gait_last {
+                b.fx(p.x);
+                b.fx(p.y);
+                b.fx(p.z);
+                b.i32(*h);
+                b.i32(*ph);
+            }
         }
         self.world.save(&mut b);
         self.matter.save(&mut b);
@@ -1301,7 +1381,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 17 {
+        if s.u32() != 18 {
             return None;
         }
         let extended = s.bool();
@@ -1509,6 +1589,20 @@ impl BlastRange {
                 }
             }
             u.seg_detached = s.usize();
+            if s.u32() as usize != u.rigs.len() {
+                return None;
+            }
+            for f in &mut u.feet {
+                *f = crate::gait::Foot::load(&mut s)?;
+            }
+            u.gait_last = if s.bool() {
+                let p = phys::V3::new(s.fx(), s.fx(), s.fx());
+                Some((p, s.i32(), s.i32()))
+            } else {
+                None
+            };
+            // The legs stand on the restored feet.
+            u.update_pose(if id == gun_id { turret_angle } else { head });
         }
         if !r.world.load(&mut s) {
             return None;
@@ -1785,6 +1879,7 @@ impl BlastRange {
                     self.tick,
                     self.config.gravity,
                 );
+                u.step_feet(&self.world);
                 let head = u.motion.drive.head;
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
@@ -2315,6 +2410,140 @@ mod tests {
         }
         layout
     }
+    /// A walker ordered across the pad with the patrols running.
+    fn walking_walker() -> BlastRange {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.patrols_running = true;
+        let u = &mut a.units[0];
+        u.motion.enabled = true;
+        u.motion.destination = Some([420, 336]);
+        u.motion.path = vec![[420, 336]];
+        a
+    }
+    fn near_v3(a: phys::V3, b: phys::V3, tol: Fx) -> bool {
+        a.sub(b).len_sq() < tol.mul(tol)
+    }
+    /// A parked walker's feet plant at the template's rest ankles and its
+    /// leg frames stay the rest frames (ADR-279).
+    #[test]
+    fn a_parked_walker_plants_its_feet_where_the_template_rests_them() {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.patrols_running = true;
+        let rest: Vec<_> = a.units[0].seg_frames.iter().map(|f| f.base).collect();
+        assert_eq!(a.units[0].feet.len(), 4);
+        for _ in 0..30 {
+            a.step();
+        }
+        let u = &a.units[0];
+        assert!(u.feet.iter().all(|f| f.planted()));
+        for (leg, foot) in u.body.legs.iter().zip(&u.feet) {
+            let c = foot.contact.unwrap();
+            let ankle = u.pose.world([
+                Fx::from_int(i32::from(leg.ankle.0)),
+                Fx::from_int(i32::from(leg.ankle.1)),
+                Fx::from_int(i32::from(leg.ankle.2)),
+            ]);
+            assert!(
+                near_v3(c.pos, ankle, Fx::from_ratio(1, 2)),
+                "{c:?} vs {ankle:?}"
+            );
+            assert_eq!(c.normal, phys::V3::UP);
+        }
+        for (f, r) in u.seg_frames.iter().zip(&rest) {
+            assert!(
+                near_v3(f.base, *r, Fx::from_ratio(1, 2)),
+                "{:?} vs {r:?}",
+                f.base
+            );
+        }
+    }
+    /// A walking walker lifts its feet, and a point of a lifted shin maps
+    /// to the shin through the stepped frames but not through the rest
+    /// frames (ADR-279).
+    #[test]
+    fn feet_follow_the_walk_and_a_hit_finds_a_lifted_shin_where_it_is() {
+        let mut a = walking_walker();
+        let mut found = None;
+        for _ in 0..600 {
+            a.step();
+            let u = &a.units[0];
+            for (i, leg) in u.body.legs.iter().enumerate() {
+                let Some(c) = u.feet[i].contact else {
+                    continue;
+                };
+                let floor = Fx::from_int(motion::floor(
+                    &a.world,
+                    c.pos.x.to_int_trunc(),
+                    c.pos.z.to_int_trunc(),
+                ));
+                let rest = Fx::from_int(i32::from(leg.ankle.1));
+                if c.pos.y.sub(floor).sub(rest) > Fx::from_int(2) {
+                    found = Some(i);
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let leg = found.expect("no foot lifted in 600 ticks");
+        let u = &a.units[0];
+        assert!(!u.feet[leg].planted());
+        let shin = u.body.legs[leg].shin as usize;
+        let b = &u.body.segments[shin].body;
+        let cell = [
+            b.vol.nx as usize / 2,
+            b.vol.ny as usize / 2,
+            b.vol.nz as usize / 2,
+        ];
+        assert!(b.vol.get(cell[0], cell[1], cell[2]));
+        let w = u.seg_frames[shin]
+            .world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        let p = [w.x.to_int_trunc(), w.y.to_int_trunc(), w.z.to_int_trunc()];
+        let hit = u.hit_at(p, &u.pose, &u.seg_frames);
+        assert_eq!(
+            hit.map(|(part, _)| part),
+            Some(shin + 1),
+            "{hit:?} at {p:?}"
+        );
+        let rest = crate::damage::segment_frames(
+            &u.pose,
+            &u.body,
+            u.motion.drive.head,
+            u.motion.drive.head,
+        );
+        assert_ne!(
+            u.hit_at(p, &u.pose, &rest),
+            hit,
+            "the lifted leg is not at rest"
+        );
+    }
+    /// Feet in mid-step survive the snapshot: the restored range keeps the
+    /// same contacts and frames and walks on tick for tick (ADR-279).
+    #[test]
+    fn feet_state_round_trips_through_the_snapshot_mid_step() {
+        let mut a = walking_walker();
+        for _ in 0..150 {
+            a.step();
+        }
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.units[0].feet, b.units[0].feet);
+        for (x, y) in a.units[0].seg_frames.iter().zip(&b.units[0].seg_frames) {
+            assert_eq!(x.base, y.base);
+            assert_eq!(x.x, y.x);
+        }
+        assert_eq!(a.state_hash(), b.state_hash());
+        for _ in 0..90 {
+            a.step();
+            b.step();
+        }
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(a.units[0].feet, b.units[0].feet);
+        assert!(
+            a.units[0].motion.pos[0] > Fx::from_int(310),
+            "the walker did not walk"
+        );
+    }
     /// Aim points on a walker parked at the pad, for captures: each leg's
     /// hip mount and outer thigh cell in world units. Also writes
     /// `out/leg-demo.ron`, the same walker with the gun laid on its first
@@ -2348,6 +2577,151 @@ mod tests {
                 w.z.to_int_trunc()
             );
         }
+    }
+    /// Writes `out/walk-demo.ron`: the walker on a short out-and-back
+    /// patrol at the pad, the target laid on the shin of a leg that is in
+    /// the air, on the gun's side of the body, at the tick the bolt lands
+    /// (ADR-279). The route's first heading is chosen so that such a leg
+    /// exists at the impact tick, then the aim is refined until the impact
+    /// maps to that leg. For `capture-range.ps1 -RangePath out/walk-demo.ron
+    /// -Weapon energy -Power 500 -View target`.
+    #[test]
+    #[ignore]
+    fn print_walking_leg_demo() {
+        // `-Power 500` of the capture script.
+        let mut config =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        config.energy = config.energy * 500 / 1000;
+        config.material_energy_j = (u64::from(config.material_energy_j) * 500 / 1000) as u32;
+        config.gas_pressure_milli = (config.gas_pressure_milli * 500 / 1000).min(10000);
+        config.gas_source_radius = config.gas_source_radius * 1500 / 2000;
+        let start = [300, 336];
+        let mut routes = Vec::new();
+        for k in 0..8 {
+            let a = fx::angle::FULL / 8 * k;
+            routes.push([
+                start[0] + Fx::from_int(48).mul(fx::angle::cos(a)).to_int_trunc(),
+                start[1] + Fx::from_int(48).mul(fx::angle::sin(a)).to_int_trunc(),
+            ]);
+        }
+        for far in routes {
+            let mut demo = walker_layout();
+            {
+                let c = demo.course.as_mut().unwrap();
+                c.min = [150, 250];
+                c.max = [500, 450];
+                c.ramps.clear();
+                c.patrols = vec![modding::range::Patrol {
+                    unit: 0,
+                    points: vec![start, far, start],
+                }];
+            }
+            demo.target = [start[0], 22, start[1]];
+            for round in 0..8 {
+                let mut a = BlastRange::with_layout(config.clone(), demo.clone()).unwrap();
+                let mut impact = None;
+                for _ in 0..600 {
+                    a.step();
+                    if let Some(p) = a.impact {
+                        impact = Some((a.impact_tick, p));
+                        break;
+                    }
+                }
+                let (tick, p) = impact.expect("no impact");
+                let u = &a.units[0];
+                let ys: Vec<Fx> = u
+                    .feet
+                    .iter()
+                    .map(|f| f.contact.map_or(Fx::ZERO, |c| c.pos.y))
+                    .collect();
+                let lowest = ys.iter().copied().fold(Fx::from_int(1000), Fx::min);
+                // A leg in the air on the gun's side: nearer the gun than
+                // the body's centre, so the bolt meets it first.
+                let lifted = u.feet.iter().enumerate().find(|(i, f)| {
+                    ys[*i] > lowest.add(Fx::ONE)
+                        && f.contact
+                            .is_some_and(|c| c.pos.x < u.motion.pos[0].sub(Fx::from_int(3)))
+                });
+                let lifted = lifted.map(|(i, _)| i);
+                let l = lifted.map(|i| u.body.legs[i]);
+                // The wave takes the struck cells within the impact tick, so
+                // the point is tested against the pristine template in the
+                // frames of that tick.
+                let pristine = voxel::unit::strider();
+                let struck = l.is_some_and(|l| {
+                    [
+                        Some(l.thigh),
+                        Some(l.shin),
+                        l.knee_ball,
+                        l.ankle_ball,
+                        l.foot,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|seg| {
+                        let seg = seg as usize;
+                        local_in(&pristine.segments[seg].body, p, &u.seg_frames[seg])
+                            .is_some_and(|c| pristine.segments[seg].body.vol.get(c[0], c[1], c[2]))
+                    })
+                });
+                let in_root = local_in(&pristine, p, &u.pose)
+                    .is_some_and(|c| pristine.vol.get(c[0], c[1], c[2]));
+                let shin_world = l.map(|l| {
+                    let shin = l.shin as usize;
+                    let b = &u.body.segments[shin].body;
+                    let cell = [
+                        b.vol.nx as usize / 2,
+                        b.vol.ny as usize / 2,
+                        b.vol.nz as usize / 2,
+                    ];
+                    u.seg_frames[shin]
+                        .world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))))
+                });
+                for _ in 0..3 {
+                    a.step();
+                }
+                let u = &a.units[0];
+                let parts = l.map_or(Vec::new(), |l| {
+                    [
+                        Some(l.thigh),
+                        Some(l.shin),
+                        l.knee_ball,
+                        l.ankle_ball,
+                        l.foot,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<u8>>()
+                });
+                let leg_cells = u
+                    .seg_removed
+                    .iter()
+                    .filter(|(seg, _)| parts.contains(seg))
+                    .count();
+                eprintln!(
+                    "route {far:?} round {round}: impact tick {tick} at {p:?} feet {:?} walker {:?} lifted {lifted:?} struck {struck} in root {in_root} leg cells {leg_cells} root {} other segments {}",
+                    ys.iter().map(|y| y.to_int_trunc()).collect::<Vec<_>>(),
+                    u.at,
+                    u.removed.len(),
+                    u.seg_removed.len() - leg_cells
+                );
+                let Some(w) = shin_world else {
+                    break;
+                };
+                if struck && leg_cells > 0 {
+                    std::fs::create_dir_all("../../out").ok();
+                    std::fs::write("../../out/walk-demo.ron", demo.to_ron().unwrap())
+                        .expect("demo layout");
+                    eprintln!(
+                        "written: route {far:?} target {:?} impact tick {tick}",
+                        demo.target
+                    );
+                    return;
+                }
+                demo.target = [w.x.to_int_trunc(), w.y.to_int_trunc(), w.z.to_int_trunc()];
+            }
+        }
+        panic!("no route put a lifted gun-side leg under the bolt");
     }
     /// Segment frames sit each pivot on its mount, chain through parents,
     /// and turn turret-mounted parts with the traverse (ADR-278).

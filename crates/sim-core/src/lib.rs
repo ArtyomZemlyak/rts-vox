@@ -14,6 +14,7 @@ mod contacts;
 pub mod drive;
 pub mod economy;
 pub mod energy;
+pub mod gait;
 pub mod ground;
 pub mod heat;
 pub mod index;

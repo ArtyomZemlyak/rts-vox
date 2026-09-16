@@ -1,16 +1,45 @@
 //! Interpolated actors and incremental shadow / gas occupancy.
 use super::*;
-use render::gait::{self, FootPlant, GaitParams, LegRig, Pose, Stance, StepMotion};
+use render::footing::Contact;
+use render::gait::{self, LegRig, Pose};
 use sim_core::blast::RangeUnit;
 
 #[derive(Resource, Default)]
 pub struct Visual {
     pub previous: Vec<Pose>,
+    /// Foot contacts of the previous tick, per unit and leg (ADR-279).
+    previous_feet: Vec<Vec<Option<Contact>>>,
     pub fragments: std::collections::BTreeMap<u64, Vec3>,
     pub turret: Option<i32>,
     occupied: Vec<usize>,
-    feet: Vec<Vec<FootPlant>>,
     rigs: Vec<LegRig>,
+}
+/// A range contact as the picture uses it: the ankle point and the sole's
+/// rotation, heading then tilt, the same composition as `footing::Sole`.
+fn foot_of(c: &sim_core::gait::Contact) -> Contact {
+    let f = |v: fx::Fx| v.to_f64_lossy() as f32;
+    let normal = Vec3::new(f(c.normal.x), f(c.normal.y), f(c.normal.z))
+        .try_normalize()
+        .unwrap_or(Vec3::Y);
+    Contact {
+        pos: Vec3::new(f(c.pos.x), f(c.pos.y), f(c.pos.z)),
+        rot: Quat::from_rotation_y(render::yaw_of(c.head))
+            * Quat::from_rotation_arc(Vec3::Y, normal),
+    }
+}
+fn feet_of(u: &RangeUnit) -> Vec<Option<Contact>> {
+    u.feet
+        .iter()
+        .map(|f| f.contact.as_ref().map(foot_of))
+        .collect()
+}
+/// Share of the tick elapsed on this frame; a whole tick outside realtime.
+fn fraction(scene: &Scene) -> f32 {
+    if scene.realtime && !scene.paused {
+        (scene.acc * 30.0).clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
 }
 pub fn pose(u: &RangeUnit) -> Pose {
     let m = &u.motion;
@@ -28,11 +57,7 @@ pub fn pose(u: &RangeUnit) -> Pose {
 }
 pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
     let current = pose(u);
-    let t = if scene.realtime && !scene.paused {
-        (scene.acc * 30.0).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
+    let t = fraction(scene);
     previous.map_or(current, |p| gait::lerp(p, &current, t))
 }
 pub fn before(sim: &BlastRange, v: &mut Visual) {
@@ -55,6 +80,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual) {
         .chain(std::iter::once(&sim.gun))
         .map(pose)
         .collect();
+    v.previous_feet = sim.units.iter().map(feet_of).collect();
     if v.occupied.is_empty() {
         v.occupied = cells(sim);
     }
@@ -137,48 +163,43 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
 pub fn animate(
     scene: Res<Scene>,
     mut v: ResMut<Visual>,
-    time: Res<Time<Real>>,
     mut query: Query<(&Witness, &mut Transform)>,
 ) {
     if v.rigs.is_empty() {
         let b = voxel::unit::strider();
         v.rigs = gait::rigs_of(&b, 0.01, &render::model::segment_frames(&b, 0.01));
     }
-    let rigs = v.rigs.clone();
-    v.feet.resize_with(scene.sim.units.len(), Vec::new);
+    let rigs = &v.rigs;
+    let t = fraction(&scene);
     let mut poses = Vec::new();
     let mut legs = Vec::new();
     for (i, u) in scene.sim.units.iter().enumerate() {
         let p = visible(u, v.previous.get(i), &scene);
         poses.push(p);
         let mut lp = Vec::new();
-        if u.kind == RangeUnitKind::Strider && u.motion.enabled {
-            let params = GaitParams::of(u.motion.chassis.gait.as_ref().expect("walking gait"), 0.1);
-            let motion = v.previous.get(i).map_or(StepMotion::default(), |old| {
-                StepMotion::between(old, &pose(u), 1.0 / 30.0)
-            });
-            let floor = |x: f32, z: f32| {
-                sim_core::blast::motion::floor(&scene.sim.world, x.floor() as i32, z.floor() as i32)
-                    as f32
-            };
-            let stance = Stance {
-                grounded: u.motion.hull.load > fx::Fx::ZERO,
-                dt: if scene.paused { 0.0 } else { time.delta_secs() },
-                base: p.pos,
-                rot: render::realtime::hull_rotation(p.up, p.yaw),
-                phase: p.phase,
-                lift_scale: (motion.cycles * params.stride / u.motion.speed.max(1) as f32 * 4.0)
-                    .min(1.0),
-                motion,
-                params: &params,
-                floor: &floor,
-            };
-            v.feet[i].resize(rigs.len(), FootPlant::default());
-            lp.extend(
-                rigs.iter()
-                    .zip(&mut v.feet[i])
-                    .map(|(r, f)| f.pose(r, &stance)),
-            );
+        // The range plants the feet (ADR-279); the picture interpolates
+        // their contacts between ticks and poses the links with the same
+        // two-link solve the simulation uses.
+        if u.kind == RangeUnitKind::Strider {
+            let rot = render::realtime::hull_rotation(p.up, p.yaw);
+            for (j, rig) in rigs.iter().enumerate() {
+                let Some(now) = u.feet.get(j).and_then(|f| f.contact.as_ref()).map(foot_of) else {
+                    break;
+                };
+                let was = v
+                    .previous_feet
+                    .get(i)
+                    .and_then(|f| f.get(j))
+                    .copied()
+                    .flatten();
+                let c = match was {
+                    Some(w) if t < 1.0 => w.lerp(now, t),
+                    _ => now,
+                };
+                let mut pose = rig.solve(rot.inverse() * (c.pos - p.pos), rot);
+                pose.foot.rot = rot.inverse() * c.rot;
+                lp.push(pose);
+            }
         }
         legs.push(lp);
     }

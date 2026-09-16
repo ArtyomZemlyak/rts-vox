@@ -497,6 +497,65 @@ pub fn phase_of(gait: i32) -> f32 {
 mod tests {
     use super::*;
 
+    /// The range's feet (`sim_core::gait`, ADR-279) and this module agree:
+    /// the same rigs, the same two-link solve, the same sole contact on a
+    /// slope. What the range hits is what the picture draws.
+    #[test]
+    fn the_simulation_poses_a_leg_where_this_module_draws_it() {
+        use sim_core::damage::V3;
+        let b = voxel::unit::strider();
+        let ours = rigs_of(&b, 0.01, &crate::model::segment_frames(&b, 0.01));
+        let theirs = sim_core::gait::rigs_of(&b);
+        assert_eq!(ours.len(), theirs.len());
+        let f = |v: V3| {
+            Vec3::new(
+                v.x.to_f64_lossy() as f32,
+                v.y.to_f64_lossy() as f32,
+                v.z.to_f64_lossy() as f32,
+            )
+        };
+        let q = |v: f32| fx::Fx::from_ratio((v * 1000.0).round() as i32, 1000);
+        let v3 = |v: Vec3| V3::new(q(v.x), q(v.y), q(v.z));
+        for (a, s) in ours.iter().zip(&theirs) {
+            assert!((a.hip - f(s.hip)).length() < 1e-3);
+            assert!((a.knee - f(s.knee)).length() < 1e-3);
+            assert!((a.ankle - f(s.ankle)).length() < 1e-3);
+            for target in [
+                a.ankle,
+                a.ankle + Vec3::new(6.0, 3.0, 0.0),
+                a.ankle + Vec3::new(-5.0, 1.0, 4.0),
+                a.ankle + Vec3::new(0.0, 8.0, -2.0),
+            ] {
+                let mine = a.solve(target, Quat::IDENTITY);
+                let sim = s.solve(v3(target));
+                assert!(
+                    (mine.knee.pos - f(sim.knee)).length() < 0.05,
+                    "knee {:?} vs {:?} for {target:?}",
+                    mine.knee.pos,
+                    f(sim.knee)
+                );
+                assert!((mine.ankle.pos - f(sim.ankle)).length() < 0.05);
+            }
+            let floor = |x: f32, z: f32| 0.3 * x - 0.2 * z;
+            let floor_fx = |x: fx::Fx, z: fx::Fx| q(0.3).mul(x).sub(q(0.2).mul(z));
+            let head = 7000;
+            let mine = a
+                .sole
+                .contact(Vec3::new(2.0, 0.0, 4.0), crate::yaw_of(head), &floor);
+            let sim = s
+                .sole
+                .contact(v3(Vec3::new(2.0, 0.0, 4.0)), head, &floor_fx);
+            assert!(
+                (mine.pos - f(sim.pos)).length() < 0.05,
+                "{:?} vs {:?}",
+                mine.pos,
+                f(sim.pos)
+            );
+            let [_, up, _] = sim.axes();
+            assert!((mine.rot * Vec3::Y - f(up)).length() < 0.02);
+        }
+    }
+
     fn params() -> GaitParams {
         GaitParams {
             stride: 1.6,
