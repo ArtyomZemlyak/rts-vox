@@ -541,7 +541,7 @@ impl Matter {
             }
         }
     }
-    pub fn flush(&mut self, w: &World, material: bool, gravity: i32) {
+    pub fn flush(&mut self, w: &World, material: bool, gravity: i32, tick: u64) {
         self.debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
         for &(by, mat) in w.taken() {
@@ -563,6 +563,7 @@ impl Matter {
             &mut self.economy,
             &self.tuning,
             Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)),
+            tick,
         );
     }
     pub fn save(&self, b: &mut Blob) {

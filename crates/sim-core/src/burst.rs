@@ -81,14 +81,84 @@ mod tests {
             held,
             resting: false,
         });
-        b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t));
+        b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
         assert!(b.fragments[0].position.x < start.x.sub(Fx::ONE));
         assert!(!b.fragments[0].resting);
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t));
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
         }
         assert!(b.fragments[0].resting);
         assert!(b.fragments[0].position.y < Fx::from_int(14));
+    }
+
+    /// A piece on a shelf stays put while the shelf stands, and when the
+    /// shelf is dug away it wakes within the check period, falls to the
+    /// ground and settles again, its wreck entry following (ADR-291).
+    #[test]
+    fn a_resting_piece_falls_again_when_the_ground_under_it_is_dug() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.queue_edit(Edit::put(48, 14, 48, 2));
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        b.fragments.push(Fragment {
+            id: 1,
+            position: centre([48, 16, 48]),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        let mut tick = 0;
+        while !b.fragments[0].resting {
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            tick += 1;
+            assert!(tick < 300, "never rested");
+        }
+        let shelf = b.fragments[0].position.y;
+        assert!(
+            shelf > Fx::from_int(15) && shelf < Fx::from_int(16),
+            "not on the shelf: {shelf:?}"
+        );
+        assert_eq!(e.wrecks.iter().filter(|w| w.held == held).count(), 1);
+        for _ in 0..t.blast.rest_check_ticks * 2 {
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            tick += 1;
+        }
+        assert!(b.fragments[0].resting);
+        assert_eq!(b.fragments[0].position.y, shelf);
+        w.queue_edit(Edit::dig(48, 14, 48));
+        w.begin_tick();
+        w.flush();
+        assert!(!w.solid(48, 14, 48));
+        let mut woke = false;
+        for _ in 0..300 {
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            tick += 1;
+            woke |= !b.fragments[0].resting;
+            if woke && b.fragments[0].resting {
+                break;
+            }
+        }
+        assert!(woke, "the piece never woke");
+        assert!(b.fragments[0].resting, "the piece did not settle again");
+        assert!(
+            b.fragments[0].position.y < Fx::from_int(14),
+            "still up: {:?}",
+            b.fragments[0].position
+        );
+        let wrecks: Vec<_> = e.wrecks.iter().filter(|w| w.held == held).collect();
+        assert_eq!(wrecks.len(), 1);
+        assert!(wrecks[0].y < 14);
+        assert!(e.balanced());
     }
 
     struct Ground;
@@ -250,7 +320,7 @@ mod tests {
             resting: false,
         });
         for _ in 0..100 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t));
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
             assert!(b.fragments[0].position.x < Fx::from_int(52));
         }
     }
@@ -557,7 +627,7 @@ mod tests {
         }
         let n = b.removed;
         for _ in 0..800 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t));
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
         }
         assert!(n > 0);
         assert!(b.fragments.iter().all(|f| f.resting));
@@ -1212,12 +1282,25 @@ impl Bursts {
         e: &mut Economy,
         t: &Blast,
         gravity: Fx,
+        tick: u64,
     ) {
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
         let mut merged = BTreeSet::new();
+        // Waking pieces count against the flying budget like new ones; a
+        // piece without room waits for its next turn.
+        let mut room = (t.max_flying as usize)
+            .saturating_sub(self.fragments.iter().filter(|f| !f.resting).count());
         for i in 0..self.fragments.len() {
             let f = &mut self.fragments[i];
+            if room > 0 && f.resting && due(f.id, tick, t) && !supported(f, world) {
+                // The ground under it was taken (ADR-291): it falls again,
+                // and its wreck entry goes until it settles anew.
+                f.resting = false;
+                room -= 1;
+                let held = f.held;
+                e.wrecks.retain(|w| w.held != held);
+            }
             if advance_fragment(f, world, t, gravity) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
                 e.wrecks.push(Wreck {
@@ -1257,6 +1340,9 @@ impl Bursts {
             }
         }
         for f in self.corpses.values_mut() {
+            if f.resting && due(f.id, tick, t) && !supported(f, world) {
+                f.resting = false;
+            }
             advance_fragment(f, world, t, gravity);
         }
         for w in &mut e.wrecks {
@@ -1622,7 +1708,9 @@ impl Bursts {
                 || f.shape == 0
                 || !(1..=4).contains(&f.side)
                 || (f.side < 4 && f.shape >> box_cells(f.side) != 0)
-                || (f.chunk.is_none() && !f.resting && f.count != f.shape.count_ones())
+                // A pile that fell again (ADR-291) flies with more cells
+                // than its shape shows; a piece never has fewer.
+                || (f.chunk.is_none() && f.count < f.shape.count_ones())
                 || (f.material == AIR && f.paint.is_none())
                 || f.mm == 0
                 || f.mm > 1000
@@ -1663,6 +1751,21 @@ impl Bursts {
     }
 }
 
+/// A resting piece looks under itself every `rest_check_ticks` ticks
+/// (ADR-291), the pieces spread over the period by id so that no tick
+/// checks them all.
+fn due(id: u64, tick: u64, t: &Blast) -> bool {
+    id.wrapping_add(tick)
+        .is_multiple_of(u64::from(t.rest_check_ticks.max(1)))
+}
+/// Whether material still holds the piece up: its box half a unit lower,
+/// the most a settling step moves, meets the world.
+fn supported(f: &Fragment, world: &voxel::World) -> bool {
+    let (low, high) = f.bounds();
+    let mut p = arr(f.position);
+    p[1] = p[1].sub(Fx::from_ratio(1, 2));
+    fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
+}
 /// Common translation/contact step for fragments and persistent dead hulls.
 fn advance_fragment(f: &mut Fragment, world: &voxel::World, t: &Blast, gravity: Fx) -> bool {
     if f.resting {

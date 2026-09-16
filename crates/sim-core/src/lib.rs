@@ -1912,6 +1912,7 @@ impl World {
                 e,
                 &self.tuning.blast,
                 gravity_per_tick(&self.tuning),
+                self.tick,
             );
         }
     }

@@ -2029,6 +2029,7 @@ impl BlastRange {
             &self.world,
             self.config.material_energy_j > 0,
             self.config.gravity,
+            u64::from(self.tick),
         );
         for e in self.world.edits() {
             if e.mat == 0 {

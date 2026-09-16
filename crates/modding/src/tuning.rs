@@ -185,6 +185,10 @@ pub struct Blast {
     pub bounce_pct: u32,
     pub friction_pct: u32,
     pub sleep_mm_s: u32,
+    /// Раз в столько тиков осевший кусок проверяет опору под собой и,
+    /// если её сняли, падает снова (ADR-291). Очередь разнесена по
+    /// номерам кусков; ожидание в тиках, одинаковое у всех клиентов.
+    pub rest_check_ticks: u32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -433,6 +437,7 @@ impl Tuning {
             || b.bounce_pct >= 100
             || b.friction_pct > 100
             || b.sleep_mm_s == 0
+            || b.rest_check_ticks == 0
         {
             return Err(TuningError::Ron(
                 "invalid blast domain, energy or work budgets".into(),
