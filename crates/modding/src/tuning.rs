@@ -189,6 +189,12 @@ pub struct Blast {
     /// если её сняли, падает снова (ADR-291). Очередь разнесена по
     /// номерам кусков; ожидание в тиках, одинаковое у всех клиентов.
     pub rest_check_ticks: u32,
+    /// Движущийся корпус выталкивает кусок, на который наехал (ADR-294):
+    /// кусок получает смещение корпуса за тик, умноженное на эту долю в
+    /// процентах; ноль — корпус кусков не толкает.
+    pub push_pct: u32,
+    /// Подъём выталкиваемого куска: доля длины толчка, в процентах.
+    pub push_up_pct: u32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -438,6 +444,7 @@ impl Tuning {
             || b.friction_pct > 100
             || b.sleep_mm_s == 0
             || b.rest_check_ticks == 0
+            || b.push_up_pct > 100
         {
             return Err(TuningError::Ron(
                 "invalid blast domain, energy or work budgets".into(),

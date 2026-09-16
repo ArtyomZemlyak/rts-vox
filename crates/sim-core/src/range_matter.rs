@@ -548,6 +548,7 @@ impl Matter {
         gravity: i32,
         tick: u64,
         hulls: &[crate::burst::Hull],
+        yielding: &[voxel::store::Mat],
     ) {
         self.debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
@@ -571,7 +572,7 @@ impl Matter {
             &self.tuning,
             Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)),
             tick,
-            hulls,
+            crate::burst::Surroundings { hulls, yielding },
         );
     }
     pub fn save(&self, b: &mut Blob) {

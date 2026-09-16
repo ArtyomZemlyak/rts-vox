@@ -82,11 +82,23 @@ mod tests {
             held,
             resting: false,
         });
-        b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
+        b.step_fragments(
+            &w,
+            &mut e,
+            &t.blast,
+            crate::gravity_per_tick(&t),
+            0,
+            Surroundings::NONE);
         assert!(b.fragments[0].position.x < start.x.sub(Fx::ONE));
         assert!(!b.fragments[0].resting);
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                0,
+                Surroundings::NONE);
         }
         assert!(b.fragments[0].resting);
         assert!(b.fragments[0].position.y < Fx::from_int(14));
@@ -120,7 +132,13 @@ mod tests {
         });
         let mut tick = 0;
         while !b.fragments[0].resting {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE);
             tick += 1;
             assert!(tick < 300, "never rested");
         }
@@ -131,7 +149,13 @@ mod tests {
         );
         assert_eq!(e.wrecks.iter().filter(|w| w.held == held).count(), 1);
         for _ in 0..t.blast.rest_check_ticks * 2 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE);
             tick += 1;
         }
         assert!(b.fragments[0].resting);
@@ -142,7 +166,13 @@ mod tests {
         assert!(!w.solid(48, 14, 48));
         let mut woke = false;
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE);
             tick += 1;
             woke |= !b.fragments[0].resting;
             if woke && b.fragments[0].resting {
@@ -190,7 +220,13 @@ mod tests {
             });
         }
         for tick in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE);
         }
         assert_eq!(b.fragments.len(), 1, "the pieces did not merge");
         let f = &b.fragments[0];
@@ -236,6 +272,8 @@ mod tests {
             head: angle::FULL / 8,
             half: [Fx::from_int(3), Fx::from_int(2)],
             height: Fx::from_int(3),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ZERO,
         };
         let mut tick = 0;
         while !b.fragments[0].resting {
@@ -245,7 +283,10 @@ mod tests {
                 &t.blast,
                 crate::gravity_per_tick(&t),
                 tick,
-                &[hull],
+                Surroundings {
+                    hulls: &[hull],
+                    yielding: &[],
+                },
             );
             tick += 1;
             assert!(tick < 300, "never rested");
@@ -258,7 +299,13 @@ mod tests {
         assert!(b.rubble(&w, &[]).is_empty(), "a piece on a roof is no heap");
         let mut woke = false;
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE);
             tick += 1;
             woke |= !b.fragments[0].resting;
             if woke && b.fragments[0].resting {
@@ -273,6 +320,91 @@ mod tests {
             b.fragments[0].position.y < Fx::from_int(13),
             "still up: {:?}",
             b.fragments[0].position
+        );
+        assert!(e.balanced());
+    }
+
+    /// A hull driving into a lying piece bulldozes it: the piece leaves
+    /// ahead of the hull and settles again outside it (ADR-294).
+    #[test]
+    fn a_moving_hull_bulldozes_a_lying_piece_out_of_its_way() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        b.fragments.push(Fragment {
+            id: 1,
+            position: centre([48, 12, 48]),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: true,
+        });
+        let mut hull = Hull {
+            pos: [Fx::from_int(40), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(3), Fx::from_int(2)],
+            height: Fx::from_int(3),
+            vel: [Fx::from_ratio(1, 2), Fx::ZERO, Fx::ZERO],
+            step: Fx::ZERO,
+        };
+        let mut tick = 0;
+        let mut moved = false;
+        for _ in 0..40 {
+            hull.pos[0] = hull.pos[0].add(hull.vel[0]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings {
+                    hulls: &[hull],
+                    yielding: &[],
+                },
+            );
+            tick += 1;
+            moved |= !b.fragments[0].resting;
+        }
+        assert!(moved, "the hull drove through the piece");
+        hull.vel = [Fx::ZERO; 3];
+        for _ in 0..300 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings {
+                    hulls: &[hull],
+                    yielding: &[],
+                },
+            );
+            tick += 1;
+            if b.fragments[0].resting {
+                break;
+            }
+        }
+        let f = &b.fragments[0];
+        let front = hull.pos[0].add(hull.half[0]);
+        assert!(f.resting, "the piece never settled again");
+        assert!(
+            f.position.x >= front.sub(Fx::ONE),
+            "the piece stayed under the hull: {:?}, front {front:?}",
+            f.position
+        );
+        assert!(
+            f.position.y < Fx::from_int(13),
+            "the piece did not come down: {:?}",
+            f.position
         );
         assert!(e.balanced());
     }
@@ -436,7 +568,13 @@ mod tests {
             resting: false,
         });
         for _ in 0..100 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                0,
+                Surroundings::NONE);
             assert!(b.fragments[0].position.x < Fx::from_int(52));
         }
     }
@@ -743,7 +881,13 @@ mod tests {
         }
         let n = b.removed;
         for _ in 0..800 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                0,
+                Surroundings::NONE);
         }
         assert!(n > 0);
         assert!(b.fragments.iter().all(|f| f.resting));
@@ -770,13 +914,34 @@ struct Claim {
 }
 
 /// A live hull a piece can land on (ADR-293): its footprint box about
-/// `pos` turned by `head`, standing `height` above `pos.y`.
+/// `pos` turned by `head`, standing `height` above `pos.y`; `vel` is how
+/// far it moved this tick, and a moving hull bulldozes the pieces it
+/// drives into (ADR-294).
 #[derive(Clone, Copy, Debug)]
 pub struct Hull {
     pub pos: [Fx; 3],
     pub head: i32,
     pub half: [Fx; 2],
     pub height: Fx,
+    pub vel: [Fx; 3],
+    /// The rise the hull climbs rather than pushes: a piece no taller
+    /// than this above the hull's bottom is floor to it (ADR-292).
+    pub step: Fx,
+}
+
+/// What the pieces meet besides the world this tick: the live hulls
+/// (ADR-293) and the materials a hull crushes rather than climbs
+/// (ADR-294). The batch has neither.
+#[derive(Clone, Copy)]
+pub struct Surroundings<'a> {
+    pub hulls: &'a [Hull],
+    pub yielding: &'a [Mat],
+}
+impl Surroundings<'static> {
+    pub const NONE: Self = Self {
+        hulls: &[],
+        yielding: &[],
+    };
 }
 
 /// A real removed world voxel, or a settled local pile of them. Coordinates and
@@ -1409,8 +1574,9 @@ impl Bursts {
         t: &Blast,
         gravity: Fx,
         tick: u64,
-        hulls: &[Hull],
+        around: Surroundings<'_>,
     ) {
+        let (hulls, yielding) = (around.hulls, around.yielding);
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
         let mut merged = BTreeSet::new();
@@ -1420,6 +1586,34 @@ impl Bursts {
             .saturating_sub(self.fragments.iter().filter(|f| !f.resting).count());
         for i in 0..self.fragments.len() {
             let f = &mut self.fragments[i];
+            if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || room > 0) {
+                let (low, high) = f.bounds();
+                if let Some(h) = hull_hit(arr(f.position), low, high, hulls, 0) {
+                    // What the hull climbs as floor it does not push: a
+                    // piece of a yielding material, or one rising above
+                    // the hull's step, is bulldozed; the rest is ridden.
+                    let climbs = !yielding.contains(&f.material)
+                        && f.position.y.add(high[1]) <= h.pos[1].add(h.step);
+                    if h.vel != [Fx::ZERO; 3] && !climbs {
+                        // A moving hull bulldozes the piece it drove into
+                        // (ADR-294): the piece leaves ahead of it at the
+                        // hull's pace and a little up.
+                        if f.resting {
+                            f.resting = false;
+                            room -= 1;
+                            let held = f.held;
+                            e.wrecks.retain(|w| w.held != held);
+                        }
+                        let push = Fx::from_ratio(t.push_pct as i32, 100);
+                        let along = V3::new(h.vel[0], Fx::ZERO, h.vel[2]).scale(push);
+                        let lift = along
+                            .len_sq()
+                            .sqrt()
+                            .mul(Fx::from_ratio(t.push_up_pct as i32, 100));
+                        f.velocity = V3::new(along.x, h.vel[1].mul(push).add(lift), along.z);
+                    }
+                }
+            }
             if room > 0 && f.resting && due(f.id, tick, t) && !supported(f, world, hulls) {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
@@ -1963,28 +2157,28 @@ fn supported(f: &Fragment, world: &voxel::World, hulls: &[Hull]) -> bool {
     let mut p = arr(f.position);
     p[1] = p[1].sub(Fx::from_ratio(1, 2));
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
-        || hull_contact(p, low, high, hulls)
+        || hull_hit(p, low, high, hulls, 0).is_some()
 }
 /// Whether a piece's box at `p` meets a live hull (ADR-293): its vertical
 /// extent against the hull's height, its horizontal reach against the
 /// hull's footprint in the hull's own frame. A turned piece counts its
 /// longest horizontal reach in every direction.
-fn hull_contact(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull]) -> bool {
+fn hull_hit(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull], skip: u64) -> Option<&Hull> {
     if hulls.is_empty() {
-        return false;
+        return None;
     }
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
-    hulls.iter().any(|h| {
-        if top < h.pos[1] || bottom > h.pos[1].add(h.height) {
-            return false;
+    hulls.iter().enumerate().find_map(|(i, h)| {
+        if (i < 64 && skip & (1 << i) != 0) || top < h.pos[1] || bottom > h.pos[1].add(h.height) {
+            return None;
         }
         let (c, s) = (angle::cos(h.head), angle::sin(h.head));
         let dx = p[0].sub(h.pos[0]);
         let dz = p[2].sub(h.pos[2]);
         let u = dx.mul(c).add(dz.mul(s));
         let v = dz.mul(c).sub(dx.mul(s));
-        u.abs() <= h.half[0].add(reach) && v.abs() <= h.half[1].add(reach)
+        (u.abs() <= h.half[0].add(reach) && v.abs() <= h.half[1].add(reach)).then_some(h)
     })
 }
 /// Common translation/contact step for fragments and persistent dead hulls.
@@ -2019,6 +2213,16 @@ fn advance_fragment(
     let mut delta = arr(f.velocity.scale(Fx::from_ratio(1, steps as i32)));
     let mut supported = false;
     let (low, high) = f.bounds();
+    // Hulls the piece already overlaps do not pen it in (ADR-294): it may
+    // leave them, and only entering one is a contact.
+    let start = arr(f.position);
+    let inside = hulls.iter().enumerate().fold(0u64, |m, (i, h)| {
+        if i < 64 && hull_hit(start, low, high, std::slice::from_ref(h), 0).is_some() {
+            m | (1 << i)
+        } else {
+            m
+        }
+    });
     for _ in 0..steps {
         for axis in 0..3 {
             if delta[axis] == Fx::ZERO {
@@ -2027,7 +2231,7 @@ fn advance_fragment(
             let mut p = arr(f.position);
             p[axis] = p[axis].add(delta[axis]);
             let blocked = fragment_contact(f, world, p, low, high, bounds)
-                || hull_contact(p, low, high, hulls);
+                || hull_hit(p, low, high, hulls, inside).is_some();
             if blocked {
                 supported |= axis == 1 && delta[axis] < Fx::ZERO;
                 delta[axis] = Fx::ZERO;

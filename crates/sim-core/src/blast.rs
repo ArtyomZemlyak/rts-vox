@@ -1806,6 +1806,8 @@ impl BlastRange {
         // This small range commits motion in stable slot order. Later actors
         // see accepted positions, so two approaching tanks cannot each consume
         // the same free gap between the beginning and end of the tick.
+        let before: Vec<[Fx; 3]> = self.units.iter().map(|u| u.motion.pos).collect();
+        let gun_before = self.gun.motion.pos;
         let mut positions: Vec<_> = self
             .units
             .iter()
@@ -2037,13 +2039,15 @@ impl BlastRange {
         self.world.flush();
         self.matter.step_sections(&mut self.units);
         self.matter.shed_segments(&mut self.units);
-        // Live hulls catch falling pieces (ADR-293); the dead lie as debris.
+        // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
+        // they drive into (ADR-294); the dead lie as debris.
         let hulls: Vec<crate::burst::Hull> = self
             .units
             .iter()
-            .chain(std::iter::once(&self.gun))
-            .filter(|u| u.status.alive)
-            .map(|u| {
+            .zip(&before)
+            .chain(std::iter::once((&self.gun, &gun_before)))
+            .filter(|(u, _)| u.status.alive)
+            .map(|(u, was)| {
                 let o = motion::Obstacle::of(&u.motion, &u.body);
                 crate::burst::Hull {
                     pos: o.pos,
@@ -2053,6 +2057,8 @@ impl BlastRange {
                         u.body.vol.ny as i32 * u.body.mm as i32,
                         voxel::unit::WORLD_MM as i32,
                     ),
+                    vel: [0, 1, 2].map(|k| o.pos[k].sub(was[k])),
+                    step: Fx::from_int(u.motion.step),
                 }
             })
             .collect();
@@ -2062,6 +2068,7 @@ impl BlastRange {
             self.config.gravity,
             u64::from(self.tick),
             &hulls,
+            &self.navigation.fell.materials,
         );
         for e in self.world.edits() {
             if e.mat == 0 {
