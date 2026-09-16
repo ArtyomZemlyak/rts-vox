@@ -167,6 +167,11 @@ impl Field {
         budget: &mut u32,
     ) {
         let source = index([n as i32 / 2; 3], n);
+        debug_assert_eq!(
+            resistance.len(),
+            n * n * n,
+            "the field builds into the job's own buffer"
+        );
         while *budget > 0 && self.build_actor < self.actors.len() {
             *budget -= 1;
             if let Some(probe) = self.probe.as_mut() {

@@ -3276,8 +3276,11 @@ impl World {
                             &burst_tuning,
                         );
                         debug_assert!(accepted, "validated blast retained by shot backpressure");
-                        if let (Some(bodies), Some(frames)) =
-                            (material_bodies.as_ref(), frames.as_ref())
+                        // A refused blast has no job of its own: capturing
+                        // would hand its bodies to whichever job is last
+                        // (ADR-287).
+                        if let (true, Some(bodies), Some(frames)) =
+                            (accepted, material_bodies.as_ref(), frames.as_ref())
                         {
                             bursts.capture_last(bodies, frames, &burst_tuning);
                         }

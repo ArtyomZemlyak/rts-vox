@@ -427,6 +427,53 @@ mod tests {
             "without cover both bodies must be reached: {open:?}"
         );
     }
+    /// A blast refused for want of room has no job; a late capture must
+    /// leave the last job alone, whose wave may already hold its
+    /// resistance buffer (ADR-287).
+    #[test]
+    fn a_refused_blast_does_not_recapture_the_last_job() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let (mut bodies, frames) = targets();
+        let mut t = tuning();
+        t.impact.work_kj_m3 = [20_000; 5];
+        t.blast.max_pending = 2;
+        // Both jobs sample within the first tick; their waves then take
+        // many ticks, so the queue stays full.
+        t.blast.samples_per_tick = 200_000;
+        t.blast.wave_pops_per_tick = 500;
+        assert!(b.enqueue(&w, [48, 15, 48], 16, 3_000_000_000, &t.blast));
+        b.capture_last(&bodies, &frames, &t.blast);
+        assert!(b.enqueue(&w, [40, 15, 48], 16, 3_000_000_000, &t.blast));
+        let tick = |b: &mut Bursts,
+                    w: &mut voxel::World,
+                    bodies: &mut crate::damage::Bodies,
+                    e: &mut Economy| {
+            b.advance_material(w, &e.mats, Some(bodies), &t);
+            w.begin_tick();
+            w.flush();
+            b.confirm(w.completed(), e, &t.blast);
+            bodies.step(
+                &t.impact.work_kj_m3,
+                t.impact.cells_per_tick,
+                t.impact.jobs_per_tick,
+            );
+        };
+        tick(&mut b, &mut w, &mut bodies, &mut e);
+        // Both jobs are still at work, the last with its wave holding the
+        // resistance buffer; the queue is full.
+        assert_eq!(b.pending(), 2);
+        // Refused for want of room; the old caller captured anyway.
+        assert!(!b.enqueue(&w, [56, 15, 48], 16, 3_000_000_000, &t.blast));
+        b.capture_last(&bodies, &frames, &t.blast);
+        for _ in 0..2000 {
+            tick(&mut b, &mut w, &mut bodies, &mut e);
+            if b.pending() == 0 && b.claims() == 0 && bodies.pending.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(b.pending(), 0);
+        assert!(e.balanced());
+    }
     #[test]
     fn unit_wave_build_and_damage_cursors_resume_exactly() {
         let (mut b, mut w, e) = (Bursts::default(), world(), economy());
@@ -880,6 +927,13 @@ impl Bursts {
         let Some(j) = self.jobs.back_mut() else {
             return;
         };
+        // Only a job that has not started may take bodies: one that has
+        // sampled, captured or handed its resistance to its wave keeps
+        // what it has (ADR-287). The load stand caught a refused blast
+        // recapturing the last job after its wave had emptied the buffer.
+        if j.cursor > 0 || j.wave.is_some() || !j.body_field.empty() {
+            return;
+        }
         j.body_field =
             crate::body_wave::Field::capture(bodies, frames, j.origin, j.n as i32 * j.cell);
         if !j.body_field.empty() {
