@@ -36,6 +36,9 @@ pub struct RangeUnit {
     pub body: UnitBody,
     pub at: [i32; 3],
     pub removed: Vec<[u8; 3]>,
+    /// Wave pressure the body took this tick (ADR-297); the range turns it
+    /// into a push on the hull and clears it. Transient.
+    pub absorbed: u32,
     /// Removed cells transferred to persistent debris, excluded from the sink.
     pub detached: usize,
     /// Local work already spent deforming surviving body cells.
@@ -143,6 +146,7 @@ impl RangeUnit {
             body,
             at,
             removed: Vec::new(),
+            absorbed: 0,
             detached: 0,
             dents: BTreeMap::new(),
             revision: 0,
@@ -817,6 +821,7 @@ impl Explosion {
                                 }
                                 if apply {
                                     u.receive_cell(cell, hit.pressure, c);
+                                    u.absorbed = u.absorbed.saturating_add(hit.pressure);
                                 }
                             }
                         }
@@ -844,6 +849,7 @@ impl Explosion {
                             }
                             if apply {
                                 u.receive_seg_cell(seg, cell, hit.pressure, c);
+                                u.absorbed = u.absorbed.saturating_add(hit.pressure);
                             }
                         }
                         None => {}
@@ -2034,14 +2040,6 @@ impl BlastRange {
                     &self.units,
                     &self.surface_work,
                 ));
-                // The burst pushes every hull in reach (ADR-286).
-                let energy = u64::from(self.config.material_energy_j);
-                let milli = self.config.hull_impulse_milli;
-                for u in self.units.iter_mut().chain(std::iter::once(&mut self.gun)) {
-                    if u.status.alive {
-                        u.motion.impulse(&u.body, at, energy, milli);
-                    }
-                }
                 self.shell = None;
             } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(SIZE[a] as i32)) {
                 // A miss retires at the map boundary, allowing another order.
@@ -2073,6 +2071,20 @@ impl BlastRange {
                             .annihilate_body(id, u.removed.len() - n + u.seg_removed.len() - m);
                     }
                     u.refresh_damage(id);
+                }
+            }
+            // The wave's pressure on a body pushes its hull (ADR-297): what
+            // dents and breaks the side is what throws the machine, so a
+            // hull behind cover or out of the wave is not pushed at all.
+            let milli = u64::from(self.config.hull_impulse_milli);
+            let at = e.at;
+            for u in &mut self.units {
+                if u.absorbed > 0 {
+                    if u.status.alive {
+                        let newton_s = u64::from(u.absorbed).saturating_mul(milli) / 1000;
+                        u.motion.impulse(&u.body, at, newton_s);
+                    }
+                    u.absorbed = 0;
                 }
             }
         }
@@ -3200,11 +3212,14 @@ mod tests {
             }
         }
         impact.expect("no impact");
-        let u = &a.units[0];
-        assert!(u.motion.shove.len_sq() > Fx::ZERO, "no shove at impact");
-        for _ in 0..5 {
+        // The push arrives with the wave, a few ticks after the impact,
+        // and only once the wave has pressed on the body (ADR-297).
+        let mut pushed = false;
+        for _ in 0..8 {
             a.step();
+            pushed |= a.units[0].motion.shove.len_sq() > Fx::ZERO;
         }
+        assert!(pushed, "no shove from the wave");
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.units[0].motion.shove, b.units[0].motion.shove);
         let level = a.units[0].motion.hull.y;

@@ -219,16 +219,18 @@ impl Motion {
             self.hull.up,
         )
     }
-    /// A burst's push on this hull (ADR-286): `energy_j · milli / 1000`
-    /// newton-seconds at one unit from the centre of mass, falling off with
-    /// the distance, along the line from the burst to the centre. The mass
-    /// is the body's volume at the chassis density. The horizontal part
-    /// becomes a shove the brakes and the terrain spend, the vertical part
-    /// a hop through the suspension, and the moment of the push about the
-    /// near face and the burst's height a roll or pitch through the ride's
-    /// radius of gyration. Bursts farther than the reach do nothing.
-    pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], energy_j: u64, milli: u32) {
-        if milli == 0 || energy_j == 0 {
+    /// A burst's push on this hull (ADR-286, ADR-297): `newton_s`
+    /// newton-seconds along the line from the burst to the centre of mass.
+    /// The range derives them from the wave's pressure the body absorbed,
+    /// so the falling off with distance and the shadow of cover are the
+    /// wave's, not this function's. The mass is the body's volume at the
+    /// chassis density. The horizontal part becomes a shove the brakes and
+    /// the terrain spend, the vertical part a hop through the suspension,
+    /// and the moment of the push about the near face and the burst's
+    /// height a roll or pitch through the ride's radius of gyration. Bursts
+    /// farther than the reach do nothing.
+    pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], newton_s: u64) {
+        if newton_s == 0 {
             return;
         }
         let r = crate::ride::ride_of(&self.chassis);
@@ -246,13 +248,12 @@ impl Motion {
         }
         let dist = dist2.sqrt().max(Fx::ONE);
         let dir = d.scale(Fx::ONE.div(dist));
-        let newton_s = (energy_j.saturating_mul(u64::from(milli)) / 1000).min(i32::MAX as u64);
+        let newton_s = newton_s.min(i32::MAX as u64);
         let mass_kg = (u128::from(b.volume_mm3()) * self.chassis.density.max(1) as u128
             / 1_000_000_000)
             .clamp(1, i32::MAX as u128) as i32;
         let units_per_metre = (1000 / i32::from(voxel::unit::WORLD_MM)).max(1);
         let dv = Fx::from_int(newton_s as i32)
-            .div(dist)
             .div(Fx::from_int(mass_kg))
             .mul(Fx::from_int(units_per_metre));
         let push = dir.scale(dv);
@@ -1174,8 +1175,10 @@ mod tests {
         }
         let before = m.pos;
         let level = m.hull;
-        // Eighteen megajoules a hull's width to the west, at the ground.
-        m.impulse(&body, [284, 16, 300], 18_000_000, 110);
+        // A hundred and twenty thousand newton-seconds a hull's width to
+        // the west, at the ground: what eighteen megajoules of a shell
+        // delivered to a tank at that distance before ADR-297.
+        m.impulse(&body, [284, 16, 300], 120_000);
         assert!(m.shove.x > Fx::from_int(5), "shove {:?}", m.shove);
         assert!(m.hull.w.len_sq() > Fx::ZERO, "no spin");
         assert!(m.hull.vy > Fx::ONE, "no hop: {:?}", m.hull.vy);
@@ -1197,16 +1200,22 @@ mod tests {
             m.hull.up
         );
         assert!((m.hull.y.sub(level.y)).abs() < Fx::from_ratio(1, 10));
-        // Twice the distance, a quarter of the push: the fall-off is 1/r
-        // on the impulse and the same on the moment.
+        // The same newton-seconds from twice as far push no less: the
+        // falling off with distance is the wave's, which delivers less
+        // pressure there, not the push's (ADR-297).
         let mut far = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
-        far.impulse(&body, [268, 16, 300], 18_000_000, 110);
+        far.impulse(&body, [268, 16, 300], 120_000);
         let mut near = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
-        near.impulse(&body, [284, 16, 300], 18_000_000, 110);
-        assert!(far.shove.x < near.shove.x && far.shove.x.mul(Fx::from_int(3)) > near.shove.x);
+        near.impulse(&body, [284, 16, 300], 120_000);
+        assert!(
+            far.shove.x >= near.shove.x,
+            "far {:?} near {:?}",
+            far.shove,
+            near.shove
+        );
         // Out of reach: nothing.
         let mut away = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
-        away.impulse(&body, [200, 16, 300], 18_000_000, 110);
+        away.impulse(&body, [200, 16, 300], 120_000);
         assert_eq!(away.shove, V3::ZERO);
     }
     /// A wide two-legged body stands on both legs, each foot carrying

@@ -3,11 +3,21 @@ use sim_core::blast::BlastRange;
 use std::time::Instant;
 
 fn main() {
+    // `--weapon shell` measures the heavier debris of the shell (ADR-296).
+    let args: Vec<String> = std::env::args().collect();
+    let weapon = args
+        .iter()
+        .position(|a| a == "--weapon")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| "energy".to_string());
+    let ron = match weapon.as_str() {
+        "energy" => include_str!("../../../../data/energy-cannon.ron"),
+        "shell" => include_str!("../../../../data/explosion.ron"),
+        "anni" => include_str!("../../../../data/anni-cannon.ron"),
+        _ => panic!("--weapon expects energy, shell or anni"),
+    };
     for firing in [false, true] {
-        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
-            "../../../../data/energy-cannon.ron"
-        ))
-        .unwrap();
+        let config = modding::explosion::ExplosionConfig::from_ron(ron).unwrap();
         let layout =
             modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-cover.ron"))
                 .unwrap();
@@ -31,7 +41,10 @@ fn main() {
             .take(5)
             .map(|(us, tick)| format!("{tick}:{us}"))
             .collect();
-        println!("firing={firing} slowest_ticks_us={}", top.join(","));
+        println!(
+            "weapon={weapon} firing={firing} slowest_ticks_us={}",
+            top.join(",")
+        );
         samples.sort_unstable();
         let laps: Vec<_> = scene
             .units

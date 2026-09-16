@@ -54,9 +54,10 @@ pub struct ExplosionConfig {
     /// in, `1..=4` (ADR-284). Older presets keep the two-cell box.
     #[serde(default = "two_cells")]
     pub fragment_box: u32,
-    /// Push on a hull, thousandths of a newton-second per joule of material
-    /// energy at one world unit from the hull's centre, falling off with
-    /// the distance (ADR-286). Zero: the burst does not move hulls.
+    /// Push on a hull, thousandths of a newton-second per unit of wave
+    /// pressure the body absorbed (ADR-286, ADR-297): the pressure that
+    /// dents and breaks the side is what throws the machine. Zero: the
+    /// burst does not move hulls.
     #[serde(default)]
     pub hull_impulse_milli: u32,
 }

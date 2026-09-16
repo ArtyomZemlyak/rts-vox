@@ -14,7 +14,9 @@
     edits_per_tick: 8192,
     // A shell throws pieces of up to three cells a side (ADR-284).
     fragment_box: 3,
-    // A shell shoves and rocks hulls in reach (ADR-286).
+    // Push on a hull: thousandths of a newton-second per unit of wave
+    // pressure the body absorbed (ADR-297) - what dents the side throws
+    // the machine, and a hull the wave never reached is not pushed.
     hull_impulse_milli: 110,
     fire_tick: 45,
     shell_speed: 150,
