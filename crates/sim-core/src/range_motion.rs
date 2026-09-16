@@ -356,6 +356,7 @@ impl Motion {
     fn slide(
         &mut self,
         w: &World,
+        rubble: &nav::vehicle::Rubble,
         b: &UnitBody,
         others: &[Obstacle],
         response: crate::mobility::Mobility,
@@ -365,7 +366,8 @@ impl Motion {
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), true);
         let mut ground =
-            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
+                .with_rubble(rubble);
         let shape = self.shape(b);
         let current = ground.pose([self.pos[0], self.pos[2]], self.drive.head, shape);
         let nx = self.pos[0].add(self.shove.x.div(Fx::from_int(30)));
@@ -410,6 +412,7 @@ impl Motion {
     fn settle(
         &mut self,
         w: &World,
+        rubble: &nav::vehicle::Rubble,
         b: &UnitBody,
         gravity: i32,
         response: crate::mobility::Mobility,
@@ -419,7 +422,8 @@ impl Motion {
         }
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
         let mut ground =
-            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
+                .with_rubble(rubble);
         let shape = self.shape(b);
         let f = ground
             .pose([self.pos[0], self.pos[2]], self.drive.head, shape)
@@ -449,7 +453,15 @@ impl Motion {
     /// (ADR-279): the displacement, yaw step and phase advance of this
     /// tick, the terrain under each sole, and whether the hull carries
     /// load. A lost leg keeps its last state.
-    fn step_feet(&mut self, w: &World, b: &UnitBody, linear: V3, angular: i32, cycles: Fx) {
+    fn step_feet(
+        &mut self,
+        w: &World,
+        rubble: &nav::vehicle::Rubble,
+        b: &UnitBody,
+        linear: V3,
+        angular: i32,
+        cycles: Fx,
+    ) {
         let Some(g) = self.chassis.gait.as_ref() else {
             return;
         };
@@ -465,7 +477,12 @@ impl Motion {
             .mul(Fx::from_int(4))
             .div(Fx::from_int(self.speed.max(1)))
             .min(Fx::ONE);
-        let floor = |x: Fx, z: Fx| Fx::from_int(floor(w, x.to_int_trunc(), z.to_int_trunc()));
+        // A resting heap of debris is floor for a foot too (ADR-292).
+        let floor = |x: Fx, z: Fx| {
+            let (x, z) = (x.to_int_trunc(), z.to_int_trunc());
+            let top = rubble.get(&[x, z]).map_or(0, |t| i32::from(*t));
+            Fx::from_int(floor(w, x, z).max(top))
+        };
         let stance = crate::gait::Stance {
             grounded: self.hull.grounded(),
             root: &root,
@@ -495,12 +512,19 @@ impl Motion {
             }
         }
     }
-    pub fn move_to(&mut self, w: &World, to: [i32; 2], b: &UnitBody, others: &[Obstacle]) -> bool {
+    pub fn move_to(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+    ) -> bool {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
         let half = shape.half.map(Fx::from_int);
         let plan = nav::vehicle::plan(
-            nav::vehicle::Probe::with_yield(w, &self.yielding),
+            nav::vehicle::Probe::with_yield(w, &self.yielding).with_rubble(rubble),
             shape,
             from,
             self.drive.head,
@@ -578,21 +602,22 @@ impl Motion {
         others: &[Obstacle],
         tick: u32,
         gravity: i32,
+        rubble: &nav::vehicle::Rubble,
     ) {
         self.cut.clear();
         if !self.enabled {
             // A parked hull that a burst pushed slides and rocks (ADR-286);
             // a parked walker still stands on its feet, and its hull on them.
-            let moved = self.slide(w, b, others, response);
-            self.step_feet(w, b, moved, 0, Fx::ZERO);
-            self.settle(w, b, gravity, response);
+            let moved = self.slide(w, rubble, b, others, response);
+            self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
+            self.settle(w, rubble, b, gravity, response);
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
         if self.escape_left == 0 && (self.blocked || self.path.is_empty()) && tick >= self.next_plan
         {
             if let Some(goal) = self.destination {
-                self.move_to(w, goal, b, others);
+                self.move_to(w, goal, b, others, rubble);
                 self.next_plan = tick.saturating_add(self.replan);
             }
         }
@@ -604,7 +629,7 @@ impl Motion {
             && (!self.blocked || tick.is_multiple_of(self.replan))
         {
             let goal = self.route[self.waypoint];
-            self.move_to(w, goal, b, others);
+            self.move_to(w, goal, b, others, rubble);
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
@@ -677,7 +702,8 @@ impl Motion {
         // Two poses and the cut lie within a hull length of the vehicle; a
         // whole-map cache would cost more to clear than the poses to compute.
         let mut ground =
-            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
+                .with_rubble(rubble);
         let shape = self.shape(b);
         let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
         // Pushing through a tree is slower than open ground.
@@ -812,6 +838,7 @@ impl Motion {
         );
         self.step_feet(
             w,
+            rubble,
             b,
             linear,
             angle::diff(self.drive.head, old.head),
@@ -1000,6 +1027,7 @@ mod tests {
             others,
             tick,
             98,
+            &nav::vehicle::Rubble::new(),
         );
     }
     /// A whole walker carries its hull on all four legs, feet in the air or
@@ -1387,7 +1415,7 @@ mod tests {
                     let mut m = Motion::new([start, 16, 300], kind, &body);
                     m.drive.head = if reverse { angle::FULL / 2 } else { 0 };
                     assert!(
-                        m.move_to(&w, [end, 300], &body, &[]),
+                        m.move_to(&w, [end, 300], &body, &[], &nav::vehicle::Rubble::new()),
                         "no path {depth} {kind:?}"
                     );
                     let mut low = Fx::from_int(16);

@@ -205,7 +205,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
     let mut m = Motion::new([start[0], settle(t, start), start[1]], kind, &body);
     m.drive.head = yaw;
     let mut out = Run {
-        routed: m.move_to(&w, goal, &body, &[]),
+        routed: m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()),
         low: i32::MAX,
         high: i32::MIN,
         ..Default::default()
@@ -216,7 +216,17 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
     let mut floors = [0i64; 4];
     let mut rate = Fx::ZERO;
     for tick in 0..1500u32 {
-        m.step(&w, &body, true, true, Mobility::intact(true), &[], tick, 98);
+        m.step(
+            &w,
+            &body,
+            true,
+            true,
+            Mobility::intact(true),
+            &[],
+            tick,
+            98,
+            &nav::vehicle::Rubble::new(),
+        );
         let dup = m.hull.up.sub(up);
         let step = m.pos[1].sub(y);
         let jump = step.abs();
@@ -284,10 +294,23 @@ fn probe_poses_along_the_run() {
         }
         // The executed run: every tick the hull was refused a move.
         let mut m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
-        eprintln!("routed={}", m.move_to(&w, [430, 320], &body, &[]));
+        eprintln!(
+            "routed={}",
+            m.move_to(&w, [430, 320], &body, &[], &nav::vehicle::Rubble::new())
+        );
         let mut shown = 0;
         for tick in 0..900u32 {
-            m.step(&w, &body, true, true, Mobility::intact(true), &[], tick, 98);
+            m.step(
+                &w,
+                &body,
+                true,
+                true,
+                Mobility::intact(true),
+                &[],
+                tick,
+                98,
+                &nav::vehicle::Rubble::new(),
+            );
             if m.blocked && shown < 12 {
                 shown += 1;
                 let mut p = nav::vehicle::Probe::new(&w);

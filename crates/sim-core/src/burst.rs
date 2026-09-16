@@ -161,6 +161,51 @@ mod tests {
         assert!(e.balanced());
     }
 
+    /// Two pieces settling in one pile cell become one upright heap on the
+    /// floor with a cell for each of theirs, and the heap is floor in its
+    /// columns (ADR-292).
+    #[test]
+    fn pieces_settling_together_become_an_upright_heap_that_is_floor() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        for (id, x) in [(1, 48), (2, 49)] {
+            let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+            b.fragments.push(Fragment {
+                id,
+                position: centre([x, 16, 48]),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1200,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held,
+                resting: false,
+            });
+        }
+        for tick in 0..300 {
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+        }
+        assert_eq!(b.fragments.len(), 1, "the pieces did not merge");
+        let f = &b.fragments[0];
+        assert!(f.resting);
+        assert_eq!((f.side, f.shape, f.count), (4, 0b11, 2));
+        assert_eq!(f.basis, IDENTITY);
+        // Its bottom sits on the ground at 12 and its top one cell up.
+        assert_eq!(f.position.y, Fx::from_ratio(25, 2));
+        let rubble = b.rubble(&[]);
+        assert_eq!(rubble.get(&[48, 48]), Some(&13));
+        assert!(b.rubble(&[1]).is_empty(), "a yielding heap is no floor");
+        assert_eq!(rubble.get(&[49, 48]), Some(&13));
+        assert_eq!(rubble.get(&[51, 48]), None);
+        assert!(e.balanced());
+    }
+
     struct Ground;
     impl voxel::world::Generator for Ground {
         fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
@@ -1327,6 +1372,7 @@ impl Bursts {
                 e.ledger.transfer(from.held, to.held, u64::MAX);
                 to.mass_g += from.mass_g;
                 to.count += from.count;
+                heap(to, world);
                 merged.insert(from.held);
             } else {
                 piles.insert(key, i);
@@ -1355,6 +1401,35 @@ impl Bursts {
         }
     }
 
+    /// The columns resting pieces stand in and the height of their tops,
+    /// for the contacts, feet and planner of the range (ADR-292). Pieces
+    /// of `yielding` materials are left out: a hull crushes through a
+    /// felled crown as through a standing one. Derived from the pieces
+    /// every tick; nothing is saved.
+    pub fn rubble(&self, yielding: &[Mat]) -> nav::vehicle::Rubble {
+        let mut out = nav::vehicle::Rubble::new();
+        for f in self
+            .fragments
+            .iter()
+            .filter(|f| f.resting && f.chunk.is_none() && !yielding.contains(&f.material))
+        {
+            let (low, high) = f.bounds();
+            let p = arr(f.position);
+            // Floor of the bottom corners, ceiling of the top: the columns
+            // the box covers and the height it reaches.
+            let lo = [p[0].add(low[0]), p[2].add(low[2])].map(|v| (v.raw() >> 32) as i32);
+            let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
+            let top = -(p[1].add(high[1]).neg().raw() >> 32);
+            let top = top.clamp(0, i64::from(u16::MAX)) as u16;
+            for z in lo[1].max(0)..=hi[1] {
+                for x in lo[0].max(0)..=hi[0] {
+                    let cell = out.entry([x, z]).or_insert(0);
+                    *cell = (*cell).max(top);
+                }
+            }
+        }
+        out
+    }
     /// Before empty wreck containers are released/reused, remove their geometry.
     pub fn sweep(&mut self, e: &Economy) {
         self.corpses.retain(|held, _| e.ledger.held(*held) > 0);
@@ -1751,6 +1826,45 @@ impl Bursts {
     }
 }
 
+/// A pile with more than one piece in it is a heap (ADR-292): its cells
+/// fill a four-cell box from the bottom layer up, upright, standing on the
+/// world under its centre, so that it has the height its matter takes.
+/// Matter beyond the box stays in the container; the box only saturates.
+pub(crate) fn heap(f: &mut Fragment, world: &voxel::World) {
+    let n = f.count.min(box_cells(4));
+    let mut shape = 0u64;
+    let mut placed = 0;
+    for y in 0..4 {
+        for z in 0..4 {
+            for x in 0..4 {
+                if placed < n {
+                    shape |= 1u64 << (x + 4 * y + 16 * z);
+                    placed += 1;
+                }
+            }
+        }
+    }
+    f.shape = shape;
+    f.side = 4;
+    f.basis = IDENTITY;
+    let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+    let p = arr(f.position);
+    let (x, z) = ((p[0].raw() >> 32) as i32, (p[2].raw() >> 32) as i32);
+    if x < 0 || z < 0 || x as u32 >= world.nx || z as u32 >= world.nz {
+        return;
+    }
+    let mut floor = 0;
+    let mut y = (p[1].raw() >> 32).clamp(0, i64::from(world.ny) - 1) as i32;
+    while y >= 0 {
+        if world.solid(x as u32, y as u32, z as u32) {
+            floor = y + 1;
+            break;
+        }
+        y -= 1;
+    }
+    let centre = arr(shape_centre(shape, 4));
+    f.position.y = Fx::from_int(floor).add(centre[1].add(Fx::from_ratio(1, 2)).mul(scale));
+}
 /// A resting piece looks under itself every `rest_check_ticks` ticks
 /// (ADR-291), the pieces spread over the period by id so that no tick
 /// checks them all.

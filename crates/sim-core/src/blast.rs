@@ -931,6 +931,9 @@ pub struct BlastRange {
     /// Authoritative heat and fire (ADR-277).
     pub heat: Heat,
     heat_tuning: modding::heat::HeatTuning,
+    /// Columns of resting debris and their tops, rebuilt each tick from
+    /// the pieces (ADR-292); derived, not saved.
+    pub rubble: nav::vehicle::Rubble,
 }
 
 impl BlastRange {
@@ -1127,6 +1130,7 @@ impl BlastRange {
                 "../../../data/heat.ron"
             ))
             .expect("heat tuning"),
+            rubble: nav::vehicle::Rubble::new(),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result
@@ -1739,6 +1743,7 @@ impl BlastRange {
                 .iter()
                 .map(|u| motion::Obstacle::of(&u.motion, &u.body))
                 .collect::<Vec<_>>(),
+            &self.rubble,
         )
     }
     pub fn order_attack(&mut self, id: usize) -> bool {
@@ -1781,6 +1786,8 @@ impl BlastRange {
     pub fn step(&mut self) {
         self.surface_changed.clear();
         self.shield_hits.clear();
+        // Resting debris is floor for this tick's motion (ADR-292).
+        self.rubble = self.matter.debris.rubble(&self.navigation.fell.materials);
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
         for s in &mut self.shields {
@@ -1822,6 +1829,7 @@ impl BlastRange {
                     &others,
                     self.tick,
                     self.config.gravity,
+                    &self.rubble,
                 );
                 let head = u.motion.drive.head;
                 u.update_pose(head);
@@ -1837,6 +1845,7 @@ impl BlastRange {
             &positions,
             self.tick,
             self.config.gravity,
+            &self.rubble,
         );
         self.gun.update_pose(self.turret.angle);
         // Tracked hulls cut the yielding matter they stand in; the crown that
@@ -2072,7 +2081,9 @@ mod tests {
             damaged.mobility.engine > Fx::ZERO && damaged.mobility.engine < Fx::from_ratio(1, 2)
         );
         for u in [&mut intact, &mut damaged] {
-            assert!(u.motion.move_to(&r.world, [205, 336], &u.body, &[]));
+            assert!(u
+                .motion
+                .move_to(&r.world, [205, 336], &u.body, &[], &r.rubble));
         }
         for tick in 0..30 {
             for u in [&mut intact, &mut damaged] {
@@ -2085,6 +2096,7 @@ mod tests {
                     &[],
                     tick,
                     r.config.gravity,
+                    &r.rubble,
                 );
             }
         }
@@ -3026,9 +3038,10 @@ mod tests {
             pieces.iter().any(|f| f.side == 3 && f.count > 8),
             "no piece bigger than a two-cell box could hold"
         );
-        assert!(pieces
-            .iter()
-            .all(|f| f.chunk.is_some() || f.side == 3 || f.material == 3));
+        assert!(pieces.iter().all(|f| f.chunk.is_some()
+            || f.side == 3
+            || f.material == 3
+            || (f.resting && f.side == 4)));
         let mut bolt = BlastRange::new(
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
         );
@@ -3036,7 +3049,12 @@ mod tests {
         for _ in 0..400 {
             bolt.step();
         }
-        assert!(bolt.matter.debris.fragments.iter().all(|f| f.side == 2));
+        assert!(bolt
+            .matter
+            .debris
+            .fragments
+            .iter()
+            .all(|f| f.side == 2 || (f.resting && f.side == 4)));
         let b = BlastRange::restore(shell.config.clone(), &shell.snapshot()).unwrap();
         assert_eq!(shell.state_hash(), b.state_hash());
     }
@@ -3182,6 +3200,79 @@ mod tests {
         let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.heat.melted_total, 1);
+    }
+    /// A heap of resting debris under one belt is floor (ADR-292): the
+    /// driven tank rides over it with its hull raised where a flat drive
+    /// stays level, and still arrives.
+    #[test]
+    fn a_tank_rides_up_over_a_heap_of_debris() {
+        fn drive(heap: bool) -> (Fx, bool) {
+            let mut a = BlastRange::new(config());
+            a.patrols_running = false;
+            let goal = [GUN[0] + 60, GUN[2]];
+            if heap {
+                let belt = a.gun.motion.shape(&a.gun.body).support[1];
+                let cells = 32;
+                let held = a
+                    .matter
+                    .economy
+                    .ledger
+                    .create(crate::matter::Kind::Debris, 0, u64::MAX);
+                let amount = a.matter.economy.per_voxel(2) * cells;
+                let ground = a.matter.economy.ground;
+                a.matter.economy.ledger.reveal(ground, amount);
+                a.matter.economy.ledger.transfer(ground, held, amount);
+                let mut f = crate::burst::Fragment {
+                    id: 9000,
+                    position: phys::V3::new(
+                        Fx::from_int(GUN[0] + 30),
+                        Fx::from_int(FLOOR),
+                        Fx::from_int(GUN[2] + belt),
+                    ),
+                    velocity: phys::V3::ZERO,
+                    material: 2,
+                    paint: None,
+                    mm: 100,
+                    basis: [phys::V3::ZERO; 3],
+                    mass_g: 2400 * cells,
+                    count: cells as u32,
+                    shape: 0,
+                    side: 4,
+                    chunk: None,
+                    held,
+                    resting: true,
+                };
+                crate::burst::heap(&mut f, &a.world);
+                a.matter.debris.fragments.push(f);
+                a.rubble = a.matter.debris.rubble(&a.navigation.fell.materials);
+                assert_eq!(
+                    a.rubble.get(&[GUN[0] + 30, GUN[2] + belt]),
+                    Some(&(FLOOR as u16 + 2))
+                );
+            }
+            let rubble = a.rubble.clone();
+            assert!(a
+                .gun
+                .motion
+                .move_to(&a.world, goal, &a.gun.body, &[], &rubble));
+            let mut top = a.gun.motion.hull.y;
+            for _ in 0..600 {
+                a.step();
+                top = top.max(a.gun.motion.hull.y);
+                if a.gun.motion.destination.is_none() {
+                    break;
+                }
+            }
+            (top, a.gun.motion.destination.is_none())
+        }
+        let (flat, arrived) = drive(false);
+        assert!(arrived, "the flat drive did not arrive");
+        let (over, arrived) = drive(true);
+        assert!(arrived, "the tank did not get past the heap");
+        assert!(
+            over.sub(flat) > Fx::from_ratio(1, 2),
+            "hull top over the heap {over:?}, flat {flat:?}"
+        );
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
@@ -3587,7 +3678,7 @@ mod tests {
         a.units[id].motion.route.clear();
         a.units[id]
             .motion
-            .move_to(&a.world, [128, 470], &body, &others);
+            .move_to(&a.world, [128, 470], &body, &others, &a.rubble);
         for _ in 0..600 {
             a.step();
             let u = &a.units[id];
@@ -4223,7 +4314,7 @@ mod tests {
         assert!(!a
             .gun
             .motion
-            .move_to(&a.world, goal, &a.gun.body, &[obstacle]));
+            .move_to(&a.world, goal, &a.gun.body, &[obstacle], &a.rubble));
         assert!(a.gun.motion.path.is_empty());
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         b.gun.motion.step(
@@ -4235,6 +4326,7 @@ mod tests {
             &[],
             b.gun.motion.replan,
             b.config.gravity,
+            &b.rubble,
         );
         assert!(!b.gun.motion.path.is_empty());
         a.gun.motion.stop();
@@ -4247,6 +4339,7 @@ mod tests {
             &[],
             a.gun.motion.replan,
             a.config.gravity,
+            &a.rubble,
         );
         assert!(a.gun.motion.path.is_empty());
         assert_eq!(a.gun.motion.destination, None);

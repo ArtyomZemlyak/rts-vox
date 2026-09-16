@@ -7,7 +7,10 @@
 //! columns hold such matter inside the hull height, so the caller can crush
 //! it and the planner can price the detour.
 use fx::{angle, Fx};
-use std::{cmp::Reverse, collections::BinaryHeap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BinaryHeap},
+};
 use voxel::{
     store::{Mat, AIR},
     World,
@@ -50,6 +53,10 @@ impl Pose {
         self.blocked != 0 || self.steep || self.tilt
     }
 }
+/// Columns where resting debris stands and the height of its top, in
+/// world units (ADR-292): an overlay the probe adds to the world's floor,
+/// so that contacts, feet and the planner all stand on the same heaps.
+pub type Rubble = BTreeMap<[i32; 2], u16>;
 /// Query-local height cache. No cached result survives a world edit.
 ///
 /// The cache is a window of columns: the whole map for a route search, a
@@ -66,6 +73,7 @@ pub struct Probe<'a> {
     /// Empty when nothing yields.
     yields: Vec<[u16; 2]>,
     yielding: Vec<Mat>,
+    rubble: Option<&'a Rubble>,
 }
 impl<'a> Probe<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -105,7 +113,13 @@ impl<'a> Probe<'a> {
                 vec![[u16::MAX, 0]; w * h]
             },
             yielding: yielding.to_vec(),
+            rubble: None,
         }
+    }
+    /// Resting debris counts as floor in its columns (ADR-292).
+    pub fn with_rubble(mut self, rubble: &'a Rubble) -> Self {
+        self.rubble = Some(rubble);
+        self
     }
     pub fn yields(&self, m: Mat) -> bool {
         self.yielding.contains(&m)
@@ -124,6 +138,10 @@ impl<'a> Probe<'a> {
             }
             floor = y as u16 + 1;
             break;
+        }
+        // A resting heap of debris is floor in its columns (ADR-292).
+        if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+            floor = floor.max(*top);
         }
         (floor, span)
     }
@@ -778,6 +796,27 @@ mod tests {
             };
             u16::from(y < h)
         }
+    }
+    /// A resting heap of debris raises the probe's floor in its columns
+    /// only, and a hull whose step is lower than the heap is refused over
+    /// it while a hull that steps higher is not (ADR-292).
+    #[test]
+    fn rubble_raises_the_floor_of_its_columns_and_blocks_a_hull_below_its_step() {
+        let w = world(false, false, false);
+        let mut rubble = Rubble::new();
+        rubble.insert([100, 100], 19);
+        let mut p = Probe::new(&w).with_rubble(&rubble);
+        assert_eq!(p.floor(100, 100), 19);
+        assert_eq!(p.floor(101, 100), 16);
+        assert_eq!(Probe::new(&w).floor(100, 100), 16);
+        let over = [Fx::from_ratio(201, 2), Fx::from_ratio(201, 2)];
+        let mut low = tank();
+        low.step = 2;
+        low.clearance = Fx::ONE;
+        assert!(p.pose(over, 0, low).blocked > 0);
+        let mut high = tank();
+        high.step = 4;
+        assert_eq!(p.pose(over, 0, high).blocked, 0);
     }
     #[test]
     fn a_track_bridges_a_narrow_ditch_and_climbs_a_ledge_over_its_run_up() {
