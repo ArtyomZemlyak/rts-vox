@@ -36,7 +36,6 @@ use bevy::post_process::effect_stack::Vignette;
 use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 use bevy::window::PresentMode;
 use render::edge::{EdgePlugin, Edges};
 use render::geom::MeshBuf;
@@ -94,32 +93,6 @@ fn tonemapping(t: look::Tonemap) -> Tonemapping {
         look::Tonemap::Tony => Tonemapping::TonyMcMapface,
         look::Tonemap::AgX => Tonemapping::AgX,
         look::Tonemap::Filmic => Tonemapping::BlenderFilmic,
-    }
-}
-
-fn section(s: look::Section) -> ColorGradingSection {
-    ColorGradingSection {
-        saturation: s.saturation,
-        contrast: s.contrast,
-        gamma: s.gamma,
-        gain: s.gain,
-        lift: s.lift,
-    }
-}
-
-fn grading(g: look::Grade) -> ColorGrading {
-    ColorGrading {
-        global: ColorGradingGlobal {
-            exposure: g.exposure,
-            temperature: g.temperature,
-            tint: g.tint,
-            hue: 0.0,
-            post_saturation: g.post_saturation,
-            midtones_range: g.midtones_range.0..g.midtones_range.1,
-        },
-        shadows: section(g.shadows),
-        midtones: section(g.midtones),
-        highlights: section(g.highlights),
     }
 }
 
@@ -438,7 +411,7 @@ fn setup(
         .spawn((
             Camera3d::default(),
             tonemapping(sc.tonemap),
-            grading(sc.grade),
+            render::presentation::grading(sc.grade),
             Exposure { ev100: sc.ev100 },
             Bloom {
                 intensity: sc.bloom.max(0.02),

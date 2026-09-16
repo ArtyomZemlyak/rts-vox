@@ -49,7 +49,6 @@ use bevy::render::render_resource::PrimitiveTopology;
 #[cfg(feature = "rt")]
 use bevy::render::render_resource::TextureUsages;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
-use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection};
 #[cfg(feature = "rt")]
 use bevy::solari::pathtracer::{Pathtracer, PathtracingPlugin};
 #[cfg(feature = "rt")]
@@ -540,32 +539,6 @@ fn tonemapping(t: look::Tonemap) -> Tonemapping {
         look::Tonemap::Tony => Tonemapping::TonyMcMapface,
         look::Tonemap::AgX => Tonemapping::AgX,
         look::Tonemap::Filmic => Tonemapping::BlenderFilmic,
-    }
-}
-
-fn section(s: look::Section) -> ColorGradingSection {
-    ColorGradingSection {
-        saturation: s.saturation,
-        contrast: s.contrast,
-        gamma: s.gamma,
-        gain: s.gain,
-        lift: s.lift,
-    }
-}
-
-fn grading(g: look::Grade) -> ColorGrading {
-    ColorGrading {
-        global: ColorGradingGlobal {
-            exposure: g.exposure,
-            temperature: g.temperature,
-            tint: g.tint,
-            hue: 0.0,
-            post_saturation: g.post_saturation,
-            midtones_range: g.midtones_range.0..g.midtones_range.1,
-        },
-        shadows: section(g.shadows),
-        midtones: section(g.midtones),
-        highlights: section(g.highlights),
     }
 }
 
@@ -1426,7 +1399,7 @@ fn setup(
             tonemapping(sc.tonemap),
             // Цветокоррекция — **после** расчёта света, поэтому она
             // красит кадр, ничего не ломая в освещении.
-            grading(sc.grade),
+            render::presentation::grading(sc.grade),
             // Экспозиция идёт в паре с яркостью солнца: 130 000 люкс
             // на входе атмосферы — это не «ярче», а «до фильтрации»
             // (ADR-198).

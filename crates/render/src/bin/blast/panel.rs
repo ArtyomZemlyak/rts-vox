@@ -329,13 +329,10 @@ pub fn actions(
                 scene.paused = false;
             }
             Action::Stop => {
-                scene.sim.attack = None;
-                scene.sim.gun.motion.stop();
+                scene.sim.order_stop();
                 panel.ground_fire = false;
             }
-            Action::Patrol => {
-                scene.sim.patrols_running = !scene.sim.patrols_running;
-            }
+            Action::Patrol => scene.sim.toggle_patrols(),
             Action::Routes => panel.routes = !panel.routes,
             Action::Weapon(e) => {
                 let p = panel.pending.map_or(scene.power, |v| v.1);
@@ -432,10 +429,7 @@ pub fn actions(
         let (e, p) = panel.pending.take().unwrap();
         scene.energy = e;
         scene.power = p;
-        scene.sim.config = scaled_config(e, p);
-        if let Some(r) = &scene.sim.layout {
-            scene.sim.config.unit_ablation_resistance = r.unit_resistance;
-        }
+        scene.sim.reconfigure(scaled_config(e, p));
         let origin = gas.params.origin;
         configure_gas(&scene.sim, e, &mut gas);
         gas.params.origin = origin;

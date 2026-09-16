@@ -940,13 +940,7 @@ fn setup(
             intensity: 1.0,
             ..default()
         },
-        bevy::render::view::ColorGrading {
-            global: bevy::render::view::ColorGradingGlobal {
-                post_saturation: 1.02,
-                ..default()
-            },
-            ..default()
-        },
+        render::presentation::grading(look::play_grade()),
     ));
     render::presentation::daylight_scaled(
         &mut commands,

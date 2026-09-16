@@ -48,6 +48,8 @@ struct Scene {
     acc: f32,
     repeat: bool,
     view: u8,
+    /// Номер маршрута для `--view target`, считая с единицы.
+    patrol: usize,
     previous_shell: Option<Vec3>,
     fps: f32,
     realtime: bool,
@@ -199,6 +201,7 @@ fn main() {
     let mut repeat = false;
     let mut view = 0;
     let mut requested_view = None;
+    let mut patrol = None;
     let mut close_view = None;
     let mut realtime = false;
     let mut layout_file = None;
@@ -251,6 +254,11 @@ fn main() {
                     _ => panic!("--view expects auto, overview, exposed, sheltered, gun or target"),
                 });
             }
+            "--patrol" => {
+                i += 1;
+                patrol = Some(args[i].parse().expect("patrol number"));
+                assert!(patrol != Some(0), "--patrol counts routes from 1");
+            }
             "--realtime" => realtime = true,
             "--weapon" => {
                 i += 1;
@@ -276,9 +284,13 @@ fn main() {
     if let Some(p) = &out {
         std::fs::create_dir_all(p).expect("capture directory");
     }
+    // `--edit` включает паузу (`paused: edit`), а шаг симуляции выходит по
+    // `scene.paused` — запись писала бы неподвижный кадр сколько угодно секунд
+    // и завершалась кодом 0 с валидным timeline (ADR-269). Редактор живёт
+    // в интерактивном запуске, где паузу снимает человек.
     assert!(
-        record_dir.is_none() || (out.is_none() && !repeat),
-        "--record needs one realtime session, without --capture/--shots/--loop"
+        record_dir.is_none() || (out.is_none() && !repeat && !edit),
+        "--record needs one realtime session, without --capture/--shots/--loop/--edit"
     );
     let recording = Recording::new(record_dir, record_seconds).expect("record setup");
     realtime |= out.is_none();
@@ -310,6 +322,21 @@ fn main() {
         !(3..=5).contains(&view) || workshop.layout.is_some(),
         "--view sheltered/gun/target needs --range"
     );
+    // Раскладка держит до восьми маршрутов, а ключ `--view target` сам по себе
+    // называет только первый. `--patrol` называет остальные — и отказывает
+    // сразу, а не снимает молча чужую мишень (ADR-269).
+    if let Some(n) = patrol {
+        let routes = workshop
+            .layout
+            .as_ref()
+            .and_then(|l| l.course.as_ref())
+            .map_or(0, |c| c.patrols.len());
+        assert!(
+            n <= routes,
+            "--patrol {n} needs a range with at least {n} route(s), found {routes}"
+        );
+    }
+    let patrol = patrol.unwrap_or(1);
     let finish = finish.unwrap_or(if energy { 420 } else { 330 });
     let mut gas = GasInput::default();
     fill_terrain(&sim, &mut gas);
@@ -379,6 +406,7 @@ fn main() {
             acc: 0.0,
             repeat,
             view,
+            patrol,
             previous_shell: None,
             fps: 60.0,
             realtime,
@@ -1709,7 +1737,9 @@ fn framing(
                             Some(workbench::Selection::Unit(i)) if patrol(i) => Some(i),
                             _ => None,
                         })
-                        .or_else(|| Some(layout.course.as_ref()?.patrols.first()?.unit));
+                        .or_else(|| {
+                            Some(layout.course.as_ref()?.patrols.get(scene.patrol - 1)?.unit)
+                        });
                     // Мишени может не быть вовсе: сохранённая раскладка
                     // допускает ноль тел. Тогда остаётся общий план, а не
                     // кроп в 150 единиц по пустому рельефу.

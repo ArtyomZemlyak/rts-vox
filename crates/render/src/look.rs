@@ -1750,6 +1750,17 @@ pub fn live_range_grade() -> Grade {
     }
 }
 
+/// Коррекция игрового окна: AgX и едва поднятая насыщенность.
+///
+/// Тот же случай, что и у стенда: число картинки живёт в `look` (ADR-175),
+/// а окно ставит его через общий перевод, а не литералом поверх камеры.
+pub fn play_grade() -> Grade {
+    Grade {
+        post_saturation: 1.02,
+        ..Grade::NEUTRAL
+    }
+}
+
 /// Виньетка: затемнение по краю кадра. Нулевая сила — её нет.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Vignette {
