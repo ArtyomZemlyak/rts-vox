@@ -617,6 +617,8 @@ pub struct Overrides {
     started: bool,
     last_tick: u32,
     pub notice: String,
+    /// The row whose number is being typed, and the digits so far.
+    pub editing: Option<(usize, String)>,
 }
 
 impl Overrides {
@@ -1014,7 +1016,9 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                 TextColor(Color::srgb(0.83, 0.94, 0.93)),
             ));
             p.spawn((
-                Text::new("− и + меняют на шаг, с Shift — на десять шагов"),
+                Text::new(
+                    "Щелчок по числу — ввод с клавиатуры, Enter; − и + на шаг, с Shift на десять",
+                ),
                 TextFont {
                     font_size: FontSize::Px(12.0),
                     ..text_font.clone()
@@ -1064,6 +1068,8 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                         },
                     ));
                     r.spawn((
+                        Button,
+                        Action::EditKnob(slot as u8),
                         SlotValue(slot),
                         Text::new(""),
                         TextFont {
@@ -1074,8 +1080,11 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
                         Node {
                             width: px(78),
                             justify_content: JustifyContent::FlexEnd,
+                            padding: UiRect::horizontal(px(4)),
+                            border_radius: BorderRadius::all(px(4)),
                             ..default()
                         },
+                        BackgroundColor(Color::NONE),
                     ));
                     r.spawn(button("−", Action::Knob(slot as u8, false), px(28)));
                     r.spawn(button("+", Action::Knob(slot as u8, true), px(28)));
@@ -1104,6 +1113,24 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
         });
 }
 
+/// The character a key types into a number, if any.
+fn typed(key: KeyCode) -> Option<char> {
+    Some(match key {
+        KeyCode::Digit0 | KeyCode::Numpad0 => '0',
+        KeyCode::Digit1 | KeyCode::Numpad1 => '1',
+        KeyCode::Digit2 | KeyCode::Numpad2 => '2',
+        KeyCode::Digit3 | KeyCode::Numpad3 => '3',
+        KeyCode::Digit4 | KeyCode::Numpad4 => '4',
+        KeyCode::Digit5 | KeyCode::Numpad5 => '5',
+        KeyCode::Digit6 | KeyCode::Numpad6 => '6',
+        KeyCode::Digit7 | KeyCode::Numpad7 => '7',
+        KeyCode::Digit8 | KeyCode::Numpad8 => '8',
+        KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+        KeyCode::Period | KeyCode::Comma | KeyCode::NumpadDecimal => '.',
+        KeyCode::Minus | KeyCode::NumpadSubtract => '-',
+        _ => return None,
+    })
+}
 fn shown(o: &Overrides) -> Vec<&'static Knob> {
     let group = Group::ALL[o.group.min(Group::ALL.len() - 1)];
     knobs().filter(|k| k.group == group).take(SLOTS).collect()
@@ -1175,6 +1202,45 @@ pub fn actions(
         }
     }
     o.last_tick = reach.scene.sim.tick;
+    // A number typed for the row under edit: digits, a point, a leading
+    // minus, Backspace; Enter puts it in force, Escape drops it.
+    if let Some((slot, mut buffer)) = o.editing.take() {
+        let mut keep = true;
+        for key in keys.get_just_pressed() {
+            match key {
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    keep = false;
+                    let knob = shown(&o).get(slot).copied();
+                    match (knob, buffer.trim().parse::<f64>()) {
+                        (Some(knob), Ok(v)) => {
+                            let v = v.clamp(knob.min, knob.max);
+                            o.values.insert(knob.key, v);
+                            apply(knob.key, v, &mut reach, &o);
+                            o.notice = format!("{} = {}", knob.label, format_value(knob, v));
+                        }
+                        (Some(knob), Err(_)) if !buffer.trim().is_empty() => {
+                            o.notice = format!("{}: не число «{buffer}»", knob.label);
+                        }
+                        _ => {}
+                    }
+                }
+                KeyCode::Escape => keep = false,
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                key => {
+                    if let Some(c) = typed(*key) {
+                        if c != '-' || buffer.is_empty() {
+                            buffer.push(c);
+                        }
+                    }
+                }
+            }
+        }
+        if keep {
+            o.editing = Some((slot, buffer));
+        }
+    }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     for (&action, interaction) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -1182,6 +1248,14 @@ pub fn actions(
         }
         match action {
             Action::Settings => o.open = !o.open,
+            Action::EditKnob(slot) => {
+                let slot = usize::from(slot);
+                o.editing = match o.editing.take() {
+                    Some((s, _)) if s == slot => None,
+                    _ if slot < shown(&o).len() => Some((slot, String::new())),
+                    _ => None,
+                };
+            }
             Action::Group(g) => o.group = usize::from(g).min(Group::ALL.len() - 1),
             Action::Knob(slot, up) => {
                 let Some(knob) = shown(&o).get(usize::from(slot)).copied() else {
@@ -1270,14 +1344,36 @@ pub fn refresh(
     }
     for (slot, mut t) in &mut values {
         if let Some(knob) = list.get(slot.0) {
+            let typed = o
+                .editing
+                .as_ref()
+                .filter(|(s, _)| *s == slot.0)
+                .map(|(_, buffer)| format!("{buffer}_"));
             let v = read(knob.key, &scene, &gas);
-            *t = Text::new(v.map_or_else(|| "—".to_string(), |v| format_value(knob, v)));
+            *t =
+                Text::new(typed.unwrap_or_else(|| {
+                    v.map_or_else(|| "—".to_string(), |v| format_value(knob, v))
+                }));
         }
     }
     for (a, interaction, mut color) in &mut buttons {
         let active = match *a {
             Action::Settings => o.open,
             Action::Group(g) => usize::from(g) == o.group,
+            Action::EditKnob(slot) => {
+                let editing = o
+                    .editing
+                    .as_ref()
+                    .is_some_and(|(s, _)| *s == usize::from(slot));
+                color.0 = if editing {
+                    Color::srgb(0.12, 0.34, 0.36)
+                } else if *interaction == Interaction::Hovered {
+                    Color::srgb(0.1, 0.2, 0.22)
+                } else {
+                    Color::NONE
+                };
+                continue;
+            }
             _ => continue,
         };
         color.0 = if *interaction == Interaction::Hovered {

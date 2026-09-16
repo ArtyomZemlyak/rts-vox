@@ -55,6 +55,7 @@ pub enum Action {
     Settings,
     Group(u8),
     Knob(u8, bool),
+    EditKnob(u8),
     SaveKnobs,
     LoadKnobs,
     ResetKnobs,
@@ -444,6 +445,7 @@ pub fn actions(
             Action::Settings
             | Action::Group(_)
             | Action::Knob(..)
+            | Action::EditKnob(_)
             | Action::SaveKnobs
             | Action::LoadKnobs
             | Action::ResetKnobs => {}
