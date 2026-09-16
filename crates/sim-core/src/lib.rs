@@ -15,6 +15,7 @@ pub mod drive;
 pub mod economy;
 pub mod energy;
 pub mod ground;
+pub mod heat;
 pub mod index;
 pub mod integrity;
 pub mod mapcache;

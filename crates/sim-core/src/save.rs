@@ -48,7 +48,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && v != 8 && v != 9 && v != 10 {
+    if v != VERSION && !(8..=11).contains(&v) {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -404,7 +404,11 @@ fn load_econ(s: &mut Scan, w: &mut World) -> Result<(), LoadError> {
             alive: s.bool(),
         });
     }
-    let sunk = s.u64s();
+    let mut sunk = s.u64s();
+    // A sink added after a save was written has sunk nothing in it.
+    if sunk.len() < crate::matter::SINKS.len() {
+        sunk.resize(crate::matter::SINKS.len(), 0);
+    }
     let initial = s.u64();
     let free_head = s.u32();
     let free = s.u32s();

@@ -14,6 +14,11 @@
     edits_per_tick: 8192,
     fire_tick: 45,
     shell_speed: 150,
+    // The fireball lights fuel within thirty-two units: eighty heat at the
+    // centre, falling to nothing at the edge, so the crowns of the trees
+    // beside the one it destroys catch (ADR-276).
+    heat_units: 32,
+    heat_per_cell: 80,
     gravity: 98,
     gas_cell_units: 5,
     gas_source_radius: 32,

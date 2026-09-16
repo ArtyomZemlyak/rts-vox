@@ -352,14 +352,19 @@ impl Matter {
     pub fn flush(&mut self, w: &World, material: bool, gravity: i32) {
         self.debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
-        if !material {
-            for &(_, mat) in w.taken() {
-                let amount = self.economy.per_voxel(mat);
-                self.economy.ledger.reveal(self.economy.ground, amount);
-                self.economy
-                    .ledger
-                    .sink(self.economy.ground, amount, Sink::Annihilation);
-            }
+        for &(by, mat) in w.taken() {
+            // A voxel consumed by fire went to the combustion sink whatever
+            // the weapon; the rest of an annihilating weapon's take is its.
+            let sink = if by == crate::heat::FIRE {
+                Sink::Combustion
+            } else if !material {
+                Sink::Annihilation
+            } else {
+                continue;
+            };
+            let amount = self.economy.per_voxel(mat);
+            self.economy.ledger.reveal(self.economy.ground, amount);
+            self.economy.ledger.sink(self.economy.ground, amount, sink);
         }
         self.debris.step_fragments(
             w,

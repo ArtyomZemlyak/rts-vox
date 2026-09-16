@@ -14,6 +14,7 @@
 
 pub mod data;
 pub mod explosion;
+pub mod heat;
 pub mod integrity;
 pub mod kinds;
 pub mod navigation;
@@ -57,6 +58,13 @@ pub struct MatDef {
     pub strength: u32,
     /// Наносит ли урон тому, кто его касается (лава, ADR-100).
     pub harmful: bool,
+    /// Тепло, которое горящий воксель отдаёт каждому соседу за время
+    /// горения, в единицах энергии оружия; ноль — не горит (ADR-276).
+    #[serde(default)]
+    pub fuel: u32,
+    /// Тепло, при котором воксель загорается; ноль — никогда.
+    #[serde(default)]
+    pub kindling: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,6 +150,8 @@ mod tests {
             density,
             strength: 10,
             harmful: false,
+            fuel: 0,
+            kindling: 0,
         }
     }
 

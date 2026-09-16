@@ -7,6 +7,7 @@ use fx::Fx;
 pub mod matter;
 #[path = "range_motion.rs"]
 pub mod motion;
+use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
 use modding::range::{RangeLayout, RangeShieldDef, RangeUnitKind};
@@ -670,6 +671,9 @@ pub struct BlastRange {
     /// Transient renderer notification, like `surface_changed`.
     pub shield_hits: Vec<ShieldHit>,
     shield_tuning: modding::shield::ShieldTuning,
+    /// Authoritative heat and fire (ADR-276).
+    pub heat: Heat,
+    heat_tuning: modding::heat::HeatTuning,
 }
 
 impl BlastRange {
@@ -861,9 +865,17 @@ impl BlastRange {
             shields,
             shield_hits: Vec::new(),
             shield_tuning,
+            heat: Heat::default(),
+            heat_tuning: modding::heat::HeatTuning::from_ron(include_str!(
+                "../../../data/heat.ron"
+            ))
+            .expect("heat tuning"),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result
+    }
+    pub fn heat_tuning(&self) -> &modding::heat::HeatTuning {
+        &self.heat_tuning
     }
     pub fn shield_tuning(&self) -> &modding::shield::ShieldTuning {
         &self.shield_tuning
@@ -901,7 +913,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(15);
+        b.u32(16);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1014,12 +1026,13 @@ impl BlastRange {
             b.u32(s.down);
             b.u32(s.hits);
         }
+        self.heat.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 15 {
+        if s.u32() != 16 {
             return None;
         }
         let extended = s.bool();
@@ -1256,6 +1269,7 @@ impl BlastRange {
                 return None;
             }
         }
+        r.heat = Heat::load(&mut s, &r.world, &r.heat_tuning)?;
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -1483,6 +1497,13 @@ impl BlastRange {
             } else if let Some(at) = impact {
                 self.impact = Some(at);
                 self.impact_tick = self.tick;
+                self.heat.deposit(
+                    &self.world,
+                    &self.matter.economy.mats,
+                    at,
+                    self.config.heat_units,
+                    self.config.heat_per_cell,
+                );
                 self.matter.begin(self.config.material_energy_j);
                 self.explosion = Some(Explosion::with_damage(
                     &self.world,
@@ -1519,6 +1540,20 @@ impl BlastRange {
                     u.refresh_damage(id);
                 }
             }
+        }
+        {
+            // Fire consumes voxels through the same edit queue as the wave;
+            // cells the wave has claimed wait for it.
+            let Self {
+                heat,
+                world,
+                matter,
+                heat_tuning,
+                ..
+            } = self;
+            heat.step(world, &matter.economy.mats, heat_tuning, |p| {
+                matter.debris.claimed(p)
+            });
         }
         self.world.flush();
         self.matter.step_sections(&mut self.units);
@@ -1851,6 +1886,132 @@ mod tests {
             a.gun.motion.pos
         );
         assert!(longest_still <= 90, "stood {longest_still} ticks");
+    }
+    /// The first upper-crown foliage cell of the south-western woods, in
+    /// cell order: the round from the gun crosses only the open lane to it.
+    fn a_crown(a: &BlastRange) -> [i32; 3] {
+        for z in 440..520u32 {
+            for x in 80..180u32 {
+                for y in (36..60u32).rev() {
+                    if a.world.material(x, y, z) == 4 {
+                        return [x as i32, y as i32, z as i32];
+                    }
+                }
+            }
+        }
+        panic!("no crown in the far woods")
+    }
+    /// A burst in a crown lights it: the fire spreads through the tree,
+    /// consumes it into the combustion sink with the ledger balanced, and
+    /// dies out; soil and rock never burn (ADR-276).
+    #[test]
+    fn a_burst_in_a_crown_lights_the_tree_and_the_fire_burns_out_into_the_sink() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.airburst_on_target = false;
+        let mut a = BlastRange::with_layout(config(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        a.aim = Some(a_crown(&a));
+        // Let the turret traverse to the crown before the round is charged.
+        for _ in 0..120 {
+            a.step();
+        }
+        assert!(a.refire());
+        let mut lit = None;
+        let mut peak = 0;
+        let mut out = None;
+        for tick in 0..3000 {
+            a.step();
+            let burning = a.heat.burning();
+            peak = peak.max(burning);
+            if burning > 0 && lit.is_none() {
+                lit = Some(tick);
+            }
+            assert!(a.matter.economy.ledger.balanced(), "ledger at {tick}");
+            if lit.is_some() && burning == 0 && a.heat.hot() == 0 {
+                out = Some(tick);
+                break;
+            }
+        }
+        let sunk = a
+            .matter
+            .economy
+            .ledger
+            .sunk(crate::matter::Sink::Combustion);
+        eprintln!(
+            "lit {lit:?} out {out:?} peak {peak} burned {} foliage {} trunk {} sunk {sunk}",
+            a.heat.burned_total, a.heat.burned_by_material[4], a.heat.burned_by_material[5]
+        );
+        let (lit, out) = (
+            lit.expect("the burst lit nothing"),
+            out.expect("the fire never died"),
+        );
+        // Longer than one burn: the fire moved through crowns the burst
+        // never reached, and consumed far more than it lit.
+        assert!(out - lit >= 120, "the fire only flashed: {lit}..{out}");
+        assert!(peak >= 20 && a.heat.burned_total >= 200, "peak {peak}");
+        assert!(sunk > 0);
+        let wood = a.heat.burned_by_material[4] + a.heat.burned_by_material[5];
+        assert_eq!(
+            wood, a.heat.burned_total,
+            "something other than wood burned"
+        );
+    }
+    /// A bolt into bare ground lights nothing and leaves no hot cell:
+    /// heat is kept on fuel alone.
+    #[test]
+    fn a_bolt_into_bare_ground_leaves_no_heat_and_no_fire() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut a = BlastRange::new(c);
+        a.control();
+        a.aim = Some([300, FLOOR, 336]);
+        assert!(a.refire());
+        for _ in 0..400 {
+            a.step();
+            assert_eq!(
+                (a.heat.hot(), a.heat.burning()),
+                (0, 0),
+                "bare ground burned"
+            );
+        }
+        assert!(a.impact.is_some(), "the bolt never landed");
+    }
+    /// Heat is state: a range restored mid-fire matches tick for tick, and
+    /// one unit of heat more changes the hash.
+    #[test]
+    fn heat_and_fire_are_saved_and_hashed() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.airburst_on_target = false;
+        let mut a = BlastRange::with_layout(config(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        a.aim = Some(a_crown(&a));
+        // Let the turret traverse to the crown before the round is charged.
+        for _ in 0..120 {
+            a.step();
+        }
+        assert!(a.refire());
+        for _ in 0..400 {
+            a.step();
+            if a.heat.burning() > 0 {
+                break;
+            }
+        }
+        assert!(a.heat.burning() > 0, "nothing burns to save");
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        for _ in 0..60 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert_eq!(a.heat.hot(), b.heat.hot());
+        let mut c = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let (p, _) = c.heat.hottest().unwrap();
+        c.heat.add(&c.world, p, 1);
+        assert_ne!(a.state_hash(), c.state_hash());
     }
     fn shielded_layout() -> RangeLayout {
         let mut layout =

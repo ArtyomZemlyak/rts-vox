@@ -4,8 +4,11 @@
     (id: 1, density: 120, strength: 30, harmful: false),
     (id: 2, density: 240, strength: 140, harmful: false),
     (id: 3, density: 785, strength: 500, harmful: false),
-    (id: 4, density: 6, strength: 5, harmful: false), // foliage
-    (id: 5, density: 70, strength: 10, harmful: false), // trunk
+    // Fuel: heat each neighbour receives over the burn of one voxel; kindling:
+    // heat at which it lights (ADR-276). Four units a tick from one burning
+    // neighbour light foliage in ten ticks; a trunk needs two burning sides.
+    (id: 4, density: 6, strength: 5, harmful: false, fuel: 240, kindling: 30), // foliage
+    (id: 5, density: 70, strength: 10, harmful: false, fuel: 600, kindling: 120), // trunk
     (id: 6, density: 260, strength: 220, harmful: false), // rock
     (id: 7, density: 120, strength: 30, harmful: false), // grass-covered soil
     (id: 8, density: 180, strength: 40, harmful: false),

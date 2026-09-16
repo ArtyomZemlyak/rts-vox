@@ -279,6 +279,8 @@ mod tests {
                 density: 780,
                 strength: 100000,
                 harmful: false,
+                fuel: 0,
+                kindling: 0,
             })
             .unwrap();
         for z in 28..=68 {
@@ -338,6 +340,8 @@ mod tests {
                     density: 780,
                     strength: 100000,
                     harmful: false,
+                    fuel: 0,
+                    kindling: 0,
                 })
                 .unwrap();
             if wall {

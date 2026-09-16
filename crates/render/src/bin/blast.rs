@@ -1251,6 +1251,14 @@ fn advance(
         if scene.sim.impact.is_some() {
             gas.params.control.y = (scene.sim.tick - scene.sim.impact_tick) as f32 * 2.0;
         }
+        // Fire is decided by the authoritative heat (ADR-276); the image
+        // only follows its ignition events, one small plume a tick.
+        if let Some(p) = scene.sim.heat.ignited.first() {
+            let mut params = gas.params;
+            params.control.z = 1.0;
+            params.source = Vec4::new(p[0] as f32, p[1] as f32 + 2.0, p[2] as f32, 3.0);
+            gas.atmosphere.emit_at(params, scene.sim.tick * 2);
+        }
         gas.advance(scene.sim.tick * 2);
         let age = if scene.sim.impact.is_some() {
             (scene.sim.tick - scene.sim.impact_tick) as f32 / 30.0

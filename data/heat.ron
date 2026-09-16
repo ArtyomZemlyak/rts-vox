@@ -1,0 +1,11 @@
+// Heat and secondary combustion on the range (ADR-276). Heat is counted in
+// the wave units the weapons declare as `energy`; what burns and at what
+// heat is a property of each material in range-materials.ron.
+(
+    // Three percent of a cell's heat per tick, at least one unit: a burst's
+    // sixty units on bare soil are gone in about forty ticks.
+    cooling_milli: 30,
+    cells_per_tick: 4096,
+    // A lit voxel burns two seconds, then it is gone.
+    burn_ticks: 60,
+)

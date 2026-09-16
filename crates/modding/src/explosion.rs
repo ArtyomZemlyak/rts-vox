@@ -40,6 +40,12 @@ pub struct ExplosionConfig {
     pub gas_source_radius: i32,
     pub gas_temperature_k: i32,
     pub gas_fuel_milli: i32,
+    /// Authoritative heat left by the burst (ADR-276): every solid cell
+    /// within this many units of the impact receives `heat_per_cell`.
+    #[serde(default)]
+    pub heat_units: i32,
+    #[serde(default)]
+    pub heat_per_cell: u32,
     pub gas_pressure_milli: i32,
     pub reaction_milli: i32,
     pub cooling_milli: i32,
@@ -80,6 +86,8 @@ impl ExplosionConfig {
             || !(0..=10000).contains(&c.reaction_milli)
             || !(0..=10000).contains(&c.cooling_milli)
             || !(0..=10000).contains(&c.buoyancy_milli)
+            || !(0..=32).contains(&c.heat_units)
+            || c.heat_per_cell > 100_000
         {
             return Err("explosion parameters exceed supported bounds".into());
         }

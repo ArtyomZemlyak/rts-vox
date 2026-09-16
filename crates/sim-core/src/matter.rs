@@ -42,15 +42,19 @@ pub enum Sink {
     /// `max_bodies` = 256. Бой уменьшает запасы карты — это свойство
     /// игры, а не недосмотр (ADR-185).
     Pulverised = 5,
+    /// Горящий воксель топлива выгорел (ADR-276): тепло ушло соседям,
+    /// материя — сюда.
+    Combustion = 6,
 }
 
-pub const SINKS: [Sink; 6] = [
+pub const SINKS: [Sink; 7] = [
     Sink::RefiningLoss,
     Sink::Annihilation,
     Sink::ToEnergy,
     Sink::ContainerBreach,
     Sink::OverCap,
     Sink::Pulverised,
+    Sink::Combustion,
 ];
 
 impl Sink {
@@ -62,6 +66,7 @@ impl Sink {
             Sink::ContainerBreach => "потери при разрушении контейнера",
             Sink::OverCap => "излишек над упавшим потолком игрока",
             Sink::Pulverised => "распыление воронкой",
+            Sink::Combustion => "сгорание",
         }
     }
 }
