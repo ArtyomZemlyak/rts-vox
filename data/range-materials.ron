@@ -2,8 +2,11 @@
 (materials: [
     (id: 0, density: 0, strength: 0, harmful: false),
     (id: 1, density: 120, strength: 30, harmful: false),
-    (id: 2, density: 240, strength: 140, harmful: false),
-    (id: 3, density: 785, strength: 500, harmful: false),
+    // Concrete and steel do not burn, but heat enough and they run off as
+    // debris (ADR-290): a bolt's spot is 120, a burning trunk feeds its
+    // neighbours 600 over its two seconds.
+    (id: 2, density: 240, strength: 140, harmful: false, melt: 900),
+    (id: 3, density: 785, strength: 500, harmful: false, melt: 360),
     // Fuel: heat each neighbour receives over the burn of one voxel; kindling:
     // heat at which it lights (ADR-277). Four units a tick from one burning
     // neighbour light foliage in ten ticks; a trunk needs two burning sides.

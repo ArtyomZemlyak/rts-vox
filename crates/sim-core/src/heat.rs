@@ -36,6 +36,10 @@ pub struct Heat {
     pub burned: BTreeSet<[u32; 3]>,
     pub burned_total: u64,
     pub burned_by_material: [u64; 16],
+    /// Voxels at their melting point this tick, for the range to turn into
+    /// debris (ADR-290). Transient; a cell the pool cannot take stays hot.
+    pub melting: Vec<[u32; 3]>,
+    pub melted_total: u64,
 }
 
 const HEAT_CAP: u32 = 1_000_000;
@@ -90,7 +94,7 @@ impl Heat {
                         continue;
                     }
                     let m = w.material(p[0], p[1], p[2]);
-                    if m == AIR || mats.get(m).is_none_or(|d| d.kindling == 0) {
+                    if m == AIR || mats.get(m).is_none_or(|d| d.kindling == 0 && d.melt == 0) {
                         continue;
                     }
                     let share = (u64::from(per_cell) * (r2 - d2) as u64 / r2 as u64) as u32;
@@ -110,6 +114,7 @@ impl Heat {
     ) {
         self.ignited.clear();
         self.burned.clear();
+        self.melting.clear();
         if self.cells.is_empty() {
             self.cursor = None;
             return;
@@ -189,6 +194,11 @@ impl Heat {
                     c.burn = t.burn_ticks;
                     self.ignited.push(p);
                 }
+                // A meltable voxel at its point gives way (ADR-290); the
+                // range takes it as debris and forgets its heat.
+                if d.melt > 0 && c.heat >= d.melt {
+                    self.melting.push(p);
+                }
             }
             if c.heat > 0 {
                 let lost = (c.heat * t.cooling_milli / 1000).max(1);
@@ -211,6 +221,10 @@ impl Heat {
                 .map(|(k, _)| *k)
         });
     }
+    /// A voxel the range took: its heat went with it.
+    pub fn forget(&mut self, p: [u32; 3]) {
+        self.cells.remove(&p);
+    }
     pub fn save(&self, b: &mut Blob) {
         b.u32(self.cells.len() as u32);
         for (p, c) in &self.cells {
@@ -230,6 +244,7 @@ impl Heat {
         for n in self.burned_by_material {
             b.u64(n);
         }
+        b.u64(self.melted_total);
     }
     pub fn load(s: &mut Scan, w: &World, t: &HeatTuning) -> Option<Self> {
         let mut h = Self::default();
@@ -268,6 +283,7 @@ impl Heat {
         }
         h.burned_total = s.u64();
         h.burned_by_material = std::array::from_fn(|_| s.u64());
+        h.melted_total = s.u64();
         s.ok().then_some(h)
     }
 }

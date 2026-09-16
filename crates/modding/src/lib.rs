@@ -65,6 +65,10 @@ pub struct MatDef {
     /// Тепло, при котором воксель загорается; ноль — никогда.
     #[serde(default)]
     pub kindling: u32,
+    /// Тепло, при котором негорючий воксель оплавляется и стекает
+    /// обломком (ADR-290); ноль — никогда.
+    #[serde(default)]
+    pub melt: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -152,6 +156,7 @@ mod tests {
             harmful: false,
             fuel: 0,
             kindling: 0,
+            melt: 0,
         }
     }
 

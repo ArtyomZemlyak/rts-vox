@@ -164,6 +164,17 @@ impl Matter {
         self.remaining_mj -= cost;
         self.spent_mj += cost;
     }
+    /// A voxel that melted (ADR-290): it runs off as debris of its own
+    /// material, its matter moving from the ground to the piece, with no
+    /// throw. `false` when the pool has no room; it then stays hot.
+    pub fn melt(&mut self, w: &mut World, p: [u32; 3]) -> bool {
+        let m = w.material(p[0], p[1], p[2]);
+        if m == 0 || self.economy.mats.get(m).is_none() {
+            return false;
+        }
+        let at = p.map(|v| v as i32);
+        self.debris.claim_voxel(w, p, m, at, 0, 2, &self.tuning)
+    }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
         let m = material(w, p);
         let (cost, motion) = self.cost(m);

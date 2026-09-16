@@ -1170,7 +1170,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(22);
+        b.u32(23);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1326,7 +1326,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 22 {
+        if s.u32() != 23 {
             return None;
         }
         let extended = s.bool();
@@ -2013,6 +2013,14 @@ impl BlastRange {
             heat.step(world, &matter.economy.mats, heat_tuning, |p| {
                 matter.debris.claimed(p)
             });
+            // Melted voxels run off as debris (ADR-290); one the pool
+            // cannot take keeps its heat for the next tick.
+            for p in heat.melting.clone() {
+                if matter.melt(world, p) {
+                    heat.forget(p);
+                    heat.melted_total += 1;
+                }
+            }
         }
         self.world.flush();
         self.matter.step_sections(&mut self.units);
@@ -3107,6 +3115,72 @@ mod tests {
             "the tank did not hop: {hopped:?}"
         );
         assert_eq!(u.motion.shove, phys::V3::ZERO);
+    }
+    /// Steel heated to its melting point runs off as a piece of steel
+    /// (ADR-290): the cell is gone, the debris holds its matter, the ledger
+    /// balances, and the count survives the snapshot; soil never melts.
+    #[test]
+    fn heated_steel_melts_into_debris_and_soil_does_not() {
+        let mut a = BlastRange::new(config());
+        let steel = a.matter.economy.mats.get(3).expect("range steel");
+        assert!(steel.melt > 0 && steel.kindling == 0);
+        assert_eq!(a.matter.economy.mats.get(1).map(|d| d.melt), Some(0));
+        // A steel cell of the target wall and a soil cell of the pad.
+        let mut wall = None;
+        for x in (TARGET[0] - 30)..(TARGET[0] + 30) {
+            for y in FLOOR..(FLOOR + 30) {
+                for z in (TARGET[2] - 30)..(TARGET[2] + 30) {
+                    if material(&a.world, [x, y, z]) == 3 {
+                        wall = Some([x as u32, y as u32, z as u32]);
+                    }
+                }
+            }
+        }
+        let wall = wall.expect("no steel near the target");
+        let mut soil = None;
+        for x in (TARGET[0] - 120)..(TARGET[0] - 40) {
+            for y in (FLOOR - 6)..FLOOR {
+                for z in (TARGET[2] - 30)..(TARGET[2] + 30) {
+                    if material(&a.world, [x, y, z]) == 1 {
+                        soil = Some([x as u32, y as u32, z as u32]);
+                    }
+                }
+            }
+        }
+        let soil = soil.expect("no soil near the target");
+        a.heat.add(&a.world, wall, steel.melt);
+        a.heat.add(&a.world, soil, 100_000);
+        let pieces = a.matter.debris.fragments.len();
+        for _ in 0..4 {
+            a.step();
+        }
+        assert_eq!(
+            material(&a.world, wall.map(|v| v as i32)),
+            0,
+            "the steel stood"
+        );
+        assert_eq!(
+            material(&a.world, soil.map(|v| v as i32)),
+            1,
+            "the soil melted"
+        );
+        assert_eq!(a.heat.melted_total, 1);
+        // The ground is not enumerated: it reveals the cell's matter and
+        // hands it to the piece, which holds exactly one voxel of steel.
+        let mut steel_pieces = 0;
+        let mut steel_matter = 0;
+        for f in &a.matter.debris.fragments[pieces..] {
+            if f.material == 3 && f.chunk.is_none() {
+                steel_pieces += 1;
+                steel_matter += a.matter.economy.ledger.held(f.held);
+            }
+        }
+        assert_eq!(steel_pieces, 1, "steel pieces");
+        assert_eq!(steel_matter, a.matter.economy.per_voxel(3));
+        assert!(a.matter.economy.ledger.balanced());
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(b.heat.melted_total, 1);
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
