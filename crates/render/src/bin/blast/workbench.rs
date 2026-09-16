@@ -289,11 +289,14 @@ pub fn input(
     mut wheel: MessageReader<MouseWheel>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<GasCamera>>,
+    overrides: Option<Res<knobs::Overrides>>,
 ) {
     if edit.layout.is_none() {
         wheel.clear();
         return;
     }
+    let stock = knobs::Overrides::default();
+    let overrides = overrides.as_deref().unwrap_or(&stock);
     if keys.just_pressed(KeyCode::KeyE) {
         edit.editing = !edit.editing;
         scene.paused = true;
@@ -403,7 +406,7 @@ pub fn input(
         edit.rotate = !edit.rotate;
     }
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let cfg = scaled_config(scene.energy, scene.anni, scene.power);
+    let cfg = knobs::effective_config(scene.energy, scene.anni, scene.power, overrides);
     if ctrl && (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyY)) {
         let redo = keys.just_pressed(KeyCode::KeyY);
         if let Err(e) = edit.undo(cfg, redo) {

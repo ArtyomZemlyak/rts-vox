@@ -44,6 +44,9 @@ pub struct GasParams {
     pub energy: Vec4,
     pub beam: Vec4,
     pub weapon: Vec4,
+    /// Picture knobs of the overlay (ADR-298): `x` scales the residual
+    /// glow of heated ground after a shell.
+    pub look: Vec4,
 }
 impl Default for GasParams {
     fn default() -> Self {
@@ -62,6 +65,7 @@ impl Default for GasParams {
             energy: Vec4::ZERO,
             beam: Vec4::ZERO,
             weapon: Vec4::ZERO,
+            look: Vec4::new(1.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -446,6 +450,7 @@ fn prepare(
         p.terrain = params.terrain;
         p.weapon.y = params.weapon.y;
         p.weapon.w = params.weapon.w;
+        p.look = params.look;
         p.control.y = input.atmosphere.clock.saturating_sub(source.last) as f32;
         p.control.z = source.opacity(input.atmosphere.clock);
         p.control.w = 1.0; // overlay: the terrain and beam have already been drawn

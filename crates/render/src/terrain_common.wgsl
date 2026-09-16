@@ -3,7 +3,7 @@ struct Params {
     world_from_clip: mat4x4<f32>, camera: vec4<f32>, origin: vec4<f32>, source: vec4<f32>,
     control: vec4<f32>, chemistry: vec4<f32>, charge: vec4<f32>, terrain: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
-    energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>,
+    energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;

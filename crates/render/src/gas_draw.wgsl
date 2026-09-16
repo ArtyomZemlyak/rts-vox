@@ -159,7 +159,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             if ground.material==1u && age>0.25 && r<24.0 {
                 let fissure=smoothstep(0.73,0.82,noise(pos*0.6));
                 let residual=select(vec3(1.5,0.10,0.002),vec3(0.22,0.32,0.5),p.weapon.x>0.5);
-                lit+=residual*fissure*exp(-age*0.38)*(1.0-r/24.0);
+                lit+=residual*fissure*exp(-age*0.38)*(1.0-r/24.0)*p.look.x;
             }
         bg=vec4(bg.rgb+lit*p.control.z*exp(-ground.t*p.sky.w),bg.a);
     }

@@ -1107,8 +1107,19 @@ pub struct Dust {
 
 /// Числа частиц выбранного направления.
 pub fn dust() -> Dust {
-    dust_of(active())
+    DUST_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|o| *o)
+        .unwrap_or_else(|| dust_of(active()))
 }
+/// Числа частиц, выкрученные вживую (ADR-298); `None` — стоковые.
+pub fn override_dust(d: Option<Dust>) {
+    if let Ok(mut slot) = DUST_OVERRIDE.write() {
+        *slot = d;
+    }
+}
+static DUST_OVERRIDE: std::sync::RwLock<Option<Dust>> = std::sync::RwLock::new(None);
 
 /// Числа частиц направления. Пыль — цвета почвы этого направления,
 /// высветленная: поднятая пыль всегда светлее земли, с которой снята.
@@ -1854,6 +1865,9 @@ pub struct Scene {
     /// плотность до решения, меньше — облако прозрачнее, и бой читается
     /// сквозь его края.
     pub smoke_extinction: f32,
+    /// Множитель остаточного свечения прогретой земли после фугаса в
+    /// проходе газа (ADR-298): единица — как было, ноль — нет.
+    pub ground_glow: f32,
 
     /// Экспозиция камеры, EV100. Держится в паре с `sun_lux`: яркость
     /// источника и экспозиция — одна настройка, разнесённая по двум
@@ -2014,8 +2028,19 @@ impl Fog {
 
 /// Набор чисел выбранного направления.
 pub fn scene() -> Scene {
-    scene_of(active())
+    SCENE_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|o| *o)
+        .unwrap_or_else(|| scene_of(active()))
 }
+/// Числа картинки, выкрученные вживую (ADR-298); `None` — стоковые.
+pub fn override_scene(s: Option<Scene>) {
+    if let Ok(mut slot) = SCENE_OVERRIDE.write() {
+        *slot = s;
+    }
+}
+static SCENE_OVERRIDE: std::sync::RwLock<Option<Scene>> = std::sync::RwLock::new(None);
 
 /// Набор чисел заданного направления.
 pub fn scene_of(l: Look) -> Scene {
@@ -2030,6 +2055,7 @@ pub fn scene_of(l: Look) -> Scene {
         sun_disk_size: 0.028,
         sun_disk_intensity: 1.0,
         smoke_extinction: 0.55,
+        ground_glow: 0.35,
         ev100: 13.1,
         tonemap: Tonemap::Aces,
         grade: Grade::NEUTRAL,

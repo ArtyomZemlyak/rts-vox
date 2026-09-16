@@ -109,6 +109,18 @@ impl Registry {
         self.defs.get(m as usize).and_then(|o| o.as_ref())
     }
 
+    /// Заменить определение материала с тем же номером (ADR-298: живые
+    /// настройки полигона). Номер обязан уже быть в реестре.
+    pub fn replace(&mut self, d: MatDef) -> Result<(), RegistryError> {
+        match self.defs.get_mut(d.id as usize) {
+            Some(slot) if slot.is_some() => {
+                *slot = Some(d);
+                Ok(())
+            }
+            _ => Err(RegistryError::OutOfRange(d.id)),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.defs.iter().filter(|o| o.is_some()).count()
     }

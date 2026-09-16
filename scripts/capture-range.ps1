@@ -8,6 +8,7 @@ param(
     [ValidateRange(1,8)][int]$Patrol = 0,
     [switch]$Open,
     [switch]$DriveDemo,
+    [switch]$Settings,
     [switch]$Close,
     [string]$Move = ''
 )
@@ -35,6 +36,7 @@ $captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $seco
     '--weapon', $Weapon.ToLowerInvariant(), '--power', $Power.ToString($culture), '--range', ('"{0}"' -f $RangePath))
 if ($Open) { $captureArgs += '--open' }
 if ($DriveDemo) { $captureArgs += '--drive-demo' }
+if ($Settings) { $captureArgs += '--settings' }
 if ($Move) { $captureArgs += @('--move', $Move) }
 if ($Close) { $captureArgs += '--close' }
 if ($View) { $captureArgs += @('--view', $View.ToLowerInvariant()) }

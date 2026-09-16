@@ -23,6 +23,8 @@ use sim_core::blast::{BlastRange, GUN, MUZZLE, SIZE};
 mod damage_art;
 #[path = "blast/fragments.rs"]
 mod fragments;
+#[path = "blast/knobs.rs"]
+mod knobs;
 #[path = "blast/moving.rs"]
 mod moving;
 #[path = "blast/panel.rs"]
@@ -211,6 +213,7 @@ fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput)
     gas.params.weapon.x = weapon_code(energy, anni);
     gas.params.weapon.z = if sim.layout.is_some() { 1.0 } else { 0.0 };
     gas.params.weapon.w = look::scene().smoke_extinction;
+    gas.params.look.x = look::scene().ground_glow;
 }
 fn main() {
     let mut out = None;
@@ -224,6 +227,9 @@ fn main() {
     let mut patrol = None;
     let mut close_view = None;
     let mut realtime = false;
+    // The live tuning menu open from the first frame (ADR-298), for a
+    // capture of it.
+    let mut settings = false;
     let mut layout_file = None;
     let mut power = 1000;
     let mut uncovered = false;
@@ -289,6 +295,7 @@ fn main() {
                 assert!(patrol != Some(0), "--patrol counts routes from 1");
             }
             "--realtime" => realtime = true,
+            "--settings" => settings = true,
             "--weapon" => {
                 i += 1;
                 (energy, anni) = match args.get(i).map(String::as_str) {
@@ -403,6 +410,7 @@ fn main() {
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
     gas.params.weapon.x = weapon_code(energy, anni);
     gas.params.weapon.w = look::scene().smoke_extinction;
+    gas.params.look.x = look::scene().ground_glow;
     gas.params.beam = Vec4::new(
         MUZZLE[0] as f32 + 2.0,
         MUZZLE[1] as f32,
@@ -462,6 +470,7 @@ fn main() {
             notice: String::new(),
         })
         .insert_resource(panel::Panel::new(drive, demo))
+        .insert_resource(knobs::Overrides::new(settings))
         .init_resource::<moving::Visual>()
         .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
@@ -473,6 +482,7 @@ fn main() {
             Update,
             (
                 panel::actions,
+                knobs::actions,
                 workbench::input,
                 advance,
                 orient_gun,
@@ -485,6 +495,7 @@ fn main() {
                 workbench::camera,
                 workbench::overlay,
                 panel::refresh,
+                knobs::refresh,
                 panel::release_keys,
                 record,
                 capture,

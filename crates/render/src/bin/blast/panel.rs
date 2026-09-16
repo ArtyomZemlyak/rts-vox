@@ -51,6 +51,13 @@ pub enum Action {
     Target,
     Zoom(f32),
     Pan(f32, f32),
+    /// The live tuning menu (ADR-298), handled in `knobs`.
+    Settings,
+    Group(u8),
+    Knob(u8, bool),
+    SaveKnobs,
+    LoadKnobs,
+    ResetKnobs,
 }
 #[derive(Component)]
 pub struct Readout;
@@ -81,6 +88,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         font_size: FontSize::Px(14.0),
         ..default()
     };
+    knobs::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
         Node {
             position_type: PositionType::Absolute,
@@ -205,6 +213,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Мишень", Action::Target),
                 ],
             ),
+            (false, vec![("Настройки", Action::Settings)]),
             (
                 false,
                 vec![
@@ -278,7 +287,10 @@ pub fn actions(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
     scale: Option<ResMut<UiScale>>,
+    overrides: Option<Res<knobs::Overrides>>,
 ) {
+    let stock = knobs::Overrides::default();
+    let overrides = overrides.as_deref().unwrap_or(&stock);
     let factor = windows
         .single()
         .map_or(1.0, |w| (w.height() / 860.0).clamp(0.65, 1.0));
@@ -394,9 +406,10 @@ pub fn actions(
                             }
                         }
                     }
-                    if let Err(e) =
-                        edit.commit(layout, scaled_config(scene.energy, scene.anni, scene.power))
-                    {
+                    if let Err(e) = edit.commit(
+                        layout,
+                        knobs::effective_config(scene.energy, scene.anni, scene.power, overrides),
+                    ) {
                         scene.notice = e;
                     }
                 }
@@ -428,6 +441,12 @@ pub fn actions(
                 edit.pan =
                     (edit.pan + Vec2::new(x, z)).clamp(Vec2::splat(-220.0), Vec2::splat(220.0));
             }
+            Action::Settings
+            | Action::Group(_)
+            | Action::Knob(..)
+            | Action::SaveKnobs
+            | Action::LoadKnobs
+            | Action::ResetKnobs => {}
         }
     }
     if (edit.editing || scene.sim.ready()) && panel.pending.is_some() {
@@ -435,7 +454,7 @@ pub fn actions(
         scene.energy = w >= 1;
         scene.anni = w == 2;
         scene.power = p;
-        let cfg = scaled_config(scene.energy, scene.anni, p);
+        let cfg = knobs::effective_config(scene.energy, scene.anni, p, overrides);
         scene.sim.reconfigure(cfg);
         let origin = gas.params.origin;
         configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
