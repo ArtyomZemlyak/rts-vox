@@ -495,25 +495,11 @@ fn fill_terrain(sim: &BlastRange, gas: &mut GasInput) {
     }
     gas.terrain_words = Arc::new(words);
     // The unit remains PBR geometry. Its voxel body only supplies occupancy to
-    // the terrain's shadow rays (reserved presentation material 15).
-    let tank = voxel::unit::tank();
+    // the terrain's shadow rays (reserved presentation material 15): the root
+    // and every segment in the frames the simulation posed them in (ADR-282).
     let words = Arc::make_mut(&mut gas.terrain_words);
-    for (body, at) in std::iter::once((&tank, GUN)).chain(sim.units.iter().map(|u| (&u.body, u.at)))
-    {
-        for z in 0..body.vol.nz as usize {
-            for y in 0..body.vol.ny as usize {
-                for x in 0..body.vol.nx as usize {
-                    if !body.vol.get(x, y, z) {
-                        continue;
-                    }
-                    let wx = at[0] + x as i32 - body.vol.nx as i32 / 2;
-                    let wy = at[1] + y as i32;
-                    let wz = at[2] + z as i32 - body.vol.nz as i32 / 2;
-                    let i = (wx as u32 + nx * (wy as u32 + ny * wz as u32)) as usize;
-                    words[i / 8] = (words[i / 8] & !(15 << ((i % 8) * 4))) | (15 << ((i % 8) * 4));
-                }
-            }
-        }
+    for i in moving::cells(sim) {
+        words[i / 8] = (words[i / 8] & !(15 << ((i % 8) * 4))) | (15 << ((i % 8) * 4));
     }
     gas.terrain_revision += 1;
     gas.terrain_dirty = std::iter::once(0..gas.terrain_words.len()).collect();

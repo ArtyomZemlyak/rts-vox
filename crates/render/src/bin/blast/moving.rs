@@ -86,8 +86,17 @@ pub fn before(sim: &BlastRange, v: &mut Visual) {
         v.occupied = cells(sim);
     }
 }
-fn cells(sim: &BlastRange) -> Vec<usize> {
+/// World cells the bodies occupy, for the terrain's shadow rays: the root
+/// in its pose and every segment in the frame the simulation posed it in
+/// (ADR-282), so a walker's legs and a tank's plates shade the ground
+/// under them rather than only the high root far downsun.
+pub(super) fn cells(sim: &BlastRange) -> Vec<usize> {
     let mut out = Vec::new();
+    let mut push = |q: IVec3| {
+        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::new(640, 192, 640)).all() {
+            out.push((q.x + 640 * (q.y + 192 * q.z)) as usize);
+        }
+    };
     for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {
         let p = pose(u);
         let rot = render::realtime::hull_rotation(p.up, p.yaw);
@@ -103,8 +112,29 @@ fn cells(sim: &BlastRange) -> Vec<usize> {
                             * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
                         .floor()
                         .as_ivec3();
-                    if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::new(640, 192, 640)).all() {
-                        out.push((q.x + 640 * (q.y + 192 * q.z)) as usize);
+                    push(q);
+                }
+            }
+        }
+        let half = fx::Fx::from_ratio(1, 2);
+        for (i, (seg, frame)) in u.body.segments.iter().zip(&u.seg_frames).enumerate() {
+            if u.seg_gone.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            let b = &seg.body;
+            for z in 0..b.vol.nz as usize {
+                for y in 0..b.vol.ny as usize {
+                    for x in 0..b.vol.nx as usize {
+                        if !b.vol.get(x, y, z) {
+                            continue;
+                        }
+                        let w =
+                            frame.world([x, y, z].map(|v| fx::Fx::from_int(v as i32).add(half)));
+                        push(IVec3::new(
+                            (w.x.raw() >> 32) as i32,
+                            (w.y.raw() >> 32) as i32,
+                            (w.z.raw() >> 32) as i32,
+                        ));
                     }
                 }
             }
@@ -229,5 +259,51 @@ pub fn animate(
         *tr = local;
         tr.translation = p.pos + rotation * local.translation;
         tr.rotation = rotation * local.rotation;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shadow occupancy holds a walker's legs down to the ground, not
+    /// only its root high above it (ADR-282).
+    #[test]
+    fn a_walker_shades_the_ground_with_its_legs() {
+        let sim = BlastRange::with_layout(
+            ExplosionConfig::from_ron(include_str!("../../../../../data/energy-cannon.ron"))
+                .unwrap(),
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap(),
+        )
+        .unwrap();
+        let (walker, u) = sim
+            .units
+            .iter()
+            .enumerate()
+            .find(|(_, u)| u.kind == RangeUnitKind::Strider)
+            .expect("the cover range has a walker");
+        let _ = walker;
+        let low = u.at[1] + 12;
+        let near = |i: usize| {
+            let (x, y, z) = (
+                (i % 640) as i32,
+                (i / 640 % 192) as i32,
+                (i / 640 / 192) as i32,
+            );
+            y < low && (x - u.at[0]).abs() <= 16 && (z - u.at[2]).abs() <= 16
+        };
+        let legs = cells(&sim).into_iter().filter(|&i| near(i)).count();
+        assert!(legs > 500, "only {legs} occupied cells under the walker");
+        // The root alone reaches no lower than its belly.
+        let root_low = (0..u.body.vol.ny as usize)
+            .find(|&y| {
+                (0..u.body.vol.nz as usize)
+                    .any(|z| (0..u.body.vol.nx as usize).any(|x| u.body.vol.get(x, y, z)))
+            })
+            .unwrap();
+        assert!(
+            root_low as i32 >= 12,
+            "the root itself reaches y {root_low}"
+        );
     }
 }
