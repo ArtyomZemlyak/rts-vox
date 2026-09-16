@@ -216,7 +216,7 @@ fn main() {
             "--edit" => edit = true,
             "--drive" => drive = true,
             // Order the player's tank to a point at start, for scripted
-            // captures such as a run through the woods (ADR-269).
+            // captures such as a run through the woods (ADR-270).
             "--move" => {
                 i += 1;
                 let (x, z) = args[i].split_once(',').expect("--move x,z");

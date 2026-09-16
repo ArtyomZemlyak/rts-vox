@@ -383,7 +383,7 @@ impl Generator for RangeTerrain {
         }
         // Small broken rocks on the shoulders, out of the firing lane. No
         // taller than the course step: a hull climbs a shoulder rock rather
-        // than steering round it (ADR-273).
+        // than steering round it (ADR-274).
         if !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)) {
             let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
             let dx = x as i32 % 13 - 6;
@@ -1608,7 +1608,7 @@ mod tests {
             "saved whole fragment"
         );
     }
-    /// The owner's report: craters came out square (ADR-272). A shell into
+    /// The owner's report: craters came out square (ADR-273). A shell into
     /// flat soil must dig a crater whose rim reaches as far along the
     /// diagonals as along the axes.
     #[test]
@@ -1651,7 +1651,7 @@ mod tests {
         );
         assert!(low >= 3000, "no crater to speak of: {radii:?}");
         // One diagonal cell is 1.41 units, so single rays quantise coarsely;
-        // the means must agree closely, every ray roughly. Before ADR-272
+        // the means must agree closely, every ray roughly. Before ADR-273
         // the diagonals ran a quarter longer than the axes.
         let axis = axes.iter().sum::<i64>() / axes.len() as i64;
         let diagonal = diagonals.iter().sum::<i64>() / diagonals.len() as i64;
@@ -1661,13 +1661,13 @@ mod tests {
         );
         assert!(high * 100 <= low * 125, "a ray is far off: {radii:?}");
     }
-    /// Trees are matter a tracked hull pushes over (ADR-269): the cut is paid
+    /// Trees are matter a tracked hull pushes over (ADR-270): the cut is paid
     /// by the vehicle, the crown falls for free, and nothing is erased.
     /// The default range as the capture script drives it: the player's
     /// tank is sent from its start into the far woods with the patrols
     /// running. Its first turn happens beside two boulders that no planner
     /// sample sees at the heading the executor reaches; it must leave that
-    /// spot on its own and arrive (ADR-273).
+    /// spot on its own and arrive (ADR-274).
     #[test]
     fn the_player_tank_reaches_the_far_woods_from_the_start() {
         let c = config();
@@ -1914,7 +1914,7 @@ mod tests {
     }
     /// The owner's report: a directed-energy hit on a moving tank kept eating
     /// it for almost three seconds after the flash. The pieces cut loose were
-    /// leaving one per tick while the wave waited on them (ADR-268).
+    /// leaving one per tick while the wave waited on them (ADR-269).
     #[test]
     fn damage_arrives_with_the_wave_while_sections_are_still_leaving() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
