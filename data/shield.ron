@@ -1,0 +1,12 @@
+// Energy shields on the range (ADR-275). Charge is counted in the wave
+// units the weapons declare as `energy`: explosion.ron 2300, energy-cannon.ron
+// 2700. A dome holds one round of either and falls to the second inside the
+// recharge window: 2300 + 2700 is more than the capacity.
+(
+    capacity: 4000,
+    // A spent dome fills in twenty seconds.
+    recharge_per_tick: 7,
+    // Three seconds down after a collapse.
+    overload_ticks: 90,
+    default_radius: 40,
+)

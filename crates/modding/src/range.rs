@@ -25,6 +25,15 @@ impl RangeBlock {
     }
 }
 
+/// A dome the range raises over a point of the ground (ADR-275). The
+/// sphere continues under the surface unseen, so digging under a shield
+/// works (ADR-040).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeShieldDef {
+    pub at: [i32; 3],
+    pub radius: i32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeLayout {
     #[serde(default)]
@@ -37,6 +46,8 @@ pub struct RangeLayout {
     pub units: Vec<RangeUnitDef>,
     /// Later blocks override earlier blocks, allowing cladding and cutouts.
     pub blocks: Vec<RangeBlock>,
+    #[serde(default)]
+    pub shields: Vec<RangeShieldDef>,
     pub power_milli: Vec<u32>,
     pub unit_resistance: u32,
 }
@@ -111,6 +122,11 @@ impl RangeLayout {
                     || u.at[1] > 96
                     || u.at[2] < 80
                     || u.at[2] > 560
+            })
+            || r.shields.len() > 8
+            || r.shields.iter().any(|s| {
+                !crate::shield::SHIELD_RADIUS.contains(&s.radius)
+                    || (0..3).any(|a| s.at[a] < 0 || s.at[a] >= size[a])
             })
         {
             return Err("range layout exceeds supported bounds".into());

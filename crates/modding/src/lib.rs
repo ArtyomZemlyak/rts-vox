@@ -18,6 +18,7 @@ pub mod integrity;
 pub mod kinds;
 pub mod navigation;
 pub mod range;
+pub mod shield;
 pub mod skirmish;
 pub mod tuning;
 pub mod turret;

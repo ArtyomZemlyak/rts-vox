@@ -176,6 +176,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Бетон", Action::Tool(Tool::Concrete)),
                     ("Сталь", Action::Tool(Tool::Steel)),
                     ("Грунт", Action::Tool(Tool::Earth)),
+                    ("Щит", Action::Tool(Tool::Shield)),
                 ],
             ),
             (
@@ -493,7 +494,7 @@ pub fn refresh(
         Some(Selection::Unit(i)) => Some(i),
         _ => None,
     });
-    let target = selected
+    let mut target = selected
         .and_then(|i| {
             scene.sim.units.get(i).map(|u| {
                 format!(
@@ -539,6 +540,39 @@ pub fn refresh(
                 .collect();
             format!("Круги мишеней: {}", laps.join(" / "))
         });
+    let capacity = scene.sim.shield_tuning().capacity.max(1);
+    if let Some(Selection::Shield(i)) = edit.selected {
+        if let Some(s) = scene.sim.shields.get(i) {
+            target = format!(
+                "Щит {} · радиус {} · заряд {}%{}",
+                i + 1,
+                s.radius,
+                s.charge * 100 / capacity,
+                if s.down > 0 {
+                    " · перегружен"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    let shields = if scene.sim.shields.is_empty() {
+        String::new()
+    } else {
+        let list: Vec<String> = scene
+            .sim
+            .shields
+            .iter()
+            .map(|s| {
+                if s.down > 0 {
+                    format!("перегружен {:.1} с", s.down as f32 / 30.0)
+                } else {
+                    format!("{}%", s.charge * 100 / capacity)
+                }
+            })
+            .collect();
+        format!("\nЩиты: {}", list.join(" · "))
+    };
     let state = if edit.editing {
         "РАССТАНОВКА"
     } else if scene.paused {
@@ -563,7 +597,7 @@ pub fn refresh(
             )
         };
         *t = Text::new(format!(
-            "{state} · {:.0} FPS\n\n{instructions}\n\n{readiness}\n{target}\n{}{debris}{}",
+            "{state} · {:.0} FPS\n\n{instructions}\n\n{readiness}\n{target}{shields}\n{}{debris}{}",
             scene.fps,
             if panel.pending.is_some() {
                 "Новый заряд после выстрела\n"

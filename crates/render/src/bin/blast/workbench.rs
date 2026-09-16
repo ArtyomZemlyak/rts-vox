@@ -3,7 +3,7 @@
 use super::*;
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use modding::range::{RangeBlock, RangeUnitDef};
+use modding::range::{RangeBlock, RangeShieldDef, RangeUnitDef};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub enum Tool {
@@ -15,11 +15,19 @@ pub enum Tool {
     Steel,
     Earth,
     Aim,
+    Shield,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Selection {
     Unit(usize),
     Block(usize),
+    Shield(usize),
+}
+/// Rounds caught by domes, kept for a few frames after their tick.
+#[derive(Resource, Default)]
+pub struct ShieldFlashes {
+    seen: u32,
+    live: Vec<(Vec3, u8)>,
 }
 #[derive(Component)]
 pub struct EditorCamera;
@@ -196,6 +204,7 @@ fn group(layout: &RangeLayout, id: usize) -> Vec<usize> {
 fn relocate(layout: &mut RangeLayout, selected: Selection, at: [i32; 3]) {
     match selected {
         Selection::Unit(i) => layout.units[i].at = at,
+        Selection::Shield(i) => layout.shields[i].at = at,
         Selection::Block(i) => {
             let b = &layout.blocks[i];
             let dx = at[0] - (b.min[0] + b.max[0]) / 2;
@@ -230,6 +239,9 @@ fn remove(layout: &mut RangeLayout, selected: Selection) {
                 layout.blocks.remove(j);
             }
         }
+        Selection::Shield(i) => {
+            layout.shields.remove(i);
+        }
     }
 }
 
@@ -251,7 +263,16 @@ fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
                 .as_ref()
                 .and_then(|l| l.blocks.iter().rposition(|b| b.contains(p)))
                 .map(Selection::Block);
-            return Some((p, b));
+            // Open ground under a dome picks the dome.
+            let dome = sim
+                .shields
+                .iter()
+                .position(|s| {
+                    let (dx, dz) = (p[0] - s.at[0], p[2] - s.at[2]);
+                    dx * dx + dz * dz <= s.radius * s.radius
+                })
+                .map(Selection::Shield);
+            return Some((p, b.or(dome)));
         }
     }
     None
@@ -366,6 +387,7 @@ pub fn input(
         (KeyCode::Digit5, Tool::Steel),
         (KeyCode::Digit6, Tool::Earth),
         (KeyCode::Digit7, Tool::Aim),
+        (KeyCode::Digit8, Tool::Shield),
     ] {
         if keys.just_pressed(key) {
             edit.tool = tool;
@@ -477,6 +499,10 @@ pub fn input(
                     next.target = hit;
                     next.airburst_on_target = false;
                 }
+                Tool::Shield => next.shields.push(RangeShieldDef {
+                    at,
+                    radius: scene.sim.shield_tuning().default_radius,
+                }),
                 tool => next.blocks.push(block(tool, at, edit.rotate)),
             }
         }
@@ -502,8 +528,43 @@ pub fn overlay(
     edit: Res<Workshop>,
     art: Res<WitnessArt>,
     panel: Res<panel::Panel>,
+    mut flashes: ResMut<ShieldFlashes>,
 ) {
     let flat = Quat::from_rotation_arc(Vec3::Z, Vec3::Y);
+    // Domes: a wire sphere fading with the charge, red and low while down.
+    let capacity = scene.sim.shield_tuning().capacity.max(1) as f32;
+    for s in &scene.sim.shields {
+        let c = Vec3::from(s.at.map(|v| v as f32));
+        let (colour, radius) = if s.down > 0 {
+            (Color::srgba(0.9, 0.35, 0.25, 0.4), s.radius as f32 * 0.3)
+        } else {
+            let k = s.charge as f32 / capacity;
+            (
+                Color::srgba(0.35 + 0.5 * (1.0 - k), 0.8, 1.0, 0.2 + 0.6 * k),
+                s.radius as f32,
+            )
+        };
+        giz.sphere(Isometry3d::from_translation(c), radius, colour)
+            .resolution(48);
+        giz.circle(Isometry3d::new(c + Vec3::Y * 0.5, flat), radius, colour);
+    }
+    if flashes.seen != scene.sim.tick {
+        flashes.seen = scene.sim.tick;
+        for h in &scene.sim.shield_hits {
+            let ttl = if h.collapsed { 40 } else { 18 };
+            flashes.live.push((Vec3::from(h.at.map(|v| v as f32)), ttl));
+        }
+    }
+    for (p, ttl) in &mut flashes.live {
+        let t = (f32::from(*ttl) / 18.0).min(1.0);
+        giz.sphere(
+            Isometry3d::from_translation(*p),
+            2.0 + (1.0 - t) * 6.0,
+            Color::srgba(1.0, 0.95, 0.6, t),
+        );
+        *ttl -= 1;
+    }
+    flashes.live.retain(|(_, ttl)| *ttl > 0);
     if !edit.editing {
         let p = Vec3::from(scene.sim.gun.motion.pos.map(|v| v.to_f64_lossy() as f32));
         giz.circle(
@@ -624,6 +685,15 @@ pub fn overlay(
                     }
                 }
             }
+            Selection::Shield(i) => {
+                if let Some(s) = layout.shields.get(i) {
+                    giz.sphere(
+                        Isometry3d::from_translation(Vec3::from(s.at.map(|v| v as f32))),
+                        s.radius as f32,
+                        cyan,
+                    );
+                }
+            }
         }
     }
     if let Some(p) = edit.hover {
@@ -652,6 +722,13 @@ pub fn overlay(
                 let size = Vec3::new(body.vol.nx as f32, body.vol.ny as f32, body.vol.nz as f32);
                 let lo = at - Vec3::new(size.x * 0.5, 0.0, size.z * 0.5);
                 bounds(&mut giz, lo, lo + size, c);
+            }
+            Tool::Shield => {
+                giz.sphere(
+                    Isometry3d::from_translation(at),
+                    scene.sim.shield_tuning().default_radius as f32,
+                    c,
+                );
             }
             _ => {}
         }

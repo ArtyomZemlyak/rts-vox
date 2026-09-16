@@ -7,8 +7,9 @@ use fx::Fx;
 pub mod matter;
 #[path = "range_motion.rs"]
 pub mod motion;
+use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
-use modding::range::{RangeLayout, RangeUnitKind};
+use modding::range::{RangeLayout, RangeShieldDef, RangeUnitKind};
 use motion::Motion;
 use phys::blast::Wave;
 use std::collections::BTreeMap;
@@ -579,6 +580,63 @@ pub fn material(w: &World, p: [i32; 3]) -> u16 {
     w.material(p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
+/// A dome on the range (ADR-275): geometry from the layout, charge in the
+/// wave units of the weapons.
+#[derive(Clone, Debug)]
+pub struct RangeShield {
+    pub at: [i32; 3],
+    pub radius: i32,
+    pub charge: u32,
+    /// Ticks left before a collapsed dome stands again; zero while it stands.
+    pub down: u32,
+    pub hits: u32,
+}
+impl RangeShield {
+    fn new(d: &RangeShieldDef, capacity: u32) -> Self {
+        Self {
+            at: d.at,
+            radius: d.radius,
+            charge: capacity,
+            down: 0,
+            hits: 0,
+        }
+    }
+    /// The predicate's view of the dome: a collapsed one catches nothing.
+    pub fn dome(&self) -> Shield {
+        Shield {
+            x: self.at[0],
+            y: self.at[1],
+            z: self.at[2],
+            r: self.radius,
+            owner: 0,
+            charge: if self.down > 0 {
+                0
+            } else {
+                self.charge.min(i32::MAX as u32) as i32
+            },
+        }
+    }
+    pub fn standing(&self) -> bool {
+        self.down == 0 && self.charge > 0
+    }
+}
+/// A round caught by a dome this tick, for the renderer's flash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShieldHit {
+    pub shield: usize,
+    pub at: [i32; 3],
+    pub drained: u32,
+    pub collapsed: bool,
+}
+fn shot_point(p: [i32; 3]) -> Point {
+    Point {
+        x: p[0],
+        y: p[1],
+        z: p[2],
+        owner: 1,
+    }
+}
+
 pub struct BlastRange {
     pub matter: matter::Matter,
     pub world: World,
@@ -608,6 +666,10 @@ pub struct BlastRange {
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
     navigation: modding::navigation::Navigation,
+    pub shields: Vec<RangeShield>,
+    /// Transient renderer notification, like `surface_changed`.
+    pub shield_hits: Vec<ShieldHit>,
+    shield_tuning: modding::shield::ShieldTuning,
 }
 
 impl BlastRange {
@@ -753,6 +815,15 @@ impl BlastRange {
             }
         }
         let matter = matter::Matter::new(&units);
+        let shield_tuning =
+            modding::shield::ShieldTuning::from_ron(include_str!("../../../data/shield.ron"))
+                .expect("shield tuning");
+        let shields = layout.as_ref().map_or_else(Vec::new, |r| {
+            r.shields
+                .iter()
+                .map(|d| RangeShield::new(d, shield_tuning.capacity))
+                .collect()
+        });
         let mut result = Self {
             matter,
             gun,
@@ -787,15 +858,50 @@ impl BlastRange {
                 "../../../data/range-navigation.ron"
             ))
             .expect("navigation"),
+            shields,
+            shield_hits: Vec::new(),
+            shield_tuning,
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         result
+    }
+    pub fn shield_tuning(&self) -> &modding::shield::ShieldTuning {
+        &self.shield_tuning
+    }
+    /// The first dome whose surface lies between two swept points: a dome
+    /// is a wall for a round crossing it either way (ADR-040).
+    fn dome_crossed(&self, a: [i32; 3], b: [i32; 3]) -> Option<usize> {
+        let (pa, pb) = (shot_point(a), shot_point(b));
+        self.shields.iter().position(|s| {
+            let d = s.dome();
+            inside(&d, &pa) != inside(&d, &pb)
+        })
+    }
+    /// The round is spent against the dome: its wave energy leaves the
+    /// charge, and a dome drained to nothing collapses for the tuned outage.
+    fn absorb(&mut self, i: usize, at: [i32; 3]) {
+        let drain = self.config.energy;
+        let overload = self.shield_tuning.overload_ticks;
+        let s = &mut self.shields[i];
+        let drained = drain.min(s.charge);
+        let collapsed = s.charge <= drain;
+        s.charge -= drained;
+        s.hits += 1;
+        if collapsed {
+            s.down = overload;
+        }
+        self.shield_hits.push(ShieldHit {
+            shield: i,
+            at,
+            drained,
+            collapsed,
+        });
     }
 
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(14);
+        b.u32(15);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -902,12 +1008,18 @@ impl BlastRange {
                 }
             }
         }
+        b.u32(self.shields.len() as u32);
+        for s in &self.shields {
+            b.u32(s.charge);
+            b.u32(s.down);
+            b.u32(s.hits);
+        }
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 14 {
+        if s.u32() != 15 {
             return None;
         }
         let extended = s.bool();
@@ -1133,6 +1245,17 @@ impl BlastRange {
                 wave,
             });
         }
+        if s.u32() as usize != r.shields.len() {
+            return None;
+        }
+        for sh in &mut r.shields {
+            sh.charge = s.u32();
+            sh.down = s.u32();
+            sh.hits = s.u32();
+            if sh.charge > r.shield_tuning.capacity || sh.down > r.shield_tuning.overload_ticks {
+                return None;
+            }
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -1199,6 +1322,19 @@ impl BlastRange {
     }
     pub fn step(&mut self) {
         self.surface_changed.clear();
+        self.shield_hits.clear();
+        // Domes recover before this tick's round flies: a collapsed one
+        // counts its outage down, a standing one refills to capacity.
+        for s in &mut self.shields {
+            if s.down > 0 {
+                s.down -= 1;
+            } else {
+                s.charge = s
+                    .charge
+                    .saturating_add(self.shield_tuning.recharge_per_tick)
+                    .min(self.shield_tuning.capacity);
+            }
+        }
         // This small range commits motion in stable slot order. Later actors
         // see accepted positions, so two approaching tanks cannot each consume
         // the same free gap between the beginning and end of the tick.
@@ -1317,9 +1453,16 @@ impl BlastRange {
                 .unwrap_or(0)
                 + 1;
             let mut impact = None;
+            let mut caught = None;
+            let mut prev = p.map(Fx::to_int_trunc);
             for s in 1..=span * 2 {
                 let f = Fx::from_ratio(s, span * 2);
                 let v = std::array::from_fn(|a| p[a].add(q[a].sub(p[a]).mul(f)).to_int_trunc());
+                if let Some(i) = self.dome_crossed(prev, v) {
+                    caught = Some((i, v));
+                    break;
+                }
+                prev = v;
                 if self
                     .layout
                     .as_ref()
@@ -1331,7 +1474,13 @@ impl BlastRange {
                     break;
                 }
             }
-            if let Some(at) = impact {
+            if let Some((i, at)) = caught {
+                // Spent against the dome: no impact, no crater, another
+                // order may follow at once.
+                self.absorb(i, at);
+                self.shell = None;
+                self.fire_tick = u32::MAX;
+            } else if let Some(at) = impact {
                 self.impact = Some(at);
                 self.impact_tick = self.tick;
                 self.matter.begin(self.config.material_energy_j);
@@ -1702,6 +1851,130 @@ mod tests {
             a.gun.motion.pos
         );
         assert!(longest_still <= 90, "stood {longest_still} ticks");
+    }
+    fn shielded_layout() -> RangeLayout {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.airburst_on_target = false;
+        layout.shields.push(RangeShieldDef {
+            at: [layout.target[0], FLOOR, layout.target[2]],
+            radius: 40,
+        });
+        layout
+    }
+    fn caught(a: &mut BlastRange) -> Option<ShieldHit> {
+        let hits = a.shields[0].hits;
+        for _ in 0..300 {
+            a.step();
+            if let Some(h) = a.shield_hits.first() {
+                return Some(*h);
+            }
+            if a.shields[0].hits > hits || a.impact.is_some() {
+                break;
+            }
+        }
+        None
+    }
+    /// A dome over the target catches the round at its surface: no impact,
+    /// no crater, and the weapon's wave energy leaves the charge (ADR-275).
+    #[test]
+    fn a_dome_stops_the_round_at_its_surface_and_pays_with_charge() {
+        let mut a = BlastRange::with_layout(config(), shielded_layout()).unwrap();
+        let capacity = a.shields[0].charge;
+        let h = caught(&mut a).expect("the round never met the dome");
+        assert!(
+            a.impact.is_none() && a.explosion.is_none(),
+            "the round exploded"
+        );
+        assert_eq!((a.removed, a.shell), (0, None));
+        let s = &a.shields[0];
+        assert_eq!(
+            (s.hits, s.charge, s.down, h.collapsed, h.drained),
+            (1, capacity - a.config.energy, 0, false, a.config.energy)
+        );
+        let d2: i64 = (0..3).map(|k| i64::from(h.at[k] - s.at[k]).pow(2)).sum();
+        let r = i64::from(s.radius);
+        assert!(
+            (d2 - r * r).abs() <= 4 * r,
+            "caught at {:?}, not on a dome of radius {r}",
+            h.at
+        );
+        assert!(a.ready(), "the spent round left the gun busy");
+    }
+    /// Both weapons drain one dome by their own wave energy: the HE round
+    /// leaves less than the energy bolt needs, so the bolt collapses the
+    /// dome, a third round passes while it is down, and the charge climbs
+    /// back at the tuned rate once it stands again.
+    #[test]
+    fn two_weapons_on_one_dome_drain_it_and_the_second_collapses_it() {
+        let mut a = BlastRange::with_layout(config(), shielded_layout()).unwrap();
+        a.control();
+        let tuning = *a.shield_tuning();
+        let he = config().energy;
+        let bolt =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        assert!(
+            he < tuning.capacity && he + bolt.energy > tuning.capacity,
+            "shield.ron no longer holds one round of each weapon and not two"
+        );
+        assert!(a.refire());
+        let first = caught(&mut a).expect("the HE round passed the dome");
+        assert!(!first.collapsed);
+        assert_eq!(a.shields[0].charge, tuning.capacity - he);
+        let bolt_energy = bolt.energy;
+        a.config = bolt;
+        assert!(a.refire());
+        let second = caught(&mut a).expect("the bolt passed the dome");
+        let s = &a.shields[0];
+        assert!(second.collapsed && s.down > 0 && s.charge == 0, "{s:?}");
+        // The dome recharged a little while the bolt was on its way, but
+        // never enough to hold it.
+        assert_eq!(s.hits, 2);
+        assert!(
+            second.drained >= tuning.capacity - he && second.drained < bolt_energy,
+            "drained {} of a dome recharging from {}",
+            second.drained,
+            tuning.capacity - he
+        );
+        assert!(a.impact.is_none());
+        assert!(a.refire());
+        assert!(
+            caught(&mut a).is_none(),
+            "the collapsed dome caught a round"
+        );
+        assert!(
+            a.impact.is_some(),
+            "the round neither hit the dome nor the ground"
+        );
+        assert_eq!(a.shields[0].hits, 2);
+        while a.shields[0].down > 0 {
+            a.step();
+        }
+        for _ in 0..20 {
+            a.step();
+        }
+        assert_eq!(a.shields[0].charge, 20 * tuning.recharge_per_tick);
+    }
+    /// Dome state is saved and hashed: a range restored after a catch
+    /// matches tick for tick, and a spent point of charge changes the hash.
+    #[test]
+    fn dome_charge_and_outage_are_saved_and_hashed() {
+        let mut a = BlastRange::with_layout(config(), shielded_layout()).unwrap();
+        assert!(caught(&mut a).is_some());
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        for _ in 0..60 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert_eq!(a.shields[0].charge, b.shields[0].charge);
+        let mut c = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        c.shields[0].charge -= 1;
+        assert_ne!(a.state_hash(), c.state_hash());
+        let mut wide = shielded_layout();
+        wide.shields[0].radius = 200;
+        assert!(BlastRange::with_layout(config(), wide).is_err());
     }
     #[test]
     fn a_tank_pushes_through_the_forest_and_the_trees_fall_as_debris() {

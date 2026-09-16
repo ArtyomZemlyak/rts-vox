@@ -405,6 +405,7 @@ fn main() {
         })
         .insert_resource(panel::Panel::new(drive, demo))
         .init_resource::<moving::Visual>()
+        .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
         .insert_resource(recording)
         .insert_resource(gas)
