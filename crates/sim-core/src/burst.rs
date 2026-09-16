@@ -6,6 +6,7 @@ use crate::{
     matter, NO_TARGET,
 };
 use fx::{
+    angle,
     blob::{Blob, Scan},
     Fx,
 };
@@ -81,11 +82,11 @@ mod tests {
             held,
             resting: false,
         });
-        b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
+        b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
         assert!(b.fragments[0].position.x < start.x.sub(Fx::ONE));
         assert!(!b.fragments[0].resting);
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
         }
         assert!(b.fragments[0].resting);
         assert!(b.fragments[0].position.y < Fx::from_int(14));
@@ -119,7 +120,7 @@ mod tests {
         });
         let mut tick = 0;
         while !b.fragments[0].resting {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
             tick += 1;
             assert!(tick < 300, "never rested");
         }
@@ -130,7 +131,7 @@ mod tests {
         );
         assert_eq!(e.wrecks.iter().filter(|w| w.held == held).count(), 1);
         for _ in 0..t.blast.rest_check_ticks * 2 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
             tick += 1;
         }
         assert!(b.fragments[0].resting);
@@ -141,7 +142,7 @@ mod tests {
         assert!(!w.solid(48, 14, 48));
         let mut woke = false;
         for _ in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
             tick += 1;
             woke |= !b.fragments[0].resting;
             if woke && b.fragments[0].resting {
@@ -189,7 +190,7 @@ mod tests {
             });
         }
         for tick in 0..300 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
         }
         assert_eq!(b.fragments.len(), 1, "the pieces did not merge");
         let f = &b.fragments[0];
@@ -198,11 +199,81 @@ mod tests {
         assert_eq!(f.basis, IDENTITY);
         // Its bottom sits on the ground at 12 and its top one cell up.
         assert_eq!(f.position.y, Fx::from_ratio(25, 2));
-        let rubble = b.rubble(&[]);
+        let rubble = b.rubble(&w, &[]);
         assert_eq!(rubble.get(&[48, 48]), Some(&13));
-        assert!(b.rubble(&[1]).is_empty(), "a yielding heap is no floor");
+        assert!(b.rubble(&w, &[1]).is_empty(), "a yielding heap is no floor");
         assert_eq!(rubble.get(&[49, 48]), Some(&13));
         assert_eq!(rubble.get(&[51, 48]), None);
+        assert!(e.balanced());
+    }
+
+    /// A piece falling onto a live hull rests on its roof, and when the
+    /// hull is gone from under it, it falls to the ground (ADR-293).
+    #[test]
+    fn a_piece_rests_on_a_hull_and_falls_when_the_hull_leaves() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        b.fragments.push(Fragment {
+            id: 1,
+            position: centre([48, 20, 48]),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        let hull = Hull {
+            pos: [Fx::from_int(48), Fx::from_int(12), Fx::from_int(48)],
+            head: angle::FULL / 8,
+            half: [Fx::from_int(3), Fx::from_int(2)],
+            height: Fx::from_int(3),
+        };
+        let mut tick = 0;
+        while !b.fragments[0].resting {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                &[hull],
+            );
+            tick += 1;
+            assert!(tick < 300, "never rested");
+        }
+        let roof = b.fragments[0].position.y;
+        assert!(
+            roof > Fx::from_int(15) && roof < Fx::from_int(16),
+            "not on the roof: {roof:?}"
+        );
+        assert!(b.rubble(&w, &[]).is_empty(), "a piece on a roof is no heap");
+        let mut woke = false;
+        for _ in 0..300 {
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), tick, &[]);
+            tick += 1;
+            woke |= !b.fragments[0].resting;
+            if woke && b.fragments[0].resting {
+                break;
+            }
+        }
+        assert!(
+            woke && b.fragments[0].resting,
+            "the piece did not fall and settle"
+        );
+        assert!(
+            b.fragments[0].position.y < Fx::from_int(13),
+            "still up: {:?}",
+            b.fragments[0].position
+        );
         assert!(e.balanced());
     }
 
@@ -365,7 +436,7 @@ mod tests {
             resting: false,
         });
         for _ in 0..100 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
             assert!(b.fragments[0].position.x < Fx::from_int(52));
         }
     }
@@ -672,7 +743,7 @@ mod tests {
         }
         let n = b.removed;
         for _ in 0..800 {
-            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0);
+            b.step_fragments(&w, &mut e, &t.blast, crate::gravity_per_tick(&t), 0, &[]);
         }
         assert!(n > 0);
         assert!(b.fragments.iter().all(|f| f.resting));
@@ -696,6 +767,16 @@ struct Claim {
     motion_mj: u64,
     /// Cells per side of the box this cell's piece is grouped in (ADR-284).
     side: u8,
+}
+
+/// A live hull a piece can land on (ADR-293): its footprint box about
+/// `pos` turned by `head`, standing `height` above `pos.y`.
+#[derive(Clone, Copy, Debug)]
+pub struct Hull {
+    pub pos: [Fx; 3],
+    pub head: i32,
+    pub half: [Fx; 2],
+    pub height: Fx,
 }
 
 /// A real removed world voxel, or a settled local pile of them. Coordinates and
@@ -1328,6 +1409,7 @@ impl Bursts {
         t: &Blast,
         gravity: Fx,
         tick: u64,
+        hulls: &[Hull],
     ) {
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
@@ -1338,7 +1420,7 @@ impl Bursts {
             .saturating_sub(self.fragments.iter().filter(|f| !f.resting).count());
         for i in 0..self.fragments.len() {
             let f = &mut self.fragments[i];
-            if room > 0 && f.resting && due(f.id, tick, t) && !supported(f, world) {
+            if room > 0 && f.resting && due(f.id, tick, t) && !supported(f, world, hulls) {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
@@ -1346,7 +1428,7 @@ impl Bursts {
                 let held = f.held;
                 e.wrecks.retain(|w| w.held != held);
             }
-            if advance_fragment(f, world, t, gravity) {
+            if advance_fragment(f, world, t, gravity, hulls) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
                 e.wrecks.push(Wreck {
                     held: f.held,
@@ -1386,10 +1468,10 @@ impl Bursts {
             }
         }
         for f in self.corpses.values_mut() {
-            if f.resting && due(f.id, tick, t) && !supported(f, world) {
+            if f.resting && due(f.id, tick, t) && !supported(f, world, &[]) {
                 f.resting = false;
             }
-            advance_fragment(f, world, t, gravity);
+            advance_fragment(f, world, t, gravity, &[]);
         }
         for w in &mut e.wrecks {
             if let Some(f) = self.corpses.get(&w.held) {
@@ -1404,15 +1486,17 @@ impl Bursts {
     /// The columns resting pieces stand in and the height of their tops,
     /// for the contacts, feet and planner of the range (ADR-292). Pieces
     /// of `yielding` materials are left out: a hull crushes through a
-    /// felled crown as through a standing one. Derived from the pieces
-    /// every tick; nothing is saved.
-    pub fn rubble(&self, yielding: &[Mat]) -> nav::vehicle::Rubble {
+    /// felled crown as through a standing one, and so is a piece lying on
+    /// a hull's roof rather than on the world (ADR-293). Derived from the
+    /// pieces every tick; nothing is saved.
+    pub fn rubble(&self, world: &voxel::World, yielding: &[Mat]) -> nav::vehicle::Rubble {
         let mut out = nav::vehicle::Rubble::new();
-        for f in self
-            .fragments
-            .iter()
-            .filter(|f| f.resting && f.chunk.is_none() && !yielding.contains(&f.material))
-        {
+        for f in self.fragments.iter().filter(|f| {
+            f.resting
+                && f.chunk.is_none()
+                && !yielding.contains(&f.material)
+                && supported(f, world, &[])
+        }) {
             let (low, high) = f.bounds();
             let p = arr(f.position);
             // Floor of the bottom corners, ceiling of the top: the columns
@@ -1872,16 +1956,45 @@ fn due(id: u64, tick: u64, t: &Blast) -> bool {
     id.wrapping_add(tick)
         .is_multiple_of(u64::from(t.rest_check_ticks.max(1)))
 }
-/// Whether material still holds the piece up: its box half a unit lower,
-/// the most a settling step moves, meets the world.
-fn supported(f: &Fragment, world: &voxel::World) -> bool {
+/// Whether material or a live hull still holds the piece up: its box half
+/// a unit lower, the most a settling step moves, meets the world or a hull.
+fn supported(f: &Fragment, world: &voxel::World, hulls: &[Hull]) -> bool {
     let (low, high) = f.bounds();
     let mut p = arr(f.position);
     p[1] = p[1].sub(Fx::from_ratio(1, 2));
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
+        || hull_contact(p, low, high, hulls)
+}
+/// Whether a piece's box at `p` meets a live hull (ADR-293): its vertical
+/// extent against the hull's height, its horizontal reach against the
+/// hull's footprint in the hull's own frame. A turned piece counts its
+/// longest horizontal reach in every direction.
+fn hull_contact(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull]) -> bool {
+    if hulls.is_empty() {
+        return false;
+    }
+    let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
+    let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
+    hulls.iter().any(|h| {
+        if top < h.pos[1] || bottom > h.pos[1].add(h.height) {
+            return false;
+        }
+        let (c, s) = (angle::cos(h.head), angle::sin(h.head));
+        let dx = p[0].sub(h.pos[0]);
+        let dz = p[2].sub(h.pos[2]);
+        let u = dx.mul(c).add(dz.mul(s));
+        let v = dz.mul(c).sub(dx.mul(s));
+        u.abs() <= h.half[0].add(reach) && v.abs() <= h.half[1].add(reach)
+    })
 }
 /// Common translation/contact step for fragments and persistent dead hulls.
-fn advance_fragment(f: &mut Fragment, world: &voxel::World, t: &Blast, gravity: Fx) -> bool {
+fn advance_fragment(
+    f: &mut Fragment,
+    world: &voxel::World,
+    t: &Blast,
+    gravity: Fx,
+    hulls: &[Hull],
+) -> bool {
     if f.resting {
         return false;
     }
@@ -1913,7 +2026,8 @@ fn advance_fragment(f: &mut Fragment, world: &voxel::World, t: &Blast, gravity: 
             }
             let mut p = arr(f.position);
             p[axis] = p[axis].add(delta[axis]);
-            let blocked = fragment_contact(f, world, p, low, high, bounds);
+            let blocked = fragment_contact(f, world, p, low, high, bounds)
+                || hull_contact(p, low, high, hulls);
             if blocked {
                 supported |= axis == 1 && delta[axis] < Fx::ZERO;
                 delta[axis] = Fx::ZERO;

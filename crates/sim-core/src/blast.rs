@@ -1787,7 +1787,10 @@ impl BlastRange {
         self.surface_changed.clear();
         self.shield_hits.clear();
         // Resting debris is floor for this tick's motion (ADR-292).
-        self.rubble = self.matter.debris.rubble(&self.navigation.fell.materials);
+        self.rubble = self
+            .matter
+            .debris
+            .rubble(&self.world, &self.navigation.fell.materials);
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
         for s in &mut self.shields {
@@ -2034,11 +2037,31 @@ impl BlastRange {
         self.world.flush();
         self.matter.step_sections(&mut self.units);
         self.matter.shed_segments(&mut self.units);
+        // Live hulls catch falling pieces (ADR-293); the dead lie as debris.
+        let hulls: Vec<crate::burst::Hull> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .filter(|u| u.status.alive)
+            .map(|u| {
+                let o = motion::Obstacle::of(&u.motion, &u.body);
+                crate::burst::Hull {
+                    pos: o.pos,
+                    head: o.head,
+                    half: o.half,
+                    height: Fx::from_ratio(
+                        u.body.vol.ny as i32 * u.body.mm as i32,
+                        voxel::unit::WORLD_MM as i32,
+                    ),
+                }
+            })
+            .collect();
         self.matter.flush(
             &self.world,
             self.config.material_energy_j > 0,
             self.config.gravity,
             u64::from(self.tick),
+            &hulls,
         );
         for e in self.world.edits() {
             if e.mat == 0 {
@@ -3244,7 +3267,10 @@ mod tests {
                 };
                 crate::burst::heap(&mut f, &a.world);
                 a.matter.debris.fragments.push(f);
-                a.rubble = a.matter.debris.rubble(&a.navigation.fell.materials);
+                a.rubble = a
+                    .matter
+                    .debris
+                    .rubble(&a.world, &a.navigation.fell.materials);
                 assert_eq!(
                     a.rubble.get(&[GUN[0] + 30, GUN[2] + belt]),
                     Some(&(FLOOR as u16 + 2))
@@ -3272,6 +3298,81 @@ mod tests {
         assert!(
             over.sub(flat) > Fx::from_ratio(1, 2),
             "hull top over the heap {over:?}, flat {flat:?}"
+        );
+    }
+    /// A piece falling onto the parked tank rests on its roof (ADR-293),
+    /// and when the tank drives off it falls to the ground (ADR-291).
+    #[test]
+    fn a_piece_falling_onto_the_tank_rests_on_its_roof_and_falls_when_it_drives_off() {
+        let mut a = BlastRange::new(config());
+        a.patrols_running = false;
+        let height = Fx::from_ratio(
+            a.gun.body.vol.ny as i32 * a.gun.body.mm as i32,
+            voxel::unit::WORLD_MM as i32,
+        );
+        let held = a
+            .matter
+            .economy
+            .ledger
+            .create(crate::matter::Kind::Debris, 0, u64::MAX);
+        let amount = a.matter.economy.per_voxel(2);
+        let ground = a.matter.economy.ground;
+        a.matter.economy.ledger.reveal(ground, amount);
+        a.matter.economy.ledger.transfer(ground, held, amount);
+        let pos = a.gun.motion.pos;
+        let roof = pos[1].add(height);
+        a.matter.debris.fragments.push(crate::burst::Fragment {
+            id: 9001,
+            position: phys::V3::new(pos[0], roof.add(Fx::from_int(6)), pos[2]),
+            velocity: phys::V3::ZERO,
+            material: 2,
+            paint: None,
+            mm: 100,
+            basis: crate::burst::IDENTITY,
+            mass_g: 2400,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        let piece = |a: &BlastRange| {
+            let f = a
+                .matter
+                .debris
+                .fragments
+                .iter()
+                .find(|f| f.id == 9001)
+                .expect("the piece is gone");
+            (f.resting, f.position.y)
+        };
+        let mut rested = None;
+        for _ in 0..300 {
+            a.step();
+            let (resting, y) = piece(&a);
+            if resting {
+                rested = Some(y);
+                break;
+            }
+        }
+        let y = rested.expect("the piece never rested");
+        assert!(
+            y > roof && y < roof.add(Fx::from_int(2)),
+            "not on the roof: {y:?}, roof {roof:?}"
+        );
+        assert!(a.order_move([GUN[0] + 60, GUN[2]]));
+        let mut low = y;
+        for _ in 0..600 {
+            a.step();
+            low = low.min(piece(&a).1);
+            if a.gun.motion.destination.is_none() {
+                break;
+            }
+        }
+        assert!(
+            low < roof.sub(Fx::from_int(2)),
+            "the piece never fell: {low:?}"
         );
     }
     /// Segment damage is state: a restored range matches tick for tick.
