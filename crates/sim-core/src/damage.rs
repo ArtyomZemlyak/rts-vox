@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use fx::Fx;
-use phys::V3;
+pub use phys::V3;
 use voxel::impact::{Cell, Dents, Penetration};
 use voxel::topo::unit::CoreBufs;
 use voxel::{Status, UnitBody};
@@ -66,6 +66,101 @@ impl Frame {
             .add(self.y.scale(v[1]))
             .add(self.z.scale(v[2]))
     }
+}
+
+/// Columns of the attachment rotation: the images of the segment's local
+/// axes in its parent's axes. Roll about X, then pitch about Z, then yaw
+/// about Y, with the renderer's right-handed signs (ADR-231); the renderer's
+/// test pins both against each other.
+fn attach_rotation(a: &voxel::unit::Attach) -> [[Fx; 3]; 3] {
+    let (cr, sr) = (fx::angle::cos(a.roll), fx::angle::sin(a.roll));
+    let (cp, sp) = (fx::angle::cos(a.pitch), fx::angle::sin(a.pitch));
+    let (cy, sy) = (fx::angle::cos(a.yaw), fx::angle::sin(a.yaw));
+    let rx = |v: [Fx; 3]| {
+        [
+            v[0],
+            cr.mul(v[1]).sub(sr.mul(v[2])),
+            sr.mul(v[1]).add(cr.mul(v[2])),
+        ]
+    };
+    let rz = |v: [Fx; 3]| {
+        [
+            cp.mul(v[0]).sub(sp.mul(v[1])),
+            sp.mul(v[0]).add(cp.mul(v[1])),
+            v[2],
+        ]
+    };
+    let ry = |v: [Fx; 3]| {
+        [
+            cy.mul(v[0]).add(sy.mul(v[2])),
+            v[1],
+            cy.mul(v[2]).sub(sy.mul(v[0])),
+        ]
+    };
+    let e = |k: usize| {
+        let mut v = [Fx::ZERO; 3];
+        v[k] = Fx::ONE;
+        v
+    };
+    [ry(rz(rx(e(0)))), ry(rz(rx(e(1)))), ry(rz(rx(e(2))))]
+}
+
+/// The root frame turned about its own up axis to the turret's traverse:
+/// the parent of turret-mounted segments (ADR-277).
+pub fn turned(root: &Frame, turret_yaw: i32, head: i32) -> Frame {
+    let d = fx::angle::diff(turret_yaw, head);
+    let (c, s) = (fx::angle::cos(d), fx::angle::sin(d));
+    Frame {
+        x: root.x.scale(c).add(root.z.scale(s)),
+        z: root.z.scale(c).sub(root.x.scale(s)),
+        ..*root
+    }
+}
+
+/// Rest-pose frames of a body's segments in world space, composed along
+/// the parent chain exactly as the renderer places them: pivot on the
+/// parent's attachment point, roll then pitch then yaw about the pivot.
+/// Turret-mounted segments and their descendants ride with the traverse
+/// (ADR-277). Legs are at rest: the gait is the image's.
+pub fn segment_frames(root: &Frame, body: &UnitBody, turret_yaw: i32, head: i32) -> Vec<Frame> {
+    let turret = turned(root, turret_yaw, head);
+    let mut frames: Vec<(Frame, bool)> = Vec::with_capacity(body.segments.len());
+    for seg in &body.segments {
+        let a = &seg.attach;
+        let (parent, on_turret) = if a.parent == 0 {
+            (if a.turret { turret } else { *root }, a.turret)
+        } else {
+            let (f, t) = frames[a.parent as usize - 1];
+            (f, t || a.turret)
+        };
+        let base = parent.world([
+            Fx::from_int(i32::from(a.at.0)),
+            Fx::from_int(i32::from(a.at.1)),
+            Fx::from_int(i32::from(a.at.2)),
+        ]);
+        let r = attach_rotation(a);
+        let axis = |col: [Fx; 3]| {
+            parent
+                .x
+                .scale(col[0])
+                .add(parent.y.scale(col[1]))
+                .add(parent.z.scale(col[2]))
+        };
+        let frame = Frame {
+            base,
+            x: axis(r[0]),
+            y: axis(r[1]),
+            z: axis(r[2]),
+            scale: Fx::from_ratio(voxel::unit::WORLD_MM as i32, seg.body.mm as i32),
+            centre: [
+                Fx::from_int(i32::from(a.pivot.0)),
+                Fx::from_int(i32::from(a.pivot.1)),
+                Fx::from_int(i32::from(a.pivot.2)),
+            ],
+        };
+        frames.push((frame, on_turret));
+    }
+    frames.into_iter().map(|(f, _)| f).collect()
 }
 
 /// First solid cell and the parameter at which the ray enters it.

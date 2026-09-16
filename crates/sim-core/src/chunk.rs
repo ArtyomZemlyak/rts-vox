@@ -9,6 +9,9 @@ use voxel::UnitBody;
 pub struct Chunk {
     pub template: u16,
     pub owner: u8,
+    /// A whole segment of the template rather than a piece of its root:
+    /// cells and shape are in the segment's own volume (ADR-277).
+    pub segment: Option<u8>,
     pub cells: Vec<Cell>,
     pub body: Option<Arc<UnitBody>>,
     pub dents: Dents,
@@ -168,6 +171,7 @@ impl Chunk {
         Self {
             template,
             owner,
+            segment: None,
             cells,
             body: None,
             dents: Dents::new(),
@@ -189,6 +193,12 @@ impl Chunk {
         out.body = Some(body);
         out
     }
+    /// Mark the chunk as segment `seg` of its template.
+    pub fn in_segment(mut self, seg: u8) -> Self {
+        mix(&mut self.fingerprint, 1000 + u64::from(seg));
+        self.segment = Some(seg);
+        self
+    }
     pub fn with_dents(mut self, dents: Dents) -> Self {
         for (c, energy) in &dents {
             for v in c {
@@ -205,6 +215,7 @@ impl Chunk {
     pub(super) fn save(&self, b: &mut Blob) {
         b.u16(self.template);
         b.u8(self.owner);
+        b.u8(self.segment.unwrap_or(u8::MAX));
         for f in self.frames {
             crate::body_wave::save_frame(b, f);
         }
@@ -230,22 +241,43 @@ impl Chunk {
     pub(super) fn load(s: &mut Scan, bodies: Option<&Bodies>, mm: u16, count: u32) -> Option<Self> {
         let template = s.u16();
         let owner = s.u8();
+        let segment = s.u8();
+        let segment = (segment != u8::MAX).then_some(segment);
         let frames = [
             crate::body_wave::load_frame(s)?,
             crate::body_wave::load_frame(s)?,
         ];
-        let body = bodies?.templates.get(template as usize)?;
+        let root = bodies?.templates.get(template as usize)?;
+        // A segment chunk is checked against the segment's own volume,
+        // about its pivot; a root chunk about the root's base centre.
+        let (body, centre) = match segment {
+            None => (
+                Arc::clone(root),
+                [
+                    Fx::from_ratio(root.vol.nx as i32, 2),
+                    Fx::ZERO,
+                    Fx::from_ratio(root.vol.nz as i32, 2),
+                ],
+            ),
+            Some(i) => {
+                let seg = root.segments.get(usize::from(i))?;
+                (
+                    Arc::new(seg.body.clone()),
+                    [
+                        Fx::from_int(i32::from(seg.attach.pivot.0)),
+                        Fx::from_int(i32::from(seg.attach.pivot.1)),
+                        Fx::from_int(i32::from(seg.attach.pivot.2)),
+                    ],
+                )
+            }
+        };
+        let body = &body;
         if count == 0
             || owner >= 8
             || mm != body.mm
             || frames.iter().any(|f| {
                 f.scale != Fx::from_ratio(voxel::unit::WORLD_MM as i32, mm as i32)
-                    || f.centre
-                        != [
-                            Fx::from_ratio(body.vol.nx as i32, 2),
-                            Fx::ZERO,
-                            Fx::from_ratio(body.vol.nz as i32, 2),
-                        ]
+                    || f.centre != centre
             })
         {
             return None;
@@ -300,7 +332,12 @@ impl Chunk {
                 }
             }
             return s.ok().then(|| {
-                Self::from_body(template, owner, geometry, frames, shape).with_dents(dents)
+                let chunk =
+                    Self::from_body(template, owner, geometry, frames, shape).with_dents(dents);
+                match segment {
+                    Some(i) => chunk.in_segment(i),
+                    None => chunk,
+                }
             });
         }
         let n = s.list(3);
@@ -326,7 +363,9 @@ impl Chunk {
             shape.add(c, body.turret_y);
             cells.push(c);
         }
-        s.ok()
-            .then(|| Self::new(template, owner, cells, frames, shape))
+        s.ok().then(|| match segment {
+            Some(i) => Self::new(template, owner, cells, frames, shape).in_segment(i),
+            None => Self::new(template, owner, cells, frames, shape),
+        })
     }
 }

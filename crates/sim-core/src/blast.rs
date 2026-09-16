@@ -48,6 +48,74 @@ pub struct RangeUnit {
     integrity_model: crate::integrity::Model,
     connectivity: CoreBufs,
     section: Option<crate::damage::SectionJob>,
+    /// Rest-pose frames of the segments, refreshed with the pose (ADR-277).
+    pub seg_frames: Vec<crate::damage::Frame>,
+    /// Segment cells removed by damage: segment index and cell. Saved.
+    pub seg_removed: Vec<(u8, [u8; 3])>,
+    seg_dents: BTreeMap<(u8, [u8; 3]), u32>,
+    /// Segment cells handed to persistent debris rather than annihilated.
+    pub seg_detached: usize,
+    /// Segments that left the body whole; their volumes are emptied.
+    pub seg_gone: Vec<bool>,
+    /// Detached segments not yet handed to debris, in detachment order.
+    seg_shed: Vec<u8>,
+    /// Root cells a segment hangs from, from the template; empty never sheds.
+    seg_mounts: Vec<Vec<[u8; 3]>>,
+}
+/// Root cells within one voxel of each root-mounted segment's attachment
+/// point: the mount it hangs from. A segment mounted on another segment
+/// leaves with it, so its own list is empty.
+fn mounts_of(body: &UnitBody) -> Vec<Vec<[u8; 3]>> {
+    body.segments
+        .iter()
+        .map(|seg| {
+            let a = &seg.attach;
+            if a.parent != 0 {
+                return Vec::new();
+            }
+            let mut cells = Vec::new();
+            for dz in -1..=1 {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let p = [
+                            i32::from(a.at.0) + dx,
+                            i32::from(a.at.1) + dy,
+                            i32::from(a.at.2) + dz,
+                        ];
+                        if p[0] < 0
+                            || p[1] < 0
+                            || p[2] < 0
+                            || p[0] >= i32::from(body.vol.nx)
+                            || p[1] >= i32::from(body.vol.ny)
+                            || p[2] >= i32::from(body.vol.nz)
+                        {
+                            continue;
+                        }
+                        if body.vol.get(p[0] as usize, p[1] as usize, p[2] as usize) {
+                            cells.push(p.map(|v| v as u8));
+                        }
+                    }
+                }
+            }
+            cells
+        })
+        .collect()
+}
+/// A world point in a body's own cells through the given frame.
+fn local_in(body: &UnitBody, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
+    if (p[0] - pose.base.x.to_int_trunc()).abs() > 80
+        || (p[2] - pose.base.z.to_int_trunc()).abs() > 80
+    {
+        return None;
+    }
+    let v = p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+    let q = pose
+        .local(phys::V3::new(v[0], v[1], v[2]))
+        .map(|v| (v.raw() >> 32) as i32);
+    let size = [body.vol.nx, body.vol.ny, body.vol.nz];
+    (0..3)
+        .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
+        .then_some(q.map(|v| v as usize))
 }
 impl RangeUnit {
     pub fn new(at: [i32; 3]) -> Self {
@@ -64,6 +132,10 @@ impl RangeUnit {
         let motion = Motion::new(at, kind, &body);
         let pose = motion.frame(&body);
         let original_shape = crate::burst::chunk::Shape::from_body(&body);
+        let seg_frames =
+            crate::damage::segment_frames(&pose, &body, motion.drive.head, motion.drive.head);
+        let seg_mounts = mounts_of(&body);
+        let seg_gone = vec![false; body.segments.len()];
         Self {
             motion,
             pose,
@@ -82,10 +154,32 @@ impl RangeUnit {
             integrity_model,
             connectivity,
             section: None,
+            seg_frames,
+            seg_removed: Vec::new(),
+            seg_dents: BTreeMap::new(),
+            seg_detached: 0,
+            seg_gone,
+            seg_shed: Vec::new(),
+            seg_mounts,
         }
     }
     fn refresh_damage(&mut self, id: usize) {
         self.update_response();
+        // A segment whose mount in the root is gone leaves whole, and
+        // everything hanging from it goes with it (ADR-277).
+        for i in 0..self.body.segments.len() {
+            if self.seg_gone[i]
+                || self.seg_mounts[i].is_empty()
+                || self.seg_mounts[i].iter().any(|m| {
+                    self.body
+                        .vol
+                        .get(m[0] as usize, m[1] as usize, m[2] as usize)
+                })
+            {
+                continue;
+            }
+            self.shed(i);
+        }
         if !self.status.alive {
             self.section = None;
         } else if self.status.detached > 0 && self.section.is_none() {
@@ -113,9 +207,104 @@ impl RangeUnit {
         )
         .with_traction(self.integrity.drive);
     }
-    pub fn update_pose(&mut self) {
+    /// Mark a segment as detached, with its descendants and, for a leg
+    /// part, the rest of the leg: the links are mounted on the root
+    /// separately and only the kinematic description ties them. Debris
+    /// takes them when the pool has room.
+    fn shed(&mut self, seg: usize) {
+        let mut stack = vec![seg];
+        while let Some(i) = stack.pop() {
+            if self.seg_gone[i] {
+                continue;
+            }
+            self.seg_gone[i] = true;
+            self.seg_shed.push(i as u8);
+            for (j, other) in self.body.segments.iter().enumerate() {
+                if other.attach.parent as usize == i + 1 && !self.seg_gone[j] {
+                    stack.push(j);
+                }
+            }
+            for leg in &self.body.legs {
+                let parts = [
+                    Some(leg.thigh),
+                    Some(leg.shin),
+                    leg.knee_ball,
+                    leg.ankle_ball,
+                    leg.foot,
+                ];
+                if parts.contains(&Some(i as u8)) {
+                    for part in parts.into_iter().flatten() {
+                        if !self.seg_gone[part as usize] {
+                            stack.push(part as usize);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pub fn update_pose(&mut self, turret_yaw: i32) {
         self.at = self.motion.pos.map(|v| v.to_int_trunc());
         self.pose = self.motion.frame(&self.body);
+        self.seg_frames = crate::damage::segment_frames(
+            &self.pose,
+            &self.body,
+            turret_yaw,
+            self.motion.drive.head,
+        );
+    }
+    /// Where a world point lands on this body: `0` the root, `i + 1` the
+    /// segment `i`, with the cell there. Segments are tested in the given
+    /// rest-pose frames.
+    pub fn hit_at(
+        &self,
+        p: [i32; 3],
+        pose: &crate::damage::Frame,
+        segs: &[crate::damage::Frame],
+    ) -> Option<(usize, [usize; 3])> {
+        if let Some(c) = self.local_at(p, pose) {
+            if self.body.vol.get(c[0], c[1], c[2]) {
+                return Some((0, c));
+            }
+        }
+        self.segment_hit(p, segs)
+    }
+    fn segment_hit(
+        &self,
+        p: [i32; 3],
+        segs: &[crate::damage::Frame],
+    ) -> Option<(usize, [usize; 3])> {
+        for (i, (seg, f)) in self.body.segments.iter().zip(segs).enumerate() {
+            if self.seg_gone.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Some(c) = local_in(&seg.body, p, f) {
+                if seg.body.vol.get(c[0], c[1], c[2]) {
+                    return Some((i + 1, c));
+                }
+            }
+        }
+        None
+    }
+    /// The body part under a world point in the current pose.
+    pub fn hit(&self, p: [i32; 3]) -> Option<(usize, [usize; 3])> {
+        if let Some(c) = self.local(p) {
+            if self.body.vol.get(c[0], c[1], c[2]) {
+                return Some((0, c));
+            }
+        }
+        self.segment_hit(p, &self.seg_frames)
+    }
+    pub fn seg_dent(&self, seg: usize, cell: [usize; 3]) -> u32 {
+        self.seg_dents
+            .get(&(seg as u8, cell.map(|v| v as u8)))
+            .copied()
+            .unwrap_or(0)
+    }
+    pub fn segment_shed_pending(&self) -> &[u8] {
+        &self.seg_shed
+    }
+    pub fn segment_mounts(&self, seg: usize) -> &[[u8; 3]] {
+        &self.seg_mounts[seg]
     }
     pub fn world_pos(&self, p: [usize; 3]) -> [i32; 3] {
         if self.motion.enabled {
@@ -131,19 +320,7 @@ impl RangeUnit {
         ]
     }
     pub fn local_at(&self, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
-        if (p[0] - pose.base.x.to_int_trunc()).abs() > 80
-            || (p[2] - pose.base.z.to_int_trunc()).abs() > 80
-        {
-            return None;
-        }
-        let v = p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
-        let q = pose
-            .local(phys::V3::new(v[0], v[1], v[2]))
-            .map(|v| (v.raw() >> 32) as i32);
-        let size = [self.body.vol.nx, self.body.vol.ny, self.body.vol.nz];
-        (0..3)
-            .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
-            .then_some(q.map(|v| v as usize))
+        local_in(&self.body, p, pose)
     }
     pub fn local(&self, p: [i32; 3]) -> Option<[usize; 3]> {
         if self.motion.enabled {
@@ -157,19 +334,16 @@ impl RangeUnit {
             .then_some(q.map(|v| v as usize))
     }
     pub fn solid(&self, p: [i32; 3]) -> bool {
-        self.local(p)
-            .is_some_and(|[x, y, z]| self.body.vol.get(x, y, z))
+        self.hit(p).is_some()
     }
     pub fn resistance(&self, p: [i32; 3], c: &ExplosionConfig) -> u32 {
-        let Some(cell) = self.local(p) else {
-            return 0;
-        };
-        let [x, y, z] = cell;
-        if !self.body.vol.get(x, y, z) {
-            return 0;
+        match self.hit(p) {
+            Some((0, cell)) => unit_work(&self.body, cell, c)
+                .saturating_sub(self.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0)),
+            Some((part, cell)) => unit_work(&self.body.segments[part - 1].body, cell, c)
+                .saturating_sub(self.seg_dent(part - 1, cell)),
+            None => 0,
         }
-        unit_work(&self.body, cell, c)
-            .saturating_sub(self.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0))
     }
     #[cfg(test)]
     fn receive(&mut self, p: [i32; 3], pressure: u32, c: &ExplosionConfig) {
@@ -198,6 +372,32 @@ impl RangeUnit {
         } else {
             let cell = key;
             *self.dents.entry(cell).or_default() += pressure;
+            self.revision += 1;
+        }
+    }
+    fn receive_seg_cell(
+        &mut self,
+        seg: usize,
+        cell: [usize; 3],
+        pressure: u32,
+        c: &ExplosionConfig,
+    ) {
+        let [x, y, z] = cell;
+        let key = (seg as u8, cell.map(|v| v as u8));
+        let body = &mut self.body.segments[seg].body;
+        if pressure == 0 || !body.vol.get(x, y, z) {
+            return;
+        }
+        let need =
+            unit_work(body, cell, c).saturating_sub(self.seg_dents.get(&key).copied().unwrap_or(0));
+        if pressure >= need {
+            if body.remove(x, y, z) {
+                self.seg_removed.push(key);
+                self.seg_dents.remove(&key);
+                self.revision += 1;
+            }
+        } else {
+            *self.seg_dents.entry(key).or_default() += pressure;
             self.revision += 1;
         }
     }
@@ -411,6 +611,8 @@ pub struct Explosion {
     // Next subcell/actor in the first pending contact; committed work is never replayed.
     contact_cursor: usize,
     poses: Vec<crate::damage::Frame>,
+    /// Segment frames of each unit when the burst began (ADR-277).
+    seg_poses: Vec<Vec<crate::damage::Frame>>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
 }
 
@@ -464,6 +666,7 @@ impl Explosion {
             pending: Default::default(),
             contact_cursor: 0,
             poses: units.iter().map(|u| u.pose).collect(),
+            seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
             origin,
             cell: c.cell_units,
             wave: Wave::new(n, c.energy, resistance).expect("validated explosion"),
@@ -501,33 +704,62 @@ impl Explosion {
                 // Advance only after successful application or an unaffordable
                 // hit. Pool pressure retries this exact actor on the next tick.
                 if let Some(u) = units.get_mut(actor) {
-                    if let Some(cell) = u.local_at(q, &self.poses[actor]) {
-                        let [x, y, z] = cell;
-                        // A cell already cut loose leaves with its whole
-                        // section; the wave neither ablates it nor waits for
-                        // it. Every other cell takes the impulse as it arrives.
-                        let leaving = u
-                            .section
-                            .as_ref()
-                            .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
-                        if u.body.vol.get(x, y, z) && !leaving {
-                            let need = unit_work(&u.body, cell, c).saturating_sub(
-                                u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
-                            );
+                    match u.hit_at(q, &self.poses[actor], &self.seg_poses[actor]) {
+                        Some((0, cell)) => {
+                            // A cell already cut loose leaves with its whole
+                            // section; the wave neither ablates it nor waits
+                            // for it. Every other cell takes the impulse as
+                            // it arrives.
+                            let leaving = u
+                                .section
+                                .as_ref()
+                                .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
+                            if !leaving {
+                                let need = unit_work(&u.body, cell, c).saturating_sub(
+                                    u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
+                                );
+                                let mut apply = true;
+                                if hit.pressure >= need && hit.pressure > 0 {
+                                    if let Some(m) = matter.as_deref_mut() {
+                                        match m.body(actor, u, cell, &self.poses[actor], self.at) {
+                                            matter::ClaimResult::Applied => u.detached += 1,
+                                            matter::ClaimResult::Unaffordable => apply = false,
+                                            matter::ClaimResult::Deferred => return,
+                                        }
+                                    }
+                                }
+                                if apply {
+                                    u.receive_cell(cell, hit.pressure, c);
+                                }
+                            }
+                        }
+                        Some((part, cell)) => {
+                            // A segment takes the impulse in its own frame.
+                            let seg = part - 1;
+                            let need = unit_work(&u.body.segments[seg].body, cell, c)
+                                .saturating_sub(u.seg_dent(seg, cell));
                             let mut apply = true;
                             if hit.pressure >= need && hit.pressure > 0 {
                                 if let Some(m) = matter.as_deref_mut() {
-                                    match m.body(actor, u, cell, &self.poses[actor], self.at) {
-                                        matter::ClaimResult::Applied => u.detached += 1,
+                                    match m.body_segment(
+                                        actor,
+                                        u,
+                                        seg,
+                                        cell,
+                                        &self.seg_poses[actor][seg],
+                                        self.at,
+                                    ) {
+                                        matter::ClaimResult::Applied => u.seg_detached += 1,
                                         matter::ClaimResult::Unaffordable => apply = false,
                                         matter::ClaimResult::Deferred => return,
                                     }
                                 }
                             }
                             if apply {
-                                u.receive_cell(cell, hit.pressure, c);
+                                u.receive_seg_cell(seg, cell, hit.pressure, c);
                             }
                         }
+                        None => {}
                     }
                 } else {
                     let m = material(w, q);
@@ -913,7 +1145,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(16);
+        b.u32(17);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -984,6 +1216,29 @@ impl BlastRange {
             if let Some(j) = &u.section {
                 j.save_cut(&mut b);
             }
+            b.u32(u.seg_removed.len() as u32);
+            for (seg, p) in &u.seg_removed {
+                b.u8(*seg);
+                for v in p {
+                    b.u8(*v);
+                }
+            }
+            b.u32(u.seg_dents.len() as u32);
+            for ((seg, p), work) in &u.seg_dents {
+                b.u8(*seg);
+                for v in p {
+                    b.u8(*v);
+                }
+                b.u32(*work);
+            }
+            for gone in &u.seg_gone {
+                b.bool(*gone);
+            }
+            b.u32(u.seg_shed.len() as u32);
+            for seg in &u.seg_shed {
+                b.u8(*seg);
+            }
+            b.usize(u.seg_detached);
         }
         self.world.save(&mut b);
         self.matter.save(&mut b);
@@ -1019,6 +1274,20 @@ impl BlastRange {
                     b.fx(v);
                 }
             }
+            for frames in &e.seg_poses {
+                b.u32(frames.len() as u32);
+                for f in frames {
+                    for v in [f.base, f.x, f.y, f.z] {
+                        b.fx(v.x);
+                        b.fx(v.y);
+                        b.fx(v.z);
+                    }
+                    b.fx(f.scale);
+                    for v in f.centre {
+                        b.fx(v);
+                    }
+                }
+            }
         }
         b.u32(self.shields.len() as u32);
         for s in &self.shields {
@@ -1032,7 +1301,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 16 {
+        if s.u32() != 17 {
             return None;
         }
         let extended = s.bool();
@@ -1098,6 +1367,8 @@ impl BlastRange {
         if s.u32() as usize != r.units.len() + 1 {
             return None;
         }
+        let gun_id = r.units.len();
+        let turret_angle = r.turret.angle;
         for (id, u) in r
             .units
             .iter_mut()
@@ -1108,7 +1379,8 @@ impl BlastRange {
             if !u.motion.load(&mut s) {
                 return None;
             }
-            u.update_pose();
+            let head = u.motion.drive.head;
+            u.update_pose(if id == gun_id { turret_angle } else { head });
             if u.at != at {
                 return None;
             }
@@ -1167,6 +1439,76 @@ impl BlastRange {
             if u.status.alive && u.status.detached > 0 && u.section.is_none() {
                 return None;
             }
+            let count = s.u32() as usize;
+            if count > bytes.len() / 4 {
+                return None;
+            }
+            for _ in 0..count {
+                let seg = s.u8() as usize;
+                let p = [s.u8(), s.u8(), s.u8()];
+                let [x, y, z] = p.map(usize::from);
+                let segment = u.body.segments.get_mut(seg)?;
+                let b = &mut segment.body;
+                if x >= b.vol.nx as usize
+                    || y >= b.vol.ny as usize
+                    || z >= b.vol.nz as usize
+                    || !b.vol.get(x, y, z)
+                {
+                    return None;
+                }
+                b.remove(x, y, z);
+                u.seg_removed.push((seg as u8, p));
+            }
+            let count = s.u32() as usize;
+            if count > bytes.len() / 8 {
+                return None;
+            }
+            for _ in 0..count {
+                let seg = s.u8() as usize;
+                let p = [s.u8(), s.u8(), s.u8()];
+                let work = s.u32();
+                let segment = u.body.segments.get(seg)?;
+                let [x, y, z] = p.map(usize::from);
+                if x >= segment.body.vol.nx as usize
+                    || y >= segment.body.vol.ny as usize
+                    || z >= segment.body.vol.nz as usize
+                    || !segment.body.vol.get(x, y, z)
+                    || work == 0
+                    || work >= 1_000_000
+                    || u.seg_dents.insert((seg as u8, p), work).is_some()
+                {
+                    return None;
+                }
+            }
+            for i in 0..u.body.segments.len() {
+                u.seg_gone[i] = s.bool();
+            }
+            let count = s.u32() as usize;
+            if count > u.body.segments.len() {
+                return None;
+            }
+            for _ in 0..count {
+                let seg = s.u8();
+                if seg as usize >= u.body.segments.len() || !u.seg_gone[seg as usize] {
+                    return None;
+                }
+                u.seg_shed.push(seg);
+            }
+            // A segment already handed to debris has no cells left; one
+            // still waiting for pool room keeps them until its turn.
+            for i in 0..u.body.segments.len() {
+                if u.seg_gone[i] && !u.seg_shed.contains(&(i as u8)) {
+                    let b = &mut u.body.segments[i].body;
+                    for z in 0..b.vol.nz as usize {
+                        for y in 0..b.vol.ny as usize {
+                            for x in 0..b.vol.nx as usize {
+                                b.remove(x, y, z);
+                            }
+                        }
+                    }
+                }
+            }
+            u.seg_detached = s.usize();
         }
         if !r.world.load(&mut s) {
             return None;
@@ -1247,8 +1589,44 @@ impl BlastRange {
                     centre,
                 });
             }
+            let mut seg_poses = Vec::new();
+            for u in &r.units {
+                let n = s.u32() as usize;
+                if n != u.body.segments.len() {
+                    return None;
+                }
+                let mut frames = Vec::with_capacity(n);
+                for _ in 0..n {
+                    let mut v = || phys::V3::new(s.fx(), s.fx(), s.fx());
+                    let (base, x, y, z) = (v(), v(), v(), v());
+                    let scale = s.fx();
+                    let centre = std::array::from_fn(|_| s.fx());
+                    if scale <= Fx::ZERO
+                        || [base.x, base.y, base.z]
+                            .iter()
+                            .any(|v| *v < Fx::from_int(-384) || *v > Fx::from_int(1024))
+                        || [x, y, z].iter().any(|v| {
+                            [v.x, v.y, v.z]
+                                .iter()
+                                .any(|c| *c < Fx::from_int(-2) || *c > Fx::from_int(2))
+                        })
+                    {
+                        return None;
+                    }
+                    frames.push(crate::damage::Frame {
+                        base,
+                        x,
+                        y,
+                        z,
+                        scale,
+                        centre,
+                    });
+                }
+                seg_poses.push(frames);
+            }
             r.explosion = Some(Explosion {
                 poses,
+                seg_poses,
                 pending,
                 contact_cursor,
                 at,
@@ -1379,7 +1757,8 @@ impl BlastRange {
                     self.tick,
                     self.config.gravity,
                 );
-                u.update_pose();
+                let head = u.motion.drive.head;
+                u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
             }
         }
@@ -1393,7 +1772,7 @@ impl BlastRange {
             self.tick,
             self.config.gravity,
         );
-        self.gun.update_pose();
+        self.gun.update_pose(self.turret.angle);
         // Tracked hulls cut the yielding matter they stand in; the crown that
         // hung from those cells follows over the next ticks.
         let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
@@ -1522,7 +1901,11 @@ impl BlastRange {
             }
         }
         if let Some(e) = self.explosion.as_mut() {
-            let before: Vec<_> = self.units.iter().map(|u| u.removed.len()).collect();
+            let before: Vec<_> = self
+                .units
+                .iter()
+                .map(|u| (u.removed.len(), u.seg_removed.len()))
+                .collect();
             e.step(
                 &mut self.world,
                 self.config.wave_work_per_tick,
@@ -1532,10 +1915,11 @@ impl BlastRange {
                 &self.config,
                 (self.config.material_energy_j > 0).then_some(&mut self.matter),
             );
-            for (id, (u, n)) in self.units.iter_mut().zip(before).enumerate() {
-                if u.removed.len() != n {
+            for (id, (u, (n, m))) in self.units.iter_mut().zip(before).enumerate() {
+                if u.removed.len() != n || u.seg_removed.len() != m {
                     if self.config.material_energy_j == 0 {
-                        self.matter.annihilate_body(id, u.removed.len() - n);
+                        self.matter
+                            .annihilate_body(id, u.removed.len() - n + u.seg_removed.len() - m);
                     }
                     u.refresh_damage(id);
                 }
@@ -1557,6 +1941,7 @@ impl BlastRange {
         }
         self.world.flush();
         self.matter.step_sections(&mut self.units);
+        self.matter.shed_segments(&mut self.units);
         self.matter.flush(
             &self.world,
             self.config.material_energy_j > 0,
@@ -1886,6 +2271,269 @@ mod tests {
             a.gun.motion.pos
         );
         assert!(longest_still <= 90, "stood {longest_still} ticks");
+    }
+    /// One walker alone on the open pad: a body with legs to shoot at.
+    fn walker_layout() -> RangeLayout {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.units = vec![modding::range::RangeUnitDef {
+            kind: RangeUnitKind::Strider,
+            at: [300, FLOOR, 336],
+        }];
+        layout.blocks.clear();
+        layout.airburst_on_target = false;
+        if let Some(c) = &mut layout.course {
+            c.patrols.clear();
+        }
+        layout
+    }
+    /// Aim points on a walker parked at the pad, for captures: each leg's
+    /// hip mount and outer thigh cell in world units. Also writes
+    /// `out/leg-demo.ron`, the same walker with the gun laid on its first
+    /// hip, for `capture-range.ps1 -RangePath out/leg-demo.ron`.
+    #[test]
+    #[ignore]
+    fn print_walker_aim_points() {
+        let a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        let u = &a.units[0];
+        let hip0 = u.body.legs[0].hip;
+        let mut demo = walker_layout();
+        demo.target = u.world_pos([hip0.0 as usize, hip0.1 as usize, hip0.2 as usize]);
+        std::fs::create_dir_all("../../out").ok();
+        std::fs::write("../../out/leg-demo.ron", demo.to_ron().unwrap()).expect("demo layout");
+        for (i, leg) in u.body.legs.iter().enumerate() {
+            let hip = u.world_pos([leg.hip.0 as usize, leg.hip.1 as usize, leg.hip.2 as usize]);
+            let thigh = leg.thigh as usize;
+            let b = &u.body.segments[thigh].body;
+            let cell = [
+                b.vol.nx as usize - 2,
+                b.vol.ny as usize / 2,
+                b.vol.nz as usize / 2,
+            ];
+            let w = u.seg_frames[thigh]
+                .world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+            eprintln!(
+                "leg {i}: hip {hip:?} mounts {} thigh cell at [{}, {}, {}]",
+                u.segment_mounts(thigh).len(),
+                w.x.to_int_trunc(),
+                w.y.to_int_trunc(),
+                w.z.to_int_trunc()
+            );
+        }
+    }
+    /// Segment frames sit each pivot on its mount, chain through parents,
+    /// and turn turret-mounted parts with the traverse (ADR-277).
+    #[test]
+    fn segment_frames_sit_on_their_mounts_and_turret_parts_turn_with_the_aim() {
+        let body = voxel::unit::tank();
+        let base = phys::V3::new(Fx::from_int(100), Fx::from_int(16), Fx::from_int(100));
+        let root = crate::damage::Frame::new(&body, base, 0, phys::V3::UP);
+        let fx3 = |v: (i16, i16, i16)| {
+            [
+                Fx::from_int(i32::from(v.0)),
+                Fx::from_int(i32::from(v.1)),
+                Fx::from_int(i32::from(v.2)),
+            ]
+        };
+        let pivot = |v: (u8, u8, u8)| {
+            [
+                Fx::from_int(i32::from(v.0)),
+                Fx::from_int(i32::from(v.1)),
+                Fx::from_int(i32::from(v.2)),
+            ]
+        };
+        let straight = crate::damage::segment_frames(&root, &body, 0, 0);
+        let turned = crate::damage::segment_frames(&root, &body, fx::angle::FULL / 4, 0);
+        assert_eq!(straight.len(), body.segments.len());
+        let mut turret_parts = 0;
+        for (i, seg) in body.segments.iter().enumerate() {
+            let a = &seg.attach;
+            let mount = if a.parent == 0 {
+                (if a.turret {
+                    crate::damage::turned(&root, 0, 0)
+                } else {
+                    root
+                })
+                .world(fx3(a.at))
+            } else {
+                straight[a.parent as usize - 1].world(fx3(a.at))
+            };
+            let here = straight[i].world(pivot(a.pivot));
+            let d = here.sub(mount);
+            assert!(
+                d.len_sq() < Fx::from_ratio(1, 1000),
+                "segment {i} left its mount"
+            );
+            let moved = turned[i].base.sub(straight[i].base);
+            if a.turret {
+                turret_parts += 1;
+                // A quarter turn about the root: same distance, right angle.
+                let (r0, r1) = (straight[i].base.sub(base), turned[i].base.sub(base));
+                assert!(
+                    r0.len_sq().sub(r1.len_sq()).abs() < Fx::from_ratio(1, 100),
+                    "segment {i} changed its distance to the root"
+                );
+                let dot = r0.x.mul(r1.x).add(r0.z.mul(r1.z));
+                assert!(
+                    dot.abs() < Fx::from_ratio(1, 10),
+                    "segment {i} did not turn a right angle"
+                );
+            } else if a.parent == 0 {
+                assert_eq!(
+                    moved.len_sq(),
+                    Fx::ZERO,
+                    "hull segment {i} moved with the turret"
+                );
+            }
+        }
+        assert!(turret_parts > 0, "the tank has no turret-mounted segment");
+    }
+    /// A bolt at a walker's thigh lands on the thigh: segment cells go, the
+    /// impact maps to that segment, and the wave is priced by its material.
+    #[test]
+    fn a_bolt_at_a_walker_thigh_takes_thigh_cells() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, walker_layout()).unwrap();
+        a.control();
+        let thigh = a.units[0].body.legs[0].thigh as usize;
+        let cell = {
+            let b = &a.units[0].body.segments[thigh].body;
+            [
+                b.vol.nx as usize - 2,
+                b.vol.ny as usize / 2,
+                b.vol.nz as usize / 2,
+            ]
+        };
+        assert!(a.units[0].body.segments[thigh]
+            .body
+            .vol
+            .get(cell[0], cell[1], cell[2]));
+        let world = a.units[0].seg_frames[thigh]
+            .world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        let aim = [world.x, world.y, world.z].map(|v| v.to_int_trunc());
+        assert_eq!(a.units[0].hit(aim).map(|(part, _)| part), Some(thigh + 1));
+        a.aim = Some(aim);
+        for _ in 0..120 {
+            a.step();
+        }
+        assert!(a.refire());
+        for _ in 0..200 {
+            a.step();
+            if a.impact.is_some() {
+                break;
+            }
+        }
+        let at = a.impact.expect("the bolt never landed");
+        let u = &a.units[0];
+        assert!(
+            u.seg_removed.iter().any(|(seg, _)| *seg as usize == thigh),
+            "no thigh cell was taken: impact {at:?}, removed {:?}",
+            u.seg_removed
+        );
+        assert!(u
+            .seg_removed
+            .iter()
+            .all(|(seg, _)| !u.seg_gone[*seg as usize]));
+    }
+    /// A leg whose hip mount is shot away leaves as one piece: its cells
+    /// become a debris chunk with the leg's mass, the ledger balances, and
+    /// the body no longer has it.
+    #[test]
+    fn a_leg_whose_mount_is_gone_falls_off_whole() {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.control();
+        let leg = a.units[0].body.legs[0];
+        let thigh = leg.thigh as usize;
+        let shin = leg.shin as usize;
+        let mounts = a.units[0].segment_mounts(thigh).to_vec();
+        assert!(!mounts.is_empty(), "the thigh has no mount");
+        let leg_cells: u32 = a.units[0]
+            .body
+            .segments
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| *i == thigh || s.attach.parent as usize == thigh + 1 || *i == shin)
+            .map(|(_, s)| s.body.solid_count())
+            .sum();
+        let held = a.matter.economy.ledger.held(a.matter.body_container(0));
+        // Shoot the mount away by hand, with the accounting a weapon would
+        // do for the cells it removes.
+        for m in &mounts {
+            let [x, y, z] = m.map(usize::from);
+            assert!(a.units[0].body.remove(x, y, z));
+            a.units[0].removed.push(*m);
+        }
+        a.matter.annihilate_body(0, mounts.len());
+        a.units[0].refresh_damage(0);
+        let u = &a.units[0];
+        assert!(
+            u.seg_gone[thigh] && u.seg_gone[shin],
+            "the leg stayed on: {:?}",
+            u.seg_gone
+        );
+        assert!(!u.segment_shed_pending().is_empty());
+        let fragments = a.matter.debris.fragments.len();
+        a.matter.shed_segments(&mut a.units);
+        let u = &a.units[0];
+        assert!(
+            u.segment_shed_pending().is_empty(),
+            "shedding did not finish"
+        );
+        assert_eq!(u.body.segments[thigh].body.solid_count(), 0);
+        assert_eq!(u.body.segments[shin].body.solid_count(), 0);
+        let shed: u32 = a.matter.debris.fragments[fragments..]
+            .iter()
+            .map(|f| {
+                assert!(f.chunk.is_some(), "a shed segment lost its shape");
+                f.count
+            })
+            .sum();
+        assert!(shed >= leg_cells, "shed {shed} of {leg_cells} leg cells");
+        assert!(a.matter.economy.ledger.balanced());
+        let amount = a.matter.economy.per_voxel(3);
+        assert_eq!(
+            a.matter.economy.ledger.held(a.matter.body_container(0)),
+            held - (u64::from(shed) + mounts.len() as u64) * amount
+        );
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(b.units[0].seg_gone, a.units[0].seg_gone);
+    }
+    /// Segment damage is state: a restored range matches tick for tick.
+    #[test]
+    fn segment_damage_is_saved_and_hashed() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, walker_layout()).unwrap();
+        a.control();
+        let thigh = a.units[0].body.legs[0].thigh as usize;
+        let world = a.units[0].seg_frames[thigh].world([
+            Fx::from_ratio(21, 2),
+            Fx::from_ratio(9, 2),
+            Fx::from_ratio(9, 2),
+        ]);
+        a.aim = Some([world.x, world.y, world.z].map(|v| v.to_int_trunc()));
+        for _ in 0..120 {
+            a.step();
+        }
+        assert!(a.refire());
+        for _ in 0..200 {
+            a.step();
+            if !a.units[0].seg_removed.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            !a.units[0].seg_removed.is_empty(),
+            "no segment damage to save"
+        );
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(a.units[0].seg_removed, b.units[0].seg_removed);
+        for _ in 0..30 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
     }
     /// The first upper-crown foliage cell of the south-western woods, in
     /// cell order: the round from the gun crosses only the open lane to it.
@@ -2580,7 +3228,11 @@ mod tests {
             .iter()
             .map(|f| u64::from(f.count))
             .sum::<u64>();
-        let detached_before = r.units.iter().map(|u| u.detached as u64).sum::<u64>();
+        let detached_before = r
+            .units
+            .iter()
+            .map(|u| (u.detached + u.seg_detached) as u64)
+            .sum::<u64>();
         r.config =
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         r.aim = Some([359, 28, 312]);
@@ -2588,6 +3240,8 @@ mod tests {
         for _ in 0..200 {
             r.step();
         }
+        // Whole pieces cut loose stay matter under any weapon: sections of
+        // the root and shed segments alike.
         assert_eq!(
             r.matter
                 .debris
@@ -2595,7 +3249,12 @@ mod tests {
                 .iter()
                 .map(|f| u64::from(f.count))
                 .sum::<u64>(),
-            count + r.units.iter().map(|u| u.detached as u64).sum::<u64>() - detached_before
+            count
+                + r.units
+                    .iter()
+                    .map(|u| (u.detached + u.seg_detached) as u64)
+                    .sum::<u64>()
+                - detached_before
         );
         assert!(r.matter.economy.ledger.sunk_total() > 0 && r.matter.economy.ledger.balanced());
         assert_eq!(

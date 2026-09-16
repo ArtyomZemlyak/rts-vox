@@ -1,5 +1,7 @@
 //! Map each visual skin cell to nearby authoritative root material once.
-//! Skins have no second mass container; this is a projection of root damage.
+//! A segment's own volume is authoritative since ADR-277 (its cells take
+//! hits in their frame); the root projection still opens the plates that
+//! merely cover damaged root steps.
 use bevy::prelude::*;
 use voxel::unit::UnitBody;
 
@@ -71,7 +73,7 @@ impl SkinBindings {
         self.cells[seg][index(b, p)]
     }
     pub fn clipped(&self, pristine: &UnitBody, current: &UnitBody, seg: usize) -> UnitBody {
-        let mut b = pristine.segments[seg].body.clone();
+        let mut b = current.segments[seg].body.clone();
         for z in 0..b.vol.nz {
             for y in 0..b.vol.ny {
                 for x in 0..b.vol.nx {
@@ -107,18 +109,24 @@ mod tests {
         for _ in 0..250 {
             range.step();
         }
-        let pristine = voxel::unit::tank();
-        let bindings = SkinBindings::new(&pristine);
+        let templates = [voxel::unit::tank(), voxel::unit::strider()];
+        let bindings = templates.each_ref().map(SkinBindings::new);
         let lost: Vec<u32> = range
             .units
             .iter()
             .map(|u| {
+                let kind = match u.kind {
+                    modding::range::RangeUnitKind::Tank => 0,
+                    modding::range::RangeUnitKind::Strider => 1,
+                };
+                let pristine = &templates[kind];
                 pristine
                     .segments
                     .iter()
                     .enumerate()
                     .map(|(i, s)| {
-                        s.body.solid_count() - bindings.clipped(&pristine, &u.body, i).solid_count()
+                        s.body.solid_count()
+                            - bindings[kind].clipped(pristine, &u.body, i).solid_count()
                     })
                     .sum()
             })

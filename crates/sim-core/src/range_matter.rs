@@ -48,7 +48,14 @@ impl Matter {
         let bodies = units
             .iter()
             .map(|u| {
-                let n = u.body.solid_count() as u64 * amount;
+                // Segments are matter of the same body (ADR-277).
+                let cells = u.body.solid_count() as u64
+                    + u.body
+                        .segments
+                        .iter()
+                        .map(|s| u64::from(s.body.solid_count()))
+                        .sum::<u64>();
+                let n = cells * amount;
                 economy.ledger.create(Kind::Body, n, n)
             })
             .collect();
@@ -226,6 +233,163 @@ impl Matter {
         );
         self.pay(cost);
         ClaimResult::Applied
+    }
+    pub fn body_container(&self, id: usize) -> u32 {
+        self.bodies[id]
+    }
+    /// A segment cell claimed by the wave: the same price and container as
+    /// a root cell, thrown from the segment's own frame (ADR-277).
+    pub fn body_segment(
+        &mut self,
+        id: usize,
+        u: &RangeUnit,
+        seg: usize,
+        cell: [usize; 3],
+        frame: &crate::damage::Frame,
+        at: [i32; 3],
+    ) -> ClaimResult {
+        let (cost, motion) = self.cost(3);
+        if cost > self.remaining_mj {
+            return ClaimResult::Unaffordable;
+        }
+        if self.debris.fragment_room(&self.tuning) == 0 {
+            return ClaimResult::Deferred;
+        }
+        let body = &u.body.segments[seg].body;
+        let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        let mut direction = position.sub(V3::new(
+            Fx::from_int(at[0]),
+            Fx::from_int(at[1]),
+            Fx::from_int(at[2]),
+        ));
+        direction.y = direction.y.add(
+            Fx::from_ratio(self.tuning.lift_pct as i32, 100)
+                .mul(direction.x.abs().add(direction.z.abs())),
+        );
+        if direction.len_sq() == Fx::ZERO {
+            direction = frame.y;
+        }
+        let amount = self.economy.per_voxel(3);
+        let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+        assert_eq!(
+            self.economy.ledger.transfer(self.bodies[id], held, amount),
+            amount
+        );
+        let d = self.economy.mats.get(3).unwrap();
+        let mass_g = u64::from(d.density)
+            * u64::from(self.tuning.density_kg_m3_per_density)
+            * u64::from(body.mm).pow(3)
+            / 1_000_000;
+        let [x, y, z] = cell;
+        self.debris.emit_body_fragment(
+            Fragment {
+                id: 0,
+                position,
+                velocity: V3::ZERO,
+                material: 3,
+                paint: Some([1, body.finish_at(x, y, z), body.part_at(x, y, z) as u8]),
+                mm: body.mm,
+                basis: [frame.x, frame.y, frame.z],
+                mass_g,
+                count: 1,
+                shape: 1,
+                chunk: None,
+                held,
+                resting: false,
+            },
+            direction,
+            motion,
+            &self.tuning,
+        );
+        self.pay(cost);
+        ClaimResult::Applied
+    }
+    /// Detached segments leave whole, with the body's motion, as chunks that
+    /// keep their cells and shape; matter moves with them. A full pool only
+    /// postpones the rest (ADR-277).
+    pub fn shed_segments(&mut self, units: &mut [RangeUnit]) {
+        for (id, u) in units.iter_mut().enumerate() {
+            while let Some(&seg) = u.seg_shed.first() {
+                let seg = seg as usize;
+                let body = &u.body.segments[seg].body;
+                let count = body.solid_count();
+                if count > 0 && self.debris.fragment_room(&self.tuning) == 0 {
+                    break;
+                }
+                u.seg_shed.remove(0);
+                if count == 0 {
+                    continue;
+                }
+                let mut cells = Vec::with_capacity(count as usize);
+                for z in 0..body.vol.nz {
+                    for y in 0..body.vol.ny {
+                        for x in 0..body.vol.nx {
+                            if body.vol.get(x as usize, y as usize, z as usize) {
+                                cells.push([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                let shape = crate::burst::chunk::Shape::from_body(body);
+                let frame = u.seg_frames[seg];
+                let chunk = crate::burst::chunk::Chunk::new(id as u16, 1, cells, [frame; 2], shape)
+                    .in_segment(seg as u8);
+                let amount = u64::from(count) * self.economy.per_voxel(3);
+                let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+                assert_eq!(
+                    self.economy.ledger.transfer(self.bodies[id], held, amount),
+                    amount
+                );
+                let speed = u
+                    .motion
+                    .drive
+                    .vel
+                    .div(Fx::from_int(crate::TICKS_PER_SECOND));
+                let mut velocity = V3::new(
+                    fx::angle::cos(u.motion.drive.head).mul(speed),
+                    u.motion.hull.vy.div(Fx::from_int(crate::TICKS_PER_SECOND)),
+                    fx::angle::sin(u.motion.drive.head).mul(speed),
+                );
+                let vmax = Fx::from_ratio(
+                    self.tuning.max_speed_mm_s as i32,
+                    voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+                );
+                if velocity.len_sq() > vmax.mul(vmax) {
+                    velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
+                }
+                let density = self.economy.mats.get(3).unwrap().density;
+                let mm = body.mm;
+                self.debris.emit_section(Fragment {
+                    id: 0,
+                    position: chunk.centre,
+                    velocity,
+                    material: 3,
+                    paint: Some([1, 0, 0]),
+                    mm,
+                    basis: [frame.x, frame.y, frame.z],
+                    mass_g: u64::from(density)
+                        * u64::from(self.tuning.density_kg_m3_per_density)
+                        * u64::from(mm).pow(3)
+                        / 1_000_000
+                        * u64::from(count),
+                    count,
+                    shape: 1,
+                    chunk: Some(chunk),
+                    held,
+                    resting: false,
+                });
+                let body = &mut u.body.segments[seg].body;
+                for z in 0..body.vol.nz as usize {
+                    for y in 0..body.vol.ny as usize {
+                        for x in 0..body.vol.nx as usize {
+                            body.remove(x, y, z);
+                        }
+                    }
+                }
+                u.seg_detached += count as usize;
+                u.revision += u64::from(count);
+            }
+        }
     }
     pub fn annihilate_body(&mut self, id: usize, count: usize) {
         let amount = count as u64 * self.economy.per_voxel(3);
@@ -471,7 +635,14 @@ impl Matter {
             let c = l.try_get(*id)?;
             if !c.alive
                 || c.kind != Kind::Body
-                || c.held != u.body.solid_count() as u64 * self.economy.per_voxel(3)
+                || c.held
+                    != (u.body.solid_count() as u64
+                        + u.body
+                            .segments
+                            .iter()
+                            .map(|s| u64::from(s.body.solid_count()))
+                            .sum::<u64>())
+                        * self.economy.per_voxel(3)
             {
                 return None;
             }

@@ -155,6 +155,10 @@ pub fn section_to_mesh(
 ) -> Vec<(usize, MeshBuf)> {
     let f32v = |v: [fx::Fx; 3]| Vec3::from_array(v.map(|v| v.raw() as f32 / fx::ONE_RAW as f32));
     let mut out = Vec::new();
+    // A shed segment's cells live in the segment's own volume (ADR-277).
+    let template = chunk
+        .segment
+        .map_or(template, |i| &template.segments[usize::from(i)].body);
     let corpse = chunk.body.as_deref();
     let source = corpse.unwrap_or(template);
     let mut removed = std::collections::BTreeSet::new();
@@ -914,6 +918,53 @@ mod tests {
         );
         place(&mut tr, Vec3::new(10.0, 0.0, 0.0), rot, None);
         assert!(near(tr.translation, Vec3::new(10.0, 0.0, 0.0)));
+    }
+
+    /// Кадры сегментов симуляции (ADR-277) и рендера совпадают: одна и та
+    /// же точка сегмента ложится в одно и то же место мира у обоих, для
+    /// каждого сегмента танка и шагохода, включая цепочки родителей.
+    #[test]
+    fn simulation_segment_frames_match_the_renderer() {
+        for body in [voxel::unit::tank(), voxel::unit::strider()] {
+            let base = sim_core::damage::V3::new(
+                fx::Fx::from_int(100),
+                fx::Fx::from_int(16),
+                fx::Fx::from_int(100),
+            );
+            let root = sim_core::damage::Frame::new(&body, base, 0, sim_core::damage::V3::UP);
+            let sim = sim_core::damage::segment_frames(&root, &body, 0, 0);
+            let per_mm = 1.0 / voxel::unit::WORLD_MM as f32;
+            let render = segment_frames(&body, per_mm);
+            let origin = Vec3::new(100.0, 16.0, 100.0);
+            for (i, seg) in body.segments.iter().enumerate() {
+                let pivot = Vec3::from(pivot_centre(&seg.attach));
+                let scale = seg.body.mm as f32 * per_mm;
+                for cell in [
+                    Vec3::ZERO,
+                    Vec3::new(seg.body.vol.nx as f32, 0.0, 0.0),
+                    Vec3::new(0.0, seg.body.vol.ny as f32, seg.body.vol.nz as f32),
+                ] {
+                    let expected =
+                        origin + render[i].pos + render[i].rot * ((cell - pivot) * scale);
+                    let got = sim[i].world([
+                        fx::Fx::from_int(cell.x as i32),
+                        fx::Fx::from_int(cell.y as i32),
+                        fx::Fx::from_int(cell.z as i32),
+                    ]);
+                    let got = Vec3::new(
+                        got.x.to_f64_lossy() as f32,
+                        got.y.to_f64_lossy() as f32,
+                        got.z.to_f64_lossy() as f32,
+                    );
+                    // Синус симуляции табличный: расхождение с плавающей
+                    // точкой рендера — доли градуса, миллиметры на метре.
+                    assert!(
+                        got.distance(expected) < 0.06,
+                        "segment {i} cell {cell:?}: simulation {got:?}, renderer {expected:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// **Отделка красит воксель, а не роль.** Трак танка — броня,

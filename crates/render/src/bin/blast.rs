@@ -957,6 +957,9 @@ fn update_witness(
             .zip(render::model::segment_frames(&unit.body, 0.01))
             .enumerate()
         {
+            if unit.seg_gone[seg] {
+                continue;
+            }
             let clipped = skins.clipped(pristine, &unit.body, seg);
             draw(
                 &clipped,
