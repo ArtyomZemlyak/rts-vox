@@ -169,6 +169,10 @@ pub struct Ride {
     /// рывками до полного хода. Теперь корпус догоняет пол не быстрее
     /// этого предела за тик; свободное падение поправка не ограничивает.
     pub settle: Fx,
+    /// Доля поправки, которая идёт в наклон, а не в подъём (ADR-295):
+    /// опирающийся корпус сначала задирает просевшую сторону и лишь
+    /// остаток поднимает центром масс. Ноль — прежний перенос целиком.
+    pub settle_tilt: Fx,
     /// Насколько корпусу позволено завалиться: наименьшее `up.y`.
     ///
     /// **Не косметика.** Опоры стоят по углам машины, а рельеф
@@ -340,17 +344,7 @@ pub fn step(
     // и вместе с ней гасится вращение: иначе пружина каждый тик
     // толкала бы корпус за предел, а ограничение возвращало — и машина
     // дрожала бы на месте.
-    if c.up.y < r.min_up {
-        let h2 = c.up.x.mul(c.up.x).add(c.up.z.mul(c.up.z));
-        if h2.raw() > 0 {
-            // Корень считается **только при завале за предел**, то есть
-            // на уступе, а не каждый тик у каждой машины.
-            let want = Fx::ONE.sub(r.min_up.mul(r.min_up)).max(Fx::ZERO).sqrt();
-            let k = want.div(h2.sqrt());
-            c.up = V3::new(c.up.x.mul(k), r.min_up, c.up.z.mul(k));
-            c.w = V3::ZERO;
-        }
-    }
+    clamp_tilt(c, r);
 
     // Опора наружу отдаётся **долей касающихся точек**, а не суммой сил.
     // Сумма сил у корпуса, подвешенного на среднем поле (так его зовёт
@@ -373,25 +367,88 @@ pub fn step(
     // (ADR-234). Подвеска распрямляется не быстрее своего хода
     // за тик: уступ в полметра при ходе в двадцать два сантиметра
     // берётся за три тика, а не за один.
-    let mut sink = Fx::ZERO;
+    // Просевшие опоры, стоящие на полу **выше среднего** — то есть на
+    // уступе, а не в клевке на ровном, — взвешенные глубиной, называют
+    // сторону, в которую корпус наклоняется первой (ADR-295).
+    let mean_ground = ground
+        .iter()
+        .fold(Fx::ZERO, |a, g| a.add(*g))
+        .div(Fx::from_int(ground.len().max(1) as i32));
+    let (mut sink, mut total, mut mx, mut mz) = (Fx::ZERO, Fx::ZERO, Fx::ZERO, Fx::ZERO);
     for (s, g) in supports.iter().zip(ground.iter()) {
         let rx = s.x.mul(hc).sub(s.z.mul(hs));
         let rz = s.x.mul(hs).add(s.z.mul(hc));
         let lift = c.up.x.mul(rx).add(c.up.z.mul(rz)).neg();
         let foot = c.y.add(lift).sub(r.clearance);
-        sink = sink.max(g.sub(r.travel).sub(foot));
+        let deep = g.sub(r.travel).sub(foot);
+        if deep.raw() > 0 {
+            sink = sink.max(deep);
+            if g.sub(mean_ground) > Fx::from_ratio(1, 10) {
+                total = total.add(deep);
+                mx = mx.add(rx.mul(deep));
+                mz = mz.add(rz.mul(deep));
+            }
+        }
     }
     if sink.raw() > 0 {
         // A falling body sweeps the floor within this tick. Limiting this
         // correction to suspension travel lets a fast descent tunnel through
         // it. A supported body climbing laterally still extends gradually.
-        let correction = if touching == 0 && c.vy < Fx::ZERO {
+        let falling = touching == 0 && c.vy < Fx::ZERO;
+        let correction = if falling {
             sink
         } else {
             sink.min(r.settle.min(r.travel))
         };
-        c.y = c.y.add(correction);
+        // Опирающийся корпус сначала **наклоняется** над просевшей
+        // стороной и лишь остаток поднимает целиком (ADR-295): доля
+        // `settle_tilt` поправки поворачивает нормаль так, чтобы средняя
+        // просевшая точка поднялась на неё, и центр масс за тик
+        // прыгает меньше. Опоры, просевшие поровну или на ровном полу
+        // (клевок при торможении), стороны не называют, и вся поправка
+        // идёт в подъём; падающее тело только поднимается.
+        let mut lift = correction;
+        if !falling && total.raw() > 0 {
+            let (px, pz) = (mx.div(total), mz.div(total));
+            let rho2 = px.mul(px).add(pz.mul(pz));
+            if rho2 > Fx::from_ratio(1, 4) {
+                let tilt = correction.mul(r.settle_tilt);
+                let k = tilt.div(rho2);
+                let was = c.up;
+                c.up = V3::new(c.up.x.sub(px.mul(k)), c.up.y, c.up.z.sub(pz.mul(k))).renormalised();
+                clamp_tilt(c, r);
+                // Что наклон поднял на самом деле (предел завала мог
+                // его срезать), остальное — подъём.
+                let raised = was
+                    .x
+                    .sub(c.up.x)
+                    .mul(px)
+                    .add(was.z.sub(c.up.z).mul(pz))
+                    .max(Fx::ZERO)
+                    .min(correction);
+                lift = correction.sub(raised);
+            }
+        }
+        c.y = c.y.add(lift);
         c.vy = c.vy.max(Fx::ZERO);
+    }
+}
+
+/// Предел завала. Горизонтальная часть нормали прижимается к конусу,
+/// и вместе с ней гасится вращение: иначе пружина каждый тик толкала
+/// бы корпус за предел, а ограничение возвращало — и машина дрожала
+/// бы на месте.
+fn clamp_tilt(c: &mut Chassis, r: &Ride) {
+    if c.up.y < r.min_up {
+        let h2 = c.up.x.mul(c.up.x).add(c.up.z.mul(c.up.z));
+        if h2.raw() > 0 {
+            // Корень считается **только при завале за предел**, то есть
+            // на уступе, а не каждый тик у каждой машины.
+            let want = Fx::ONE.sub(r.min_up.mul(r.min_up)).max(Fx::ZERO).sqrt();
+            let k = want.div(h2.sqrt());
+            c.up = V3::new(c.up.x.mul(k), r.min_up, c.up.z.mul(k));
+            c.w = V3::ZERO;
+        }
     }
 }
 
@@ -421,6 +478,7 @@ mod tests {
             angular_damping: Fx::from_int(3),
             min_up: Fx::from_ratio(87, 100),
             settle: Fx::from_ratio(1, 2),
+            settle_tilt: Fx::from_ratio(1, 2),
         };
         (s, r)
     }
@@ -827,6 +885,47 @@ mod tests {
             "после уступа корпус на {:?}, ждали {:?}",
             c.y,
             want
+        );
+    }
+
+    /// Уступ под носом сначала задирает нос, а потом поднимает корпус
+    /// (ADR-295): центр масс за тик поднимается меньше, чем на всю
+    /// поправку, нос идёт вверх; без доли наклона тот же уступ переносит
+    /// корпус целиком; уступ под всеми опорами поднимает без наклона.
+    #[test]
+    fn a_step_under_the_nose_pitches_the_hull_before_it_lifts() {
+        let (s, mut r) = preloaded();
+        let mut c = Chassis::resting(FLAT, &r);
+        let flat = level(s.len());
+        for _ in 0..300 {
+            step(&mut c, &s, &flat, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        }
+        let rise = r.travel.mul(Fx::from_int(2));
+        let nose: Vec<Fx> = vec![rise, rise, FLAT, FLAT];
+        let before = c;
+        step(&mut c, &s, &nose, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        let lifted = c.y.sub(before.y);
+        assert!(
+            lifted < r.settle.min(r.travel).mul(Fx::from_ratio(3, 4)),
+            "the hull was carried, not pitched: {lifted:?}"
+        );
+        assert!(c.up.x < Fx::ZERO, "the nose did not go up: {:?}", c.up);
+        r.settle_tilt = Fx::ZERO;
+        let mut d = before;
+        step(&mut d, &s, &nose, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        assert!(d.y.sub(before.y) > lifted, "the tilt share changed nothing");
+        assert!(
+            d.up.x > c.up.x,
+            "the nose went up as much without the share"
+        );
+        r.settle_tilt = Fx::from_ratio(1, 2);
+        let all: Vec<Fx> = vec![rise; s.len()];
+        let mut e = before;
+        step(&mut e, &s, &all, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        assert!(
+            e.up.x.abs() < Fx::from_ratio(1, 100) && e.up.z.abs() < Fx::from_ratio(1, 100),
+            "an even step tilted the hull: {:?}",
+            e.up
         );
     }
 

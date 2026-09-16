@@ -23,6 +23,7 @@ fn ride(supports: usize) -> Ride {
         angular_damping: Fx::from_int(3),
         min_up: Fx::from_ratio(91, 100),
         settle: Fx::from_ratio(1, 2),
+        settle_tilt: Fx::from_ratio(1, 2),
     }
 }
 

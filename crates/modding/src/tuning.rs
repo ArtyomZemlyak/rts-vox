@@ -154,6 +154,10 @@ pub struct Chassis {
     /// пружина за полом не успевает, и без предела подъём шёл рывками
     /// до полного хода.
     pub settle_pct: i32,
+    /// Доля этой поправки, которая идёт в наклон над просевшей
+    /// стороной, а не в подъём целиком, в процентах (ADR-295). Ноль —
+    /// перенос целиком.
+    pub settle_tilt_pct: i32,
     /// Походка: есть у шагающей, нет у гусеничной (ADR-234).
     pub gait: Option<Gait>,
 }
@@ -411,6 +415,7 @@ impl Tuning {
             if !(0..=1000).contains(&c.contact_cm)
                 || !(1..=300).contains(&c.approach_pct)
                 || !(1..=100).contains(&c.settle_pct)
+                || !(0..=100).contains(&c.settle_tilt_pct)
             {
                 return Err(TuningError::Ron(
                     "contact length and approach slope out of range".into(),
