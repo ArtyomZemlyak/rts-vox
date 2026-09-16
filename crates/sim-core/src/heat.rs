@@ -1,4 +1,4 @@
-//! Authoritative heat and secondary combustion (ADR-276).
+//! Authoritative heat and secondary combustion (ADR-277).
 //!
 //! Heat lives on fuel cells, in the wave units the weapons declare as
 //! `energy`; without conduction, heat on anything that cannot burn would

@@ -106,7 +106,7 @@ fn attach_rotation(a: &voxel::unit::Attach) -> [[Fx; 3]; 3] {
 }
 
 /// The root frame turned about its own up axis to the turret's traverse:
-/// the parent of turret-mounted segments (ADR-277).
+/// the parent of turret-mounted segments (ADR-278).
 pub fn turned(root: &Frame, turret_yaw: i32, head: i32) -> Frame {
     let d = fx::angle::diff(turret_yaw, head);
     let (c, s) = (fx::angle::cos(d), fx::angle::sin(d));
@@ -121,7 +121,7 @@ pub fn turned(root: &Frame, turret_yaw: i32, head: i32) -> Frame {
 /// the parent chain exactly as the renderer places them: pivot on the
 /// parent's attachment point, roll then pitch then yaw about the pivot.
 /// Turret-mounted segments and their descendants ride with the traverse
-/// (ADR-277). Legs are at rest: the gait is the image's.
+/// (ADR-278). Legs are at rest: the gait is the image's.
 pub fn segment_frames(root: &Frame, body: &UnitBody, turret_yaw: i32, head: i32) -> Vec<Frame> {
     let turret = turned(root, turret_yaw, head);
     let mut frames: Vec<(Frame, bool)> = Vec::with_capacity(body.segments.len());

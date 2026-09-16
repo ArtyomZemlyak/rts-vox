@@ -40,7 +40,7 @@ pub struct ExplosionConfig {
     pub gas_source_radius: i32,
     pub gas_temperature_k: i32,
     pub gas_fuel_milli: i32,
-    /// Authoritative heat left by the burst (ADR-276): every solid cell
+    /// Authoritative heat left by the burst (ADR-277): every solid cell
     /// within this many units of the impact receives `heat_per_cell`.
     #[serde(default)]
     pub heat_units: i32,

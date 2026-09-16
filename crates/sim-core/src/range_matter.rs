@@ -48,7 +48,7 @@ impl Matter {
         let bodies = units
             .iter()
             .map(|u| {
-                // Segments are matter of the same body (ADR-277).
+                // Segments are matter of the same body (ADR-278).
                 let cells = u.body.solid_count() as u64
                     + u.body
                         .segments
@@ -238,7 +238,7 @@ impl Matter {
         self.bodies[id]
     }
     /// A segment cell claimed by the wave: the same price and container as
-    /// a root cell, thrown from the segment's own frame (ADR-277).
+    /// a root cell, thrown from the segment's own frame (ADR-278).
     pub fn body_segment(
         &mut self,
         id: usize,
@@ -306,7 +306,7 @@ impl Matter {
     }
     /// Detached segments leave whole, with the body's motion, as chunks that
     /// keep their cells and shape; matter moves with them. A full pool only
-    /// postpones the rest (ADR-277).
+    /// postpones the rest (ADR-278).
     pub fn shed_segments(&mut self, units: &mut [RangeUnit]) {
         for (id, u) in units.iter_mut().enumerate() {
             while let Some(&seg) = u.seg_shed.first() {

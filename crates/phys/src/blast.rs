@@ -190,7 +190,7 @@ impl Wave {
                         // than an axis step, so the target's material is also
                         // charged for the extra length: otherwise soil is 18 %
                         // cheaper per metre along diagonals and every crater
-                        // comes out square (ADR-273).
+                        // comes out square (ADR-274).
                         let extra = self.resistance[j].saturating_mul(cost - 100) / 100;
                         let next = left.saturating_sub(cost).saturating_sub(extra);
                         if next > self.pressure[j] && !self.settled[j] {
@@ -277,7 +277,7 @@ mod tests {
     }
     /// Uniform soil worked from the centre: the reach along an axis and
     /// along a floor diagonal must agree within a few percent, or every
-    /// crater comes out square (ADR-273).
+    /// crater comes out square (ADR-274).
     #[test]
     fn soil_is_worked_isotropically_not_square() {
         let n = 41;

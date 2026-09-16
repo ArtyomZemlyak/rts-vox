@@ -101,9 +101,9 @@ pub struct Motion {
     escape_left: u32,
     /// Escape manoeuvres begun since the last waypoint. The next one to
     /// try cycles astern, ahead, then astern and ahead turning each way
-    /// (ADR-274).
+    /// (ADR-275).
     escape: u32,
-    /// The last search could not leave the start pose (ADR-274).
+    /// The last search could not leave the start pose (ADR-275).
     stranded: bool,
     recovery_head: i32,
     next_plan: u32,

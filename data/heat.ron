@@ -1,4 +1,4 @@
-// Heat and secondary combustion on the range (ADR-276). Heat is counted in
+// Heat and secondary combustion on the range (ADR-277). Heat is counted in
 // the wave units the weapons declare as `energy`; what burns and at what
 // heat is a property of each material in range-materials.ron.
 (

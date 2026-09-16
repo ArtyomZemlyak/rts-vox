@@ -25,7 +25,7 @@ impl RangeBlock {
     }
 }
 
-/// A dome the range raises over a point of the ground (ADR-275). The
+/// A dome the range raises over a point of the ground (ADR-276). The
 /// sphere continues under the surface unseen, so digging under a shield
 /// works (ADR-040).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

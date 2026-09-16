@@ -1,4 +1,4 @@
-//! Heat and secondary combustion tuning for the range (ADR-276). The
+//! Heat and secondary combustion tuning for the range (ADR-277). The
 //! balance lives in `data/heat.ron`; the model is `sim_core::heat`.
 use serde::Deserialize;
 

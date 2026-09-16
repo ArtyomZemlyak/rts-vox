@@ -10,7 +10,7 @@ pub struct Chunk {
     pub template: u16,
     pub owner: u8,
     /// A whole segment of the template rather than a piece of its root:
-    /// cells and shape are in the segment's own volume (ADR-277).
+    /// cells and shape are in the segment's own volume (ADR-278).
     pub segment: Option<u8>,
     pub cells: Vec<Cell>,
     pub body: Option<Arc<UnitBody>>,

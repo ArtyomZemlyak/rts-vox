@@ -1,4 +1,4 @@
-//! Battle-damaged terrain series for the range vehicles (ADR-271): every
+//! Battle-damaged terrain series for the range vehicles (ADR-272): every
 //! terrain kind from every approach heading, both hull kinds, with pose
 //! continuity measured per tick. A run either arrives smoothly or the table
 //! says exactly where it did not.

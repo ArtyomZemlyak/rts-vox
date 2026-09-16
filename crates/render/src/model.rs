@@ -155,7 +155,7 @@ pub fn section_to_mesh(
 ) -> Vec<(usize, MeshBuf)> {
     let f32v = |v: [fx::Fx; 3]| Vec3::from_array(v.map(|v| v.raw() as f32 / fx::ONE_RAW as f32));
     let mut out = Vec::new();
-    // A shed segment's cells live in the segment's own volume (ADR-277).
+    // A shed segment's cells live in the segment's own volume (ADR-278).
     let template = chunk
         .segment
         .map_or(template, |i| &template.segments[usize::from(i)].body);
@@ -920,7 +920,7 @@ mod tests {
         assert!(near(tr.translation, Vec3::new(10.0, 0.0, 0.0)));
     }
 
-    /// Кадры сегментов симуляции (ADR-277) и рендера совпадают: одна и та
+    /// Кадры сегментов симуляции (ADR-278) и рендера совпадают: одна и та
     /// же точка сегмента ложится в одно и то же место мира у обоих, для
     /// каждого сегмента танка и шагохода, включая цепочки родителей.
     #[test]

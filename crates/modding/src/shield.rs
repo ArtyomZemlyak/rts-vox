@@ -1,4 +1,4 @@
-//! Energy shield tuning for the range stand (ADR-275). The balance lives
+//! Energy shield tuning for the range stand (ADR-276). The balance lives
 //! in `data/shield.ron`; the dome and its predicate are `sim_core::shield`.
 use serde::Deserialize;
 

@@ -217,7 +217,7 @@ fn main() {
             "--edit" => edit = true,
             "--drive" => drive = true,
             // Order the player's tank to a point at start, for scripted
-            // captures such as a run through the woods (ADR-270).
+            // captures such as a run through the woods (ADR-271).
             "--move" => {
                 i += 1;
                 let (x, z) = args[i].split_once(',').expect("--move x,z");
@@ -1254,7 +1254,7 @@ fn advance(
         if scene.sim.impact.is_some() {
             gas.params.control.y = (scene.sim.tick - scene.sim.impact_tick) as f32 * 2.0;
         }
-        // Fire is decided by the authoritative heat (ADR-276); the image
+        // Fire is decided by the authoritative heat (ADR-277); the image
         // only follows its ignition events, one small plume a tick.
         if let Some(p) = scene.sim.heat.ignited.first() {
             let mut params = gas.params;

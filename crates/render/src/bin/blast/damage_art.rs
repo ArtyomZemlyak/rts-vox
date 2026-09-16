@@ -1,5 +1,5 @@
 //! Map each visual skin cell to nearby authoritative root material once.
-//! A segment's own volume is authoritative since ADR-277 (its cells take
+//! A segment's own volume is authoritative since ADR-278 (its cells take
 //! hits in their frame); the root projection still opens the plates that
 //! merely cover damaged root steps.
 use bevy::prelude::*;

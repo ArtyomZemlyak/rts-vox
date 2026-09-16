@@ -48,7 +48,7 @@ pub struct RangeUnit {
     integrity_model: crate::integrity::Model,
     connectivity: CoreBufs,
     section: Option<crate::damage::SectionJob>,
-    /// Rest-pose frames of the segments, refreshed with the pose (ADR-277).
+    /// Rest-pose frames of the segments, refreshed with the pose (ADR-278).
     pub seg_frames: Vec<crate::damage::Frame>,
     /// Segment cells removed by damage: segment index and cell. Saved.
     pub seg_removed: Vec<(u8, [u8; 3])>,
@@ -166,7 +166,7 @@ impl RangeUnit {
     fn refresh_damage(&mut self, id: usize) {
         self.update_response();
         // A segment whose mount in the root is gone leaves whole, and
-        // everything hanging from it goes with it (ADR-277).
+        // everything hanging from it goes with it (ADR-278).
         for i in 0..self.body.segments.len() {
             if self.seg_gone[i]
                 || self.seg_mounts[i].is_empty()
@@ -585,7 +585,7 @@ impl Generator for RangeTerrain {
         }
         // Small broken rocks on the shoulders, out of the firing lane. No
         // taller than the course step: a hull climbs a shoulder rock rather
-        // than steering round it (ADR-274).
+        // than steering round it (ADR-275).
         if !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)) {
             let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
             let dx = x as i32 % 13 - 6;
@@ -611,7 +611,7 @@ pub struct Explosion {
     // Next subcell/actor in the first pending contact; committed work is never replayed.
     contact_cursor: usize,
     poses: Vec<crate::damage::Frame>,
-    /// Segment frames of each unit when the burst began (ADR-277).
+    /// Segment frames of each unit when the burst began (ADR-278).
     seg_poses: Vec<Vec<crate::damage::Frame>>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
 }
@@ -813,7 +813,7 @@ pub fn material(w: &World, p: [i32; 3]) -> u16 {
     w.material(p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
-/// A dome on the range (ADR-275): geometry from the layout, charge in the
+/// A dome on the range (ADR-276): geometry from the layout, charge in the
 /// wave units of the weapons.
 #[derive(Clone, Debug)]
 pub struct RangeShield {
@@ -903,7 +903,7 @@ pub struct BlastRange {
     /// Transient renderer notification, like `surface_changed`.
     pub shield_hits: Vec<ShieldHit>,
     shield_tuning: modding::shield::ShieldTuning,
-    /// Authoritative heat and fire (ADR-276).
+    /// Authoritative heat and fire (ADR-277).
     pub heat: Heat,
     heat_tuning: modding::heat::HeatTuning,
 }
@@ -2177,7 +2177,7 @@ mod tests {
             "saved whole fragment"
         );
     }
-    /// The owner's report: craters came out square (ADR-273). A shell into
+    /// The owner's report: craters came out square (ADR-274). A shell into
     /// flat soil must dig a crater whose rim reaches as far along the
     /// diagonals as along the axes.
     #[test]
@@ -2220,7 +2220,7 @@ mod tests {
         );
         assert!(low >= 3000, "no crater to speak of: {radii:?}");
         // One diagonal cell is 1.41 units, so single rays quantise coarsely;
-        // the means must agree closely, every ray roughly. Before ADR-273
+        // the means must agree closely, every ray roughly. Before ADR-274
         // the diagonals ran a quarter longer than the axes.
         let axis = axes.iter().sum::<i64>() / axes.len() as i64;
         let diagonal = diagonals.iter().sum::<i64>() / diagonals.len() as i64;
@@ -2230,13 +2230,13 @@ mod tests {
         );
         assert!(high * 100 <= low * 125, "a ray is far off: {radii:?}");
     }
-    /// Trees are matter a tracked hull pushes over (ADR-270): the cut is paid
+    /// Trees are matter a tracked hull pushes over (ADR-271): the cut is paid
     /// by the vehicle, the crown falls for free, and nothing is erased.
     /// The default range as the capture script drives it: the player's
     /// tank is sent from its start into the far woods with the patrols
     /// running. Its first turn happens beside two boulders that no planner
     /// sample sees at the heading the executor reaches; it must leave that
-    /// spot on its own and arrive (ADR-274).
+    /// spot on its own and arrive (ADR-275).
     #[test]
     fn the_player_tank_reaches_the_far_woods_from_the_start() {
         let c = config();
@@ -2322,7 +2322,7 @@ mod tests {
         }
     }
     /// Segment frames sit each pivot on its mount, chain through parents,
-    /// and turn turret-mounted parts with the traverse (ADR-277).
+    /// and turn turret-mounted parts with the traverse (ADR-278).
     #[test]
     fn segment_frames_sit_on_their_mounts_and_turret_parts_turn_with_the_aim() {
         let body = voxel::unit::tank();
@@ -2551,7 +2551,7 @@ mod tests {
     }
     /// A burst in a crown lights it: the fire spreads through the tree,
     /// consumes it into the combustion sink with the ledger balanced, and
-    /// dies out; soil and rock never burn (ADR-276).
+    /// dies out; soil and rock never burn (ADR-277).
     #[test]
     fn a_burst_in_a_crown_lights_the_tree_and_the_fire_burns_out_into_the_sink() {
         let mut layout =
@@ -2685,7 +2685,7 @@ mod tests {
         None
     }
     /// A dome over the target catches the round at its surface: no impact,
-    /// no crater, and the weapon's wave energy leaves the charge (ADR-275).
+    /// no crater, and the weapon's wave energy leaves the charge (ADR-276).
     #[test]
     fn a_dome_stops_the_round_at_its_surface_and_pays_with_charge() {
         let mut a = BlastRange::with_layout(config(), shielded_layout()).unwrap();
@@ -2996,7 +2996,7 @@ mod tests {
     }
     /// The owner's report: a directed-energy hit on a moving tank kept eating
     /// it for almost three seconds after the flash. The pieces cut loose were
-    /// leaving one per tick while the wave waited on them (ADR-269).
+    /// leaving one per tick while the wave waited on them (ADR-270).
     #[test]
     fn damage_arrives_with_the_wave_while_sections_are_still_leaving() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
