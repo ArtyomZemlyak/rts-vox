@@ -508,17 +508,27 @@ impl Foot {
         self.anchor.is_some() && (!self.swing || self.progress == ZERO)
     }
 
-    /// A buckled leg (ADR-281): the ankle tucked under the hip as close as
-    /// the links allow, so the two-link solve folds the knee out; no
-    /// anchor, no step.
-    pub fn fold(&mut self, rig: &LegRig, root: &Frame, head: i32) -> Contact {
-        let reach = rig.l1.sub(rig.l2).abs().add(ONE);
-        let c = Contact {
-            pos: to_world(root, rig.hip).sub(V3::UP.scale(reach)),
-            head,
-            normal: V3::UP,
-        };
-        self.anchor = None;
+    /// A buckled leg (ADR-288): it folds on its own foot. The foot stays on
+    /// the ground, drawn in under the hip to `share_milli` thousandths of
+    /// its rest reach, so the two-link solve bends the knee out; the leg
+    /// neither steps nor carries.
+    pub fn fold(
+        &mut self,
+        rig: &LegRig,
+        root: &Frame,
+        head: i32,
+        share_milli: u32,
+        floor: &dyn Fn(Fx, Fx) -> Fx,
+    ) -> Contact {
+        let k = Fx::from_ratio(share_milli.min(1000) as i32, 1000);
+        let rest = rig.ankle.sub(rig.hip);
+        let local = V3::new(
+            rig.hip.x.add(rest.x.mul(k)),
+            rig.ankle.y,
+            rig.hip.z.add(rest.z.mul(k)),
+        );
+        let c = rig.sole.contact(to_world(root, local), head, floor);
+        self.anchor = Some(c);
         self.swing = false;
         self.progress = ZERO;
         self.local = None;
@@ -1038,25 +1048,31 @@ mod tests {
     }
 
     #[test]
-    fn a_folded_leg_tucks_its_foot_under_the_hip_and_bends_the_knee_out() {
+    fn a_buckled_leg_folds_on_its_foot_with_the_knee_out() {
         let r = rig();
         let mut foot = Foot::default();
         let root = hull(v(3.0, 0.0, -2.0), radians(0.4));
-        let c = foot.fold(&r, &root, radians(0.4));
+        let c = foot.fold(&r, &root, radians(0.4), 350, &flat);
+        // On the ground, where the rest foot would stand at this height.
+        assert!((c.pos.y.sub(r.ankle.y)).abs() < MILLI, "{c:?}");
+        // Drawn in under the hip to a third of the rest reach.
         let hip = to_world(&root, r.hip);
+        let rest = to_world(&root, r.ankle);
+        let reach = |p: V3| {
+            V3::new(p.x.sub(hip.x), ZERO, p.z.sub(hip.z))
+                .len_sq()
+                .sqrt()
+        };
+        let want = reach(rest).mul(fx(0.35));
         assert!(
-            near(V3::new(c.pos.x, hip.y, c.pos.z), hip, 1e-6),
-            "not under the hip"
+            (reach(c.pos).sub(want)).abs() < fx(0.01),
+            "{:?} vs {want:?}",
+            reach(c.pos)
         );
-        assert!(hip.y.sub(c.pos.y) < r.l1.sub(r.l2).abs().add(fx(1.001)));
-        assert!(!foot.planted());
+        assert!(foot.planted());
+        // The leg still reaches its foot: the solve puts the ankle there.
         let pose = r.solve(to_local(&root, c.pos));
-        // The knee is out to the side, far from the hip-ankle line.
-        let side = pose.knee.sub(r.hip);
-        assert!(
-            V3::new(side.x, ZERO, side.z).len_sq().sqrt() > r.l1.mul(fx(0.5)),
-            "{pose:?}"
-        );
+        assert!(near(to_world(&root, pose.ankle), c.pos, 1e-3), "{pose:?}");
     }
 
     #[test]

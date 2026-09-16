@@ -1403,6 +1403,76 @@ pub fn strider() -> UnitBody {
     u
 }
 
+/// Широкое двуногое тело для проверок опор (ADR-288): плита корпуса на
+/// двух ногах по бортам с длинными ступнями, чтобы каждая нога несла и
+/// пятку, и носок своей стороны. Без двух ног оно не стоит: смятая нога
+/// роняет корпус на свою сторону. Стенд, не боевая машина.
+pub fn biped() -> UnitBody {
+    let mut u = UnitBody::new_scaled(40, 44, 40, 4, BODY_MM);
+    for &hz in &[6i32, 34] {
+        let hx = 20i32;
+        let out = |v: i32, d: i32| if v < 20 { v - d } else { v + d };
+        let (kx, kz) = (hx, out(hz, 4));
+        let (ax, az) = (hx, out(hz, 2));
+        ball(&mut u, (hx, 28, hz), 5, Part::Armour);
+        mark_ball(&mut u, (hx, 28, hz), 5, FINISH_STEEL);
+        let first = u.segments.len() as u8;
+        let mut thigh = UnitBody::new_scaled(13, 8, 8, 1, BODY_MM);
+        fill(&mut thigh, (0, 13), (0, 8), (0, 8), Part::Armour);
+        u.push_segment(
+            Attach::aimed(
+                (hx as i16, 27, hz as i16),
+                (0, 4, 4),
+                (kx - hx, 15 - 27, kz - hz),
+            ),
+            thigh,
+        );
+        let mut shin = UnitBody::new_scaled(11, 6, 6, 1, BODY_MM);
+        fill(&mut shin, (0, 11), (0, 6), (0, 6), Part::Armour);
+        u.push_segment(
+            Attach::aimed(
+                (kx as i16, 15, kz as i16),
+                (0, 3, 3),
+                (ax - kx, 4 - 15, az - kz),
+            ),
+            shin,
+        );
+        let mut knee = UnitBody::new_scaled(9, 9, 9, 1, BODY_MM);
+        ball(&mut knee, (4, 4, 4), 4, Part::Armour);
+        u.push_segment(Attach::flat((kx as i16, 15, kz as i16), (4, 4, 4)), knee);
+        let mut ankle = UnitBody::new_scaled(7, 7, 7, 1, BODY_MM);
+        ball(&mut ankle, (3, 3, 3), 3, Part::Armour);
+        u.push_segment(Attach::flat((ax as i16, 4, az as i16), (3, 3, 3)), ankle);
+        // A long foot: heel and toe both stand.
+        let mut foot = UnitBody::new_scaled(25, 3, 9, 1, BODY_MM);
+        fill(&mut foot, (0, 25), (0, 3), (0, 9), Part::Armour);
+        u.push_segment(Attach::flat((ax as i16, 4, az as i16), (12, 4, 4)), foot);
+        // Both hips sit on the hull's midline: the side names the support.
+        let support = u8::from(hz < 20);
+        u.push_leg(Leg {
+            hip: (hx as i16, 27, hz as i16),
+            knee: (kx as i16, 15, kz as i16),
+            ankle: (ax as i16, 4, az as i16),
+            thigh: first,
+            shin: first + 1,
+            knee_ball: Some(first + 2),
+            ankle_ball: Some(first + 3),
+            foot: Some(first + 4),
+            support,
+        });
+        u.push_load_path(WeaponPath {
+            min: [(hx - 3) as u8, 25, (hz - 3) as u8],
+            max: [(hx + 4) as u8, 32, (hz + 4) as u8],
+            axis: 1,
+        });
+    }
+    // The plate of a hull between the hips, engine aft, core in the middle.
+    fill(&mut u, (6, 34), (26, 38), (4, 36), Part::Armour);
+    fill(&mut u, (10, 18), (28, 36), (14, 26), Part::Engine);
+    fill(&mut u, (18, 24), (29, 35), (17, 23), Part::Core);
+    seat(u, "двуногий стенд")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -106,6 +106,9 @@ pub struct Motion {
     pub shove: V3,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
+    /// Share of a buckled leg's rest reach its foot keeps, thousandths
+    /// (ADR-288), from the integrity data.
+    fold_milli: u32,
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
@@ -149,6 +152,13 @@ impl Motion {
         };
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
+        let fold_milli = modding::integrity::Integrity::from_ron(include_str!(
+            "../../../data/unit-integrity.ron"
+        ))
+        .expect("unit integrity tuning")
+        .leg_fold_pct
+        .clamp(0, 100) as u32
+            * 10;
         let legs_lost = vec![false; rigs.len()];
         let legs_buckled = vec![false; rigs.len()];
         Self {
@@ -185,6 +195,7 @@ impl Motion {
             legs_buckled,
             shove: V3::ZERO,
             rigs,
+            fold_milli,
             navigation,
             yielding,
             blocked_ticks: 0,
@@ -316,6 +327,11 @@ impl Motion {
         }
         let mut support = Vec::with_capacity(4);
         let mut ground = Vec::with_capacity(4);
+        // A body with fewer legs than nominal points stands on long feet:
+        // each leg carries heel and toe, every point on its own side
+        // (ADR-288), so a two-legged body stands whole and falls onto a
+        // buckled leg.
+        let long_feet = self.rigs.len() < 4;
         // Support order, not leg order: the suspension sums in index order,
         // and a whole walker must add up exactly as the nominal four do.
         for i in 0..4 {
@@ -323,7 +339,10 @@ impl Motion {
                 .rigs
                 .iter()
                 .zip(self.legs_lost.iter().zip(&self.legs_buckled))
-                .any(|(rig, (lost, buckled))| rig.support.min(3) == i && !*lost && !*buckled);
+                .any(|(rig, (lost, buckled))| {
+                    let s = rig.support.min(3);
+                    (s == i || (long_feet && s % 2 == i % 2)) && !*lost && !*buckled
+                });
             if carried {
                 support.push(nominal[i]);
                 ground.push(floors[i]);
@@ -470,7 +489,7 @@ impl Motion {
                 continue;
             }
             if *buckled {
-                foot.fold(rig, &root, self.drive.head);
+                foot.fold(rig, &root, self.drive.head, self.fold_milli, &floor);
             } else {
                 foot.step(rig, &stance);
             }
@@ -1059,10 +1078,11 @@ mod tests {
         );
         assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
     }
-    /// A buckled leg carries nothing and folds under its hip (ADR-281): the
-    /// walker sinks and leans over it and still walks.
+    /// A buckled leg carries nothing and folds on its foot (ADR-288): the
+    /// foot stays on the ground drawn in under the hip, the walker sinks
+    /// and leans over it and still walks.
     #[test]
-    fn a_buckled_leg_carries_nothing_and_folds_under_the_hip() {
+    fn a_buckled_leg_carries_nothing_and_folds_on_its_foot() {
         let w = ground(0);
         let body = voxel::unit::strider();
         let mut m = Motion::new([200, 16, 300], RangeUnitKind::Strider, &body);
@@ -1072,22 +1092,43 @@ mod tests {
         m.destination = Some([430, 300]);
         m.path = vec![[430, 300]];
         let gone = nominal[usize::from(body.legs[1].support)];
+        let leg = body.legs[1];
         for tick in 0..300 {
             step(&mut m, &w, &body, &[], tick);
             let (support, _) = m.foot_supports(&nominal, &m.floors).unwrap();
             assert_eq!(support.len(), 3);
             assert!(!support.contains(&gone));
             let c = m.feet[1].contact.expect("the folded leg has a contact");
-            let hip = m.frame(&body).world([
-                Fx::from_int(i32::from(body.legs[1].hip.0)),
-                Fx::from_int(i32::from(body.legs[1].hip.1)),
-                Fx::from_int(i32::from(body.legs[1].hip.2)),
-            ]);
+            // On the ground: the sole's rest height over the floor.
             assert!(
-                hip.y.sub(c.pos.y) < Fx::from_int(4),
-                "not folded at tick {tick}: {c:?}"
+                (c.pos
+                    .y
+                    .sub(Fx::from_int(16))
+                    .sub(Fx::from_int(i32::from(leg.ankle.1))))
+                .abs()
+                    < Fx::from_ratio(1, 2),
+                "foot off the ground at tick {tick}: {c:?}"
             );
-            assert!(!m.feet[1].planted());
+            // Drawn in under the hip: nearer than the rest ankle, measured
+            // from the hip's projection at ankle height so the hull's lean
+            // moves both alike.
+            let frame = m.frame(&body);
+            let hip = frame.world([
+                Fx::from_int(i32::from(leg.hip.0)),
+                Fx::from_int(i32::from(leg.ankle.1)),
+                Fx::from_int(i32::from(leg.hip.2)),
+            ]);
+            let rest = frame.world([
+                Fx::from_int(i32::from(leg.ankle.0)),
+                Fx::from_int(i32::from(leg.ankle.1)),
+                Fx::from_int(i32::from(leg.ankle.2)),
+            ]);
+            let flat = |p: V3| V3::new(p.x.sub(hip.x), Fx::ZERO, p.z.sub(hip.z)).len_sq();
+            assert!(
+                flat(c.pos) < flat(rest).div(Fx::from_int(4)),
+                "not drawn in at tick {tick}"
+            );
+            assert!(m.feet[1].planted());
         }
         assert!(
             m.pos[1] < Fx::from_int(16).sub(Fx::from_ratio(1, 10)),
@@ -1095,9 +1136,6 @@ mod tests {
         );
         assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
     }
-    /// A burst beside a parked tank shoves it away and hops it; the
-    /// brakes and the suspension settle it again (ADR-286). The roll from
-    /// the moment is real but small on a fifty-tonne hull.
     #[test]
     fn a_burst_beside_a_parked_tank_shoves_and_rocks_it() {
         let w = ground(0);
@@ -1142,6 +1180,69 @@ mod tests {
         let mut away = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
         away.impulse(&body, [200, 16, 300], 18_000_000, 110);
         assert_eq!(away.shove, V3::ZERO);
+    }
+    /// A wide two-legged body stands on both legs, each foot carrying
+    /// heel and toe; a buckled leg leaves one side, and the body falls onto
+    /// the broken leg: the hull leans to its limit and comes down, and the
+    /// leg folds under it (ADR-288, the owner's two-legged check).
+    #[test]
+    fn a_wide_two_legged_body_falls_onto_a_buckled_leg() {
+        let w = ground(0);
+        let body = voxel::unit::biped();
+        assert_eq!(body.legs.len(), 2);
+        let mut m = Motion::new([300, 16, 300], RangeUnitKind::Strider, &body);
+        let nominal = crate::ride::supports_of(&m.chassis);
+        for tick in 0..60 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let (support, _) = m.foot_supports(&nominal, &m.floors).unwrap();
+        assert_eq!(support.len(), 4, "each foot carries heel and toe");
+        assert!(
+            m.hull.up.y > Fx::from_ratio(99, 100),
+            "did not stand: {:?}",
+            m.hull.up
+        );
+        let level = m.hull.y;
+        let leg = body.legs[0];
+        let hip_of = |m: &Motion| {
+            m.frame(&body).world([
+                Fx::from_int(i32::from(leg.hip.0)),
+                Fx::from_int(i32::from(leg.hip.1)),
+                Fx::from_int(i32::from(leg.hip.2)),
+            ])
+        };
+        let ankle_of = |m: &Motion| {
+            m.frame(&body).world([
+                Fx::from_int(i32::from(leg.ankle.0)),
+                Fx::from_int(i32::from(leg.ankle.1)),
+                Fx::from_int(i32::from(leg.ankle.2)),
+            ])
+        };
+        let rest_length = hip_of(&m).sub(ankle_of(&m)).len_sq().sqrt();
+        // The -z leg buckles: only the +z foot carries.
+        m.legs_buckled[0] = true;
+        for tick in 60..240 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let (support, _) = m.foot_supports(&nominal, &m.floors).unwrap();
+        assert_eq!(support.len(), 2);
+        assert!(support.iter().all(|s| s.z > Fx::ZERO));
+        assert!(
+            m.hull.up.z < Fx::from_ratio(-1, 10),
+            "did not lean onto the broken leg: {:?}",
+            m.hull.up
+        );
+        assert!(
+            m.hull.y < level.sub(Fx::ONE),
+            "did not come down: {:?} from {level:?}",
+            m.hull.y
+        );
+        let c = m.feet[0].contact.expect("the folded leg keeps its foot");
+        let length = hip_of(&m).sub(c.pos).len_sq().sqrt();
+        assert!(
+            length < rest_length.mul(Fx::from_ratio(9, 10)),
+            "the leg did not fold under the body: {length:?} of {rest_length:?}"
+        );
     }
     #[test]
     fn opposing_tanks_recover_and_do_not_reenter_each_other() {

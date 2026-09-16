@@ -2901,8 +2901,8 @@ mod tests {
         assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
     }
     /// A leg whose thigh and shin lost more than half their cells buckles
-    /// (ADR-281): it folds under the hip, carries nothing, the walker sinks
-    /// and leans over it, and the snapshot keeps the fold.
+    /// (ADR-281, ADR-288): it folds on its foot, carries nothing, the
+    /// walker sinks and leans over it, and the snapshot keeps the fold.
     #[test]
     fn a_leg_that_lost_more_than_half_its_cells_buckles() {
         let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
@@ -2961,17 +2961,31 @@ mod tests {
             hull.up
         );
         let c = u.motion.feet[0].contact.unwrap();
-        let hip = u.pose.world([
+        // Folded on its foot: on the ground, drawn in under the hip; both
+        // measured from the hip's projection at ankle height.
+        let under = u.pose.world([
             Fx::from_int(i32::from(leg.hip.0)),
-            Fx::from_int(i32::from(leg.hip.1)),
+            Fx::from_int(i32::from(leg.ankle.1)),
             Fx::from_int(i32::from(leg.hip.2)),
         ]);
+        let rest = u.pose.world([
+            Fx::from_int(i32::from(leg.ankle.0)),
+            Fx::from_int(i32::from(leg.ankle.1)),
+            Fx::from_int(i32::from(leg.ankle.2)),
+        ]);
+        let on_ground = Fx::from_int(FLOOR + i32::from(leg.ankle.1));
         assert!(
-            hip.y.sub(c.pos.y) < Fx::from_int(4),
-            "not folded: {c:?} under {hip:?}"
+            (c.pos.y.sub(on_ground)).abs() < Fx::from_ratio(1, 2),
+            "foot off the ground: {c:?}"
         );
-        // The folded leg's frames follow the fold: the shin's base sits at the
-        // bent knee, far from the rest knee.
+        let flat =
+            |p: phys::V3| phys::V3::new(p.x.sub(under.x), Fx::ZERO, p.z.sub(under.z)).len_sq();
+        assert!(
+            flat(c.pos) < flat(rest).div(Fx::from_int(4)),
+            "not drawn in: {c:?}"
+        );
+        // The folded leg's frames follow the fold: the shin's base, the knee,
+        // left its rest place.
         let rest = crate::damage::segment_frames(
             &u.pose,
             &u.body,
@@ -2979,10 +2993,7 @@ mod tests {
             u.motion.drive.head,
         );
         let moved = u.seg_frames[shin].base.sub(rest[shin].base).len_sq().sqrt();
-        assert!(
-            moved > Fx::from_int(4),
-            "the shin stayed at rest: moved {moved:?}"
-        );
+        assert!(moved > Fx::ONE, "the shin stayed at rest: moved {moved:?}");
         let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(

@@ -12,9 +12,16 @@ pub struct Integrity {
     /// fall off.
     #[serde(default = "no_buckling")]
     pub leg_buckle_pct: i32,
+    /// Share of a buckled leg's rest reach its foot keeps from the hip,
+    /// per cent (ADR-288): the leg folds on its foot rather than lifting.
+    #[serde(default = "a_third")]
+    pub leg_fold_pct: i32,
 }
 fn no_buckling() -> i32 {
     100
+}
+fn a_third() -> i32 {
+    35
 }
 impl Integrity {
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -26,6 +33,7 @@ impl Integrity {
             rules.gear_section_pct,
             rules.required_gears_pct,
             rules.leg_buckle_pct,
+            rules.leg_fold_pct,
         ]
         .iter()
         .any(|v| !(1..=100).contains(v))

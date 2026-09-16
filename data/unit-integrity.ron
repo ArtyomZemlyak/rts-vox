@@ -8,4 +8,7 @@
     // A walker's leg that lost more than this share of its thigh and shin
     // cells buckles: it folds under the hip and carries nothing (ADR-281).
     leg_buckle_pct: 50,
+    // A buckled leg folds on its own foot: the foot keeps this share of
+    // its rest reach from the hip, so the knee bends out (ADR-288).
+    leg_fold_pct: 35,
 )
