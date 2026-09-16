@@ -101,7 +101,10 @@ fn check_field(energy: bool, wide: bool) {
         .map(|i| u32::from(i % N == 18 || i / N % N < 3))
         .collect();
     g.queue.write_buffer(&mask, 0, gpu::as_bytes(&solid));
-    let mut p = vec![0.0f32; 80];
+    // The runtime layout of the params: the look vector (ADR-298) is the
+    // last, its x the ground glow.
+    let mut p = vec![0.0f32; 84];
+    p[80] = 1.0;
     p[23] = 1.0;
     p[24..28].copy_from_slice(&[10.0, 12.0, 24.0, 4.0]);
     if wide {
@@ -117,7 +120,7 @@ fn check_field(energy: bool, wide: bool) {
     }
     let params = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 320,
+        size: 336,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
