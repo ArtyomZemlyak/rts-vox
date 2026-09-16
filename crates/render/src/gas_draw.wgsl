@@ -25,6 +25,11 @@ fn noise(v:vec3<f32>)->f32 {
         mix(mix(hash(q+vec3(0,0,1)),hash(q+vec3(1,0,1)),f.x),mix(hash(q+vec3(0,1,1)),hash(q+vec3(1,1,1)),f.x),f.y),f.z);
 }
 fn hot(t:f32)->vec3<f32> {
+    if p.weapon.x>1.5 {
+        // The annihilation bolt (ADR-289): its dust never glows white.
+        return mix(mix(vec3(0.05,0.03,0.09),vec3(0.55,0.25,1.1),smoothstep(0.9,1.7,t)),
+            vec3(2.4,1.3,4.2),smoothstep(1.8,2.9,t));
+    }
     if p.weapon.x>0.5 {
         return mix(mix(vec3(0.07,0.11,0.18),vec3(0.45,0.8,1.8),smoothstep(0.9,1.7,t)),
             vec3(9.0,11.0,14.0),smoothstep(1.8,2.9,t));
@@ -136,9 +141,20 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
             let soot=(1.0-smoothstep(16.0,37.0,r))*(0.62+0.30*noise(pos*0.31))*smoothstep(0.0,0.5,age);
             if ground.material!=4u && visible {bg=vec4(bg.rgb*(1.0-soot*0.85*p.control.z),bg.a);}
-            let flash=select(vec3(5.0,0.75,0.065),vec3(1.2,1.65,2.7),p.weapon.x>0.5);
+            var flash=select(vec3(5.0,0.75,0.065),vec3(1.2,1.65,2.7),p.weapon.x>0.5);
             let decay=select(1.15,4.0,p.weapon.x>0.5);
-            lit+=flash*exp(-age*decay)*950.0/(110.0+dot(delta,delta))
+            var reach=950.0;
+            if p.weapon.x>1.5 {
+                // The annihilation strike (ADR-289) gives off a faint violet
+                // glimmer and swallows the light around the point it struck
+                // while its dark sphere lasts.
+                flash=vec3(0.9,0.35,1.7);reach=140.0;
+                let grow=sin(min(age/0.55,1.0)*3.14159)*step(age,0.55);
+                let sphere=3.0+11.0*grow;
+                let swallow=(1.0-smoothstep(0.6*sphere,sphere,length(delta)))*grow;
+                bg=vec4(bg.rgb*(1.0-0.97*swallow),bg.a);
+            }
+            lit+=flash*exp(-age*decay)*reach/(110.0+dot(delta,delta))
                 *max(0.05,dot(ground.normal,normalize(delta)))*select(0.06,1.0,visible);
             if ground.material==1u && age>0.25 && r<24.0 {
                 let fissure=smoothstep(0.73,0.82,noise(pos*0.6));
@@ -155,10 +171,14 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let delta=centre-world_pos;let dist=length(delta);
         let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;
         let charging=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
-        let pulse=select(charging,5.0*exp(-p.control.y/60.0*select(1.15,4.0,p.weapon.x>0.5))*p.control.z,deposited);
-        let tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
+        var pulse=select(charging,5.0*exp(-p.control.y/60.0*select(1.15,4.0,p.weapon.x>0.5))*p.control.z,deposited);
+        var tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
+        if p.weapon.x>1.5 {tint=vec3(1.1,0.45,2.0);pulse*=select(1.0,0.25,deposited);}
         if visible {bg=vec4(bg.rgb*(vec3(1.0)+tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)))),1.0);}
     }
+    // The annihilation bolt swallows what is behind its core before any
+    // light is added (ADR-289).
+    if p.control.w<0.5 && p.weapon.x>1.5 {bg=vec4(bg.rgb*(1.0-anni_absorb(ro,rd,maxdist)),bg.a);}
     if p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);}
     if p.control.w<0.0 || p.control.z<0.001 {return bg;}
     let inv=1.0/(rd+vec3(0.0000001));
@@ -189,7 +209,8 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let dust=1.0-smoothstep(26.0,49.0,p.origin.y+centre.y);
             let base=mix(vec3(0.105,0.12,0.135),vec3(0.21,0.16,0.095),dust);
             let interior_glow=field(gas_pos+rd*2.5).x;
-            let inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
+            var inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
+            if p.weapon.x>1.5 {inner_colour=vec3(0.07,0.03,0.13);}
             let smoke=base*(0.23+shade*self_shadow*1.55)+inner_colour*interior_glow*exp(-age*0.45);
             let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
             let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);

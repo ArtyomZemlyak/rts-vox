@@ -62,16 +62,16 @@ fn energy_ball(ro:vec3<f32>,rd:vec3<f32>,centre:vec3<f32>,radius:f32,limit:f32,t
     }
     return result;
 }
-// Annihilation bolt (ADR-285): the picture bends around the bolt and, for
-// a moment, around the point it struck. Presentation only: the offset is
-// applied to the already-drawn scene before any light is added.
+// Annihilation bolt (ADR-285, ADR-289): the picture bends around the bolt
+// and, for a moment, around the point it struck. Presentation only: the
+// offset is applied to the already-drawn scene before any light is added.
 fn anni_warp(uv:vec2<f32>)->vec2<f32> {
     var centre=vec3(0.0);var strength=0.0;var radius=0.0;
     if p.energy.w>0.0 {
-        centre=p.energy.xyz;strength=0.05;radius=0.12;
+        centre=p.energy.xyz;strength=0.09;radius=0.17;
     } else if p.control.z>0.5 {
         let age=p.control.y/60.0;
-        if age<0.9 {centre=p.energy.xyz;strength=0.10*(1.0-age/0.9);radius=0.12+age*0.25;}
+        if age<0.9 {centre=p.energy.xyz;strength=0.14*(1.0-age/0.9);radius=0.14+age*0.4;}
     }
     if strength<=0.0 {return vec2(0.0);}
     let clip=p.clip_from_world*vec4(centre,1.0);
@@ -82,9 +82,71 @@ fn anni_warp(uv:vec2<f32>)->vec2<f32> {
     let ring=sin(r/radius*9.42-p.weapon.y*30.0)*0.5+0.5;
     return d/r*strength*(1.0-r/radius)*(0.6+0.4*ring);
 }
+// Annihilation bolt (ADR-289): a dark elongated core that swallows the
+// picture behind it, a cold violet rim, and after the strike a dark
+// implosion that grows and fades. `x` is absorption, `y` the rim.
+fn anni_core(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->vec2<f32> {
+    var out=vec2(0.0);let time=p.weapon.y;
+    if p.beam.w>0.01 {
+        // The charge: a small dark sphere growing at the muzzle.
+        let r=0.5+p.beam.w*1.6;
+        let d=energy_segment(ro,rd,p.beam.xyz,p.beam.xyz,limit);
+        out.x=max(out.x,(1.0-smoothstep(0.5*r,0.9*r,d))*p.beam.w);
+        out.y=max(out.y,exp(-pow((d-1.05*r)/(0.3*r),2.0))*p.beam.w);
+    }
+    if p.energy.w>0.0 {
+        // In flight: a capsule stretched along the way it goes.
+        let r=p.energy.w*1.1;
+        let dir=normalize(p.energy.xyz-p.beam.xyz+vec3(0.0001));
+        let half=r*2.4;
+        let d=energy_segment(ro,rd,p.energy.xyz-dir*half,p.energy.xyz+dir*half,limit);
+        let pulse=0.85+0.15*sin(time*47.0);
+        out.x=max(out.x,1.0-smoothstep(0.55*r*pulse,0.95*r*pulse,d));
+        out.y=max(out.y,exp(-pow((d-1.1*r)/(0.28*r),2.0)));
+    }
+    if p.control.z>0.5 && p.energy.w<=0.0 {
+        // The strike: a dark sphere that swells and collapses in half a second.
+        let age=p.control.y/60.0;
+        if age<0.55 {
+            let grow=sin(min(age/0.55,1.0)*3.14159);
+            let r=3.0+11.0*grow;
+            let d=energy_segment(ro,rd,p.energy.xyz,p.energy.xyz,limit);
+            out.x=max(out.x,(1.0-smoothstep(0.6*r,r,d))*grow);
+            out.y=max(out.y,exp(-pow((d-1.15*r)/(0.3*r),2.0))*grow);
+        }
+    }
+    return out;
+}
+fn anni_absorb(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->f32 {
+    return anni_core(ro,rd,limit).x*0.97;
+}
 fn energy_effect(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->vec3<f32> {
     if p.weapon.x<0.5 {return vec3(0.0);}
     var colour=vec3(0.0);let time=p.weapon.y;
+    if p.weapon.x>1.5 {
+        // The annihilation bolt: the rim of the dark core, a thin cold
+        // wake, and violet arcs at the strike (ADR-289).
+        let core=anni_core(ro,rd,limit);
+        colour+=vec3(2.2,0.9,5.5)*core.y*(0.7+0.3*sin(time*31.0));
+        if p.energy.w>0.0 {
+            let direction=normalize(p.energy.xyz-p.beam.xyz+vec3(0.0001));
+            let start=p.energy.xyz-direction*min(40.0,length(p.energy.xyz-p.beam.xyz));
+            colour+=energy_path(ro,rd,start,p.energy.xyz,limit,time)*vec3(1.4,0.6,1.8)*0.35;
+        }
+        if p.control.z>0.5 && p.energy.w<=0.0 {
+            let age=p.control.y/60.0;
+            if age<0.7 {
+                let centre=p.energy.xyz;
+                for(var j=0;j<7;j++) {
+                    let a=f32(j)*2.39996+0.2*sin(f32(j)*9.7);
+                    let spread=9.0+age*40.0+5.0*sin(f32(j)*7.13);
+                    let end=centre+vec3(cos(a),0.3+0.5*abs(sin(a*3.0)),sin(a))*spread;
+                    colour+=energy_path(ro,rd,centre,end,limit,time+f32(j))*vec3(1.6,0.7,2.2)*exp(-age*6.0)*0.6;
+                }
+            }
+        }
+        return colour;
+    }
     if p.beam.w>0.01 {
         let charge=p.beam.w;
         colour+=energy_ball(ro,rd,p.beam.xyz,0.6+charge*2.5,limit,time)*charge;
