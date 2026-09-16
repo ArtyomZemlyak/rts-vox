@@ -16,6 +16,8 @@
     edits_per_tick: 8192,
     // A bolt ablates finely: pieces within a two-cell box (ADR-284).
     fragment_box: 2,
+    // A bolt ablates; it does not push hulls (ADR-286).
+    hull_impulse_milli: 0,
     fire_tick: 75,
     shell_speed: 1200,
     // A bolt heats a small spot hard (ADR-277).

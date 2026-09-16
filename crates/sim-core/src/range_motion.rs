@@ -64,6 +64,8 @@ impl Obstacle {
 }
 /// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
 const ESCAPES: u32 = 6;
+/// Farthest a burst pushes a hull, world units from its centre (ADR-286).
+const IMPULSE_REACH: i32 = 64;
 #[derive(Clone, Debug)]
 pub struct Motion {
     pub pos: [Fx; 3],
@@ -98,6 +100,10 @@ pub struct Motion {
     /// Legs that lost more than the buckling share of their links
     /// (ADR-281): folded under the hip, carrying nothing. Saved.
     pub legs_buckled: Vec<bool>,
+    /// Sideways velocity a burst gave the hull, world units per second in
+    /// the horizontal plane (ADR-286); the brakes and the terrain spend it.
+    /// Saved.
+    pub shove: V3,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
     // Installed engine sizing is based on the pristine machine. Losing armour
@@ -177,6 +183,7 @@ impl Motion {
             feet,
             legs_lost,
             legs_buckled,
+            shove: V3::ZERO,
             rigs,
             navigation,
             yielding,
@@ -200,6 +207,88 @@ impl Motion {
             self.drive.head,
             self.hull.up,
         )
+    }
+    /// A burst's push on this hull (ADR-286): `energy_j · milli / 1000`
+    /// newton-seconds at one unit from the centre of mass, falling off with
+    /// the distance, along the line from the burst to the centre. The mass
+    /// is the body's volume at the chassis density. The horizontal part
+    /// becomes a shove the brakes and the terrain spend, the vertical part
+    /// a hop through the suspension, and the moment of the push about the
+    /// near face and the burst's height a roll or pitch through the ride's
+    /// radius of gyration. Bursts farther than the reach do nothing.
+    pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], energy_j: u64, milli: u32) {
+        if milli == 0 || energy_j == 0 {
+            return;
+        }
+        let r = crate::ride::ride_of(&self.chassis);
+        let centre = V3::new(self.pos[0], self.pos[1].add(r.clearance), self.pos[2]);
+        let burst = V3::new(
+            Fx::from_int(at[0]),
+            Fx::from_int(at[1]),
+            Fx::from_int(at[2]),
+        );
+        let d = centre.sub(burst);
+        let reach = Fx::from_int(IMPULSE_REACH);
+        let dist2 = d.len_sq();
+        if dist2 > reach.mul(reach) {
+            return;
+        }
+        let dist = dist2.sqrt().max(Fx::ONE);
+        let dir = d.scale(Fx::ONE.div(dist));
+        let newton_s = (energy_j.saturating_mul(u64::from(milli)) / 1000).min(i32::MAX as u64);
+        let mass_kg = (u128::from(b.volume_mm3()) * self.chassis.density.max(1) as u128
+            / 1_000_000_000)
+            .clamp(1, i32::MAX as u128) as i32;
+        let units_per_metre = (1000 / i32::from(voxel::unit::WORLD_MM)).max(1);
+        let dv = Fx::from_int(newton_s as i32)
+            .div(dist)
+            .div(Fx::from_int(mass_kg))
+            .mul(Fx::from_int(units_per_metre));
+        let push = dir.scale(dv);
+        self.shove = self.shove.add(V3::new(push.x, Fx::ZERO, push.z));
+        self.hull.vy = self.hull.vy.add(push.y);
+        // The push lands on the near face, at the burst's height: its
+        // moment about the centre of mass rolls or pitches the hull.
+        let shape = self.shape(b);
+        let half = Fx::from_int(shape.half[0].min(shape.half[1]).max(1));
+        let lever = V3::new(
+            dir.x.neg().mul(half),
+            burst
+                .y
+                .sub(centre.y)
+                .max(r.clearance.neg())
+                .min(r.clearance),
+            dir.z.neg().mul(half),
+        );
+        let torque = lever.cross(push);
+        let k2 = r.inertia.max(Fx::ONE);
+        self.hull.w = self
+            .hull
+            .w
+            .add(V3::new(torque.x.div(k2), Fx::ZERO, torque.z.div(k2)));
+    }
+    /// Spend the shove against the brakes for one tick; the terrain spends
+    /// the rest when it refuses the slide.
+    fn brake_shove(&mut self, lim: &Limits) {
+        let len2 = self.shove.len_sq();
+        if len2 == Fx::ZERO {
+            return;
+        }
+        let len = len2.sqrt();
+        let left = len.sub(lim.brake).max(Fx::ZERO);
+        self.shove = if left == Fx::ZERO {
+            V3::ZERO
+        } else {
+            self.shove.scale(left.div(len))
+        };
+    }
+    /// Whether a burst left the hull moving: a shove, a hop or a spin the
+    /// suspension has not yet settled.
+    fn disturbed(&self) -> bool {
+        self.shove.len_sq() != Fx::ZERO
+            || self.hull.vy != Fx::ZERO
+            || self.hull.w.x != Fx::ZERO
+            || self.hull.w.z != Fx::ZERO
     }
     /// The legs of this hull, in template order; empty for a tracked one.
     pub fn rigs(&self) -> &[crate::gait::LegRig] {
@@ -242,9 +331,63 @@ impl Motion {
         }
         (support.len() >= 2).then_some((support, ground))
     }
+    /// A parked hull's slide under a burst's shove (ADR-286): the same
+    /// acceptance as a driven move, and a refusal spends the shove. Returns
+    /// the accepted displacement.
+    fn slide(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        response: crate::mobility::Mobility,
+    ) -> V3 {
+        if self.shove.len_sq() == Fx::ZERO {
+            return V3::ZERO;
+        }
+        let lim = response.limits(&Limits::of(&self.chassis, 30), true);
+        let mut ground =
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
+        let shape = self.shape(b);
+        let current = ground.pose([self.pos[0], self.pos[2]], self.drive.head, shape);
+        let nx = self.pos[0].add(self.shove.x.div(Fx::from_int(30)));
+        let nz = self.pos[2].add(self.shove.z.div(Fx::from_int(30)));
+        let target = ground.pose([nx, nz], self.drive.head, shape);
+        let previous = Obstacle::of(self, b);
+        let mut candidate = previous;
+        candidate.pos[0] = nx;
+        candidate.pos[2] = nz;
+        let collision = others.iter().any(|p| {
+            let penetration = candidate.penetration(p);
+            penetration > Fx::ZERO && penetration >= previous.penetration(p)
+        });
+        let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
+        let allowed = (target.blocked == 0 || target.blocked < current.blocked)
+            && !target.tilt
+            && x >= 40
+            && z >= 40
+            && x < 600
+            && z < 600
+            && target.height.sub(current.height) <= Fx::from_int(self.step)
+            && !collision;
+        let moved = if allowed {
+            let d = V3::new(nx.sub(self.pos[0]), Fx::ZERO, nz.sub(self.pos[2]));
+            self.pos[0] = nx;
+            self.pos[2] = nz;
+            self.floors = {
+                let f = target.floors;
+                [f[3], f[1], f[2], f[0]]
+            };
+            d
+        } else {
+            self.shove = V3::ZERO;
+            V3::ZERO
+        };
+        self.brake_shove(&lim);
+        moved
+    }
     /// A parked walker's hull rests on its legs (ADR-280): a lost leg lets
     /// it sink and lean where it stands. A tracked hull keeps the resting
-    /// pose.
+    /// pose unless a burst disturbed it (ADR-286).
     fn settle(
         &mut self,
         w: &World,
@@ -252,7 +395,7 @@ impl Motion {
         gravity: i32,
         response: crate::mobility::Mobility,
     ) {
-        if self.rigs.is_empty() {
+        if self.rigs.is_empty() && !self.disturbed() {
             return;
         }
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
@@ -265,9 +408,9 @@ impl Motion {
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         let nominal = crate::ride::supports_of(&self.chassis);
-        let Some((support, ground)) = self.foot_supports(&nominal, &floors) else {
-            return;
-        };
+        let (support, ground) = self
+            .foot_supports(&nominal, &floors)
+            .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
@@ -419,8 +562,10 @@ impl Motion {
     ) {
         self.cut.clear();
         if !self.enabled {
-            // A parked walker still stands on its feet, and its hull on them.
-            self.step_feet(w, b, V3::ZERO, 0, Fx::ZERO);
+            // A parked hull that a burst pushed slides and rocks (ADR-286);
+            // a parked walker still stands on its feet, and its hull on them.
+            let moved = self.slide(w, b, others, response);
+            self.step_feet(w, b, moved, 0, Fx::ZERO);
             self.settle(w, b, gravity, response);
             return;
         }
@@ -530,8 +675,14 @@ impl Motion {
         );
         let previous = Obstacle::of(self, b);
         self.drive = next;
-        let nx = self.pos[0].add(delta.dx);
-        let nz = self.pos[2].add(delta.dz);
+        // A burst's shove rides along with the drive's own step (ADR-286)
+        // and is spent by the brakes, or by the terrain if it refuses.
+        let nx = self.pos[0]
+            .add(delta.dx)
+            .add(self.shove.x.div(Fx::from_int(30)));
+        let nz = self.pos[2]
+            .add(delta.dz)
+            .add(self.shove.z.div(Fx::from_int(30)));
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         let target = ground.pose([nx, nz], next.head, shape);
         let mut candidate = Obstacle::of(self, b);
@@ -567,8 +718,10 @@ impl Motion {
             self.drive.head = old.head;
             self.drive.yaw_rate = 0;
             self.blocked = true;
+            self.shove = V3::ZERO;
             Fx::ZERO
         };
+        self.brake_shove(&lim);
         if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
             self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
         }
@@ -701,6 +854,8 @@ impl Motion {
         for buckled in &self.legs_buckled {
             b.bool(*buckled);
         }
+        b.fx(self.shove.x);
+        b.fx(self.shove.z);
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
         self.pos = std::array::from_fn(|_| s.fx());
@@ -753,6 +908,10 @@ impl Motion {
         }
         for buckled in &mut self.legs_buckled {
             *buckled = s.bool();
+        }
+        self.shove = V3::new(s.fx(), Fx::ZERO, s.fx());
+        if self.shove.len_sq() > Fx::from_int(1_000_000) {
+            return false;
         }
         s.ok()
             && self.escape_left <= self.navigation.escape_ticks
@@ -935,6 +1094,54 @@ mod tests {
             "did not sink"
         );
         assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
+    }
+    /// A burst beside a parked tank shoves it away and hops it; the
+    /// brakes and the suspension settle it again (ADR-286). The roll from
+    /// the moment is real but small on a fifty-tonne hull.
+    #[test]
+    fn a_burst_beside_a_parked_tank_shoves_and_rocks_it() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        for tick in 0..5 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let before = m.pos;
+        let level = m.hull;
+        // Eighteen megajoules a hull's width to the west, at the ground.
+        m.impulse(&body, [284, 16, 300], 18_000_000, 110);
+        assert!(m.shove.x > Fx::from_int(5), "shove {:?}", m.shove);
+        assert!(m.hull.w.len_sq() > Fx::ZERO, "no spin");
+        assert!(m.hull.vy > Fx::ONE, "no hop: {:?}", m.hull.vy);
+        let mut hopped = Fx::ZERO;
+        for tick in 5..125 {
+            step(&mut m, &w, &body, &[], tick);
+            hopped = hopped.max(m.hull.y.sub(level.y));
+        }
+        assert!(
+            m.pos[0].sub(before[0]) > Fx::ONE,
+            "did not move: {:?}",
+            m.pos
+        );
+        assert!(hopped > Fx::from_ratio(3, 10), "did not hop: {hopped:?}");
+        assert_eq!(m.shove, V3::ZERO, "the brakes did not spend the shove");
+        assert!(
+            m.hull.up.y > Fx::from_ratio(999, 1000),
+            "did not settle: {:?}",
+            m.hull.up
+        );
+        assert!((m.hull.y.sub(level.y)).abs() < Fx::from_ratio(1, 10));
+        // Twice the distance, a quarter of the push: the fall-off is 1/r
+        // on the impulse and the same on the moment.
+        let mut far = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        far.impulse(&body, [268, 16, 300], 18_000_000, 110);
+        let mut near = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        near.impulse(&body, [284, 16, 300], 18_000_000, 110);
+        assert!(far.shove.x < near.shove.x && far.shove.x.mul(Fx::from_int(3)) > near.shove.x);
+        // Out of reach: nothing.
+        let mut away = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        away.impulse(&body, [200, 16, 300], 18_000_000, 110);
+        assert_eq!(away.shove, V3::ZERO);
     }
     #[test]
     fn opposing_tanks_recover_and_do_not_reenter_each_other() {

@@ -1170,7 +1170,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(21);
+        b.u32(22);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1326,7 +1326,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 21 {
+        if s.u32() != 22 {
             return None;
         }
         let extended = s.bool();
@@ -1958,6 +1958,14 @@ impl BlastRange {
                     &self.units,
                     &self.surface_work,
                 ));
+                // The burst pushes every hull in reach (ADR-286).
+                let energy = u64::from(self.config.material_energy_j);
+                let milli = self.config.hull_impulse_milli;
+                for u in self.units.iter_mut().chain(std::iter::once(&mut self.gun)) {
+                    if u.status.alive {
+                        u.motion.impulse(&u.body, at, energy, milli);
+                    }
+                }
                 self.shell = None;
             } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(SIZE[a] as i32)) {
                 // A miss retires at the map boundary, allowing another order.
@@ -3039,6 +3047,55 @@ mod tests {
             "an annihilating bolt threw loose pieces"
         );
         assert!(a.matter.economy.ledger.balanced());
+    }
+    /// A shell landing beside a parked tank on the range shoves it, hops
+    /// it, and the snapshot mid-shove restores tick for tick (ADR-286).
+    #[test]
+    fn a_shell_beside_a_target_shoves_it_and_the_snapshot_keeps_the_shove() {
+        let mut layout = walker_layout();
+        layout.units = vec![modding::range::RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [300, FLOOR, 336],
+        }];
+        layout.target = [286, 20, 336];
+        let mut a = BlastRange::with_layout(config(), layout).unwrap();
+        assert!(a.config.hull_impulse_milli > 0, "the shell must push");
+        let start = a.units[0].motion.pos;
+        let mut impact = None;
+        for _ in 0..300 {
+            a.step();
+            if a.impact.is_some() {
+                impact = Some(a.tick);
+                break;
+            }
+        }
+        impact.expect("no impact");
+        let u = &a.units[0];
+        assert!(u.motion.shove.len_sq() > Fx::ZERO, "no shove at impact");
+        for _ in 0..5 {
+            a.step();
+        }
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.units[0].motion.shove, b.units[0].motion.shove);
+        let level = a.units[0].motion.hull.y;
+        let mut hopped = Fx::ZERO;
+        for _ in 0..90 {
+            a.step();
+            b.step();
+            hopped = hopped.max(a.units[0].motion.hull.y.sub(level));
+        }
+        assert_eq!(a.state_hash(), b.state_hash());
+        let u = &a.units[0];
+        assert!(
+            u.motion.pos[0].sub(start[0]) > Fx::ONE,
+            "the tank did not move: {:?} from {start:?}",
+            u.motion.pos
+        );
+        assert!(
+            hopped > Fx::from_ratio(1, 10),
+            "the tank did not hop: {hopped:?}"
+        );
+        assert_eq!(u.motion.shove, phys::V3::ZERO);
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]

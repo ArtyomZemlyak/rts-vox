@@ -54,6 +54,11 @@ pub struct ExplosionConfig {
     /// in, `1..=4` (ADR-284). Older presets keep the two-cell box.
     #[serde(default = "two_cells")]
     pub fragment_box: u32,
+    /// Push on a hull, thousandths of a newton-second per joule of material
+    /// energy at one world unit from the hull's centre, falling off with
+    /// the distance (ADR-286). Zero: the burst does not move hulls.
+    #[serde(default)]
+    pub hull_impulse_milli: u32,
 }
 
 fn two_cells() -> u32 {
@@ -96,6 +101,7 @@ impl ExplosionConfig {
             || !(0..=32).contains(&c.heat_units)
             || c.heat_per_cell > 100_000
             || !(1..=4).contains(&c.fragment_box)
+            || c.hull_impulse_milli > 100_000
         {
             return Err("explosion parameters exceed supported bounds".into());
         }

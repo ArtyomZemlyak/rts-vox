@@ -14,6 +14,8 @@
     edits_per_tick: 8192,
     // A shell throws pieces of up to three cells a side (ADR-284).
     fragment_box: 3,
+    // A shell shoves and rocks hulls in reach (ADR-286).
+    hull_impulse_milli: 110,
     fire_tick: 45,
     shell_speed: 150,
     // The fireball lights fuel within thirty-two units: eighty heat at the

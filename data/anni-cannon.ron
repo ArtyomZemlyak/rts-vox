@@ -20,6 +20,8 @@
     edits_per_tick: 8192,
     // Pieces within a two-cell box, though the bolt leaves none (ADR-284).
     fragment_box: 2,
+    // Annihilated matter pushes nothing (ADR-286).
+    hull_impulse_milli: 0,
     fire_tick: 75,
     shell_speed: 1200,
     heat_units: 0,
