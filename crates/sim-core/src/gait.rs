@@ -11,8 +11,8 @@
 //! interpolates the range's contacts between ticks and keeps its own
 //! planting only for bodies whose simulation has no feet (the batch).
 //!
-//! Support forces still use the chassis' four nominal points: a lifted
-//! foot does not yet release its support.
+//! The hull's supports stay the chassis' nominal points (ADR-280): a lost
+//! leg drops its support, a foot in the air keeps it.
 //!
 //! Nothing here is parallel: a walker's feet are stepped in slot order
 //! by the range, one sqrt per link per tick.

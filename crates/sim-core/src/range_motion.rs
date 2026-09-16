@@ -89,6 +89,14 @@ pub struct Motion {
     pub cut: Vec<[u32; 3]>,
     /// Support floors used by the last suspension step, for diagnostics.
     pub floors: [Fx; 4],
+    /// Planting state of each leg, in leg order (ADR-279); empty for a
+    /// tracked hull. Saved.
+    pub feet: Vec<crate::gait::Foot>,
+    /// Legs that left the body whole (ADR-278): they neither step nor
+    /// carry (ADR-280). Saved.
+    pub legs_lost: Vec<bool>,
+    /// Legs computed once from the body.
+    rigs: Vec<crate::gait::LegRig>,
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
@@ -130,6 +138,9 @@ impl Motion {
         } else {
             Vec::new()
         };
+        let rigs = crate::gait::rigs_of(body);
+        let feet = vec![crate::gait::Foot::default(); rigs.len()];
+        let legs_lost = vec![false; rigs.len()];
         Self {
             pos: at.map(Fx::from_int),
             drive: Drive {
@@ -159,6 +170,9 @@ impl Motion {
             replan: c.replan_ticks,
             cut: Vec::new(),
             floors: [Fx::ZERO; 4],
+            feet,
+            legs_lost,
+            rigs,
             navigation,
             yielding,
             blocked_ticks: 0,
@@ -181,6 +195,127 @@ impl Motion {
             self.drive.head,
             self.hull.up,
         )
+    }
+    /// The legs of this hull, in template order; empty for a tracked one.
+    pub fn rigs(&self) -> &[crate::gait::LegRig] {
+        &self.rigs
+    }
+    /// Supports of a walker (ADR-280): the chassis' nominal point of every
+    /// leg it still has, over the probed floor of that point. A lost leg
+    /// carries nothing. A foot in the air keeps its leg's support: the
+    /// gait stabilises the hull actively, and a passive spring that let go
+    /// of the swinging leg rocked the hull to fourteen degrees on flat
+    /// ground. The point of application stays nominal and the floor the
+    /// probe's: a stance foot keeps its world point while the hull moves,
+    /// and both the sole's own height and the foot's own position under a
+    /// spring with four units of travel threw the hull up by whole units
+    /// on crater and trench runs; the probe under the nominal point is
+    /// what the planner accepted (ADR-272). `None` for a tracked hull and
+    /// with fewer than two legs left.
+    fn foot_supports(
+        &self,
+        nominal: &[phys::Support; 4],
+        floors: &[Fx; 4],
+    ) -> Option<(Vec<phys::Support>, Vec<Fx>)> {
+        if self.rigs.is_empty() {
+            return None;
+        }
+        let mut support = Vec::with_capacity(4);
+        let mut ground = Vec::with_capacity(4);
+        // Support order, not leg order: the suspension sums in index order,
+        // and a whole walker must add up exactly as the nominal four do.
+        for i in 0..4 {
+            let carried = self
+                .rigs
+                .iter()
+                .zip(&self.legs_lost)
+                .any(|(rig, lost)| rig.support.min(3) == i && !*lost);
+            if carried {
+                support.push(nominal[i]);
+                ground.push(floors[i]);
+            }
+        }
+        (support.len() >= 2).then_some((support, ground))
+    }
+    /// A parked walker's hull rests on its legs (ADR-280): a lost leg lets
+    /// it sink and lean where it stands. A tracked hull keeps the resting
+    /// pose.
+    fn settle(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        gravity: i32,
+        response: crate::mobility::Mobility,
+    ) {
+        if self.rigs.is_empty() {
+            return;
+        }
+        let (hc, hs) = crate::ride::heading_of(self.drive.head);
+        let mut ground =
+            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96);
+        let shape = self.shape(b);
+        let f = ground
+            .pose([self.pos[0], self.pos[2]], self.drive.head, shape)
+            .floors;
+        let floors = [f[3], f[1], f[2], f[0]];
+        self.floors = floors;
+        let nominal = crate::ride::supports_of(&self.chassis);
+        let Some((support, ground)) = self.foot_supports(&nominal, &floors) else {
+            return;
+        };
+        let mut r = crate::ride::ride_of(&self.chassis);
+        r.gravity = Fx::from_int(gravity);
+        r.preload = r.gravity.div(Fx::from_int(4));
+        let r = response.ride(r);
+        phys::step(
+            &mut self.hull,
+            &support,
+            &ground,
+            (hc, hs),
+            V3::ZERO,
+            &r,
+            Fx::from_ratio(1, 30),
+        );
+        self.pos[1] = self.hull.y.sub(r.clearance);
+    }
+    /// Advance a walker's feet one tick from the motion just accepted
+    /// (ADR-279): the displacement, yaw step and phase advance of this
+    /// tick, the terrain under each sole, and whether the hull carries
+    /// load. A lost leg keeps its last state.
+    fn step_feet(&mut self, w: &World, b: &UnitBody, linear: V3, angular: i32, cycles: Fx) {
+        let Some(g) = self.chassis.gait.as_ref() else {
+            return;
+        };
+        if self.rigs.is_empty() {
+            return;
+        }
+        let gait = crate::gait::Gait::of(g);
+        let root = self.frame(b);
+        // A slow walk lifts less: the picture's rule, in per-second terms.
+        let lift_scale = cycles
+            .mul(Fx::from_int(crate::TICKS_PER_SECOND))
+            .mul(gait.stride)
+            .mul(Fx::from_int(4))
+            .div(Fx::from_int(self.speed.max(1)))
+            .min(Fx::ONE);
+        let floor = |x: Fx, z: Fx| Fx::from_int(floor(w, x.to_int_trunc(), z.to_int_trunc()));
+        let stance = crate::gait::Stance {
+            grounded: self.hull.grounded(),
+            root: &root,
+            head: self.drive.head,
+            phase: self.phase,
+            lift_scale,
+            linear,
+            angular,
+            cycles,
+            gait: &gait,
+            floor: &floor,
+        };
+        for ((rig, foot), lost) in self.rigs.iter().zip(&mut self.feet).zip(&self.legs_lost) {
+            if !*lost {
+                foot.step(rig, &stance);
+            }
+        }
     }
     pub fn move_to(&mut self, w: &World, to: [i32; 2], b: &UnitBody, others: &[Obstacle]) -> bool {
         let from = [self.pos[0], self.pos[2]];
@@ -268,6 +403,9 @@ impl Motion {
     ) {
         self.cut.clear();
         if !self.enabled {
+            // A parked walker still stands on its feet, and its hull on them.
+            self.step_feet(w, b, V3::ZERO, 0, Fx::ZERO);
+            self.settle(w, b, gravity, response);
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
@@ -355,6 +493,7 @@ impl Motion {
         }
         let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
         let old = self.drive;
+        let old_pos = self.pos;
         // Two poses and the cut lie within a hull length of the vehicle; a
         // whole-map cache would cost more to clear than the poses to compute.
         let mut ground =
@@ -439,13 +578,12 @@ impl Motion {
         } else {
             self.blocked_ticks = 0;
         }
+        let mut advanced = 0;
         if let Some(c) = drive::StepCycle::of(&self.chassis) {
-            self.phase = angle::norm(
-                self.phase
-                    .wrapping_add(c.advance(path, angle::diff(self.drive.head, old.head))),
-            );
+            advanced = c.advance(path, angle::diff(self.drive.head, old.head));
+            self.phase = angle::norm(self.phase.wrapping_add(advanced));
         }
-        let support = crate::ride::supports_of(&self.chassis);
+        let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
         let f = if allowed {
             target.floors
@@ -454,6 +592,11 @@ impl Motion {
         };
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
+        // A walker stands on the legs it still has (ADR-280); a tracked
+        // hull on all four nominal points over the probe's floors.
+        let (support, ground) = self
+            .foot_supports(&nominal, &floors)
+            .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
@@ -467,13 +610,25 @@ impl Motion {
         phys::step(
             &mut self.hull,
             &support,
-            &floors,
+            &ground,
             (hc, hs),
             sway,
             &r,
             Fx::from_ratio(1, 30),
         );
         self.pos[1] = self.hull.y.sub(r.clearance);
+        let linear = V3::new(
+            self.pos[0].sub(old_pos[0]),
+            Fx::ZERO,
+            self.pos[2].sub(old_pos[2]),
+        );
+        self.step_feet(
+            w,
+            b,
+            linear,
+            angle::diff(self.drive.head, old.head),
+            Fx::from_ratio(advanced, angle::FULL),
+        );
     }
     pub fn save(&self, b: &mut Blob) {
         for v in self.pos {
@@ -520,6 +675,13 @@ impl Motion {
                 b.i32(p[1]);
             }
         }
+        b.u32(self.feet.len() as u32);
+        for f in &self.feet {
+            f.save(b);
+        }
+        for lost in &self.legs_lost {
+            b.bool(*lost);
+        }
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
         self.pos = std::array::from_fn(|_| s.fx());
@@ -557,6 +719,18 @@ impl Motion {
             for _ in 0..n {
                 list.push([s.i32(), s.i32()]);
             }
+        }
+        if s.u32() as usize != self.rigs.len() {
+            return false;
+        }
+        for f in &mut self.feet {
+            match crate::gait::Foot::load(s) {
+                Some(v) => *f = v,
+                None => return false,
+            }
+        }
+        for lost in &mut self.legs_lost {
+            *lost = s.bool();
         }
         s.ok()
             && self.escape_left <= self.navigation.escape_ticks
@@ -627,6 +801,82 @@ mod tests {
             tick,
             98,
         );
+    }
+    /// A whole walker carries its hull on all four legs, feet in the air or
+    /// not (ADR-280): the gait stabilises the hull, and the run stays level.
+    #[test]
+    fn a_whole_walker_carries_its_hull_on_all_four_legs() {
+        let w = ground(0);
+        let body = voxel::unit::strider();
+        let mut m = Motion::new([200, 16, 300], RangeUnitKind::Strider, &body);
+        let nominal = crate::ride::supports_of(&m.chassis);
+        assert_eq!(m.feet.len(), 4);
+        m.enabled = true;
+        m.destination = Some([430, 300]);
+        m.path = vec![[430, 300]];
+        let mut lifted = 0;
+        for tick in 0..300 {
+            step(&mut m, &w, &body, &[], tick);
+            let (support, ground) = m
+                .foot_supports(&nominal, &m.floors)
+                .expect("a walker has legs");
+            assert_eq!(support, nominal.to_vec());
+            assert_eq!(ground, m.floors.to_vec());
+            lifted += usize::from(m.feet.iter().any(|f| !f.planted()));
+            assert_eq!(m.hull.load, Fx::ONE);
+            assert!(
+                m.hull.up.y > Fx::from_ratio(99, 100),
+                "tilted at tick {tick}: {:?}",
+                m.hull.up
+            );
+        }
+        assert!(lifted > 200, "feet in the air on {lifted} ticks");
+        assert!(
+            m.pos[0] > Fx::from_int(300),
+            "the walker did not walk: {:?}",
+            m.pos
+        );
+    }
+    /// A walker that lost a leg carries its hull on the other three
+    /// (ADR-280): it sinks, leans over the missing corner, and still walks.
+    #[test]
+    fn a_walker_that_lost_a_leg_sinks_leans_and_walks_on_three() {
+        let w = ground(0);
+        let body = voxel::unit::strider();
+        let mut m = Motion::new([200, 16, 300], RangeUnitKind::Strider, &body);
+        let nominal = crate::ride::supports_of(&m.chassis);
+        m.legs_lost[0] = true;
+        m.enabled = true;
+        m.destination = Some([430, 300]);
+        m.path = vec![[430, 300]];
+        let gone = nominal[usize::from(body.legs[0].support)];
+        for tick in 0..300 {
+            step(&mut m, &w, &body, &[], tick);
+            let (support, _) = m.foot_supports(&nominal, &m.floors).unwrap();
+            assert_eq!(support.len(), 3);
+            assert!(!support.contains(&gone));
+            // The lean is bounded by the chassis' tilt limit, nothing else:
+            // the missing corner has no leg and no belly near the ground.
+            assert!(
+                m.hull.up.y >= Fx::from_ratio(84, 100),
+                "fell over at tick {tick}: {:?}",
+                m.hull.up
+            );
+        }
+        // Leg 0 hangs at the `-x, -z` corner; heading `+x`, the hull sinks
+        // and its normal leans towards the sunk corner.
+        assert_eq!(m.drive.head, 0);
+        assert!(
+            m.pos[1] < Fx::from_int(16).sub(Fx::from_ratio(1, 10)),
+            "did not sink: {:?}",
+            m.pos
+        );
+        assert!(
+            m.hull.up.x < Fx::ZERO && m.hull.up.z < Fx::ZERO,
+            "did not lean over the lost leg: {:?}",
+            m.hull.up
+        );
+        assert!(m.pos[0] > Fx::from_int(300), "did not walk: {:?}", m.pos);
     }
     #[test]
     fn opposing_tanks_recover_and_do_not_reenter_each_other() {

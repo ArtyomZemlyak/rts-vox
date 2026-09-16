@@ -61,12 +61,6 @@ pub struct RangeUnit {
     seg_shed: Vec<u8>,
     /// Root cells a segment hangs from, from the template; empty never sheds.
     seg_mounts: Vec<Vec<[u8; 3]>>,
-    /// Legs computed once from the body (ADR-279); empty for tracked hulls.
-    rigs: Vec<crate::gait::LegRig>,
-    /// Planting state of each leg, in leg order. Saved.
-    pub feet: Vec<crate::gait::Foot>,
-    /// Hull position, heading and phase the feet last saw. Saved.
-    gait_last: Option<(phys::V3, i32, i32)>,
 }
 /// Root cells within one voxel of each root-mounted segment's attachment
 /// point: the mount it hangs from. A segment mounted on another segment
@@ -142,8 +136,6 @@ impl RangeUnit {
             crate::damage::segment_frames(&pose, &body, motion.drive.head, motion.drive.head);
         let seg_mounts = mounts_of(&body);
         let seg_gone = vec![false; body.segments.len()];
-        let rigs = crate::gait::rigs_of(&body);
-        let feet = vec![crate::gait::Foot::default(); rigs.len()];
         Self {
             motion,
             pose,
@@ -169,9 +161,6 @@ impl RangeUnit {
             seg_gone,
             seg_shed: Vec::new(),
             seg_mounts,
-            rigs,
-            feet,
-            gait_last: None,
         }
     }
     fn refresh_damage(&mut self, id: usize) {
@@ -235,7 +224,7 @@ impl RangeUnit {
                     stack.push(j);
                 }
             }
-            for leg in &self.body.legs {
+            for (li, leg) in self.body.legs.iter().enumerate() {
                 let parts = [
                     Some(leg.thigh),
                     Some(leg.shin),
@@ -244,6 +233,10 @@ impl RangeUnit {
                     leg.foot,
                 ];
                 if parts.contains(&Some(i as u8)) {
+                    // The leg is gone: it neither steps nor carries (ADR-280).
+                    if let Some(lost) = self.motion.legs_lost.get_mut(li) {
+                        *lost = true;
+                    }
                     for part in parts.into_iter().flatten() {
                         if !self.seg_gone[part as usize] {
                             stack.push(part as usize);
@@ -264,60 +257,10 @@ impl RangeUnit {
         );
         // Legs stand where their feet are, not where the template rests
         // them (ADR-279).
-        for (rig, foot) in self.rigs.iter().zip(&self.feet) {
+        for (rig, foot) in self.motion.rigs().iter().zip(&self.motion.feet) {
             if let Some(c) = &foot.contact {
                 crate::gait::leg_frames(rig, &self.pose, c, &mut self.seg_frames);
             }
-        }
-    }
-    /// Advance a walker's feet one tick from the motion just accepted
-    /// (ADR-279): the displacement, yaw step and phase advance since the
-    /// last call, the terrain under each sole, and whether the hull
-    /// carries load.
-    pub fn step_feet(&mut self, w: &World) {
-        let Some(g) = self.motion.chassis.gait.as_ref() else {
-            return;
-        };
-        if self.rigs.is_empty() {
-            return;
-        }
-        let gait = crate::gait::Gait::of(g);
-        let root = self.motion.frame(&self.body);
-        let head = self.motion.drive.head;
-        let phase = self.motion.phase;
-        let pos = phys::V3::new(self.motion.pos[0], self.motion.pos[1], self.motion.pos[2]);
-        let (linear, angular, cycles) = match self.gait_last {
-            Some((p, h, ph)) => (
-                phys::V3::new(pos.x.sub(p.x), Fx::ZERO, pos.z.sub(p.z)),
-                fx::angle::diff(head, h),
-                Fx::from_ratio(fx::angle::norm(phase.wrapping_sub(ph)), fx::angle::FULL),
-            ),
-            None => (phys::V3::ZERO, 0, Fx::ZERO),
-        };
-        self.gait_last = Some((pos, head, phase));
-        // A slow walk lifts less: the picture's rule, in per-second terms.
-        let lift_scale = cycles
-            .mul(Fx::from_int(crate::TICKS_PER_SECOND))
-            .mul(gait.stride)
-            .mul(Fx::from_int(4))
-            .div(Fx::from_int(self.motion.speed.max(1)))
-            .min(Fx::ONE);
-        let floor =
-            |x: Fx, z: Fx| Fx::from_int(motion::floor(w, x.to_int_trunc(), z.to_int_trunc()));
-        let stance = crate::gait::Stance {
-            grounded: self.motion.hull.grounded(),
-            root: &root,
-            head,
-            phase,
-            lift_scale,
-            linear,
-            angular,
-            cycles,
-            gait: &gait,
-            floor: &floor,
-        };
-        for (rig, foot) in self.rigs.iter().zip(&mut self.feet) {
-            foot.step(rig, &stance);
         }
     }
     /// Where a world point lands on this body: `0` the root, `i + 1` the
@@ -1213,7 +1156,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(18);
+        b.u32(19);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1307,18 +1250,6 @@ impl BlastRange {
                 b.u8(*seg);
             }
             b.usize(u.seg_detached);
-            b.u32(u.feet.len() as u32);
-            for f in &u.feet {
-                f.save(&mut b);
-            }
-            b.bool(u.gait_last.is_some());
-            if let Some((p, h, ph)) = &u.gait_last {
-                b.fx(p.x);
-                b.fx(p.y);
-                b.fx(p.z);
-                b.i32(*h);
-                b.i32(*ph);
-            }
         }
         self.world.save(&mut b);
         self.matter.save(&mut b);
@@ -1381,7 +1312,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 18 {
+        if s.u32() != 19 {
             return None;
         }
         let extended = s.bool();
@@ -1589,20 +1520,13 @@ impl BlastRange {
                 }
             }
             u.seg_detached = s.usize();
-            if s.u32() as usize != u.rigs.len() {
-                return None;
+            // A lost leg is a shed thigh, and the motion's own record of it
+            // must agree.
+            for (li, leg) in u.body.legs.iter().enumerate() {
+                if u.motion.legs_lost.get(li).copied() != Some(u.seg_gone[leg.thigh as usize]) {
+                    return None;
+                }
             }
-            for f in &mut u.feet {
-                *f = crate::gait::Foot::load(&mut s)?;
-            }
-            u.gait_last = if s.bool() {
-                let p = phys::V3::new(s.fx(), s.fx(), s.fx());
-                Some((p, s.i32(), s.i32()))
-            } else {
-                None
-            };
-            // The legs stand on the restored feet.
-            u.update_pose(if id == gun_id { turret_angle } else { head });
         }
         if !r.world.load(&mut s) {
             return None;
@@ -1879,7 +1803,6 @@ impl BlastRange {
                     self.tick,
                     self.config.gravity,
                 );
-                u.step_feet(&self.world);
                 let head = u.motion.drive.head;
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
@@ -2430,13 +2353,13 @@ mod tests {
         let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
         a.patrols_running = true;
         let rest: Vec<_> = a.units[0].seg_frames.iter().map(|f| f.base).collect();
-        assert_eq!(a.units[0].feet.len(), 4);
+        assert_eq!(a.units[0].motion.feet.len(), 4);
         for _ in 0..30 {
             a.step();
         }
         let u = &a.units[0];
-        assert!(u.feet.iter().all(|f| f.planted()));
-        for (leg, foot) in u.body.legs.iter().zip(&u.feet) {
+        assert!(u.motion.feet.iter().all(|f| f.planted()));
+        for (leg, foot) in u.body.legs.iter().zip(&u.motion.feet) {
             let c = foot.contact.unwrap();
             let ankle = u.pose.world([
                 Fx::from_int(i32::from(leg.ankle.0)),
@@ -2468,7 +2391,7 @@ mod tests {
             a.step();
             let u = &a.units[0];
             for (i, leg) in u.body.legs.iter().enumerate() {
-                let Some(c) = u.feet[i].contact else {
+                let Some(c) = u.motion.feet[i].contact else {
                     continue;
                 };
                 let floor = Fx::from_int(motion::floor(
@@ -2488,7 +2411,7 @@ mod tests {
         }
         let leg = found.expect("no foot lifted in 600 ticks");
         let u = &a.units[0];
-        assert!(!u.feet[leg].planted());
+        assert!(!u.motion.feet[leg].planted());
         let shin = u.body.legs[leg].shin as usize;
         let b = &u.body.segments[shin].body;
         let cell = [
@@ -2527,7 +2450,7 @@ mod tests {
             a.step();
         }
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
-        assert_eq!(a.units[0].feet, b.units[0].feet);
+        assert_eq!(a.units[0].motion.feet, b.units[0].motion.feet);
         for (x, y) in a.units[0].seg_frames.iter().zip(&b.units[0].seg_frames) {
             assert_eq!(x.base, y.base);
             assert_eq!(x.x, y.x);
@@ -2538,7 +2461,7 @@ mod tests {
             b.step();
         }
         assert_eq!(a.state_hash(), b.state_hash());
-        assert_eq!(a.units[0].feet, b.units[0].feet);
+        assert_eq!(a.units[0].motion.feet, b.units[0].motion.feet);
         assert!(
             a.units[0].motion.pos[0] > Fx::from_int(310),
             "the walker did not walk"
@@ -2630,6 +2553,7 @@ mod tests {
                 let (tick, p) = impact.expect("no impact");
                 let u = &a.units[0];
                 let ys: Vec<Fx> = u
+                    .motion
                     .feet
                     .iter()
                     .map(|f| f.contact.map_or(Fx::ZERO, |c| c.pos.y))
@@ -2637,7 +2561,7 @@ mod tests {
                 let lowest = ys.iter().copied().fold(Fx::from_int(1000), Fx::min);
                 // A leg in the air on the gun's side: nearer the gun than
                 // the body's centre, so the bolt meets it first.
-                let lifted = u.feet.iter().enumerate().find(|(i, f)| {
+                let lifted = u.motion.feet.iter().enumerate().find(|(i, f)| {
                     ys[*i] > lowest.add(Fx::ONE)
                         && f.contact
                             .is_some_and(|c| c.pos.x < u.motion.pos[0].sub(Fx::from_int(3)))
@@ -2900,6 +2824,52 @@ mod tests {
         let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].seg_gone, a.units[0].seg_gone);
+    }
+    /// A leg that fell off carries nothing (ADR-280): the walker stands on
+    /// three feet, sinks, and leans towards the missing corner.
+    #[test]
+    fn a_lost_leg_carries_nothing_and_the_hull_leans_over_it() {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.control();
+        for _ in 0..30 {
+            a.step();
+        }
+        let level = a.units[0].motion.hull;
+        assert!(a.units[0].motion.feet.iter().all(|f| f.planted()));
+        let leg = a.units[0].body.legs[0];
+        let thigh = leg.thigh as usize;
+        let mounts = a.units[0].segment_mounts(thigh).to_vec();
+        for m in &mounts {
+            let [x, y, z] = m.map(usize::from);
+            assert!(a.units[0].body.remove(x, y, z));
+            a.units[0].removed.push(*m);
+        }
+        a.matter.annihilate_body(0, mounts.len());
+        a.units[0].refresh_damage(0);
+        assert!(a.units[0].seg_gone[thigh]);
+        assert_eq!(a.units[0].motion.legs_lost, [true, false, false, false]);
+        for _ in 0..90 {
+            a.step();
+        }
+        let u = &a.units[0];
+        let hull = u.motion.hull;
+        // Leg 0 hangs at the hull's `-x, -z` corner in the hull frame; with
+        // the hull heading `+x` those are world axes too. The corner sinks,
+        // and the hull's normal leans towards the sunk corner.
+        assert_eq!(u.motion.drive.head, 0);
+        assert!(
+            hull.y < level.y.sub(Fx::from_ratio(1, 10)),
+            "did not sink: {hull:?}"
+        );
+        assert!(
+            hull.up.x < Fx::from_ratio(-1, 200) && hull.up.z < Fx::from_ratio(-1, 200),
+            "did not lean over the lost leg: {:?}",
+            hull.up
+        );
+        assert!(hull.load > Fx::ZERO);
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]

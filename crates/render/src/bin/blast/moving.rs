@@ -28,7 +28,8 @@ fn foot_of(c: &sim_core::gait::Contact) -> Contact {
     }
 }
 fn feet_of(u: &RangeUnit) -> Vec<Option<Contact>> {
-    u.feet
+    u.motion
+        .feet
         .iter()
         .map(|f| f.contact.as_ref().map(foot_of))
         .collect()
@@ -183,7 +184,13 @@ pub fn animate(
         if u.kind == RangeUnitKind::Strider {
             let rot = render::realtime::hull_rotation(p.up, p.yaw);
             for (j, rig) in rigs.iter().enumerate() {
-                let Some(now) = u.feet.get(j).and_then(|f| f.contact.as_ref()).map(foot_of) else {
+                let Some(now) = u
+                    .motion
+                    .feet
+                    .get(j)
+                    .and_then(|f| f.contact.as_ref())
+                    .map(foot_of)
+                else {
                     break;
                 };
                 let was = v
