@@ -719,9 +719,25 @@ impl Explosion {
         units: &[RangeUnit],
         dents: &SurfaceWork,
     ) -> Self {
-        let n = c.half_cells * 2 + 1;
-        let h = c.half_cells as i32 * c.cell_units;
+        // The grid is as wide as the charge can reach through the cheapest
+        // matter — a step and the matter's own cost per cell — and never
+        // narrower than the data's, up to the wave's ceiling of 65 cells a
+        // side; and the wave stops at the sphere inscribed in it (ADR-303).
+        // A crater that met the grid's cube came out square (P-21).
+        let cheapest = c
+            .air_cost
+            .min(c.soil_resistance)
+            .min(c.concrete_resistance)
+            .min(c.steel_resistance)
+            .max(1);
+        let half = c
+            .half_cells
+            .max((c.energy / (100 + cheapest)) as usize + 2)
+            .min(32);
+        let n = half * 2 + 1;
+        let h = half as i32 * c.cell_units;
         let origin = at.map(|v| v - h);
+        let radius2 = (half * half) as i32;
         // Bodies are asked only where they can be (ADR-296): one box test
         // per body instead of a pose-mapped lookup for every voxel of the
         // domain, and dents are looked up only where there is material.
@@ -735,6 +751,17 @@ impl Explosion {
                         origin[1] + y as i32 * c.cell_units,
                         origin[2] + z as i32 * c.cell_units,
                     ];
+                    // Beyond the inscribed sphere the wave does not go: a
+                    // reach the grid cuts is cut the same in every direction.
+                    let (cx, cy, cz) = (
+                        x as i32 - half as i32,
+                        y as i32 - half as i32,
+                        z as i32 - half as i32,
+                    );
+                    if cx * cx + cy * cy + cz * cz > radius2 {
+                        resistance.push(u32::MAX);
+                        continue;
+                    }
                     let mut r = 0;
                     for dz in 0..c.cell_units {
                         for dy in 0..c.cell_units {
@@ -2603,6 +2630,62 @@ mod tests {
             a.state_hash(),
             restored.state_hash(),
             "saved whole fragment"
+        );
+    }
+    /// The owner's second report: craters came out square at high power
+    /// (P-21, ADR-303). A double charge of the energy cannon into a wide
+    /// flat clearing wants a crater wider than the data's wave grid; the
+    /// grid grows with the charge and the wave stops at the sphere in it,
+    /// so the rim reaches as far along the axes as along the diagonals.
+    #[test]
+    fn a_high_charge_crater_stays_round_where_the_grid_would_cut_it() {
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        c.energy *= 2;
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.clear_min = [150, 150];
+        layout.clear_max = [550, 550];
+        layout.units.clear();
+        layout.target = [350, FLOOR - 1, 350];
+        layout.blocks.clear();
+        layout.airburst_on_target = false;
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        for _ in 0..300 {
+            r.step();
+            if r.impact.is_some() {
+                break;
+            }
+        }
+        let at = r.impact.expect("the bolt never landed");
+        let grid = r.explosion.as_ref().map(|e| e.wave.size()).unwrap_or(0);
+        assert!(grid > 41, "the grid did not grow with the charge: {grid}");
+        for _ in 0..40 {
+            r.step();
+        }
+        let y = FLOOR - 1;
+        let reach = |dx: i32, dz: i32| {
+            (1..120)
+                .take_while(|&k| material(&r.world, [at[0] + dx * k, y, at[2] + dz * k]) == 0)
+                .count() as i64
+        };
+        let axes = [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| reach(dx, dz) * 1000);
+        let diagonals = [(1, 1), (1, -1), (-1, 1), (-1, -1)].map(|(dx, dz)| reach(dx, dz) * 1414);
+        let radii: Vec<i64> = axes.into_iter().chain(diagonals).collect();
+        let (low, high) = (
+            radii.iter().copied().min().unwrap(),
+            radii.iter().copied().max().unwrap(),
+        );
+        eprintln!("grid {grid} radii (thousandths): axes {axes:?} diagonals {diagonals:?}");
+        assert!(low >= 40_000, "no crater to speak of: {radii:?}");
+        // Before ADR-303 the axes stopped at the grid's face, 41 units, and
+        // the diagonals ran on to its corners, 58: a square.
+        assert!(
+            (high - low) * 100 <= high * 15,
+            "the crater is not round: {radii:?}"
         );
     }
     /// The owner's report: craters came out square (ADR-274). A shell into
