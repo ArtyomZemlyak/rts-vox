@@ -462,6 +462,90 @@ mod tests {
     fn tuning() -> crate::Tuning {
         crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap()
     }
+    /// A flying piece tumbles (ADR-309): thrown, it turns as it goes and
+    /// keeps the face it landed on; laid down with no speed, it never
+    /// turns. Its axes stay square to one another whatever it did.
+    #[test]
+    fn a_thrown_piece_tumbles_and_one_laid_down_does_not() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        let piece = |id, x: i32, velocity| Fragment {
+            id,
+            position: V3::new(
+                Fx::from_int(x).add(Fx::from_ratio(1, 2)),
+                Fx::from_int(20),
+                Fx::from_int(48).add(Fx::from_ratio(1, 2)),
+            ),
+            velocity,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        };
+        b.fragments
+            .push(piece(1, 40, V3::new(Fx::from_int(2), Fx::ONE, Fx::ZERO)));
+        b.fragments.push(piece(2, 56, V3::ZERO));
+        for tick in 0..30 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        let thrown = &b.fragments[0];
+        assert_ne!(thrown.basis, IDENTITY, "the thrown piece did not turn");
+        for (i, row) in thrown.basis.iter().enumerate() {
+            assert!(
+                row.len_sq().sub(Fx::ONE).abs() < Fx::from_ratio(1, 100),
+                "axis {i} is no longer of unit length: {:?}",
+                row.len_sq()
+            );
+            let next = thrown.basis[(i + 1) % 3];
+            let dot = row
+                .x
+                .mul(next.x)
+                .add(row.y.mul(next.y))
+                .add(row.z.mul(next.z));
+            assert!(
+                dot.abs() < Fx::from_ratio(1, 100),
+                "axes {i} and {} are no longer square: {dot:?}",
+                (i + 1) % 3
+            );
+        }
+        // Dropped straight down with no speed of its own, it lands as it
+        // was laid: falling alone is not tumbling.
+        let still = &b.fragments[1];
+        assert_eq!(still.basis[0], IDENTITY[0], "the still piece turned");
+        // What it turned to when it stopped is what it keeps.
+        let turned = thrown.basis;
+        for tick in 30..90 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert!(
+            b.fragments[0].resting,
+            "still in the air after three seconds"
+        );
+        assert_ne!(b.fragments[0].basis, turned, "it stopped turning too early");
+    }
     /// A piece falls onto one that landed before it and stands on it
     /// (ADR-308) instead of sinking through it to the ground. Two
     /// materials, so that the heap of a cell (ADR-292) does not gather
@@ -2665,6 +2749,7 @@ fn advance_fragment(
             }
         }
     }
+    tumble(f, t);
     let sleep = Fx::from_ratio(
         t.sleep_mm_s as i32,
         voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
@@ -2677,6 +2762,46 @@ fn advance_fragment(
     false
 }
 
+/// A flying piece tumbles (ADR-309): it turns about one of its own axes,
+/// chosen by its number, as fast as it goes. The turn lives in the basis
+/// the piece already carries, so nothing is added to what is saved, and
+/// a piece that lands keeps the face it landed on. A piece dropped into
+/// place with no speed does not turn at all.
+fn tumble(f: &mut Fragment, t: &Blast) {
+    if t.spin_deg_s == 0 || f.chunk.is_some() {
+        return;
+    }
+    // The spin comes from the throw, not from the fall: a piece dropped
+    // straight down has nothing to turn it, and one that flies sideways or
+    // bounces does.
+    let speed = f
+        .velocity
+        .x
+        .mul(f.velocity.x)
+        .add(f.velocity.z.mul(f.velocity.z))
+        .sqrt();
+    // Degrees a second for each unit of speed a tick, into binary angle
+    // a tick: `deg × FULL / 360 / ticks`.
+    let turn = speed
+        .mul(Fx::from_ratio(
+            t.spin_deg_s as i32 * (fx::angle::FULL / 360),
+            crate::TICKS_PER_SECOND,
+        ))
+        .to_int_trunc();
+    if turn == 0 {
+        return;
+    }
+    let axis = (f.id % 3) as usize;
+    let (c, s) = (fx::angle::cos(turn), fx::angle::sin(turn));
+    let (i, j) = ((axis + 1) % 3, (axis + 2) % 3);
+    for row in &mut f.basis {
+        let v = arr(*row);
+        let mut out = v;
+        out[i] = v[i].mul(c).sub(v[j].mul(s));
+        out[j] = v[i].mul(s).add(v[j].mul(c));
+        *row = v3(out).renormalised();
+    }
+}
 /// Move a piece out of a hull's box by the nearest side, in the hull's
 /// own frame, keeping its height (ADR-302).
 fn evict(f: &mut Fragment, h: &Hull, low: [Fx; 3], high: [Fx; 3]) {
