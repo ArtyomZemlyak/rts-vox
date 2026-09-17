@@ -619,12 +619,18 @@ pub fn refresh(
     };
     for mut t in &mut text {
         let pieces = &scene.sim.matter.debris.fragments;
-        let debris = if pieces.is_empty() {
+        let bodies = scene.sim.bodies.list.len();
+        let debris = if pieces.is_empty() && bodies == 0 {
             String::new()
         } else {
             let settled = pieces.iter().filter(|f| f.resting).count();
+            let falling = if bodies > 0 {
+                format!(" · падает тел: {bodies}")
+            } else {
+                String::new()
+            };
             format!(
-                "\nОбломки: {} летят / {settled} на земле\n",
+                "\nОбломки: {} летят / {settled} на земле{falling}\n",
                 pieces.len() - settled
             )
         };

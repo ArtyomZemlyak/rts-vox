@@ -1,0 +1,19 @@
+// A slab of concrete on one pillar, the shell aimed at the pillar's foot:
+// the pillar goes, the slab is left without support and falls whole,
+// baking back where it lands (ADR-300). Millimetre scale: one world cell
+// is 0.1 m. Run the range window with `--range data/range-slab.ron`.
+(
+    target: (384, 20, 336),
+    airburst_on_target: true,
+    clear_min: (315, 274),
+    clear_max: (483, 401),
+    units: [
+        (kind: Tank, at: (439, 16, 336)), // a witness behind the pillar, where the cover layout parks one
+    ],
+    blocks: [
+        (min: (380, 0, 332), max: (388, 40, 340), material: 2), // pillar, rooted in the ground
+        (min: (372, 40, 324), max: (396, 44, 348), material: 2), // slab on top of it
+    ],
+    power_milli: [500, 1000, 2000, 4000],
+    unit_resistance: 180,
+)

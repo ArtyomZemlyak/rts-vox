@@ -1502,10 +1502,11 @@ fn advance(
         }
         if scene.frame.is_multiple_of(30) {
             println!(
-                "frame={} blast_age={age:.2}s removed={} pending_edits={}",
+                "frame={} blast_age={age:.2}s removed={} pending_edits={} bodies={}",
                 scene.frame,
                 scene.sim.removed,
-                scene.sim.world.queued()
+                scene.sim.world.queued(),
+                scene.sim.bodies.list.len()
             );
         }
     }
