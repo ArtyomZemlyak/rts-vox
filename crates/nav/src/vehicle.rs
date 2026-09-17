@@ -180,7 +180,10 @@ impl<'a> Probe<'a> {
     fn scan(&self, x: i32, z: i32) -> (u16, [u16; 2]) {
         let mut floor = 0;
         let mut span = [u16::MAX, 0];
-        for y in (0..self.world.ny).rev() {
+        // The walk starts at the column's own ceiling, not at the sky
+        // (ADR-313): above it there is nothing, and on the range that was
+        // a hundred and seventy-four empty cells every time.
+        for y in (0..self.world.column_ceiling(x as u32, z as u32)).rev() {
             if !self.world.solid(x as u32, y, z as u32) {
                 continue;
             }

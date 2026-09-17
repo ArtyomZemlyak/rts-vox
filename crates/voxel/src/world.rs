@@ -162,6 +162,13 @@ pub struct World {
     cy: u32,
     /// Битовый объём занятости, плотный. Слово на 64 воксела по X.
     bits: Vec<u64>,
+    /// Потолок колонки: на единицу выше самого высокого занятого
+    /// воксела, ноль у пустой (ADR-313). Считается из битового объёма
+    /// при сборке мира и правится вместе с ним. Это **сводка**, а не
+    /// состояние: в снимок и хеш не входит и восстанавливается из тех же
+    /// бит. Навигация искала пол колонки обходом от неба — сто семьдесят
+    /// четыре пустые ячейки на колонку полигона.
+    ceiling: Vec<u16>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
@@ -284,6 +291,49 @@ fn fill_bits(
     bits
 }
 
+/// Потолок каждой колонки из готового битового объёма (ADR-313).
+///
+/// Обход идёт сверху вниз по рядам `y` и помнит, какие колонки уже
+/// ответили: пустое небо — это нулевые слова, они пропускаются целиком,
+/// а ниже поверхности почти каждая колонка отвечает за первые же ряды.
+/// У мира есть дно-рамка (ADR-034), поэтому к `y = 0` отвечают все.
+fn fill_ceiling(nx: u32, ny: u32, nz: u32, wx: u32, bits: &[u64]) -> Vec<u16> {
+    let (wxu, nzu) = (wx as usize, nz as usize);
+    let mut ceiling = vec![0u16; nx as usize * nzu];
+    if nx == 0 || ny == 0 || nz == 0 {
+        return ceiling;
+    }
+    let mut done = vec![0u64; wxu * nzu];
+    let mut left = nx as usize * nzu;
+    for y in (0..ny).rev() {
+        if left == 0 {
+            break;
+        }
+        let row = y as usize * nzu * wxu;
+        for z in 0..nzu {
+            for w in 0..wxu {
+                let i = z * wxu + w;
+                let fresh = bits[row + i] & !done[i];
+                if fresh == 0 {
+                    continue;
+                }
+                done[i] |= fresh;
+                let mut rest = fresh;
+                while rest != 0 {
+                    let b = rest.trailing_zeros();
+                    rest &= rest - 1;
+                    let x = w as u32 * 64 + b;
+                    if x < nx {
+                        ceiling[x as usize + nx as usize * z] = (y + 1) as u16;
+                        left -= 1;
+                    }
+                }
+            }
+        }
+    }
+    ceiling
+}
+
 impl World {
     /// Создать мир и построить битовый объём из генератора.
     ///
@@ -352,6 +402,7 @@ impl World {
             ny.div_ceil(CS as u32),
             nz.div_ceil(CS as u32),
         );
+        let ceiling = fill_ceiling(nx, ny, nz, nx.div_ceil(64), &bits);
         World {
             nx,
             ny,
@@ -369,6 +420,7 @@ impl World {
             cx,
             cy,
             bits,
+            ceiling,
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
             applied: Vec::new(),
@@ -377,6 +429,17 @@ impl World {
             defer_buf: Vec::new(),
             materialized: 0,
         }
+    }
+
+    /// На единицу выше самого высокого занятого воксела колонки; ноль,
+    /// если колонка пуста или лежит за миром (ADR-313). Тот же ответ,
+    /// что у обхода колонки сверху вниз, только без обхода.
+    #[inline]
+    pub fn column_ceiling(&self, x: u32, z: u32) -> u32 {
+        if x >= self.nx || z >= self.nz {
+            return 0;
+        }
+        u32::from(self.ceiling[x as usize + self.nx as usize * z as usize])
     }
 
     #[inline]
@@ -722,6 +785,24 @@ impl World {
             self.bits[w] &= !m;
         } else {
             self.bits[w] |= m;
+        }
+        // The column's ceiling moves with the bit (ADR-313). Filling can
+        // only raise it; emptying lowers it only when the cell taken was
+        // the top one, and then the next cell down is found by a walk
+        // that starts where the old ceiling was, not at the sky.
+        let c = e.x as usize + self.nx as usize * e.z as usize;
+        if e.mat != AIR {
+            self.ceiling[c] = self.ceiling[c].max((e.y + 1) as u16);
+        } else if u32::from(self.ceiling[c]) == e.y + 1 {
+            let mut top = 0;
+            for y in (0..e.y).rev() {
+                let (w, m) = self.bit_index(e.x, y, e.z);
+                if self.bits[w] & m != 0 {
+                    top = y + 1;
+                    break;
+                }
+            }
+            self.ceiling[c] = top as u16;
         }
         Some(was)
     }
@@ -1375,6 +1456,67 @@ mod tests {
 
     fn world() -> World {
         World::new(64, 48, 64, 1000, Box::new(Layers { h: 30 }))
+    }
+
+    /// Потолок колонки обязан отвечать ровно то, что ответил бы обход
+    /// от неба (ADR-313) — и после правок тоже. Правка вверх поднимает
+    /// потолок, снятие с самого верха опускает его на следующий занятый
+    /// воксель, а снятие изнутри толщи не трогает вовсе.
+    #[test]
+    fn the_column_ceiling_answers_as_a_walk_from_the_sky_would() {
+        let walk = |w: &World, x: u32, z: u32| {
+            (0..w.ny)
+                .rev()
+                .find(|&y| w.solid(x, y, z))
+                .map_or(0, |y| y + 1)
+        };
+        let check = |w: &World, when: &str| {
+            for z in 0..w.nz {
+                for x in 0..w.nx {
+                    assert_eq!(
+                        w.column_ceiling(x, z),
+                        walk(w, x, z),
+                        "колонка {x},{z} {when}"
+                    );
+                }
+            }
+        };
+        let mut w = world();
+        check(&w, "у свежего мира");
+        assert_eq!(w.column_ceiling(5, 5), 30, "слоистый генератор до 30");
+        assert_eq!(w.column_ceiling(64, 0), 0, "за миром потолка нет");
+        // Строится вверх: потолок обязан подняться.
+        w.queue_edit(Edit {
+            x: 5,
+            y: 40,
+            z: 5,
+            mat: 2,
+            by: NOBODY,
+        });
+        w.flush();
+        assert_eq!(w.column_ceiling(5, 5), 41);
+        check(&w, "после постройки");
+        // Снимается верх: потолок обязан опуститься до толщи под ним.
+        w.queue_dig(5, 40, 5);
+        w.flush();
+        assert_eq!(w.column_ceiling(5, 5), 30);
+        // Снимается изнутри толщи: потолок стоит.
+        w.queue_dig(5, 10, 5);
+        w.flush();
+        assert_eq!(w.column_ceiling(5, 5), 30);
+        // Снимается верхний воксель толщи, один за другим.
+        for y in (20..30).rev() {
+            w.queue_dig(5, y, 5);
+            w.flush();
+            assert_eq!(w.column_ceiling(5, 5), y, "сняли {y}");
+        }
+        check(&w, "после копки");
+        // Колонка выбирается до дна-рамки: у рамки потолок единица.
+        for y in (1..20).rev() {
+            w.queue_dig(5, y, 5);
+        }
+        w.flush();
+        check(&w, "после выборки до рамки");
     }
 
     /// Нетронутый мир обязан совпадать с генератором во всех вокселях —
