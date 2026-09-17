@@ -46,6 +46,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 
 Уже собранный полигон открывается двойным щелчком по `scripts/play-range.cmd`.
 Из PowerShell в папке `scripts` запустите `.\play-range.cmd`.
+Ключ `-Build` сначала пересобирает окно (без ключа сборка идёт только
+тогда, когда `target/release/blast.exe` ещё нет); `-Settings` открывает
+меню настроек сразу, `-Weapon shell` выбирает оружие, `-LayoutPath
+data/range-slab.ron` — раскладку (плита на одной опоре). Ярлыки на
+рабочем столе — «Полигон» и «Полигон — собрать и запустить» — делает
+`scripts/make-range-shortcuts.ps1`; повторный запуск переписывает их.
 Обёртка задаёт `ExecutionPolicy Bypass` только для своего процесса PowerShell;
 настройки пользователя и системы остаются прежними.
 
