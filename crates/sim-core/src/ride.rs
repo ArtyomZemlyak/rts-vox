@@ -207,6 +207,8 @@ mod tests {
             approach_pct: 60,
             settle_pct: 35,
             settle_tilt_pct: 50,
+            push_max_mps: 8,
+            spin_max_deg_s: 120,
             gait: None,
         }
     }

@@ -190,6 +190,11 @@ impl RangeUnit {
                 }
             }
         }
+        // A dead body's legs carry nothing: they all fold, and the hull
+        // comes down on them (ADR-304).
+        if !self.status.alive {
+            self.motion.legs_buckled.fill(true);
+        }
         // A segment whose mount in the root is gone leaves whole, and
         // everything hanging from it goes with it (ADR-278).
         for i in 0..self.body.segments.len() {
@@ -3335,6 +3340,93 @@ mod tests {
         let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
+    }
+    /// A leg cut through its shin buckles though most of it stands
+    /// (ADR-304): a slab one cell thick across the shin is a tenth of the
+    /// leg, far under the buckling share, and the leg is in two pieces.
+    #[test]
+    fn a_leg_cut_through_its_shin_buckles_though_most_of_it_stands() {
+        let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        a.control();
+        for _ in 0..30 {
+            a.step();
+        }
+        let leg = a.units[0].body.legs[1];
+        let shin = leg.shin as usize;
+        let (nx, ny, nz) = {
+            let b = &a.units[0].body.segments[shin].body;
+            (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize)
+        };
+        let cut = nx / 2;
+        let mut taken = 0;
+        for z in 0..nz {
+            for y in 0..ny {
+                if a.units[0].body.segments[shin].body.remove(cut, y, z) {
+                    a.units[0]
+                        .seg_removed
+                        .push((shin as u8, [cut as u8, y as u8, z as u8]));
+                    taken += 1;
+                }
+            }
+        }
+        assert!(taken > 0 && taken < 60, "the cut took {taken} cells");
+        a.matter.annihilate_body(0, taken);
+        a.units[0].refresh_damage(0);
+        let u = &a.units[0];
+        assert!(!u.seg_gone[shin], "the shin fell off instead of buckling");
+        assert_eq!(u.motion.legs_buckled, [false, true, false, false]);
+        assert!(u.status.alive);
+    }
+    /// A dead walker folds every leg and comes down on them (ADR-304): a
+    /// treble bolt into its core kills it, and within three seconds its
+    /// hull sits well below where it stood.
+    #[test]
+    fn a_dead_walker_folds_its_legs_and_comes_down() {
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        c.energy *= 3;
+        // No `control()`: it would silence the gun of a range nobody plays.
+        let mut a = BlastRange::with_layout(c, walker_layout()).unwrap();
+        let core = {
+            let u = &a.units[0];
+            let (x, y, z) = u.body.core;
+            let half = usize::from(u.body.core_size) / 2;
+            u.world_pos([
+                usize::from(x) + half,
+                usize::from(y) + half,
+                usize::from(z) + half,
+            ])
+        };
+        a.aim = Some(core);
+        for _ in 0..30 {
+            a.step();
+        }
+        let level = a.units[0].motion.hull.y;
+        let floor = a.units[0].motion.pos[1];
+        let mut dead = None;
+        for _ in 0..400 {
+            a.step();
+            if !a.units[0].status.alive {
+                dead = Some(a.tick);
+                break;
+            }
+        }
+        dead.expect("the bolt did not kill the walker");
+        assert!(
+            a.units[0].motion.legs_buckled.iter().all(|b| *b),
+            "a dead walker's legs did not all fold: {:?}",
+            a.units[0].motion.legs_buckled
+        );
+        for _ in 0..90 {
+            a.step();
+        }
+        let u = &a.units[0];
+        let drop = level.sub(u.motion.hull.y);
+        assert!(
+            drop > level.sub(floor).mul(Fx::from_ratio(2, 5)),
+            "the hull did not come down: stood {level:?} over {floor:?}, now {:?}",
+            u.motion.hull.y
+        );
     }
     /// A leg whose thigh and shin lost more than half their cells buckles
     /// (ADR-281, ADR-288): it folds on its foot, carries nothing, the

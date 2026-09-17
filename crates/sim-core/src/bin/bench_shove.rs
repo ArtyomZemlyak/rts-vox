@@ -116,13 +116,16 @@ fn main() {
         {
             landed = Some(i);
         }
-        if i < 12 || i.is_multiple_of(15) {
+        if i < 20 || i.is_multiple_of(15) {
             trail.push(format!(
-                "{i}:y{:.2}/vy{:.2}/x{:.1}/s{:.1}",
+                "{i}:y{:.2}/vy{:.2}/x{:.1}/s{:.1}/w{:.2}/up{:.2}/ld{:.2}",
                 h.to_f64_lossy(),
                 m.hull.vy.to_f64_lossy(),
                 m.pos[0].sub(at_impact[0]).to_f64_lossy(),
-                m.shove.len_sq().sqrt().to_f64_lossy()
+                m.shove.len_sq().sqrt().to_f64_lossy(),
+                m.hull.w.len_sq().sqrt().to_f64_lossy(),
+                m.hull.up.y.to_f64_lossy(),
+                m.hull.load.to_f64_lossy()
             ));
         }
     }

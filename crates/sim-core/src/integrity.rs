@@ -24,6 +24,58 @@ pub struct Model {
     legs: Vec<u32>,
 }
 
+/// Whether a link's solid cells no longer join its two ends along its
+/// length — the x axis of a leg's link (ADR-304). A link cut through
+/// anywhere is severed, however many cells stand on either side of the
+/// cut; a link with no cell at its hip end is severed too.
+fn severed(b: &UnitBody) -> bool {
+    let (nx, ny, nz) = (b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize);
+    if nx == 0 || ny == 0 || nz == 0 {
+        return true;
+    }
+    let idx = |x: usize, y: usize, z: usize| x + nx * (y + ny * z);
+    let mut seen = vec![false; nx * ny * nz];
+    let mut stack = Vec::new();
+    for z in 0..nz {
+        for y in 0..ny {
+            if b.vol.get(0, y, z) {
+                seen[idx(0, y, z)] = true;
+                stack.push((0usize, y, z));
+            }
+        }
+    }
+    while let Some((x, y, z)) = stack.pop() {
+        if x + 1 == nx {
+            return false;
+        }
+        let mut next = Vec::with_capacity(6);
+        if x > 0 {
+            next.push((x - 1, y, z));
+        }
+        next.push((x + 1, y, z));
+        if y > 0 {
+            next.push((x, y - 1, z));
+        }
+        if y + 1 < ny {
+            next.push((x, y + 1, z));
+        }
+        if z > 0 {
+            next.push((x, y, z - 1));
+        }
+        if z + 1 < nz {
+            next.push((x, y, z + 1));
+        }
+        for (qx, qy, qz) in next {
+            let i = idx(qx, qy, qz);
+            if !seen[i] && b.vol.get(qx, qy, qz) {
+                seen[i] = true;
+                stack.push((qx, qy, qz));
+            }
+        }
+    }
+    true
+}
+
 /// Cells of a leg's thigh and shin in a body.
 fn leg_cells(body: &UnitBody, leg: &voxel::unit::Leg) -> u32 {
     [leg.thigh, leg.shin]
@@ -88,14 +140,24 @@ impl Model {
     /// Which legs have lost more than the buckling share of their thigh and
     /// shin cells (ADR-281), in leg order. A leg with no cells in the
     /// template never buckles.
+    /// A leg buckles when its links lost more than the buckling share of
+    /// their cells (ADR-281), or when either link is cut through (ADR-304):
+    /// a thin leg severed by a bolt stands on nothing whatever is left of
+    /// it.
     pub fn buckled(&self, body: &UnitBody) -> Vec<bool> {
         body.legs
             .iter()
             .zip(&self.legs)
             .map(|(leg, original)| {
                 let lost = original.saturating_sub(leg_cells(body, leg));
+                let cut = [leg.thigh, leg.shin]
+                    .iter()
+                    .filter_map(|i| body.segments.get(usize::from(*i)))
+                    .any(|s| severed(&s.body));
                 *original > 0
-                    && lost as u64 * 100 > u64::from(*original) * self.rules.leg_buckle_pct as u64
+                    && (cut
+                        || lost as u64 * 100
+                            > u64::from(*original) * self.rules.leg_buckle_pct as u64)
             })
             .collect()
     }

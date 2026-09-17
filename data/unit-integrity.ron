@@ -11,4 +11,7 @@
     // A buckled leg folds on its own foot: the foot keeps this share of
     // its rest reach from the hip, so the knee bends out (ADR-288).
     leg_fold_pct: 35,
+    // A walker with fewer than two legs carrying — dead, or every leg
+    // buckled or lost — sits at this share of its clearance (ADR-304).
+    collapse_clearance_pct: 25,
 )

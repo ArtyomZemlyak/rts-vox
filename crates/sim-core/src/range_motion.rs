@@ -109,6 +109,9 @@ pub struct Motion {
     /// Share of a buckled leg's rest reach its foot keeps, thousandths
     /// (ADR-288), from the integrity data.
     fold_milli: u32,
+    /// Clearance of a walker with fewer than two legs carrying, per cent
+    /// of the ride's (ADR-304), from the integrity data.
+    collapse_pct: i32,
     // Installed engine sizing is based on the pristine machine. Losing armour
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
@@ -158,13 +161,12 @@ impl Motion {
         };
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
-        let fold_milli = modding::integrity::Integrity::from_ron(include_str!(
+        let integrity = modding::integrity::Integrity::from_ron(include_str!(
             "../../../data/unit-integrity.ron"
         ))
-        .expect("unit integrity tuning")
-        .leg_fold_pct
-        .clamp(0, 100) as u32
-            * 10;
+        .expect("unit integrity tuning");
+        let fold_milli = integrity.leg_fold_pct.clamp(0, 100) as u32 * 10;
+        let collapse_pct = integrity.collapse_clearance_pct.clamp(0, 100);
         let legs_lost = vec![false; rigs.len()];
         let legs_buckled = vec![false; rigs.len()];
         Self {
@@ -202,6 +204,7 @@ impl Motion {
             shove: V3::ZERO,
             rigs,
             fold_milli,
+            collapse_pct,
             navigation,
             yielding,
             blocked_ticks: 0,
@@ -318,20 +321,36 @@ impl Motion {
                 .clamp(1, i32::MAX as u128) as i32
         };
         let units_per_metre = (1000 / i32::from(voxel::unit::WORLD_MM)).max(1);
+        // No single push throws a hull faster than the chassis allows: a
+        // bolt in the body presses on every cell at once, and the sum has
+        // no ceiling of its own (ADR-304).
         let dv = Fx::from_int(newton_s as i32)
             .div(Fx::from_int(mass_kg))
-            .mul(Fx::from_int(units_per_metre));
+            .mul(Fx::from_int(units_per_metre))
+            .min(Fx::from_int(
+                self.chassis.push_max_mps.max(1) * units_per_metre,
+            ));
         let push = dir.scale(dv);
         self.shove = self.shove.add(V3::new(push.x, Fx::ZERO, push.z));
         self.hull.vy = self.hull.vy.add(push.y);
         // The push lands where the pressure did: its moment about the
-        // centre of mass rolls or pitches the hull.
+        // centre of mass rolls or pitches the hull, no faster than the
+        // chassis allows.
         let torque = hit.sub(centre).cross(push);
         let k2 = r.inertia.max(Fx::ONE);
-        self.hull.w = self
+        let w = self
             .hull
             .w
             .add(V3::new(torque.x.div(k2), Fx::ZERO, torque.z.div(k2)));
+        let spin = w.x.mul(w.x).add(w.z.mul(w.z)).sqrt();
+        let spin_max = Fx::from_int(self.chassis.spin_max_deg_s.max(1))
+            .mul(Fx::from_ratio(314159, 100000))
+            .div(Fx::from_int(180));
+        self.hull.w = if spin > spin_max {
+            w.scale(spin_max.div(spin))
+        } else {
+            w
+        };
     }
     /// Spend the shove against the brakes for one tick; the terrain spends
     /// the rest when it refuses the slide.
@@ -461,17 +480,38 @@ impl Motion {
         self.brake_shove(&lim);
         moved
     }
+    /// Whether the legs carry the hull: a tracked hull always, a walker
+    /// with at least two legs neither lost nor buckled (ADR-280). A walker
+    /// with fewer sits at the collapse clearance on its folded legs
+    /// (ADR-304): dead, or with every leg gone or buckled.
+    fn carried(&self) -> bool {
+        self.rigs.is_empty()
+            || self
+                .legs_lost
+                .iter()
+                .zip(&self.legs_buckled)
+                .filter(|(lost, buckled)| !**lost && !**buckled)
+                .count()
+                >= 2
+    }
+    /// The ride of this hull now: the chassis' ride at the range's gravity,
+    /// low on its legs when none carries. On the chassis' nominal mass, not
+    /// the volume left (ADR-302, ADR-304): scaled by the cells a bolt left,
+    /// a wrecked walker's springs and dampers threw it twenty times as
+    /// hard, and a dead one landing on folded legs went up like a shell.
+    fn ride_now(&self, gravity: i32) -> phys::Ride {
+        let mut r = crate::ride::ride_of(&self.chassis);
+        r.gravity = Fx::from_int(gravity);
+        r.preload = r.gravity.div(Fx::from_int(4));
+        if !self.carried() {
+            r.clearance = r.clearance.mul(Fx::from_ratio(self.collapse_pct, 100));
+        }
+        r
+    }
     /// A parked walker's hull rests on its legs (ADR-280): a lost leg lets
     /// it sink and lean where it stands. A tracked hull keeps the resting
     /// pose unless a burst disturbed it (ADR-286).
-    fn settle(
-        &mut self,
-        w: &World,
-        rubble: &nav::vehicle::Rubble,
-        b: &UnitBody,
-        gravity: i32,
-        response: crate::mobility::Mobility,
-    ) {
+    fn settle(&mut self, w: &World, rubble: &nav::vehicle::Rubble, b: &UnitBody, gravity: i32) {
         if self.rigs.is_empty() && !self.disturbed() {
             return;
         }
@@ -489,10 +529,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let mut r = crate::ride::ride_of(&self.chassis);
-        r.gravity = Fx::from_int(gravity);
-        r.preload = r.gravity.div(Fx::from_int(4));
-        let r = response.ride(r);
+        let r = self.ride_now(gravity);
         phys::step(
             &mut self.hull,
             &support,
@@ -687,7 +724,7 @@ impl Motion {
             // a parked walker still stands on its feet, and its hull on them.
             let moved = self.slide(w, rubble, b, others, response);
             self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
-            self.settle(w, rubble, b, gravity, response);
+            self.settle(w, rubble, b, gravity);
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
@@ -891,10 +928,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let mut r = crate::ride::ride_of(&self.chassis);
-        r.gravity = Fx::from_int(gravity);
-        r.preload = r.gravity.div(Fx::from_int(4));
-        let r = response.ride(r);
+        let r = self.ride_now(gravity);
         let sway = crate::ride::sway_of(
             self.drive.vel.sub(old.vel).mul(Fx::from_int(30)),
             self.drive.vel,

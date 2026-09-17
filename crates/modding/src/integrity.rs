@@ -16,12 +16,20 @@ pub struct Integrity {
     /// per cent (ADR-288): the leg folds on its foot rather than lifting.
     #[serde(default = "a_third")]
     pub leg_fold_pct: i32,
+    /// Clearance of a walker with fewer than two legs carrying — dead, or
+    /// with every leg buckled or lost — per cent of the ride's (ADR-304):
+    /// the hull comes down onto its folded legs.
+    #[serde(default = "a_quarter")]
+    pub collapse_clearance_pct: i32,
 }
 fn no_buckling() -> i32 {
     100
 }
 fn a_third() -> i32 {
     35
+}
+fn a_quarter() -> i32 {
+    25
 }
 impl Integrity {
     pub fn from_ron(text: &str) -> Result<Self, String> {
