@@ -141,6 +141,12 @@ pub struct Motion {
     stranded: bool,
     recovery_head: i32,
     next_plan: u32,
+    /// The range hands out permission to begin a search each tick
+    /// (ADR-312); `started` reports back whether this hull used it. Both
+    /// are scratch for the tick, not state: the range sets them before
+    /// every step, and a hull stepped by anything else may always begin.
+    may_start: bool,
+    started: bool,
 }
 impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
@@ -218,6 +224,8 @@ impl Motion {
             stranded: false,
             recovery_head: 0,
             next_plan: 0,
+            may_start: true,
+            started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
             hunt: None,
@@ -750,6 +758,16 @@ impl Motion {
             self.replan
         }
     }
+    /// May this hull begin a search this tick, and did it. The range
+    /// hands the permission out under a ceiling (ADR-312); a hull refused
+    /// keeps its order and asks again next tick.
+    pub fn allow_start(&mut self, may: bool) {
+        self.may_start = may;
+        self.started = false;
+    }
+    pub fn started_search(&self) -> bool {
+        self.started
+    }
     /// Planner budget and weight, for benches and tests; the data sets them.
     pub fn set_search(&mut self, nodes: usize, heuristic_pct: u32) {
         self.navigation.search_nodes = nodes;
@@ -822,8 +840,10 @@ impl Motion {
             && self.escape_left == 0
             && (self.blocked || self.path.is_empty())
             && tick >= self.next_plan
+            && self.may_start
         {
             if let Some(goal) = self.destination {
+                self.started = true;
                 self.move_to(w, goal, b, others, rubble);
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
@@ -835,8 +855,10 @@ impl Motion {
             && alive
             && engine
             && (!self.blocked || (tick.is_multiple_of(self.replan) && tick >= self.next_plan))
+            && self.may_start
         {
             let goal = self.route[self.waypoint];
+            self.started = true;
             self.move_to(w, goal, b, others, rubble);
             if self.dry {
                 self.next_plan = tick.saturating_add(self.replan_after_search());

@@ -1134,7 +1134,7 @@ pub struct BlastRange {
     pub aim: Option<[i32; 3]>,
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
-    navigation: modding::navigation::Navigation,
+    pub navigation: modding::navigation::Navigation,
     pub shields: Vec<RangeShield>,
     /// Transient renderer notification, like `surface_changed`.
     pub shield_hits: Vec<ShieldHit>,
@@ -2123,7 +2123,15 @@ impl BlastRange {
             .iter()
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
+        // Beginning a search is dearer than a slice of one (ADR-312): the
+        // goal is probed from every heading over a ring of cells and a
+        // straight run to it is walked whole, and five hulls replanning
+        // together made the dearest tick of the range. A tick begins only
+        // so many; the hulls over the ceiling keep their orders and ask
+        // again next tick, in the same stable slot order.
+        let mut starts = self.navigation.searches_started_per_tick;
         for (id, u) in self.units.iter_mut().enumerate() {
+            u.motion.allow_start(starts > 0);
             if self.patrols_running {
                 let others: Vec<_> = positions
                     .iter()
@@ -2151,7 +2159,9 @@ impl BlastRange {
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
             }
+            starts = starts.saturating_sub(usize::from(u.motion.started_search()));
         }
+        self.gun.motion.allow_start(starts > 0);
         self.gun.motion.step(
             &self.world,
             &self.gun.body,
@@ -5335,6 +5345,52 @@ mod tests {
         assert_eq!(a.gun.motion.destination, None);
     }
 
+    #[test]
+    fn a_tick_begins_no_more_searches_than_the_ceiling_allows() {
+        // Beginning a search costs a hundred times a slice of one
+        // (ADR-312), so a tick begins only so many and the hulls over the
+        // ceiling keep their orders for the next tick. Every hull still
+        // gets its route: the patrol drives on.
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        let mut r = BlastRange::with_layout(config(), layout).unwrap();
+        r.control();
+        assert_eq!(
+            r.navigation.searches_started_per_tick, 1,
+            "the data's ceiling"
+        );
+        let began = |r: &BlastRange| {
+            r.units.iter().filter(|u| u.motion.started_search()).count()
+                + usize::from(r.gun.motion.started_search())
+        };
+        let mut total = 0;
+        for _ in 0..400 {
+            r.step();
+            let n = began(&r);
+            assert!(n <= 1, "{n} searches began in one tick");
+            total += n;
+        }
+        assert!(total > 5, "the patrol never planned: {total}");
+        assert!(
+            r.units.iter().any(|u| !u.motion.path.is_empty()),
+            "no hull ever got a route"
+        );
+        // Without the ceiling the hulls pile into the same tick, which is
+        // what made the dearest tick of the range.
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        let mut loose = BlastRange::with_layout(config(), layout).unwrap();
+        loose.control();
+        loose.navigation.searches_started_per_tick = usize::MAX;
+        let mut worst = 0;
+        for _ in 0..400 {
+            loose.step();
+            worst = worst.max(began(&loose));
+        }
+        assert!(worst > 1, "the ceiling was not what kept them apart");
+    }
     fn config() -> ExplosionConfig {
         ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
     }

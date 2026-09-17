@@ -5,6 +5,10 @@
     // 1072 nodes and 70 ms whole, so 96 keeps a slice near five
     // milliseconds and answers it in a third of a second.
     search_nodes_per_tick: 96,
+    // Searches the range may begin in one tick (ADR-312). A slice of a
+    // search costs 0,15 мс, but beginning one costs 2–3: five hulls
+    // replanning together made the dearest tick of the range, 15,6 мс.
+    searches_started_per_tick: 1,
     // After recovery_ticks refused, the hull runs a cycle of escape
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.

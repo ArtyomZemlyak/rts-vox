@@ -8,6 +8,13 @@ pub struct Navigation {
     /// then found over several ticks instead of stopping one.
     #[serde(default = "whole_search")]
     pub search_nodes_per_tick: usize,
+    /// Searches the whole range may **begin** in one tick (ADR-312).
+    /// Beginning one is dearer than a slice of one: the goal is probed
+    /// from every heading over a ring of cells and a straight run to it
+    /// is walked whole. Hulls over the ceiling keep their order and try
+    /// again next tick.
+    #[serde(default = "every_start")]
+    pub searches_started_per_tick: usize,
     pub recovery_ticks: u32,
     pub escape_ticks: u32,
     pub escape_speed_pct: i32,
@@ -25,6 +32,10 @@ fn plain_heuristic() -> u32 {
 }
 /// Older data without a slice budget searches whole, as it used to.
 fn whole_search() -> usize {
+    usize::MAX
+}
+/// Older data begins every search the tick asks for, as it used to.
+fn every_start() -> usize {
     usize::MAX
 }
 /// What a tracked hull pushes over instead of driving around.
@@ -47,7 +58,8 @@ pub struct Felling {
 impl Navigation {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let n: Self = ron::from_str(text).map_err(|e| e.to_string())?;
-        if !(2..=16).contains(&n.cell_units)
+        if n.searches_started_per_tick == 0
+            || !(2..=16).contains(&n.cell_units)
             || 640 % n.cell_units != 0
             || !(64..=51200).contains(&n.search_nodes)
             || !(1..=300).contains(&n.recovery_ticks)
