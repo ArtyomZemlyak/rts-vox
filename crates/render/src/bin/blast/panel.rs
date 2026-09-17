@@ -635,8 +635,9 @@ pub fn refresh(
             )
         };
         *t = Text::new(format!(
-            "{state} · {:.0} FPS\n\n{instructions}\n\n{readiness}\n{target}{shields}\n{}{debris}{}",
+            "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{target}{shields}\n{}{debris}{}",
             scene.fps,
+            scene.step_us as f32 / 1000.0,
             if panel.pending.is_some() {
                 "Новый заряд после выстрела\n"
             } else {

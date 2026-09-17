@@ -11,7 +11,13 @@ pub struct Navigation {
     /// Extra contact length the planner probes with, world units: its
     /// refusals are wider than the executor's by this much.
     pub plan_margin: i32,
+    /// Weight of the planner's distance estimate, percent; 100 is plain A*.
+    #[serde(default = "plain_heuristic")]
+    pub heuristic_pct: u32,
     pub fell: Felling,
+}
+fn plain_heuristic() -> u32 {
+    100
 }
 /// What a tracked hull pushes over instead of driving around.
 #[derive(Clone, Copy, Debug, Deserialize)]

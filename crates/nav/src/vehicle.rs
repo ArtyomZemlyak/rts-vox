@@ -466,6 +466,10 @@ pub struct Search {
     /// is that much wider than the executor's, so a hull following the plan
     /// never meets a refusal the plan did not see between two samples.
     pub margin: i32,
+    /// Weight of the distance-to-goal estimate, percent: 100 is plain A*;
+    /// more trades the shortest route for far fewer expansions where every
+    /// step carries a crush price and the estimate falls short of it.
+    pub heuristic_pct: u32,
 }
 const DIR: [[i32; 2]; 8] = [
     [1, 0],
@@ -531,6 +535,13 @@ pub struct Route {
     /// No move at all was open from the start pose: the hull stands where
     /// the search cannot begin, and only moving will change that.
     pub stranded: bool,
+    /// Nodes the search expanded and poses it probed: the price of the
+    /// order, for benches and budgets.
+    pub nodes: u32,
+    pub poses: u32,
+    /// The open set ran dry before the budget: no route exists in the
+    /// world as probed, and only a change of the world can make one.
+    pub exhausted: bool,
 }
 /// An oriented A*: translations keep heading, turns reserve their swept
 /// footprint. It cannot choose a narrow corridor and then rotate through it.
@@ -555,9 +566,12 @@ pub fn plan(
     cfg: Search,
     clear: impl Fn([Fx; 2], i32) -> bool,
 ) -> Route {
-    let none = |stranded| Route {
+    let none = |stranded, exhausted, nodes, poses| Route {
         path: vec![],
         stranded,
+        nodes,
+        poses,
+        exhausted,
     };
     let shape = Shape {
         span: if shape.span >= 2 {
@@ -578,14 +592,49 @@ pub fn plan(
         || ground.world.nx as i32 % cfg.cell != 0
         || ground.world.nz as i32 % cfg.cell != 0
     {
-        return none(false);
+        return none(false, false, 0, 0);
     }
+    // The goal must be a pose the hull may take, clear of the other hulls:
+    // a point inside a parked hull, on a slope or against a wall is moved
+    // to the nearest cell within four that is, else there is no route at
+    // all — and the search does not spend its budget finding that out.
+    let mut probed = 0u32;
+    let mut goal = None;
+    'ring: for r in 0..=4i32 {
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                let p = [to[0] + dx * cfg.cell, to[1] + dz * cfg.cell];
+                if (0..2).any(|a| p[a] < cfg.min[a] || p[a] >= cfg.max[a]) {
+                    continue;
+                }
+                let q = p.map(Fx::from_int);
+                let open = (0..8).any(|d| {
+                    let yaw = d * angle::FULL / 8;
+                    probed += 1;
+                    !ground.pose(q, yaw, shape).refused() && clear(q, yaw)
+                });
+                if open {
+                    goal = Some(p);
+                    break 'ring;
+                }
+            }
+        }
+    }
+    let Some(to) = goal else {
+        return none(false, true, 0, probed);
+    };
     // A straight run through yielding matter is legal but not free: let the
     // search look for cheaper open ground first.
     if connects(&mut ground, shape, from, head, to.map(Fx::from_int), &clear) == Some(0) {
         return Route {
             path: vec![to],
             stranded: false,
+            nodes: 0,
+            poses: probed,
+            exhausted: false,
         };
     }
     let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
@@ -614,17 +663,24 @@ pub fn plan(
     open.push(Reverse((0, 0, initial)));
     let mut found = None;
     let mut left_start = false;
+    let mut nodes = 0u32;
+    let mut exhausted = false;
     for _ in 0..cfg.nodes {
         let Some(Reverse((_, cost, i))) = open.pop() else {
+            exhausted = true;
             break;
         };
         if cost != distance[i] {
             continue;
         }
+        nodes += 1;
         let at = point(i / 8);
         let direction = i % 8;
         let yaw = direction as i32 * angle::FULL / 8;
-        let pose = *poses[i].get_or_insert_with(|| ground.pose(at, yaw, shape));
+        let pose = *poses[i].get_or_insert_with(|| {
+            probed += 1;
+            ground.pose(at, yaw, shape)
+        });
         if ((at[0].to_int_trunc() - to[0])
             .abs()
             .max((at[1].to_int_trunc() - to[1]).abs())
@@ -655,7 +711,10 @@ pub fn plan(
                 continue;
             }
             let j = cell * 8 + d;
-            let next = *poses[j].get_or_insert_with(|| ground.pose(q, next_yaw, shape));
+            let next = *poses[j].get_or_insert_with(|| {
+                probed += 1;
+                ground.pose(q, next_yaw, shape)
+            });
             let next_cost =
                 cost + if turn == 0 {
                     if d.is_multiple_of(2) {
@@ -682,6 +741,7 @@ pub fn plan(
                 at[1].add(q[1]).div(Fx::from_int(2)),
             ];
             let mid_yaw = angle::norm(yaw + angle::diff(next_yaw, yaw) / 2);
+            probed += 1;
             if ground.pose(mid, mid_yaw, shape).refused() || !clear(mid, mid_yaw) {
                 continue;
             }
@@ -694,12 +754,13 @@ pub fn plan(
                 .max(q[1].sub(Fx::from_int(to[1])).abs())
                 .to_int_trunc()
                 / cfg.cell
-                * 10;
+                * cfg.heuristic_pct.max(1) as i32
+                / 10;
             open.push(Reverse((next_cost + heuristic as u32, next_cost, j)));
         }
     }
     let Some(mut i) = found else {
-        return none(!left_start);
+        return none(!left_start, exhausted, nodes, probed);
     };
     let mut all = vec![];
     while i != initial {
@@ -729,6 +790,9 @@ pub fn plan(
     Route {
         path: out,
         stranded: false,
+        nodes,
+        poses: probed,
+        exhausted: false,
     }
 }
 
@@ -909,6 +973,7 @@ mod tests {
             crush_cost: 1,
             crush_cap: 20,
             margin: 2,
+            heuristic_pct: 100,
         }
     }
     /// A soil floor with a wall of trees (trunk 7, crown 8) across x = 120..126.
@@ -1004,6 +1069,54 @@ mod tests {
         }
         w.flush();
         assert!(!Probe::new(&w).pose(at, 0, tank()).refused());
+    }
+    /// A goal inside a parked hull is served next to it (P-17): the goal
+    /// moves to the nearest open cell instead of the search running the
+    /// whole map dry to find that the point itself is taken.
+    #[test]
+    fn a_goal_inside_a_parked_hull_is_served_next_to_it() {
+        let w = world(false, false, false);
+        let parked = |p: [Fx; 2], _: i32| {
+            (p[0].to_int_trunc() - 200).abs() > 20 || (p[1].to_int_trunc() - 70).abs() > 20
+        };
+        let r = plan(
+            Probe::new(&w),
+            tank(),
+            [Fx::from_int(40), Fx::from_int(70)],
+            0,
+            [200, 70],
+            search(),
+            parked,
+        );
+        assert!(!r.exhausted && !r.path.is_empty());
+        let end = *r.path.last().unwrap();
+        assert!(
+            parked(end.map(Fx::from_int), 0),
+            "the route ends inside the hull: {end:?}"
+        );
+        assert!(
+            (end[0] - 200).abs() <= 32 && (end[1] - 70).abs() <= 32,
+            "far from the goal: {end:?}"
+        );
+        assert!(r.nodes < 400, "the snap cost a search: {} nodes", r.nodes);
+    }
+    /// A goal cut off from the hull ends the search when the open set runs
+    /// dry, well under the budget, and says so (P-17).
+    #[test]
+    fn a_cut_off_goal_ends_the_search_when_the_open_set_runs_dry() {
+        let w = world(false, false, false);
+        let fence = |p: [Fx; 2], _: i32| !(100..110).contains(&p[0].to_int_trunc());
+        let r = plan(
+            Probe::new(&w),
+            tank(),
+            [Fx::from_int(40), Fx::from_int(70)],
+            0,
+            [200, 70],
+            search(),
+            fence,
+        );
+        assert!(r.path.is_empty() && r.exhausted);
+        assert!(r.nodes > 0 && (r.nodes as usize) < search().nodes);
     }
     #[test]
     fn rounded_crest_and_gradual_slopes_fit_the_vehicle_clearance() {

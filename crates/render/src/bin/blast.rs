@@ -59,6 +59,8 @@ struct Scene {
     patrol: usize,
     previous_shell: Option<Vec3>,
     fps: f32,
+    /// The slowest simulation tick of the last thirty frames, microseconds.
+    step_us: u128,
     realtime: bool,
     live_elapsed: f32,
     last_capture: u32,
@@ -461,6 +463,7 @@ fn main() {
             patrol,
             previous_shell: None,
             fps: 60.0,
+            step_us: 0,
             realtime,
             live_elapsed: 0.0,
             last_capture: 0,
@@ -1298,7 +1301,14 @@ fn advance(
                 scene.sim.order_attack(2);
             }
         }
+        let started = std::time::Instant::now();
         scene.sim.step();
+        let us = started.elapsed().as_micros();
+        scene.step_us = if scene.frame.is_multiple_of(30) {
+            us
+        } else {
+            scene.step_us.max(us)
+        };
         scene.frame += 1;
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
@@ -1502,11 +1512,12 @@ fn advance(
         }
         if scene.frame.is_multiple_of(30) {
             println!(
-                "frame={} blast_age={age:.2}s removed={} pending_edits={} bodies={}",
+                "frame={} blast_age={age:.2}s removed={} pending_edits={} bodies={} tick_ms={:.1}",
                 scene.frame,
                 scene.sim.removed,
                 scene.sim.world.queued(),
-                scene.sim.bodies.list.len()
+                scene.sim.bodies.list.len(),
+                scene.step_us as f64 / 1000.0
             );
         }
     }

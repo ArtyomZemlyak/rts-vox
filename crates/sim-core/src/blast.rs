@@ -3847,6 +3847,24 @@ mod tests {
             "the pieces did not come down"
         );
     }
+    /// An order onto a parked unit or into the wall is served next to it
+    /// at once (P-17, ADR-301): the goal moves to the nearest open cell
+    /// instead of the search running the map dry.
+    #[test]
+    fn an_order_onto_a_parked_unit_or_into_the_wall_is_served_next_to_it() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        assert!(a.order_move([340, 336]), "no route next to the parked tank");
+        assert!(
+            a.gun.motion.last_plan[0] < 2000,
+            "the order cost {} nodes",
+            a.gun.motion.last_plan[0]
+        );
+        assert!(a.order_move([400, 336]), "no route to the wall's foot");
+        let end = *a.gun.motion.path.last().unwrap();
+        assert!(end[0] < 392, "the route ends inside the wall: {end:?}");
+    }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
     fn segment_damage_is_saved_and_hashed() {

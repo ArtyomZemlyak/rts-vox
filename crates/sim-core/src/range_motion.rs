@@ -113,6 +113,12 @@ pub struct Motion {
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
     navigation: modding::navigation::Navigation,
+    /// Nodes expanded and poses probed by the last plan: diagnostics, not
+    /// state.
+    pub last_plan: [u32; 2],
+    /// The last search ran its open set dry after expanding nodes. Read in
+    /// the same tick it is written, never across one: not state.
+    dry: bool,
     /// Materials this hull crushes instead of avoiding; empty for walkers.
     yielding: Vec<voxel::store::Mat>,
     blocked_ticks: u32,
@@ -204,6 +210,8 @@ impl Motion {
             stranded: false,
             recovery_head: 0,
             next_plan: 0,
+            last_plan: [0; 2],
+            dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
                 (u128::from(body.volume_mm3()) * chassis.density as u128 / 1_000_000_000).max(1)
@@ -538,6 +546,7 @@ impl Motion {
                 crush_cost: self.navigation.fell.cost_per_column,
                 crush_cap: self.navigation.fell.cost_cap,
                 margin: self.navigation.plan_margin,
+                heuristic_pct: self.navigation.heuristic_pct,
             },
             |p, head| {
                 !others.iter().any(|o| {
@@ -550,12 +559,33 @@ impl Motion {
             },
         );
         self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
+        // A search that ran the open set dry found the goal cut off in the
+        // world as it is; the goal stays, since the world changes — a hull
+        // moves, a tree falls, a crater fills — but the next try waits four
+        // replan periods, not one (P-17). A goal with no cell to stand on
+        // near it is refused without a search and retried as before.
+        self.dry = plan.exhausted && plan.nodes > 0;
         self.blocked = plan.path.is_empty();
         self.stranded = plan.stranded;
+        self.last_plan = [plan.nodes, plan.poses];
         self.path = plan.path;
         self.cursor = 0;
         self.enabled = true;
         !self.blocked
+    }
+    /// Ticks until the next search after the last one: four replan periods
+    /// when it ran the open set dry, one otherwise (P-17).
+    fn replan_after_search(&self) -> u32 {
+        if self.dry {
+            self.replan.saturating_mul(4)
+        } else {
+            self.replan
+        }
+    }
+    /// Planner budget and weight, for benches and tests; the data sets them.
+    pub fn set_search(&mut self, nodes: usize, heuristic_pct: u32) {
+        self.navigation.search_nodes = nodes;
+        self.navigation.heuristic_pct = heuristic_pct;
     }
     pub fn stop(&mut self) {
         self.path.clear();
@@ -619,7 +649,7 @@ impl Motion {
         {
             if let Some(goal) = self.destination {
                 self.move_to(w, goal, b, others, rubble);
-                self.next_plan = tick.saturating_add(self.replan);
+                self.next_plan = tick.saturating_add(self.replan_after_search());
             }
         }
         if self.cursor == self.path.len()
@@ -627,10 +657,13 @@ impl Motion {
             && !self.route.is_empty()
             && alive
             && engine
-            && (!self.blocked || tick.is_multiple_of(self.replan))
+            && (!self.blocked || (tick.is_multiple_of(self.replan) && tick >= self.next_plan))
         {
             let goal = self.route[self.waypoint];
             self.move_to(w, goal, b, others, rubble);
+            if self.dry {
+                self.next_plan = tick.saturating_add(self.replan_after_search());
+            }
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
