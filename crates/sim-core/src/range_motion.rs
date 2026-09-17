@@ -66,6 +66,14 @@ impl Obstacle {
 const ESCAPES: u32 = 6;
 /// Farthest a burst pushes a hull, world units from its centre (ADR-286).
 const IMPULSE_REACH: i32 = 64;
+/// How far from the edge of the world an order may still be given, world
+/// units (ADR-315). A hull needs room to turn at the far end of a route,
+/// and the planner's goal ring reaches four cells.
+const EDGE: i32 = 40;
+/// The widest world these checks accept when the world itself is not at
+/// hand: they guard a restored snapshot against nonsense, and the exact
+/// bound is the world's own, where the world is known.
+const MAX_SIDE: i32 = 16384;
 #[derive(Clone, Debug)]
 pub struct Motion {
     pub pos: [Fx; 3],
@@ -647,7 +655,10 @@ impl Motion {
                 })
             })
         };
-        self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
+        let far = [w.nx as i32 - EDGE, w.nz as i32 - EDGE];
+        self.destination = (0..2)
+            .all(|a| (EDGE..far[a]).contains(&to[a]))
+            .then_some(to);
         self.enabled = true;
         self.hunt = None;
         self.path.clear();
@@ -659,7 +670,7 @@ impl Motion {
             from,
             self.drive.head,
             to,
-            self.search(),
+            self.search(w),
             &clear,
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
@@ -678,12 +689,13 @@ impl Motion {
         }
         !self.blocked
     }
-    /// The planner's budget and rules for this hull.
-    fn search(&self) -> nav::vehicle::Search {
+    /// The planner's budget and rules for this hull. Its bounds are the
+    /// world's, less a margin at the edge (ADR-315).
+    fn search(&self, w: &World) -> nav::vehicle::Search {
         nav::vehicle::Search {
             cell: self.navigation.cell_units,
-            min: [40; 2],
-            max: [600; 2],
+            min: [EDGE; 2],
+            max: [w.nx as i32 - EDGE, w.nz as i32 - EDGE],
             nodes: self.navigation.search_nodes,
             crush_cost: self.navigation.fell.cost_per_column,
             crush_cap: self.navigation.fell.cost_cap,
@@ -1217,9 +1229,9 @@ impl Motion {
             && self.escape_left <= self.navigation.escape_ticks
             && (0..angle::FULL).contains(&self.recovery_head)
             && self.pos[0] >= Fx::ZERO
-            && self.pos[0] < Fx::from_int(640)
+            && self.pos[0] < Fx::from_int(MAX_SIDE)
             && self.pos[2] >= Fx::ZERO
-            && self.pos[2] < Fx::from_int(640)
+            && self.pos[2] < Fx::from_int(MAX_SIDE)
             && self.pos[1].abs() < Fx::from_int(384)
             && self.drive.vel.abs() <= Fx::from_int(200)
             && [self.hull.up.x, self.hull.up.y, self.hull.up.z]
@@ -1231,10 +1243,10 @@ impl Motion {
                 .path
                 .iter()
                 .chain(&self.route)
-                .all(|p| p.iter().all(|v| *v >= 0 && *v < 640))
+                .all(|p| p.iter().all(|v| *v >= 0 && *v < MAX_SIDE))
             && self
                 .destination
-                .is_none_or(|p| p.iter().all(|v| (40..600).contains(v)))
+                .is_none_or(|p| p.iter().all(|v| (EDGE..MAX_SIDE).contains(v)))
             && self.cursor <= self.path.len()
             && (self.route.is_empty() || self.waypoint < self.route.len())
     }

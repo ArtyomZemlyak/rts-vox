@@ -36,6 +36,12 @@ pub struct RangeShieldDef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeLayout {
+    /// Side, height and side of the world this layout is laid out in,
+    /// world units (ADR-315). A layout without one keeps the stock
+    /// range, so that every preset written before the size moved into
+    /// the data goes on meaning what it meant.
+    #[serde(default = "stock_size")]
+    pub size: [u32; 3],
     #[serde(default)]
     pub course: Option<RangeCourse>,
     pub target: [i32; 3],
@@ -85,6 +91,10 @@ fn default_turn_alignment() -> i32 {
 fn default_replan() -> u32 {
     90
 }
+/// The range as it was before the size moved into the data.
+pub const fn stock_size() -> [u32; 3] {
+    [640, 192, 640]
+}
 impl RangeLayout {
     pub fn to_ron(&self) -> Result<String, String> {
         self.validate()?;
@@ -98,8 +108,14 @@ impl RangeLayout {
     }
     pub fn validate(&self) -> Result<(), String> {
         let r = self;
-        let size = [640, 192, 640];
-        if r.unit_resistance == 0
+        let size = r.size.map(|v| v as i32);
+        // The side is a multiple of sixteen so that every allowed cell of
+        // the planner divides it and chunks tile it whole; the ceiling is
+        // what a dense volume of occupancy still fits in memory.
+        if r.size
+            .iter()
+            .any(|v| !(128..=16384).contains(v) || v % 16 != 0)
+            || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
             || r.units.len() > 8
             || r.blocks.len() > 32
@@ -109,7 +125,9 @@ impl RangeLayout {
             || r.target[0] <= 160
             || (0..3).any(|a| r.target[a] < 0 || r.target[a] >= size[a])
             || (0..2).any(|a| {
-                r.clear_min[a] < 0 || r.clear_max[a] > 640 || r.clear_min[a] >= r.clear_max[a]
+                r.clear_min[a] < 0
+                    || r.clear_max[a] > size[a * 2]
+                    || r.clear_min[a] >= r.clear_max[a]
             })
             || r.blocks.iter().any(|b| {
                 ![0, 1, 2, 3, 6].contains(&b.material)

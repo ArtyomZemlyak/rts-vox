@@ -20,7 +20,9 @@ use voxel::topo::unit::CoreBufs;
 use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
 
-pub const SIZE: [u32; 3] = [640, 192, 640];
+/// The range as it is without a layout to say otherwise. A layout
+/// carries its own size (ADR-315), and the scene reads it from there.
+pub const SIZE: [u32; 3] = modding::range::stock_size();
 pub const FLOOR: i32 = 16;
 pub const GUN: [i32; 3] = [128, FLOOR, 336];
 /// Muzzle of the vanilla 100 mm tank template relative to its base centre.
@@ -1109,6 +1111,9 @@ fn shot_point(p: [i32; 3]) -> Point {
 pub struct BlastRange {
     pub matter: matter::Matter,
     pub world: World,
+    /// Side, height and side of this range in world units (ADR-315). The
+    /// layout says it; without a layout it is the stock [`SIZE`].
+    size: [u32; 3],
     pub config: ExplosionConfig,
     pub tick: u32,
     pub shell: Option<[Fx; 3]>,
@@ -1268,10 +1273,11 @@ impl BlastRange {
         extended: bool,
         witness: bool,
     ) -> Self {
+        let size = layout.as_ref().map_or(SIZE, |r| r.size);
         let world = World::new(
-            SIZE[0],
-            SIZE[1],
-            SIZE[2],
+            size[0],
+            size[1],
+            size[2],
             config.edits_per_tick,
             Box::new(RangeTerrain {
                 extended,
@@ -1336,6 +1342,7 @@ impl BlastRange {
             attack: None,
             aim: None,
             world,
+            size,
             fire_tick: config.fire_tick,
             config,
             tick: 0,
@@ -1418,6 +1425,10 @@ impl BlastRange {
     }
 
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
+    /// Side, height and side of this range in world units (ADR-315).
+    pub fn size(&self) -> [u32; 3] {
+        self.size
+    }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
         b.u32(27);
@@ -1645,7 +1656,7 @@ impl BlastRange {
             let work = s.u32();
             if work == 0
                 || work > 1_000_000
-                || (0..3).any(|a| p[a] < 0 || p[a] >= SIZE[a] as i32)
+                || (0..3).any(|a| p[a] < 0 || p[a] >= r.size[a] as i32)
                 || r.surface_work.insert(p, work).is_some()
             {
                 return None;
@@ -1854,7 +1865,7 @@ impl BlastRange {
                 || (pending.is_empty() && contact_cursor != 0)
                 || (0..3).any(|a| {
                     at[a] < 0
-                        || at[a] >= SIZE[a] as i32
+                        || at[a] >= r.size[a] as i32
                         || i64::from(origin[a])
                             != i64::from(at[a]) - (wave.size() / 2) as i64 * i64::from(cell)
                 })
@@ -2289,7 +2300,7 @@ impl BlastRange {
                     .begin(self.config.material_energy_j, self.config.fragment_box);
                 self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
                 self.shell = None;
-            } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(SIZE[a] as i32)) {
+            } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32)) {
                 // A miss retires at the map boundary, allowing another order.
                 self.shell = None;
                 self.fire_tick = u32::MAX;
@@ -5415,6 +5426,61 @@ mod tests {
             worst = worst.max(began(&loose));
         }
         assert!(worst > 1, "the ceiling was not what kept them apart");
+    }
+    #[test]
+    fn a_layout_says_how_wide_its_world_is() {
+        // The size of the range lives in its layout, not in the code
+        // (ADR-315): the game is to have a kilometre, and the tests a
+        // range small enough to build hundreds of times. A preset from
+        // before keeps the stock range, and the planner's bounds follow
+        // the world instead of the old six hundred and forty.
+        let stock = BlastRange::new(config());
+        assert_eq!(stock.size(), SIZE, "no layout, stock range");
+        let mut layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        assert_eq!(
+            layout.size, SIZE,
+            "a preset without a size keeps the stock one"
+        );
+        layout.size = [1024, 192, 1024];
+        let mut wide = BlastRange::with_layout(config(), layout).unwrap();
+        assert_eq!(wide.size(), [1024, 192, 1024]);
+        assert_eq!(
+            [wide.world.nx, wide.world.ny, wide.world.nz],
+            [1024, 192, 1024],
+            "the world was built to the layout's size"
+        );
+        assert!(
+            material(&wide.world, [900, 10, 900]) != 0,
+            "the far corner of the wider world has no ground"
+        );
+        // An order out where the stock range has no room at all.
+        let far = [900, 900];
+        wide.gun.motion.move_to(
+            &wide.world,
+            far,
+            &wide.gun.body,
+            &[],
+            &nav::vehicle::Rubble::new(),
+        );
+        assert_eq!(
+            wide.gun.motion.destination,
+            Some(far),
+            "the planner's bounds did not follow the world"
+        );
+        let mut narrow = BlastRange::new(config());
+        narrow.gun.motion.move_to(
+            &narrow.world,
+            far,
+            &narrow.gun.body,
+            &[],
+            &nav::vehicle::Rubble::new(),
+        );
+        assert_eq!(
+            narrow.gun.motion.destination, None,
+            "the stock range accepted an order outside itself"
+        );
     }
     fn config() -> ExplosionConfig {
         ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()

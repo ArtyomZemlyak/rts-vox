@@ -92,9 +92,10 @@ pub fn before(sim: &BlastRange, v: &mut Visual) {
 /// under them rather than only the high root far downsun.
 pub(super) fn cells(sim: &BlastRange) -> Vec<usize> {
     let mut out = Vec::new();
+    let size = sim.size().map(|v| v as i32);
     let mut push = |q: IVec3| {
-        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::new(640, 192, 640)).all() {
-            out.push((q.x + 640 * (q.y + 192 * q.z)) as usize);
+        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::from_array(size)).all() {
+            out.push((q.x + size[0] * (q.y + size[1] * q.z)) as usize);
         }
     };
     for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {

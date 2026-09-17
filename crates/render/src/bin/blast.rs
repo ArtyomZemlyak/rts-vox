@@ -18,7 +18,7 @@ use render::geom::MeshBuf;
 use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
 use render::{look, presentation};
-use sim_core::blast::{BlastRange, GUN, MUZZLE, SIZE};
+use sim_core::blast::{BlastRange, GUN, MUZZLE};
 #[path = "blast/bodies.rs"]
 mod bodies;
 #[path = "blast/damage_art.rs"]
@@ -536,7 +536,7 @@ fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
     }
 }
 fn fill_terrain(sim: &BlastRange, gas: &mut GasInput) {
-    let [nx, ny, nz] = SIZE;
+    let [nx, ny, nz] = sim.size();
     let mut words = vec![0u32; (nx * ny * nz) as usize / 8];
     for z in 0..nz {
         for y in 0..ny {
@@ -594,10 +594,11 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
             (q, sim_core::blast::material(&sim.world, q))
         }));
     for (p, mat) in edits {
-        if (0..3).any(|a| p[a] < 0 || p[a] >= SIZE[a] as i32) {
+        let size = sim.size();
+        if (0..3).any(|a| p[a] < 0 || p[a] >= size[a] as i32) {
             continue;
         }
-        let i = (p[0] as u32 + SIZE[0] * (p[1] as u32 + SIZE[1] * p[2] as u32)) as usize;
+        let i = (p[0] as u32 + size[0] * (p[1] as u32 + size[1] * p[2] as u32)) as usize;
         let shift = (i % 8) * 4;
         let m = if sim.units.iter().any(|u| u.solid(p)) {
             15

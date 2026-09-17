@@ -251,7 +251,7 @@ fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
     for step in 0..2600 {
         let v = ray.origin + *ray.direction * (step as f32 * 0.5);
         let p = v.floor().as_ivec3().to_array();
-        if (0..3).any(|a| p[a] < 0 || p[a] >= SIZE[a] as i32) {
+        if (0..3).any(|a| p[a] < 0 || p[a] >= sim.size()[a] as i32) {
             continue;
         }
         if let Some(i) = sim.units.iter().position(|u| u.solid(p)) {

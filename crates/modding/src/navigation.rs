@@ -60,7 +60,7 @@ impl Navigation {
         let n: Self = ron::from_str(text).map_err(|e| e.to_string())?;
         if n.searches_started_per_tick == 0
             || !(2..=16).contains(&n.cell_units)
-            || 640 % n.cell_units != 0
+            || !(n.cell_units as u32).is_power_of_two()
             || !(64..=51200).contains(&n.search_nodes)
             || !(1..=300).contains(&n.recovery_ticks)
             || !(1..=300).contains(&n.escape_ticks)
