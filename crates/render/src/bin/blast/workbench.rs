@@ -909,6 +909,7 @@ mod tests {
             previous_shell: None,
             fps: 60.0,
             step_us: 0,
+            flame: 0,
             realtime: true,
             live_elapsed: 0.0,
             last_capture: 0,

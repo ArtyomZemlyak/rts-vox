@@ -61,6 +61,9 @@ struct Scene {
     fps: f32,
     /// The slowest simulation tick of the last thirty frames, microseconds.
     step_us: u128,
+    /// Which burning voxel gets this tick's flame (P-22): the picture
+    /// walks the fire rather than lighting all of it at once.
+    flame: usize,
     realtime: bool,
     live_elapsed: f32,
     last_capture: u32,
@@ -187,6 +190,8 @@ fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
 }
+/// Radius of one burning voxel's flame, world units (P-22).
+const FLAME_RADIUS: f32 = 2.4;
 fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput) {
     let c = &sim.config;
     let target = sim.layout.as_ref().map_or(
@@ -469,6 +474,7 @@ fn main() {
             previous_shell: None,
             fps: 60.0,
             step_us: 0,
+            flame: 0,
             realtime,
             live_elapsed: 0.0,
             last_capture: 0,
@@ -1335,12 +1341,35 @@ fn advance(
             gas.params.control.y = (scene.sim.tick - scene.sim.impact_tick) as f32 * 2.0;
         }
         // Fire is decided by the authoritative heat (ADR-277); the image
-        // only follows its ignition events, one small plume a tick.
+        // follows it. One small plume a tick where a voxel lights, and one
+        // where a voxel keeps burning, walking the fire voxel by voxel so
+        // a tree alight shows a flame and not a single puff (P-22). The
+        // flame's own chemistry is hotter and its plume smaller than the
+        // weapon's, so every flame shares one region of gas.
         if let Some(p) = scene.sim.heat.ignited.first() {
             let mut params = gas.params;
             params.control.z = 1.0;
             params.source = Vec4::new(p[0] as f32, p[1] as f32 + 2.0, p[2] as f32, 3.0);
             gas.atmosphere.emit_at(params, scene.sim.tick * 2);
+        }
+        let alight = scene.sim.heat.burning();
+        if alight > 0 {
+            scene.flame = (scene.flame + 1) % alight;
+            if let Some(p) = scene.sim.heat.burning_cells().nth(scene.flame) {
+                let mut params = gas.params;
+                params.control.z = 1.0;
+                // Hot, little pressure and half the fuel: a flame, not a burst.
+                params.chemistry.w = (params.chemistry.w * 1.8).max(2.2);
+                params.charge = Vec4::new(
+                    gas.params.charge.x * 0.5,
+                    gas.params.charge.y * 0.2,
+                    1.1,
+                    0.0,
+                );
+                params.source =
+                    Vec4::new(p[0] as f32, p[1] as f32 + 1.5, p[2] as f32, FLAME_RADIUS);
+                gas.atmosphere.emit_at(params, scene.sim.tick * 2);
+            }
         }
         gas.advance(scene.sim.tick * 2);
         let age = if scene.sim.impact.is_some() {

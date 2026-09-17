@@ -51,6 +51,14 @@ impl Heat {
     pub fn burning(&self) -> usize {
         self.cells.values().filter(|c| c.burn > 0).count()
     }
+    /// Every voxel alight now, in the map's order: the picture draws a
+    /// flame where the heat says one burns (P-22). Read-only.
+    pub fn burning_cells(&self) -> impl Iterator<Item = [u32; 3]> + '_ {
+        self.cells
+            .iter()
+            .filter(|(_, c)| c.burn > 0)
+            .map(|(p, _)| *p)
+    }
     pub fn cell(&self, p: [u32; 3]) -> HeatCell {
         self.cells.get(&p).copied().unwrap_or_default()
     }
