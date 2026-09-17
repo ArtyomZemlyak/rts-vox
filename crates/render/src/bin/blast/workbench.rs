@@ -524,6 +524,30 @@ pub fn input(
     };
 }
 
+/// A dashed line laid along the ground between two ground points, every
+/// other segment drawn: a route as the hull will drive it (P-25).
+fn ground_dash(
+    giz: &mut Gizmos,
+    sim: &BlastRange,
+    a: [i32; 2],
+    b: [i32; 2],
+    lift: f32,
+    colour: Color,
+) {
+    let n = ((b[0] - a[0]).abs().max((b[1] - a[1]).abs()) / 6).max(1);
+    let point = |t: i32| {
+        let x = a[0] + (b[0] - a[0]) * t / n;
+        let z = a[1] + (b[1] - a[1]) * t / n;
+        Vec3::new(
+            x as f32,
+            sim_core::blast::motion::floor(&sim.world, x, z) as f32 + lift,
+            z as f32,
+        )
+    };
+    for k in (0..n).step_by(2) {
+        giz.line(point(k), point(k + 1), colour);
+    }
+}
 fn bounds(giz: &mut Gizmos, min: Vec3, max: Vec3, color: Color) {
     giz.cube(
         Transform::from_translation((min + max) * 0.5).with_scale(max - min),
@@ -580,13 +604,31 @@ pub fn overlay(
             23.0,
             Color::srgb(0.22, 0.85, 0.68),
         );
-        if let Some(goal) = scene.sim.gun.motion.path.last() {
+        // The way the hull will go (P-25): from where it stands through
+        // the turn points it has left, a ring at each and at the goal.
+        let m = &scene.sim.gun.motion;
+        let teal = Color::srgba(0.22, 0.85, 0.68, 0.8);
+        let mut from = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
+        for goal in m.path.iter().skip(m.cursor) {
+            ground_dash(&mut giz, &scene.sim, from, *goal, 0.6, teal);
+            from = *goal;
+        }
+        for (i, goal) in m.path.iter().enumerate().skip(m.cursor) {
             let p = Vec3::new(
                 goal[0] as f32,
                 sim_core::blast::motion::floor(&scene.sim.world, goal[0], goal[1]) as f32 + 0.7,
                 goal[1] as f32,
             );
-            giz.circle(Isometry3d::new(p, flat), 5.0, Color::srgb(0.22, 0.85, 0.68));
+            let last = i + 1 == m.path.len();
+            giz.circle(
+                Isometry3d::new(p, flat),
+                if last { 5.0 } else { 2.0 },
+                if last {
+                    Color::srgb(0.22, 0.85, 0.68)
+                } else {
+                    teal
+                },
+            );
         }
         if let Some(i) = scene.sim.attack {
             if let Some(u) = scene.sim.units.get(i) {
@@ -605,27 +647,18 @@ pub fn overlay(
                 for i in 0..patrol.points.len() {
                     let a = patrol.points[i];
                     let b = patrol.points[(i + 1) % patrol.points.len()];
-                    let n = ((b[0] - a[0]).abs().max((b[1] - a[1]).abs()) / 6).max(1);
-                    for k in (0..n).step_by(2) {
-                        let p = |t: i32| {
-                            let x = a[0] + (b[0] - a[0]) * t / n;
-                            let z = a[1] + (b[1] - a[1]) * t / n;
-                            Vec3::new(
-                                x as f32,
-                                sim_core::blast::motion::floor(&scene.sim.world, x, z) as f32 + 0.5,
-                                z as f32,
-                            )
-                        };
-                        giz.line(
-                            p(k),
-                            p(k + 1),
-                            if j == 0 {
-                                Color::srgba(0.9, 0.68, 0.3, 0.65)
-                            } else {
-                                Color::srgba(0.36, 0.75, 0.9, 0.65)
-                            },
-                        );
-                    }
+                    ground_dash(
+                        &mut giz,
+                        &scene.sim,
+                        a,
+                        b,
+                        0.5,
+                        if j == 0 {
+                            Color::srgba(0.9, 0.68, 0.3, 0.65)
+                        } else {
+                            Color::srgba(0.36, 0.75, 0.9, 0.65)
+                        },
+                    );
                 }
             }
         }
