@@ -61,6 +61,12 @@ impl Wave {
         self.pressure[p[0] + self.n * (p[1] + self.n * p[2])]
     }
 
+    /// What the cell costs to break. Read by the test that holds the
+    /// capture to the answer a per-voxel walk would give (ADR-310).
+    pub fn resistance_at(&self, p: [usize; 3]) -> u32 {
+        self.resistance[p[0] + self.n * (p[1] + self.n * p[2])]
+    }
+
     pub fn save(&self, b: &mut fx::blob::Blob) {
         b.u32(self.n as u32);
         b.u32s(&self.resistance);

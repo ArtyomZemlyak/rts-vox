@@ -16,8 +16,18 @@ fn main() {
         "anni" => include_str!("../../../../data/anni-cannon.ron"),
         _ => panic!("--weapon expects energy, shell or anni"),
     };
+    // Power scales the charge as the window's buttons do (P-31).
+    let power: u32 = args
+        .iter()
+        .position(|a| a == "--power")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000);
     for firing in [false, true] {
-        let config = modding::explosion::ExplosionConfig::from_ron(ron).unwrap();
+        let mut config = modding::explosion::ExplosionConfig::from_ron(ron).unwrap();
+        config.energy = config.energy * power / 1000;
+        config.material_energy_j =
+            (u64::from(config.material_energy_j) * u64::from(power) / 1000) as u32;
         let layout =
             modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-cover.ron"))
                 .unwrap();
@@ -42,7 +52,7 @@ fn main() {
             .map(|(us, tick)| format!("{tick}:{us}"))
             .collect();
         println!(
-            "weapon={weapon} firing={firing} slowest_ticks_us={}",
+            "weapon={weapon} power={power} firing={firing} slowest_ticks_us={}",
             top.join(",")
         );
         samples.sort_unstable();

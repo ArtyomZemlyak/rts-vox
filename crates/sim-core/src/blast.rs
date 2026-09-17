@@ -747,6 +747,26 @@ impl Explosion {
         // per body instead of a pose-mapped lookup for every voxel of the
         // domain, and dents are looked up only where there is material.
         let boxes: Vec<([i32; 3], [i32; 3])> = units.iter().map(|u| u.bounds()).collect();
+        // Three questions used to be asked of every voxel of the domain,
+        // and all three answer the same for a whole cell (ADR-310): which
+        // bodies can reach into it, whether any dented voxel lies in it,
+        // and which chunk holds it. Each is asked once a cell now. The
+        // answers are the same to the bit — this is a hoist, not an
+        // approximation — and at four charges the capture fell from 12.2
+        // to 4.1 ms.
+        let far = [0, 1, 2].map(|a| origin[a] + (n as i32 - 1) * c.cell_units + c.cell_units - 1);
+        let mut dented = vec![false; n * n * n];
+        for q in dents
+            .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
+            .map(|(q, _)| q)
+        {
+            let cell = [0, 1, 2].map(|a| (q[a] - origin[a]).div_euclid(c.cell_units));
+            if (0..3).all(|a| cell[a] >= 0 && (cell[a] as usize) < n) {
+                dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
+            }
+        }
+        let mut cursor = World::mat_cursor();
+        let mut near: Vec<usize> = Vec::new();
         let mut resistance = Vec::with_capacity(n * n * n);
         for z in 0..n {
             for y in 0..n {
@@ -767,22 +787,34 @@ impl Explosion {
                         resistance.push(u32::MAX);
                         continue;
                     }
+                    let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
+                    near.clear();
+                    for (i, (lo, hi)) in boxes.iter().enumerate() {
+                        if (0..3).all(|a| end[a] >= lo[a] && p[a] <= hi[a]) {
+                            near.push(i);
+                        }
+                    }
+                    let look = dented[(z * n + y) * n + x];
                     let mut r = 0;
                     for dz in 0..c.cell_units {
                         for dy in 0..c.cell_units {
                             for dx in 0..c.cell_units {
                                 let q = [p[0] + dx, p[1] + dy, p[2] + dz];
-                                let m = material(w, q);
-                                for (u, (lo, hi)) in units.iter().zip(&boxes) {
+                                let m = material_cached(w, &mut cursor, q);
+                                for &i in &near {
+                                    let (lo, hi) = &boxes[i];
                                     if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
-                                        r = r.max(u.resistance(q, c));
+                                        r = r.max(units[i].resistance(q, c));
                                     }
                                 }
                                 let work = material_work(m, c);
                                 if work > 0 {
-                                    r = r.max(
-                                        work.saturating_sub(dents.get(&q).copied().unwrap_or(0)),
-                                    );
+                                    let dent = if look {
+                                        dents.get(&q).copied().unwrap_or(0)
+                                    } else {
+                                        0
+                                    };
+                                    r = r.max(work.saturating_sub(dent));
                                 }
                             }
                         }
@@ -941,6 +973,21 @@ impl Explosion {
             self.pending.pop_front();
         }
     }
+}
+
+/// The same material as [`material`], to the bit, with the chunk index
+/// kept between neighbouring voxels (ADR-310).
+fn material_cached(w: &World, cursor: &mut voxel::world::MatCursor, p: [i32; 3]) -> u16 {
+    if p[0] < 0
+        || p[1] < 0
+        || p[2] < 0
+        || p[0] >= w.nx as i32
+        || p[1] >= w.ny as i32
+        || p[2] >= w.nz as i32
+    {
+        return 0;
+    }
+    w.material_cached(cursor, p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
 pub fn material(w: &World, p: [i32; 3]) -> u16 {
@@ -5218,6 +5265,97 @@ mod tests {
 
     fn config() -> ExplosionConfig {
         ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()
+    }
+    #[test]
+    fn asking_a_cell_once_answers_as_if_every_voxel_had_been_asked() {
+        // The capture used to ask three questions of every voxel of the
+        // domain: which bodies can reach it, whether it is dented, and
+        // which chunk holds it. All three answer the same for a whole
+        // cell, and ADR-310 asks them once a cell. The answers have to be
+        // the same to the bit, at the edges of the domain as much as in
+        // the middle, so the per-voxel walk stands here as the reference.
+        // A shot is fired first, so that the world is edited, the dents
+        // are real and the bodies have moved off their start.
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        let mut r = BlastRange::with_layout(config(), layout).unwrap();
+        r.control();
+        r.refire();
+        for _ in 0..200 {
+            r.step();
+        }
+        assert!(!r.surface_work.is_empty(), "no dents to fall between cells");
+        assert!(!r.units.is_empty(), "the cover range brings machines");
+        let c = r.config.clone();
+        let walk = |at: [i32; 3]| {
+            let e = Explosion::with_damage(&r.world, at, &c, &r.units, &r.surface_work);
+            let n = e.wave.size();
+            let half = n / 2;
+            let radius2 = (half * half) as i32;
+            let origin = at.map(|v| v - half as i32 * c.cell_units);
+            let boxes: Vec<([i32; 3], [i32; 3])> = r.units.iter().map(|u| u.bounds()).collect();
+            let (mut solid, mut armoured) = (0usize, 0usize);
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 0..n {
+                        let (cx, cy, cz) = (
+                            x as i32 - half as i32,
+                            y as i32 - half as i32,
+                            z as i32 - half as i32,
+                        );
+                        let want = if cx * cx + cy * cy + cz * cz > radius2 {
+                            u32::MAX
+                        } else {
+                            let p = [
+                                origin[0] + x as i32 * c.cell_units,
+                                origin[1] + y as i32 * c.cell_units,
+                                origin[2] + z as i32 * c.cell_units,
+                            ];
+                            let mut want = 0;
+                            for dz in 0..c.cell_units {
+                                for dy in 0..c.cell_units {
+                                    for dx in 0..c.cell_units {
+                                        let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+                                        let m = material(&r.world, q);
+                                        for (u, (lo, hi)) in r.units.iter().zip(&boxes) {
+                                            if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
+                                                let hard = u.resistance(q, &c);
+                                                armoured += usize::from(hard > 0);
+                                                want = want.max(hard);
+                                            }
+                                        }
+                                        let work = material_work(m, &c);
+                                        if work > 0 {
+                                            let dent = r.surface_work.get(&q).copied().unwrap_or(0);
+                                            want = want.max(work.saturating_sub(dent));
+                                        }
+                                    }
+                                }
+                            }
+                            want
+                        };
+                        if want > 0 && want < u32::MAX {
+                            solid += 1;
+                        }
+                        assert_eq!(
+                            e.wave.resistance_at([x, y, z]),
+                            want,
+                            "cell {x},{y},{z} of {n} around {at:?}"
+                        );
+                    }
+                }
+            }
+            (solid, armoured)
+        };
+        // Once where the round landed: terrain, a dented crater and the
+        // wall. Once over a machine, so that the bodies are in the domain
+        // and the shortlist of bodies per cell is exercised.
+        let (solid, _) = walk(r.impact.expect("the round has landed"));
+        assert!(solid > 1000, "the domain held almost nothing: {solid}");
+        let (lo, hi) = r.units[0].bounds();
+        let (_, armoured) = walk([0, 1, 2].map(|a| (lo[a] + hi[a]) / 2));
+        assert!(armoured > 0, "no body reached into the domain");
     }
     #[test]
     fn shell_impacts_destroys_target_and_leaves_the_barrier() {
