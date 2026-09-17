@@ -32,6 +32,13 @@ pub struct ExplosionConfig {
     #[serde(default = "unit_roles")]
     pub unit_role_resistance_milli: [u32; 5],
     pub wave_work_per_tick: usize,
+    /// Cells of the resistance grid captured in one tick (ADR-311). The
+    /// capture of a charge that reaches further costs more ticks, not a
+    /// longer one; cells the inscribed sphere cuts are free and do not
+    /// count. Presets from before the ceiling keep the whole grid of the
+    /// stock weapons in one tick.
+    #[serde(default = "capture_cells")]
+    pub capture_cells_per_tick: usize,
     pub edits_per_tick: usize,
     pub fire_tick: u32,
     pub shell_speed: i32,
@@ -65,6 +72,9 @@ pub struct ExplosionConfig {
 fn two_cells() -> u32 {
     2
 }
+fn capture_cells() -> usize {
+    40000
+}
 fn unit_roles() -> [u32; 5] {
     [1000; 5]
 }
@@ -87,6 +97,8 @@ impl ExplosionConfig {
                 .any(|v| !(1..=10000).contains(v))
             || c.wave_work_per_tick == 0
             || c.wave_work_per_tick > 8192
+            || c.capture_cells_per_tick == 0
+            || c.capture_cells_per_tick > 1_000_000
             || c.edits_per_tick == 0
             || c.edits_per_tick > 65536
             || !(1..=10000).contains(&c.shell_speed)

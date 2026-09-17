@@ -67,6 +67,15 @@ impl Wave {
         self.resistance[p[0] + self.n * (p[1] + self.n * p[2])]
     }
 
+    /// What one cell costs to break, as the capture finds it. The grid is
+    /// filled in slices under a ceiling per tick and the wave waits for
+    /// the whole of it (ADR-311), so this is only ever written before the
+    /// wave has taken a step.
+    pub fn set_resistance(&mut self, i: usize, r: u32) {
+        debug_assert_eq!(self.examined, 0, "the wave has already walked the grid");
+        self.resistance[i] = r;
+    }
+
     pub fn save(&self, b: &mut fx::blob::Blob) {
         b.u32(self.n as u32);
         b.u32s(&self.resistance);

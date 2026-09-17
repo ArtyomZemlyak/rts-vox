@@ -709,6 +709,11 @@ pub struct Explosion {
     /// Segment frames of each unit when the burst began (ADR-278).
     seg_poses: Vec<Vec<crate::damage::Frame>>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
+    /// Cells of the grid whose resistance is captured (ADR-311). The
+    /// capture runs under a ceiling per tick and the wave waits for all
+    /// of them, so a charge that reaches further costs more ticks rather
+    /// than one longer tick.
+    captured: usize,
 }
 
 impl Explosion {
@@ -717,6 +722,8 @@ impl Explosion {
     pub fn new(w: &World, at: [i32; 3], c: &ExplosionConfig, units: &[RangeUnit]) -> Self {
         Self::with_damage(w, at, c, units, &SurfaceWork::new())
     }
+    /// The whole grid at once. The range captures it in slices instead
+    /// (ADR-311); this is the same burst with every slice already run.
     pub fn with_damage(
         w: &World,
         at: [i32; 3],
@@ -724,6 +731,14 @@ impl Explosion {
         units: &[RangeUnit],
         dents: &SurfaceWork,
     ) -> Self {
+        let mut e = Self::begin(at, c, units);
+        e.capture(w, c, units, dents, usize::MAX);
+        e
+    }
+
+    /// A burst with its grid still empty. Nothing may read the grid until
+    /// [`Explosion::capture`] reports it whole.
+    pub fn begin(at: [i32; 3], c: &ExplosionConfig, units: &[RangeUnit]) -> Self {
         // The grid is as wide as the charge can reach through the cheapest
         // matter — a step and the matter's own cost per cell — and never
         // narrower than the data's, up to the wave's ceiling of 65 cells a
@@ -742,6 +757,45 @@ impl Explosion {
         let n = half * 2 + 1;
         let h = half as i32 * c.cell_units;
         let origin = at.map(|v| v - h);
+        Self {
+            at,
+            pending: Default::default(),
+            contact_cursor: 0,
+            poses: units.iter().map(|u| u.pose).collect(),
+            seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
+            origin,
+            cell: c.cell_units,
+            wave: Wave::new(n, c.energy, vec![0; n * n * n]).expect("validated explosion"),
+            queued: 0,
+            captured: 0,
+        }
+    }
+
+    /// The grid still has cells to capture.
+    pub fn capturing(&self) -> bool {
+        let n = self.wave.size();
+        self.captured < n * n * n
+    }
+
+    /// Capture up to `budget` cells, resuming where the last slice
+    /// stopped, and report whether the grid is whole. Cells the inscribed
+    /// sphere cuts are free and do not count against the budget: they are
+    /// out of the wave's reach and cost nothing to answer.
+    pub fn capture(
+        &mut self,
+        w: &World,
+        c: &ExplosionConfig,
+        units: &[RangeUnit],
+        dents: &SurfaceWork,
+        budget: usize,
+    ) -> bool {
+        let n = self.wave.size();
+        let cells = n * n * n;
+        if self.captured >= cells {
+            return true;
+        }
+        let half = n / 2;
+        let origin = self.origin;
         let radius2 = (half * half) as i32;
         // Bodies are asked only where they can be (ADR-296): one box test
         // per body instead of a pose-mapped lookup for every voxel of the
@@ -753,9 +807,10 @@ impl Explosion {
         // and which chunk holds it. Each is asked once a cell now. The
         // answers are the same to the bit — this is a hoist, not an
         // approximation — and at four charges the capture fell from 12.2
-        // to 4.1 ms.
+        // to 11.2 ms on a clean world and from 23.7 to 17.3 ms late in a
+        // match, where the dent map has grown.
         let far = [0, 1, 2].map(|a| origin[a] + (n as i32 - 1) * c.cell_units + c.cell_units - 1);
-        let mut dented = vec![false; n * n * n];
+        let mut dented = vec![false; cells];
         for q in dents
             .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
             .map(|(q, _)| q)
@@ -767,80 +822,71 @@ impl Explosion {
         }
         let mut cursor = World::mat_cursor();
         let mut near: Vec<usize> = Vec::new();
-        let mut resistance = Vec::with_capacity(n * n * n);
-        for z in 0..n {
-            for y in 0..n {
-                for x in 0..n {
-                    let p = [
-                        origin[0] + x as i32 * c.cell_units,
-                        origin[1] + y as i32 * c.cell_units,
-                        origin[2] + z as i32 * c.cell_units,
-                    ];
-                    // Beyond the inscribed sphere the wave does not go: a
-                    // reach the grid cuts is cut the same in every direction.
-                    let (cx, cy, cz) = (
-                        x as i32 - half as i32,
-                        y as i32 - half as i32,
-                        z as i32 - half as i32,
-                    );
-                    if cx * cx + cy * cy + cz * cz > radius2 {
-                        resistance.push(u32::MAX);
-                        continue;
-                    }
-                    let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
-                    near.clear();
-                    for (i, (lo, hi)) in boxes.iter().enumerate() {
-                        if (0..3).all(|a| end[a] >= lo[a] && p[a] <= hi[a]) {
-                            near.push(i);
-                        }
-                    }
-                    let look = dented[(z * n + y) * n + x];
-                    let mut r = 0;
-                    for dz in 0..c.cell_units {
-                        for dy in 0..c.cell_units {
-                            for dx in 0..c.cell_units {
-                                let q = [p[0] + dx, p[1] + dy, p[2] + dz];
-                                let m = material_cached(w, &mut cursor, q);
-                                for &i in &near {
-                                    let (lo, hi) = &boxes[i];
-                                    if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
-                                        r = r.max(units[i].resistance(q, c));
-                                    }
-                                }
-                                let work = material_work(m, c);
-                                if work > 0 {
-                                    let dent = if look {
-                                        dents.get(&q).copied().unwrap_or(0)
-                                    } else {
-                                        0
-                                    };
-                                    r = r.max(work.saturating_sub(dent));
-                                }
-                            }
-                        }
-                    }
-                    resistance.push(r);
+        let mut spent = 0;
+        let mut next = self.captured;
+        while next < cells && spent < budget {
+            let (x, y, z) = (next % n, (next / n) % n, next / (n * n));
+            next += 1;
+            let p = [
+                origin[0] + x as i32 * c.cell_units,
+                origin[1] + y as i32 * c.cell_units,
+                origin[2] + z as i32 * c.cell_units,
+            ];
+            // Beyond the inscribed sphere the wave does not go: a reach
+            // the grid cuts is cut the same in every direction.
+            let (cx, cy, cz) = (
+                x as i32 - half as i32,
+                y as i32 - half as i32,
+                z as i32 - half as i32,
+            );
+            if cx * cx + cy * cy + cz * cz > radius2 {
+                self.wave.set_resistance(x + n * (y + n * z), u32::MAX);
+                continue;
+            }
+            spent += 1;
+            let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
+            near.clear();
+            for (i, (lo, hi)) in boxes.iter().enumerate() {
+                if (0..3).all(|a| end[a] >= lo[a] && p[a] <= hi[a]) {
+                    near.push(i);
                 }
             }
+            let look = dented[(z * n + y) * n + x];
+            let mut r = 0;
+            for dz in 0..c.cell_units {
+                for dy in 0..c.cell_units {
+                    for dx in 0..c.cell_units {
+                        let q = [p[0] + dx, p[1] + dy, p[2] + dz];
+                        let m = material_cached(w, &mut cursor, q);
+                        for &i in &near {
+                            let (lo, hi) = &boxes[i];
+                            if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
+                                r = r.max(units[i].resistance(q, c));
+                            }
+                        }
+                        let work = material_work(m, c);
+                        if work > 0 {
+                            let dent = if look {
+                                dents.get(&q).copied().unwrap_or(0)
+                            } else {
+                                0
+                            };
+                            r = r.max(work.saturating_sub(dent));
+                        }
+                    }
+                }
+            }
+            self.wave.set_resistance(x + n * (y + n * z), r);
         }
-        Self {
-            at,
-            pending: Default::default(),
-            contact_cursor: 0,
-            poses: units.iter().map(|u| u.pose).collect(),
-            seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
-            origin,
-            cell: c.cell_units,
-            wave: Wave::new(n, c.energy, resistance).expect("validated explosion"),
-            queued: 0,
-        }
+        self.captured = next;
+        !self.capturing()
     }
 
     /// The wave has cells still to reach or hits still to apply. The
     /// collapse layer waits for it (ADR-300), so that what it takes does
     /// not depend on how the wave is sliced across ticks.
     pub fn working(&self) -> bool {
-        !self.pending.is_empty() || !self.wave.finished()
+        self.capturing() || !self.pending.is_empty() || !self.wave.finished()
     }
     // Separate authoritative outputs keep world edits and material claims explicit.
     #[allow(clippy::too_many_arguments)]
@@ -1374,7 +1420,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(26);
+        b.u32(27);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1481,6 +1527,7 @@ impl BlastRange {
             }
             b.i32(e.cell);
             b.usize(e.queued);
+            b.usize(e.captured);
             e.wave.save(&mut b);
             b.usize(e.contact_cursor);
             b.usize(e.pending.len());
@@ -1541,7 +1588,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 26 {
+        if s.u32() != 27 {
             return None;
         }
         let extended = s.bool();
@@ -1778,7 +1825,11 @@ impl BlastRange {
             let origin = std::array::from_fn(|_| s.i32());
             let cell = s.i32();
             let queued = s.usize();
+            let captured = s.usize();
             let wave = Wave::load(&mut s)?;
+            if captured > wave.size().pow(3) {
+                return None;
+            }
             let contact_cursor = s.usize();
             let n = s.usize();
             if n > 8192 {
@@ -1887,6 +1938,7 @@ impl BlastRange {
                 cell,
                 queued,
                 wave,
+                captured,
             });
         }
         if s.u32() as usize != r.shields.len() {
@@ -2225,13 +2277,7 @@ impl BlastRange {
                 );
                 self.matter
                     .begin(self.config.material_energy_j, self.config.fragment_box);
-                self.explosion = Some(Explosion::with_damage(
-                    &self.world,
-                    at,
-                    &self.config,
-                    &self.units,
-                    &self.surface_work,
-                ));
+                self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
                 self.shell = None;
             } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(SIZE[a] as i32)) {
                 // A miss retires at the map boundary, allowing another order.
@@ -2241,7 +2287,33 @@ impl BlastRange {
                 self.shell = Some(q);
             }
         }
-        if let Some(e) = self.explosion.as_mut() {
+        {
+            // The grid of resistance is captured under a ceiling per tick
+            // (ADR-311): a charge that reaches further costs the burst
+            // more ticks rather than one longer tick. The wave waits for
+            // the whole grid, so how the capture is sliced never decides
+            // what the wave finds.
+            let Self {
+                explosion,
+                world,
+                config,
+                units,
+                surface_work,
+                ..
+            } = self;
+            if let Some(e) = explosion.as_mut() {
+                if e.capturing() {
+                    e.capture(
+                        world,
+                        config,
+                        units,
+                        surface_work,
+                        config.capture_cells_per_tick,
+                    );
+                }
+            }
+        }
+        if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
             let before: Vec<_> = self
                 .units
                 .iter()
@@ -5392,6 +5464,72 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn a_capture_cut_into_slices_leaves_the_same_crater() {
+        // The grid of resistance is captured under a ceiling per tick
+        // (ADR-311), so a charge reaching further costs the burst more
+        // ticks instead of one longer tick. The wave waits for the whole
+        // grid, so what it then finds must not depend on how the capture
+        // was sliced. A slice of a thousand cells cuts this burst's grid
+        // into some thirty-four.
+        let mut a = BlastRange::new(config());
+        let mut c = config();
+        c.capture_cells_per_tick = 1000;
+        let mut b = BlastRange::new(c);
+        let mut slices = 0;
+        for _ in 0..400 {
+            a.step();
+            b.step();
+            slices += usize::from(b.explosion.as_ref().is_some_and(|e| e.capturing()));
+            assert!(
+                !a.explosion.as_ref().is_some_and(|e| e.capturing()),
+                "the stock ceiling captured this grid in one tick"
+            );
+        }
+        assert!(
+            slices > 20,
+            "the ceiling never bit: {slices} ticks capturing"
+        );
+        assert_eq!(a.impact, b.impact);
+        assert_eq!(a.removed, b.removed);
+        for z in 316..358 {
+            for y in 0..50 {
+                for x in 205..270 {
+                    assert_eq!(a.world.material(x, y, z), b.world.material(x, y, z));
+                }
+            }
+        }
+    }
+    #[test]
+    fn the_wave_waits_for_the_whole_grid() {
+        // Nothing of the burst happens while the grid is still being
+        // captured: no cell is dug and no pressure is dealt, so the
+        // slicing cannot decide what the wave finds.
+        let mut c = config();
+        c.capture_cells_per_tick = 1000;
+        let mut r = BlastRange::new(c);
+        while r.impact.is_none() {
+            r.step();
+        }
+        let mut waited = 0;
+        while r.explosion.as_ref().is_some_and(|e| e.capturing()) {
+            let walked = r.explosion.as_ref().map_or(1, |e| e.wave.examined);
+            assert_eq!(walked, 0, "the wave walked before the grid was whole");
+            waited += 1;
+            r.step();
+        }
+        assert!(
+            waited > 20,
+            "the ceiling never bit: {waited} ticks capturing"
+        );
+        for _ in 0..80 {
+            r.step();
+        }
+        assert!(
+            r.explosion.as_ref().is_none_or(|e| e.wave.examined > 0),
+            "the wave never ran"
+        );
     }
     #[test]
     fn save_during_propagation_matches_uninterrupted_run() {

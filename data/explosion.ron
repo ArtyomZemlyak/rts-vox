@@ -11,6 +11,7 @@
     steel_resistance: 10000,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 4096,
+    capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
     // A shell throws pieces of up to three cells a side (ADR-284).
     fragment_box: 3,

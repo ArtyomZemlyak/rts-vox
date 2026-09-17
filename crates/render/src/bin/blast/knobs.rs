@@ -227,7 +227,7 @@ macro_rules! chassis_knobs {
 }
 const TANK: [Knob; 18] = chassis_knobs!("tank", Group::Tank);
 const WALKER: [Knob; 18] = chassis_knobs!("walker", Group::Walker);
-const WEAPON: [Knob; 12] = [
+const WEAPON: [Knob; 13] = [
     k(
         "weapon.energy",
         Group::Weapon,
@@ -323,6 +323,14 @@ const WEAPON: [Knob; 12] = [
         512.0,
         64.0,
         65_536.0,
+    ),
+    k(
+        "weapon.capture_cells_per_tick",
+        Group::Weapon,
+        "Съём сетки за тик, ячеек",
+        5_000.0,
+        1_000.0,
+        1_000_000.0,
     ),
 ];
 const DEBRIS: [Knob; 11] = [
@@ -662,6 +670,7 @@ fn set_weapon(c: &mut ExplosionConfig, f: &str, v: f64) {
         "heat_per_cell" => c.heat_per_cell = u(v),
         "gas_source_radius" => c.gas_source_radius = i(v).max(1),
         "wave_work_per_tick" => c.wave_work_per_tick = u(v).max(64) as usize,
+        "capture_cells_per_tick" => c.capture_cells_per_tick = u(v).max(1000) as usize,
         _ => {}
     }
 }
@@ -679,6 +688,7 @@ fn get_weapon(c: &ExplosionConfig, f: &str) -> Option<f64> {
         "heat_per_cell" => f64::from(c.heat_per_cell),
         "gas_source_radius" => f64::from(c.gas_source_radius),
         "wave_work_per_tick" => c.wave_work_per_tick as f64,
+        "capture_cells_per_tick" => c.capture_cells_per_tick as f64,
         _ => return None,
     })
 }

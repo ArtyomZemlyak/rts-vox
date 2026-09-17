@@ -17,6 +17,7 @@
     unit_ablation_resistance: 120,
     unit_role_resistance_milli: (1000, 1000, 1000, 1000, 1000),
     wave_work_per_tick: 4096,
+    capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
     // Pieces within a two-cell box, though the bolt leaves none (ADR-284).
     fragment_box: 2,
