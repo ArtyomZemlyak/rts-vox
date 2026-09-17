@@ -4,6 +4,10 @@ use crate::burst::chunk::Shape;
 use crate::drive::Limits;
 use fx::Fx;
 
+/// How much lighter than whole a body may ride (ADR-305): the spring of
+/// a hull stripped to a tenth of its cells is ten times as stiff taken to
+/// its mass, and a fixed step of a thirtieth of a second does not hold it.
+const RIDE_MASS_CAP: i32 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mobility {
     pub inverse_mass: Fx,
@@ -102,10 +106,18 @@ impl Mobility {
         self
     }
 
+    /// The ride of a damaged body (ADR-305). Springs and dampers are the
+    /// machine's own, so taken to its mass they grow as its cells go: a
+    /// lighter body on the same suspension. The preload does not grow. It
+    /// carries the weight, and weight taken to mass is gravity whatever
+    /// is left, so scaling it pushed a wrecked hull up with many times
+    /// its own weight and threw it into the air (P-30). The ratio is
+    /// capped: the step is fixed, and a spring stiff enough for it walks
+    /// away in one tick.
     pub fn ride(self, mut original: phys::Ride) -> phys::Ride {
-        original.stiffness = original.stiffness.mul(self.inverse_mass);
-        original.damping = original.damping.mul(self.inverse_mass);
-        original.preload = original.preload.mul(self.inverse_mass);
+        let lighter = self.inverse_mass.min(Fx::from_int(RIDE_MASS_CAP));
+        original.stiffness = original.stiffness.mul(lighter);
+        original.damping = original.damping.mul(lighter);
         // Ride stores I/M, so divide the mass response by the inertia response.
         original.inertia = original.inertia.mul(self.tilt_radius_ratio).max(Fx(1));
         original

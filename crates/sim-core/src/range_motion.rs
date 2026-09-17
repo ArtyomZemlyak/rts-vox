@@ -494,24 +494,29 @@ impl Motion {
                 .count()
                 >= 2
     }
-    /// The ride of this hull now: the chassis' ride at the range's gravity,
-    /// low on its legs when none carries. On the chassis' nominal mass, not
-    /// the volume left (ADR-302, ADR-304): scaled by the cells a bolt left,
-    /// a wrecked walker's springs and dampers threw it twenty times as
-    /// hard, and a dead one landing on folded legs went up like a shell.
-    fn ride_now(&self, gravity: i32) -> phys::Ride {
+    /// The ride of this hull now: the chassis' ride at the range's gravity
+    /// and the body's own mobility (ADR-305), low on its legs when none
+    /// carries them (ADR-304).
+    fn ride_now(&self, gravity: i32, response: crate::mobility::Mobility) -> phys::Ride {
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
         if !self.carried() {
             r.clearance = r.clearance.mul(Fx::from_ratio(self.collapse_pct, 100));
         }
-        r
+        response.ride(r)
     }
     /// A parked walker's hull rests on its legs (ADR-280): a lost leg lets
     /// it sink and lean where it stands. A tracked hull keeps the resting
     /// pose unless a burst disturbed it (ADR-286).
-    fn settle(&mut self, w: &World, rubble: &nav::vehicle::Rubble, b: &UnitBody, gravity: i32) {
+    fn settle(
+        &mut self,
+        w: &World,
+        rubble: &nav::vehicle::Rubble,
+        b: &UnitBody,
+        gravity: i32,
+        response: crate::mobility::Mobility,
+    ) {
         if self.rigs.is_empty() && !self.disturbed() {
             return;
         }
@@ -529,7 +534,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let r = self.ride_now(gravity);
+        let r = self.ride_now(gravity, response);
         phys::step(
             &mut self.hull,
             &support,
@@ -724,7 +729,7 @@ impl Motion {
             // a parked walker still stands on its feet, and its hull on them.
             let moved = self.slide(w, rubble, b, others, response);
             self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
-            self.settle(w, rubble, b, gravity);
+            self.settle(w, rubble, b, gravity, response);
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
@@ -928,7 +933,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let r = self.ride_now(gravity);
+        let r = self.ride_now(gravity, response);
         let sway = crate::ride::sway_of(
             self.drive.vel.sub(old.vel).mul(Fx::from_int(30)),
             self.drive.vel,
