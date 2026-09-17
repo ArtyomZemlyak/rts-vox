@@ -21,13 +21,15 @@ fn main() {
     let bits = cells / 8;
     let ceiling = nx * nz * 2;
     let window = nx * nz * 6;
-    // What one route search allocates for its own state: eight headings a
-    // cell of the planner's grid, three arrays over them.
+    // What one route search would allocate for its own state if it held
+    // every cell of the planner grid: eight headings a cell, three arrays
+    // over them. It holds only the cells it reaches now (ADR-316), so this
+    // column is what the map no longer costs.
     let nav = (nx / 8) * (nz / 8) * 8;
     let search = nav * (4 + 8 + 64);
     let mb = |v: u64| v as f64 / 1e6;
     println!(
-        "side={nx} height={ny} cells={cells} build_ms={build} bits_mb={:.1} ceiling_mb={:.1} probe_window_mb={:.1} search_state_mb={:.1}",
+        "side={nx} height={ny} cells={cells} build_ms={build} bits_mb={:.1} ceiling_mb={:.1} probe_window_mb={:.1} dense_search_state_mb={:.1}",
         mb(bits),
         mb(ceiling),
         mb(window),

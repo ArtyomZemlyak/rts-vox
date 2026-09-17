@@ -675,9 +675,15 @@ pub struct Hunt {
     anchor: [i32; 2],
     initial: usize,
     end: usize,
-    distance: Vec<u32>,
-    previous: Vec<usize>,
-    poses: Vec<Option<Pose>>,
+    /// What the search knows about the cells it has reached, by cell and
+    /// heading: the cost to get there, where it came from, and the pose it
+    /// probed. Held by the cells reached rather than by every cell of the
+    /// map (ADR-316): a route search reaches thousands, and a map of a
+    /// kilometre has twelve million, which at the poses alone is most of a
+    /// gigabyte for every order given.
+    distance: BTreeMap<usize, u32>,
+    previous: BTreeMap<usize, usize>,
+    poses: BTreeMap<usize, Pose>,
     open: BinaryHeap<Reverse<(u32, u32, usize)>>,
     /// Pops taken against the allowance, expansions made, poses probed.
     spent: usize,
@@ -804,11 +810,11 @@ impl Hunt {
             + n * (to[1] - anchor[1]).div_euclid(cfg.cell) as usize;
         let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
         let initial = start * 8 + start_dir;
-        let mut distance = vec![u32::MAX; n * rows * 8];
-        let previous = vec![usize::MAX; distance.len()];
-        let poses = vec![None; distance.len()];
+        let mut distance = BTreeMap::new();
+        let previous = BTreeMap::new();
+        let poses = BTreeMap::new();
         let mut open = BinaryHeap::new();
-        distance[initial] = 0;
+        distance.insert(initial, 0);
         open.push(Reverse((0, 0, initial)));
         Hunting::Open(Box::new(Hunt {
             shape,
@@ -835,6 +841,11 @@ impl Hunt {
         }))
     }
 
+    /// What the search has paid to reach this cell and heading; the most
+    /// a `u32` holds when it has not reached it.
+    fn cost(&self, i: usize) -> u32 {
+        self.distance.get(&i).copied().unwrap_or(u32::MAX)
+    }
     /// The goal as the search snapped it.
     pub fn goal(&self) -> [i32; 2] {
         self.to
@@ -865,7 +876,7 @@ impl Hunt {
     /// what it would have found without them (P-29).
     pub fn forget_world(&mut self) {
         self.columns = Columns::default();
-        self.poses.iter_mut().for_each(|p| *p = None);
+        self.poses.clear();
     }
     /// The search as bytes: the cells it reached, the frontier in priority
     /// order, and the request. What it scanned and probed is left out
@@ -918,14 +929,13 @@ impl Hunt {
         b.u32(self.nodes);
         b.bool(self.left_start);
         // Only the cells the search reached; the rest is its default.
-        let reached: Vec<u32> = (0..self.distance.len() as u32)
-            .filter(|i| self.distance[*i as usize] != u32::MAX)
-            .collect();
-        b.u32(reached.len() as u32);
-        for i in reached {
-            b.u32(i);
-            b.u32(self.distance[i as usize]);
-            b.u32(self.previous[i as usize] as u32);
+        // A map keeps them in the order of the cell, which is the order
+        // the dense array was written in before (ADR-316).
+        b.u32(self.distance.len() as u32);
+        for (&i, &d) in &self.distance {
+            b.u32(i as u32);
+            b.u32(d);
+            b.u32(self.previous.get(&i).copied().unwrap_or(usize::MAX) as u32);
         }
         // Heap storage order is an implementation detail. Persist priority
         // order, as the blast wave does with its own frontier.
@@ -991,9 +1001,9 @@ impl Hunt {
             anchor,
             initial,
             end,
-            distance: vec![u32::MAX; cells],
-            previous: vec![usize::MAX; cells],
-            poses: vec![None; cells],
+            distance: BTreeMap::new(),
+            previous: BTreeMap::new(),
+            poses: BTreeMap::new(),
             open: BinaryHeap::new(),
             spent,
             nodes,
@@ -1012,12 +1022,10 @@ impl Hunt {
             if i >= cells {
                 return None;
             }
-            hunt.distance[i] = d;
-            hunt.previous[i] = if p == u32::MAX {
-                usize::MAX
-            } else {
-                p as usize
-            };
+            hunt.distance.insert(i, d);
+            if p != u32::MAX {
+                hunt.previous.insert(i, p as usize);
+            }
         }
         let open = s.u32() as usize;
         if open > cells {
@@ -1060,17 +1068,22 @@ impl Hunt {
                 exhausted = true;
                 break;
             };
-            if cost != self.distance[i] {
+            if cost != self.cost(i) {
                 continue;
             }
             self.nodes += 1;
             let at = self.point(i / 8);
             let direction = i % 8;
             let yaw = direction as i32 * angle::FULL / 8;
-            let pose = *self.poses[i].get_or_insert_with(|| {
-                self.probed += 1;
-                ground.pose(at, yaw, self.shape)
-            });
+            let pose = match self.poses.get(&i) {
+                Some(p) => *p,
+                None => {
+                    self.probed += 1;
+                    let p = ground.pose(at, yaw, self.shape);
+                    self.poses.insert(i, p);
+                    p
+                }
+            };
             if ((at[0].to_int_trunc() - self.to[0])
                 .abs()
                 .max((at[1].to_int_trunc() - self.to[1]).abs())
@@ -1111,10 +1124,15 @@ impl Hunt {
                     continue;
                 }
                 let j = cell * 8 + d;
-                let next = *self.poses[j].get_or_insert_with(|| {
-                    self.probed += 1;
-                    ground.pose(q, next_yaw, self.shape)
-                });
+                let next = match self.poses.get(&j) {
+                    Some(p) => *p,
+                    None => {
+                        self.probed += 1;
+                        let p = ground.pose(q, next_yaw, self.shape);
+                        self.poses.insert(j, p);
+                        p
+                    }
+                };
                 let next_cost =
                     cost + if turn == 0 {
                         if d.is_multiple_of(2) {
@@ -1127,7 +1145,7 @@ impl Hunt {
                     } + (next.crush as u32)
                         .saturating_mul(self.cfg.crush_cost)
                         .min(self.cfg.crush_cap);
-                if next_cost >= self.distance[j] {
+                if next_cost >= self.cost(j) {
                     continue;
                 }
                 if next.refused()
@@ -1145,8 +1163,8 @@ impl Hunt {
                 if ground.pose(mid, mid_yaw, self.shape).refused() || !clear(mid, mid_yaw) {
                     continue;
                 }
-                self.distance[j] = next_cost;
-                self.previous[j] = i;
+                self.distance.insert(j, next_cost);
+                self.previous.insert(j, i);
                 self.left_start = true;
                 let heuristic = q[0]
                     .sub(Fx::from_int(self.to[0]))
@@ -1188,7 +1206,7 @@ impl Hunt {
             if all.last() != Some(&p) {
                 all.push(p);
             }
-            i = self.previous[i];
+            i = self.previous.get(&i).copied().unwrap_or(usize::MAX);
         }
         all.reverse();
         if all.last() != Some(&self.to) {
