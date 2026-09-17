@@ -1060,6 +1060,9 @@ pub struct BlastRange {
     pub bodies: Bodies,
     /// Cells that fell for want of support. In the snapshot and the hash.
     pub collapsed_cells: u64,
+    /// No edit reached the world on the last drain (ADR-306): a route
+    /// search in flight may keep what it scanned. In the snapshot.
+    world_steady: bool,
     /// Edits the layer has not seen yet: it waits for the wave's claims
     /// to clear and for room in the piece pool, and takes them in a batch.
     /// The latest edit per cell. In the snapshot.
@@ -1278,6 +1281,7 @@ impl BlastRange {
             collapse,
             bodies,
             collapsed_cells: 0,
+            world_steady: true,
             collapse_backlog: BTreeMap::new(),
             collapse_cap: stock.max_body_cells as usize,
         };
@@ -1323,7 +1327,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(25);
+        b.u32(26);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1484,12 +1488,13 @@ impl BlastRange {
             b.u32(u32::from(e.mat));
         }
         self.bodies.save(&mut b);
+        b.bool(self.world_steady);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 25 {
+        if s.u32() != 26 {
             return None;
         }
         let extended = s.bool();
@@ -1873,6 +1878,7 @@ impl BlastRange {
         if !r.bodies.load(&mut s) {
             return None;
         }
+        r.world_steady = s.bool();
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2040,6 +2046,7 @@ impl BlastRange {
                     self.tick,
                     self.config.gravity,
                     &self.rubble,
+                    self.world_steady,
                 );
                 let head = u.motion.drive.head;
                 u.update_pose(head);
@@ -2056,6 +2063,7 @@ impl BlastRange {
             self.tick,
             self.config.gravity,
             &self.rubble,
+            self.world_steady,
         );
         self.gun.update_pose(self.turret.angle);
         // Tracked hulls cut the yielding matter they stand in; the crown that
@@ -2251,7 +2259,7 @@ impl BlastRange {
                 }
             }
         }
-        self.world.flush();
+        self.world_steady = self.world.flush().applied == 0;
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
         // bodies. The cohesive cells of a body fall on as the body and
@@ -2461,6 +2469,7 @@ mod tests {
                     tick,
                     r.config.gravity,
                     &r.rubble,
+                    true,
                 );
             }
         }
@@ -2786,7 +2795,9 @@ mod tests {
             "stuck at {:?} for {longest_still} ticks",
             a.gun.motion.pos
         );
-        assert!(longest_still <= 90, "stood {longest_still} ticks");
+        // Ninety ticks of waiting for the next try (`replan_ticks`) and
+        // the slices of the search that follows it (ADR-306).
+        assert!(longest_still <= 120, "stood {longest_still} ticks");
     }
     /// One walker alone on the open pad: a body with legs to shoot at.
     fn walker_layout() -> RangeLayout {
@@ -4062,14 +4073,66 @@ mod tests {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         let mut a = BlastRange::with_layout(c, layout).unwrap();
         assert!(a.order_move([340, 336]), "no route next to the parked tank");
+        while a.gun.motion.searching() {
+            a.step();
+        }
         assert!(
             a.gun.motion.last_plan[0] < 2000,
             "the order cost {} nodes",
             a.gun.motion.last_plan[0]
         );
         assert!(a.order_move([400, 336]), "no route to the wall's foot");
+        while a.gun.motion.searching() {
+            a.step();
+        }
         let end = *a.gun.motion.path.last().unwrap();
         assert!(end[0] < 392, "the route ends inside the wall: {end:?}");
+    }
+    /// A route too long for one tick is found over several (ADR-306): the
+    /// order stands, the hull waits where it is, and a snapshot taken
+    /// while the search walks restores into the same search — the restored
+    /// range answers the same route on the same tick.
+    #[test]
+    fn a_long_route_is_searched_over_ticks_and_the_snapshot_keeps_the_search() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        a.patrols_running = false;
+        a.fire_tick = u32::MAX;
+        let start = a.gun.motion.pos;
+        assert!(a.order_move([128, 470]), "the order was refused");
+        assert!(
+            a.gun.motion.searching(),
+            "the woods were found in one tick: {:?}",
+            a.gun.motion.last_plan
+        );
+        assert!(a.gun.motion.path.is_empty());
+        // Mid-search: a restored range carries the same frontier.
+        for _ in 0..3 {
+            a.step();
+        }
+        assert!(a.gun.motion.searching(), "the search ended too early");
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        let mut answered = None;
+        for i in 0..200 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at slice {i}");
+            if answered.is_none() && !a.gun.motion.searching() {
+                answered = Some(i);
+            }
+        }
+        let at = answered.expect("the search never ended");
+        assert!(at > 0, "the search did not span ticks");
+        assert!(!a.gun.motion.path.is_empty(), "no route to the woods");
+        assert_eq!(a.gun.motion.path, b.gun.motion.path);
+        assert!(
+            a.gun.motion.pos[0].sub(start[0]).abs() > Fx::ONE
+                || a.gun.motion.pos[2].sub(start[2]).abs() > Fx::ONE,
+            "the hull never left: {:?}",
+            a.gun.motion.pos
+        );
     }
     /// Segment damage is state: a restored range matches tick for tick.
     #[test]
@@ -5133,6 +5196,7 @@ mod tests {
             b.gun.motion.replan,
             b.config.gravity,
             &b.rubble,
+            true,
         );
         assert!(!b.gun.motion.path.is_empty());
         a.gun.motion.stop();
@@ -5146,6 +5210,7 @@ mod tests {
             a.gun.motion.replan,
             a.config.gravity,
             &a.rubble,
+            true,
         );
         assert!(a.gun.motion.path.is_empty());
         assert_eq!(a.gun.motion.destination, None);

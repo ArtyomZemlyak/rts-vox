@@ -62,6 +62,19 @@ pub type Rubble = BTreeMap<[i32; 2], u16>;
 /// The cache is a window of columns: the whole map for a route search, a
 /// few hull lengths around the vehicle for the per-tick pose checks, so
 /// that clearing it every tick costs kilobytes rather than megabytes.
+/// The column window of a probe, taken out and put back so that a search
+/// spanning ticks scans each column once rather than once a slice (P-29).
+/// It holds answers about the world and is therefore only as good as the
+/// world it was filled from: a search whose world changed drops it.
+#[derive(Clone, Default)]
+pub struct Columns {
+    x0: i32,
+    z0: i32,
+    w: usize,
+    h: usize,
+    heights: Vec<u16>,
+    yields: Vec<[u16; 2]>,
+}
 pub struct Probe<'a> {
     world: &'a World,
     x0: i32,
@@ -128,6 +141,38 @@ impl<'a> Probe<'a> {
     pub fn with_rubble(mut self, rubble: &'a Rubble) -> Self {
         self.rubble = Some(rubble);
         self
+    }
+    /// Take back a window filled earlier, if it covers the same ground
+    /// (P-29); a window of another shape is dropped rather than adapted.
+    pub fn with_columns(mut self, c: Columns) -> Self {
+        if c.x0 == self.x0
+            && c.z0 == self.z0
+            && c.w == self.w
+            && c.h == self.h
+            && c.heights.len() == self.heights.len()
+            && c.yields.len() == self.yields.len()
+        {
+            self.heights = c.heights;
+            self.yields = c.yields;
+        }
+        self
+    }
+    /// Give up the filled window; the probe keeps an empty one of the same
+    /// shape and answers as a fresh probe would.
+    pub fn take_columns(&mut self) -> Columns {
+        let blank = if self.yields.is_empty() {
+            Vec::new()
+        } else {
+            vec![[u16::MAX, 0]; self.w * self.h]
+        };
+        Columns {
+            x0: self.x0,
+            z0: self.z0,
+            w: self.w,
+            h: self.h,
+            heights: std::mem::replace(&mut self.heights, vec![u16::MAX; self.w * self.h]),
+            yields: std::mem::replace(&mut self.yields, blank),
+        }
     }
     pub fn yields(&self, m: Mat) -> bool {
         self.yielding.contains(&m)
@@ -609,12 +654,19 @@ pub enum Hunting {
 /// answer: a search resumed with an empty memo reaches the same answer,
 /// as long as the world has not changed under it. A search whose world
 /// changed is dropped and begun again, never resumed.
+#[derive(Clone)]
 pub struct Hunt {
     shape: Shape,
     cfg: Search,
     from: [Fx; 2],
     /// The goal as the search snapped it, not as it was asked.
     to: [i32; 2],
+    /// Materials the probe of each slice treats as yielding.
+    yielding: Vec<Mat>,
+    /// What the slices before this one scanned. Answers about the world,
+    /// so only as good as the world they came from: [`Hunt::forget_world`]
+    /// drops them when it changes, and the search itself carries on.
+    columns: Columns,
     n: usize,
     rows: usize,
     anchor: [i32; 2],
@@ -633,6 +685,19 @@ pub struct Hunt {
     left_start: bool,
 }
 
+impl std::fmt::Debug for Hunt {
+    /// The reached set is thousands of cells; a search prints as what it
+    /// is looking for and how far it has got.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Hunt {{ to: {:?}, nodes: {}, open: {} }}",
+            self.to,
+            self.nodes,
+            self.open.len()
+        )
+    }
+}
 impl Hunt {
     /// Begin a search: check the request, move the goal to a cell the hull
     /// may stand on, and try the straight run. Any of the three may answer
@@ -747,6 +812,8 @@ impl Hunt {
             cfg,
             from,
             to,
+            yielding: ground.yielding.clone(),
+            columns: Columns::default(),
             n,
             rows,
             anchor,
@@ -768,6 +835,199 @@ impl Hunt {
     /// The goal as the search snapped it.
     pub fn goal(&self) -> [i32; 2] {
         self.to
+    }
+    /// Frontier still open and nodes expanded so far.
+    pub fn nodes(&self) -> u32 {
+        self.nodes
+    }
+    /// One slice of a search that spans ticks (P-29): a probe over the
+    /// window the earlier slices filled, `budget` of the frontier, and the
+    /// window kept for the next slice.
+    pub fn advance_in(
+        &mut self,
+        world: &World,
+        rubble: &Rubble,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
+    ) -> Option<Route> {
+        let carried = std::mem::take(&mut self.columns);
+        let mut ground = Probe::with_yield(world, &self.yielding)
+            .with_rubble(rubble)
+            .with_columns(carried);
+        self.advance(&mut ground, clear, budget)
+    }
+    /// The world changed under the search: everything scanned or probed in
+    /// the world as it was goes, the search itself stays. Its answers are
+    /// a pure function of the world, so a search that forgets them finds
+    /// what it would have found without them (P-29).
+    pub fn forget_world(&mut self) {
+        self.columns = Columns::default();
+        self.poses.iter_mut().for_each(|p| *p = None);
+    }
+    /// The search as bytes: the cells it reached, the frontier in priority
+    /// order, and the request. What it scanned and probed is left out
+    /// twice over — the window and the memo because they are answers about
+    /// the world that a resumed search asks again, the counts of them
+    /// because they count those asks and a resumed search asks fewer.
+    /// A search restored from these bytes finds the same route (P-29).
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        for v in [
+            self.shape.half[0],
+            self.shape.half[1],
+            self.shape.support[0],
+            self.shape.support[1],
+            self.shape.step,
+            self.shape.height,
+            self.shape.span,
+        ] {
+            b.i32(v);
+        }
+        for v in [self.shape.clearance, self.shape.min_up, self.shape.ramp] {
+            b.fx(v);
+        }
+        for v in [
+            self.cfg.cell,
+            self.cfg.min[0],
+            self.cfg.min[1],
+            self.cfg.max[0],
+            self.cfg.max[1],
+            self.cfg.margin,
+        ] {
+            b.i32(v);
+        }
+        b.usize(self.cfg.nodes);
+        for v in [
+            self.cfg.crush_cost,
+            self.cfg.crush_cap,
+            self.cfg.heuristic_pct,
+        ] {
+            b.u32(v);
+        }
+        for v in self.from {
+            b.fx(v);
+        }
+        for v in [self.to[0], self.to[1], self.anchor[0], self.anchor[1]] {
+            b.i32(v);
+        }
+        for v in [self.n, self.rows, self.initial, self.end, self.spent] {
+            b.usize(v);
+        }
+        b.u32(self.nodes);
+        b.bool(self.left_start);
+        // Only the cells the search reached; the rest is its default.
+        let reached: Vec<u32> = (0..self.distance.len() as u32)
+            .filter(|i| self.distance[*i as usize] != u32::MAX)
+            .collect();
+        b.u32(reached.len() as u32);
+        for i in reached {
+            b.u32(i);
+            b.u32(self.distance[i as usize]);
+            b.u32(self.previous[i as usize] as u32);
+        }
+        // Heap storage order is an implementation detail. Persist priority
+        // order, as the blast wave does with its own frontier.
+        let mut open: Vec<(u32, u32, usize)> = self.open.iter().map(|Reverse(v)| *v).collect();
+        open.sort_unstable();
+        b.u32(open.len() as u32);
+        for (f, cost, i) in open {
+            b.u32(f);
+            b.u32(cost);
+            b.u32(i as u32);
+        }
+    }
+    /// A search read back. `None` when the bytes do not describe one.
+    pub fn load(s: &mut fx::blob::Scan, yielding: &[Mat]) -> Option<Hunt> {
+        let mut i32s = [0i32; 7];
+        for v in &mut i32s {
+            *v = s.i32();
+        }
+        let shape = Shape {
+            half: [i32s[0], i32s[1]],
+            support: [i32s[2], i32s[3]],
+            step: i32s[4],
+            height: i32s[5],
+            span: i32s[6],
+            clearance: s.fx(),
+            min_up: s.fx(),
+            ramp: s.fx(),
+        };
+        let mut c = [0i32; 6];
+        for v in &mut c {
+            *v = s.i32();
+        }
+        let cfg = Search {
+            cell: c[0],
+            min: [c[1], c[2]],
+            max: [c[3], c[4]],
+            margin: c[5],
+            nodes: s.usize(),
+            crush_cost: s.u32(),
+            crush_cap: s.u32(),
+            heuristic_pct: s.u32(),
+        };
+        let from = [s.fx(), s.fx()];
+        let to = [s.i32(), s.i32()];
+        let anchor = [s.i32(), s.i32()];
+        let (n, rows, initial, end, spent) =
+            (s.usize(), s.usize(), s.usize(), s.usize(), s.usize());
+        let nodes = s.u32();
+        let left_start = s.bool();
+        let cells = n.checked_mul(rows)?.checked_mul(8)?;
+        if !s.ok() || cells == 0 || cells > 1 << 22 || initial >= cells {
+            return None;
+        }
+        let mut hunt = Hunt {
+            shape,
+            cfg,
+            from,
+            to,
+            yielding: yielding.to_vec(),
+            columns: Columns::default(),
+            n,
+            rows,
+            anchor,
+            initial,
+            end,
+            distance: vec![u32::MAX; cells],
+            previous: vec![usize::MAX; cells],
+            poses: vec![None; cells],
+            open: BinaryHeap::new(),
+            spent,
+            nodes,
+            probed: 0,
+            scans: 0,
+            samples: 0,
+            left_start,
+        };
+        let reached = s.u32() as usize;
+        if reached > cells {
+            return None;
+        }
+        for _ in 0..reached {
+            let i = s.u32() as usize;
+            let (d, p) = (s.u32(), s.u32());
+            if i >= cells {
+                return None;
+            }
+            hunt.distance[i] = d;
+            hunt.previous[i] = if p == u32::MAX {
+                usize::MAX
+            } else {
+                p as usize
+            };
+        }
+        let open = s.u32() as usize;
+        if open > cells {
+            return None;
+        }
+        for _ in 0..open {
+            let (f, cost, i) = (s.u32(), s.u32(), s.u32() as usize);
+            if i >= cells {
+                return None;
+            }
+            hunt.open.push(Reverse((f, cost, i)));
+        }
+        s.ok().then_some(hunt)
     }
 
     fn point(&self, i: usize) -> [Fx; 2] {
@@ -899,6 +1159,8 @@ impl Hunt {
         }
         self.scans += ground.scans.saturating_sub(scans);
         self.samples += ground.samples.saturating_sub(samples);
+        // What this slice scanned goes to the next one (P-29).
+        self.columns = ground.take_columns();
         match found {
             Some(i) => Some(self.route_through(i)),
             None if exhausted || self.spent >= self.cfg.nodes => Some(Route {

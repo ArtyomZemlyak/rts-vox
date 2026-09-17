@@ -121,6 +121,9 @@ pub struct Motion {
     pub last_plan: [u32; 2],
     /// Columns scanned and surface samples taken by it (P-29).
     pub last_probe: [u64; 2],
+    /// A route search still walking its frontier (ADR-306). While one is
+    /// in flight the hull stands and the orders wait for it.
+    hunt: Option<Box<nav::vehicle::Hunt>>,
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
@@ -217,6 +220,7 @@ impl Motion {
             next_plan: 0,
             last_plan: [0; 2],
             last_probe: [0; 2],
+            hunt: None,
             dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
@@ -612,6 +616,9 @@ impl Motion {
             }
         }
     }
+    /// Ask for a route to `to` and walk one tick's worth of the search
+    /// (ADR-306). `false` once the answer is known to be no route; while
+    /// the search goes on the order stands and this is `true`.
     pub fn move_to(
         &mut self,
         w: &World,
@@ -623,33 +630,62 @@ impl Motion {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
         let half = shape.half.map(Fx::from_int);
-        let plan = nav::vehicle::plan(
-            nav::vehicle::Probe::with_yield(w, &self.yielding).with_rubble(rubble),
+        let clear = |p: [Fx; 2], head: i32| {
+            !others.iter().any(|o| {
+                o.overlaps(&Obstacle {
+                    pos: [p[0], Fx::ZERO, p[1]],
+                    head,
+                    half,
+                })
+            })
+        };
+        self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
+        self.enabled = true;
+        self.hunt = None;
+        self.path.clear();
+        self.cursor = 0;
+        let mut ground = nav::vehicle::Probe::with_yield(w, &self.yielding).with_rubble(rubble);
+        match nav::vehicle::Hunt::start(
+            &mut ground,
             shape,
             from,
             self.drive.head,
             to,
-            nav::vehicle::Search {
-                cell: self.navigation.cell_units,
-                min: [40; 2],
-                max: [600; 2],
-                nodes: self.navigation.search_nodes,
-                crush_cost: self.navigation.fell.cost_per_column,
-                crush_cap: self.navigation.fell.cost_cap,
-                margin: self.navigation.plan_margin,
-                heuristic_pct: self.navigation.heuristic_pct,
-            },
-            |p, head| {
-                !others.iter().any(|o| {
-                    o.overlaps(&Obstacle {
-                        pos: [p[0], Fx::ZERO, p[1]],
-                        head,
-                        half,
-                    })
-                })
-            },
-        );
-        self.destination = to.iter().all(|v| (40..600).contains(v)).then_some(to);
+            self.search(),
+            &clear,
+        ) {
+            nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
+            nav::vehicle::Hunting::Open(mut hunt) => {
+                let slice = self.navigation.search_nodes_per_tick.max(1);
+                match hunt.advance(&mut ground, &clear, slice) {
+                    Some(plan) => self.take_plan(plan),
+                    None => {
+                        // Still looking: the order stands, the hull waits.
+                        self.hunt = Some(hunt);
+                        self.blocked = false;
+                        self.stranded = false;
+                        self.dry = false;
+                    }
+                }
+            }
+        }
+        !self.blocked
+    }
+    /// The planner's budget and rules for this hull.
+    fn search(&self) -> nav::vehicle::Search {
+        nav::vehicle::Search {
+            cell: self.navigation.cell_units,
+            min: [40; 2],
+            max: [600; 2],
+            nodes: self.navigation.search_nodes,
+            crush_cost: self.navigation.fell.cost_per_column,
+            crush_cap: self.navigation.fell.cost_cap,
+            margin: self.navigation.plan_margin,
+            heuristic_pct: self.navigation.heuristic_pct,
+        }
+    }
+    /// A search's answer becomes the hull's route.
+    fn take_plan(&mut self, plan: nav::vehicle::Route) {
         // A search that ran the open set dry found the goal cut off in the
         // world as it is; the goal stays, since the world changes — a hull
         // moves, a tree falls, a crater fills — but the next try waits four
@@ -662,8 +698,48 @@ impl Motion {
         self.last_probe = [plan.scans, plan.samples];
         self.path = plan.path;
         self.cursor = 0;
-        self.enabled = true;
-        !self.blocked
+    }
+    /// Whether a route search is still walking its frontier (ADR-306).
+    pub fn searching(&self) -> bool {
+        self.hunt.is_some()
+    }
+    /// One tick's worth of the search in flight, if there is one. A world
+    /// that changed under it drops what it scanned, not the search.
+    fn hunt_step(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        tick: u32,
+        steady: bool,
+    ) {
+        let Some(mut hunt) = self.hunt.take() else {
+            return;
+        };
+        if !steady {
+            hunt.forget_world();
+        }
+        let half = self.shape(b).half.map(Fx::from_int);
+        let clear = |p: [Fx; 2], head: i32| {
+            !others.iter().any(|o| {
+                o.overlaps(&Obstacle {
+                    pos: [p[0], Fx::ZERO, p[1]],
+                    head,
+                    half,
+                })
+            })
+        };
+        let slice = self.navigation.search_nodes_per_tick.max(1);
+        match hunt.advance_in(w, rubble, &clear, slice) {
+            Some(plan) => {
+                // The cadence of the next try counts from the answer, not
+                // from the question (ADR-306).
+                self.take_plan(plan);
+                self.next_plan = tick.saturating_add(self.replan_after_search());
+            }
+            None => self.hunt = Some(hunt),
+        }
     }
     /// Ticks until the next search after the last one: four replan periods
     /// when it ran the open set dry, one otherwise (P-17).
@@ -680,6 +756,7 @@ impl Motion {
         self.navigation.heuristic_pct = heuristic_pct;
     }
     pub fn stop(&mut self) {
+        self.hunt = None;
         self.path.clear();
         self.cursor = 0;
         self.destination = None;
@@ -726,6 +803,7 @@ impl Motion {
         tick: u32,
         gravity: i32,
         rubble: &nav::vehicle::Rubble,
+        steady: bool,
     ) {
         self.cut.clear();
         if !self.enabled {
@@ -737,7 +815,13 @@ impl Motion {
             return;
         }
         let engine = engine && response.traction > Fx::ZERO;
-        if self.escape_left == 0 && (self.blocked || self.path.is_empty()) && tick >= self.next_plan
+        // A search begun on an earlier tick walks on before anything asks
+        // for another (ADR-306).
+        self.hunt_step(w, b, others, rubble, tick, steady);
+        if self.hunt.is_none()
+            && self.escape_left == 0
+            && (self.blocked || self.path.is_empty())
+            && tick >= self.next_plan
         {
             if let Some(goal) = self.destination {
                 self.move_to(w, goal, b, others, rubble);
@@ -745,6 +829,7 @@ impl Motion {
             }
         }
         if self.cursor == self.path.len()
+            && self.hunt.is_none()
             && self.escape_left == 0
             && !self.route.is_empty()
             && alive
@@ -898,7 +983,12 @@ impl Motion {
         }
         // A search that could not leave this pose is a block like any
         // other: only a manoeuvre will change what the next search sees.
-        if self.stranded && self.destination.is_some() && self.path.is_empty() {
+        // A search still walking is not a block: the hull is waiting.
+        if self.stranded
+            && self.hunt.is_none()
+            && self.destination.is_some()
+            && self.path.is_empty()
+        {
             self.blocked = true;
         }
         if self.escape_left > 0 {
@@ -1025,6 +1115,13 @@ impl Motion {
         }
         b.fx(self.shove.x);
         b.fx(self.shove.z);
+        // A search still walking its frontier (ADR-306). Without it a
+        // restored hull would answer the same order a tick later than the
+        // hull it was restored from.
+        b.bool(self.hunt.is_some());
+        if let Some(hunt) = &self.hunt {
+            hunt.save(b);
+        }
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
         self.pos = std::array::from_fn(|_| s.fx());
@@ -1082,6 +1179,14 @@ impl Motion {
         if self.shove.len_sq() > Fx::from_int(1_000_000) {
             return false;
         }
+        self.hunt = if s.bool() {
+            match nav::vehicle::Hunt::load(s, &self.yielding) {
+                Some(hunt) => Some(Box::new(hunt)),
+                None => return false,
+            }
+        } else {
+            None
+        };
         s.ok()
             && self.escape_left <= self.navigation.escape_ticks
             && (0..angle::FULL).contains(&self.recovery_head)
@@ -1151,6 +1256,7 @@ mod tests {
             tick,
             98,
             &nav::vehicle::Rubble::new(),
+            true,
         );
     }
     /// A whole walker carries its hull on all four legs, feet in the air or

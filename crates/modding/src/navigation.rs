@@ -4,6 +4,10 @@ use serde::Deserialize;
 pub struct Navigation {
     pub cell_units: i32,
     pub search_nodes: usize,
+    /// Frontier a search walks in one tick (ADR-306). A long route is
+    /// then found over several ticks instead of stopping one.
+    #[serde(default = "whole_search")]
+    pub search_nodes_per_tick: usize,
     pub recovery_ticks: u32,
     pub escape_ticks: u32,
     pub escape_speed_pct: i32,
@@ -18,6 +22,10 @@ pub struct Navigation {
 }
 fn plain_heuristic() -> u32 {
     100
+}
+/// Older data without a slice budget searches whole, as it used to.
+fn whole_search() -> usize {
+    usize::MAX
 }
 /// What a tracked hull pushes over instead of driving around.
 #[derive(Clone, Copy, Debug, Deserialize)]

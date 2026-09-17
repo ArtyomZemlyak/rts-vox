@@ -226,6 +226,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
             tick,
             98,
             &nav::vehicle::Rubble::new(),
+            true,
         );
         let dup = m.hull.up.sub(up);
         let step = m.pos[1].sub(y);
@@ -310,6 +311,7 @@ fn probe_poses_along_the_run() {
                 tick,
                 98,
                 &nav::vehicle::Rubble::new(),
+                true,
             );
             if m.blocked && shown < 12 {
                 shown += 1;

@@ -1,6 +1,10 @@
 (
     cell_units: 8,
     search_nodes: 16000,
+    // Frontier walked in one tick (ADR-306): the route into the woods took
+    // 1072 nodes and 70 ms whole, so 96 keeps a slice near five
+    // milliseconds and answers it in a third of a second.
+    search_nodes_per_tick: 96,
     // After recovery_ticks refused, the hull runs a cycle of escape
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.
