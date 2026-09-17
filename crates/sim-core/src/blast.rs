@@ -5346,6 +5346,31 @@ mod tests {
     }
 
     #[test]
+    fn a_tick_that_begins_a_search_does_not_also_walk_it() {
+        // Beginning a search is a slice of work by itself (ADR-314): the
+        // goal is probed from all eight headings over a ring of cells and
+        // the straight run to it is walked pose by pose. The frontier
+        // waits for the next tick, so one tick never pays for both.
+        let mut r = BlastRange::new(config());
+        assert!(r.order_move([128, 470]), "the order was refused");
+        assert!(
+            r.gun.motion.searching(),
+            "the goal answered at once; this test needs one that does not"
+        );
+        assert_eq!(
+            r.gun.motion.frontier_nodes(),
+            0,
+            "the tick that began the search also walked its frontier"
+        );
+        for _ in 0..3 {
+            r.step();
+        }
+        assert!(
+            !r.gun.motion.searching() || r.gun.motion.frontier_nodes() > 0,
+            "the frontier stood still after the tick that began it"
+        );
+    }
+    #[test]
     fn a_tick_begins_no_more_searches_than_the_ceiling_allows() {
         // Beginning a search costs a hundred times a slice of one
         // (ADR-312), so a tick begins only so many and the hulls over the

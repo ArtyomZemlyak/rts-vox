@@ -663,18 +663,17 @@ impl Motion {
             &clear,
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
-            nav::vehicle::Hunting::Open(mut hunt) => {
-                let slice = self.navigation.search_nodes_per_tick.max(1);
-                match hunt.advance(&mut ground, &clear, slice) {
-                    Some(plan) => self.take_plan(plan),
-                    None => {
-                        // Still looking: the order stands, the hull waits.
-                        self.hunt = Some(hunt);
-                        self.blocked = false;
-                        self.stranded = false;
-                        self.dry = false;
-                    }
-                }
+            nav::vehicle::Hunting::Open(hunt) => {
+                // Beginning a search is this tick's share of it (ADR-314):
+                // the goal has been probed from every heading over a ring
+                // of cells and the straight run to it walked whole, which
+                // is a slice of work by itself. The frontier waits for the
+                // next tick. Still looking: the order stands, the hull
+                // waits where it is.
+                self.hunt = Some(hunt);
+                self.blocked = false;
+                self.stranded = false;
+                self.dry = false;
             }
         }
         !self.blocked
@@ -710,6 +709,11 @@ impl Motion {
     /// Whether a route search is still walking its frontier (ADR-306).
     pub fn searching(&self) -> bool {
         self.hunt.is_some()
+    }
+    /// Cells the search in flight has expanded so far; zero when none is
+    /// in flight or when it has not walked yet (ADR-314).
+    pub fn frontier_nodes(&self) -> u32 {
+        self.hunt.as_ref().map_or(0, |h| h.nodes())
     }
     /// One tick's worth of the search in flight, if there is one. A world
     /// that changed under it drops what it scanned, not the search.
