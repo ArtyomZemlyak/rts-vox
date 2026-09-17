@@ -376,7 +376,7 @@ fn every_terrain_is_crossed_from_every_heading_without_pose_jumps() {
                         r.routed
                             && r.arrived.is_some()
                             && (!r.reversed || recovery_allowed)
-                            && r.ddy < Fx::ONE
+                            && r.ddy < Fx::from_ratio(7, 10)
                             && r.tilt < Fx::from_ratio(1, 4)
                             && r.blocked <= if recovery_allowed { 60 } else { 12 }
                     } else {

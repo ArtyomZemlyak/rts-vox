@@ -24,6 +24,7 @@ fn ride(supports: usize) -> Ride {
         min_up: Fx::from_ratio(91, 100),
         settle: Fx::from_ratio(1, 2),
         settle_tilt: Fx::from_ratio(1, 2),
+        settle_catch: Fx::ONE,
     }
 }
 

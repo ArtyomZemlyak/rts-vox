@@ -226,6 +226,7 @@
         // на уступе нос задирается прежде, чем корпус поднимается.
         settle_pct: 35,
         settle_tilt_pct: 50,
+        settle_catch_pct: 30,
         // Предел толчка взрыва: скорость и вращение корпуса (ADR-304).
         push_max_mps: 8,
         spin_max_deg_s: 120,
@@ -263,6 +264,7 @@
         approach_pct: 50,
         settle_pct: 50,
         settle_tilt_pct: 50,
+        settle_catch_pct: 30,
         // Предел толчка взрыва: скорость и вращение корпуса (ADR-304).
         push_max_mps: 8,
         spin_max_deg_s: 120,

@@ -54,6 +54,7 @@ pub fn ride_of(c: &Chassis) -> Ride {
         min_up: Fx::from_ratio(c.max_tilt_pct.clamp(0, 100), 100),
         settle: cm(c.travel_cm).mul(Fx::from_ratio(c.settle_pct.clamp(1, 100), 100)),
         settle_tilt: Fx::from_ratio(c.settle_tilt_pct.clamp(0, 100), 100),
+        settle_catch: Fx::from_ratio(c.settle_catch_pct.clamp(1, 100), 100),
     }
 }
 
@@ -207,6 +208,7 @@ mod tests {
             approach_pct: 60,
             settle_pct: 35,
             settle_tilt_pct: 50,
+            settle_catch_pct: 100,
             push_max_mps: 8,
             spin_max_deg_s: 120,
             gait: None,

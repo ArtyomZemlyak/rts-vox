@@ -20,7 +20,7 @@
 ///
 /// Тот же прогон, что печатает `sim-cli --seed 42 --ticks 1000
 /// --dump-hash`, и то же число, что записано в `docs/11-roadmap.md`.
-const GOLDEN_1000: u64 = 0x3d5b_3289_0583_5e69;
+const GOLDEN_1000: u64 = 0x12bd_9cb0_d534_98f2;
 
 const SEED: u64 = 42;
 const UNITS: usize = 5000;
@@ -156,7 +156,7 @@ fn world_digest(w: &voxel::World) -> u64 {
 }
 
 /// Слепок мира эталонного сценария после тысячи тиков.
-const GOLDEN_WORLD_1000: u64 = 0xa58a_7b3e_c65b_75b1;
+const GOLDEN_WORLD_1000: u64 = 0x75d4_79f0_cc35_c738;
 
 /// **Мир эталонного прогона тот же, что записан.**
 #[test]
