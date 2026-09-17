@@ -39,8 +39,12 @@ pub struct RangeUnit {
     pub at: [i32; 3],
     pub removed: Vec<[u8; 3]>,
     /// Wave pressure the body took this tick (ADR-297); the range turns it
-    /// into a push on the hull and clears it. Transient.
+    /// into a push on the hull and clears it. A cell the wave breaks off
+    /// counts too: the plate took the blow before it went. Transient.
     pub absorbed: u32,
+    /// The last push: the burst, the point it went through, the pressure
+    /// absorbed and the newton-seconds. Diagnostics, not state.
+    pub last_push: Option<([i32; 3], [i32; 3], u32, u64)>,
     /// Removed cells transferred to persistent debris, excluded from the sink.
     pub detached: usize,
     /// Local work already spent deforming surviving body cells.
@@ -149,6 +153,7 @@ impl RangeUnit {
             at,
             removed: Vec::new(),
             absorbed: 0,
+            last_push: None,
             detached: 0,
             dents: BTreeMap::new(),
             revision: 0,
@@ -1932,11 +1937,33 @@ impl BlastRange {
     pub fn step(&mut self) {
         self.surface_changed.clear();
         self.shield_hits.clear();
-        // Resting debris is floor for this tick's motion (ADR-292).
-        self.rubble = self
-            .matter
-            .debris
-            .rubble(&self.world, &self.navigation.fell.materials);
+        // Resting debris is floor for this tick's motion (ADR-292), except
+        // a piece lying against a live hull's flank under that hull
+        // (ADR-302).
+        let hulls: Vec<crate::burst::Hull> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .filter(|u| u.status.alive)
+            .map(|u| {
+                let o = motion::Obstacle::of(&u.motion, &u.body);
+                crate::burst::Hull {
+                    pos: o.pos,
+                    head: o.head,
+                    half: o.half,
+                    height: Fx::from_ratio(
+                        u.body.vol.ny as i32 * u.body.mm as i32,
+                        voxel::unit::WORLD_MM as i32,
+                    ),
+                    vel: [Fx::ZERO; 3],
+                    step: Fx::from_int(u.motion.step),
+                }
+            })
+            .collect();
+        self.rubble =
+            self.matter
+                .debris
+                .rubble(&self.world, &self.navigation.fell.materials, &hulls);
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
         for s in &mut self.shields {
@@ -2154,13 +2181,17 @@ impl BlastRange {
             // The wave's pressure on a body pushes its hull (ADR-297): what
             // dents and breaks the side is what throws the machine, so a
             // hull behind cover or out of the wave is not pushed at all.
+            // The push lands on the hull's near face at the burst's height
+            // (ADR-302): sideways from a blast beside the hull, upward from
+            // one under its belly.
             let milli = u64::from(self.config.hull_impulse_milli);
             let at = e.at;
             for u in &mut self.units {
                 if u.absorbed > 0 {
                     if u.status.alive {
                         let newton_s = u64::from(u.absorbed).saturating_mul(milli) / 1000;
-                        u.motion.impulse(&u.body, at, newton_s);
+                        let through = u.motion.impulse(&u.body, at, newton_s);
+                        u.last_push = Some((at, through, u.absorbed, newton_s));
                     }
                     u.absorbed = 0;
                 }
@@ -3551,7 +3582,7 @@ mod tests {
                 a.rubble = a
                     .matter
                     .debris
-                    .rubble(&a.world, &a.navigation.fell.materials);
+                    .rubble(&a.world, &a.navigation.fell.materials, &[]);
                 assert_eq!(
                     a.rubble.get(&[GUN[0] + 30, GUN[2] + belt]),
                     Some(&(FLOOR as u16 + 2))

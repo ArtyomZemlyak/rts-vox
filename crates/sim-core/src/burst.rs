@@ -241,9 +241,12 @@ mod tests {
         assert_eq!(f.basis, IDENTITY);
         // Its bottom sits on the ground at 12 and its top one cell up.
         assert_eq!(f.position.y, Fx::from_ratio(25, 2));
-        let rubble = b.rubble(&w, &[]);
+        let rubble = b.rubble(&w, &[], &[]);
         assert_eq!(rubble.get(&[48, 48]), Some(&13));
-        assert!(b.rubble(&w, &[1]).is_empty(), "a yielding heap is no floor");
+        assert!(
+            b.rubble(&w, &[1], &[]).is_empty(),
+            "a yielding heap is no floor"
+        );
         assert_eq!(rubble.get(&[49, 48]), Some(&13));
         assert_eq!(rubble.get(&[51, 48]), None);
         assert!(e.balanced());
@@ -302,7 +305,10 @@ mod tests {
             roof > Fx::from_int(15) && roof < Fx::from_int(16),
             "not on the roof: {roof:?}"
         );
-        assert!(b.rubble(&w, &[]).is_empty(), "a piece on a roof is no heap");
+        assert!(
+            b.rubble(&w, &[], &[]).is_empty(),
+            "a piece on a roof is no heap"
+        );
         let mut woke = false;
         for _ in 0..300 {
             b.step_fragments(
@@ -455,6 +461,67 @@ mod tests {
     }
     fn tuning() -> crate::Tuning {
         crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap()
+    }
+    /// A piece that came to rest against a live hull's flank is no floor
+    /// under that hull (ADR-302): the columns of the hull's box it reaches
+    /// stay out of the map, its own columns outside stay in, and a piece
+    /// the hull stands over is floor.
+    #[test]
+    fn a_piece_against_a_flank_is_no_floor_under_the_hull() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        // Two by two by two, its bottom on the ground at 12.
+        let piece = |id, x: i32, z: i32| Fragment {
+            id,
+            position: V3::new(
+                Fx::from_int(x).add(Fx::from_ratio(1, 2)),
+                Fx::from_int(13),
+                Fx::from_int(z).add(Fx::from_ratio(1, 2)),
+            ),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 9600,
+            count: 8,
+            shape: 0xff,
+            side: 2,
+            chunk: None,
+            held,
+            resting: true,
+        };
+        // Against the flank: its centre a column outside the box, its
+        // edge reaching a column under it. Under the hull: centre inside.
+        b.fragments.push(piece(1, 45, 48));
+        b.fragments.push(piece(2, 50, 48));
+        let hull = Hull {
+            pos: [Fx::from_int(50), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(4), Fx::from_int(3)],
+            height: Fx::from_int(3),
+            vel: [Fx::ZERO; 3],
+            step: Fx::from_int(4),
+        };
+        let free = b.rubble(&w, &[], &[]);
+        assert!(
+            free.contains_key(&[46, 48]),
+            "no hull: every column is heap"
+        );
+        let map = b.rubble(&w, &[], &[hull]);
+        assert!(
+            !map.contains_key(&[46, 48]),
+            "the flank piece lifts the hull"
+        );
+        assert!(
+            map.contains_key(&[44, 48]),
+            "the flank piece lost its own column"
+        );
+        assert!(
+            map.contains_key(&[50, 48]),
+            "the piece under the hull is no floor"
+        );
     }
     fn economy() -> Economy {
         let mats =
@@ -965,6 +1032,23 @@ pub struct Hull {
     /// The rise the hull climbs rather than pushes: a piece no taller
     /// than this above the hull's bottom is floor to it (ADR-292).
     pub step: Fx,
+}
+impl Hull {
+    /// Whether a point of the ground plane lies under the hull's box.
+    pub fn covers_point(&self, p: [Fx; 2]) -> bool {
+        let (c, s) = (fx::angle::cos(self.head), fx::angle::sin(self.head));
+        let (dx, dz) = (p[0].sub(self.pos[0]), p[1].sub(self.pos[2]));
+        let u = dx.mul(c).add(dz.mul(s));
+        let v = dz.mul(c).sub(dx.mul(s));
+        u.abs() <= self.half[0] && v.abs() <= self.half[1]
+    }
+    /// Whether the column's centre lies under the hull's box.
+    pub fn covers(&self, x: i32, z: i32) -> bool {
+        self.covers_point([
+            Fx::from_int(x).add(Fx::from_ratio(1, 2)),
+            Fx::from_int(z).add(Fx::from_ratio(1, 2)),
+        ])
+    }
 }
 
 /// What the pieces meet besides the world this tick: the live hulls
@@ -1791,7 +1875,16 @@ impl Bursts {
     /// felled crown as through a standing one, and so is a piece lying on
     /// a hull's roof rather than on the world (ADR-293). Derived from the
     /// pieces every tick; nothing is saved.
-    pub fn rubble(&self, world: &voxel::World, yielding: &[Mat]) -> nav::vehicle::Rubble {
+    /// A piece that came to rest against a live hull's flank — its centre
+    /// outside the hull's box, its edge reaching under — is no floor under
+    /// that hull (ADR-302): the columns of the box it covers stay out of
+    /// the map, while a piece the hull stands over is floor as before.
+    pub fn rubble(
+        &self,
+        world: &voxel::World,
+        yielding: &[Mat],
+        hulls: &[Hull],
+    ) -> nav::vehicle::Rubble {
         let mut out = nav::vehicle::Rubble::new();
         for f in self.fragments.iter().filter(|f| {
             f.resting
@@ -1807,8 +1900,15 @@ impl Bursts {
             let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
             let top = -(p[1].add(high[1]).neg().raw() >> 32);
             let top = top.clamp(0, i64::from(u16::MAX)) as u16;
+            let against: Vec<&Hull> = hulls
+                .iter()
+                .filter(|h| !h.covers_point([p[0], p[2]]))
+                .collect();
             for z in lo[1].max(0)..=hi[1] {
                 for x in lo[0].max(0)..=hi[0] {
+                    if against.iter().any(|h| h.covers(x, z)) {
+                        continue;
+                    }
                     let cell = out.entry([x, z]).or_insert(0);
                     *cell = (*cell).max(top);
                 }
@@ -2331,6 +2431,15 @@ fn advance_fragment(
             m
         }
     });
+    // A piece inside a live hull's box — born there, from a cell dug under
+    // the hull — leaves by the nearest side before it flies (ADR-302): the
+    // blast throws it out from under the hull rather than letting it pile
+    // up under the belly and lift the hull off the ground.
+    for (i, h) in hulls.iter().enumerate() {
+        if i < 64 && inside & (1 << i) != 0 {
+            evict(f, h, low, high);
+        }
+    }
     for _ in 0..steps {
         for axis in 0..3 {
             if delta[axis] == Fx::ZERO {
@@ -2368,6 +2477,30 @@ fn advance_fragment(
         return true;
     }
     false
+}
+
+/// Move a piece out of a hull's box by the nearest side, in the hull's
+/// own frame, keeping its height (ADR-302).
+fn evict(f: &mut Fragment, h: &Hull, low: [Fx; 3], high: [Fx; 3]) {
+    let (c, s) = (fx::angle::cos(h.head), fx::angle::sin(h.head));
+    let p = arr(f.position);
+    let (dx, dz) = (p[0].sub(h.pos[0]), p[2].sub(h.pos[2]));
+    let u = dx.mul(c).add(dz.mul(s));
+    let v = dz.mul(c).sub(dx.mul(s));
+    let reach = high[0].max(high[2]).max(low[0].neg()).max(low[2].neg());
+    let clear = reach.add(Fx::from_ratio(1, 2));
+    let out_u = h.half[0].add(clear);
+    let out_v = h.half[1].add(clear);
+    let (nu, nv) = if out_u.sub(u.abs()) <= out_v.sub(v.abs()) {
+        (if u.raw() < 0 { out_u.neg() } else { out_u }, v)
+    } else {
+        (u, if v.raw() < 0 { out_v.neg() } else { out_v })
+    };
+    f.position = V3::new(
+        h.pos[0].add(nu.mul(c)).sub(nv.mul(s)),
+        p[1],
+        h.pos[2].add(nu.mul(s)).add(nv.mul(c)),
+    );
 }
 
 fn box_contact(

@@ -16,8 +16,11 @@
     edits_per_tick: 8192,
     // A bolt ablates finely: pieces within a two-cell box (ADR-284).
     fragment_box: 2,
-    // A bolt ablates; it does not push hulls (ADR-286).
-    hull_impulse_milli: 0,
+    // A bolt pushes too, by the pressure its wave puts on the body: the
+    // owner's call of 17.09.2026 (ADR-302). Its wave presses five times
+    // the shell's over ten ticks, so a fifth of the shell's milli gives a
+    // tank a metre from the burst the same shove.
+    hull_impulse_milli: 20,
     fire_tick: 75,
     shell_speed: 1200,
     // A bolt heats a small spot hard (ADR-277).

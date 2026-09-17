@@ -227,17 +227,63 @@ impl Motion {
             self.hull.up,
         )
     }
-    /// A burst's push on this hull (ADR-286, ADR-297): `newton_s`
-    /// newton-seconds along the line from the burst to the centre of mass.
-    /// The range derives them from the wave's pressure the body absorbed,
-    /// so the falling off with distance and the shadow of cover are the
-    /// wave's, not this function's. The mass is the body's volume at the
-    /// chassis density. The horizontal part becomes a shove the brakes and
-    /// the terrain spend, the vertical part a hop through the suspension,
-    /// and the moment of the push about the near face and the burst's
-    /// height a roll or pitch through the ride's radius of gyration. Bursts
-    /// farther than the reach do nothing.
-    pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], newton_s: u64) {
+    /// A burst's push on this hull (ADR-286, ADR-297, ADR-302): `newton_s`
+    /// newton-seconds of the wave's pressure the body absorbed, landing on
+    /// the point of the hull's box nearest the burst, at the burst's height
+    /// within the hull's — the face the wave met. A burst inside the box
+    /// pushes through the centre of mass. Returns the point.
+    pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], newton_s: u64) -> [i32; 3] {
+        let shape = self.shape(b);
+        let (c, s) = (
+            fx::angle::cos(self.drive.head),
+            fx::angle::sin(self.drive.head),
+        );
+        let burst = [
+            Fx::from_int(at[0]),
+            Fx::from_int(at[1]),
+            Fx::from_int(at[2]),
+        ];
+        let (dx, dz) = (burst[0].sub(self.pos[0]), burst[2].sub(self.pos[2]));
+        let half = shape.half.map(Fx::from_int);
+        let u = dx.mul(c).add(dz.mul(s)).max(half[0].neg()).min(half[0]);
+        let v = dz.mul(c).sub(dx.mul(s)).max(half[1].neg()).min(half[1]);
+        let bottom = self.pos[1];
+        let top = bottom.add(Fx::from_int(shape.height));
+        let mut through = [
+            self.pos[0].add(u.mul(c)).sub(v.mul(s)),
+            burst[1].max(bottom).min(top),
+            self.pos[2].add(u.mul(s)).add(v.mul(c)),
+        ]
+        .map(Fx::to_int_trunc);
+        if through == at {
+            let r = crate::ride::ride_of(&self.chassis);
+            through =
+                [self.pos[0], self.pos[1].add(r.clearance), self.pos[2]].map(Fx::to_int_trunc);
+        }
+        self.impulse_through(b, at, through, newton_s);
+        through
+    }
+    /// The push of `newton_s` newton-seconds landing at `through`, the
+    /// point the wave's pressure on this body centres on (ADR-302). It acts
+    /// along the line from the burst to that point — the wave's own
+    /// direction where it met the body — so a blast beside a hull shoves
+    /// it sideways, one under its belly lifts it, and a tall body is not
+    /// thrown up merely for carrying its mass high; its moment about the
+    /// centre of mass rolls or pitches the hull through the ride's radius
+    /// of gyration. The range derives the newton-seconds from the pressure
+    /// the body absorbed, so the falling off with distance and the shadow
+    /// of cover are the wave's. The mass is the chassis' own, not the
+    /// volume left: a hull that lost its plates is not thrown twenty times
+    /// as far. The horizontal part becomes a shove the brakes and the
+    /// terrain spend, the vertical part a hop through the suspension.
+    /// Bursts farther than the reach do nothing.
+    pub fn impulse_through(
+        &mut self,
+        b: &UnitBody,
+        at: [i32; 3],
+        through: [i32; 3],
+        newton_s: u64,
+    ) {
         if newton_s == 0 {
             return;
         }
@@ -248,18 +294,29 @@ impl Motion {
             Fx::from_int(at[1]),
             Fx::from_int(at[2]),
         );
-        let d = centre.sub(burst);
         let reach = Fx::from_int(IMPULSE_REACH);
+        if centre.sub(burst).len_sq() > reach.mul(reach) {
+            return;
+        }
+        let hit = V3::new(
+            Fx::from_int(through[0]),
+            Fx::from_int(through[1]),
+            Fx::from_int(through[2]),
+        );
+        let d = hit.sub(burst);
         let dist2 = d.len_sq();
-        if dist2 > reach.mul(reach) {
+        if dist2 == Fx::ZERO {
             return;
         }
         let dist = dist2.sqrt().max(Fx::ONE);
         let dir = d.scale(Fx::ONE.div(dist));
         let newton_s = newton_s.min(i32::MAX as u64);
-        let mass_kg = (u128::from(b.volume_mm3()) * self.chassis.density.max(1) as u128
-            / 1_000_000_000)
-            .clamp(1, i32::MAX as u128) as i32;
+        let mass_kg = if self.chassis.mass > 0 {
+            self.chassis.mass.saturating_mul(1000)
+        } else {
+            (u128::from(b.volume_mm3()) * self.chassis.density.max(1) as u128 / 1_000_000_000)
+                .clamp(1, i32::MAX as u128) as i32
+        };
         let units_per_metre = (1000 / i32::from(voxel::unit::WORLD_MM)).max(1);
         let dv = Fx::from_int(newton_s as i32)
             .div(Fx::from_int(mass_kg))
@@ -267,20 +324,9 @@ impl Motion {
         let push = dir.scale(dv);
         self.shove = self.shove.add(V3::new(push.x, Fx::ZERO, push.z));
         self.hull.vy = self.hull.vy.add(push.y);
-        // The push lands on the near face, at the burst's height: its
-        // moment about the centre of mass rolls or pitches the hull.
-        let shape = self.shape(b);
-        let half = Fx::from_int(shape.half[0].min(shape.half[1]).max(1));
-        let lever = V3::new(
-            dir.x.neg().mul(half),
-            burst
-                .y
-                .sub(centre.y)
-                .max(r.clearance.neg())
-                .min(r.clearance),
-            dir.z.neg().mul(half),
-        );
-        let torque = lever.cross(push);
+        // The push lands where the pressure did: its moment about the
+        // centre of mass rolls or pitches the hull.
+        let torque = hit.sub(centre).cross(push);
         let k2 = r.inertia.max(Fx::ONE);
         self.hull.w = self
             .hull
@@ -1208,24 +1254,24 @@ mod tests {
         }
         let before = m.pos;
         let level = m.hull;
-        // A hundred and twenty thousand newton-seconds a hull's width to
-        // the west, at the ground: what eighteen megajoules of a shell
-        // delivered to a tank at that distance before ADR-297.
-        m.impulse(&body, [284, 16, 300], 120_000);
+        // A hundred and twenty thousand newton-seconds a hull's width
+        // beyond the near face, at the ground: what eighteen megajoules of
+        // a shell delivered to a tank at that distance before ADR-297. The
+        // tank's box reaches thirty units from its centre.
+        m.impulse(&body, [254, 16, 300], 120_000);
         assert!(m.shove.x > Fx::from_int(5), "shove {:?}", m.shove);
         assert!(m.hull.w.len_sq() > Fx::ZERO, "no spin");
-        assert!(m.hull.vy > Fx::ONE, "no hop: {:?}", m.hull.vy);
-        let mut hopped = Fx::ZERO;
+        // A push on the flank at ground height is level (ADR-302): the
+        // hop belongs to a push under the belly.
+        assert_eq!(m.hull.vy, Fx::ZERO, "a flank push lifted the hull");
         for tick in 5..125 {
             step(&mut m, &w, &body, &[], tick);
-            hopped = hopped.max(m.hull.y.sub(level.y));
         }
         assert!(
             m.pos[0].sub(before[0]) > Fx::ONE,
             "did not move: {:?}",
             m.pos
         );
-        assert!(hopped > Fx::from_ratio(3, 10), "did not hop: {hopped:?}");
         assert_eq!(m.shove, V3::ZERO, "the brakes did not spend the shove");
         assert!(
             m.hull.up.y > Fx::from_ratio(999, 1000),
@@ -1237,11 +1283,11 @@ mod tests {
         // falling off with distance is the wave's, which delivers less
         // pressure there, not the push's (ADR-297).
         let mut far = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
-        far.impulse(&body, [268, 16, 300], 120_000);
+        far.impulse(&body, [238, 16, 300], 120_000);
         let mut near = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
-        near.impulse(&body, [284, 16, 300], 120_000);
+        near.impulse(&body, [254, 16, 300], 120_000);
         assert!(
-            far.shove.x >= near.shove.x,
+            far.shove.x >= near.shove.x.sub(Fx::from_ratio(1, 100)),
             "far {:?} near {:?}",
             far.shove,
             near.shove
@@ -1250,6 +1296,33 @@ mod tests {
         let mut away = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
         away.impulse(&body, [200, 16, 300], 120_000);
         assert_eq!(away.shove, V3::ZERO);
+    }
+    /// A push landing under the belly lifts the hull (ADR-302): the same
+    /// newton-seconds from below hop it and it comes back down, where the
+    /// flank push only shoves and rocks.
+    #[test]
+    fn a_push_under_the_belly_lifts_the_hull_and_it_comes_down() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        for tick in 0..5 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let level = m.hull.y;
+        m.impulse_through(&body, [300, 12, 300], [300, 17, 300], 120_000);
+        assert!(m.hull.vy > Fx::ONE, "no lift: {:?}", m.hull.vy);
+        assert_eq!(m.shove, V3::ZERO, "a push from below shoved sideways");
+        let mut hopped = Fx::ZERO;
+        for tick in 5..125 {
+            step(&mut m, &w, &body, &[], tick);
+            hopped = hopped.max(m.hull.y.sub(level));
+        }
+        assert!(hopped > Fx::from_ratio(3, 10), "did not hop: {hopped:?}");
+        assert!(
+            m.hull.y.sub(level).abs() < Fx::from_ratio(1, 10),
+            "did not come down: {:?}",
+            m.hull.y.sub(level)
+        );
     }
     /// A wide two-legged body stands on both legs, each foot carrying
     /// heel and toe; a buckled leg leaves one side, and the body falls onto
