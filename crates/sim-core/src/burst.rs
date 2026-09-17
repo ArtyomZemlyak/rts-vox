@@ -462,6 +462,68 @@ mod tests {
     fn tuning() -> crate::Tuning {
         crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap()
     }
+    /// A piece falls onto one that landed before it and stands on it
+    /// (ADR-308) instead of sinking through it to the ground. Two
+    /// materials, so that the heap of a cell (ADR-292) does not gather
+    /// them into one and hide the answer.
+    #[test]
+    fn a_piece_stands_on_the_piece_that_landed_before_it() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        let piece = |id, material, y: i32, resting| Fragment {
+            id,
+            position: V3::new(
+                Fx::from_int(48).add(Fx::from_ratio(1, 2)),
+                Fx::from_int(y),
+                Fx::from_int(48).add(Fx::from_ratio(1, 2)),
+            ),
+            velocity: V3::ZERO,
+            material,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 9600,
+            count: 8,
+            shape: 0xff,
+            side: 2,
+            chunk: None,
+            held,
+            resting,
+        };
+        // Ground is at 12: one piece of soil already lying on it, one of
+        // concrete falling from six units up.
+        b.fragments.push(piece(1, 1, 13, true));
+        b.fragments.push(piece(2, 2, 19, false));
+        for tick in 0..240 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert_eq!(b.fragments.len(), 2, "the pieces merged");
+        let (below, above) = (&b.fragments[0], &b.fragments[1]);
+        assert!(above.resting && below.resting, "still falling");
+        let (_, high) = below.bounds();
+        let (low, _) = above.bounds();
+        let top = below.position.y.add(high[1]);
+        let bottom = above.position.y.add(low[1]);
+        assert!(
+            bottom >= top.sub(Fx::from_ratio(1, 2)),
+            "the piece sank into the one below: bottom {bottom:?} against top {top:?}"
+        );
+        assert!(
+            above.position.y > below.position.y,
+            "the piece did not land on top: {:?} against {:?}",
+            above.position.y,
+            below.position.y
+        );
+    }
     /// A piece that came to rest against a live hull's flank is no floor
     /// under that hull (ADR-302): the columns of the hull's box it reaches
     /// stay out of the map, its own columns outside stay in, and a piece
@@ -1109,7 +1171,8 @@ pub const IDENTITY: [V3; 3] = [
     V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
 ];
 impl Fragment {
-    fn bounds(&self) -> ([Fx; 3], [Fx; 3]) {
+    /// The piece's box in its own turn, around its centre.
+    pub fn bounds(&self) -> ([Fx; 3], [Fx; 3]) {
         if let Some(chunk) = &self.chunk {
             return chunk.bounds;
         }
@@ -1769,6 +1832,9 @@ impl Bursts {
         around: Surroundings<'_>,
     ) {
         let (hulls, yielding) = (around.hulls, around.yielding);
+        // What has already landed is ground for what is still falling
+        // (ADR-308), gathered once for the whole tick.
+        let settled = Settled::of(&self.fragments, hulls, tick, t);
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
         let mut merged = BTreeSet::new();
@@ -1806,7 +1872,11 @@ impl Bursts {
                     }
                 }
             }
-            if room > 0 && f.resting && due(f.id, tick, t) && !supported(f, world, hulls) {
+            if room > 0
+                && f.resting
+                && due(f.id, tick, t)
+                && !supported(f, world, hulls, &settled, i as u32)
+            {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
@@ -1814,7 +1884,7 @@ impl Bursts {
                 let held = f.held;
                 e.wrecks.retain(|w| w.held != held);
             }
-            if advance_fragment(f, world, t, gravity, hulls) {
+            if advance_fragment(f, world, t, gravity, hulls, &settled, i as u32) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
                 e.wrecks.push(Wreck {
                     held: f.held,
@@ -1854,10 +1924,13 @@ impl Bursts {
             }
         }
         for f in self.corpses.values_mut() {
-            if f.resting && due(f.id, tick, t) && !supported(f, world, &[]) {
+            if f.resting
+                && due(f.id, tick, t)
+                && !supported(f, world, &[], &Settled::default(), u32::MAX)
+            {
                 f.resting = false;
             }
-            advance_fragment(f, world, t, gravity, &[]);
+            advance_fragment(f, world, t, gravity, &[], &Settled::default(), u32::MAX);
         }
         for w in &mut e.wrecks {
             if let Some(f) = self.corpses.get(&w.held) {
@@ -1890,7 +1963,7 @@ impl Bursts {
             f.resting
                 && f.chunk.is_none()
                 && !yielding.contains(&f.material)
-                && supported(f, world, &[])
+                && supported(f, world, &[], &Settled::default(), u32::MAX)
         }) {
             let (low, high) = f.bounds();
             let p = arr(f.position);
@@ -2360,12 +2433,130 @@ fn due(id: u64, tick: u64, t: &Blast) -> bool {
 }
 /// Whether material or a live hull still holds the piece up: its box half
 /// a unit lower, the most a settling step moves, meets the world or a hull.
-fn supported(f: &Fragment, world: &voxel::World, hulls: &[Hull]) -> bool {
+fn supported(
+    f: &Fragment,
+    world: &voxel::World,
+    hulls: &[Hull],
+    settled: &Settled,
+    skip: u32,
+) -> bool {
     let (low, high) = f.bounds();
     let mut p = arr(f.position);
     p[1] = p[1].sub(Fx::from_ratio(1, 2));
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
         || hull_hit(p, low, high, hulls, 0).is_some()
+        || settled.hit(
+            [0, 1, 2].map(|a| p[a].add(low[a])),
+            [0, 1, 2].map(|a| p[a].add(high[a])),
+            skip,
+        )
+}
+/// The boxes of resting pieces, in the cells a flying piece may reach
+/// (ADR-308). Built once a tick: a piece that landed is ground for the
+/// next one, and without this they fall through one another.
+#[derive(Default)]
+pub(crate) struct Settled {
+    /// Cell of `CELL` units to the indices of the pieces whose box covers
+    /// it, in index order.
+    cells: BTreeMap<[i32; 3], Vec<u32>>,
+    /// Box of each piece by index: low corner, high corner, in the world.
+    boxes: BTreeMap<u32, ([Fx; 3], [Fx; 3])>,
+}
+/// Side of a cell of the settled index, world units.
+const SETTLED_CELL: i32 = 4;
+fn settled_cells(lo: [Fx; 3], hi: [Fx; 3]) -> ([i32; 3], [i32; 3]) {
+    let cell = |v: Fx| v.to_int_trunc().div_euclid(SETTLED_CELL);
+    (
+        [0, 1, 2].map(|a| cell(lo[a])),
+        [0, 1, 2].map(|a| cell(hi[a])),
+    )
+}
+impl Settled {
+    /// The resting pieces around those that will ask about them this tick:
+    /// the flying ones, and the resting ones whose turn it is to look for
+    /// their support (ADR-291). Pieces on a hull's roof (ADR-293) are left
+    /// out: they ride, they are not ground.
+    fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
+        let mut want: BTreeSet<[i32; 3]> = BTreeSet::new();
+        let mut boxes = Vec::with_capacity(fragments.len());
+        for f in fragments {
+            let (low, high) = f.bounds();
+            let p = arr(f.position);
+            let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
+            let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
+            boxes.push((lo, hi));
+            if f.resting && !due(f.id, tick, t) {
+                continue;
+            }
+            // A piece may reach a cell beside the one it is in.
+            let (c0, c1) = settled_cells(lo, hi);
+            for z in c0[2] - 1..=c1[2] + 1 {
+                for y in c0[1] - 1..=c1[1] + 1 {
+                    for x in c0[0] - 1..=c1[0] + 1 {
+                        want.insert([x, y, z]);
+                    }
+                }
+            }
+        }
+        let mut out = Settled::default();
+        if want.is_empty() {
+            return out;
+        }
+        for (i, f) in fragments.iter().enumerate() {
+            if !f.resting {
+                continue;
+            }
+            let (lo, hi) = boxes[i];
+            if hull_hit(arr(f.position), [Fx::ZERO; 3], [Fx::ZERO; 3], hulls, 0).is_some() {
+                continue;
+            }
+            let (c0, c1) = settled_cells(lo, hi);
+            let mut held = false;
+            for z in c0[2]..=c1[2] {
+                for y in c0[1]..=c1[1] {
+                    for x in c0[0]..=c1[0] {
+                        if want.contains(&[x, y, z]) {
+                            out.cells.entry([x, y, z]).or_default().push(i as u32);
+                            held = true;
+                        }
+                    }
+                }
+            }
+            if held {
+                out.boxes.insert(i as u32, (lo, hi));
+            }
+        }
+        out
+    }
+    /// Whether the box `lo..hi` shares space with a resting piece other
+    /// than `skip`. The pieces are boxes here, as they are to the world.
+    fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32) -> bool {
+        if self.cells.is_empty() {
+            return false;
+        }
+        let (c0, c1) = settled_cells(lo, hi);
+        for z in c0[2]..=c1[2] {
+            for y in c0[1]..=c1[1] {
+                for x in c0[0]..=c1[0] {
+                    let Some(list) = self.cells.get(&[x, y, z]) else {
+                        continue;
+                    };
+                    for i in list {
+                        if *i == skip {
+                            continue;
+                        }
+                        let Some((qlo, qhi)) = self.boxes.get(i) else {
+                            continue;
+                        };
+                        if (0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 /// Whether a piece's box at `p` meets a live hull (ADR-293): its vertical
 /// extent against the hull's height, its horizontal reach against the
@@ -2396,6 +2587,8 @@ fn advance_fragment(
     t: &Blast,
     gravity: Fx,
     hulls: &[Hull],
+    settled: &Settled,
+    skip: u32,
 ) -> bool {
     if f.resting {
         return false;
@@ -2448,7 +2641,12 @@ fn advance_fragment(
             let mut p = arr(f.position);
             p[axis] = p[axis].add(delta[axis]);
             let blocked = fragment_contact(f, world, p, low, high, bounds)
-                || hull_hit(p, low, high, hulls, inside).is_some();
+                || hull_hit(p, low, high, hulls, inside).is_some()
+                || settled.hit(
+                    [0, 1, 2].map(|a| p[a].add(low[a])),
+                    [0, 1, 2].map(|a| p[a].add(high[a])),
+                    skip,
+                );
             if blocked {
                 supported |= axis == 1 && delta[axis] < Fx::ZERO;
                 delta[axis] = Fx::ZERO;
