@@ -570,7 +570,9 @@ pub fn route(
 ) -> Vec<[i32; 2]> {
     plan(ground, shape, from, head, to, cfg, clear).path
 }
-/// [`route`], also reporting a start the search could not leave.
+/// [`route`], also reporting a start the search could not leave. The whole
+/// search runs in this one call; [`Hunt`] spreads the same work over
+/// several (P-29).
 pub fn plan(
     mut ground: Probe<'_>,
     shape: Shape,
@@ -580,239 +582,375 @@ pub fn plan(
     cfg: Search,
     clear: impl Fn([Fx; 2], i32) -> bool,
 ) -> Route {
-    let none = |stranded, exhausted, nodes, poses| Route {
-        path: vec![],
-        stranded,
-        nodes,
-        poses,
-        exhausted,
-        scans: 0,
-        samples: 0,
-    };
-    let shape = Shape {
-        span: if shape.span >= 2 {
-            shape.span + cfg.margin.max(0)
-        } else {
-            shape.span
-        },
-        ..shape
-    };
-    if cfg.cell <= 0
-        || cfg.nodes == 0
-        || (0..2).any(|a| {
-            to[a] < cfg.min[a]
-                || to[a] >= cfg.max[a]
-                || from[a] < Fx::ZERO
-                || from[a] >= Fx::from_int([ground.world.nx, ground.world.nz][a] as i32)
-        })
-        || ground.world.nx as i32 % cfg.cell != 0
-        || ground.world.nz as i32 % cfg.cell != 0
-    {
-        return none(false, false, 0, 0);
+    match Hunt::start(&mut ground, shape, from, head, to, cfg, &clear) {
+        Hunting::Done(route) => route,
+        Hunting::Open(mut hunt) => hunt
+            .advance(&mut ground, &clear, cfg.nodes)
+            .expect("a slice of the whole allowance finishes the search"),
     }
-    // The goal must be a pose the hull may take, clear of the other hulls:
-    // a point inside a parked hull, on a slope or against a wall is moved
-    // to the nearest cell within four that is, else there is no route at
-    // all — and the search does not spend its budget finding that out.
-    let mut probed = 0u32;
-    let mut goal = None;
-    'ring: for r in 0..=4i32 {
-        for dz in -r..=r {
-            for dx in -r..=r {
-                if dx.abs() != r && dz.abs() != r {
-                    continue;
-                }
-                let p = [to[0] + dx * cfg.cell, to[1] + dz * cfg.cell];
-                if (0..2).any(|a| p[a] < cfg.min[a] || p[a] >= cfg.max[a]) {
-                    continue;
-                }
-                let q = p.map(Fx::from_int);
-                let open = (0..8).any(|d| {
-                    let yaw = d * angle::FULL / 8;
-                    probed += 1;
-                    !ground.pose(q, yaw, shape).refused() && clear(q, yaw)
-                });
-                if open {
-                    goal = Some(p);
-                    break 'ring;
+}
+
+/// What a route search answered, or the search itself to carry on with.
+pub enum Hunting {
+    /// Answered without walking the graph at all.
+    Done(Route),
+    /// A search begun, with its frontier open. Boxed: a search in flight
+    /// carries the whole reached set, an answer carries a handful of turn
+    /// points.
+    Open(Box<Hunt>),
+}
+
+/// A route search in flight (P-29).
+///
+/// The A* of [`plan`] keeps its frontier and everything it has reached
+/// between slices, so a search too long for one tick is spread over
+/// several instead of stopping one. The poses it has probed are a memo of
+/// a pure function of the world, and they are not part of the search's
+/// answer: a search resumed with an empty memo reaches the same answer,
+/// as long as the world has not changed under it. A search whose world
+/// changed is dropped and begun again, never resumed.
+pub struct Hunt {
+    shape: Shape,
+    cfg: Search,
+    from: [Fx; 2],
+    /// The goal as the search snapped it, not as it was asked.
+    to: [i32; 2],
+    n: usize,
+    rows: usize,
+    anchor: [i32; 2],
+    initial: usize,
+    end: usize,
+    distance: Vec<u32>,
+    previous: Vec<usize>,
+    poses: Vec<Option<Pose>>,
+    open: BinaryHeap<Reverse<(u32, u32, usize)>>,
+    /// Pops taken against the allowance, expansions made, poses probed.
+    spent: usize,
+    nodes: u32,
+    probed: u32,
+    scans: u64,
+    samples: u64,
+    left_start: bool,
+}
+
+impl Hunt {
+    /// Begin a search: check the request, move the goal to a cell the hull
+    /// may stand on, and try the straight run. Any of the three may answer
+    /// outright, and then no graph is walked.
+    pub fn start(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+    ) -> Hunting {
+        let none = |stranded, exhausted, nodes, poses| {
+            Hunting::Done(Route {
+                path: vec![],
+                stranded,
+                nodes,
+                poses,
+                exhausted,
+                scans: 0,
+                samples: 0,
+            })
+        };
+        let shape = Shape {
+            span: if shape.span >= 2 {
+                shape.span + cfg.margin.max(0)
+            } else {
+                shape.span
+            },
+            ..shape
+        };
+        if cfg.cell <= 0
+            || cfg.nodes == 0
+            || (0..2).any(|a| {
+                to[a] < cfg.min[a]
+                    || to[a] >= cfg.max[a]
+                    || from[a] < Fx::ZERO
+                    || from[a] >= Fx::from_int([ground.world.nx, ground.world.nz][a] as i32)
+            })
+            || ground.world.nx as i32 % cfg.cell != 0
+            || ground.world.nz as i32 % cfg.cell != 0
+        {
+            return none(false, false, 0, 0);
+        }
+        // The goal must be a pose the hull may take, clear of the other
+        // hulls: a point inside a parked hull, on a slope or against a wall
+        // is moved to the nearest cell within four that is, else there is
+        // no route at all — and the search does not spend its budget
+        // finding that out.
+        let mut probed = 0u32;
+        let mut goal = None;
+        'ring: for r in 0..=4i32 {
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let p = [to[0] + dx * cfg.cell, to[1] + dz * cfg.cell];
+                    if (0..2).any(|a| p[a] < cfg.min[a] || p[a] >= cfg.max[a]) {
+                        continue;
+                    }
+                    let q = p.map(Fx::from_int);
+                    let open = (0..8).any(|d| {
+                        let yaw = d * angle::FULL / 8;
+                        probed += 1;
+                        !ground.pose(q, yaw, shape).refused() && clear(q, yaw)
+                    });
+                    if open {
+                        goal = Some(p);
+                        break 'ring;
+                    }
                 }
             }
         }
-    }
-    let Some(to) = goal else {
-        return none(false, true, 0, probed);
-    };
-    // A straight run through yielding matter is legal but not free: let the
-    // search look for cheaper open ground first.
-    if connects(&mut ground, shape, from, head, to.map(Fx::from_int), &clear) == Some(0) {
-        return Route {
-            path: vec![to],
-            stranded: false,
+        let Some(to) = goal else {
+            return none(false, true, 0, probed);
+        };
+        // A straight run through yielding matter is legal but not free: let
+        // the search look for cheaper open ground first.
+        if connects(ground, shape, from, head, to.map(Fx::from_int), clear) == Some(0) {
+            return Hunting::Done(Route {
+                path: vec![to],
+                stranded: false,
+                nodes: 0,
+                poses: probed,
+                exhausted: false,
+                scans: ground.scans,
+                samples: ground.samples,
+            });
+        }
+        let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
+        let rows = (ground.world.nz as i32).div_euclid(cfg.cell) as usize;
+        let start = from[0].to_int_trunc().div_euclid(cfg.cell) as usize
+            + n * from[1].to_int_trunc().div_euclid(cfg.cell) as usize;
+        let anchor = [
+            from[0].to_int_trunc().rem_euclid(cfg.cell),
+            from[1].to_int_trunc().rem_euclid(cfg.cell),
+        ];
+        let end = (to[0] - anchor[0]).div_euclid(cfg.cell) as usize
+            + n * (to[1] - anchor[1]).div_euclid(cfg.cell) as usize;
+        let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
+        let initial = start * 8 + start_dir;
+        let mut distance = vec![u32::MAX; n * rows * 8];
+        let previous = vec![usize::MAX; distance.len()];
+        let poses = vec![None; distance.len()];
+        let mut open = BinaryHeap::new();
+        distance[initial] = 0;
+        open.push(Reverse((0, 0, initial)));
+        Hunting::Open(Box::new(Hunt {
+            shape,
+            cfg,
+            from,
+            to,
+            n,
+            rows,
+            anchor,
+            initial,
+            end,
+            distance,
+            previous,
+            poses,
+            open,
+            spent: 0,
             nodes: 0,
-            poses: probed,
-            exhausted: false,
+            probed,
             scans: ground.scans,
             samples: ground.samples,
-        };
+            left_start: false,
+        }))
     }
-    let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
-    let rows = (ground.world.nz as i32).div_euclid(cfg.cell) as usize;
-    let start = from[0].to_int_trunc().div_euclid(cfg.cell) as usize
-        + n * from[1].to_int_trunc().div_euclid(cfg.cell) as usize;
-    let anchor = [
-        from[0].to_int_trunc().rem_euclid(cfg.cell),
-        from[1].to_int_trunc().rem_euclid(cfg.cell),
-    ];
-    let end = (to[0] - anchor[0]).div_euclid(cfg.cell) as usize
-        + n * (to[1] - anchor[1]).div_euclid(cfg.cell) as usize;
-    let point = |i: usize| {
+
+    /// The goal as the search snapped it.
+    pub fn goal(&self) -> [i32; 2] {
+        self.to
+    }
+
+    fn point(&self, i: usize) -> [Fx; 2] {
         [
-            Fx::from_int((i % n) as i32 * cfg.cell + anchor[0]),
-            Fx::from_int((i / n) as i32 * cfg.cell + anchor[1]),
+            Fx::from_int((i % self.n) as i32 * self.cfg.cell + self.anchor[0]),
+            Fx::from_int((i / self.n) as i32 * self.cfg.cell + self.anchor[1]),
         ]
-    };
-    let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
-    let initial = start * 8 + start_dir;
-    let mut distance = vec![u32::MAX; n * rows * 8];
-    let mut previous = vec![usize::MAX; distance.len()];
-    let mut poses = vec![None; distance.len()];
-    let mut open = BinaryHeap::new();
-    distance[initial] = 0;
-    open.push(Reverse((0, 0, initial)));
-    let mut found = None;
-    let mut left_start = false;
-    let mut nodes = 0u32;
-    let mut exhausted = false;
-    for _ in 0..cfg.nodes {
-        let Some(Reverse((_, cost, i))) = open.pop() else {
-            exhausted = true;
-            break;
-        };
-        if cost != distance[i] {
-            continue;
-        }
-        nodes += 1;
-        let at = point(i / 8);
-        let direction = i % 8;
-        let yaw = direction as i32 * angle::FULL / 8;
-        let pose = *poses[i].get_or_insert_with(|| {
-            probed += 1;
-            ground.pose(at, yaw, shape)
-        });
-        if ((at[0].to_int_trunc() - to[0])
-            .abs()
-            .max((at[1].to_int_trunc() - to[1]).abs())
-            <= cfg.cell * 4
-            || i / 8 == end)
-            && !pose.refused()
-            && clear(at, yaw)
-            && connects(&mut ground, shape, at, yaw, to.map(Fx::from_int), &clear).is_some()
-        {
-            found = Some(i);
-            break;
-        }
-        for turn in [-1, 0, 1] {
-            let d = (direction as i32 + turn).rem_euclid(8) as usize;
-            let next_yaw = d as i32 * angle::FULL / 8;
-            let cell = if turn == 0 {
-                let x = (i / 8 % n) as i32 + DIR[d][0];
-                let z = (i / 8 / n) as i32 + DIR[d][1];
-                if x < 0 || z < 0 || x >= n as i32 || z >= rows as i32 {
+    }
+
+    /// Walk at most `budget` of the frontier. `None` while the search goes
+    /// on, the answer once it is over: a route found, a graph run dry, or
+    /// the whole allowance of `cfg.nodes` spent.
+    pub fn advance(
+        &mut self,
+        ground: &mut Probe<'_>,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
+    ) -> Option<Route> {
+        let (scans, samples) = (ground.scans, ground.samples);
+        let mut found = None;
+        let mut exhausted = false;
+        let mut slice = 0usize;
+        while self.spent < self.cfg.nodes && slice < budget {
+            self.spent += 1;
+            slice += 1;
+            let Some(Reverse((_, cost, i))) = self.open.pop() else {
+                exhausted = true;
+                break;
+            };
+            if cost != self.distance[i] {
+                continue;
+            }
+            self.nodes += 1;
+            let at = self.point(i / 8);
+            let direction = i % 8;
+            let yaw = direction as i32 * angle::FULL / 8;
+            let pose = *self.poses[i].get_or_insert_with(|| {
+                self.probed += 1;
+                ground.pose(at, yaw, self.shape)
+            });
+            if ((at[0].to_int_trunc() - self.to[0])
+                .abs()
+                .max((at[1].to_int_trunc() - self.to[1]).abs())
+                <= self.cfg.cell * 4
+                || i / 8 == self.end)
+                && !pose.refused()
+                && clear(at, yaw)
+                && connects(
+                    ground,
+                    self.shape,
+                    at,
+                    yaw,
+                    self.to.map(Fx::from_int),
+                    clear,
+                )
+                .is_some()
+            {
+                found = Some(i);
+                break;
+            }
+            for turn in [-1, 0, 1] {
+                let d = (direction as i32 + turn).rem_euclid(8) as usize;
+                let next_yaw = d as i32 * angle::FULL / 8;
+                let cell = if turn == 0 {
+                    let x = (i / 8 % self.n) as i32 + DIR[d][0];
+                    let z = (i / 8 / self.n) as i32 + DIR[d][1];
+                    if x < 0 || z < 0 || x >= self.n as i32 || z >= self.rows as i32 {
+                        continue;
+                    }
+                    x as usize + self.n * z as usize
+                } else {
+                    i / 8
+                };
+                let q = self.point(cell);
+                if (0..2).any(|a| {
+                    q[a] < Fx::from_int(self.cfg.min[a]) || q[a] >= Fx::from_int(self.cfg.max[a])
+                }) {
                     continue;
                 }
-                x as usize + n * z as usize
-            } else {
-                i / 8
-            };
-            let q = point(cell);
-            if (0..2).any(|a| q[a] < Fx::from_int(cfg.min[a]) || q[a] >= Fx::from_int(cfg.max[a])) {
-                continue;
-            }
-            let j = cell * 8 + d;
-            let next = *poses[j].get_or_insert_with(|| {
-                probed += 1;
-                ground.pose(q, next_yaw, shape)
-            });
-            let next_cost =
-                cost + if turn == 0 {
-                    if d.is_multiple_of(2) {
-                        10
+                let j = cell * 8 + d;
+                let next = *self.poses[j].get_or_insert_with(|| {
+                    self.probed += 1;
+                    ground.pose(q, next_yaw, self.shape)
+                });
+                let next_cost =
+                    cost + if turn == 0 {
+                        if d.is_multiple_of(2) {
+                            10
+                        } else {
+                            14
+                        }
                     } else {
-                        14
-                    }
-                } else {
-                    6
-                } + (next.crush as u32)
-                    .saturating_mul(cfg.crush_cost)
-                    .min(cfg.crush_cap);
-            if next_cost >= distance[j] {
-                continue;
+                        6
+                    } + (next.crush as u32)
+                        .saturating_mul(self.cfg.crush_cost)
+                        .min(self.cfg.crush_cap);
+                if next_cost >= self.distance[j] {
+                    continue;
+                }
+                if next.refused()
+                    || !clear(q, next_yaw)
+                    || next.height.sub(pose.height).abs() > Fx::from_int(self.shape.step)
+                {
+                    continue;
+                }
+                let mid = [
+                    at[0].add(q[0]).div(Fx::from_int(2)),
+                    at[1].add(q[1]).div(Fx::from_int(2)),
+                ];
+                let mid_yaw = angle::norm(yaw + angle::diff(next_yaw, yaw) / 2);
+                self.probed += 1;
+                if ground.pose(mid, mid_yaw, self.shape).refused() || !clear(mid, mid_yaw) {
+                    continue;
+                }
+                self.distance[j] = next_cost;
+                self.previous[j] = i;
+                self.left_start = true;
+                let heuristic = q[0]
+                    .sub(Fx::from_int(self.to[0]))
+                    .abs()
+                    .max(q[1].sub(Fx::from_int(self.to[1])).abs())
+                    .to_int_trunc()
+                    / self.cfg.cell
+                    * self.cfg.heuristic_pct.max(1) as i32
+                    / 10;
+                self.open
+                    .push(Reverse((next_cost + heuristic as u32, next_cost, j)));
             }
-            if next.refused()
-                || !clear(q, next_yaw)
-                || next.height.sub(pose.height).abs() > Fx::from_int(shape.step)
-            {
-                continue;
-            }
-            let mid = [
-                at[0].add(q[0]).div(Fx::from_int(2)),
-                at[1].add(q[1]).div(Fx::from_int(2)),
-            ];
-            let mid_yaw = angle::norm(yaw + angle::diff(next_yaw, yaw) / 2);
-            probed += 1;
-            if ground.pose(mid, mid_yaw, shape).refused() || !clear(mid, mid_yaw) {
-                continue;
-            }
-            distance[j] = next_cost;
-            previous[j] = i;
-            left_start = true;
-            let heuristic = q[0]
-                .sub(Fx::from_int(to[0]))
-                .abs()
-                .max(q[1].sub(Fx::from_int(to[1])).abs())
-                .to_int_trunc()
-                / cfg.cell
-                * cfg.heuristic_pct.max(1) as i32
-                / 10;
-            open.push(Reverse((next_cost + heuristic as u32, next_cost, j)));
+        }
+        self.scans += ground.scans.saturating_sub(scans);
+        self.samples += ground.samples.saturating_sub(samples);
+        match found {
+            Some(i) => Some(self.route_through(i)),
+            None if exhausted || self.spent >= self.cfg.nodes => Some(Route {
+                path: vec![],
+                stranded: !self.left_start,
+                nodes: self.nodes,
+                poses: self.probed,
+                exhausted,
+                scans: self.scans,
+                samples: self.samples,
+            }),
+            None => None,
         }
     }
-    let Some(mut i) = found else {
-        return none(!left_start, exhausted, nodes, probed);
-    };
-    let mut all = vec![];
-    while i != initial {
-        let p = point(i / 8).map(Fx::to_int_trunc);
-        if all.last() != Some(&p) {
-            all.push(p);
+
+    /// The turn points from the start to the node the search stopped on,
+    /// with the collinear ones between them dropped.
+    fn route_through(&self, mut i: usize) -> Route {
+        let mut all = vec![];
+        while i != self.initial {
+            let p = self.point(i / 8).map(Fx::to_int_trunc);
+            if all.last() != Some(&p) {
+                all.push(p);
+            }
+            i = self.previous[i];
         }
-        i = previous[i];
-    }
-    all.reverse();
-    if all.last() != Some(&to) {
-        all.push(to);
-    }
-    // Remove collinear grid points while retaining the exact turn centres.
-    let mut out = vec![];
-    let mut before = from.map(Fx::to_int_trunc);
-    for (i, p) in all.iter().enumerate() {
-        let keep = i + 1 == all.len() || {
-            let q = all[i + 1];
-            (p[0] - before[0]) * (q[1] - p[1]) != (p[1] - before[1]) * (q[0] - p[0])
-        };
-        if keep {
-            out.push(*p);
+        all.reverse();
+        if all.last() != Some(&self.to) {
+            all.push(self.to);
         }
-        before = *p;
-    }
-    Route {
-        path: out,
-        stranded: false,
-        nodes,
-        poses: probed,
-        exhausted: false,
-        scans: ground.scans,
-        samples: ground.samples,
+        // Remove collinear grid points while retaining the exact turn centres.
+        let mut out = vec![];
+        let mut before = self.from.map(Fx::to_int_trunc);
+        for (i, p) in all.iter().enumerate() {
+            let keep = i + 1 == all.len() || {
+                let q = all[i + 1];
+                (p[0] - before[0]) * (q[1] - p[1]) != (p[1] - before[1]) * (q[0] - p[0])
+            };
+            if keep {
+                out.push(*p);
+            }
+            before = *p;
+        }
+        Route {
+            path: out,
+            stranded: false,
+            nodes: self.nodes,
+            poses: self.probed,
+            exhausted: false,
+            scans: self.scans,
+            samples: self.samples,
+        }
     }
 }
 
