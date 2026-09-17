@@ -119,6 +119,8 @@ pub struct Motion {
     /// Nodes expanded and poses probed by the last plan: diagnostics, not
     /// state.
     pub last_plan: [u32; 2],
+    /// Columns scanned and surface samples taken by it (P-29).
+    pub last_probe: [u64; 2],
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
@@ -214,6 +216,7 @@ impl Motion {
             recovery_head: 0,
             next_plan: 0,
             last_plan: [0; 2],
+            last_probe: [0; 2],
             dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
@@ -656,6 +659,7 @@ impl Motion {
         self.blocked = plan.path.is_empty();
         self.stranded = plan.stranded;
         self.last_plan = [plan.nodes, plan.poses];
+        self.last_probe = [plan.scans, plan.samples];
         self.path = plan.path;
         self.cursor = 0;
         self.enabled = true;

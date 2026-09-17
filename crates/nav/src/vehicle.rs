@@ -74,6 +74,11 @@ pub struct Probe<'a> {
     yields: Vec<[u16; 2]>,
     yielding: Vec<Mat>,
     rubble: Option<&'a Rubble>,
+    /// Columns scanned, columns answered and surface samples taken since
+    /// this probe was made: the price of a search, for benches (P-29).
+    pub scans: u64,
+    pub columns: u64,
+    pub samples: u64,
 }
 impl<'a> Probe<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -114,6 +119,9 @@ impl<'a> Probe<'a> {
             },
             yielding: yielding.to_vec(),
             rubble: None,
+            scans: 0,
+            columns: 0,
+            samples: 0,
         }
     }
     /// Resting debris counts as floor in its columns (ADR-292).
@@ -147,6 +155,7 @@ impl<'a> Probe<'a> {
     }
     /// Floor and yielding span of a column; `None` outside the world.
     fn column(&mut self, x: i32, z: i32) -> Option<(u16, [u16; 2])> {
+        self.columns += 1;
         if x < 0 || z < 0 || x >= self.world.nx as i32 || z >= self.world.nz as i32 {
             return None;
         }
@@ -156,6 +165,7 @@ impl<'a> Probe<'a> {
         }
         let i = dx as usize + self.w * dz as usize;
         if self.heights[i] == u16::MAX {
+            self.scans += 1;
             let (floor, span) = self.scan(x, z);
             self.heights[i] = floor;
             if !self.yields.is_empty() {
@@ -243,6 +253,7 @@ impl<'a> Probe<'a> {
             && v.abs() <= Fx::from_int(s.half[1]).add(Fx::from_ratio(1, 2))
     }
     fn surface(&mut self, p: [Fx; 2]) -> Fx {
+        self.samples += 1;
         // A support has a finite contact patch. Blend the four neighbouring
         // columns instead of snapping its load at each integer boundary.
         // Hull obstacle checks below still use the exact voxel surface.
@@ -539,6 +550,9 @@ pub struct Route {
     /// order, for benches and budgets.
     pub nodes: u32,
     pub poses: u32,
+    /// Columns scanned and surface samples taken (P-29).
+    pub scans: u64,
+    pub samples: u64,
     /// The open set ran dry before the budget: no route exists in the
     /// world as probed, and only a change of the world can make one.
     pub exhausted: bool,
@@ -572,6 +586,8 @@ pub fn plan(
         nodes,
         poses,
         exhausted,
+        scans: 0,
+        samples: 0,
     };
     let shape = Shape {
         span: if shape.span >= 2 {
@@ -635,6 +651,8 @@ pub fn plan(
             nodes: 0,
             poses: probed,
             exhausted: false,
+            scans: ground.scans,
+            samples: ground.samples,
         };
     }
     let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
@@ -793,6 +811,8 @@ pub fn plan(
         nodes,
         poses: probed,
         exhausted: false,
+        scans: ground.scans,
+        samples: ground.samples,
     }
 }
 

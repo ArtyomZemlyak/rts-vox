@@ -57,11 +57,13 @@ fn main() {
         let ok = scene.order_move(target);
         let us = start.elapsed().as_micros();
         println!(
-            "plan to=({},{}) ok={ok} us={us} nodes={} poses={} path_len={} blocked={}",
+            "plan to=({},{}) ok={ok} us={us} nodes={} poses={} scans={} samples={} path_len={} blocked={}",
             target[0],
             target[1],
             scene.gun.motion.last_plan[0],
             scene.gun.motion.last_plan[1],
+            scene.gun.motion.last_probe[0],
+            scene.gun.motion.last_probe[1],
             scene.gun.motion.path.len(),
             scene.gun.motion.blocked
         );
