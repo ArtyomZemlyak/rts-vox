@@ -164,20 +164,26 @@ impl Matter {
         self.remaining_mj -= cost;
         self.spent_mj += cost;
     }
-    /// Terrain the world let go of (ADR-299): pieces when the weapon
-    /// leaves debris, nothing when it annihilates — the dig then sinks
-    /// the cells like any other. Returns pieces made and cells put back.
+    /// Loose terrain the world let go of (ADR-299, ADR-300) crumbles into
+    /// pieces of its own matter. Returns pieces made and cells put back.
     pub fn collapse(
         &mut self,
         w: &mut World,
         cells: &[([u32; 3], voxel::store::Mat)],
-        material: bool,
     ) -> (usize, usize) {
-        if !material {
-            return (0, 0);
-        }
         self.debris
             .pieces_from_cells(w, cells, &mut self.economy, &self.tuning, self.fragment_box)
+    }
+    /// Loose terrain that fell on an annihilating range (ADR-285) leaves
+    /// no pieces: its matter goes to the annihilation sink at once.
+    pub fn annihilate_cells(&mut self, cells: &[([u32; 3], voxel::store::Mat)]) {
+        for &(_, mat) in cells {
+            let amount = self.economy.per_voxel(mat);
+            self.economy.ledger.reveal(self.economy.ground, amount);
+            self.economy
+                .ledger
+                .sink(self.economy.ground, amount, Sink::Annihilation);
+        }
     }
     /// A voxel that melted (ADR-290): it runs off as debris of its own
     /// material, its matter moving from the ground to the piece, with no
@@ -570,8 +576,12 @@ impl Matter {
         for &(by, mat) in w.taken() {
             // A voxel consumed by fire went to the combustion sink whatever
             // the weapon; the rest of an annihilating weapon's take is its.
+            // A cell the collapse layer dug is nobody's take (ADR-300): it
+            // falls as a body, crumbles into pieces, or was sunk already.
             let sink = if by == crate::heat::FIRE {
                 Sink::Combustion
+            } else if by == voxel::world::NOBODY {
+                continue;
             } else if !material {
                 Sink::Annihilation
             } else {

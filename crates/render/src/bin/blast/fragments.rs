@@ -9,6 +9,18 @@ pub struct Cache {
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
     chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
 }
+/// The cube colour of a range material, shared with falling bodies.
+pub fn material_colour(material: u16) -> [f32; 4] {
+    look::to_linear(match material {
+        1 | 8 => [0.25, 0.20, 0.13],
+        2 => [0.42, 0.40, 0.34],
+        3 => [0.29, 0.32, 0.33],
+        4 => [0.17, 0.22, 0.10],
+        5 => [0.27, 0.20, 0.12],
+        7 => [0.23, 0.25, 0.12],
+        _ => [0.33, 0.33, 0.29],
+    })
+}
 pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(v.map(|a| a.to_f64_lossy() as f32))
 }
@@ -105,15 +117,7 @@ pub fn draw(
                 [0.22, 0.32, 0.27],
             ))
         } else {
-            look::to_linear(match f.material {
-                1 | 8 => [0.25, 0.20, 0.13],
-                2 => [0.42, 0.40, 0.34],
-                3 => [0.29, 0.32, 0.33],
-                4 => [0.17, 0.22, 0.10],
-                5 => [0.27, 0.20, 0.12],
-                7 => [0.23, 0.25, 0.12],
-                _ => [0.33, 0.33, 0.29],
-            })
+            material_colour(f.material)
         };
         let key = (f.material, f.shape, f.side, f.paint);
         let mesh = cache

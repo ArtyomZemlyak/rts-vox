@@ -682,6 +682,7 @@ mod tests {
                 fuel: 0,
                 kindling: 0,
                 melt: 0,
+                loose: false,
             })
             .unwrap();
         for z in 28..=68 {
@@ -744,6 +745,7 @@ mod tests {
                     fuel: 0,
                     kindling: 0,
                     melt: 0,
+                    loose: false,
                 })
                 .unwrap();
             if wall {

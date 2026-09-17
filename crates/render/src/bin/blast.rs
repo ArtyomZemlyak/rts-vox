@@ -19,6 +19,8 @@ use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
 use render::{look, presentation};
 use sim_core::blast::{BlastRange, GUN, MUZZLE, SIZE};
+#[path = "blast/bodies.rs"]
+mod bodies;
 #[path = "blast/damage_art.rs"]
 mod damage_art;
 #[path = "blast/fragments.rs"]
@@ -489,6 +491,7 @@ fn main() {
                 update_witness,
                 moving::animate,
                 fragments::draw,
+                bodies::draw,
                 weapon_art,
                 animate_energy,
                 framing,

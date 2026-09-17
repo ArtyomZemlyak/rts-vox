@@ -767,6 +767,12 @@ impl Explosion {
         }
     }
 
+    /// The wave has cells still to reach or hits still to apply. The
+    /// collapse layer waits for it (ADR-300), so that what it takes does
+    /// not depend on how the wave is sliced across ticks.
+    pub fn working(&self) -> bool {
+        !self.pending.is_empty() || !self.wave.finished()
+    }
     // Separate authoritative outputs keep world edits and material claims explicit.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
@@ -873,7 +879,12 @@ impl Explosion {
                                     matter::ClaimResult::Deferred => return,
                                 }
                             } else {
-                                w.queue_dig(q[0] as u32, q[1] as u32, q[2] as u32);
+                                w.queue_edit(voxel::world::Edit::dig_if(
+                                    q[0] as u32,
+                                    q[1] as u32,
+                                    q[2] as u32,
+                                    m,
+                                ));
                             }
                             if apply {
                                 dents.remove(&q);
@@ -1007,9 +1018,9 @@ pub struct BlastRange {
     /// The batch's support graph over the range's world (ADR-299): what
     /// the tick's edits leave hanging is dug out and becomes pieces.
     collapse: CollapseLayer,
-    /// The layer's outlet, drained every tick: the range never lets a
-    /// body fall as a body.
-    bodies: Bodies,
+    /// Cohesive terrain the layer tore loose, falling whole until it
+    /// lands and bakes back into the world (ADR-300). In the snapshot.
+    pub bodies: Bodies,
     /// Cells that fell for want of support. In the snapshot and the hash.
     pub collapsed_cells: u64,
     /// Edits the layer has not seen yet: it waits for the wave's claims
@@ -1138,7 +1149,13 @@ impl BlastRange {
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
         let mut collapse = CollapseLayer::new(&world);
         collapse.set_max_body_cells(stock.max_body_cells as usize);
-        let bodies = Bodies::new(stock.max_bodies, Fx::ZERO);
+        let bodies = Bodies::new(
+            stock.max_bodies,
+            Fx::from_ratio(
+                config.gravity,
+                crate::TICKS_PER_SECOND * crate::TICKS_PER_SECOND,
+            ),
+        );
         let mut units: Vec<RangeUnit> = if let Some(r) = &layout {
             r.units
                 .iter()
@@ -1269,7 +1286,7 @@ impl BlastRange {
     /// Complete authoritative snapshot of this test range. Visual gas is absent.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(24);
+        b.u32(25);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1429,12 +1446,13 @@ impl BlastRange {
             }
             b.u32(u32::from(e.mat));
         }
+        self.bodies.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 24 {
+        if s.u32() != 25 {
             return None;
         }
         let extended = s.bool();
@@ -1815,6 +1833,9 @@ impl BlastRange {
             };
             r.collapse_backlog.insert([x, y, z], e);
         }
+        if !r.bodies.load(&mut s) {
+            return None;
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2170,17 +2191,25 @@ impl BlastRange {
         self.world.flush();
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
-        // bodies; the range turns those into debris pieces at once, and the
-        // annihilation bolt's digs sink them like any other. The layer
-        // waits for the wave's claims to clear, so that it never takes a
-        // claimed cell from under the wave, and takes bodies no larger
-        // than the room in the piece pool, so that no cell has to go back.
+        // bodies. The cohesive cells of a body fall on as the body and
+        // bake back where it lands (ADR-300); its loose cells crumble
+        // into debris pieces at once, or sink under an annihilating
+        // weapon. The layer waits for the wave to finish — a slow wave
+        // would otherwise lose cells to bodies torn off a half-dug crater
+        // — and for its claims to clear, so that it never takes a claimed
+        // cell from under the wave, and takes bodies no larger than the
+        // room in the piece pool, so that no crumbling cell has to go back.
         for e in self.world.edits() {
             self.collapse_backlog.insert([e.x, e.y, e.z], *e);
         }
         let room = self.matter.debris.fragment_room(&self.matter.tuning) as usize;
-        let mut fallen = Vec::new();
-        if !self.collapse_backlog.is_empty() && self.matter.debris.claims() == 0 && room > 0 {
+        let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
+        let wave_working = self.explosion.as_ref().is_some_and(|e| e.working());
+        if !self.collapse_backlog.is_empty()
+            && !wave_working
+            && self.matter.debris.claims() == 0
+            && room > 0
+        {
             self.collapse
                 .set_max_body_cells(self.collapse_cap.min(room));
             let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
@@ -2192,28 +2221,75 @@ impl BlastRange {
             if stats.too_big == 0 || room >= self.collapse_cap {
                 self.collapse_backlog.clear();
             }
-            fallen = std::mem::take(&mut self.bodies.list);
+            // Each cell goes by its own matter, not by the body it came
+            // off in — else the wave's slicing would decide what crumbles.
+            // A body torn off this tick keeps its cohesive cells, rebuilt
+            // without the loose ones, which crumble; one of loose cells
+            // alone is all crumbs. Bodies already falling pass through.
+            let mats = &self.matter.economy.mats;
+            let mut whole = Vec::new();
+            for b in std::mem::take(&mut self.bodies.list) {
+                if !b.fresh {
+                    whole.push(b);
+                    continue;
+                }
+                self.collapsed_cells += b.voxels.len() as u64;
+                let mut keep: Vec<([u32; 3], u16)> = Vec::new();
+                let mut shed: Vec<([u32; 3], u16)> = Vec::new();
+                for v in &b.voxels {
+                    let p = [
+                        (b.ox + i64::from(v.x)) as u32,
+                        (b.oy + i64::from(v.y)) as u32,
+                        (b.oz + i64::from(v.z)) as u32,
+                    ];
+                    if mats.get(v.mat).is_some_and(|d| !d.loose) {
+                        keep.push((p, v.mat));
+                    } else {
+                        shed.push((p, v.mat));
+                    }
+                }
+                if shed.is_empty() {
+                    whole.push(b);
+                    continue;
+                }
+                crumbs.append(&mut shed);
+                if keep.is_empty() {
+                    continue;
+                }
+                // The cells are still in the world: the layer's digs are
+                // queued, not applied, so the rest of the body reads from it.
+                let cells: Vec<(u32, u32, u32)> =
+                    keep.iter().map(|(p, _)| (p[0], p[1], p[2])).collect();
+                match voxel::bodies::Body::from_world_cells(&self.world, &cells) {
+                    Some(mut rest) => {
+                        rest.id = b.id;
+                        whole.push(rest);
+                    }
+                    None => crumbs.append(&mut keep),
+                }
+            }
+            self.bodies.list = whole;
             self.bodies.spawned.clear();
         }
-        for body in &fallen {
-            let cells: Vec<([u32; 3], u16)> = body
-                .voxels
-                .iter()
-                .map(|v| {
-                    (
-                        [
-                            (body.ox + i64::from(v.x)) as u32,
-                            (body.oy + i64::from(v.y)) as u32,
-                            (body.oz + i64::from(v.z)) as u32,
-                        ],
-                        v.mat,
-                    )
-                })
-                .collect();
-            self.collapsed_cells += cells.len() as u64;
-            self.matter
-                .collapse(&mut self.world, &cells, self.config.material_energy_j > 0);
+        if !crumbs.is_empty() {
+            // Crumbled cells are removed matter now held by pieces, or
+            // sunk; the layer's digs are nobody's and not counted below.
+            let returned = if self.config.material_energy_j > 0 {
+                self.matter.collapse(&mut self.world, &crumbs).1
+            } else {
+                self.matter.annihilate_cells(&crumbs);
+                0
+            };
+            self.removed += crumbs.len().saturating_sub(returned);
+            for (_, mat) in &crumbs {
+                if let Some(n) = self.removed_materials.get_mut(usize::from(*mat)) {
+                    *n += 1;
+                }
+            }
         }
+        // Whole bodies fall a voxel at a time and bake back where they
+        // land, through the edit queue like everything else.
+        self.bodies.step(&mut self.world);
         self.matter.step_sections(&mut self.units);
         self.matter.shed_segments(&mut self.units);
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
@@ -2254,12 +2330,17 @@ impl BlastRange {
             }
         }
         // What left the world for good this tick: a cell dug and put back
-        // within one drain (ADR-299) was not removed.
+        // within one drain (ADR-299) was not removed, and nobody's digs —
+        // the collapse layer's — are counted where they crumble (ADR-300)
+        // or not at all when the body bakes back.
         let mut dug: BTreeMap<[u32; 3], u16> = BTreeMap::new();
         for &(e, previous) in self.world.completed() {
             let p = [e.x, e.y, e.z];
             if e.mat == 0 {
-                if previous != 0 && e.expected_material().is_none_or(|x| x == previous) {
+                if previous != 0
+                    && e.by != voxel::world::NOBODY
+                    && e.expected_material().is_none_or(|x| x == previous)
+                {
                     dug.insert(p, previous);
                 }
             } else {
@@ -3605,12 +3686,12 @@ mod tests {
             assert!(hits > 0, "no cells found in the box");
         }
     }
-    /// A block of concrete left in the air falls (ADR-299): the collapse
-    /// layer digs it out, the range turns it into pieces of the same
-    /// matter, they settle on the ground, the ledger balances, and the
-    /// snapshot carries the support graph and the count.
-    #[test]
-    fn an_unsupported_block_falls_as_pieces_of_its_own_matter() {
+    /// A block of four by four by four placed in the air, with a layer of
+    /// `cap` on top when that is not air, applied by the range's own
+    /// flush; the collapse layer sees those edits the same tick. Returns
+    /// the range, the block's cells and the piece count before the block
+    /// went in.
+    fn a_block_in_the_air(mat: u16, cap: u16) -> (BlastRange, Vec<[i32; 3]>, usize) {
         let mut a = BlastRange::new(config());
         a.patrols_running = false;
         a.fire_tick = u32::MAX;
@@ -3624,18 +3705,108 @@ mod tests {
                         p[0] as u32,
                         p[1] as u32,
                         p[2] as u32,
-                        2,
+                        mat,
                     ));
                     cells.push(p);
                 }
             }
         }
-        // The range's own flush applies the block, the collapse layer sees
-        // those edits the same tick, and the pieces appear at once; the
-        // cells themselves go with the next tick's edits.
+        if cap != 0 {
+            for x in 0..4 {
+                for z in 0..4 {
+                    a.world.queue_edit(voxel::world::Edit::put(
+                        (base[0] + x) as u32,
+                        (base[1] + 4) as u32,
+                        (base[2] + z) as u32,
+                        cap,
+                    ));
+                }
+            }
+        }
         let pieces_before = a.matter.debris.fragments.len();
         a.step();
-        assert!(cells.iter().all(|p| material(&a.world, *p) == 2));
+        assert!(cells.iter().all(|p| material(&a.world, *p) == mat));
+        (a, cells, pieces_before)
+    }
+    /// A block of concrete under a layer of soil left in the air falls
+    /// whole (ADR-300): the collapse layer tears the lot off as one body,
+    /// the soil crumbles off it into pieces, the concrete falls on as the
+    /// body, the snapshot mid-fall carries it, and it bakes back on the
+    /// ground with every cell, no piece of concrete made and only the
+    /// soil counted as removed.
+    #[test]
+    fn an_unsupported_concrete_block_falls_whole_and_lands() {
+        let (mut a, cells, pieces_before) = a_block_in_the_air(2, 1);
+        assert_eq!(a.bodies.list.len(), 1, "no body torn loose");
+        assert_eq!(
+            a.bodies.list[0].voxels.len(),
+            64,
+            "the soil fell with the body"
+        );
+        assert_eq!(a.collapsed_cells, 80);
+        assert_eq!(a.removed, 16, "the soil cap was not counted");
+        let soil: u64 = a.matter.debris.fragments[pieces_before..]
+            .iter()
+            .filter(|f| f.material == 1)
+            .map(|f| u64::from(f.count))
+            .sum();
+        assert_eq!(soil, 16, "the soil cap did not crumble into pieces");
+        for _ in 0..3 {
+            a.step();
+        }
+        assert!(
+            cells.iter().all(|p| material(&a.world, *p) == 0),
+            "the block stood"
+        );
+        assert_eq!(a.bodies.list.len(), 1, "the body landed at once");
+        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert_eq!(b.bodies.list.len(), 1);
+        assert_eq!(b.collapsed_cells, 80);
+        let mut landed = None;
+        for _ in 0..200 {
+            a.step();
+            if a.bodies.list.is_empty() {
+                landed = Some(a.tick);
+                break;
+            }
+        }
+        landed.expect("the body never landed");
+        a.step();
+        let mut back = 0;
+        let mut top = 0;
+        for x in 0..4 {
+            for z in 0..4 {
+                for y in 0..(FLOOR + 8) {
+                    if material(&a.world, [GUN[0] - 40 + x, y, GUN[2] + 20 + z]) == 2 {
+                        back += 1;
+                        top = top.max(y);
+                    }
+                }
+            }
+        }
+        assert_eq!(back, 64, "the body did not bake back whole");
+        assert!(top < FLOOR + 8, "the body did not come down: top {top}");
+        assert_eq!(
+            a.matter.debris.fragments[pieces_before..]
+                .iter()
+                .filter(|f| f.material == 2)
+                .count(),
+            0,
+            "concrete crumbled"
+        );
+        assert_eq!(a.collapsed_cells, 80);
+        assert_eq!(a.removed, 16, "a body that came back counted as removed");
+        assert!(a.matter.economy.ledger.balanced());
+    }
+    /// A block of soil left in the air crumbles (ADR-299): the layer digs
+    /// it out, the range turns it into pieces of the same matter, they
+    /// settle on the ground, the ledger balances, and the snapshot
+    /// carries the support graph and the count.
+    #[test]
+    fn an_unsupported_soil_block_crumbles_into_pieces_of_its_own_matter() {
+        let (mut a, cells, pieces_before) = a_block_in_the_air(1, 0);
+        assert!(a.bodies.list.is_empty(), "soil fell as a body");
         let mut gone = None;
         for _ in 0..30 {
             a.step();
@@ -3646,9 +3817,10 @@ mod tests {
         }
         gone.expect("the block never fell");
         assert_eq!(a.collapsed_cells, 64);
+        assert_eq!(a.removed, 64);
         let held: u64 = a.matter.debris.fragments[pieces_before..]
             .iter()
-            .filter(|f| f.material == 2)
+            .filter(|f| f.material == 1)
             .map(|f| u64::from(f.count))
             .sum();
         assert_eq!(held, 64, "the pieces do not hold the block's cells");
@@ -3659,21 +3831,19 @@ mod tests {
         for _ in 0..300 {
             a.step();
         }
-        let concrete: Vec<_> = a
+        let soil: Vec<_> = a
             .matter
             .debris
             .fragments
             .iter()
-            .filter(|f| f.material == 2 && f.chunk.is_none())
+            .filter(|f| f.material == 1 && f.chunk.is_none())
             .collect();
         assert!(
-            !concrete.is_empty() && concrete.iter().all(|f| f.resting),
+            !soil.is_empty() && soil.iter().all(|f| f.resting),
             "pieces still in the air"
         );
         assert!(
-            concrete
-                .iter()
-                .all(|f| f.position.y < Fx::from_int(FLOOR + 8)),
+            soil.iter().all(|f| f.position.y < Fx::from_int(FLOOR + 8)),
             "the pieces did not come down"
         );
     }

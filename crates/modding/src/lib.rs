@@ -69,6 +69,10 @@ pub struct MatDef {
     /// обломком (ADR-290); ноль — никогда.
     #[serde(default)]
     pub melt: u32,
+    /// Сыпучий: оставшись без опоры, рассыпается кусками; связный
+    /// (бетон, сталь, ствол, камень) падает целым телом (ADR-300).
+    #[serde(default)]
+    pub loose: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -169,6 +173,7 @@ mod tests {
             fuel: 0,
             kindling: 0,
             melt: 0,
+            loose: false,
         }
     }
 
