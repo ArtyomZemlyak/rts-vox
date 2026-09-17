@@ -169,7 +169,9 @@ fn gun_rotation(sim: &BlastRange) -> Quat {
     let d = sim.heading();
     Quat::from_rotation_y(-(d[2].to_f64_lossy() as f32).atan2(d[0].to_f64_lossy() as f32))
 }
-fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
+/// The turret's yaw this frame, in the picture's convention, interpolated
+/// through the tick like the hull's own heading.
+fn visible_gun_yaw(scene: &Scene, visual: &moving::Visual) -> f32 {
     let old = visual.turret.unwrap_or(scene.sim.turret.angle);
     let fraction = if scene.realtime && !scene.paused {
         (scene.acc * 30.0).clamp(0.0, 1.0)
@@ -177,7 +179,10 @@ fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
         1.0
     };
     let turn = old as f32 + fx::angle::diff(scene.sim.turret.angle, old) as f32 * fraction;
-    Quat::from_rotation_y(-turn * std::f32::consts::TAU / fx::angle::FULL as f32)
+    -turn * std::f32::consts::TAU / fx::angle::FULL as f32
+}
+fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
+    Quat::from_rotation_y(visible_gun_yaw(scene, visual))
 }
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
@@ -1531,7 +1536,9 @@ fn orient_gun(
     let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
     let pivot = pose.pos;
     let origin = Vec3::from(GUN.map(|v| v as f32));
-    let aim = visible_gun_rotation(&scene, &visual);
+    // The turret turns about the hull's own up, not the world's (P-28): on
+    // a tilted hull a level turret left a gap at the ring.
+    let aim = render::realtime::hull_rotation(pose.up, visible_gun_yaw(&scene, &visual));
     let hull = render::realtime::hull_rotation(pose.up, pose.yaw);
     let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32 / 30.0;
     let recoil = if (0.0..0.6).contains(&age) {

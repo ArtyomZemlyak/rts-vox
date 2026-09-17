@@ -989,6 +989,8 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
     commands
         .spawn((
             SettingsRoot,
+            super::panel::PanelRoot,
+            bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 left: px(310),

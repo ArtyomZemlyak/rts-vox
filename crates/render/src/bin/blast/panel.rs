@@ -91,6 +91,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     };
     knobs::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
+        PanelRoot,
+        bevy::ui::RelativeCursorPosition::default(),
         Node {
             position_type: PositionType::Absolute,
             left: px(16),
@@ -277,6 +279,11 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     });
 }
 
+/// A panel's root node: the cursor over it belongs to the panel, not the
+/// map (P-24).
+#[derive(Component)]
+pub struct PanelRoot;
+
 // Bevy injects each resource independently into this system.
 #[allow(clippy::too_many_arguments)]
 pub fn actions(
@@ -285,6 +292,7 @@ pub fn actions(
     mut edit: ResMut<Workshop>,
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
+    roots: Query<&bevy::ui::RelativeCursorPosition, With<PanelRoot>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
     scale: Option<ResMut<UiScale>>,
@@ -298,11 +306,9 @@ pub fn actions(
     if let Some(mut scale) = scale {
         scale.0 = factor;
     }
-    panel.blocked = windows
-        .single()
-        .ok()
-        .and_then(|w| w.cursor_position())
-        .is_some_and(|p| p.x < 310.0 * factor);
+    // The cursor over any panel — the main one or the settings — keeps
+    // its clicks off the map (P-24): a nudge of a knob fired the gun.
+    panel.blocked = roots.iter().any(|r| r.cursor_over());
     if let Some(id) = scene.sim.attack {
         if edit.selected.is_none() {
             edit.selected = Some(Selection::Unit(id));
