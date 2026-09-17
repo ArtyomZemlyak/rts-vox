@@ -663,7 +663,12 @@ impl Motion {
         self.hunt = None;
         self.path.clear();
         self.cursor = 0;
-        let mut ground = nav::vehicle::Probe::with_yield(w, &self.yielding).with_rubble(rubble);
+        // The window of columns covers the run and a detour, not the map
+        // (ADR-317): over a range of a kilometre the whole map is 600 MB,
+        // and this is built for every order given.
+        let (centre, radius) = nav::vehicle::search_window(from, to);
+        let mut ground =
+            nav::vehicle::Probe::around(w, &self.yielding, centre, radius).with_rubble(rubble);
         match nav::vehicle::Hunt::start(
             &mut ground,
             shape,

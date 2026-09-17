@@ -605,6 +605,26 @@ pub struct Route {
     /// world as probed, and only a change of the world can make one.
     pub exhausted: bool,
 }
+/// How far outside the straight line from hull to goal a search's window
+/// of columns reaches, world units (ADR-317). A detour wider than this is
+/// still found; its columns are simply read afresh instead of once.
+const WINDOW_MARGIN: i32 = 256;
+
+/// Where a search's window of columns sits and how far it reaches: around
+/// the middle of the run, wide enough for the run and a detour. A window
+/// over the whole map costs 600 MB on a range of a kilometre, and one is
+/// built for every order (ADR-317).
+pub fn search_window(from: [Fx; 2], to: [i32; 2]) -> ([Fx; 2], i32) {
+    let goal = to.map(Fx::from_int);
+    let centre = [0, 1].map(|a| from[a].add(goal[a]).div(Fx::from_int(2)));
+    let reach = [0, 1]
+        .map(|a| goal[a].sub(from[a]).abs().to_int_trunc())
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    (centre, reach / 2 + WINDOW_MARGIN)
+}
+
 /// An oriented A*: translations keep heading, turns reserve their swept
 /// footprint. It cannot choose a narrow corridor and then rotate through it.
 pub fn route(
@@ -865,7 +885,8 @@ impl Hunt {
         budget: usize,
     ) -> Option<Route> {
         let carried = std::mem::take(&mut self.columns);
-        let mut ground = Probe::with_yield(world, &self.yielding)
+        let (centre, radius) = search_window(self.from, self.to);
+        let mut ground = Probe::around(world, &self.yielding, centre, radius)
             .with_rubble(rubble)
             .with_columns(carried);
         self.advance(&mut ground, clear, budget)
