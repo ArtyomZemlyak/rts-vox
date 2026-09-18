@@ -29,7 +29,7 @@ pub const GAS_CELLS: usize = GAS_N * GAS_N * GAS_N;
 /// The largest window of terrain the buffer on the card holds (ADR-318).
 /// The volume follows the hull rather than covering the map, so this is
 /// the size of the window, not of the world.
-pub const TERRAIN_WORDS: usize = 640 * 192 * 640 / 8;
+pub const TERRAIN_WORDS: usize = 1280 * 192 * 1280 / 8;
 
 #[derive(Clone, Copy, ShaderType)]
 pub struct GasParams {

@@ -525,6 +525,46 @@ pub struct RangeTerrain {
     extended: bool,
     layout: Option<RangeLayout>,
 }
+/// The range as it was before it could be bigger: everything inside this
+/// square keeps exactly the relief it had (ADR-320).
+const STOCK_SIDE: i32 = 640;
+
+/// Relief beyond the stock range, so that a bigger map is not a plain
+/// (P-34). A hill sits in each cell of a lattice, placed, sized and
+/// raised by the cell's own number, and fades to nothing at its own
+/// radius like the hills of the stock range do. A hill whose reach could
+/// touch the stock square is not raised at all, so the range as it was
+/// is untouched to the voxel.
+fn far_ridge(x: u32, z: u32) -> u32 {
+    const CELL: i32 = 320;
+    let mut ridge = 0;
+    let (gx, gz) = ((x as i32) / CELL, (z as i32) / CELL);
+    for ox in -1..=1 {
+        for oz in -1..=1 {
+            let (cx, cz) = (gx + ox, gz + oz);
+            if cx < 0 || cz < 0 {
+                continue;
+            }
+            let seed =
+                (cx as u32).wrapping_mul(2_654_435_761) ^ ((cz as u32).wrapping_mul(2_246_822_519));
+            if seed.is_multiple_of(5) {
+                continue;
+            }
+            let radius = 96 + (seed >> 3) as i32 % 96;
+            let hx = cx * CELL + (seed >> 11) as i32 % CELL;
+            let hz = cz * CELL + (seed >> 19) as i32 % CELL;
+            if hx - radius < STOCK_SIDE && hz - radius < STOCK_SIDE {
+                continue;
+            }
+            let (dx, dz) = (x as i32 - hx, z as i32 - hz);
+            let r2 = radius * radius;
+            let height = 10 + (seed >> 27) as i32 % 22;
+            ridge = ridge.max(((r2 - dx * dx - dz * dz).max(0) * height / r2) as u32);
+        }
+    }
+    ridge
+}
+
 /// A flat firing lane surrounded by terraced woodland. Integer-only world data.
 pub fn range_height(x: u32, z: u32) -> u32 {
     let mut ridge = 0;
@@ -541,6 +581,7 @@ pub fn range_height(x: u32, z: u32) -> u32 {
     }
     // Blend the wooded hills into the level range without a straight escarpment.
     ridge = ridge * (302u32.saturating_sub(z) + x.saturating_sub(285)).min(48) / 48;
+    ridge = ridge.max(far_ridge(x, z));
     let relief = if ridge > 0 {
         let a = (x / 48).wrapping_mul(17) ^ (z / 48).wrapping_mul(31);
         let b = (x / 48 + 1).wrapping_mul(17) ^ (z / 48).wrapping_mul(31);
@@ -554,7 +595,222 @@ pub fn range_height(x: u32, z: u32) -> u32 {
     };
     FLOOR as u32 + ridge + relief
 }
+/// Everything about a column of the range that does not depend on its
+/// height (ADR-319). Worked out once a column instead of once a voxel:
+/// building the world asks the generator for every voxel of it, and on a
+/// range of a kilometre that is nineteen billion asks.
+struct Column {
+    shift: u32,
+    /// Layout blocks this column runs through, latest first, as the
+    /// per-voxel walk sees them (it takes the last that contains the
+    /// voxel).
+    blocks: Vec<(i32, i32, u16)>,
+    /// Height of the obstacle course here, when the column is on it.
+    course: Option<i32>,
+    /// Ground height, with the pads levelled.
+    ground: u32,
+    lane: bool,
+    wall: bool,
+    target: bool,
+    /// Trunk and crown of the tree whose cell this column belongs to:
+    /// its base, its height and the offset of this column from it.
+    tree: Option<(u32, u32, i32, i32)>,
+    rock: Option<(u32, i32, i32)>,
+}
+
+impl RangeTerrain {
+    fn column_of(&self, x: u32, z: u32) -> Column {
+        let shift = if self.extended { 160 } else { 0 };
+        let layout_pad = self.layout.as_ref().is_some_and(|r| {
+            x as i32 >= r.clear_min[0]
+                && (x as i32) < r.clear_max[0]
+                && z as i32 >= r.clear_min[1]
+                && (z as i32) < r.clear_max[1]
+        });
+        let blocks = self.layout.as_ref().map_or_else(Vec::new, |r| {
+            r.blocks
+                .iter()
+                .rev()
+                .filter(|b| {
+                    x as i32 >= b.min[0]
+                        && (x as i32) < b.max[0]
+                        && z as i32 >= b.min[2]
+                        && (z as i32) < b.max[2]
+                })
+                .map(|b| (b.min[1], b.max[1], b.material))
+                .collect()
+        });
+        let course = self
+            .layout
+            .as_ref()
+            .and_then(|r| r.course.as_ref())
+            .filter(|c| {
+                x as i32 >= c.min[0]
+                    && (x as i32) < c.max[0]
+                    && z as i32 >= c.min[1]
+                    && (z as i32) < c.max[1]
+            })
+            .map(|c| {
+                let mut h = FLOOR;
+                for r in &c.ramps {
+                    if (x as i32) >= r.min[0]
+                        && (x as i32) < r.max[0]
+                        && (z as i32) >= r.min[2]
+                        && (z as i32) < r.max[2]
+                    {
+                        let v = if r.axis == 0 { x as i32 } else { z as i32 };
+                        let n = r.max[r.axis] - r.min[r.axis];
+                        let along = if r.reverse {
+                            r.max[r.axis] - v
+                        } else {
+                            v - r.min[r.axis]
+                        };
+                        h = h.max(r.min[1] + along * (r.max[1] - r.min[1]) / n);
+                    }
+                }
+                h
+            });
+        let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
+        let ground =
+            if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
+                FLOOR as u32
+            } else {
+                range_height(x, z)
+            };
+        let lane = (322..351).contains(&z) && x < 254 + shift;
+        let wall = self.layout.is_none()
+            && (256 + shift..264 + shift).contains(&x)
+            && (291..383).contains(&z)
+            && (x > 257 + shift || z % 12 < 3);
+        let target = self.layout.is_none()
+            && (232 + shift..250 + shift).contains(&x)
+            && (321..352).contains(&z);
+        let cx = x / 28;
+        let cz = z / 28;
+        let seed = cx.wrapping_mul(73856093) ^ cz.wrapping_mul(19349663);
+        let tx = cx * 28 + 8 + seed % 11;
+        let tz = cz * 28 + 8 + (seed >> 7) % 11;
+        let layout_tree = self.layout.as_ref().is_some_and(|r| {
+            tx as i32 >= r.clear_min[0] - 10
+                && (tx as i32) < r.clear_max[0] + 10
+                && tz as i32 >= r.clear_min[1] - 10
+                && (tz as i32) < r.clear_max[1] + 10
+        });
+        let unit_trees = self.extended && (328..425).contains(&tx) && (273..332).contains(&tz);
+        let tree = (!layout_tree
+            && !unit_trees
+            && !(tx < 288 + shift && (298..=386).contains(&tz))
+            && !seed.is_multiple_of(5))
+        .then(|| {
+            (
+                range_height(tx, tz),
+                19 + (seed >> 13) % 18,
+                x as i32 - tx as i32,
+                z as i32 - tz as i32,
+            )
+        });
+        let rock = (!layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)))
+            .then(|| {
+                let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
+                (stone, x as i32 % 13 - 6, z as i32 % 13 - 6)
+            })
+            .filter(|(stone, _, _)| stone.is_multiple_of(7));
+        Column {
+            shift,
+            blocks,
+            course,
+            ground,
+            lane,
+            wall,
+            target,
+            tree,
+            rock,
+        }
+    }
+    /// The material at this height of a column already worked out. The
+    /// same answer as [`RangeTerrain::material`], to the bit; the test
+    /// `the_column_of_the_range_matches_its_voxels` holds them together.
+    fn at(&self, c: &Column, x: u32, y: u32, z: u32) -> u16 {
+        if let Some(&(_, _, mat)) = c
+            .blocks
+            .iter()
+            .find(|(lo, hi, _)| (y as i32) >= *lo && (y as i32) < *hi)
+        {
+            return mat;
+        }
+        if let Some(h) = c.course {
+            return if (y as i32) < h {
+                if y as i32 == h - 1 {
+                    8
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
+        }
+        if y < c.ground {
+            return if y + 1 == c.ground {
+                if c.lane {
+                    8
+                } else {
+                    7
+                }
+            } else {
+                1
+            };
+        }
+        // A massive rear wall channels the gas upward and sideways.
+        // Ribbed revetment, with a broken parapet instead of a blank slab.
+        if c.wall && y < 66 && (y < 55 || !(z / 9).is_multiple_of(3)) {
+            return 3;
+        }
+        // Hollow concrete target, with a face struck by the shell.
+        if c.target
+            && y < 45
+            && (x < 236 + c.shift || x >= 247 + c.shift || !(325..348).contains(&z) || y >= 41)
+        {
+            return 2;
+        }
+        // Voxel trees are actual matter: rays, shadows and gas see the same tree.
+        if let Some((base, tall, dx, dz)) = c.tree {
+            let dy = y as i32 - base as i32;
+            if dy >= 0 && dy < tall as i32 {
+                if dx.abs() <= 1 && dz.abs() <= 1 && dy < tall as i32 - 4 {
+                    return 5;
+                }
+                let crown = tall as i32 - dy;
+                let radius = (crown / 3 + (dy % 5) / 2).clamp(1, 9);
+                if dy > 5 && dx * dx + dz * dz < radius * radius {
+                    return 4;
+                }
+            }
+        }
+        // Small broken rocks on the shoulders, out of the firing lane. No
+        // taller than the course step: a hull climbs a shoulder rock rather
+        // than steering round it (ADR-275).
+        if let Some((stone, dx, dz)) = c.rock {
+            if y >= c.ground
+                && y < c.ground + 2 + stone % 3
+                && dx * dx + dz * dz < (5 - (y - c.ground).min(4)) as i32 * 3
+            {
+                return 6;
+            }
+        }
+        0
+    }
+}
+
 impl Generator for RangeTerrain {
+    /// A whole column at once (ADR-114, ADR-319): what depends only on
+    /// `(x, z)` is worked out once instead of once a voxel. Building a
+    /// world asks for every voxel of it, and that is where the time goes.
+    fn column(&self, x: u32, z: u32, y0: u32, out: &mut [u16]) {
+        let c = self.column_of(x, z);
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = self.at(&c, x, y0 + i as u32, z);
+        }
+    }
     fn material(&self, x: u32, y: u32, z: u32) -> u16 {
         let shift = if self.extended { 160 } else { 0 };
         let layout_pad = self.layout.as_ref().is_some_and(|r| {
@@ -5481,6 +5737,58 @@ mod tests {
             narrow.gun.motion.destination, None,
             "the stock range accepted an order outside itself"
         );
+    }
+    #[test]
+    fn the_column_of_the_range_matches_its_voxels() {
+        // The generator answers a whole column at once (ADR-319), with
+        // everything that depends only on (x, z) worked out once. The
+        // answer has to be the same as the per-voxel walk to the bit,
+        // or the world is built one way and read another. Checked on
+        // both ranges the code makes: the bare one and the one a layout
+        // lays out, with its blocks, its course and its clearings.
+        let layouts = [
+            None,
+            Some(
+                modding::range::RangeLayout::from_ron(include_str!(
+                    "../../../data/range-cover.ron"
+                ))
+                .unwrap(),
+            ),
+        ];
+        for layout in layouts {
+            for extended in [false, true] {
+                let gen = RangeTerrain {
+                    extended,
+                    layout: layout.clone(),
+                };
+                let mut col = vec![0u16; SIZE[1] as usize];
+                let mut solid = 0usize;
+                let mut kinds = std::collections::BTreeSet::new();
+                // Every seventh column: the walk is the reference, and
+                // over four hundred thousand columns of it is a minute.
+                for z in (0..SIZE[2]).step_by(7) {
+                    for x in (0..SIZE[0]).step_by(7) {
+                        gen.column(x, z, 0, &mut col);
+                        for (y, &m) in col.iter().enumerate() {
+                            assert_eq!(
+                                m,
+                                gen.material(x, y as u32, z),
+                                "column {x},{z} at {y}, extended={extended}"
+                            );
+                            if m != 0 {
+                                solid += 1;
+                                kinds.insert(m);
+                            }
+                        }
+                    }
+                }
+                assert!(solid > 100_000, "the range came out empty: {solid}");
+                assert!(
+                    kinds.len() >= 4,
+                    "only {kinds:?} of the range's materials were seen"
+                );
+            }
+        }
     }
     fn config() -> ExplosionConfig {
         ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap()

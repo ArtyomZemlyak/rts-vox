@@ -19,7 +19,7 @@ if ($Build -or !(Test-Path -LiteralPath $binary)) {
     }
 }
 if (!$LayoutPath) {
-    $LayoutPath = 'data/range-cover.ron'
+    $LayoutPath = 'data/range-km.ron'
 }
 $rangeArgs = @('--weapon', $Weapon, '--range', ('"{0}"' -f $LayoutPath))
 if (!$AutoFire) { $rangeArgs += '--drive' }

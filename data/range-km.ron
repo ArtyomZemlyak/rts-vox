@@ -1,0 +1,39 @@
+// The range a kilometre on a side (P-34, ADR-320). One world cell is
+// 0.1 m, so ten thousand cells a side. The structured part of the range
+// keeps the coordinates it always had, in one corner; beyond it the
+// relief carries on by itself, with hills and woodland to drive into.
+(
+    size: (10000, 192, 10000),
+    course: Some((
+        min: (200, 400), max: (590, 625),
+        tank_speed: 40, walker_speed: 28, step_height: 4,
+        arrival: 4, reload_ticks: 60, turn_alignment_pct: 97, replan_ticks: 90,
+        ramps: [
+            (min: (365,16,410), max: (445,28,480), axis: 0, reverse: false),
+            (min: (445,16,410), max: (525,28,480), axis: 0, reverse: true),
+            (min: (365,16,490), max: (435,24,535), axis: 0, reverse: false),
+            (min: (435,16,490), max: (505,24,535), axis: 0, reverse: true),
+            (min: (370,16,540), max: (480,20,590), axis: 2, reverse: false),
+        ],
+        patrols: [
+            (unit: 2, points: [(550,445),(550,588),(270,588),(270,445)]),
+            (unit: 3, points: [(495,505),(495,540),(325,540),(325,505)]),
+        ],
+    )),
+    target: (392, 24, 336),
+    airburst_on_target: true,
+    clear_min: (315, 274),
+    clear_max: (483, 401),
+    units: [
+        (kind: Tank, at: (359, 16, 312)), // exposed: fully in front of the wall
+        (kind: Tank, at: (439, 16, 336)), // sheltered: same blast domain
+        (kind: Tank, at: (300,16,445)),
+        (kind: Strider, at: (320,16,505)),
+    ],
+    blocks: [
+        (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
+        (min: (394, 0, 282), max: (406, 60, 390), material: 3), // steel core
+    ],
+    power_milli: [500, 1000, 2000, 4000],
+    unit_resistance: 180,
+)

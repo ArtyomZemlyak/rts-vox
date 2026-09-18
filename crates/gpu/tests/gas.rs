@@ -102,9 +102,11 @@ fn check_field(energy: bool, wide: bool) {
         .collect();
     g.queue.write_buffer(&mask, 0, gpu::as_bytes(&solid));
     // The runtime layout of the params: the look vector (ADR-298) is the
-    // last, its x the ground glow.
-    let mut p = vec![0.0f32; 84];
-    p[80] = 1.0;
+    // last, its x the ground glow. The corner of the terrain window
+    // (ADR-318) sits after the terrain vector, so everything past it is
+    // four floats further along than it used to be.
+    let mut p = vec![0.0f32; 88];
+    p[84] = 1.0;
     p[23] = 1.0;
     p[24..28].copy_from_slice(&[10.0, 12.0, 24.0, 4.0]);
     if wide {
@@ -116,11 +118,11 @@ fn check_field(energy: bool, wide: bool) {
     if energy {
         p[32..36].copy_from_slice(&[0.0, 1.25, 1.0, 3.4]);
         p[36..40].copy_from_slice(&[0.0, 3.2, 0.3, 0.0]);
-        p[76] = 1.0;
+        p[80] = 1.0;
     }
     let params = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 336,
+        size: 352,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });

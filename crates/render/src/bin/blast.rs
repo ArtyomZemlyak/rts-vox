@@ -536,7 +536,10 @@ fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
     }
 }
 /// The window of terrain the picture keeps, in world units (ADR-318).
-const TERRAIN_WINDOW: [u32; 3] = [640, 192, 640];
+/// Wide enough for the whole reach of the ray march, which stops after
+/// about a thousand voxels: a narrower window would cut the view short
+/// of what the shader can already draw.
+const TERRAIN_WINDOW: [u32; 3] = [1280, 192, 1280];
 /// The window's corner moves in steps of this many voxels.
 const WINDOW_STEP: i32 = 64;
 
@@ -567,17 +570,28 @@ fn write_window(
     had: Option<TerrainWindow>,
 ) {
     let words = Arc::make_mut(&mut gas.terrain_words);
-    let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>| {
+    // Above a column's ceiling there is nothing to ask about (ADR-313):
+    // the volume is 192 cells tall and the ground stands at twenty to
+    // sixty, so four fifths of every column is sky and costs a nibble
+    // rather than a material.
+    let mut highest = 0i32;
+    let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
         for z in zs.clone() {
-            for y in window.span(1) {
-                for x in xs.clone() {
+            for x in xs.clone() {
+                let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
+                *highest = (*highest).max(top);
+                for y in window.span(1) {
                     let q = [x, y, z];
                     let Some(i) = window.index(q) else { continue };
-                    let m = surface_material(
-                        sim,
-                        q,
-                        sim.world.material(q[0] as u32, q[1] as u32, q[2] as u32),
-                    );
+                    let m = if y < top {
+                        surface_material(
+                            sim,
+                            q,
+                            sim.world.material(q[0] as u32, q[1] as u32, q[2] as u32),
+                        )
+                    } else {
+                        0
+                    };
                     let shift = (i % 8) * 4;
                     words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
                 }
@@ -585,7 +599,7 @@ fn write_window(
         }
     };
     match had {
-        None => write(window.span(0), window.span(2)),
+        None => write(window.span(0), window.span(2), &mut highest),
         Some(had) => {
             // At most one slab an axis comes into view. The slab along x
             // spans the new window's depth; the one along z covers only
@@ -604,12 +618,12 @@ fn write_window(
             let sx = fresh(nx.clone(), ox.clone());
             let sz = fresh(nz.clone(), oz);
             if !sx.is_empty() {
-                write(sx, nz);
+                write(sx, nz, &mut highest);
             }
             if !sz.is_empty() {
                 let rest = nx.start.max(ox.start)..nx.end.min(ox.end);
                 if !rest.is_empty() {
-                    write(rest, sz);
+                    write(rest, sz, &mut highest);
                 }
             }
         }
@@ -626,7 +640,12 @@ fn write_window(
     let d = window.dims;
     gas.params.terrain = Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 0.0);
     let o = window.origin;
-    gas.params.terrain_origin = Vec4::new(o[0] as f32, o[1] as f32, o[2] as f32, 0.0);
+    // The `w` of the corner is the top of everything the window holds
+    // (ADR-321): the march above it meets nothing. A slab that came into
+    // view can only raise it; a dig can only lower it, and a stale top is
+    // merely a march that skips a little less.
+    let ceiling = highest.max(sim.gun.at[1] + 64).min(window.span(1).end) as f32;
+    gas.params.terrain_origin = Vec4::new(o[0] as f32, o[1] as f32, o[2] as f32, ceiling);
 }
 
 /// Move the window when the hull has left the middle of it, writing only
@@ -679,6 +698,9 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         } else {
             surface_material(sim, p, mat)
         };
+        if m != 0 {
+            gas.params.terrain_origin.w = gas.params.terrain_origin.w.max((p[1] + 1) as f32);
+        }
         words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
         dirty.insert(i / 8);
     }

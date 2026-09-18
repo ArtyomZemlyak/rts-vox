@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 $env:WGPU_BACKEND = 'vulkan'
 if (!$RangePath) {
-    $RangePath = if (Test-Path -LiteralPath (Join-Path $repoRoot 'out/range-layout.ron')) { 'out/range-layout.ron' } else { 'data/range-cover.ron' }
+    $RangePath = if (Test-Path -LiteralPath (Join-Path $repoRoot 'out/range-layout.ron')) { 'out/range-layout.ron' } else { 'data/range-km.ron' }
 }
 if (!$OutputDir) { $OutputDir = 'out/range-capture-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') }
 $destination = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))

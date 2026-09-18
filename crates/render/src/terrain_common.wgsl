@@ -27,8 +27,23 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
     let aa=(p.terrain_origin.xyz-ro)*inv;
     let bb=(p.terrain_origin.xyz+p.terrain.xyz-ro)*inv;
     let a=min(aa,bb);let b=max(aa,bb);
-    var t=max(0.0,max(a.x,max(a.y,a.z)));let end=min(limit,min(b.x,min(b.y,b.z)));
+    var t=max(0.0,max(a.x,max(a.y,a.z)));var end=min(limit,min(b.x,min(b.y,b.z)));
     var normal=vec3(0.0,1.0,0.0);
+    // Nothing in the window stands above this height (ADR-321). A ray up
+    // there meets nothing at all if it climbs, and if it falls it may go
+    // straight to that height instead of stepping through empty sky a
+    // tenth of a metre at a time. The march is the cost of the picture,
+    // and sky was most of it.
+    let top=p.terrain_origin.w;
+    if (rd.y>0.0) {
+        // A climbing ray, which a shadow ray usually is, is done the
+        // moment it passes the top: there is nothing above to meet.
+        end=min(end,(top-ro.y)*inv.y);
+    } else if (ro.y+rd.y*t>top) {
+        // A falling ray starts at the top instead of stepping down
+        // through empty sky a tenth of a metre at a time.
+        t=max(t,(top-ro.y)*inv.y);
+    }
     for(var j=0;j<1050;j++) {
         if t>=end {break;}
         let pos=ro+rd*(t+0.001);let q=vec3<i32>(floor(pos));let m=raw_material(q);
