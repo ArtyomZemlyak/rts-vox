@@ -26,6 +26,9 @@ use std::sync::{
 
 pub const GAS_N: usize = 48;
 pub const GAS_CELLS: usize = GAS_N * GAS_N * GAS_N;
+/// The largest window of terrain the buffer on the card holds (ADR-318).
+/// The volume follows the hull rather than covering the map, so this is
+/// the size of the window, not of the world.
 pub const TERRAIN_WORDS: usize = 640 * 192 * 640 / 8;
 
 #[derive(Clone, Copy, ShaderType)]
@@ -38,6 +41,10 @@ pub struct GasParams {
     pub chemistry: Vec4,
     pub charge: Vec4,
     pub terrain: Vec4,
+    /// Where the window of terrain sits in the world, `xyz` (ADR-318).
+    /// The volume follows the hull instead of covering the map, and its
+    /// storage wraps: world voxel `q` lives at `q % dims`.
+    pub terrain_origin: Vec4,
     pub clip_from_world: Mat4,
     pub sun: Vec4,
     pub sky: Vec4,
@@ -59,6 +66,7 @@ impl Default for GasParams {
             chemistry: Vec4::ZERO,
             charge: Vec4::new(0.0, 0.0, 2.0, 0.0),
             terrain: Vec4::ZERO,
+            terrain_origin: Vec4::ZERO,
             clip_from_world: Mat4::IDENTITY,
             sun: Vec4::new(-0.55, 0.6, -0.55, 1.5),
             sky: Vec4::new(0.12, 0.16, 0.21, 0.0012),
@@ -70,6 +78,50 @@ impl Default for GasParams {
     }
 }
 
+/// The window of terrain the picture keeps in memory (ADR-318).
+///
+/// The ray march reaches about a thousand voxels, so a window of that
+/// order shows everything the shader can see; a volume over a whole
+/// range of a kilometre would be 9.6 GB. Storage **wraps**: world voxel
+/// `q` lives at `q % dims`, so moving the window rewrites only the slabs
+/// that came into view and leaves the rest of the volume where it is.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerrainWindow {
+    pub origin: [i32; 3],
+    pub dims: [u32; 3],
+}
+impl TerrainWindow {
+    /// A window of at most `want` voxels a side, centred on `focus` and
+    /// held inside the world. Its corner moves in steps of `step`, so a
+    /// hull creeping about does not rewrite the volume every metre.
+    pub fn around(world: [u32; 3], focus: [i32; 3], want: [u32; 3], step: i32) -> Self {
+        let dims = [0, 1, 2].map(|a| world[a].min(want[a]));
+        let origin = [0, 1, 2].map(|a| {
+            let free = (world[a] - dims[a]) as i32;
+            let wanted = focus[a] - dims[a] as i32 / 2;
+            (wanted.div_euclid(step.max(1)) * step.max(1)).clamp(0, free)
+        });
+        Self { origin, dims }
+    }
+    pub fn holds(&self, q: [i32; 3]) -> bool {
+        (0..3).all(|a| q[a] >= self.origin[a] && q[a] < self.origin[a] + self.dims[a] as i32)
+    }
+    /// Where this voxel lives in the volume, if the window holds it.
+    pub fn index(&self, q: [i32; 3]) -> Option<usize> {
+        self.holds(q).then(|| {
+            let m = [0, 1, 2].map(|a| q[a] as u32 % self.dims[a]);
+            (m[0] + self.dims[0] * (m[1] + self.dims[1] * m[2])) as usize
+        })
+    }
+    pub fn words(&self) -> usize {
+        (self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize) / 8
+    }
+    /// The stretch of this axis the window holds.
+    pub fn span(&self, a: usize) -> std::ops::Range<i32> {
+        self.origin[a]..self.origin[a] + self.dims[a] as i32
+    }
+}
+
 #[derive(Resource, Clone, ExtractResource)]
 pub struct GasInput {
     pub params: GasParams,
@@ -77,6 +129,8 @@ pub struct GasInput {
     pub terrain_words: Arc<Vec<u32>>,
     pub terrain_revision: u64,
     pub terrain_dirty: Vec<std::ops::Range<usize>>,
+    /// Where the volume of terrain sits in the world (ADR-318).
+    pub window: TerrainWindow,
     /// The scene can wait for actual shader readiness before advancing capture.
     pub ready: Arc<AtomicBool>,
 }
@@ -88,6 +142,7 @@ impl Default for GasInput {
             terrain_words: Arc::new(vec![]),
             terrain_revision: 0,
             terrain_dirty: vec![],
+            window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
         }
     }

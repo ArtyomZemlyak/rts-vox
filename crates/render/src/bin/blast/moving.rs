@@ -61,7 +61,7 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
     let t = fraction(scene);
     previous.map_or(current, |p| gait::lerp(p, &current, t))
 }
-pub fn before(sim: &BlastRange, v: &mut Visual) {
+pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWindow) {
     v.turret = Some(sim.turret.angle);
     v.fragments = sim
         .matter
@@ -83,19 +83,18 @@ pub fn before(sim: &BlastRange, v: &mut Visual) {
         .collect();
     v.previous_feet = sim.units.iter().map(feet_of).collect();
     if v.occupied.is_empty() {
-        v.occupied = cells(sim);
+        v.occupied = cells(sim, window);
     }
 }
 /// World cells the bodies occupy, for the terrain's shadow rays: the root
 /// in its pose and every segment in the frame the simulation posed it in
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
-pub(super) fn cells(sim: &BlastRange) -> Vec<usize> {
+pub(super) fn cells(sim: &BlastRange, window: &render::gas::TerrainWindow) -> Vec<usize> {
     let mut out = Vec::new();
-    let size = sim.size().map(|v| v as i32);
     let mut push = |q: IVec3| {
-        if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::from_array(size)).all() {
-            out.push((q.x + size[0] * (q.y + size[1] * q.z)) as usize);
+        if let Some(i) = window.index(q.to_array()) {
+            out.push(i);
         }
     };
     for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {
@@ -146,7 +145,8 @@ pub(super) fn cells(sim: &BlastRange) -> Vec<usize> {
     out
 }
 pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
-    let next = cells(sim);
+    let window = gas.window;
+    let next = cells(sim, &window);
     if next == v.occupied {
         return;
     }
@@ -293,7 +293,12 @@ mod tests {
             );
             y < low && (x - u.at[0]).abs() <= 16 && (z - u.at[2]).abs() <= 16
         };
-        let legs = cells(&sim).into_iter().filter(|&i| near(i)).count();
+        let window =
+            render::gas::TerrainWindow::around(sim.size(), [320, 96, 320], [640, 192, 640], 64);
+        let legs = cells(&sim, &window)
+            .into_iter()
+            .filter(|&i| near(i))
+            .count();
         assert!(legs > 500, "only {legs} occupied cells under the walker");
         // The root alone reaches no lower than its belly.
         let root_low = (0..u.body.vol.ny as usize)

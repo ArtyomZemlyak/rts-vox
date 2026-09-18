@@ -13,7 +13,7 @@ use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
 use modding::explosion::ExplosionConfig;
 use modding::range::{RangeLayout, RangeUnitKind};
-use render::gas::{GasCamera, GasInput, GasPlugin};
+use render::gas::{GasCamera, GasInput, GasPlugin, TerrainWindow};
 use render::geom::MeshBuf;
 use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
@@ -535,33 +535,108 @@ fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
         m as u32
     }
 }
+/// The window of terrain the picture keeps, in world units (ADR-318).
+const TERRAIN_WINDOW: [u32; 3] = [640, 192, 640];
+/// The window's corner moves in steps of this many voxels.
+const WINDOW_STEP: i32 = 64;
+
+/// What the picture keeps the terrain around: the machine the player
+/// drives. When the camera learns to leave it (P-42), the focus follows
+/// the camera instead.
+fn focus(sim: &BlastRange) -> [i32; 3] {
+    let p = sim.gun.motion.pos;
+    [p[0], p[1], p[2]].map(|v| v.to_int_trunc())
+}
+fn wanted_window(sim: &BlastRange) -> TerrainWindow {
+    TerrainWindow::around(sim.size(), focus(sim), TERRAIN_WINDOW, WINDOW_STEP)
+}
+
 fn fill_terrain(sim: &BlastRange, gas: &mut GasInput) {
-    let [nx, ny, nz] = sim.size();
-    let mut words = vec![0u32; (nx * ny * nz) as usize / 8];
-    for z in 0..nz {
-        for y in 0..ny {
-            for x in 0..nx {
-                let m = surface_material(
-                    sim,
-                    [x as i32, y as i32, z as i32],
-                    sim.world.material(x, y, z),
-                );
-                let i = (x + nx * (y + ny * z)) as usize;
-                words[i / 8] |= m << ((i % 8) * 4);
+    let window = wanted_window(sim);
+    gas.terrain_words = Arc::new(vec![0u32; window.words()]);
+    write_window(sim, gas, window, None);
+}
+
+/// Write every voxel of `window` that `had` did not already hold, and
+/// put the moving bodies back on top. Without an earlier window that is
+/// the whole volume; with one it is only the slabs that came into view.
+fn write_window(
+    sim: &BlastRange,
+    gas: &mut GasInput,
+    window: TerrainWindow,
+    had: Option<TerrainWindow>,
+) {
+    let words = Arc::make_mut(&mut gas.terrain_words);
+    let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>| {
+        for z in zs.clone() {
+            for y in window.span(1) {
+                for x in xs.clone() {
+                    let q = [x, y, z];
+                    let Some(i) = window.index(q) else { continue };
+                    let m = surface_material(
+                        sim,
+                        q,
+                        sim.world.material(q[0] as u32, q[1] as u32, q[2] as u32),
+                    );
+                    let shift = (i % 8) * 4;
+                    words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
+                }
+            }
+        }
+    };
+    match had {
+        None => write(window.span(0), window.span(2)),
+        Some(had) => {
+            // At most one slab an axis comes into view. The slab along x
+            // spans the new window's depth; the one along z covers only
+            // the part of it the first has not already written.
+            let fresh = |new: std::ops::Range<i32>, old: std::ops::Range<i32>| {
+                if new.start >= old.end || new.end <= old.start {
+                    new
+                } else if new.start < old.start {
+                    new.start..old.start
+                } else {
+                    old.end..new.end
+                }
+            };
+            let (nx, nz) = (window.span(0), window.span(2));
+            let (ox, oz) = (had.span(0), had.span(2));
+            let sx = fresh(nx.clone(), ox.clone());
+            let sz = fresh(nz.clone(), oz);
+            if !sx.is_empty() {
+                write(sx, nz);
+            }
+            if !sz.is_empty() {
+                let rest = nx.start.max(ox.start)..nx.end.min(ox.end);
+                if !rest.is_empty() {
+                    write(rest, sz);
+                }
             }
         }
     }
-    gas.terrain_words = Arc::new(words);
     // The unit remains PBR geometry. Its voxel body only supplies occupancy to
     // the terrain's shadow rays (reserved presentation material 15): the root
     // and every segment in the frames the simulation posed them in (ADR-282).
-    let words = Arc::make_mut(&mut gas.terrain_words);
-    for i in moving::cells(sim) {
+    for i in moving::cells(sim, &window) {
         words[i / 8] = (words[i / 8] & !(15 << ((i % 8) * 4))) | (15 << ((i % 8) * 4));
     }
+    gas.window = window;
     gas.terrain_revision += 1;
     gas.terrain_dirty = std::iter::once(0..gas.terrain_words.len()).collect();
-    gas.params.terrain = Vec4::new(nx as f32, ny as f32, nz as f32, 0.0);
+    let d = window.dims;
+    gas.params.terrain = Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 0.0);
+    let o = window.origin;
+    gas.params.terrain_origin = Vec4::new(o[0] as f32, o[1] as f32, o[2] as f32, 0.0);
+}
+
+/// Move the window when the hull has left the middle of it, writing only
+/// what came into view (ADR-318).
+fn recentre_terrain(sim: &BlastRange, gas: &mut GasInput) {
+    let had = gas.window;
+    let want = wanted_window(sim);
+    if want != had {
+        write_window(sim, gas, want, Some(had));
+    }
 }
 fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     let unit_edits: Vec<_> = sim
@@ -577,6 +652,7 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     if sim.world.edits().is_empty() && unit_edits.is_empty() && sim.surface_changed.is_empty() {
         return;
     }
+    let window = gas.window;
     let words = Arc::make_mut(&mut gas.terrain_words);
     let mut dirty = BTreeSet::new();
     let edits = sim
@@ -594,11 +670,9 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
             (q, sim_core::blast::material(&sim.world, q))
         }));
     for (p, mat) in edits {
-        let size = sim.size();
-        if (0..3).any(|a| p[a] < 0 || p[a] >= size[a] as i32) {
+        let Some(i) = window.index(p) else {
             continue;
-        }
-        let i = (p[0] as u32 + size[0] * (p[1] as u32 + size[1] * p[2] as u32)) as usize;
+        };
         let shift = (i % 8) * 4;
         let m = if sim.units.iter().any(|u| u.solid(p)) {
             15
@@ -1304,7 +1378,7 @@ fn advance(
         if scene.sim.tick == scene.sim.fire_tick {
             scene.previous_shell = Some(muzzle_vec(&scene.sim));
         }
-        moving::before(&scene.sim, &mut visual);
+        moving::before(&scene.sim, &mut visual, &gas.window);
         if panel.demo {
             if scene.sim.tick == 20 {
                 scene.sim.order_move([235, 365]);
@@ -1322,6 +1396,7 @@ fn advance(
             scene.step_us.max(us)
         };
         scene.frame += 1;
+        recentre_terrain(&scene.sim, &mut gas);
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
         if before.is_none() {

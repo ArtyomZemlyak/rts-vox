@@ -2,21 +2,30 @@
 struct Params {
     world_from_clip: mat4x4<f32>, camera: vec4<f32>, origin: vec4<f32>, source: vec4<f32>,
     control: vec4<f32>, chemistry: vec4<f32>, charge: vec4<f32>, terrain: vec4<f32>,
+    terrain_origin: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;
 struct In { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
+// The volume is a window on the world, not the whole of it (ADR-318):
+// it holds `dims` voxels from `lo`, and its storage wraps, so a voxel
+// lives at `q % dims` whatever the window's corner. Unsigned modulo
+// throughout: a signed one is forbidden on our backend.
 fn raw_material(q: vec3<i32>) -> u32 {
     let dims=vec3<i32>(p.terrain.xyz);
-    if any(q<vec3(0)) || any(q>=dims) {return 0u;}
-    let i=u32(q.x+dims.x*(q.y+dims.y*q.z));
+    let lo=vec3<i32>(p.terrain_origin.xyz);
+    if any(q<lo) || any(q>=lo+dims) {return 0u;}
+    let m=vec3<u32>(q)%vec3<u32>(dims);
+    let i=m.x+u32(dims.x)*(m.y+u32(dims.y)*m.z);
     return (terrain[i/8u]>>((i&7u)*4u))&15u;
 }
 struct TerrainHit { t:f32, normal:vec3<f32>, material:u32 };
 fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
-    let inv=1.0/(rd+vec3(0.0000001));let aa=-ro*inv;let bb=(p.terrain.xyz-ro)*inv;
+    let inv=1.0/(rd+vec3(0.0000001));
+    let aa=(p.terrain_origin.xyz-ro)*inv;
+    let bb=(p.terrain_origin.xyz+p.terrain.xyz-ro)*inv;
     let a=min(aa,bb);let b=max(aa,bb);
     var t=max(0.0,max(a.x,max(a.y,a.z)));let end=min(limit,min(b.x,min(b.y,b.z)));
     var normal=vec3(0.0,1.0,0.0);

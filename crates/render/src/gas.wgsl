@@ -9,6 +9,7 @@ struct Params {
     chemistry: vec4<f32>, // reaction, cooling, buoyancy, temperature/1000
     charge: vec4<f32>, // fuel, pressure, display voxel size, unused
     terrain: vec4<f32>,
+    terrain_origin: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>,
     look: vec4<f32>,
