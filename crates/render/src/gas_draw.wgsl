@@ -11,6 +11,9 @@ fn mat(q:vec3<i32>)->vec4<f32> {
     return gas[u32(q.x+N*(q.y+N*q.z))].matter;
 }
 fn field(v:vec3<f32>)->vec4<f32> {
+    // Outside the trilinear support every one of the eight taps is zero.
+    // Reject once, before computing and bounds-checking all eight addresses.
+    if any(v<=vec3(-0.5)) || any(v>=vec3(f32(N)+0.5)) {return vec4(0.0);}
     let u=v-vec3(0.5);let b=vec3<i32>(floor(u));let f=fract(u);
     return mix(mix(mix(mat(b),mat(b+vec3(1,0,0)),f.x),mix(mat(b+vec3(0,1,0)),mat(b+vec3(1,1,0)),f.x),f.y),
         mix(mix(mat(b+vec3(0,0,1)),mat(b+vec3(1,0,1)),f.x),mix(mat(b+vec3(0,1,1)),mat(b+vec3(1,1,1)),f.x),f.y),f.z);
@@ -76,6 +79,11 @@ fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
 }
 fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     if p.control.z<0.001 {return 1.0;}
+    let first=(pos+sun*9.0-p.origin.xyz)/p.origin.w;
+    let last=(pos+sun*63.0-p.origin.xyz)/p.origin.w;
+    // All seven taps lie on this segment. An axis separating the complete
+    // segment from the field proves the shadow is exactly empty.
+    if any(max(first,last)<=vec3(-0.5)) || any(min(first,last)>=vec3(f32(N)+0.5)) {return 1.0;}
     var density=0.0;
     for(var j=1;j<=7;j++) {density+=field((pos+sun*f32(j)*9.0-p.origin.xyz)/p.origin.w).w;}
     return exp(-density*0.46);

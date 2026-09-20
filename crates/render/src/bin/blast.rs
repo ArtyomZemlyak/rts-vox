@@ -264,6 +264,7 @@ fn main() {
     let mut record_seconds = 10.0;
     let mut profile_output = None;
     let mut profile_seconds = 20.0;
+    let mut profile_clouds = 0;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -271,6 +272,11 @@ fn main() {
             "--profile" => {
                 i += 1;
                 profile_output = Some(args[i].clone());
+            }
+            "--profile-clouds" => {
+                i += 1;
+                profile_clouds = args[i].parse::<usize>().expect("cloud count");
+                assert!(profile_clouds <= 8);
             }
             "--profile-seconds" => {
                 i += 1;
@@ -418,7 +424,16 @@ fn main() {
     }
     let patrol = patrol.unwrap_or(1);
     let finish = finish.unwrap_or(if energy { 420 } else { 330 });
+    assert!(
+        profile_clouds == 0 || profile_output.is_some(),
+        "--profile-clouds requires --profile"
+    );
+    let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
+    profiler.clouds = profile_clouds;
     let mut gas = GasInput::default();
+    gas.timings
+        .enabled
+        .store(profile_output.is_some(), Ordering::Relaxed);
     fill_terrain(&sim, &mut gas);
     let c = &sim.config;
     gas.params.origin = Vec4::new(
@@ -511,7 +526,7 @@ fn main() {
         .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
         .insert_resource(recording)
-        .insert_resource(profile::Profile::new(profile_output, profile_seconds))
+        .insert_resource(profiler)
         .insert_resource(gas)
         .add_plugins((GasPlugin, OcclusionPlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))

@@ -90,23 +90,39 @@ impl Heat {
             return;
         }
         let r2 = radius * radius;
-        for z in at[2] - radius..=at[2] + radius {
-            for y in at[1] - radius..=at[1] + radius {
-                for x in at[0] - radius..=at[0] + radius {
-                    let d2 = (x - at[0]).pow(2) + (y - at[1]).pow(2) + (z - at[2]).pow(2);
-                    if d2 >= r2 || x < 0 || y < 0 || z < 0 {
-                        continue;
+        let x0 = (at[0] - radius).max(0);
+        let x1 = (at[0] + radius + 1).min(w.nx as i32);
+        let mut cursor = World::mat_cursor();
+        for z in (at[2] - radius).max(0)..(at[2] + radius + 1).min(w.nz as i32) {
+            for y in (at[1] - radius).max(0)..(at[1] + radius + 1).min(w.ny as i32) {
+                let yz2 = (y - at[1]).pow(2) + (z - at[2]).pow(2);
+                if yz2 >= r2 {
+                    continue;
+                }
+                // Enumerate occupied bits in the original +X order; empty air
+                // never reaches material generation or the heat ledger.
+                for begin in (x0..x1).step_by(64) {
+                    let mut bits = w.solid_bits(
+                        begin as u32,
+                        y as u32,
+                        z as u32,
+                        (x1 - begin).min(64) as u32,
+                    );
+                    while bits != 0 {
+                        let x = begin + bits.trailing_zeros() as i32;
+                        bits &= bits - 1;
+                        let d2 = (x - at[0]).pow(2) + yz2;
+                        if d2 >= r2 {
+                            continue;
+                        }
+                        let p = [x as u32, y as u32, z as u32];
+                        let m = w.material_cached(&mut cursor, p[0], p[1], p[2]);
+                        if m == AIR || mats.get(m).is_none_or(|d| d.kindling == 0 && d.melt == 0) {
+                            continue;
+                        }
+                        let share = (u64::from(per_cell) * (r2 - d2) as u64 / r2 as u64) as u32;
+                        self.add(w, p, share);
                     }
-                    let p = [x as u32, y as u32, z as u32];
-                    if !inside(w, p) {
-                        continue;
-                    }
-                    let m = w.material(p[0], p[1], p[2]);
-                    if m == AIR || mats.get(m).is_none_or(|d| d.kindling == 0 && d.melt == 0) {
-                        continue;
-                    }
-                    let share = (u64::from(per_cell) * (r2 - d2) as u64 / r2 as u64) as u32;
-                    self.add(w, p, share);
                 }
             }
         }
@@ -319,6 +335,44 @@ fn neighbours(w: &World, p: [u32; 3]) -> Vec<[u32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn occupied_rows_deposit_the_same_heat_as_the_voxel_reference() {
+        let mut w = World::new(96, 64, 96, 100, Box::new(Flat));
+        w.queue_dig(31, 18, 31);
+        w.queue_edit(voxel::Edit::put(65, 21, 32, 3));
+        w.flush();
+        let registry = mats();
+        for at in [[32, 20, 32], [64, 20, 32], [-4, 8, 1], [92, 63, 94]] {
+            let mut reference = Heat::default();
+            let mut actual = Heat::default();
+            let radius: i32 = 32;
+            let r2 = radius * radius;
+            for z in at[2] - radius..=at[2] + radius {
+                for y in at[1] - radius..=at[1] + radius {
+                    for x in at[0] - radius..=at[0] + radius {
+                        let d2 = (x - at[0]).pow(2) + (y - at[1]).pow(2) + (z - at[2]).pow(2);
+                        if d2 >= r2 || x < 0 || y < 0 || z < 0 {
+                            continue;
+                        }
+                        let p = [x as u32, y as u32, z as u32];
+                        if !inside(&w, p) {
+                            continue;
+                        }
+                        let m = w.material(p[0], p[1], p[2]);
+                        if m != AIR
+                            && registry
+                                .get(m)
+                                .is_some_and(|d| d.kindling > 0 || d.melt > 0)
+                        {
+                            reference.add(&w, p, (800u64 * (r2 - d2) as u64 / r2 as u64) as u32);
+                        }
+                    }
+                }
+            }
+            actual.deposit(&w, &registry, at, radius, 800);
+            assert_eq!(actual.cells, reference.cells, "deposit at {at:?}");
+        }
+    }
     struct Flat;
     impl voxel::Generator for Flat {
         fn material(&self, x: u32, y: u32, z: u32) -> u16 {

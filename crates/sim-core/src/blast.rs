@@ -1087,6 +1087,27 @@ impl Explosion {
                 dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
             }
         }
+        // Air above a coarse column's highest solid cell needs no material
+        // queries. This ceiling reads authoritative occupancy, including edits.
+        let mut ceilings = vec![0u32; n * n];
+        for z in 0..n {
+            for x in 0..n {
+                for dz in 0..c.cell_units {
+                    for dx in 0..c.cell_units {
+                        let wx = origin[0] + x as i32 * c.cell_units + dx;
+                        let wz = origin[2] + z as i32 * c.cell_units + dz;
+                        if wx >= 0 && wz >= 0 && wx < w.nx as i32 && wz < w.nz as i32 {
+                            ceilings[z * n + x] =
+                                ceilings[z * n + x].max(w.column_ceiling(wx as u32, wz as u32));
+                        }
+                    }
+                }
+            }
+        }
+        let maximum = c
+            .soil_resistance
+            .max(c.concrete_resistance)
+            .max(c.steel_resistance);
         let mut cursor = World::mat_cursor();
         let mut near: Vec<usize> = Vec::new();
         let mut spent = 0;
@@ -1120,25 +1141,41 @@ impl Explosion {
             }
             let look = dented[(z * n + y) * n + x];
             let mut r = 0;
-            for dz in 0..c.cell_units {
-                for dy in 0..c.cell_units {
-                    for dx in 0..c.cell_units {
-                        let q = [p[0] + dx, p[1] + dy, p[2] + dz];
-                        let m = material_cached(w, &mut cursor, q);
-                        for &i in &near {
-                            let (lo, hi) = &boxes[i];
-                            if (0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]) {
-                                r = r.max(units[i].resistance(q, c));
-                            }
+            if p[1] < ceilings[z * n + x] as i32 && end[1] >= 0 {
+                let x0 = p[0].max(0);
+                let x1 = (end[0] + 1).min(w.nx as i32);
+                'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
+                    for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
+                        if x1 <= x0 {
+                            continue;
                         }
-                        let work = material_work(m, c);
-                        if work > 0 {
+                        let mut bits =
+                            w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
+                        while bits != 0 {
+                            let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
+                            bits &= bits - 1;
+                            let work = material_work(material_cached(w, &mut cursor, q), c);
                             let dent = if look {
                                 dents.get(&q).copied().unwrap_or(0)
                             } else {
                                 0
                             };
                             r = r.max(work.saturating_sub(dent));
+                            if r == maximum {
+                                break 'terrain;
+                            }
+                        }
+                    }
+                }
+            }
+            // Body resistance is independent of the terrain reduction. Ask
+            // only the intersecting part of each box, including suspended parts.
+            for &i in &near {
+                let (lo, hi) = boxes[i];
+                for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
+                    for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
+                        for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
+                            r = r.max(units[i].resistance([wx, wy, wz], c));
                         }
                     }
                 }
@@ -1706,7 +1743,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(27);
+        b.u32(28);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1874,7 +1911,7 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if s.u32() != 27 {
+        if ![27, 28].contains(&s.u32()) {
             return None;
         }
         let extended = s.bool();
@@ -2358,6 +2395,11 @@ impl BlastRange {
         }
     }
     pub fn step(&mut self) {
+        self.step_observed(|_| {});
+    }
+    /// Report completed phases to a read-only observer. The simulation never
+    /// reads clocks or consumes a result from it; benches own their timers.
+    pub fn step_observed(&mut self, mut completed: impl FnMut(&'static str)) {
         self.surface_changed.clear();
         self.shield_hits.clear();
         // Resting debris is floor for this tick's motion (ADR-292), except
@@ -2387,6 +2429,7 @@ impl BlastRange {
             self.matter
                 .debris
                 .rubble(&self.world, &self.navigation.fell.materials, &hulls);
+        completed("rubble");
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
         for s in &mut self.shields {
@@ -2409,11 +2452,8 @@ impl BlastRange {
             .iter()
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
-        // Beginning a search is dearer than a slice of one (ADR-312): the
-        // goal is probed from every heading over a ring of cells and a
-        // straight run to it is walked whole, and five hulls replanning
-        // together made the dearest tick of the range. A tick begins only
-        // so many; the hulls over the ceiling keep their orders and ask
+        // Bound concurrent starts as well as each search's work (ADR-312,
+        // ADR-326). Hulls over this ceiling retain their orders and ask
         // again next tick, in the same stable slot order.
         let mut starts = self.navigation.searches_started_per_tick;
         for (id, u) in self.units.iter_mut().enumerate() {
@@ -2494,6 +2534,7 @@ impl BlastRange {
                 }
             }
         }
+        completed("motion");
         let dt = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
         let gravity = match self.config.motion {
             ProjectileMotion::Ballistic => self.config.gravity,
@@ -2583,6 +2624,7 @@ impl BlastRange {
                 self.shell = Some(q);
             }
         }
+        completed("flight");
         {
             // The grid of resistance is captured under a ceiling per tick
             // (ADR-311): a charge that reaches further costs the burst
@@ -2609,6 +2651,7 @@ impl BlastRange {
                 }
             }
         }
+        completed("capture");
         if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
             let before: Vec<_> = self
                 .units
@@ -2652,6 +2695,7 @@ impl BlastRange {
                 }
             }
         }
+        completed("wave");
         {
             // Fire consumes voxels through the same edit queue as the wave;
             // cells the wave has claimed wait for it.
@@ -2675,6 +2719,7 @@ impl BlastRange {
             }
         }
         self.world_steady = self.world.flush().applied == 0;
+        completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
         // bodies. The cohesive cells of a body fall on as the body and
@@ -2773,6 +2818,7 @@ impl BlastRange {
                 }
             }
         }
+        completed("collapse");
         // Whole bodies fall a voxel at a time and bake back where they
         // land, through the edit queue like everything else.
         self.bodies.step(&mut self.world);
@@ -2809,6 +2855,7 @@ impl BlastRange {
             &hulls,
             &self.navigation.fell.materials,
         );
+        completed("debris");
         for e in self.world.edits() {
             if e.mat == 0 {
                 self.surface_work
@@ -2840,6 +2887,7 @@ impl BlastRange {
             }
         }
         self.tick += 1;
+        completed("accounting");
     }
 }
 
@@ -5627,10 +5675,30 @@ mod tests {
             head: 0,
             half: [Fx::from_int(32); 2],
         };
-        assert!(!a
+        assert!(a
             .gun
             .motion
             .move_to(&a.world, goal, &a.gun.body, &[obstacle], &a.rubble));
+        // The obstructed target ring is checked in bounded slices too.
+        for tick in 0..20 {
+            if !a.gun.motion.searching() {
+                break;
+            }
+            a.gun.motion.step(
+                &a.world,
+                &a.gun.body,
+                true,
+                true,
+                a.gun.mobility,
+                &[obstacle],
+                tick,
+                a.config.gravity,
+                &a.rubble,
+                true,
+            );
+        }
+        assert!(!a.gun.motion.searching());
+        assert!(a.gun.motion.blocked);
         assert!(a.gun.motion.path.is_empty());
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         b.gun.motion.step(
@@ -5640,7 +5708,7 @@ mod tests {
             true,
             b.gun.mobility,
             &[],
-            b.gun.motion.replan,
+            b.gun.motion.replan + 20,
             b.config.gravity,
             &b.rubble,
             true,
@@ -5934,6 +6002,57 @@ mod tests {
         let (lo, hi) = r.units[0].bounds();
         let (_, armoured) = walk([0, 1, 2].map(|a| (lo[a] + hi[a]) / 2));
         assert!(armoured > 0, "no body reached into the domain");
+    }
+    #[test]
+    fn capture_clips_packed_rows_at_world_edges_for_every_cell_size() {
+        struct Pattern;
+        impl Generator for Pattern {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 8 + (x + z) % 5 {
+                    ((x + 3 * y + z) % 9) as u16
+                } else {
+                    0
+                }
+            }
+        }
+        let w = World::new(64, 32, 64, 100, Box::new(Pattern));
+        let dents = BTreeMap::from([([1, 1, 1], 777), ([62, 9, 63], 500)]);
+        for edge in 1..=4 {
+            let mut c = config();
+            c.half_cells = 4;
+            c.cell_units = edge;
+            c.energy = 100;
+            for at in [[0, 0, 0], [63, 10, 63]] {
+                let e = Explosion::with_damage(&w, at, &c, &[], &dents);
+                let n = e.wave.size();
+                let half = (n / 2) as i32;
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            let q = [x as i32 - half, y as i32 - half, z as i32 - half];
+                            if q.iter().map(|v| v * v).sum::<i32>() > half * half {
+                                continue;
+                            }
+                            let base = [0, 1, 2].map(|a| at[a] + q[a] * edge);
+                            let mut expected = 0;
+                            for dz in 0..edge {
+                                for dy in 0..edge {
+                                    for dx in 0..edge {
+                                        let p = [base[0] + dx, base[1] + dy, base[2] + dz];
+                                        expected = expected.max(
+                                            material_work(material(&w, p), &c).saturating_sub(
+                                                dents.get(&p).copied().unwrap_or(0),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            assert_eq!(e.wave.resistance_at([x, y, z]), expected);
+                        }
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn shell_impacts_destroys_target_and_leaves_the_barrier() {

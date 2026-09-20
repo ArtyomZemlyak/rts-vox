@@ -1,0 +1,113 @@
+//! A swept turn and straight run, resumable at each exact pose sample.
+use super::*;
+use fx::blob::{Blob, Scan};
+
+#[derive(Clone)]
+pub(super) struct Connection {
+    from: [Fx; 2],
+    to: [Fx; 2],
+    head: i32,
+    cursor: i32,
+    height: Fx,
+    crush: usize,
+}
+impl Connection {
+    pub fn new(from: [Fx; 2], head: i32, to: [Fx; 2]) -> Self {
+        Self {
+            from,
+            to,
+            head,
+            cursor: 0,
+            height: Fx::ZERO,
+            crush: 0,
+        }
+    }
+    pub fn restart(&mut self) {
+        self.cursor = 0;
+        self.height = Fx::ZERO;
+        self.crush = 0;
+    }
+    /// Outer None: allowance spent. Inner None: blocked. Some count: open.
+    pub fn advance(
+        &mut self,
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        allowance: &mut usize,
+    ) -> Option<Option<usize>> {
+        let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
+        let yaw = if delta == [Fx::ZERO; 2] {
+            self.head
+        } else {
+            angle::atan2(delta[1].raw(), delta[0].raw())
+        };
+        let turn = angle::diff(yaw, self.head);
+        let turns = (turn.abs() / (angle::FULL / 16) + 1).max(1);
+        let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
+        while *allowance > 0 {
+            *allowance -= 1;
+            if self.cursor == 0 {
+                self.height = ground.pose(self.from, self.head, shape).height;
+            } else {
+                let (p, h) = if self.cursor <= turns {
+                    (
+                        self.from,
+                        angle::norm(self.head + turn * self.cursor / turns),
+                    )
+                } else {
+                    let f = Fx::from_ratio(self.cursor - turns, steps);
+                    (
+                        [
+                            self.from[0].add(delta[0].mul(f)),
+                            self.from[1].add(delta[1].mul(f)),
+                        ],
+                        yaw,
+                    )
+                };
+                let next = ground.pose(p, h, shape);
+                if next.refused()
+                    || next.height.sub(self.height).abs() > Fx::from_int(shape.step)
+                    || !clear(p, h)
+                {
+                    return Some(None);
+                }
+                self.crush = if self.cursor <= turns {
+                    self.crush.max(next.crush)
+                } else {
+                    self.crush + next.crush
+                };
+                self.height = next.height;
+            }
+            self.cursor += 1;
+            if self.cursor > turns + steps {
+                return Some(Some(self.crush));
+            }
+        }
+        None
+    }
+    pub fn save(&self, b: &mut Blob) {
+        for p in [self.from, self.to] {
+            for v in p {
+                b.fx(v);
+            }
+        }
+        b.i32(self.head);
+        b.i32(self.cursor);
+        b.fx(self.height);
+        b.usize(self.crush);
+    }
+    pub fn load(s: &mut Scan) -> Option<Self> {
+        let result = Self {
+            from: [s.fx(), s.fx()],
+            to: [s.fx(), s.fx()],
+            head: s.i32(),
+            cursor: s.i32(),
+            height: s.fx(),
+            crush: s.usize(),
+        };
+        (s.ok()
+            && (0..=200_000).contains(&result.cursor)
+            && (0..angle::FULL).contains(&result.head))
+        .then_some(result)
+    }
+}

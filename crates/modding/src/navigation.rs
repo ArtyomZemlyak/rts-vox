@@ -4,15 +4,12 @@ use serde::Deserialize;
 pub struct Navigation {
     pub cell_units: i32,
     pub search_nodes: usize,
-    /// Frontier a search walks in one tick (ADR-306). A long route is
-    /// then found over several ticks instead of stopping one.
+    /// Search work in one tick: one frontier node or one swept pose.
+    /// Target selection and connections share the same bounded allowance.
     #[serde(default = "whole_search")]
     pub search_nodes_per_tick: usize,
-    /// Searches the whole range may **begin** in one tick (ADR-312).
-    /// Beginning one is dearer than a slice of one: the goal is probed
-    /// from every heading over a ring of cells and a straight run to it
-    /// is walked whole. Hulls over the ceiling keep their order and try
-    /// again next tick.
+    /// Searches the whole range may begin in one tick. Hulls beyond the
+    /// ceiling retain their orders; each admitted start also has a work cap.
     #[serde(default = "every_start")]
     pub searches_started_per_tick: usize,
     pub recovery_ticks: u32,

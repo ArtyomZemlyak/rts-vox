@@ -19,15 +19,12 @@ fn point(s: &str) -> [i32; 2] {
         .map(|v| v.trim().parse::<i32>().expect("integer"));
     [it.next().expect("x"), it.next().expect("z")]
 }
-fn range(search: Option<(usize, u32)>) -> BlastRange {
+fn range(search: Option<(usize, u32)>, layout: &modding::range::RangeLayout) -> BlastRange {
     let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../../data/explosion.ron"
     ))
     .unwrap();
-    let layout =
-        modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-cover.ron"))
-            .unwrap();
-    let mut scene = BlastRange::with_layout(config, layout).unwrap();
+    let mut scene = BlastRange::with_layout(config, layout.clone()).unwrap();
     scene.control();
     if let Some((nodes, pct)) = search {
         scene.gun.motion.set_search(nodes, pct);
@@ -37,6 +34,10 @@ fn range(search: Option<(usize, u32)>) -> BlastRange {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let layout = arg(&args, "--range")
+        .map(|p| std::fs::read_to_string(p).expect("range file"))
+        .unwrap_or_else(|| include_str!("../../../../data/range-cover.ron").into());
+    let layout = modding::range::RangeLayout::from_ron(&layout).expect("range layout");
     let ticks: usize = arg(&args, "--ticks")
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
@@ -52,12 +53,21 @@ fn main() {
     // Planning alone: the order's cost and whether a route came out.
     for t in targets.split(';').filter(|t| !t.is_empty()) {
         let target = point(t);
-        let mut scene = range(search);
+        let mut scene = range(search, &layout);
         let start = Instant::now();
         let ok = scene.order_move(target);
         let us = start.elapsed().as_micros();
+        let mut slices = 0;
+        let mut slice_us = 0;
+        while scene.gun.motion.searching() && slices < 10000 {
+            let started = Instant::now();
+            scene.step();
+            slice_us = slice_us.max(started.elapsed().as_micros());
+            slices += 1;
+        }
+        assert!(!scene.gun.motion.searching(), "search never completed");
         println!(
-            "plan to=({},{}) ok={ok} us={us} nodes={} poses={} scans={} samples={} path_len={} blocked={}",
+            "plan to=({},{}) ok={ok} us={us} slices={slices} max_slice_us={slice_us} nodes={} poses={} scans={} samples={} path_len={} blocked={}",
             target[0],
             target[1],
             scene.gun.motion.last_plan[0],
@@ -68,10 +78,13 @@ fn main() {
             scene.gun.motion.blocked
         );
     }
+    if args.iter().any(|a| a == "--plan-only") {
+        return;
+    }
 
     // The drive: a shell on the open ground, then the order across it.
     for with_crater in [false, true] {
-        let mut scene = range(search);
+        let mut scene = range(search, &layout);
         let mut samples: Vec<(u128, usize)> = Vec::new();
         let mut tick = 0usize;
         if with_crater {

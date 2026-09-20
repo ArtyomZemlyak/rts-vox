@@ -663,13 +663,9 @@ impl Motion {
         self.hunt = None;
         self.path.clear();
         self.cursor = 0;
-        // The window of columns covers the run and a detour, not the map
-        // (ADR-317): over a range of a kilometre the whole map is 600 MB,
-        // and this is built for every order given.
-        let (centre, radius) = nav::vehicle::search_window(from, to);
-        let mut ground =
-            nav::vehicle::Probe::around(w, &self.yielding, centre, radius).with_rubble(rubble);
-        match nav::vehicle::Hunt::start(
+        let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
+            .with_rubble(rubble);
+        match nav::vehicle::Hunt::start_bounded(
             &mut ground,
             shape,
             from,
@@ -677,15 +673,12 @@ impl Motion {
             to,
             self.search(w),
             &clear,
+            self.navigation.search_nodes_per_tick.max(1),
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
             nav::vehicle::Hunting::Open(hunt) => {
-                // Beginning a search is this tick's share of it (ADR-314):
-                // the goal has been probed from every heading over a ring
-                // of cells and the straight run to it walked whole, which
-                // is a slice of work by itself. The frontier waits for the
-                // next tick. Still looking: the order stands, the hull
-                // waits where it is.
+                // Starting consumed this tick's bounded share. Goal probes,
+                // the direct sweep and frontier resume on the next tick.
                 self.hunt = Some(hunt);
                 self.blocked = false;
                 self.stranded = false;

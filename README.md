@@ -36,8 +36,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 `.\target\release\blast.exe --range data/range-km.ron --weapon shell --power 4000 --view overview --profile out/performance/shell.csv --profile-seconds 20`.
 Это прогон 1× с выключенным VSync, CSV по кадрам и CPU-фазам; окно
 само закроется после замера. `--drive` вместо оружия проверяет движение
-мишеней без стрельбы. Условия, команды и ограничения результатов — в
-[разборе производительности](docs/analysis/32-range-performance.md).
+мишеней без стрельбы. `--drive --profile-clouds 8` одновременно создаёт
+восемь независимых облаков для нагрузки атмосферы; это визуальный стенд,
+а не восемь физических попаданий. CSV также содержит CPU-время подготовки
+рендера, создания ресурсов газа и число областей. Эти счётчики читаются
+из потока рендера и не являются GPU-таймерами.
+Условия, команды и ограничения результатов — в
+[первом разборе](docs/analysis/32-range-performance.md) и
+[продолжении оптимизации](docs/analysis/33-range-spikes.md).
 
 Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
 `-Patrol` выбирает, за какой ходовой мишенью следить, считая с единицы.

@@ -6,12 +6,14 @@ use std::{io::Write, time::Instant};
 pub struct Profile {
     pub output: Option<String>,
     pub seconds: f64,
+    pub clouds: usize,
+    emitted: bool,
     warm: Option<f64>,
     start: Option<f64>,
     mark: Option<Instant>,
     phases: Vec<f64>,
     detail: [f64; 3],
-    rows: Vec<(f64, u32, [f64; 8])>,
+    rows: Vec<(f64, u32, [f64; 11])>,
     finished: bool,
 }
 impl Profile {
@@ -37,7 +39,12 @@ impl Profile {
         }
     }
 }
-pub fn begin(time: Res<Time<Real>>, gas: Res<GasInput>, mut p: ResMut<Profile>) {
+pub fn begin(
+    time: Res<Time<Real>>,
+    scene: Res<Scene>,
+    mut gas: ResMut<GasInput>,
+    mut p: ResMut<Profile>,
+) {
     if p.output.is_none() || !gas.ready.load(Ordering::Relaxed) {
         return;
     }
@@ -46,7 +53,25 @@ pub fn begin(time: Res<Time<Real>>, gas: Res<GasInput>, mut p: ResMut<Profile>) 
     if now - warm < 2.0 {
         return;
     }
-    p.start.get_or_insert(now);
+    if p.start.is_none() {
+        gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
+        gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
+    }
+    let start = *p.start.get_or_insert(now);
+    if p.clouds > 0 && !p.emitted && now - start >= 0.5 {
+        p.emitted = true;
+        for i in 0..p.clouds {
+            let mut params = gas.params;
+            params.source = Vec4::new(
+                210.0 + (i % 4) as f32 * 90.0,
+                32.0,
+                260.0 + (i / 4) as f32 * 110.0,
+                24.0,
+            );
+            params.control.z = 1.0;
+            gas.atmosphere.emit_at(params, scene.sim.tick * 2);
+        }
+    }
     p.phases.clear();
     p.detail.fill(0.0);
     p.mark = Some(Instant::now());
@@ -81,6 +106,9 @@ pub fn end(
         p.detail[0],
         p.detail[1],
         p.detail[2],
+        gas.timings.prepare_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        gas.timings.allocation_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        gas.timings.active_regions.load(Ordering::Relaxed) as f64,
     ];
     if elapsed > 0.0 {
         p.rows.push((elapsed, scene.sim.tick, phases));
@@ -93,13 +121,13 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions"
         )?;
         for (t, tick, ms) in &p.rows {
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
-                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7]
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0}",
+                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10]
             )?;
         }
         out.flush()
@@ -113,6 +141,8 @@ pub fn end(
         "physics",
         "terrain",
         "atmosphere",
+        "render_prepare",
+        "gas_allocation",
     ]
     .into_iter()
     .enumerate()
@@ -130,6 +160,15 @@ pub fn end(
             );
         }
     }
+    println!(
+        "PROFILE max_gas_regions={}",
+        p.rows.iter().map(|r| r.2[10] as usize).max().unwrap_or(0)
+    );
+    println!(
+        "PROFILE render_thread_prepare_peak_ms={:.3} allocation_peak_ms={:.3}",
+        gas.timings.prepare_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        gas.timings.allocation_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    );
     println!(
         "PROFILE ticks={} removed={} elapsed={elapsed:.3}s",
         scene.sim.tick, scene.sim.removed

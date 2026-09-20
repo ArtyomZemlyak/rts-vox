@@ -141,8 +141,20 @@ pub struct GasInput {
     pub window: TerrainWindow,
     /// The scene can wait for actual shader readiness before advancing capture.
     pub ready: Arc<AtomicBool>,
+    pub timings: Arc<GasTimings>,
     uploaded: Arc<AtomicU64>,
     patches: Vec<(usize, Vec<u32>)>,
+}
+/// Optional render-thread CPU counters for the native frame profiler.
+/// These are not GPU timestamps and never enter the simulation.
+#[derive(Default)]
+pub struct GasTimings {
+    pub enabled: AtomicBool,
+    pub prepare_ns: AtomicU64,
+    pub allocation_ns: AtomicU64,
+    pub prepare_peak_ns: AtomicU64,
+    pub allocation_peak_ns: AtomicU64,
+    pub active_regions: AtomicU64,
 }
 impl Default for GasInput {
     fn default() -> Self {
@@ -154,6 +166,7 @@ impl Default for GasInput {
             terrain_dirty: vec![],
             window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
+            timings: Arc::new(GasTimings::default()),
             uploaded: Arc::new(AtomicU64::new(0)),
             patches: Vec::new(),
         }
@@ -195,6 +208,7 @@ impl ExtractResource for GasInput {
             terrain_dirty: Vec::new(),
             window: source.window,
             ready: source.ready.clone(),
+            timings: source.timings.clone(),
             uploaded: source.uploaded.clone(),
         }
     }
@@ -202,7 +216,7 @@ impl ExtractResource for GasInput {
 impl GasInput {
     pub fn advance(&mut self, step: u32) {
         self.atmosphere
-            .advance(step, &self.terrain_words, self.window, &self.terrain_dirty);
+            .advance_gpu(step, &self.terrain_words, self.window, &self.terrain_dirty);
     }
 }
 
@@ -256,6 +270,7 @@ mod window_tests {
 }
 #[derive(Resource)]
 struct Shaders {
+    mask: Handle<Shader>,
     upload: Handle<Shader>,
     compute: Handle<Shader>,
     draw: Handle<Shader>,
@@ -275,6 +290,10 @@ impl Plugin for GasPlugin {
         };
         let common = source("terrain_common.wgsl", include_str!("terrain_common.wgsl"));
         let mut assets = app.world_mut().resource_mut::<Assets<Shader>>();
+        let mask = assets.add(Shader::from_wgsl(
+            include_str!("gas_mask.wgsl"),
+            "render/src/gas_mask.wgsl",
+        ));
         let upload = assets.add(Shader::from_wgsl(
             include_str!("terrain_upload.wgsl"),
             "render/src/terrain_upload.wgsl",
@@ -308,6 +327,7 @@ impl Plugin for GasPlugin {
             return;
         };
         r.insert_resource(Shaders {
+            mask,
             upload,
             compute,
             draw,
@@ -339,6 +359,8 @@ struct GpuCell {
 }
 #[derive(Resource)]
 struct Pipeline {
+    mask_layout: BindGroupLayoutDescriptor,
+    mask_build: CachedComputePipelineId,
     upload_layout: BindGroupLayoutDescriptor,
     upload: CachedComputePipelineId,
     compute_layout: BindGroupLayoutDescriptor,
@@ -361,12 +383,21 @@ struct GpuRegion {
     buffers: [Buffer; 2],
     mask: Buffer,
     mask_revision: u64,
+    mask_dirty: bool,
+    mask_uniform: UniformBuffer<MaskParams>,
+    mask_group: BindGroup,
     uniform: UniformBuffer<GasParams>,
     groups: [BindGroup; 2],
     deposits: Vec<GpuDeposit>,
     read: usize,
     simulated: u32,
     applied: u64,
+}
+#[derive(Clone, Copy, ShaderType)]
+struct MaskParams {
+    origin: IVec4,
+    window: IVec4,
+    dims: UVec4,
 }
 struct GpuDeposit {
     serial: u64,
@@ -434,6 +465,24 @@ fn init(
     shaders: Res<Shaders>,
     fullscreen: Res<FullscreenShader>,
 ) {
+    let mask_layout = BindGroupLayoutDescriptor::new(
+        "gas occupancy build",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer::<MaskParams>(false),
+                storage_buffer_read_only::<Vec<u32>>(false),
+                storage_buffer::<Vec<u32>>(false),
+            ),
+        ),
+    );
+    let mask_build = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("gas occupancy build".into()),
+        layout: vec![mask_layout.clone()],
+        shader: shaders.mask.clone(),
+        entry_point: Some("build".into()),
+        ..default()
+    });
     let upload_layout = BindGroupLayoutDescriptor::new(
         "terrain sparse upload",
         &BindGroupLayoutEntries::sequential(
@@ -546,6 +595,8 @@ fn init(
         mapped_at_creation: false,
     });
     commands.insert_resource(Pipeline {
+        mask_layout,
+        mask_build,
         upload_layout,
         upload,
         compute_layout,
@@ -574,6 +625,12 @@ fn prepare(
     cache: Res<PipelineCache>,
     views: Query<(Entity, &ExtractedView), With<GasCamera>>,
 ) -> Result<(), BevyError> {
+    let started = input
+        .timings
+        .enabled
+        .load(Ordering::Relaxed)
+        .then(std::time::Instant::now);
+    let mut allocated_ns = 0;
     let mut params = input.params;
     for (entity, view) in &views {
         params.world_from_clip = view.world_from_view.to_matrix() * view.clip_from_view.inverse();
@@ -649,6 +706,8 @@ fn prepare(
             .store(input.terrain_revision, Ordering::Release);
     }
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
+    let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
+    let terrain_buffer = pipeline.terrain.clone();
     for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
         let Some(source) = source else {
             *slot = None;
@@ -669,6 +728,7 @@ fn prepare(
         p.control.z = source.opacity(input.atmosphere.clock);
         p.control.w = 1.0; // overlay: the terrain and beam have already been drawn
         if slot.as_ref().is_none_or(|r| r.id != source.id) {
+            let allocation = started.map(|_| std::time::Instant::now());
             let buffers = std::array::from_fn(|_| state_buffer(&device));
             let mask = device.create_buffer(&BufferDescriptor {
                 label: Some("gas solid geometry"),
@@ -676,6 +736,21 @@ fn prepare(
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
+            let mut mask_uniform = UniformBuffer::from(MaskParams {
+                origin: p.origin.as_ivec4(),
+                window: p.terrain_origin.as_ivec4(),
+                dims: p.terrain.as_uvec4(),
+            });
+            mask_uniform.write_buffer(&device, &queue);
+            let mask_group = device.create_bind_group(
+                "gas occupancy build",
+                &mask_layout,
+                &BindGroupEntries::sequential((
+                    mask_uniform.binding().unwrap(),
+                    terrain_buffer.as_entire_binding(),
+                    mask.as_entire_binding(),
+                )),
+            );
             let mut uniform = UniformBuffer::from(p);
             uniform.write_buffer(&device, &queue);
             let groups = compute_groups(&device, &layout, &uniform, &buffers, &mask);
@@ -684,6 +759,9 @@ fn prepare(
                 buffers,
                 mask,
                 mask_revision: 0,
+                mask_dirty: false,
+                mask_uniform,
+                mask_group,
                 uniform,
                 groups,
                 deposits: vec![],
@@ -691,13 +769,26 @@ fn prepare(
                 simulated: 0,
                 applied: 0,
             });
+            if let Some(allocation) = allocation {
+                allocated_ns += allocation.elapsed().as_nanos() as u64;
+            }
         }
         let r = slot.as_mut().unwrap();
         r.uniform.set(p);
         r.uniform.write_buffer(&device, &queue);
         if r.mask_revision != source.mask_revision {
-            let bytes: Vec<u8> = source.mask.iter().flat_map(|v| v.to_le_bytes()).collect();
-            queue.write_buffer(&r.mask, 0, &bytes);
+            if source.mask.is_empty() {
+                r.mask_uniform.set(MaskParams {
+                    origin: p.origin.as_ivec4(),
+                    window: p.terrain_origin.as_ivec4(),
+                    dims: p.terrain.as_uvec4(),
+                });
+                r.mask_uniform.write_buffer(&device, &queue);
+                r.mask_dirty = true;
+            } else {
+                let bytes: Vec<u8> = source.mask.iter().flat_map(|v| v.to_le_bytes()).collect();
+                queue.write_buffer(&r.mask, 0, &bytes);
+            }
             r.mask_revision = source.mask_revision;
         }
         r.deposits.clear();
@@ -719,6 +810,26 @@ fn prepare(
                 groups,
             });
         }
+    }
+    if let Some(started) = started {
+        let elapsed = started.elapsed().as_nanos() as u64;
+        input
+            .timings
+            .prepare_peak_ns
+            .fetch_max(elapsed, Ordering::Relaxed);
+        input
+            .timings
+            .allocation_peak_ns
+            .fetch_max(allocated_ns, Ordering::Relaxed);
+        input.timings.prepare_ns.store(elapsed, Ordering::Relaxed);
+        input
+            .timings
+            .allocation_ns
+            .store(allocated_ns, Ordering::Relaxed);
+        input.timings.active_regions.store(
+            input.atmosphere.regions.iter().flatten().count() as u64,
+            Ordering::Relaxed,
+        );
     }
     Ok(())
 }
@@ -790,10 +901,11 @@ fn draw_gas(
     mut ctx: RenderContext,
 ) {
     let (target, prepass, id) = view.into_inner();
-    let (Some(draw), Some(init), Some(step), Some(depth), Some(normals)) = (
+    let (Some(draw), Some(init), Some(step), Some(mask_build), Some(depth), Some(normals)) = (
         cache.get_render_pipeline(id.0),
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
+        cache.get_compute_pipeline(pipeline.mask_build),
         prepass.depth_view(),
         prepass.normal_view(),
     ) else {
@@ -810,6 +922,22 @@ fn draw_gas(
         };
         if pipeline.ready_frames >= 12 {
             input.ready.store(true, Ordering::Relaxed);
+        }
+    }
+    {
+        let mut pass = ctx
+            .command_encoder()
+            .begin_compute_pass(&ComputePassDescriptor {
+                label: Some("gas occupancy"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(mask_build);
+        for region in pipeline.regions.iter_mut().flatten() {
+            if region.mask_dirty {
+                pass.set_bind_group(0, &region.mask_group, &[]);
+                pass.dispatch_workgroups(12, 12, 12);
+                region.mask_dirty = false;
+            }
         }
     }
     for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {

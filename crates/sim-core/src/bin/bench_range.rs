@@ -35,12 +35,22 @@ fn main() {
         scene.control();
         let mut samples = Vec::new();
         let mut shots = 0;
+        let mut phases = std::collections::BTreeMap::<&str, (u128, usize)>::new();
         for tick in 0..1800 {
             if firing && tick % 180 == 0 && scene.refire() {
                 shots += 1;
             }
             let start = Instant::now();
-            scene.step();
+            let mut mark = start;
+            scene.step_observed(|name| {
+                let now = Instant::now();
+                let elapsed = now.duration_since(mark).as_micros();
+                mark = now;
+                let peak = phases.entry(name).or_default();
+                if elapsed > peak.0 {
+                    *peak = (elapsed, tick);
+                }
+            });
             samples.push(start.elapsed().as_micros());
         }
         // The slowest ticks by number: a spike names its moment.
@@ -55,6 +65,9 @@ fn main() {
             "weapon={weapon} power={power} firing={firing} slowest_ticks_us={}",
             top.join(",")
         );
+        for (name, (us, tick)) in phases {
+            println!("phase={name} firing={firing} max_us={us} tick={tick}");
+        }
         samples.sort_unstable();
         let laps: Vec<_> = scene
             .units

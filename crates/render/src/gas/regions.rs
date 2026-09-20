@@ -87,6 +87,25 @@ impl Atmosphere {
         window: TerrainWindow,
         dirty: &[Range<usize>],
     ) {
+        self.advance_impl(clock, words, window, dirty, false);
+    }
+    pub(super) fn advance_gpu(
+        &mut self,
+        clock: u32,
+        words: &[u32],
+        window: TerrainWindow,
+        dirty: &[Range<usize>],
+    ) {
+        self.advance_impl(clock, words, window, dirty, true);
+    }
+    fn advance_impl(
+        &mut self,
+        clock: u32,
+        words: &[u32],
+        window: TerrainWindow,
+        dirty: &[Range<usize>],
+        gpu: bool,
+    ) {
         self.clock = clock;
         for slot in &mut self.regions {
             if let Some(r) = slot {
@@ -95,7 +114,14 @@ impl Atmosphere {
                 if r.opacity(clock) <= 0.0 {
                     *slot = None;
                 } else if !dirty.is_empty() || window != r.mask_window {
-                    refresh_mask(r, words, window, dirty);
+                    if gpu {
+                        if window != r.mask_window || touches_mask(r, window, dirty) {
+                            r.mask_window = window;
+                            r.mask_revision += 1;
+                        }
+                    } else {
+                        refresh_mask(r, words, window, dirty);
+                    }
                 }
             }
         }
@@ -127,7 +153,11 @@ impl Atmosphere {
                 p.origin.y = (p.source.y - GAS_N as f32 * p.origin.w * 0.15)
                     .floor()
                     .max(0.0);
-                let mask = make_mask(words, window, p.origin);
+                let mask = if gpu {
+                    Vec::new()
+                } else {
+                    make_mask(words, window, p.origin)
+                };
                 self.regions[i] = Some(Region {
                     id: self.serial,
                     born: clock,
@@ -245,6 +275,45 @@ fn make_mask(words: &[u32], window: TerrainWindow, origin: Vec4) -> Vec<u32> {
     }
     mask
 }
+// A conservative overlap test: stop at the first changed packed word
+// intersecting the field. No per-cell temporary vector or terrain scan.
+fn touches_mask(r: &Region, window: TerrainWindow, spans: &[Range<usize>]) -> bool {
+    let lo = r.params.origin.truncate().as_ivec3();
+    let hi = lo + IVec3::splat(GAS_N as i32 * r.params.origin.w as i32);
+    if spans.iter().map(|s| s.len()).sum::<usize>() > GAS_CELLS / 8 {
+        return true;
+    }
+    for span in spans {
+        for word in span.clone() {
+            let first = window.position(word * 8);
+            let contiguous = word * 8 % window.dims[0] as usize + 8 <= window.dims[0] as usize
+                && first[0] + 8 <= window.origin[0] + window.dims[0] as i32;
+            if contiguous {
+                if first[0] < hi.x
+                    && first[0] + 8 > lo.x
+                    && first[1] >= lo.y
+                    && first[1] < hi.y
+                    && first[2] >= lo.z
+                    && first[2] < hi.z
+                {
+                    return true;
+                }
+            } else {
+                for lane in 0..8 {
+                    let index = word * 8 + lane;
+                    if index >= window.dims.iter().map(|&n| n as usize).product() {
+                        break;
+                    }
+                    let p = IVec3::from_array(window.position(index));
+                    if p.cmpge(lo).all() && p.cmplt(hi).all() {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
 fn refresh_mask(r: &mut Region, words: &[u32], window: TerrainWindow, spans: &[Range<usize>]) {
     // Bulk world uploads must not turn into a walk over hundreds of millions
     // of terrain cells for each small gas volume. Rebuild the bounded volume.
@@ -300,6 +369,48 @@ fn refresh_mask(r: &mut Region, words: &[u32], window: TerrainWindow, spans: &[R
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gpu_mask_invalidation_covers_each_changed_voxel_across_wraps() {
+        let window = TerrainWindow {
+            origin: [79, 0, 71],
+            dims: [97, 32, 96],
+        };
+        let words = vec![0u32; (97 * 32 * 96usize).div_ceil(8)];
+        let mut a = Atmosphere::default();
+        a.emit(shot(100.0, false));
+        a.advance_gpu(0, &words, window, &[]);
+        let r = a.regions[0].as_mut().unwrap();
+        assert!(r.mask.is_empty(), "the GPU path must not build a CPU mask");
+        for origin in [
+            Vec4::new(70.0, 0.0, 60.0, 1.0),
+            Vec4::new(89.0, 0.0, 87.0, 3.0),
+        ] {
+            r.params.origin = origin;
+            let lo = origin.truncate().as_ivec3();
+            let hi = lo + IVec3::splat(GAS_N as i32 * origin.w as i32);
+            for start in (0..words.len() - 3).step_by(37) {
+                let span = start..start + 3;
+                let expected = (span.start * 8..span.end * 8).any(|i| {
+                    let p = IVec3::from_array(window.position(i));
+                    p.cmpge(lo).all() && p.cmplt(hi).all()
+                });
+                assert_eq!(touches_mask(r, window, &[span]), expected);
+            }
+        }
+        let revision = r.mask_revision;
+        a.advance_gpu(1, &words, window, &[]);
+        assert_eq!(a.regions[0].as_ref().unwrap().mask_revision, revision);
+        a.advance_gpu(
+            2,
+            &words,
+            TerrainWindow {
+                origin: [80, 0, 71],
+                ..window
+            },
+            &[],
+        );
+        assert_eq!(a.regions[0].as_ref().unwrap().mask_revision, revision + 1);
+    }
     #[test]
     fn packed_mask_matches_voxel_reference_across_window_and_word_seams() {
         let window = TerrainWindow {

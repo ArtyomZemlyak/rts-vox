@@ -6,6 +6,8 @@
 //! floor is the terrain beneath them, and the pose reports how many footprint
 //! columns hold such matter inside the hull height, so the caller can crush
 //! it and the planner can price the detour.
+mod connection;
+use connection::Connection;
 use fx::{angle, Fx};
 use std::{
     cmp::Reverse,
@@ -57,26 +59,27 @@ impl Pose {
 /// world units (ADR-292): an overlay the probe adds to the world's floor,
 /// so that contacts, feet and the planner all stand on the same heaps.
 pub type Rubble = BTreeMap<[i32; 2], u16>;
-/// Query-local height cache. No cached result survives a world edit.
-///
-/// The cache is a window of columns: the whole map for a route search, a
-/// few hull lengths around the vehicle for the per-tick pose checks, so
-/// that clearing it every tick costs kilobytes rather than megabytes.
-/// The column window of a probe, taken out and put back so that a search
-/// spanning ticks scans each column once rather than once a slice (P-29).
-/// It holds answers about the world and is therefore only as good as the
-/// world it was filled from: a search whose world changed drops it.
+/// Cached column answers for a suspended search. Pages are bounded and moved
+/// into the next probe; none survive a world edit or enter authoritative saves.
 #[derive(Clone, Default)]
 pub struct Columns {
-    x0: i32,
-    z0: i32,
-    w: usize,
-    h: usize,
-    heights: Vec<u16>,
-    yields: Vec<[u16; 2]>,
+    pages: Vec<Option<ColumnPage>>,
+    replacement: Vec<u8>,
+}
+// Four-way set-associative pages bound a search cache independently of map or route size.
+// Eviction only repeats a pure query, never changes the search's work allowance.
+const PAGE_SIDE: usize = 32;
+const PAGE_SLOTS: usize = 128;
+#[derive(Clone)]
+struct ColumnPage {
+    key: [i32; 2],
+    values: Vec<(u16, [u16; 2])>,
 }
 pub struct Probe<'a> {
     world: &'a World,
+    pages: Vec<Option<ColumnPage>>,
+    replacement: Vec<u8>,
+    last_page: usize,
     x0: i32,
     z0: i32,
     w: usize,
@@ -120,6 +123,9 @@ impl<'a> Probe<'a> {
         let h = (hi[1] - lo[1]).max(0) as usize;
         Self {
             world,
+            pages: Vec::new(),
+            replacement: Vec::new(),
+            last_page: 0,
             x0: lo[0],
             z0: lo[1],
             w,
@@ -142,36 +148,23 @@ impl<'a> Probe<'a> {
         self.rubble = Some(rubble);
         self
     }
-    /// Take back a window filled earlier, if it covers the same ground
-    /// (P-29); a window of another shape is dropped rather than adapted.
-    pub fn with_columns(mut self, c: Columns) -> Self {
-        if c.x0 == self.x0
-            && c.z0 == self.z0
-            && c.w == self.w
-            && c.h == self.h
-            && c.heights.len() == self.heights.len()
-            && c.yields.len() == self.yields.len()
-        {
-            self.heights = c.heights;
-            self.yields = c.yields;
+    /// Bounded cache for long searches, moved between slices without clearing
+    /// or allocating a dense window over the remaining distance.
+    pub fn for_search(world: &'a World, yielding: &[Mat], mut columns: Columns) -> Self {
+        if columns.pages.is_empty() {
+            columns.pages = (0..PAGE_SLOTS).map(|_| None).collect();
+            columns.replacement = vec![0; PAGE_SLOTS / 4];
         }
-        self
+        let mut probe = Self::window(world, yielding, [0; 2], [0; 2]);
+        probe.pages = columns.pages;
+        probe.replacement = columns.replacement;
+        probe
     }
-    /// Give up the filled window; the probe keeps an empty one of the same
-    /// shape and answers as a fresh probe would.
+    /// Transfer search pages without allocating or clearing a replacement.
     pub fn take_columns(&mut self) -> Columns {
-        let blank = if self.yields.is_empty() {
-            Vec::new()
-        } else {
-            vec![[u16::MAX, 0]; self.w * self.h]
-        };
         Columns {
-            x0: self.x0,
-            z0: self.z0,
-            w: self.w,
-            h: self.h,
-            heights: std::mem::replace(&mut self.heights, vec![u16::MAX; self.w * self.h]),
-            yields: std::mem::replace(&mut self.yields, blank),
+            pages: std::mem::take(&mut self.pages),
+            replacement: std::mem::take(&mut self.replacement),
         }
     }
     pub fn yields(&self, m: Mat) -> bool {
@@ -206,6 +199,44 @@ impl<'a> Probe<'a> {
         self.columns += 1;
         if x < 0 || z < 0 || x >= self.world.nx as i32 || z >= self.world.nz as i32 {
             return None;
+        }
+        if !self.pages.is_empty() {
+            let key = [x / PAGE_SIDE as i32, z / PAGE_SIDE as i32];
+            let slot = if self.pages[self.last_page]
+                .as_ref()
+                .is_some_and(|p| p.key == key)
+            {
+                self.last_page
+            } else {
+                let bucket = ((key[0] as usize).wrapping_mul(73_856_093)
+                    ^ (key[1] as usize).wrapping_mul(19_349_663))
+                    % (PAGE_SLOTS / 4);
+                let base = bucket * 4;
+                let slot = (base..base + 4)
+                    .find(|&i| self.pages[i].as_ref().is_some_and(|p| p.key == key))
+                    .unwrap_or_else(|| {
+                        let i = base + usize::from(self.replacement[bucket]);
+                        self.replacement[bucket] = (self.replacement[bucket] + 1) % 4;
+                        let page = self.pages[i].get_or_insert_with(|| ColumnPage {
+                            key,
+                            values: vec![(u16::MAX, [u16::MAX, 0]); PAGE_SIDE * PAGE_SIDE],
+                        });
+                        page.key = key;
+                        page.values.fill((u16::MAX, [u16::MAX, 0]));
+                        i
+                    });
+                self.last_page = slot;
+                slot
+            };
+            let index = x as usize % PAGE_SIDE + (z as usize % PAGE_SIDE) * PAGE_SIDE;
+            let value = self.pages[slot].as_ref().unwrap().values[index];
+            if value.0 != u16::MAX {
+                return Some(value);
+            }
+            self.scans += 1;
+            let value = self.scan(x, z);
+            self.pages[slot].as_mut().unwrap().values[index] = value;
+            return Some(value);
         }
         let (dx, dz) = (x - self.x0, z - self.z0);
         if dx < 0 || dz < 0 || dx as usize >= self.w || dz as usize >= self.h {
@@ -541,6 +572,7 @@ const DIR: [[i32; 2]; 8] = [
     [1, -1],
 ];
 /// Whether the straight move is open, and how many yielding columns it crushes.
+#[cfg(test)]
 fn connects(
     ground: &mut Probe<'_>,
     shape: Shape,
@@ -605,26 +637,6 @@ pub struct Route {
     /// world as probed, and only a change of the world can make one.
     pub exhausted: bool,
 }
-/// How far outside the straight line from hull to goal a search's window
-/// of columns reaches, world units (ADR-317). A detour wider than this is
-/// still found; its columns are simply read afresh instead of once.
-const WINDOW_MARGIN: i32 = 256;
-
-/// Where a search's window of columns sits and how far it reaches: around
-/// the middle of the run, wide enough for the run and a detour. A window
-/// over the whole map costs 600 MB on a range of a kilometre, and one is
-/// built for every order (ADR-317).
-pub fn search_window(from: [Fx; 2], to: [i32; 2]) -> ([Fx; 2], i32) {
-    let goal = to.map(Fx::from_int);
-    let centre = [0, 1].map(|a| from[a].add(goal[a]).div(Fx::from_int(2)));
-    let reach = [0, 1]
-        .map(|a| goal[a].sub(from[a]).abs().to_int_trunc())
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-    (centre, reach / 2 + WINDOW_MARGIN)
-}
-
 /// An oriented A*: translations keep heading, turns reserve their swept
 /// footprint. It cannot choose a narrow corridor and then rotate through it.
 pub fn route(
@@ -653,7 +665,7 @@ pub fn plan(
     match Hunt::start(&mut ground, shape, from, head, to, cfg, &clear) {
         Hunting::Done(route) => route,
         Hunting::Open(mut hunt) => hunt
-            .advance(&mut ground, &clear, cfg.nodes)
+            .advance(&mut ground, &clear, usize::MAX)
             .expect("a slice of the whole allowance finishes the search"),
     }
 }
@@ -712,6 +724,14 @@ pub struct Hunt {
     scans: u64,
     samples: u64,
     left_start: bool,
+    prelude: Option<Prelude>,
+    connection: Option<(usize, u32, Connection)>,
+}
+#[derive(Clone)]
+struct Prelude {
+    head: i32,
+    goal_cursor: usize,
+    straight: Option<Connection>,
 }
 
 impl std::fmt::Debug for Hunt {
@@ -728,9 +748,8 @@ impl std::fmt::Debug for Hunt {
     }
 }
 impl Hunt {
-    /// Begin a search: check the request, move the goal to a cell the hull
-    /// may stand on, and try the straight run. Any of the three may answer
-    /// outright, and then no graph is walked.
+    /// Whole prelude for synchronous callers; the live range uses the same
+    /// work through `start_bounded` with its deterministic per-tick allowance.
     pub fn start(
         ground: &mut Probe<'_>,
         shape: Shape,
@@ -739,6 +758,19 @@ impl Hunt {
         to: [i32; 2],
         cfg: Search,
         clear: &impl Fn([Fx; 2], i32) -> bool,
+    ) -> Hunting {
+        Self::start_bounded(ground, shape, from, head, to, cfg, clear, usize::MAX)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_bounded(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
     ) -> Hunting {
         let none = |stranded, exhausted, nodes, poses| {
             Hunting::Done(Route {
@@ -772,52 +804,6 @@ impl Hunt {
         {
             return none(false, false, 0, 0);
         }
-        // The goal must be a pose the hull may take, clear of the other
-        // hulls: a point inside a parked hull, on a slope or against a wall
-        // is moved to the nearest cell within four that is, else there is
-        // no route at all — and the search does not spend its budget
-        // finding that out.
-        let mut probed = 0u32;
-        let mut goal = None;
-        'ring: for r in 0..=4i32 {
-            for dz in -r..=r {
-                for dx in -r..=r {
-                    if dx.abs() != r && dz.abs() != r {
-                        continue;
-                    }
-                    let p = [to[0] + dx * cfg.cell, to[1] + dz * cfg.cell];
-                    if (0..2).any(|a| p[a] < cfg.min[a] || p[a] >= cfg.max[a]) {
-                        continue;
-                    }
-                    let q = p.map(Fx::from_int);
-                    let open = (0..8).any(|d| {
-                        let yaw = d * angle::FULL / 8;
-                        probed += 1;
-                        !ground.pose(q, yaw, shape).refused() && clear(q, yaw)
-                    });
-                    if open {
-                        goal = Some(p);
-                        break 'ring;
-                    }
-                }
-            }
-        }
-        let Some(to) = goal else {
-            return none(false, true, 0, probed);
-        };
-        // A straight run through yielding matter is legal but not free: let
-        // the search look for cheaper open ground first.
-        if connects(ground, shape, from, head, to.map(Fx::from_int), clear) == Some(0) {
-            return Hunting::Done(Route {
-                path: vec![to],
-                stranded: false,
-                nodes: 0,
-                poses: probed,
-                exhausted: false,
-                scans: ground.scans,
-                samples: ground.samples,
-            });
-        }
         let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
         let rows = (ground.world.nz as i32).div_euclid(cfg.cell) as usize;
         let start = from[0].to_int_trunc().div_euclid(cfg.cell) as usize
@@ -826,8 +812,6 @@ impl Hunt {
             from[0].to_int_trunc().rem_euclid(cfg.cell),
             from[1].to_int_trunc().rem_euclid(cfg.cell),
         ];
-        let end = (to[0] - anchor[0]).div_euclid(cfg.cell) as usize
-            + n * (to[1] - anchor[1]).div_euclid(cfg.cell) as usize;
         let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
         let initial = start * 8 + start_dir;
         let mut distance = BTreeMap::new();
@@ -836,7 +820,7 @@ impl Hunt {
         let mut open = BinaryHeap::new();
         distance.insert(initial, 0);
         open.push(Reverse((0, 0, initial)));
-        Hunting::Open(Box::new(Hunt {
+        let mut hunt = Hunt {
             shape,
             cfg,
             from,
@@ -847,18 +831,116 @@ impl Hunt {
             rows,
             anchor,
             initial,
-            end,
+            // The requested point can still be outside the hull's legal
+            // ground. Index only the pose chosen by the bounded target probe.
+            end: 0,
             distance,
             previous,
             poses,
             open,
             spent: 0,
             nodes: 0,
-            probed,
-            scans: ground.scans,
-            samples: ground.samples,
+            probed: 0,
+            scans: 0,
+            samples: 0,
             left_start: false,
-        }))
+            prelude: Some(Prelude {
+                head,
+                goal_cursor: 0,
+                straight: None,
+            }),
+            connection: None,
+        };
+        let result = hunt.prepare(ground, clear, &mut budget.max(1));
+        hunt.scans = ground.scans;
+        hunt.samples = ground.samples;
+        if let Some(mut route) = result {
+            route.scans = hunt.scans;
+            route.samples = hunt.samples;
+            Hunting::Done(route)
+        } else {
+            hunt.columns = ground.take_columns();
+            Hunting::Open(Box::new(hunt))
+        }
+    }
+    /// Probe the target ring in the original order, then the exact swept run.
+    fn prepare(
+        &mut self,
+        ground: &mut Probe<'_>,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        allowance: &mut usize,
+    ) -> Option<Route> {
+        let mut pending = self.prelude.take()?;
+        if pending.straight.is_none() {
+            let mut candidates = Vec::with_capacity(81);
+            for r in 0..=4i32 {
+                for dz in -r..=r {
+                    for dx in -r..=r {
+                        if dx.abs() == r || dz.abs() == r {
+                            candidates.push([
+                                self.to[0] + dx * self.cfg.cell,
+                                self.to[1] + dz * self.cfg.cell,
+                            ]);
+                        }
+                    }
+                }
+            }
+            while pending.goal_cursor < candidates.len() * 8 && *allowance > 0 {
+                let p = candidates[pending.goal_cursor / 8];
+                let yaw = (pending.goal_cursor % 8) as i32 * angle::FULL / 8;
+                pending.goal_cursor += 1;
+                if (0..2).any(|a| p[a] < self.cfg.min[a] || p[a] >= self.cfg.max[a]) {
+                    continue;
+                }
+                *allowance -= 1;
+                self.probed += 1;
+                let q = p.map(Fx::from_int);
+                if !ground.pose(q, yaw, self.shape).refused() && clear(q, yaw) {
+                    self.to = p;
+                    let cell = [self.n, self.rows].map(|n| n as i32 - 1);
+                    let end = [0, 1].map(|a| {
+                        (p[a] - self.anchor[a])
+                            .div_euclid(self.cfg.cell)
+                            .clamp(0, cell[a]) as usize
+                    });
+                    self.end = end[0] + self.n * end[1];
+                    pending.straight = Some(Connection::new(self.from, pending.head, q));
+                    break;
+                }
+            }
+            if pending.straight.is_none() && pending.goal_cursor == candidates.len() * 8 {
+                return Some(self.empty(false, true));
+            }
+        }
+        if let Some(run) = &mut pending.straight {
+            let before = *allowance;
+            let answer = run.advance(ground, self.shape, clear, allowance);
+            self.probed += (before - *allowance) as u32;
+            match answer {
+                Some(Some(0)) => {
+                    return Some(Route {
+                        path: vec![self.to],
+                        ..self.empty(false, false)
+                    })
+                }
+                // Yielding matter is legal, but the graph may find a cheaper detour.
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        self.prelude = Some(pending);
+        None
+    }
+    fn empty(&self, stranded: bool, exhausted: bool) -> Route {
+        Route {
+            path: vec![],
+            stranded,
+            exhausted,
+            nodes: self.nodes,
+            poses: self.probed,
+            scans: self.scans,
+            samples: self.samples,
+        }
     }
 
     /// What the search has paid to reach this cell and heading; the most
@@ -874,9 +956,8 @@ impl Hunt {
     pub fn nodes(&self) -> u32 {
         self.nodes
     }
-    /// One slice of a search that spans ticks (P-29): a probe over the
-    /// window the earlier slices filled, `budget` of the frontier, and the
-    /// window kept for the next slice.
+    /// One slice of a search that spans ticks: reuse its bounded pages and
+    /// spend `budget` on target poses, swept poses or frontier nodes.
     pub fn advance_in(
         &mut self,
         world: &World,
@@ -885,11 +966,10 @@ impl Hunt {
         budget: usize,
     ) -> Option<Route> {
         let carried = std::mem::take(&mut self.columns);
-        let (centre, radius) = search_window(self.from, self.to);
-        let mut ground = Probe::around(world, &self.yielding, centre, radius)
-            .with_rubble(rubble)
-            .with_columns(carried);
-        self.advance(&mut ground, clear, budget)
+        let mut ground = Probe::for_search(world, &self.yielding, carried).with_rubble(rubble);
+        let result = self.advance(&mut ground, clear, budget);
+        self.columns = ground.take_columns();
+        result
     }
     /// The world changed under the search: everything scanned or probed in
     /// the world as it was goes, the search itself stays. Its answers are
@@ -898,6 +978,16 @@ impl Hunt {
     pub fn forget_world(&mut self) {
         self.columns = Columns::default();
         self.poses.clear();
+        if let Some(pending) = &mut self.prelude {
+            if let Some(run) = &mut pending.straight {
+                run.restart();
+            } else {
+                pending.goal_cursor = 0;
+            }
+        }
+        if let Some((_, _, run)) = &mut self.connection {
+            run.restart();
+        }
     }
     /// The search as bytes: the cells it reached, the frontier in priority
     /// order, and the request. What it scanned and probed is left out
@@ -906,6 +996,8 @@ impl Hunt {
     /// because they count those asks and a resumed search asks fewer.
     /// A search restored from these bytes finds the same route (P-29).
     pub fn save(&self, b: &mut fx::blob::Blob) {
+        // Negative half-size cannot occur in the legacy layout.
+        b.i32(-1);
         for v in [
             self.shape.half[0],
             self.shape.half[1],
@@ -968,11 +1060,29 @@ impl Hunt {
             b.u32(cost);
             b.u32(i as u32);
         }
+        b.bool(self.prelude.is_some());
+        if let Some(p) = &self.prelude {
+            b.i32(p.head);
+            b.usize(p.goal_cursor);
+            b.bool(p.straight.is_some());
+            if let Some(run) = &p.straight {
+                run.save(b);
+            }
+        }
+        b.bool(self.connection.is_some());
+        if let Some((node, cost, run)) = &self.connection {
+            b.usize(*node);
+            b.u32(*cost);
+            run.save(b);
+        }
     }
     /// A search read back. `None` when the bytes do not describe one.
     pub fn load(s: &mut fx::blob::Scan, yielding: &[Mat]) -> Option<Hunt> {
         let mut i32s = [0i32; 7];
-        for v in &mut i32s {
+        let first = s.i32();
+        let resumable = first == -1;
+        i32s[0] = if resumable { s.i32() } else { first };
+        for v in &mut i32s[1..] {
             *v = s.i32();
         }
         let shape = Shape {
@@ -1007,7 +1117,14 @@ impl Hunt {
         let nodes = s.u32();
         let left_start = s.bool();
         let cells = n.checked_mul(rows)?.checked_mul(8)?;
-        if !s.ok() || cells == 0 || cells > 1 << 22 || initial >= cells {
+        if !s.ok()
+            || cells == 0
+            || cells > 1 << 29
+            || initial >= cells
+            || end >= cells / 8
+            || cfg.cell <= 0
+            || cfg.nodes == 0
+        {
             return None;
         }
         let mut hunt = Hunt {
@@ -1032,15 +1149,17 @@ impl Hunt {
             scans: 0,
             samples: 0,
             left_start,
+            prelude: None,
+            connection: None,
         };
         let reached = s.u32() as usize;
-        if reached > cells {
+        if reached > cells || reached > s.left() / 12 {
             return None;
         }
         for _ in 0..reached {
             let i = s.u32() as usize;
             let (d, p) = (s.u32(), s.u32());
-            if i >= cells {
+            if i >= cells || (p != u32::MAX && p as usize >= cells) {
                 return None;
             }
             hunt.distance.insert(i, d);
@@ -1049,7 +1168,7 @@ impl Hunt {
             }
         }
         let open = s.u32() as usize;
-        if open > cells {
+        if open > cells || open > s.left() / 12 {
             return None;
         }
         for _ in 0..open {
@@ -1058,6 +1177,33 @@ impl Hunt {
                 return None;
             }
             hunt.open.push(Reverse((f, cost, i)));
+        }
+        if resumable {
+            if s.bool() {
+                let head = s.i32();
+                let goal_cursor = s.usize();
+                if !(0..angle::FULL).contains(&head) || goal_cursor > 648 {
+                    return None;
+                }
+                let straight = if s.bool() {
+                    Some(Connection::load(s)?)
+                } else {
+                    None
+                };
+                hunt.prelude = Some(Prelude {
+                    head,
+                    goal_cursor,
+                    straight,
+                });
+            }
+            if s.bool() {
+                let node = s.usize();
+                let cost = s.u32();
+                if node >= cells {
+                    return None;
+                }
+                hunt.connection = Some((node, cost, Connection::load(s)?));
+            }
         }
         s.ok().then_some(hunt)
     }
@@ -1081,18 +1227,33 @@ impl Hunt {
         let (scans, samples) = (ground.scans, ground.samples);
         let mut found = None;
         let mut exhausted = false;
-        let mut slice = 0usize;
-        while self.spent < self.cfg.nodes && slice < budget {
-            self.spent += 1;
-            slice += 1;
-            let Some(Reverse((_, cost, i))) = self.open.pop() else {
-                exhausted = true;
-                break;
+        let mut allowance = budget;
+        if let Some(mut route) = self.prepare(ground, clear, &mut allowance) {
+            self.scans += ground.scans.saturating_sub(scans);
+            self.samples += ground.samples.saturating_sub(samples);
+            route.scans = self.scans;
+            route.samples = self.samples;
+            return Some(route);
+        }
+        while self.prelude.is_none()
+            && (self.spent < self.cfg.nodes || self.connection.is_some())
+            && allowance > 0
+        {
+            let (cost, i, resuming) = if let Some((i, cost, _)) = &self.connection {
+                (*cost, *i, true)
+            } else {
+                self.spent += 1;
+                allowance -= 1;
+                let Some(Reverse((_, cost, i))) = self.open.pop() else {
+                    exhausted = true;
+                    break;
+                };
+                if cost != self.cost(i) {
+                    continue;
+                }
+                self.nodes += 1;
+                (cost, i, false)
             };
-            if cost != self.cost(i) {
-                continue;
-            }
-            self.nodes += 1;
             let at = self.point(i / 8);
             let direction = i % 8;
             let yaw = direction as i32 * angle::FULL / 8;
@@ -1105,25 +1266,32 @@ impl Hunt {
                     p
                 }
             };
-            if ((at[0].to_int_trunc() - self.to[0])
-                .abs()
-                .max((at[1].to_int_trunc() - self.to[1]).abs())
-                <= self.cfg.cell * 4
-                || i / 8 == self.end)
+            if !resuming
+                && ((at[0].to_int_trunc() - self.to[0])
+                    .abs()
+                    .max((at[1].to_int_trunc() - self.to[1]).abs())
+                    <= self.cfg.cell * 4
+                    || i / 8 == self.end)
                 && !pose.refused()
                 && clear(at, yaw)
-                && connects(
-                    ground,
-                    self.shape,
-                    at,
-                    yaw,
-                    self.to.map(Fx::from_int),
-                    clear,
-                )
-                .is_some()
             {
-                found = Some(i);
-                break;
+                self.connection =
+                    Some((i, cost, Connection::new(at, yaw, self.to.map(Fx::from_int))));
+            }
+            if let Some((_, _, run)) = &mut self.connection {
+                let before = allowance;
+                let answer = run.advance(ground, self.shape, clear, &mut allowance);
+                self.probed += (before - allowance) as u32;
+                match answer {
+                    None => break,
+                    Some(Some(_)) => {
+                        found = Some(i);
+                        break;
+                    }
+                    Some(None) => {
+                        self.connection = None;
+                    }
+                }
             }
             for turn in [-1, 0, 1] {
                 let d = (direction as i32 + turn).rem_euclid(8) as usize;
@@ -1201,19 +1369,19 @@ impl Hunt {
         }
         self.scans += ground.scans.saturating_sub(scans);
         self.samples += ground.samples.saturating_sub(samples);
-        // What this slice scanned goes to the next one (P-29).
-        self.columns = ground.take_columns();
         match found {
             Some(i) => Some(self.route_through(i)),
-            None if exhausted || self.spent >= self.cfg.nodes => Some(Route {
-                path: vec![],
-                stranded: !self.left_start,
-                nodes: self.nodes,
-                poses: self.probed,
-                exhausted,
-                scans: self.scans,
-                samples: self.samples,
-            }),
+            None if exhausted || (self.spent >= self.cfg.nodes && self.connection.is_none()) => {
+                Some(Route {
+                    path: vec![],
+                    stranded: !self.left_start,
+                    nodes: self.nodes,
+                    poses: self.probed,
+                    exhausted,
+                    scans: self.scans,
+                    samples: self.samples,
+                })
+            }
             None => None,
         }
     }
@@ -1261,6 +1429,175 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn target_at_world_corner_is_probed_before_it_is_indexed() {
+        let w = world(false, false, false);
+        let cfg = Search {
+            min: [0; 2],
+            ..search()
+        };
+        let mut ground = Probe::new(&w);
+        let Hunting::Open(mut hunt) = Hunt::start_bounded(
+            &mut ground,
+            tank(),
+            [51, 73].map(Fx::from_int),
+            0,
+            [0, 0],
+            cfg,
+            &|_, _| true,
+            1,
+        ) else {
+            panic!("the corner target requires further pose checks");
+        };
+        let mut bytes = fx::blob::Blob::new();
+        hunt.save(&mut bytes);
+        *hunt = Hunt::load(&mut fx::blob::Scan::new(&bytes.v), &[]).unwrap();
+        let answer = hunt
+            .advance_in(&w, &Rubble::new(), &|_, _| true, usize::MAX)
+            .unwrap();
+        assert_ne!(answer.path.last(), Some(&[0, 0]));
+    }
+    #[test]
+    fn sliced_connections_match_the_original_swept_poses() {
+        for (rock, corridor, hill) in [
+            (false, false, false),
+            (true, true, false),
+            (false, false, true),
+        ] {
+            let w = world(rock, corridor, hill);
+            for (from, head, to) in [
+                ([45, 72], 0, [210, 72]),
+                ([150, 128], angle::FULL / 3, [65, 100]),
+            ] {
+                let from = from.map(Fx::from_int);
+                let to = to.map(Fx::from_int);
+                let mut reference = Probe::new(&w);
+                let expected = connects(&mut reference, tank(), from, head, to, &|_, _| true);
+                for budget in [1, 7, 96] {
+                    let mut ground = Probe::for_search(&w, &[], Columns::default());
+                    let mut run = Connection::new(from, head, to);
+                    let actual = loop {
+                        let before = ground.samples;
+                        let mut left = budget;
+                        let answer = run.advance(&mut ground, tank(), &|_, _| true, &mut left);
+                        assert!(ground.samples - before < (budget * 1000) as u64);
+                        let mut b = fx::blob::Blob::new();
+                        run.save(&mut b);
+                        run = Connection::load(&mut fx::blob::Scan::new(&b.v)).unwrap();
+                        if let Some(answer) = answer {
+                            break answer;
+                        }
+                    };
+                    assert_eq!(actual, expected);
+                    assert_eq!(
+                        ground.samples, reference.samples,
+                        "a pose was skipped or repeated"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn bounded_prelude_and_finish_restore_on_the_same_slice() {
+        let w = world(false, false, true);
+        let from = [50, 72].map(Fx::from_int);
+        for to in [[220, 72], [128, 128]] {
+            let expected = plan(Probe::new(&w), tank(), from, 0, to, search(), |_, _| true);
+            let mut probe = Probe::for_search(&w, &[], Columns::default());
+            let Hunting::Open(mut live) =
+                Hunt::start_bounded(&mut probe, tank(), from, 0, to, search(), &|_, _| true, 1)
+            else {
+                panic!("one pose cannot finish a long route");
+            };
+            let mut slices = 0;
+            loop {
+                let mut bytes = fx::blob::Blob::new();
+                live.save(&mut bytes);
+                let mut loaded = Hunt::load(&mut fx::blob::Scan::new(&bytes.v), &[]).unwrap();
+                let a = live.advance_in(&w, &Rubble::new(), &|_, _| true, 7);
+                let b = loaded.advance_in(&w, &Rubble::new(), &|_, _| true, 7);
+                assert_eq!(a.is_some(), b.is_some());
+                let mut lhs = fx::blob::Blob::new();
+                let mut rhs = fx::blob::Blob::new();
+                live.save(&mut lhs);
+                loaded.save(&mut rhs);
+                assert_eq!(lhs.v, rhs.v, "different search progress after load");
+                slices += 1;
+                assert!(slices < 5000);
+                if let Some(answer) = a {
+                    assert_eq!(answer.path, expected.path);
+                    assert_eq!(answer.path, b.unwrap().path);
+                    break;
+                }
+            }
+            assert!(slices > 1);
+        }
+    }
+    #[test]
+    fn bounded_column_cache_survives_eviction_transfer_and_world_edits() {
+        let mut w = World::new(
+            1024,
+            64,
+            1024,
+            100,
+            Box::new(TestGround {
+                rock: true,
+                corridor: false,
+                hill: true,
+            }),
+        );
+        let mut cached = Probe::for_search(&w, &[], Columns::default());
+        let mut reference = Probe::new(&w);
+        for x in (0..1024).step_by(13) {
+            for z in (0..1024).step_by(17) {
+                assert_eq!(cached.column(x, z), reference.column(x, z));
+            }
+        }
+        assert_eq!(cached.pages.len(), PAGE_SLOTS);
+        let columns = cached.take_columns();
+        assert!(cached.pages.is_empty());
+        let mut resumed = Probe::for_search(&w, &[], columns);
+        for x in (0..256).rev() {
+            assert_eq!(resumed.floor(x, 72), reference.floor(x, 72));
+        }
+        drop(resumed);
+        drop(cached);
+        drop(reference);
+        w.queue_dig(90, 29, 72);
+        w.flush();
+        let mut fresh = Probe::for_search(&w, &[], Columns::default());
+        assert_eq!(fresh.floor(90, 72), Probe::new(&w).floor(90, 72));
+    }
+    #[test]
+    fn old_frontiers_and_kilometre_search_dimensions_load() {
+        let w = world(false, false, false);
+        let mut ground = Probe::new(&w);
+        let Hunting::Open(mut hunt) = Hunt::start(
+            &mut ground,
+            tank(),
+            [50, 72].map(Fx::from_int),
+            0,
+            [210, 72],
+            search(),
+            &|p, _| p[0] < Fx::from_int(100) || p[0] > Fx::from_int(120),
+        ) else {
+            panic!("the direct road crosses a blocker");
+        };
+        assert!(hunt.prelude.is_none() && hunt.connection.is_none());
+        let mut bytes = fx::blob::Blob::new();
+        hunt.save(&mut bytes);
+        // The previous layout had neither the marker nor the two pending flags.
+        let old = &bytes.v[4..bytes.v.len() - 2];
+        let loaded = Hunt::load(&mut fx::blob::Scan::new(old), &[]).unwrap();
+        let mut check = fx::blob::Blob::new();
+        loaded.save(&mut check);
+        assert_eq!(bytes.v, check.v);
+        hunt.n = 1250;
+        hunt.rows = 1250;
+        let mut large = fx::blob::Blob::new();
+        hunt.save(&mut large);
+        assert!(Hunt::load(&mut fx::blob::Scan::new(&large.v), &[]).is_some());
+    }
     struct TestGround {
         rock: bool,
         corridor: bool,
