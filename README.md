@@ -31,6 +31,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 третий записывает итоговый GPU-рендер в MP4 со скоростью 1×.
 Для MP4 используется ffmpeg из PATH или `cache/video-tools`.
 
+Замер производительности без записи видео: после сборки создайте папку
+`out/performance` и запустите
+`.\target\release\blast.exe --range data/range-km.ron --weapon shell --power 4000 --view overview --profile out/performance/shell.csv --profile-seconds 20`.
+Это прогон 1× с выключенным VSync, CSV по кадрам и CPU-фазам; окно
+само закроется после замера. `--drive` вместо оружия проверяет движение
+мишеней без стрельбы. Условия, команды и ограничения результатов — в
+[разборе производительности](docs/analysis/32-range-performance.md).
+
 Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
 `-Patrol` выбирает, за какой ходовой мишенью следить, считая с единицы.
 `-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`;

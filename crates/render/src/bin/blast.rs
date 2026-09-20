@@ -31,6 +31,10 @@ mod knobs;
 mod moving;
 #[path = "blast/panel.rs"]
 mod panel;
+#[path = "blast/profile.rs"]
+mod profile;
+#[path = "blast/witness.rs"]
+mod witness;
 #[path = "blast/workbench.rs"]
 mod workbench;
 use damage_art::SkinBindings;
@@ -41,6 +45,7 @@ use workbench::Workshop;
 #[derive(Resource)]
 struct Scene {
     sim: BlastRange,
+    generation: u64,
     energy: bool,
     /// The annihilation bolt: an energy weapon for the picture, its own
     /// preset for the simulation (ADR-285).
@@ -79,9 +84,13 @@ struct Witness(usize, Transform, Option<usize>);
 #[derive(Resource)]
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: [voxel::unit::UnitBody; 2],
-    skins: [SkinBindings; 2],
+    pristine: Arc<[voxel::unit::UnitBody; 2]>,
+    skins: Arc<[SkinBindings; 2]>,
     seen: Vec<Option<(usize, u64, RangeUnitKind)>>,
+    pending: Vec<Option<witness::Pending>>,
+    emitted: Vec<usize>,
+    next_mesh: usize,
+    generation: u64,
 }
 #[derive(Component)]
 struct Gun {
@@ -253,10 +262,20 @@ fn main() {
     let mut go: Option<[i32; 2]> = None;
     let mut record_dir = None;
     let mut record_seconds = 10.0;
+    let mut profile_output = None;
+    let mut profile_seconds = 20.0;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--profile" => {
+                i += 1;
+                profile_output = Some(args[i].clone());
+            }
+            "--profile-seconds" => {
+                i += 1;
+                profile_seconds = args[i].parse().expect("profile seconds");
+            }
             "--edit" => edit = true,
             "--drive" => drive = true,
             // Order the player's tank to a point at start, for scripted
@@ -438,7 +457,7 @@ fn main() {
                 title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
                 resolution:
                     bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0),
-                present_mode: if realtime {
+                present_mode: if realtime && profile_output.is_none() {
                     PresentMode::AutoVsync
                 } else {
                     PresentMode::AutoNoVsync
@@ -458,6 +477,7 @@ fn main() {
         })
         .insert_resource(Scene {
             sim,
+            generation: 0,
             energy,
             anni,
             paused: edit,
@@ -491,31 +511,43 @@ fn main() {
         .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
         .insert_resource(recording)
+        .insert_resource(profile::Profile::new(profile_output, profile_seconds))
         .insert_resource(gas)
         .add_plugins((GasPlugin, OcclusionPlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))
         .add_systems(
             Update,
             (
-                panel::actions,
-                knobs::actions,
-                workbench::input,
-                advance,
-                orient_gun,
-                update_witness,
-                moving::animate,
-                fragments::draw,
-                bodies::draw,
-                weapon_art,
-                animate_energy,
-                framing,
-                workbench::camera,
-                workbench::overlay,
-                panel::refresh,
-                knobs::refresh,
-                panel::release_keys,
-                record,
-                capture,
+                profile::begin,
+                (
+                    panel::actions,
+                    knobs::actions,
+                    workbench::input,
+                    advance,
+                    profile::stamp,
+                    orient_gun,
+                    witness::update,
+                    profile::stamp,
+                    moving::animate,
+                    fragments::draw,
+                    bodies::draw,
+                    profile::stamp,
+                )
+                    .chain(),
+                (
+                    weapon_art,
+                    animate_energy,
+                    framing,
+                    workbench::camera,
+                    workbench::overlay,
+                    panel::refresh,
+                    knobs::refresh,
+                    panel::release_keys,
+                    record,
+                    capture,
+                    profile::end,
+                )
+                    .chain(),
             )
                 .chain(),
         )
@@ -541,7 +573,7 @@ fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
 /// of what the shader can already draw.
 const TERRAIN_WINDOW: [u32; 3] = [1280, 192, 1280];
 /// The window's corner moves in steps of this many voxels.
-const WINDOW_STEP: i32 = 64;
+const WINDOW_STEP: i32 = 8;
 
 /// What the picture keeps the terrain around: the machine the player
 /// drives. When the camera learns to leave it (P-42), the focus follows
@@ -574,24 +606,42 @@ fn write_window(
     // the volume is 192 cells tall and the ground stands at twenty to
     // sixty, so four fifths of every column is sky and costs a nibble
     // rather than a material.
-    let mut highest = 0i32;
+    let mut highest = if had.is_some() {
+        gas.params.terrain_origin.w as i32
+    } else {
+        0
+    };
+    let mut dirty = Vec::new();
+    let mut cursor = voxel::World::mat_cursor();
     let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
+        // Every window edge is word aligned. Clear whole rows, including sky,
+        // then visit only material below the column ceiling.
+        assert!(window.dims[0].is_multiple_of(8));
+        assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
         for z in zs.clone() {
+            for y in window.span(1) {
+                let mut x = xs.start;
+                while x < xs.end {
+                    let i = window.index([x, y, z]).unwrap();
+                    let n = (xs.end - x).min(window.dims[0] as i32 - x % window.dims[0] as i32);
+                    let span = i / 8..(i + n as usize) / 8;
+                    words[span.clone()].fill(0);
+                    dirty.push(span);
+                    x += n;
+                }
+            }
             for x in xs.clone() {
                 let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
                 *highest = (*highest).max(top);
-                for y in window.span(1) {
+                for y in window.origin[1]..top.min(window.span(1).end) {
                     let q = [x, y, z];
-                    let Some(i) = window.index(q) else { continue };
-                    let m = if y < top {
-                        surface_material(
-                            sim,
-                            q,
-                            sim.world.material(q[0] as u32, q[1] as u32, q[2] as u32),
-                        )
-                    } else {
-                        0
-                    };
+                    let i = window.index(q).unwrap();
+                    let m = surface_material(
+                        sim,
+                        q,
+                        sim.world
+                            .material_cached(&mut cursor, x as u32, y as u32, z as u32),
+                    );
                     let shift = (i % 8) * 4;
                     words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
                 }
@@ -631,12 +681,20 @@ fn write_window(
     // The unit remains PBR geometry. Its voxel body only supplies occupancy to
     // the terrain's shadow rays (reserved presentation material 15): the root
     // and every segment in the frames the simulation posed them in (ADR-282).
-    for i in moving::cells(sim, &window) {
-        words[i / 8] = (words[i / 8] & !(15 << ((i % 8) * 4))) | (15 << ((i % 8) * 4));
+    if had.is_none() {
+        for i in moving::cells(sim, &window) {
+            words[i / 8] = (words[i / 8] & !(15 << ((i % 8) * 4))) | (15 << ((i % 8) * 4));
+        }
     }
     gas.window = window;
     gas.terrain_revision += 1;
-    gas.terrain_dirty = std::iter::once(0..gas.terrain_words.len()).collect();
+    // Occupancy restores moving bodies after a shift; only the newly exposed
+    // rows are uploaded, not the 157 MB volume.
+    if had.is_none() {
+        gas.terrain_dirty = std::iter::once(0..gas.terrain_words.len()).collect();
+    } else {
+        gas.terrain_dirty.extend(dirty);
+    }
     let d = window.dims;
     gas.params.terrain = Vec4::new(d[0] as f32, d[1] as f32, d[2] as f32, 0.0);
     let o = window.origin;
@@ -770,12 +828,16 @@ fn setup(
     let finishes = render::unit_surface::materials(&mut images, &mut materials);
     commands.insert_resource(WitnessArt {
         materials: finishes.clone(),
-        skins: [
+        skins: Arc::new([
             SkinBindings::new(&voxel::unit::tank()),
             SkinBindings::new(&voxel::unit::strider()),
-        ],
-        pristine: [voxel::unit::tank(), voxel::unit::strider()],
+        ]),
+        pristine: Arc::new([voxel::unit::tank(), voxel::unit::strider()]),
         seen: Vec::new(),
+        pending: Vec::new(),
+        emitted: Vec::new(),
+        next_mesh: 0,
+        generation: scene.generation,
     });
     let body = voxel::unit::tank();
     let tint = [0.16, 0.25, 0.34];
@@ -961,218 +1023,6 @@ fn setup(
 }
 
 /// Rebuild only after authoritative geometry changes, including its exposed cuts.
-fn update_witness(
-    mut commands: Commands,
-    scene: Res<Scene>,
-    mut art: ResMut<WitnessArt>,
-    debris_art: Res<Art>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    old: Query<(Entity, &Witness)>,
-) {
-    for (entity, w) in &old {
-        if w.0 >= scene.sim.units.len() {
-            commands.entity(entity).despawn();
-        }
-    }
-    art.seen.resize(scene.sim.units.len(), None);
-    for (id, unit) in scene.sim.units.iter().enumerate() {
-        let removed = unit.removed.len();
-        let revision = (removed, unit.revision, unit.kind);
-        if art.seen[id] == Some(revision) {
-            continue;
-        }
-        let from = art.seen[id].map_or(removed, |r| r.0).min(removed);
-        for (entity, w) in &old {
-            if w.0 == id {
-                commands.entity(entity).despawn();
-            }
-        }
-        let base = Vec3::from(unit.at.map(|v| v as f32));
-        let centre = Vec3::from(render::model::root_centre(&unit.body));
-        let kind = match unit.kind {
-            RangeUnitKind::Tank => 0,
-            RangeUnitKind::Strider => 1,
-        };
-        let pristine = &art.pristine[kind];
-        let skins = &art.skins[kind];
-        let lost = |v: Vec3| {
-            let q = v.floor().as_ivec3();
-            q.cmpge(IVec3::ZERO).all()
-                && q.cmplt(IVec3::new(
-                    pristine.vol.nx as i32,
-                    pristine.vol.ny as i32,
-                    pristine.vol.nz as i32,
-                ))
-                .all()
-                && pristine.vol.get(q.x as usize, q.y as usize, q.z as usize)
-                && !unit.body.vol.get(q.x as usize, q.y as usize, q.z as usize)
-        };
-        let mut draw = |body: &voxel::unit::UnitBody,
-                        pivot: [f32; 3],
-                        pos: Vec3,
-                        rot: Quat,
-                        segment: Option<usize>| {
-            let mut bufs = std::array::from_fn(|_| MeshBuf::default());
-            render::model::body_to_mesh(
-                body,
-                if id == 0 {
-                    [0.38, 0.34, 0.25]
-                } else {
-                    [0.22, 0.32, 0.27]
-                },
-                1.0,
-                (0, usize::MAX),
-                0.35,
-                pivot,
-                &mut bufs,
-            );
-            for (k, buf) in bufs.iter_mut().enumerate() {
-                if buf.idx.is_empty() {
-                    continue;
-                }
-                weather(buf, k);
-                if unit.revision > 0 {
-                    for j in 0..buf.pos.len() {
-                        let normal = Vec3::from(buf.nrm[j]);
-                        let local = Vec3::from(buf.pos[j]) + Vec3::from(pivot) - normal * 0.08;
-                        let cell = local.floor().as_ivec3();
-                        let owner = if let Some(seg) = segment {
-                            if cell.cmplt(IVec3::ZERO).any() {
-                                None
-                            } else {
-                                skins.owner(
-                                    pristine,
-                                    seg,
-                                    [cell.x as u8, cell.y as u8, cell.z as u8],
-                                )
-                            }
-                        } else if cell.cmplt(IVec3::ZERO).any() {
-                            None
-                        } else {
-                            Some([cell.x as u8, cell.y as u8, cell.z as u8])
-                        };
-                        let Some(owner) = owner else {
-                            continue;
-                        };
-                        let p = Vec3::from(owner.map(|v| v as f32)) + Vec3::splat(0.5);
-                        let work = unit.dents.get(&owner).copied().unwrap_or(0);
-                        if work > 0 {
-                            let cost = sim_core::blast::unit_work(
-                                &unit.body,
-                                owner.map(usize::from),
-                                &scene.sim.config,
-                            );
-                            let severity = (work as f32 / cost as f32).clamp(0.0, 1.0);
-                            let grain = (p.dot(Vec3::new(17.1, 7.7, 23.3)).sin() * 437.1)
-                                .fract()
-                                .abs();
-                            let steel = Vec3::new(0.14, 0.155, 0.165) * (0.65 + grain * 0.7);
-                            let burned = Vec3::new(0.026, 0.03, 0.035);
-                            let col = steel.lerp(burned, severity * 0.85);
-                            buf.col[j] = [col.x, col.y, col.z, 1.0];
-                            // Sub-voxel deformation is presentation of the
-                            // persisted work, never a second collision body.
-                            buf.pos[j] =
-                                (Vec3::from(buf.pos[j]) - normal * severity * 0.13).to_array();
-                        }
-                        let cut = lost(p + normal * 0.55);
-                        let scorched = cut
-                            || [
-                                Vec3::X,
-                                Vec3::NEG_X,
-                                Vec3::Y,
-                                Vec3::NEG_Y,
-                                Vec3::Z,
-                                Vec3::NEG_Z,
-                            ]
-                            .iter()
-                            .any(|d| lost(p + *d * 1.4));
-                        if scorched {
-                            let grain = (p.dot(Vec3::new(17.1, 7.7, 23.3)).sin() * 437.1)
-                                .fract()
-                                .abs();
-                            let c = if cut {
-                                0.038 + grain * 0.065
-                            } else {
-                                0.025 + grain * 0.022
-                            };
-                            buf.col[j] = [c, c * 0.95, c * 0.87, 1.0];
-                        }
-                    }
-                }
-                commands.spawn((
-                    Mesh3d(meshes.add(mesh(buf))),
-                    MeshMaterial3d(art.materials[k].clone()),
-                    Transform::from_translation(base + pos).with_rotation(rot),
-                    Witness(
-                        id,
-                        Transform::from_translation(pos).with_rotation(rot),
-                        segment,
-                    ),
-                ));
-            }
-        };
-        draw(
-            &unit.body,
-            centre.to_array(),
-            Vec3::ZERO,
-            Quat::IDENTITY,
-            None,
-        );
-        for (seg, (segment, frame)) in unit
-            .body
-            .segments
-            .iter()
-            .zip(render::model::segment_frames(&unit.body, 0.01))
-            .enumerate()
-        {
-            if unit.seg_gone[seg] {
-                continue;
-            }
-            let clipped = skins.clipped(pristine, &unit.body, seg);
-            draw(
-                &clipped,
-                render::model::pivot_centre(&segment.attach),
-                frame.pos,
-                frame.rot,
-                Some(seg),
-            );
-        }
-        if let Some(at) = scene
-            .sim
-            .impact
-            .filter(|_| scene.sim.config.material_energy_j == 0)
-        {
-            let hit = Vec3::from(at.map(|v| v as f32));
-            for p in unit.removed[from..].iter().step_by(97).take(32) {
-                let pos = Vec3::from(unit.world_pos(p.map(usize::from)).map(|v| v as f32));
-                let seed = f32::from(p[0] ^ p[1] ^ p[2]) / 63.0;
-                commands.spawn((
-                    Mesh3d(debris_art.cube.clone()),
-                    MeshMaterial3d(debris_art.rock.clone()),
-                    Transform::from_translation(pos).with_scale(Vec3::new(1.0 + seed, 0.35, 1.5)),
-                    Ejecta {
-                        velocity: (pos - hit).normalize_or_zero() * (20.0 + seed * 24.0)
-                            + Vec3::Y * 24.0,
-                        life: 4.0,
-                    },
-                ));
-            }
-        }
-        art.seen[id] = Some(revision);
-        if removed > 0 {
-            println!(
-                "unit {id} ablated={} core={} engine={} weapon={} sensor={}",
-                removed,
-                unit.status.alive,
-                unit.status.engine,
-                unit.status.weapon,
-                unit.status.sensor
-            );
-        }
-    }
-}
-
 // Explicit ECS inputs and disjoint filters describe the visual update borrows.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn advance(
@@ -1181,7 +1031,7 @@ fn advance(
     mut workshop: ResMut<Workshop>,
     mut visual: ResMut<moving::Visual>,
     panel: Res<panel::Panel>,
-    recording: Res<Recording>,
+    (recording, mut profile): (Res<Recording>, ResMut<profile::Profile>),
     mut gas: ResMut<GasInput>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
@@ -1321,6 +1171,7 @@ fn advance(
             workshop.editing = false;
         }
         scene.sim = sim;
+        scene.generation += 1;
         if panel.drive {
             scene.sim.control();
         }
@@ -1363,7 +1214,7 @@ fn advance(
     if !gas.ready.load(Ordering::Relaxed) {
         return;
     }
-    if !recording.running() {
+    if !recording.running() || !profile.running() {
         scene.skip_delta = false;
         return;
     }
@@ -1412,15 +1263,18 @@ fn advance(
         let started = std::time::Instant::now();
         scene.sim.step();
         let us = started.elapsed().as_micros();
+        profile.measure(0, started.elapsed());
         scene.step_us = if scene.frame.is_multiple_of(30) {
             us
         } else {
             scene.step_us.max(us)
         };
         scene.frame += 1;
+        let terrain_started = std::time::Instant::now();
         recentre_terrain(&scene.sim, &mut gas);
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
+        profile.measure(1, terrain_started.elapsed());
         if before.is_none() {
             if let Some(at) = scene.sim.impact {
                 gas.params.control.z = 1.0;
@@ -1469,7 +1323,9 @@ fn advance(
                 gas.atmosphere.emit_at(params, scene.sim.tick * 2);
             }
         }
+        let gas_started = std::time::Instant::now();
         gas.advance(scene.sim.tick * 2);
+        profile.measure(2, gas_started.elapsed());
         let age = if scene.sim.impact.is_some() {
             (scene.sim.tick - scene.sim.impact_tick) as f32 / 30.0
         } else {

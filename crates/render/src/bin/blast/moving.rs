@@ -1,5 +1,6 @@
 //! Interpolated actors and incremental shadow / gas occupancy.
 use super::*;
+
 use render::footing::Contact;
 use render::gait::{self, LegRig, Pose};
 use sim_core::blast::RangeUnit;
@@ -12,6 +13,8 @@ pub struct Visual {
     pub fragments: std::collections::BTreeMap<u64, Vec3>,
     pub turret: Option<i32>,
     occupied: Vec<usize>,
+    cached: Vec<Occupied>,
+    window: Option<TerrainWindow>,
     rigs: Vec<LegRig>,
 }
 /// A range contact as the picture uses it: the ankle point and the sole's
@@ -90,64 +93,107 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
 /// in its pose and every segment in the frame the simulation posed it in
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
-pub(super) fn cells(sim: &BlastRange, window: &render::gas::TerrainWindow) -> Vec<usize> {
-    let mut out = Vec::new();
+struct Occupied {
+    pose: sim_core::damage::Frame,
+    segments: Vec<sim_core::damage::Frame>,
+    revision: u64,
+    cells: Vec<usize>,
+}
+fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
     let mut push = |q: IVec3| {
         if let Some(i) = window.index(q.to_array()) {
             out.push(i);
         }
     };
-    for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {
-        let p = pose(u);
-        let rot = render::realtime::hull_rotation(p.up, p.yaw);
-        let centre = Vec3::from(render::model::root_centre(&u.body));
-        for z in 0..u.body.vol.nz {
-            for y in 0..u.body.vol.ny {
-                for x in 0..u.body.vol.nx {
-                    if !u.body.vol.get(x as usize, y as usize, z as usize) {
+    let p = pose(u);
+    let rot = render::realtime::hull_rotation(p.up, p.yaw);
+    let centre = Vec3::from(render::model::root_centre(&u.body));
+    for z in 0..u.body.vol.nz {
+        for y in 0..u.body.vol.ny {
+            for x in 0..u.body.vol.nx {
+                if !u.body.vol.get(x as usize, y as usize, z as usize) {
+                    continue;
+                }
+                let q = (p.pos
+                    + rot * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
+                    .floor()
+                    .as_ivec3();
+                push(q);
+            }
+        }
+    }
+    let half = fx::Fx::from_ratio(1, 2);
+    for (i, (seg, frame)) in u.body.segments.iter().zip(&u.seg_frames).enumerate() {
+        if u.seg_gone.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let b = &seg.body;
+        for z in 0..b.vol.nz as usize {
+            for y in 0..b.vol.ny as usize {
+                for x in 0..b.vol.nx as usize {
+                    if !b.vol.get(x, y, z) {
                         continue;
                     }
-                    let q = (p.pos
-                        + rot
-                            * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
-                        .floor()
-                        .as_ivec3();
-                    push(q);
+                    let w = frame.world([x, y, z].map(|v| fx::Fx::from_int(v as i32).add(half)));
+                    push(IVec3::new(
+                        (w.x.raw() >> 32) as i32,
+                        (w.y.raw() >> 32) as i32,
+                        (w.z.raw() >> 32) as i32,
+                    ));
                 }
             }
         }
-        let half = fx::Fx::from_ratio(1, 2);
-        for (i, (seg, frame)) in u.body.segments.iter().zip(&u.seg_frames).enumerate() {
-            if u.seg_gone.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            let b = &seg.body;
-            for z in 0..b.vol.nz as usize {
-                for y in 0..b.vol.ny as usize {
-                    for x in 0..b.vol.nx as usize {
-                        if !b.vol.get(x, y, z) {
-                            continue;
-                        }
-                        let w =
-                            frame.world([x, y, z].map(|v| fx::Fx::from_int(v as i32).add(half)));
-                        push(IVec3::new(
-                            (w.x.raw() >> 32) as i32,
-                            (w.y.raw() >> 32) as i32,
-                            (w.z.raw() >> 32) as i32,
-                        ));
-                    }
-                }
-            }
-        }
+    }
+}
+pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
+    let mut out = Vec::new();
+    for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {
+        unit_cells(u, window, &mut out);
     }
     out.sort_unstable();
     out.dedup();
     out
 }
+fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -> Vec<usize> {
+    if visual.window != Some(*window) || visual.cached.len() != sim.units.len() + 1 {
+        visual.cached.clear();
+        visual.window = Some(*window);
+    }
+    let mut next = Vec::with_capacity(visual.occupied.len());
+    for (id, u) in sim
+        .units
+        .iter()
+        .chain(std::iter::once(&sim.gun))
+        .enumerate()
+    {
+        if visual.cached.get(id).is_none_or(|old| {
+            old.pose != u.pose || old.segments != u.seg_frames || old.revision != u.revision
+        }) {
+            let mut cells = Vec::new();
+            unit_cells(u, window, &mut cells);
+            let value = Occupied {
+                pose: u.pose,
+                segments: u.seg_frames.clone(),
+                revision: u.revision,
+                cells,
+            };
+            if id == visual.cached.len() {
+                visual.cached.push(value);
+            } else {
+                visual.cached[id] = value;
+            }
+        }
+        next.extend_from_slice(&visual.cached[id].cells);
+    }
+    next.sort_unstable();
+    next.dedup();
+    next
+}
 pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     let window = gas.window;
-    let next = cells(sim, &window);
-    if next == v.occupied {
+    let shifted = v.window != Some(window);
+    let next = cached_cells(sim, &window, v);
+    if !shifted && next == v.occupied {
         return;
     }
     let mut dirty = Vec::new();
@@ -162,19 +208,29 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
         *word = new;
         dirty.push(i / 8);
     };
-    for &i in &v.occupied {
-        let p = [
-            (i % 640) as i32,
-            (i / 640 % 192) as i32,
-            (i / 640 / 192) as i32,
-        ];
-        set(
-            i,
-            surface_material(sim, p, sim_core::blast::material(&sim.world, p)),
-        );
-    }
-    for &i in &next {
-        set(i, 15);
+    // Both lists are sorted sets. Interior cells shared by the old and new
+    // pose need neither a material lookup nor a GPU upload.
+    let (mut old, mut new) = (0, 0);
+    while old < v.occupied.len() || new < next.len() {
+        let a = v.occupied.get(old).copied().unwrap_or(usize::MAX);
+        let b = next.get(new).copied().unwrap_or(usize::MAX);
+        if a == b {
+            if shifted {
+                set(b, 15);
+            }
+            old += 1;
+            new += 1;
+        } else if a < b {
+            let p = window.position(a);
+            set(
+                a,
+                surface_material(sim, p, sim_core::blast::material(&sim.world, p)),
+            );
+            old += 1;
+        } else {
+            set(b, 15);
+            new += 1;
+        }
     }
     dirty.sort_unstable();
     dirty.dedup();
@@ -267,6 +323,59 @@ pub fn animate(
 mod tests {
     use super::*;
 
+    #[test]
+    fn moving_shadows_equal_a_fresh_volume_in_a_shifted_window() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let mut sim = range_sim(true, false, 1000, Some(&layout), false, None).unwrap();
+        sim.control();
+        sim.order_move([235, 365]);
+        let window = TerrainWindow {
+            origin: [96, 0, 256],
+            dims: [256, 192, 256],
+        };
+        let mut gas = GasInput::default();
+        gas.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut gas, window, None);
+        let mut visual = Visual {
+            occupied: cells(&sim, &window),
+            ..default()
+        };
+        for _ in 0..8 {
+            sim.step();
+            occupancy(&sim, &mut gas, &mut visual);
+        }
+        // Cached stationary units must invalidate on damage as well as pose.
+        sim.units[0].body.vol.cols.fill(0);
+        sim.units[0].seg_gone.fill(true);
+        sim.units[0].revision += 1;
+        occupancy(&sim, &mut gas, &mut visual);
+        let mut reference = GasInput::default();
+        reference.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut reference, window, None);
+        assert_eq!(gas.terrain_words, reference.terrain_words);
+        for origin in [[104, 0, 264], [360, 0, 264], [96, 0, 256]] {
+            let had = gas.window;
+            let next = TerrainWindow { origin, ..window };
+            gas.terrain_dirty.clear();
+            write_window(&sim, &mut gas, next, Some(had));
+            occupancy(&sim, &mut gas, &mut visual);
+            if origin == [104, 0, 264] {
+                let changed: usize = gas.terrain_dirty.iter().map(|r| r.len()).sum();
+                assert!(
+                    changed < next.words() / 4,
+                    "a short shift uploaded the full window"
+                );
+            }
+            let mut fresh = GasInput::default();
+            fresh.terrain_words = Arc::new(vec![0; next.words()]);
+            write_window(&sim, &mut fresh, next, None);
+            assert_eq!(
+                gas.terrain_words, fresh.terrain_words,
+                "shift to {origin:?}"
+            );
+        }
+    }
     /// The shadow occupancy holds a walker's legs down to the ground, not
     /// only its root high above it (ADR-282).
     #[test]

@@ -15,7 +15,7 @@ pub use detach::Separated;
 
 /// Orthonormal hull frame, computed once per unit/phase. Root origin and scale
 /// match the renderer; collision uses the same suspension normal and heading.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
     pub base: V3,
     pub x: V3,

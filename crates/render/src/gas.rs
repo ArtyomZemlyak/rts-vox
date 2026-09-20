@@ -20,7 +20,7 @@ use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::shader::Shader;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 
@@ -116,13 +116,21 @@ impl TerrainWindow {
     pub fn words(&self) -> usize {
         (self.dims[0] as usize * self.dims[1] as usize * self.dims[2] as usize) / 8
     }
+    /// World position represented by a wrapped storage index.
+    pub fn position(&self, index: usize) -> [i32; 3] {
+        let d = self.dims.map(|v| v as usize);
+        let m = [index % d[0], index / d[0] % d[1], index / d[0] / d[1]];
+        [0, 1, 2].map(|a| {
+            self.origin[a] + ((m[a] + d[a] - self.origin[a] as usize % d[a]) % d[a]) as i32
+        })
+    }
     /// The stretch of this axis the window holds.
     pub fn span(&self, a: usize) -> std::ops::Range<i32> {
         self.origin[a]..self.origin[a] + self.dims[a] as i32
     }
 }
 
-#[derive(Resource, Clone, ExtractResource)]
+#[derive(Resource, Clone)]
 pub struct GasInput {
     pub params: GasParams,
     pub atmosphere: Atmosphere,
@@ -133,6 +141,8 @@ pub struct GasInput {
     pub window: TerrainWindow,
     /// The scene can wait for actual shader readiness before advancing capture.
     pub ready: Arc<AtomicBool>,
+    uploaded: Arc<AtomicU64>,
+    patches: Vec<(usize, Vec<u32>)>,
 }
 impl Default for GasInput {
     fn default() -> Self {
@@ -144,17 +154,55 @@ impl Default for GasInput {
             terrain_dirty: vec![],
             window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
+            uploaded: Arc::new(AtomicU64::new(0)),
+            patches: Vec::new(),
+        }
+    }
+}
+impl ExtractResource for GasInput {
+    type Source = Self;
+    fn extract_resource(source: &Self) -> Self {
+        let uploaded = source.uploaded.load(Ordering::Acquire);
+        let mut spans = if uploaded == source.terrain_revision {
+            Vec::new()
+        } else if uploaded == 0 {
+            std::iter::once(0..source.terrain_words.len()).collect()
+        } else {
+            source.terrain_dirty.clone()
+        };
+        spans.sort_unstable_by_key(|r| r.start);
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+        for r in spans {
+            if let Some(last) = merged.last_mut() {
+                if r.start <= last.end {
+                    last.end = last.end.max(r.end);
+                    continue;
+                }
+            }
+            merged.push(r);
+        }
+        Self {
+            params: source.params,
+            atmosphere: source.atmosphere.clone(),
+            // Never share the full mutable terrain with the render world:
+            // doing so makes Arc::make_mut copy 157 MB on each moving tick.
+            terrain_words: Arc::new(Vec::new()),
+            patches: merged
+                .into_iter()
+                .map(|r| (r.start, source.terrain_words[r].to_vec()))
+                .collect(),
+            terrain_revision: source.terrain_revision,
+            terrain_dirty: Vec::new(),
+            window: source.window,
+            ready: source.ready.clone(),
+            uploaded: source.uploaded.clone(),
         }
     }
 }
 impl GasInput {
     pub fn advance(&mut self, step: u32) {
-        self.atmosphere.advance(
-            step,
-            &self.terrain_words,
-            self.params.terrain.truncate().as_uvec3(),
-            &self.terrain_dirty,
-        );
+        self.atmosphere
+            .advance(step, &self.terrain_words, self.window, &self.terrain_dirty);
     }
 }
 
@@ -163,8 +211,52 @@ impl GasInput {
 pub struct GasCamera;
 
 pub struct GasPlugin;
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    #[test]
+    fn extraction_copies_only_unacknowledged_patches_without_sharing_the_world() {
+        let mut source = GasInput {
+            terrain_words: Arc::new(vec![7; 1000]),
+            terrain_revision: 1,
+            ..default()
+        };
+        let first = GasInput::extract_resource(&source);
+        assert_eq!(Arc::strong_count(&source.terrain_words), 1);
+        assert!(first.terrain_words.is_empty());
+        assert_eq!(first.patches, vec![(0, vec![7; 1000])]);
+        first.uploaded.store(1, Ordering::Release);
+        assert!(GasInput::extract_resource(&source).patches.is_empty());
+        Arc::make_mut(&mut source.terrain_words)[13] = 9;
+        source.terrain_revision = 3; // Two simulation ticks in one frame.
+        source.terrain_dirty = vec![12..15, 10..14, 99..100];
+        let next = GasInput::extract_resource(&source);
+        assert_eq!(next.patches, vec![(10, vec![7, 7, 7, 9, 7]), (99, vec![7])]);
+        assert_eq!(first.patches[0].1[13], 7);
+        assert_eq!(Arc::strong_count(&source.terrain_words), 1);
+    }
+    #[test]
+    fn wrapped_storage_recovers_world_positions_after_window_moves() {
+        for origin in [[0, 0, 0], [64, 0, 128], [8768, 0, 8640]] {
+            let w = TerrainWindow {
+                origin,
+                dims: [1280, 192, 1280],
+            };
+            for x in [0, 1, 639, 640, 1279] {
+                for z in [0, 127, 640, 1279] {
+                    for y in [0, 63, 191] {
+                        let q = [origin[0] + x, y, origin[2] + z];
+                        assert_eq!(w.position(w.index(q).unwrap()), q);
+                    }
+                }
+            }
+        }
+    }
+}
 #[derive(Resource)]
 struct Shaders {
+    upload: Handle<Shader>,
     compute: Handle<Shader>,
     draw: Handle<Shader>,
     terrain: Handle<Shader>,
@@ -183,6 +275,10 @@ impl Plugin for GasPlugin {
         };
         let common = source("terrain_common.wgsl", include_str!("terrain_common.wgsl"));
         let mut assets = app.world_mut().resource_mut::<Assets<Shader>>();
+        let upload = assets.add(Shader::from_wgsl(
+            include_str!("terrain_upload.wgsl"),
+            "render/src/terrain_upload.wgsl",
+        ));
         let compute = assets.add(Shader::from_wgsl(
             source("gas.wgsl", include_str!("gas.wgsl")),
             "render/src/gas.wgsl",
@@ -212,6 +308,7 @@ impl Plugin for GasPlugin {
             return;
         };
         r.insert_resource(Shaders {
+            upload,
             compute,
             draw,
             terrain,
@@ -242,6 +339,8 @@ struct GpuCell {
 }
 #[derive(Resource)]
 struct Pipeline {
+    upload_layout: BindGroupLayoutDescriptor,
+    upload: CachedComputePipelineId,
     compute_layout: BindGroupLayoutDescriptor,
     draw_layout: BindGroupLayoutDescriptor,
     init: CachedComputePipelineId,
@@ -335,6 +434,23 @@ fn init(
     shaders: Res<Shaders>,
     fullscreen: Res<FullscreenShader>,
 ) {
+    let upload_layout = BindGroupLayoutDescriptor::new(
+        "terrain sparse upload",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                storage_buffer_read_only::<Vec<UVec2>>(false),
+                storage_buffer::<Vec<u32>>(false),
+            ),
+        ),
+    );
+    let upload = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("terrain sparse upload".into()),
+        layout: vec![upload_layout.clone()],
+        shader: shaders.upload.clone(),
+        entry_point: Some("apply".into()),
+        ..default()
+    });
     let compute_layout = BindGroupLayoutDescriptor::new(
         "gas compute",
         &BindGroupLayoutEntries::sequential(
@@ -430,6 +546,8 @@ fn init(
         mapped_at_creation: false,
     });
     commands.insert_resource(Pipeline {
+        upload_layout,
+        upload,
         compute_layout,
         draw_layout,
         init,
@@ -474,21 +592,61 @@ fn prepare(
     pipeline.uniform.set(params);
     pipeline.uniform.write_buffer(&device, &queue);
     if pipeline.terrain_revision != input.terrain_revision {
-        assert!(input.terrain_words.len() <= TERRAIN_WORDS);
-        // First upload is dense; later uploads cover only changed word spans.
-        let spans = if pipeline.terrain_revision == 0 {
-            std::iter::once(0..input.terrain_words.len()).collect()
+        assert!(input.window.words() <= TERRAIN_WORDS);
+        let count: usize = input.patches.iter().map(|(_, words)| words.len()).sum();
+        if let Some(compute) = cache.get_compute_pipeline(pipeline.upload).filter(|_| {
+            input.patches.len() > 128
+                && count > 0
+                && count * 8 <= device.limits().max_storage_buffer_binding_size as usize
+        }) {
+            let mut bytes = Vec::with_capacity(count * 8);
+            for (start, words) in &input.patches {
+                for (offset, &word) in words.iter().enumerate() {
+                    bytes.extend_from_slice(&((*start + offset) as u32).to_le_bytes());
+                    bytes.extend_from_slice(&word.to_le_bytes());
+                }
+            }
+            let staging = device.create_buffer(&BufferDescriptor {
+                label: Some("terrain patch list"),
+                size: bytes.len() as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&staging, 0, &bytes);
+            let group = device.create_bind_group(
+                "terrain sparse upload",
+                &cache.get_bind_group_layout(&pipeline.upload_layout),
+                &BindGroupEntries::sequential((
+                    staging.as_entire_binding(),
+                    pipeline.terrain.as_entire_binding(),
+                )),
+            );
+            let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("terrain sparse upload"),
+            });
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("terrain sparse upload"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(compute);
+                pass.set_bind_group(0, &group, &[]);
+                let groups = (count as u32).div_ceil(64);
+                pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+            }
+            // Submit before the frame's passes, making the new terrain visible
+            // to depth, shadows and gas in this same frame.
+            queue.submit([encoder.finish()]);
         } else {
-            input.terrain_dirty.clone()
-        };
-        for r in spans {
-            let bytes: Vec<u8> = input.terrain_words[r.clone()]
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect();
-            queue.write_buffer(&pipeline.terrain, r.start as u64 * 4, &bytes);
+            for (start, words) in &input.patches {
+                let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
+                queue.write_buffer(&pipeline.terrain, *start as u64 * 4, &bytes);
+            }
         }
         pipeline.terrain_revision = input.terrain_revision;
+        input
+            .uploaded
+            .store(input.terrain_revision, Ordering::Release);
     }
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
@@ -503,6 +661,7 @@ fn prepare(
         p.sun = params.sun;
         p.sky = params.sky;
         p.terrain = params.terrain;
+        p.terrain_origin = params.terrain_origin;
         p.weapon.y = params.weapon.y;
         p.weapon.w = params.weapon.w;
         p.look = params.look;

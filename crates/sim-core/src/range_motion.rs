@@ -481,10 +481,10 @@ impl Motion {
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         let allowed = (target.blocked == 0 || target.blocked < current.blocked)
             && !target.tilt
-            && x >= 40
-            && z >= 40
-            && x < 600
-            && z < 600
+            && x >= EDGE
+            && z >= EDGE
+            && x < w.nx as i32 - EDGE
+            && z < w.nz as i32 - EDGE
             && target.height.sub(current.height) <= Fx::from_int(self.step)
             && !collision;
         let moved = if allowed {
@@ -1001,10 +1001,10 @@ impl Motion {
             && !target.tilt
             && (self.escape_left > 0 || !target.steep || current.steep);
         let allowed = clear
-            && x >= 40
-            && z >= 40
-            && x < 600
-            && z < 600
+            && x >= EDGE
+            && z >= EDGE
+            && x < w.nx as i32 - EDGE
+            && z < w.nz as i32 - EDGE
             && target.height.sub(current.height) <= Fx::from_int(self.step)
             && !collision;
         let path = if allowed {
@@ -1301,6 +1301,40 @@ mod tests {
             &nav::vehicle::Rubble::new(),
             true,
         );
+    }
+    #[test]
+    fn driving_and_blast_shoves_cross_the_old_range_boundary() {
+        let w = World::new(1024, 64, 1024, 100, Box::new(Ground { depth: 0 }));
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let body = match kind {
+                RangeUnitKind::Tank => voxel::unit::tank(),
+                RangeUnitKind::Strider => voxel::unit::strider(),
+            };
+            for axis in [0, 1] {
+                let mut m = Motion::new([590, 16, 590], kind, &body);
+                let mut goal = [590, 590];
+                goal[axis] = 720;
+                assert!(m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
+                for tick in 0..900 {
+                    step(&mut m, &w, &body, &[], tick);
+                }
+                assert!(
+                    m.pos[axis * 2] > Fx::from_int(700),
+                    "stopped at {:?}",
+                    m.pos
+                );
+            }
+            let mut m = Motion::new([700, 16, 700], kind, &body);
+            m.shove = V3::new(Fx::from_int(30), Fx::ZERO, Fx::from_int(30));
+            let moved = m.slide(
+                &w,
+                &nav::vehicle::Rubble::new(),
+                &body,
+                &[],
+                crate::mobility::Mobility::intact(true),
+            );
+            assert!(moved.x > Fx::ZERO && moved.z > Fx::ZERO);
+        }
     }
     /// A whole walker carries its hull on all four legs, feet in the air or
     /// not (ADR-280): the gait stabilises the hull, and the run stays level.

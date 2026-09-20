@@ -383,6 +383,15 @@ impl RangeUnit {
     /// a unit of margin around it (ADR-296): a point outside it hits
     /// nothing, and the pose-mapped lookups need not be asked.
     pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
+        self.bounds_for(self.motion.enabled.then_some(&self.pose), &self.seg_frames)
+    }
+    /// An enclosing box in the supplied frames, including a burst's frozen
+    /// poses. Current motion must never move that burst's broad phase.
+    fn bounds_for(
+        &self,
+        pose: Option<&crate::damage::Frame>,
+        segments: &[crate::damage::Frame],
+    ) -> ([i32; 3], [i32; 3]) {
         let mut lo = [i32::MAX; 3];
         let mut hi = [i32::MIN; 3];
         let mut take = |v: phys::V3| {
@@ -408,9 +417,9 @@ impl RangeUnit {
                 i32::from(b.vol.nz),
             ]
         };
-        if self.motion.enabled {
+        if let Some(pose) = pose {
             for l in corners(size(&self.body)) {
-                take(self.pose.world(l.map(Fx::from_int)));
+                take(pose.world(l.map(Fx::from_int)));
             }
         } else {
             let o = self.world_pos([0; 3]);
@@ -426,7 +435,7 @@ impl RangeUnit {
                 Fx::from_int(o[2] + n[2]),
             ));
         }
-        for (seg, frame) in self.body.segments.iter().zip(&self.seg_frames) {
+        for (seg, frame) in self.body.segments.iter().zip(segments) {
             for l in corners(size(&seg.body)) {
                 take(frame.world(l.map(Fx::from_int)));
             }
@@ -1163,6 +1172,11 @@ impl Explosion {
         }
         let edge = self.cell as usize;
         let actors = units.len() + 1;
+        let boxes: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| u.bounds_for(Some(&self.poses[i]), &self.seg_poses[i]))
+            .collect();
         while let Some(hit) = self.pending.front().copied() {
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
             while self.contact_cursor < edge.pow(3) * actors {
@@ -1176,6 +1190,11 @@ impl Explosion {
                 // Advance only after successful application or an unaffordable
                 // hit. Pool pressure retries this exact actor on the next tick.
                 if let Some(u) = units.get_mut(actor) {
+                    let (lo, hi) = boxes[actor];
+                    if (0..3).any(|a| q[a] < lo[a] || q[a] > hi[a]) {
+                        self.contact_cursor += 1;
+                        continue;
+                    }
                     match u.hit_at(q, &self.poses[actor], &self.seg_poses[actor]) {
                         Some((0, cell)) => {
                             // A cell already cut loose leaves with its whole
@@ -4297,6 +4316,38 @@ mod tests {
                 }
             }
             assert!(hits > 0, "no cells found in the box");
+        }
+    }
+    #[test]
+    fn blast_bounds_hold_frozen_hits_after_the_vehicle_moves_away() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let mut unit = RangeUnit::of_kind(kind, [200, 24, 200]);
+            for yaw in [0, fx::angle::FULL / 7] {
+                unit.motion.drive.head = yaw;
+                unit.update_pose(yaw);
+                let pose = unit.pose;
+                let segments = unit.seg_frames.clone();
+                let (lo, hi) = unit.bounds_for(Some(&pose), &segments);
+                unit.motion.pos[0] = unit.motion.pos[0].add(Fx::from_int(300));
+                unit.update_pose(yaw);
+                assert_ne!(
+                    unit.bounds_for(Some(&unit.pose), &unit.seg_frames),
+                    (lo, hi)
+                );
+                let mut hits = 0;
+                for z in lo[2] - 2..=hi[2] + 2 {
+                    for y in lo[1] - 2..=hi[1] + 2 {
+                        for x in lo[0] - 2..=hi[0] + 2 {
+                            let q = [x, y, z];
+                            if unit.hit_at(q, &pose, &segments).is_some() {
+                                hits += 1;
+                                assert!((0..3).all(|a| q[a] >= lo[a] && q[a] <= hi[a]));
+                            }
+                        }
+                    }
+                }
+                assert!(hits > 100, "the frozen pose must contain a real body");
+            }
         }
     }
     /// A block of four by four by four placed in the air, with a layer of

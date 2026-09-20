@@ -1,7 +1,7 @@
 //! Bounded presentation state. Shot/reload state never owns a plume's lifetime.
-use super::{GasParams, GAS_CELLS, GAS_N};
+use super::{GasParams, TerrainWindow, GAS_CELLS, GAS_N};
 use bevy::prelude::*;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -30,6 +30,7 @@ pub struct Region {
     pub(super) applied: Arc<AtomicU64>,
     pub(super) mask: Arc<Vec<u32>>,
     pub(super) mask_revision: u64,
+    mask_window: TerrainWindow,
     retire: Option<u32>,
 }
 impl Region {
@@ -79,7 +80,13 @@ impl Atmosphere {
             self.omitted += 1;
         }
     }
-    pub fn advance(&mut self, clock: u32, words: &[u32], dims: UVec3, dirty: &[Range<usize>]) {
+    pub fn advance(
+        &mut self,
+        clock: u32,
+        words: &[u32],
+        window: TerrainWindow,
+        dirty: &[Range<usize>],
+    ) {
         self.clock = clock;
         for slot in &mut self.regions {
             if let Some(r) = slot {
@@ -87,8 +94,8 @@ impl Atmosphere {
                 r.deposits.retain(|d| d.serial > done);
                 if r.opacity(clock) <= 0.0 {
                     *slot = None;
-                } else if !dirty.is_empty() {
-                    refresh_mask(r, words, dims, dirty);
+                } else if !dirty.is_empty() || window != r.mask_window {
+                    refresh_mask(r, words, window, dirty);
                 }
             }
         }
@@ -120,7 +127,7 @@ impl Atmosphere {
                 p.origin.y = (p.source.y - GAS_N as f32 * p.origin.w * 0.15)
                     .floor()
                     .max(0.0);
-                let mask = make_mask(words, dims, p.origin);
+                let mask = make_mask(words, window, p.origin);
                 self.regions[i] = Some(Region {
                     id: self.serial,
                     born: clock,
@@ -130,6 +137,7 @@ impl Atmosphere {
                     applied: Arc::new(AtomicU64::new(0)),
                     mask: Arc::new(mask),
                     mask_revision: 1,
+                    mask_window: window,
                     retire: None,
                 });
             }
@@ -146,17 +154,31 @@ impl Atmosphere {
     }
 }
 
-fn solid(words: &[u32], dims: UVec3, base: IVec3, edge: i32) -> u32 {
-    for z in base.z.max(0)..(base.z + edge).min(dims.z as i32) {
-        for y in base.y.max(0)..(base.y + edge).min(dims.y as i32) {
-            let row = dims.x as usize * (y as usize + dims.y as usize * z as usize);
-            for x in base.x.max(0)..(base.x + edge).min(dims.x as i32) {
-                let i = row + x as usize;
-                if words
-                    .get(i / 8)
-                    .is_some_and(|w| (w >> (i % 8 * 4)) & 15 != 0)
-                {
+fn solid(words: &[u32], window: TerrainWindow, base: IVec3, edge: i32) -> u32 {
+    let lo = base.max(IVec3::from_array(window.origin));
+    let hi = (base + IVec3::splat(edge))
+        .min(IVec3::from_array(window.origin) + UVec3::from_array(window.dims).as_ivec3());
+    for z in lo.z..hi.z {
+        let depth = (z as usize % window.dims[2] as usize) * window.dims[1] as usize;
+        for y in lo.y..hi.y {
+            let row = window.dims[0] as usize * (depth + y as usize % window.dims[1] as usize);
+            let mut x = lo.x;
+            let mut column = x as usize % window.dims[0] as usize;
+            while x < hi.x {
+                let i = row + column;
+                // Test up to eight packed cells at once, stopping at a word,
+                // row or toroidal seam. The mask is exact even on odd widths.
+                let count = (hi.x - x)
+                    .min(8 - (i % 8) as i32)
+                    .min(window.dims[0] as i32 - column as i32);
+                let mask = (u32::MAX >> ((8 - count) * 4)) << ((i % 8) * 4);
+                if words.get(i / 8).is_some_and(|w| w & mask != 0) {
                     return 1;
+                }
+                x += count;
+                column += count as usize;
+                if column == window.dims[0] as usize {
+                    column = 0;
                 }
             }
         }
@@ -171,31 +193,97 @@ fn base(i: usize, origin: Vec4) -> IVec3 {
             (i / GAS_N / GAS_N) as i32,
         ) * origin.w as i32
 }
-fn make_mask(words: &[u32], dims: UVec3, origin: Vec4) -> Vec<u32> {
-    (0..GAS_CELLS)
-        .map(|i| solid(words, dims, base(i, origin), origin.w as i32))
-        .collect()
+fn make_mask(words: &[u32], window: TerrainWindow, origin: Vec4) -> Vec<u32> {
+    let mut mask = vec![0; GAS_CELLS];
+    let edge = origin.w as i32;
+    let corner = origin.truncate().as_ivec3();
+    let lo = corner.max(IVec3::from_array(window.origin));
+    let hi = (corner + IVec3::splat(GAS_N as i32 * edge))
+        .min(IVec3::from_array(window.origin) + UVec3::from_array(window.dims).as_ivec3());
+    // Scan contiguous packed terrain rows. Empty words skip eight voxels;
+    // occupied rows populate a whole gas row, then stop once it is solid.
+    // Gathering each gas cell separately re-read the same rows with strides.
+    for gz in 0..GAS_N {
+        for gy in 0..GAS_N {
+            let target = &mut mask[GAS_N * (gy + GAS_N * gz)..GAS_N * (gy + GAS_N * gz + 1)];
+            let z0 = corner.z + gz as i32 * edge;
+            let y0 = corner.y + gy as i32 * edge;
+            for z in z0.max(lo.z)..(z0 + edge).min(hi.z) {
+                let depth = z as usize % window.dims[2] as usize * window.dims[1] as usize;
+                for y in y0.max(lo.y)..(y0 + edge).min(hi.y) {
+                    let row =
+                        window.dims[0] as usize * (depth + y as usize % window.dims[1] as usize);
+                    let mut x = lo.x;
+                    let mut column = x as usize % window.dims[0] as usize;
+                    while x < hi.x {
+                        let i = row + column;
+                        let count = (hi.x - x)
+                            .min(8 - (i % 8) as i32)
+                            .min(window.dims[0] as i32 - column as i32);
+                        let mut packed = words.get(i / 8).copied().unwrap_or(0) >> ((i % 8) * 4);
+                        packed &= u32::MAX >> ((8 - count) * 4);
+                        while packed != 0 {
+                            let lane = packed.trailing_zeros() / 4;
+                            target[((x + lane as i32 - corner.x) / edge) as usize] = 1;
+                            packed &= !(15 << (lane * 4));
+                        }
+                        x += count;
+                        column += count as usize;
+                        if column == window.dims[0] as usize {
+                            column = 0;
+                        }
+                    }
+                    if target.iter().all(|&v| v != 0) {
+                        break;
+                    }
+                }
+                if target.iter().all(|&v| v != 0) {
+                    break;
+                }
+            }
+        }
+    }
+    mask
 }
-fn refresh_mask(r: &mut Region, words: &[u32], dims: UVec3, spans: &[Range<usize>]) {
-    let mut changed = BTreeSet::new();
+fn refresh_mask(r: &mut Region, words: &[u32], window: TerrainWindow, spans: &[Range<usize>]) {
+    // Bulk world uploads must not turn into a walk over hundreds of millions
+    // of terrain cells for each small gas volume. Rebuild the bounded volume.
+    if window != r.mask_window || spans.iter().map(|s| s.len()).sum::<usize>() > GAS_CELLS / 8 {
+        r.mask = Arc::new(make_mask(words, window, r.params.origin));
+        r.mask_window = window;
+        r.mask_revision += 1;
+        return;
+    }
+    let mut visited = vec![false; GAS_CELLS];
+    let mut changed = Vec::new();
     let edge = r.params.origin.w as i32;
     let origin = r.params.origin.truncate().as_ivec3();
     for span in spans {
         for word in span.clone() {
+            let first = window.position(word * 8);
+            let contiguous = word * 8 % window.dims[0] as usize + 8 <= window.dims[0] as usize
+                && first[0] + 8 <= window.origin[0] + window.dims[0] as i32;
             // A packed word can straddle both a world row and a gas cell.
             for i in word * 8..word * 8 + 8 {
-                let p = IVec3::new(
-                    (i % dims.x as usize) as i32,
-                    (i / dims.x as usize % dims.y as usize) as i32,
-                    (i / dims.x as usize / dims.y as usize) as i32,
-                ) - origin;
+                if i >= window.dims.iter().map(|&v| v as usize).product::<usize>() {
+                    break;
+                }
+                let p = IVec3::from_array(if contiguous {
+                    [first[0] + (i % 8) as i32, first[1], first[2]]
+                } else {
+                    window.position(i)
+                }) - origin;
                 let q = IVec3::new(
                     p.x.div_euclid(edge),
                     p.y.div_euclid(edge),
                     p.z.div_euclid(edge),
                 );
                 if q.cmpge(IVec3::ZERO).all() && q.cmplt(IVec3::splat(GAS_N as i32)).all() {
-                    changed.insert(q.x as usize + GAS_N * (q.y as usize + GAS_N * q.z as usize));
+                    let index = q.x as usize + GAS_N * (q.y as usize + GAS_N * q.z as usize);
+                    if !visited[index] {
+                        visited[index] = true;
+                        changed.push(index);
+                    }
                 }
             }
         }
@@ -203,7 +291,7 @@ fn refresh_mask(r: &mut Region, words: &[u32], dims: UVec3, spans: &[Range<usize
     if !changed.is_empty() {
         let mask = Arc::make_mut(&mut r.mask);
         for i in changed {
-            mask[i] = solid(words, dims, base(i, r.params.origin), edge);
+            mask[i] = solid(words, window, base(i, r.params.origin), edge);
         }
         r.mask_revision += 1;
     }
@@ -212,6 +300,57 @@ fn refresh_mask(r: &mut Region, words: &[u32], dims: UVec3, spans: &[Range<usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packed_mask_matches_voxel_reference_across_window_and_word_seams() {
+        let window = TerrainWindow {
+            origin: [79, 0, 71],
+            dims: [97, 32, 96],
+        };
+        let mut words = vec![0; (97 * 32 * 96usize).div_ceil(8)];
+        for p in [[96, 12, 95], [97, 13, 96], [79, 0, 71], [175, 31, 166]] {
+            let i = window.index(p).unwrap();
+            words[i / 8] |= 15 << ((i % 8) * 4);
+        }
+        for origin in [
+            Vec4::new(70.0, 0.0, 60.0, 3.0),
+            Vec4::new(89.0, 0.0, 87.0, 5.0),
+        ] {
+            let mask = make_mask(&words, window, origin);
+            for (i, &got) in mask.iter().enumerate() {
+                let p = base(i, origin);
+                let edge = origin.w as i32;
+                let expected = (0..edge).any(|z| {
+                    (0..edge).any(|y| {
+                        (0..edge).any(|x| {
+                            window
+                                .index((p + IVec3::new(x, y, z)).to_array())
+                                .is_some_and(|j| words[j / 8] >> ((j % 8) * 4) & 15 != 0)
+                        })
+                    })
+                });
+                assert_eq!(got, u32::from(expected), "cell {i}");
+            }
+        }
+        let mut a = Atmosphere::default();
+        a.emit(shot(100.0, false));
+        a.advance(0, &words, window, &[]);
+        let i = window.index([100, 18, 102]).unwrap();
+        words[i / 8] |= 15 << ((i % 8) * 4);
+        a.advance(2, &words, window, std::slice::from_ref(&(i / 8..i / 8 + 1)));
+        let r = a.regions[0].as_ref().unwrap();
+        assert_eq!(*r.mask, make_mask(&words, window, r.params.origin));
+        let moved = TerrainWindow {
+            origin: [370, 0, 359],
+            ..window
+        };
+        a.advance(4, &words, moved, &[]);
+        let r = a.regions[0].as_ref().unwrap();
+        assert_eq!(*r.mask, make_mask(&words, moved, r.params.origin));
+        assert!(
+            !r.mask.contains(&1),
+            "old world cells must leave the gas mask"
+        );
+    }
     fn shot(x: f32, energy: bool) -> GasParams {
         GasParams {
             source: Vec4::new(x, 20.0, 100.0, 15.0),
@@ -220,7 +359,7 @@ mod tests {
         }
     }
     fn advance(a: &mut Atmosphere, tick: u32) {
-        a.advance(tick, &[], UVec3::new(640, 192, 640), &[]);
+        a.advance(tick, &[], TerrainWindow::default(), &[]);
     }
     #[test]
     fn refire_keeps_old_region_and_mixed_weapons_keep_their_colour() {
@@ -273,23 +412,27 @@ mod tests {
     #[test]
     fn every_region_observes_wall_removal_and_moving_occupancy() {
         let dims = UVec3::new(97, 32, 96);
+        let window = TerrainWindow {
+            origin: [0; 3],
+            dims: dims.to_array(),
+        };
         let mut words = vec![0; (dims.x * dims.y * dims.z).div_ceil(8) as usize];
         let mut a = Atmosphere::default();
         a.emit(shot(30.0, false));
         a.emit(shot(30.0, true));
-        a.advance(0, &words, dims, &[]);
+        a.advance(0, &words, window, &[]);
         // Packed words straddle rows; both the old and new occupied location
         // must enter each region's mask, including negative region origins.
         let i = (29 + dims.x * (16 + dims.y * 40)) as usize;
         words[i / 8] |= 15 << (i % 8 * 4);
-        a.advance(2, &words, dims, std::slice::from_ref(&(i / 8..i / 8 + 1)));
+        a.advance(2, &words, window, std::slice::from_ref(&(i / 8..i / 8 + 1)));
         assert!(a.regions[0].as_ref().unwrap().mask.contains(&1));
         words[i / 8] = 0;
         let j = (78 + dims.x * (18 + dims.y * 51)) as usize;
         words[j / 8] |= 15 << (j % 8 * 4);
-        a.advance(4, &words, dims, &[i / 8..i / 8 + 1, j / 8..j / 8 + 1]);
+        a.advance(4, &words, window, &[i / 8..i / 8 + 1, j / 8..j / 8 + 1]);
         for r in a.regions.iter().flatten() {
-            assert_eq!(*r.mask, make_mask(&words, dims, r.params.origin));
+            assert_eq!(*r.mask, make_mask(&words, window, r.params.origin));
         }
     }
 }

@@ -892,6 +892,7 @@ mod tests {
         let original = workshop.layout.clone().unwrap();
         let sim = BlastRange::with_layout(c, original.clone()).unwrap();
         let scene = Scene {
+            generation: 0,
             sim,
             energy: true,
             anni: false,
