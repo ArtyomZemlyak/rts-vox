@@ -523,7 +523,7 @@ const MELT: [Knob; 2] = [
         100_000.0,
     ),
 ];
-const PICTURE: [Knob; 9] = [
+const PICTURE: [Knob; 10] = [
     k(
         "picture.smoke_extinction",
         Group::Picture,
@@ -579,6 +579,14 @@ const PICTURE: [Knob; 9] = [
         0.1,
         0.1,
         5.0,
+    ),
+    k(
+        "picture.gas_display_cm",
+        Group::Picture,
+        "Кубик дыма, см",
+        8.0,
+        10.0,
+        160.0,
     ),
     k(
         "picture.smoke_size",
@@ -804,6 +812,9 @@ fn picture_get(f: &str, gas: &GasInput) -> Option<f64> {
         "blast_puffs" => d.blast_puffs as f64,
         "spark_size" => f64::from(d.spark_size),
         "smoke_size" => f64::from(d.smoke_size.1),
+        "gas_display_cm" => {
+            f64::from(gas.params.charge.z) * f64::from(voxel::unit::WORLD_MM) / 10.0
+        }
         "dust_alpha" => f64::from(d.dust_alpha),
         _ => return None,
     })
@@ -874,6 +885,10 @@ pub fn apply(key: &str, v: f64, r: &mut Reach, o: &Overrides) {
         let origin = r.gas.params.origin;
         configure_gas(&r.scene.sim, r.scene.energy, r.scene.anni, r.gas);
         r.gas.params.origin = origin;
+        if let Some(&cm) = o.values.get("picture.gas_display_cm") {
+            r.gas
+                .set_display_edge(cm as f32 * 10.0 / voxel::unit::WORLD_MM as f32);
+        }
         return;
     }
     if let Some((kind, f)) = kind_of(key) {
@@ -907,6 +922,10 @@ pub fn apply(key: &str, v: f64, r: &mut Reach, o: &Overrides) {
         let mut d = look::dust();
         let x = v as f32;
         match f {
+            "gas_display_cm" => {
+                let edge = x * 10.0 / voxel::unit::WORLD_MM as f32;
+                r.gas.set_display_edge(edge);
+            }
             "smoke_extinction" => {
                 s.smoke_extinction = x;
                 r.gas.params.weapon.w = x;

@@ -223,10 +223,11 @@ fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput)
         c.buoyancy_milli as f32 / 1000.0,
         c.gas_temperature_k as f32 / 1000.0,
     );
+    gas.set_display_edge(c.gas_display_mm as f32 / voxel::unit::WORLD_MM as f32);
     gas.params.charge = Vec4::new(
         c.gas_fuel_milli as f32 / 1000.0,
         c.gas_pressure_milli as f32 / 1000.0,
-        if energy { 1.7 } else { 3.2 },
+        c.gas_display_mm as f32 / voxel::unit::WORLD_MM as f32,
         0.0,
     );
     gas.params.beam = (muzzle_vec(sim) + gun_rotation(sim) * Vec3::X * 2.0).extend(0.0);
@@ -265,6 +266,8 @@ fn main() {
     let mut profile_output = None;
     let mut profile_seconds = 20.0;
     let mut profile_clouds = 0;
+    let mut profile_gpu = false;
+    let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -272,6 +275,13 @@ fn main() {
             "--profile" => {
                 i += 1;
                 profile_output = Some(args[i].clone());
+            }
+            "--profile-gpu" => profile_gpu = true,
+            "--gas-cell-mm" => {
+                i += 1;
+                let mm = args[i].parse::<u32>().expect("visible gas cube edge in mm");
+                assert!((100..=1600).contains(&mm));
+                gas_cell_mm = Some(mm);
             }
             "--profile-clouds" => {
                 i += 1;
@@ -386,6 +396,9 @@ fn main() {
         None,
     )
     .expect("valid range");
+    if let Some(mm) = gas_cell_mm {
+        sim.config.gas_display_mm = mm;
+    }
     if drive {
         sim.control();
         view = 1;
@@ -428,60 +441,40 @@ fn main() {
         profile_clouds == 0 || profile_output.is_some(),
         "--profile-clouds requires --profile"
     );
+    assert!(
+        !profile_gpu || profile_output.is_some(),
+        "--profile-gpu requires --profile"
+    );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
     profiler.clouds = profile_clouds;
+    profiler.gpu = profile_gpu;
     let mut gas = GasInput::default();
     gas.timings
         .enabled
         .store(profile_output.is_some(), Ordering::Relaxed);
     fill_terrain(&sim, &mut gas);
-    let c = &sim.config;
-    gas.params.origin = Vec4::new(
-        if energy { 272.0 } else { 112.0 },
-        0.0,
-        216.0,
-        c.gas_cell_units as f32,
-    );
-    gas.params.chemistry = Vec4::new(
-        c.reaction_milli as f32 / 1000.0,
-        c.cooling_milli as f32 / 1000.0,
-        c.buoyancy_milli as f32 / 1000.0,
-        c.gas_temperature_k as f32 / 1000.0,
-    );
-    gas.params.charge = Vec4::new(
-        c.gas_fuel_milli as f32 / 1000.0,
-        c.gas_pressure_milli as f32 / 1000.0,
-        if energy { 1.7 } else { 3.2 },
-        0.0,
-    );
     gas.params.sun = (-Vec3::from(look::sun_dir())).extend(1.8);
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
-    gas.params.weapon.x = weapon_code(energy, anni);
-    gas.params.weapon.w = look::scene().smoke_extinction;
-    gas.params.look.x = look::scene().ground_glow;
-    gas.params.beam = Vec4::new(
-        MUZZLE[0] as f32 + 2.0,
-        MUZZLE[1] as f32,
-        MUZZLE[2] as f32,
-        0.0,
-    );
     configure_gas(&sim, energy, anni, &mut gas);
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
-                resolution:
-                    bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0),
-                present_mode: if realtime && profile_output.is_none() {
-                    PresentMode::AutoVsync
-                } else {
-                    PresentMode::AutoNoVsync
-                },
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
+            resolution:
+                bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0),
+            present_mode: if realtime && profile_output.is_none() {
+                PresentMode::AutoVsync
+            } else {
+                PresentMode::AutoNoVsync
+            },
             ..default()
-        }))
-        .insert_resource(ClearColor(Color::srgb(0.12, 0.15, 0.19)))
+        }),
+        ..default()
+    }));
+    if profile_gpu {
+        app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+    }
+    app.insert_resource(ClearColor(Color::srgb(0.12, 0.15, 0.19)))
         .insert_resource(DirectionalLightShadowMap {
             size: look::scene().shadow_map,
         })
@@ -1293,12 +1286,11 @@ fn advance(
         if before.is_none() {
             if let Some(at) = scene.sim.impact {
                 gas.params.control.z = 1.0;
-                gas.params.source = Vec4::new(
-                    at[0] as f32 - 3.0,
-                    at[1] as f32 + 7.0,
-                    at[2] as f32,
-                    scene.sim.config.gas_source_radius as f32,
-                );
+                let point = Vec3::from(at.map(|v| v as f32));
+                let outward = scene.previous_shell.map_or(Vec3::Y, |p| p - point);
+                gas.params.source = gas
+                    .surface_source(point, outward)
+                    .extend(scene.sim.config.gas_source_radius as f32);
                 let params = gas.params;
                 gas.atmosphere.emit_at(params, scene.sim.impact_tick * 2);
                 println!("IMPACT tick={} at={at:?}", scene.sim.impact_tick);
@@ -1316,7 +1308,9 @@ fn advance(
         if let Some(p) = scene.sim.heat.ignited.first() {
             let mut params = gas.params;
             params.control.z = 1.0;
-            params.source = Vec4::new(p[0] as f32, p[1] as f32 + 2.0, p[2] as f32, 3.0);
+            params.source = gas
+                .surface_source(Vec3::from(p.map(|v| v as f32)), Vec3::Y)
+                .extend(3.0);
             gas.atmosphere.emit_at(params, scene.sim.tick * 2);
         }
         let alight = scene.sim.heat.burning();
@@ -1330,11 +1324,12 @@ fn advance(
                 params.charge = Vec4::new(
                     gas.params.charge.x * 0.5,
                     gas.params.charge.y * 0.2,
-                    1.1,
+                    gas.params.charge.z * 0.5,
                     0.0,
                 );
-                params.source =
-                    Vec4::new(p[0] as f32, p[1] as f32 + 1.5, p[2] as f32, FLAME_RADIUS);
+                params.source = gas
+                    .surface_source(Vec3::from(p.map(|v| v as f32)), Vec3::Y)
+                    .extend(FLAME_RADIUS);
                 gas.atmosphere.emit_at(params, scene.sim.tick * 2);
             }
         }

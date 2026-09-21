@@ -1,6 +1,7 @@
 //! Bounded GPU atmosphere regions. Nearby compatible sources share a field;
 //! distant impacts retain independent fields and clocks. No field readback.
 
+mod bricks;
 mod regions;
 pub use regions::Atmosphere;
 use regions::REGIONS;
@@ -11,6 +12,7 @@ use bevy::core_pipeline::prepass::{
 use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::post_process::bloom::bloom;
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::binding_types::*;
@@ -214,6 +216,24 @@ impl ExtractResource for GasInput {
     }
 }
 impl GasInput {
+    /// Presentation only; existing plumes keep their clocks, fields and scale
+    /// relative to the weapon (small burning surfaces use half-size cubes).
+    pub fn set_display_edge(&mut self, edge: f32) {
+        self.atmosphere
+            .resize_display(self.params.charge.z.max(0.01), edge);
+        self.params.charge.z = edge;
+    }
+    /// Move a surface emitter toward the incident air, keeping the whole gas
+    /// cell clear even when it joins a region with a different grid origin.
+    pub fn surface_source(&self, point: Vec3, outward: Vec3) -> Vec3 {
+        regions::surface_source(
+            &self.terrain_words,
+            self.window,
+            point,
+            outward,
+            self.params.origin.w as i32,
+        )
+    }
     pub fn advance(&mut self, step: u32) {
         self.atmosphere
             .advance_gpu(step, &self.terrain_words, self.window, &self.terrain_dirty);
@@ -270,6 +290,7 @@ mod window_tests {
 }
 #[derive(Resource)]
 struct Shaders {
+    bricks: Handle<Shader>,
     mask: Handle<Shader>,
     upload: Handle<Shader>,
     compute: Handle<Shader>,
@@ -293,6 +314,10 @@ impl Plugin for GasPlugin {
         let mask = assets.add(Shader::from_wgsl(
             include_str!("gas_mask.wgsl"),
             "render/src/gas_mask.wgsl",
+        ));
+        let bricks = assets.add(Shader::from_wgsl(
+            source("terrain_bricks.wgsl", include_str!("terrain_bricks.wgsl")),
+            "render/src/terrain_bricks.wgsl",
         ));
         let upload = assets.add(Shader::from_wgsl(
             include_str!("terrain_upload.wgsl"),
@@ -327,6 +352,7 @@ impl Plugin for GasPlugin {
             return;
         };
         r.insert_resource(Shaders {
+            bricks,
             mask,
             upload,
             compute,
@@ -374,6 +400,7 @@ struct Pipeline {
     regions: [Option<GpuRegion>; REGIONS],
     terrain: Buffer,
     terrain_revision: u64,
+    bricks: bricks::Bricks,
     ready_frames: u32,
     terrain_layout: BindGroupLayoutDescriptor,
     terrain_prepass: CachedRenderPipelineId,
@@ -538,6 +565,7 @@ fn init(
                 storage_buffer_read_only::<Vec<GpuCell>>(false),
                 storage_buffer_read_only::<Vec<u32>>(false),
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                storage_buffer_read_only::<Vec<u32>>(false),
             ),
         ),
     );
@@ -563,6 +591,7 @@ fn init(
             (
                 (3, uniform_buffer::<GasParams>(false)),
                 (5, storage_buffer_read_only::<Vec<u32>>(false)),
+                (7, storage_buffer_read_only::<Vec<u32>>(false)),
             ),
         ),
     );
@@ -608,6 +637,7 @@ fn init(
         uniform: UniformBuffer::from(GasParams::default()),
         empty: state_buffer(&device),
         regions: std::array::from_fn(|_| None),
+        bricks: bricks::Bricks::new(&device, &cache, shaders.bricks.clone()),
         terrain,
         terrain_revision: 0,
         ready_frames: 0,
@@ -705,9 +735,17 @@ fn prepare(
             .uploaded
             .store(input.terrain_revision, Ordering::Release);
     }
+    let terrain_buffer = pipeline.terrain.clone();
+    pipeline.bricks.prepare(
+        input.window,
+        &input.patches,
+        &terrain_buffer,
+        &device,
+        &queue,
+        &cache,
+    );
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
-    let terrain_buffer = pipeline.terrain.clone();
     for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
         let Some(source) = source else {
             *slot = None;
@@ -836,11 +874,19 @@ fn prepare(
 
 fn terrain_prepass(
     view: ViewQuery<(&ViewDepthTexture, &ViewPrepassTextures), With<GasCamera>>,
-    pipeline: Res<Pipeline>,
+    mut pipeline: ResMut<Pipeline>,
     cache: Res<PipelineCache>,
     mut ctx: RenderContext,
 ) {
     let (depth, prepass) = view.into_inner();
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let span = diagnostics.time_span(ctx.command_encoder(), "terrain-bricks");
+    let ready = pipeline.bricks.encode(&cache, ctx.command_encoder());
+    span.end(ctx.command_encoder());
+    if !ready {
+        return;
+    }
     let (Some(draw), Some(normals), Some(copy)) = (
         cache.get_render_pipeline(pipeline.terrain_prepass),
         prepass.normal.as_ref(),
@@ -854,8 +900,10 @@ fn terrain_prepass(
         &BindGroupEntries::with_indices((
             (3, pipeline.uniform.binding().unwrap()),
             (5, pipeline.terrain.as_entire_binding()),
+            (7, pipeline.bricks.buffer.as_entire_binding()),
         )),
     );
+    let span = diagnostics.time_span(ctx.command_encoder(), "terrain-prepass");
     {
         let mut pass = ctx
             .command_encoder()
@@ -886,6 +934,7 @@ fn terrain_prepass(
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
     }
+    span.end(ctx.command_encoder());
     ctx.command_encoder().copy_texture_to_texture(
         depth.texture.as_image_copy(),
         copy.texture.texture.as_image_copy(),
@@ -924,6 +973,9 @@ fn draw_gas(
             input.ready.store(true, Ordering::Relaxed);
         }
     }
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let mask_span = diagnostics.time_span(ctx.command_encoder(), "gas-mask");
     {
         let mut pass = ctx
             .command_encoder()
@@ -940,6 +992,8 @@ fn draw_gas(
             }
         }
     }
+    mask_span.end(ctx.command_encoder());
+    let simulation_span = diagnostics.time_span(ctx.command_encoder(), "gas-simulation");
     for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
         let (Some(r), Some(source)) = (slot, source) else {
             continue;
@@ -975,6 +1029,7 @@ fn draw_gas(
         }
         source.applied.store(r.applied, Ordering::Relaxed);
     }
+    simulation_span.end(ctx.command_encoder());
     // Shade terrain/charging effects exactly once. Overlay plumes cannot
     // overwrite an earlier plume's colour with a fresh terrain calculation.
     let mut order: Vec<_> = input
@@ -999,6 +1054,10 @@ fn draw_gas(
         } else {
             (&pipeline.uniform, &pipeline.empty)
         };
+        let span = diagnostics.time_span(
+            ctx.command_encoder(),
+            slot.map_or_else(|| "gas-base".to_string(), |i| format!("gas-region-{i}")),
+        );
         let post = target.post_process_write();
         let group = ctx.render_device().create_bind_group(
             "gas draw",
@@ -1011,6 +1070,7 @@ fn draw_gas(
                 buffer.as_entire_binding(),
                 pipeline.terrain.as_entire_binding(),
                 normals,
+                pipeline.bricks.buffer.as_entire_binding(),
             )),
         );
         let mut pass = ctx
@@ -1031,5 +1091,7 @@ fn draw_gas(
         pass.set_pipeline(draw);
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
+        drop(pass);
+        span.end(ctx.command_encoder());
     }
 }

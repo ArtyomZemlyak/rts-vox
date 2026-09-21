@@ -64,6 +64,18 @@ pub struct Atmosphere {
     pub omitted: u64,
 }
 impl Atmosphere {
+    /// Resize already visible cubes without restarting any field or clock.
+    pub(super) fn resize_display(&mut self, old: f32, edge: f32) {
+        for r in self.regions.iter_mut().flatten() {
+            r.params.charge.z = edge * (r.params.charge.z / old);
+            for d in &mut r.deposits {
+                d.params.charge.z = edge * (d.params.charge.z / old);
+            }
+        }
+        for (_, p) in &mut self.pending {
+            p.charge.z = edge * (p.charge.z / old);
+        }
+    }
     pub fn clear(&mut self) {
         self.regions.fill(None);
         self.pending.clear();
@@ -182,6 +194,31 @@ impl Atmosphere {
             });
         }
     }
+}
+
+pub(super) fn surface_source(
+    words: &[u32],
+    window: TerrainWindow,
+    point: Vec3,
+    outward: Vec3,
+    edge: i32,
+) -> Vec3 {
+    if edge <= 0 || words.is_empty() {
+        return point;
+    }
+    let direction = outward.normalize_or_zero();
+    // At most four field cells toward the incoming projectile (or upwards
+    // for a burning surface). Never choose the far side of the obstacle.
+    // The surrounding cube covers every possible alignment of a gas cell.
+    for step in 0..=8 {
+        let candidate = point + direction * (step as f32 * edge as f32 * 0.5);
+        let base = candidate.floor().as_ivec3() - IVec3::splat(edge - 1);
+        if solid(words, window, base, edge * 2 - 1) == 0 {
+            return candidate;
+        }
+    }
+    // Fully buried emissions remain blocked by the field's occupancy mask.
+    point
 }
 
 fn solid(words: &[u32], window: TerrainWindow, base: IVec3, edge: i32) -> u32 {
@@ -545,5 +582,87 @@ mod tests {
         for r in a.regions.iter().flatten() {
             assert_eq!(*r.mask, make_mask(&words, window, r.params.origin));
         }
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    #[test]
+    fn resizing_visible_and_queued_clouds_keeps_their_field_and_lifetime() {
+        let window = TerrainWindow {
+            origin: [0; 3],
+            dims: [8; 3],
+        };
+        let mut p = GasParams::default();
+        p.source = Vec4::new(40.0, 40.0, 40.0, 5.0);
+        p.charge.z = 3.2;
+        let mut a = Atmosphere::default();
+        a.emit_at(p, 10);
+        a.advance_gpu(10, &[0; 64], window, &[]);
+        a.emit_at(p, 12);
+        let before = a.regions[0].as_ref().unwrap().clone();
+        for edge in [6.4, 7.2, 3.2] {
+            a.resize_display(p.charge.z, edge);
+            p.charge.z = edge;
+            let r = a.regions[0].as_ref().unwrap();
+            assert_eq!(
+                (r.id, r.born, r.last, r.mask_revision),
+                (before.id, before.born, before.last, before.mask_revision)
+            );
+            assert_eq!(r.params.origin, before.params.origin);
+            assert_eq!(r.params.chemistry, before.params.chemistry);
+            assert_eq!(r.params.charge.z, edge);
+            assert_eq!(r.deposits[0].params.charge.z, edge);
+            assert_eq!(a.pending[0].1.charge.z, edge);
+            assert!(r.accepts(&p));
+        }
+    }
+    #[test]
+    fn surface_deposits_stay_in_incident_air_for_any_field_alignment() {
+        let window = TerrainWindow {
+            origin: [40, 0, 56],
+            dims: [64, 64, 64],
+        };
+        for axis in 0..3 {
+            let mut words = vec![0u32; window.words()];
+            for z in window.span(2) {
+                for y in window.span(1) {
+                    for x in window.span(0) {
+                        let q = [x, y, z];
+                        if q[axis] == window.origin[axis] + 32 {
+                            let i = window.index(q).unwrap();
+                            words[i / 8] |= 3 << ((i % 8) * 4);
+                        }
+                    }
+                }
+            }
+            for sign in [-1.0, 1.0] {
+                let mut point = Vec3::from(window.origin.map(|v| v as f32)) + Vec3::splat(32.0);
+                point[axis] += if sign > 0.0 { 0.99 } else { 0.0 };
+                let mut outward = Vec3::ZERO;
+                outward[axis] = sign;
+                let result = surface_source(&words, window, point, outward, 5);
+                assert!((result - point).dot(outward) > 0.0);
+                assert!((result - point).length() <= 20.0);
+                for dz in 0..5 {
+                    for dy in 0..5 {
+                        for dx in 0..5 {
+                            let base = result.floor().as_ivec3() - IVec3::new(dx, dy, dz);
+                            assert_eq!(
+                                solid(&words, window, base, 5),
+                                0,
+                                "axis={axis} sign={sign}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let words = vec![0; window.words()];
+        let point = Vec3::new(55.5, 20.1, 90.2);
+        assert_eq!(surface_source(&words, window, point, Vec3::X, 5), point);
+        let words = vec![u32::MAX; window.words()];
+        assert_eq!(surface_source(&words, window, point, Vec3::ZERO, 5), point);
     }
 }

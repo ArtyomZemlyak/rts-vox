@@ -28,6 +28,8 @@
     heat_per_cell: 80,
     gravity: 98,
     gas_cell_units: 5,
+    // Visible cubes are larger than the transport grid; the physics is unchanged.
+    gas_display_mm: 640,
     gas_source_radius: 32,
     gas_temperature_k: 2900,
     gas_fuel_milli: 1800,

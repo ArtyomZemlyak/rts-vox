@@ -44,6 +44,9 @@ pub struct ExplosionConfig {
     pub shell_speed: i32,
     pub gravity: i32,
     pub gas_cell_units: i32,
+    /// Visible gas cube edge, in millimetres. Independent of the solver grid.
+    #[serde(default = "display_cell")]
+    pub gas_display_mm: u32,
     pub gas_source_radius: i32,
     pub gas_temperature_k: i32,
     pub gas_fuel_milli: i32,
@@ -69,6 +72,9 @@ pub struct ExplosionConfig {
     pub hull_impulse_milli: u32,
 }
 
+fn display_cell() -> u32 {
+    320
+}
 fn two_cells() -> u32 {
     2
 }
@@ -104,6 +110,7 @@ impl ExplosionConfig {
             || !(1..=10000).contains(&c.shell_speed)
             || !(1..=10000).contains(&c.gravity)
             || !(1..=8).contains(&c.gas_cell_units)
+            || !(100..=1600).contains(&c.gas_display_mm)
             || !(1..=128).contains(&c.gas_source_radius)
             || !(300..=6000).contains(&c.gas_temperature_k)
             || !(0..=10000).contains(&c.gas_fuel_milli)
@@ -119,5 +126,25 @@ impl ExplosionConfig {
             return Err("explosion parameters exceed supported bounds".into());
         }
         Ok(c)
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    #[test]
+    fn display_scale_is_optional_bounded_and_independent_of_solver_grid() {
+        let text = include_str!("../../../data/explosion.ron");
+        let base = ExplosionConfig::from_ron(text).unwrap();
+        let old = text.replace("gas_display_mm: 640,", "");
+        let old = ExplosionConfig::from_ron(&old).unwrap();
+        assert_eq!(old.gas_display_mm, 320);
+        assert_eq!(old.gas_cell_units, base.gas_cell_units);
+        for mm in [0, 99, 1601, u32::MAX] {
+            assert!(ExplosionConfig::from_ron(
+                &text.replace("gas_display_mm: 640", &format!("gas_display_mm: {mm}"))
+            )
+            .is_err());
+        }
     }
 }

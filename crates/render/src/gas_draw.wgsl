@@ -6,6 +6,9 @@ struct Cell { flow:vec4<f32>, matter:vec4<f32> };
 @group(0) @binding(4) var<storage,read> gas:array<Cell>;
 @group(0) @binding(6) var normals:texture_2d<f32>;
 const N:i32=48;
+// Maximum omitted direct-light contribution per HDR channel and region.
+// Cloud opacity, cloud shadows, soot and hot fissures are not culled.
+const LIGHT_EPSILON:f32=0.00001;
 fn mat(q:vec3<i32>)->vec4<f32> {
     if any(q<vec3(0)) || any(q>=vec3(N)) {return vec4(0.0);}
     return gas[u32(q.x+N*(q.y+N*q.z))].matter;
@@ -146,9 +149,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         var lit=vec3(0.0);
             let age=p.control.y/60.0;
             let delta=p.source.xyz-pos;let r=length(delta.xz);
-            let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
             let soot=(1.0-smoothstep(16.0,37.0,r))*(0.62+0.30*noise(pos*0.31))*smoothstep(0.0,0.5,age);
-            if ground.material!=4u && visible {bg=vec4(bg.rgb*(1.0-soot*0.85*p.control.z),bg.a);}
             var flash=select(vec3(5.0,0.75,0.065),vec3(1.2,1.65,2.7),p.weapon.x>0.5);
             let decay=select(1.15,4.0,p.weapon.x>0.5);
             var reach=950.0;
@@ -162,8 +163,15 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 let swallow=(1.0-smoothstep(0.6*sphere,sphere,length(delta)))*grow;
                 bg=vec4(bg.rgb*(1.0-0.97*swallow),bg.a);
             }
-            lit+=flash*exp(-age*decay)*reach/(110.0+dot(delta,delta))
-                *max(0.05,dot(ground.normal,normalize(delta)))*select(0.06,1.0,visible);
+            let direct=flash*exp(-age*decay)*reach/(110.0+dot(delta,delta))
+                *max(0.05,dot(ground.normal,normalize(delta)));
+            let needs_soot=ground.material!=4u && soot>0.0;
+            let needs_light=any(direct*p.control.z*exp(-ground.t*p.sky.w)>vec3(LIGHT_EPSILON));
+            if needs_soot || needs_light {
+                let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
+                if needs_soot && visible {bg=vec4(bg.rgb*(1.0-soot*0.85*p.control.z),bg.a);}
+                lit+=direct*select(0.06,1.0,visible);
+            }
             if ground.material==1u && age>0.25 && r<24.0 {
                 let fissure=smoothstep(0.73,0.82,noise(pos*0.6));
                 let residual=select(vec3(1.5,0.10,0.002),vec3(0.22,0.32,0.5),p.weapon.x>0.5);
@@ -177,12 +185,15 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let deposited=p.control.w>0.5;
         let centre=select(select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0),p.source.xyz,deposited);
         let delta=centre-world_pos;let dist=length(delta);
-        let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;
         let charging=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
         var pulse=select(charging,5.0*exp(-p.control.y/60.0*select(1.15,4.0,p.weapon.x>0.5))*p.control.z,deposited);
         var tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
         if p.weapon.x>1.5 {tint=vec3(1.1,0.45,2.0);pulse*=select(1.0,0.25,deposited);}
-        if visible {bg=vec4(bg.rgb*(vec3(1.0)+tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)))),1.0);}
+        let direct=bg.rgb*tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)));
+        if any(direct>vec3(LIGHT_EPSILON)) {
+            let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;
+            if visible {bg=vec4(bg.rgb+direct,1.0);}
+        }
     }
     // The annihilation bolt swallows what is behind its core before any
     // light is added (ADR-289).

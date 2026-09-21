@@ -8,6 +8,17 @@ struct Params {
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;
+@group(0) @binding(7) var<storage, read> bricks: array<u32>;
+// The hierarchy is enabled only for aligned windows. Small test layouts
+// remain valid without padding or changing their physical storage.
+fn brick_ceiling(q:vec3<i32>)->i32 {
+    let dims=vec3<u32>(p.terrain.xyz);let lo=vec3<i32>(p.terrain_origin.xyz);
+    if any(dims==vec3(0u)) || any((dims&vec3(7u))!=vec3(0u)) ||
+       any(lo<vec3(0)) || any((vec3<u32>(lo)&vec3(7u))!=vec3(0u)) {return q.y+1;}
+    if any(q<lo) || any(q>=lo+vec3<i32>(dims)) {return q.y+1;}
+    let b=(vec3<u32>(q)%dims)/8u;let size=dims/8u;
+    return i32(floor(f32(q.y)/8.0))*8+i32(bricks[b.x+size.x*(b.y+size.y*b.z)]);
+}
 struct In { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
 // The volume is a window on the world, not the whole of it (ADR-318):
 // it holds `dims` voxels from `lo`, and its storage wraps, so a voxel
@@ -58,7 +69,13 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
             }
             return TerrainHit(t+inset,normal,m);
         }
-        let face=select(vec3<f32>(q),vec3<f32>(q)+vec3(1.0),rd>vec3(0.0));
+        var low=vec3<f32>(q);var high=low+vec3(1.0);
+        let ceiling=brick_ceiling(q);
+        if q.y>=ceiling {
+            low=floor(low/8.0)*8.0;high=low+vec3(8.0);
+            low.y=f32(ceiling);
+        }
+        let face=select(low,high,rd>vec3(0.0));
         let dist=(face-pos)*inv;let d=max(0.002,min(dist.x,min(dist.y,dist.z)));
         normal=vec3(0.0);
         if dist.x<=dist.y && dist.x<=dist.z {normal.x=-sign(rd.x);}

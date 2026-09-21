@@ -1,4 +1,5 @@
-//! Frame timings without screenshots, PNG encoding or GPU readback.
+//! Frame timings without screenshots or PNG encoding. Optional GPU timestamps
+//! read back timing queries only, never terrain, pixels or simulation fields.
 use super::*;
 use std::{io::Write, time::Instant};
 
@@ -7,6 +8,8 @@ pub struct Profile {
     pub output: Option<String>,
     pub seconds: f64,
     pub clouds: usize,
+    pub gpu: bool,
+    gpu_samples: std::collections::BTreeMap<String, GpuSamples>,
     emitted: bool,
     warm: Option<f64>,
     start: Option<f64>,
@@ -15,6 +18,11 @@ pub struct Profile {
     detail: [f64; 3],
     rows: Vec<(f64, u32, [f64; 11])>,
     finished: bool,
+}
+#[derive(Default)]
+struct GpuSamples {
+    last: Option<bevy::platform::time::Instant>,
+    values: Vec<f64>,
 }
 impl Profile {
     pub fn new(output: Option<String>, seconds: f64) -> Self {
@@ -86,6 +94,7 @@ pub fn end(
     scene: Res<Scene>,
     gas: Res<GasInput>,
     art: Res<WitnessArt>,
+    diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
     mut p: ResMut<Profile>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -96,6 +105,23 @@ pub fn end(
         return;
     }
     p.stamp();
+    if p.gpu {
+        if let Some(diagnostics) = diagnostics {
+            for d in diagnostics.iter() {
+                let path = d.path().to_string();
+                if !path.ends_with("/elapsed_gpu") {
+                    continue;
+                }
+                if let Some(m) = d.measurement() {
+                    let samples = p.gpu_samples.entry(path).or_default();
+                    if samples.last != Some(m.time) {
+                        samples.last = Some(m.time);
+                        samples.values.push(m.value);
+                    }
+                }
+            }
+        }
+    }
     let elapsed = time.elapsed_secs_f64() - start;
     let phases = [
         time.delta_secs_f64() * 1000.0,
@@ -180,6 +206,25 @@ pub fn end(
         art.seen.iter().filter(|v| v.is_some()).count(),
         art.pending.iter().filter(|v| v.is_some()).count()
     );
+    if p.gpu {
+        for (name, samples) in &mut p.gpu_samples {
+            let v = &mut samples.values;
+            v.sort_by(f64::total_cmp);
+            if !v.is_empty() {
+                println!(
+                    "GPU {name} n={} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
+                    v.len(),
+                    v[v.len() / 2],
+                    v[v.len() * 95 / 100],
+                    v[v.len() * 99 / 100],
+                    v[v.len() - 1]
+                );
+            }
+        }
+        if p.gpu_samples.is_empty() {
+            eprintln!("GPU timestamps unavailable on this device/backend");
+        }
+    }
     if let Err(e) = result {
         eprintln!("profile output: {e}");
         exit.write(AppExit::error());
