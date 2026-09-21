@@ -84,7 +84,12 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
         .chain(std::iter::once(&sim.gun))
         .map(pose)
         .collect();
-    v.previous_feet = sim.units.iter().map(feet_of).collect();
+    v.previous_feet = sim
+        .units
+        .iter()
+        .chain(std::iter::once(&sim.gun))
+        .map(feet_of)
+        .collect();
     if v.occupied.is_empty() {
         v.occupied = cells(sim, window);
     }
@@ -319,6 +324,48 @@ pub fn animate(
     }
 }
 
+/// Player links use the same foot interpolation as target walkers.
+pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
+    let u = &scene.sim.gun;
+    if u.kind != RangeUnitKind::Strider {
+        return Vec::new();
+    }
+    let root = render::realtime::hull_rotation(p.up, p.yaw);
+    let frames = render::model::segment_frames(&u.body, 0.01);
+    let rigs = gait::rigs_of(&u.body, 0.01, &frames);
+    let mut out: Vec<_> = frames
+        .iter()
+        .map(|f| Transform::from_translation(p.pos + root * f.pos).with_rotation(root * f.rot))
+        .collect();
+    for (i, rig) in rigs.iter().enumerate() {
+        let Some(now) = u
+            .motion
+            .feet
+            .get(i)
+            .and_then(|f| f.contact.as_ref())
+            .map(foot_of)
+        else {
+            continue;
+        };
+        let old = v
+            .previous_feet
+            .last()
+            .and_then(|f| f.get(i))
+            .copied()
+            .flatten();
+        let c = old.map_or(now, |was| was.lerp(now, fraction(scene)));
+        let mut solved = rig.solve(root.inverse() * (c.pos - p.pos), root);
+        solved.foot.rot = root.inverse() * c.rot;
+        for (seg, tr) in out.iter_mut().enumerate() {
+            if let Some(role) = rig.role(seg) {
+                let f = solved.part(role);
+                *tr = Transform::from_translation(p.pos + root * f.pos).with_rotation(root * f.rot);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +374,8 @@ mod tests {
     fn moving_shadows_equal_a_fresh_volume_in_a_shifted_window() {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
-        let mut sim = range_sim(true, false, 1000, Some(&layout), false, None).unwrap();
+        let mut sim =
+            range_sim(scaled_config(true, false, 1000), Some(&layout), false, None).unwrap();
         sim.control();
         sim.order_move([235, 365]);
         let window = TerrainWindow {

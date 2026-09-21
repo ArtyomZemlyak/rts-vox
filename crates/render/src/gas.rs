@@ -6,6 +6,7 @@ mod regions;
 pub use regions::Atmosphere;
 use regions::REGIONS;
 
+use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
 use bevy::core_pipeline::prepass::{
     DepthPrepass, NormalPrepass, ViewPrepassTextures, NORMAL_PREPASS_FORMAT,
 };
@@ -469,6 +470,13 @@ impl Plugin for GasPlugin {
             terrain_prepass
                 .after(Core3dSystems::Prepass)
                 .before(Core3dSystems::MainPass),
+        )
+        .add_systems(
+            Core3d,
+            shade_terrain
+                .in_set(Core3dSystems::MainPass)
+                .after(main_opaque_pass_3d)
+                .before(main_transparent_pass_3d),
         )
         .add_systems(
             Core3d,
@@ -1053,7 +1061,7 @@ fn draw_gas(
     mut ctx: RenderContext,
 ) {
     let (target, prepass, id) = view.into_inner();
-    let (Some(draw), Some(init), Some(step), Some(mask_build), Some(depth), Some(normals)) = (
+    let (Some(_draw), Some(init), Some(step), Some(mask_build), Some(_depth), Some(_normals)) = (
         cache.get_render_pipeline(id.0),
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
@@ -1150,51 +1158,83 @@ fn draw_gas(
         })
         .collect();
     order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-    for slot in std::iter::once(None).chain(order.into_iter().map(|(i, _)| Some(i))) {
-        let (uniform, buffer) = if let Some(i) = slot {
-            let r = pipeline.regions[i].as_ref().unwrap();
-            (&r.uniform, &r.buffers[r.read])
-        } else {
-            (&pipeline.uniform, &pipeline.empty)
-        };
-        let span = diagnostics.time_span(
-            ctx.command_encoder(),
-            slot.map_or_else(|| "gas-base".to_string(), |i| format!("gas-region-{i}")),
-        );
-        let post = target.post_process_write();
-        let group = ctx.render_device().create_bind_group(
-            "gas draw",
-            &cache.get_bind_group_layout(&pipeline.draw_layout),
-            &BindGroupEntries::sequential((
-                post.source,
-                &pipeline.sampler,
-                depth,
-                uniform.binding().unwrap(),
-                buffer.as_entire_binding(),
-                pipeline.terrain.as_entire_binding(),
-                normals,
-                pipeline.bricks.buffer.as_entire_binding(),
-            )),
-        );
-        let mut pass = ctx
-            .command_encoder()
-            .begin_render_pass(&RenderPassDescriptor {
-                label: Some("voxel gas composite"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: post.destination,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations::default(),
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        pass.set_pipeline(draw);
-        pass.set_bind_group(0, &group, &[]);
-        pass.draw(0..3, 0..1);
-        drop(pass);
-        span.end(ctx.command_encoder());
+    for (slot, _) in order {
+        composite(&mut ctx, &pipeline, &cache, target, prepass, id, Some(slot));
     }
+}
+
+/// Terrain shading must precede transparent meshes. Compositing it after them
+/// overwrote every flame/smoke pixel whose opaque depth belonged to the ground.
+fn shade_terrain(
+    view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &DrawId), With<GasCamera>>,
+    pipeline: Res<Pipeline>,
+    cache: Res<PipelineCache>,
+    mut ctx: RenderContext,
+) {
+    let (target, prepass, id) = view.into_inner();
+    composite(&mut ctx, &pipeline, &cache, target, prepass, id, None);
+}
+fn composite(
+    ctx: &mut RenderContext,
+    pipeline: &Pipeline,
+    cache: &PipelineCache,
+    target: &ViewTarget,
+    prepass: &ViewPrepassTextures,
+    id: &DrawId,
+    slot: Option<usize>,
+) {
+    let (Some(draw), Some(depth), Some(normals)) = (
+        cache.get_render_pipeline(id.0),
+        prepass.depth_view(),
+        prepass.normal_view(),
+    ) else {
+        return;
+    };
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let (uniform, buffer) = if let Some(i) = slot {
+        let r = pipeline.regions[i].as_ref().unwrap();
+        (&r.uniform, &r.buffers[r.read])
+    } else {
+        (&pipeline.uniform, &pipeline.empty)
+    };
+    let span = diagnostics.time_span(
+        ctx.command_encoder(),
+        slot.map_or_else(|| "gas-base".to_string(), |i| format!("gas-region-{i}")),
+    );
+    let post = target.post_process_write();
+    let group = ctx.render_device().create_bind_group(
+        "gas draw",
+        &cache.get_bind_group_layout(&pipeline.draw_layout),
+        &BindGroupEntries::sequential((
+            post.source,
+            &pipeline.sampler,
+            depth,
+            uniform.binding().unwrap(),
+            buffer.as_entire_binding(),
+            pipeline.terrain.as_entire_binding(),
+            normals,
+            pipeline.bricks.buffer.as_entire_binding(),
+        )),
+    );
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("voxel gas composite"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: post.destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    pass.set_pipeline(draw);
+    pass.set_bind_group(0, &group, &[]);
+    pass.draw(0..3, 0..1);
+    drop(pass);
+    span.end(ctx.command_encoder());
 }

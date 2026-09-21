@@ -8,8 +8,18 @@ pub enum ProjectileMotion {
     Direct,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub enum Delivery {
+    #[default]
+    Blast,
+    Flame,
+    MachineGun,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExplosionConfig {
+    #[serde(default)]
+    pub delivery: Delivery,
     #[serde(default)]
     pub motion: ProjectileMotion,
     #[serde(default)]

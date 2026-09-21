@@ -522,14 +522,7 @@ pub fn input(
         scene.notice.clear();
         if edit.editing {
             edit.selected = None;
-            match range_sim(
-                scene.energy,
-                scene.anni,
-                scene.power,
-                edit.layout.as_ref(),
-                false,
-                None,
-            ) {
+            match range_sim(scene.sim.config.clone(), edit.layout.as_ref(), false, None) {
                 Ok(sim) => edit.pending = Some(sim),
                 Err(e) => scene.notice = e,
             }
@@ -621,7 +614,13 @@ pub fn input(
         edit.rotate = !edit.rotate;
     }
     let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    let cfg = knobs::effective_config(scene.energy, scene.anni, scene.power, overrides);
+    let cfg = knobs::effective_config(
+        scene.energy,
+        scene.anni,
+        scene.power,
+        scene.sim.config.delivery,
+        overrides,
+    );
     if ctrl && (keys.just_pressed(KeyCode::KeyZ) || keys.just_pressed(KeyCode::KeyY)) {
         let redo = keys.just_pressed(KeyCode::KeyY);
         if let Err(e) = edit.undo(cfg, redo) {

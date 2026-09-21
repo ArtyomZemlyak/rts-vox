@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::PrimitiveTopology;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PresentMode;
-use modding::explosion::ExplosionConfig;
+use modding::explosion::{Delivery, ExplosionConfig};
 use modding::range::{RangeLayout, RangeUnitKind};
 use render::gas::{GasCamera, GasInput, GasPlugin, TerrainWindow};
 use render::geom::MeshBuf;
@@ -23,8 +23,12 @@ use sim_core::blast::{BlastRange, GUN, MUZZLE};
 mod bodies;
 #[path = "blast/damage_art.rs"]
 mod damage_art;
+#[path = "blast/fire.rs"]
+mod fire;
 #[path = "blast/fragments.rs"]
 mod fragments;
+#[path = "blast/gun_art.rs"]
+mod gun_art;
 #[path = "blast/knobs.rs"]
 mod knobs;
 #[path = "blast/moving.rs"]
@@ -96,6 +100,7 @@ struct WitnessArt {
 struct Gun {
     base: Transform,
     turret: bool,
+    segment: Option<usize>,
 }
 #[derive(Component)]
 struct Shell;
@@ -135,6 +140,19 @@ fn scaled_config(energy: bool, anni: bool, power: u32) -> ExplosionConfig {
     c.gas_source_radius = c.gas_source_radius * (1000 + power as i32) / 2000;
     c
 }
+fn weapon_config(energy: bool, anni: bool, power: u32, delivery: Delivery) -> ExplosionConfig {
+    if delivery == Delivery::Blast {
+        return scaled_config(energy, anni, power);
+    }
+    let mut c = ExplosionConfig::from_ron(match delivery {
+        Delivery::Flame => include_str!("../../../../data/flamethrower.ron"),
+        Delivery::MachineGun => include_str!("../../../../data/machine-gun.ron"),
+        Delivery::Blast => unreachable!(),
+    })
+    .expect("stream weapon RON");
+    c.energy = power;
+    c
+}
 /// What the gas shader reads as the weapon: shell 0, energy bolt 1, the
 /// annihilation bolt 2 (ADR-285), which the shader treats as an energy bolt
 /// that also bends the picture.
@@ -154,14 +172,11 @@ fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
     .transpose()
 }
 fn range_sim(
-    energy: bool,
-    anni: bool,
-    power: u32,
+    c: ExplosionConfig,
     layout: Option<&RangeLayout>,
     uncovered: bool,
     kind: Option<RangeUnitKind>,
 ) -> Result<BlastRange, String> {
-    let c = scaled_config(energy, anni, power);
     if let Some(layout) = layout {
         let mut layout = layout.clone();
         if uncovered {
@@ -243,6 +258,8 @@ fn main() {
     let mut out = None;
     let mut all_frames = false;
     let mut finish = None;
+    let mut delivery = Delivery::Blast;
+    let mut gun_kind = None;
     let mut energy = false;
     let mut anni = false;
     let mut repeat = false;
@@ -350,13 +367,29 @@ fn main() {
             }
             "--realtime" => realtime = true,
             "--settings" => settings = true,
+            "--chassis" => {
+                i += 1;
+                gun_kind = Some(match args[i].as_str() {
+                    "tank" => RangeUnitKind::Tank,
+                    "walker" => RangeUnitKind::Strider,
+                    _ => panic!("--chassis tank|walker"),
+                });
+            }
             "--weapon" => {
                 i += 1;
                 (energy, anni) = match args.get(i).map(String::as_str) {
                     Some("energy") => (true, false),
                     Some("anni") => (true, true),
                     Some("shell") => (false, false),
-                    _ => panic!("--weapon expects shell, energy or anni"),
+                    Some("flame") => {
+                        delivery = Delivery::Flame;
+                        (false, false)
+                    }
+                    Some("machine-gun") => {
+                        delivery = Delivery::MachineGun;
+                        (false, false)
+                    }
+                    _ => panic!("--weapon expects shell, energy, anni, flame or machine-gun"),
                 };
             }
             "--capture" | "--shots" => {
@@ -401,11 +434,12 @@ fn main() {
         view = 1;
     }
     assert!(!edit || layout.is_some(), "--edit needs --range");
+    if let Some(kind) = gun_kind {
+        layout.as_mut().expect("--chassis needs --range").gun_kind = kind;
+    }
     let workshop = Workshop::new(layout, edit);
     let mut sim = range_sim(
-        energy,
-        anni,
-        power,
+        weapon_config(energy, anni, power, delivery),
         workshop.layout.as_ref(),
         uncovered,
         None,
@@ -531,6 +565,7 @@ fn main() {
         .insert_resource(panel::Panel::new(drive, demo))
         .insert_resource(knobs::Overrides::new(settings))
         .init_resource::<moving::Visual>()
+        .init_resource::<fire::Effects>()
         .init_resource::<workbench::ShieldFlashes>()
         .insert_resource(workshop)
         .insert_resource(recording)
@@ -549,6 +584,7 @@ fn main() {
                     workbench::input,
                     advance,
                     profile::stamp,
+                    gun_art::refresh,
                     orient_gun,
                     witness::update,
                     profile::stamp,
@@ -559,6 +595,7 @@ fn main() {
                 )
                     .chain(),
                 (
+                    fire::draw,
                     weapon_art,
                     animate_energy,
                     framing,
@@ -912,74 +949,8 @@ fn setup(
         next_mesh: 0,
         generation: scene.generation,
     });
-    let body = voxel::unit::tank();
-    let tint = [0.16, 0.25, 0.34];
-    let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
-    let frames = render::model::segment_frames(&body, 1.0 / voxel::unit::WORLD_MM as f32);
-    let mut add_body = |b: &voxel::unit::UnitBody,
-                        centre: [f32; 3],
-                        pos: Vec3,
-                        rot: Quat,
-                        rows: (usize, usize),
-                        turret: bool| {
-        let mut bufs = std::array::from_fn(|_| MeshBuf::default());
-        render::model::body_to_mesh(
-            b,
-            tint,
-            b.mm as f32 / voxel::unit::WORLD_MM as f32,
-            rows,
-            render::model::BEVEL,
-            centre,
-            &mut bufs,
-        );
-        for (k, buf) in bufs.iter_mut().enumerate() {
-            if buf.idx.is_empty() {
-                continue;
-            }
-            weather(buf, k);
-            let base = Transform::from_translation(
-                Vec3::new(GUN[0] as f32, GUN[1] as f32, GUN[2] as f32) + pos,
-            )
-            .with_rotation(rot);
-            commands.spawn((
-                Mesh3d(meshes.add(mesh(buf))),
-                MeshMaterial3d(finishes[k].clone()),
-                base,
-                Gun { base, turret },
-            ));
-        }
-    };
-    add_body(
-        &body,
-        render::model::root_centre(&body),
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        (0, body.turret_y as usize),
-        false,
-    );
-    add_body(
-        &body,
-        render::model::root_centre(&body),
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        (body.turret_y as usize, usize::MAX),
-        true,
-    );
-    for (s, f) in body.segments.iter().zip(frames) {
-        add_body(
-            &s.body,
-            render::model::pivot_centre(&s.attach),
-            f.pos,
-            f.rot,
-            (0, usize::MAX),
-            f.turret,
-        );
-    }
-    println!(
-        "gun: {} mm voxels, scale {scale}, {} segments",
-        body.mm,
-        body.segments.len()
-    );
+    gun_art::spawn(&mut commands, &mut meshes, &finishes, &scene);
+    commands.insert_resource(gun_art::Chassis(scene.sim.gun.kind));
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     {
         let coil = materials.add(StandardMaterial {
@@ -1006,7 +977,11 @@ fn setup(
                     MeshMaterial3d(coil.clone()),
                     base,
                     Emitter,
-                    Gun { base, turret: true },
+                    Gun {
+                        base,
+                        turret: true,
+                        segment: None,
+                    },
                 ));
             }
         }
@@ -1104,7 +1079,11 @@ fn advance(
     mut workshop: ResMut<Workshop>,
     mut visual: ResMut<moving::Visual>,
     panel: Res<panel::Panel>,
-    (recording, mut profile): (Res<Recording>, ResMut<profile::Profile>),
+    (recording, mut profile, mut fire_fx): (
+        Res<Recording>,
+        ResMut<profile::Profile>,
+        ResMut<fire::Effects>,
+    ),
     mut gas: ResMut<GasInput>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
@@ -1173,6 +1152,11 @@ fn advance(
     }
     let mut energy = scene.energy;
     let mut anni = scene.anni;
+    let delivery = if keys.just_pressed(KeyCode::KeyW) {
+        Delivery::Blast
+    } else {
+        scene.sim.config.delivery
+    };
     let mut power = scene.power;
     let mut uncovered = scene.uncovered;
     let mut kind = scene.unit_override;
@@ -1230,7 +1214,12 @@ fn advance(
         let next = if let Some(sim) = authored.filter(|_| !changed) {
             Ok(sim)
         } else {
-            range_sim(energy, anni, power, reloaded.as_ref(), uncovered, kind)
+            range_sim(
+                weapon_config(energy, anni, power, delivery),
+                reloaded.as_ref(),
+                uncovered,
+                kind,
+            )
         };
         let Ok(sim) = next else {
             scene.notice = format!("Layout rejected: {}", next.err().unwrap());
@@ -1245,6 +1234,7 @@ fn advance(
             workshop.editing = false;
         }
         scene.sim = sim;
+        fire_fx.clear();
         scene.generation += 1;
         if panel.drive {
             scene.sim.control();
@@ -1335,6 +1325,7 @@ fn advance(
         }
         let started = std::time::Instant::now();
         scene.sim.step();
+        fire_fx.capture(&scene.sim);
         let us = started.elapsed().as_micros();
         profile.measure(0, started.elapsed());
         scene.step_us = if scene.frame.is_multiple_of(30) {
@@ -1372,6 +1363,10 @@ fn advance(
         if let Some(p) = scene.sim.heat.ignited.first() {
             let mut params = gas.params;
             params.control.z = 1.0;
+            params.weapon.x = 0.0;
+            params.chemistry.w = 2.7;
+            params.charge.x = 0.6;
+            params.charge.y = 0.06;
             params.source = gas
                 .surface_source(Vec3::from(p.map(|v| v as f32)), Vec3::Y)
                 .extend(3.0);
@@ -1383,6 +1378,7 @@ fn advance(
             if let Some(p) = scene.sim.heat.burning_cells().nth(scene.flame) {
                 let mut params = gas.params;
                 params.control.z = 1.0;
+                params.weapon.x = 0.0;
                 // Hot, little pressure and half the fuel: a flame, not a burst.
                 params.chemistry.w = (params.chemistry.w * 1.8).max(2.2);
                 params.charge = Vec4::new(
@@ -1482,7 +1478,10 @@ fn advance(
             0.0
         };
         for mut tr in &mut flash {
-            if !scene.energy && (0.0..0.1).contains(&recoil_age) {
+            if scene.sim.config.delivery == Delivery::Blast
+                && !scene.energy
+                && (0.0..0.1).contains(&recoil_age)
+            {
                 tr.translation =
                     muzzle_vec(&scene.sim) + gun_rotation(&scene.sim) * Vec3::X * (2.0 - recoil);
                 tr.rotation = gun_rotation(&scene.sim);
@@ -1597,6 +1596,7 @@ fn orient_gun(
     // a tilted hull a level turret left a gap at the ring.
     let aim = render::realtime::hull_rotation(pose.up, visible_gun_yaw(&scene, &visual));
     let hull = render::realtime::hull_rotation(pose.up, pose.yaw);
+    let segments = moving::gun_segments(&scene, &visual, pose);
     let age = (i64::from(scene.sim.tick) - i64::from(scene.sim.fire_tick)) as f32 / 30.0;
     let recoil = if (0.0..0.6).contains(&age) {
         (age * 14.0).sin() * (-age * 8.0).exp() * 3.0
@@ -1604,6 +1604,12 @@ fn orient_gun(
         0.0
     };
     for (g, mut tr) in &mut gun {
+        if let Some(seg) = g.segment {
+            if let Some(local) = segments.get(seg) {
+                *tr = *local;
+                continue;
+            }
+        }
         let rotation = if g.turret { aim } else { hull };
         *tr = g.base;
         tr.translation = pivot
@@ -2001,23 +2007,41 @@ fn capture(
     if scene.paused || scene.last_capture == scene.frame {
         return;
     }
-    let fire = scene.sim.fire_tick;
+    let fire = if scene.sim.config.delivery == Delivery::Blast {
+        scene.sim.fire_tick
+    } else {
+        scene.sim.config.fire_tick
+    };
     let impact = if scene.sim.impact.is_some() {
         scene.sim.impact_tick
     } else {
         u32::MAX - 1000
     };
-    let phases = [
-        (30, "00-ready"),
-        (fire.saturating_sub(10), "01-charge"),
-        (fire + 2, "02-launch"),
-        (fire + 4, "03-flight"),
-        (impact + 1, "04-impact"),
-        (impact + 8, "05-discharge"),
-        (impact + 48, "06-dust"),
-        (impact + 140, "07-wall-and-damage"),
-        (impact + 280, "08-sheltered-unit"),
-    ];
+    let phases = if scene.sim.config.delivery != Delivery::Blast {
+        [
+            (30, "00-ready"),
+            (fire.saturating_sub(1), "01-aim"),
+            (fire.saturating_add(2), "02-launch"),
+            (fire.saturating_add(10), "03-flight"),
+            (fire.saturating_add(20), "04-contact"),
+            (fire.saturating_add(38), "05-stream"),
+            (fire.saturating_add(72), "06-smoke"),
+            (fire.saturating_add(100), "07-damage"),
+            (fire.saturating_add(140), "08-after"),
+        ]
+    } else {
+        [
+            (30, "00-ready"),
+            (fire.saturating_sub(10), "01-charge"),
+            (fire.saturating_add(2), "02-launch"),
+            (fire.saturating_add(4), "03-flight"),
+            (impact + 1, "04-impact"),
+            (impact + 8, "05-discharge"),
+            (impact + 48, "06-dust"),
+            (impact + 140, "07-wall-and-damage"),
+            (impact + 280, "08-sheltered-unit"),
+        ]
+    };
     let stage = phases
         .iter()
         .find(|(tick, _)| *tick > scene.last_capture && *tick <= scene.frame)

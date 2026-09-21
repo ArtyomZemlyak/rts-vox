@@ -4,7 +4,8 @@ param(
     [switch]$Build,
     [switch]$Settings,
     [ValidateRange(1, 12)][int]$Zone = 1,
-    [ValidateSet('energy', 'shell', 'anni')][string]$Weapon = 'energy'
+    [ValidateSet('energy', 'shell', 'anni', 'flame', 'machine-gun')][string]$Weapon = 'energy',
+    [ValidateSet('tank', 'walker')][string]$Chassis = 'tank'
 )
 # ASCII only: Windows PowerShell 5.1 reads a .ps1 without a BOM as ANSI.
 $ErrorActionPreference = 'Stop'
@@ -22,7 +23,7 @@ if ($Build -or !(Test-Path -LiteralPath $binary)) {
 if (!$LayoutPath) {
     $LayoutPath = 'data/range-km.ron'
 }
-$rangeArgs = @('--weapon', $Weapon, '--range', ('"{0}"' -f $LayoutPath))
+$rangeArgs = @('--weapon', $Weapon, '--chassis', $Chassis, '--range', ('"{0}"' -f $LayoutPath))
 if (!$AutoFire) { $rangeArgs += '--drive' }
 if ($Settings) { $rangeArgs += '--settings' }
 if ($Zone -gt 1) { $rangeArgs += @('--zone', $Zone.ToString()) }

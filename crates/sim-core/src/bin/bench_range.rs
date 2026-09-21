@@ -14,7 +14,9 @@ fn main() {
         "energy" => include_str!("../../../../data/energy-cannon.ron"),
         "shell" => include_str!("../../../../data/explosion.ron"),
         "anni" => include_str!("../../../../data/anni-cannon.ron"),
-        _ => panic!("--weapon expects energy, shell or anni"),
+        "flame" => include_str!("../../../../data/flamethrower.ron"),
+        "machine-gun" => include_str!("../../../../data/machine-gun.ron"),
+        _ => panic!("--weapon expects energy, shell, anni, flame or machine-gun"),
     };
     // Power scales the charge as the window's buttons do (P-31).
     let power: u32 = args
@@ -28,10 +30,16 @@ fn main() {
         config.energy = config.energy * power / 1000;
         config.material_energy_j =
             (u64::from(config.material_energy_j) * u64::from(power) / 1000) as u32;
-        let layout =
+        let mut layout =
             modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-cover.ron"))
                 .unwrap();
+        if weapon == "machine-gun" {
+            layout.gun_kind = modding::range::RangeUnitKind::Strider;
+        }
         let mut scene = BlastRange::with_layout(config, layout).unwrap();
+        if scene.config.delivery != modding::explosion::Delivery::Blast {
+            scene.aim = Some(scene.units[0].world_pos([30, 18, 16]));
+        }
         scene.control();
         let mut samples = Vec::new();
         let mut shots = 0;
@@ -78,7 +86,7 @@ fn main() {
         assert!(laps.iter().any(|n| *n > 0), "no completed patrols");
         if firing {
             assert!(
-                scene.removed > 0 && shots > 1,
+                (scene.removed > 0 || scene.units.iter().any(|u| u.revision > 0)) && shots > 1,
                 "no real repeated destruction"
             );
         }

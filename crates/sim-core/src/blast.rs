@@ -1462,7 +1462,11 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_weapons.rs"]
+pub mod weapons;
+
 pub struct BlastRange {
+    pub streams: weapons::Streams,
     pub matter: matter::Matter,
     pub world: World,
     /// Side, height and side of this range in world units (ADR-315). The
@@ -1583,6 +1587,11 @@ impl BlastRange {
         [x.div(length), Fx::ZERO, z.div(length)]
     }
     pub fn muzzle(&self) -> [Fx; 3] {
+        if self.gun.kind == RangeUnitKind::Strider {
+            if let Some(p) = self.stream_muzzles().first() {
+                return *p;
+            }
+        }
         let d = self.heading();
         [
             self.gun.motion.pos[0].add(d[0].mul(Fx::from_int(30))),
@@ -1642,7 +1651,10 @@ impl BlastRange {
                 .into_iter()
                 .collect()
         };
-        let mut gun = RangeUnit::new(layout.as_ref().map_or(GUN, |r| r.gun));
+        let mut gun = RangeUnit::of_kind(
+            layout.as_ref().map_or(RangeUnitKind::Tank, |r| r.gun_kind),
+            layout.as_ref().map_or(GUN, |r| r.gun),
+        );
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
                 u.motion.speed = if u.kind == RangeUnitKind::Tank {
@@ -1671,6 +1683,7 @@ impl BlastRange {
                 .collect()
         });
         let mut result = Self {
+            streams: weapons::Streams::default(),
             matter,
             gun,
             player: false,
@@ -1768,7 +1781,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(30);
+        b.u32(31);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1932,13 +1945,14 @@ impl BlastRange {
         }
         self.bodies.save(&mut b);
         b.bool(self.world_steady);
+        self.streams.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30].contains(&version) {
+        if ![27, 28, 29, 30, 31].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2329,6 +2343,9 @@ impl BlastRange {
             return None;
         }
         r.world_steady = s.bool();
+        if version >= 31 {
+            r.streams.load(&mut s)?;
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2344,6 +2361,7 @@ impl BlastRange {
     pub fn ready(&self) -> bool {
         self.gun.status.alive
             && self.gun.status.weapon
+            && self.streams.ready(self.tick)
             && self.shell.is_none()
             && (self.fire_tick == u32::MAX || self.tick > self.fire_tick)
             && self
@@ -2466,6 +2484,10 @@ impl BlastRange {
         self.set_auto_attack(false);
         self.attack = None;
         self.gun.motion.stop();
+        self.streams.left = 0;
+        if self.shell.is_none() {
+            self.fire_tick = u32::MAX;
+        }
     }
     /// Пуск и остановка маршрутов мишеней.
     pub fn toggle_patrols(&mut self) {
@@ -2638,7 +2660,11 @@ impl BlastRange {
             // Keep the charged round until the actual barrel has traversed.
             self.fire_tick = self.fire_tick.saturating_add(1);
         }
-        if self.tick == self.fire_tick && self.gun.status.alive && self.gun.status.weapon {
+        if self.tick == self.fire_tick
+            && self.gun.status.alive
+            && self.gun.status.weapon
+            && self.config.delivery == modding::explosion::Delivery::Blast
+        {
             let from = self.muzzle();
             let target = self.target();
             let dx = Fx::from_int(target[0]).sub(from[0]);
@@ -2659,6 +2685,7 @@ impl BlastRange {
             ];
             self.shell = Some(from);
         }
+        self.step_streams();
         if let Some(p) = self.shell {
             self.velocity[1] = self.velocity[1].sub(Fx::from_int(gravity).mul(dt));
             let q = std::array::from_fn(|a| p[a].add(self.velocity[a].mul(dt)));
@@ -3102,6 +3129,9 @@ mod tests {
         r.set_auto_attack(true);
         r.acquire_auto_target();
         let mut bytes = r.snapshot();
+        let mut tail = fx::blob::Blob::new();
+        r.streams.save(&mut tail);
+        bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();
         s.bool();

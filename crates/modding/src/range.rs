@@ -22,8 +22,9 @@ pub const fn stock_gun() -> [i32; 3] {
     [128, 16, 336]
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum RangeUnitKind {
+    #[default]
     Tank,
     Strider,
 }
@@ -67,6 +68,8 @@ pub struct RangeLayout {
     pub course: Option<RangeCourse>,
     #[serde(default = "stock_gun")]
     pub gun: [i32; 3],
+    #[serde(default)]
+    pub gun_kind: RangeUnitKind,
     #[serde(default)]
     pub zones: Vec<RangeZone>,
     pub target: [i32; 3],

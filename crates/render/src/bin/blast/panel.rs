@@ -38,6 +38,7 @@ pub enum Action {
     Routes,
     /// Shell 0, energy bolt 1, annihilation bolt 2 (ADR-285).
     Weapon(u8),
+    Chassis(RangeUnitKind),
     Power(u32),
     Tool(Tool),
     Delete,
@@ -156,7 +157,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
-                    ("Управлять танком", Action::Play),
+                    ("Управлять юнитом", Action::Play),
                     ("Расстановка", Action::Edit),
                 ],
             ),
@@ -171,7 +172,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Огонь по точке", Action::Fire),
-                    ("Стоп танк", Action::Stop),
+                    ("Стоп юнит", Action::Stop),
                 ],
             ),
             (false, vec![("Автоатака", Action::AutoAttack)]),
@@ -188,6 +189,20 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Энергопушка", Action::Weapon(1)),
                     ("Фугас", Action::Weapon(0)),
                     ("Анипушка", Action::Weapon(2)),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    ("Огнемёт", Action::Weapon(3)),
+                    ("Пулемёт", Action::Weapon(4)),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    ("Танк / сброс", Action::Chassis(RangeUnitKind::Tank)),
+                    ("Шагоход / сброс", Action::Chassis(RangeUnitKind::Strider)),
                 ],
             ),
             (
@@ -242,7 +257,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Обзор", Action::Overview),
-                    ("Мой танк", Action::Own),
+                    ("Мой юнит", Action::Own),
                     ("Мишень", Action::Target),
                 ],
             ),
@@ -398,6 +413,39 @@ pub fn actions(
             }
             Action::Patrol => scene.sim.toggle_patrols(),
             Action::Routes => panel.routes = !panel.routes,
+            Action::Chassis(kind) => {
+                panel.pending = None;
+                if let Some(mut layout) = edit.layout.clone() {
+                    layout.gun_kind = kind;
+                    let w = if kind == RangeUnitKind::Strider {
+                        4
+                    } else {
+                        weapon_of(&scene)
+                    };
+                    let delivery = match w {
+                        3 => Delivery::Flame,
+                        4 => Delivery::MachineGun,
+                        _ => Delivery::Blast,
+                    };
+                    let cfg = knobs::effective_config(
+                        scene.energy,
+                        scene.anni,
+                        scene.power,
+                        delivery,
+                        overrides,
+                    );
+                    match edit.commit(layout, cfg) {
+                        Ok(()) => {
+                            if delivery != Delivery::Blast {
+                                scene.energy = false;
+                                scene.anni = false;
+                            }
+                            scene.notice = "Шасси сменится со сбросом опыта".into();
+                        }
+                        Err(e) => scene.notice = e.to_string(),
+                    }
+                }
+            }
             Action::Weapon(e) => {
                 let p = panel.pending.map_or(scene.power, |v| v.1);
                 panel.pending = Some((e, p));
@@ -462,7 +510,13 @@ pub fn actions(
                     }
                     if let Err(e) = edit.commit(
                         layout,
-                        knobs::effective_config(scene.energy, scene.anni, scene.power, overrides),
+                        knobs::effective_config(
+                            scene.energy,
+                            scene.anni,
+                            scene.power,
+                            scene.sim.config.delivery,
+                            overrides,
+                        ),
                     ) {
                         scene.notice = e;
                     }
@@ -484,6 +538,7 @@ pub fn actions(
                     scene.energy,
                     scene.anni,
                     scene.power,
+                    scene.sim.config.delivery,
                     overrides,
                 )) {
                     Ok(()) => {
@@ -529,10 +584,15 @@ pub fn actions(
     }
     if (edit.editing || scene.sim.ready()) && panel.pending.is_some() {
         let (w, p) = panel.pending.take().unwrap();
-        scene.energy = w >= 1;
+        scene.energy = w == 1 || w == 2;
+        let delivery = match w {
+            3 => Delivery::Flame,
+            4 => Delivery::MachineGun,
+            _ => Delivery::Blast,
+        };
         scene.anni = w == 2;
         scene.power = p;
-        let cfg = knobs::effective_config(scene.energy, scene.anni, p, overrides);
+        let cfg = knobs::effective_config(scene.energy, scene.anni, p, delivery, overrides);
         scene.sim.reconfigure(cfg);
         let origin = gas.params.origin;
         configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
@@ -542,6 +602,11 @@ pub fn actions(
 /// The scene's weapon as the panel counts them: shell 0, energy bolt 1,
 /// annihilation bolt 2.
 fn weapon_of(scene: &Scene) -> u8 {
+    match scene.sim.config.delivery {
+        Delivery::Flame => return 3,
+        Delivery::MachineGun => return 4,
+        Delivery::Blast => {}
+    }
     if scene.anni {
         2
     } else if scene.energy {
@@ -591,6 +656,7 @@ pub fn refresh(
             Action::Pause => scene.paused,
             Action::Fire => panel.ground_fire,
             Action::AutoAttack => scene.sim.auto_attack,
+            Action::Chassis(k) => k == scene.sim.gun.kind,
             Action::Weapon(w) => w == panel.pending.map_or(weapon_of(&scene), |v| v.0),
             Action::Power(p) => p == panel.pending.map_or(scene.power, |v| v.1),
             Action::Tool(t) => edit.tool == t,
@@ -705,6 +771,18 @@ pub fn refresh(
     } else {
         "РЕАЛЬНОЕ ВРЕМЯ · 1×"
     };
+    let weapon_hint = match scene.sim.config.delivery {
+        Delivery::Flame => format!(
+            "Огнемёт · дальность {} м",
+            scene.sim.streams.tuning.flame.range / 10
+        ),
+        Delivery::MachineGun => format!(
+            "Пулемёт · {} ствола · дальность {} м",
+            scene.sim.stream_muzzles().len(),
+            scene.sim.streams.tuning.machine_gun.range / 10
+        ),
+        Delivery::Blast => String::new(),
+    };
     let readiness = if scene.sim.ready() {
         "Готов к выстрелу"
     } else {
@@ -728,7 +806,7 @@ pub fn refresh(
             )
         };
         *t = Text::new(format!(
-            "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{target}{shields}\n{}{debris}{}",
+            "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{weapon_hint}\n{target}{shields}\n{}{debris}{}",
             scene.fps,
             scene.step_us as f32 / 1000.0,
             if panel.pending.is_some() {

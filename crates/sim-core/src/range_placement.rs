@@ -92,7 +92,10 @@ impl Validator {
     pub fn validate(&self, layout: &RangeLayout) -> Result<(), Rejection> {
         layout.validate().map_err(Rejection::Layout)?;
         let terrain = RangeTerrain::new(true, Some(layout.clone()));
-        let mut units = vec![(&self.footprints[0], layout.gun)];
+        let mut units = vec![(
+            &self.footprints[usize::from(layout.gun_kind == RangeUnitKind::Strider)],
+            layout.gun,
+        )];
         units.extend(layout.units.iter().map(|u| {
             (
                 &self.footprints[usize::from(u.kind == RangeUnitKind::Strider)],

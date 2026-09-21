@@ -290,7 +290,8 @@ mod tests {
     fn worker_owns_a_snapshot_while_the_authoritative_body_keeps_changing() {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
-        let mut sim = range_sim(true, false, 1000, Some(&layout), false, None).unwrap();
+        let mut sim =
+            range_sim(scaled_config(true, false, 1000), Some(&layout), false, None).unwrap();
         for _ in 0..250 {
             sim.step();
         }

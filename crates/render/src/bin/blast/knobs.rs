@@ -649,8 +649,14 @@ impl Overrides {
 /// The weapon preset with the turned weapon knobs on top of the power
 /// scaling: the knob shows the value in force, and the value it sets is
 /// the one in force whatever the power button says.
-pub fn effective_config(energy: bool, anni: bool, power: u32, o: &Overrides) -> ExplosionConfig {
-    let mut c = scaled_config(energy, anni, power);
+pub fn effective_config(
+    energy: bool,
+    anni: bool,
+    power: u32,
+    delivery: Delivery,
+    o: &Overrides,
+) -> ExplosionConfig {
+    let mut c = weapon_config(energy, anni, power, delivery);
     for (key, v) in &o.values {
         if let Some(f) = key.strip_prefix("weapon.") {
             set_weapon(&mut c, f, *v);
@@ -880,7 +886,13 @@ pub struct Reach<'a, 'w, 's, 'b> {
 /// scaling and every weapon override, so `o` must already hold the value.
 pub fn apply(key: &str, v: f64, r: &mut Reach, o: &Overrides) {
     if key.starts_with("weapon.") {
-        let cfg = effective_config(r.scene.energy, r.scene.anni, r.scene.power, o);
+        let cfg = effective_config(
+            r.scene.energy,
+            r.scene.anni,
+            r.scene.power,
+            r.scene.sim.config.delivery,
+            o,
+        );
         r.scene.sim.reconfigure(cfg);
         let origin = r.gas.params.origin;
         configure_gas(&r.scene.sim, r.scene.energy, r.scene.anni, r.gas);

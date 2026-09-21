@@ -375,7 +375,8 @@ impl UnitBody {
         std::sync::Arc::make_mut(&mut self.weapon_paths).push(path);
     }
 
-    fn barrel_connected(&self, path: &WeaponPath, reached: &[u64]) -> bool {
+    /// Whether this individual barrel still joins its breech to its muzzle.
+    pub fn barrel_connected(&self, path: &WeaponPath, reached: &[u64]) -> bool {
         let axis = usize::from(path.axis);
         if (0..3).any(|a| path.min[a] >= path.max[a]) {
             return false;
