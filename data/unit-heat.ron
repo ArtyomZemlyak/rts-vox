@@ -1,0 +1,12 @@
+// Local unit heat. One heat unit uses the same scale as terrain Heat.
+// Thresholds are energy per 100 mm cube; larger cells require more energy.
+(
+    cells_per_tick: 512,
+    max_cells: 16384,
+    cooling_milli: 8,
+    conduction_milli: 8,
+    // Armour, core, engine, weapon, sensor. Geometry shields inner cells.
+    softening: (400, 650, 160, 350, 120),
+    smoke: 90,
+    glow: 140,
+)

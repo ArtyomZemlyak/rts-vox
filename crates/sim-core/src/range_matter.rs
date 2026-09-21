@@ -196,6 +196,65 @@ impl Matter {
         let at = p.map(|v| v as i32);
         self.debris.claim_voxel(w, p, m, at, 0, 2, &self.tuning)
     }
+    /// Heat has already softened this cell. Transfer it without explosive
+    /// fracture work or a launch impulse, like melted terrain.
+    pub fn melt_unit(&mut self, id: usize, u: &RangeUnit, part: usize, cell: [usize; 3]) -> bool {
+        if self.debris.fragment_room(&self.tuning) == 0 {
+            return false;
+        }
+        let (body, frame) = if part == 0 {
+            (&u.body, &u.pose)
+        } else {
+            (&u.body.segments[part - 1].body, &u.seg_frames[part - 1])
+        };
+        let [x, y, z] = cell;
+        if !body.vol.get(x, y, z) {
+            return false;
+        }
+        let amount = self.economy.per_voxel(3);
+        let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+        assert_eq!(
+            self.economy.ledger.transfer(self.bodies[id], held, amount),
+            amount
+        );
+        let density = self.economy.mats.get(3).unwrap().density;
+        let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        let speed = u
+            .motion
+            .drive
+            .vel
+            .div(Fx::from_int(crate::TICKS_PER_SECOND));
+        let velocity = V3::new(
+            fx::angle::cos(u.motion.drive.head).mul(speed),
+            u.motion.hull.vy.div(Fx::from_int(crate::TICKS_PER_SECOND)),
+            fx::angle::sin(u.motion.drive.head).mul(speed),
+        );
+        self.debris.emit_body_fragment(
+            Fragment {
+                id: 0,
+                position,
+                velocity,
+                material: 3,
+                paint: Some([1, body.finish_at(x, y, z), body.part_at(x, y, z) as u8]),
+                mm: body.mm,
+                basis: [frame.x, frame.y, frame.z],
+                mass_g: u64::from(density)
+                    * u64::from(self.tuning.density_kg_m3_per_density)
+                    * u64::from(body.mm).pow(3)
+                    / 1_000_000,
+                count: 1,
+                shape: 1,
+                side: 2,
+                chunk: None,
+                held,
+                resting: false,
+            },
+            V3::ZERO,
+            0,
+            &self.tuning,
+        );
+        true
+    }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
         let m = material(w, p);
         let (cost, motion) = self.cost(m);

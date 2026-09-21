@@ -24,6 +24,7 @@ pub mod shield;
 pub mod skirmish;
 pub mod tuning;
 pub mod turret;
+pub mod unit_heat;
 pub mod vox;
 pub mod weapons;
 

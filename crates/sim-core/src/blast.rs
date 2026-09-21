@@ -1462,10 +1462,14 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_thermal.rs"]
+pub mod thermal;
 #[path = "range_weapons.rs"]
 pub mod weapons;
 
 pub struct BlastRange {
+    pub thermals: thermal::Thermals,
+    pub thermal_tuning: modding::unit_heat::Tuning,
     pub streams: weapons::Streams,
     pub matter: matter::Matter,
     pub world: World,
@@ -1684,6 +1688,11 @@ impl BlastRange {
         });
         let mut result = Self {
             streams: weapons::Streams::default(),
+            thermals: thermal::Thermals::default(),
+            thermal_tuning: modding::unit_heat::Tuning::from_ron(include_str!(
+                "../../../data/unit-heat.ron"
+            ))
+            .expect("unit heat tuning"),
             matter,
             gun,
             player: false,
@@ -1781,7 +1790,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(31);
+        b.u32(32);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1946,13 +1955,14 @@ impl BlastRange {
         self.bodies.save(&mut b);
         b.bool(self.world_steady);
         self.streams.save(&mut b);
+        self.thermals.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2345,6 +2355,9 @@ impl BlastRange {
         r.world_steady = s.bool();
         if version >= 31 {
             r.streams.load(&mut s)?;
+        }
+        if version >= 32 {
+            r.thermals.load(&mut s, &r.units, &r.thermal_tuning)?;
         }
         (s.ok() && s.left() == 0).then_some(r)
     }
@@ -2839,6 +2852,7 @@ impl BlastRange {
                 }
             }
         }
+        self.step_unit_heat();
         self.world_steady = self.world.flush().applied == 0;
         completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse
@@ -3131,6 +3145,7 @@ mod tests {
         let mut bytes = r.snapshot();
         let mut tail = fx::blob::Blob::new();
         r.streams.save(&mut tail);
+        r.thermals.save(&mut tail);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();

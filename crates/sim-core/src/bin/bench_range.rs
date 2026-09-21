@@ -43,6 +43,7 @@ fn main() {
         scene.control();
         let mut samples = Vec::new();
         let mut shots = 0;
+        let mut hottest = 0;
         let mut phases = std::collections::BTreeMap::<&str, (u128, usize)>::new();
         for tick in 0..1800 {
             if firing && tick % 180 == 0 && scene.refire() {
@@ -60,6 +61,7 @@ fn main() {
                 }
             });
             samples.push(start.elapsed().as_micros());
+            hottest = hottest.max(scene.thermals.hot());
         }
         // The slowest ticks by number: a spike names its moment.
         let mut top: Vec<(u128, usize)> = samples.iter().copied().zip(0..).collect();
@@ -76,6 +78,10 @@ fn main() {
         for (name, (us, tick)) in phases {
             println!("phase={name} firing={firing} max_us={us} tick={tick}");
         }
+        println!(
+            "thermal_peak_cells={hottest} melted={} rejected_heat={}",
+            scene.thermals.melted, scene.thermals.rejected_heat
+        );
         samples.sort_unstable();
         let laps: Vec<_> = scene
             .units

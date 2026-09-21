@@ -1,6 +1,7 @@
 //! Bounded cubic combustion: hot torn tongues, cooling embers and coarse smoke.
 //! Pure presentation; body integrity and stream contacts come from sim-core.
 use super::*;
+use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
 #[derive(Component)]
 pub(super) struct Layer(bool);
@@ -23,6 +24,7 @@ pub struct Effects {
     serial: u32,
     last_frame: Option<f32>,
     sources: Vec<(u64, Option<[usize; 3]>)>,
+    heat_spots: Vec<(HeatCell, u32)>,
 }
 fn noise(n: u32) -> f32 {
     let n = (n ^ (n >> 16)).wrapping_mul(0x7feb352d);
@@ -37,6 +39,7 @@ impl Effects {
         self.particles.clear();
         self.dead_since.clear();
         self.sources.clear();
+        self.heat_spots.clear();
         self.serial = 0;
         self.last_frame = None;
     }
@@ -150,6 +153,31 @@ impl Effects {
                 }
             }
         }
+        self.heat_spots.clear();
+        let mut warmest = vec![None; sim.units.len()];
+        for (cell, heat) in sim.thermals.cells() {
+            let Some(body) = cell.body(&sim.units) else {
+                continue;
+            };
+            let temp = temperature(heat, body.mm);
+            if temp >= sim.thermal_tuning.glow {
+                self.heat_spots.push((cell, temp));
+            }
+            let hottest = &mut warmest[usize::from(cell.unit)];
+            if temp >= sim.thermal_tuning.smoke && hottest.is_none_or(|(_, h)| temp > h) {
+                *hottest = Some((cell, temp));
+            }
+        }
+        self.heat_spots
+            .sort_by_key(|(p, h)| (std::cmp::Reverse(*h), *p));
+        self.heat_spots.truncate(128);
+        if sim.tick.is_multiple_of(3) {
+            for (cell, _) in warmest.into_iter().flatten() {
+                if let Some(at) = cell.world(&sim.units) {
+                    self.plume(point(at), now, false, 0.65);
+                }
+            }
+        }
         // Spread terrain sources over the burning set, bounded independently of its size.
         for p in sim
             .heat
@@ -253,6 +281,7 @@ fn cube(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4]) {
         }
     }
 }
+#[allow(clippy::too_many_arguments)] // Independent Bevy resources and read-only pose queries.
 pub fn draw(
     mut commands: Commands,
     scene: Res<Scene>,
@@ -260,6 +289,7 @@ pub fn draw(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera: Query<&Transform, With<Camera3d>>,
+    bodies: Query<(&Witness, &Transform)>,
     mut layers: Query<(&Layer, &mut Visibility)>,
 ) {
     if fx.fire.is_none() {
@@ -345,6 +375,48 @@ pub fn draw(
             cube(&mut hot, at, edge, col);
         }
     }
+    // Use exactly the interpolated transforms already applied to visible meshes,
+    // including solved legs. Current simulation poses can lead the picture by a tick.
+    let mut poses = std::collections::BTreeMap::new();
+    if !fx.heat_spots.is_empty() {
+        for (w, tr) in &bodies {
+            poses.entry((w.0, w.2)).or_insert(*tr);
+        }
+    }
+    for &(cell, heat) in &fx.heat_spots {
+        let id = usize::from(cell.unit);
+        let seg = cell.part.checked_sub(1).map(usize::from);
+        let Some(tr) = poses.get(&(id, seg)) else {
+            continue;
+        };
+        let Some(body) = cell.body(&scene.sim.units) else {
+            continue;
+        };
+        let level = (heat as f32 / scene.sim.thermal_tuning.glow as f32 - 1.0).clamp(0.0, 3.0);
+        let start = hot.pos.len();
+        let unit = &scene.sim.units[id];
+        let pivot = if let Some(seg) = seg {
+            render::model::pivot_centre(&unit.body.segments[seg].attach)
+        } else {
+            render::model::root_centre(body)
+        };
+        let local = (Vec3::from(cell.at.map(|v| v as f32)) + Vec3::splat(0.5) - Vec3::from(pivot))
+            * (body.mm as f32 / voxel::unit::WORLD_MM as f32);
+        let centre = tr.translation + tr.rotation * local;
+        cube(
+            &mut hot,
+            centre,
+            body.mm as f32 / voxel::unit::WORLD_MM as f32 * 1.06,
+            [0.8 + level * 1.4, 0.025 + level * 0.12, 0.006, 0.65],
+        );
+        let rotation = tr.rotation;
+        for p in &mut hot.pos[start..] {
+            *p = (centre + rotation * (Vec3::from(*p) - centre)).to_array();
+        }
+        for n in &mut hot.nrm[start..] {
+            *n = (rotation * Vec3::from(*n)).to_array();
+        }
+    }
     for (layer, mut visible) in &mut layers {
         *visible = if if layer.0 {
             smoke.is_empty()
@@ -412,6 +484,37 @@ mod tests {
                 .iter()
                 .any(|p| p.at == point(at) && p.edge == 3.8));
         }
+    }
+    #[test]
+    fn hot_metal_glows_and_smokes_without_structural_damage() {
+        let mut r = BlastRange::new(config(true, false));
+        let body = &r.units[0].body;
+        let mut at = [0; 3];
+        'outer: for z in 0..body.vol.nz {
+            for y in 0..body.vol.ny {
+                for x in 0..body.vol.nx {
+                    if body.vol.get(x as usize, y as usize, z as usize) {
+                        at = [x, y, z];
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let cell = HeatCell {
+            unit: 0,
+            part: 0,
+            at,
+        };
+        r.thermals.deposit(cell, 250, &r.thermal_tuning);
+        r.tick = 3;
+        let mut effects = Effects::default();
+        effects.capture(&r);
+        assert_eq!(effects.heat_spots, vec![(cell, 250)]);
+        assert!(!effects.particles.is_empty());
+        assert!(effects.particles.iter().all(|p| p.smoke));
+        assert_eq!(r.units[0].revision, 0);
+        effects.clear();
+        assert!(effects.heat_spots.is_empty());
     }
     #[test]
     fn flame_cubes_have_outward_faces_and_keep_cpu_mesh_for_updates() {

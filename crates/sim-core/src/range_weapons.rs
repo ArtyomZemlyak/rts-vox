@@ -171,6 +171,18 @@ impl BlastRange {
             {
                 return;
             }
+            if flame {
+                self.thermals.deposit(
+                    thermal::Cell {
+                        unit: id as u16,
+                        part: part as u8,
+                        at: cell.map(|v| v as u8),
+                    },
+                    tuning.heat,
+                    &self.thermal_tuning,
+                );
+                return;
+            }
             let pressure = tuning.work;
             let need = u.resistance(p, &self.config);
             if pressure >= need {
@@ -430,6 +442,8 @@ mod tests {
         }
         assert!(open.units[0].revision > 0, "flame never reached target");
         assert_eq!(wall.units[0].revision, 0, "flame went through cover");
+        assert_eq!(wall.thermals.hot(), 0, "heat teleported through cover");
+        assert!(open.thermals.hot() > 0, "the exposed body retained no heat");
         assert!(open.explosion.is_none() && wall.explosion.is_none());
         assert!(
             open.units[0].detached > 0,
@@ -473,7 +487,10 @@ mod tests {
             a.step();
             b.step();
         }
-        assert!(a.units[0].revision > 0);
+        assert!(
+            a.thermals.hot() > 0,
+            "in-flight heat never reached the body"
+        );
         assert_eq!(a.state_hash(), b.state_hash());
     }
     #[test]
