@@ -608,6 +608,52 @@ mod tests {
             below.position.y
         );
     }
+    #[test]
+    fn overlapping_airborne_pieces_cannot_hold_each_other_up() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        for i in 0..2 {
+            let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+            b.fragments.push(Fragment {
+                id: i + 1,
+                position: V3::new(
+                    Fx::from_int(48),
+                    Fx::from_int(30).add(Fx::from_ratio(i as i32, 4)),
+                    Fx::from_int(48),
+                ),
+                velocity: V3::ZERO,
+                material: i as u16 + 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 9600,
+                count: 8,
+                shape: 0xff,
+                side: 2,
+                chunk: None,
+                held,
+                resting: true,
+            });
+        }
+        for tick in 0..180 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert_eq!(b.fragments.len(), 2);
+        assert!(
+            b.fragments
+                .iter()
+                .all(|f| f.resting && f.position.y < Fx::from_int(16)),
+            "mutual support left pieces in mid-air"
+        );
+    }
     /// A piece that came to rest against a live hull's flank is no floor
     /// under that hull (ADR-302): the columns of the hull's box it reaches
     /// stay out of the map, its own columns outside stay in, and a piece
@@ -2533,6 +2579,7 @@ fn supported(
             [0, 1, 2].map(|a| p[a].add(low[a])),
             [0, 1, 2].map(|a| p[a].add(high[a])),
             skip,
+            Some(f.position.y.add(low[1])),
         )
 }
 /// The boxes of resting pieces, in the cells a flying piece may reach
@@ -2614,7 +2661,7 @@ impl Settled {
     }
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.
-    fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32) -> bool {
+    fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
         if self.cells.is_empty() {
             return false;
         }
@@ -2632,6 +2679,12 @@ impl Settled {
                         let Some((qlo, qhi)) = self.boxes.get(i) else {
                             continue;
                         };
+                        // Support is a top face reached from above, not
+                        // an existing overlap. Otherwise two intersecting
+                        // pieces can hold each other in mid-air forever.
+                        if from_above.is_some_and(|bottom| qhi[1] > bottom) {
+                            continue;
+                        }
                         if (0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a]) {
                             return true;
                         }
@@ -2730,6 +2783,7 @@ fn advance_fragment(
                     [0, 1, 2].map(|a| p[a].add(low[a])),
                     [0, 1, 2].map(|a| p[a].add(high[a])),
                     skip,
+                    (axis == 1 && delta[axis] < Fx::ZERO).then_some(f.position.y.add(low[1])),
                 );
             if blocked {
                 supported |= axis == 1 && delta[axis] < Fx::ZERO;

@@ -105,22 +105,31 @@ impl Job {
         source: &UnitBody,
         core: &mut CoreBufs,
     ) -> Option<Self> {
+        source.status(core);
+        let mut allowed = source.vol.clone();
+        for (w, r) in allowed.cols.iter_mut().zip(core.reached_cols()) {
+            *w &= !r;
+        }
+        Self::load_domain(unit, generation, s, source, &allowed)
+    }
+    pub(crate) fn load_domain(
+        unit: u32,
+        generation: u32,
+        s: &mut Scan,
+        source: &UnitBody,
+        uncommitted: &UnitVol,
+    ) -> Option<Self> {
         let scan = UnitComponents::load(s)?;
         let cursor = s.usize();
         let count = s.list(3);
-        let status = source.status(core);
-        if !status.alive
-            || scan.dims() != [source.vol.nx, source.vol.ny, source.vol.nz]
-            || count > status.detached as usize
+        let detached = uncommitted.solid_count() as usize;
+        if scan.dims() != [source.vol.nx, source.vol.ny, source.vol.nz]
+            || count > detached
             || cursor > count
         {
             return None;
         }
-        let mut uncommitted = source.vol.clone();
-        for (w, r) in uncommitted.cols.iter_mut().zip(core.reached_cols()) {
-            *w &= !r;
-        }
-        if !scan.contained_in(&uncommitted) {
+        if !scan.contained_in(uncommitted) {
             return None;
         }
         let domain = scan.mask();
@@ -154,8 +163,7 @@ impl Job {
         }
         // Damage outside the domain may have cut more cells loose since the
         // job began; those wait for the next job, so the count is a floor.
-        (s.ok() && j.scan.pending_count() + count <= status.detached as usize && !j.finished())
-            .then_some(j)
+        (s.ok() && j.scan.pending_count() + count <= detached && !j.finished()).then_some(j)
     }
 }
 impl Bodies {

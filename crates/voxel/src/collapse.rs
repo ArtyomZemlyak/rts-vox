@@ -237,6 +237,11 @@ pub struct CollapseLayer {
 }
 
 impl CollapseLayer {
+    /// Work survives the edit batch that started it: frontier expansion,
+    /// deferred relabels and retries for a full body pool.
+    pub fn pending(&self) -> bool {
+        self.recheck || !self.frontier.is_empty() || !self.pending.is_empty()
+    }
     /// Поставить потолок на размер отвала из данных.
     ///
     /// Отдельным вызовом, а не параметром конструктора: слой строят
@@ -374,7 +379,7 @@ impl CollapseLayer {
         // Замер: в мире 320³ подрез ножки гриба даёт правки в тиках
         // 0–2 и фронтир в 14 чанков на тике 2; без этой строки отвала
         // не происходит ни разу за сорок тиков.
-        if self.dirty.is_empty() && !self.recheck && self.frontier.is_empty() {
+        if self.dirty.is_empty() && !self.pending() {
             return st;
         }
 
@@ -456,6 +461,7 @@ impl CollapseLayer {
         st.promoted = self.promote(w);
         st.frontier = self.frontier.len();
 
+        let refused_before = bodies.refused;
         let mut torn_total = 0usize;
         for round in 0..MAX_ROUNDS {
             st.rounds = round + 1;
@@ -476,7 +482,7 @@ impl CollapseLayer {
         // Оторвав кусок, каскад мог лишить опоры что-то ещё. Разбор
         // повторяется **следующим тиком**, а не сейчас: замер говорит,
         // что повторный раунд не находит ничего, а стоит как первый.
-        self.recheck = torn_total > 0;
+        self.recheck = torn_total > 0 || st.too_big > 0 || bodies.refused > refused_before;
         st.rounds_capped = self.recheck;
         self.report(&mut st);
         st

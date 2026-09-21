@@ -395,14 +395,6 @@ impl Motion {
             self.shove.scale(left.div(len))
         };
     }
-    /// Whether a burst left the hull moving: a shove, a hop or a spin the
-    /// suspension has not yet settled.
-    fn disturbed(&self) -> bool {
-        self.shove.len_sq() != Fx::ZERO
-            || self.hull.vy != Fx::ZERO
-            || self.hull.w.x != Fx::ZERO
-            || self.hull.w.z != Fx::ZERO
-    }
     /// The legs of this hull, in template order; empty for a tracked one.
     pub fn rigs(&self) -> &[crate::gait::LegRig] {
         &self.rigs
@@ -525,18 +517,37 @@ impl Motion {
     /// The ride of this hull now: the chassis' ride at the range's gravity
     /// and the body's own mobility (ADR-305), low on its legs when none
     /// carries them (ADR-304).
-    fn ride_now(&self, gravity: i32, response: crate::mobility::Mobility) -> phys::Ride {
+    fn ride_now(
+        &self,
+        b: &UnitBody,
+        gravity: i32,
+        response: crate::mobility::Mobility,
+    ) -> phys::Ride {
         let mut r = crate::ride::ride_of(&self.chassis);
         r.gravity = Fx::from_int(gravity);
         r.preload = r.gravity.div(Fx::from_int(4));
         if !self.carried() {
-            r.clearance = r.clearance.mul(Fx::from_ratio(self.collapse_pct, 100));
+            // The surviving root lands on its belly. Empty space where
+            // the legs used to be is not a contact surface. Keep the
+            // original body origin / suspension anchor relationship.
+            let low = (0..b.vol.ny as usize)
+                .find(|&y| {
+                    (0..b.vol.nz as usize).any(|z| {
+                        let start = (z * b.vol.ny as usize + y) * b.vol.words as usize;
+                        b.vol.cols[start..start + b.vol.words as usize]
+                            .iter()
+                            .any(|v| *v != 0)
+                    })
+                })
+                .unwrap_or(0);
+            let belly = Fx::from_ratio(low as i32 * b.mm as i32, voxel::unit::WORLD_MM as i32);
+            let gap = r.clearance.mul(Fx::from_ratio(self.collapse_pct, 100));
+            r.clearance = r.clearance.sub(belly).add(gap);
         }
         response.ride(r)
     }
-    /// A parked walker's hull rests on its legs (ADR-280): a lost leg lets
-    /// it sink and lean where it stands. A tracked hull keeps the resting
-    /// pose unless a burst disturbed it (ADR-286).
+    /// Passive physics remains active without a drive order. Zero velocity
+    /// does not prove support: terrain may disappear or a hop reach its apex.
     fn settle(
         &mut self,
         w: &World,
@@ -545,16 +556,13 @@ impl Motion {
         gravity: i32,
         response: crate::mobility::Mobility,
     ) {
-        if self.rigs.is_empty() && !self.disturbed() {
-            return;
-        }
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
         let mut ground =
             nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
                 .with_rubble(rubble);
         let shape = self.shape(b);
         let f = ground
-            .pose([self.pos[0], self.pos[2]], self.drive.head, shape)
+            .support_pose([self.pos[0], self.pos[2]], self.drive.head, shape)
             .floors;
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
@@ -562,7 +570,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let r = self.ride_now(gravity, response);
+        let r = self.ride_now(b, gravity, response);
         phys::step(
             &mut self.hull,
             &support,
@@ -572,7 +580,24 @@ impl Motion {
             &r,
             Fx::from_ratio(1, 30),
         );
-        self.pos[1] = self.hull.y.sub(r.clearance);
+        self.pos[1] = self
+            .hull
+            .y
+            .sub(crate::ride::ride_of(&self.chassis).clearance);
+    }
+    pub(super) fn passive(
+        &mut self,
+        w: &World,
+        rubble: &nav::vehicle::Rubble,
+        b: &UnitBody,
+        gravity: i32,
+        response: crate::mobility::Mobility,
+        others: &[Obstacle],
+    ) {
+        self.cut.clear();
+        let moved = self.slide(w, rubble, b, others, response);
+        self.settle(w, rubble, b, gravity, response);
+        self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
     }
     /// Advance a walker's feet one tick from the motion just accepted
     /// (ADR-279): the displacement, yaw step and phase advance of this
@@ -849,12 +874,10 @@ impl Motion {
         if !self.enabled {
             // A parked hull that a burst pushed slides and rocks (ADR-286);
             // a parked walker still stands on its feet, and its hull on them.
-            let moved = self.slide(w, rubble, b, others, response);
-            self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
-            self.settle(w, rubble, b, gravity, response);
+            self.passive(w, rubble, b, gravity, response, others);
             return;
         }
-        let engine = engine && response.traction > Fx::ZERO;
+        let engine = engine && response.traction > Fx::ZERO && self.carried();
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
         self.hunt_step(w, b, others, rubble, tick, steady);
@@ -1108,11 +1131,9 @@ impl Motion {
         }
         let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
-        let f = if allowed {
-            target.floors
-        } else {
-            current.floors
-        };
+        let f = ground
+            .support_pose([self.pos[0], self.pos[2]], self.drive.head, shape)
+            .floors;
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         // A walker stands on the legs it still has (ADR-280); a tracked
@@ -1120,7 +1141,7 @@ impl Motion {
         let (support, ground) = self
             .foot_supports(&nominal, &floors)
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
-        let r = self.ride_now(gravity, response);
+        let r = self.ride_now(b, gravity, response);
         let sway = crate::ride::sway_of(
             self.drive.vel.sub(old.vel).mul(Fx::from_int(30)),
             self.drive.vel,
@@ -1136,7 +1157,10 @@ impl Motion {
             &r,
             Fx::from_ratio(1, 30),
         );
-        self.pos[1] = self.hull.y.sub(r.clearance);
+        self.pos[1] = self
+            .hull
+            .y
+            .sub(crate::ride::ride_of(&self.chassis).clearance);
         let linear = V3::new(
             self.pos[0].sub(old_pos[0]),
             Fx::ZERO,

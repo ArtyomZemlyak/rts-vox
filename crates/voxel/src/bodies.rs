@@ -63,10 +63,11 @@ pub struct Body {
     pub fy: Fx,
     /// Тело только что отвалилось и в этом тике ещё не падает.
     ///
-    /// Пауза в один тик нужна не физике, а порядку фаз: между отрывом
+    /// Пауза минимум в один тик нужна порядку фаз: между отрывом
     /// и падением кто-то должен успеть посадить на кусок наездников,
     /// а внутри одного тика такого места нет. Отставание
-    /// детерминированное и одинаковое у всех (ADR-133).
+    /// детерминированное и одинаковое у всех (ADR-133). При неполном
+    /// дренаже правок тело ждёт удаления исходных ячеек (ADR-345).
     pub fresh: bool,
     pub resting: bool,
     /// Юниты, едущие на теле. Индексы во внешнем массиве юнитов;
@@ -277,6 +278,19 @@ impl Bodies {
             if self.list[i].resting {
                 i += 1;
                 continue;
+            }
+            if self.list[i].fallen == 0 {
+                // Detachment digs use the world's bounded edit queue. A
+                // large piece waits for its source cells to drain, without
+                // adding a second delay to ordinary one-tick detachment.
+                let b = &self.list[i];
+                if b.voxels.iter().any(|v| {
+                    let (x, y, z) = b.world_of(*v);
+                    x >= 0 && y >= 0 && z >= 0 && w.solid(x as u32, y as u32, z as u32)
+                }) {
+                    i += 1;
+                    continue;
+                }
             }
             if self.list[i].can_fall(w) {
                 // Скорость растёт на тяготение, высота — на скорость.
@@ -522,6 +536,33 @@ mod tests {
             }
         }
         assert_eq!(solid, 8, "кубик не восстановился на полу");
+    }
+
+    #[test]
+    fn partial_detachment_waits_for_its_cells_but_not_an_extra_tick() {
+        let mut w = world();
+        let cells: Vec<_> = (10..12)
+            .flat_map(|z| (10..12).flat_map(move |y| (10..12).map(move |x| (x, y, z))))
+            .collect();
+        for &(x, y, z) in &cells {
+            w.queue_edit(crate::Edit::put(x, y, z, 3));
+        }
+        w.flush();
+        w.max_edits_per_tick = 1;
+        let mut bodies = Bodies::new(8, Fx::ONE);
+        assert!(bodies.detach(&mut w, &cells));
+        bodies.step(&mut w);
+        for _ in 1..cells.len() {
+            w.flush();
+            bodies.step(&mut w);
+            assert_eq!(bodies.list.len(), 1, "body baked into its undrained source");
+            assert_eq!(bodies.list[0].oy, 10);
+            assert_eq!(bodies.list[0].vy, Fx::ZERO);
+        }
+        w.flush();
+        assert_eq!(w.queued(), 0);
+        bodies.step(&mut w);
+        assert_eq!(bodies.list[0].fallen, 1, "extra delay after source cleared");
     }
 
     /// Тело, стоящее на полу, не падает вовсе.

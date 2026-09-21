@@ -164,11 +164,7 @@ impl BlastRange {
             let Some((part, cell)) = u.hit(p) else {
                 return;
             };
-            if part == 0
-                && u.section
-                    .as_ref()
-                    .is_some_and(|j| j.holds(cell.map(|v| v as u8)))
-            {
+            if u.section_holds(part, cell.map(|v| v as u8)) {
                 return;
             }
             if flame {

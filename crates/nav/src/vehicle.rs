@@ -424,6 +424,13 @@ impl<'a> Probe<'a> {
         }
         (height, steep)
     }
+    pub fn support_pose(&mut self, pos: [Fx; 2], head: i32, mut s: Shape) -> Pose {
+        // Contact belongs to the footprint. Looking beyond the track's
+        // end makes a neighbouring wall lift even a parked vehicle.
+        // Route clearance still looks ahead over the full approach span.
+        s.span = s.span.min((s.half[0] - s.support[0]).max(0));
+        self.pose(pos, head, s)
+    }
     pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let point = |x: i32, z: i32| {

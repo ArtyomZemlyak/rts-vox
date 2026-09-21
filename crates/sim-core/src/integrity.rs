@@ -117,6 +117,16 @@ fn sections(body: &UnitBody, path: WeaponPath, reached: &[u64]) -> Vec<u32> {
 }
 
 impl Model {
+    pub fn severed_legs(&self, body: &UnitBody) -> Vec<bool> {
+        body.legs
+            .iter()
+            .map(|leg| {
+                [leg.thigh, leg.shin]
+                    .iter()
+                    .any(|i| severed(&body.segments[usize::from(*i)].body))
+            })
+            .collect()
+    }
     pub fn new(template: &UnitBody) -> Self {
         Self {
             rules: modding::integrity::Integrity::from_ron(include_str!(

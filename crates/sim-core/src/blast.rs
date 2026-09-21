@@ -22,6 +22,12 @@ use voxel::topo::unit::CoreBufs;
 use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
 
+#[path = "range_structure.rs"]
+mod structure;
+#[cfg(test)]
+#[path = "range_support_tests.rs"]
+mod support_tests;
+
 /// The range as it is without a layout to say otherwise. A layout
 /// carries its own size (ADR-315), and the scene reads it from there.
 pub const SIZE: [u32; 3] = modding::range::stock_size();
@@ -63,7 +69,7 @@ pub struct RangeUnit {
     section: Option<crate::damage::SectionJob>,
     /// Rest-pose frames of the segments, refreshed with the pose (ADR-278).
     pub seg_frames: Vec<crate::damage::Frame>,
-    /// Segment cells removed by damage: segment index and cell. Saved.
+    /// Segment cells removed by damage or separation: index and cell. Saved.
     pub seg_removed: Vec<(u8, [u8; 3])>,
     seg_dents: BTreeMap<(u8, [u8; 3]), u32>,
     /// Segment cells handed to persistent debris rather than annihilated.
@@ -72,6 +78,7 @@ pub struct RangeUnit {
     pub seg_gone: Vec<bool>,
     /// Detached segments not yet handed to debris, in detachment order.
     seg_shed: Vec<u8>,
+    seg_sections: Vec<Option<crate::damage::SectionJob>>,
     /// Root cells a segment hangs from, from the template; empty never sheds.
     seg_mounts: Vec<Vec<[u8; 3]>>,
 }
@@ -149,6 +156,7 @@ impl RangeUnit {
             crate::damage::segment_frames(&pose, &body, motion.drive.head, motion.drive.head);
         let seg_mounts = mounts_of(&body);
         let seg_gone = vec![false; body.segments.len()];
+        let seg_sections = (0..body.segments.len()).map(|_| None).collect();
         Self {
             motion,
             pose,
@@ -175,11 +183,22 @@ impl RangeUnit {
             seg_detached: 0,
             seg_gone,
             seg_shed: Vec::new(),
+            seg_sections,
             seg_mounts,
         }
     }
     fn refresh_damage(&mut self, id: usize) {
         self.update_response();
+        for (li, severed) in self
+            .integrity_model
+            .severed_legs(&self.body)
+            .into_iter()
+            .enumerate()
+        {
+            if severed {
+                self.shed(self.body.legs[li].thigh as usize);
+            }
+        }
         // A leg that lost more than the buckling share of its links folds
         // and stays folded (ADR-281).
         for (li, buckled) in self
@@ -205,24 +224,25 @@ impl RangeUnit {
             if self.seg_gone[i]
                 || self.seg_mounts[i].is_empty()
                 || self.seg_mounts[i].iter().any(|m| {
-                    self.body
-                        .vol
-                        .get(m[0] as usize, m[1] as usize, m[2] as usize)
+                    let word = (usize::from(m[2]) * usize::from(self.body.vol.ny)
+                        + usize::from(m[1]))
+                        * usize::from(self.body.vol.words)
+                        + usize::from(m[0]) / 64;
+                    self.connectivity.reached_cols()[word] & (1u64 << (m[0] % 64)) != 0
                 })
             {
                 continue;
             }
             self.shed(i);
         }
-        if !self.status.alive {
-            self.section = None;
-        } else if self.status.detached > 0 && self.section.is_none() {
+        if self.status.detached > 0 && self.section.is_none() {
             let mut mask = self.body.vol.clone();
             for (w, r) in mask.cols.iter_mut().zip(self.connectivity.reached_cols()) {
                 *w &= !r;
             }
             self.section = Some(crate::damage::SectionJob::new(id as u32, 0, mask));
         }
+        self.refresh_segment_sections(id);
     }
     fn update_response(&mut self) {
         (self.status, self.integrity) = self
@@ -352,31 +372,16 @@ impl RangeUnit {
         &self.seg_mounts[seg]
     }
     pub fn world_pos(&self, p: [usize; 3]) -> [i32; 3] {
-        if self.motion.enabled {
-            let v = self
-                .pose
-                .world(p.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
-            return [v.x, v.y, v.z].map(|v| v.to_int_trunc());
-        }
-        [
-            self.at[0] + p[0] as i32 - self.body.vol.nx as i32 / 2,
-            self.at[1] + p[1] as i32,
-            self.at[2] + p[2] as i32 - self.body.vol.nz as i32 / 2,
-        ]
+        let v = self
+            .pose
+            .world(p.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+        [v.x, v.y, v.z].map(|v| v.to_int_trunc())
     }
     pub fn local_at(&self, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
         local_in(&self.body, p, pose)
     }
     pub fn local(&self, p: [i32; 3]) -> Option<[usize; 3]> {
-        if self.motion.enabled {
-            return self.local_at(p, &self.pose);
-        }
-        let origin = self.world_pos([0; 3]);
-        let q: [i32; 3] = std::array::from_fn(|a| p[a] - origin[a]);
-        let size = [self.body.vol.nx, self.body.vol.ny, self.body.vol.nz];
-        (0..3)
-            .all(|a| q[a] >= 0 && q[a] < i32::from(size[a]))
-            .then_some(q.map(|v| v as usize))
+        self.local_at(p, &self.pose)
     }
     pub fn solid(&self, p: [i32; 3]) -> bool {
         self.hit(p).is_some()
@@ -385,7 +390,7 @@ impl RangeUnit {
     /// a unit of margin around it (ADR-296): a point outside it hits
     /// nothing, and the pose-mapped lookups need not be asked.
     pub fn bounds(&self) -> ([i32; 3], [i32; 3]) {
-        self.bounds_for(self.motion.enabled.then_some(&self.pose), &self.seg_frames)
+        self.bounds_for(Some(&self.pose), &self.seg_frames)
     }
     /// An enclosing box in the supplied frames, including a burst's frozen
     /// poses. Current motion must never move that burst's broad phase.
@@ -1305,6 +1310,10 @@ impl Explosion {
                             }
                         }
                         Some((part, cell)) => {
+                            if u.section_holds(part, cell.map(|v| v as u8)) {
+                                self.contact_cursor += 1;
+                                continue;
+                            }
                             // A segment takes the impulse in its own frame.
                             let seg = part - 1;
                             let need = unit_work(&u.body.segments[seg].body, cell, c)
@@ -1799,7 +1808,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(34);
+        b.u32(35);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1967,13 +1976,24 @@ impl BlastRange {
         self.thermals.save(&mut b);
         self.heat_exchange.save(&mut b);
         self.combustion.save(&mut b);
+        self.save_structure(&mut b);
         b.v
+    }
+    fn save_structure(&self, b: &mut fx::blob::Blob) {
+        for u in &self.units {
+            for job in &u.seg_sections {
+                b.bool(job.is_some());
+                if let Some(job) = job {
+                    job.save_cut(b);
+                }
+            }
+        }
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33, 34].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33, 34, 35].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2109,7 +2129,7 @@ impl BlastRange {
                     &mut u.connectivity,
                 )?);
             }
-            if u.status.alive && u.status.detached > 0 && u.section.is_none() {
+            if (u.status.alive || version >= 35) && u.status.detached > 0 && u.section.is_none() {
                 return None;
             }
             let count = s.u32() as usize;
@@ -2388,6 +2408,28 @@ impl BlastRange {
             }
             r.combustion = fire::Combustion::empty(r.units.len());
         }
+        if version >= 35 {
+            for (id, u) in r.units.iter_mut().enumerate() {
+                for i in 0..u.seg_sections.len() {
+                    if s.bool() {
+                        let mask = u.segment_loose_mask(i);
+                        u.seg_sections[i] = Some(crate::damage::SectionJob::load_domain(
+                            id as u32,
+                            0,
+                            &mut s,
+                            &u.body.segments[i].body,
+                            &mask,
+                        )?);
+                    }
+                }
+            }
+        } else {
+            // Old snapshots could leave dead roots and severed limbs
+            // suspended. Rebuild their structural work under today's rules.
+            for (id, u) in r.units.iter_mut().enumerate() {
+                u.refresh_damage(id);
+            }
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2619,7 +2661,7 @@ impl BlastRange {
         let mut starts = self.navigation.searches_started_per_tick;
         for (id, u) in self.units.iter_mut().enumerate() {
             u.motion.allow_start(starts > 0);
-            if self.patrols_running {
+            {
                 let others: Vec<_> = positions
                     .iter()
                     .enumerate()
@@ -2630,18 +2672,29 @@ impl BlastRange {
                         &self.gun.body,
                     )))
                     .collect();
-                u.motion.step(
-                    &self.world,
-                    &u.body,
-                    u.status.alive,
-                    u.status.engine,
-                    u.mobility,
-                    &others,
-                    self.tick,
-                    self.config.gravity,
-                    &self.rubble,
-                    self.world_steady,
-                );
+                if self.patrols_running {
+                    u.motion.step(
+                        &self.world,
+                        &u.body,
+                        u.status.alive,
+                        u.status.engine,
+                        u.mobility,
+                        &others,
+                        self.tick,
+                        self.config.gravity,
+                        &self.rubble,
+                        self.world_steady,
+                    );
+                } else {
+                    u.motion.passive(
+                        &self.world,
+                        &self.rubble,
+                        &u.body,
+                        self.config.gravity,
+                        u.mobility,
+                        &others,
+                    );
+                }
                 let head = u.motion.drive.head;
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
@@ -2896,30 +2949,22 @@ impl BlastRange {
         // weapon. The layer waits for the wave to finish — a slow wave
         // would otherwise lose cells to bodies torn off a half-dug crater
         // — and for its claims to clear, so that it never takes a claimed
-        // cell from under the wave, and takes bodies no larger than the
-        // room in the piece pool, so that no crumbling cell has to go back.
+        // cell from under the wave. Cohesive bodies have their own pool;
+        // spare particle slots must not decide whether a building can fall.
         for e in self.world.edits() {
             self.collapse_backlog.insert([e.x, e.y, e.z], *e);
         }
-        let room = self.matter.debris.fragment_room(&self.matter.tuning) as usize;
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
         let wave_working = self.explosion.as_ref().is_some_and(|e| e.working());
-        if !self.collapse_backlog.is_empty()
+        if (!self.collapse_backlog.is_empty() || self.collapse.pending())
             && !wave_working
             && self.matter.debris.claims() == 0
-            && room > 0
         {
-            self.collapse
-                .set_max_body_cells(self.collapse_cap.min(room));
+            self.collapse.set_max_body_cells(self.collapse_cap);
             let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
-            let stats = self
-                .collapse
+            self.collapse
                 .apply(&mut self.world, &edits, &mut self.bodies);
-            // A body held back for room is tried again when room grows;
-            // one over the data ceiling is left where it hangs.
-            if stats.too_big == 0 || room >= self.collapse_cap {
-                self.collapse_backlog.clear();
-            }
+            self.collapse_backlog.clear();
             // Each cell goes by its own matter, not by the body it came
             // off in — else the wave's slicing would decide what crumbles.
             // A body torn off this tick keeps its cohesive cells, rebuilt
@@ -2928,7 +2973,7 @@ impl BlastRange {
             let mats = &self.matter.economy.mats;
             let mut whole = Vec::new();
             for b in std::mem::take(&mut self.bodies.list) {
-                if !b.fresh {
+                if !self.bodies.spawned.contains(&b.id) {
                     whole.push(b);
                     continue;
                 }
@@ -2990,8 +3035,8 @@ impl BlastRange {
         // Whole bodies fall a voxel at a time and bake back where they
         // land, through the edit queue like everything else.
         self.bodies.step(&mut self.world);
-        self.matter.step_sections(&mut self.units);
-        self.matter.shed_segments(&mut self.units);
+        let work = self.matter.step_sections(&mut self.units);
+        self.matter.shed_segments_budget(&mut self.units, work);
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
         // they drive into (ADR-294); the dead lie as debris.
         let hulls: Vec<crate::burst::Hull> = self
@@ -3183,6 +3228,7 @@ mod tests {
         r.thermals.save(&mut tail);
         r.heat_exchange.save(&mut tail);
         r.combustion.save(&mut tail);
+        r.save_structure(&mut tail);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();
@@ -3384,6 +3430,7 @@ mod tests {
         let mut b = BlastRange::restore(c, &snapshot).unwrap();
         a.matter.tuning.max_flying = b.matter.tuning.max_flying;
         assert_eq!(a.state_hash(), b.state_hash());
+        let frame = a.units[0].pose;
         for _ in 0..40 {
             a.step();
             b.step();
@@ -3408,7 +3455,7 @@ mod tests {
         for f in fragments {
             let chunk = f.chunk.as_ref().unwrap();
             assert_eq!(chunk.cells.len(), f.count as usize);
-            assert_eq!(chunk.frames[0].base, a.units[0].pose.base);
+            assert_eq!(chunk.frames[0].base, frame.base);
             for c in &chunk.cells {
                 assert!(cells.insert(*c));
             }
@@ -4015,10 +4062,11 @@ mod tests {
             "no thigh cell was taken: impact {at:?}, removed {:?}",
             u.seg_removed
         );
-        assert!(u
-            .seg_removed
-            .iter()
-            .all(|(seg, _)| !u.seg_gone[*seg as usize]));
+        assert!(u.seg_removed.iter().all(|(seg, c)| {
+            let [x, y, z] = c.map(usize::from);
+            !u.body.segments[*seg as usize].body.vol.get(x, y, z)
+        }));
+        assert!(a.matter.economy.ledger.balanced());
     }
     /// A leg whose hip mount is shot away leaves as one piece: its cells
     /// become a debris chunk with the leg's mass, the ledger balances, and
@@ -4130,11 +4178,10 @@ mod tests {
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
     }
-    /// A leg cut through its shin buckles though most of it stands
-    /// (ADR-304): a slab one cell thick across the shin is a tenth of the
-    /// leg, far under the buckling share, and the leg is in two pieces.
+    /// Severing a thin slice breaks a leg even when most of its metal
+    /// remains. It leaves the skeleton and becomes independent debris.
     #[test]
-    fn a_leg_cut_through_its_shin_buckles_though_most_of_it_stands() {
+    fn a_leg_cut_through_its_shin_detaches_though_most_of_it_stands() {
         let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
         a.control();
         for _ in 0..30 {
@@ -4162,8 +4209,8 @@ mod tests {
         a.matter.annihilate_body(0, taken);
         a.units[0].refresh_damage(0);
         let u = &a.units[0];
-        assert!(!u.seg_gone[shin], "the shin fell off instead of buckling");
-        assert_eq!(u.motion.legs_buckled, [false, true, false, false]);
+        assert!(u.seg_gone[shin], "severed shin stayed on the skeleton");
+        assert_eq!(u.motion.legs_lost, [false, true, false, false]);
         assert!(u.status.alive);
     }
     /// A dead walker folds every leg and comes down on them (ADR-304): a
@@ -4231,7 +4278,7 @@ mod tests {
         let leg = a.units[0].body.legs[0];
         let thigh = leg.thigh as usize;
         let shin = leg.shin as usize;
-        // Take every second cell of both links: over half, mounts untouched.
+        // Thin but continuous beams still join each link's endpoints.
         let mut taken = 0;
         for seg in [thigh, shin] {
             let cells: Vec<[usize; 3]> = {
@@ -4249,8 +4296,8 @@ mod tests {
                 }
                 cells
             };
-            for (i, c) in cells.iter().enumerate() {
-                if i % 5 != 4 {
+            for c in &cells {
+                if c[1] >= 2 || c[2] >= 2 {
                     assert!(a.units[0].body.segments[seg].body.remove(c[0], c[1], c[2]));
                     a.units[0].seg_removed.push((seg as u8, c.map(|v| v as u8)));
                     taken += 1;
@@ -5330,11 +5377,12 @@ mod tests {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         let mut a = BlastRange::with_layout(c, layout).unwrap();
-        a.patrols_running = false;
-        // Crowns the pad's clearing left hanging fall first (ADR-299); the
-        // walker itself must fell nothing.
-        for _ in 0..60 {
-            a.step();
+        a.control();
+        // Only this walker moves; neither gunfire nor another tracked
+        // patrol may fell trees on its behalf.
+        for u in &mut a.units {
+            u.motion.enabled = false;
+            u.motion.route.clear();
         }
         let felled_before = a.removed_materials[4] + a.removed_materials[5];
         let id = a
@@ -5351,6 +5399,7 @@ mod tests {
             .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
         a.units[id].motion.route.clear();
+        let start = a.units[id].motion.pos;
         a.units[id]
             .motion
             .move_to(&a.world, [128, 470], &body, &others, &a.rubble);
@@ -5373,6 +5422,12 @@ mod tests {
         assert_eq!(
             a.removed_materials[4] + a.removed_materials[5],
             felled_before
+        );
+        assert!(
+            [0, 2]
+                .iter()
+                .any(|&k| a.units[id].motion.pos[k].sub(start[k]).abs() > Fx::ONE),
+            "walker never moved"
         );
     }
     #[test]

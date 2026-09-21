@@ -414,87 +414,104 @@ impl Matter {
     /// keep their cells and shape; matter moves with them. A full pool only
     /// postpones the rest (ADR-278).
     pub fn shed_segments(&mut self, units: &mut [RangeUnit]) {
+        self.shed_segments_budget(units, self.section_work);
+    }
+    pub fn shed_segments_budget(&mut self, units: &mut [RangeUnit], mut budget: u32) {
         for (id, u) in units.iter_mut().enumerate() {
-            while let Some(&seg) = u.seg_shed.first() {
-                let seg = seg as usize;
-                let body = &u.body.segments[seg].body;
-                let count = body.solid_count();
-                if count > 0 && self.debris.fragment_room(&self.tuning) == 0 {
-                    break;
+            for &seg in &u.seg_shed {
+                let i = usize::from(seg);
+                if u.seg_sections[i].is_none() && u.body.segments[i].body.solid_count() > 0 {
+                    u.seg_sections[i] = Some(crate::damage::SectionJob::new(
+                        id as u32,
+                        0,
+                        u.body.segments[i].body.vol.clone(),
+                    ));
                 }
-                u.seg_shed.remove(0);
-                if count == 0 {
+            }
+            let mut changed = false;
+            for seg in 0..u.seg_sections.len() {
+                let Some(mut job) = u.seg_sections[seg].take() else {
                     continue;
-                }
-                let mut cells = Vec::with_capacity(count as usize);
-                for z in 0..body.vol.nz {
-                    for y in 0..body.vol.ny {
-                        for x in 0..body.vol.nx {
-                            if body.vol.get(x as usize, y as usize, z as usize) {
-                                cells.push([x, y, z]);
-                            }
-                        }
+                };
+                loop {
+                    let source = &u.body.segments[seg].body;
+                    job.advance(source, &mut budget);
+                    if !job.ready() || self.debris.fragment_room(&self.tuning) == 0 {
+                        break;
                     }
-                }
-                let shape = crate::burst::chunk::Shape::from_body(body);
-                let frame = u.seg_frames[seg];
-                let chunk = crate::burst::chunk::Chunk::new(id as u16, 1, cells, [frame; 2], shape)
+                    let (body, part) = job.commit(source);
+                    let count = part.cells.len() as u32;
+                    let mm = source.mm;
+                    let frame = u.seg_frames[seg];
+                    let chunk = crate::burst::chunk::Chunk::new(
+                        id as u16, 1, part.cells, [frame; 2], part.shape,
+                    )
                     .in_segment(seg as u8);
-                let amount = u64::from(count) * self.economy.per_voxel(3);
-                let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
-                assert_eq!(
-                    self.economy.ledger.transfer(self.bodies[id], held, amount),
-                    amount
-                );
-                let speed = u
-                    .motion
-                    .drive
-                    .vel
-                    .div(Fx::from_int(crate::TICKS_PER_SECOND));
-                let mut velocity = V3::new(
-                    fx::angle::cos(u.motion.drive.head).mul(speed),
-                    u.motion.hull.vy.div(Fx::from_int(crate::TICKS_PER_SECOND)),
-                    fx::angle::sin(u.motion.drive.head).mul(speed),
-                );
-                let vmax = Fx::from_ratio(
-                    self.tuning.max_speed_mm_s as i32,
-                    voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-                );
-                if velocity.len_sq() > vmax.mul(vmax) {
-                    velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
-                }
-                let density = self.economy.mats.get(3).unwrap().density;
-                let mm = body.mm;
-                self.debris.emit_section(Fragment {
-                    id: 0,
-                    position: chunk.centre,
-                    velocity,
-                    material: 3,
-                    paint: Some([1, 0, 0]),
-                    mm,
-                    basis: [frame.x, frame.y, frame.z],
-                    mass_g: u64::from(density)
-                        * u64::from(self.tuning.density_kg_m3_per_density)
-                        * u64::from(mm).pow(3)
-                        / 1_000_000
-                        * u64::from(count),
-                    count,
-                    shape: 1,
-                    side: 2,
-                    chunk: Some(chunk),
-                    held,
-                    resting: false,
-                });
-                let body = &mut u.body.segments[seg].body;
-                for z in 0..body.vol.nz as usize {
-                    for y in 0..body.vol.ny as usize {
-                        for x in 0..body.vol.nx as usize {
-                            body.remove(x, y, z);
-                        }
+                    let amount = u64::from(count) * self.economy.per_voxel(3);
+                    let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
+                    assert_eq!(
+                        self.economy.ledger.transfer(self.bodies[id], held, amount),
+                        amount
+                    );
+                    let speed = u
+                        .motion
+                        .drive
+                        .vel
+                        .div(Fx::from_int(crate::TICKS_PER_SECOND));
+                    let mut velocity = V3::new(
+                        fx::angle::cos(u.motion.drive.head).mul(speed),
+                        u.motion.hull.vy.div(Fx::from_int(crate::TICKS_PER_SECOND)),
+                        fx::angle::sin(u.motion.drive.head).mul(speed),
+                    );
+                    let vmax = Fx::from_ratio(
+                        self.tuning.max_speed_mm_s as i32,
+                        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+                    );
+                    if velocity.len_sq() > vmax.mul(vmax) {
+                        velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
+                    }
+                    let density = self.economy.mats.get(3).unwrap().density;
+                    for c in &chunk.cells {
+                        u.seg_dents.remove(&(seg as u8, *c));
+                        u.seg_removed.push((seg as u8, *c));
+                    }
+                    self.debris.emit_section(Fragment {
+                        id: 0,
+                        position: chunk.centre,
+                        velocity,
+                        material: 3,
+                        paint: Some([1, 0, 0]),
+                        mm,
+                        basis: [frame.x, frame.y, frame.z],
+                        mass_g: u64::from(density)
+                            * u64::from(self.tuning.density_kg_m3_per_density)
+                            * u64::from(mm).pow(3)
+                            / 1_000_000
+                            * u64::from(count),
+                        count,
+                        shape: 1,
+                        side: 2,
+                        chunk: Some(chunk),
+                        held,
+                        resting: false,
+                    });
+                    u.body.segments[seg].body = std::sync::Arc::unwrap_or_clone(body);
+                    u.seg_detached += count as usize;
+                    u.revision += u64::from(count);
+                    changed = true;
+                    if budget == 0 {
+                        break;
                     }
                 }
-                u.seg_detached += count as usize;
-                u.revision += u64::from(count);
+                if !job.finished() {
+                    u.seg_sections[seg] = Some(job);
+                }
+                if u.body.segments[seg].body.solid_count() == 0 {
+                    u.seg_shed.retain(|s| usize::from(*s) != seg);
+                }
+            }
+            if changed {
+                u.refresh_damage(id);
             }
         }
     }
@@ -512,10 +529,10 @@ impl Matter {
     /// never charged or annihilated a second time. A body shattered into many
     /// pieces sheds as many of them per tick as work and room allow, so the
     /// wave never waits a tick per piece.
-    pub fn step_sections(&mut self, units: &mut [RangeUnit]) {
+    pub fn step_sections(&mut self, units: &mut [RangeUnit]) -> u32 {
         let n = units.len();
         if n == 0 {
-            return;
+            return self.section_work;
         }
         let mut left = self.section_work;
         let mut jobs = units
@@ -613,13 +630,14 @@ impl Matter {
                 }
             }
             left -= start - budget;
-            if committed {
-                u.update_response();
-            }
             if !job.finished() {
                 u.section = Some(job);
             }
+            if committed {
+                u.refresh_damage(id);
+            }
         }
+        left
     }
     pub fn flush(
         &mut self,

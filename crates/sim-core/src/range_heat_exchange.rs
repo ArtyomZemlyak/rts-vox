@@ -95,7 +95,7 @@ impl Site {
                 .then_some(p.map(|n| Fx::from_int(n as i32).add(Fx::from_ratio(1, 2)))),
             Self::Body(p) => {
                 let u = &r.units[usize::from(p.unit)];
-                if p.part == 0 && u.section.as_ref().is_some_and(|s| s.holds(p.at)) {
+                if u.section_holds(usize::from(p.part), p.at) {
                     return None;
                 }
                 p.world(&r.units)
@@ -583,6 +583,7 @@ mod tests {
         let mut tail = Blob::new();
         a.heat_exchange.save(&mut tail);
         a.combustion.save(&mut tail);
+        a.save_structure(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&32u32.to_le_bytes());
         let b = BlastRange::restore(a.config.clone(), &data).unwrap();

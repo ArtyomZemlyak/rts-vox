@@ -202,7 +202,7 @@ impl Thermals {
             let id = usize::from(p.unit);
             let u = &mut units[id];
             // A detached section already owns its geometry and matter.
-            if p.part == 0 && u.section.as_ref().is_some_and(|s| s.holds(p.at)) {
+            if u.section_holds(usize::from(p.part), p.at) {
                 continue;
             }
             if !matter.melt_unit(id, u, usize::from(p.part), cell) {
@@ -471,6 +471,7 @@ mod tests {
         r.thermals.save(&mut tail);
         r.heat_exchange.save(&mut tail);
         r.combustion.save(&mut tail);
+        r.save_structure(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &data).unwrap();
