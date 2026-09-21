@@ -45,6 +45,9 @@ pub struct RangeLayout {
     #[serde(default)]
     pub course: Option<RangeCourse>,
     pub target: [i32; 3],
+    /// Automatic acquisition radius in world units; manual fire is unchanged.
+    #[serde(default = "default_auto_attack_range")]
+    pub auto_attack_range: i32,
     /// Target-plane fuse makes the with/without-cover comparison reproducible.
     pub airburst_on_target: bool,
     pub clear_min: [i32; 2],
@@ -85,6 +88,9 @@ pub struct RangeCourse {
     #[serde(default = "default_replan")]
     pub replan_ticks: u32,
 }
+fn default_auto_attack_range() -> i32 {
+    1200
+}
 fn default_turn_alignment() -> i32 {
     97
 }
@@ -118,6 +124,7 @@ impl RangeLayout {
             || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
             || r.units.len() > 8
+            || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > 32
             || r.power_milli.is_empty()
             || r.power_milli.len() > 8

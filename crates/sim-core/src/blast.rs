@@ -1448,6 +1448,8 @@ pub struct BlastRange {
     pub player: bool,
     pub patrols_running: bool,
     pub attack: Option<usize>,
+    /// Automatically acquire a live range target; manual orders disable it.
+    pub auto_attack: bool,
     pub aim: Option<[i32; 3]>,
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
@@ -1652,6 +1654,7 @@ impl BlastRange {
             player: false,
             patrols_running: true,
             attack: None,
+            auto_attack: false,
             aim: None,
             world,
             size,
@@ -1743,7 +1746,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(29);
+        b.u32(30);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1755,6 +1758,7 @@ impl BlastRange {
         b.bool(self.player);
         b.bool(self.patrols_running);
         b.usize(self.attack.unwrap_or(usize::MAX));
+        b.bool(self.auto_attack);
         b.bool(self.aim.is_some());
         if let Some(p) = self.aim {
             for v in p {
@@ -1912,7 +1916,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29].contains(&version) {
+        if ![27, 28, 29, 30].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -1945,6 +1949,7 @@ impl BlastRange {
             }
             r.attack = Some(attack);
         }
+        r.auto_attack = version >= 30 && s.bool();
         if s.bool() {
             r.aim = Some(std::array::from_fn(|_| s.i32()));
         }
@@ -2343,6 +2348,7 @@ impl BlastRange {
         self.player = true;
     }
     pub fn order_move(&mut self, to: [i32; 2]) -> bool {
+        self.set_auto_attack(false);
         self.control();
         self.attack = None;
         self.gun.motion.route.clear();
@@ -2362,13 +2368,80 @@ impl BlastRange {
         if id >= self.units.len() || !self.units[id].status.alive {
             return false;
         }
+        self.set_auto_attack(false);
         self.control();
         self.attack = Some(id);
         self.gun.motion.stop();
         true
     }
+    /// All placed range units are targets. Team rules belong to the battle
+    /// scenario; this mode never retargets a manual order (ADR-338).
+    pub fn set_auto_attack(&mut self, enabled: bool) {
+        if self.auto_attack || enabled {
+            self.attack = None;
+            // Cancel a charged but unfired automatic round. A flying round
+            // and its explosion remain physical events when the mode ends.
+            if self.shell.is_none() && self.fire_tick >= self.tick {
+                self.fire_tick = u32::MAX;
+            }
+        }
+        self.auto_attack = enabled && self.layout.is_some();
+        if self.auto_attack {
+            self.control();
+            self.gun.motion.stop();
+        }
+    }
+    fn reload_ticks(&self) -> u32 {
+        self.layout
+            .as_ref()
+            .and_then(|r| r.course.as_ref())
+            .map_or(0, |c| c.reload_ticks)
+    }
+    fn acquire_auto_target(&mut self) {
+        if !self.auto_attack {
+            return;
+        }
+        if !self.gun.status.alive || !self.gun.status.weapon {
+            self.set_auto_attack(false);
+            return;
+        }
+        let radius = self
+            .layout
+            .as_ref()
+            .map_or(0, |r| i64::from(r.auto_attack_range));
+        let from = self.gun.motion.pos.map(Fx::to_int_trunc);
+        // Layout validation caps this scan at eight slots. Integer world
+        // coordinates keep squared distance safe on future 10 km layouts.
+        let distance = |id: usize| -> Option<i64> {
+            let u = self.units.get(id)?;
+            let p = u.motion.pos.map(Fx::to_int_trunc);
+            let dx = i64::from(p[0]) - i64::from(from[0]);
+            let dz = i64::from(p[2]) - i64::from(from[2]);
+            let d = dx * dx + dz * dz;
+            (u.status.alive && d <= radius * radius).then_some(d)
+        };
+        if self.attack.is_some_and(|id| distance(id).is_some()) {
+            return;
+        }
+        let chosen = (0..self.units.len())
+            .filter_map(|id| distance(id).map(|d| (d, id)))
+            .min()
+            .map(|(_, id)| id);
+        self.attack = None;
+        if self.shell.is_none() && self.fire_tick >= self.tick {
+            self.fire_tick = u32::MAX;
+        }
+        // A new target does not bypass reload or replace a live projectile.
+        if self.ready()
+            && (self.impact.is_none()
+                || self.tick.saturating_sub(self.impact_tick) >= self.reload_ticks())
+        {
+            self.attack = chosen;
+        }
+    }
     /// Отмена приказа: цель снята, машина останавливается.
     pub fn order_stop(&mut self) {
+        self.set_auto_attack(false);
         self.attack = None;
         self.gun.motion.stop();
     }
@@ -2379,6 +2452,7 @@ impl BlastRange {
     /// Выстрел по точке земли вместо тела: прежняя цель снимается.
     /// Возвращает `false`, если орудие ещё занято.
     pub fn order_ground_fire(&mut self, at: [i32; 3]) -> bool {
+        self.set_auto_attack(false);
         self.attack = None;
         self.aim = Some(at);
         self.refire()
@@ -2517,17 +2591,14 @@ impl BlastRange {
         }
         self.matter
             .step_felling(&mut self.world, &self.navigation.fell);
+        self.acquire_auto_target();
         let target_angle = self.aim_angle();
         self.turret.step(target_angle, self.turret_limits);
         if let Some(id) = self.attack {
             if !self.units[id].status.alive {
                 self.attack = None;
             } else {
-                let reload = self
-                    .layout
-                    .as_ref()
-                    .and_then(|r| r.course.as_ref())
-                    .map_or(0, |c| c.reload_ticks);
+                let reload = self.reload_ticks();
                 if self.fire_tick == u32::MAX
                     || (self.impact.is_some() && self.tick >= self.impact_tick + reload)
                 {
@@ -2895,6 +2966,138 @@ impl BlastRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn auto_range() -> BlastRange {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.clear_min = [64, 240];
+        layout.clear_max = [480, 570];
+        layout.course.as_mut().unwrap().patrols.clear();
+        layout.course.as_mut().unwrap().ramps.clear();
+        layout.units.truncate(3);
+        for (u, at) in layout
+            .units
+            .iter_mut()
+            .zip([[300, 16, 336], [128, 16, 508], [430, 16, 336]])
+        {
+            u.at = at;
+        }
+        layout.auto_attack_range = 200;
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.control();
+        r
+    }
+    #[test]
+    fn automatic_targeting_has_stable_ties_range_and_reload() {
+        let mut r = auto_range();
+        r.set_auto_attack(true);
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(0), "equal distances resolve by slot");
+        r.units[0].status.alive = false;
+        r.impact = Some([300, 20, 336]);
+        r.impact_tick = r.tick;
+        r.acquire_auto_target();
+        assert!(r.attack.is_none(), "retarget bypassed reload");
+        r.tick += r.reload_ticks();
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(1));
+        r.units[1].motion.pos[2] = Fx::from_int(900);
+        r.acquire_auto_target();
+        assert!(r.attack.is_none(), "selected an out-of-range target");
+        assert!(r.auto_attack, "mode must wait for a new target");
+        r.units[2].motion.pos[0] = Fx::from_int(310);
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(2));
+    }
+    #[test]
+    fn manual_orders_cancel_automatic_charge_and_mode() {
+        for command in 0..4 {
+            let mut r = auto_range();
+            r.set_auto_attack(true);
+            r.acquire_auto_target();
+            assert!(r.refire());
+            assert_ne!(r.fire_tick, u32::MAX);
+            match command {
+                0 => {
+                    r.order_stop();
+                }
+                1 => {
+                    r.order_move([200, 336]);
+                }
+                2 => {
+                    assert!(r.order_attack(1));
+                }
+                _ => {
+                    assert!(r.order_ground_fire([320, 16, 336]));
+                }
+            }
+            assert!(!r.auto_attack);
+            if command < 2 {
+                assert!(r.attack.is_none());
+                assert_eq!(r.fire_tick, u32::MAX, "cancelled charge still fires");
+            }
+            if command == 2 {
+                assert_eq!(r.attack, Some(1));
+            }
+        }
+        let mut r = auto_range();
+        r.set_auto_attack(true);
+        r.shell = Some([Fx::from_int(200), Fx::from_int(30), Fx::from_int(336)]);
+        let shell = r.shell;
+        r.set_auto_attack(false);
+        assert_eq!(r.shell, shell, "turning off erased an airborne round");
+    }
+    #[test]
+    fn automatic_fire_damages_a_target_and_resumes_bit_for_bit() {
+        let mut a = auto_range();
+        a.set_auto_attack(true);
+        a.step();
+        assert_eq!(a.attack, Some(0));
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        assert!(b.auto_attack);
+        let mut impacted = false;
+        for tick in 0..240 {
+            a.step();
+            b.step();
+            impacted |= a.impact.is_some();
+            assert_eq!(
+                a.state_hash(),
+                b.state_hash(),
+                "automatic fire diverged at {tick}"
+            );
+        }
+        assert!(impacted);
+        assert!(
+            !a.units[0].removed.is_empty(),
+            "auto fire did not damage the acquired target"
+        );
+    }
+    #[test]
+    fn range_version_29_restores_with_auto_attack_off() {
+        let mut r = auto_range();
+        r.set_auto_attack(true);
+        r.acquire_auto_target();
+        let mut bytes = r.snapshot();
+        let mut s = fx::blob::Scan::new(&bytes);
+        s.u32();
+        s.bool();
+        s.bool();
+        s.u32();
+        assert!(s.bool());
+        s.u8s();
+        crate::turret::Traverse::load(&mut s, r.turret_limits).unwrap();
+        s.bool();
+        s.bool();
+        s.usize();
+        let offset = bytes.len() - s.left();
+        bytes.remove(offset);
+        bytes[..4].copy_from_slice(&29u32.to_le_bytes());
+        let old = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        assert!(!old.auto_attack);
+        assert_eq!(old.attack, r.attack);
+    }
     #[test]
     fn range_engine_damage_uses_the_shared_physical_mobility_response() {
         // Compare propulsion on flat ground; route search latency is tested

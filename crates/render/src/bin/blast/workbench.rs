@@ -1068,6 +1068,19 @@ mod tests {
             .spawn((panel::Action::Stop, Interaction::Pressed));
         app.update();
         assert!(app.world().resource::<Scene>().sim.attack.is_none());
+        // Auto attack is a mouse-only command and Stop cancels its mode.
+        *app.world_mut().resource_mut::<ButtonInput<MouseButton>>() = default();
+        let auto = app
+            .world_mut()
+            .spawn((panel::Action::AutoAttack, Interaction::Pressed))
+            .id();
+        app.update();
+        assert!(app.world().resource::<Scene>().sim.auto_attack);
+        app.world_mut().entity_mut(auto).insert(Interaction::None);
+        app.world_mut()
+            .spawn((panel::Action::Stop, Interaction::Pressed));
+        app.update();
+        assert!(!app.world().resource::<Scene>().sim.auto_attack);
         assert!(app
             .world()
             .resource::<Scene>()

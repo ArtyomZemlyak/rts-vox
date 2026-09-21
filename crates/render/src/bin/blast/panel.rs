@@ -31,6 +31,7 @@ pub enum Action {
     Edit,
     Pause,
     Fire,
+    AutoAttack,
     Stop,
     Reset,
     Patrol,
@@ -145,6 +146,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Стоп танк", Action::Stop),
                 ],
             ),
+            (false, vec![("Автоатака", Action::AutoAttack)]),
             (
                 false,
                 vec![
@@ -344,10 +346,19 @@ pub fn actions(
             }
             Action::Reset => key(KeyCode::KeyR, &mut panel),
             Action::Fire => {
+                scene.sim.set_auto_attack(false);
                 panel.ground_fire = !panel.ground_fire;
                 panel.drive = true;
                 edit.editing = false;
                 scene.sim.control();
+                scene.paused = false;
+            }
+            Action::AutoAttack => {
+                let enabled = !scene.sim.auto_attack;
+                scene.sim.set_auto_attack(enabled);
+                panel.ground_fire = false;
+                panel.drive = true;
+                edit.editing = false;
                 scene.paused = false;
             }
             Action::Stop => {
@@ -506,6 +517,7 @@ pub fn refresh(
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
             Action::Fire => panel.ground_fire,
+            Action::AutoAttack => scene.sim.auto_attack,
             Action::Weapon(w) => w == panel.pending.map_or(weapon_of(&scene), |v| v.0),
             Action::Power(p) => p == panel.pending.map_or(scene.power, |v| v.1),
             Action::Tool(t) => edit.tool == t,
@@ -525,6 +537,8 @@ pub fn refresh(
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
     } else if panel.ground_fire {
         "Укажите точку выстрела на карте"
+    } else if scene.sim.auto_attack {
+        "Автоатака — живые мишени в радиусе\nПКМ — перейти к ручному приказу"
     } else {
         "ПКМ по земле — ехать\nПКМ по юниту — атаковать\nЛКМ — осмотреть мишень"
     };

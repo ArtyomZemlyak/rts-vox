@@ -594,8 +594,10 @@ mod surface_tests {
             origin: [0; 3],
             dims: [8; 3],
         };
-        let mut p = GasParams::default();
-        p.source = Vec4::new(40.0, 40.0, 40.0, 5.0);
+        let mut p = GasParams {
+            source: Vec4::new(40.0, 40.0, 40.0, 5.0),
+            ..Default::default()
+        };
         p.charge.z = 3.2;
         let mut a = Atmosphere::default();
         a.emit_at(p, 10);
