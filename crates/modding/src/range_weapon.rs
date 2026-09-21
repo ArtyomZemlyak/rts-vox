@@ -19,7 +19,6 @@ pub struct Tuning {
     pub smoke_engine_milli: i32,
     pub smoke_core_milli: i32,
     pub smoke_loss_milli: u32,
-    pub wreck_fire_ticks: u32,
 }
 impl Tuning {
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -41,7 +40,6 @@ impl Tuning {
         if !(0..=1000).contains(&t.smoke_engine_milli)
             || !(0..=1000).contains(&t.smoke_core_milli)
             || !(1..=1000).contains(&t.smoke_loss_milli)
-            || !(30..=18000).contains(&t.wreck_fire_ticks)
         {
             return Err("unit fire tuning outside bounded limits".into());
         }

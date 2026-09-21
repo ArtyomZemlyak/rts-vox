@@ -213,6 +213,17 @@ pub fn end(
         art.seen.iter().filter(|v| v.is_some()).count(),
         art.pending.iter().filter(|v| v.is_some()).count()
     );
+    println!(
+        "PROFILE fuel_consumed={} generated_heat={} dissipated_heat={} active_fires={}",
+        scene.sim.combustion.consumed,
+        scene.sim.combustion.generated_heat,
+        scene.sim.combustion.dissipated_heat,
+        scene
+            .sim
+            .combustion
+            .sources(&scene.sim.units, &scene.sim.matter)
+            .len()
+    );
     if p.gpu {
         for (name, samples) in &mut p.gpu_samples {
             let v = &mut samples.values;

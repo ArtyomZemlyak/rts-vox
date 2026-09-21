@@ -148,16 +148,16 @@ fn intersects(bounds: Bounds, from: [Fx; 3], to: [Fx; 3]) -> bool {
 impl BlastRange {
     /// Closest solid across all volumes, including opaque neighbours in the
     /// source volume. Never skip armour just because local diffusion handles it.
-    fn heat_contact(
+    fn first_contact(
         &self,
-        source: Site,
+        source: Option<Site>,
         from: [Fx; 3],
         to: [Fx; 3],
         bounds: &[Bounds],
-    ) -> Option<Site> {
+    ) -> Option<(Fx, Option<Site>)> {
         let mut best: Option<(Fx, Option<Site>)> = None;
         let mut take = |t: Fx, site: Option<Site>| {
-            if site != Some(source) && best.is_none_or(|old| (t, site) < old) {
+            if (source.is_none() || site != source) && best.is_none_or(|old| (t, site) < old) {
                 best = Some((t, site));
             }
         };
@@ -174,7 +174,7 @@ impl BlastRange {
                 continue;
             }
             let q = q.map(|n| n as u32);
-            if Site::World(q) != source && self.world.solid(q[0], q[1], q[2]) {
+            if Some(Site::World(q)) != source && self.world.solid(q[0], q[1], q[2]) {
                 take(entry(a, b, p), Some(Site::World(q)));
                 break;
             }
@@ -199,7 +199,7 @@ impl BlastRange {
                     // The player's range gun is an opaque body, even though
                     // its damage/heat ledger is not part of the target list.
                     let site = (id < self.units.len()).then_some(Site::Body(p));
-                    if site != Some(source)
+                    if (source.is_none() || site != source)
                         && body.vol.get(at[0] as usize, at[1] as usize, at[2] as usize)
                     {
                         take(entry(a, b, at), site);
@@ -214,7 +214,51 @@ impl BlastRange {
                 }
             }
         }
-        best.and_then(|(_, p)| p)
+        best
+    }
+    /// Collision for a small physical spill. Caller bounds travel per tick.
+    pub(super) fn fuel_collision(&self, from: [Fx; 3], to: [Fx; 3]) -> Option<Fx> {
+        let bounds: Vec<_> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .map(|u| u.bounds())
+            .collect();
+        self.first_contact(None, from, to, &bounds).map(|(t, _)| t)
+    }
+    /// Chemical heat touches the first surface, including its own compartment.
+    /// Heat with no receiver (or no field capacity) dissipates into the air.
+    pub(super) fn deposit_fire_heat(&mut self, from: [Fx; 3], reach: u8, heat: u32) -> u32 {
+        let bounds: Vec<_> = self
+            .units
+            .iter()
+            .chain(std::iter::once(&self.gun))
+            .map(|u| u.bounds())
+            .collect();
+        let mut contacts = BTreeSet::new();
+        for a in 0..3 {
+            for sign in [-1, 1] {
+                let mut to = from;
+                to[a] = to[a].add(Fx::from_int(sign * i32::from(reach)));
+                if let Some((_, Some(site))) = self.first_contact(None, from, to, &bounds) {
+                    if site.accepts(self) {
+                        contacts.insert(site);
+                    }
+                }
+            }
+        }
+        let mut accepted = 0;
+        let count = contacts.len() as u32;
+        for (i, site) in contacts.into_iter().enumerate() {
+            let share = heat / count + u32::from((i as u32) < heat % count);
+            let before = site.heat(self);
+            match site {
+                Site::World(p) => self.heat.add(&self.world, p, share),
+                Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+            }
+            accepted += site.heat(self) - before;
+        }
+        accepted
     }
     pub(super) fn exchange_heat(&mut self) {
         self.heat_exchange.visited = 0;
@@ -257,7 +301,10 @@ impl BlastRange {
                 for sign in [-1, 1] {
                     let mut to = from;
                     to[axis] = to[axis].add(Fx::from_int(sign * i32::from(t.exchange_reach)));
-                    let Some(dest) = self.heat_contact(source, from, to, &bounds) else {
+                    let Some(dest) = self
+                        .first_contact(Some(source), from, to, &bounds)
+                        .and_then(|(_, p)| p)
+                    else {
                         continue;
                     };
                     if !source.separate(dest)
@@ -530,9 +577,12 @@ mod tests {
             b.step();
             assert_eq!(a.state_hash(), b.state_hash());
         }
+        a.matter = super::super::matter::Matter::new(&a.units);
+        a.combustion = super::super::fire::Combustion::empty(a.units.len());
         let mut data = a.snapshot();
         let mut tail = Blob::new();
         a.heat_exchange.save(&mut tail);
+        a.combustion.save(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&32u32.to_le_bytes());
         let b = BlastRange::restore(a.config.clone(), &data).unwrap();

@@ -6,6 +6,7 @@ fn main() {
     // `--weapon shell` measures the heavier debris of the shell (ADR-296).
     let args: Vec<String> = std::env::args().collect();
     let thermal_stress = args.iter().any(|a| a == "--thermal-stress");
+    let fire_stress = args.iter().any(|a| a == "--fire-stress");
     let weapon = args
         .iter()
         .position(|a| a == "--weapon")
@@ -70,6 +71,25 @@ fn main() {
             }
             println!("thermal_stress_seeded={}", scene.thermals.hot());
         }
+        if fire_stress {
+            for (id, u) in scene
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(_, u)| u.motion.route.is_empty())
+            {
+                let at = scene.combustion.tuning.reservoir(u.kind).at;
+                scene.thermals.deposit(
+                    sim_core::blast::thermal::Cell {
+                        unit: id as u16,
+                        part: 0,
+                        at,
+                    },
+                    scene.combustion.tuning.ignition,
+                    &scene.thermal_tuning,
+                );
+            }
+        }
         let mut samples = Vec::new();
         let mut shots = 0;
         let mut hottest = 0;
@@ -111,6 +131,19 @@ fn main() {
             "thermal_peak_cells={hottest} melted={} rejected_heat={} exchanged_heat={}",
             scene.thermals.melted, scene.thermals.rejected_heat, scene.heat_exchange.transferred
         );
+        println!(
+            "fuel_consumed={} generated_heat={} dissipated_heat={} active_fires={}",
+            scene.combustion.consumed,
+            scene.combustion.generated_heat,
+            scene.combustion.dissipated_heat,
+            scene.combustion.sources(&scene.units, &scene.matter).len()
+        );
+        if fire_stress {
+            assert!(
+                scene.combustion.consumed > 0,
+                "fire benchmark did not burn real fuel"
+            );
+        }
         samples.sort_unstable();
         let laps: Vec<_> = scene
             .units

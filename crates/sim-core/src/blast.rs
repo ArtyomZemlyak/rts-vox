@@ -1462,6 +1462,8 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_fire.rs"]
+pub mod fire;
 #[path = "range_heat_exchange.rs"]
 pub mod heat_exchange;
 #[path = "range_thermal.rs"]
@@ -1470,6 +1472,7 @@ pub mod thermal;
 pub mod weapons;
 
 pub struct BlastRange {
+    pub combustion: fire::Combustion,
     pub heat_exchange: heat_exchange::Exchange,
     pub thermals: thermal::Thermals,
     pub thermal_tuning: modding::unit_heat::Tuning,
@@ -1679,7 +1682,8 @@ impl BlastRange {
                 units[p.unit].motion.enabled = true;
             }
         }
-        let matter = matter::Matter::new(&units);
+        let mut matter = matter::Matter::new(&units);
+        let combustion = fire::Combustion::new(&units, &mut matter);
         let shield_tuning =
             modding::shield::ShieldTuning::from_ron(include_str!("../../../data/shield.ron"))
                 .expect("shield tuning");
@@ -1690,6 +1694,7 @@ impl BlastRange {
                 .collect()
         });
         let mut result = Self {
+            combustion,
             streams: weapons::Streams::default(),
             heat_exchange: heat_exchange::Exchange::default(),
             thermals: thermal::Thermals::default(),
@@ -1794,7 +1799,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(33);
+        b.u32(34);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1961,13 +1966,14 @@ impl BlastRange {
         self.streams.save(&mut b);
         self.thermals.save(&mut b);
         self.heat_exchange.save(&mut b);
+        self.combustion.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33, 34].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2366,6 +2372,21 @@ impl BlastRange {
         }
         if version >= 33 {
             r.heat_exchange.load(&mut s, r.size, &r.units)?;
+        }
+        if version >= 34 {
+            r.combustion.load(&mut s, &r.units, &r.matter, r.size)?;
+        } else {
+            if r.matter
+                .economy
+                .ledger
+                .snapshot()
+                .0
+                .iter()
+                .any(|c| c.kind == crate::matter::Kind::Fuel)
+            {
+                return None;
+            }
+            r.combustion = fire::Combustion::empty(r.units.len());
         }
         (s.ok() && s.left() == 0).then_some(r)
     }
@@ -2838,6 +2859,8 @@ impl BlastRange {
             }
         }
         completed("wave");
+        self.step_unit_fire();
+        completed("unit_fire");
         self.exchange_heat();
         completed("heat_exchange");
         {
@@ -3152,11 +3175,14 @@ mod tests {
         let mut r = auto_range();
         r.set_auto_attack(true);
         r.acquire_auto_target();
+        r.matter = matter::Matter::new(&r.units);
+        r.combustion = fire::Combustion::empty(r.units.len());
         let mut bytes = r.snapshot();
         let mut tail = fx::blob::Blob::new();
         r.streams.save(&mut tail);
         r.thermals.save(&mut tail);
         r.heat_exchange.save(&mut tail);
+        r.combustion.save(&mut tail);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();

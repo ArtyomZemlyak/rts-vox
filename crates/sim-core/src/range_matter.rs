@@ -730,7 +730,7 @@ impl Matter {
         );
         self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0, false)?;
         let n = s.usize();
-        if n > self.tuning.max_fragments as usize + units.len() + 2 {
+        if n > self.tuning.max_fragments as usize + units.len() * 2 + 2 {
             return None;
         }
         let mut containers = Vec::with_capacity(n);

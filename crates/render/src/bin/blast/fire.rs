@@ -18,7 +18,6 @@ struct Particle {
 #[derive(Resource, Default)]
 pub struct Effects {
     particles: Vec<Particle>,
-    dead_since: Vec<Option<u32>>,
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
@@ -37,7 +36,6 @@ fn point(p: [fx::Fx; 3]) -> Vec3 {
 impl Effects {
     pub fn clear(&mut self) {
         self.particles.clear();
-        self.dead_since.clear();
         self.sources.clear();
         self.heat_spots.clear();
         self.serial = 0;
@@ -91,7 +89,6 @@ impl Effects {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
         let tuning = &sim.streams.tuning;
-        self.dead_since.resize(sim.units.len() + 1, None);
         self.sources.resize(sim.units.len() + 1, (u64::MAX, None));
         for (id, u) in sim
             .units
@@ -100,14 +97,6 @@ impl Effects {
             .enumerate()
         {
             let dead = !u.status.alive;
-            if dead && self.dead_since[id].is_none() {
-                self.dead_since[id] = Some(sim.tick);
-            }
-            if !dead {
-                self.dead_since[id] = None;
-            }
-            let fire = self.dead_since[id]
-                .is_some_and(|t| sim.tick.saturating_sub(t) < tuning.wreck_fire_ticks);
             let removed = u.removed.len() + u.seg_removed.len();
             let remaining = u.body.solid_count() as usize
                 + u.body
@@ -118,7 +107,7 @@ impl Effects {
             let damaged = u.integrity.engine < fx::Fx::from_ratio(tuning.smoke_engine_milli, 1000)
                 || u.integrity.core < fx::Fx::from_ratio(tuning.smoke_core_milli, 1000)
                 || removed * 1000 > (remaining + removed) * tuning.smoke_loss_milli as usize;
-            if remaining == 0 || !(fire || damaged) || (!fire && !sim.tick.is_multiple_of(3)) {
+            if remaining == 0 || dead || !damaged || !sim.tick.is_multiple_of(3) {
                 continue;
             }
             // Anchor to a surviving surface; erased bodies never leave a floating fire.
@@ -147,10 +136,32 @@ impl Effects {
             let surface = self.sources[id].1;
             if let Some(p) = surface {
                 let at = Vec3::from(u.world_pos(p).map(|v| v as f32)) + Vec3::Y;
-                self.plume(at, now, fire, if dead { 1.6 } else { 0.85 });
-                if fire {
-                    self.plume(at + Vec3::new(3.5, -1.0, 3.0), now, true, 1.0);
+                self.plume(at, now, false, 0.85);
+            }
+        }
+        for source in sim.combustion.sources(&sim.units, &sim.matter) {
+            let mut at = point(source.at);
+            if let Some(id) = source.unit {
+                // Internal compartment fire vents at the roof above the actual
+                // reservoir; released fuel burns at its physical spill position.
+                let u = &sim.units[id];
+                let [x, _, z] = sim.combustion.tuning.reservoir(u.kind).at.map(usize::from);
+                if let Some(y) = (0..u.body.vol.ny as usize)
+                    .rev()
+                    .find(|&y| u.body.vol.get(x, y, z))
+                {
+                    let p = u.pose.world([
+                        fx::Fx::from_ratio((x * 2 + 1) as i32, 2),
+                        fx::Fx::from_int(y as i32 + 1),
+                        fx::Fx::from_ratio((z * 2 + 1) as i32, 2),
+                    ]);
+                    at = point([p.x, p.y, p.z]);
                 }
+            }
+            let scale = (source.intensity_milli as f32 / 1000.0).sqrt();
+            self.plume(at, now, true, 1.6 * scale);
+            if source.intensity_milli >= 500 {
+                self.plume(at + Vec3::new(2.5, -0.5, 2.0), now, true, scale);
             }
         }
         self.heat_spots.clear();
@@ -543,8 +554,24 @@ mod tests {
         assert!(fx.particles.iter().all(|p| p.smoke));
         fx.clear();
         r.units[0].status.alive = false;
-        for tick in 4..30 {
-            r.tick = tick;
+        fx.capture(&r);
+        assert!(
+            fx.particles.is_empty(),
+            "death alone must not create chemical fuel fire"
+        );
+        let at = r.combustion.tuning.reservoir(r.units[0].kind).at;
+        r.thermals.deposit(
+            HeatCell {
+                unit: 0,
+                part: 0,
+                at,
+            },
+            200,
+            &r.thermal_tuning,
+        );
+        r.control();
+        for _ in 4..30 {
+            r.step();
             fx.capture(&r);
         }
         assert!(fx.particles.iter().any(|p| !p.smoke));

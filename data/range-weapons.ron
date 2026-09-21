@@ -7,5 +7,4 @@
         spread_milli: 3, work: 310, heat: 0, heat_radius: 0,
         fracture_j: 60000, reload_ticks: 12),
     smoke_engine_milli: 750, smoke_core_milli: 900, smoke_loss_milli: 180,
-    wreck_fire_ticks: 2700,
 )

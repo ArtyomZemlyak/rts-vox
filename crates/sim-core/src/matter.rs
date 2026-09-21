@@ -85,6 +85,8 @@ pub enum Kind {
     Depot,
     /// Тело юнита.
     Body,
+    /// Combustible contents, separate from the body's steel geometry.
+    Fuel,
 }
 
 impl Kind {
@@ -98,6 +100,7 @@ impl Kind {
             Kind::Debris => 2,
             Kind::Depot => 3,
             Kind::Body => 4,
+            Kind::Fuel => 5,
         }
     }
 
@@ -110,6 +113,7 @@ impl Kind {
             2 => Some(Kind::Debris),
             3 => Some(Kind::Depot),
             4 => Some(Kind::Body),
+            5 => Some(Kind::Fuel),
             _ => None,
         }
     }

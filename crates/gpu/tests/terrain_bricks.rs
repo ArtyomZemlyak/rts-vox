@@ -168,8 +168,10 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
         let fast_result = g.read_u32(&results[0], n * 4);
         let reference_result = g.read_u32(&results[1], n * 4);
         for (i, (a, b)) in fast_result
-            .chunks_exact(4)
-            .zip(reference_result.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference_result.as_chunks::<4>().0)
             .enumerate()
         {
             assert_eq!(a[3], b[3], "material of ray {i}, origin {origin:?}");

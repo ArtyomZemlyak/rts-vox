@@ -463,11 +463,14 @@ mod tests {
     }
     #[test]
     fn version_31_restores_a_cold_field() {
-        let r = range();
+        let mut r = range();
+        r.matter = Matter::new(&r.units);
+        r.combustion = super::super::fire::Combustion::empty(r.units.len());
         let mut data = r.snapshot();
         let mut tail = Blob::new();
         r.thermals.save(&mut tail);
         r.heat_exchange.save(&mut tail);
+        r.combustion.save(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &data).unwrap();
