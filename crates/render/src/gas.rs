@@ -145,13 +145,16 @@ pub struct GasInput {
     pub ready: Arc<AtomicBool>,
     pub timings: Arc<GasTimings>,
     uploaded: Arc<AtomicU64>,
-    patches: Vec<(usize, Vec<u32>)>,
+    patches: Vec<std::ops::Range<usize>>,
+    patch_words: Vec<u32>,
 }
-/// Optional render-thread CPU counters for the native frame profiler.
+/// Optional extraction and render preparation CPU counters for the native profiler.
 /// These are not GPU timestamps and never enter the simulation.
 #[derive(Default)]
 pub struct GasTimings {
     pub enabled: AtomicBool,
+    pub extract_ns: AtomicU64,
+    pub extract_peak_ns: AtomicU64,
     pub prepare_ns: AtomicU64,
     pub allocation_ns: AtomicU64,
     pub prepare_peak_ns: AtomicU64,
@@ -171,12 +174,18 @@ impl Default for GasInput {
             timings: Arc::new(GasTimings::default()),
             uploaded: Arc::new(AtomicU64::new(0)),
             patches: Vec::new(),
+            patch_words: Vec::new(),
         }
     }
 }
 impl ExtractResource for GasInput {
     type Source = Self;
     fn extract_resource(source: &Self) -> Self {
+        let started = source
+            .timings
+            .enabled
+            .load(Ordering::Relaxed)
+            .then(std::time::Instant::now);
         let uploaded = source.uploaded.load(Ordering::Acquire);
         let mut spans = if uploaded == source.terrain_revision {
             Vec::new()
@@ -186,36 +195,59 @@ impl ExtractResource for GasInput {
             source.terrain_dirty.clone()
         };
         spans.sort_unstable_by_key(|r| r.start);
-        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
-        for r in spans {
-            if let Some(last) = merged.last_mut() {
-                if r.start <= last.end {
-                    last.end = last.end.max(r.end);
-                    continue;
-                }
+        let mut used = 0;
+        for i in 0..spans.len() {
+            let r = spans[i].clone();
+            if used > 0 && r.start <= spans[used - 1].end {
+                spans[used - 1].end = spans[used - 1].end.max(r.end);
+            } else {
+                spans[used] = r;
+                used += 1;
             }
-            merged.push(r);
         }
-        Self {
+        spans.truncate(used);
+        let merged = spans;
+        let mut patch_words = Vec::with_capacity(merged.iter().map(|r| r.len()).sum());
+        for r in &merged {
+            patch_words.extend_from_slice(&source.terrain_words[r.clone()]);
+        }
+        let result = Self {
             params: source.params,
             atmosphere: source.atmosphere.clone(),
             // Never share the full mutable terrain with the render world:
             // doing so makes Arc::make_mut copy 157 MB on each moving tick.
             terrain_words: Arc::new(Vec::new()),
-            patches: merged
-                .into_iter()
-                .map(|r| (r.start, source.terrain_words[r].to_vec()))
-                .collect(),
+            // One contiguous payload, even for 245760 disjoint rows of a
+            // streamed x slab. A Vec allocation per row stalled extraction.
+            patches: merged,
+            patch_words,
             terrain_revision: source.terrain_revision,
             terrain_dirty: Vec::new(),
             window: source.window,
             ready: source.ready.clone(),
             timings: source.timings.clone(),
             uploaded: source.uploaded.clone(),
+        };
+        if let Some(started) = started {
+            let ns = started.elapsed().as_nanos() as u64;
+            source.timings.extract_ns.store(ns, Ordering::Relaxed);
+            source
+                .timings
+                .extract_peak_ns
+                .fetch_max(ns, Ordering::Relaxed);
         }
+        result
     }
 }
 impl GasInput {
+    fn patches(&self) -> impl Iterator<Item = (usize, &[u32])> {
+        self.patches.iter().scan(0, |cursor, span| {
+            let end = *cursor + span.len();
+            let words = &self.patch_words[*cursor..end];
+            *cursor = end;
+            Some((span.start, words))
+        })
+    }
     /// Presentation only; existing plumes keep their clocks, fields and scale
     /// relative to the weapon (small burning surfaces use half-size cubes).
     pub fn set_display_edge(&mut self, edge: f32) {
@@ -250,6 +282,34 @@ pub struct GasPlugin;
 mod window_tests {
     use super::*;
     #[test]
+    #[ignore = "manual CPU benchmark of one streamed x slab, includes resource drop"]
+    fn bench_sparse_slab_extraction() {
+        let window = TerrainWindow {
+            origin: [8, 0, 0],
+            dims: [1280, 192, 1280],
+        };
+        let source = GasInput {
+            window,
+            terrain_words: Arc::new(vec![0x77777777; window.words()]),
+            terrain_revision: 2,
+            terrain_dirty: (0..192 * 1280)
+                .map(|row| row * 160..row * 160 + 1)
+                .collect(),
+            ..default()
+        };
+        source.uploaded.store(1, Ordering::Release);
+        for trial in 0..5 {
+            let start = std::time::Instant::now();
+            let extracted = GasInput::extract_resource(&source);
+            std::hint::black_box(&extracted);
+            drop(extracted);
+            println!(
+                "SLAB trial={trial} ms={:.3}",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
+    #[test]
     fn extraction_copies_only_unacknowledged_patches_without_sharing_the_world() {
         let mut source = GasInput {
             terrain_words: Arc::new(vec![7; 1000]),
@@ -259,16 +319,37 @@ mod window_tests {
         let first = GasInput::extract_resource(&source);
         assert_eq!(Arc::strong_count(&source.terrain_words), 1);
         assert!(first.terrain_words.is_empty());
-        assert_eq!(first.patches, vec![(0, vec![7; 1000])]);
+        assert_eq!(first.patches, std::iter::once(0..1000).collect::<Vec<_>>());
+        assert_eq!(first.patch_words, vec![7; 1000]);
         first.uploaded.store(1, Ordering::Release);
         assert!(GasInput::extract_resource(&source).patches.is_empty());
         Arc::make_mut(&mut source.terrain_words)[13] = 9;
         source.terrain_revision = 3; // Two simulation ticks in one frame.
         source.terrain_dirty = vec![12..15, 10..14, 99..100];
         let next = GasInput::extract_resource(&source);
-        assert_eq!(next.patches, vec![(10, vec![7, 7, 7, 9, 7]), (99, vec![7])]);
-        assert_eq!(first.patches[0].1[13], 7);
+        assert_eq!(next.patches, vec![10..15, 99..100]);
+        assert_eq!(next.patch_words, vec![7, 7, 7, 9, 7, 7]);
+        assert_eq!(next.patches().nth(1), Some((99, &[7][..])));
+        assert_eq!(first.patch_words[13], 7);
         assert_eq!(Arc::strong_count(&source.terrain_words), 1);
+    }
+    #[test]
+    fn packed_patches_preserve_addresses_across_gaps_overlaps_and_unequal_rows() {
+        let source = GasInput {
+            terrain_words: Arc::new((0..1000).map(|i| i * 713).collect()),
+            terrain_revision: 2,
+            terrain_dirty: vec![991..1000, 700..703, 8..13, 13..40, 25..30, 6..8, 1..2],
+            ..default()
+        };
+        source.uploaded.store(1, Ordering::Release);
+        let extracted = GasInput::extract_resource(&source);
+        assert_eq!(extracted.patches, vec![1..2, 6..40, 700..703, 991..1000]);
+        assert_eq!(extracted.patch_words.len(), 47);
+        for (at, words) in extracted.patches() {
+            for (i, word) in words.iter().enumerate() {
+                assert_eq!(*word, (at + i) as u32 * 713);
+            }
+        }
     }
     #[test]
     fn wrapped_storage_recovers_world_positions_after_window_moves() {
@@ -680,16 +761,16 @@ fn prepare(
     pipeline.uniform.write_buffer(&device, &queue);
     if pipeline.terrain_revision != input.terrain_revision {
         assert!(input.window.words() <= TERRAIN_WORDS);
-        let count: usize = input.patches.iter().map(|(_, words)| words.len()).sum();
+        let count = input.patch_words.len();
         if let Some(compute) = cache.get_compute_pipeline(pipeline.upload).filter(|_| {
             input.patches.len() > 128
                 && count > 0
                 && count * 8 <= device.limits().max_storage_buffer_binding_size as usize
         }) {
             let mut bytes = Vec::with_capacity(count * 8);
-            for (start, words) in &input.patches {
+            for (start, words) in input.patches() {
                 for (offset, &word) in words.iter().enumerate() {
-                    bytes.extend_from_slice(&((*start + offset) as u32).to_le_bytes());
+                    bytes.extend_from_slice(&((start + offset) as u32).to_le_bytes());
                     bytes.extend_from_slice(&word.to_le_bytes());
                 }
             }
@@ -725,9 +806,9 @@ fn prepare(
             // to depth, shadows and gas in this same frame.
             queue.submit([encoder.finish()]);
         } else {
-            for (start, words) in &input.patches {
+            for (start, words) in input.patches() {
                 let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
-                queue.write_buffer(&pipeline.terrain, *start as u64 * 4, &bytes);
+                queue.write_buffer(&pipeline.terrain, start as u64 * 4, &bytes);
             }
         }
         pipeline.terrain_revision = input.terrain_revision;

@@ -354,12 +354,21 @@ mod tests {
         reference.terrain_words = Arc::new(vec![0; window.words()]);
         write_window(&sim, &mut reference, window, None);
         assert_eq!(gas.terrain_words, reference.terrain_words);
-        for origin in [[104, 0, 264], [360, 0, 264], [96, 0, 256]] {
+        for origin in [[104, 0, 264], [360, 0, 264], [96, 0, 256], [96, 0, 256]] {
             let had = gas.window;
             let next = TerrainWindow { origin, ..window };
             gas.terrain_dirty.clear();
+            let uploaded = gas.terrain_words.as_ref().clone();
             write_window(&sim, &mut gas, next, Some(had));
             occupancy(&sim, &mut gas, &mut visual);
+            let mut delivered = uploaded;
+            for span in &gas.terrain_dirty {
+                delivered[span.clone()].copy_from_slice(&gas.terrain_words[span.clone()]);
+            }
+            assert_eq!(
+                delivered, *gas.terrain_words,
+                "missing GPU patch at {origin:?}"
+            );
             if origin == [104, 0, 264] {
                 let changed: usize = gas.terrain_dirty.iter().map(|r| r.len()).sum();
                 assert!(

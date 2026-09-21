@@ -64,7 +64,7 @@ impl Bricks {
     pub fn prepare(
         &mut self,
         window: TerrainWindow,
-        patches: &[(usize, Vec<u32>)],
+        patches: &[Range<usize>],
         terrain: &Buffer,
         device: &RenderDevice,
         queue: &RenderQueue,
@@ -87,13 +87,13 @@ impl Bricks {
         if patches.is_empty() && self.pending == 0 && !self.full {
             return;
         }
-        if patches.iter().map(|(_, w)| w.len()).sum::<usize>() >= window.words() / 8 {
+        if patches.iter().map(|r| r.len()).sum::<usize>() >= window.words() / 8 {
             self.full = true;
         }
         // Accumulate until submitted, even if a pipeline is still compiling.
         if !self.full {
-            for (start, words) in patches {
-                mark(&mut self.dirty, window.dims, *start..*start + words.len());
+            for span in patches {
+                mark(&mut self.dirty, window.dims, span.clone());
             }
         }
         let indices: Vec<u32> = if self.full {

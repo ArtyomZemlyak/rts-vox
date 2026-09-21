@@ -16,7 +16,7 @@ pub struct Profile {
     mark: Option<Instant>,
     phases: Vec<f64>,
     detail: [f64; 3],
-    rows: Vec<(f64, u32, [f64; 11])>,
+    rows: Vec<(f64, u32, [f64; 12])>,
     finished: bool,
 }
 #[derive(Default)]
@@ -62,6 +62,7 @@ pub fn begin(
         return;
     }
     if p.start.is_none() {
+        gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
     }
@@ -135,6 +136,7 @@ pub fn end(
         gas.timings.prepare_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         gas.timings.allocation_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         gas.timings.active_regions.load(Ordering::Relaxed) as f64,
+        gas.timings.extract_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
     ];
     if elapsed > 0.0 {
         p.rows.push((elapsed, scene.sim.tick, phases));
@@ -147,13 +149,13 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms"
         )?;
         for (t, tick, ms) in &p.rows {
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0}",
-                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10]
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6}",
+                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11]
             )?;
         }
         out.flush()
@@ -172,6 +174,7 @@ pub fn end(
     ]
     .into_iter()
     .enumerate()
+    .chain(std::iter::once((11, "render_extract")))
     {
         let mut values: Vec<_> = p.rows.iter().map(|r| r.2[column]).collect();
         values.sort_by(f64::total_cmp);
@@ -189,6 +192,10 @@ pub fn end(
     println!(
         "PROFILE max_gas_regions={}",
         p.rows.iter().map(|r| r.2[10] as usize).max().unwrap_or(0)
+    );
+    println!(
+        "PROFILE render_extract_peak_ms={:.3}",
+        gas.timings.extract_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
     );
     println!(
         "PROFILE render_thread_prepare_peak_ms={:.3} allocation_peak_ms={:.3}",

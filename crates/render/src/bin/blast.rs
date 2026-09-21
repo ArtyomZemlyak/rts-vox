@@ -619,22 +619,38 @@ fn write_window(
     } else {
         0
     };
-    let mut dirty = Vec::new();
+    let mut dirty: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut before: Vec<(usize, u32)> = Vec::new();
     let mut cursor = voxel::World::mat_cursor();
     let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
-        // Every window edge is word aligned. Clear whole rows, including sky,
-        // then visit only material below the column ceiling.
+        // Remember only rows that can change. Sky already empty in both the
+        // old and new slab needs no write, allocation or GPU upload.
         assert!(window.dims[0].is_multiple_of(8));
         assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
         for z in zs.clone() {
+            let next_top = xs
+                .clone()
+                .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
+                .max()
+                .unwrap_or(window.origin[1]);
             for y in window.span(1) {
                 let mut x = xs.start;
                 while x < xs.end {
                     let i = window.index([x, y, z]).unwrap();
                     let n = (xs.end - x).min(window.dims[0] as i32 - x % window.dims[0] as i32);
                     let span = i / 8..(i + n as usize) / 8;
-                    words[span.clone()].fill(0);
-                    dirty.push(span);
+                    if had.is_none() || y < next_top || words[span.clone()].iter().any(|w| *w != 0)
+                    {
+                        if had.is_some() {
+                            before.extend(
+                                words[span.clone()]
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(offset, &word)| (span.start + offset, word)),
+                            );
+                        }
+                        words[span].fill(0);
+                    }
                     x += n;
                 }
             }
@@ -653,6 +669,21 @@ fn write_window(
                     let shift = (i % 8) * 4;
                     words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
                 }
+            }
+            // A toroidal slot often receives exactly the material it already
+            // held. Publish actual differences, including old solids becoming
+            // air, instead of every row in the entering slab.
+            for (i, old) in before.drain(..) {
+                if words[i] == old {
+                    continue;
+                }
+                if let Some(last) = dirty.last_mut() {
+                    if last.end == i {
+                        last.end += 1;
+                        continue;
+                    }
+                }
+                dirty.push(i..i + 1);
             }
         }
     };
