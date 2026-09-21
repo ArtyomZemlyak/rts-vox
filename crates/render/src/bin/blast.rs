@@ -547,6 +547,7 @@ fn main() {
                     animate_energy,
                     framing,
                     workbench::camera,
+                    workbench::ghost::update,
                     workbench::overlay,
                     panel::refresh,
                     knobs::refresh,

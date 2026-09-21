@@ -1,5 +1,7 @@
 //! Placement tools for the existing forest range. Edits replace a validated
 //! pristine fixture; damage never leaks back into the authored layout.
+#[path = "workbench/ghost.rs"]
+pub mod ghost;
 use super::*;
 use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
@@ -32,10 +34,17 @@ pub struct ShieldFlashes {
 #[derive(Component)]
 pub struct EditorCamera;
 
-pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut config: ResMut<GizmoConfigStore>) {
+pub fn setup(
+    mut commands: Commands,
+    edit: Res<Workshop>,
+    mut config: ResMut<GizmoConfigStore>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     if edit.layout.is_none() {
         return;
     }
+    ghost::setup(&mut commands, &mut meshes, &mut materials);
     // The gas composite follows the world pass and would cover ordinary
     // gizmos. Draw interaction handles with a second, transparent camera.
     let (style, _) = config.config_mut::<DefaultGizmoConfigGroup>();
@@ -92,6 +101,8 @@ pub struct Workshop {
     history: Vec<RangeLayout>,
     redo: Vec<RangeLayout>,
     hover: Option<[i32; 3]>,
+    preview: Option<Preview>,
+    validator: sim_core::blast::placement::Validator,
     previous_cursor: Option<Vec2>,
     pub pending: Option<BlastRange>,
 }
@@ -113,6 +124,8 @@ impl Workshop {
             history: Vec::new(),
             redo: Vec::new(),
             hover: None,
+            preview: None,
+            validator: default(),
             previous_cursor: None,
             pending: None,
         }
@@ -124,6 +137,7 @@ impl Workshop {
         config: ExplosionConfig,
     ) -> Result<(), String> {
         let sim = BlastRange::with_layout(config, next.clone())?;
+        self.preview = None;
         if let Some(old) = self.layout.replace(next) {
             if self.history.len() == 32 {
                 self.history.remove(0);
@@ -144,6 +158,7 @@ impl Workshop {
             return Ok(());
         };
         let sim = BlastRange::with_layout(config, next.clone())?;
+        self.preview = None;
         stack.pop();
         if let Some(old) = self.layout.replace(next) {
             if redo {
@@ -156,6 +171,122 @@ impl Workshop {
         self.pending = Some(sim);
         Ok(())
     }
+    fn preview(&mut self, at: [i32; 3], radius: i32) {
+        let key = PreviewKey {
+            at,
+            tool: self.tool,
+            selected: self.selected,
+            rotate: self.rotate,
+            radius,
+        };
+        if self.preview.as_ref().is_some_and(|p| p.key == key) {
+            return;
+        }
+        let Some(layout) = &self.layout else { return };
+        let mut next = layout.clone();
+        let selected = match self.tool {
+            Tool::Select => {
+                let Some(s) = self.selected else {
+                    self.preview = None;
+                    return;
+                };
+                relocate(&mut next, s, at);
+                s
+            }
+            Tool::Tank | Tool::Strider => {
+                next.units.push(RangeUnitDef {
+                    kind: if self.tool == Tool::Tank {
+                        RangeUnitKind::Tank
+                    } else {
+                        RangeUnitKind::Strider
+                    },
+                    at,
+                });
+                Selection::Unit(next.units.len() - 1)
+            }
+            Tool::Shield => {
+                next.shields.push(RangeShieldDef { at, radius });
+                Selection::Shield(next.shields.len() - 1)
+            }
+            Tool::Aim => {
+                self.preview = None;
+                return;
+            }
+            tool => {
+                next.blocks.push(block(tool, at, self.rotate));
+                Selection::Block(next.blocks.len() - 1)
+            }
+        };
+        let inside = |lo: [i32; 2], hi: [i32; 2]| {
+            at[0] >= lo[0] && at[0] < hi[0] && at[2] >= lo[1] && at[2] < hi[1]
+        };
+        let issue = if !inside(next.clear_min, next.clear_max)
+            && !next.course.as_ref().is_some_and(|c| inside(c.min, c.max))
+        {
+            Some("Выберите место на подготовленной площадке".into())
+        } else {
+            // Authored layers may intersect within their own group. Moving
+            // that group or adding a wall must not swallow another object.
+            let collides = if let Selection::Block(i) = selected {
+                let moved = if self.tool == Tool::Select {
+                    group(layout, i)
+                } else {
+                    vec![i]
+                };
+                moved.iter().any(|j| {
+                    next.blocks
+                        .iter()
+                        .enumerate()
+                        .any(|(k, b)| !moved.contains(&k) && overlap(&next.blocks[*j], b))
+                })
+            } else {
+                false
+            };
+            if collides {
+                Some("Место занято другим блоком".into())
+            } else {
+                self.validator.validate(&next).err().map(|e| {
+                    use sim_core::blast::placement::Rejection;
+                    match e {
+                        Rejection::Layout(_) => "Превышен лимит объектов или границы расстановки",
+                        Rejection::Outside => "Часть корпуса выходит за границу карты",
+                        Rejection::Terrain => "Корпус пересекается с грунтом или блоком",
+                        Rejection::Units => "Место занято юнитом",
+                    }
+                    .into()
+                })
+            }
+        };
+        self.preview = Some(Preview {
+            key,
+            next,
+            selected,
+            issue,
+        });
+    }
+    pub fn placement_notice(&self) -> &str {
+        if !self.editing || self.hover.is_none() {
+            return "";
+        }
+        self.preview
+            .as_ref()
+            .map_or("", |p| p.issue.as_deref().unwrap_or("Можно разместить"))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PreviewKey {
+    at: [i32; 3],
+    tool: Tool,
+    selected: Option<Selection>,
+    rotate: bool,
+    radius: i32,
+}
+struct Preview {
+    key: PreviewKey,
+    next: RangeLayout,
+    selected: Selection,
+    issue: Option<String>,
 }
 
 fn snap(v: f32) -> i32 {
@@ -458,63 +589,37 @@ pub fn input(
         edit.hover = Some(at);
         let left = mouse.just_pressed(MouseButton::Left);
         let right = mouse.just_pressed(MouseButton::Right);
+        if right && edit.tool != Tool::Select {
+            edit.tool = Tool::Select;
+            edit.preview = None;
+            return;
+        }
+        if left && edit.tool == Tool::Select {
+            edit.selected = pick(&scene.sim, ray).and_then(|(_, s)| s);
+            edit.preview = None;
+            return;
+        }
+        edit.preview(at, scene.sim.shield_tuning().default_radius);
         if !left && !right {
             return;
         }
-        if (right && edit.selected.is_some())
-            || (left && !matches!(edit.tool, Tool::Select | Tool::Aim))
-        {
-            let inside = |lo: [i32; 2], hi: [i32; 2]| {
-                at[0] >= lo[0] && at[0] < hi[0] && at[2] >= lo[1] && at[2] < hi[1]
+        if left && edit.tool == Tool::Aim {
+            let Some((hit, _)) = pick(&scene.sim, ray) else {
+                return;
             };
-            if !inside(next.clear_min, next.clear_max)
-                && !next.course.as_ref().is_some_and(|c| inside(c.min, c.max))
-            {
-                scene.notice = "Place inside the prepared test pad; wheel zoom / MMB pan".into();
+            next.target = hit;
+            next.airburst_on_target = false;
+        } else if let Some(preview) = &edit.preview {
+            if preview.issue.is_some() {
                 return;
             }
-        }
-        if right {
-            if edit.tool != Tool::Select {
-                edit.tool = Tool::Select;
-                return;
-            }
-            if let Some(s) = edit.selected {
-                relocate(&mut next, s, at);
-            } else {
-                return;
-            }
+            // The exact checked proposal under the cursor is committed.
+            next = preview.next.clone();
         } else {
-            match edit.tool {
-                Tool::Select => {
-                    edit.selected = pick(&scene.sim, ray).and_then(|(_, s)| s);
-                    return;
-                }
-                Tool::Tank | Tool::Strider => {
-                    next.units.push(RangeUnitDef {
-                        kind: if edit.tool == Tool::Tank {
-                            RangeUnitKind::Tank
-                        } else {
-                            RangeUnitKind::Strider
-                        },
-                        at,
-                    });
-                }
-                Tool::Aim => {
-                    let Some((hit, _)) = pick(&scene.sim, ray) else {
-                        return;
-                    };
-                    next.target = hit;
-                    next.airburst_on_target = false;
-                }
-                Tool::Shield => next.shields.push(RangeShieldDef {
-                    at,
-                    radius: scene.sim.shield_tuning().default_radius,
-                }),
-                tool => next.blocks.push(block(tool, at, edit.rotate)),
-            }
+            return;
         }
     }
+
     // Keep additions in the prepared pad: outside terrain is intentionally
     // forested and uneven. Real unit-volume validation catches every overlap.
     let result = edit.commit(next, cfg);
@@ -737,47 +842,127 @@ pub fn overlay(
             }
         }
     }
-    if let Some(p) = edit.hover {
-        let at = Vec3::from(p.map(|v| v as f32));
-        let pad = p[0] >= layout.clear_min[0]
-            && p[0] < layout.clear_max[0]
-            && p[2] >= layout.clear_min[1]
-            && p[2] < layout.clear_max[1];
-        let c = if pad {
-            cyan
-        } else {
-            Color::srgb(1.0, 0.4, 0.2)
-        };
-        match edit.tool {
-            Tool::Concrete | Tool::Steel | Tool::Earth => {
-                let b = block(edit.tool, p, edit.rotate);
-                bounds(
-                    &mut giz,
-                    Vec3::from(b.min.map(|v| v as f32)),
-                    Vec3::from(b.max.map(|v| v as f32)),
-                    c,
-                );
+    if edit.hover.is_some() {
+        if let Some(preview) = &edit.preview {
+            let c = if preview.issue.is_none() {
+                Color::srgb(0.22, 1.0, 0.42)
+            } else {
+                Color::srgb(1.0, 0.18, 0.12)
+            };
+            match preview.selected {
+                Selection::Block(i) => {
+                    let ids = if edit.tool == Tool::Select {
+                        group(layout, i)
+                    } else {
+                        vec![i]
+                    };
+                    for j in ids {
+                        let b = &preview.next.blocks[j];
+                        bounds(
+                            &mut giz,
+                            Vec3::from(b.min.map(|v| v as f32)),
+                            Vec3::from(b.max.map(|v| v as f32)),
+                            c,
+                        );
+                    }
+                }
+                Selection::Unit(i) => {
+                    let u = &preview.next.units[i];
+                    let body = &art.pristine[usize::from(u.kind == RangeUnitKind::Strider)];
+                    let size =
+                        Vec3::new(body.vol.nx as f32, body.vol.ny as f32, body.vol.nz as f32);
+                    let lo = Vec3::from(u.at.map(|v| v as f32))
+                        - Vec3::new(size.x * 0.5, 0.0, size.z * 0.5);
+                    bounds(&mut giz, lo, lo + size, c);
+                }
+                Selection::Shield(i) => {
+                    let s = &preview.next.shields[i];
+                    giz.sphere(
+                        Isometry3d::from_translation(Vec3::from(s.at.map(|v| v as f32))),
+                        s.radius as f32,
+                        c,
+                    );
+                }
             }
-            Tool::Tank | Tool::Strider => {
-                let body = &art.pristine[if edit.tool == Tool::Tank { 0 } else { 1 }];
-                let size = Vec3::new(body.vol.nx as f32, body.vol.ny as f32, body.vol.nz as f32);
-                let lo = at - Vec3::new(size.x * 0.5, 0.0, size.z * 0.5);
-                bounds(&mut giz, lo, lo + size, c);
-            }
-            Tool::Shield => {
-                giz.sphere(
-                    Isometry3d::from_translation(at),
-                    scene.sim.shield_tuning().default_radius as f32,
-                    c,
-                );
-            }
-            _ => {}
         }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_and_commit_agree_on_terrain_and_unit_collisions() {
+        let (mut w, c) = fixture();
+        let before = w.layout.clone();
+        w.tool = Tool::Strider;
+        w.preview([448, 16, 384], 60);
+        let p = w.preview.as_ref().unwrap();
+        assert_eq!(p.issue, None);
+        let ptr = p.next.blocks.as_ptr();
+        w.preview([448, 16, 384], 60);
+        assert_eq!(
+            w.preview.as_ref().unwrap().next.blocks.as_ptr(),
+            ptr,
+            "unchanged hover rebuilt the proposal"
+        );
+        for at in [[400, 16, 336], [439, 16, 336]] {
+            w.preview(at, 60);
+            let p = w.preview.as_ref().unwrap();
+            assert!(p.issue.is_some());
+            assert!(w.commit(p.next.clone(), c.clone()).is_err());
+            assert_eq!(w.layout, before);
+            assert!(w.history.is_empty());
+            assert!(w.pending.is_none());
+        }
+        w.preview([448, 16, 384], 60);
+        w.commit(w.preview.as_ref().unwrap().next.clone(), c)
+            .unwrap();
+        assert!(
+            w.preview.is_none(),
+            "edit did not invalidate the hover cache"
+        );
+    }
+    #[test]
+    fn course_placement_rotation_and_layered_moves_have_checked_previews() {
+        let (mut w, _) = fixture();
+        w.tool = Tool::Concrete;
+        w.preview([550, 16, 570], 60);
+        let p = w.preview.as_ref().unwrap();
+        assert_eq!(p.issue, None, "course outside the stock pad must be green");
+        let old = p.next.blocks.last().unwrap().clone();
+        w.rotate = true;
+        w.preview([550, 16, 570], 60);
+        assert_ne!(w.preview.as_ref().unwrap().next.blocks.last(), Some(&old));
+        w.preview([400, 16, 336], 60);
+        assert!(
+            w.preview.as_ref().unwrap().issue.is_some(),
+            "new block swallowed the wall"
+        );
+        w.tool = Tool::Select;
+        w.selected = Some(Selection::Block(1));
+        w.preview([400, 16, 340], 60);
+        let p = w.preview.as_ref().unwrap();
+        assert_eq!(p.issue, None);
+        assert_eq!(p.next.blocks[0].min[2], 286);
+        assert_eq!(p.next.blocks[1].min[2], 286);
+        w.preview([100, 16, 100], 60);
+        assert!(w.preview.as_ref().unwrap().issue.is_some());
+    }
+    #[test]
+    fn object_limit_is_visible_before_clicking() {
+        let (mut w, _) = fixture();
+        let layout = w.layout.as_mut().unwrap();
+        layout.shields = vec![
+            RangeShieldDef {
+                at: [448, 16, 384],
+                radius: 60
+            };
+            8
+        ];
+        w.tool = Tool::Shield;
+        w.preview([450, 16, 380], 60);
+        assert!(w.preview.as_ref().unwrap().issue.is_some());
+    }
     #[test]
     fn overview_keeps_the_shooter_when_aim_moves_beyond_the_wall() {
         use bevy::camera::{CameraProjection, RenderTargetInfo};

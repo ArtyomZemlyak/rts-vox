@@ -8,7 +8,9 @@
 //! reports the first refused terrain pose on the exact straight connection
 //! with resting rubble (ignores other units); it does not change the order.
 //! `--trace` reports path changes, `--inspect-state` prints the final motion
-//! state and `--no-crater` runs only the original terrain.
+//! state and `--no-crater` runs only the original terrain. `--inspect-motion`
+//! compares current, planner and rubble-free contacts at a block transition
+//! and at the end, plus nearby translations and rotations (not a full sweep).
 use sim_core::blast::BlastRange;
 use std::time::Instant;
 
@@ -116,11 +118,19 @@ fn main() {
         let plan_us = plan.elapsed().as_micros();
         let mut trail = Vec::new();
         let mut last_path = Vec::new();
+        let mut was_blocked = false;
         for _ in 0..ticks {
             let start = Instant::now();
             scene.step();
             samples.push((start.elapsed().as_micros(), tick));
             tick += 1;
+            if args.iter().any(|a| a == "--inspect-motion")
+                && scene.gun.motion.blocked
+                && !was_blocked
+            {
+                inspect_motion(&scene);
+            }
+            was_blocked = scene.gun.motion.blocked;
             if args.iter().any(|a| a == "--trace") && scene.gun.motion.path != last_path {
                 let m = &scene.gun.motion;
                 println!(
@@ -147,6 +157,9 @@ fn main() {
         }
         if args.iter().any(|a| a == "--inspect-state") {
             println!("motion={:?}", scene.gun.motion);
+        }
+        if args.iter().any(|a| a == "--inspect-motion") {
+            inspect_motion(&scene);
         }
         let mut top = samples.clone();
         top.sort_unstable_by(|a, b| b.cmp(a));
@@ -228,4 +241,56 @@ fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
         old = next;
     }
     println!("direct to={target:?} terrain_clear=true crushed={crush}");
+}
+
+fn inspect_motion(scene: &BlastRange) {
+    use fx::{angle, Fx};
+    let config = modding::navigation::Navigation::from_ron(include_str!(
+        "../../../../data/range-navigation.ron"
+    ))
+    .unwrap();
+    let m = &scene.gun.motion;
+    let shape = m.probe_shape(&scene.gun.body);
+    let mut planned = shape;
+    planned.span += config.plan_margin;
+    let from = [m.pos[0], m.pos[2]];
+    let mut actual =
+        nav::vehicle::Probe::for_search(&scene.world, &config.fell.materials, Default::default())
+            .with_rubble(&scene.rubble);
+    let mut bare =
+        nav::vehicle::Probe::for_search(&scene.world, &config.fell.materials, Default::default());
+    println!(
+        "probe tick={} pos={:?} head={} actual={:?} planned={:?} bare={:?}",
+        scene.tick,
+        from,
+        m.drive.head,
+        actual.pose(from, m.drive.head, shape),
+        actual.pose(from, m.drive.head, planned),
+        bare.pose(from, m.drive.head, shape)
+    );
+    for (sign, turn) in [
+        (-30, 0),
+        (30, 0),
+        (-120, 0),
+        (120, 0),
+        (0, -64),
+        (0, 64),
+        (0, -128),
+        (0, 128),
+        (0, -256),
+        (0, 256),
+        (0, -512),
+        (0, 512),
+    ] {
+        let p = [
+            from[0].add(angle::cos(m.drive.head).mul(Fx::from_ratio(sign, 30))),
+            from[1].add(angle::sin(m.drive.head).mul(Fx::from_ratio(sign, 30))),
+        ];
+        let head = angle::norm(m.drive.head + turn);
+        println!(
+            "probe move={sign} turn={turn} actual={:?} planned={:?}",
+            actual.pose(p, head, shape),
+            actual.pose(p, head, planned)
+        );
+    }
 }

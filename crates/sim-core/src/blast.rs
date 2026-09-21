@@ -7,6 +7,8 @@ use fx::Fx;
 pub mod matter;
 #[path = "range_motion.rs"]
 pub mod motion;
+#[path = "range_placement.rs"]
+pub mod placement;
 use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
@@ -1552,30 +1554,13 @@ impl BlastRange {
         Self::build(config, None)
     }
     pub fn with_layout(mut config: ExplosionConfig, layout: RangeLayout) -> Result<Self, String> {
-        layout.validate()?;
+        placement::Validator::default()
+            .validate(&layout)
+            .map_err(|e| e.to_string())?;
         config.unit_ablation_resistance = layout.unit_resistance;
-        let r = Self::build(config, Some(layout));
-        for (i, u) in r.units.iter().enumerate() {
-            for z in 0..u.body.vol.nz as usize {
-                for y in 0..u.body.vol.ny as usize {
-                    for x in 0..u.body.vol.nx as usize {
-                        if !u.body.vol.get(x, y, z) {
-                            continue;
-                        }
-                        let p = u.world_pos([x, y, z]);
-                        if material(&r.world, p) != 0
-                            || r.units[..i].iter().any(|other| other.solid(p))
-                        {
-                            return Err(
-                                "a range unit intersects terrain, a block or another unit".into()
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        Ok(r)
+        Ok(Self::build(config, Some(layout)))
     }
+
     fn build(config: ExplosionConfig, layout: Option<RangeLayout>) -> Self {
         let extended = layout.is_some() || config.motion == ProjectileMotion::Direct;
         let witness = config.unit_ablation_resistance > 0;

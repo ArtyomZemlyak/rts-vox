@@ -663,7 +663,7 @@ pub fn refresh(
             } else {
                 ""
             },
-            scene.notice
+            format_args!("{}\n{}", edit.placement_notice(), scene.notice)
         ));
     }
 }
