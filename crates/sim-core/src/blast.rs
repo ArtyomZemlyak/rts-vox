@@ -26,7 +26,7 @@ use voxel::{Generator, World};
 /// carries its own size (ADR-315), and the scene reads it from there.
 pub const SIZE: [u32; 3] = modding::range::stock_size();
 pub const FLOOR: i32 = 16;
-pub const GUN: [i32; 3] = [128, FLOOR, 336];
+pub const GUN: [i32; 3] = modding::range::stock_gun();
 /// Muzzle of the vanilla 100 mm tank template relative to its base centre.
 pub const MUZZLE: [i32; 3] = [GUN[0] + 30, GUN[1] + 23, GUN[2]];
 pub const TARGET: [i32; 3] = [236, 24, 336];
@@ -532,7 +532,11 @@ pub fn material_work(m: u16, c: &ExplosionConfig) -> u32 {
     }
 }
 
+#[path = "range_index.rs"]
+mod range_index;
+
 pub struct RangeTerrain {
+    index: range_index::Index,
     extended: bool,
     layout: Option<RangeLayout>,
 }
@@ -630,6 +634,22 @@ struct Column {
 }
 
 impl RangeTerrain {
+    fn new(extended: bool, layout: Option<RangeLayout>) -> Self {
+        Self {
+            index: range_index::Index::new(layout.as_ref()),
+            extended,
+            layout,
+        }
+    }
+    fn in_zone(&self, x: u32, z: u32) -> bool {
+        self.layout.as_ref().is_some_and(|r| {
+            self.index
+                .at(x, z)
+                .zones
+                .iter()
+                .any(|&i| r.zones[i].contains([x as i32, z as i32], 0))
+        })
+    }
     fn column_of(&self, x: u32, z: u32) -> Column {
         let shift = if self.extended { 160 } else { 0 };
         let layout_pad = self.layout.as_ref().is_some_and(|r| {
@@ -639,9 +659,12 @@ impl RangeTerrain {
                 && (z as i32) < r.clear_max[1]
         });
         let blocks = self.layout.as_ref().map_or_else(Vec::new, |r| {
-            r.blocks
+            self.index
+                .at(x, z)
+                .blocks
                 .iter()
                 .rev()
+                .map(|&i| &r.blocks[i])
                 .filter(|b| {
                     x as i32 >= b.min[0]
                         && (x as i32) < b.max[0]
@@ -656,14 +679,15 @@ impl RangeTerrain {
             .as_ref()
             .and_then(|r| r.course.as_ref())
             .filter(|c| {
-                x as i32 >= c.min[0]
+                (x as i32 >= c.min[0]
                     && (x as i32) < c.max[0]
                     && z as i32 >= c.min[1]
-                    && (z as i32) < c.max[1]
+                    && (z as i32) < c.max[1])
+                    || self.in_zone(x, z)
             })
             .map(|c| {
                 let mut h = FLOOR;
-                for r in &c.ramps {
+                for r in self.index.at(x, z).ramps.iter().map(|&i| &c.ramps[i]) {
                     if (x as i32) >= r.min[0]
                         && (x as i32) < r.max[0]
                         && (z as i32) >= r.min[2]
@@ -680,7 +704,8 @@ impl RangeTerrain {
                     }
                 }
                 h
-            });
+            })
+            .or_else(|| self.in_zone(x, z).then_some(FLOOR));
         let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
         let ground =
             if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
@@ -831,23 +856,27 @@ impl Generator for RangeTerrain {
                 && (z as i32) < r.clear_max[1]
         });
         if let Some(r) = &self.layout {
-            if let Some(b) = r
+            if let Some(b) = self
+                .index
+                .at(x, z)
                 .blocks
                 .iter()
                 .rev()
+                .map(|&i| &r.blocks[i])
                 .find(|b| b.contains([x as i32, y as i32, z as i32]))
             {
                 return b.material;
             }
         }
         if let Some(c) = self.layout.as_ref().and_then(|r| r.course.as_ref()) {
-            if x as i32 >= c.min[0]
+            if (x as i32 >= c.min[0]
                 && (x as i32) < c.max[0]
                 && z as i32 >= c.min[1]
-                && (z as i32) < c.max[1]
+                && (z as i32) < c.max[1])
+                || self.in_zone(x, z)
             {
                 let mut h = FLOOR;
-                for r in &c.ramps {
+                for r in self.index.at(x, z).ramps.iter().map(|&i| &c.ramps[i]) {
                     if (x as i32) >= r.min[0]
                         && (x as i32) < r.max[0]
                         && (z as i32) >= r.min[2]
@@ -873,6 +902,17 @@ impl Generator for RangeTerrain {
                     0
                 };
             }
+        }
+        if self.in_zone(x, z) {
+            return if y < FLOOR as u32 {
+                if y + 1 == FLOOR as u32 {
+                    8
+                } else {
+                    1
+                }
+            } else {
+                0
+            };
         }
         let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
         let h = if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
@@ -1578,10 +1618,7 @@ impl BlastRange {
             size[1],
             size[2],
             config.edits_per_tick,
-            Box::new(RangeTerrain {
-                extended,
-                layout: layout.clone(),
-            }),
+            Box::new(RangeTerrain::new(extended, layout.clone())),
         );
         let stock =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
@@ -1605,7 +1642,7 @@ impl BlastRange {
                 .into_iter()
                 .collect()
         };
-        let mut gun = RangeUnit::new(GUN);
+        let mut gun = RangeUnit::new(layout.as_ref().map_or(GUN, |r| r.gun));
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
                 u.motion.speed = if u.kind == RangeUnitKind::Tank {
@@ -6077,10 +6114,7 @@ mod tests {
         ];
         for layout in layouts {
             for extended in [false, true] {
-                let gen = RangeTerrain {
-                    extended,
-                    layout: layout.clone(),
-                };
+                let gen = RangeTerrain::new(extended, layout.clone());
                 let mut col = vec![0u16; SIZE[1] as usize];
                 let mut solid = 0usize;
                 let mut kinds = std::collections::BTreeSet::new();
@@ -6107,6 +6141,58 @@ mod tests {
                     kinds.len() >= 4,
                     "only {kinds:?} of the range's materials were seen"
                 );
+            }
+        }
+    }
+    #[test]
+    fn all_sector_blocks_cutouts_and_index_boundaries_match_authored_material() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        let mut columns = std::collections::BTreeSet::new();
+        for b in &layout.blocks {
+            for x in [
+                b.min[0] - 1,
+                b.min[0],
+                (b.min[0] + b.max[0]) / 2,
+                b.max[0] - 1,
+                b.max[0],
+            ] {
+                for z in [
+                    b.min[2] - 1,
+                    b.min[2],
+                    (b.min[2] + b.max[2]) / 2,
+                    b.max[2] - 1,
+                    b.max[2],
+                ] {
+                    columns.insert([x, z]);
+                }
+            }
+        }
+        for zone in &layout.zones {
+            for x in (zone.min[0] - 1..=zone.max[0]).step_by(127) {
+                for z in (zone.min[1] - 1..=zone.max[1]).step_by(127) {
+                    columns.insert([x, z]);
+                }
+            }
+        }
+        for [x, z] in columns {
+            let mut col = [0u16; 192];
+            gen.column(x as u32, z as u32, 0, &mut col);
+            for (y, &mat) in col.iter().enumerate() {
+                assert_eq!(
+                    mat,
+                    gen.material(x as u32, y as u32, z as u32),
+                    "{x},{y},{z}"
+                );
+                // Independent full walk verifies broad-phase candidates and last-writer order.
+                if let Some(b) = layout
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find(|b| b.contains([x, y as i32, z]))
+                {
+                    assert_eq!(mat, b.material, "authored block at {x},{y},{z}");
+                }
             }
         }
     }

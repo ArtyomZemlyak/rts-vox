@@ -1,6 +1,27 @@
 //! Bounded, integer-only fixtures for the live weapons proving ground.
 use serde::{Deserialize, Serialize};
 
+pub const MAX_RANGE_BLOCKS: usize = 256;
+pub const MAX_RANGE_ZONES: usize = 12;
+
+/// A prepared sector of the same world, with an authored firing position.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeZone {
+    pub name: String,
+    pub min: [i32; 2],
+    pub max: [i32; 2],
+    pub spawn: [i32; 3],
+    pub target: [i32; 3],
+}
+impl RangeZone {
+    pub fn contains(&self, p: [i32; 2], margin: i32) -> bool {
+        (0..2).all(|a| p[a] >= self.min[a] + margin && p[a] < self.max[a] - margin)
+    }
+}
+pub const fn stock_gun() -> [i32; 3] {
+    [128, 16, 336]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub enum RangeUnitKind {
     Tank,
@@ -44,6 +65,10 @@ pub struct RangeLayout {
     pub size: [u32; 3],
     #[serde(default)]
     pub course: Option<RangeCourse>,
+    #[serde(default = "stock_gun")]
+    pub gun: [i32; 3],
+    #[serde(default)]
+    pub zones: Vec<RangeZone>,
     pub target: [i32; 3],
     /// Automatic acquisition radius in world units; manual fire is unchanged.
     #[serde(default = "default_auto_attack_range")]
@@ -125,7 +150,7 @@ impl RangeLayout {
             || r.unit_resistance > 1_000_000
             || r.units.len() > 8
             || !(1..=100_000).contains(&r.auto_attack_range)
-            || r.blocks.len() > 32
+            || r.blocks.len() > MAX_RANGE_BLOCKS
             || r.power_milli.is_empty()
             || r.power_milli.len() > 8
             || r.power_milli.iter().any(|p| !(100..=4000).contains(p))
@@ -137,16 +162,34 @@ impl RangeLayout {
                     || r.clear_min[a] >= r.clear_max[a]
             })
             || r.blocks.iter().any(|b| {
-                ![0, 1, 2, 3, 6].contains(&b.material)
+                ![0, 1, 2, 3, 5, 6, 8].contains(&b.material)
                     || (0..3).any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
             })
-            || r.units.iter().any(|u| {
-                u.at[0] < 80
-                    || u.at[0] > 560
-                    || u.at[1] < 0
-                    || u.at[1] > 96
-                    || u.at[2] < 80
-                    || u.at[2] > 560
+            || std::iter::once(r.gun)
+                .chain(r.units.iter().map(|u| u.at))
+                .any(|at| {
+                    at[0] < 32
+                        || at[0] >= size[0] - 32
+                        || at[1] < 0
+                        || at[1] >= size[1]
+                        || at[2] < 32
+                        || at[2] >= size[2] - 32
+                })
+            || r.zones.len() > MAX_RANGE_ZONES
+            || r.zones.iter().any(|z| {
+                z.name.trim().is_empty()
+                    || z.name.chars().count() > 48
+                    || (0..2).any(|a| {
+                        z.min[a] < 0
+                            || z.max[a] > size[a * 2]
+                            || z.min[a] >= z.max[a]
+                            || z.max[a] - z.min[a] < 96
+                    })
+                    || !z.contains([z.spawn[0], z.spawn[2]], 32)
+                    || !z.contains([z.target[0], z.target[2]], 0)
+                    || [z.spawn, z.target]
+                        .iter()
+                        .any(|p| p[1] < 0 || p[1] >= size[1])
             })
             || r.shields.len() > 8
             || r.shields.iter().any(|s| {
@@ -161,7 +204,7 @@ impl RangeLayout {
                 .iter()
                 .enumerate()
                 .any(|(i, p)| c.patrols[..i].iter().any(|q| q.unit == p.unit))
-                || c.ramps.len() > 16
+                || c.ramps.len() > 32
                 || c.patrols.len() > 8
                 || !(1..=100).contains(&c.tank_speed)
                 || !(1..=100).contains(&c.walker_speed)
@@ -171,14 +214,15 @@ impl RangeLayout {
                 || c.replan_ticks == 0
                 || c.replan_ticks > 1800
                 || !(1..=99).contains(&c.turn_alignment_pct)
-                || (0..2).any(|a| c.min[a] < 0 || c.max[a] > 640 || c.min[a] >= c.max[a])
+                || (0..2).any(|a| c.min[a] < 0 || c.max[a] > size[a * 2] || c.min[a] >= c.max[a])
                 || c.patrols.iter().any(|p| {
                     p.unit >= r.units.len()
                         || p.points.len() < 2
                         || p.points.len() > 32
-                        || p.points
-                            .iter()
-                            .any(|p| (0..2).any(|a| p[a] < c.min[a] + 32 || p[a] >= c.max[a] - 32))
+                        || p.points.iter().any(|p| {
+                            (0..2).any(|a| p[a] < c.min[a] + 32 || p[a] >= c.max[a] - 32)
+                                && !r.zones.iter().any(|z| z.contains(*p, 32))
+                        })
                 })
                 || c.ramps.iter().any(|b| {
                     ![0, 2].contains(&b.axis)
@@ -190,5 +234,26 @@ impl RangeLayout {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn sector_bounds_and_catalog_limits_are_rejected_without_overflow() {
+        let good = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        for (lo, hi) in [(i32::MAX, i32::MIN), (-1, 100), (100, 101), (100, 20000)] {
+            let mut r = good.clone();
+            r.zones[0].min[0] = lo;
+            r.zones[0].max[0] = hi;
+            assert!(r.validate().is_err());
+        }
+        let mut r = good.clone();
+        r.zones = vec![r.zones[0].clone(); MAX_RANGE_ZONES + 1];
+        assert!(r.validate().is_err());
+        r = good;
+        r.blocks = vec![r.blocks[0].clone(); MAX_RANGE_BLOCKS + 1];
+        assert!(r.validate().is_err());
     }
 }

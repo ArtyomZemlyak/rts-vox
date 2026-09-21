@@ -3,6 +3,7 @@ param(
     [switch]$AutoFire,
     [switch]$Build,
     [switch]$Settings,
+    [ValidateRange(1, 12)][int]$Zone = 1,
     [ValidateSet('energy', 'shell', 'anni')][string]$Weapon = 'energy'
 )
 # ASCII only: Windows PowerShell 5.1 reads a .ps1 without a BOM as ANSI.
@@ -24,6 +25,7 @@ if (!$LayoutPath) {
 $rangeArgs = @('--weapon', $Weapon, '--range', ('"{0}"' -f $LayoutPath))
 if (!$AutoFire) { $rangeArgs += '--drive' }
 if ($Settings) { $rangeArgs += '--settings' }
+if ($Zone -gt 1) { $rangeArgs += @('--zone', $Zone.ToString()) }
 $env:WGPU_BACKEND = 'vulkan'
 Write-Output 'POLIGON: RMB ground = move, RMB unit = attack. The left panel contains weapons, power, pause, editor, settings and camera controls.'
 Write-Output 'Optional: wheel zoom, middle mouse pan. Layouts: -LayoutPath data/range-slab.ron (a slab on one pillar), out/range-layout.ron (saved from the editor).'

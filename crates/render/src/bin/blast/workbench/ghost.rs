@@ -87,7 +87,7 @@ pub fn setup(
         ));
     }
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    for i in 0..32 {
+    for i in 0..modding::range::MAX_RANGE_BLOCKS {
         commands.spawn((
             Mesh3d(cube.clone()),
             MeshMaterial3d(colours.0[0].clone()),

@@ -48,6 +48,9 @@ pub enum Action {
     Load,
     AssignRoute,
     Overview,
+    Zone(i32),
+    RestartHere,
+    Orbit(f32),
     Own,
     Target,
     Zoom(f32),
@@ -63,6 +66,10 @@ pub enum Action {
 }
 #[derive(Component)]
 pub struct Readout;
+#[derive(Component)]
+pub struct SectorLabel;
+#[derive(Component)]
+pub struct ScrollPanel;
 #[derive(Component)]
 pub struct EditorOnly;
 
@@ -93,12 +100,16 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     knobs::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
         PanelRoot,
+        ScrollPanel,
+        ScrollPosition::default(),
         bevy::ui::RelativeCursorPosition::default(),
         Node {
             position_type: PositionType::Absolute,
             left: px(16),
             top: px(16),
             width: px(282),
+            max_height: percent(96),
+            overflow: Overflow::scroll_y(),
             padding: UiRect::all(px(14)),
             row_gap: px(5),
             flex_direction: FlexDirection::Column,
@@ -124,7 +135,24 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             text_font.clone(),
             TextColor(Color::srgb(0.48, 0.65, 0.68)),
         ));
+        p.spawn((
+            Text::new(""),
+            text_font.clone(),
+            TextColor(Color::srgb(0.85, 0.76, 0.48)),
+            SectorLabel,
+        ));
         let rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
+            (
+                false,
+                vec![
+                    ("‹ Участок", Action::Zone(-1)),
+                    ("Участок ›", Action::Zone(1)),
+                ],
+            ),
+            (
+                false,
+                vec![("Новый опыт здесь (сброс)", Action::RestartHere)],
+            ),
             (
                 false,
                 vec![
@@ -233,12 +261,15 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Камера ↑", Action::Pan(0.0, -24.0)),
                     ("Камера ↓", Action::Pan(0.0, 24.0)),
+                    ("↶", Action::Orbit(-0.25)),
+                    ("↷", Action::Orbit(0.25)),
                 ],
             ),
         ];
         for (editor, row) in rows {
             let mut parent = p.spawn(Node {
                 width: percent(100),
+                flex_shrink: 0.0,
                 column_gap: px(6),
                 ..default()
             });
@@ -395,6 +426,7 @@ pub fn actions(
                 if let (Some(Selection::Unit(id)), Some(mut layout)) =
                     (edit.selected, edit.layout.clone())
                 {
+                    let sector_route = workbench::sector_patrol(&layout, id);
                     if let Some(c) = &mut layout.course {
                         if c.patrols.iter().any(|p| p.unit == id) {
                             c.patrols.retain(|p| p.unit != id);
@@ -403,11 +435,15 @@ pub fn actions(
                                 "../../../../../data/range-cover.ron"
                             ))
                             .expect("stock course");
-                            let template = c
-                                .patrols
-                                .iter()
-                                .find(|p| layout.units[p.unit].kind == layout.units[id].kind)
-                                .map(|p| p.points.clone())
+                            let template = sector_route
+                                .or_else(|| {
+                                    c.patrols
+                                        .iter()
+                                        .find(|p| {
+                                            layout.units[p.unit].kind == layout.units[id].kind
+                                        })
+                                        .map(|p| p.points.clone())
+                                })
                                 .or_else(|| {
                                     stock
                                         .course
@@ -439,6 +475,30 @@ pub fn actions(
                 }
                 key(KeyCode::F5, &mut panel);
             }
+            Action::Zone(step) => {
+                edit.change_zone(step);
+                scene.view = 1;
+            }
+            Action::RestartHere => {
+                match edit.restart_here(knobs::effective_config(
+                    scene.energy,
+                    scene.anni,
+                    scene.power,
+                    overrides,
+                )) {
+                    Ok(()) => {
+                        panel.drive = true;
+                        panel.demo = false;
+                        panel.ground_fire = false;
+                        scene.repeat = false;
+                        scene.view = 1;
+                    }
+                    Err(e) => scene.notice = e,
+                }
+            }
+            Action::Orbit(delta) => {
+                edit.orbit = (edit.orbit + delta).rem_euclid(std::f32::consts::TAU)
+            }
             Action::Overview => {
                 scene.view = 1;
                 edit.pan = Vec2::ZERO;
@@ -456,8 +516,7 @@ pub fn actions(
             }
             Action::Zoom(z) => edit.zoom = (edit.zoom * z).clamp(0.3, 2.0),
             Action::Pan(x, z) => {
-                edit.pan =
-                    (edit.pan + Vec2::new(x, z)).clamp(Vec2::splat(-220.0), Vec2::splat(220.0));
+                edit.pan_by(Vec2::new(x, z));
             }
             Action::Settings
             | Action::Group(_)
@@ -502,8 +561,22 @@ pub fn refresh(
     panel: Res<Panel>,
     mut rows: Query<&mut Node, With<EditorOnly>>,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
-    mut text: Query<&mut Text, With<Readout>>,
+    mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
+    mut sectors: Query<&mut Text, (With<SectorLabel>, Without<Readout>)>,
 ) {
+    for mut t in &mut sectors {
+        **t = edit.sector().map_or_else(
+            || "Испытательная площадка".into(),
+            |z| {
+                format!(
+                    "{} / {} · {}",
+                    edit.zone + 1,
+                    edit.layout.as_ref().unwrap().zones.len(),
+                    z.name
+                )
+            },
+        );
+    }
     for mut n in &mut rows {
         n.display = if edit.editing {
             Display::Flex
@@ -665,5 +738,37 @@ pub fn refresh(
             },
             format_args!("{}\n{}", edit.placement_notice(), scene.notice)
         ));
+    }
+}
+
+/// Scroll the sidebar at small window sizes; map input already ignores its hover.
+pub fn scroll(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut panels: Query<
+        (
+            &bevy::ui::RelativeCursorPosition,
+            &ComputedNode,
+            &mut ScrollPosition,
+        ),
+        With<ScrollPanel>,
+    >,
+) {
+    use bevy::input::mouse::MouseScrollUnit;
+    let delta: f32 = wheel
+        .read()
+        .map(|e| {
+            -e.y * if e.unit == MouseScrollUnit::Line {
+                32.0
+            } else {
+                1.0
+            }
+        })
+        .sum();
+    for (cursor, node, mut pos) in &mut panels {
+        if cursor.cursor_over() {
+            let max =
+                ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
+            pos.y = (pos.y + delta).clamp(0.0, max);
+        }
     }
 }

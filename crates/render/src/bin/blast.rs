@@ -247,6 +247,7 @@ fn main() {
     let mut anni = false;
     let mut repeat = false;
     let mut view = 0;
+    let mut zone = None;
     let mut requested_view = None;
     let mut patrol = None;
     let mut close_view = None;
@@ -313,6 +314,10 @@ fn main() {
             "--record-seconds" => {
                 i += 1;
                 record_seconds = args[i].parse().expect("seconds");
+            }
+            "--zone" => {
+                i += 1;
+                zone = Some(args[i].parse::<usize>().expect("zone number (1-based)"));
             }
             "--range" => {
                 i += 1;
@@ -384,7 +389,17 @@ fn main() {
         !(realtime && all_frames),
         "--realtime supports --shots; use offline capture for a gap-free movie"
     );
-    let layout = read_layout(layout_file.as_deref()).expect("range file");
+    let mut layout = read_layout(layout_file.as_deref()).expect("range file");
+    if let Some(id) = zone {
+        let r = layout.as_mut().expect("--zone needs --range");
+        let z = r
+            .zones
+            .get(id.checked_sub(1).expect("zones start at 1"))
+            .expect("zone in layout");
+        r.gun = z.spawn;
+        r.target = z.target;
+        view = 1;
+    }
     assert!(!edit || layout.is_some(), "--edit needs --range");
     let workshop = Workshop::new(layout, edit);
     let mut sim = range_sim(
@@ -529,6 +544,7 @@ fn main() {
                 profile::begin,
                 (
                     panel::actions,
+                    panel::scroll,
                     knobs::actions,
                     workbench::input,
                     advance,
@@ -546,6 +562,7 @@ fn main() {
                     weapon_art,
                     animate_energy,
                     framing,
+                    stream_camera,
                     workbench::camera,
                     workbench::ghost::update,
                     workbench::overlay,
@@ -584,9 +601,7 @@ const TERRAIN_WINDOW: [u32; 3] = [1280, 192, 1280];
 /// The window's corner moves in steps of this many voxels.
 const WINDOW_STEP: i32 = 8;
 
-/// What the picture keeps the terrain around: the machine the player
-/// drives. When the camera learns to leave it (P-42), the focus follows
-/// the camera instead.
+/// Initial terrain window before the first camera update.
 fn focus(sim: &BlastRange) -> [i32; 3] {
     let p = sim.gun.motion.pos;
     [p[0], p[1], p[2]].map(|v| v.to_int_trunc())
@@ -746,13 +761,31 @@ fn write_window(
     gas.params.terrain_origin = Vec4::new(o[0] as f32, o[1] as f32, o[2] as f32, ceiling);
 }
 
-/// Move the window when the hull has left the middle of it, writing only
+/// Move the window when the camera has left the middle of it, writing only
 /// what came into view (ADR-318).
-fn recentre_terrain(sim: &BlastRange, gas: &mut GasInput) {
+fn recentre_terrain(sim: &BlastRange, gas: &mut GasInput, focus: [i32; 3]) -> bool {
     let had = gas.window;
-    let want = wanted_window(sim);
+    let want = TerrainWindow::around(sim.size(), focus, TERRAIN_WINDOW, WINDOW_STEP);
     if want != had {
         write_window(sim, gas, want, Some(had));
+        return true;
+    }
+    false
+}
+/// Runs even on pause: browsing a distant sector must stream the actual terrain.
+fn stream_camera(
+    scene: Res<Scene>,
+    camera: Query<&Transform, With<GasCamera>>,
+    mut gas: ResMut<GasInput>,
+    mut visual: ResMut<moving::Visual>,
+) {
+    let Ok(t) = camera.single() else { return };
+    let ray = t.forward();
+    let distance = (sim_core::blast::FLOOR as f32 - t.translation.y) / ray.y.min(-0.01);
+    let p = t.translation + ray * distance;
+    if recentre_terrain(&scene.sim, &mut gas, [p.x as i32, 16, p.z as i32]) {
+        moving::occupancy(&scene.sim, &mut gas, &mut visual);
+        gas.advance(scene.sim.tick * 2);
     }
 }
 fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
@@ -1111,6 +1144,7 @@ fn advance(
     >,
     mut exit: MessageWriter<AppExit>,
 ) {
+    gas.begin_frame();
     if keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
     }
@@ -1277,7 +1311,6 @@ fn advance(
     } else {
         1
     };
-    gas.terrain_dirty.clear();
     for _ in 0..steps {
         if scene.realtime {
             scene.acc -= 1.0 / 30.0;
@@ -1311,7 +1344,6 @@ fn advance(
         };
         scene.frame += 1;
         let terrain_started = std::time::Instant::now();
-        recentre_terrain(&scene.sim, &mut gas);
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
         profile.measure(1, terrain_started.elapsed());
@@ -1675,7 +1707,7 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
             max = max.max(q);
         }
     };
-    let gun = Vec3::from(GUN.map(|v| v as f32));
+    let gun = Vec3::from(sim.gun.at.map(|v| v as f32));
     include(
         gun - Vec3::new(45.0, 2.0, 30.0),
         gun + Vec3::new(45.0, 50.0, 30.0),
@@ -1732,6 +1764,48 @@ fn overview_frame(sim: &BlastRange, aim: Vec3, offset: Vec3, aspect: f32) -> (Ve
     )
 }
 
+/// Fit only the selected sector, never all objects across a kilometre.
+fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Vec3, f32) {
+    let aim = Vec3::new(
+        (z.min[0] + z.max[0]) as f32 * 0.5,
+        34.0,
+        (z.min[1] + z.max[1]) as f32 * 0.5,
+    );
+    let rotation = Transform::from_translation(offset)
+        .looking_at(Vec3::ZERO, Vec3::Y)
+        .rotation;
+    let mut extent = Vec2::ZERO;
+    for x in [z.min[0], z.max[0]] {
+        for y in [0, 110] {
+            for zz in [z.min[1], z.max[1]] {
+                let p = Vec3::new(x as f32, y as f32, zz as f32) - aim;
+                extent = extent
+                    .max(Vec2::new((rotation * Vec3::X).dot(p), (rotation * Vec3::Y).dot(p)).abs());
+            }
+        }
+    }
+    (
+        aim,
+        (extent.y * 2.0).max(extent.x * 2.0 / aspect.max(0.1)) + 24.0,
+    )
+}
+
+fn window_height_limit(offset: Vec3, aspect: f32, size: [u32; 3]) -> f32 {
+    let rotation = Transform::from_translation(offset)
+        .looking_at(Vec3::ZERO, Vec3::Y)
+        .rotation;
+    let right = rotation * Vec3::X;
+    let up = rotation * Vec3::Y;
+    let forward = rotation * Vec3::NEG_Z;
+    let ground_up = up - forward * (up.y / forward.y);
+    let extent = right.abs() * aspect + ground_up.abs();
+    let dims = [
+        size[0].min(TERRAIN_WINDOW[0]),
+        size[2].min(TERRAIN_WINDOW[2]),
+    ];
+    ((dims[0] as f32 - 16.0) / extent.x.max(0.01)).min((dims[1] as f32 - 16.0) / extent.z.max(0.01))
+}
+
 fn framing(
     scene: Res<Scene>,
     workshop: Res<Workshop>,
@@ -1782,12 +1856,23 @@ fn framing(
             }
             if let Some(layout) = &scene.sim.layout {
                 let centre = Vec3::from(layout.target.map(|v| v as f32));
-                let mut aim = Vec3::new((GUN[0] as f32 + centre.x) * 0.5 + 35.0, 34.0, centre.z);
+                let mut aim = Vec3::new(
+                    (layout.gun[0] as f32 + centre.x) * 0.5 + 35.0,
+                    34.0,
+                    centre.z,
+                );
                 let mut offset = Vec3::new(-155.0, 250.0, 320.0);
                 let aspect = camera
                     .logical_viewport_size()
                     .map_or(16.0 / 9.0, |v| v.x / v.y.max(1.0));
-                let (fitted, mut height) = overview_frame(&scene.sim, aim, offset, aspect);
+                if workshop.sector().is_some() {
+                    offset.y = 420.0;
+                }
+                offset = Quat::from_rotation_y(workshop.orbit) * offset;
+                let (fitted, mut height) = workshop.sector().map_or_else(
+                    || overview_frame(&scene.sim, aim, offset, aspect),
+                    |z| sector_frame(z, offset, aspect),
+                );
                 aim = fitted;
                 if scene.view == 2 || scene.view == 3 {
                     let id = if scene.view == 3 { 1 } else { 0 };
@@ -1821,30 +1906,9 @@ fn framing(
                     height = 150.0;
                 }
                 if scene.view == 5 {
-                    // Ходовую мишень называет сама раскладка. Прежний
-                    // `unwrap_or(2)` держался на порядке юнитов в
-                    // range-cover.ron и на чужой раскладке снимал не то.
-                    //
-                    // Выбор редактора участвует только если выбрано **ходовое**
-                    // тело: `Workshop::new` заранее ставит `Unit(0)` при
-                    // `--edit`, и без этого условия `--edit --view target`
-                    // всегда снимал неподвижный танк (ADR-268).
-                    let patrol = |i: usize| {
-                        layout
-                            .course
-                            .as_ref()
-                            .is_some_and(|c| c.patrols.iter().any(|p| p.unit == i))
-                    };
-                    let id = scene
-                        .sim
-                        .attack
-                        .or_else(|| match workshop.selected {
-                            Some(workbench::Selection::Unit(i)) if patrol(i) => Some(i),
-                            _ => None,
-                        })
-                        .or_else(|| {
-                            Some(layout.course.as_ref()?.patrols.get(scene.patrol - 1)?.unit)
-                        });
+                    // Explicit attack wins. Otherwise inspect a target in the
+                    // selected sector; old layouts retain their named patrol.
+                    let id = workshop.target_unit(scene.sim.attack, scene.patrol);
                     // Мишени может не быть вовсе: сохранённая раскладка
                     // допускает ноль тел. Тогда остаётся общий план, а не
                     // кроп в 150 единиц по пустому рельефу.
@@ -1865,9 +1929,13 @@ fn framing(
                     .looking_at(Vec3::ZERO, Vec3::Y)
                     .rotation
                     * Vec3::X;
+                height = (height * workshop.zoom).min(window_height_limit(
+                    offset,
+                    aspect,
+                    scene.sim.size(),
+                ));
                 aim -= right * height * aspect * panel_fraction * 0.5;
                 aim += Vec3::new(workshop.pan.x, 0.0, workshop.pan.y);
-                height *= workshop.zoom;
                 *transform = Transform::from_translation(aim + offset).looking_at(aim, Vec3::Y);
                 if let Projection::Orthographic(p) = &mut *projection {
                     p.scaling_mode = bevy::camera::ScalingMode::FixedVertical {

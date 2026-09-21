@@ -97,6 +97,8 @@ pub struct Workshop {
     pub selected: Option<Selection>,
     pub pan: Vec2,
     pub zoom: f32,
+    pub zone: usize,
+    pub orbit: f32,
     rotate: bool,
     history: Vec<RangeLayout>,
     redo: Vec<RangeLayout>,
@@ -108,14 +110,24 @@ pub struct Workshop {
 }
 impl Workshop {
     pub fn new(layout: Option<RangeLayout>, editing: bool) -> Self {
-        let selected = if editing && layout.as_ref().is_some_and(|l| !l.units.is_empty()) {
+        let selected = if editing
+            && layout
+                .as_ref()
+                .is_some_and(|l| l.zones.is_empty() && !l.units.is_empty())
+        {
             Some(Selection::Unit(0))
         } else {
             None
         };
+        let zone = layout
+            .as_ref()
+            .and_then(|r| r.zones.iter().position(|z| z.spawn == r.gun))
+            .unwrap_or(0);
         Self {
             layout,
             editing,
+            zone,
+            orbit: 0.0,
             tool: Tool::Select,
             selected,
             pan: Vec2::ZERO,
@@ -129,6 +141,79 @@ impl Workshop {
             previous_cursor: None,
             pending: None,
         }
+    }
+    pub fn sector(&self) -> Option<&modding::range::RangeZone> {
+        self.layout.as_ref()?.zones.get(self.zone)
+    }
+    pub fn change_zone(&mut self, step: i32) {
+        let count = self.layout.as_ref().map_or(0, |r| r.zones.len());
+        if count == 0 {
+            return;
+        }
+        self.zone = (self.zone as i32 + step).rem_euclid(count as i32) as usize;
+        self.selected = None;
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
+        self.orbit = 0.0;
+        self.hover = None;
+        self.preview = None;
+    }
+    pub fn target_unit(&self, attack: Option<usize>, patrol_number: usize) -> Option<usize> {
+        let r = self.layout.as_ref()?;
+        if let Some(i) = attack.filter(|&i| i < r.units.len()) {
+            return Some(i);
+        }
+        let local = |i: usize| {
+            r.units.get(i).is_some_and(|u| {
+                self.sector()
+                    .is_none_or(|z| z.contains([u.at[0], u.at[2]], 0))
+            })
+        };
+        let patrols = r.course.as_ref().map_or(&[][..], |c| c.patrols.as_slice());
+        if let Some(Selection::Unit(i)) = self.selected {
+            if local(i) && (self.sector().is_some() || patrols.iter().any(|p| p.unit == i)) {
+                return Some(i);
+            }
+        }
+        patrols
+            .get(patrol_number.saturating_sub(1))
+            .filter(|p| local(p.unit))
+            .or_else(|| patrols.iter().find(|p| local(p.unit)))
+            .map(|p| p.unit)
+            .or_else(|| {
+                self.sector()
+                    .and_then(|_| (0..r.units.len()).find(|&i| local(i)))
+            })
+    }
+    pub fn pan_by(&mut self, delta: Vec2) {
+        let Some(layout) = &self.layout else { return };
+        let centre =
+            self.sector()
+                .map_or(Vec2::new(layout.gun[0] as f32, layout.gun[2] as f32), |z| {
+                    Vec2::new(
+                        (z.min[0] + z.max[0]) as f32 * 0.5,
+                        (z.min[1] + z.max[1]) as f32 * 0.5,
+                    )
+                });
+        self.pan = (centre + self.pan + delta).clamp(
+            Vec2::ZERO,
+            Vec2::new(layout.size[0] as f32, layout.size[2] as f32),
+        ) - centre;
+    }
+    /// Starting a new experiment is explicit: restore the world and use the
+    /// selected sector's authored shooter and target. Browsing never mutates it.
+    pub fn restart_here(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let Some(zone) = self.sector() else {
+            return Ok(());
+        };
+        let mut next = self.layout.clone().unwrap();
+        next.gun = zone.spawn;
+        next.target = zone.target;
+        self.commit(next, config)?;
+        self.selected = None;
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
+        Ok(())
     }
     /// Atomic edit: validate the real body occupancy before touching history.
     pub(super) fn commit(
@@ -222,6 +307,7 @@ impl Workshop {
         };
         let issue = if !inside(next.clear_min, next.clear_max)
             && !next.course.as_ref().is_some_and(|c| inside(c.min, c.max))
+            && !next.zones.iter().any(|z| inside(z.min, z.max))
         {
             Some("Выберите место на подготовленной площадке".into())
         } else {
@@ -479,9 +565,7 @@ pub fn input(
                 camera.viewport_to_world(gt, b),
             ) {
                 let d = ra.origin - rb.origin;
-                edit.pan =
-                    (edit.pan + Vec2::new(d.x, d.z)).clamp(Vec2::splat(-220.0), Vec2::splat(220.0));
-                scene.view = 1;
+                edit.pan_by(Vec2::new(d.x, d.z));
             }
         }
     }
@@ -629,6 +713,25 @@ pub fn input(
     };
 }
 
+/// Prefer a same-sector route; otherwise use its clear perimeter rather than
+/// copying a route from the original firing pad on the other side of the map.
+pub fn sector_patrol(layout: &RangeLayout, id: usize) -> Option<Vec<[i32; 2]>> {
+    let unit = layout.units.get(id)?;
+    let zone = layout
+        .zones
+        .iter()
+        .find(|z| z.contains([unit.at[0], unit.at[2]], 0))?;
+    if let Some(p) = layout.course.as_ref()?.patrols.iter().find(|p| {
+        layout.units[p.unit].kind == unit.kind && p.points.iter().all(|p| zone.contains(*p, 32))
+    }) {
+        return Some(p.points.clone());
+    }
+    // Leave room for the stock body and its turn at the prepared boundary.
+    let lo = zone.min.map(|v| v + 48);
+    let hi = zone.max.map(|v| v - 48);
+    Some(vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]])
+}
+
 /// A dashed line laid along the ground between two ground points, every
 /// other segment drawn: a route as the hull will drive it (P-25).
 fn ground_dash(
@@ -774,12 +877,10 @@ pub fn overlay(
 
     let Some(layout) = &edit.layout else { return };
     let cyan = Color::srgb(0.3, 0.85, 0.9);
-    let corners = [
-        [layout.clear_min[0], layout.clear_min[1]],
-        [layout.clear_max[0], layout.clear_min[1]],
-        [layout.clear_max[0], layout.clear_max[1]],
-        [layout.clear_min[0], layout.clear_max[1]],
-    ];
+    let (lo, hi) = edit
+        .sector()
+        .map_or((layout.clear_min, layout.clear_max), |z| (z.min, z.max));
+    let corners = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]];
     for i in 0..4 {
         let a = corners[i];
         let b = corners[(i + 1) % 4];
@@ -1001,6 +1102,74 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn browsing_sectors_preserves_the_experiment_and_restart_moves_the_shooter() {
+        let (mut w, config) = fixture();
+        let zone = modding::range::RangeZone {
+            name: "Test sector".into(),
+            min: [80, 260],
+            max: [620, 625],
+            spawn: [200, 16, 336],
+            target: [392, 24, 336],
+        };
+        w.layout.as_mut().unwrap().zones = vec![zone.clone(), zone];
+        let before = w.layout.clone();
+        w.pan = Vec2::splat(50.0);
+        w.change_zone(-1);
+        assert_eq!(w.zone, 1);
+        assert_eq!(w.layout, before);
+        assert!(w.pending.is_none());
+        assert_eq!(w.pan, Vec2::ZERO);
+        w.pan_by(Vec2::splat(20000.0));
+        assert!(w.pan.x <= 640.0 && w.pan.y <= 640.0);
+        w.restart_here(config).unwrap();
+        assert_eq!(w.pending.as_ref().unwrap().gun.at, [200, 16, 336]);
+        assert_eq!(w.layout.as_ref().unwrap().gun, [200, 16, 336]);
+        assert_eq!(w.history.len(), 1);
+    }
+    #[test]
+    fn distant_sector_framing_is_local_and_contains_its_structures_when_rotated() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let zone = layout.zones.last().unwrap();
+        for orbit in [0.0, 1.2, 2.6, 4.8] {
+            let offset = Quat::from_rotation_y(orbit) * Vec3::new(-155.0, 420.0, 320.0);
+            let (aim, height) = sector_frame(zone, offset, 16.0 / 9.0);
+            assert!(aim.x > 8000.0 && aim.z > 8000.0);
+            assert!(height < 1300.0, "fit included distant units: {height}");
+            let rotation = Transform::from_translation(offset)
+                .looking_at(Vec3::ZERO, Vec3::Y)
+                .rotation;
+            for b in &layout.blocks {
+                if !zone.contains([b.min[0], b.min[2]], 0) {
+                    continue;
+                }
+                for p in [b.min, b.max] {
+                    let delta = Vec3::from(p.map(|v| v as f32)) - aim;
+                    assert!((rotation * Vec3::X).dot(delta).abs() < height * 16.0 / 9.0 * 0.5);
+                    assert!((rotation * Vec3::Y).dot(delta).abs() < height * 0.5);
+                }
+            }
+        }
+    }
+    #[test]
+    fn a_remote_target_and_its_new_route_stay_in_the_selected_sector() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let mut w = Workshop::new(Some(layout.clone()), false);
+        assert_eq!(w.target_unit(None, 1), Some(2));
+        w.change_zone(4);
+        assert_eq!(w.target_unit(None, 1), Some(4));
+        let points = sector_patrol(&layout, 4).unwrap();
+        assert!(points.iter().all(|p| layout.zones[4].contains(*p, 32)));
+        w.change_zone(3);
+        assert_eq!(
+            w.target_unit(None, 1),
+            None,
+            "empty far sector must not jump to the old patrol"
+        );
+        assert_eq!(w.target_unit(Some(4), 1), Some(4), "explicit attack wins");
     }
     fn fixture() -> (Workshop, ExplosionConfig) {
         (

@@ -91,11 +91,8 @@ impl Validator {
     /// Layered authored blocks retain their last-writer material semantics.
     pub fn validate(&self, layout: &RangeLayout) -> Result<(), Rejection> {
         layout.validate().map_err(Rejection::Layout)?;
-        let terrain = RangeTerrain {
-            extended: true,
-            layout: Some(layout.clone()),
-        };
-        let mut units = vec![(&self.footprints[0], GUN)];
+        let terrain = RangeTerrain::new(true, Some(layout.clone()));
+        let mut units = vec![(&self.footprints[0], layout.gun)];
         units.extend(layout.units.iter().map(|u| {
             (
                 &self.footprints[usize::from(u.kind == RangeUnitKind::Strider)],

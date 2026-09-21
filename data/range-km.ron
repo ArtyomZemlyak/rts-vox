@@ -1,9 +1,18 @@
-// The range a kilometre on a side (P-34, ADR-320). One world cell is
-// 0.1 m, so ten thousand cells a side. The structured part of the range
-// keeps the coordinates it always had, in one corner; beyond it the
-// relief carries on by itself, with hills and woodland to drive into.
+// One 1 km world; prepared sectors share the same destruction and motion rules.
+// Coordinates are world units (0.1 m). Later blocks cut holes in earlier solids.
 (
     size: (10000, 192, 10000),
+    gun: (128,16,336),
+    zones: [
+        (name: "Укрытие и броня", min: (80,260), max: (640,650), spawn: (128,16,336), target: (392,24,336)),
+        (name: "Материалы", min: (1400,300), max: (2160,900), spawn: (1480,16,460), target: (1850,28,460)),
+        (name: "Обрушение", min: (2850,400), max: (3650,1080), spawn: (2930,16,590), target: (3260,34,551)),
+        (name: "Ходовая полоса", min: (4400,500), max: (5240,1260), spawn: (4490,16,660), target: (4880,24,660)),
+        (name: "Энергетическая защита", min: (6100,700), max: (6860,1330), spawn: (6180,16,880), target: (6510,32,880)),
+        (name: "Городской квартал", min: (1800,3900), max: (2640,4700), spawn: (1880,16,4120), target: (2270,54,4120)),
+        (name: "Карьер и земляные укрытия", min: (4700,5100), max: (5540,5860), spawn: (4780,16,5300), target: (5140,26,5300)),
+        (name: "Дальний рубеж", min: (8650,8600), max: (9490,9360), spawn: (8730,16,8800), target: (9090,50,8800)),
+    ],
     course: Some((
         min: (200, 400), max: (590, 625),
         tank_speed: 40, walker_speed: 28, step_height: 4,
@@ -14,10 +23,19 @@
             (min: (365,16,490), max: (435,24,535), axis: 0, reverse: false),
             (min: (435,16,490), max: (505,24,535), axis: 0, reverse: true),
             (min: (370,16,540), max: (480,20,590), axis: 2, reverse: false),
+            (min: (4750,16,820), max: (4870,32,900), axis: 0, reverse: false),
+            (min: (4870,16,820), max: (4990,32,900), axis: 0, reverse: true),
+            (min: (4750,16,940), max: (4860,24,1010), axis: 0, reverse: false),
+            (min: (4860,16,940), max: (4970,24,1010), axis: 0, reverse: true),
+            (min: (5020,16,1000), max: (5150,30,1140), axis: 2, reverse: false),
+            (min: (5020,16,1140), max: (5150,30,1220), axis: 2, reverse: true),
+            (min: (4920,16,5530), max: (5040,38,5630), axis: 0, reverse: false),
+            (min: (5040,16,5530), max: (5160,38,5630), axis: 0, reverse: true),
         ],
         patrols: [
             (unit: 2, points: [(550,445),(550,588),(270,588),(270,445)]),
             (unit: 3, points: [(495,505),(495,540),(325,540),(325,505)]),
+            (unit: 5, points: [(4660,700),(5120,700),(5120,1220),(4660,1220)]),
         ],
     )),
     auto_attack_range: 1200, // 120 m, all placed units are range targets.
@@ -30,10 +48,115 @@
         (kind: Tank, at: (439, 16, 336)), // sheltered: same blast domain
         (kind: Tank, at: (300,16,445)),
         (kind: Strider, at: (320,16,505)),
+        (kind: Tank, at: (6555,16,880)), // inside the dome
+        (kind: Strider, at: (4660,16,700)), // obstacle-course patrol
     ],
+    shields: [(at: (6555,16,880), radius: 80)],
     blocks: [
         (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
         (min: (394, 0, 282), max: (406, 60, 390), material: 3), // steel core
+
+        // Materials: thin/thick concrete, steel, wood, layered armor, rubble.
+        (min: (1770,0,420), max: (1776,62,484), material: 2),
+        (min: (1770,0,540), max: (1788,62,604), material: 2),
+        (min: (1770,0,660), max: (1778,62,724), material: 3),
+        (min: (1770,0,780), max: (1782,62,844), material: 5),
+        (min: (1850,0,426), max: (1862,64,498), material: 3), // steel behind thin concrete
+        (min: (1980,0,610), max: (2020,42,680), material: 1), // earth-filled revetment
+        (min: (1976,0,606), max: (1980,48,684), material: 2),
+        (min: (1970,16,780), max: (1988,29,801), material: 6),
+        (min: (2000,16,800), max: (2018,35,821), material: 6),
+        (min: (2040,16,755), max: (2058,40,776), material: 6),
+        // Collapse: supported deck, hollow tower and timber shed.
+        (min: (3220,5,530), max: (3420,17,660), material: 0), // pit under the deck
+        (min: (3260,5,546), max: (3270,52,556), material: 2), // load-bearing column
+        (min: (3260,5,630), max: (3270,52,640), material: 2), // load-bearing column
+        (min: (3360,5,546), max: (3370,52,556), material: 2), // load-bearing column
+        (min: (3360,5,630), max: (3370,52,640), material: 2), // load-bearing column
+        (min: (3240,52,536), max: (3400,60,650), material: 2), // unsupported when columns are destroyed
+        (min: (3440,16,820), max: (3550,110,950), material: 2), // hollow building
+        (min: (3445,16,825), max: (3545,105,945), material: 0), // interior
+        (min: (3440,16,871), max: (3446,42,899), material: 0), // door
+        (min: (3440,46,832), max: (3446,62,847), material: 0), // window
+        (min: (3440,46,923), max: (3446,62,938), material: 0), // window
+        (min: (3445,56,825), max: (3545,60,945), material: 2), // upper floor
+        (min: (3200,16,850), max: (3305,70,960), material: 5), // hollow building
+        (min: (3205,16,855), max: (3300,65,955), material: 0), // interior
+        (min: (3200,16,891), max: (3206,42,919), material: 0), // door
+        (min: (3200,46,862), max: (3206,62,877), material: 0), // window
+        (min: (3200,46,933), max: (3206,62,948), material: 0), // window
+        // Mobility: trenches of different width; a bridge across the widest.
+        (min: (4780,3,620), max: (4788,16,770), material: 0), // trench
+        (min: (4840,3,620), max: (4856,16,770), material: 0), // trench
+        (min: (4940,3,620), max: (4996,16,770), material: 0), // trench
+        (min: (4934,12,674), max: (5002,16,722), material: 3), // driveable deck over the wide trench
+        (min: (5050,16,830), max: (5068,18,900), material: 2), // steps
+        (min: (5068,16,830), max: (5086,20,900), material: 2), // steps
+        (min: (5086,16,830), max: (5104,22,900), material: 2), // steps
+        (min: (5104,16,830), max: (5122,24,900), material: 2), // steps
+        (min: (5122,16,830), max: (5140,26,900), material: 2), // steps
+        (min: (4600,16,890), max: (4622,48,926), material: 6), // slalom
+        (min: (4660,16,1010), max: (4682,48,1046), material: 6), // slalom
+        (min: (4600,16,1110), max: (4622,48,1146), material: 6), // slalom
+        // Shield: one dome target and an exposed comparison target.
+        (min: (6510,0,840), max: (6518,56,920), material: 2), // wall inside the dome
+        (min: (6690,0,1050), max: (6704,60,1150), material: 3),
+        (min: (6650,16,1090), max: (6670,44,1110), material: 2), // exposed sample
+        (min: (6410,16,1130), max: (6520,80,1230), material: 2), // hollow building
+        (min: (6415,16,1135), max: (6515,75,1225), material: 0), // interior
+        (min: (6410,16,1166), max: (6416,42,1194), material: 0), // door
+        (min: (6410,46,1142), max: (6416,62,1157), material: 0), // window
+        (min: (6410,46,1203), max: (6416,62,1218), material: 0), // window
+        // Urban lane: hollow structures, openings, courtyard cover.
+        (min: (2270,16,4050), max: (2390,110,4190), material: 2), // hollow building
+        (min: (2275,16,4055), max: (2385,105,4185), material: 0), // interior
+        (min: (2270,16,4106), max: (2276,42,4134), material: 0), // door
+        (min: (2270,46,4062), max: (2276,62,4077), material: 0), // window
+        (min: (2270,46,4163), max: (2276,62,4178), material: 0), // window
+        (min: (2400,16,4370), max: (2535,94,4505), material: 2), // hollow building
+        (min: (2405,16,4375), max: (2530,89,4500), material: 0), // interior
+        (min: (2400,16,4423), max: (2406,42,4451), material: 0), // door
+        (min: (2400,46,4382), max: (2406,62,4397), material: 0), // window
+        (min: (2400,46,4478), max: (2406,62,4493), material: 0), // window
+        (min: (2090,16,4430), max: (2195,78,4560), material: 5), // hollow building
+        (min: (2095,16,4435), max: (2190,73,4555), material: 0), // interior
+        (min: (2090,16,4481), max: (2096,42,4509), material: 0), // door
+        (min: (2090,46,4442), max: (2096,62,4457), material: 0), // window
+        (min: (2090,46,4533), max: (2096,62,4548), material: 0), // window
+        (min: (2130,16,4210), max: (2146,36,4280), material: 2),
+        (min: (2420,16,4230), max: (2436,36,4300), material: 2),
+        (min: (2230,16,4530), max: (2246,36,4600), material: 2),
+        (min: (2400,54,4160), max: (2490,60,4180), material: 3), // cantilever
+        // Quarry: excavated basin, layered berm and large rock samples.
+        (min: (5090,5,5390), max: (5350,16,5480), material: 0), // shallow excavation
+        (min: (5140,0,5250), max: (5170,42,5350), material: 1), // earth berm
+        (min: (5160,0,5250), max: (5170,34,5350), material: 6), // stone backing
+        (min: (5280,16,5250), max: (5324,50,5294), material: 6),
+        (min: (5288,50,5258), max: (5316,58,5286), material: 6),
+        (min: (5360,16,5330), max: (5420,66,5390), material: 6),
+        (min: (5368,66,5338), max: (5412,74,5382), material: 6),
+        (min: (5300,16,5680), max: (5332,38,5712), material: 6),
+        (min: (5308,38,5688), max: (5324,46,5704), material: 6),
+        (min: (4870,16,5690), max: (4910,46,5730), material: 6),
+        (min: (4878,46,5698), max: (4902,54,5722), material: 6),
+        // Far range: fortified bunker, timber stores, steel gate.
+        (min: (9090,16,8730), max: (9220,94,8890), material: 2), // hollow building
+        (min: (9095,16,8735), max: (9215,89,8885), material: 0), // interior
+        (min: (9090,16,8796), max: (9096,42,8824), material: 0), // door
+        (min: (9090,46,8742), max: (9096,62,8757), material: 0), // window
+        (min: (9090,46,8863), max: (9096,62,8878), material: 0), // window
+        (min: (9084,0,8730), max: (9090,88,8785), material: 3), // steel reinforcement beside entry
+        (min: (8920,16,9090), max: (9030,70,9210), material: 5), // hollow building
+        (min: (8925,16,9095), max: (9025,65,9205), material: 0), // interior
+        (min: (8920,16,9136), max: (8926,42,9164), material: 0), // door
+        (min: (8920,46,9102), max: (8926,62,9117), material: 0), // window
+        (min: (8920,46,9183), max: (8926,62,9198), material: 0), // window
+        (min: (9230,0,9080), max: (9242,70,9240), material: 2),
+        (min: (9230,16,9130), max: (9242,49,9190), material: 0), // vehicle gate
+        (min: (9230,49,9130), max: (9242,57,9190), material: 3), // steel lintel
+        (min: (9010,16,9270), max: (9034,38,9300), material: 3), // armor samples
+        (min: (9050,16,9270), max: (9074,38,9300), material: 3), // armor samples
+        (min: (9090,16,9270), max: (9114,38,9300), material: 3), // armor samples
     ],
     power_milli: [500, 1000, 2000, 4000],
     unit_resistance: 180,

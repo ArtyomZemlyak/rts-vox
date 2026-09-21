@@ -240,6 +240,13 @@ impl ExtractResource for GasInput {
     }
 }
 impl GasInput {
+    /// Preserve patches until the renderer acknowledges them, including frames
+    /// that only pan a paused camera and never execute a simulation tick.
+    pub fn begin_frame(&mut self) {
+        if self.uploaded.load(Ordering::Acquire) == self.terrain_revision {
+            self.terrain_dirty.clear();
+        }
+    }
     fn patches(&self) -> impl Iterator<Item = (usize, &[u32])> {
         self.patches.iter().scan(0, |cursor, span| {
             let end = *cursor + span.len();
@@ -281,6 +288,21 @@ pub struct GasPlugin;
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn paused_frames_retain_unacknowledged_terrain_edits() {
+        let mut source = GasInput {
+            terrain_revision: 4,
+            terrain_dirty: std::iter::once(2..5).collect(),
+            ..default()
+        };
+        source.uploaded.store(3, Ordering::Release);
+        source.begin_frame();
+        assert_eq!(source.terrain_dirty.len(), 1);
+        assert_eq!(source.terrain_dirty[0], 2..5);
+        source.uploaded.store(4, Ordering::Release);
+        source.begin_frame();
+        assert!(source.terrain_dirty.is_empty());
+    }
     #[test]
     #[ignore = "manual CPU benchmark of one streamed x slab, includes resource drop"]
     fn bench_sparse_slab_extraction() {
