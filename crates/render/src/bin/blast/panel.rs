@@ -28,6 +28,11 @@ impl Panel {
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum Action {
     Play,
+    BattlePreset,
+    RangeMode,
+    BattleStart,
+    Side(bool),
+    NextOwn,
     Edit,
     Pause,
     Fire,
@@ -73,6 +78,8 @@ pub struct SectorLabel;
 pub struct ScrollPanel;
 #[derive(Component)]
 pub struct EditorOnly;
+#[derive(Component)]
+pub struct RangeOnly;
 
 pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>) {
     if edit.layout.is_none() {
@@ -143,6 +150,22 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             SectorLabel,
         ));
         let rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
+            (false, vec![("Бой 2×2 / расстановка", Action::BattlePreset)]),
+            (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
+            (
+                false,
+                vec![
+                    ("Начать бой", Action::BattleStart),
+                    ("Следующий свой", Action::NextOwn),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    ("Свои / синие", Action::Side(true)),
+                    ("Враги / красные", Action::Side(false)),
+                ],
+            ),
             (
                 false,
                 vec![
@@ -291,6 +314,14 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             if editor {
                 parent.insert(EditorOnly);
             }
+            if row.iter().any(|(_, a)| {
+                matches!(
+                    a,
+                    Action::Weapon(_) | Action::Chassis(_) | Action::Power(_) | Action::Patrol
+                )
+            }) {
+                parent.insert(RangeOnly);
+            }
             let width = 100.0 / row.len() as f32;
             parent.with_children(|r| {
                 for (label, action) in row {
@@ -372,6 +403,61 @@ pub fn actions(
         }
         scene.notice.clear();
         match action {
+            Action::BattlePreset => match edit.battle_preset(scene.sim.config.clone()) {
+                Ok(()) => {
+                    scene.view = 1;
+                    scene.repeat = false;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                }
+                Err(e) => scene.notice = e,
+            },
+            Action::RangeMode => match edit.range_mode(scene.sim.config.clone()) {
+                Ok(()) => {
+                    panel.drive = true;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                    panel.pending = None;
+                    scene.repeat = false;
+                    scene.paused = false;
+                }
+                Err(e) => scene.notice = e,
+            },
+            Action::BattleStart => match scene.sim.start_battle() {
+                Ok(()) => {
+                    edit.editing = false;
+                    scene.paused = false;
+                    panel.drive = true;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                    scene.repeat = false;
+                    edit.controlled = scene
+                        .sim
+                        .units
+                        .iter()
+                        .enumerate()
+                        .find(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+                        .map(|(i, _)| i);
+                }
+                Err(e) => scene.notice = e.into(),
+            },
+            Action::Side(allied) => {
+                if edit.editing {
+                    if let Err(e) = edit.side(allied, scene.sim.config.clone()) {
+                        scene.notice = e;
+                    }
+                }
+            }
+            Action::NextOwn => {
+                let n = scene.sim.units.len();
+                let start = edit.controlled.map_or(0, |i| i + 1);
+                if n > 0 {
+                    edit.controlled = (0..n)
+                        .map(|i| (start + i) % n)
+                        .find(|&i| scene.sim.allied(i) && scene.sim.units[i].status.alive);
+                    edit.selected = edit.controlled.map(Selection::Unit);
+                }
+            }
             Action::Play => {
                 panel.drive = true;
                 panel.ground_fire = false;
@@ -390,7 +476,12 @@ pub fn actions(
                     scene.paused = !scene.paused;
                 }
             }
-            Action::Reset => key(KeyCode::KeyR, &mut panel),
+            Action::Reset => {
+                if scene.sim.battle_mode() {
+                    edit.editing = true;
+                }
+                key(KeyCode::KeyR, &mut panel);
+            }
             Action::Fire => {
                 scene.sim.set_auto_attack(false);
                 panel.ground_fire = !panel.ground_fire;
@@ -400,6 +491,15 @@ pub fn actions(
                 scene.paused = false;
             }
             Action::AutoAttack => {
+                if scene.sim.battle_mode() {
+                    if let Some(id) = edit.controlled {
+                        scene
+                            .sim
+                            .battle_order(id, sim_core::blast::battle::Order::Auto, None);
+                    }
+                    panel.ground_fire = false;
+                    continue;
+                }
                 let enabled = !scene.sim.auto_attack;
                 scene.sim.set_auto_attack(enabled);
                 panel.ground_fire = false;
@@ -408,7 +508,15 @@ pub fn actions(
                 scene.paused = false;
             }
             Action::Stop => {
-                scene.sim.order_stop();
+                if scene.sim.battle_mode() {
+                    if let Some(id) = edit.controlled {
+                        scene
+                            .sim
+                            .battle_order(id, sim_core::blast::battle::Order::Hold, None);
+                    }
+                } else {
+                    scene.sim.order_stop();
+                }
                 panel.ground_fire = false;
             }
             Action::Patrol => scene.sim.toggle_patrols(),
@@ -560,7 +668,12 @@ pub fn actions(
                 edit.zoom = 1.0;
             }
             Action::Own => {
-                scene.view = 4;
+                scene.view = if scene.sim.battle_mode() {
+                    edit.selected = edit.controlled.map(Selection::Unit);
+                    5
+                } else {
+                    4
+                };
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 1.0;
             }
@@ -620,11 +733,15 @@ pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCo
         keys.reset(k);
     }
 }
+#[allow(clippy::type_complexity)] // Disjoint UI row markers in a single Bevy query.
 pub fn refresh(
     scene: Res<Scene>,
     edit: Res<Workshop>,
     panel: Res<Panel>,
-    mut rows: Query<&mut Node, With<EditorOnly>>,
+    mut rows: Query<
+        (&mut Node, Option<&EditorOnly>, Option<&RangeOnly>),
+        Or<(With<EditorOnly>, With<RangeOnly>)>,
+    >,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
     mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
     mut sectors: Query<&mut Text, (With<SectorLabel>, Without<Readout>)>,
@@ -642,8 +759,10 @@ pub fn refresh(
             },
         );
     }
-    for mut n in &mut rows {
-        n.display = if edit.editing {
+    for (mut n, editor, range) in &mut rows {
+        n.display = if (editor.is_none() || edit.editing)
+            && (range.is_none() || !scene.sim.battle_mode())
+        {
             Display::Flex
         } else {
             Display::None
@@ -651,6 +770,11 @@ pub fn refresh(
     }
     for (a, interaction, mut color) in &mut buttons {
         let active = match *a {
+            Action::Side(own) => edit.allied == own,
+            Action::BattleStart => {
+                scene.sim.battle.phase == sim_core::blast::battle::Phase::Fighting
+                    && scene.sim.battle_mode()
+            }
             Action::Play => !edit.editing,
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
@@ -674,6 +798,9 @@ pub fn refresh(
     }
     let instructions = if edit.editing {
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
+    } else if scene.sim.battle_mode() {
+        "ЛКМ — выбрать своего
+ПКМ — движение / атака врага"
     } else if panel.ground_fire {
         "Укажите точку выстрела на карте"
     } else if scene.sim.auto_attack {
@@ -722,6 +849,9 @@ pub fn refresh(
             })
         })
         .unwrap_or_else(|| {
+            if scene.sim.battle_mode() {
+                return String::new();
+            }
             let laps: Vec<_> = scene
                 .sim
                 .units
@@ -731,6 +861,26 @@ pub fn refresh(
                 .collect();
             format!("Круги мишеней: {}", laps.join(" / "))
         });
+    if scene.sim.battle_mode() {
+        let [own, enemy] = scene.sim.battle_counts();
+        let phase = match scene.sim.battle.phase {
+            sim_core::blast::battle::Phase::Setup => "Расставьте отряды и нажмите «Начать бой»",
+            sim_core::blast::battle::Phase::Fighting => "БОЙ",
+            sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
+            sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
+            sim_core::blast::battle::Phase::Draw => "НИЧЬЯ",
+        };
+        let controlled = edit
+            .controlled
+            .map_or_else(|| "не выбран".into(), |i| format!("№{}", i + 1));
+        target = format!(
+            "{phase}
+Свои: {own} · Враги: {enemy}
+Управление: {controlled}
+Танки — фугас · Шагоходы — два пулемёта
+{target}"
+        );
+    }
     let capacity = scene.sim.shield_tuning().capacity.max(1);
     if let Some(Selection::Shield(i)) = edit.selected {
         if let Some(s) = scene.sim.shields.get(i) {
@@ -747,7 +897,7 @@ pub fn refresh(
             );
         }
     }
-    let shields = if scene.sim.shields.is_empty() {
+    let shields = if scene.sim.shields.is_empty() || scene.sim.battle_mode() {
         String::new()
     } else {
         let list: Vec<String> = scene
@@ -771,19 +921,25 @@ pub fn refresh(
     } else {
         "РЕАЛЬНОЕ ВРЕМЯ · 1×"
     };
-    let weapon_hint = match scene.sim.config.delivery {
-        Delivery::Flame => format!(
-            "Огнемёт · дальность {} м",
-            scene.sim.streams.tuning.flame.range / 10
-        ),
-        Delivery::MachineGun => format!(
-            "Пулемёт · {} ствола · дальность {} м",
-            scene.sim.stream_muzzles().len(),
-            scene.sim.streams.tuning.machine_gun.range / 10
-        ),
-        Delivery::Blast => String::new(),
+    let weapon_hint = if scene.sim.battle_mode() {
+        String::new()
+    } else {
+        match scene.sim.config.delivery {
+            Delivery::Flame => format!(
+                "Огнемёт · дальность {} м",
+                scene.sim.streams.tuning.flame.range / 10
+            ),
+            Delivery::MachineGun => format!(
+                "Пулемёт · {} ствола · дальность {} м",
+                scene.sim.stream_muzzles().len(),
+                scene.sim.streams.tuning.machine_gun.range / 10
+            ),
+            Delivery::Blast => String::new(),
+        }
     };
-    let readiness = if scene.sim.ready() {
+    let readiness = if scene.sim.battle_mode() {
+        ""
+    } else if scene.sim.ready() {
         "Готов к выстрелу"
     } else {
         "Заряд / выстрел / перезарядка"

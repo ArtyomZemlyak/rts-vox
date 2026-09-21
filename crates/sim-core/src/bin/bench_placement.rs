@@ -18,6 +18,7 @@ fn main() {
             [550, 16, 445],
         ] {
             layout.units.push(RangeUnitDef {
+                allied: false,
                 kind: RangeUnitKind::Tank,
                 at,
             });

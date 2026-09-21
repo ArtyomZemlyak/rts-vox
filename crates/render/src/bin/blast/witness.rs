@@ -14,17 +14,20 @@ struct Built {
     finish: usize,
     local: Transform,
     segment: Option<usize>,
+    turret: bool,
 }
 struct Snapshot {
     body: voxel::unit::UnitBody,
     dents: BTreeMap<[u8; 3], u32>,
     revision: u64,
     seg_gone: Vec<bool>,
+    allied: Option<bool>,
 }
 impl From<&RangeUnit> for Snapshot {
     fn from(u: &RangeUnit) -> Self {
         Self {
             body: u.body.clone(),
+            allied: None,
             dents: u.dents.clone(),
             revision: u.revision,
             seg_gone: u.seg_gone.clone(),
@@ -56,17 +59,25 @@ fn build(
                     pivot: [f32; 3],
                     pos: Vec3,
                     rot: Quat,
-                    segment: Option<usize>| {
+                    segment: Option<usize>,
+                    rows: (usize, usize),
+                    turret: bool| {
         let mut bufs = std::array::from_fn(|_| MeshBuf::default());
         render::model::body_to_mesh(
             body,
-            if id == 0 {
+            if let Some(allied) = unit.allied {
+                if allied {
+                    [0.14, 0.30, 0.40]
+                } else {
+                    [0.44, 0.17, 0.12]
+                }
+            } else if id == 0 {
                 [0.38, 0.34, 0.25]
             } else {
                 [0.22, 0.32, 0.27]
             },
             1.0,
-            (0, usize::MAX),
+            rows,
             0.35,
             pivot,
             &mut bufs,
@@ -142,6 +153,7 @@ fn build(
                 finish: k,
                 local: Transform::from_translation(pos).with_rotation(rot),
                 segment,
+                turret,
             });
         }
     };
@@ -151,6 +163,17 @@ fn build(
         Vec3::ZERO,
         Quat::IDENTITY,
         None,
+        (0, unit.body.turret_y as usize),
+        false,
+    );
+    draw(
+        &unit.body,
+        centre.to_array(),
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        None,
+        (unit.body.turret_y as usize, usize::MAX),
+        true,
     );
     for (seg, (segment, frame)) in unit
         .body
@@ -169,6 +192,8 @@ fn build(
             frame.pos,
             frame.rot,
             Some(seg),
+            (0, usize::MAX),
+            frame.turret,
         );
     }
 
@@ -247,7 +272,7 @@ pub(super) fn update(
                         Mesh3d(meshes.add(b.mesh)),
                         MeshMaterial3d(art.materials[b.finish].clone()),
                         transform,
-                        Witness(id, b.local, b.segment),
+                        Witness(id, b.local, b.segment, b.turret),
                     ));
                 }
                 art.seen[id] = Some(built_revision);
@@ -266,7 +291,10 @@ pub(super) fn update(
             continue;
         }
         art.next_mesh = (id + 1) % count;
-        let snapshot = Snapshot::from(unit);
+        let mut snapshot = Snapshot::from(unit);
+        if scene.sim.battle_mode() {
+            snapshot.allied = Some(scene.sim.allied(id));
+        }
         let kind = match unit.kind {
             RangeUnitKind::Tank => 0,
             RangeUnitKind::Strider => 1,

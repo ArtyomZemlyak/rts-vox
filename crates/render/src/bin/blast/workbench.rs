@@ -93,6 +93,8 @@ pub fn camera(
 pub struct Workshop {
     pub layout: Option<RangeLayout>,
     pub editing: bool,
+    pub allied: bool,
+    pub controlled: Option<usize>,
     pub tool: Tool,
     pub selected: Option<Selection>,
     pub pan: Vec2,
@@ -126,6 +128,8 @@ impl Workshop {
         Self {
             layout,
             editing,
+            allied: true,
+            controlled: None,
             zone,
             orbit: 0.0,
             tool: Tool::Select,
@@ -141,6 +145,57 @@ impl Workshop {
             previous_cursor: None,
             pending: None,
         }
+    }
+    pub fn battle_preset(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let tuning = modding::range_battle::Tuning::from_ron(include_str!(
+            "../../../../../data/range-battle.ron"
+        ))?;
+        let mut layout = self.layout.clone().ok_or("No range layout")?;
+        layout.battle = true;
+        layout.units = tuning.units;
+        layout.gun = tuning.zone.spawn;
+        layout.target = tuning.zone.target;
+        if let Some(c) = &mut layout.course {
+            c.patrols.clear();
+        }
+        let zone = if let Some(i) = layout.zones.iter().position(|z| z.name == tuning.zone.name) {
+            i
+        } else {
+            layout.zones.push(tuning.zone);
+            layout.zones.len() - 1
+        };
+        self.commit(layout, config)?;
+        self.zone = zone;
+        self.editing = true;
+        self.selected = None;
+        self.controlled = Some(0);
+        self.pan = Vec2::ZERO;
+        self.zoom = 0.85;
+        self.orbit = 0.0;
+        Ok(())
+    }
+    pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let mut layout = self.layout.clone().ok_or("No range layout")?;
+        layout.battle = false;
+        self.commit(layout, config)?;
+        self.controlled = None;
+        self.selected = None;
+        self.editing = false;
+        Ok(())
+    }
+    pub fn side(&mut self, allied: bool, config: ExplosionConfig) -> Result<(), String> {
+        self.allied = allied;
+        self.preview = None;
+        if let Some(mut layout) = self.layout.clone() {
+            layout.battle = true;
+            if let Some(Selection::Unit(i)) = self.selected {
+                if let Some(u) = layout.units.get_mut(i) {
+                    u.allied = allied;
+                }
+            }
+            self.commit(layout, config)?;
+        }
+        Ok(())
     }
     pub fn sector(&self) -> Option<&modding::range::RangeZone> {
         self.layout.as_ref()?.zones.get(self.zone)
@@ -263,6 +318,7 @@ impl Workshop {
             selected: self.selected,
             rotate: self.rotate,
             radius,
+            allied: self.allied,
         };
         if self.preview.as_ref().is_some_and(|p| p.key == key) {
             return;
@@ -280,6 +336,7 @@ impl Workshop {
             }
             Tool::Tank | Tool::Strider => {
                 next.units.push(RangeUnitDef {
+                    allied: self.allied,
                     kind: if self.tool == Tool::Tank {
                         RangeUnitKind::Tank
                     } else {
@@ -367,6 +424,7 @@ struct PreviewKey {
     selected: Option<Selection>,
     rotate: bool,
     radius: i32,
+    allied: bool,
 }
 struct Preview {
     key: PreviewKey,
@@ -571,11 +629,45 @@ pub fn input(
                     if let Some((hit, selection)) = pick(&scene.sim, ray) {
                         if mouse.just_pressed(MouseButton::Left) {
                             edit.selected = selection;
+                            if let Some(Selection::Unit(i)) = selection {
+                                if scene.sim.allied(i) && scene.sim.units[i].status.alive {
+                                    edit.controlled = Some(i);
+                                }
+                            }
                         }
                         let fire = panel.as_ref().is_some_and(|p| p.ground_fire);
                         if mouse.just_pressed(MouseButton::Right)
                             || (fire && mouse.just_pressed(MouseButton::Left))
                         {
+                            if scene.sim.battle_mode() {
+                                if let Some(id) = edit.controlled {
+                                    use sim_core::blast::battle::Order;
+                                    let order = if fire {
+                                        Order::Ground(hit)
+                                    } else if let Some(Selection::Unit(enemy)) = selection {
+                                        if scene.sim.allied(enemy) {
+                                            if !scene.sim.units[enemy].status.alive {
+                                                return;
+                                            }
+                                            edit.controlled = Some(enemy);
+                                            edit.selected = selection;
+                                            return;
+                                        }
+                                        Order::Attack(enemy)
+                                    } else {
+                                        Order::Move
+                                    };
+                                    if scene.sim.battle_order(id, order, Some([hit[0], hit[2]])) {
+                                        scene.notice.clear();
+                                    } else {
+                                        scene.notice="Приказ недоступен: проверьте фазу боя и состояние юнита".into();
+                                    }
+                                } else {
+                                    scene.notice =
+                                        "Сначала выберите свой юнит левой кнопкой".into();
+                                }
+                                return;
+                            }
                             scene.sim.control();
                             scene.paused = false;
                             if fire {
@@ -770,6 +862,28 @@ pub fn overlay(
     mut flashes: ResMut<ShieldFlashes>,
 ) {
     let flat = Quat::from_rotation_arc(Vec3::Z, Vec3::Y);
+    if scene.sim.battle_mode() {
+        for (i, u) in scene.sim.units.iter().enumerate() {
+            if !u.status.alive {
+                continue;
+            }
+            let p = Vec3::from(u.motion.pos.map(|v| v.to_f64_lossy() as f32));
+            let color = if scene.sim.allied(i) {
+                Color::srgb(0.15, 0.8, 1.0)
+            } else {
+                Color::srgb(1.0, 0.3, 0.16)
+            };
+            giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), 24.0, color);
+            if edit.controlled == Some(i) {
+                giz.circle(Isometry3d::new(p + Vec3::Y, flat), 27.0, Color::WHITE);
+                let mut from = [u.at[0], u.at[2]];
+                for &to in u.motion.path.iter().skip(u.motion.cursor) {
+                    ground_dash(&mut giz, &scene.sim, from, to, 0.8, color);
+                    from = to;
+                }
+            }
+        }
+    }
     // Domes: a wire sphere fading with the charge, red and low while down.
     let capacity = scene.sim.shield_tuning().capacity.max(1) as f32;
     for s in &scene.sim.shields {
@@ -804,7 +918,7 @@ pub fn overlay(
         *ttl -= 1;
     }
     flashes.live.retain(|(_, ttl)| *ttl > 0);
-    if !edit.editing {
+    if !edit.editing && !scene.sim.battle_mode() {
         let p = Vec3::from(scene.sim.gun.motion.pos.map(|v| v.to_f64_lossy() as f32));
         giz.circle(
             Isometry3d::new(p + Vec3::Y * 0.5, flat),
@@ -990,6 +1104,38 @@ pub fn overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn battle_preset_preserves_map_and_editor_sides_roundtrip() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let blocks = layout.blocks.clone();
+        let mut edit = Workshop::new(Some(layout), false);
+        edit.battle_preset(config(false, false)).unwrap();
+        let layout = edit.layout.as_ref().unwrap();
+        assert_eq!(layout.blocks, blocks);
+        assert_eq!(layout.size, [10000, 192, 10000]);
+        assert_eq!(layout.units.iter().filter(|u| u.allied).count(), 2);
+        assert_eq!(layout.units.iter().filter(|u| !u.allied).count(), 2);
+        assert_eq!(
+            RangeLayout::from_ron(&layout.to_ron().unwrap()).unwrap(),
+            *layout
+        );
+        let mut sim = edit.pending.take().unwrap();
+        assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Setup);
+        sim.start_battle().unwrap();
+        edit.selected = Some(Selection::Unit(2));
+        edit.side(true, config(false, false)).unwrap();
+        assert!(edit.layout.as_ref().unwrap().units[2].allied);
+        assert_eq!(
+            edit.pending.as_ref().unwrap().battle.phase,
+            sim_core::blast::battle::Phase::Setup
+        );
+        edit.range_mode(config(false, false)).unwrap();
+        assert!(!edit.layout.as_ref().unwrap().battle);
+        assert!(!edit.pending.as_ref().unwrap().battle_mode());
+        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 4);
+        assert!(edit.controlled.is_none());
+    }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {
         let (mut w, c) = fixture();
@@ -1218,6 +1364,7 @@ mod tests {
         let (mut w, c) = fixture();
         let mut next = w.layout.clone().unwrap();
         next.units.push(RangeUnitDef {
+            allied: false,
             kind: RangeUnitKind::Strider,
             at: [448, 16, 385],
         });

@@ -84,7 +84,7 @@ struct Scene {
     notice: String,
 }
 #[derive(Component)]
-struct Witness(usize, Transform, Option<usize>);
+struct Witness(usize, Transform, Option<usize>, bool);
 #[derive(Resource)]
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
@@ -217,7 +217,11 @@ fn muzzle_vec(sim: &BlastRange) -> Vec3 {
 /// Radius of one burning voxel's flame, world units (P-22).
 const FLAME_RADIUS: f32 = 2.4;
 fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput) {
-    let c = &sim.config;
+    let c = if sim.battle_mode() {
+        &sim.battle.shell_config
+    } else {
+        &sim.config
+    };
     let target = sim.layout.as_ref().map_or(
         if energy {
             sim_core::blast::ENERGY_TARGET
@@ -249,7 +253,11 @@ fn configure_gas(sim: &BlastRange, energy: bool, anni: bool, gas: &mut GasInput)
     gas.params.energy = Vec4::ZERO;
     gas.params.source = Vec4::ZERO;
     gas.params.control.y = 0.0;
-    gas.params.weapon.x = weapon_code(energy, anni);
+    gas.params.weapon.x = if sim.battle_mode() {
+        0.0
+    } else {
+        weapon_code(energy, anni)
+    };
     gas.params.weapon.z = if sim.layout.is_some() { 1.0 } else { 0.0 };
     gas.params.weapon.w = look::scene().smoke_extinction;
     gas.params.look.x = look::scene().ground_glow;
@@ -278,6 +286,7 @@ fn main() {
     let mut edit = false;
     let mut drive = false;
     let mut demo = false;
+    let mut battle_preset = false;
     let mut go: Option<[i32; 2]> = None;
     let mut record_dir = None;
     let mut record_seconds = 10.0;
@@ -310,6 +319,7 @@ fn main() {
                 i += 1;
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
+            "--battle" => battle_preset = true,
             "--edit" => edit = true,
             "--drive" => drive = true,
             // Order the player's tank to a point at start, for scripted
@@ -437,7 +447,19 @@ fn main() {
     if let Some(kind) = gun_kind {
         layout.as_mut().expect("--chassis needs --range").gun_kind = kind;
     }
-    let workshop = Workshop::new(layout, edit);
+    let mut workshop = Workshop::new(layout, edit);
+    if battle_preset {
+        workshop
+            .battle_preset(config(false, false))
+            .expect("battle preset needs the kilometre range");
+        workshop.pending = None;
+        workshop.editing = edit;
+        view = 1;
+        repeat = false;
+        energy = false;
+        anni = false;
+        drive = true;
+    }
     let mut sim = range_sim(
         weapon_config(energy, anni, power, delivery),
         workshop.layout.as_ref(),
@@ -445,6 +467,9 @@ fn main() {
         None,
     )
     .expect("valid range");
+    if battle_preset && !edit {
+        sim.start_battle().expect("two battle teams");
+    }
     if let Some(mm) = gas_cell_mm {
         sim.config.gas_display_mm = mm;
     }
@@ -1325,6 +1350,17 @@ fn advance(
         }
         let started = std::time::Instant::now();
         scene.sim.step();
+        for impact in scene.sim.battle.impacts.iter().filter(|i| i.shell) {
+            let mut params = gas.params;
+            let c = &scene.sim.battle.shell_config;
+            params.control.z = 1.0;
+            params.control.y = 0.0;
+            params.weapon.x = 0.0;
+            params.source = gas
+                .surface_source(Vec3::from(impact.at.map(|v| v as f32)), Vec3::Y)
+                .extend(c.gas_source_radius as f32);
+            gas.atmosphere.emit_at(params, scene.sim.tick * 2);
+        }
         fire_fx.capture(&scene.sim);
         let us = started.elapsed().as_micros();
         profile.measure(0, started.elapsed());
@@ -1587,7 +1623,7 @@ fn advance(
 fn orient_gun(
     scene: Res<Scene>,
     visual: Res<moving::Visual>,
-    mut gun: Query<(&Gun, &mut Transform)>,
+    mut gun: Query<(&Gun, &mut Transform, &mut Visibility)>,
 ) {
     let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
     let pivot = pose.pos;
@@ -1603,7 +1639,12 @@ fn orient_gun(
     } else {
         0.0
     };
-    for (g, mut tr) in &mut gun {
+    for (g, mut tr, mut visible) in &mut gun {
+        *visible = if scene.sim.battle_mode() {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         if let Some(seg) = g.segment {
             if let Some(local) = segments.get(seg) {
                 *tr = *local;
@@ -1626,10 +1667,11 @@ fn weapon_art(
     mut coils: Query<&mut Visibility, With<Emitter>>,
     mut last: Local<Option<bool>>,
 ) {
-    if *last == Some(scene.energy) {
+    let visible_energy = scene.energy && !scene.sim.battle_mode();
+    if *last == Some(visible_energy) {
         return;
     }
-    *last = Some(scene.energy);
+    *last = Some(visible_energy);
     if let Some(mut m) = materials.get_mut(&art.ember) {
         m.base_color = if scene.energy {
             Color::srgb(0.15, 0.5, 1.0)
@@ -1643,7 +1685,7 @@ fn weapon_art(
         };
     }
     for mut v in &mut coils {
-        *v = if scene.energy {
+        *v = if visible_energy {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -2017,7 +2059,19 @@ fn capture(
     } else {
         u32::MAX - 1000
     };
-    let phases = if scene.sim.config.delivery != Delivery::Blast {
+    let phases = if scene.sim.battle_mode() {
+        [
+            (30, "00-ready"),
+            (60, "01-aim"),
+            (90, "02-flight"),
+            (120, "03-contact"),
+            (180, "04-exchange"),
+            (240, "05-damage"),
+            (360, "06-battle"),
+            (540, "07-survivors"),
+            (720, "08-aftermath"),
+        ]
+    } else if scene.sim.config.delivery != Delivery::Blast {
         [
             (30, "00-ready"),
             (fire.saturating_sub(1), "01-aim"),

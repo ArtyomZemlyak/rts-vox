@@ -88,12 +88,23 @@ impl Effects {
     pub fn capture(&mut self, sim: &BlastRange) {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
+        for i in &sim.battle.impacts {
+            let at = Vec3::from(i.at.map(|v| v as f32));
+            self.add(
+                at,
+                Vec3::Y * 3.0,
+                now,
+                if i.shell { 0.8 } else { 0.16 },
+                if i.shell { 9.0 } else { 1.8 },
+                false,
+            );
+        }
         let tuning = &sim.streams.tuning;
         self.sources.resize(sim.units.len() + 1, (u64::MAX, None));
         for (id, u) in sim
             .units
             .iter()
-            .chain(std::iter::once(&sim.gun))
+            .chain((!sim.battle_mode()).then_some(&sim.gun))
             .enumerate()
         {
             let dead = !u.status.alive;
@@ -362,6 +373,36 @@ pub fn draw(
             .total_cmp(&eye.distance_squared(a.1))
     });
     let mut hot = MeshBuf::default();
+    if scene.sim.battle_mode() {
+        let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
+        for r in &scene.sim.battle.rounds {
+            let t = if scene.realtime {
+                (scene.acc * 30.0).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let at = point(r.previous).lerp(point(r.pos), t);
+            cube(
+                &mut hot,
+                at,
+                if r.shell { 2.0 } else { 0.8 },
+                [6.0, 3.2, 0.55, 1.0],
+            );
+        }
+        for trace in &scene.sim.battle.traces {
+            let from = point(trace.from);
+            let to = point(trace.to);
+            let n = ((to - from).length() / 2.0).ceil().clamp(1.0, 48.0) as usize;
+            for i in 0..n {
+                cube(
+                    &mut hot,
+                    from.lerp(to, i as f32 / n as f32),
+                    0.65,
+                    [4.0, 2.1, 0.25, 0.85],
+                );
+            }
+        }
+    }
     let mut smoke = MeshBuf::default();
     for (p, at, t) in particles {
         if p.smoke {
@@ -391,13 +432,16 @@ pub fn draw(
     let mut poses = std::collections::BTreeMap::new();
     if !fx.heat_spots.is_empty() {
         for (w, tr) in &bodies {
-            poses.entry((w.0, w.2)).or_insert(*tr);
+            poses.entry((w.0, w.2, w.3)).or_insert(*tr);
         }
     }
     for &(cell, heat) in &fx.heat_spots {
         let id = usize::from(cell.unit);
         let seg = cell.part.checked_sub(1).map(usize::from);
-        let Some(tr) = poses.get(&(id, seg)) else {
+        let turret = seg.map_or(cell.at[1] >= scene.sim.units[id].body.turret_y, |i| {
+            scene.sim.units[id].body.segments[i].attach.turret
+        });
+        let Some(tr) = poses.get(&(id, seg, turret)) else {
             continue;
         };
         let Some(body) = cell.body(&scene.sim.units) else {

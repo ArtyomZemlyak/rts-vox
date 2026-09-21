@@ -224,6 +224,26 @@ pub fn end(
             .sources(&scene.sim.units, &scene.sim.matter)
             .len()
     );
+    if scene.sim.battle_mode() {
+        println!(
+            "PROFILE battle={:?} alive={:?} shots={:?} damage={:?}",
+            scene.sim.battle.phase,
+            scene.sim.battle_counts(),
+            scene
+                .sim
+                .battle
+                .actors
+                .iter()
+                .map(|a| a.fired)
+                .collect::<Vec<_>>(),
+            scene
+                .sim
+                .units
+                .iter()
+                .map(|u| u.revision)
+                .collect::<Vec<_>>()
+        );
+    }
     if p.gpu {
         for (name, samples) in &mut p.gpu_samples {
             let v = &mut samples.values;

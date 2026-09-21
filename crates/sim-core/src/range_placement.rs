@@ -29,8 +29,10 @@ struct Footprint {
     max: [i32; 3],
 }
 impl Footprint {
-    fn of(kind: RangeUnitKind) -> Self {
-        let unit = RangeUnit::of_kind(kind, GUN);
+    fn of(kind: RangeUnitKind, head: i32) -> Self {
+        let mut unit = RangeUnit::of_kind(kind, GUN);
+        unit.motion.drive.head = head;
+        unit.update_pose(head);
         let (lo, hi) = unit.bounds();
         let mut columns = BTreeMap::new();
         let mut min = [i32::MAX; 3];
@@ -74,14 +76,16 @@ impl Footprint {
 }
 
 pub struct Validator {
-    footprints: [Footprint; 2],
+    footprints: [Footprint; 4],
 }
 impl Default for Validator {
     fn default() -> Self {
         Self {
             footprints: [
-                Footprint::of(RangeUnitKind::Tank),
-                Footprint::of(RangeUnitKind::Strider),
+                Footprint::of(RangeUnitKind::Tank, 0),
+                Footprint::of(RangeUnitKind::Strider, 0),
+                Footprint::of(RangeUnitKind::Tank, fx::angle::FULL / 2),
+                Footprint::of(RangeUnitKind::Strider, fx::angle::FULL / 2),
             ],
         }
     }
@@ -96,9 +100,13 @@ impl Validator {
             &self.footprints[usize::from(layout.gun_kind == RangeUnitKind::Strider)],
             layout.gun,
         )];
+        if layout.battle {
+            units.clear();
+        }
         units.extend(layout.units.iter().map(|u| {
             (
-                &self.footprints[usize::from(u.kind == RangeUnitKind::Strider)],
+                &self.footprints[usize::from(u.kind == RangeUnitKind::Strider)
+                    + usize::from(layout.battle && !u.allied) * 2],
                 u.at,
             )
         }));
@@ -149,6 +157,7 @@ mod tests {
         let v = Validator::default();
         let mut r = layout();
         r.units.push(RangeUnitDef {
+            allied: false,
             kind: RangeUnitKind::Tank,
             at: GUN,
         });

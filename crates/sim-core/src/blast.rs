@@ -45,6 +45,7 @@ pub struct RangeUnit {
     pub kind: RangeUnitKind,
     pub motion: Motion,
     pub pose: crate::damage::Frame,
+    pub turret_delta: i32,
     pub body: UnitBody,
     pub at: [i32; 3],
     pub removed: Vec<[u8; 3]>,
@@ -160,6 +161,7 @@ impl RangeUnit {
         Self {
             motion,
             pose,
+            turret_delta: 0,
             kind,
             body,
             at,
@@ -301,6 +303,7 @@ impl RangeUnit {
         }
     }
     pub fn update_pose(&mut self, turret_yaw: i32) {
+        self.turret_delta = fx::angle::diff(turret_yaw, self.motion.drive.head);
         self.at = self.motion.pos.map(|v| v.to_int_trunc());
         self.pose = self.motion.frame(&self.body);
         self.seg_frames = crate::damage::segment_frames(
@@ -326,7 +329,16 @@ impl RangeUnit {
         pose: &crate::damage::Frame,
         segs: &[crate::damage::Frame],
     ) -> Option<(usize, [usize; 3])> {
-        if let Some(c) = self.local_at(p, pose) {
+        self.hit_with_turret(p, pose, segs, self.turret_delta)
+    }
+    fn hit_with_turret(
+        &self,
+        p: [i32; 3],
+        pose: &crate::damage::Frame,
+        segs: &[crate::damage::Frame],
+        delta: i32,
+    ) -> Option<(usize, [usize; 3])> {
+        if let Some(c) = self.root_local(p, pose, delta) {
             if self.body.vol.get(c[0], c[1], c[2]) {
                 return Some((0, c));
             }
@@ -373,12 +385,33 @@ impl RangeUnit {
     }
     pub fn world_pos(&self, p: [usize; 3]) -> [i32; 3] {
         let v = self
-            .pose
+            .root_frame(p[1])
             .world(p.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
         [v.x, v.y, v.z].map(|v| v.to_int_trunc())
     }
+    pub fn root_frame(&self, y: usize) -> crate::damage::Frame {
+        if y >= usize::from(self.body.turret_y) {
+            crate::damage::turned(&self.pose, self.turret_delta, 0)
+        } else {
+            self.pose
+        }
+    }
+    fn root_local(
+        &self,
+        p: [i32; 3],
+        pose: &crate::damage::Frame,
+        delta: i32,
+    ) -> Option<[usize; 3]> {
+        if let Some(c) = local_in(&self.body, p, pose) {
+            if c[1] < usize::from(self.body.turret_y) {
+                return Some(c);
+            }
+        }
+        local_in(&self.body, p, &crate::damage::turned(pose, delta, 0))
+            .filter(|c| c[1] >= usize::from(self.body.turret_y))
+    }
     pub fn local_at(&self, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
-        local_in(&self.body, p, pose)
+        self.root_local(p, pose, self.turret_delta)
     }
     pub fn local(&self, p: [i32; 3]) -> Option<[usize; 3]> {
         self.local_at(p, &self.pose)
@@ -398,6 +431,14 @@ impl RangeUnit {
         &self,
         pose: Option<&crate::damage::Frame>,
         segments: &[crate::damage::Frame],
+    ) -> ([i32; 3], [i32; 3]) {
+        self.bounds_aimed(pose, segments, self.turret_delta)
+    }
+    fn bounds_aimed(
+        &self,
+        pose: Option<&crate::damage::Frame>,
+        segments: &[crate::damage::Frame],
+        delta: i32,
     ) -> ([i32; 3], [i32; 3]) {
         let mut lo = [i32::MAX; 3];
         let mut hi = [i32::MIN; 3];
@@ -427,6 +468,9 @@ impl RangeUnit {
         if let Some(pose) = pose {
             for l in corners(size(&self.body)) {
                 take(pose.world(l.map(Fx::from_int)));
+                if delta != 0 {
+                    take(crate::damage::turned(pose, delta, 0).world(l.map(Fx::from_int)));
+                }
             }
         } else {
             let o = self.world_pos([0; 3]);
@@ -1020,6 +1064,7 @@ pub struct Explosion {
     // Next subcell/actor in the first pending contact; committed work is never replayed.
     contact_cursor: usize,
     poses: Vec<crate::damage::Frame>,
+    turret_deltas: Vec<i32>,
     /// Segment frames of each unit when the burst began (ADR-278).
     seg_poses: Vec<Vec<crate::damage::Frame>>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
@@ -1076,6 +1121,7 @@ impl Explosion {
             pending: Default::default(),
             contact_cursor: 0,
             poses: units.iter().map(|u| u.pose).collect(),
+            turret_deltas: units.iter().map(|u| u.turret_delta).collect(),
             seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
             origin,
             cell: c.cell_units,
@@ -1259,7 +1305,13 @@ impl Explosion {
         let boxes: Vec<_> = units
             .iter()
             .enumerate()
-            .map(|(i, u)| u.bounds_for(Some(&self.poses[i]), &self.seg_poses[i]))
+            .map(|(i, u)| {
+                u.bounds_aimed(
+                    Some(&self.poses[i]),
+                    &self.seg_poses[i],
+                    self.turret_deltas[i],
+                )
+            })
             .collect();
         while let Some(hit) = self.pending.front().copied() {
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
@@ -1279,7 +1331,12 @@ impl Explosion {
                         self.contact_cursor += 1;
                         continue;
                     }
-                    match u.hit_at(q, &self.poses[actor], &self.seg_poses[actor]) {
+                    match u.hit_with_turret(
+                        q,
+                        &self.poses[actor],
+                        &self.seg_poses[actor],
+                        self.turret_deltas[actor],
+                    ) {
                         Some((0, cell)) => {
                             // A cell already cut loose leaves with its whole
                             // section; the wave neither ablates it nor waits
@@ -1296,7 +1353,16 @@ impl Explosion {
                                 let mut apply = true;
                                 if hit.pressure >= need && hit.pressure > 0 {
                                     if let Some(m) = matter.as_deref_mut() {
-                                        match m.body(actor, u, cell, &self.poses[actor], self.at) {
+                                        let frame = if cell[1] >= usize::from(u.body.turret_y) {
+                                            crate::damage::turned(
+                                                &self.poses[actor],
+                                                self.turret_deltas[actor],
+                                                0,
+                                            )
+                                        } else {
+                                            self.poses[actor]
+                                        };
+                                        match m.body(actor, u, cell, &frame, self.at) {
                                             matter::ClaimResult::Applied => u.detached += 1,
                                             matter::ClaimResult::Unaffordable => apply = false,
                                             matter::ClaimResult::Deferred => return,
@@ -1480,7 +1546,11 @@ pub mod thermal;
 #[path = "range_weapons.rs"]
 pub mod weapons;
 
+#[path = "range_battle.rs"]
+pub mod battle;
+
 pub struct BlastRange {
+    pub battle: battle::Battle,
     pub combustion: fire::Combustion,
     pub heat_exchange: heat_exchange::Exchange,
     pub thermals: thermal::Thermals,
@@ -1662,7 +1732,14 @@ impl BlastRange {
         let mut units: Vec<RangeUnit> = if let Some(r) = &layout {
             r.units
                 .iter()
-                .map(|u| RangeUnit::of_kind(u.kind, u.at))
+                .map(|u| {
+                    let mut actor = RangeUnit::of_kind(u.kind, u.at);
+                    if r.battle && !u.allied {
+                        actor.motion.drive.head = fx::angle::FULL / 2;
+                        actor.update_pose(actor.motion.drive.head);
+                    }
+                    actor
+                })
                 .collect()
         } else {
             witness
@@ -1702,7 +1779,9 @@ impl BlastRange {
                 .map(|d| RangeShield::new(d, shield_tuning.capacity))
                 .collect()
         });
+        let battle = battle::Battle::new(&units, config.unit_ablation_resistance);
         let mut result = Self {
+            battle,
             combustion,
             streams: weapons::Streams::default(),
             heat_exchange: heat_exchange::Exchange::default(),
@@ -1808,7 +1887,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(35);
+        b.u32(36);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1908,51 +1987,7 @@ impl BlastRange {
         self.matter.save(&mut b);
         b.bool(self.explosion.is_some());
         if let Some(e) = &self.explosion {
-            for v in e.at {
-                b.i32(v);
-            }
-            for v in e.origin {
-                b.i32(v);
-            }
-            b.i32(e.cell);
-            b.usize(e.queued);
-            b.usize(e.captured);
-            e.wave.save(&mut b);
-            b.usize(e.contact_cursor);
-            b.usize(e.pending.len());
-            for hit in &e.pending {
-                for v in hit.cell {
-                    b.i32(v);
-                }
-                b.u32(hit.pressure);
-                b.bool(hit.broken);
-            }
-            b.u32(e.poses.len() as u32);
-            for f in &e.poses {
-                for v in [f.base, f.x, f.y, f.z] {
-                    b.fx(v.x);
-                    b.fx(v.y);
-                    b.fx(v.z);
-                }
-                b.fx(f.scale);
-                for v in f.centre {
-                    b.fx(v);
-                }
-            }
-            for frames in &e.seg_poses {
-                b.u32(frames.len() as u32);
-                for f in frames {
-                    for v in [f.base, f.x, f.y, f.z] {
-                        b.fx(v.x);
-                        b.fx(v.y);
-                        b.fx(v.z);
-                    }
-                    b.fx(f.scale);
-                    for v in f.centre {
-                        b.fx(v);
-                    }
-                }
-            }
+            e.save(&mut b);
         }
         b.u32(self.shields.len() as u32);
         for s in &self.shields {
@@ -1977,6 +2012,7 @@ impl BlastRange {
         self.heat_exchange.save(&mut b);
         self.combustion.save(&mut b);
         self.save_structure(&mut b);
+        self.battle.save(&mut b);
         b.v
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
@@ -1993,7 +2029,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33, 34, 35].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2227,125 +2263,7 @@ impl BlastRange {
             return None;
         }
         if s.bool() {
-            let at = std::array::from_fn(|_| s.i32());
-            let origin = std::array::from_fn(|_| s.i32());
-            let cell = s.i32();
-            let queued = s.usize();
-            let captured = s.usize();
-            let wave = Wave::load(&mut s)?;
-            if captured > wave.size().pow(3) {
-                return None;
-            }
-            let contact_cursor = s.usize();
-            let n = s.usize();
-            if n > 8192 {
-                return None;
-            }
-            let mut pending = std::collections::VecDeque::new();
-            for _ in 0..n {
-                let hit = phys::blast::Hit {
-                    cell: std::array::from_fn(|_| s.i32()),
-                    pressure: s.u32(),
-                    broken: s.bool(),
-                };
-                if hit.cell.iter().any(|&v| v < 0 || v >= wave.size() as i32)
-                    || hit.pressure > 1_000_000
-                {
-                    return None;
-                }
-                pending.push_back(hit);
-            }
-            if !(1..=4).contains(&cell)
-                || contact_cursor >= (cell as usize).pow(3) * (r.units.len() + 1)
-                || (pending.is_empty() && contact_cursor != 0)
-                || (0..3).any(|a| {
-                    at[a] < 0
-                        || at[a] >= r.size[a] as i32
-                        || i64::from(origin[a])
-                            != i64::from(at[a]) - (wave.size() / 2) as i64 * i64::from(cell)
-                })
-            {
-                return None;
-            }
-            let n = s.u32() as usize;
-            if n != r.units.len() {
-                return None;
-            }
-            let mut poses = Vec::new();
-            for u in &r.units {
-                let mut v = || phys::V3::new(s.fx(), s.fx(), s.fx());
-                let (base, x, y, z) = (v(), v(), v(), v());
-                let scale = s.fx();
-                let centre = std::array::from_fn(|_| s.fx());
-                if scale != u.pose.scale
-                    || centre != u.pose.centre
-                    || [base.x, base.y, base.z]
-                        .iter()
-                        .any(|v| *v < Fx::from_int(-384) || *v > Fx::from_int(1024))
-                    || [x, y, z].iter().any(|v| {
-                        [v.x, v.y, v.z]
-                            .iter()
-                            .any(|c| *c < Fx::from_int(-2) || *c > Fx::from_int(2))
-                    })
-                {
-                    return None;
-                }
-                poses.push(crate::damage::Frame {
-                    base,
-                    x,
-                    y,
-                    z,
-                    scale,
-                    centre,
-                });
-            }
-            let mut seg_poses = Vec::new();
-            for u in &r.units {
-                let n = s.u32() as usize;
-                if n != u.body.segments.len() {
-                    return None;
-                }
-                let mut frames = Vec::with_capacity(n);
-                for _ in 0..n {
-                    let mut v = || phys::V3::new(s.fx(), s.fx(), s.fx());
-                    let (base, x, y, z) = (v(), v(), v(), v());
-                    let scale = s.fx();
-                    let centre = std::array::from_fn(|_| s.fx());
-                    if scale <= Fx::ZERO
-                        || [base.x, base.y, base.z]
-                            .iter()
-                            .any(|v| *v < Fx::from_int(-384) || *v > Fx::from_int(1024))
-                        || [x, y, z].iter().any(|v| {
-                            [v.x, v.y, v.z]
-                                .iter()
-                                .any(|c| *c < Fx::from_int(-2) || *c > Fx::from_int(2))
-                        })
-                    {
-                        return None;
-                    }
-                    frames.push(crate::damage::Frame {
-                        base,
-                        x,
-                        y,
-                        z,
-                        scale,
-                        centre,
-                    });
-                }
-                seg_poses.push(frames);
-            }
-            r.explosion = Some(Explosion {
-                poses,
-                seg_poses,
-                pending,
-                contact_cursor,
-                at,
-                origin,
-                cell,
-                queued,
-                wave,
-                captured,
-            });
+            r.explosion = Some(Explosion::load(&mut s, &r.units, r.size, version >= 36)?);
         }
         if s.u32() as usize != r.shields.len() {
             return None;
@@ -2430,6 +2348,14 @@ impl BlastRange {
                 u.refresh_damage(id);
             }
         }
+        if version >= 36 {
+            r.battle.load(&mut s, &r.units, r.size, r.turret_limits)?;
+            if r.battle_mode() {
+                for (u, a) in r.units.iter_mut().zip(&r.battle.actors) {
+                    u.update_pose(a.turret.angle);
+                }
+            }
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2443,7 +2369,8 @@ impl BlastRange {
 
     /// Charge another round against the current, already damaged world.
     pub fn ready(&self) -> bool {
-        self.gun.status.alive
+        !self.battle_mode()
+            && self.gun.status.alive
             && self.gun.status.weapon
             && self.streams.ready(self.tick)
             && self.shell.is_none()
@@ -2611,7 +2538,7 @@ impl BlastRange {
         let hulls: Vec<crate::burst::Hull> = self
             .units
             .iter()
-            .chain(std::iter::once(&self.gun))
+            .chain((!self.battle_mode()).then_some(&self.gun))
             .filter(|u| u.status.alive)
             .map(|u| {
                 let o = motion::Obstacle::of(&u.motion, &u.body);
@@ -2658,6 +2585,7 @@ impl BlastRange {
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
         // again next tick, in the same stable slot order.
+        let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
         for (id, u) in self.units.iter_mut().enumerate() {
             u.motion.allow_start(starts > 0);
@@ -2667,12 +2595,14 @@ impl BlastRange {
                     .enumerate()
                     .filter(|(i, _)| *i != id)
                     .map(|(_, p)| *p)
-                    .chain(std::iter::once(motion::Obstacle::of(
-                        &self.gun.motion,
-                        &self.gun.body,
-                    )))
+                    .chain(
+                        (!battle_mode)
+                            .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
+                    )
                     .collect();
-                if self.patrols_running {
+                if self.patrols_running
+                    && (!battle_mode || self.battle.phase == battle::Phase::Fighting)
+                {
                     u.motion.step(
                         &self.world,
                         &u.body,
@@ -2695,32 +2625,38 @@ impl BlastRange {
                         &others,
                     );
                 }
-                let head = u.motion.drive.head;
+                let head = if battle_mode {
+                    self.battle.actors[id].turret.angle
+                } else {
+                    u.motion.drive.head
+                };
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
             }
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
         }
-        self.gun.motion.allow_start(starts > 0);
-        self.gun.motion.step(
-            &self.world,
-            &self.gun.body,
-            self.gun.status.alive,
-            self.gun.status.engine,
-            self.gun.mobility,
-            &positions,
-            self.tick,
-            self.config.gravity,
-            &self.rubble,
-            self.world_steady,
-        );
-        self.gun.update_pose(self.turret.angle);
+        if !self.battle_mode() {
+            self.gun.motion.allow_start(starts > 0);
+            self.gun.motion.step(
+                &self.world,
+                &self.gun.body,
+                self.gun.status.alive,
+                self.gun.status.engine,
+                self.gun.mobility,
+                &positions,
+                self.tick,
+                self.config.gravity,
+                &self.rubble,
+                self.world_steady,
+            );
+            self.gun.update_pose(self.turret.angle);
+        }
         // Tracked hulls cut the yielding matter they stand in; the crown that
         // hung from those cells follows over the next ticks.
         let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
             .units
             .iter()
-            .chain(std::iter::once(&self.gun))
+            .chain((!self.battle_mode()).then_some(&self.gun))
             .filter(|u| u.kind == RangeUnitKind::Tank && u.status.alive && !u.motion.cut.is_empty())
             .map(|u| (u.motion.cut.clone(), u.at))
             .collect();
@@ -2730,187 +2666,191 @@ impl BlastRange {
         }
         self.matter
             .step_felling(&mut self.world, &self.navigation.fell);
-        self.acquire_auto_target();
-        let target_angle = self.aim_angle();
-        self.turret.step(target_angle, self.turret_limits);
-        if let Some(id) = self.attack {
-            if !self.units[id].status.alive {
-                self.attack = None;
-            } else {
-                let reload = self.reload_ticks();
-                if self.fire_tick == u32::MAX
-                    || (self.impact.is_some() && self.tick >= self.impact_tick + reload)
-                {
-                    self.refire();
+        if !battle_mode {
+            self.acquire_auto_target();
+            let target_angle = self.aim_angle();
+            self.turret.step(target_angle, self.turret_limits);
+            if let Some(id) = self.attack {
+                if !self.units[id].status.alive {
+                    self.attack = None;
+                } else {
+                    let reload = self.reload_ticks();
+                    if self.fire_tick == u32::MAX
+                        || (self.impact.is_some() && self.tick >= self.impact_tick + reload)
+                    {
+                        self.refire();
+                    }
                 }
             }
-        }
-        completed("motion");
-        let dt = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
-        let gravity = match self.config.motion {
-            ProjectileMotion::Ballistic => self.config.gravity,
-            ProjectileMotion::Direct => 0,
-        };
-        if self.tick == self.fire_tick && !self.turret.aligned(target_angle, self.turret_limits) {
-            // Keep the charged round until the actual barrel has traversed.
-            self.fire_tick = self.fire_tick.saturating_add(1);
-        }
-        if self.tick == self.fire_tick
-            && self.gun.status.alive
-            && self.gun.status.weapon
-            && self.config.delivery == modding::explosion::Delivery::Blast
-        {
-            let from = self.muzzle();
-            let target = self.target();
-            let dx = Fx::from_int(target[0]).sub(from[0]);
-            let dz = Fx::from_int(target[2]).sub(from[2]);
-            let time = dx
-                .mul(dx)
-                .add(dz.mul(dz))
-                .sqrt()
-                .div(Fx::from_int(self.config.shell_speed))
-                .max(Fx::from_ratio(1, 1000));
-            self.velocity = [
-                self.heading()[0].mul(Fx::from_int(self.config.shell_speed)),
-                Fx::from_int(target[1])
-                    .sub(from[1])
-                    .div(time)
-                    .add(Fx::from_int(gravity).mul(time).mul(Fx::from_ratio(1, 2))),
-                self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
-            ];
-            self.shell = Some(from);
-        }
-        self.step_streams();
-        if let Some(p) = self.shell {
-            self.velocity[1] = self.velocity[1].sub(Fx::from_int(gravity).mul(dt));
-            let q = std::array::from_fn(|a| p[a].add(self.velocity[a].mul(dt)));
-            // Sweep at sub-voxel intervals; never jump through a thin target.
-            let span = (0..3)
-                .map(|a| q[a].sub(p[a]).abs().to_int_trunc())
-                .max()
-                .unwrap_or(0)
-                + 1;
-            let mut impact = None;
-            let mut caught = None;
-            let mut prev = p.map(Fx::to_int_trunc);
-            for s in 1..=span * 2 {
-                let f = Fx::from_ratio(s, span * 2);
-                let v = std::array::from_fn(|a| p[a].add(q[a].sub(p[a]).mul(f)).to_int_trunc());
-                if let Some(i) = self.dome_crossed(prev, v) {
-                    caught = Some((i, v));
-                    break;
-                }
-                prev = v;
-                if self
-                    .layout
-                    .as_ref()
-                    .is_some_and(|r| !self.player && r.airburst_on_target && v[0] >= r.target[0])
-                    || material(&self.world, v) != 0
-                    || self.units.iter().any(|u| u.solid(v))
-                {
-                    impact = Some(v);
-                    break;
-                }
+            completed("motion");
+            let dt = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
+            let gravity = match self.config.motion {
+                ProjectileMotion::Ballistic => self.config.gravity,
+                ProjectileMotion::Direct => 0,
+            };
+            if self.tick == self.fire_tick && !self.turret.aligned(target_angle, self.turret_limits)
+            {
+                // Keep the charged round until the actual barrel has traversed.
+                self.fire_tick = self.fire_tick.saturating_add(1);
             }
-            if let Some((i, at)) = caught {
-                // Spent against the dome: no impact, no crater, another
-                // order may follow at once.
-                self.absorb(i, at);
-                self.shell = None;
-                self.fire_tick = u32::MAX;
-            } else if let Some(at) = impact {
-                self.impact = Some(at);
-                self.impact_tick = self.tick;
-                self.heat.deposit(
-                    &self.world,
-                    &self.matter.economy.mats,
-                    at,
-                    self.config.heat_units,
-                    self.config.heat_per_cell,
-                );
-                self.matter
-                    .begin(self.config.material_energy_j, self.config.fragment_box);
-                self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
-                self.shell = None;
-            } else if (0..3).any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32)) {
-                // A miss retires at the map boundary, allowing another order.
-                self.shell = None;
-                self.fire_tick = u32::MAX;
-            } else {
-                self.shell = Some(q);
+            if self.tick == self.fire_tick
+                && self.gun.status.alive
+                && self.gun.status.weapon
+                && self.config.delivery == modding::explosion::Delivery::Blast
+            {
+                let from = self.muzzle();
+                let target = self.target();
+                let dx = Fx::from_int(target[0]).sub(from[0]);
+                let dz = Fx::from_int(target[2]).sub(from[2]);
+                let time = dx
+                    .mul(dx)
+                    .add(dz.mul(dz))
+                    .sqrt()
+                    .div(Fx::from_int(self.config.shell_speed))
+                    .max(Fx::from_ratio(1, 1000));
+                self.velocity = [
+                    self.heading()[0].mul(Fx::from_int(self.config.shell_speed)),
+                    Fx::from_int(target[1])
+                        .sub(from[1])
+                        .div(time)
+                        .add(Fx::from_int(gravity).mul(time).mul(Fx::from_ratio(1, 2))),
+                    self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
+                ];
+                self.shell = Some(from);
             }
-        }
-        completed("flight");
-        {
-            // The grid of resistance is captured under a ceiling per tick
-            // (ADR-311): a charge that reaches further costs the burst
-            // more ticks rather than one longer tick. The wave waits for
-            // the whole grid, so how the capture is sliced never decides
-            // what the wave finds.
-            let Self {
-                explosion,
-                world,
-                config,
-                units,
-                surface_work,
-                ..
-            } = self;
-            if let Some(e) = explosion.as_mut() {
-                if e.capturing() {
-                    e.capture(
-                        world,
-                        config,
-                        units,
-                        surface_work,
-                        config.capture_cells_per_tick,
+            self.step_streams();
+            if let Some(p) = self.shell {
+                self.velocity[1] = self.velocity[1].sub(Fx::from_int(gravity).mul(dt));
+                let q = std::array::from_fn(|a| p[a].add(self.velocity[a].mul(dt)));
+                // Sweep at sub-voxel intervals; never jump through a thin target.
+                let span = (0..3)
+                    .map(|a| q[a].sub(p[a]).abs().to_int_trunc())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let mut impact = None;
+                let mut caught = None;
+                let mut prev = p.map(Fx::to_int_trunc);
+                for s in 1..=span * 2 {
+                    let f = Fx::from_ratio(s, span * 2);
+                    let v = std::array::from_fn(|a| p[a].add(q[a].sub(p[a]).mul(f)).to_int_trunc());
+                    if let Some(i) = self.dome_crossed(prev, v) {
+                        caught = Some((i, v));
+                        break;
+                    }
+                    prev = v;
+                    if self.layout.as_ref().is_some_and(|r| {
+                        !self.player && r.airburst_on_target && v[0] >= r.target[0]
+                    }) || material(&self.world, v) != 0
+                        || self.units.iter().any(|u| u.solid(v))
+                    {
+                        impact = Some(v);
+                        break;
+                    }
+                }
+                if let Some((i, at)) = caught {
+                    // Spent against the dome: no impact, no crater, another
+                    // order may follow at once.
+                    self.absorb(i, at);
+                    self.shell = None;
+                    self.fire_tick = u32::MAX;
+                } else if let Some(at) = impact {
+                    self.impact = Some(at);
+                    self.impact_tick = self.tick;
+                    self.heat.deposit(
+                        &self.world,
+                        &self.matter.economy.mats,
+                        at,
+                        self.config.heat_units,
+                        self.config.heat_per_cell,
                     );
+                    self.matter
+                        .begin(self.config.material_energy_j, self.config.fragment_box);
+                    self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
+                    self.shell = None;
+                } else if (0..3)
+                    .any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32))
+                {
+                    // A miss retires at the map boundary, allowing another order.
+                    self.shell = None;
+                    self.fire_tick = u32::MAX;
+                } else {
+                    self.shell = Some(q);
+                }
+            }
+            completed("flight");
+            {
+                // The grid of resistance is captured under a ceiling per tick
+                // (ADR-311): a charge that reaches further costs the burst
+                // more ticks rather than one longer tick. The wave waits for
+                // the whole grid, so how the capture is sliced never decides
+                // what the wave finds.
+                let Self {
+                    explosion,
+                    world,
+                    config,
+                    units,
+                    surface_work,
+                    ..
+                } = self;
+                if let Some(e) = explosion.as_mut() {
+                    if e.capturing() {
+                        e.capture(
+                            world,
+                            config,
+                            units,
+                            surface_work,
+                            config.capture_cells_per_tick,
+                        );
+                    }
+                }
+            }
+            completed("capture");
+            if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
+                let before: Vec<_> = self
+                    .units
+                    .iter()
+                    .map(|u| (u.removed.len(), u.seg_removed.len()))
+                    .collect();
+                e.step(
+                    &mut self.world,
+                    self.config.wave_work_per_tick,
+                    &mut self.units,
+                    &mut self.surface_work,
+                    &mut self.surface_changed,
+                    &self.config,
+                    (self.config.material_energy_j > 0).then_some(&mut self.matter),
+                );
+                for (id, (u, (n, m))) in self.units.iter_mut().zip(before).enumerate() {
+                    if u.removed.len() != n || u.seg_removed.len() != m {
+                        if self.config.material_energy_j == 0 {
+                            self.matter
+                                .annihilate_body(id, u.removed.len() - n + u.seg_removed.len() - m);
+                        }
+                        u.refresh_damage(id);
+                    }
+                }
+                // The wave's pressure on a body pushes its hull (ADR-297): what
+                // dents and breaks the side is what throws the machine, so a
+                // hull behind cover or out of the wave is not pushed at all.
+                // The push lands on the hull's near face at the burst's height
+                // (ADR-302): sideways from a blast beside the hull, upward from
+                // one under its belly.
+                let milli = u64::from(self.config.hull_impulse_milli);
+                let at = e.at;
+                for u in &mut self.units {
+                    if u.absorbed > 0 {
+                        if u.status.alive {
+                            let newton_s = u64::from(u.absorbed).saturating_mul(milli) / 1000;
+                            let through = u.motion.impulse(&u.body, at, newton_s);
+                            u.last_push = Some((at, through, u.absorbed, newton_s));
+                        }
+                        u.absorbed = 0;
+                    }
                 }
             }
         }
-        completed("capture");
-        if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
-            let before: Vec<_> = self
-                .units
-                .iter()
-                .map(|u| (u.removed.len(), u.seg_removed.len()))
-                .collect();
-            e.step(
-                &mut self.world,
-                self.config.wave_work_per_tick,
-                &mut self.units,
-                &mut self.surface_work,
-                &mut self.surface_changed,
-                &self.config,
-                (self.config.material_energy_j > 0).then_some(&mut self.matter),
-            );
-            for (id, (u, (n, m))) in self.units.iter_mut().zip(before).enumerate() {
-                if u.removed.len() != n || u.seg_removed.len() != m {
-                    if self.config.material_energy_j == 0 {
-                        self.matter
-                            .annihilate_body(id, u.removed.len() - n + u.seg_removed.len() - m);
-                    }
-                    u.refresh_damage(id);
-                }
-            }
-            // The wave's pressure on a body pushes its hull (ADR-297): what
-            // dents and breaks the side is what throws the machine, so a
-            // hull behind cover or out of the wave is not pushed at all.
-            // The push lands on the hull's near face at the burst's height
-            // (ADR-302): sideways from a blast beside the hull, upward from
-            // one under its belly.
-            let milli = u64::from(self.config.hull_impulse_milli);
-            let at = e.at;
-            for u in &mut self.units {
-                if u.absorbed > 0 {
-                    if u.status.alive {
-                        let newton_s = u64::from(u.absorbed).saturating_mul(milli) / 1000;
-                        let through = u.motion.impulse(&u.body, at, newton_s);
-                        u.last_push = Some((at, through, u.absorbed, newton_s));
-                    }
-                    u.absorbed = 0;
-                }
-            }
-        }
+        self.battle_tick();
         completed("wave");
         self.step_unit_fire();
         completed("unit_fire");
@@ -2955,7 +2895,8 @@ impl BlastRange {
             self.collapse_backlog.insert([e.x, e.y, e.z], *e);
         }
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
-        let wave_working = self.explosion.as_ref().is_some_and(|e| e.working());
+        let wave_working =
+            self.explosion.as_ref().is_some_and(|e| e.working()) || self.battle.working();
         if (!self.collapse_backlog.is_empty() || self.collapse.pending())
             && !wave_working
             && self.matter.debris.claims() == 0
@@ -3018,7 +2959,7 @@ impl BlastRange {
         if !crumbs.is_empty() {
             // Crumbled cells are removed matter now held by pieces, or
             // sunk; the layer's digs are nobody's and not counted below.
-            let returned = if self.config.material_energy_j > 0 {
+            let returned = if battle_mode || self.config.material_energy_j > 0 {
                 self.matter.collapse(&mut self.world, &crumbs).1
             } else {
                 self.matter.annihilate_cells(&crumbs);
@@ -3043,7 +2984,7 @@ impl BlastRange {
             .units
             .iter()
             .zip(&before)
-            .chain(std::iter::once((&self.gun, &gun_before)))
+            .chain((!battle_mode).then_some((&self.gun, &gun_before)))
             .filter(|(u, _)| u.status.alive)
             .map(|(u, was)| {
                 let o = motion::Obstacle::of(&u.motion, &u.body);
@@ -3062,7 +3003,7 @@ impl BlastRange {
             .collect();
         self.matter.flush(
             &self.world,
-            self.config.material_energy_j > 0,
+            battle_mode || self.config.material_energy_j > 0,
             self.config.gravity,
             u64::from(self.tick),
             &hulls,
@@ -3101,6 +3042,200 @@ impl BlastRange {
         }
         self.tick += 1;
         completed("accounting");
+    }
+}
+
+impl Explosion {
+    fn save(&self, b: &mut fx::blob::Blob) {
+        for v in self.at {
+            b.i32(v);
+        }
+        for v in self.origin {
+            b.i32(v);
+        }
+        b.i32(self.cell);
+        b.usize(self.queued);
+        b.usize(self.captured);
+        self.wave.save(b);
+        b.usize(self.contact_cursor);
+        b.usize(self.pending.len());
+        for hit in &self.pending {
+            for v in hit.cell {
+                b.i32(v);
+            }
+            b.u32(hit.pressure);
+            b.bool(hit.broken);
+        }
+        b.u32(self.poses.len() as u32);
+        for f in &self.poses {
+            for v in [f.base, f.x, f.y, f.z] {
+                b.fx(v.x);
+                b.fx(v.y);
+                b.fx(v.z);
+            }
+            b.fx(f.scale);
+            for v in f.centre {
+                b.fx(v);
+            }
+        }
+        for frames in &self.seg_poses {
+            b.u32(frames.len() as u32);
+            for f in frames {
+                for v in [f.base, f.x, f.y, f.z] {
+                    b.fx(v.x);
+                    b.fx(v.y);
+                    b.fx(v.z);
+                }
+                b.fx(f.scale);
+                for v in f.centre {
+                    b.fx(v);
+                }
+            }
+        }
+        for d in &self.turret_deltas {
+            b.i32(*d);
+        }
+    }
+    fn load(
+        s: &mut fx::blob::Scan,
+        units: &[RangeUnit],
+        size: [u32; 3],
+        aimed: bool,
+    ) -> Option<Self> {
+        let at = std::array::from_fn(|_| s.i32());
+        let origin = std::array::from_fn(|_| s.i32());
+        let cell = s.i32();
+        let queued = s.usize();
+        let captured = s.usize();
+        let wave = Wave::load(s)?;
+        if captured > wave.size().pow(3) {
+            return None;
+        }
+        let contact_cursor = s.usize();
+        let n = s.usize();
+        if n > 8192 {
+            return None;
+        }
+        let mut pending = std::collections::VecDeque::new();
+        for _ in 0..n {
+            let hit = phys::blast::Hit {
+                cell: std::array::from_fn(|_| s.i32()),
+                pressure: s.u32(),
+                broken: s.bool(),
+            };
+            if hit.cell.iter().any(|&v| v < 0 || v >= wave.size() as i32)
+                || hit.pressure > 1_000_000
+            {
+                return None;
+            }
+            pending.push_back(hit);
+        }
+        if !(1..=4).contains(&cell)
+            || contact_cursor >= (cell as usize).pow(3) * (units.len() + 1)
+            || (pending.is_empty() && contact_cursor != 0)
+            || (0..3).any(|a| {
+                at[a] < 0
+                    || at[a] >= size[a] as i32
+                    || i64::from(origin[a])
+                        != i64::from(at[a]) - (wave.size() / 2) as i64 * i64::from(cell)
+            })
+        {
+            return None;
+        }
+        let n = s.u32() as usize;
+        if n != units.len() {
+            return None;
+        }
+        let mut poses = Vec::new();
+        for u in units {
+            let mut v = || phys::V3::new(s.fx(), s.fx(), s.fx());
+            let (base, x, y, z) = (v(), v(), v(), v());
+            let scale = s.fx();
+            let centre = std::array::from_fn(|_| s.fx());
+            if scale != u.pose.scale
+                || centre != u.pose.centre
+                || [base.x, base.y, base.z].iter().any(|v| {
+                    *v < Fx::from_int(-384)
+                        || *v > Fx::from_int(size.into_iter().max().unwrap_or(1024) as i32 + 384)
+                })
+                || [x, y, z].iter().any(|v| {
+                    [v.x, v.y, v.z]
+                        .iter()
+                        .any(|c| *c < Fx::from_int(-2) || *c > Fx::from_int(2))
+                })
+            {
+                return None;
+            }
+            poses.push(crate::damage::Frame {
+                base,
+                x,
+                y,
+                z,
+                scale,
+                centre,
+            });
+        }
+        let mut seg_poses = Vec::new();
+        for u in units {
+            let n = s.u32() as usize;
+            if n != u.body.segments.len() {
+                return None;
+            }
+            let mut frames = Vec::with_capacity(n);
+            for _ in 0..n {
+                let mut v = || phys::V3::new(s.fx(), s.fx(), s.fx());
+                let (base, x, y, z) = (v(), v(), v(), v());
+                let scale = s.fx();
+                let centre = std::array::from_fn(|_| s.fx());
+                if scale <= Fx::ZERO
+                    || [base.x, base.y, base.z].iter().any(|v| {
+                        *v < Fx::from_int(-384)
+                            || *v
+                                > Fx::from_int(size.into_iter().max().unwrap_or(1024) as i32 + 384)
+                    })
+                    || [x, y, z].iter().any(|v| {
+                        [v.x, v.y, v.z]
+                            .iter()
+                            .any(|c| *c < Fx::from_int(-2) || *c > Fx::from_int(2))
+                    })
+                {
+                    return None;
+                }
+                frames.push(crate::damage::Frame {
+                    base,
+                    x,
+                    y,
+                    z,
+                    scale,
+                    centre,
+                });
+            }
+            seg_poses.push(frames);
+        }
+        let turret_deltas = if aimed {
+            (0..units.len()).map(|_| s.i32()).collect()
+        } else {
+            vec![0; units.len()]
+        };
+        if turret_deltas
+            .iter()
+            .any(|d| i64::from(*d).abs() > i64::from(fx::angle::FULL))
+        {
+            return None;
+        }
+        Some(Self {
+            turret_deltas,
+            poses,
+            seg_poses,
+            pending,
+            contact_cursor,
+            at,
+            origin,
+            cell,
+            queued,
+            wave,
+            captured,
+        })
     }
 }
 
@@ -3229,6 +3364,7 @@ mod tests {
         r.heat_exchange.save(&mut tail);
         r.combustion.save(&mut tail);
         r.save_structure(&mut tail);
+        r.battle.save(&mut tail);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();
@@ -3629,6 +3765,7 @@ mod tests {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         layout.units = vec![modding::range::RangeUnitDef {
+            allied: false,
             kind: RangeUnitKind::Strider,
             at: [300, FLOOR, 336],
         }];
@@ -4435,6 +4572,7 @@ mod tests {
     fn a_shell_beside_a_target_shoves_it_and_the_snapshot_keeps_the_shove() {
         let mut layout = walker_layout();
         layout.units = vec![modding::range::RangeUnitDef {
+            allied: false,
             kind: RangeUnitKind::Tank,
             at: [300, FLOOR, 336],
         }];

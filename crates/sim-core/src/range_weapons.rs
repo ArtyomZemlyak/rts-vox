@@ -89,25 +89,26 @@ impl Streams {
         s.ok().then_some(())
     }
 }
+/// Shared authored spread, seeded by shot order and never render time.
+pub(super) fn spread(mut delta: [Fx; 3], heading: [Fx; 3], serial: u32, milli: i32) -> [Fx; 3] {
+    let noise = |shift: u32| {
+        ((serial.wrapping_mul(1664525).wrapping_add(1013904223) >> shift) & 255u32) as i32 - 128
+    };
+    let range = delta[0]
+        .mul(delta[0])
+        .add(delta[2].mul(delta[2]))
+        .sqrt()
+        .max(Fx::ONE);
+    delta[1] = delta[1].add(range.mul(Fx::from_ratio(noise(8) * milli, 128000)));
+    let side = range.mul(Fx::from_ratio(noise(16) * milli, 128000));
+    delta[0] = delta[0].sub(heading[2].mul(side));
+    delta[2] = delta[2].add(heading[0].mul(side));
+    delta
+}
 impl BlastRange {
     /// Authored barrel ends, with independent connectivity for the two guns.
     pub fn stream_muzzles(&self) -> Vec<[Fx; 3]> {
-        let u = &self.gun;
-        let f = crate::damage::turned(&u.pose, self.turret.angle, u.motion.drive.head);
-        u.body
-            .weapon_paths()
-            .iter()
-            .filter(|p| u.body.barrel_connected(p, u.connectivity.reached_cols()))
-            .take(2)
-            .map(|p| {
-                let mut cell = std::array::from_fn(|a| {
-                    Fx::from_ratio(i32::from(p.min[a]) + i32::from(p.max[a]), 2)
-                });
-                cell[usize::from(p.axis)] = Fx::from_int(i32::from(p.max[usize::from(p.axis)]) + 1);
-                let v = f.world(cell);
-                [v.x, v.y, v.z]
-            })
-            .collect()
+        muzzles(&self.gun, self.turret.angle)
     }
     fn emit_stream(&mut self, tuning: &Stream) {
         let flame = self.config.delivery == Delivery::Flame;
@@ -126,21 +127,8 @@ impl BlastRange {
                     std::array::from_fn(|a| Fx::from_int(self.target()[a]).sub(from[a]));
                 // Spread is seeded by shot order, never frame time. Keep the first
                 // flame packet on axis; the two others describe the ragged cone.
-                let noise = |shift: u32| {
-                    ((id.wrapping_mul(1664525).wrapping_add(1013904223) >> shift) & 255u32) as i32
-                        - 128
-                };
-                let range = delta[0]
-                    .mul(delta[0])
-                    .add(delta[2].mul(delta[2]))
-                    .sqrt()
-                    .max(Fx::ONE);
                 if !flame || ray > 0 {
-                    delta[1] = delta[1]
-                        .add(range.mul(Fx::from_ratio(noise(8) * tuning.spread_milli, 128000)));
-                    let side = range.mul(Fx::from_ratio(noise(16) * tuning.spread_milli, 128000));
-                    delta[0] = delta[0].sub(self.heading()[2].mul(side));
-                    delta[2] = delta[2].add(self.heading()[0].mul(side));
+                    delta = spread(delta, self.heading(), id, tuning.spread_milli);
                 }
                 let len = delta
                     .iter()
@@ -157,8 +145,14 @@ impl BlastRange {
             }
         }
     }
-    fn stream_contact(&mut self, p: [i32; 3], tuning: &Stream, flame: bool) {
-        let at = self.gun.at;
+    pub(super) fn stream_contact(
+        &mut self,
+        p: [i32; 3],
+        tuning: &Stream,
+        flame: bool,
+        at: [i32; 3],
+        config: &ExplosionConfig,
+    ) {
         if let Some(id) = self.units.iter().position(|u| u.solid(p)) {
             let u = &mut self.units[id];
             let Some((part, cell)) = u.hit(p) else {
@@ -180,11 +174,11 @@ impl BlastRange {
                 return;
             }
             let pressure = tuning.work;
-            let need = u.resistance(p, &self.config);
+            let need = u.resistance(p, config);
             if pressure >= need {
                 self.matter.begin(tuning.fracture_j, 1);
                 let result = if part == 0 {
-                    self.matter.body(id, u, cell, &u.pose, at)
+                    self.matter.body(id, u, cell, &u.root_frame(cell[1]), at)
                 } else {
                     self.matter
                         .body_segment(id, u, part - 1, cell, &u.seg_frames[part - 1], at)
@@ -199,9 +193,9 @@ impl BlastRange {
                 }
             }
             if part == 0 {
-                u.receive_cell(cell, pressure, &self.config);
+                u.receive_cell(cell, pressure, config);
             } else {
-                u.receive_seg_cell(part - 1, cell, pressure, &self.config);
+                u.receive_seg_cell(part - 1, cell, pressure, config);
             }
         } else if material(&self.world, p) != 0 {
             if flame {
@@ -219,7 +213,7 @@ impl BlastRange {
                     .copied()
                     .unwrap_or(0)
                     .saturating_add(tuning.work);
-                if total >= material_work(material(&self.world, p), &self.config) {
+                if total >= material_work(material(&self.world, p), config) {
                     self.matter.begin(tuning.fracture_j, 1);
                     if matches!(
                         self.matter.ground(&mut self.world, p, at),
@@ -320,7 +314,7 @@ impl BlastRange {
                     break;
                 }
                 if material(&self.world, p) != 0 || self.units.iter().any(|u| u.solid(p)) {
-                    self.stream_contact(p, &tuning, flame);
+                    self.stream_contact(p, &tuning, flame, self.gun.at, &self.config.clone());
                     end = point;
                     hit = true;
                     break;
@@ -349,6 +343,24 @@ impl BlastRange {
             }
         }
     }
+}
+
+pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
+    let f = crate::damage::turned(&u.pose, angle, u.motion.drive.head);
+    u.body
+        .weapon_paths()
+        .iter()
+        .filter(|p| u.body.barrel_connected(p, u.connectivity.reached_cols()))
+        .take(2)
+        .map(|p| {
+            let mut cell = std::array::from_fn(|a| {
+                Fx::from_ratio(i32::from(p.min[a]) + i32::from(p.max[a]), 2)
+            });
+            cell[usize::from(p.axis)] = Fx::from_int(i32::from(p.max[usize::from(p.axis)]) + 1);
+            let v = f.world(cell);
+            [v.x, v.y, v.z]
+        })
+        .collect()
 }
 
 #[cfg(test)]

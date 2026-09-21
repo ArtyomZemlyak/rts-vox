@@ -1,0 +1,18 @@
+// 30 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
+(
+    tank_power_milli: 500,
+    tank_reload_ticks: 90,
+    tank_range: 700,
+    pursuit_ticks: 60,
+    standoff_milli: 750,
+    max_rounds: 64,
+    max_waves: 4,
+    zone: (name: "Учебный бой", min: (3200,2000), max: (4100,2800),
+        spawn: (3280,16,2400), target: (3900,34,2400)),
+    units: [
+        (kind: Tank, allied: true, at: (3360,16,2290)),
+        (kind: Strider, allied: true, at: (3360,16,2490)),
+        (kind: Tank, allied: false, at: (3860,16,2290)),
+        (kind: Strider, allied: false, at: (3860,16,2490)),
+    ],
+)

@@ -3,6 +3,7 @@ param(
     [switch]$AutoFire,
     [switch]$Build,
     [switch]$Settings,
+    [switch]$Battle,
     [ValidateRange(1, 12)][int]$Zone = 1,
     [ValidateSet('energy', 'shell', 'anni', 'flame', 'machine-gun')][string]$Weapon = 'energy',
     [ValidateSet('tank', 'walker')][string]$Chassis = 'tank'
@@ -26,6 +27,7 @@ if (!$LayoutPath) {
 $rangeArgs = @('--weapon', $Weapon, '--chassis', $Chassis, '--range', ('"{0}"' -f $LayoutPath))
 if (!$AutoFire) { $rangeArgs += '--drive' }
 if ($Settings) { $rangeArgs += '--settings' }
+if ($Battle) { $rangeArgs += @('--battle', '--edit') }
 if ($Zone -gt 1) { $rangeArgs += @('--zone', $Zone.ToString()) }
 $env:WGPU_BACKEND = 'vulkan'
 Write-Output 'POLIGON: RMB ground = move, RMB unit = attack. The left panel contains weapons, power, pause, editor, settings and camera controls.'

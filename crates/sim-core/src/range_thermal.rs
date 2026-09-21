@@ -41,8 +41,9 @@ impl Cell {
     pub fn world(self, units: &[RangeUnit]) -> Option<[Fx; 3]> {
         self.body(units)?;
         let u = &units[usize::from(self.unit)];
+        let root_frame = u.root_frame(usize::from(self.at[1]));
         let frame = if self.part == 0 {
-            &u.pose
+            &root_frame
         } else {
             &u.seg_frames[usize::from(self.part - 1)]
         };
@@ -472,6 +473,7 @@ mod tests {
         r.heat_exchange.save(&mut tail);
         r.combustion.save(&mut tail);
         r.save_structure(&mut tail);
+        r.battle.save(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &data).unwrap();

@@ -150,6 +150,9 @@ impl Matter {
             self.spread(p, seed, f.radius);
         }
     }
+    pub(super) fn fragment_size(&mut self, size: u32) {
+        self.fragment_box = size.clamp(1, 4) as u8;
+    }
     pub fn begin(&mut self, joules: u32, fragment_box: u32) {
         self.fragment_box = fragment_box.clamp(1, 4) as u8;
         self.remaining_mj = u64::from(joules) * 1000;
@@ -202,8 +205,9 @@ impl Matter {
         if self.debris.fragment_room(&self.tuning) == 0 {
             return false;
         }
+        let root_frame = u.root_frame(cell[1]);
         let (body, frame) = if part == 0 {
-            (&u.body, &u.pose)
+            (&u.body, &root_frame)
         } else {
             (&u.body.segments[part - 1].body, &u.seg_frames[part - 1])
         };

@@ -12,6 +12,7 @@ pub struct Visual {
     previous_feet: Vec<Vec<Option<Contact>>>,
     pub fragments: std::collections::BTreeMap<u64, Vec3>,
     pub turret: Option<i32>,
+    pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,
     cached: Vec<Occupied>,
     window: Option<TerrainWindow>,
@@ -66,6 +67,7 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
 }
 pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWindow) {
     v.turret = Some(sim.turret.angle);
+    v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
     v.fragments = sim
         .matter
         .debris
@@ -81,13 +83,13 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
     v.previous = sim
         .units
         .iter()
-        .chain(std::iter::once(&sim.gun))
+        .chain((!sim.battle_mode()).then_some(&sim.gun))
         .map(pose)
         .collect();
     v.previous_feet = sim
         .units
         .iter()
-        .chain(std::iter::once(&sim.gun))
+        .chain((!sim.battle_mode()).then_some(&sim.gun))
         .map(feet_of)
         .collect();
     if v.occupied.is_empty() {
@@ -99,6 +101,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
 struct Occupied {
+    turret_delta: i32,
     pose: sim_core::damage::Frame,
     segments: Vec<sim_core::damage::Frame>,
     revision: u64,
@@ -123,6 +126,11 @@ fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
                     + rot * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
                     .floor()
                     .as_ivec3();
+                let q = if y >= u.body.turret_y && u.turret_delta != 0 {
+                    IVec3::from(u.world_pos([x as usize, y as usize, z as usize]))
+                } else {
+                    q
+                };
                 push(q);
             }
         }
@@ -152,7 +160,11 @@ fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
 }
 pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
     let mut out = Vec::new();
-    for u in sim.units.iter().chain(std::iter::once(&sim.gun)) {
+    for u in sim
+        .units
+        .iter()
+        .chain((!sim.battle_mode()).then_some(&sim.gun))
+    {
         unit_cells(u, window, &mut out);
     }
     out.sort_unstable();
@@ -168,15 +180,19 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
     for (id, u) in sim
         .units
         .iter()
-        .chain(std::iter::once(&sim.gun))
+        .chain((!sim.battle_mode()).then_some(&sim.gun))
         .enumerate()
     {
         if visual.cached.get(id).is_none_or(|old| {
-            old.pose != u.pose || old.segments != u.seg_frames || old.revision != u.revision
+            old.turret_delta != u.turret_delta
+                || old.pose != u.pose
+                || old.segments != u.seg_frames
+                || old.revision != u.revision
         }) {
             let mut cells = Vec::new();
             unit_cells(u, window, &mut cells);
             let value = Occupied {
+                turret_delta: u.turret_delta,
                 pose: u.pose,
                 segments: u.seg_frames.clone(),
                 revision: u.revision,
@@ -306,7 +322,17 @@ pub fn animate(
         let Some(p) = poses.get(w.0) else {
             continue;
         };
-        let rotation = render::realtime::hull_rotation(p.up, p.yaw);
+        let yaw = if w.3 && scene.sim.battle_mode() {
+            {
+                let angle = scene.sim.battle.actors[w.0].turret.angle;
+                let was = v.battle_turrets.get(w.0).copied().unwrap_or(angle);
+                -(was as f32 + fx::angle::diff(angle, was) as f32 * t) * std::f32::consts::TAU
+                    / fx::angle::FULL as f32
+            }
+        } else {
+            p.yaw
+        };
+        let rotation = render::realtime::hull_rotation(p.up, yaw);
         let mut local = w.1;
         if let Some(seg) = w.2 {
             for (i, r) in rigs.iter().enumerate() {

@@ -134,7 +134,12 @@ pub fn update(
         };
         let pose = match (ghost, p.selected) {
             (Ghost::Unit(kind), Selection::Unit(i)) if *kind == p.next.units[i].kind => Some(
-                Transform::from_translation(Vec3::from(p.next.units[i].at.map(|v| v as f32))),
+                Transform::from_translation(Vec3::from(p.next.units[i].at.map(|v| v as f32)))
+                    .with_rotation(if p.next.battle && !p.next.units[i].allied {
+                        Quat::from_rotation_y(std::f32::consts::PI)
+                    } else {
+                        Quat::IDENTITY
+                    }),
             ),
             (Ghost::Block(slot), Selection::Block(_)) => blocks.get(*slot).map(|i| {
                 let b = &p.next.blocks[*i];

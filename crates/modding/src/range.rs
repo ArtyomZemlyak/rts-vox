@@ -31,6 +31,8 @@ pub enum RangeUnitKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeUnitDef {
+    #[serde(default)]
+    pub allied: bool,
     pub kind: RangeUnitKind,
     pub at: [i32; 3],
 }
@@ -58,6 +60,9 @@ pub struct RangeShieldDef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeLayout {
+    /// Battle actors are the placed roster; the test gun is parked off-scene.
+    #[serde(default)]
+    pub battle: bool,
     /// Side, height and side of the world this layout is laid out in,
     /// world units (ADR-315). A layout without one keeps the stock
     /// range, so that every preset written before the size moved into

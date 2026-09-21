@@ -51,7 +51,11 @@ fn main() {
     // burst west of it; walking, it patrols north and back through the
     // burst's spot.
     let at = [359, FLOOR, 312];
-    layout.units = vec![modding::range::RangeUnitDef { kind, at }];
+    layout.units = vec![modding::range::RangeUnitDef {
+        allied: false,
+        kind,
+        at,
+    }];
     layout.target = if side {
         [at[0], FLOOR + above, at[2] - gap]
     } else {
