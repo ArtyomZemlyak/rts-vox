@@ -45,6 +45,34 @@ pub struct Heat {
 const HEAT_CAP: u32 = 1_000_000;
 
 impl Heat {
+    /// Ordered bounded source slice for range contact heat. No full-map scan.
+    pub(crate) fn batch_after(&self, cursor: Option<[u32; 3]>, limit: usize) -> Vec<[u32; 3]> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let mut out: Vec<_> = cursor.map_or_else(Vec::new, |c| {
+            self.cells
+                .range((Excluded(c), Unbounded))
+                .map(|(p, _)| *p)
+                .take(limit)
+                .collect()
+        });
+        out.extend(
+            self.cells
+                .iter()
+                .take_while(|(p, _)| cursor.is_none_or(|c| **p <= c))
+                .map(|(p, _)| *p)
+                .take(limit - out.len()),
+        );
+        out
+    }
+    /// Exchange spends stored heat, never burn time or fuel.
+    pub(crate) fn take_heat(&mut self, p: [u32; 3], amount: u32) {
+        if let Some(c) = self.cells.get_mut(&p) {
+            c.heat = c.heat.saturating_sub(amount);
+            if c.heat == 0 && c.burn == 0 {
+                self.cells.remove(&p);
+            }
+        }
+    }
     pub fn hot(&self) -> usize {
         self.cells.len()
     }

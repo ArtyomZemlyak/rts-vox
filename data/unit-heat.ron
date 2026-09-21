@@ -9,4 +9,8 @@
     softening: (400, 650, 160, 350, 120),
     smoke: 90,
     glow: 140,
+    // Each field visits at most this many sources; cold scenes do no probing.
+    exchange_cells_per_tick: 64,
+    exchange_reach: 4,
+    exchange_milli: 40,
 )

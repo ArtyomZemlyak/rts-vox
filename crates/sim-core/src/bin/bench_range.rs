@@ -5,6 +5,7 @@ use std::time::Instant;
 fn main() {
     // `--weapon shell` measures the heavier debris of the shell (ADR-296).
     let args: Vec<String> = std::env::args().collect();
+    let thermal_stress = args.iter().any(|a| a == "--thermal-stress");
     let weapon = args
         .iter()
         .position(|a| a == "--weapon")
@@ -41,6 +42,34 @@ fn main() {
             scene.aim = Some(scene.units[0].world_pos([30, 18, 16]));
         }
         scene.control();
+        // Saturate the sparse field with real surviving armour cells. This
+        // measures the budget ceiling, independent of a lucky flame contact.
+        if thermal_stress {
+            'units: for (id, u) in scene.units.iter().enumerate() {
+                let b = &u.body;
+                for z in 0..b.vol.nz {
+                    for y in 0..b.vol.ny {
+                        for x in 0..b.vol.nx {
+                            if b.vol.get(x as usize, y as usize, z as usize) {
+                                scene.thermals.deposit(
+                                    sim_core::blast::thermal::Cell {
+                                        unit: id as u16,
+                                        part: 0,
+                                        at: [x, y, z],
+                                    },
+                                    80,
+                                    &scene.thermal_tuning,
+                                );
+                                if scene.thermals.hot() == scene.thermal_tuning.max_cells {
+                                    break 'units;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            println!("thermal_stress_seeded={}", scene.thermals.hot());
+        }
         let mut samples = Vec::new();
         let mut shots = 0;
         let mut hottest = 0;
@@ -79,8 +108,8 @@ fn main() {
             println!("phase={name} firing={firing} max_us={us} tick={tick}");
         }
         println!(
-            "thermal_peak_cells={hottest} melted={} rejected_heat={}",
-            scene.thermals.melted, scene.thermals.rejected_heat
+            "thermal_peak_cells={hottest} melted={} rejected_heat={} exchanged_heat={}",
+            scene.thermals.melted, scene.thermals.rejected_heat, scene.heat_exchange.transferred
         );
         samples.sort_unstable();
         let laps: Vec<_> = scene

@@ -1462,12 +1462,15 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_heat_exchange.rs"]
+pub mod heat_exchange;
 #[path = "range_thermal.rs"]
 pub mod thermal;
 #[path = "range_weapons.rs"]
 pub mod weapons;
 
 pub struct BlastRange {
+    pub heat_exchange: heat_exchange::Exchange,
     pub thermals: thermal::Thermals,
     pub thermal_tuning: modding::unit_heat::Tuning,
     pub streams: weapons::Streams,
@@ -1688,6 +1691,7 @@ impl BlastRange {
         });
         let mut result = Self {
             streams: weapons::Streams::default(),
+            heat_exchange: heat_exchange::Exchange::default(),
             thermals: thermal::Thermals::default(),
             thermal_tuning: modding::unit_heat::Tuning::from_ron(include_str!(
                 "../../../data/unit-heat.ron"
@@ -1790,7 +1794,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(32);
+        b.u32(33);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1956,13 +1960,14 @@ impl BlastRange {
         b.bool(self.world_steady);
         self.streams.save(&mut b);
         self.thermals.save(&mut b);
+        self.heat_exchange.save(&mut b);
         b.v
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2358,6 +2363,9 @@ impl BlastRange {
         }
         if version >= 32 {
             r.thermals.load(&mut s, &r.units, &r.thermal_tuning)?;
+        }
+        if version >= 33 {
+            r.heat_exchange.load(&mut s, r.size, &r.units)?;
         }
         (s.ok() && s.left() == 0).then_some(r)
     }
@@ -2830,6 +2838,8 @@ impl BlastRange {
             }
         }
         completed("wave");
+        self.exchange_heat();
+        completed("heat_exchange");
         {
             // Fire consumes voxels through the same edit queue as the wave;
             // cells the wave has claimed wait for it.
@@ -3146,6 +3156,7 @@ mod tests {
         let mut tail = fx::blob::Blob::new();
         r.streams.save(&mut tail);
         r.thermals.save(&mut tail);
+        r.heat_exchange.save(&mut tail);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();

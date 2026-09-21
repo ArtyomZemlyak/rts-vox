@@ -1,6 +1,6 @@
 //! Bounded local heat on surviving range bodies. No scalar unit hit points.
 //! Conduction reads the old field; gains are committed together. Removed
-//! material takes its heat with it. Fuel and transfer across joints are separate.
+//! material takes its heat with it. Cross-volume contact is a separate phase.
 use super::{matter::Matter, BlastRange, RangeUnit};
 use fx::{
     blob::{Blob, Scan},
@@ -65,14 +65,14 @@ impl Cell {
             })
         })
     }
-    fn save(self, b: &mut Blob) {
+    pub(super) fn save(self, b: &mut Blob) {
         b.u32(u32::from(self.unit));
         b.u8(self.part);
         for v in self.at {
             b.u8(v);
         }
     }
-    fn load(s: &mut Scan) -> Option<Self> {
+    pub(super) fn load(s: &mut Scan) -> Option<Self> {
         Some(Self {
             unit: u16::try_from(s.u32()).ok()?,
             part: s.u8(),
@@ -94,6 +94,31 @@ pub struct Thermals {
     pub rejected_heat: u64,
 }
 impl Thermals {
+    pub(super) fn batch_after(&self, cursor: Option<Cell>, limit: usize) -> Vec<Cell> {
+        let mut out: Vec<_> = cursor.map_or_else(Vec::new, |c| {
+            self.cells
+                .range((Excluded(c), Unbounded))
+                .map(|(p, _)| *p)
+                .take(limit)
+                .collect()
+        });
+        out.extend(
+            self.cells
+                .iter()
+                .take_while(|(p, _)| cursor.is_none_or(|c| **p <= c))
+                .map(|(p, _)| *p)
+                .take(limit - out.len()),
+        );
+        out
+    }
+    pub(super) fn take_heat(&mut self, p: Cell, amount: u32) {
+        if let Some(h) = self.cells.get_mut(&p) {
+            *h = h.saturating_sub(amount);
+            if *h == 0 {
+                self.cells.remove(&p);
+            }
+        }
+    }
     pub fn cells(&self) -> impl Iterator<Item = (Cell, u32)> + '_ {
         self.cells.iter().map(|(p, h)| (*p, *h))
     }
@@ -117,24 +142,7 @@ impl Thermals {
         self.rejected_heat = self.rejected_heat.saturating_add(u64::from(heat - used));
     }
     pub fn step(&mut self, units: &mut [RangeUnit], matter: &mut Matter, t: &Tuning) {
-        let mut batch: Vec<_> = if let Some(cursor) = self.cursor {
-            self.cells
-                .range((Excluded(cursor), Unbounded))
-                .map(|(p, _)| *p)
-                .take(t.cells_per_tick)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        if batch.len() < t.cells_per_tick {
-            batch.extend(
-                self.cells
-                    .iter()
-                    .take_while(|(p, _)| self.cursor.is_none_or(|c| **p <= c))
-                    .map(|(p, _)| *p)
-                    .take(t.cells_per_tick - batch.len()),
-            );
-        }
+        let batch = self.batch_after(self.cursor, t.cells_per_tick);
         self.cursor = batch.last().copied();
         let mut delta = BTreeMap::<Cell, i64>::new();
         let mut new = BTreeSet::new();
@@ -459,6 +467,7 @@ mod tests {
         let mut data = r.snapshot();
         let mut tail = Blob::new();
         r.thermals.save(&mut tail);
+        r.heat_exchange.save(&mut tail);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &data).unwrap();
