@@ -1,8 +1,8 @@
 (
     cell_units: 8,
     search_nodes: 16000,
-    // Work per tick (ADR-326): one frontier node or one sampled pose
-    // while choosing a goal or checking a direct/final connection.
+    // Graph work counts popped nodes, endpoint queries and swept edge poses.
+    // Work per tick also includes goal selection and direct/final connections.
     search_nodes_per_tick: 96,
     // Starts admitted per tick. Already-running searches keep their own
     // bounded slice; a hull beyond this start allowance retains its order.
@@ -17,6 +17,9 @@
     // The planner probes two units more contact than the hull: a plan never
     // leads into a grade the executor refuses between two search samples.
     plan_margin: 2,
+    // Reach checked turn centres before pivoting; the final order still uses
+    // the course arrival radius. Cutting corners skips the planner's clearance.
+    corner_arrival_mm: 50,
     // Weight of the planner's distance estimate, percent; 100 is plain A*.
     // Measured 17.09.2026 (ADR-301): the forest route from the gun took
     // 2509 nodes and 130 ms at 100, 1072 and 68 ms at 200, 27 and 10 ms at
@@ -25,5 +28,7 @@
     heuristic_pct: 200,
     // Foliage and trunk of range-materials.ron. A tracked hull cuts what it
     // overlaps; the connected crown within the radius falls without a cut.
-    fell: (materials: (4, 5), radius: 14, cells_per_tick: 4096, cost_per_column: 1, cost_cap: 20, speed_pct: 60),
+    // A tree crossing at 60% speed costs about 10/0.6 = 17 instead of 10.
+    // A cap of 20 priced it as triple travel time and flooded the forest search.
+    fell: (materials: (4, 5), radius: 14, cells_per_tick: 4096, cost_per_column: 1, cost_cap: 7, speed_pct: 60),
 )

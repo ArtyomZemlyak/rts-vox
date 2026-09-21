@@ -7,16 +7,27 @@ pub(super) struct Connection {
     from: [Fx; 2],
     to: [Fx; 2],
     head: i32,
+    yaw: i32,
     cursor: i32,
     height: Fx,
     crush: usize,
 }
 impl Connection {
     pub fn new(from: [Fx; 2], head: i32, to: [Fx; 2]) -> Self {
+        let delta = [to[0].sub(from[0]), to[1].sub(from[1])];
+        let yaw = if delta == [Fx::ZERO; 2] {
+            head
+        } else {
+            angle::atan2(delta[1].raw(), delta[0].raw())
+        };
+        Self::sweep(from, head, to, yaw)
+    }
+    pub fn sweep(from: [Fx; 2], head: i32, to: [Fx; 2], yaw: i32) -> Self {
         Self {
             from,
             to,
             head,
+            yaw,
             cursor: 0,
             height: Fx::ZERO,
             crush: 0,
@@ -36,13 +47,11 @@ impl Connection {
         allowance: &mut usize,
     ) -> Option<Option<usize>> {
         let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
-        let yaw = if delta == [Fx::ZERO; 2] {
-            self.head
-        } else {
-            angle::atan2(delta[1].raw(), delta[0].raw())
-        };
+        let yaw = self.yaw;
         let turn = angle::diff(yaw, self.head);
-        let turns = (turn.abs() / (angle::FULL / 16) + 1).max(1);
+        // Bound the furthest footprint corner's arc between probes by one
+        // world voxel. Seven is a conservative integer upper bound for 2*pi.
+        let turns = turn_samples(turn, shape);
         let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
         while *allowance > 0 {
             *allowance -= 1;
@@ -92,22 +101,38 @@ impl Connection {
             }
         }
         b.i32(self.head);
+        b.i32(self.yaw);
         b.i32(self.cursor);
         b.fx(self.height);
         b.usize(self.crush);
     }
-    pub fn load(s: &mut Scan) -> Option<Self> {
-        let result = Self {
+    pub fn load(s: &mut Scan, swept: bool) -> Option<Self> {
+        let mut result = Self {
             from: [s.fx(), s.fx()],
             to: [s.fx(), s.fx()],
             head: s.i32(),
+            yaw: if swept { s.i32() } else { 0 },
             cursor: s.i32(),
             height: s.fx(),
             crush: s.usize(),
         };
+        if !swept {
+            // Old snapshots sampled turns more sparsely. Restart this finite
+            // connection so an unchecked part cannot be accepted on upgrade.
+            result = Self::new(result.from, result.head, result.to);
+        }
         (s.ok()
             && (0..=200_000).contains(&result.cursor)
-            && (0..angle::FULL).contains(&result.head))
+            && (0..angle::FULL).contains(&result.head)
+            && (0..angle::FULL).contains(&result.yaw))
         .then_some(result)
     }
+}
+
+pub(super) fn turn_samples(turn: i32, shape: Shape) -> i32 {
+    ((i64::from(turn.abs()) * i64::from(shape.half[0] + shape.half[1]) * 7
+        + i64::from(angle::FULL)
+        - 1)
+        / i64::from(angle::FULL))
+    .max(1) as i32
 }

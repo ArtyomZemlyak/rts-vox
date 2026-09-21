@@ -1743,7 +1743,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(28);
+        b.u32(29);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -1911,7 +1911,8 @@ impl BlastRange {
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
-        if ![27, 28].contains(&s.u32()) {
+        let version = s.u32();
+        if ![27, 28, 29].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -1986,7 +1987,7 @@ impl BlastRange {
             .enumerate()
         {
             let at = std::array::from_fn(|_| s.i32());
-            if !u.motion.load(&mut s) {
+            if !u.motion.load_version(&mut s, version >= 29) {
                 return None;
             }
             let head = u.motion.drive.head;
@@ -2896,7 +2897,16 @@ mod tests {
     use super::*;
     #[test]
     fn range_engine_damage_uses_the_shared_physical_mobility_response() {
-        let r = BlastRange::new(config());
+        // Compare propulsion on flat ground; route search latency is tested
+        // separately and must not turn this into two stationary hulls.
+        struct Flat;
+        impl Generator for Flat {
+            fn material(&self, _x: u32, y: u32, _z: u32) -> u16 {
+                u16::from(y < 16)
+            }
+        }
+        let world = World::new(640, 64, 640, 100, Box::new(Flat));
+        let rubble = nav::vehicle::Rubble::new();
         let mut intact = RangeUnit::new(GUN);
         let mut damaged = RangeUnit::new(GUN);
         for z in 0..30 {
@@ -2916,22 +2926,20 @@ mod tests {
             damaged.mobility.engine > Fx::ZERO && damaged.mobility.engine < Fx::from_ratio(1, 2)
         );
         for u in [&mut intact, &mut damaged] {
-            assert!(u
-                .motion
-                .move_to(&r.world, [205, 336], &u.body, &[], &r.rubble));
+            assert!(u.motion.move_to(&world, [205, 336], &u.body, &[], &rubble));
         }
         for tick in 0..30 {
             for u in [&mut intact, &mut damaged] {
                 u.motion.step(
-                    &r.world,
+                    &world,
                     &u.body,
                     u.status.alive,
                     u.status.engine,
                     u.mobility,
                     &[],
                     tick,
-                    r.config.gravity,
-                    &r.rubble,
+                    config().gravity,
+                    &rubble,
                     true,
                 );
             }
@@ -4603,9 +4611,8 @@ mod tests {
         );
         assert!(a.gun.motion.path.is_empty());
         // Mid-search: a restored range carries the same frontier.
-        for _ in 0..3 {
-            a.step();
-        }
+        // The legal direct forest path now needs only two slices. Save
+        // immediately after its bounded first slice, before it finishes.
         assert!(a.gun.motion.searching(), "the search ended too early");
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
@@ -5775,14 +5782,20 @@ mod tests {
             r.units.iter().filter(|u| u.motion.started_search()).count()
                 + usize::from(r.gun.motion.started_search())
         };
-        let mut total = 0;
+        let mut started = vec![false; r.units.len()];
         for _ in 0..400 {
             r.step();
             let n = began(&r);
             assert!(n <= 1, "{n} searches began in one tick");
-            total += n;
+            for (seen, u) in started.iter_mut().zip(&r.units) {
+                *seen |= u.motion.started_search();
+            }
         }
-        assert!(total > 5, "the patrol never planned: {total}");
+        for (id, u) in r.units.iter().enumerate() {
+            if !u.motion.route.is_empty() {
+                assert!(started[id], "patrol {id} was starved by the start ceiling");
+            }
+        }
         assert!(
             r.units.iter().any(|u| !u.motion.path.is_empty()),
             "no hull ever got a route"

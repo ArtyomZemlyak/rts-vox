@@ -546,6 +546,8 @@ pub struct Search {
     pub cell: i32,
     pub min: [i32; 2],
     pub max: [i32; 2],
+    /// Total graph work: popped nodes and exact edge poses.
+    /// Total graph work: frontier pops, endpoint queries and swept edge poses.
     pub nodes: usize,
     /// Planner price of one crushed footprint column; a straight move costs 10.
     pub crush_cost: u32,
@@ -588,7 +590,7 @@ fn connects(
         angle::atan2(delta[1].raw(), delta[0].raw())
     };
     let turn = angle::diff(yaw, head);
-    let turns = (turn.abs() / (angle::FULL / 16) + 1).max(1);
+    let turns = connection::turn_samples(turn, shape);
     let mut old = ground.pose(from, head, shape);
     let mut crush = 0;
     for i in 1..=turns {
@@ -623,6 +625,9 @@ fn connects(
 pub struct Route {
     /// Turn points to the goal; empty when there is none.
     pub path: Vec<[i32; 2]>,
+    /// The budget ended before the goal. This path stops at a reached node;
+    /// the caller must keep its goal and plan again from that endpoint.
+    pub partial: bool,
     /// No move at all was open from the start pose: the hull stands where
     /// the search cannot begin, and only moving will change that.
     pub stranded: bool,
@@ -648,7 +653,12 @@ pub fn route(
     cfg: Search,
     clear: impl Fn([Fx; 2], i32) -> bool,
 ) -> Vec<[i32; 2]> {
-    plan(ground, shape, from, head, to, cfg, clear).path
+    let answer = plan(ground, shape, from, head, to, cfg, clear);
+    if answer.partial {
+        Vec::new()
+    } else {
+        answer.path
+    }
 }
 /// [`route`], also reporting a start the search could not leave. The whole
 /// search runs in this one call; [`Hunt`] spreads the same work over
@@ -694,6 +704,7 @@ pub struct Hunt {
     shape: Shape,
     cfg: Search,
     from: [Fx; 2],
+    head: i32,
     /// The goal as the search snapped it, not as it was asked.
     to: [i32; 2],
     /// Materials the probe of each slice treats as yielding.
@@ -717,15 +728,36 @@ pub struct Hunt {
     previous: BTreeMap<usize, usize>,
     poses: BTreeMap<usize, Pose>,
     open: BinaryHeap<Reverse<(u32, u32, usize)>>,
-    /// Pops taken against the allowance, expansions made, poses probed.
+    /// Graph work spent, expansions made, poses probed.
     spent: usize,
     nodes: u32,
     probed: u32,
     scans: u64,
     samples: u64,
     left_start: bool,
+    /// Derived from reached nodes; reconstructed on load, never new work.
+    /// Distance, path cost, stable node index resolve ties in that order.
+    nearest: (u64, u32, usize),
     prelude: Option<Prelude>,
     connection: Option<(usize, u32, Connection)>,
+    expansion: Option<Expansion>,
+}
+#[derive(Clone)]
+struct Expansion {
+    node: usize,
+    cost: u32,
+    edge: u8,
+    pending: Option<(usize, u32, Connection)>,
+}
+impl Expansion {
+    fn new(node: usize, cost: u32) -> Self {
+        Self {
+            node,
+            cost,
+            edge: 0,
+            pending: None,
+        }
+    }
 }
 #[derive(Clone)]
 struct Prelude {
@@ -775,6 +807,7 @@ impl Hunt {
         let none = |stranded, exhausted, nodes, poses| {
             Hunting::Done(Route {
                 path: vec![],
+                partial: false,
                 stranded,
                 nodes,
                 poses,
@@ -824,6 +857,7 @@ impl Hunt {
             shape,
             cfg,
             from,
+            head,
             to,
             yielding: ground.yielding.clone(),
             columns: Columns::default(),
@@ -844,12 +878,14 @@ impl Hunt {
             scans: 0,
             samples: 0,
             left_start: false,
+            nearest: (u64::MAX, 0, initial),
             prelude: Some(Prelude {
                 head,
                 goal_cursor: 0,
                 straight: None,
             }),
             connection: None,
+            expansion: None,
         };
         let result = hunt.prepare(ground, clear, &mut budget.max(1));
         hunt.scans = ground.scans;
@@ -897,6 +933,7 @@ impl Hunt {
                 let q = p.map(Fx::from_int);
                 if !ground.pose(q, yaw, self.shape).refused() && clear(q, yaw) {
                     self.to = p;
+                    self.nearest = self.progress(self.initial, 0);
                     let cell = [self.n, self.rows].map(|n| n as i32 - 1);
                     let end = [0, 1].map(|a| {
                         (p[a] - self.anchor[a])
@@ -917,14 +954,15 @@ impl Hunt {
             let answer = run.advance(ground, self.shape, clear, allowance);
             self.probed += (before - *allowance) as u32;
             match answer {
-                Some(Some(0)) => {
+                Some(Some(_)) => {
                     return Some(Route {
                         path: vec![self.to],
                         ..self.empty(false, false)
                     })
                 }
-                // Yielding matter is legal, but the graph may find a cheaper detour.
-                Some(_) => return None,
+                // A fully swept direct route is usable even through yielding
+                // trees. Do not discard it for an optional cheaper detour.
+                Some(None) => return None,
                 None => {}
             }
         }
@@ -934,6 +972,7 @@ impl Hunt {
     fn empty(&self, stranded: bool, exhausted: bool) -> Route {
         Route {
             path: vec![],
+            partial: false,
             stranded,
             exhausted,
             nodes: self.nodes,
@@ -988,6 +1027,11 @@ impl Hunt {
         if let Some((_, _, run)) = &mut self.connection {
             run.restart();
         }
+        if let Some(e) = &mut self.expansion {
+            if let Some((_, _, run)) = &mut e.pending {
+                run.restart();
+            }
+        }
     }
     /// The search as bytes: the cells it reached, the frontier in priority
     /// order, and the request. What it scanned and probed is left out
@@ -997,7 +1041,7 @@ impl Hunt {
     /// A search restored from these bytes finds the same route (P-29).
     pub fn save(&self, b: &mut fx::blob::Blob) {
         // Negative half-size cannot occur in the legacy layout.
-        b.i32(-1);
+        b.i32(-2);
         for v in [
             self.shape.half[0],
             self.shape.half[1],
@@ -1075,12 +1119,26 @@ impl Hunt {
             b.u32(*cost);
             run.save(b);
         }
+        b.bool(self.expansion.is_some());
+        if let Some(e) = &self.expansion {
+            b.usize(e.node);
+            b.u32(e.cost);
+            b.u8(e.edge);
+            b.bool(e.pending.is_some());
+            if let Some((node, cost, run)) = &e.pending {
+                b.usize(*node);
+                b.u32(*cost);
+                run.save(b);
+            }
+        }
+        b.i32(self.head);
     }
     /// A search read back. `None` when the bytes do not describe one.
     pub fn load(s: &mut fx::blob::Scan, yielding: &[Mat]) -> Option<Hunt> {
         let mut i32s = [0i32; 7];
         let first = s.i32();
-        let resumable = first == -1;
+        let swept = first == -2;
+        let resumable = first == -1 || swept;
         i32s[0] = if resumable { s.i32() } else { first };
         for v in &mut i32s[1..] {
             *v = s.i32();
@@ -1131,6 +1189,7 @@ impl Hunt {
             shape,
             cfg,
             from,
+            head: (initial % 8) as i32 * angle::FULL / 8,
             to,
             yielding: yielding.to_vec(),
             columns: Columns::default(),
@@ -1149,8 +1208,10 @@ impl Hunt {
             scans: 0,
             samples: 0,
             left_start,
+            nearest: (u64::MAX, 0, initial),
             prelude: None,
             connection: None,
+            expansion: None,
         };
         let reached = s.u32() as usize;
         if reached > cells || reached > s.left() / 12 {
@@ -1163,6 +1224,7 @@ impl Hunt {
                 return None;
             }
             hunt.distance.insert(i, d);
+            hunt.nearest = hunt.nearest.min(hunt.progress(i, d));
             if p != u32::MAX {
                 hunt.previous.insert(i, p as usize);
             }
@@ -1186,7 +1248,7 @@ impl Hunt {
                     return None;
                 }
                 let straight = if s.bool() {
-                    Some(Connection::load(s)?)
+                    Some(Connection::load(s, swept)?)
                 } else {
                     None
                 };
@@ -1202,13 +1264,55 @@ impl Hunt {
                 if node >= cells {
                     return None;
                 }
-                hunt.connection = Some((node, cost, Connection::load(s)?));
+                hunt.connection = Some((node, cost, Connection::load(s, swept)?));
             }
         }
-        s.ok().then_some(hunt)
+        if swept && s.bool() {
+            let node = s.usize();
+            let cost = s.u32();
+            let edge = s.u8();
+            if node >= cells || edge > 3 {
+                return None;
+            }
+            let pending = if s.bool() {
+                let j = s.usize();
+                let next_cost = s.u32();
+                if j >= cells {
+                    return None;
+                }
+                Some((j, next_cost, Connection::load(s, true)?))
+            } else {
+                None
+            };
+            hunt.expansion = Some(Expansion {
+                node,
+                cost,
+                edge,
+                pending,
+            });
+        }
+        if swept {
+            hunt.head = s.i32();
+        } else if let Some(p) = &hunt.prelude {
+            hunt.head = p.head;
+        }
+        (s.ok() && (0..angle::FULL).contains(&hunt.head)).then_some(hunt)
+    }
+
+    fn heading(&self, node: usize) -> i32 {
+        if node == self.initial {
+            self.head
+        } else {
+            (node % 8) as i32 * angle::FULL / 8
+        }
     }
 
     fn point(&self, i: usize) -> [Fx; 2] {
+        // The first swept turn starts at the real sub-voxel position, not
+        // its truncated grid corner. Rounding can invent a collision.
+        if i == self.initial / 8 {
+            return self.from;
+        }
         [
             Fx::from_int((i % self.n) as i32 * self.cfg.cell + self.anchor[0]),
             Fx::from_int((i / self.n) as i32 * self.cfg.cell + self.anchor[1]),
@@ -1235,95 +1339,126 @@ impl Hunt {
             route.samples = self.samples;
             return Some(route);
         }
-        while self.prelude.is_none()
-            && (self.spent < self.cfg.nodes || self.connection.is_some())
-            && allowance > 0
-        {
-            let (cost, i, resuming) = if let Some((i, cost, _)) = &self.connection {
-                (*cost, *i, true)
-            } else {
-                self.spent += 1;
-                allowance -= 1;
-                let Some(Reverse((_, cost, i))) = self.open.pop() else {
-                    exhausted = true;
-                    break;
-                };
-                if cost != self.cost(i) {
-                    continue;
-                }
-                self.nodes += 1;
-                (cost, i, false)
-            };
-            let at = self.point(i / 8);
-            let direction = i % 8;
-            let yaw = direction as i32 * angle::FULL / 8;
-            let pose = match self.poses.get(&i) {
-                Some(p) => *p,
-                None => {
-                    self.probed += 1;
-                    let p = ground.pose(at, yaw, self.shape);
-                    self.poses.insert(i, p);
-                    p
-                }
-            };
-            if !resuming
-                && ((at[0].to_int_trunc() - self.to[0])
-                    .abs()
-                    .max((at[1].to_int_trunc() - self.to[1]).abs())
-                    <= self.cfg.cell * 4
-                    || i / 8 == self.end)
-                && !pose.refused()
-                && clear(at, yaw)
-            {
-                self.connection =
-                    Some((i, cost, Connection::new(at, yaw, self.to.map(Fx::from_int))));
+        while self.prelude.is_none() && allowance > 0 {
+            if self.spent >= self.cfg.nodes && self.connection.is_none() {
+                // Finish only completed edges. An unverified pending edge is
+                // never part of the returned prefix.
+                self.expansion = None;
+                break;
             }
-            if let Some((_, _, run)) = &mut self.connection {
+            if self.expansion.is_some() {
+                let mut edge_allowance = allowance.min(self.cfg.nodes - self.spent);
+                let before = edge_allowance;
+                self.expand(ground, clear, &mut edge_allowance);
+                let used = before - edge_allowance;
+                allowance -= used;
+                self.spent += used;
+                continue;
+            }
+            if let Some((node, cost, run)) = &mut self.connection {
                 let before = allowance;
                 let answer = run.advance(ground, self.shape, clear, &mut allowance);
                 self.probed += (before - allowance) as u32;
                 match answer {
                     None => break,
                     Some(Some(_)) => {
-                        found = Some(i);
+                        found = Some(*node);
                         break;
                     }
                     Some(None) => {
+                        self.expansion = Some(Expansion::new(*node, *cost));
                         self.connection = None;
+                        continue;
                     }
                 }
             }
-            for turn in [-1, 0, 1] {
+            if self.spent >= self.cfg.nodes {
+                break;
+            }
+            self.spent += 1;
+            allowance -= 1;
+            let Some(Reverse((_, cost, i))) = self.open.pop() else {
+                exhausted = true;
+                break;
+            };
+            if cost != self.cost(i) {
+                continue;
+            }
+            self.nodes += 1;
+            let at = self.point(i / 8);
+            let yaw = self.heading(i);
+            if (at[0].to_int_trunc() - self.to[0])
+                .abs()
+                .max((at[1].to_int_trunc() - self.to[1]).abs())
+                <= self.cfg.cell * 4
+                || i / 8 == self.end
+            {
+                self.connection =
+                    Some((i, cost, Connection::new(at, yaw, self.to.map(Fx::from_int))));
+            } else {
+                self.expansion = Some(Expansion::new(i, cost));
+            }
+        }
+        self.scans += ground.scans.saturating_sub(scans);
+        self.samples += ground.samples.saturating_sub(samples);
+        match found {
+            Some(i) => Some(self.route_through(i, false)),
+            None if exhausted
+                || (self.spent >= self.cfg.nodes
+                    && self.connection.is_none()
+                    && self.expansion.is_none()) =>
+            {
+                // A dry frontier is a proven refusal. A spent budget is not:
+                // retain useful, checked progress instead of discarding it.
+                let (distance, _, node) = self.nearest;
+                if !exhausted && node != self.initial && distance < self.progress(self.initial, 0).0
+                {
+                    Some(self.route_through(node, true))
+                } else {
+                    Some(self.empty(!self.left_start, exhausted))
+                }
+            }
+            None => None,
+        }
+    }
+
+    /// Finish at most this tick's allowance of exact pose probes. In
+    /// particular, an edge never pays for a whole turn in one tick.
+    fn expand(
+        &mut self,
+        ground: &mut Probe<'_>,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        allowance: &mut usize,
+    ) {
+        let mut e = self.expansion.take().unwrap();
+        let direction = e.node % 8;
+        let at = self.point(e.node / 8);
+        let yaw = self.heading(e.node);
+        while e.edge < 3 && *allowance > 0 {
+            if e.pending.is_none() {
+                let turn = i32::from(e.edge) - 1;
                 let d = (direction as i32 + turn).rem_euclid(8) as usize;
-                let next_yaw = d as i32 * angle::FULL / 8;
                 let cell = if turn == 0 {
-                    let x = (i / 8 % self.n) as i32 + DIR[d][0];
-                    let z = (i / 8 / self.n) as i32 + DIR[d][1];
+                    let x = (e.node / 8 % self.n) as i32 + DIR[d][0];
+                    let z = (e.node / 8 / self.n) as i32 + DIR[d][1];
                     if x < 0 || z < 0 || x >= self.n as i32 || z >= self.rows as i32 {
+                        e.edge += 1;
                         continue;
                     }
                     x as usize + self.n * z as usize
                 } else {
-                    i / 8
+                    e.node / 8
                 };
                 let q = self.point(cell);
                 if (0..2).any(|a| {
                     q[a] < Fx::from_int(self.cfg.min[a]) || q[a] >= Fx::from_int(self.cfg.max[a])
                 }) {
+                    e.edge += 1;
                     continue;
                 }
                 let j = cell * 8 + d;
-                let next = match self.poses.get(&j) {
-                    Some(p) => *p,
-                    None => {
-                        self.probed += 1;
-                        let p = ground.pose(q, next_yaw, self.shape);
-                        self.poses.insert(j, p);
-                        p
-                    }
-                };
-                let next_cost =
-                    cost + if turn == 0 {
+                let base = e.cost
+                    + if turn == 0 {
                         if d.is_multiple_of(2) {
                             10
                         } else {
@@ -1331,74 +1466,86 @@ impl Hunt {
                         }
                     } else {
                         6
-                    } + (next.crush as u32)
+                    };
+                if base >= self.cost(j) {
+                    e.edge += 1;
+                    continue;
+                }
+                let next_yaw = d as i32 * angle::FULL / 8;
+                // Charge the logical query even on a memo hit: restored
+                // searches have empty caches but must finish on the same tick.
+                *allowance -= 1;
+                let pose = if let Some(p) = self.poses.get(&j) {
+                    *p
+                } else {
+                    self.probed += 1;
+                    let p = ground.pose(q, next_yaw, self.shape);
+                    self.poses.insert(j, p);
+                    p
+                };
+                let next_cost = base
+                    + (pose.crush as u32)
                         .saturating_mul(self.cfg.crush_cost)
                         .min(self.cfg.crush_cap);
-                if next_cost >= self.cost(j) {
+                if next_cost >= self.cost(j) || pose.refused() || !clear(q, next_yaw) {
+                    e.edge += 1;
                     continue;
                 }
-                if next.refused()
-                    || !clear(q, next_yaw)
-                    || next.height.sub(pose.height).abs() > Fx::from_int(self.shape.step)
-                {
-                    continue;
-                }
-                let mid = [
-                    at[0].add(q[0]).div(Fx::from_int(2)),
-                    at[1].add(q[1]).div(Fx::from_int(2)),
-                ];
-                let mid_yaw = angle::norm(yaw + angle::diff(next_yaw, yaw) / 2);
-                self.probed += 1;
-                if ground.pose(mid, mid_yaw, self.shape).refused() || !clear(mid, mid_yaw) {
-                    continue;
-                }
-                self.distance.insert(j, next_cost);
-                self.previous.insert(j, i);
-                self.left_start = true;
-                let heuristic = q[0]
-                    .sub(Fx::from_int(self.to[0]))
-                    .abs()
-                    .max(q[1].sub(Fx::from_int(self.to[1])).abs())
-                    .to_int_trunc()
-                    / self.cfg.cell
-                    * self.cfg.heuristic_pct.max(1) as i32
-                    / 10;
-                self.open
-                    .push(Reverse((next_cost + heuristic as u32, next_cost, j)));
+                e.pending = Some((j, next_cost, Connection::sweep(at, yaw, q, next_yaw)));
             }
+            let (j, next_cost, run) = e.pending.as_mut().unwrap();
+            let before = *allowance;
+            let answer = run.advance(ground, self.shape, clear, allowance);
+            self.probed += (before - *allowance) as u32;
+            match answer {
+                None => break,
+                Some(Some(_)) => {
+                    let (j, next_cost) = (*j, *next_cost);
+                    self.nearest = self.nearest.min(self.progress(j, next_cost));
+                    self.distance.insert(j, next_cost);
+                    self.previous.insert(j, e.node);
+                    self.left_start |= j / 8 != self.initial / 8;
+                    let q = self.point(j / 8);
+                    let heuristic = q[0]
+                        .sub(Fx::from_int(self.to[0]))
+                        .abs()
+                        .max(q[1].sub(Fx::from_int(self.to[1])).abs())
+                        .to_int_trunc()
+                        / self.cfg.cell
+                        * self.cfg.heuristic_pct.max(1) as i32
+                        / 10;
+                    self.open
+                        .push(Reverse((next_cost + heuristic as u32, next_cost, j)));
+                }
+                Some(None) => {}
+            }
+            e.pending = None;
+            e.edge += 1;
         }
-        self.scans += ground.scans.saturating_sub(scans);
-        self.samples += ground.samples.saturating_sub(samples);
-        match found {
-            Some(i) => Some(self.route_through(i)),
-            None if exhausted || (self.spent >= self.cfg.nodes && self.connection.is_none()) => {
-                Some(Route {
-                    path: vec![],
-                    stranded: !self.left_start,
-                    nodes: self.nodes,
-                    poses: self.probed,
-                    exhausted,
-                    scans: self.scans,
-                    samples: self.samples,
-                })
-            }
-            None => None,
+        if e.edge < 3 {
+            self.expansion = Some(e);
         }
     }
 
-    /// The turn points from the start to the node the search stopped on,
-    /// with the collinear ones between them dropped.
-    fn route_through(&self, mut i: usize) -> Route {
+    fn progress(&self, node: usize, cost: u32) -> (u64, u32, usize) {
+        let p = self.point(node / 8).map(Fx::to_int_trunc);
+        let d = [0, 1].map(|a| (p[a] - self.to[a]).unsigned_abs() as u64);
+        (d[0] * d[0] + d[1] * d[1], cost, node)
+    }
+
+    /// The checked turn points to this node; only a completed final connection
+    /// may append the actual goal. Partial paths never bridge unchecked space.
+    fn route_through(&self, mut i: usize, partial: bool) -> Route {
         let mut all = vec![];
         while i != self.initial {
             let p = self.point(i / 8).map(Fx::to_int_trunc);
-            if all.last() != Some(&p) {
+            if i / 8 != self.initial / 8 && all.last() != Some(&p) {
                 all.push(p);
             }
             i = self.previous.get(&i).copied().unwrap_or(usize::MAX);
         }
         all.reverse();
-        if all.last() != Some(&self.to) {
+        if !partial && all.last() != Some(&self.to) {
             all.push(self.to);
         }
         // Remove collinear grid points while retaining the exact turn centres.
@@ -1416,6 +1563,7 @@ impl Hunt {
         }
         Route {
             path: out,
+            partial,
             stranded: false,
             nodes: self.nodes,
             poses: self.probed,
@@ -1429,6 +1577,42 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn swept_edges_reject_obstacles_between_old_midpoint_samples() {
+        let w = world(false, false, false);
+        for turn in [false, true] {
+            let from = [80, 100].map(Fx::from_int);
+            let to = if turn {
+                from
+            } else {
+                [88, 100].map(Fx::from_int)
+            };
+            let yaw = if turn { angle::FULL / 8 } else { 0 };
+            let clear = |p: [Fx; 2], h: i32| {
+                if turn {
+                    !(500..900).contains(&h)
+                } else {
+                    p[0] < Fx::from_int(82) || p[0] > Fx::from_int(83)
+                }
+            };
+            let mut run = Connection::sweep(from, 0, to, yaw);
+            let mut ground = Probe::new(&w);
+            let mut refused = false;
+            for _ in 0..100 {
+                let result = run.advance(&mut ground, tank(), &clear, &mut 1);
+                if let Some(result) = result {
+                    assert_eq!(result, None);
+                    refused = true;
+                    break;
+                }
+                let mut b = fx::blob::Blob::new();
+                run.save(&mut b);
+                run = Connection::load(&mut fx::blob::Scan::new(&b.v), true).unwrap();
+            }
+            assert!(refused, "missed obstacle during turn={turn}");
+        }
+    }
+
     #[test]
     fn target_at_world_corner_is_probed_before_it_is_indexed() {
         let w = world(false, false, false);
@@ -1483,7 +1667,7 @@ mod tests {
                         assert!(ground.samples - before < (budget * 1000) as u64);
                         let mut b = fx::blob::Blob::new();
                         run.save(&mut b);
-                        run = Connection::load(&mut fx::blob::Scan::new(&b.v)).unwrap();
+                        run = Connection::load(&mut fx::blob::Scan::new(&b.v), true).unwrap();
                         if let Some(answer) = answer {
                             break answer;
                         }
@@ -1586,8 +1770,8 @@ mod tests {
         assert!(hunt.prelude.is_none() && hunt.connection.is_none());
         let mut bytes = fx::blob::Blob::new();
         hunt.save(&mut bytes);
-        // The previous layout had neither the marker nor the two pending flags.
-        let old = &bytes.v[4..bytes.v.len() - 2];
+        // Legacy searches had no marker, pending flags or exact start heading.
+        let old = &bytes.v[4..bytes.v.len() - 7];
         let loaded = Hunt::load(&mut fx::blob::Scan::new(old), &[]).unwrap();
         let mut check = fx::blob::Blob::new();
         loaded.save(&mut check);
@@ -1837,6 +2021,81 @@ mod tests {
         assert!(walker.is_empty(), "a hard hull passed through the wall");
     }
     #[test]
+    fn spent_budget_returns_checked_progress_and_restores_the_same_endpoint() {
+        let w = World::new(256, 64, 256, 100, Box::new(Forest));
+        let clear = |p: [Fx; 2], _: i32| {
+            !((110..130).contains(&p[0].to_int_trunc()) && (70..130).contains(&p[1].to_int_trunc()))
+        };
+        let cfg = Search {
+            nodes: 512,
+            ..search()
+        };
+        let from = [60, 100].map(Fx::from_int);
+        let to = [200, 100];
+        let reference = plan(
+            Probe::with_yield(&w, &[7, 8]),
+            tank(),
+            from,
+            0,
+            to,
+            cfg,
+            clear,
+        );
+        assert!(reference.partial && !reference.exhausted && !reference.path.is_empty());
+        let endpoint = *reference.path.last().unwrap();
+        assert_ne!(endpoint, to, "unchecked goal appended to a partial path");
+        assert!(endpoint[0] > 60 && endpoint[0] < 200);
+        let mut probe = Probe::for_search(&w, &[7, 8], Columns::default());
+        let Hunting::Open(mut live) =
+            Hunt::start_bounded(&mut probe, tank(), from, 0, to, cfg, &clear, 7)
+        else {
+            panic!("the search should be suspended");
+        };
+        let mut slices = 0;
+        let actual = loop {
+            let mut bytes = fx::blob::Blob::new();
+            live.save(&mut bytes);
+            let mut loaded = Hunt::load(&mut fx::blob::Scan::new(&bytes.v), &[7, 8]).unwrap();
+            let a = live.advance_in(&w, &Rubble::new(), &clear, 7);
+            let b = loaded.advance_in(&w, &Rubble::new(), &clear, 7);
+            assert_eq!(a.is_some(), b.is_some());
+            slices += 1;
+            assert!(slices < 1000);
+            if let Some(a) = a {
+                let b = b.unwrap();
+                assert_eq!(a.path, b.path);
+                assert_eq!(a.partial, b.partial);
+                break a;
+            }
+        };
+        assert!(actual.partial);
+        assert_eq!(actual.path, reference.path);
+        let mut at = from;
+        let mut head = 0;
+        let shape = Shape {
+            span: tank().span + cfg.margin,
+            ..tank()
+        };
+        for p in actual.path {
+            let to = p.map(Fx::from_int);
+            assert!(connects(&mut probe, shape, at, head, to, &clear).is_some());
+            head = angle::atan2(to[1].sub(at[1]).raw(), to[0].sub(at[0]).raw());
+            at = to;
+        }
+        // A caller using the legacy path-only API never mistakes a partial
+        // route for arrival at its requested destination.
+        assert!(route(
+            Probe::with_yield(&w, &[7, 8]),
+            tank(),
+            from,
+            0,
+            to,
+            cfg,
+            clear
+        )
+        .is_empty());
+    }
+    #[test]
     fn narrow_opening_uses_width_and_forbids_a_turn_inside_it() {
         let w = world(false, true, false);
         let mut p = Probe::new(&w);
@@ -1911,7 +2170,10 @@ mod tests {
             [Fx::from_int(40), Fx::from_int(70)],
             0,
             [200, 70],
-            search(),
+            Search {
+                nodes: 1_000_000,
+                ..search()
+            },
             fence,
         );
         assert!(r.path.is_empty() && r.exhausted);

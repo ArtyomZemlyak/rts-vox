@@ -83,6 +83,8 @@ pub struct Motion {
     pub path: Vec<[i32; 2]>,
     pub cursor: usize,
     pub destination: Option<[i32; 2]>,
+    /// The current route ends at a checked intermediate point, not the order.
+    pub partial_path: bool,
     pub route: Vec<[i32; 2]>,
     pub waypoint: usize,
     pub laps: u32,
@@ -148,6 +150,7 @@ pub struct Motion {
     /// The last search could not leave the start pose (ADR-275).
     stranded: bool,
     recovery_head: i32,
+    recovery_origin: [Fx; 2],
     next_plan: u32,
     /// The range hands out permission to begin a search each tick
     /// (ADR-312); `started` reports back whether this hull used it. Both
@@ -200,6 +203,7 @@ impl Motion {
             path: Vec::new(),
             cursor: 0,
             destination: None,
+            partial_path: false,
             route: Vec::new(),
             waypoint: 0,
             laps: 0,
@@ -231,6 +235,7 @@ impl Motion {
             escape: 0,
             stranded: false,
             recovery_head: 0,
+            recovery_origin: [Fx::from_int(at[0]), Fx::from_int(at[2])],
             next_plan: 0,
             may_start: true,
             started: false,
@@ -662,6 +667,7 @@ impl Motion {
         self.enabled = true;
         self.hunt = None;
         self.path.clear();
+        self.partial_path = false;
         self.cursor = 0;
         let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
             .with_rubble(rubble);
@@ -713,6 +719,7 @@ impl Motion {
         self.stranded = plan.stranded;
         self.last_plan = [plan.nodes, plan.poses];
         self.last_probe = [plan.scans, plan.samples];
+        self.partial_path = plan.partial;
         self.path = plan.path;
         self.cursor = 0;
     }
@@ -790,6 +797,7 @@ impl Motion {
     pub fn stop(&mut self) {
         self.hunt = None;
         self.path.clear();
+        self.partial_path = false;
         self.cursor = 0;
         self.destination = None;
         self.blocked = false;
@@ -866,6 +874,7 @@ impl Motion {
             && self.hunt.is_none()
             && self.escape_left == 0
             && !self.route.is_empty()
+            && !self.partial_path
             && alive
             && engine
             && (!self.blocked || (tick.is_multiple_of(self.replan) && tick >= self.next_plan))
@@ -880,17 +889,39 @@ impl Motion {
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
+        let base_limits = Limits::of(&self.chassis, 30);
+        let brake = response
+            .limits(&base_limits, false)
+            .brake
+            .mul(self.drive_scale)
+            .mul(self.hull.load);
         if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
             let goal = self.path[self.cursor];
             let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
             let dz = Fx::from_int(goal[1]).sub(self.pos[2]);
-            if dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(self.arrival * self.arrival) {
+            let arrival = if self.partial_path || self.cursor + 1 < self.path.len() {
+                Fx::from_ratio(
+                    self.navigation.corner_arrival_mm,
+                    voxel::unit::WORLD_MM as i32,
+                )
+                .min(Fx::from_int(self.arrival))
+            } else {
+                Fx::from_int(self.arrival)
+            };
+            if dx.mul(dx).add(dz.mul(dz)) <= arrival.mul(arrival) {
                 self.cursor += 1;
                 self.escape = 0;
-                if self.cursor == self.path.len() {
+                let reached_end = self.cursor == self.path.len();
+                if reached_end && self.partial_path {
+                    // Keep the player's goal and patrol waypoint. The next tick
+                    // requests a continuation under the normal start allowance.
+                    self.path.clear();
+                    self.cursor = 0;
+                    self.next_plan = tick.saturating_add(1);
+                } else if reached_end {
                     self.destination = None;
                 }
-                if self.cursor == self.path.len() && !self.route.is_empty() {
+                if reached_end && !self.partial_path && !self.route.is_empty() {
                     self.waypoint = (self.waypoint + 1) % self.route.len();
                     if self.waypoint == 0 {
                         self.laps += 1;
@@ -903,21 +934,47 @@ impl Motion {
                     .mul(response.traction)
                     .min(dx.abs().max(dz.abs()).mul(Fx::from_int(2)));
                 let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
-                speed = speed.mul(if alignment > Fx::from_ratio(self.alignment, 100) {
-                    alignment
+                // Reserve the actual stopping distance before a checked turn
+                // centre. Merely asking for 2*distance can brake too late.
+                let distance = dx.abs().max(dz.abs());
+                let stopping = brake.mul(Fx::from_int(60)).mul(distance);
+                if self.drive.vel.mul(self.drive.vel) > stopping {
+                    speed = Fx::ZERO;
+                }
+                if alignment > Fx::from_ratio(self.alignment, 100)
+                    && (self.drive.vel > Fx::ZERO
+                        || angle::diff(want, self.drive.head).abs() <= base_limits.turn)
+                {
+                    speed = speed.mul(alignment);
                 } else {
-                    Fx::ZERO
-                });
+                    speed = Fx::ZERO;
+                    // The planner reserves a pivot, not a moving curve. Finish
+                    // braking along the checked segment before rotating.
+                    if self.drive.vel.abs() > brake {
+                        want = self.drive.head;
+                    }
+                }
             }
         }
-        // One cycle of manoeuvres per waypoint: a hull that none of them
-        // freed waits for the world to change rather than pacing forever.
+        // Repeat recovery only after a net move of at least half a navigation
+        // cell. Returning to the same spot cannot renew the cycle forever.
+        if self.escape >= ESCAPES && self.escape_left == 0 {
+            let dx = self.pos[0].sub(self.recovery_origin[0]);
+            let dz = self.pos[2].sub(self.recovery_origin[1]);
+            let cell = Fx::from_ratio(self.navigation.cell_units, 2);
+            if dx.mul(dx).add(dz.mul(dz)) >= cell.mul(cell) {
+                self.escape = 0;
+            }
+        }
         if alive
             && engine
             && self.blocked_ticks >= self.navigation.recovery_ticks
             && self.escape_left == 0
             && self.escape < ESCAPES
         {
+            if self.escape == 0 {
+                self.recovery_origin = [self.pos[0], self.pos[2]];
+            }
             self.escape_left = self.navigation.escape_ticks;
             self.recovery_head = self.drive.head;
             self.blocked_ticks = 0;
@@ -943,7 +1000,7 @@ impl Motion {
                 .mul(response.traction)
                 .mul(Fx::from_ratio(pct, 100));
         }
-        let lim = response.limits(&Limits::of(&self.chassis, 30), want == drive::NO_WAY);
+        let lim = response.limits(&base_limits, want == drive::NO_WAY);
         let old = self.drive;
         let old_pos = self.pos;
         // Two poses and the cut lie within a hull length of the vehicle; a
@@ -1017,10 +1074,10 @@ impl Motion {
         if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
             self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
         }
-        // A search that could not leave this pose is a block like any
-        // other: only a manoeuvre will change what the next search sees.
+        // A dry search is a block even if its tiny reachable pocket contains
+        // several cells. Only recovery can change the next search start.
         // A search still walking is not a block: the hull is waiting.
-        if self.stranded
+        if (self.stranded || self.dry)
             && self.hunt.is_none()
             && self.destination.is_some()
             && self.path.is_empty()
@@ -1158,8 +1215,15 @@ impl Motion {
         if let Some(hunt) = &self.hunt {
             hunt.save(b);
         }
+        b.bool(self.partial_path);
+        for v in self.recovery_origin {
+            b.fx(v);
+        }
     }
     pub fn load(&mut self, s: &mut Scan) -> bool {
+        self.load_version(s, true)
+    }
+    pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),
@@ -1223,7 +1287,18 @@ impl Motion {
         } else {
             None
         };
+        self.partial_path = continuation && s.bool();
+        self.recovery_origin = if continuation {
+            [s.fx(), s.fx()]
+        } else {
+            [self.pos[0], self.pos[2]]
+        };
         s.ok()
+            && (!self.partial_path || self.destination.is_some())
+            && self
+                .recovery_origin
+                .iter()
+                .all(|p| *p >= Fx::ZERO && *p < Fx::from_int(MAX_SIDE))
             && self.escape_left <= self.navigation.escape_ticks
             && (0..angle::FULL).contains(&self.recovery_head)
             && self.pos[0] >= Fx::ZERO
@@ -1268,6 +1343,87 @@ mod tests {
     struct Ground {
         depth: i32,
     }
+    #[test]
+    fn partial_routes_keep_the_order_and_patrol_waypoint_until_arrival() {
+        struct Trees;
+        impl voxel::Generator for Trees {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                if y < 16 || ((240..248).contains(&x) && (60..140).contains(&_z) && y < 50) {
+                    1
+                } else if x % 64 < 8 && y < 40 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let world = World::new(640, 64, 256, 100, Box::new(Trees));
+        let body = voxel::unit::tank();
+        let goal = [430, 100];
+        let mut motion = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+        motion.route = vec![goal, [60, 100]];
+        motion.destination = Some(goal);
+        motion.enabled = true;
+        motion.take_plan(nav::vehicle::Route {
+            path: vec![[190, 100]],
+            partial: true,
+            stranded: false,
+            nodes: 1,
+            poses: 1,
+            exhausted: false,
+            scans: 0,
+            samples: 0,
+        });
+        let mut saw_partial = false;
+        let mut reached = false;
+        for tick in 0..2400 {
+            if motion.partial_path {
+                saw_partial = true;
+                assert_eq!(motion.destination, Some(goal));
+                assert_eq!(motion.waypoint, 0);
+                let mut bytes = Blob::new();
+                motion.save(&mut bytes);
+                let mut restored = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+
+                assert!(restored.load(&mut Scan::new(&bytes.v)));
+                let mut check = Blob::new();
+                restored.save(&mut check);
+                assert_eq!(bytes.v, check.v);
+                motion = restored;
+            }
+            motion.allow_start(true);
+            step(&mut motion, &world, &body, &[], tick);
+            if motion.destination.is_none() && motion.waypoint == 1 {
+                assert!((motion.pos[0].to_int_trunc() - goal[0]).abs() <= motion.arrival);
+                reached = true;
+                break;
+            }
+        }
+        assert!(saw_partial, "fixture must exercise continuation");
+        assert!(
+            reached,
+            "partial route never reached its real goal: {:?}",
+            motion.pos
+        );
+        motion.stop();
+        assert!(!motion.partial_path);
+    }
+    #[test]
+    fn old_motion_without_continuation_flag_still_loads() {
+        let body = voxel::unit::tank();
+        let motion = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+        let mut bytes = Blob::new();
+        motion.save(&mut bytes);
+        let extra = bytes.v.split_off(bytes.v.len() - 17);
+        assert_eq!(extra[0], 0);
+        let mut restored = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+        assert!(restored.load_version(&mut Scan::new(&bytes.v), false));
+        assert!(!restored.partial_path);
+        let mut check = Blob::new();
+        restored.save(&mut check);
+        bytes.v.extend(extra);
+        assert_eq!(bytes.v, check.v);
+    }
     impl voxel::Generator for Ground {
         fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
             let height = 16 - (self.depth - (x as i32 - 320).abs() / 3).max(0);
@@ -1295,6 +1451,24 @@ mod tests {
             true,
         );
     }
+    #[test]
+    fn a_dry_reachable_pocket_starts_recovery_without_declaring_start_stranded() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        m.enabled = true;
+        m.destination = Some([430, 300]);
+        m.dry = true;
+        m.stranded = false;
+        m.next_plan = 1000;
+        let from = m.pos;
+        for tick in 0..80 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        assert!(m.escape > 0);
+        assert_ne!(m.pos, from, "dry pocket stayed idle forever");
+    }
+
     #[test]
     fn driving_and_blast_shoves_cross_the_old_range_boundary() {
         let w = World::new(1024, 64, 1024, 100, Box::new(Ground { depth: 0 }));
@@ -1636,11 +1810,9 @@ mod tests {
         assert_eq!(old, Fx::ZERO);
         assert!(
             a.destination.is_none() && b.destination.is_none(),
-            "a {:?} path {:?}; b {:?} path {:?}",
-            a.pos,
-            a.path,
-            b.pos,
-            b.path
+            "a {:?} path {:?} search {:?} stranded {} escape {} blocked {} dry {} plan {:?}; b {:?} path {:?} search {:?} stranded {} escape {} blocked {} dry {} plan {:?}",
+            a.pos, a.path, a.hunt, a.stranded,a.escape,a.blocked,a.dry,a.last_plan,
+            b.pos, b.path, b.hunt,b.stranded,b.escape,b.blocked,b.dry,b.last_plan
         );
     }
     #[test]

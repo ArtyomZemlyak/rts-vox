@@ -4,7 +4,11 @@
 //! naming the slowest ones. `--targets x,z;x,z` picks the points,
 //! `--crater x,z` where the shell lands, `--to x,z` where the tank then
 //! drives, `--ticks n` how long, `--nodes n` and `--heuristic pct` the
-//! planner's budget and weight instead of the data's.
+//! planner's budget and weight instead of the data's. `--inspect-direct`
+//! reports the first refused terrain pose on the exact straight connection
+//! with resting rubble (ignores other units); it does not change the order.
+//! `--trace` reports path changes, `--inspect-state` prints the final motion
+//! state and `--no-crater` runs only the original terrain.
 use sim_core::blast::BlastRange;
 use std::time::Instant;
 
@@ -54,6 +58,9 @@ fn main() {
     for t in targets.split(';').filter(|t| !t.is_empty()) {
         let target = point(t);
         let mut scene = range(search, &layout);
+        if args.iter().any(|a| a == "--inspect-direct") {
+            inspect_direct(&scene, target);
+        }
         let start = Instant::now();
         let ok = scene.order_move(target);
         let us = start.elapsed().as_micros();
@@ -83,7 +90,10 @@ fn main() {
     }
 
     // The drive: a shell on the open ground, then the order across it.
-    for with_crater in [false, true] {
+    for with_crater in [false, true]
+        .into_iter()
+        .filter(|v| !*v || !args.iter().any(|a| a == "--no-crater"))
+    {
         let mut scene = range(search, &layout);
         let mut samples: Vec<(u128, usize)> = Vec::new();
         let mut tick = 0usize;
@@ -105,11 +115,24 @@ fn main() {
         let ok = scene.order_move(to);
         let plan_us = plan.elapsed().as_micros();
         let mut trail = Vec::new();
+        let mut last_path = Vec::new();
         for _ in 0..ticks {
             let start = Instant::now();
             scene.step();
             samples.push((start.elapsed().as_micros(), tick));
             tick += 1;
+            if args.iter().any(|a| a == "--trace") && scene.gun.motion.path != last_path {
+                let m = &scene.gun.motion;
+                println!(
+                    "route tick={tick} pos={:?} partial={} destination={:?} path={:?} nodes={:?}",
+                    m.pos.map(fx::Fx::to_int_trunc),
+                    m.partial_path,
+                    m.destination,
+                    m.path,
+                    m.last_plan
+                );
+                last_path = m.path.clone();
+            }
             if tick.is_multiple_of(100) {
                 trail.push(format!(
                     "{tick}:({},{})",
@@ -117,6 +140,13 @@ fn main() {
                     scene.gun.motion.pos[2].to_int_trunc()
                 ));
             }
+        }
+        println!("end destination={:?} partial={} pos={:?} head={} cursor={} searching={} last_plan={:?}",scene.gun.motion.destination,scene.gun.motion.partial_path,scene.gun.motion.pos.map(fx::Fx::to_int_trunc),scene.gun.motion.drive.head,scene.gun.motion.cursor,scene.gun.motion.searching(),scene.gun.motion.last_plan);
+        if args.iter().any(|a| a == "--inspect-direct") {
+            inspect_direct(&scene, to);
+        }
+        if args.iter().any(|a| a == "--inspect-state") {
+            println!("motion={:?}", scene.gun.motion);
         }
         let mut top = samples.clone();
         top.sort_unstable_by(|a, b| b.cmp(a));
@@ -140,4 +170,62 @@ fn main() {
             scene.state_hash()
         );
     }
+}
+
+/// Terrain-only diagnostic with the same swept positions as Connection.
+fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
+    use fx::{angle, Fx};
+    let config = modding::navigation::Navigation::from_ron(include_str!(
+        "../../../../data/range-navigation.ron"
+    ))
+    .unwrap();
+    let motion = &scene.gun.motion;
+    let mut shape = motion.probe_shape(&scene.gun.body);
+    if shape.span >= 2 {
+        shape.span += config.plan_margin;
+    }
+    let from = [motion.pos[0], motion.pos[2]];
+    let to = target.map(Fx::from_int);
+    let delta = [to[0].sub(from[0]), to[1].sub(from[1])];
+    let head = motion.drive.head;
+    let yaw = if delta == [Fx::ZERO; 2] {
+        head
+    } else {
+        angle::atan2(delta[1].raw(), delta[0].raw())
+    };
+    let turn = angle::diff(yaw, head);
+    let turns = ((i64::from(turn.abs()) * i64::from(shape.half[0] + shape.half[1]) * 7
+        + i64::from(angle::FULL)
+        - 1)
+        / i64::from(angle::FULL))
+    .max(1) as i32;
+    let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
+    let mut ground =
+        nav::vehicle::Probe::for_search(&scene.world, &config.fell.materials, Default::default())
+            .with_rubble(&scene.rubble);
+    let mut old = ground.pose(from, head, shape);
+    let mut crush = 0;
+    for i in 1..=turns + steps {
+        let (p, h) = if i <= turns {
+            (from, angle::norm(head + turn * i / turns))
+        } else {
+            let f = Fx::from_ratio(i - turns, steps);
+            (
+                [from[0].add(delta[0].mul(f)), from[1].add(delta[1].mul(f))],
+                yaw,
+            )
+        };
+        let next = ground.pose(p, h, shape);
+        if next.refused() || next.height.sub(old.height).abs() > Fx::from_int(shape.step) {
+            println!("direct to={target:?} refused_at={:?} yaw={h} pose={next:?} previous_height={:?} crushed={crush}",p.map(Fx::to_int_trunc),old.height);
+            return;
+        }
+        crush = if i <= turns {
+            crush.max(next.crush)
+        } else {
+            crush + next.crush
+        };
+        old = next;
+    }
+    println!("direct to={target:?} terrain_clear=true crushed={crush}");
 }

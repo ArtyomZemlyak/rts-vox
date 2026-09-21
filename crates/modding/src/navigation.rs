@@ -19,10 +19,17 @@ pub struct Navigation {
     /// Extra contact length the planner probes with, world units: its
     /// refusals are wider than the executor's by this much.
     pub plan_margin: i32,
+    /// Precision at a checked turn centre or intermediate route endpoint.
+    /// Final order arrival keeps the course's ordinary arrival radius.
+    #[serde(default = "corner_arrival")]
+    pub corner_arrival_mm: i32,
     /// Weight of the planner's distance estimate, percent; 100 is plain A*.
     #[serde(default = "plain_heuristic")]
     pub heuristic_pct: u32,
     pub fell: Felling,
+}
+fn corner_arrival() -> i32 {
+    50
 }
 fn plain_heuristic() -> u32 {
     100
@@ -64,6 +71,7 @@ impl Navigation {
             || !(1..=60).contains(&n.escape_speed_pct)
             || !(0..=60).contains(&n.recovery_turn_deg)
             || !(0..=16).contains(&n.plan_margin)
+            || !(1..=500).contains(&n.corner_arrival_mm)
             || n.fell.materials.contains(&0)
             || !(1..=32).contains(&n.fell.radius)
             || !(1..=8192).contains(&n.fell.cells_per_tick)

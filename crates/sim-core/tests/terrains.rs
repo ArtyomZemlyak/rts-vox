@@ -215,6 +215,8 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
     let mut vel = m.drive.vel;
     let mut floors = [0i64; 4];
     let mut rate = Fx::ZERO;
+    let mut old_path = Vec::new();
+    let trace = std::env::var_os("RTS_TRACE_TERRAIN").is_some();
     for tick in 0..1500u32 {
         m.step(
             &w,
@@ -228,6 +230,10 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
             &nav::vehicle::Rubble::new(),
             true,
         );
+        if trace && (old_path != m.path || (m.blocked && out.blocked < 3)) {
+            eprintln!("tick={tick} {kind:?} pos={:?} head={} vel={:?} blocked={} path={:?} cursor={} partial={}", m.pos, m.drive.head, m.drive.vel, m.blocked, m.path, m.cursor, m.partial_path);
+            old_path = m.path.clone();
+        }
         let dup = m.hull.up.sub(up);
         let step = m.pos[1].sub(y);
         let jump = step.abs();
@@ -256,6 +262,26 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         }
     }
     out
+}
+
+/// Trace a crater detour against the same physical controller as the series.
+#[test]
+#[ignore]
+fn trace_crater_detour() {
+    let t = Terrain::Crater {
+        depth: 12,
+        radius: 24,
+    };
+    for (kind, heading) in [
+        (RangeUnitKind::Tank, 3 * angle::FULL / 8),
+        (RangeUnitKind::Strider, angle::FULL / 8),
+    ] {
+        let r = run(t, kind, heading, false);
+        eprintln!(
+            "trace {kind:?}: arrived={:?} blocked={}",
+            r.arrived, r.blocked
+        );
+    }
 }
 
 /// Poses along the straight run, for reading why a route is refused.
