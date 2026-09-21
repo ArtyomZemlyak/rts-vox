@@ -23,3 +23,20 @@ fn build(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_inde
     workgroupBarrier();
     if lane==0u {bricks[index]=atomicLoad(&ceiling);}
 }
+
+// The coarse 32^3 level follows the fine level in the same buffer. This
+// dispatch runs after all fine writes, so removals lower both ceilings.
+@compute @workgroup_size(64)
+fn reduce(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
+    let dims=config.xyz/32u;let index=group.x;
+    if index>=dims.x*dims.y*dims.z {return;}
+    let b=vec3(index%dims.x,index/dims.x%dims.y,index/(dims.x*dims.y));
+    let local=vec3(lane%4u,lane/4u%4u,lane/16u);
+    let fine=config.xyz/8u;let child=b*4u+local;
+    if lane==0u {atomicStore(&ceiling,0u);}
+    workgroupBarrier();
+    let h=bricks[child.x+fine.x*(child.y+fine.y*child.z)];
+    if h>0u {atomicMax(&ceiling,local.y*8u+h);}
+    workgroupBarrier();
+    if lane==0u {bricks[fine.x*fine.y*fine.z+index]=atomicLoad(&ceiling);}
+}

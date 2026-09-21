@@ -375,7 +375,11 @@ impl BlastRange {
         }
         n
     }
+    #[cfg(test)]
     pub(super) fn battle_tick(&mut self) {
+        self.battle_tick_observed(|_| {});
+    }
+    pub(super) fn battle_tick_observed(&mut self, mut completed: impl FnMut(&'static str)) {
         if !self.battle_mode() {
             return;
         }
@@ -397,14 +401,18 @@ impl BlastRange {
         if battle.phase == Phase::Fighting {
             self.battle_orders(&mut battle);
         }
+        completed("battle_orders");
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
         self.battle_flight(&mut battle);
+        completed("battle_flight");
         self.battle_waves(&mut battle);
+        completed("battle_waves");
         for (id, (u, old)) in self.units.iter_mut().zip(revisions).enumerate() {
             if u.revision != old {
                 u.refresh_damage(id);
             }
         }
+        completed("battle_damage");
         if battle.phase == Phase::Fighting && battle.rounds.is_empty() && battle.waves.is_empty() {
             let n = self.battle_counts();
             battle.phase = match n {
@@ -608,12 +616,28 @@ impl BlastRange {
     fn battle_flight(&mut self, b: &mut Battle) {
         let dt = Fx::from_ratio(1, crate::TICKS_PER_SECOND);
         let stream = self.streams.tuning.machine_gun.clone();
+        let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
             if r.shell {
                 r.velocity[1] = r.velocity[1].sub(Fx::from_int(b.shell_config.gravity).mul(dt));
             }
             let delta = r.velocity.map(|v| v.mul(dt));
+            let from = r.pos.map(Fx::to_int_trunc);
+            let to = std::array::from_fn::<_, 3, _>(|a| r.pos[a].add(delta[a]).to_int_trunc());
+            // The sweep still samples at sub-voxel intervals and preserves
+            // stable actor order. Empty portions of a round's flight need no
+            // local body transforms (especially the paired machine guns).
+            let near: Vec<_> = boxes
+                .iter()
+                .enumerate()
+                .filter_map(|(id, (lo, hi))| {
+                    (id != r.owner
+                        && (0..3)
+                            .all(|a| from[a].min(to[a]) <= hi[a] && from[a].max(to[a]) >= lo[a]))
+                    .then_some(id)
+                })
+                .collect();
             let travel = delta.iter().fold(Fx::ZERO, |n, v| n.add(v.mul(*v))).sqrt();
             let steps = (delta
                 .iter()
@@ -637,11 +661,10 @@ impl BlastRange {
                     break;
                 }
                 if material(&self.world, p) != 0
-                    || self
-                        .units
-                        .iter()
-                        .enumerate()
-                        .any(|(id, u)| id != r.owner && u.solid(p))
+                    || near.iter().any(|&id| {
+                        let (lo, hi) = boxes[id];
+                        (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
+                    })
                 {
                     hit = Some(p);
                     break;

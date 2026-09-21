@@ -9,6 +9,9 @@ const N:i32=48;
 // Maximum omitted direct-light contribution per HDR channel and region.
 // Cloud opacity, cloud shadows, soot and hot fissures are not culled.
 const LIGHT_EPSILON:f32=0.00001;
+fn gas_may_show(m:vec4<f32>)->bool {
+    return (m.w*1.1+m.y*0.22)*1.55>0.12;
+}
 fn mat(q:vec3<i32>)->vec4<f32> {
     if any(q<vec3(0)) || any(q>=vec3(N)) {return vec4(0.0);}
     return gas[u32(q.x+N*(q.y+N*q.z))].matter;
@@ -215,31 +218,35 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let vi=vec3<i32>(floor((pos-p.origin.xyz)/edge));
         let centre=(vec3<f32>(vi)+vec3(0.5))*edge;
         let gas_pos=centre/p.origin.w;let m=field(gas_pos);
-        // Subcell detail rides upward with the plume. The coarse field owns
-        // transport, silhouette, heat and constituent mass.
-        let detail=noise(gas_pos*1.15-vec3(0.0,p.weapon.y*0.9,0.0));
-        let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
-        let grain=hash(vi);
         let face=select(vec3<f32>(vi),vec3<f32>(vi)+vec3(1.0),rd>vec3(0.0))*edge+p.origin.xyz;
         let distance=(face-pos)*inv;let dt=max(0.005,min(distance.x,min(distance.y,distance.z)));
-        if occupancy>0.12+grain*0.15 {
-            let shade=0.37+0.63*max(0.0,dot(normal,sun));
-            let self_shadow=exp(-(field(gas_pos+sun*1.5).w+field(gas_pos+sun*3.5).w)*0.64);
-            let dust=1.0-smoothstep(26.0,49.0,p.origin.y+centre.y);
-            let base=mix(vec3(0.105,0.12,0.135),vec3(0.21,0.16,0.095),dust);
-            let interior_glow=field(gas_pos+rd*2.5).x;
-            var inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
-            if p.weapon.x>1.5 {inner_colour=vec3(0.07,0.03,0.13);}
-            let smoke=base*(0.23+shade*self_shadow*1.55)+inner_colour*interior_glow*exp(-age*0.45);
-            let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
-            let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
-            let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
-            // Beer-Lambert extinction: a thin smoky edge stays transparent.
-            // A fixed 97% per display cell made smoke look like solid bricks.
-            // The look scales the extinction (ADR-283): p.weapon.w.
-            let density=max(0.0,occupancy-(0.12+grain*0.15));
-            let opacity=1.0-exp(-density*dt*p.control.z*select(0.55,0.75,p.weapon.x>0.5)*p.weapon.w);
-            light+=transmit*colour*opacity;transmit*=1.0-opacity;
+        // Even the largest possible noise multiplier cannot make this cell
+        // visible. Skip procedural detail only; the ray takes the same step.
+        if gas_may_show(m) {
+            // Subcell detail rides upward with the plume. The coarse field owns
+            // transport, silhouette, heat and constituent mass.
+            let detail=noise(gas_pos*1.15-vec3(0.0,p.weapon.y*0.9,0.0));
+            let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
+            let grain=hash(vi);
+            if occupancy>0.12+grain*0.15 {
+                let shade=0.37+0.63*max(0.0,dot(normal,sun));
+                let self_shadow=exp(-(field(gas_pos+sun*1.5).w+field(gas_pos+sun*3.5).w)*0.64);
+                let dust=1.0-smoothstep(26.0,49.0,p.origin.y+centre.y);
+                let base=mix(vec3(0.105,0.12,0.135),vec3(0.21,0.16,0.095),dust);
+                let interior_glow=field(gas_pos+rd*2.5).x;
+                var inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
+                if p.weapon.x>1.5 {inner_colour=vec3(0.07,0.03,0.13);}
+                let smoke=base*(0.23+shade*self_shadow*1.55)+inner_colour*interior_glow*exp(-age*0.45);
+                let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
+                let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
+                let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
+                // Beer-Lambert extinction: a thin smoky edge stays transparent.
+                // A fixed 97% per display cell made smoke look like solid bricks.
+                // The look scales the extinction (ADR-283): p.weapon.w.
+                let density=max(0.0,occupancy-(0.12+grain*0.15));
+                let opacity=1.0-exp(-density*dt*p.control.z*select(0.55,0.75,p.weapon.x>0.5)*p.weapon.w);
+                light+=transmit*colour*opacity;transmit*=1.0-opacity;
+            }
         }
         normal=vec3(0.0);
         if distance.x<=distance.y && distance.x<=distance.z {normal.x=-sign(rd.x);}

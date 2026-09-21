@@ -66,6 +66,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 [продолжении оптимизации](docs/analysis/33-range-spikes.md) и
 [разборе дыма и GPU-света](docs/analysis/34-smoke-and-rays.md).
 
+Вся серия замеров: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -SkipBuild`. Семь сценариев идут последовательно:
+бой 2×2 и 4×4, энергия 4×, фугас 4×, восемь облаков, движение, огнемёт.
+Без `-SkipBuild` скрипт сначала собирает текущий код. `-Seconds 60`
+удлиняет каждый прогон; `-CheckBudget` возвращает ошибку при p99 выше
+8,33 мс. В `out/performance` сохраняются покадровые CSV, журналы и
+`summary.csv` с максимумом и числом медленных кадров. Диагностический
+флаг `blast --battle-eight` запускает тот же бой 4×4 отдельно.
+`--attack-unit 1` приказывает стрелять по первой мишени полигона;
+стенд огнемёта проверяет ненулевой урон, а не только наличие пламени.
+Сравнение до/после и оставшиеся пики — в
+[отчёте о бюджете кадра](docs/analysis/45-range-frame-budget.md).
+
 Для записи ходовых мишеней используйте `capture-range.ps1 -DriveDemo -View target -Seconds 24`.
 `-Patrol` выбирает, за какой ходовой мишенью следить, считая с единицы.
 `-View` выбирает камеру: `auto`, `overview`, `exposed`, `sheltered`, `gun` или `target`;

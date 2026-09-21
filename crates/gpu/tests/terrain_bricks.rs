@@ -49,7 +49,7 @@ fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows(
     let dims = [64usize, 32, 64];
     let count = dims.iter().product::<usize>() / 512;
     let terrain = g.storage((count * 64 * 4) as u64, "packed terrain");
-    let bricks = g.storage((count * 4) as u64, "occupied bricks");
+    let bricks = g.storage(((count + count / 64) * 4) as u64, "occupied bricks");
     let dirty = g.storage((count * 4) as u64, "dirty bricks");
     let config = uniform(&g, &[64, 32, 64, count as u32 | 0x80000000]);
     let build = g.pipeline(
@@ -62,6 +62,12 @@ fn bricks_rebuild_after_removal_and_rays_preserve_thin_walls_in_wrapped_windows(
         &build,
         &[(0, &config), (1, &terrain), (2, &dirty), (3, &bricks)],
     );
+    let reduce = g.pipeline(
+        include_str!("../../render/src/terrain_bricks.wgsl"),
+        "reduce",
+        "coarse bricks",
+    );
+    let reduce_group = group(&g, &reduce, &[(0, &config), (3, &bricks)]);
     let query = r#"
 struct Ray { origin:vec4<f32>, direction:vec4<f32> };
 @group(0) @binding(0) var<storage,read> rays:array<Ray>;
@@ -77,12 +83,18 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
     let reference = g.pipeline(
         &format!(
             "{}\n{query}",
-            common.replace("let ceiling=brick_ceiling(q);", "let ceiling=q.y+1;")
+            common.replace("let skip=brick_space(q);", "let skip=vec2<i32>(q.y+1,8);")
         ),
         "query",
         "voxel rays",
     );
-    for origin in [[0, 0, 0], [40, 0, 56], [200, 0, 568], [41, 0, 57]] {
+    for origin in [
+        [0, 0, 0],
+        [96, 0, 160],
+        [40, 0, 56],
+        [200, 0, 568],
+        [41, 0, 57],
+    ] {
         let mut words = vec![0u32; count * 64];
         let mut expected = vec![0u32; count];
         // Ground, a single-voxel wall, and a PBR proxy above the wall.
@@ -116,7 +128,25 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
             as_bytes(&[64, 32, 64, count as u32 | 0x80000000]),
         );
         dispatch(&g, &build, &build_group, count as u32);
-        assert_eq!(g.read_u32(&bricks, count), expected);
+        dispatch(&g, &reduce, &reduce_group, (count / 64) as u32);
+        let got = g.read_u32(&bricks, count + count / 64);
+        assert_eq!(&got[..count], expected);
+        for coarse in 0..count / 64 {
+            let bx = coarse % 2;
+            let bz = coarse / 2;
+            let mut top = 0;
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let h = expected[bx * 4 + x + 8 * (y + 4 * (bz * 4 + z))];
+                        if h > 0 {
+                            top = top.max(y as u32 * 8 + h);
+                        }
+                    }
+                }
+            }
+            assert_eq!(got[count + coarse], top);
+        }
         let mut params = vec![0f32; 88];
         params[40..44].copy_from_slice(&[64.0, 32.0, 64.0, 0.0]);
         params[44..48].copy_from_slice(&[origin[0] as f32, 0.0, origin[2] as f32, 32.0]);
@@ -196,6 +226,24 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
         g.queue.write_buffer(&config, 0, as_bytes(&[64, 32, 64, 1]));
         dispatch(&g, &build, &build_group, 1);
         expected[index] = 0;
-        assert_eq!(g.read_u32(&bricks, count), expected);
+        dispatch(&g, &reduce, &reduce_group, (count / 64) as u32);
+        let got = g.read_u32(&bricks, count + count / 64);
+        assert_eq!(&got[..count], expected);
+        for coarse in 0..count / 64 {
+            let bx = coarse % 2;
+            let bz = coarse / 2;
+            let mut top = 0;
+            for z in 0..4 {
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let h = expected[bx * 4 + x + 8 * (y + 4 * (bz * 4 + z))];
+                        if h > 0 {
+                            top = top.max(y as u32 * 8 + h);
+                        }
+                    }
+                }
+            }
+            assert_eq!(got[count + coarse], top);
+        }
     }
 }

@@ -12,6 +12,7 @@ pub(super) struct Bricks {
     group: Option<BindGroup>,
     layout: BindGroupLayoutDescriptor,
     build: CachedComputePipelineId,
+    reduce: CachedComputePipelineId,
     pending: u32,
     dirty: Vec<u64>,
     full: bool,
@@ -35,14 +36,21 @@ impl Bricks {
         let build = cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("terrain brick build".into()),
             layout: vec![layout.clone()],
-            shader,
+            shader: shader.clone(),
             entry_point: Some("build".into()),
+            ..default()
+        });
+        let reduce = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("terrain coarse brick build".into()),
+            layout: vec![layout.clone()],
+            shader,
+            entry_point: Some("reduce".into()),
             ..default()
         });
         let buffer = |label| {
             device.create_buffer(&BufferDescriptor {
                 label: Some(label),
-                size: (MAX_BRICKS * 4) as u64,
+                size: ((MAX_BRICKS + MAX_BRICKS / 64) * 4) as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -54,6 +62,7 @@ impl Bricks {
             group: None,
             layout,
             build,
+            reduce,
             pending: 0,
             dirty: vec![],
             full: false,
@@ -150,8 +159,11 @@ impl Bricks {
         if self.pending == 0 {
             return true;
         }
-        let (Some(build), Some(group)) = (cache.get_compute_pipeline(self.build), &self.group)
-        else {
+        let (Some(build), Some(reduce), Some(group)) = (
+            cache.get_compute_pipeline(self.build),
+            cache.get_compute_pipeline(self.reduce),
+            &self.group,
+        ) else {
             return false;
         };
         {
@@ -162,6 +174,16 @@ impl Bricks {
             pass.set_pipeline(build);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(self.pending.min(65535), self.pending.div_ceil(65535), 1);
+        }
+        if self.dims.iter().all(|n| n % 32 == 0) {
+            let count = self.dims.iter().map(|n| n / 32).product::<u32>();
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("terrain coarse brick build"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(reduce);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(count, 1, 1);
         }
         self.pending = 0;
         self.full = false;

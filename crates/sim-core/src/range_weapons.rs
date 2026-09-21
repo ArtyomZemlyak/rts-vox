@@ -45,6 +45,10 @@ impl Default for Streams {
     }
 }
 impl Streams {
+    /// Number of emitted packets since the range was reset (wrapping u32).
+    pub fn emitted(&self) -> u32 {
+        self.serial
+    }
     pub fn ready(&self, tick: u32) -> bool {
         self.left == 0 && self.rounds.is_empty() && tick >= self.cooldown
     }

@@ -287,6 +287,8 @@ fn main() {
     let mut drive = false;
     let mut demo = false;
     let mut battle_preset = false;
+    let mut battle_eight = false;
+    let mut attack_unit: Option<usize> = None;
     let mut go: Option<[i32; 2]> = None;
     let mut record_dir = None;
     let mut record_seconds = 10.0;
@@ -320,7 +322,22 @@ fn main() {
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
             "--battle" => battle_preset = true,
+            "--battle-eight" => {
+                battle_preset = true;
+                battle_eight = true;
+            }
             "--edit" => edit = true,
+            "--attack-unit" => {
+                i += 1;
+                attack_unit = Some(
+                    args[i]
+                        .parse::<usize>()
+                        .expect("unit number (1-based)")
+                        .checked_sub(1)
+                        .expect("unit numbers start at 1"),
+                );
+                drive = true;
+            }
             "--drive" => drive = true,
             // Order the player's tank to a point at start, for scripted
             // captures such as a run through the woods (ADR-271).
@@ -453,6 +470,19 @@ fn main() {
             .battle_preset(config(false, false))
             .expect("battle preset needs the kilometre range");
         workshop.pending = None;
+        if battle_eight {
+            let layout = workshop.layout.as_mut().expect("battle layout");
+            let more = layout
+                .units
+                .iter()
+                .cloned()
+                .map(|mut u| {
+                    u.at[2] += 90;
+                    u
+                })
+                .collect::<Vec<_>>();
+            layout.units.extend(more);
+        }
         workshop.editing = edit;
         view = 1;
         repeat = false;
@@ -479,6 +509,16 @@ fn main() {
     }
     if let Some(p) = go {
         assert!(sim.order_move(p), "--move: no route to {p:?}");
+    }
+    if let Some(id) = attack_unit {
+        assert!(
+            !battle_preset && id < sim.units.len(),
+            "--attack-unit needs a range target"
+        );
+        assert!(
+            sim.order_attack(id),
+            "--attack-unit: target cannot be attacked"
+        );
     }
     if edit {
         repeat = false;
@@ -864,6 +904,10 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     if sim.world.edits().is_empty() && unit_edits.is_empty() && sim.surface_changed.is_empty() {
         return;
     }
+    // Most crater edits are nowhere near a unit. Its enclosing box also
+    // includes the turned turret and articulated segments, so rejecting here
+    // preserves every actual voxel hit without transforming empty space.
+    let unit_boxes: Vec<_> = sim.units.iter().map(|u| u.bounds()).collect();
     let window = gas.window;
     let words = Arc::make_mut(&mut gas.terrain_words);
     let mut dirty = BTreeSet::new();
@@ -886,7 +930,12 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
             continue;
         };
         let shift = (i % 8) * 4;
-        let m = if sim.units.iter().any(|u| u.solid(p)) {
+        let m = if sim
+            .units
+            .iter()
+            .zip(&unit_boxes)
+            .any(|(u, (lo, hi))| (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && u.solid(p))
+        {
             15
         } else {
             surface_material(sim, p, mat)

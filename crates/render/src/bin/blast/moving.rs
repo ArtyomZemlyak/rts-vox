@@ -14,6 +14,8 @@ pub struct Visual {
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,
+    #[cfg(test)]
+    occupancy_rebuilds: usize,
     cached: Vec<Occupied>,
     window: Option<TerrainWindow>,
     rigs: Vec<LegRig>,
@@ -105,7 +107,54 @@ struct Occupied {
     pose: sim_core::damage::Frame,
     segments: Vec<sim_core::damage::Frame>,
     revision: u64,
+    root_bits: Vec<u64>,
+    segment_bits: Vec<Vec<u64>>,
+    gone: Vec<bool>,
     cells: Vec<usize>,
+}
+impl Occupied {
+    fn same_geometry(&self, u: &RangeUnit) -> bool {
+        self.root_bits == u.body.vol.cols
+            && self.gone == u.seg_gone
+            && self.segment_bits.len() == u.body.segments.len()
+            && self
+                .segment_bits
+                .iter()
+                .zip(&u.body.segments)
+                .all(|(bits, segment)| *bits == segment.body.vol.cols)
+    }
+}
+/// Factor the exact fixed-point cell transform by axis. Divisions and basis
+/// products are shared by a whole row, without changing their rounding/order.
+struct CellFrame {
+    base: sim_core::damage::V3,
+    axes: [Vec<sim_core::damage::V3>; 3],
+}
+impl CellFrame {
+    fn new(frame: &sim_core::damage::Frame, dims: [usize; 3]) -> Self {
+        let basis = [frame.x, frame.y, frame.z];
+        Self {
+            base: frame.base,
+            axes: std::array::from_fn(|a| {
+                (0..dims[a])
+                    .map(|v| {
+                        basis[a].scale(
+                            fx::Fx::from_int(v as i32)
+                                .add(fx::Fx::from_ratio(1, 2))
+                                .sub(frame.centre[a])
+                                .div(frame.scale),
+                        )
+                    })
+                    .collect()
+            }),
+        }
+    }
+    fn world(&self, p: [usize; 3]) -> sim_core::damage::V3 {
+        self.base
+            .add(self.axes[0][p[0]])
+            .add(self.axes[1][p[1]])
+            .add(self.axes[2][p[2]])
+    }
 }
 fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
     let mut push = |q: IVec3| {
@@ -116,48 +165,64 @@ fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
     let p = pose(u);
     let rot = render::realtime::hull_rotation(p.up, p.yaw);
     let centre = Vec3::from(render::model::root_centre(&u.body));
-    for z in 0..u.body.vol.nz {
-        for y in 0..u.body.vol.ny {
-            for x in 0..u.body.vol.nx {
-                if !u.body.vol.get(x as usize, y as usize, z as usize) {
-                    continue;
-                }
-                let q = (p.pos
-                    + rot * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
-                    .floor()
-                    .as_ivec3();
-                let q = if y >= u.body.turret_y && u.turret_delta != 0 {
-                    IVec3::from(u.world_pos([x as usize, y as usize, z as usize]))
-                } else {
-                    q
-                };
-                push(q);
-            }
-        }
-    }
-    let half = fx::Fx::from_ratio(1, 2);
+    let turret = (u.turret_delta != 0).then(|| {
+        CellFrame::new(
+            &u.root_frame(usize::from(u.body.turret_y)),
+            [
+                u.body.vol.nx as usize,
+                u.body.vol.ny as usize,
+                u.body.vol.nz as usize,
+            ],
+        )
+    });
+    solid_cells(&u.body.vol, |[x, y, z]| {
+        let q = if let Some(turret) = turret.as_ref().filter(|_| y >= u.body.turret_y as usize) {
+            let w = turret.world([x, y, z]);
+            IVec3::from([w.x, w.y, w.z].map(|v| v.to_int_trunc()))
+        } else {
+            (p.pos + rot * (Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5) - centre))
+                .floor()
+                .as_ivec3()
+        };
+        push(q);
+    });
     for (i, (seg, frame)) in u.body.segments.iter().zip(&u.seg_frames).enumerate() {
         if u.seg_gone.get(i).copied().unwrap_or(false) {
             continue;
         }
         let b = &seg.body;
-        for z in 0..b.vol.nz as usize {
-            for y in 0..b.vol.ny as usize {
-                for x in 0..b.vol.nx as usize {
-                    if !b.vol.get(x, y, z) {
-                        continue;
+        let frame = CellFrame::new(
+            frame,
+            [b.vol.nx as usize, b.vol.ny as usize, b.vol.nz as usize],
+        );
+        solid_cells(&b.vol, |cell| {
+            let w = frame.world(cell);
+            push(IVec3::new(
+                (w.x.raw() >> 32) as i32,
+                (w.y.raw() >> 32) as i32,
+                (w.z.raw() >> 32) as i32,
+            ));
+        });
+    }
+}
+/// Enumerate occupied runs without visiting erased/empty body voxels.
+fn solid_cells(vol: &voxel::topo::unit::UnitVol, mut visit: impl FnMut([usize; 3])) {
+    for z in 0..vol.nz as usize {
+        for y in 0..vol.ny as usize {
+            for (word, &bits) in vol.col(y, z).iter().enumerate() {
+                let mut bits = bits;
+                while bits != 0 {
+                    let x = word * 64 + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if x < vol.nx as usize {
+                        visit([x, y, z]);
                     }
-                    let w = frame.world([x, y, z].map(|v| fx::Fx::from_int(v as i32).add(half)));
-                    push(IVec3::new(
-                        (w.x.raw() >> 32) as i32,
-                        (w.y.raw() >> 32) as i32,
-                        (w.z.raw() >> 32) as i32,
-                    ));
                 }
             }
         }
     }
 }
+
 pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
     let mut out = Vec::new();
     for u in sim
@@ -172,7 +237,9 @@ pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
     out
 }
 fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -> Vec<usize> {
-    if visual.window != Some(*window) || visual.cached.len() != sim.units.len() + 1 {
+    if visual.window != Some(*window)
+        || visual.cached.len() != sim.units.len() + usize::from(!sim.battle_mode())
+    {
         visual.cached.clear();
         visual.window = Some(*window);
     }
@@ -187,8 +254,14 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
             old.turret_delta != u.turret_delta
                 || old.pose != u.pose
                 || old.segments != u.seg_frames
-                || old.revision != u.revision
+                // Dents/heat update appearance but keep occupancy. Compare
+                // the small packed geometry only when its revision changed.
+                || (old.revision != u.revision && !old.same_geometry(u))
         }) {
+            #[cfg(test)]
+            {
+                visual.occupancy_rebuilds += 1;
+            }
             let mut cells = Vec::new();
             unit_cells(u, window, &mut cells);
             let value = Occupied {
@@ -196,6 +269,14 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
                 pose: u.pose,
                 segments: u.seg_frames.clone(),
                 revision: u.revision,
+                root_bits: u.body.vol.cols.clone(),
+                segment_bits: u
+                    .body
+                    .segments
+                    .iter()
+                    .map(|s| s.body.vol.cols.clone())
+                    .collect(),
+                gone: u.seg_gone.clone(),
                 cells,
             };
             if id == visual.cached.len() {
@@ -204,6 +285,7 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
                 visual.cached[id] = value;
             }
         }
+        visual.cached[id].revision = u.revision;
         next.extend_from_slice(&visual.cached[id].cells);
     }
     next.sort_unstable();
@@ -395,6 +477,101 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_shadow_cells_match_multiword_volume_after_damage() {
+        let mut v = voxel::topo::unit::UnitVol::new(139, 7, 5);
+        let mut expected = Vec::new();
+        for z in 0..5 {
+            for y in 0..7 {
+                for x in 0..139 {
+                    if (x + 7 * y + 11 * z) % 5 == 0 || [0, 63, 64, 127, 128, 138].contains(&x) {
+                        v.set(x, y, z, true);
+                        expected.push([x, y, z]);
+                    }
+                }
+            }
+        }
+        let mut actual = Vec::new();
+        solid_cells(&v, |p| actual.push(p));
+        assert_eq!(actual, expected);
+        v.cols.fill(0);
+        actual.clear();
+        solid_cells(&v, |p| actual.push(p));
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn factored_cell_frames_match_fixed_point_transforms_exactly() {
+        use fx::Fx;
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let mut u = RangeUnit::of_kind(kind, [-73, 19, -21]);
+            u.motion.drive.head = fx::angle::FULL / 7;
+            u.motion.hull.up =
+                sim_core::damage::V3::new(Fx::from_ratio(1, 7), Fx::ONE, Fx::from_ratio(-1, 5));
+            u.update_pose(-fx::angle::FULL / 9);
+            for (body, source) in std::iter::once((&u.body, u.root_frame(u.body.turret_y as usize)))
+                .chain(
+                    u.body
+                        .segments
+                        .iter()
+                        .zip(&u.seg_frames)
+                        .map(|(s, f)| (&s.body, *f)),
+                )
+            {
+                let dims = [
+                    body.vol.nx as usize,
+                    body.vol.ny as usize,
+                    body.vol.nz as usize,
+                ];
+                let factored = CellFrame::new(&source, dims);
+                for z in 0..dims[2] {
+                    for y in 0..dims[1] {
+                        for x in 0..dims[0] {
+                            let p = [x, y, z];
+                            assert_eq!(
+                                factored.world(p),
+                                source.world(
+                                    p.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2)))
+                                )
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn battle_occupancy_reuses_unchanged_units_and_invalidates_damage_and_aim() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+        let window = TerrainWindow::around(sim.size(), [320, 96, 320], [640, 192, 640], 64);
+        let mut v = Visual::default();
+        assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
+        let initial = v.occupancy_rebuilds;
+        assert_eq!(initial, sim.units.len());
+        assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
+        assert_eq!(
+            v.occupancy_rebuilds, initial,
+            "unchanged battle re-created every shadow"
+        );
+        sim.units[0].revision += 1; // appearance-only dent, no removed voxel
+        assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
+        assert_eq!(
+            v.occupancy_rebuilds, initial,
+            "a dent rebuilt unchanged occupancy"
+        );
+        sim.units[0].update_pose(fx::angle::FULL / 4);
+        assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
+        assert_eq!(v.occupancy_rebuilds, initial + 1);
+        sim.units[0].body.vol.cols.fill(0);
+        sim.units[0].revision += 1;
+        assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
+        assert_eq!(v.occupancy_rebuilds, initial + 2);
+    }
 
     #[test]
     fn moving_shadows_equal_a_fresh_volume_in_a_shifted_window() {

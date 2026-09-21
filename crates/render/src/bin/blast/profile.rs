@@ -224,6 +224,12 @@ pub fn end(
             .sources(&scene.sim.units, &scene.sim.matter)
             .len()
     );
+    println!(
+        "PROFILE stream_packets={} unit_damage={} melted_cells={}",
+        scene.sim.streams.emitted(),
+        scene.sim.units.iter().map(|u| u.revision).sum::<u64>(),
+        scene.sim.thermals.melted
+    );
     if scene.sim.battle_mode() {
         println!(
             "PROFILE battle={:?} alive={:?} shots={:?} damage={:?}",

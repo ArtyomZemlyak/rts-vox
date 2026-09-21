@@ -29,6 +29,7 @@
 use crate::bodies::Bodies;
 use crate::topo::{batch_cannot_split, Chunk as TopoChunk, Components, SplitBufs, CS};
 use crate::{Edit, World};
+use std::collections::BTreeSet;
 
 /// Потолок на размер одного отвала в вокселях **по умолчанию**.
 ///
@@ -128,7 +129,7 @@ pub struct CollapseStats {
     pub faces: usize,
     /// Чанков, в которых пришлось собирать состав незаякоренного.
     pub gathered: usize,
-    /// Чанков собрано из мира целиком — 32 768 чтений на каждый.
+    /// Чанков собрано из упакованной занятости мира.
     pub built: usize,
     /// Чанков, которым переразметка не понадобилась: локальная
     /// проверка доказала, что пачка снятий ничего не расщепила.
@@ -137,6 +138,7 @@ pub struct CollapseStats {
 
 /// Компоненты одного чанка, как их видит граф.
 struct ChunkNodes {
+    cached_edges: usize,
     /// Сколько компонент в чанке.
     n: usize,
     /// Метки компонент на граничных ячейках грани — **отрезками**,
@@ -163,6 +165,7 @@ struct ChunkNodes {
 impl ChunkNodes {
     fn new() -> ChunkNodes {
         ChunkNodes {
+            cached_edges: 0,
             n: 0,
             faces: Default::default(),
             bedrock: Vec::new(),
@@ -174,6 +177,9 @@ impl ChunkNodes {
 
 pub struct CollapseLayer {
     comps: Components,
+    // Derived graph summaries; authoritative nodes keep the same wire format.
+    needs_anchor: BTreeSet<u32>,
+    edge_count: usize,
     chunks: Vec<Option<Box<TopoChunk>>>,
     nx: u32,
     ny: u32,
@@ -195,6 +201,8 @@ pub struct CollapseLayer {
     known: Vec<u32>,
     /// Заякоренность на глобальный номер узла.
     reached: Vec<bool>,
+    walk: Vec<(u32, u16)>,
+    #[cfg(test)]
     queue: Vec<u32>,
     /// Грани, которые надо пересчитать: `(чанк, грань)`.
     face_todo: Vec<(u32, u8)>,
@@ -257,6 +265,8 @@ impl CollapseLayer {
         let n = (nx * ny * nz) as usize;
         CollapseLayer {
             comps: Components::new(),
+            needs_anchor: BTreeSet::new(),
+            edge_count: 0,
             chunks: (0..n).map(|_| None).collect(),
             nx,
             ny,
@@ -270,6 +280,8 @@ impl CollapseLayer {
             base: vec![0; n],
             known: Vec::new(),
             reached: Vec::new(),
+            walk: Vec::new(),
+            #[cfg(test)]
             queue: Vec::new(),
             face_todo: Vec::new(),
             face_prev: Default::default(),
@@ -319,19 +331,23 @@ impl CollapseLayer {
         Some(self.index(nx, ny, nz))
     }
 
-    /// Собрать чанк из мира целиком: 32 768 чтений. Зовётся при первом
-    /// касании и при втягивании в граф, и это не дёшево.
+    /// Copy the existing occupancy words, including partial edge chunks.
+    /// A 32-cell X row is aligned to one half of the world's 64-bit word.
     fn build(w: &World, cx: u32, cy: u32, cz: u32) -> Box<TopoChunk> {
         let cs = CS as u32;
         let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
         let mut c = Box::new(TopoChunk::new());
-        for z in 0..cs {
-            for y in 0..cs {
-                for x in 0..cs {
-                    if w.solid(ox + x, oy + y, oz + z) {
-                        c.set(x as usize, y as usize, z as usize, true);
-                    }
-                }
+        let width = w.nx.saturating_sub(ox).min(cs);
+        if width == 0 {
+            return c;
+        }
+        let mask = u32::MAX >> (32 - width);
+        let wx = w.bit_words_per_row() as usize;
+        for z in 0..w.nz.saturating_sub(oz).min(cs) {
+            for y in 0..w.ny.saturating_sub(oy).min(cs) {
+                let row = ((oy + y) as usize * w.nz as usize + (oz + z) as usize) * wx;
+                c.cols[z as usize * CS + y as usize] =
+                    ((w.bits()[row + (ox / 64) as usize] >> (ox % 64)) as u32) & mask;
             }
         }
         c
@@ -339,6 +355,15 @@ impl CollapseLayer {
 
     /// Прогнать правки тика через каскад и оторвать всё, что отвалилось.
     pub fn apply(&mut self, w: &mut World, edits: &[Edit], bodies: &mut Bodies) -> CollapseStats {
+        self.apply_observed(w, edits, bodies, |_| {})
+    }
+    pub fn apply_observed(
+        &mut self,
+        w: &mut World,
+        edits: &[Edit],
+        bodies: &mut Bodies,
+        mut completed: impl FnMut(&'static str),
+    ) -> CollapseStats {
         let cs = CS as u32;
         let mut st = CollapseStats::default();
         self.epoch = self.epoch.wrapping_add(1);
@@ -443,6 +468,7 @@ impl CollapseLayer {
                 self.pending.push(i as u32);
             }
         }
+        completed("collapse_edits");
         // Переразметка по потолку. Порядок — по возрастанию индекса
         // чанка, поэтому от порядка правок он не зависит.
         self.pending.sort_unstable();
@@ -458,7 +484,9 @@ impl CollapseLayer {
         }
         self.rebuild_index();
         self.refresh_faces(w);
+        completed("collapse_labels");
         st.promoted = self.promote(w);
+        completed("collapse_promote");
         st.frontier = self.frontier.len();
 
         let refused_before = bodies.refused;
@@ -466,7 +494,9 @@ impl CollapseLayer {
         for round in 0..MAX_ROUNDS {
             st.rounds = round + 1;
             self.resolve(&mut st);
+            completed("collapse_resolve");
             let torn = self.detach_unanchored(w, bodies, &mut st);
+            completed("collapse_detach");
             if round > 0 {
                 st.torn_after_first += torn;
             }
@@ -595,7 +625,16 @@ impl CollapseLayer {
             }
         }
         let changed = (0..FACES).any(|f| nd.faces[f] != self.face_prev[f]);
+        // Keep the sorted active index instead of scanning every possible
+        // chunk on the kilometre map. Empty/invalid entries are filtered at
+        // the same rebuild boundary as before; bases retain their semantics.
+        if n > 0 {
+            if let Err(at) = self.known.binary_search(&(i as u32)) {
+                self.known.insert(at, i as u32);
+            }
+        }
         self.nodes[i] = Some(nd);
+        self.cache_nodes(i);
         self.chunks[i] = Some(c);
         changed
     }
@@ -746,6 +785,7 @@ impl CollapseLayer {
             }
         }
         self.nodes[i] = Some(nd);
+        self.cache_nodes(i);
     }
 
     /// Мировые координаты граничной ячейки грани.
@@ -764,27 +804,119 @@ impl CollapseLayer {
 
     /// Пересобрать нумерацию узлов.
     fn rebuild_index(&mut self) {
-        self.known.clear();
+        self.known
+            .retain(|&i| self.nodes[i as usize].as_ref().is_some_and(|nd| nd.n > 0));
         let mut total = 0u32;
-        for i in 0..self.nodes.len() {
-            if let Some(nd) = &self.nodes[i] {
-                // Пустой чанк узлов не даёт. Он обязан выпасть из
-                // нумерации: два чанка с одинаковой базой сделали бы
-                // двоичный поиск по ней неоднозначным.
-                if nd.n == 0 {
-                    continue;
-                }
-                self.base[i] = total;
-                total += nd.n as u32;
-                self.known.push(i as u32);
-            }
+        for &ci in &self.known {
+            let i = ci as usize;
+            self.base[i] = total;
+            total += self.nodes[i].as_ref().expect("known").n as u32;
         }
         self.reached.clear();
         self.reached.resize(total as usize, false);
     }
 
-    /// Обход графа от заземлённых узлов.
+    fn cache_nodes(&mut self, i: usize) {
+        let nd = self.nodes[i].as_mut().expect("node cache");
+        let edges = if nd.n == 0 {
+            0
+        } else {
+            nd.edges.iter().map(Vec::len).sum()
+        };
+        self.edge_count = self.edge_count - nd.cached_edges + edges;
+        nd.cached_edges = edges;
+        let missing = (0..nd.n)
+            .any(|lab| !nd.bedrock[lab] && !nd.ground.iter().any(|g| g.contains(&(lab as u16))));
+        if missing {
+            self.needs_anchor.insert(i as u32);
+        } else {
+            self.needs_anchor.remove(&(i as u32));
+        }
+    }
+
+    /// Поиск пути к опоре для узлов без прямого заземления.
     fn resolve(&mut self, st: &mut CollapseStats) {
+        // Most discovered terrain is already certified by direct bedrock.
+        // Revisit only chunks whose local nodes still need a graph path.
+        self.reached.fill(true);
+        self.walk.clear();
+        for &ci in &self.needs_anchor {
+            let i = ci as usize;
+            if self.stale[i] {
+                continue;
+            }
+            let base = self.base[i] as usize;
+            let nd = self.nodes[i].as_ref().expect("anchor cache");
+            self.reached[base..base + nd.n].copy_from_slice(&nd.bedrock);
+            for face in &nd.ground {
+                for &lab in face {
+                    self.reached[base + lab as usize] = true;
+                }
+            }
+        }
+        st.nodes = st.nodes.max(self.reached.len());
+        st.edges = st.edges.max(self.edge_count);
+
+        // Bedrock and the temporary conservative anchors are already known.
+        // Visit only the remaining connected components of this undirected
+        // graph, instead of expanding every grounded terrain node each tick.
+        let mut seen = vec![false; self.reached.len()];
+        for &ci in &self.needs_anchor {
+            let start_chunk = ci as usize;
+            for start_lab in 0..self.nodes[start_chunk].as_ref().expect("anchor cache").n {
+                let start = self.base[start_chunk] as usize + start_lab;
+                if self.reached[start] || seen[start] {
+                    continue;
+                }
+                self.walk.clear();
+                self.walk.push((ci, start_lab as u16));
+                seen[start] = true;
+                let mut anchored = false;
+                let mut head = 0;
+                'search: while head < self.walk.len() {
+                    let (chunk, lab) = self.walk[head];
+                    head += 1;
+                    let i = chunk as usize;
+                    let nd = self.nodes[i].as_ref().expect("known");
+                    for f in 0..FACES {
+                        if nd.edges[f].is_empty() {
+                            continue;
+                        }
+                        let Some(j) = self.neighbour(i, f) else {
+                            continue;
+                        };
+                        if self.nodes[j].is_none() {
+                            continue;
+                        }
+                        for &(a, b) in &nd.edges[f] {
+                            if a != lab {
+                                continue;
+                            }
+                            let nid = (self.base[j] + u32::from(b)) as usize;
+                            if self.reached[nid] {
+                                anchored = true;
+                                // Every discovered node already has a path to
+                                // this search root. One certified anchor proves
+                                // them all; do not traverse the rest of the map.
+                                break 'search;
+                            } else if !seen[nid] {
+                                seen[nid] = true;
+                                self.walk.push((j as u32, b));
+                            }
+                        }
+                    }
+                }
+                if anchored {
+                    for &(chunk, lab) in &self.walk {
+                        self.reached[(self.base[chunk as usize] + u32::from(lab)) as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn resolve_reference(&mut self, st: &mut CollapseStats) {
         self.reached.iter_mut().for_each(|v| *v = false);
         self.queue.clear();
         let mut edges = 0usize;
@@ -881,10 +1013,7 @@ impl CollapseLayer {
         bodies: &mut Bodies,
         st: &mut CollapseStats,
     ) -> usize {
-        for k in 0..self.known.len() {
-            let i = self.known[k] as usize;
-            st.probed += self.nodes[i].as_ref().expect("known").n;
-        }
+        st.probed += self.reached.len();
         if self.reached.iter().all(|&r| r) {
             return 0;
         }
@@ -895,6 +1024,13 @@ impl CollapseLayer {
         for k in 0..self.known.len() {
             let i = self.known[k] as usize;
             let base = self.base[i];
+            let n = self.nodes[i].as_ref().expect("known").n;
+            if self.reached[base as usize..base as usize + n]
+                .iter()
+                .all(|&r| r)
+            {
+                continue;
+            }
             for f in 0..FACES {
                 let Some(j) = self.neighbour(i, f) else {
                     continue;
@@ -1022,7 +1158,10 @@ impl CollapseLayer {
         }
         let i = self.index(cx, cy, cz);
         self.chunks[i] = None;
-        self.nodes[i] = None;
+        if let Some(nd) = self.nodes[i].take() {
+            self.edge_count -= nd.cached_edges;
+        }
+        self.needs_anchor.remove(&(i as u32));
         if self.stale[i] {
             self.stale[i] = false;
             self.pending.retain(|&x| x as usize != i);
@@ -1146,6 +1285,9 @@ impl CollapseLayer {
                 let mut nd = Box::new(ChunkNodes::new());
                 nd.n = s.usize();
                 nd.bedrock = s.bools();
+                if nd.bedrock.len() != nd.n {
+                    return false;
+                }
                 for f in 0..FACES {
                     let nf = s.list(6);
                     nd.faces[f] = (0..nf).map(|_| (s.u16(), s.u16(), s.u16())).collect();
@@ -1157,6 +1299,14 @@ impl CollapseLayer {
             } else {
                 None
             };
+        }
+        self.needs_anchor.clear();
+        self.edge_count = 0;
+        for i in 0..self.nodes.len() {
+            if let Some(nd) = self.nodes[i].as_mut() {
+                nd.cached_edges = 0;
+                self.cache_nodes(i);
+            }
         }
         // Достижимость — рабочий буфер обхода, но её длина задана
         // нумерацией узлов, а не обходом: восстанавливается по ней.
@@ -1202,6 +1352,158 @@ mod tests {
     use super::*;
     use crate::bodies::test_gravity;
     use crate::store::{Mat, AIR};
+
+    #[test]
+    fn copied_occupancy_matches_cells_across_words_edges_and_edits() {
+        struct Pattern;
+        impl crate::Generator for Pattern {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                if (x * 7 + y * 3 + z * 11) % 17 < 8 {
+                    2
+                } else {
+                    AIR
+                }
+            }
+        }
+        let mut w = World::new(77, 45, 51, 1000, Box::new(Pattern));
+        for edited in [false, true] {
+            if edited {
+                for x in [0, 31, 32, 63, 64, 76] {
+                    w.queue_edit(Edit::put(x, 44, 50, 3));
+                    w.queue_edit(Edit::dig(x, 0, 0));
+                }
+                w.flush();
+            }
+            for cz in 0..2 {
+                for cy in 0..2 {
+                    for cx in 0..3 {
+                        let c = CollapseLayer::build(&w, cx, cy, cz);
+                        for z in 0..CS {
+                            for y in 0..CS {
+                                for x in 0..CS {
+                                    assert_eq!(
+                                        c.get(x, y, z),
+                                        w.solid(
+                                            cx * 32 + x as u32,
+                                            cy * 32 + y as u32,
+                                            cz * 32 + z as u32
+                                        )
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_index_tracks_empty_invalidated_and_refilled_chunks() {
+        let w = World::new(96, 64, 64, 1000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        for i in [7, 1, 10] {
+            let mut ch = Box::new(TopoChunk::new());
+            ch.set(1, 1, 1, true);
+            c.chunks[i] = Some(ch);
+            c.relabel(i);
+        }
+        c.rebuild_index();
+        assert_eq!(c.known, vec![1, 7, 10]);
+        assert_eq!([c.base[1], c.base[7], c.base[10]], [0, 1, 2]);
+        c.chunks[7].as_mut().unwrap().set(1, 1, 1, false);
+        c.relabel(7);
+        let (x, y, z) = c.coords(1);
+        c.invalidate_at(x * 32, y * 32, z * 32);
+        c.rebuild_index();
+        assert_eq!(c.known, vec![10]);
+        c.chunks[7].as_mut().unwrap().set(2, 2, 2, true);
+        c.relabel(7);
+        c.rebuild_index();
+        assert_eq!(c.known, vec![7, 10]);
+        assert_eq!([c.base[7], c.base[10]], [0, 1]);
+    }
+
+    #[test]
+    fn local_anchor_search_matches_full_flood_during_cuts_and_baking() {
+        let mut w = World::new(96, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16, test_gravity());
+        for tick in 0..60 {
+            if tick == 1 {
+                cut(&mut w, 4);
+            }
+            if tick == 15 {
+                w.queue_edit(Edit::put(8, 4, 8, 2));
+            }
+            if tick == 20 {
+                w.queue_edit(Edit::put(80, 50, 30, 3));
+            }
+            w.flush();
+            let edits = w.edits().to_vec();
+            c.apply(&mut w, &edits, &mut b);
+            let mut fast = CollapseStats::default();
+            c.resolve(&mut fast);
+            let expected = c.reached.clone();
+            let mut reference = CollapseStats::default();
+            c.resolve_reference(&mut reference);
+            assert_eq!(c.reached, expected, "anchor query at tick {tick}");
+            assert_eq!((fast.nodes, fast.edges), (reference.nodes, reference.edges));
+            b.step(&mut w);
+        }
+    }
+
+    #[test]
+    fn anchor_search_matches_full_flood_on_graphs_with_cycles_and_stale_nodes() {
+        let w = World::new(96, 96, 96, 1000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut seed = 72u32;
+        let mut draw = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed >> 16
+        };
+        for round in 0..256 {
+            c.known.clear();
+            c.needs_anchor.clear();
+            c.edge_count = 0;
+            for i in 0..c.nodes.len() {
+                let mut nd = Box::new(ChunkNodes::new());
+                nd.n = (draw() % 4 + 1) as usize;
+                nd.bedrock = (0..nd.n).map(|_| draw() % 11 == 0).collect();
+                if draw() % 5 == 0 {
+                    nd.ground[0].push((draw() as usize % nd.n) as u16);
+                }
+                c.nodes[i] = Some(nd);
+                c.known.push(i as u32);
+                c.stale[i] = draw() % 13 == 0;
+            }
+            for i in 0..c.nodes.len() {
+                for f in [1, 3, 5] {
+                    let Some(j) = c.neighbour(i, f) else { continue };
+                    for a in 0..c.nodes[i].as_ref().unwrap().n {
+                        for b in 0..c.nodes[j].as_ref().unwrap().n {
+                            if draw() % 4 == 0 {
+                                c.nodes[i].as_mut().unwrap().edges[f].push((a as u16, b as u16));
+                                c.nodes[j].as_mut().unwrap().edges[opposite(f)]
+                                    .push((b as u16, a as u16));
+                            }
+                        }
+                    }
+                }
+            }
+            c.rebuild_index();
+            for i in 0..c.nodes.len() {
+                c.cache_nodes(i);
+            }
+            let mut fast = CollapseStats::default();
+            c.resolve(&mut fast);
+            let reached = c.reached.clone();
+            let mut reference = CollapseStats::default();
+            c.resolve_reference(&mut reference);
+            assert_eq!(c.reached, reached, "graph {round}");
+            assert_eq!((fast.nodes, fast.edges), (reference.nodes, reference.edges));
+        }
+    }
 
     /// Мост: столб от дна до `DECK`, от него настил поперёк всей карты.
     /// Настил заведомо длиннее чанка — в этом весь смысл.

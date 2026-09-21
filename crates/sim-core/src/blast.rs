@@ -138,6 +138,89 @@ fn local_in(body: &UnitBody, p: [i32; 3], pose: &crate::damage::Frame) -> Option
         .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
         .then_some(q.map(|v| v as usize))
 }
+/// Derived broad phase for a batch of voxel queries in one (possibly frozen)
+/// pose. Damage is read live; only transforms and enclosing boxes are cached.
+struct HitFrames {
+    root: crate::damage::Frame,
+    turret: crate::damage::Frame,
+    shared_root: bool,
+    segments: Vec<crate::damage::Frame>,
+    boxes: Vec<([i32; 3], [i32; 3])>,
+}
+impl HitFrames {
+    fn new(
+        u: &RangeUnit,
+        root: crate::damage::Frame,
+        segments: &[crate::damage::Frame],
+        delta: i32,
+    ) -> Self {
+        let boxes = u
+            .body
+            .segments
+            .iter()
+            .zip(segments)
+            .map(|(s, frame)| {
+                let mut lo = [i32::MAX; 3];
+                let mut hi = [i32::MIN; 3];
+                let dims = [s.body.vol.nx, s.body.vol.ny, s.body.vol.nz];
+                for k in 0..8 {
+                    let p = frame.world(std::array::from_fn(|a| {
+                        Fx::from_int(if k & (1 << a) == 0 { 0 } else { dims[a] as i32 })
+                    }));
+                    for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                        lo[a] = lo[a].min(v.to_int_trunc() - 1);
+                        hi[a] = hi[a].max(v.to_int_trunc() + 1);
+                    }
+                }
+                (lo, hi)
+            })
+            .collect();
+        Self {
+            root,
+            turret: crate::damage::turned(&root, delta, 0),
+            shared_root: delta == 0,
+            segments: segments.to_vec(),
+            boxes,
+        }
+    }
+    fn hit(&self, u: &RangeUnit, p: [i32; 3]) -> Option<(usize, [usize; 3])> {
+        let cell = local_in(&u.body, p, &self.root);
+        let cell = if self.shared_root {
+            cell
+        } else {
+            cell.filter(|c| c[1] < usize::from(u.body.turret_y))
+                .or_else(|| {
+                    local_in(&u.body, p, &self.turret)
+                        .filter(|c| c[1] >= usize::from(u.body.turret_y))
+                })
+        };
+        if let Some(c) = cell {
+            if u.body.vol.get(c[0], c[1], c[2]) {
+                return Some((0, c));
+            }
+        }
+        for (i, ((seg, frame), (lo, hi))) in u
+            .body
+            .segments
+            .iter()
+            .zip(&self.segments)
+            .zip(&self.boxes)
+            .enumerate()
+        {
+            if u.seg_gone.get(i).copied().unwrap_or(false)
+                || (0..3).any(|a| p[a] < lo[a] || p[a] > hi[a])
+            {
+                continue;
+            }
+            if let Some(c) = local_in(&seg.body, p, frame) {
+                if seg.body.vol.get(c[0], c[1], c[2]) {
+                    return Some((i + 1, c));
+                }
+            }
+        }
+        None
+    }
+}
 impl RangeUnit {
     pub fn new(at: [i32; 3]) -> Self {
         Self::of_kind(RangeUnitKind::Tank, at)
@@ -402,6 +485,9 @@ impl RangeUnit {
         pose: &crate::damage::Frame,
         delta: i32,
     ) -> Option<[usize; 3]> {
+        if delta == 0 {
+            return local_in(&self.body, p, pose);
+        }
         if let Some(c) = local_in(&self.body, p, pose) {
             if c[1] < usize::from(self.body.turret_y) {
                 return Some(c);
@@ -494,7 +580,10 @@ impl RangeUnit {
         (lo, hi)
     }
     pub fn resistance(&self, p: [i32; 3], c: &ExplosionConfig) -> u32 {
-        match self.hit(p) {
+        self.hit_resistance(self.hit(p), c)
+    }
+    fn hit_resistance(&self, hit: Option<(usize, [usize; 3])>, c: &ExplosionConfig) -> u32 {
+        match hit {
             Some((0, cell)) => unit_work(&self.body, cell, c)
                 .saturating_sub(self.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0)),
             Some((part, cell)) => unit_work(&self.body.segments[part - 1].body, cell, c)
@@ -1157,6 +1246,10 @@ impl Explosion {
         let half = n / 2;
         let origin = self.origin;
         let radius2 = (half * half) as i32;
+        let queries: Vec<_> = units
+            .iter()
+            .map(|u| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+            .collect();
         // Bodies are asked only where they can be (ADR-296): one box test
         // per body instead of a pose-mapped lookup for every voxel of the
         // domain, and dents are looked up only where there is material.
@@ -1268,7 +1361,9 @@ impl Explosion {
                 for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
                     for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
                         for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
-                            r = r.max(units[i].resistance([wx, wy, wz], c));
+                            r = r.max(
+                                units[i].hit_resistance(queries[i].hit(&units[i], [wx, wy, wz]), c),
+                            );
                         }
                     }
                 }
@@ -1302,6 +1397,13 @@ impl Explosion {
         }
         let edge = self.cell as usize;
         let actors = units.len() + 1;
+        let queries: Vec<_> = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                HitFrames::new(u, self.poses[i], &self.seg_poses[i], self.turret_deltas[i])
+            })
+            .collect();
         let boxes: Vec<_> = units
             .iter()
             .enumerate()
@@ -1313,11 +1415,24 @@ impl Explosion {
                 )
             })
             .collect();
+        // For each coarse wave cell, skip actors whose complete frozen box
+        // cannot intersect it. Keep the canonical contact cursor and actor
+        // order: a deferred material claim resumes at exactly the same hit.
+        let mut next_actor = vec![units.len(); actors];
         while let Some(hit) = self.pending.front().copied() {
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
+            let mut next = units.len();
+            for i in (0..units.len()).rev() {
+                let (lo, hi) = boxes[i];
+                if (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a]) {
+                    next = i;
+                }
+                next_actor[i] = next;
+            }
             while self.contact_cursor < edge.pow(3) * actors {
                 let subcell = self.contact_cursor / actors;
-                let actor = self.contact_cursor % actors;
+                let actor = next_actor[self.contact_cursor % actors];
+                self.contact_cursor = subcell * actors + actor;
                 let q = [
                     p[0] + (subcell % edge) as i32,
                     p[1] + (subcell / edge % edge) as i32,
@@ -1331,12 +1446,7 @@ impl Explosion {
                         self.contact_cursor += 1;
                         continue;
                     }
-                    match u.hit_with_turret(
-                        q,
-                        &self.poses[actor],
-                        &self.seg_poses[actor],
-                        self.turret_deltas[actor],
-                    ) {
+                    match queries[actor].hit(u, q) {
                         Some((0, cell)) => {
                             // A cell already cut loose leaves with its whole
                             // section; the wave neither ablates it nor waits
@@ -1354,11 +1464,7 @@ impl Explosion {
                                 if hit.pressure >= need && hit.pressure > 0 {
                                     if let Some(m) = matter.as_deref_mut() {
                                         let frame = if cell[1] >= usize::from(u.body.turret_y) {
-                                            crate::damage::turned(
-                                                &self.poses[actor],
-                                                self.turret_deltas[actor],
-                                                0,
-                                            )
+                                            queries[actor].turret
                                         } else {
                                             self.poses[actor]
                                         };
@@ -2666,6 +2772,9 @@ impl BlastRange {
         }
         self.matter
             .step_felling(&mut self.world, &self.navigation.fell);
+        if battle_mode {
+            completed("motion");
+        }
         if !battle_mode {
             self.acquire_auto_target();
             let target_angle = self.aim_angle();
@@ -2850,7 +2959,7 @@ impl BlastRange {
                 }
             }
         }
-        self.battle_tick();
+        self.battle_tick_observed(&mut completed);
         completed("wave");
         self.step_unit_fire();
         completed("unit_fire");
@@ -2904,7 +3013,7 @@ impl BlastRange {
             self.collapse.set_max_body_cells(self.collapse_cap);
             let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
             self.collapse
-                .apply(&mut self.world, &edits, &mut self.bodies);
+                .apply_observed(&mut self.world, &edits, &mut self.bodies, &mut completed);
             self.collapse_backlog.clear();
             // Each cell goes by its own matter, not by the body it came
             // off in — else the wave's slicing would decide what crumbles.
@@ -4895,6 +5004,44 @@ mod tests {
                     }
                 }
                 assert!(hits > 100, "the frozen pose must contain a real body");
+            }
+        }
+    }
+    #[test]
+    fn batched_hit_frames_preserve_live_damage_in_a_frozen_turned_pose() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let mut u = RangeUnit::of_kind(kind, [200, 24, 200]);
+            u.motion.drive.head = fx::angle::FULL / 7;
+            u.motion.hull.up = phys::V3::new(Fx::from_ratio(1, 7), Fx::ONE, Fx::from_ratio(-1, 5));
+            u.update_pose(-fx::angle::FULL / 9);
+            let pose = u.pose;
+            let segments = u.seg_frames.clone();
+            let delta = u.turret_delta;
+            let batch = HitFrames::new(&u, pose, &segments, delta);
+            let (lo, hi) = u.bounds();
+            for damaged in [false, true] {
+                if damaged {
+                    u.motion.pos[0] = u.motion.pos[0].add(Fx::from_int(300));
+                    u.update_pose(fx::angle::FULL / 3);
+                    for (i, col) in u.body.vol.cols.iter_mut().enumerate() {
+                        if i % 3 == 0 {
+                            *col = 0;
+                        }
+                    }
+                    u.seg_gone[0] = true;
+                }
+                let mut hits = 0;
+                for z in lo[2] - 1..=hi[2] + 1 {
+                    for y in lo[1] - 1..=hi[1] + 1 {
+                        for x in lo[0] - 1..=hi[0] + 1 {
+                            let p = [x, y, z];
+                            let reference = u.hit_with_turret(p, &pose, &segments, delta);
+                            assert_eq!(batch.hit(&u, p), reference, "at {p:?}, damaged={damaged}");
+                            hits += usize::from(reference.is_some());
+                        }
+                    }
+                }
+                assert!(hits > 100);
             }
         }
     }

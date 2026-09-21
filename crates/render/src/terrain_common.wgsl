@@ -11,13 +11,20 @@ struct Params {
 @group(0) @binding(7) var<storage, read> bricks: array<u32>;
 // The hierarchy is enabled only for aligned windows. Small test layouts
 // remain valid without padding or changing their physical storage.
-fn brick_ceiling(q:vec3<i32>)->i32 {
+fn brick_space(q:vec3<i32>)->vec2<i32> {
     let dims=vec3<u32>(p.terrain.xyz);let lo=vec3<i32>(p.terrain_origin.xyz);
+    let none=vec2<i32>(q.y+1,8);
     if any(dims==vec3(0u)) || any((dims&vec3(7u))!=vec3(0u)) ||
-       any(lo<vec3(0)) || any((vec3<u32>(lo)&vec3(7u))!=vec3(0u)) {return q.y+1;}
-    if any(q<lo) || any(q>=lo+vec3<i32>(dims)) {return q.y+1;}
-    let b=(vec3<u32>(q)%dims)/8u;let size=dims/8u;
-    return i32(floor(f32(q.y)/8.0))*8+i32(bricks[b.x+size.x*(b.y+size.y*b.z)]);
+       any(lo<vec3(0)) || any((vec3<u32>(lo)&vec3(7u))!=vec3(0u)) {return none;}
+    if any(q<lo) || any(q>=lo+vec3<i32>(dims)) {return none;}
+    let wrapped=vec3<u32>(q)%dims;
+    if all((dims&vec3(31u))==vec3(0u)) && all((vec3<u32>(lo)&vec3(31u))==vec3(0u)) {
+        let size=dims/32u;let b=wrapped/32u;let fine=dims/8u;
+        let h=i32(floor(f32(q.y)/32.0))*32+i32(bricks[fine.x*fine.y*fine.z+b.x+size.x*(b.y+size.y*b.z)]);
+        if q.y>=h {return vec2<i32>(h,32);}
+    }
+    let b=wrapped/8u;let size=dims/8u;
+    return vec2<i32>(i32(floor(f32(q.y)/8.0))*8+i32(bricks[b.x+size.x*(b.y+size.y*b.z)]),8);
 }
 struct In { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> };
 // The volume is a window on the world, not the whole of it (ADR-318):
@@ -57,7 +64,10 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
     }
     for(var j=0;j<1050;j++) {
         if t>=end {break;}
-        let pos=ro+rd*(t+0.001);let q=vec3<i32>(floor(pos));let m=raw_material(q);
+        let pos=ro+rd*(t+0.001);let q=vec3<i32>(floor(pos));
+        let skip=brick_space(q);let ceiling=skip.x;
+        var m=0u;
+        if q.y<ceiling {m=raw_material(q);}
         // 15 is the render-only occupancy of a PBR unit, used just for shadows.
         if m>0u && (m!=15u || shadow) {
             // Persisted work selects an eroded subcell surface. Collision and
@@ -70,9 +80,8 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
             return TerrainHit(t+inset,normal,m);
         }
         var low=vec3<f32>(q);var high=low+vec3(1.0);
-        let ceiling=brick_ceiling(q);
         if q.y>=ceiling {
-            low=floor(low/8.0)*8.0;high=low+vec3(8.0);
+            let edge=f32(skip.y);low=floor(low/edge)*edge;high=low+vec3(edge);
             low.y=f32(ceiling);
         }
         let face=select(low,high,rd>vec3(0.0));
