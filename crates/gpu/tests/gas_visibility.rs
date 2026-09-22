@@ -6,10 +6,7 @@ fn empty_smoke_rejection_never_discards_a_visible_noisy_cell() {
     let Some(g) = Gpu::new(wgpu::Backends::VULKAN) else {
         return;
     };
-    let helpers = include_str!("../../render/src/gas_draw.wgsl")
-        .split("@fragment fn fragment")
-        .next()
-        .unwrap();
+    let helpers = include_str!("../../render/src/gas_sampling.wgsl");
     let query = r#"
 @group(0) @binding(8) var<storage,read_write> counts:array<atomic<u32>>;
 @compute @workgroup_size(64)

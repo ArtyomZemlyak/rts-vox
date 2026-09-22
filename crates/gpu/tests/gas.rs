@@ -27,8 +27,9 @@ fn check_field(energy: bool, wide: bool) {
         include_str!("../../render/src/terrain_prepass.wgsl"),
     ] {
         let full = format!(
-            "{}\n{}\n{}",
+            "{}\n{}\n{}\n{}",
             include_str!("../../render/src/terrain_common.wgsl"),
+            include_str!("../../render/src/gas_sampling.wgsl"),
             include_str!("../../render/src/energy.wgsl"),
             body
         );

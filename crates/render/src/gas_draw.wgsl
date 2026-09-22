@@ -1,38 +1,12 @@
-// Params and terrain DDA are prepended from terrain_common.wgsl.
-struct Cell { flow:vec4<f32>, matter:vec4<f32> };
+// Params, terrain DDA and gas sampling helpers are prepended by the host.
+@group(0) @binding(8) var<storage,read> display:array<DisplayCell>;
 @group(0) @binding(0) var scene:texture_2d<f32>;
 @group(0) @binding(1) var scene_sampler:sampler;
 @group(0) @binding(2) var depth:texture_depth_2d;
-@group(0) @binding(4) var<storage,read> gas:array<Cell>;
 @group(0) @binding(6) var normals:texture_2d<f32>;
-const N:i32=48;
 // Maximum omitted direct-light contribution per HDR channel and region.
 // Cloud opacity, cloud shadows, soot and hot fissures are not culled.
 const LIGHT_EPSILON:f32=0.00001;
-fn gas_may_show(m:vec4<f32>)->bool {
-    return (m.w*1.1+m.y*0.22)*1.55>0.12;
-}
-fn mat(q:vec3<i32>)->vec4<f32> {
-    if any(q<vec3(0)) || any(q>=vec3(N)) {return vec4(0.0);}
-    return gas[u32(q.x+N*(q.y+N*q.z))].matter;
-}
-fn field(v:vec3<f32>)->vec4<f32> {
-    // Outside the trilinear support every one of the eight taps is zero.
-    // Reject once, before computing and bounds-checking all eight addresses.
-    if any(v<=vec3(-0.5)) || any(v>=vec3(f32(N)+0.5)) {return vec4(0.0);}
-    let u=v-vec3(0.5);let b=vec3<i32>(floor(u));let f=fract(u);
-    return mix(mix(mix(mat(b),mat(b+vec3(1,0,0)),f.x),mix(mat(b+vec3(0,1,0)),mat(b+vec3(1,1,0)),f.x),f.y),
-        mix(mix(mat(b+vec3(0,0,1)),mat(b+vec3(1,0,1)),f.x),mix(mat(b+vec3(0,1,1)),mat(b+vec3(1,1,1)),f.x),f.y),f.z);
-}
-fn hash(q:vec3<i32>)->f32 {
-    var h=u32(q.x)*73856093u^u32(q.y)*19349663u^u32(q.z)*83492791u;
-    h=(h^(h>>13u))*1274126177u;return f32(h&65535u)/65535.0;
-}
-fn noise(v:vec3<f32>)->f32 {
-    let q=vec3<i32>(floor(v));let a=fract(v);let f=a*a*(vec3(3.0)-2.0*a);
-    return mix(mix(mix(hash(q),hash(q+vec3(1,0,0)),f.x),mix(hash(q+vec3(0,1,0)),hash(q+vec3(1,1,0)),f.x),f.y),
-        mix(mix(hash(q+vec3(0,0,1)),hash(q+vec3(1,0,1)),f.x),mix(hash(q+vec3(0,1,1)),hash(q+vec3(1,1,1)),f.x),f.y),f.z);
-}
 fn hot(t:f32)->vec3<f32> {
     if p.weapon.x>1.5 {
         // The annihilation bolt (ADR-289): its dust never glows white.
@@ -203,7 +177,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     if p.control.w<0.5 && p.weapon.x>1.5 {bg=vec4(bg.rgb*(1.0-anni_absorb(ro,rd,maxdist)),bg.a);}
     if p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);}
     if p.control.w<0.0 || p.control.z<0.001 {return bg;}
-    let inv=1.0/(rd+vec3(0.0000001));
+    let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
     let lo=(p.origin.xyz-ro)*inv;let hi=(p.origin.xyz+vec3(f32(N)*p.origin.w)-ro)*inv;
     let a=min(lo,hi);let b=max(lo,hi);
     var t=max(0.0,max(a.x,max(a.y,a.z)));let end=min(maxdist,min(b.x,min(b.y,b.z)));
@@ -217,20 +191,27 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let pos=ro+rd*(t+0.002);
         let vi=vec3<i32>(floor((pos-p.origin.xyz)/edge));
         let centre=(vec3<f32>(vi)+vec3(0.5))*edge;
-        let gas_pos=centre/p.origin.w;let m=field(gas_pos);
+        let gas_pos=centre/p.origin.w;
+        let side=display_side();
+        var sample:DisplayCell;
+        if side<=64u && all(vi>=vec3(0)) && all(vi<vec3(i32(side))) {
+            let cell=vec3<u32>(vi);sample=display[cell.x+side*(cell.y+side*cell.z)];
+        } else {sample=display_cell(vi);}
+        let m=sample.matter;
         let face=select(vec3<f32>(vi),vec3<f32>(vi)+vec3(1.0),rd>vec3(0.0))*edge+p.origin.xyz;
-        let distance=(face-pos)*inv;let dt=max(0.005,min(distance.x,min(distance.y,distance.z)));
+        let distance=select((face-pos)*inv,vec3(1e30),rd==vec3(0.0));
+        let dt=max(0.005,min(distance.x,min(distance.y,distance.z)));
         // Even the largest possible noise multiplier cannot make this cell
         // visible. Skip procedural detail only; the ray takes the same step.
         if gas_may_show(m) {
             // Subcell detail rides upward with the plume. The coarse field owns
             // transport, silhouette, heat and constituent mass.
-            let detail=noise(gas_pos*1.15-vec3(0.0,p.weapon.y*0.9,0.0));
+            let detail=sample.detail.x;
             let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
-            let grain=hash(vi);
+            let grain=sample.detail.y;
             if occupancy>0.12+grain*0.15 {
                 let shade=0.37+0.63*max(0.0,dot(normal,sun));
-                let self_shadow=exp(-(field(gas_pos+sun*1.5).w+field(gas_pos+sun*3.5).w)*0.64);
+                let self_shadow=sample.detail.z;
                 let dust=1.0-smoothstep(26.0,49.0,p.origin.y+centre.y);
                 let base=mix(vec3(0.105,0.12,0.135),vec3(0.21,0.16,0.095),dust);
                 let interior_glow=field(gas_pos+rd*2.5).x;

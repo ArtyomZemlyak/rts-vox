@@ -2,6 +2,7 @@
 //! distant impacts retain independent fields and clocks. No field readback.
 
 mod bricks;
+mod display;
 mod regions;
 pub use regions::Atmosphere;
 use regions::REGIONS;
@@ -395,6 +396,7 @@ mod window_tests {
 #[derive(Resource)]
 struct Shaders {
     bricks: Handle<Shader>,
+    display: Handle<Shader>,
     mask: Handle<Shader>,
     upload: Handle<Shader>,
     compute: Handle<Shader>,
@@ -431,10 +433,19 @@ impl Plugin for GasPlugin {
             source("gas.wgsl", include_str!("gas.wgsl")),
             "render/src/gas.wgsl",
         ));
+        let sampling = source("gas_sampling.wgsl", include_str!("gas_sampling.wgsl"));
+        let display = assets.add(Shader::from_wgsl(
+            format!(
+                "{common}\n{sampling}\n{}",
+                source("gas_display.wgsl", include_str!("gas_display.wgsl"))
+            ),
+            "render/src/gas_display.wgsl",
+        ));
         let draw = assets.add(Shader::from_wgsl(
             format!(
-                "{}\n{}\n{}",
+                "{}\n{}\n{}\n{}",
                 common,
+                sampling,
                 source("energy.wgsl", include_str!("energy.wgsl")),
                 source("gas_draw.wgsl", include_str!("gas_draw.wgsl"))
             ),
@@ -457,6 +468,7 @@ impl Plugin for GasPlugin {
         };
         r.insert_resource(Shaders {
             bricks,
+            display,
             mask,
             upload,
             compute,
@@ -512,12 +524,14 @@ struct Pipeline {
     terrain: Buffer,
     terrain_revision: u64,
     bricks: bricks::Bricks,
+    display: display::DisplayPipeline,
     ready_frames: u32,
     terrain_layout: BindGroupLayoutDescriptor,
     terrain_prepass: CachedRenderPipelineId,
 }
 struct GpuRegion {
     id: u64,
+    display: Option<display::Display>,
     buffers: [Buffer; 2],
     mask: Buffer,
     mask_revision: u64,
@@ -677,6 +691,7 @@ fn init(
                 storage_buffer_read_only::<Vec<u32>>(false),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 storage_buffer_read_only::<Vec<u32>>(false),
+                storage_buffer_read_only::<Vec<GpuCell>>(false),
             ),
         ),
     );
@@ -749,6 +764,7 @@ fn init(
         empty: state_buffer(&device),
         regions: std::array::from_fn(|_| None),
         bricks: bricks::Bricks::new(&device, &cache, shaders.bricks.clone()),
+        display: display::DisplayPipeline::new(&cache, shaders.display.clone()),
         terrain,
         terrain_revision: 0,
         ready_frames: 0,
@@ -857,7 +873,10 @@ fn prepare(
     );
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
-    for (slot, source) in pipeline.regions.iter_mut().zip(&input.atmosphere.regions) {
+    let Pipeline {
+        regions, display, ..
+    } = &mut *pipeline;
+    for (slot, source) in regions.iter_mut().zip(&input.atmosphere.regions) {
         let Some(source) = source else {
             *slot = None;
             continue;
@@ -905,6 +924,7 @@ fn prepare(
             let groups = compute_groups(&device, &layout, &uniform, &buffers, &mask);
             *slot = Some(GpuRegion {
                 id: source.id,
+                display: None,
                 buffers,
                 mask,
                 mask_revision: 0,
@@ -925,6 +945,15 @@ fn prepare(
         let r = slot.as_mut().unwrap();
         r.uniform.set(p);
         r.uniform.write_buffer(&device, &queue);
+        display::Display::prepare(
+            &mut r.display,
+            &p,
+            &r.uniform,
+            &r.buffers,
+            display,
+            &device,
+            &cache,
+        );
         if r.mask_revision != source.mask_revision {
             if source.mask.is_empty() {
                 r.mask_uniform.set(MaskParams {
@@ -1061,14 +1090,24 @@ fn draw_gas(
     mut ctx: RenderContext,
 ) {
     let (target, prepass, id) = view.into_inner();
-    let (Some(_draw), Some(init), Some(step), Some(mask_build), Some(_depth), Some(_normals)) = (
+    let (
+        Some(_draw),
+        Some(init),
+        Some(step),
+        Some(display_build),
+        Some(mask_build),
+        Some(_depth),
+        Some(_normals),
+    ) = (
         cache.get_render_pipeline(id.0),
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
+        cache.get_compute_pipeline(pipeline.display.build),
         cache.get_compute_pipeline(pipeline.mask_build),
         prepass.depth_view(),
         prepass.normal_view(),
-    ) else {
+    )
+    else {
         return;
     };
     // Gas may compile before PBR/depth/bloom. Starting capture then would
@@ -1141,6 +1180,20 @@ fn draw_gas(
         source.applied.store(r.applied, Ordering::Relaxed);
     }
     simulation_span.end(ctx.command_encoder());
+    let display_span = diagnostics.time_span(ctx.command_encoder(), "gas-display-samples");
+    for r in pipeline.regions.iter_mut().flatten() {
+        if let Some(display) = &mut r.display {
+            display.encode(
+                r.uniform.get(),
+                r.simulated,
+                r.applied,
+                r.read,
+                display_build,
+                ctx.command_encoder(),
+            );
+        }
+    }
+    display_span.end(ctx.command_encoder());
     // Shade terrain/charging effects exactly once. Overlay plumes cannot
     // overwrite an earlier plume's colour with a fresh terrain calculation.
     let mut order: Vec<_> = input
@@ -1192,11 +1245,15 @@ fn composite(
     };
     let diagnostics = ctx.diagnostic_recorder();
     let diagnostics = diagnostics.as_deref();
-    let (uniform, buffer) = if let Some(i) = slot {
+    let (uniform, buffer, display) = if let Some(i) = slot {
         let r = pipeline.regions[i].as_ref().unwrap();
-        (&r.uniform, &r.buffers[r.read])
+        (
+            &r.uniform,
+            &r.buffers[r.read],
+            r.display.as_ref().map_or(&pipeline.empty, |d| &d.buffer),
+        )
     } else {
-        (&pipeline.uniform, &pipeline.empty)
+        (&pipeline.uniform, &pipeline.empty, &pipeline.empty)
     };
     let span = diagnostics.time_span(
         ctx.command_encoder(),
@@ -1215,6 +1272,7 @@ fn composite(
             pipeline.terrain.as_entire_binding(),
             normals,
             pipeline.bricks.buffer.as_entire_binding(),
+            display.as_entire_binding(),
         )),
     );
     let mut pass = ctx

@@ -264,11 +264,6 @@ impl<'a> Probe<'a> {
             None => self.world.ny as i32,
         }
     }
-    /// Lowest yielding cell of the column, if any lies above its floor.
-    fn yield_low(&mut self, x: i32, z: i32) -> Option<i32> {
-        let (_, span) = self.column(x, z)?;
-        (span[0] != u16::MAX).then_some(span[0] as i32)
-    }
     /// Every yielding cell inside the hull at this pose, in column order.
     /// This is the cut a tracked hull makes when it stands here.
     pub fn crushed(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Vec<[u32; 3]> {
@@ -279,10 +274,7 @@ impl<'a> Probe<'a> {
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let (lo, hi) = self.extent(pos, head, s);
         for z in lo[1]..=hi[1] {
-            for x in lo[0]..=hi[0] {
-                if !self.inside(pos, c, sin, s, x, z) {
-                    continue;
-                }
+            for (x, _, _) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
                 let Some((floor, [low, high])) = self.column(x, z) else {
                     continue;
                 };
@@ -323,6 +315,7 @@ impl<'a> Probe<'a> {
     }
     // Include a half-cell halo so a one-voxel rock cannot hide between
     // the four nominal supports or between diagonally sampled cells.
+    #[cfg(test)]
     fn inside(&self, pos: [Fx; 2], c: Fx, sin: Fx, s: Shape, x: i32, z: i32) -> bool {
         let dx = Fx::from_int(x).add(Fx::from_ratio(1, 2)).sub(pos[0]);
         let dz = Fx::from_int(z).add(Fx::from_ratio(1, 2)).sub(pos[1]);
@@ -330,6 +323,32 @@ impl<'a> Probe<'a> {
         let v = dz.mul(c).sub(dx.mul(sin));
         u.abs() <= Fx::from_int(s.half[0]).add(Fx::from_ratio(1, 2))
             && v.abs() <= Fx::from_int(s.half[1]).add(Fx::from_ratio(1, 2))
+    }
+    /// Moving one whole world cell adds exactly `c` / `-sin` to the
+    /// fixed-point local coordinates, including the original rounding.
+    /// Reuse those coordinates for clearance and avoid transforming twice.
+    fn row(
+        pos: [Fx; 2],
+        c: Fx,
+        sin: Fx,
+        s: Shape,
+        lo: i32,
+        hi: i32,
+        z: i32,
+    ) -> impl Iterator<Item = (i32, Fx, Fx)> {
+        let half = Fx::from_ratio(1, 2);
+        let dx = Fx::from_int(lo).add(half).sub(pos[0]);
+        let dz = Fx::from_int(z).add(half).sub(pos[1]);
+        let mut u = dx.mul(c).add(dz.mul(sin));
+        let mut v = dz.mul(c).sub(dx.mul(sin));
+        let bounds = s.half.map(|n| Fx::from_int(n).add(half));
+        (lo..=hi).filter_map(move |x| {
+            let local = (u, v);
+            u = u.add(c);
+            v = v.sub(sin);
+            (local.0.abs() <= bounds[0] && local.1.abs() <= bounds[1])
+                .then_some((x, local.0, local.1))
+        })
     }
     fn surface(&mut self, p: [Fx; 2]) -> Fx {
         self.samples += 1;
@@ -516,24 +535,24 @@ impl<'a> Probe<'a> {
         let (lo, hi) = self.extent(pos, head, s);
         let mut crush = 0;
         for z in lo[1]..=hi[1] {
-            for x in lo[0]..=hi[0] {
-                if !self.inside(pos, c, sin, s, x, z) {
-                    continue;
-                }
-                let dx = Fx::from_int(x).add(Fx::from_ratio(1, 2)).sub(pos[0]);
-                let dz = Fx::from_int(z).add(Fx::from_ratio(1, 2)).sub(pos[1]);
-                let u = dx.mul(c).add(dz.mul(sin));
-                let v = dz.mul(c).sub(dx.mul(sin));
-                let ground = Fx::from_int(self.floor(x, z));
+            for (x, u, v) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
+                // Floor and yielding matter come from the same column answer.
+                // A second lookup used to repeat the page/cache query for
+                // every cell of every route pose, even without any trees.
+                let (floor, low) = self
+                    .column(x, z)
+                    .map(|(floor, [low, _])| (i32::from(floor), low))
+                    .unwrap_or((self.world.ny as i32, u16::MAX));
+                let ground = Fx::from_int(floor);
                 let local = height.add(pitch.mul(u)).add(roll.mul(v));
                 let belly = local.add(s.clearance.max(Fx::from_int(s.step)));
                 if ground > belly {
                     blocked += 1;
                 }
-                if let Some(low) = self.yield_low(x, z) {
-                    if Fx::from_int(low) < local.add(Fx::from_int(s.height)) {
-                        crush += 1;
-                    }
+                if low != u16::MAX
+                    && Fx::from_int(i32::from(low)) < local.add(Fx::from_int(s.height))
+                {
+                    crush += 1;
                 }
             }
         }
@@ -1584,6 +1603,45 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn footprint_rows_match_individual_fixed_point_transforms() {
+        let w = world(false, false, false);
+        let probe = Probe::new(&w);
+        for base in [-100, 0, 91, 99999] {
+            for half in [[20, 10], [1, 1], [0, 0], [3, 34]] {
+                let s = Shape { half, ..tank() };
+                let pos = [
+                    Fx::from_int(base).add(Fx::from_ratio(1, 3)),
+                    Fx::from_int(base).sub(Fx::from_ratio(7, 13)),
+                ];
+                for head in (0..angle::FULL).step_by(257).chain([
+                    0,
+                    1,
+                    angle::FULL / 4 - 1,
+                    angle::FULL / 4,
+                    angle::FULL / 2,
+                ]) {
+                    let (c, sin) = (angle::cos(head), angle::sin(head));
+                    let (lo, hi) = probe.extent(pos, head, s);
+                    for z in lo[1]..=hi[1] {
+                        let expected: Vec<_> = (lo[0]..=hi[0])
+                            .filter(|&x| probe.inside(pos, c, sin, s, x, z))
+                            .map(|x| {
+                                let dx = Fx::from_int(x).add(Fx::from_ratio(1, 2)).sub(pos[0]);
+                                let dz = Fx::from_int(z).add(Fx::from_ratio(1, 2)).sub(pos[1]);
+                                (x, dx.mul(c).add(dz.mul(sin)), dz.mul(c).sub(dx.mul(sin)))
+                            })
+                            .collect();
+                        assert_eq!(
+                            Probe::row(pos, c, sin, s, lo[0], hi[0], z).collect::<Vec<_>>(),
+                            expected,
+                            "base={base} half={half:?} head={head} row={z}"
+                        );
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn swept_edges_reject_obstacles_between_old_midpoint_samples() {
         let w = world(false, false, false);

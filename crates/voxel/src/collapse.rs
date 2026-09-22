@@ -139,6 +139,8 @@ pub struct CollapseStats {
 /// Компоненты одного чанка, как их видит граф.
 struct ChunkNodes {
     cached_edges: usize,
+    /// Derived adjacency by local component; avoids six face scans per visit.
+    links: Vec<Vec<(u32, u16)>>,
     /// Сколько компонент в чанке.
     n: usize,
     /// Метки компонент на граничных ячейках грани — **отрезками**,
@@ -166,6 +168,7 @@ impl ChunkNodes {
     fn new() -> ChunkNodes {
         ChunkNodes {
             cached_edges: 0,
+            links: Vec::new(),
             n: 0,
             faces: Default::default(),
             bedrock: Vec::new(),
@@ -562,7 +565,11 @@ impl CollapseLayer {
                 self.mark_faces(i);
                 done += 1;
             }
-            self.frontier.retain(|i| !batch.contains(i));
+            // Every selected chunk now has nodes. Filter known entries in
+            // one pass instead of searching the whole batch per frontier
+            // entry; the next round and the final cleanup use this same
+            // predicate, so neither promotion order nor saved state changes.
+            self.frontier.retain(|&i| self.nodes[i as usize].is_none());
             self.rebuild_index();
             self.refresh_faces(w);
         }
@@ -817,7 +824,22 @@ impl CollapseLayer {
     }
 
     fn cache_nodes(&mut self, i: usize) {
+        let neighbours: [_; FACES] = std::array::from_fn(|f| self.neighbour(i, f));
         let nd = self.nodes[i].as_mut().expect("node cache");
+        nd.links.resize_with(nd.n, Vec::new);
+        for links in &mut nd.links {
+            links.clear();
+        }
+        for (f, neighbour) in neighbours.into_iter().enumerate() {
+            if let Some(j) = neighbour {
+                for &(a, b) in &nd.edges[f] {
+                    // A relabel can temporarily precede its face refresh.
+                    if let Some(links) = nd.links.get_mut(a as usize) {
+                        links.push((j as u32, b));
+                    }
+                }
+            }
+        }
         let edges = if nd.n == 0 {
             0
         } else {
@@ -878,31 +900,20 @@ impl CollapseLayer {
                     head += 1;
                     let i = chunk as usize;
                     let nd = self.nodes[i].as_ref().expect("known");
-                    for f in 0..FACES {
-                        if nd.edges[f].is_empty() {
+                    for &(j, b) in &nd.links[lab as usize] {
+                        if self.nodes[j as usize].is_none() {
                             continue;
                         }
-                        let Some(j) = self.neighbour(i, f) else {
-                            continue;
-                        };
-                        if self.nodes[j].is_none() {
-                            continue;
-                        }
-                        for &(a, b) in &nd.edges[f] {
-                            if a != lab {
-                                continue;
-                            }
-                            let nid = (self.base[j] + u32::from(b)) as usize;
-                            if self.reached[nid] {
-                                anchored = true;
-                                // Every discovered node already has a path to
-                                // this search root. One certified anchor proves
-                                // them all; do not traverse the rest of the map.
-                                break 'search;
-                            } else if !seen[nid] {
-                                seen[nid] = true;
-                                self.walk.push((j as u32, b));
-                            }
+                        let nid = (self.base[j as usize] + u32::from(b)) as usize;
+                        if self.reached[nid] {
+                            anchored = true;
+                            // Every discovered node already has a path to
+                            // this search root. One certified anchor proves
+                            // them all; do not traverse the rest of the map.
+                            break 'search;
+                        } else if !seen[nid] {
+                            seen[nid] = true;
+                            self.walk.push((j, b));
                         }
                     }
                 }
@@ -1176,12 +1187,27 @@ impl CollapseLayer {
             n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
             n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
             n += nd.ground.iter().map(|g| g.len() * 2).sum::<usize>();
+            n += nd.links.capacity() * std::mem::size_of::<Vec<(u32, u16)>>();
+            n += nd
+                .links
+                .iter()
+                .map(|l| l.capacity() * std::mem::size_of::<(u32, u16)>())
+                .sum::<usize>();
         }
         n
     }
 
     pub fn known_chunks(&self) -> usize {
         self.known.len()
+    }
+    /// Derived graph counters for headless performance diagnostics.
+    pub fn graph_size(&self) -> [usize; 4] {
+        [
+            self.known.len(),
+            self.reached.len(),
+            self.needs_anchor.len(),
+            self.edge_count,
+        ]
     }
 
     /// Записать состояние каскада в буфер (ADR-229).
@@ -1493,6 +1519,10 @@ mod tests {
             }
             c.rebuild_index();
             for i in 0..c.nodes.len() {
+                // Production face refresh stores pairs in this order.
+                for edges in &mut c.nodes[i].as_mut().unwrap().edges {
+                    edges.sort_unstable();
+                }
                 c.cache_nodes(i);
             }
             let mut fast = CollapseStats::default();

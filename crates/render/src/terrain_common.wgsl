@@ -9,6 +9,12 @@ struct Params {
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;
 @group(0) @binding(7) var<storage, read> bricks: array<u32>;
+fn wrap_voxel(q:vec3<u32>,dims:vec3<u32>)->vec3<u32> {
+    // The starting window needs no wrap. Avoid three dynamic integer
+    // divisions at every ray step; moved windows retain the exact modulo.
+    if all(q<dims) {return q;}
+    return q%dims;
+}
 // The hierarchy is enabled only for aligned windows. Small test layouts
 // remain valid without padding or changing their physical storage.
 fn brick_space(q:vec3<i32>)->vec2<i32> {
@@ -17,7 +23,7 @@ fn brick_space(q:vec3<i32>)->vec2<i32> {
     if any(dims==vec3(0u)) || any((dims&vec3(7u))!=vec3(0u)) ||
        any(lo<vec3(0)) || any((vec3<u32>(lo)&vec3(7u))!=vec3(0u)) {return none;}
     if any(q<lo) || any(q>=lo+vec3<i32>(dims)) {return none;}
-    let wrapped=vec3<u32>(q)%dims;
+    let wrapped=wrap_voxel(vec3<u32>(q),dims);
     if all((dims&vec3(31u))==vec3(0u)) && all((vec3<u32>(lo)&vec3(31u))==vec3(0u)) {
         let size=dims/32u;let b=wrapped/32u;let fine=dims/8u;
         let h=i32(floor(f32(q.y)/32.0))*32+i32(bricks[fine.x*fine.y*fine.z+b.x+size.x*(b.y+size.y*b.z)]);
@@ -31,17 +37,23 @@ struct In { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> }
 // it holds `dims` voxels from `lo`, and its storage wraps, so a voxel
 // lives at `q % dims` whatever the window's corner. Unsigned modulo
 // throughout: a signed one is forbidden on our backend.
-fn raw_material(q: vec3<i32>) -> u32 {
+// Packed row and the material at q; tracing can reuse the same load to skip
+// eight empty x cells even below a neighbouring tree's brick ceiling.
+fn packed_material(q: vec3<i32>) -> vec2<u32> {
     let dims=vec3<i32>(p.terrain.xyz);
     let lo=vec3<i32>(p.terrain_origin.xyz);
-    if any(q<lo) || any(q>=lo+dims) {return 0u;}
-    let m=vec3<u32>(q)%vec3<u32>(dims);
+    if any(q<lo) || any(q>=lo+dims) {return vec2(0u);}
+    let m=wrap_voxel(vec3<u32>(q),vec3<u32>(dims));
     let i=m.x+u32(dims.x)*(m.y+u32(dims.y)*m.z);
-    return (terrain[i/8u]>>((i&7u)*4u))&15u;
+    let word=terrain[i/8u];
+    return vec2(word,(word>>((i&7u)*4u))&15u);
 }
+fn raw_material(q:vec3<i32>)->u32 {return packed_material(q).y;}
 struct TerrainHit { t:f32, normal:vec3<f32>, material:u32 };
 fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
-    let inv=1.0/(rd+vec3(0.0000001));
+    // A parallel axis has no next face. Adding epsilon to the direction
+    // changed its sign near zero and made horizontal rays crawl backwards.
+    let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
     let aa=(p.terrain_origin.xyz-ro)*inv;
     let bb=(p.terrain_origin.xyz+p.terrain.xyz-ro)*inv;
     let a=min(aa,bb);let b=max(aa,bb);
@@ -66,8 +78,9 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
         if t>=end {break;}
         let pos=ro+rd*(t+0.001);let q=vec3<i32>(floor(pos));
         let skip=brick_space(q);let ceiling=skip.x;
-        var m=0u;
-        if q.y<ceiling {m=raw_material(q);}
+        var packed=vec2(0u);
+        if q.y<ceiling {packed=packed_material(q);}
+        let m=packed.y;
         // 15 is the render-only occupancy of a PBR unit, used just for shadows.
         if m>0u && (m!=15u || shadow) {
             // Persisted work selects an eroded subcell surface. Collision and
@@ -83,9 +96,12 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
         if q.y>=ceiling {
             let edge=f32(skip.y);low=floor(low/edge)*edge;high=low+vec3(edge);
             low.y=f32(ceiling);
+        } else if packed.x==0u && (u32(p.terrain.x)&7u)==0u {
+            low.x=floor(low.x/8.0)*8.0;high.x=low.x+8.0;
         }
         let face=select(low,high,rd>vec3(0.0));
-        let dist=(face-pos)*inv;let d=max(0.002,min(dist.x,min(dist.y,dist.z)));
+        let dist=select((face-pos)*inv,vec3(1e30),rd==vec3(0.0));
+        let d=max(0.002,min(dist.x,min(dist.y,dist.z)));
         normal=vec3(0.0);
         if dist.x<=dist.y && dist.x<=dist.z {normal.x=-sign(rd.x);}
         else if dist.y<=dist.z {normal.y=-sign(rd.y);} else {normal.z=-sign(rd.z);}

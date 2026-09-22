@@ -83,7 +83,9 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
     let reference = g.pipeline(
         &format!(
             "{}\n{query}",
-            common.replace("let skip=brick_space(q);", "let skip=vec2<i32>(q.y+1,8);")
+            common
+                .replace("let skip=brick_space(q);", "let skip=vec2<i32>(q.y+1,8);")
+                .replace("packed.x==0u &&", "false && packed.x==0u &&")
         ),
         "query",
         "voxel rays",
@@ -156,7 +158,13 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
             for z in [2.3, 18.7, 40.3, 59.1] {
                 for (x, dx) in [(1.2, 1.0), (62.2, -1.0)] {
                     for shadow in [0.0, 1.0] {
-                        for (dy, dz) in [(0.0, 0.0), (-0.09, 0.023), (0.071, -0.017)] {
+                        for (dy, dz) in [
+                            (0.0, 0.0),
+                            (-0.09, 0.023),
+                            (0.071, -0.017),
+                            (-1e-9, 0.0),
+                            (1e-9, 0.0),
+                        ] {
                             rays.extend([
                                 x + origin[0] as f32,
                                 y,
@@ -205,6 +213,21 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
             .enumerate()
         {
             assert_eq!(a[3], b[3], "material of ray {i}, origin {origin:?}");
+            if rays[i * 8 + 5].abs() < 1e-8 && rays[i * 8 + 6].abs() < 1e-8 {
+                // Exact horizontal rays used to exhaust the iteration limit
+                // on their zero Y/Z axes. Both implementations then missed
+                // the wall, so comparing them alone could not catch it.
+                let y = rays[i * 8 + 1];
+                let shadow = rays[i * 8 + 3] > 0.5;
+                let material = if y < 22.0 {
+                    3.0f32
+                } else if (25.0..26.0).contains(&y) && shadow {
+                    15.0
+                } else {
+                    0.0
+                };
+                assert_eq!(f32::from_bits(a[3]), material, "parallel ray {i}");
+            }
             assert!(
                 (f32::from_bits(a[0]) - f32::from_bits(b[0])).abs() < 0.02,
                 "distance of ray {i}"

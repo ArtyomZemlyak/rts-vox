@@ -1,6 +1,6 @@
 param(
     [ValidateRange(5, 3600)][int]$Seconds = 30,
-    [ValidateSet('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame')]
+    [ValidateSet('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame')]
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
@@ -32,6 +32,7 @@ try {
             'shell'        { @('--weapon', 'shell', '--power', '4000', '--view', 'overview') }
             'clouds'       { @('--drive', '--profile-clouds', '8') }
             'drive'        { @('--move', '2200,336') }
+            'stream'       { @('--move', '2200,336', '--view', 'gun') }
             'flame'        { @('--weapon', 'flame', '--open', '--view', 'exposed', '--attack-unit', '1') }
         }
         $csv = Join-Path $directory "$scenario.csv"
@@ -45,6 +46,14 @@ try {
             $contacts = Select-String -LiteralPath $log -Pattern 'PROFILE stream_packets=(\d+) unit_damage=(\d+)'
             if (-not $contacts -or [long]$contacts.Matches[0].Groups[1].Value -eq 0 -or [long]$contacts.Matches[0].Groups[2].Value -eq 0) {
                 throw 'Flamethrower benchmark did not produce packets and real unit damage.'
+            }
+        }
+        if ($scenario -eq 'stream') {
+            # This preset starts in the origin window. Following the gun must
+            # actually move that window; a stationary overview is no proof.
+            $origin = Select-String -LiteralPath $log -Pattern 'terrain_origin=\[(\d+), (\d+), (\d+)\]'
+            if (-not $origin -or ([long]$origin.Matches[0].Groups[1].Value -eq 0 -and [long]$origin.Matches[0].Groups[3].Value -eq 0)) {
+                throw 'Streaming benchmark never moved the terrain window; increase -Seconds (try 90).'
             }
         }
         $rows = @(Import-Csv -LiteralPath $csv)

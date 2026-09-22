@@ -1726,6 +1726,10 @@ pub struct BlastRange {
 }
 
 impl BlastRange {
+    /// Known chunks, component nodes, chunks needing an anchor path and edges.
+    pub fn support_graph_size(&self) -> [usize; 4] {
+        self.collapse.graph_size()
+    }
     pub fn target(&self) -> [i32; 3] {
         if let Some(id) = self.attack {
             if let Some(u) = self.units.get(id) {

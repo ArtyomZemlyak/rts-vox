@@ -5,6 +5,23 @@ use std::time::Instant;
 fn main() {
     // `--weapon shell` measures the heavier debris of the shell (ADR-296).
     let args: Vec<String> = std::env::args().collect();
+    let value = |key: &str| args.windows(2).find(|w| w[0] == key).map(|w| &w[1]);
+    let ticks = value("--ticks").map_or(1800, |v| v.parse::<usize>().expect("ticks"));
+    assert!(ticks > 0);
+    let single = args.iter().any(|a| a == "--single-shot");
+    let drive_to = value("--move").map(|v| {
+        let (x, z) = v.split_once(',').expect("--move x,z");
+        [
+            x.trim().parse().expect("move x"),
+            z.trim().parse().expect("move z"),
+        ]
+    });
+    assert!(
+        !single || drive_to.is_none(),
+        "choose --move or --single-shot"
+    );
+    let uncovered = args.iter().any(|a| a == "--open");
+    let layout_ron = value("--range").map(|p| std::fs::read_to_string(p).expect("range file"));
     let thermal_stress = args.iter().any(|a| a == "--thermal-stress");
     let fire_stress = args.iter().any(|a| a == "--fire-stress");
     let weapon = args
@@ -27,14 +44,27 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
-    for firing in [false, true] {
+    let modes: &[bool] = if drive_to.is_some() {
+        &[false]
+    } else if single {
+        &[true]
+    } else {
+        &[false, true]
+    };
+    for &firing in modes {
         let mut config = modding::explosion::ExplosionConfig::from_ron(ron).unwrap();
         config.energy = config.energy * power / 1000;
         config.material_energy_j =
             (u64::from(config.material_energy_j) * u64::from(power) / 1000) as u32;
-        let mut layout =
-            modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-cover.ron"))
-                .unwrap();
+        let mut layout = modding::range::RangeLayout::from_ron(
+            layout_ron
+                .as_deref()
+                .unwrap_or(include_str!("../../../../data/range-cover.ron")),
+        )
+        .unwrap();
+        if uncovered {
+            layout.blocks.clear();
+        }
         if weapon == "machine-gun" {
             layout.gun_kind = modding::range::RangeUnitKind::Strider;
         }
@@ -42,7 +72,12 @@ fn main() {
         if scene.config.delivery != modding::explosion::Delivery::Blast {
             scene.aim = Some(scene.units[0].world_pos([30, 18, 16]));
         }
-        scene.control();
+        if !single {
+            scene.control();
+        }
+        if let Some(goal) = drive_to {
+            assert!(scene.order_move(goal), "--move: no route");
+        }
         // Saturate the sparse field with real surviving armour cells. This
         // measures the budget ceiling, independent of a lucky flame contact.
         if thermal_stress {
@@ -94,8 +129,9 @@ fn main() {
         let mut shots = 0;
         let mut hottest = 0;
         let mut phases = std::collections::BTreeMap::<&str, (u128, usize)>::new();
-        for tick in 0..1800 {
-            if firing && tick % 180 == 0 && scene.refire() {
+        let mut totals = std::collections::BTreeMap::<&str, Vec<u128>>::new();
+        for tick in 0..ticks {
+            if !single && firing && tick % 180 == 0 && scene.refire() {
                 shots += 1;
             }
             let start = Instant::now();
@@ -104,6 +140,7 @@ fn main() {
                 let now = Instant::now();
                 let elapsed = now.duration_since(mark).as_micros();
                 mark = now;
+                totals.entry(name).or_default().push(elapsed);
                 let peak = phases.entry(name).or_default();
                 if elapsed > peak.0 {
                     *peak = (elapsed, tick);
@@ -113,6 +150,11 @@ fn main() {
             hottest = hottest.max(scene.thermals.hot());
         }
         // The slowest ticks by number: a spike names its moment.
+        println!(
+            "support_graph={:?} gun={:?}",
+            scene.support_graph_size(),
+            scene.gun.at
+        );
         let mut top: Vec<(u128, usize)> = samples.iter().copied().zip(0..).collect();
         top.sort_unstable_by(|a, b| b.cmp(a));
         let top: Vec<String> = top
@@ -125,7 +167,13 @@ fn main() {
             top.join(",")
         );
         for (name, (us, tick)) in phases {
-            println!("phase={name} firing={firing} max_us={us} tick={tick}");
+            let v = totals.get_mut(name).unwrap();
+            v.sort_unstable();
+            println!(
+                "phase={name} firing={firing} p50_us={} p99_us={} max_us={us} tick={tick}",
+                v[v.len() / 2],
+                v[v.len() * 99 / 100]
+            );
         }
         println!(
             "thermal_peak_cells={hottest} melted={} rejected_heat={} exchanged_heat={}",
@@ -151,10 +199,20 @@ fn main() {
             .filter(|u| !u.motion.route.is_empty())
             .map(|u| u.motion.laps)
             .collect();
-        assert!(laps.iter().any(|n| *n > 0), "no completed patrols");
+        if ticks >= 1800 && !single {
+            assert!(laps.iter().any(|n| *n > 0), "no completed patrols");
+        }
+        if single {
+            assert!(
+                scene.impact.is_some() && scene.removed > 0,
+                "single-shot benchmark did no destruction"
+            );
+            shots = 1;
+        }
         if firing {
             assert!(
-                (scene.removed > 0 || scene.units.iter().any(|u| u.revision > 0)) && shots > 1,
+                (scene.removed > 0 || scene.units.iter().any(|u| u.revision > 0))
+                    && (single || shots > 1),
                 "no real repeated destruction"
             );
         }
