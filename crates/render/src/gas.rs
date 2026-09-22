@@ -7,7 +7,8 @@ mod regions;
 pub use regions::Atmosphere;
 use regions::REGIONS;
 
-use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
+use bevy::core_pipeline::core_3d::main_opaque_pass_3d;
+use bevy::core_pipeline::deferred::node::late_deferred_prepass;
 use bevy::core_pipeline::prepass::{
     DepthPrepass, NormalPrepass, ViewPrepassTextures, NORMAL_PREPASS_FORMAT,
 };
@@ -480,15 +481,14 @@ impl Plugin for GasPlugin {
         .add_systems(
             Core3d,
             terrain_prepass
-                .after(Core3dSystems::Prepass)
-                .before(Core3dSystems::MainPass),
+                .in_set(Core3dSystems::Prepass)
+                .after(late_deferred_prepass),
         )
         .add_systems(
             Core3d,
             shade_terrain
                 .in_set(Core3dSystems::MainPass)
-                .after(main_opaque_pass_3d)
-                .before(main_transparent_pass_3d),
+                .before(main_opaque_pass_3d),
         )
         .add_systems(
             Core3d,
@@ -514,9 +514,11 @@ struct Pipeline {
     upload: CachedComputePipelineId,
     compute_layout: BindGroupLayoutDescriptor,
     draw_layout: BindGroupLayoutDescriptor,
+    colour_layout: BindGroupLayoutDescriptor,
     init: CachedComputePipelineId,
     step: CachedComputePipelineId,
     draws: Variants<RenderPipeline, GasSpecializer>,
+    colours: Variants<RenderPipeline, GasSpecializer>,
     sampler: Sampler,
     uniform: UniformBuffer<GasParams>,
     empty: Buffer,
@@ -609,7 +611,10 @@ impl Specializer<RenderPipeline> for GasSpecializer {
     }
 }
 #[derive(Component)]
-struct DrawId(CachedRenderPipelineId);
+struct DrawId {
+    gas: CachedRenderPipelineId,
+    terrain: CachedRenderPipelineId,
+}
 fn init(
     mut commands: Commands,
     device: Res<RenderDevice>,
@@ -710,6 +715,28 @@ fn init(
         }),
         ..default()
     };
+    // Terrain is an opaque surface. It writes directly into the main colour
+    // attachment, without sampling or switching the postprocess targets.
+    let colour_layout = BindGroupLayoutDescriptor::new(
+        "terrain colour",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::FRAGMENT,
+            (
+                (2, texture_depth_2d()),
+                (3, uniform_buffer::<GasParams>(false)),
+                (5, storage_buffer_read_only::<Vec<u32>>(false)),
+                (6, texture_2d(TextureSampleType::Float { filterable: true })),
+                (7, storage_buffer_read_only::<Vec<u32>>(false)),
+            ),
+        ),
+    );
+    let mut colour_desc = desc.clone();
+    colour_desc.label = Some("voxel world colour".into());
+    colour_desc.layout = vec![colour_layout.clone()];
+    colour_desc.fragment.as_mut().unwrap().entry_point = Some("terrain_fragment".into());
+    // The shared shader has two fragment entry points.
+    let mut desc = desc;
+    desc.fragment.as_mut().unwrap().entry_point = Some("fragment".into());
     let terrain_layout = BindGroupLayoutDescriptor::new(
         "terrain prepass",
         &BindGroupLayoutEntries::with_indices(
@@ -756,9 +783,11 @@ fn init(
         upload,
         compute_layout,
         draw_layout,
+        colour_layout,
         init,
         step,
         draws: Variants::new(GasSpecializer, desc),
+        colours: Variants::new(GasSpecializer, colour_desc),
         sampler: device.create_sampler(&SamplerDescriptor::default()),
         uniform: UniformBuffer::from(GasParams::default()),
         empty: state_buffer(&device),
@@ -793,13 +822,12 @@ fn prepare(
         params.world_from_clip = view.world_from_view.to_matrix() * view.clip_from_view.inverse();
         params.clip_from_world = params.world_from_clip.inverse();
         params.camera = view.world_from_view.translation().extend(1.0);
-        let id = pipeline.draws.specialize(
-            &cache,
-            Key {
-                format: view.target_format,
-            },
-        )?;
-        commands.entity(entity).insert(DrawId(id));
+        let key = Key {
+            format: view.target_format,
+        };
+        let gas = pipeline.draws.specialize(&cache, key)?;
+        let terrain = pipeline.colours.specialize(&cache, key)?;
+        commands.entity(entity).insert(DrawId { gas, terrain });
     }
     params.control.z = 0.0;
     params.control.w = -1.0; // base pass, without raymarching a plume
@@ -1099,7 +1127,7 @@ fn draw_gas(
         Some(_depth),
         Some(_normals),
     ) = (
-        cache.get_render_pipeline(id.0),
+        cache.get_render_pipeline(id.gas),
         cache.get_compute_pipeline(pipeline.init),
         cache.get_compute_pipeline(pipeline.step),
         cache.get_compute_pipeline(pipeline.display.build),
@@ -1194,8 +1222,10 @@ fn draw_gas(
         }
     }
     display_span.end(ctx.command_encoder());
-    // Shade terrain/charging effects exactly once. Overlay plumes cannot
-    // overwrite an earlier plume's colour with a fresh terrain calculation.
+    // Projectile/refraction effects follow the completed opaque, sky and
+    // transparent passes. Only here may we swap the postprocess targets.
+    composite(&mut ctx, &pipeline, &cache, target, prepass, id, None);
+    // Overlay plumes cannot overwrite an earlier plume's colour.
     let mut order: Vec<_> = input
         .atmosphere
         .regions
@@ -1216,8 +1246,9 @@ fn draw_gas(
     }
 }
 
-/// Terrain shading must precede transparent meshes. Compositing it after them
-/// overwrote every flame/smoke pixel whose opaque depth belonged to the ground.
+/// Write opaque terrain before PBR and sky, with the normal attachment clear
+/// semantics. A post_process_write between opaque and transparent passes races
+/// the atmosphere's in-place pass, causing black sky and intermittent unit haze.
 fn shade_terrain(
     view: ViewQuery<(&ViewTarget, &ViewPrepassTextures, &DrawId), With<GasCamera>>,
     pipeline: Res<Pipeline>,
@@ -1225,7 +1256,42 @@ fn shade_terrain(
     mut ctx: RenderContext,
 ) {
     let (target, prepass, id) = view.into_inner();
-    composite(&mut ctx, &pipeline, &cache, target, prepass, id, None);
+    let (Some(draw), Some(depth), Some(normals)) = (
+        cache.get_render_pipeline(id.terrain),
+        prepass.depth_view(),
+        prepass.normal_view(),
+    ) else {
+        return;
+    };
+    let group = ctx.render_device().create_bind_group(
+        "terrain colour",
+        &cache.get_bind_group_layout(&pipeline.colour_layout),
+        &BindGroupEntries::with_indices((
+            (2, depth),
+            (3, pipeline.uniform.binding().unwrap()),
+            (5, pipeline.terrain.as_entire_binding()),
+            (6, normals),
+            (7, pipeline.bricks.buffer.as_entire_binding()),
+        )),
+    );
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let span = diagnostics.time_span(ctx.command_encoder(), "terrain-colour");
+    let mut pass = ctx
+        .command_encoder()
+        .begin_render_pass(&RenderPassDescriptor {
+            label: Some("voxel terrain colour"),
+            color_attachments: &[Some(target.get_color_attachment())],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    pass.set_pipeline(draw);
+    pass.set_bind_group(0, &group, &[]);
+    pass.draw(0..3, 0..1);
+    drop(pass);
+    span.end(ctx.command_encoder());
 }
 fn composite(
     ctx: &mut RenderContext,
@@ -1237,7 +1303,7 @@ fn composite(
     slot: Option<usize>,
 ) {
     let (Some(draw), Some(depth), Some(normals)) = (
-        cache.get_render_pipeline(id.0),
+        cache.get_render_pipeline(id.gas),
         prepass.depth_view(),
         prepass.normal_view(),
     ) else {

@@ -68,6 +68,36 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     for(var j=1;j<=7;j++) {density+=field((pos+sun*f32(j)*9.0-p.origin.xyz)/p.origin.w).w;}
     return exp(-density*0.46);
 }
+// Opaque colour is written before the mesh/sky passes. This entry point must
+// never read `scene`: the attachment is still being built, not postprocessed.
+@fragment fn terrain_fragment(input:In)->@location(0) vec4<f32> {
+    let d=textureLoad(depth,vec2<i32>(input.position.xy),0);
+    if d<=0.0 {discard;}
+    let ndc=vec2(input.uv.x*2.0-1.0,1.0-input.uv.y*2.0);
+    let near=p.world_from_clip*vec4(ndc,1.0,1.0);
+    let opaque=p.world_from_clip*vec4(ndc,d,1.0);
+    let pos=opaque.xyz/opaque.w;
+    let normal=textureLoad(normals,vec2<i32>(input.position.xy),0).xyz*2.0-vec3(1.0);
+    let m=raw_material(vec3<i32>(floor(pos-normal*0.08)));
+    if m==0u || m==15u {discard;}
+    let sun=normalize(p.sun.xyz);
+    let surface_offset=select(0.12,0.45,m>=9u && m<=11u);
+    let shadow=trace_terrain(pos+normal*surface_offset,sun,240.0,true).material>0u;
+    let diffuse=max(0.0,dot(normal,sun))*select(1.0,0.025,shadow);
+    let c=surface_colour(m,pos,normal);
+    let ambient=vec3(0.26,0.34,0.44)*(0.4+0.6*max(0.0,normal.y));
+    var lit=c*(ambient+vec3(1.0,0.81,0.54)*diffuse*p.sun.w);
+    if p.weapon.x>0.5 && (p.energy.w>0.0 || p.beam.w>0.0) {
+        let centre=select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0);
+        let delta=centre-pos;
+        let strength=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
+        let visible=trace_terrain(pos+normal*surface_offset,normalize(delta),max(0.0,length(delta)-3.0),true).material==0u;
+        lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
+            *max(0.06,dot(normal,normalize(delta)))*select(0.04,1.0,visible);
+    }
+    let fog=1.0-exp(-length(pos-near.xyz/near.w)*p.sky.w);
+    return vec4(mix(lit,p.sky.rgb,fog),1.0);
+}
 @fragment fn fragment(input:In)->@location(0) vec4<f32> {
     var bg=textureSampleLevel(scene,scene_sampler,input.uv,0.0);
     if p.weapon.x>1.5 && p.control.w<0.5 {
@@ -100,25 +130,6 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         // Every surviving region contributes a soft cloud shadow. Retiring
         // regions fade their shadow together with their visible density.
         bg=vec4(bg.rgb*mix(1.0,0.4+0.6*gas_shadow(world_pos,sun),p.control.z),bg.a);
-    }
-    if p.control.w<0.5 && d>0.0 && ground.material>0u && ground.material!=15u {
-        maxdist=ground.t;let pos=ro+rd*ground.t;
-        let surface_offset=select(0.12,0.45,ground.material>=9u && ground.material<=11u);
-        let shadow=trace_terrain(pos+ground.normal*surface_offset,sun,240.0,true).material>0u;
-        let diffuse=max(0.0,dot(ground.normal,sun))*select(1.0,0.025,shadow)*gas_shadow(pos,sun);
-        let c=surface_colour(ground.material,pos,ground.normal);
-        let ambient=vec3(0.26,0.34,0.44)*(0.4+0.6*max(0.0,ground.normal.y));
-        var lit=c*(ambient+vec3(1.0,0.81,0.54)*diffuse*p.sun.w);
-        if p.weapon.x>0.5 && (p.energy.w>0.0 || p.beam.w>0.0) {
-            let centre=select(p.beam.xyz,p.energy.xyz,p.energy.w>0.0);
-            let delta=centre-pos;
-            let strength=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
-            let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-3.0),true).material==0u;
-            lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
-                *max(0.06,dot(ground.normal,normalize(delta)))*select(0.04,1.0,visible);
-        }
-        let fog=1.0-exp(-ground.t*p.sky.w);
-        bg=vec4(mix(lit,p.sky.rgb,fog),1.0);
     }
     if p.control.w>0.5 && p.control.z>0.001 && d>0.0 && m>0u && m!=15u {
         let pos=world_pos;
