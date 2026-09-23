@@ -40,8 +40,9 @@ use bevy::window::PresentMode;
 use render::edge::{EdgePlugin, Edges};
 use render::geom::MeshBuf;
 use render::look;
-use render::model::{body_to_mesh, SegFrame, BEVEL};
+use render::model::{body_to_mesh, weather, SegFrame, BEVEL};
 use render::occlusion::{Occlusion, OcclusionPlugin};
+use render::unit_surface;
 
 /// Мировая единица рендера — воксель мира, 0.5 м (ADR-019).
 const MM_PER_UNIT: f32 = 500.0;
@@ -249,6 +250,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     mut mediums: ResMut<Assets<ScatteringMedium>>,
     scene: Res<Scene>,
 ) {
@@ -268,25 +270,10 @@ fn setup(
             }
         });
     }
-    // Материал **по отделке**: тот же набор, что в бою. Смотровая
-    // и есть то место, где разница между сталью, стеклом и резиной
-    // видна вблизи (ADR-211).
+    // The inspection stand uses the same textured PBR finishes as the
+    // range, so its close-ups show the coating, wear and normal relief.
     let sc = look::scene();
-    let mats: [Handle<StandardMaterial>; look::FINISHES] = look::FINISH_ALL.map(|f| {
-        let (rough, metal) = look::finish_surface(f);
-        materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: rough,
-            metallic: metal,
-            emissive: if f == look::Finish::Core {
-                let g = look::CORE_GLOW;
-                LinearRgba::rgb(g[0], g[1], g[2])
-            } else {
-                LinearRgba::BLACK
-            },
-            ..default()
-        })
-    });
+    let mats = unit_surface::materials(&mut images, &mut materials);
 
     let names: Vec<&str> = all.iter().map(|(n, _)| *n).collect();
     let picked = resolve(&scene.pick, &names);
@@ -330,6 +317,11 @@ fn setup(
                 centre,
                 &mut bufs,
             );
+            for (finish, buf) in bufs.iter_mut().enumerate() {
+                if !buf.is_empty() {
+                    weather(buf, finish);
+                }
+            }
             tris += bufs.iter().map(|b| b.idx.len() / 3).sum::<usize>();
             let mut tr = Transform::IDENTITY;
             render::model::place(&mut tr, base, Quat::IDENTITY, seg.as_ref());
@@ -344,6 +336,8 @@ fn setup(
                     )
                     .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos.clone())
                     .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, buf.uv.clone())
+                    .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, buf.tan.clone())
                     .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col.clone())
                     .with_inserted_indices(Indices::U32(buf.idx.clone())),
                 );

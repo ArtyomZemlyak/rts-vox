@@ -15,6 +15,7 @@ use modding::explosion::{Delivery, ExplosionConfig};
 use modding::range::{RangeLayout, RangeUnitKind};
 use render::gas::{GasCamera, GasInput, GasPlugin, TerrainWindow};
 use render::geom::MeshBuf;
+use render::model::weather;
 use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
 use render::{look, presentation};
@@ -1020,33 +1021,6 @@ fn mesh(b: &MeshBuf) -> Mesh {
         mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, b.tan.clone());
     }
     mesh
-}
-// Small finish variation breaks up pristine toy-like plates. This affects only
-// reflected colour, not occupancy, armour resistance or the damage ledger.
-fn weather(buf: &mut MeshBuf, finish: usize) {
-    for j in 0..buf.pos.len() {
-        let p = Vec3::from(buf.pos[j]) - Vec3::from(buf.nrm[j]) * 0.08;
-        let q = p.floor();
-        let grain = (q.dot(Vec3::new(17.1, 7.7, 23.3)).sin() * 437.1)
-            .fract()
-            .abs();
-        let patch = (p.x * 0.27 + (p.z * 0.32).sin() * 1.8 + p.y * 0.19).sin();
-        let dust = (1.0 - p.y.max(0.0) / 18.0).clamp(0.0, 1.0);
-        let shade = (0.69 + grain * 0.19 + patch * 0.11) * if finish == 5 { 0.52 } else { 1.0 };
-        for a in 0..3 {
-            buf.col[j][a] *= shade;
-        }
-        if finish == 0 {
-            for (a, tint) in [0.05, 0.035, 0.017].into_iter().enumerate() {
-                buf.col[j][a] = buf.col[j][a] * (1.0 - dust * 0.22) + tint * dust * 0.22;
-            }
-        }
-        if finish == 2 {
-            buf.col[j][0] *= 0.035;
-            buf.col[j][1] *= 0.07;
-            buf.col[j][2] *= 0.1;
-        }
-    }
 }
 fn setup(
     mut commands: Commands,

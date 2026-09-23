@@ -23,7 +23,8 @@
 
 use crate::shape::{
     ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid, link,
-    link_pivot, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat, slab,
+    link_pivot, mark, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat,
+    skirt, slab,
 };
 use crate::topo::unit::{core_connectivity, CoreBufs, UnitVol};
 
@@ -1104,6 +1105,11 @@ pub fn tank() -> UnitBody {
             let x = 32 + k * 8;
             fill(&mut u, (x, x + 7), (6, 11), (z, z + 1), a);
             carve(&mut u, (x + 5, x + 7), (6, 7), (z, z + 1));
+            // One hinge and two small bolt heads per replaceable skirt plate.
+            fill_f(&mut u, (x, x + 1), (10, 12), (z, z + 1), a, FINISH_STEEL);
+            for pin in [x + 2, x + 5] {
+                fill_f(&mut u, (pin, pin + 1), (8, 9), (z, z + 1), a, FINISH_GUN);
+            }
         }
     }
     // Полки: ящики ЗИП с крышками слева, бочка и канистры справа,
@@ -1135,6 +1141,16 @@ pub fn tank() -> UnitBody {
                 FINISH_STEEL,
             );
         }
+    }
+    // Deck joins and tie-downs break up the large painted shelf without
+    // covering the exposed tracks or adding a noisy all-over pattern.
+    for x in [10, 22, 42] {
+        fill_f(&mut u, (x, x + 1), (17, 18), (5, 9), a, FINISH_STEEL);
+        fill_f(&mut u, (x, x + 1), (17, 18), (21, 25), a, FINISH_STEEL);
+    }
+    for z in [6, 23] {
+        fill_f(&mut u, (36, 43), (17, 18), (z, z + 1), a, FINISH_GUN);
+        fill_f(&mut u, (38, 40), (18, 19), (z, z + 1), a, FINISH_STEEL);
     }
 
     // ---------------- Моторный отсек ----------------
@@ -1177,6 +1193,29 @@ pub fn tank() -> UnitBody {
         a,
         FINISH_PLATE,
     );
+    // Seams follow the sloping sheets in their own frames, so a damaged
+    // plate carries its details when it breaks away.
+    for plate in u.segments.iter_mut().rev().take(4) {
+        let len = plate.body.vol.nx as usize;
+        let wide = plate.body.vol.nz as usize;
+        for x in (4..len.saturating_sub(1)).step_by(6) {
+            mark(
+                &mut plate.body,
+                (x, x + 1),
+                (1, 2),
+                (1, wide.saturating_sub(1)),
+                FINISH_GUN,
+            );
+        }
+        mark(&mut plate.body, (0, len), (1, 2), (0, 1), FINISH_STEEL);
+    }
+    for z in [9, 20] {
+        fill_f(&mut u, (27, 38), (28, 29), (z, z + 1), a, FINISH_STEEL);
+    }
+    for x in [29, 35] {
+        fill_f(&mut u, (x, x + 2), (28, 29), (10, 13), a, FINISH_PLATE);
+        fill_f(&mut u, (x, x + 2), (28, 29), (17, 20), a, FINISH_PLATE);
+    }
     // Кормовая ниша башни ниже крыши, с корзиной из стальных прутьев.
     fill(&mut u, (16, 24), (19, 27), (10, 20), a);
     for &z in &[10usize, 19] {
@@ -1293,6 +1332,34 @@ pub fn strider() -> UnitBody {
             let first = u.segments.len() as u8;
             let mut thigh = UnitBody::new_scaled(13, 8, 8, 1, BODY_MM);
             fill(&mut thigh, (0, 13), (0, 8), (0, 8), Part::Armour);
+            // The weight-bearing link stays solid, while the dark collars,
+            // raised armour and outside ram make its direction legible.
+            mark(&mut thigh, (0, 2), (0, 8), (0, 8), FINISH_GUN);
+            mark(&mut thigh, (11, 13), (0, 8), (0, 8), FINISH_GUN);
+            fill_f(
+                &mut thigh,
+                (2, 11),
+                (7, 9),
+                (1, 7),
+                Part::Armour,
+                FINISH_PLATE,
+            );
+            fill_f(
+                &mut thigh,
+                (3, 10),
+                (4, 6),
+                (7, 9),
+                Part::Armour,
+                FINISH_STEEL,
+            );
+            fill_f(
+                &mut thigh,
+                (5, 10),
+                (4, 5),
+                (8, 10),
+                Part::Armour,
+                FINISH_GUN,
+            );
             u.push_segment(
                 Attach::aimed(
                     (hx as i16, 27, hz as i16),
@@ -1303,6 +1370,24 @@ pub fn strider() -> UnitBody {
             );
             let mut shin = UnitBody::new_scaled(11, 6, 6, 1, BODY_MM);
             fill(&mut shin, (0, 11), (0, 6), (0, 6), Part::Armour);
+            mark(&mut shin, (0, 2), (0, 6), (0, 6), FINISH_GUN);
+            mark(&mut shin, (9, 11), (0, 6), (0, 6), FINISH_RUBBER);
+            fill_f(
+                &mut shin,
+                (2, 9),
+                (5, 7),
+                (0, 6),
+                Part::Armour,
+                FINISH_PLATE,
+            );
+            fill_f(
+                &mut shin,
+                (3, 9),
+                (3, 4),
+                (6, 8),
+                Part::Armour,
+                FINISH_STEEL,
+            );
             u.push_segment(
                 Attach::aimed(
                     (kx as i16, 15, kz as i16),
@@ -1314,15 +1399,44 @@ pub fn strider() -> UnitBody {
             let mut knee = UnitBody::new_scaled(9, 9, 9, 1, BODY_MM);
             ball(&mut knee, (4, 4, 4), 4, Part::Armour);
             mark_ball(&mut knee, (4, 4, 4), 4, FINISH_STEEL);
+            fill_f(
+                &mut knee,
+                (6, 9),
+                (2, 7),
+                (2, 7),
+                Part::Armour,
+                FINISH_PLATE,
+            );
             u.push_segment(Attach::flat((kx as i16, 15, kz as i16), (4, 4, 4)), knee);
             let mut ankle = UnitBody::new_scaled(7, 7, 7, 1, BODY_MM);
             ball(&mut ankle, (3, 3, 3), 3, Part::Armour);
             mark_ball(&mut ankle, (3, 3, 3), 3, FINISH_STEEL);
+            fill_f(&mut ankle, (5, 7), (2, 6), (2, 5), Part::Armour, FINISH_GUN);
             u.push_segment(Attach::flat((ax as i16, 4, az as i16), (3, 3, 3)), ankle);
-            // Ступня — плита под лодыжкой: верх плиты на воксель ниже
-            // её центра, как и было в корне.
-            let mut foot = UnitBody::new_scaled(9, 3, 9, 1, BODY_MM);
-            fill(&mut foot, (0, 9), (0, 3), (0, 9), Part::Armour);
+            // A split toe shows the walking direction even in the tiny RTS
+            // silhouette; the broad rubber sole remains the contact surface.
+            let mut foot = UnitBody::new_scaled(12, 5, 10, 1, BODY_MM);
+            fill_f(
+                &mut foot,
+                (0, 11),
+                (0, 1),
+                (0, 10),
+                Part::Armour,
+                FINISH_RUBBER,
+            );
+            fill(&mut foot, (0, 10), (1, 3), (1, 9), Part::Armour);
+            fill_f(
+                &mut foot,
+                (3, 7),
+                (3, 5),
+                (3, 7),
+                Part::Armour,
+                FINISH_STEEL,
+            );
+            for z in [(1, 4), (6, 9)] {
+                fill_f(&mut foot, (9, 12), (1, 3), z, Part::Armour, FINISH_PLATE);
+                fill_f(&mut foot, (11, 12), (1, 2), z, Part::Armour, FINISH_STEEL);
+            }
             u.push_segment(Attach::flat((ax as i16, 4, az as i16), (4, 4, 4)), foot);
             // Опоры подвески идут «нос по +Z, нос по −Z, корма по +Z,
             // корма по −Z»; нос корпуса — +X.
@@ -1361,31 +1475,163 @@ pub fn strider() -> UnitBody {
         };
         disc(&mut u, (20, 20), 13 - k, (y, y + 1), Part::Armour);
     }
-    // Двигатель в корме корпуса, выхлопной стакан назад.
-    fill(&mut u, (9, 16), (28, 36), (14, 26), Part::Engine);
-    cyl(&mut u, 0, (2, 10), (33, 20), 3, 0, Part::Engine);
-
-    // Шея-шар и голова. Голова вращается целиком, и шар под ней
-    // виден как сустав, а не как стык двух коробок.
-    ball(&mut u, (20, 38, 20), 6, Part::Armour);
-    for y in 40usize..48 {
-        let k = y.saturating_sub(46);
-        fill(
+    // A recessed waist and angled side armour separate the four leg roots
+    // from the turret, instead of reading as a single square body.
+    mark(&mut u, (8, 33), (29, 30), (8, 33), FINISH_GUN);
+    for &(z, side) in &[(8, -1), (32, 1)] {
+        skirt(
             &mut u,
-            (12 + k, 28 - k),
-            (y, y + 1),
-            (12 + k, 28 - k),
+            12,
+            16,
+            37,
+            z,
+            side,
+            TURN / 16,
+            7,
+            2,
+            false,
             Part::Armour,
+            FINISH_PLATE,
         );
     }
-    // Два ствола в общей маске.
-    fill(&mut u, (24, 28), (41, 47), (13, 27), Part::Weapon);
-    cyl(&mut u, 0, (26, 40), (44, 16), 2, 0, Part::Weapon);
-    cyl(&mut u, 0, (26, 40), (44, 24), 2, 0, Part::Weapon);
-    // Наблюдение: блок на макушке и два боковых кожуха.
-    fill(&mut u, (16, 24), (48, 50), (16, 24), Part::Sensor);
-    cyl(&mut u, 2, (9, 13), (20, 44), 3, 0, Part::Sensor);
-    cyl(&mut u, 2, (27, 31), (20, 44), 3, 0, Part::Sensor);
+    fill(&mut u, (27, 32), (32, 37), (14, 26), Part::Armour);
+    for z in [14, 24] {
+        fill_f(
+            &mut u,
+            (30, 33),
+            (34, 36),
+            (z, z + 2),
+            Part::Armour,
+            FINISH_STEEL,
+        );
+    }
+    // Двигатель в корме корпуса, выхлопной стакан назад.
+    fill(&mut u, (9, 16), (28, 36), (14, 26), Part::Engine);
+    for z in [15usize, 25] {
+        cyl_f(
+            &mut u,
+            0,
+            (2, 10),
+            (33, z as i32),
+            2,
+            0,
+            Part::Engine,
+            FINISH_GUN,
+        );
+        fill_f(
+            &mut u,
+            (2, 4),
+            (32, 34),
+            (z - 1, z + 2),
+            Part::Engine,
+            FINISH_STEEL,
+        );
+    }
+    for z in (15..26).step_by(3) {
+        fill_f(
+            &mut u,
+            (8, 10),
+            (32, 35),
+            (z, z + 1),
+            Part::Engine,
+            FINISH_STEEL,
+        );
+    }
+
+    // The neck is exposed between the hull and a chamfered, rotating head.
+    ball(&mut u, (20, 38, 20), 6, Part::Armour);
+    plated_turret(
+        &mut u,
+        (12, 29),
+        (40, 47),
+        (12, 28),
+        (6, 3),
+        TURN / 16,
+        7,
+        2,
+        true,
+        Part::Armour,
+        FINISH_PLATE,
+    );
+    fill(&mut u, (15, 26), (47, 48), (14, 26), Part::Armour);
+    // Independent mantlets and cooling collars make both functional barrels
+    // readable from above. Their root voxels remain the damage-bearing path.
+    for z in [16, 24] {
+        fill_f(
+            &mut u,
+            (24, 31),
+            (42, 47),
+            (z - 3, z + 3),
+            Part::Weapon,
+            FINISH_GUN,
+        );
+        cyl_f(
+            &mut u,
+            0,
+            (28, 40),
+            (44, z as i32),
+            2,
+            0,
+            Part::Weapon,
+            FINISH_GUN,
+        );
+        cyl_f(
+            &mut u,
+            0,
+            (32, 35),
+            (44, z as i32),
+            3,
+            0,
+            Part::Weapon,
+            FINISH_STEEL,
+        );
+        cyl_f(
+            &mut u,
+            0,
+            (38, 40),
+            (44, z as i32),
+            2,
+            0,
+            Part::Weapon,
+            FINISH_STEEL,
+        );
+    }
+    // Small glazed slit in a dark sensor housing; the former white block
+    // dominated the whole silhouette at gameplay distance.
+    fill_f(
+        &mut u,
+        (22, 29),
+        (47, 49),
+        (17, 23),
+        Part::Sensor,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (28, 30),
+        (47, 49),
+        (18, 22),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    for z in [10, 28] {
+        fill_f(
+            &mut u,
+            (15, 20),
+            (44, 47),
+            (z, z + 2),
+            Part::Sensor,
+            FINISH_GUN,
+        );
+        fill_f(
+            &mut u,
+            (19, 21),
+            (45, 47),
+            (z, z + 2),
+            Part::Sensor,
+            FINISH_OPTIC,
+        );
+    }
 
     // Ядро ставится **последним**: шея-шар задевает середину корпуса,
     // и один перекрашенный ею воксель ломал сплошной куб затравки.

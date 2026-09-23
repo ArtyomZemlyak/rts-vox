@@ -33,15 +33,15 @@ fn sample(f: Finish, u: f32, v: f32) -> Sample {
     let grain = noise(u, v, 96);
     let scratches = ((u * 64.0 + noise(u, v, 8) * 0.18).fract() - 0.5).abs();
     let scratch = (1.0 - scratches * 42.0).max(0.0) * (noise(u, v, 16) - 0.55).max(0.0) * 2.2;
-    let worn = ((noise(u, v, 32) - 0.72) * 4.0)
-        .clamp(0.0, 1.0)
-        .max(scratch);
+    let worn = ((noise(u, v, 32) - 0.77) * 2.8)
+        .clamp(0.0, 0.55)
+        .max(scratch * 0.28);
     let (shade, rough, metal, relief) = match f {
         Finish::Plate => (
-            0.82 + broad * 0.14 + worn * 0.13,
-            0.64 + grain * 0.16 - worn * 0.36,
-            0.06 + worn * 0.90,
-            grain * 0.11 - worn * 0.30,
+            0.74 + broad * 0.17 - worn * 0.08,
+            0.68 + grain * 0.12 - worn * 0.12,
+            0.08 + worn * 0.50,
+            grain * 0.08 - worn * 0.12,
         ),
         Finish::Gun => (
             0.80 + broad * 0.11 + scratch * 0.16,
