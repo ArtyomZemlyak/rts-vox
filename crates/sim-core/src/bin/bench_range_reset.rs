@@ -16,8 +16,14 @@ fn main() {
         "RESET initial-world ms={:.3}",
         mark.elapsed().as_secs_f64() * 1000.0
     );
+    let mark = Instant::now();
+    let validator = Validator::default();
+    println!(
+        "RESET validator-init ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
     sim = sim
-        .rebuilt_with_layout(config.clone(), layout.clone(), &Validator::default())
+        .rebuilt_with_layout(config.clone(), layout.clone(), &validator)
         .expect("warm reset");
 
     for run in 0..3 {
@@ -37,7 +43,7 @@ fn main() {
         );
         let mark = Instant::now();
         sim = sim
-            .rebuilt_with_layout(config.clone(), layout.clone(), &Validator::default())
+            .rebuilt_with_layout(config.clone(), layout.clone(), &validator)
             .expect("reset");
         assert_eq!(sim.world.touched_chunks(), 0);
         println!(
