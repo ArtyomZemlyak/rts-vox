@@ -4311,6 +4311,7 @@ name = "render"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "bytemuck",
  "fx",
  "meshing",
  "modding",

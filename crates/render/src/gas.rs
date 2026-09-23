@@ -645,7 +645,8 @@ fn init(
         &BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
-                storage_buffer_read_only::<Vec<UVec2>>(false),
+                storage_buffer_read_only::<Vec<u32>>(false),
+                storage_buffer_read_only::<Vec<u32>>(false),
                 storage_buffer::<Vec<u32>>(false),
             ),
         ),
@@ -802,6 +803,17 @@ fn init(
     });
 }
 
+fn le_bytes(words: &[u32]) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(target_endian = "little")]
+    {
+        std::borrow::Cow::Borrowed(bytemuck::cast_slice(words))
+    }
+    #[cfg(target_endian = "big")]
+    {
+        std::borrow::Cow::Owned(words.iter().flat_map(|v| v.to_le_bytes()).collect())
+    }
+}
+
 fn prepare(
     mut commands: Commands,
     mut pipeline: ResMut<Pipeline>,
@@ -836,30 +848,56 @@ fn prepare(
     if pipeline.terrain_revision != input.terrain_revision {
         assert!(input.window.words() <= TERRAIN_WORDS);
         let count = input.patch_words.len();
+        // Bound per-workgroup serial writes when a few ranges are much longer
+        // than the usual short rows of a streamed window.
+        const WORDS_PER_UPLOAD_SPAN: usize = 512;
+        let descriptors = input
+            .patches
+            .iter()
+            .map(|r| r.len().div_ceil(WORDS_PER_UPLOAD_SPAN))
+            .sum::<usize>();
         if let Some(compute) = cache.get_compute_pipeline(pipeline.upload).filter(|_| {
             input.patches.len() > 128
                 && count > 0
-                && count * 8 <= device.limits().max_storage_buffer_binding_size as usize
+                && count * 4 <= device.limits().max_storage_buffer_binding_size as usize
+                && descriptors * 12 <= device.limits().max_storage_buffer_binding_size as usize
         }) {
-            let mut bytes = Vec::with_capacity(count * 8);
+            let mut spans = Vec::with_capacity(descriptors * 3);
+            let mut offset = 0u32;
             for (start, words) in input.patches() {
-                for (offset, &word) in words.iter().enumerate() {
-                    bytes.extend_from_slice(&((start + offset) as u32).to_le_bytes());
-                    bytes.extend_from_slice(&word.to_le_bytes());
+                for chunk in (0..words.len()).step_by(WORDS_PER_UPLOAD_SPAN) {
+                    spans.extend_from_slice(&[
+                        (start + chunk) as u32,
+                        offset + chunk as u32,
+                        (words.len() - chunk).min(WORDS_PER_UPLOAD_SPAN) as u32,
+                    ]);
                 }
+                offset += words.len() as u32;
             }
-            let staging = device.create_buffer(&BufferDescriptor {
-                label: Some("terrain patch list"),
-                size: bytes.len() as u64,
+            debug_assert_eq!(offset as usize, count);
+            debug_assert_eq!(spans.len() / 3, descriptors);
+            let descriptor_bytes = le_bytes(&spans);
+            let value_bytes = le_bytes(&input.patch_words);
+            let spans = device.create_buffer(&BufferDescriptor {
+                label: Some("terrain patch spans"),
+                size: descriptor_bytes.len() as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&staging, 0, &bytes);
+            let values = device.create_buffer(&BufferDescriptor {
+                label: Some("terrain patch values"),
+                size: value_bytes.len() as u64,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&spans, 0, descriptor_bytes.as_ref());
+            queue.write_buffer(&values, 0, value_bytes.as_ref());
             let group = device.create_bind_group(
                 "terrain sparse upload",
                 &cache.get_bind_group_layout(&pipeline.upload_layout),
                 &BindGroupEntries::sequential((
-                    staging.as_entire_binding(),
+                    spans.as_entire_binding(),
+                    values.as_entire_binding(),
                     pipeline.terrain.as_entire_binding(),
                 )),
             );
@@ -873,7 +911,7 @@ fn prepare(
                 });
                 pass.set_pipeline(compute);
                 pass.set_bind_group(0, &group, &[]);
-                let groups = (count as u32).div_ceil(64);
+                let groups = (descriptors as u32).div_ceil(4);
                 pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
             }
             // Submit before the frame's passes, making the new terrain visible
@@ -881,8 +919,8 @@ fn prepare(
             queue.submit([encoder.finish()]);
         } else {
             for (start, words) in input.patches() {
-                let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
-                queue.write_buffer(&pipeline.terrain, start as u64 * 4, &bytes);
+                let bytes = le_bytes(words);
+                queue.write_buffer(&pipeline.terrain, start as u64 * 4, bytes.as_ref());
             }
         }
         pipeline.terrain_revision = input.terrain_revision;
@@ -890,6 +928,7 @@ fn prepare(
             .uploaded
             .store(input.terrain_revision, Ordering::Release);
     }
+    let after_upload = started.map_or(0, |t| t.elapsed().as_nanos() as u64);
     let terrain_buffer = pipeline.terrain.clone();
     pipeline.bricks.prepare(
         input.window,
@@ -899,6 +938,7 @@ fn prepare(
         &queue,
         &cache,
     );
+    let after_bricks = started.map_or(0, |t| t.elapsed().as_nanos() as u64);
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
     let Pipeline {
@@ -1019,6 +1059,18 @@ fn prepare(
     }
     if let Some(started) = started {
         let elapsed = started.elapsed().as_nanos() as u64;
+        if elapsed >= 4_000_000 {
+            eprintln!(
+                "PROFILE_RENDER_PREPARE total_ms={:.3} upload_ms={:.3} bricks_ms={:.3} regions_ms={:.3} patches={} words={} regions={}",
+                elapsed as f64 / 1_000_000.0,
+                after_upload as f64 / 1_000_000.0,
+                after_bricks.saturating_sub(after_upload) as f64 / 1_000_000.0,
+                elapsed.saturating_sub(after_bricks) as f64 / 1_000_000.0,
+                input.patches.len(),
+                input.patch_words.len(),
+                input.atmosphere.regions.iter().flatten().count()
+            );
+        }
         input
             .timings
             .prepare_peak_ns
