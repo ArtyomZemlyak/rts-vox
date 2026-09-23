@@ -753,6 +753,13 @@ impl Motion {
             })
         };
         let far = [w.nx as i32 - EDGE, w.nz as i32 - EDGE];
+        // A fresh destination supersedes the recovery cycle of the old
+        // order. Replanning the same destination preserves its attempt count.
+        if self.destination != Some(to) {
+            self.escape = 0;
+            self.blocked_ticks = 0;
+        }
+        self.escape_left = 0;
         self.destination = (0..2)
             .all(|a| (EDGE..far[a]).contains(&to[a]))
             .then_some(to);
@@ -1167,6 +1174,14 @@ impl Motion {
             self.blocked = true;
             if terrain_allowed {
                 if let Some(index) = collision {
+                    // The route was valid when planned, but another hull
+                    // now occupies it. Ask for one new route promptly;
+                    // repeated refusals keep the normal replan cadence.
+                    if self.blocked_ticks == 0 && self.destination.is_some() {
+                        self.next_plan = self
+                            .next_plan
+                            .min(tick.saturating_add(self.navigation.contact_replan_ticks));
+                    }
                     let drive = V3::new(
                         delta.dx.mul(Fx::from_int(30)),
                         Fx::ZERO,
@@ -2122,6 +2137,69 @@ mod tests {
             a.pos, a.path, a.hunt, a.stranded,a.escape,a.blocked,a.dry,a.last_plan,
             b.pos, b.path, b.hunt,b.stranded,b.escape,b.blocked,b.dry,b.last_plan
         );
+    }
+    #[test]
+    fn a_new_hull_blocker_prompts_a_route_around_it_without_waiting_for_recovery() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut mover = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        let blocker = Motion::new([280, 16, 300], RangeUnitKind::Tank, &body);
+        let other = Obstacle::of(&blocker, &body);
+        mover.enabled = true;
+        mover.destination = Some([430, 300]);
+        mover.path = vec![[430, 300]];
+        mover.next_plan = 1000;
+        let mut contact_tick = None;
+        for tick in 0..300 {
+            step(&mut mover, &w, &body, &[other], tick);
+            if mover.blocked {
+                contact_tick = Some(tick);
+                assert!(
+                    mover.next_plan <= tick + 2,
+                    "contact postponed replanning to {}",
+                    mover.next_plan
+                );
+                break;
+            }
+        }
+        let first = contact_tick.expect("fixture did not meet the new blocker");
+        let mut snapshot = Blob::new();
+        mover.save(&mut snapshot);
+        let mut restored = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        assert!(restored.load(&mut Scan::new(&snapshot.v)));
+        let mut arrived = false;
+        for tick in first + 1..1200 {
+            step(&mut mover, &w, &body, &[other], tick);
+            step(&mut restored, &w, &body, &[other], tick);
+            let mut a = Blob::new();
+            let mut b = Blob::new();
+            mover.save(&mut a);
+            restored.save(&mut b);
+            assert_eq!(a.v, b.v, "route diverged after loading at {tick}");
+            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            if mover.destination.is_none() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "mover never passed the blocker: {:?}", mover.pos);
+    }
+    #[test]
+    fn a_new_move_order_interrupts_the_old_escape_manoeuvre() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut mover = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        mover.enabled = true;
+        mover.destination = Some([70, 300]);
+        mover.escape_left = mover.navigation.escape_ticks;
+        mover.escape = 2;
+        assert!(mover.move_to(&w, [430, 300], &body, &[], &nav::vehicle::Rubble::new()));
+        assert_eq!(mover.escape_left, 0, "old escape delayed the new order");
+        assert_eq!(mover.escape, 0, "old recovery cycle survived retargeting");
+        for tick in 0..30 {
+            step(&mut mover, &w, &body, &[], tick);
+        }
+        assert!(mover.pos[0] > Fx::from_int(201));
     }
     #[test]
     fn recovery_resumes_from_a_save_without_a_velocity_flip() {

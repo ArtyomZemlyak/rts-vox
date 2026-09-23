@@ -11,6 +11,9 @@
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.
     recovery_ticks: 36,
+    // A newly arrived hull invalidates the old route immediately, while
+    // ordinary terrain refusals keep the normal bounded recovery cadence.
+    contact_replan_ticks: 2,
     escape_ticks: 42,
     escape_speed_pct: 30,
     recovery_turn_deg: 25,
@@ -26,7 +29,7 @@
     // 300 — but at 300 the terrain series lost five runs of 176 on the
     // crater rim, where a greedy search hugs the refusals; at 200 none.
     heuristic_pct: 200,
-    // Foliage and trunk of range-materials.ron. A tracked hull cuts what it
+    // Foliage and trunk of range-materials.ron. A hull cuts what it
     // overlaps; the connected crown within the radius falls without a cut.
     // A tree crossing at 60% speed costs about 10/0.6 = 17 instead of 10.
     // A cap of 20 priced it as triple travel time and flooded the forest search.

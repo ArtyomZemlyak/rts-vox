@@ -13,6 +13,9 @@ pub struct Navigation {
     #[serde(default = "every_start")]
     pub searches_started_per_tick: usize,
     pub recovery_ticks: u32,
+    /// Delay before replanning once another hull blocks an accepted route.
+    #[serde(default = "old_contact_replan")]
+    pub contact_replan_ticks: u32,
     pub escape_ticks: u32,
     pub escape_speed_pct: i32,
     pub recovery_turn_deg: i32,
@@ -42,10 +45,13 @@ fn whole_search() -> usize {
 fn every_start() -> usize {
     usize::MAX
 }
-/// What a tracked hull pushes over instead of driving around.
+fn old_contact_replan() -> u32 {
+    90
+}
+/// What a hull pushes over instead of driving around.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct Felling {
-    /// Materials a tracked hull crushes; a walker still treats them as walls.
+    /// Materials a tank or walker crushes while crossing vegetation.
     pub materials: [u16; 2],
     /// Connected yielding matter within this distance of a cut cell is
     /// released and falls; farther crowns stay standing.
@@ -67,6 +73,7 @@ impl Navigation {
             || !(n.cell_units as u32).is_power_of_two()
             || !(64..=51200).contains(&n.search_nodes)
             || !(1..=300).contains(&n.recovery_ticks)
+            || !(1..=300).contains(&n.contact_replan_ticks)
             || !(1..=300).contains(&n.escape_ticks)
             || !(1..=60).contains(&n.escape_speed_pct)
             || !(0..=60).contains(&n.recovery_turn_deg)
@@ -82,5 +89,21 @@ impl Navigation {
             return Err("invalid range navigation limits".into());
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn older_navigation_keeps_its_replan_cadence() {
+        let old = include_str!("../../../data/range-navigation.ron")
+            .replace("contact_replan_ticks: 2,", "");
+        assert_eq!(Navigation::from_ron(&old).unwrap().contact_replan_ticks, 90);
+        assert!(Navigation::from_ron(
+            &include_str!("../../../data/range-navigation.ron")
+                .replace("contact_replan_ticks: 2", "contact_replan_ticks: 0")
+        )
+        .is_err());
     }
 }
