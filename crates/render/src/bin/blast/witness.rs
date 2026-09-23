@@ -19,6 +19,7 @@ struct Built {
 struct Snapshot {
     body: voxel::unit::UnitBody,
     dents: BTreeMap<[u8; 3], u32>,
+    segment_dents: BTreeMap<(u8, [u8; 3]), u32>,
     revision: u64,
     seg_gone: Vec<bool>,
     allied: Option<bool>,
@@ -29,6 +30,7 @@ impl From<&RangeUnit> for Snapshot {
             body: u.body.clone(),
             allied: None,
             dents: u.dents.clone(),
+            segment_dents: u.segment_dents().clone(),
             revision: u.revision,
             seg_gone: u.seg_gone.clone(),
         }
@@ -92,26 +94,46 @@ fn build(
                     let normal = Vec3::from(buf.nrm[j]);
                     let local = Vec3::from(buf.pos[j]) + Vec3::from(pivot) - normal * 0.08;
                     let cell = local.floor().as_ivec3();
+                    let local_cell = cell.cmpge(IVec3::ZERO).all().then_some([
+                        cell.x as u8,
+                        cell.y as u8,
+                        cell.z as u8,
+                    ]);
                     let owner = if let Some(seg) = segment {
-                        if cell.cmplt(IVec3::ZERO).any() {
-                            None
-                        } else {
-                            skins.owner(pristine, seg, [cell.x as u8, cell.y as u8, cell.z as u8])
-                        }
-                    } else if cell.cmplt(IVec3::ZERO).any() {
-                        None
+                        local_cell.and_then(|cell| skins.owner(pristine, seg, cell))
                     } else {
-                        Some([cell.x as u8, cell.y as u8, cell.z as u8])
+                        local_cell
                     };
-                    let Some(owner) = owner else {
-                        continue;
-                    };
-                    let p = Vec3::from(owner.map(|v| v as f32)) + Vec3::splat(0.5);
-                    let work = unit.dents.get(&owner).copied().unwrap_or(0);
-                    if work > 0 {
-                        let cost =
-                            sim_core::blast::unit_work(&unit.body, owner.map(usize::from), config);
-                        let severity = (work as f32 / cost as f32).clamp(0.0, 1.0);
+                    let mut severity = 0.0_f32;
+                    if let Some(owner) = owner {
+                        let work = unit.dents.get(&owner).copied().unwrap_or(0);
+                        if work > 0 {
+                            let cost = sim_core::blast::unit_work(
+                                &unit.body,
+                                owner.map(usize::from),
+                                config,
+                            );
+                            severity = (work as f32 / cost as f32).clamp(0.0, 1.0);
+                        }
+                    }
+                    if let (Some(seg), Some(cell)) = (segment, local_cell) {
+                        let work = unit
+                            .segment_dents
+                            .get(&(seg as u8, cell))
+                            .copied()
+                            .unwrap_or(0);
+                        if work > 0 {
+                            let cost = sim_core::blast::unit_work(
+                                &unit.body.segments[seg].body,
+                                cell.map(usize::from),
+                                config,
+                            );
+                            severity = severity.max((work as f32 / cost as f32).clamp(0.0, 1.0));
+                        }
+                    }
+                    if severity > 0.0 {
+                        let mark = owner.or(local_cell).unwrap();
+                        let p = Vec3::from(mark.map(|v| v as f32)) + Vec3::splat(0.5);
                         let grain = (p.dot(Vec3::new(17.1, 7.7, 23.3)).sin() * 437.1)
                             .fract()
                             .abs();
@@ -123,6 +145,10 @@ fn build(
                         // persisted work, never a second collision body.
                         buf.pos[j] = (Vec3::from(buf.pos[j]) - normal * severity * 0.13).to_array();
                     }
+                    let Some(owner) = owner else {
+                        continue;
+                    };
+                    let p = Vec3::from(owner.map(|v| v as f32)) + Vec3::splat(0.5);
                     let cut = lost(p + normal * 0.55);
                     let scorched = cut
                         || [
@@ -314,6 +340,30 @@ pub(super) fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn damaged_tank_plate_changes_its_own_visible_mesh() {
+        let pristine = voxel::unit::tank();
+        let skins = SkinBindings::new(&pristine);
+        let config = scaled_config(true, false, 1000);
+        let unit = RangeUnit::of_kind(RangeUnitKind::Tank, [300, 16, 300]);
+        let clean = Snapshot::from(&unit);
+        let mut marked = Snapshot::from(&unit);
+        let cell = [0, 0, 0];
+        assert!(marked.body.segments[0].body.vol.get(0, 0, 0));
+        let cost = sim_core::blast::unit_work(&marked.body.segments[0].body, [0, 0, 0], &config);
+        marked.segment_dents.insert((0, cell), cost / 2);
+        marked.revision = 1;
+        let clean = build(&clean, 0, &pristine, &skins, &config);
+        let marked = build(&marked, 0, &pristine, &skins, &config);
+        let colors = |meshes: &Vec<Built>| {
+            meshes
+                .iter()
+                .filter(|mesh| mesh.segment == Some(0))
+                .map(|mesh| mesh.mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap().clone())
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(colors(&clean), colors(&marked));
+    }
     #[test]
     fn worker_owns_a_snapshot_while_the_authoritative_body_keeps_changing() {
         let layout =

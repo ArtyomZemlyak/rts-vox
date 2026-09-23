@@ -463,6 +463,9 @@ impl RangeUnit {
             .copied()
             .unwrap_or(0)
     }
+    pub fn segment_dents(&self) -> &BTreeMap<(u8, [u8; 3]), u32> {
+        &self.seg_dents
+    }
     pub fn segment_shed_pending(&self) -> &[u8] {
         &self.seg_shed
     }
