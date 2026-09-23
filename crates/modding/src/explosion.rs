@@ -98,6 +98,14 @@ fn unit_roles() -> [u32; 5] {
 }
 
 impl ExplosionConfig {
+    /// Visual source volume follows charge strength, so its radius scales
+    /// with the cube root rather than filling the fixed gas window at 4x.
+    pub fn gas_radius_at_power(&self, power_milli: u32) -> i32 {
+        (f64::from(self.gas_source_radius) * (f64::from(power_milli) / 1000.0).cbrt())
+            .round()
+            .clamp(1.0, 128.0) as i32
+    }
+
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let c: Self = ron::from_str(text).map_err(|e| e.to_string())?;
         if !(1..=32).contains(&c.half_cells)
@@ -158,5 +166,15 @@ mod display_tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn visual_gas_radius_scales_with_charge_volume() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        assert_eq!(c.gas_source_radius, 32);
+        assert_eq!(
+            [500, 1000, 2000, 4000].map(|power| c.gas_radius_at_power(power)),
+            [25, 32, 40, 51]
+        );
     }
 }

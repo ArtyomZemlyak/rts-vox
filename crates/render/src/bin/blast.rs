@@ -142,7 +142,7 @@ fn scaled_config(energy: bool, anni: bool, power: u32) -> ExplosionConfig {
     c.energy = c.energy * power / 1000;
     c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
     c.gas_pressure_milli = (c.gas_pressure_milli * power as i32 / 1000).min(10000);
-    c.gas_source_radius = c.gas_source_radius * (1000 + power as i32) / 2000;
+    c.gas_source_radius = c.gas_radius_at_power(power);
     c
 }
 fn weapon_config(energy: bool, anni: bool, power: u32, delivery: Delivery) -> ExplosionConfig {
