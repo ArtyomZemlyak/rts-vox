@@ -9,6 +9,8 @@ pub mod matter;
 pub mod motion;
 #[path = "range_placement.rs"]
 pub mod placement;
+#[path = "range_plate.rs"]
+mod plate;
 use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
@@ -2124,7 +2126,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(36);
+        b.u32(37);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2266,7 +2268,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2535,7 +2537,7 @@ impl BlastRange {
             };
             r.collapse_backlog.insert([x, y, z], e);
         }
-        if !r.bodies.load(&mut s) {
+        if !r.bodies.load_version(&mut s, version >= 37) {
             return None;
         }
         r.world_steady = s.bool();
@@ -3295,6 +3297,21 @@ impl BlastRange {
             }
             self.bodies.list = whole;
             self.bodies.spawned.clear();
+            if let Some(layout) = &self.layout {
+                let before = self.bodies.list.len();
+                plate::fracture(layout, &mut self.world, &mut self.bodies, &edits, |mat| {
+                    self.matter
+                        .economy
+                        .mats
+                        .get(mat)
+                        .map(|m| (m.strength, m.density, m.bend_span))
+                });
+                self.collapsed_cells += self.bodies.list[before..]
+                    .iter()
+                    .map(|b| b.voxels.len() as u64)
+                    .sum::<u64>();
+                self.bodies.spawned.clear();
+            }
         }
         if !crumbs.is_empty() {
             // Crumbled cells are removed matter now held by pieces, or

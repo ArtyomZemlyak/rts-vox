@@ -1787,5 +1787,16 @@ mod tests {
             .motion
             .path
             .is_empty());
+        app.world_mut()
+            .spawn((panel::Action::Scenario(0), Interaction::Pressed));
+        app.update();
+        let edit = app.world().resource::<Workshop>();
+        let (config, layout) = edit.pending.as_ref().expect("scenario did not rebuild");
+        assert_eq!(edit.zone, 2);
+        assert_eq!(layout.gun, layout.zones[2].spawn);
+        assert_eq!(layout.target, layout.zones[2].target);
+        assert_eq!(config.delivery, Delivery::Blast);
+        assert_eq!(app.world().resource::<Scene>().power, 500);
+        assert!(!app.world().resource::<panel::Panel>().drive);
     }
 }

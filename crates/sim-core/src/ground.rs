@@ -218,10 +218,14 @@ impl Ground {
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.load_version(s, true)
+    }
+
+    pub fn load_version(&mut self, s: &mut fx::blob::Scan, tilted: bool) -> bool {
         if !self.world.load(s) {
             return false;
         }
-        if !self.bodies.load(s) {
+        if !self.bodies.load_version(s, tilted) {
             return false;
         }
         if !self.collapse.load(s) {

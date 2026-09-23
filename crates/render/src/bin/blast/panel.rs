@@ -9,6 +9,7 @@ pub struct Panel {
     pub ground_fire: bool,
     pub blocked: bool,
     pub routes: bool,
+    pub scenarios_open: bool,
     keys: Vec<KeyCode>,
     pending: Option<(u8, u32)>,
 }
@@ -20,6 +21,7 @@ impl Panel {
             ground_fire: false,
             blocked: false,
             routes: true,
+            scenarios_open: false,
             keys: Vec::new(),
             pending: None,
         }
@@ -57,6 +59,8 @@ pub enum Action {
     Overview,
     Zone(i32),
     RestartHere,
+    ScenarioMenu,
+    Scenario(u8),
     Orbit(f32),
     Own,
     Target,
@@ -81,6 +85,18 @@ pub struct ScrollPanel;
 pub struct EditorOnly;
 #[derive(Component)]
 pub struct RangeOnly;
+#[derive(Component)]
+pub struct ScenarioOnly;
+
+// Stock, repeatable experiments. The selected sector supplies the authored
+// shooter and aim; loading from the stock file discards prior damage/edits.
+const SCENARIOS: [(&str, &str, u8, u32); 5] = [
+    ("Обрушение опоры", "Обрушение", 1, 500),
+    ("Броня за укрытием", "Укрытие и броня", 1, 1000),
+    ("Разрушение материалов", "Материалы", 0, 2000),
+    ("Проверка щита", "Энергетическая защита", 1, 1000),
+    ("Лес и склон", "Лес и крутой склон", 5, 1000),
+];
 
 pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>) {
     if edit.layout.is_none() {
@@ -159,6 +175,12 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 ],
             ),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
+            (false, vec![("Сценарии испытаний ▾", Action::ScenarioMenu)]),
+            (false, vec![(SCENARIOS[0].0, Action::Scenario(0))]),
+            (false, vec![(SCENARIOS[1].0, Action::Scenario(1))]),
+            (false, vec![(SCENARIOS[2].0, Action::Scenario(2))]),
+            (false, vec![(SCENARIOS[3].0, Action::Scenario(3))]),
+            (false, vec![(SCENARIOS[4].0, Action::Scenario(4))]),
             (
                 false,
                 vec![
@@ -324,10 +346,18 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             if editor {
                 parent.insert(EditorOnly);
             }
+            if row.iter().any(|(_, a)| matches!(a, Action::Scenario(_))) {
+                parent.insert(ScenarioOnly);
+            }
             if row.iter().any(|(_, a)| {
                 matches!(
                     a,
-                    Action::Weapon(_) | Action::Chassis(_) | Action::Power(_) | Action::Patrol
+                    Action::Weapon(_)
+                        | Action::Chassis(_)
+                        | Action::Power(_)
+                        | Action::Patrol
+                        | Action::Scenario(_)
+                        | Action::ScenarioMenu
                 )
             }) {
                 parent.insert(RangeOnly);
@@ -680,6 +710,56 @@ pub fn actions(
                     Err(e) => scene.notice = e,
                 }
             }
+            Action::ScenarioMenu => panel.scenarios_open = !panel.scenarios_open,
+            Action::Scenario(id) => {
+                if let Some(&(_, zone_name, weapon, power)) = SCENARIOS.get(id as usize) {
+                    let stock =
+                        RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"));
+                    match stock.and_then(|mut layout| {
+                        let zone = layout
+                            .zones
+                            .iter()
+                            .position(|z| z.name == zone_name)
+                            .ok_or("Unknown scenario sector")?;
+                        let selected = &layout.zones[zone];
+                        layout.gun = selected.spawn;
+                        layout.target = selected.target;
+                        layout.battle = false;
+                        let energy = weapon == 1 || weapon == 2;
+                        let anni = weapon == 2;
+                        let delivery = match weapon {
+                            5 => Delivery::Kinetic,
+                            _ => Delivery::Blast,
+                        };
+                        let config =
+                            knobs::effective_config(energy, anni, power, delivery, overrides);
+                        edit.commit(layout, config)?;
+                        Ok::<usize, String>(zone)
+                    }) {
+                        Ok(zone) => {
+                            edit.zone = zone;
+                            edit.editing = false;
+                            edit.selected = None;
+                            edit.controlled = None;
+                            edit.pan = Vec2::ZERO;
+                            edit.zoom = 1.0;
+                            edit.orbit = 0.0;
+                            panel.scenarios_open = false;
+                            panel.drive = false;
+                            panel.demo = false;
+                            panel.pending = None;
+                            panel.ground_fire = false;
+                            scene.energy = weapon == 1 || weapon == 2;
+                            scene.anni = weapon == 2;
+                            scene.power = power;
+                            scene.repeat = false;
+                            scene.view = 1;
+                            scene.layout_file = Some("data/range-km.ron".into());
+                        }
+                        Err(e) => scene.notice = e,
+                    }
+                }
+            }
             Action::Orbit(delta) => {
                 edit.orbit = (edit.orbit + delta).rem_euclid(std::f32::consts::TAU)
             }
@@ -766,8 +846,13 @@ pub fn refresh(
     panel: Res<Panel>,
     streaming: Option<Res<streaming::Streaming>>,
     mut rows: Query<
-        (&mut Node, Option<&EditorOnly>, Option<&RangeOnly>),
-        Or<(With<EditorOnly>, With<RangeOnly>)>,
+        (
+            &mut Node,
+            Option<&EditorOnly>,
+            Option<&RangeOnly>,
+            Option<&ScenarioOnly>,
+        ),
+        Or<(With<EditorOnly>, With<RangeOnly>, With<ScenarioOnly>)>,
     >,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
     mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
@@ -791,9 +876,10 @@ pub fn refresh(
             sector
         };
     }
-    for (mut n, editor, range) in &mut rows {
+    for (mut n, editor, range, scenario) in &mut rows {
         n.display = if (editor.is_none() || edit.editing)
             && (range.is_none() || !scene.sim.battle_mode())
+            && (scenario.is_none() || panel.scenarios_open)
         {
             Display::Flex
         } else {
@@ -818,6 +904,7 @@ pub fn refresh(
             Action::Tool(t) => edit.tool == t,
             Action::Patrol => scene.sim.patrols_running,
             Action::Routes => panel.routes,
+            Action::ScenarioMenu => panel.scenarios_open,
             _ => false,
         };
         color.0 = if *interaction == Interaction::Hovered {

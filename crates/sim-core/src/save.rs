@@ -48,7 +48,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 13;
+pub const VERSION: u32 = 14;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +153,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && !(8..=12).contains(&v) {
+    if v != VERSION && !(8..=13).contains(&v) {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -466,7 +466,7 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
         let Some(g) = w.ground.as_mut() else {
             return Err(LoadError::WorldMismatch);
         };
-        if !g.load(s) {
+        if !g.load_version(s, version >= 14) {
             return Err(LoadError::WorldMismatch);
         }
         // Связность и проходимость — чистые функции мира, поэтому

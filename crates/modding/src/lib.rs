@@ -60,6 +60,10 @@ pub struct MatDef {
     pub density: u32,
     /// Прочность: сколько урона держит воксель.
     pub strength: u32,
+    /// Maximum self-supporting plate span per thickness under gravity.
+    /// Zero uses the strength-derived legacy estimate (ADR-373).
+    #[serde(default)]
+    pub bend_span: u32,
     /// Наносит ли урон тому, кто его касается (лава, ADR-100).
     pub harmful: bool,
     /// Тепло, которое горящий воксель отдаёт каждому соседу за время
@@ -152,6 +156,9 @@ impl Registry {
             w = w.wrapping_mul(31).wrapping_add(d.density as u64);
             w = w.wrapping_mul(31).wrapping_add(d.strength as u64);
             w = w.wrapping_mul(31).wrapping_add(d.harmful as u64);
+            if d.bend_span != 0 {
+                w = w.wrapping_mul(31).wrapping_add(d.bend_span as u64);
+            }
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         h
@@ -173,6 +180,7 @@ mod tests {
             id,
             density,
             strength: 10,
+            bend_span: 0,
             harmful: false,
             fuel: 0,
             kindling: 0,

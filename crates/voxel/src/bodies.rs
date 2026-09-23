@@ -61,6 +61,13 @@ pub struct Body {
     /// скорость меньше воксела за тик, и без дробной части тело
     /// не тронулось бы с места вовсе.
     pub fy: Fx,
+    /// Rotation of a fractured plate in binary turns (65536 = one turn).
+    /// Axis 0 keeps the cheap vertical-only path used by ordinary debris.
+    pub tilt_axis: u8,
+    pub tilt_angle: i32,
+    pub tilt_speed: i32,
+    pub pivot_x: u16,
+    pub pivot_z: u16,
     /// Тело только что отвалилось и в этом тике ещё не падает.
     ///
     /// Пауза минимум в один тик нужна порядку фаз: между отрывом
@@ -122,6 +129,11 @@ impl Body {
             fallen: 0,
             vy: Fx::ZERO,
             fy: Fx::ZERO,
+            tilt_axis: 0,
+            tilt_angle: 0,
+            tilt_speed: 0,
+            pivot_x: 0,
+            pivot_z: 0,
             resting: false,
             riders: Vec::new(),
         })
@@ -138,11 +150,13 @@ impl Body {
                 if f == u16::MAX {
                     continue;
                 }
-                let (x, y, z) = (
-                    self.ox + lx as i64,
-                    self.oy + f as i64 - 1,
-                    self.oz + lz as i64,
-                );
+                let (x, y0, z) = self.world_of(BodyVoxel {
+                    x: lx,
+                    y: f,
+                    z: lz,
+                    mat: 0,
+                });
+                let y = y0 - 1;
                 if x < 0 || y < 0 || z < 0 {
                     return false;
                 }
@@ -156,11 +170,63 @@ impl Body {
 
     /// Мировые координаты воксела тела.
     pub fn world_of(&self, v: BodyVoxel) -> (i64, i64, i64) {
+        if self.tilt_axis != 0 && self.tilt_angle != 0 {
+            let s = fx::angle::sin(self.tilt_angle);
+            let c = fx::angle::cos(self.tilt_angle);
+            let round = |a: Fx| (a.raw() + (1i64 << 31)) >> 32;
+            if self.tilt_axis == 1 {
+                let z = Fx::from_int(i32::from(v.z) - i32::from(self.pivot_z));
+                let y = Fx::from_int(i32::from(v.y));
+                return (
+                    self.ox + i64::from(v.x),
+                    self.oy + round(y.mul(c).sub(z.mul(s))),
+                    self.oz + i64::from(self.pivot_z) + round(y.mul(s).add(z.mul(c))),
+                );
+            }
+            let x = Fx::from_int(i32::from(v.x) - i32::from(self.pivot_x));
+            let y = Fx::from_int(i32::from(v.y));
+            return (
+                self.ox + i64::from(self.pivot_x) + round(x.mul(c).sub(y.mul(s))),
+                self.oy + round(x.mul(s).add(y.mul(c))),
+                self.oz + i64::from(v.z),
+            );
+        }
         (
             self.ox + v.x as i64,
             self.oy + v.y as i64,
             self.oz + v.z as i64,
         )
+    }
+
+    /// A detached plate tips toward its unsupported edge while gravity
+    /// translates it. The hinge is the edge still adjacent to the roof.
+    pub fn tilt(&mut self, axis: u8, direction: i32) {
+        self.tilt_axis = axis;
+        self.tilt_speed = direction.signum();
+        self.pivot_x = if direction > 0 { self.sx - 1 } else { 0 };
+        self.pivot_z = if direction < 0 { self.sz - 1 } else { 0 };
+    }
+
+    fn advance_tilt(&mut self, gravity: Fx) {
+        if self.tilt_axis == 0 {
+            return;
+        }
+        let lever = if self.tilt_axis == 1 {
+            self.sz
+        } else {
+            self.sx
+        };
+        // Thin plate about an edge: angular acceleration is proportional
+        // to g / lever length (3g/2L for a uniform rectangular plate).
+        // 15645 converts radians to 16-bit turns and includes 3/2.
+        let acceleration = gravity
+            .mul(Fx::from_int(15_645))
+            .div(Fx::from_int(i32::from(lever).max(1)))
+            .to_int_trunc()
+            .max(1);
+        self.tilt_speed =
+            (self.tilt_speed + self.tilt_speed.signum() * acceleration).clamp(-120, 120);
+        self.tilt_angle = (self.tilt_angle + self.tilt_speed).clamp(-12_000, 12_000);
     }
 }
 
@@ -292,6 +358,7 @@ impl Bodies {
                     continue;
                 }
             }
+            self.list[i].advance_tilt(self.gravity);
             if self.list[i].can_fall(w) {
                 // Скорость растёт на тяготение, высота — на скорость.
                 // Пока скорость меньше воксела за тик, тело стоит
@@ -377,6 +444,11 @@ impl Bodies {
             b.u32(bd.fallen);
             b.fx(bd.vy);
             b.fx(bd.fy);
+            b.u8(bd.tilt_axis);
+            b.i32(bd.tilt_angle);
+            b.i32(bd.tilt_speed);
+            b.u16(bd.pivot_x);
+            b.u16(bd.pivot_z);
             b.bool(bd.fresh);
             b.bool(bd.resting);
             b.u16s(&bd.floor);
@@ -399,6 +471,11 @@ impl Bodies {
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.load_version(s, true)
+    }
+
+    /// Saves written before articulated plates have no angular fields.
+    pub fn load_version(&mut self, s: &mut fx::blob::Scan, tilted: bool) -> bool {
         self.refused = s.usize();
         self.next_id = s.u64();
         self.spawned = s.u64s();
@@ -410,6 +487,11 @@ impl Bodies {
             let (sx, sz) = (s.u16(), s.u16());
             let fallen = s.u32();
             let (vy, fy) = (s.fx(), s.fx());
+            let (tilt_axis, tilt_angle, tilt_speed, pivot_x, pivot_z) = if tilted {
+                (s.u8(), s.i32(), s.i32(), s.u16(), s.u16())
+            } else {
+                (0, 0, 0, 0, 0)
+            };
             let (fresh, resting) = (s.bool(), s.bool());
             let floor = s.u16s();
             let riders = s.u32s();
@@ -434,6 +516,11 @@ impl Bodies {
                 fallen,
                 vy,
                 fy,
+                tilt_axis,
+                tilt_angle,
+                tilt_speed,
+                pivot_x,
+                pivot_z,
                 fresh,
                 resting,
                 riders,
@@ -745,5 +832,64 @@ mod tests {
             trace
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn tilted_plate_pose_survives_a_body_snapshot() {
+        let mut w = world();
+        let cells = [(10, 14, 10), (11, 14, 10), (12, 14, 10)];
+        for &(x, y, z) in &cells {
+            w.queue_edit(crate::Edit::put(x, y, z, 2));
+        }
+        w.flush();
+        let mut a = Bodies::new(8, test_gravity());
+        assert!(a.detach(&mut w, &cells));
+        a.list[0].tilt(2, 1);
+        a.list[0].tilt_angle = 4096;
+        let mut blob = fx::blob::Blob::new();
+        a.save(&mut blob);
+        let mut b = Bodies::new(8, test_gravity());
+        assert!(b.load(&mut fx::blob::Scan::new(&blob.v)));
+        assert_eq!(b.list[0].tilt_angle, a.list[0].tilt_angle);
+        assert_eq!(b.list[0].pivot_x, a.list[0].pivot_x);
+        assert_eq!(
+            b.list[0].world_of(b.list[0].voxels[0]),
+            a.list[0].world_of(a.list[0].voxels[0])
+        );
+    }
+
+    #[test]
+    fn old_body_snapshot_starts_without_angular_motion() {
+        let mut old = fx::blob::Blob::new();
+        old.usize(0); // refused
+        old.u64(2); // next id
+        old.u64s(&[1]); // spawned
+        old.u32(1); // one body
+        old.u64(1);
+        old.i64(10);
+        old.i64(20);
+        old.i64(30);
+        old.u16(1);
+        old.u16(1);
+        old.u32(0);
+        old.fx(Fx::ZERO);
+        old.fx(Fx::ZERO);
+        old.bool(false);
+        old.bool(false);
+        old.u16s(&[0]);
+        old.u32s(&[]);
+        old.u32(1);
+        old.u16(0);
+        old.u16(0);
+        old.u16(0);
+        old.u16(2);
+        old.u32(0); // landed log
+        let mut bodies = Bodies::new(8, test_gravity());
+        assert!(bodies.load_version(&mut fx::blob::Scan::new(&old.v), false));
+        assert_eq!(bodies.list[0].tilt_axis, 0);
+        assert_eq!(
+            bodies.list[0].world_of(bodies.list[0].voxels[0]),
+            (10, 20, 30)
+        );
     }
 }

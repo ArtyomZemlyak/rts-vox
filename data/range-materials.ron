@@ -7,14 +7,14 @@
     // Concrete and steel do not burn, but heat enough and they run off as
     // debris (ADR-290): a bolt's spot is 120, a burning trunk feeds its
     // neighbours 600 over its two seconds.
-    (id: 2, density: 240, strength: 140, harmful: false, melt: 900),
-    (id: 3, density: 785, strength: 500, harmful: false, melt: 360),
+    (id: 2, density: 240, strength: 140, bend_span: 5, harmful: false, melt: 900),
+    (id: 3, density: 785, strength: 500, bend_span: 10, harmful: false, melt: 360),
     // Fuel: heat each neighbour receives over the burn of one voxel; kindling:
     // heat at which it lights (ADR-277). Four units a tick from one burning
     // neighbour light foliage in ten ticks; a trunk needs two burning sides.
     (id: 4, density: 6, strength: 5, harmful: false, fuel: 240, kindling: 30, loose: true), // foliage
-    (id: 5, density: 70, strength: 10, harmful: false, fuel: 600, kindling: 120), // trunk
-    (id: 6, density: 260, strength: 220, harmful: false), // rock
+    (id: 5, density: 70, strength: 10, bend_span: 3, harmful: false, fuel: 600, kindling: 120), // trunk
+    (id: 6, density: 260, strength: 220, bend_span: 7, harmful: false), // rock
     (id: 7, density: 120, strength: 30, harmful: false, loose: true), // grass-covered soil
     (id: 8, density: 180, strength: 40, harmful: false, loose: true),
     // Inventory-only liquid fuel; range-fire.ron controls its finite combustion.
