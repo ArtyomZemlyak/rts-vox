@@ -3,6 +3,8 @@
 use super::*;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
+const TRACER_CAP: usize = 64;
+const TRACER_LIFE: f32 = 0.11;
 #[derive(Component)]
 pub(super) struct Layer(bool);
 #[derive(Clone, Copy)]
@@ -17,9 +19,16 @@ struct Particle {
     stream: bool,
     dust_material: u16,
 }
+#[derive(Clone, Copy)]
+struct Tracer {
+    tail: Vec3,
+    head: Vec3,
+    born: f32,
+}
 #[derive(Resource, Default)]
 pub struct Effects {
     particles: Vec<Particle>,
+    tracers: Vec<Tracer>,
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
@@ -39,6 +48,7 @@ fn point(p: [fx::Fx; 3]) -> Vec3 {
 impl Effects {
     pub fn clear(&mut self) {
         self.particles.clear();
+        self.tracers.clear();
         self.sources.clear();
         self.heat_spots.clear();
         self.serial = 0;
@@ -153,6 +163,7 @@ impl Effects {
     pub fn capture(&mut self, sim: &BlastRange) {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
+        self.tracers.retain(|p| now - p.born < TRACER_LIFE);
         for i in &sim.battle.impacts {
             let at = Vec3::from(i.at.map(|v| v as f32));
             if i.shell {
@@ -352,17 +363,15 @@ impl Effects {
                     self.plume(b, now, true, 0.9);
                 }
             } else {
-                // A brief broken tracer shows the faster, heavier round at
-                // ordinary camera scale without turning its path into a beam.
-                for i in 0..6 {
-                    self.add(
-                        b.lerp(a, i as f32 * 0.035),
-                        Vec3::ZERO,
-                        now,
-                        0.11,
-                        1.05,
-                        false,
-                    );
+                if let Some(tail) = tracer_tail(a, b) {
+                    if self.tracers.len() == TRACER_CAP {
+                        self.tracers.remove(0);
+                    }
+                    self.tracers.push(Tracer {
+                        tail,
+                        head: b,
+                        born: now,
+                    });
                 }
                 if trace.hit {
                     for i in 0..7 {
@@ -531,6 +540,11 @@ fn beam(buf: &mut MeshBuf, from: Vec3, to: Vec3, width: f32, col: [f32; 4]) {
         *n = (rotation * Vec3::from(*n)).to_array();
     }
 }
+fn tracer_tail(from: Vec3, to: Vec3) -> Option<Vec3> {
+    let path = to - from;
+    let length = path.length();
+    (length >= 0.01).then(|| to - path / length * length.min(12.0))
+}
 #[allow(clippy::too_many_arguments)] // Independent Bevy resources and read-only pose queries.
 pub fn draw(
     mut commands: Commands,
@@ -610,6 +624,27 @@ pub fn draw(
             if trace.hit {
                 cube(&mut hot, to, 2.5, [5.0, 0.65, 0.18, 0.75]);
             }
+        }
+    }
+    if scene.sim.config.delivery == Delivery::MachineGun && !scene.sim.battle_mode() {
+        for tracer in &fx.tracers {
+            let fade = (1.0 - (now - tracer.born) / TRACER_LIFE).clamp(0.0, 1.0);
+            // The short streak remains visible across render frames. Its head
+            // never passes the last physical bullet position.
+            beam(
+                &mut hot,
+                tracer.tail,
+                tracer.head,
+                1.1,
+                [3.8, 2.0, 0.28, 0.58 * fade],
+            );
+            beam(
+                &mut hot,
+                tracer.tail.lerp(tracer.head, 0.18),
+                tracer.head,
+                0.48,
+                [7.0, 4.3, 0.85, 0.95 * fade],
+            );
         }
     }
     if scene.sim.battle_mode() {
@@ -971,12 +1006,28 @@ mod tests {
         r.step();
         effects.capture(&r);
         assert_eq!(r.streams.traces.len(), 2);
+        assert_eq!(effects.tracers.len(), 2);
+        for trace in &r.streams.traces {
+            assert!(effects.tracers.iter().any(|p| p.head == point(trace.to)));
+        }
         for at in r.stream_muzzles() {
             assert!(effects
                 .particles
                 .iter()
                 .any(|p| p.at == point(at) && p.edge == 4.7));
         }
+        r.step();
+        effects.capture(&r);
+        assert_eq!(effects.tracers.len(), 2, "short trails remain visible");
+    }
+    #[test]
+    fn machine_gun_tracer_ends_at_the_real_bullet_and_stays_short() {
+        let from = Vec3::new(0.0, 4.0, 0.0);
+        let to = Vec3::new(40.0, 4.0, 0.0);
+        assert_eq!(tracer_tail(from, to), Some(Vec3::new(28.0, 4.0, 0.0)));
+        let hit = Vec3::new(6.0, 4.0, 0.0);
+        assert_eq!(tracer_tail(from, hit), Some(from));
+        assert_eq!(tracer_tail(from, from), None);
     }
     #[test]
     fn flame_fills_the_flown_segment_without_crossing_a_hit() {
