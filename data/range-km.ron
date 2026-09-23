@@ -19,7 +19,7 @@
         // Prepared with the other sectors; starting a battle only changes its actors.
         (name: "Учебный бой", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3900,15,2400)),
         (name: "Лес и крутой склон", min: (6880,2000), max: (7720,2800), spawn: (6960,16,2110), target: (7500,24,2110),
-            scenario: Some((title: "Лес и склон", description: "Бронебойный выстрел и патруль на крутом подъёме.", weapon: Kinetic, power_milli: 1000, shots: [(7500,24,2110)]))),
+            scenario: Some((title: "Лес и склон", description: "Бронебойный выстрел и патруль на крутом подъёме.", weapon: Kinetic, power_milli: 1000, patrols: true, shots: [(7500,24,2110)]))),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),

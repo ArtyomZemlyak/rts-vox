@@ -52,6 +52,9 @@ pub struct RangeScenario {
     pub description: String,
     pub weapon: RangeScenarioWeapon,
     pub power_milli: u32,
+    /// Use the route already authored in the range course for this sector.
+    #[serde(default)]
+    pub patrols: bool,
     /// The first shot uses the sector's authored target; later shots keep
     /// damage in the same world so their effects can be compared.
     pub shots: Vec<[i32; 3]>,
@@ -335,6 +338,7 @@ mod tests {
             layout.zones.iter().filter(|z| z.scenario.is_some()).count(),
             5
         );
+        assert!(layout.zones[9].scenario.as_ref().unwrap().patrols);
         let mut invalid = layout.clone();
         invalid.zones[0].scenario.as_mut().unwrap().shots[0][0] += 1;
         assert!(invalid.validate().is_err());

@@ -1,10 +1,12 @@
 //! Mouse-first controls for the one forest range.
 use super::*;
 use modding::range::{RangeScenario, RangeScenarioWeapon};
+use std::collections::BTreeMap;
 use workbench::{Selection, Tool};
 
 const SCENARIO_GAP_TICKS: u32 = 30;
 
+#[derive(Clone, PartialEq, Eq)]
 struct ShotResult {
     terrain: usize,
     armor: usize,
@@ -13,8 +15,11 @@ struct ShotResult {
 }
 
 pub struct ScenarioRun {
+    id: u8,
     title: String,
     description: String,
+    patrols: bool,
+    prepared: bool,
     targets: Vec<[i32; 3]>,
     fired: usize,
     completed: usize,
@@ -24,12 +29,17 @@ pub struct ScenarioRun {
     baseline_lost_units: usize,
     baseline_shield_hits: u32,
     results: Vec<ShotResult>,
+    previous: Option<Vec<ShotResult>>,
+    saved: bool,
 }
 impl ScenarioRun {
-    fn new(s: &RangeScenario) -> Self {
+    fn new(id: u8, s: &RangeScenario, previous: Option<Vec<ShotResult>>) -> Self {
         Self {
+            id,
             title: s.title.clone(),
             description: s.description.clone(),
+            patrols: s.patrols,
+            prepared: false,
             targets: s.shots.clone(),
             fired: 1,
             completed: 0,
@@ -39,9 +49,15 @@ impl ScenarioRun {
             baseline_lost_units: 0,
             baseline_shield_hits: 0,
             results: Vec::new(),
+            previous,
+            saved: false,
         }
     }
     fn progress(&mut self, sim: &mut BlastRange) {
+        if !self.prepared {
+            sim.patrols_running = self.patrols;
+            self.prepared = true;
+        }
         if !sim.ready() {
             return;
         }
@@ -86,6 +102,9 @@ impl ScenarioRun {
             self.targets.len(),
             self.description
         );
+        if self.previous.is_some() {
+            text.push_str("К предыдущему запуску:\n");
+        }
         for (i, result) in self.results.iter().enumerate() {
             text.push_str(&format!(
                 "{}: грунт −{}, броня −{}, потеряно {}, щит ×{}\n",
@@ -95,6 +114,15 @@ impl ScenarioRun {
                 result.lost_units,
                 result.shield_hits
             ));
+            if let Some(before) = self.previous.as_ref().and_then(|v| v.get(i)) {
+                text.push_str(&format!(
+                    "   Δ грунт {:+}, броня {:+}, потери {:+}, щит {:+}\n",
+                    result.terrain as i64 - before.terrain as i64,
+                    result.armor as i64 - before.armor as i64,
+                    result.lost_units as i64 - before.lost_units as i64,
+                    i64::from(result.shield_hits) - i64::from(before.shield_hits)
+                ));
+            }
         }
         text
     }
@@ -109,6 +137,7 @@ pub struct Panel {
     pub routes: bool,
     pub scenarios_open: bool,
     pub scenario_run: Option<ScenarioRun>,
+    history: BTreeMap<u8, Vec<ShotResult>>,
     keys: Vec<KeyCode>,
     pending: Option<(u8, u32)>,
 }
@@ -122,6 +151,7 @@ impl Panel {
             routes: true,
             scenarios_open: false,
             scenario_run: None,
+            history: BTreeMap::new(),
             keys: Vec::new(),
             pending: None,
         }
@@ -833,12 +863,22 @@ pub fn actions(
                     let zone = layout
                         .zones
                         .get(id as usize)
-                        .ok_or("Unknown scenario sector")?;
+                        .ok_or("Unknown scenario sector")?
+                        .clone();
                     let scenario = zone.scenario.clone().ok_or("No scenario in sector")?;
                     let (energy, anni, delivery) = scenario_weapon(scenario.weapon);
                     layout.gun = zone.spawn;
                     layout.target = zone.target;
                     layout.battle = false;
+                    if let Some(course) = layout.course.as_mut() {
+                        course.patrols.retain(|patrol| {
+                            scenario.patrols
+                                && layout
+                                    .units
+                                    .get(patrol.unit)
+                                    .is_some_and(|unit| zone.contains([unit.at[0], unit.at[2]], 0))
+                        });
+                    }
                     let config = knobs::effective_config(
                         energy,
                         anni,
@@ -862,7 +902,11 @@ pub fn actions(
                         panel.demo = false;
                         panel.pending = None;
                         panel.ground_fire = false;
-                        panel.scenario_run = Some(ScenarioRun::new(&scenario));
+                        panel.scenario_run = Some(ScenarioRun::new(
+                            id,
+                            &scenario,
+                            panel.history.get(&id).cloned(),
+                        ));
                         scene.energy = energy;
                         scene.anni = anni;
                         scene.power = scenario.power_milli;
@@ -965,6 +1009,17 @@ pub fn scenario_progress(
     }
     if let Some(run) = &mut panel.scenario_run {
         run.progress(&mut scene.sim);
+    }
+    let finished = panel.scenario_run.as_mut().and_then(|run| {
+        if run.completed == run.targets.len() && !run.saved {
+            run.saved = true;
+            Some((run.id, run.results.clone()))
+        } else {
+            None
+        }
+    });
+    if let Some((id, results)) = finished {
+        panel.history.insert(id, results);
     }
 }
 pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCode>>) {
@@ -1306,10 +1361,12 @@ mod scenario_tests {
             description: "Same world".into(),
             weapon: RangeScenarioWeapon::Shell,
             power_milli: 1000,
+            patrols: false,
             shots: vec![[392, 24, 336], [400, 24, 336]],
         };
-        let mut run = ScenarioRun::new(&scenario);
+        let mut run = ScenarioRun::new(0, &scenario, None);
         run.progress(&mut sim);
+        assert!(!sim.patrols_running);
         run.progress(&mut sim);
         assert_eq!(run.results.len(), 1);
         assert_eq!(run.results[0].terrain, 7);
@@ -1336,9 +1393,10 @@ mod scenario_tests {
             description: "Same world".into(),
             weapon: RangeScenarioWeapon::Shell,
             power_milli: 1000,
+            patrols: false,
             shots: vec![[392, 24, 336], [400, 24, 336]],
         };
-        let mut run = ScenarioRun::new(&scenario);
+        let mut run = ScenarioRun::new(0, &scenario, None);
         for _ in 0..600 {
             sim.step();
             run.progress(&mut sim);
@@ -1349,5 +1407,35 @@ mod scenario_tests {
         assert_eq!(run.results.len(), 2, "two impacts did not complete");
         assert!(sim.tick > SCENARIO_GAP_TICKS);
         assert_eq!(sim.aim, Some([400, 24, 336]));
+    }
+
+    #[test]
+    fn a_rerun_shows_per_shot_differences() {
+        let scenario = RangeScenario {
+            title: "Two hits".into(),
+            description: "Same world".into(),
+            weapon: RangeScenarioWeapon::Shell,
+            power_milli: 1000,
+            patrols: false,
+            shots: vec![[392, 24, 336]],
+        };
+        let mut run = ScenarioRun::new(
+            0,
+            &scenario,
+            Some(vec![ShotResult {
+                terrain: 5,
+                armor: 2,
+                lost_units: 0,
+                shield_hits: 0,
+            }]),
+        );
+        run.results.push(ShotResult {
+            terrain: 8,
+            armor: 1,
+            lost_units: 1,
+            shield_hits: 0,
+        });
+        let text = run.readout();
+        assert!(text.contains("Δ грунт +3, броня -1, потери +1"), "{text}");
     }
 }

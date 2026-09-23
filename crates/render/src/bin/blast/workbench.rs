@@ -1792,11 +1792,17 @@ mod tests {
             .spawn((panel::Action::Scenario(2), Interaction::Pressed));
         app.update();
         let edit = app.world().resource::<Workshop>();
-        let (config, layout) = edit.pending.as_ref().expect("scenario did not rebuild");
+        let (config, layout) = edit.pending.as_ref().unwrap_or_else(|| {
+            panic!(
+                "scenario did not rebuild: {}",
+                app.world().resource::<Scene>().notice
+            )
+        });
         assert_eq!(edit.zone, 2);
         assert_eq!(layout.gun, layout.zones[2].spawn);
         assert_eq!(layout.target, layout.zones[2].target);
         assert_eq!(config.delivery, Delivery::Blast);
+        assert!(layout.course.as_ref().unwrap().patrols.is_empty());
         assert_eq!(app.world().resource::<Scene>().power, 500);
         assert!(!app.world().resource::<panel::Panel>().drive);
         assert!(app
@@ -1804,5 +1810,17 @@ mod tests {
             .resource::<panel::Panel>()
             .scenario_run
             .is_some());
+        app.world_mut()
+            .spawn((panel::Action::Scenario(9), Interaction::Pressed));
+        app.update();
+        let edit = app.world().resource::<Workshop>();
+        let (config, layout) = edit
+            .pending
+            .as_ref()
+            .expect("forest scenario did not rebuild");
+        assert_eq!(config.delivery, Delivery::Kinetic);
+        let patrols = &layout.course.as_ref().unwrap().patrols;
+        assert_eq!(patrols.len(), 1);
+        assert_eq!(patrols[0].unit, 7);
     }
 }
