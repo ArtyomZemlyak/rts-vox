@@ -232,10 +232,22 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 let interior_glow=field(gas_pos+rd*2.5).x;
                 var inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
                 if p.weapon.x>1.5 {inner_colour=vec3(0.07,0.03,0.13);}
-                let smoke=base*(0.23+shade*self_shadow*1.55)+inner_colour*interior_glow*exp(-age*0.45);
+                // A shell has a brief irregular fire front. Once the flash is
+                // gone the transported gas remains as dust and smoke instead
+                // of a uniformly luminous cube for several seconds.
+                var fire_phase=1.0;
+                if p.weapon.x<=0.5 {
+                    let flame_pattern=smoothstep(0.35,0.80,detail*0.75+grain*0.25);
+                    let fire_end=mix(0.65,1.20,clamp((p.source.w-24.0)/56.0,0.0,1.0));
+                    fire_phase=(1.0-smoothstep(0.10,fire_end,age))*flame_pattern;
+                }
+                let smoke=base*(0.23+shade*self_shadow*1.55)+
+                    inner_colour*interior_glow*exp(-age*0.45)*fire_phase;
                 let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
-                let glow=select(smoothstep(0.7,1.18,temperature),smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
-                let colour=mix(smoke,hot(temperature)*(0.48+shade*0.52),glow);
+                let glow=select(smoothstep(0.7,1.18,temperature)*fire_phase,
+                    smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
+                let radiance=hot(select(min(temperature,2.35),temperature,p.weapon.x>0.5));
+                let colour=mix(smoke,radiance*(0.48+shade*0.52),glow);
                 // Beer-Lambert extinction: a thin smoky edge stays transparent.
                 // A fixed 97% per display cell made smoke look like solid bricks.
                 // The look scales the extinction (ADR-283): p.weapon.w.
