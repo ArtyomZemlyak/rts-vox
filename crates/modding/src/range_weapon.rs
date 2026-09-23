@@ -17,6 +17,7 @@ pub struct Stream {
 pub struct Tuning {
     pub flame: Stream,
     pub machine_gun: Stream,
+    pub laser: Stream,
     pub dust: Dust,
     pub smoke_engine_milli: i32,
     pub smoke_core_milli: i32,
@@ -42,7 +43,7 @@ pub struct Dust {
 impl Tuning {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(text).map_err(|e| e.to_string())?;
-        for s in [&t.flame, &t.machine_gun] {
+        for s in [&t.flame, &t.machine_gun, &t.laser] {
             if !(1..=300).contains(&s.burst_ticks)
                 || !(1..=30).contains(&s.interval_ticks)
                 || !(1..=3000).contains(&s.range)
@@ -93,6 +94,8 @@ mod tests {
         let text = include_str!("../../../data/range-weapons.ron");
         let t = Tuning::from_ron(text).unwrap();
         assert!(t.machine_gun.range > t.flame.range);
+        assert!(t.laser.range > t.flame.range);
+        assert_eq!(t.laser.interval_ticks, 1);
         assert!((100..=950).contains(&t.flame.standoff_milli));
         assert!(Tuning::from_ron(&text.replace("interval_ticks: 2", "interval_ticks: 0")).is_err());
         assert!(

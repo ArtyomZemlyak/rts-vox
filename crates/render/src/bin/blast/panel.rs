@@ -227,6 +227,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Бронебой", Action::Weapon(5)),
                     ("Огнемёт", Action::Weapon(3)),
                     ("Пулемёт", Action::Weapon(4)),
+                    ("Лазер", Action::Weapon(6)),
                 ],
             ),
             (
@@ -552,6 +553,7 @@ pub fn actions(
                         3 => Delivery::Flame,
                         4 => Delivery::MachineGun,
                         5 => Delivery::Kinetic,
+                        6 => Delivery::Laser,
                         _ => Delivery::Blast,
                     };
                     let cfg = knobs::effective_config(
@@ -721,6 +723,7 @@ pub fn actions(
             3 => Delivery::Flame,
             4 => Delivery::MachineGun,
             5 => Delivery::Kinetic,
+            6 => Delivery::Laser,
             _ => Delivery::Blast,
         };
         scene.anni = w == 2;
@@ -733,12 +736,13 @@ pub fn actions(
     }
 }
 /// Stable panel IDs: shell 0, energy 1, annihilation 2, flame 3,
-/// machine gun 4 and solid kinetic shot 5.
+/// machine gun 4, solid kinetic shot 5 and thermal laser 6.
 fn weapon_of(scene: &Scene) -> u8 {
     match scene.sim.config.delivery {
         Delivery::Flame => return 3,
         Delivery::MachineGun => return 4,
         Delivery::Kinetic => return 5,
+        Delivery::Laser => return 6,
         Delivery::Blast => {}
     }
     if scene.anni {
@@ -975,6 +979,10 @@ pub fn refresh(
                 scene.sim.streams.tuning.machine_gun.range / 10
             ),
             Delivery::Kinetic => "Бронебойный · локальное пробитие".into(),
+            Delivery::Laser => format!(
+                "Лазер · плавит цель · дальность {} м",
+                scene.sim.streams.tuning.laser.range / 10
+            ),
             Delivery::Blast => String::new(),
         }
     };

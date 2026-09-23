@@ -1804,12 +1804,15 @@ impl BlastRange {
                 ]);
                 let dx = Fx::from_int(p[0]).sub(self.gun.motion.pos[0]);
                 let dz = Fx::from_int(p[2]).sub(self.gun.motion.pos[2]);
-                let time = dx
-                    .mul(dx)
-                    .add(dz.mul(dz))
-                    .sqrt()
-                    .div(Fx::from_int(self.config.shell_speed))
-                    .max(Fx::from_ratio(1, 1000));
+                let time = if self.config.delivery == modding::explosion::Delivery::Laser {
+                    Fx::ZERO
+                } else {
+                    dx.mul(dx)
+                        .add(dz.mul(dz))
+                        .sqrt()
+                        .div(Fx::from_int(self.config.shell_speed))
+                        .max(Fx::from_ratio(1, 1000))
+                };
                 let travel = u.motion.drive.vel.mul(time);
                 p[0] += travel
                     .mul(fx::angle::cos(u.motion.drive.head))
@@ -2091,7 +2094,9 @@ impl BlastRange {
     /// The round is spent against the dome: its wave energy leaves the
     /// charge, and a dome drained to nothing collapses for the tuned outage.
     fn absorb(&mut self, i: usize, at: [i32; 3]) {
-        let drain = self.config.energy;
+        self.absorb_work(i, at, self.config.energy);
+    }
+    fn absorb_work(&mut self, i: usize, at: [i32; 3], drain: u32) {
         let overload = self.shield_tuning.overload_ticks;
         let s = &mut self.shields[i];
         let drained = drain.min(s.charge);
@@ -2684,6 +2689,7 @@ impl BlastRange {
         match self.config.delivery {
             modding::explosion::Delivery::Flame => Some(&self.streams.tuning.flame),
             modding::explosion::Delivery::MachineGun => Some(&self.streams.tuning.machine_gun),
+            modding::explosion::Delivery::Laser => Some(&self.streams.tuning.laser),
             modding::explosion::Delivery::Blast | modding::explosion::Delivery::Kinetic => None,
         }
     }

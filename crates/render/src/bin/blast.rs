@@ -153,6 +153,7 @@ fn weapon_config(energy: bool, anni: bool, power: u32, delivery: Delivery) -> Ex
         Delivery::Flame => include_str!("../../../../data/flamethrower.ron"),
         Delivery::MachineGun => include_str!("../../../../data/machine-gun.ron"),
         Delivery::Kinetic => include_str!("../../../../data/kinetic-shell.ron"),
+        Delivery::Laser => include_str!("../../../../data/laser.ron"),
         Delivery::Blast => unreachable!(),
     })
     .expect("weapon RON");
@@ -438,6 +439,10 @@ fn main() {
                         delivery = Delivery::Kinetic;
                         (false, false)
                     }
+                    Some("laser") => {
+                        delivery = Delivery::Laser;
+                        (false, false)
+                    }
                     Some("flame") => {
                         delivery = Delivery::Flame;
                         (false, false)
@@ -447,7 +452,7 @@ fn main() {
                         (false, false)
                     }
                     _ => panic!(
-                        "--weapon expects shell, kinetic, energy, anni, flame or machine-gun"
+                        "--weapon expects shell, kinetic, energy, anni, laser, flame or machine-gun"
                     ),
                 };
             }

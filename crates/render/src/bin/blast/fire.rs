@@ -512,6 +512,25 @@ fn cube(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4]) {
         }
     }
 }
+fn beam(buf: &mut MeshBuf, from: Vec3, to: Vec3, width: f32, col: [f32; 4]) {
+    let delta = to - from;
+    let length = delta.length();
+    if length < 0.01 {
+        return;
+    }
+    let centre = (from + to) * 0.5;
+    let rotation = Quat::from_rotation_arc(Vec3::Y, delta / length);
+    let start = buf.pos.len();
+    cube(buf, centre, 1.0, col);
+    for p in &mut buf.pos[start..] {
+        let local = Vec3::from(*p) - centre;
+        *p = (centre + rotation * Vec3::new(local.x * width, local.y * length, local.z * width))
+            .to_array();
+    }
+    for n in &mut buf.nrm[start..] {
+        *n = (rotation * Vec3::from(*n)).to_array();
+    }
+}
 #[allow(clippy::too_many_arguments)] // Independent Bevy resources and read-only pose queries.
 pub fn draw(
     mut commands: Commands,
@@ -582,6 +601,17 @@ pub fn draw(
             .total_cmp(&eye.distance_squared(a.1))
     });
     let mut hot = MeshBuf::default();
+    if scene.sim.config.delivery == Delivery::Laser && !scene.sim.battle_mode() {
+        for trace in &scene.sim.streams.traces {
+            let from = point(trace.from);
+            let to = point(trace.to);
+            beam(&mut hot, from, to, 2.4, [2.8, 0.06, 0.025, 0.18]);
+            beam(&mut hot, from, to, 0.65, [7.0, 0.36, 0.25, 0.92]);
+            if trace.hit {
+                cube(&mut hot, to, 2.5, [5.0, 0.65, 0.18, 0.75]);
+            }
+        }
+    }
     if scene.sim.battle_mode() {
         let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
         for r in &scene.sim.battle.rounds {

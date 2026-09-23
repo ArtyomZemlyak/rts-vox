@@ -217,6 +217,53 @@ impl BlastRange {
     pub fn stream_muzzles(&self) -> Vec<[Fx; 3]> {
         muzzles(&self.gun, self.turret.angle)
     }
+    fn emit_laser(&mut self, tuning: &Stream) {
+        for from in self.stream_muzzles() {
+            let target = self.target();
+            let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
+            let length = delta.iter().fold(Fx::ZERO, |n, v| n.add(v.mul(*v))).sqrt();
+            if length <= Fx::ZERO {
+                continue;
+            }
+            let direction = delta.map(|v| v.div(length));
+            let serial = self.streams.serial;
+            self.streams.serial = serial.wrapping_add(1);
+            let mut previous = from.map(Fx::to_int_trunc);
+            let mut end = from;
+            let mut hit = false;
+            // Half-cell samples cannot skip a thin plate at a diagonal. Stop
+            // at the first surface, so a wall protects the hull behind it.
+            for i in 1..=tuning.range * 2 {
+                let distance = Fx::from_ratio(i, 2);
+                let point = std::array::from_fn(|a| from[a].add(direction[a].mul(distance)));
+                let p = point.map(Fx::to_int_trunc);
+                if (0..3).any(|a| p[a] < 0 || p[a] >= self.size[a] as i32) {
+                    break;
+                }
+                end = point;
+                if p == previous {
+                    continue;
+                }
+                if let Some(shield) = self.dome_crossed(previous, p) {
+                    self.absorb_work(shield, p, tuning.work);
+                    hit = true;
+                    break;
+                }
+                if material(&self.world, p) != 0 || self.units.iter().any(|u| u.solid(p)) {
+                    self.stream_contact(p, tuning, true, self.gun.at, &self.config.clone());
+                    hit = true;
+                    break;
+                }
+                previous = p;
+            }
+            self.streams.traces.push(Trace {
+                from,
+                to: end,
+                hit,
+                serial,
+            });
+        }
+    }
     fn emit_stream(&mut self, tuning: &Stream) {
         let flame = self.config.delivery == Delivery::Flame;
         let muzzles = self.stream_muzzles();
@@ -306,13 +353,26 @@ impl BlastRange {
             }
         } else if material(&self.world, p) != 0 {
             if flame {
-                self.heat.deposit(
-                    &self.world,
-                    &self.matter.economy.mats,
-                    p,
-                    tuning.heat_radius,
-                    tuning.heat,
-                );
+                if self.config.delivery == Delivery::Laser {
+                    let mat = material(&self.world, p);
+                    if self
+                        .matter
+                        .economy
+                        .mats
+                        .get(mat)
+                        .is_some_and(|m| m.melt > 0 || m.kindling > 0)
+                    {
+                        self.heat.add(&self.world, p.map(|v| v as u32), tuning.heat);
+                    }
+                } else {
+                    self.heat.deposit(
+                        &self.world,
+                        &self.matter.economy.mats,
+                        p,
+                        tuning.heat_radius,
+                        tuning.heat,
+                    );
+                }
             } else {
                 let total = self
                     .surface_work
@@ -341,10 +401,11 @@ impl BlastRange {
             return;
         }
         let flame = self.config.delivery == Delivery::Flame;
-        let mut tuning = if flame {
-            &self.streams.tuning.flame
-        } else {
-            &self.streams.tuning.machine_gun
+        let mut tuning = match self.config.delivery {
+            Delivery::Flame => &self.streams.tuning.flame,
+            Delivery::MachineGun => &self.streams.tuning.machine_gun,
+            Delivery::Laser => &self.streams.tuning.laser,
+            Delivery::Blast | Delivery::Kinetic => unreachable!(),
         }
         .clone();
         let scale = |v: u32| {
@@ -364,7 +425,11 @@ impl BlastRange {
             if self.tick >= self.streams.next
                 && self.turret.aligned(self.aim_angle(), self.turret_limits)
             {
-                self.emit_stream(&tuning);
+                if self.config.delivery == Delivery::Laser {
+                    self.emit_laser(&tuning);
+                } else {
+                    self.emit_stream(&tuning);
+                }
                 self.streams.next = self.tick + tuning.interval_ticks;
             }
             self.streams.left -= 1;
@@ -403,19 +468,7 @@ impl BlastRange {
                 });
                 let p = point.map(Fx::to_int_trunc);
                 if let Some(shield) = self.dome_crossed(previous, p) {
-                    let charge = self.shields[shield].charge;
-                    let drained = charge.min(tuning.work);
-                    self.shields[shield].charge -= drained;
-                    self.shields[shield].hits += 1;
-                    if drained == charge {
-                        self.shields[shield].down = self.shield_tuning.overload_ticks;
-                    }
-                    self.shield_hits.push(ShieldHit {
-                        shield,
-                        at: p,
-                        drained,
-                        collapsed: drained == charge,
-                    });
+                    self.absorb_work(shield, p, tuning.work);
                     end = point;
                     hit = true;
                     break;
@@ -489,6 +542,127 @@ mod tests {
             min: [x, 32, 330],
             max: [end, 60, 342],
             material,
+        }
+    }
+    fn laser_range(blocks: Vec<modding::range::RangeBlock>) -> BlastRange {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        l.course = None;
+        l.blocks = blocks;
+        l.shields.clear();
+        l.units.truncate(1);
+        l.units[0].at = [285, 16, 336];
+        BlastRange::with_layout(c, l).unwrap()
+    }
+    #[test]
+    fn laser_slowly_melts_a_steel_wall_without_hurting_the_sheltered_unit() {
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [230, 0, 330],
+            max: [246, 60, 342],
+            material: 3,
+        }]);
+        r.control();
+        r.aim = Some([392, 40, 336]);
+        assert!(r.refire());
+        let mut first = None;
+        for _ in 0..90 {
+            r.step();
+            if first.is_none() {
+                first = r.streams.traces.first().map(|t| t.to.map(Fx::to_int_trunc));
+            }
+        }
+        let first = first.expect("laser never fired");
+        assert_eq!(first[0], 230);
+        assert_eq!(material(&r.world, first), 0, "front steel did not melt");
+        assert_eq!(material(&r.world, [244, first[1], first[2]]), 3);
+        assert!(r.heat.melted_total > 0);
+        assert!(r.units[0].removed.is_empty(), "wall failed to shield unit");
+        assert!(r.explosion.is_none());
+        assert!(r.shell.is_none());
+    }
+    #[test]
+    fn laser_softens_and_removes_armour_without_a_blast() {
+        let mut r = laser_range(vec![]);
+        r.control();
+        r.aim = Some([285, 39, 336]);
+        assert!(r.refire());
+        for _ in 0..3 {
+            r.step();
+        }
+        assert!(
+            r.units[0].removed.is_empty(),
+            "laser removed armour instantly"
+        );
+        for _ in 0..110 {
+            r.step();
+        }
+        assert!(r.thermals.melted > 0, "armour did not heat through");
+        assert!(!r.units[0].removed.is_empty());
+        assert!(r.explosion.is_none());
+        assert!(r.shell.is_none());
+    }
+    #[test]
+    fn laser_takes_time_to_cut_a_concrete_face() {
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [230, 0, 330],
+            max: [231, 60, 342],
+            material: 2,
+        }]);
+        r.control();
+        r.aim = Some([392, 40, 336]);
+        assert!(r.refire());
+        for _ in 0..5 {
+            r.step();
+        }
+        let face = r.streams.traces[0].to.map(Fx::to_int_trunc);
+        assert_eq!(material(&r.world, face), 2);
+        for _ in 0..100 {
+            r.step();
+        }
+        assert_eq!(material(&r.world, face), 0);
+        assert!(r.heat.melted_total > 0);
+    }
+    #[test]
+    fn instantaneous_laser_aims_at_a_moving_units_current_position() {
+        let mut r = laser_range(vec![]);
+        r.attack = Some(0);
+        r.units[0].motion.drive.vel = Fx::from_int(40);
+        let u = &r.units[0];
+        let core = [
+            u.body.core.0 as usize,
+            u.body.core.1 as usize,
+            u.body.core.2 as usize,
+        ];
+        assert_eq!(r.target(), u.world_pos(core));
+    }
+    #[test]
+    fn laser_does_not_heat_through_a_shield_and_replays_mid_burst() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        l.course = None;
+        l.blocks.clear();
+        l.units.truncate(1);
+        l.units[0].at = [285, 16, 336];
+        l.shields = vec![modding::range::RangeShieldDef {
+            at: [285, 16, 336],
+            radius: 40,
+        }];
+        let mut a = BlastRange::with_layout(c.clone(), l).unwrap();
+        a.control();
+        a.aim = Some([285, 39, 336]);
+        assert!(a.refire());
+        for _ in 0..20 {
+            a.step();
+        }
+        assert!(a.shields[0].hits > 0);
+        assert!(a.shields[0].charge < a.shield_tuning.capacity);
+        assert_eq!(a.thermals.hot(), 0);
+        assert!(a.units[0].removed.is_empty());
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
+        for _ in 0..75 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
         }
     }
     #[test]

@@ -13,6 +13,7 @@ pub enum Delivery {
     #[default]
     Blast,
     Kinetic,
+    Laser,
     Flame,
     MachineGun,
 }
