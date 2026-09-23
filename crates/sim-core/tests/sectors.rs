@@ -26,6 +26,9 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
         })
         .collect();
     r.blocks.retain(|b| zone.contains([b.min[0], b.min[2]], 0));
+    // Inter-sector roads belong to the full kilometre map, not this small
+    // 1024-cell fixture for one scripted shot.
+    r.roads.clear();
     for b in &mut r.blocks {
         b.min = at(b.min);
         b.max = at(b.max);

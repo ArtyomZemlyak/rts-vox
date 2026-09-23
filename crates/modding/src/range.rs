@@ -84,6 +84,13 @@ pub struct RangeBlock {
     pub max: [i32; 3],
     pub material: u16,
 }
+/// Ground-level track linking sectors. It follows the natural relief and
+/// clears trees, so vehicles can use it without a raised collision slab.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeRoad {
+    pub width: i32,
+    pub points: Vec<[i32; 2]>,
+}
 impl RangeBlock {
     pub fn contains(&self, p: [i32; 3]) -> bool {
         (0..3).all(|a| p[a] >= self.min[a] && p[a] < self.max[a])
@@ -129,6 +136,8 @@ pub struct RangeLayout {
     pub units: Vec<RangeUnitDef>,
     /// Later blocks override earlier blocks, allowing cladding and cutouts.
     pub blocks: Vec<RangeBlock>,
+    #[serde(default)]
+    pub roads: Vec<RangeRoad>,
     #[serde(default)]
     pub shields: Vec<RangeShieldDef>,
     pub power_milli: Vec<u32>,
@@ -225,6 +234,16 @@ impl RangeLayout {
             || r.units.len() > 8
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
+            || r.roads.len() > 16
+            || r.roads.iter().any(|road| {
+                !(16..=96).contains(&road.width)
+                    || !(2..=24).contains(&road.points.len())
+                    || road
+                        .points
+                        .iter()
+                        .any(|p| p[0] < 0 || p[0] >= size[0] || p[1] < 0 || p[1] >= size[2])
+                    || road.points.windows(2).any(|pair| pair[0] == pair[1])
+            })
             || r.power_milli.is_empty()
             || r.power_milli.len() > 8
             || r.power_milli.iter().any(|p| !(100..=4000).contains(p))

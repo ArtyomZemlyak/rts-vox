@@ -7,6 +7,7 @@ pub(super) struct Bin {
     pub blocks: Vec<usize>,
     pub zones: Vec<usize>,
     pub ramps: Vec<usize>,
+    pub roads: Vec<usize>,
 }
 pub(super) struct Index {
     nx: usize,
@@ -31,6 +32,24 @@ impl Index {
             }
             for (i, z) in r.zones.iter().enumerate() {
                 out.insert(z.min, z.max, |bin| bin.zones.push(i));
+            }
+            for (i, road) in r.roads.iter().enumerate() {
+                for segment in road.points.windows(2) {
+                    let pad = road.width / 2 + 20; // a crown can reach across the verge
+                    let lo = [
+                        segment[0][0].min(segment[1][0]) - pad,
+                        segment[0][1].min(segment[1][1]) - pad,
+                    ];
+                    let hi = [
+                        segment[0][0].max(segment[1][0]) + pad + 1,
+                        segment[0][1].max(segment[1][1]) + pad + 1,
+                    ];
+                    out.insert(lo, hi, |bin| {
+                        if !bin.roads.contains(&i) {
+                            bin.roads.push(i);
+                        }
+                    });
+                }
             }
             if let Some(c) = &r.course {
                 for (i, b) in c.ramps.iter().enumerate() {

@@ -762,6 +762,29 @@ pub fn range_height(x: u32, z: u32) -> u32 {
     };
     FLOOR as u32 + ridge + relief
 }
+/// Break the flat test pads into broad, irregular earth/grass patches while
+/// retaining a clear stone strip wherever a road crosses them.
+fn range_pad_surface(x: u32, z: u32, road: bool) -> u16 {
+    if road {
+        return 6;
+    }
+    const CELL: u32 = 80;
+    let (gx, gz, u, v) = (x / CELL, z / CELL, x % CELL, z % CELL);
+    let sample = |a: u32, b: u32| {
+        let n = a.wrapping_mul(73_856_093) ^ b.wrapping_mul(19_349_663);
+        (n ^ n >> 11 ^ n >> 21) & 255
+    };
+    let blend = sample(gx, gz) * (CELL - u) * (CELL - v)
+        + sample(gx + 1, gz) * u * (CELL - v)
+        + sample(gx, gz + 1) * (CELL - u) * v
+        + sample(gx + 1, gz + 1) * u * v;
+    let fine = (x / 20).wrapping_mul(83_492_791) ^ (z / 20).wrapping_mul(53_422_681);
+    if blend / (CELL * CELL) + fine % 17 < 102 {
+        7
+    } else {
+        8
+    }
+}
 /// Everything about a column of the range that does not depend on its
 /// height (ADR-319). Worked out once a column instead of once a voxel:
 /// building the world asks the generator for every voxel of it, and on a
@@ -776,6 +799,8 @@ struct Column {
     course: Option<i32>,
     /// Ground height, with the pads levelled.
     ground: u32,
+    road: bool,
+    pad_surface: u16,
     lane: bool,
     wall: bool,
     target: bool,
@@ -803,6 +828,28 @@ fn changed_span<T: PartialEq>(
 }
 
 impl RangeTerrain {
+    fn road_at(&self, x: u32, z: u32, margin: i32) -> bool {
+        let Some(layout) = &self.layout else {
+            return false;
+        };
+        self.index.at(x, z).roads.iter().any(|&i| {
+            let road = &layout.roads[i];
+            let radius = (road.width / 2 + margin) as i128;
+            road.points.windows(2).any(|segment| {
+                let a = segment[0];
+                let b = segment[1];
+                let dx = (b[0] - a[0]) as i128;
+                let dz = (b[1] - a[1]) as i128;
+                let px = x as i128 - a[0] as i128;
+                let pz = z as i128 - a[1] as i128;
+                let len2 = dx * dx + dz * dz;
+                let dot = (px * dx + pz * dz).clamp(0, len2);
+                let ox = px * len2 - dx * dot;
+                let oz = pz * len2 - dz * dot;
+                ox * ox + oz * oz <= radius * radius * len2 * len2
+            })
+        })
+    }
     /// Conservative XZ domains of changes to authored terrain. Unit rosters,
     /// firing targets, route speeds and zone labels do not generate terrain.
     fn changed_areas(old: &RangeLayout, next: &RangeLayout) -> Vec<([i32; 2], [i32; 2])> {
@@ -821,6 +868,22 @@ impl RangeTerrain {
             .chain(&next.blocks[next_blocks])
         {
             areas.push(([b.min[0], b.min[2]], [b.max[0], b.max[2]]));
+        }
+        let (old_roads, next_roads) = changed_span(&old.roads, &next.roads);
+        for road in old.roads[old_roads].iter().chain(&next.roads[next_roads]) {
+            for segment in road.points.windows(2) {
+                let pad = road.width / 2 + 20;
+                areas.push((
+                    [
+                        segment[0][0].min(segment[1][0]) - pad,
+                        segment[0][1].min(segment[1][1]) - pad,
+                    ],
+                    [
+                        segment[0][0].max(segment[1][0]) + pad + 1,
+                        segment[0][1].max(segment[1][1]) + pad + 1,
+                    ],
+                ));
+            }
         }
         for (a, b) in [(old, next), (next, old)] {
             for z in &a.zones {
@@ -865,6 +928,7 @@ impl RangeTerrain {
     }
     fn column_of(&self, x: u32, z: u32) -> Column {
         let shift = if self.extended { 160 } else { 0 };
+        let road = self.road_at(x, z, 0);
         let layout_pad = self.layout.as_ref().is_some_and(|r| {
             x as i32 >= r.clear_min[0]
                 && (x as i32) < r.clear_max[0]
@@ -919,6 +983,7 @@ impl RangeTerrain {
                 h
             })
             .or_else(|| self.in_zone(x, z).then_some(FLOOR));
+        let pad_surface = course.map_or(8, |_| range_pad_surface(x, z, road));
         let unit_pad = self.extended && (337..415).contains(&x) && (282..322).contains(&z);
         let ground =
             if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
@@ -948,6 +1013,7 @@ impl RangeTerrain {
         let unit_trees = self.extended && (328..425).contains(&tx) && (273..332).contains(&tz);
         let tree = (!layout_tree
             && !unit_trees
+            && !self.road_at(tx, tz, 10)
             && !(tx < 288 + shift && (298..=386).contains(&tz))
             && !seed.is_multiple_of(5))
         .then(|| {
@@ -958,17 +1024,20 @@ impl RangeTerrain {
                 z as i32 - tz as i32,
             )
         });
-        let rock = (!layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)))
-            .then(|| {
-                let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
-                (stone, x as i32 % 13 - 6, z as i32 % 13 - 6)
-            })
-            .filter(|(stone, _, _)| stone.is_multiple_of(7));
+        let rock =
+            (!road && !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)))
+                .then(|| {
+                    let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
+                    (stone, x as i32 % 13 - 6, z as i32 % 13 - 6)
+                })
+                .filter(|(stone, _, _)| stone.is_multiple_of(7));
         Column {
             shift,
             blocks,
             course,
             ground,
+            road,
+            pad_surface,
             lane,
             wall,
             target,
@@ -990,7 +1059,7 @@ impl RangeTerrain {
         if let Some(h) = c.course {
             return if (y as i32) < h {
                 if y as i32 == h - 1 {
-                    8
+                    c.pad_surface
                 } else {
                     1
                 }
@@ -1000,7 +1069,7 @@ impl RangeTerrain {
         }
         if y < c.ground {
             return if y + 1 == c.ground {
-                if c.lane {
+                if c.lane || c.road {
                     8
                 } else {
                     7
@@ -1068,6 +1137,7 @@ impl Generator for RangeTerrain {
                 && z as i32 >= r.clear_min[1]
                 && (z as i32) < r.clear_max[1]
         });
+        let road = self.road_at(x, z, 0);
         if let Some(r) = &self.layout {
             if let Some(b) = self
                 .index
@@ -1107,7 +1177,7 @@ impl Generator for RangeTerrain {
                 }
                 return if (y as i32) < h {
                     if y as i32 == h - 1 {
-                        8
+                        range_pad_surface(x, z, road)
                     } else {
                         1
                     }
@@ -1119,7 +1189,7 @@ impl Generator for RangeTerrain {
         if self.in_zone(x, z) {
             return if y < FLOOR as u32 {
                 if y + 1 == FLOOR as u32 {
-                    8
+                    range_pad_surface(x, z, road)
                 } else {
                     1
                 }
@@ -1136,7 +1206,7 @@ impl Generator for RangeTerrain {
         if y < h {
             let lane = (322..351).contains(&z) && x < 254 + shift;
             return if y + 1 == h {
-                if lane {
+                if lane || road {
                     8
                 } else {
                     7
@@ -1181,6 +1251,7 @@ impl Generator for RangeTerrain {
         let unit_trees = self.extended && (328..425).contains(&tx) && (273..332).contains(&tz);
         if !layout_tree
             && !unit_trees
+            && !self.road_at(tx, tz, 10)
             && !(tx < 288 + shift && (298..=386).contains(&tz))
             && !seed.is_multiple_of(5)
         {
@@ -1203,7 +1274,7 @@ impl Generator for RangeTerrain {
         // Small broken rocks on the shoulders, out of the firing lane. No
         // taller than the course step: a hull climbs a shoulder rock rather
         // than steering round it (ADR-275).
-        if !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)) {
+        if !road && !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)) {
             let stone = (x / 13).wrapping_mul(9173) ^ (z / 13).wrapping_mul(6151);
             let dx = x as i32 % 13 - 6;
             let dz = z as i32 % 13 - 6;
@@ -7063,6 +7134,44 @@ mod tests {
                     .find(|b| b.contains([x, y as i32, z]))
                 {
                     assert_eq!(mat, b.material, "authored block at {x},{y},{z}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn roads_link_sectors_and_keep_the_driving_strip_free_of_trees() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout));
+        // These two midpoints lie between prepared sectors, where natural
+        // hills and the procedural forest would otherwise fill the gap.
+        for (x, z) in [(900, 420), (3900, 730)] {
+            assert!(gen.road_at(x, z, 0));
+            let ground = range_height(x, z);
+            assert_eq!(gen.material(x, ground - 1, z), 8);
+            for y in ground..ground + 48 {
+                assert_eq!(gen.material(x, y, z), 0, "road blocked at {x},{y},{z}");
+            }
+        }
+        assert!(!gen.road_at(900, 600, 0));
+    }
+    #[test]
+    fn road_centrelines_do_not_run_through_authored_walls() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        for road in &layout.roads {
+            for segment in road.points.windows(2) {
+                let dx = segment[1][0] - segment[0][0];
+                let dz = segment[1][1] - segment[0][1];
+                let steps = (dx.abs().max(dz.abs()) + 7) / 8;
+                for i in 0..=steps {
+                    let x = segment[0][0] + dx * i / steps;
+                    let z = segment[0][1] + dz * i / steps;
+                    assert!(
+                        !layout
+                            .blocks
+                            .iter()
+                            .any(|b| b.material != 0 && b.contains([x, 40, z])),
+                        "road hits a tall wall at {x},{z}"
+                    );
                 }
             }
         }

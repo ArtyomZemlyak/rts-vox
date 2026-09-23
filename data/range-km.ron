@@ -70,6 +70,17 @@
         (kind: Strider, at: (7090,16,2460)), // patrol climbs the steep lane
     ],
     shields: [(at: (6555,16,880), radius: 80)],
+    // Cut-through tracks follow the hill surface; every branch leads to a
+    // different destructive or mobility trial on this one continuous map.
+    roads: [
+        (width: 52, points: [(128,336),(180,500),(640,500),(900,420),(1480,460),(1600,340),(2160,340),(2930,590),(3000,760),(3650,760),(4490,660),(4520,790),(5200,800),(6180,880)]),
+        (width: 48, points: [(2930,590),(3090,1500),(3280,2400),(2700,3200),(1880,4120)]),
+        (width: 48, points: [(4490,660),(4400,1800),(4200,3000),(4500,4300),(4780,5300)]),
+        (width: 40, points: [(6180,880),(6200,1380),(6750,1490),(6960,2110)]),
+        (width: 48, points: [(6750,1490),(8100,2600),(8100,3500),(8200,5300),(8500,7100),(8730,8800)]),
+        (width: 44, points: [(1880,4120),(2020,3960),(2650,3960),(2900,4400),(3900,4700),(4780,5300)]),
+        (width: 44, points: [(4780,5300),(4850,5580),(5050,5800),(5600,5900),(7100,6500),(8050,7500),(8730,8800)]),
+    ],
     blocks: [
         (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
         (min: (394, 0, 282), max: (406, 60, 390), material: 3), // steel core
@@ -182,6 +193,101 @@
         (min: (9010,16,9270), max: (9034,38,9300), material: 3), // armor samples
         (min: (9050,16,9270), max: (9074,38,9300), material: 3), // armor samples
         (min: (9090,16,9270), max: (9114,38,9300), material: 3), // armor samples
+
+        // Continuous-map landmarks and cover. Kept off the scripted firing
+        // lines, but every piece is ordinary destructible terrain matter.
+        // Cover yard: revetment lips and a staggered approach gate.
+        (min: (145,16,560), max: (290,31,574), material: 2),
+        (min: (500,16,280), max: (514,39,350), material: 2),
+        (min: (500,16,381), max: (514,39,448), material: 2),
+        (min: (500,40,280), max: (514,46,448), material: 3),
+        // Material yard: warehouse frame, stockpiles and a low test berm.
+        (min: (1600,16,690), max: (1610,83,705), material: 3),
+        (min: (1600,16,820), max: (1610,83,835), material: 3),
+        (min: (1600,76,690), max: (1700,84,835), material: 3),
+        (min: (1690,16,690), max: (1700,83,705), material: 3),
+        (min: (1690,16,820), max: (1700,83,835), material: 3),
+        (min: (1540,16,750), max: (1580,35,830), material: 5),
+        (min: (2020,16,410), max: (2140,29,425), material: 2),
+        (min: (2060,16,770), max: (2130,37,840), material: 1),
+        // Collapse yard: a partially fallen span and separate rubble pile.
+        (min: (2940,16,900), max: (3110,27,918), material: 2),
+        (min: (2960,27,900), max: (3010,36,918), material: 2),
+        (min: (3010,16,870), max: (3060,30,945), material: 6),
+        (min: (3510,16,580), max: (3610,46,596), material: 3),
+        (min: (3510,16,710), max: (3610,46,726), material: 3),
+        // Shield lab: broken outer ring and an exposed observer gantry.
+        (min: (6230,16,1080), max: (6360,29,1094), material: 2),
+        (min: (6730,16,840), max: (6744,38,960), material: 2),
+        (min: (6740,42,850), max: (6840,48,866), material: 3),
+        (min: (6830,16,850), max: (6840,46,866), material: 3),
+        // Battle field: low traverses, a breached redoubt and a landmark mast.
+        (min: (3470,16,2240), max: (3590,34,2258), material: 1),
+        (min: (3470,16,2540), max: (3590,34,2558), material: 1),
+        (min: (3700,16,2130), max: (3716,58,2210), material: 2),
+        (min: (3700,16,2260), max: (3716,58,2340), material: 2),
+        (min: (3700,16,2210), max: (3716,29,2260), material: 2),
+        (min: (3990,16,2600), max: (4000,118,2610), material: 3),
+        (min: (3960,102,2594), max: (4030,110,2616), material: 3),
+        // Urban district: courtyards, ruined shells and street-level cover.
+        (min: (1870,16,4500), max: (2000,62,4610), material: 2),
+        (min: (1880,16,4510), max: (1990,63,4600), material: 0),
+        (min: (1870,16,4530), max: (1880,42,4570), material: 0),
+        (min: (1880,16,4500), max: (1910,25,4530), material: 6),
+        (min: (1980,16,4560), max: (2020,32,4590), material: 6),
+        (min: (2520,16,4020), max: (2540,59,4140), material: 2),
+        (min: (2520,16,4190), max: (2540,59,4300), material: 2),
+        (min: (2520,16,4140), max: (2540,27,4190), material: 2),
+        (min: (1900,16,4330), max: (2020,28,4350), material: 1),
+        (min: (2350,16,4580), max: (2460,28,4600), material: 1),
+        // Quarry: stepped extraction face with broken stone seams and cover.
+        (min: (5380,16,5490), max: (5500,35,5570), material: 6),
+        (min: (5400,35,5500), max: (5490,53,5560), material: 6),
+        (min: (5420,53,5510), max: (5480,70,5550), material: 6),
+        (min: (5190,16,5730), max: (5320,29,5750), material: 1),
+        (min: (5450,16,5230), max: (5470,48,5360), material: 6),
+        (min: (5450,48,5230), max: (5490,57,5280), material: 6),
+        (min: (4840,16,5780), max: (4950,39,5800), material: 2),
+        (min: (4750,16,5120), max: (4800,28,5170), material: 6),
+        // Forest pass: stone spurs and a timber checkpoint, outside the climb.
+        (min: (7010,16,2710), max: (7080,47,2770), material: 6),
+        (min: (7030,47,2720), max: (7060,62,2750), material: 6),
+        (min: (7580,16,2010), max: (7620,64,2020), material: 5),
+        (min: (7580,16,2150), max: (7620,64,2160), material: 5),
+        (min: (7580,55,2010), max: (7620,65,2160), material: 5),
+        (min: (7500,16,2690), max: (7640,27,2710), material: 1),
+        // Far range: observation tower and revetments around the test bunker.
+        (min: (9300,16,8660), max: (9314,119,8674), material: 3),
+        (min: (9300,16,8740), max: (9314,119,8754), material: 3),
+        (min: (9370,16,8660), max: (9384,119,8674), material: 3),
+        (min: (9370,16,8740), max: (9384,119,8754), material: 3),
+        (min: (9290,108,8650), max: (9394,119,8764), material: 3),
+        (min: (9290,119,8650), max: (9394,133,8664), material: 2),
+        (min: (9290,119,8750), max: (9394,133,8764), material: 2),
+        (min: (8750,16,9140), max: (8860,40,9160), material: 1),
+        (min: (9190,16,9300), max: (9320,36,9320), material: 1),
+        // Roof silhouettes and plant equipment make the structures readable
+        // at RTS height without decorative non-physical meshes.
+        (min: (2274,110,4054), max: (2386,114,4186), material: 3),
+        (min: (2280,114,4060), max: (2310,128,4084), material: 2),
+        (min: (2350,114,4150), max: (2370,134,4170), material: 3),
+        (min: (2410,94,4380), max: (2525,98,4495), material: 3),
+        (min: (2410,98,4380), max: (2525,102,4390), material: 2),
+        (min: (2410,98,4485), max: (2525,102,4495), material: 2),
+        (min: (2480,98,4420), max: (2505,112,4450), material: 2),
+        (min: (2095,78,4450), max: (2190,84,4540), material: 5),
+        (min: (2095,84,4470), max: (2190,90,4520), material: 5),
+        (min: (2095,90,4490), max: (2190,94,4500), material: 3),
+        // Quarry loading frame overlooking the extraction face.
+        (min: (5390,16,5610), max: (5402,91,5622), material: 3),
+        (min: (5490,16,5610), max: (5502,91,5622), material: 3),
+        (min: (5390,82,5606), max: (5502,92,5626), material: 3),
+        (min: (5440,82,5610), max: (5452,102,5622), material: 3),
+        // Armoured bunker cap and a paired exhaust on the far range.
+        (min: (9092,94,8732), max: (9218,102,8744), material: 3),
+        (min: (9092,94,8876), max: (9218,102,8888), material: 3),
+        (min: (9180,94,8770), max: (9202,116,8792), material: 3),
+        (min: (9180,94,8810), max: (9202,110,8832), material: 3),
     ],
     power_milli: [500, 1000, 2000, 4000],
     unit_resistance: 180,

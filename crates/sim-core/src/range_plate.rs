@@ -193,11 +193,15 @@ mod tests {
             if y < 5 {
                 return 1;
             }
-            self.blocks
+            if self
+                .blocks
                 .iter()
                 .any(|b| b.material == self.mat && b.contains([x as i32, y as i32, z as i32]))
-                .then_some(self.mat)
-                .unwrap_or(0)
+            {
+                self.mat
+            } else {
+                0
+            }
         }
     }
     fn fixture(mat: u16) -> (RangeLayout, World, Bodies) {
