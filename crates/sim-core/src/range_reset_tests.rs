@@ -74,3 +74,21 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
         }
     }
 }
+
+#[test]
+fn resized_range_rebuild_matches_a_fresh_world() {
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    let validator = placement::Validator::default();
+    let mut scene = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+    let mut larger = layout;
+    larger.size[0] += 128;
+    larger.size[2] += 128;
+    let fresh = BlastRange::with_layout(config.clone(), larger.clone()).unwrap();
+    scene = scene
+        .rebuilt_with_layout(config, larger, &validator)
+        .unwrap();
+    assert_eq!(scene.state_hash(), fresh.state_hash());
+    assert_eq!(scene.world.bits(), fresh.world.bits());
+}

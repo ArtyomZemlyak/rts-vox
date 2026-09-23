@@ -91,9 +91,15 @@ impl Default for Validator {
     }
 }
 impl Validator {
-    /// Work is bounded by nine template footprints, not the map's area.
-    /// Layered authored blocks retain their last-writer material semantics.
+    /// Collision checks cover at most nine template footprints; the terrain
+    /// index itself scales with the authored map. Layered blocks retain
+    /// their last-writer material semantics.
     pub fn validate(&self, layout: &RangeLayout) -> Result<(), Rejection> {
+        self.prepare(layout).map(|_| ())
+    }
+    /// Keep the validated terrain index for a scene rebuild instead of
+    /// constructing the same spatial bins again after placement checks.
+    pub(super) fn prepare(&self, layout: &RangeLayout) -> Result<RangeTerrain, Rejection> {
         layout.validate().map_err(Rejection::Layout)?;
         let terrain = RangeTerrain::new(true, Some(layout.clone()));
         let mut units = vec![(
@@ -133,7 +139,7 @@ impl Validator {
                 }
             }
         }
-        Ok(())
+        Ok(terrain)
     }
 }
 

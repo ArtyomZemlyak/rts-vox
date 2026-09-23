@@ -237,9 +237,14 @@ impl RangeUnit {
         Self::of_kind(RangeUnitKind::Tank, at)
     }
     pub fn of_kind(kind: RangeUnitKind, at: [i32; 3]) -> Self {
+        // Stock range bodies are immutable templates until a shot damages an
+        // instance. Copy their prepared voxel data instead of redrawing the
+        // same shapes for every placement and battle reset.
+        static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let body = match kind {
-            RangeUnitKind::Tank => voxel::unit::tank(),
-            RangeUnitKind::Strider => voxel::unit::strider(),
+            RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
+            RangeUnitKind::Strider => STRIDER.get_or_init(voxel::unit::strider).clone(),
         };
         let mut connectivity = CoreBufs::new();
         let integrity_model = crate::integrity::Model::new(&body);
@@ -1971,16 +1976,44 @@ impl BlastRange {
     /// has moved into the returned fresh experiment.
     pub fn rebuilt_with_layout(
         &mut self,
-        mut config: ExplosionConfig,
+        config: ExplosionConfig,
         layout: RangeLayout,
         validator: &placement::Validator,
     ) -> Result<Self, String> {
-        validator.validate(&layout).map_err(|e| e.to_string())?;
+        self.rebuilt_with_layout_observed(config, layout, validator, |_| {})
+    }
+    /// Same reset with phase markers for the manual interaction benchmark.
+    pub fn rebuilt_with_layout_observed(
+        &mut self,
+        mut config: ExplosionConfig,
+        layout: RangeLayout,
+        validator: &placement::Validator,
+        mut completed: impl FnMut(&'static str),
+    ) -> Result<Self, String> {
+        let terrain = validator.prepare(&layout).map_err(|e| e.to_string())?;
+        completed("validate");
         config.unit_ablation_resistance = layout.unit_resistance;
         let ai_tuning = self.battle.ai.tuning.clone();
         let Some(old) = self.layout.as_ref().filter(|old| old.size == layout.size) else {
-            let mut next = Self::build(config, Some(layout));
+            let world = World::new(
+                layout.size[0],
+                layout.size[1],
+                layout.size[2],
+                config.edits_per_tick,
+                Box::new(terrain),
+            );
+            completed("world");
+            let witness = config.unit_ablation_resistance > 0;
+            let mut next = Self::build_in_world_observed(
+                config,
+                Some(layout),
+                true,
+                witness,
+                world,
+                &mut completed,
+            );
             next.configure_enemy_ai(ai_tuning)?;
+            completed("ai");
             return Ok(next);
         };
         let areas = RangeTerrain::changed_areas(old, &layout);
@@ -1989,14 +2022,20 @@ impl BlastRange {
             &mut self.world,
             World::new(1, 1, 1, 1, Box::new(RangeTerrain::new(false, None))),
         );
-        world.reset_generator_regions(
-            Box::new(RangeTerrain::new(true, Some(layout.clone()))),
-            &areas,
-        );
+        world.reset_generator_regions(Box::new(terrain), &areas);
+        completed("world");
         world.max_edits_per_tick = config.edits_per_tick;
         let witness = config.unit_ablation_resistance > 0;
-        let mut next = Self::build_in_world(config, Some(layout), true, witness, world);
+        let mut next = Self::build_in_world_observed(
+            config,
+            Some(layout),
+            true,
+            witness,
+            world,
+            &mut completed,
+        );
         next.configure_enemy_ai(ai_tuning)?;
+        completed("ai");
         Ok(next)
     }
     pub fn same_authored_terrain(&self, layout: &RangeLayout) -> bool {
@@ -2033,11 +2072,22 @@ impl BlastRange {
         witness: bool,
         world: World,
     ) -> Self {
+        Self::build_in_world_observed(config, layout, extended, witness, world, &mut |_| {})
+    }
+    fn build_in_world_observed(
+        config: ExplosionConfig,
+        layout: Option<RangeLayout>,
+        extended: bool,
+        witness: bool,
+        world: World,
+        completed: &mut impl FnMut(&'static str),
+    ) -> Self {
         let size = [world.nx, world.ny, world.nz];
         let stock =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
         let mut collapse = CollapseLayer::new(&world);
         collapse.set_max_body_cells(stock.max_body_cells as usize);
+        completed("collapse");
         let bodies = Bodies::new(
             stock.max_bodies,
             Fx::from_ratio(
@@ -2067,6 +2117,7 @@ impl BlastRange {
             layout.as_ref().map_or(RangeUnitKind::Tank, |r| r.gun_kind),
             layout.as_ref().map_or(GUN, |r| r.gun),
         );
+        completed("units");
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
                 u.motion.speed = if u.kind == RangeUnitKind::Tank {
@@ -2162,6 +2213,7 @@ impl BlastRange {
             collapse_cap: stock.max_body_cells as usize,
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
+        completed("components");
         result
     }
     pub fn heat_tuning(&self) -> &modding::heat::HeatTuning {
@@ -3704,6 +3756,27 @@ impl Explosion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_stock_templates_keep_damage_private_to_each_unit() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let mut first = RangeUnit::of_kind(kind, [200, 24, 200]);
+            let second = RangeUnit::of_kind(kind, [240, 24, 200]);
+            let cell = (0..first.body.vol.nz as usize)
+                .flat_map(|z| (0..first.body.vol.ny as usize).map(move |y| (y, z)))
+                .find_map(|(y, z)| {
+                    (0..first.body.vol.nx as usize)
+                        .find(|&x| first.body.vol.get(x, y, z))
+                        .map(|x| (x, y, z))
+                })
+                .expect("stock unit has solid root cells");
+            assert!(first.body.remove(cell.0, cell.1, cell.2));
+            assert!(second.body.vol.get(cell.0, cell.1, cell.2));
+            assert!(RangeUnit::of_kind(kind, [280, 24, 200])
+                .body
+                .vol
+                .get(cell.0, cell.1, cell.2));
+        }
+    }
     fn auto_range() -> BlastRange {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let mut layout =

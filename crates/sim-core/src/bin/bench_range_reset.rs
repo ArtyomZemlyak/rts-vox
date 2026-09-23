@@ -42,8 +42,15 @@ fn main() {
             mark.elapsed().as_secs_f64() * 1000.0
         );
         let mark = Instant::now();
+        let mut phase = mark;
         sim = sim
-            .rebuilt_with_layout(config.clone(), layout.clone(), &validator)
+            .rebuilt_with_layout_observed(config.clone(), layout.clone(), &validator, |name| {
+                println!(
+                    "RESET phase run={run} name={name} ms={:.3}",
+                    phase.elapsed().as_secs_f64() * 1000.0
+                );
+                phase = Instant::now();
+            })
             .expect("reset");
         assert_eq!(sim.world.touched_chunks(), 0);
         println!(
