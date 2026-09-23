@@ -130,6 +130,16 @@ pub struct RangeCourse {
     pub tank_speed: i32,
     pub walker_speed: i32,
     pub step_height: i32,
+    #[serde(default = "default_walker_step_height")]
+    pub walker_step_height: i32,
+    #[serde(default = "default_walker_terrain_tilt_pct")]
+    pub walker_terrain_tilt_pct: i32,
+    #[serde(default = "default_tank_terrain_tilt_pct")]
+    pub tank_terrain_tilt_pct: i32,
+    #[serde(default = "default_tank_terrain_approach_pct")]
+    pub tank_terrain_approach_pct: i32,
+    #[serde(default = "default_walker_terrain_approach_pct")]
+    pub walker_terrain_approach_pct: i32,
     pub arrival: i32,
     pub reload_ticks: u32,
     #[serde(default = "default_turn_alignment")]
@@ -145,6 +155,21 @@ fn default_turn_alignment() -> i32 {
 }
 fn default_replan() -> u32 {
     90
+}
+fn default_walker_step_height() -> i32 {
+    4
+}
+fn default_walker_terrain_tilt_pct() -> i32 {
+    84
+}
+fn default_tank_terrain_tilt_pct() -> i32 {
+    91
+}
+fn default_tank_terrain_approach_pct() -> i32 {
+    60
+}
+fn default_walker_terrain_approach_pct() -> i32 {
+    50
 }
 /// The range as it was before the size moved into the data.
 pub const fn stock_size() -> [u32; 3] {
@@ -186,7 +211,7 @@ impl RangeLayout {
                     || r.clear_min[a] >= r.clear_max[a]
             })
             || r.blocks.iter().any(|b| {
-                ![0, 1, 2, 3, 5, 6, 8].contains(&b.material)
+                ![0, 1, 2, 3, 4, 5, 6, 8].contains(&b.material)
                     || (0..3).any(|a| b.min[a] < 0 || b.max[a] > size[a] || b.min[a] >= b.max[a])
             })
             || std::iter::once(r.gun)
@@ -233,6 +258,11 @@ impl RangeLayout {
                 || !(1..=100).contains(&c.tank_speed)
                 || !(1..=100).contains(&c.walker_speed)
                 || !(1..=8).contains(&c.step_height)
+                || !(1..=16).contains(&c.walker_step_height)
+                || !(50..=99).contains(&c.walker_terrain_tilt_pct)
+                || !(50..=99).contains(&c.tank_terrain_tilt_pct)
+                || !(1..=100).contains(&c.tank_terrain_approach_pct)
+                || !(1..=100).contains(&c.walker_terrain_approach_pct)
                 || !(1..=16).contains(&c.arrival)
                 || c.reload_ticks > 1800
                 || c.replan_ticks == 0
@@ -264,6 +294,21 @@ impl RangeLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn older_course_defaults_keep_the_walkers_original_limits() {
+        let old = include_str!("../../../data/range-cover.ron")
+            .replace("walker_step_height: 8,", "")
+            .replace("walker_terrain_tilt_pct: 70,", "")
+            .replace("tank_terrain_tilt_pct: 88,", "")
+            .replace("tank_terrain_approach_pct: 70,", "")
+            .replace("walker_terrain_approach_pct: 90,", "");
+        let course = RangeLayout::from_ron(&old).unwrap().course.unwrap();
+        assert_eq!(course.walker_step_height, 4);
+        assert_eq!(course.walker_terrain_tilt_pct, 84);
+        assert_eq!(course.tank_terrain_tilt_pct, 91);
+        assert_eq!(course.tank_terrain_approach_pct, 60);
+        assert_eq!(course.walker_terrain_approach_pct, 50);
+    }
     #[test]
     fn sector_bounds_and_catalog_limits_are_rejected_without_overflow() {
         let good = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();

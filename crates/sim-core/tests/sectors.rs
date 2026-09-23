@@ -80,6 +80,41 @@ fn every_authored_shooter_is_clear_and_the_layout_round_trips() {
     assert!(v.validate(&r).is_err(), "custom shooter overlaps a target");
 }
 #[test]
+fn walker_patrol_climbs_the_authored_steep_lane() {
+    let base = layout();
+    let id = base
+        .zones
+        .iter()
+        .position(|z| z.name == "Лес и крутой склон")
+        .unwrap();
+    let r = crop(base, id);
+    assert_eq!(r.units.len(), 2);
+    let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+        "../../../data/energy-cannon.ron"
+    ))
+    .unwrap();
+    let mut sim = BlastRange::with_layout(config, r).unwrap();
+    sim.patrols_running = true;
+    let mut high = sim.units[1].motion.pos[1];
+    for _ in 0..650 {
+        sim.step();
+        high = high.max(sim.units[1].motion.pos[1]);
+    }
+    assert!(
+        high > fx::Fx::from_int(60),
+        "walker never climbed: {high:?}"
+    );
+    assert!(
+        sim.units[1].motion.pos[0] > fx::Fx::from_int(500),
+        "walker did not cross the ramp: {:?}",
+        sim.units[1].motion.pos
+    );
+    assert!(
+        sim.removed_materials[4] + sim.removed_materials[5] > 0,
+        "walker reached the slope without felling the authored trees"
+    );
+}
+#[test]
 fn each_sector_takes_a_real_shot_and_replays_mid_flight() {
     let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../data/energy-cannon.ron"

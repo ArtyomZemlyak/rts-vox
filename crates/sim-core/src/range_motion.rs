@@ -93,6 +93,9 @@ pub struct Motion {
     pub chassis: modding::tuning::Chassis,
     pub speed: i32,
     pub step: i32,
+    /// Terrain acceptance, distinct from the damaged hull's roll limit.
+    terrain_tilt_pct: i32,
+    terrain_approach_pct: i32,
     pub arrival: i32,
     pub alignment: i32,
     pub replan: u32,
@@ -141,7 +144,7 @@ pub struct Motion {
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
-    /// Materials this hull crushes instead of avoiding; empty for walkers.
+    /// Yielding vegetation this hull fells instead of treating as a wall.
     yielding: Vec<voxel::store::Mat>,
     blocked_ticks: u32,
     /// Ticks left in the current escape manoeuvre; zero while following
@@ -180,11 +183,7 @@ impl Motion {
             "../../../data/range-navigation.ron"
         ))
         .expect("navigation");
-        let yielding = if kind == modding::range::RangeUnitKind::Tank {
-            navigation.fell.materials.to_vec()
-        } else {
-            Vec::new()
-        };
+        let yielding = navigation.fell.materials.to_vec();
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
         let integrity = modding::integrity::Integrity::from_ron(include_str!(
@@ -219,7 +218,21 @@ impl Motion {
             } else {
                 c.walker_speed
             },
-            step: c.step_height,
+            step: if kind == modding::range::RangeUnitKind::Tank {
+                c.step_height
+            } else {
+                c.walker_step_height
+            },
+            terrain_tilt_pct: if kind == modding::range::RangeUnitKind::Tank {
+                c.tank_terrain_tilt_pct
+            } else {
+                c.walker_terrain_tilt_pct
+            },
+            terrain_approach_pct: if kind == modding::range::RangeUnitKind::Tank {
+                c.tank_terrain_approach_pct
+            } else {
+                c.walker_terrain_approach_pct
+            },
             arrival: c.arrival,
             alignment: c.turn_alignment_pct,
             replan: c.replan_ticks,
@@ -892,6 +905,13 @@ impl Motion {
     }
     pub(crate) fn shape(&self, b: &UnitBody) -> nav::vehicle::Shape {
         let units = voxel::unit::WORLD_MM as i32;
+        let terrain_tilt = if self.legs_lost.iter().any(|lost| *lost)
+            || self.legs_buckled.iter().any(|buckled| *buckled)
+        {
+            self.chassis.max_tilt_pct
+        } else {
+            self.terrain_tilt_pct
+        };
         nav::vehicle::Shape {
             half: [
                 b.vol.nx as i32 * b.mm as i32 / units / 2,
@@ -903,10 +923,10 @@ impl Motion {
             ],
             clearance: Fx::from_ratio(self.chassis.clearance_cm * 10, units),
             step: self.step,
-            min_up: Fx::from_ratio(self.chassis.max_tilt_pct, 100),
+            min_up: Fx::from_ratio(terrain_tilt, 100),
             height: b.vol.ny as i32 * b.mm as i32 / units,
             span: self.chassis.contact_cm * 10 / units,
-            ramp: Fx::from_ratio(self.chassis.approach_pct, 100),
+            ramp: Fx::from_ratio(self.terrain_approach_pct, 100),
         }
     }
     // Drive phase takes explicit body, world, clock and contact inputs.
@@ -1524,6 +1544,83 @@ mod tests {
     }
     fn ground(depth: i32) -> World {
         World::new(640, 64, 640, 100, Box::new(Ground { depth }))
+    }
+
+    #[test]
+    fn walker_plans_and_cuts_a_tree_belt() {
+        struct TreeBelt;
+        impl voxel::Generator for TreeBelt {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if (120..128).contains(&x) && y < 42 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = World::new(256, 64, 256, 100, Box::new(TreeBelt));
+        let body = voxel::unit::strider();
+        let mut m = Motion::new([60, 16, 128], RangeUnitKind::Strider, &body);
+        let goal = [190, 128];
+        assert!(m.move_to(&w, goal, &body, &[], &nav::vehicle::Rubble::new()));
+        let mut cut_trunk = false;
+        for tick in 0..600 {
+            step(&mut m, &w, &body, &[], tick);
+            for [x, y, z] in m.cut.iter().copied() {
+                cut_trunk |= w.material(x, y, z) == 4;
+                w.queue_dig(x, y, z);
+            }
+            w.flush();
+            if m.destination.is_none() {
+                break;
+            }
+        }
+        assert!(
+            cut_trunk,
+            "walker crossed the forest without felling a trunk"
+        );
+        assert!(m.destination.is_none(), "walker stopped at {:?}", m.pos);
+    }
+    #[test]
+    fn walker_climbs_a_ridge_that_refuses_a_tank() {
+        struct Ridge;
+        impl voxel::Generator for Ridge {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                let rise = (x as i32 - 220).clamp(0, 80) * 3 / 4;
+                u16::from(y < (16 + rise) as u32)
+            }
+        }
+        let w = World::new(640, 128, 640, 100, Box::new(Ridge));
+        let walker_body = voxel::unit::strider();
+        let tank_body = voxel::unit::tank();
+        let walker = Motion::new([160, 16, 320], RangeUnitKind::Strider, &walker_body);
+        let tank = Motion::new([160, 16, 320], RangeUnitKind::Tank, &tank_body);
+        let mut probe = nav::vehicle::Probe::new(&w);
+        let at = [Fx::from_int(260), Fx::from_int(320)];
+        assert!(probe.pose(at, 0, tank.shape(&tank_body)).refused());
+        assert!(!probe.pose(at, 0, walker.shape(&walker_body)).refused());
+        let mut m = walker;
+        assert!(m.move_to(
+            &w,
+            [365, 320],
+            &walker_body,
+            &[],
+            &nav::vehicle::Rubble::new()
+        ));
+        for tick in 0..1000 {
+            step(&mut m, &w, &walker_body, &[], tick);
+            if m.destination.is_none() {
+                break;
+            }
+        }
+        assert!(
+            m.destination.is_none(),
+            "walker stuck on ridge at {:?}",
+            m.pos
+        );
+        assert!(m.pos[1] > Fx::from_int(60));
     }
     fn step(m: &mut Motion, w: &World, b: &UnitBody, others: &[Obstacle], tick: u32) {
         m.step(

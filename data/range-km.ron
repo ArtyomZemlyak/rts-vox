@@ -14,10 +14,15 @@
         (name: "Дальний рубеж", min: (8650,8600), max: (9490,9360), spawn: (8730,16,8800), target: (9090,50,8800)),
         // Prepared with the other sectors; starting a battle only changes its actors.
         (name: "Учебный бой", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3900,15,2400)),
+        (name: "Лес и крутой склон", min: (6880,2000), max: (7720,2800), spawn: (6960,16,2110), target: (7500,24,2110)),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
-        tank_speed: 40, walker_speed: 28, step_height: 4,
+        tank_speed: 40, walker_speed: 28, step_height: 5, walker_step_height: 8,
+        walker_terrain_tilt_pct: 70,
+        tank_terrain_tilt_pct: 88,
+        tank_terrain_approach_pct: 70,
+        walker_terrain_approach_pct: 90,
         arrival: 4, reload_ticks: 60, turn_alignment_pct: 97, replan_ticks: 90,
         ramps: [
             (min: (365,16,410), max: (445,28,480), axis: 0, reverse: false),
@@ -33,11 +38,15 @@
             (min: (5020,16,1140), max: (5150,30,1220), axis: 2, reverse: true),
             (min: (4920,16,5530), max: (5040,38,5630), axis: 0, reverse: false),
             (min: (5040,16,5530), max: (5160,38,5630), axis: 0, reverse: true),
+            // Two lanes of a 75% grade: the walker climbs, the tracked hull detours.
+            (min: (7200,16,2300), max: (7320,106,2530), axis: 0, reverse: false),
+            (min: (7320,16,2300), max: (7440,106,2530), axis: 0, reverse: true),
         ],
         patrols: [
             (unit: 2, points: [(550,445),(550,588),(270,588),(270,445)]),
             (unit: 3, points: [(495,505),(495,540),(325,540),(325,505)]),
             (unit: 5, points: [(4660,700),(5120,700),(5120,1220),(4660,1220)]),
+            (unit: 7, points: [(7090,2460),(7500,2460)]),
         ],
     )),
     auto_attack_range: 1200, // 120 m, all placed units are range targets.
@@ -52,6 +61,8 @@
         (kind: Strider, at: (320,16,505)),
         (kind: Tank, at: (6555,16,880)), // inside the dome
         (kind: Strider, at: (4660,16,700)), // obstacle-course patrol
+        (kind: Tank, at: (7090,16,2370)), // compare: steep lane refuses tracks
+        (kind: Strider, at: (7090,16,2460)), // patrol climbs the steep lane
     ],
     shields: [(at: (6555,16,880), radius: 80)],
     blocks: [
@@ -141,6 +152,13 @@
         (min: (5308,38,5688), max: (5324,46,5704), material: 6),
         (min: (4870,16,5690), max: (4910,46,5730), material: 6),
         (min: (4878,46,5698), max: (4902,54,5722), material: 6),
+        // Mobility comparison: a small tree belt before the steep climb.
+        (min: (7126,16,2448), max: (7132,35,2454), material: 5),
+        (min: (7120,33,2442), max: (7138,47,2460), material: 4),
+        (min: (7156,16,2466), max: (7162,38,2472), material: 5),
+        (min: (7150,36,2460), max: (7168,50,2478), material: 4),
+        (min: (7178,16,2420), max: (7184,37,2426), material: 5),
+        (min: (7172,35,2414), max: (7190,49,2432), material: 4),
         // Far range: fortified bunker, timber stores, steel gate.
         (min: (9090,16,8730), max: (9220,94,8890), material: 2), // hollow building
         (min: (9095,16,8735), max: (9215,89,8885), material: 0), // interior

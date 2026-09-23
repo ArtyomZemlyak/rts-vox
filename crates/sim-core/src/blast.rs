@@ -2960,13 +2960,13 @@ impl BlastRange {
                 self.units[target].motion.receive_contact(transferred);
             }
         }
-        // Tracked hulls cut the yielding matter they stand in; the crown that
+        // Hulls cut yielding vegetation along their path; the crown that
         // hung from those cells follows over the next ticks.
         let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
             .units
             .iter()
             .chain((!self.battle_mode()).then_some(&self.gun))
-            .filter(|u| u.kind == RangeUnitKind::Tank && u.status.alive && !u.motion.cut.is_empty())
+            .filter(|u| u.status.alive && !u.motion.cut.is_empty())
             .map(|u| (u.motion.cut.clone(), u.at))
             .collect();
         for (cut, at) in cuts {
@@ -6042,13 +6042,13 @@ mod tests {
         );
     }
     #[test]
-    fn a_walker_still_treats_trees_as_walls() {
+    fn a_walker_fells_trees_on_the_live_range_and_replays() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
         a.control();
-        // Only this walker moves; neither gunfire nor another tracked
-        // patrol may fell trees on its behalf.
+        // Only this walker moves; neither gunfire nor a tracked patrol may
+        // fell trees on its behalf.
         for u in &mut a.units {
             u.motion.enabled = false;
             u.motion.route.clear();
@@ -6068,36 +6068,32 @@ mod tests {
             .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
         a.units[id].motion.route.clear();
-        let start = a.units[id].motion.pos;
         a.units[id]
             .motion
             .move_to(&a.world, [128, 470], &body, &others, &a.rubble);
-        for _ in 0..600 {
+        let mut cut = false;
+        let mut replay: Option<BlastRange> = None;
+        for _ in 0..1200 {
             a.step();
-            let u = &a.units[id];
-            let mut probe = nav::vehicle::Probe::with_yield(&a.world, &a.navigation.fell.materials);
-            assert!(
-                probe
-                    .crushed(
-                        [u.motion.pos[0], u.motion.pos[2]],
-                        u.motion.drive.head,
-                        u.motion.shape(&body)
-                    )
-                    .is_empty(),
-                "the walker stands inside a tree at {:?}",
-                u.motion.pos
-            );
+            if let Some(b) = replay.as_mut() {
+                b.step();
+                assert_eq!(a.state_hash(), b.state_hash());
+            }
+            cut |= !a.units[id].motion.cut.is_empty();
+            if cut && replay.is_none() {
+                replay = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+            }
+            if a.units[id].motion.destination.is_none() && a.matter.felling_pending() == 0 {
+                break;
+            }
         }
-        assert_eq!(
-            a.removed_materials[4] + a.removed_materials[5],
-            felled_before
-        );
+        assert!(cut && replay.is_some(), "walker never cut a tree");
         assert!(
-            [0, 2]
-                .iter()
-                .any(|&k| a.units[id].motion.pos[k].sub(start[k]).abs() > Fx::ONE),
-            "walker never moved"
+            a.units[id].motion.destination.is_none(),
+            "walker stuck at {:?}",
+            a.units[id].motion.pos
         );
+        assert!(a.removed_materials[4] + a.removed_materials[5] > felled_before);
     }
     #[test]
     fn a_waiting_section_does_not_freeze_damage_elsewhere_on_the_body() {

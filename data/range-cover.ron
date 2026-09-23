@@ -2,7 +2,11 @@
 (
     course: Some((
         min: (200, 400), max: (590, 625),
-        tank_speed: 40, walker_speed: 28, step_height: 4,
+        tank_speed: 40, walker_speed: 28, step_height: 5, walker_step_height: 8,
+        walker_terrain_tilt_pct: 70,
+        tank_terrain_tilt_pct: 88,
+        tank_terrain_approach_pct: 70,
+        walker_terrain_approach_pct: 90,
         arrival: 4, reload_ticks: 60, turn_alignment_pct: 97, replan_ticks: 90,
         ramps: [
             (min: (365,16,410), max: (445,28,480), axis: 0, reverse: false),
