@@ -686,7 +686,21 @@ pub fn draw(
                 [1.3, 0.12, 0.009, (1.0 - t) * 1.8]
             };
             let edge = p.edge * (0.8 + (t * 3.0).sin() * 0.2) * (1.0 - t * 0.55) * flicker;
-            cube(&mut hot, at, edge, col);
+            if p.stream {
+                // A flame packet travels as a ragged tongue. Extend its
+                // cuboid behind the current position so the ribbon joins up
+                // without painting beyond the latest contact point.
+                let axis = p.velocity.normalize_or_zero();
+                beam(
+                    &mut hot,
+                    at - axis * edge * (2.1 - t * 0.7),
+                    at,
+                    edge * 0.72,
+                    col,
+                );
+            } else {
+                cube(&mut hot, at, edge, col);
+            }
         }
     }
     // Use exactly the interpolated transforms already applied to visible meshes,
