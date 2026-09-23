@@ -96,6 +96,11 @@ pub type LinePart = (u32, Vec<u16>, ContainerId, u32);
 /// рендер; типа без тела в наборе быть не должно, и такой получает
 /// номинал вида, а не молчаливый ноль.
 fn drive_factors(kinds: &Kinds, t: &Tuning) -> Vec<fx::Fx> {
+    // The range uses only the material ledger, with no production kinds.
+    // Building every roster body for an empty result stalls each editor reset.
+    if kinds.is_empty() {
+        return Vec::new();
+    }
     let bodies = voxel::roster::all();
     kinds
         .all()

@@ -8,7 +8,7 @@
     max_rounds: 64,
     max_waves: 4,
     zone: (name: "Учебный бой", min: (3200,2000), max: (4100,2800),
-        spawn: (3280,16,2400), target: (3900,34,2400)),
+        spawn: (3280,16,2400), target: (3900,15,2400)),
     units: [
         (kind: Tank, allied: true, at: (3360,16,2290)),
         (kind: Strider, allied: true, at: (3360,16,2490)),

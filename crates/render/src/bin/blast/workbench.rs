@@ -106,9 +106,9 @@ pub struct Workshop {
     redo: Vec<RangeLayout>,
     hover: Option<[i32; 3]>,
     preview: Option<Preview>,
-    validator: sim_core::blast::placement::Validator,
+    pub(super) validator: sim_core::blast::placement::Validator,
     previous_cursor: Option<Vec2>,
-    pub pending: Option<BlastRange>,
+    pub pending: Option<(ExplosionConfig, RangeLayout)>,
 }
 impl Workshop {
     pub fn new(layout: Option<RangeLayout>, editing: bool) -> Self {
@@ -276,7 +276,7 @@ impl Workshop {
         next: RangeLayout,
         config: ExplosionConfig,
     ) -> Result<(), String> {
-        let sim = BlastRange::with_layout(config, next.clone())?;
+        self.validator.validate(&next).map_err(|e| e.to_string())?;
         self.preview = None;
         if let Some(old) = self.layout.replace(next) {
             if self.history.len() == 32 {
@@ -285,7 +285,7 @@ impl Workshop {
             self.history.push(old);
         }
         self.redo.clear();
-        self.pending = Some(sim);
+        self.pending = Some((config, self.layout.as_ref().unwrap().clone()));
         Ok(())
     }
     fn undo(&mut self, config: ExplosionConfig, redo: bool) -> Result<(), String> {
@@ -297,7 +297,7 @@ impl Workshop {
         let Some(next) = stack.last().cloned() else {
             return Ok(());
         };
-        let sim = BlastRange::with_layout(config, next.clone())?;
+        self.validator.validate(&next).map_err(|e| e.to_string())?;
         self.preview = None;
         stack.pop();
         if let Some(old) = self.layout.replace(next) {
@@ -308,7 +308,7 @@ impl Workshop {
             }
         }
         self.selected = None;
-        self.pending = Some(sim);
+        self.pending = Some((config, self.layout.as_ref().unwrap().clone()));
         Ok(())
     }
     fn preview(&mut self, at: [i32; 3], radius: i32) {
@@ -565,6 +565,7 @@ pub fn input(
     windows: Query<&Window>,
     cameras: Query<(&Camera, &GlobalTransform), With<GasCamera>>,
     overrides: Option<Res<knobs::Overrides>>,
+    streaming: Option<Res<streaming::Streaming>>,
 ) {
     if edit.layout.is_none() {
         wheel.clear();
@@ -580,10 +581,10 @@ pub fn input(
         scene.notice.clear();
         if edit.editing {
             edit.selected = None;
-            match range_sim(scene.sim.config.clone(), edit.layout.as_ref(), false, None) {
-                Ok(sim) => edit.pending = Some(sim),
-                Err(e) => scene.notice = e,
-            }
+            edit.pending = Some((
+                scene.sim.config.clone(),
+                edit.layout.as_ref().unwrap().clone(),
+            ));
         }
     }
     if keys.just_pressed(KeyCode::Home) {
@@ -621,6 +622,13 @@ pub fn input(
         }
     }
     edit.previous_cursor = cursor;
+    // Camera controls remain responsive, but picking the old displayed map
+    // during a staged replacement must not place/fire into another scene.
+    if streaming.as_ref().is_some_and(|s| s.loading()) {
+        edit.hover = None;
+        edit.preview = None;
+        return;
+    }
     if !edit.editing {
         edit.hover = None;
         if !blocked {
@@ -1120,19 +1128,17 @@ mod tests {
             RangeLayout::from_ron(&layout.to_ron().unwrap()).unwrap(),
             *layout
         );
-        let mut sim = edit.pending.take().unwrap();
+        let (pending_config, layout) = edit.pending.take().unwrap();
+        let mut sim = BlastRange::with_layout(pending_config, layout).unwrap();
         assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Setup);
         sim.start_battle().unwrap();
         edit.selected = Some(Selection::Unit(2));
         edit.side(true, config(false, false)).unwrap();
         assert!(edit.layout.as_ref().unwrap().units[2].allied);
-        assert_eq!(
-            edit.pending.as_ref().unwrap().battle.phase,
-            sim_core::blast::battle::Phase::Setup
-        );
+        assert!(edit.pending.as_ref().unwrap().1.battle);
         edit.range_mode(config(false, false)).unwrap();
         assert!(!edit.layout.as_ref().unwrap().battle);
-        assert!(!edit.pending.as_ref().unwrap().battle_mode());
+        assert!(!edit.pending.as_ref().unwrap().1.battle);
         assert_eq!(edit.layout.as_ref().unwrap().units.len(), 4);
         assert!(edit.controlled.is_none());
     }
@@ -1269,7 +1275,7 @@ mod tests {
         w.pan_by(Vec2::splat(20000.0));
         assert!(w.pan.x <= 640.0 && w.pan.y <= 640.0);
         w.restart_here(config).unwrap();
-        assert_eq!(w.pending.as_ref().unwrap().gun.at, [200, 16, 336]);
+        assert_eq!(w.pending.as_ref().unwrap().1.gun, [200, 16, 336]);
         assert_eq!(w.layout.as_ref().unwrap().gun, [200, 16, 336]);
         assert_eq!(w.history.len(), 1);
     }
@@ -1277,7 +1283,11 @@ mod tests {
     fn distant_sector_framing_is_local_and_contains_its_structures_when_rotated() {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
-        let zone = layout.zones.last().unwrap();
+        let zone = layout
+            .zones
+            .iter()
+            .find(|z| z.min[0] > 8000 && z.min[1] > 8000)
+            .unwrap();
         for orbit in [0.0, 1.2, 2.6, 4.8] {
             let offset = Quat::from_rotation_y(orbit) * Vec3::new(-155.0, 420.0, 320.0);
             let (aim, height) = sector_frame(zone, offset, 16.0 / 9.0);
@@ -1369,7 +1379,8 @@ mod tests {
             at: [448, 16, 385],
         });
         w.commit(next, c).unwrap();
-        let sim = w.pending.take().unwrap();
+        let (config, layout) = w.pending.take().unwrap();
+        let sim = BlastRange::with_layout(config, layout).unwrap();
         let hit = pick(
             &sim,
             Ray3d::new(Vec3::new(439.0, 180.0, 336.0), Dir3::NEG_Y),

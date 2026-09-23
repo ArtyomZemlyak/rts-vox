@@ -1,6 +1,6 @@
 param(
     [ValidateRange(5, 3600)][int]$Seconds = 30,
-    [ValidateSet('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame')]
+    [ValidateSet('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
@@ -26,6 +26,7 @@ try {
     # Run sequentially: competing windows or video readback invalidate timings.
     $report = foreach ($scenario in $Scenarios) {
         $extra = switch ($scenario) {
+            'actions'     { @('--drive', '--view', 'overview', '--realtime', '--profile-actions') }
             'battle'       { @('--battle') }
             'battle-eight' { @('--battle-eight') }
             'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
@@ -36,9 +37,10 @@ try {
             'flame'        { @('--weapon', 'flame', '--open', '--view', 'exposed', '--attack-unit', '1') }
         }
         $csv = Join-Path $directory "$scenario.csv"
+        if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
         $log = Join-Path $directory "$scenario.log"
         $err = Join-Path $directory "$scenario.err"
-        $arguments = @('--range', 'data/range-km.ron', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+        $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
         # -Wait keeps the exit status available in Windows PowerShell 5.1 too.
         $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait
         if ($process.ExitCode -ne 0) { throw "$scenario failed; see $err" }

@@ -20,6 +20,14 @@ pub struct Visual {
     window: Option<TerrainWindow>,
     rigs: Vec<LegRig>,
 }
+/// Keep the previous shadow cells so replacement actors remove old silhouettes.
+pub fn reset(v: &mut Visual) {
+    *v = Visual {
+        occupied: std::mem::take(&mut v.occupied),
+        window: v.window,
+        ..default()
+    };
+}
 /// A range contact as the picture uses it: the ankle point and the sole's
 /// rotation, heading then tilt, the same composition as `footing::Sole`.
 fn foot_of(c: &sim_core::gait::Contact) -> Contact {

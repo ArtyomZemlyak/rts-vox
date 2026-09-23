@@ -71,7 +71,7 @@ try {
         New-Item -ItemType Directory -Path $root | Out-Null
         $directories = @(foreach ($run in 1..$Runs) {
             $dir = Join-Path $root "run-$run"
-            $arguments = @('--range', 'data/range-cover.ron', '--drive', '--view', 'overview',
+            $arguments = @('--range', 'data/range-cover.ron', '--stock-tuning', '--drive', '--view', 'overview',
                 '--capture', ('"' + $dir + '"'), '--frames', $Frames)
             $process = Start-Process -FilePath 'target/release/blast.exe' -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput "$dir.log" -RedirectStandardError "$dir.err" -Wait -PassThru
             if ($process.ExitCode -ne 0) { throw "Range capture failed: $dir.err" }

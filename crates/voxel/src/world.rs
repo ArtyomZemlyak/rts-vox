@@ -19,6 +19,9 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+#[path = "world_reset_tests.rs"]
+mod reset_tests;
 #[path = "snapshot.rs"]
 pub mod snapshot;
 
@@ -593,6 +596,111 @@ impl World {
             ),
             None => self.gen.material(x, y, z),
         }
+    }
+
+    /// Exact column from the procedural layer overlaid by edited chunks.
+    /// Queries outside the world return air, just like `material`.
+    pub fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
+        out.fill(AIR);
+        if x >= self.nx || z >= self.nz || y0 >= self.ny {
+            return;
+        }
+        let n = out.len().min((self.ny - y0) as usize);
+        self.gen.column(x, z, y0, &mut out[..n]);
+        let mut offset = 0;
+        while offset < n {
+            let y = y0 + offset as u32;
+            let count = (CS - y as usize % CS).min(n - offset);
+            if let Some(chunk) = &self.chunks[self.chunk_index(x, y, z)] {
+                for (dy, dst) in out[offset..offset + count].iter_mut().enumerate() {
+                    *dst = chunk.get(x as usize % CS, y as usize % CS + dy, z as usize % CS);
+                }
+            }
+            offset += count;
+        }
+    }
+
+    /// Restore the authored map without rebuilding untouched occupancy.
+    /// Only columns of materialized chunks need regenerating. Existing
+    /// immutable snapshots retain their old edited chunks through Arc.
+    pub fn restore_pristine(&mut self) {
+        self.restore_columns(&[]);
+    }
+
+    /// Replace the authored generator at an editor/reset boundary. Every
+    /// changed procedural column must lie in a supplied half-open XZ area.
+    /// Dimensions are unchanged; previous runtime edits are discarded too.
+    pub fn reset_generator_regions(
+        &mut self,
+        generator: Box<dyn Generator + Send + Sync>,
+        areas: &[([i32; 2], [i32; 2])],
+    ) {
+        self.gen = Arc::from(generator);
+        self.restore_columns(areas);
+    }
+
+    fn restore_columns(&mut self, areas: &[([i32; 2], [i32; 2])]) {
+        let mut columns = std::collections::BTreeSet::new();
+        for &(lo, hi) in areas {
+            let lo = [
+                lo[0].clamp(0, self.nx as i32) as u32,
+                lo[1].clamp(0, self.nz as i32) as u32,
+            ];
+            let hi = [
+                hi[0].clamp(0, self.nx as i32) as u32,
+                hi[1].clamp(0, self.nz as i32) as u32,
+            ];
+            if lo[0] >= hi[0] || lo[1] >= hi[1] {
+                continue;
+            }
+            for z in lo[1] / CS as u32..hi[1].div_ceil(CS as u32) {
+                for x in lo[0] / CS as u32..hi[0].div_ceil(CS as u32) {
+                    columns.insert((x, z));
+                }
+            }
+        }
+        for (i, chunk) in self.chunks.iter_mut().enumerate() {
+            if chunk.take().is_some() {
+                columns.insert((i as u32 % self.cx, i as u32 / (self.cx * self.cy)));
+            }
+        }
+        let mut column = vec![AIR; self.ny as usize];
+        let mut rows = vec![0u32; self.ny as usize];
+        for (cx, cz) in columns {
+            let x0 = cx * CS as u32;
+            let x1 = ((cx + 1) * CS as u32).min(self.nx);
+            let shift = x0 % 64;
+            let mask = ((1u64 << (x1 - x0)) - 1) << shift;
+            for z in cz * CS as u32..((cz + 1) * CS as u32).min(self.nz) {
+                rows.fill(0);
+                for x in x0..x1 {
+                    self.gen.column(x, z, 0, &mut column);
+                    for (row, &m) in rows.iter_mut().zip(&column) {
+                        *row |= u32::from(m != AIR) << (x - x0);
+                    }
+                    let top = column
+                        .iter()
+                        .rposition(|&m| m != AIR)
+                        .map_or(0, |y| y as u16 + 1);
+                    self.ceiling[x as usize + self.nx as usize * z as usize] = top;
+                }
+                // A chunk's 32 X cells share half of one occupancy word.
+                // Commit each row once, preserving its neighbouring half.
+                for (y, &row) in rows.iter().enumerate() {
+                    let (i, _) = self.bit_index(x0, y as u32, z);
+                    self.bits[i] = (self.bits[i] & !mask) | (u64::from(row) << shift);
+                }
+            }
+        }
+        self.queue.clear();
+        self.applied.clear();
+        self.taken.clear();
+        self.completed.clear();
+        self.defer_buf.clear();
+        self.materialized = 0;
+        self.materialized_in_tick = 0;
+        self.in_tick = false;
+        self.max_materialize_per_tick = 4;
     }
 
     /// Материализовать чанк из генератора — цена первой правки в нём.

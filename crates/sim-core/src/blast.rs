@@ -22,6 +22,9 @@ use voxel::topo::unit::CoreBufs;
 use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
 
+#[cfg(test)]
+#[path = "range_reset_tests.rs"]
+mod reset_tests;
 #[path = "range_structure.rs"]
 mod structure;
 #[cfg(test)]
@@ -772,6 +775,46 @@ struct Column {
 }
 
 impl RangeTerrain {
+    /// Conservative XZ domains of changes to authored terrain. Unit rosters,
+    /// firing targets, route speeds and zone labels do not generate terrain.
+    fn changed_areas(old: &RangeLayout, next: &RangeLayout) -> Vec<([i32; 2], [i32; 2])> {
+        let mut areas = Vec::new();
+        if old.clear_min != next.clear_min || old.clear_max != next.clear_max {
+            // Trees are selected by their lattice centre outside the queried
+            // column. One full tree cell covers both the clearing margin and
+            // the crown reaching back across it.
+            for r in [old, next] {
+                areas.push((r.clear_min.map(|v| v - 28), r.clear_max.map(|v| v + 28)));
+            }
+        }
+        if old.blocks != next.blocks {
+            for b in old.blocks.iter().chain(&next.blocks) {
+                areas.push(([b.min[0], b.min[2]], [b.max[0], b.max[2]]));
+            }
+        }
+        for (a, b) in [(old, next), (next, old)] {
+            for z in &a.zones {
+                if !b.zones.iter().any(|v| z.min == v.min && z.max == v.max) {
+                    areas.push((z.min, z.max));
+                }
+            }
+        }
+        if old.course.as_ref().map(|c| (c.min, c.max))
+            != next.course.as_ref().map(|c| (c.min, c.max))
+        {
+            for c in old.course.iter().chain(&next.course) {
+                areas.push((c.min, c.max));
+            }
+        }
+        if old.course.as_ref().map(|c| &c.ramps) != next.course.as_ref().map(|c| &c.ramps) {
+            for c in old.course.iter().chain(&next.course) {
+                for r in &c.ramps {
+                    areas.push(([r.min[0], r.min[2]], [r.max[0], r.max[2]]));
+                }
+            }
+        }
+        areas
+    }
     fn new(extended: bool, layout: Option<RangeLayout>) -> Self {
         Self {
             index: range_index::Index::new(layout.as_ref()),
@@ -1809,6 +1852,47 @@ impl BlastRange {
         Ok(Self::build(config, Some(layout)))
     }
 
+    /// Reuse the occupancy allocation, restoring only damaged or reauthored
+    /// columns. Validation precedes mutation: errors preserve the old scene.
+    /// On success the caller must replace/discard `self` immediately; its world
+    /// has moved into the returned fresh experiment.
+    pub fn rebuilt_with_layout(
+        &mut self,
+        mut config: ExplosionConfig,
+        layout: RangeLayout,
+        validator: &placement::Validator,
+    ) -> Result<Self, String> {
+        validator.validate(&layout).map_err(|e| e.to_string())?;
+        config.unit_ablation_resistance = layout.unit_resistance;
+        let Some(old) = self.layout.as_ref().filter(|old| old.size == layout.size) else {
+            return Ok(Self::build(config, Some(layout)));
+        };
+        let areas = RangeTerrain::changed_areas(old, &layout);
+        // Leave only a tiny placeholder in the scene being retired.
+        let mut world = std::mem::replace(
+            &mut self.world,
+            World::new(1, 1, 1, 1, Box::new(RangeTerrain::new(false, None))),
+        );
+        world.reset_generator_regions(
+            Box::new(RangeTerrain::new(true, Some(layout.clone()))),
+            &areas,
+        );
+        world.max_edits_per_tick = config.edits_per_tick;
+        let witness = config.unit_ablation_resistance > 0;
+        Ok(Self::build_in_world(
+            config,
+            Some(layout),
+            true,
+            witness,
+            world,
+        ))
+    }
+    pub fn same_authored_terrain(&self, layout: &RangeLayout) -> bool {
+        self.layout.as_ref().is_some_and(|old| {
+            old.size == layout.size && RangeTerrain::changed_areas(old, layout).is_empty()
+        })
+    }
+
     fn build(config: ExplosionConfig, layout: Option<RangeLayout>) -> Self {
         let extended = layout.is_some() || config.motion == ProjectileMotion::Direct;
         let witness = config.unit_ablation_resistance > 0;
@@ -1828,6 +1912,16 @@ impl BlastRange {
             config.edits_per_tick,
             Box::new(RangeTerrain::new(extended, layout.clone())),
         );
+        Self::build_in_world(config, layout, extended, witness, world)
+    }
+    fn build_in_world(
+        config: ExplosionConfig,
+        layout: Option<RangeLayout>,
+        extended: bool,
+        witness: bool,
+        world: World,
+    ) -> Self {
+        let size = [world.nx, world.ny, world.nz];
         let stock =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
         let mut collapse = CollapseLayer::new(&world);

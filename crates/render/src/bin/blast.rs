@@ -29,6 +29,9 @@ mod fire;
 mod fragments;
 #[path = "blast/gun_art.rs"]
 mod gun_art;
+#[cfg(test)]
+#[path = "blast/interaction_tests.rs"]
+mod interaction_tests;
 #[path = "blast/knobs.rs"]
 mod knobs;
 #[path = "blast/moving.rs"]
@@ -37,6 +40,8 @@ mod moving;
 mod panel;
 #[path = "blast/profile.rs"]
 mod profile;
+#[path = "blast/streaming.rs"]
+mod streaming;
 #[path = "blast/witness.rs"]
 mod witness;
 #[path = "blast/workbench.rs"]
@@ -280,6 +285,7 @@ fn main() {
     // The live tuning menu open from the first frame (ADR-298), for a
     // capture of it.
     let mut settings = false;
+    let mut stock_tuning = false;
     let mut layout_file = None;
     let mut power = 1000;
     let mut uncovered = false;
@@ -296,6 +302,7 @@ fn main() {
     let mut profile_seconds = 20.0;
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
+    let mut profile_actions = false;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -306,6 +313,8 @@ fn main() {
                 profile_output = Some(args[i].clone());
             }
             "--profile-gpu" => profile_gpu = true,
+            "--profile-actions" => profile_actions = true,
+            "--stock-tuning" => stock_tuning = true,
             "--gas-cell-mm" => {
                 i += 1;
                 let mm = args[i].parse::<u32>().expect("visible gas cube edge in mm");
@@ -562,6 +571,11 @@ fn main() {
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
     profiler.clouds = profile_clouds;
     profiler.gpu = profile_gpu;
+    assert!(
+        !profile_actions || profile_output.is_some(),
+        "--profile-actions requires --profile"
+    );
+    profiler.actions = profile_actions;
     let mut gas = GasInput::default();
     gas.timings
         .enabled
@@ -628,7 +642,7 @@ fn main() {
             notice: String::new(),
         })
         .insert_resource(panel::Panel::new(drive, demo))
-        .insert_resource(knobs::Overrides::new(settings))
+        .insert_resource(knobs::Overrides::new(settings, stock_tuning))
         .init_resource::<moving::Visual>()
         .init_resource::<fire::Effects>()
         .init_resource::<workbench::ShieldFlashes>()
@@ -636,12 +650,14 @@ fn main() {
         .insert_resource(recording)
         .insert_resource(profiler)
         .insert_resource(gas)
+        .init_resource::<streaming::Streaming>()
         .add_plugins((GasPlugin, OcclusionPlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))
         .add_systems(
             Update,
             (
                 profile::begin,
+                profile::actions,
                 (
                     panel::actions,
                     panel::scroll,
@@ -664,7 +680,7 @@ fn main() {
                     weapon_art,
                     animate_energy,
                     framing,
-                    stream_camera,
+                    streaming::camera,
                     workbench::camera,
                     workbench::ghost::update,
                     workbench::overlay,
@@ -739,7 +755,7 @@ fn write_window(
     };
     let mut dirty: Vec<std::ops::Range<usize>> = Vec::new();
     let mut before: Vec<(usize, u32)> = Vec::new();
-    let mut cursor = voxel::World::mat_cursor();
+    let mut column = vec![0u16; window.dims[1] as usize];
     let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
         // Remember only rows that can change. Sky already empty in both the
         // old and new slab needs no write, allocation or GPU upload.
@@ -775,15 +791,18 @@ fn write_window(
             for x in xs.clone() {
                 let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
                 *highest = (*highest).max(top);
-                for y in window.origin[1]..top.min(window.span(1).end) {
+                let count = (top.min(window.span(1).end) - window.origin[1]).max(0) as usize;
+                sim.world.column(
+                    x as u32,
+                    z as u32,
+                    window.origin[1] as u32,
+                    &mut column[..count],
+                );
+                for (dy, &material) in column[..count].iter().enumerate() {
+                    let y = window.origin[1] + dy as i32;
                     let q = [x, y, z];
                     let i = window.index(q).unwrap();
-                    let m = surface_material(
-                        sim,
-                        q,
-                        sim.world
-                            .material_cached(&mut cursor, x as u32, y as u32, z as u32),
-                    );
+                    let m = surface_material(sim, q, material);
                     let shift = (i % 8) * 4;
                     words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
                 }
@@ -865,6 +884,7 @@ fn write_window(
 
 /// Move the window when the camera has left the middle of it, writing only
 /// what came into view (ADR-318).
+#[cfg(test)]
 fn recentre_terrain(sim: &BlastRange, gas: &mut GasInput, focus: [i32; 3]) -> bool {
     let had = gas.window;
     let want = TerrainWindow::around(sim.size(), focus, TERRAIN_WINDOW, WINDOW_STEP);
@@ -874,22 +894,7 @@ fn recentre_terrain(sim: &BlastRange, gas: &mut GasInput, focus: [i32; 3]) -> bo
     }
     false
 }
-/// Runs even on pause: browsing a distant sector must stream the actual terrain.
-fn stream_camera(
-    scene: Res<Scene>,
-    camera: Query<&Transform, With<GasCamera>>,
-    mut gas: ResMut<GasInput>,
-    mut visual: ResMut<moving::Visual>,
-) {
-    let Ok(t) = camera.single() else { return };
-    let ray = t.forward();
-    let distance = (sim_core::blast::FLOOR as f32 - t.translation.y) / ray.y.min(-0.01);
-    let p = t.translation + ray * distance;
-    if recentre_terrain(&scene.sim, &mut gas, [p.x as i32, 16, p.z as i32]) {
-        moving::occupancy(&scene.sim, &mut gas, &mut visual);
-        gas.advance(scene.sim.tick * 2);
-    }
-}
+/// Publish authoritative terrain and surface damage to the visible window.
 fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     let unit_edits: Vec<_> = sim
         .units
@@ -1153,10 +1158,11 @@ fn advance(
     mut workshop: ResMut<Workshop>,
     mut visual: ResMut<moving::Visual>,
     panel: Res<panel::Panel>,
-    (recording, mut profile, mut fire_fx): (
+    (recording, mut profile, mut fire_fx, mut streaming): (
         Res<Recording>,
         ResMut<profile::Profile>,
         ResMut<fire::Effects>,
+        ResMut<streaming::Streaming>,
     ),
     mut gas: ResMut<GasInput>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1285,12 +1291,33 @@ fn advance(
             uncovered = false;
             kind = None;
         }
-        let next = if let Some(sim) = authored.filter(|_| !changed) {
-            Ok(sim)
+        moving::before(&scene.sim, &mut visual, &gas.window);
+        let mut keep_terrain = false;
+        let mut rebuild = |config, layout: RangeLayout| {
+            keep_terrain = !streaming.loading()
+                && scene.sim.same_authored_terrain(&layout)
+                && scene.sim.world.touched_chunks() == 0
+                && scene.sim.surface_work.is_empty();
+            scene
+                .sim
+                .rebuilt_with_layout(config, layout, &workshop.validator)
+        };
+        let next = if let Some((config, layout)) = authored.filter(|_| !changed) {
+            rebuild(config, layout)
+        } else if let Some(mut layout) = reloaded.clone() {
+            if uncovered {
+                layout.blocks.clear();
+            }
+            if let Some(kind) = kind {
+                for u in &mut layout.units {
+                    u.kind = kind;
+                }
+            }
+            rebuild(weapon_config(energy, anni, power, delivery), layout)
         } else {
             range_sim(
                 weapon_config(energy, anni, power, delivery),
-                reloaded.as_ref(),
+                None,
                 uncovered,
                 kind,
             )
@@ -1313,7 +1340,7 @@ fn advance(
         if panel.drive {
             scene.sim.control();
         }
-        *visual = moving::Visual::default();
+        moving::reset(&mut visual);
         scene.energy = energy;
         scene.anni = anni;
         scene.power = power;
@@ -1330,7 +1357,11 @@ fn advance(
         gas.params.control.z = 0.0;
         gas.atmosphere.clear();
         configure_gas(&scene.sim, scene.energy, scene.anni, &mut gas);
-        fill_terrain(&scene.sim, &mut gas);
+        if keep_terrain {
+            moving::occupancy(&scene.sim, &mut gas, &mut visual);
+        } else {
+            streaming.invalidate();
+        }
         let rotation = gun_rotation(&scene.sim);
         let pivot = Vec3::from(GUN.map(|v| v as f32));
         for (g, mut tr) in &mut gun {
@@ -1350,6 +1381,10 @@ fn advance(
         return;
     }
     if !gas.ready.load(Ordering::Relaxed) {
+        return;
+    }
+    if streaming.loading() {
+        scene.skip_delta = true;
         return;
     }
     if !recording.running() || !profile.running() {

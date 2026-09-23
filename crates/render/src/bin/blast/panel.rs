@@ -733,11 +733,13 @@ pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCo
         keys.reset(k);
     }
 }
-#[allow(clippy::type_complexity)] // Disjoint UI row markers in a single Bevy query.
+// Explicit ECS resources and disjoint UI row markers.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn refresh(
     scene: Res<Scene>,
     edit: Res<Workshop>,
     panel: Res<Panel>,
+    streaming: Option<Res<streaming::Streaming>>,
     mut rows: Query<
         (&mut Node, Option<&EditorOnly>, Option<&RangeOnly>),
         Or<(With<EditorOnly>, With<RangeOnly>)>,
@@ -961,6 +963,10 @@ pub fn refresh(
                 pieces.len() - settled
             )
         };
+        let loading = streaming
+            .as_ref()
+            .and_then(|s| s.progress())
+            .map_or_else(String::new, |p| format!("Подготовка участка: {p}%\n"));
         *t = Text::new(format!(
             "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{weapon_hint}\n{target}{shields}\n{}{debris}{}",
             scene.fps,
@@ -970,7 +976,7 @@ pub fn refresh(
             } else {
                 ""
             },
-            format_args!("{}\n{}", edit.placement_notice(), scene.notice)
+            format_args!("{loading}{}\n{}", edit.placement_notice(), scene.notice)
         ));
     }
 }

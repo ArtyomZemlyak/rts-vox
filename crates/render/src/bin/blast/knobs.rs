@@ -631,6 +631,7 @@ pub struct Overrides {
     pub open: bool,
     pub group: usize,
     started: bool,
+    ignore_saved: bool,
     last_tick: u32,
     pub notice: String,
     /// The row whose number is being typed, and the digits so far.
@@ -638,9 +639,10 @@ pub struct Overrides {
 }
 
 impl Overrides {
-    pub fn new(open: bool) -> Self {
+    pub fn new(open: bool, ignore_saved: bool) -> Self {
         Self {
             open,
+            ignore_saved,
             ..Default::default()
         }
     }
@@ -1216,7 +1218,7 @@ pub fn actions(
                 o.base.insert(knob.key, v);
             }
         }
-        if std::path::Path::new(FILE).is_file() {
+        if !o.ignore_saved && std::path::Path::new(FILE).is_file() {
             match load() {
                 Ok(list) => {
                     for (knob, v) in &list {

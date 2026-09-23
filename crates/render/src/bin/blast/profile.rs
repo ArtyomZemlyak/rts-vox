@@ -9,6 +9,9 @@ pub struct Profile {
     pub seconds: f64,
     pub clouds: usize,
     pub gpu: bool,
+    pub actions: bool,
+    action_step: u8,
+    action_time: f64,
     gpu_samples: std::collections::BTreeMap<String, GpuSamples>,
     emitted: bool,
     warm: Option<f64>,
@@ -18,6 +21,86 @@ pub struct Profile {
     detail: [f64; 3],
     rows: Vec<(f64, u32, [f64; 12])>,
     finished: bool,
+}
+/// Repeat the actual workshop requests in a native renderer, without video
+/// readback. Loading must finish before the next action can be measured.
+pub fn actions(
+    time: Res<Time<Real>>,
+    mut scene: ResMut<Scene>,
+    mut edit: ResMut<Workshop>,
+    stream: Res<streaming::Streaming>,
+    gas: Res<GasInput>,
+    mut p: ResMut<Profile>,
+) {
+    if !p.actions || p.start.is_none() || p.action_step >= 8 {
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    if stream.loading() {
+        p.action_time = now;
+        return;
+    }
+    let interval = if p.action_step == 4 { 6.0 } else { 1.0 };
+    if now - p.action_time < interval {
+        return;
+    }
+    let config = scene.sim.config.clone();
+    let zone = edit.zone as i32;
+    match p.action_step {
+        0 => {
+            let mut layout = edit
+                .layout
+                .clone()
+                .expect("action profile requires a range");
+            layout.units.push(modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Tank,
+                at: [1480, 16, 560],
+                allied: true,
+            });
+            edit.commit(layout, config).expect("profile placement");
+            edit.editing = true;
+        }
+        1 => edit.pending = Some((config, edit.layout.clone().unwrap())),
+        4 => {
+            assert!(
+                scene.sim.units.iter().any(|u| u.revision > 0),
+                "battle must damage real units before reset"
+            );
+            edit.pending = Some((config, edit.layout.clone().unwrap()));
+        }
+        2 => edit.battle_preset(config).expect("profile battle preset"),
+        3 => {
+            scene.sim.start_battle().expect("profile battle teams");
+            edit.editing = false;
+            scene.paused = false;
+        }
+        5 => edit.change_zone(7 - zone),
+        6 => {
+            assert!(
+                gas.window.origin[0] > 8000 && gas.window.origin[2] > 8000,
+                "far sector must actually stream"
+            );
+            println!("INTERACTIONS far_origin={:?}", gas.window.origin);
+            edit.change_zone(-zone);
+        }
+        7 => {
+            assert_eq!(gas.window.origin, [0, 0, 0]);
+            println!(
+                "INTERACTIONS complete generation={} origin={:?}",
+                scene.generation, gas.window.origin
+            );
+        }
+        _ => unreachable!(),
+    }
+    println!(
+        "INTERACTIONS step={} seconds={:.3} tick={} damage={}",
+        p.action_step,
+        now - p.start.unwrap(),
+        scene.sim.tick,
+        scene.sim.units.iter().map(|u| u.revision).sum::<u64>()
+    );
+    p.action_step += 1;
+    p.action_time = now;
 }
 #[derive(Default)]
 struct GpuSamples {
@@ -145,6 +228,14 @@ pub fn end(
         return;
     }
     p.finished = true;
+    if p.actions && p.action_step < 8 {
+        eprintln!(
+            "Interaction profile ended before all actions completed: {}/8",
+            p.action_step
+        );
+        exit.write(AppExit::error());
+        return;
+    }
     let result = (|| -> std::io::Result<()> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(

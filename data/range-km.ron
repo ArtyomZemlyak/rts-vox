@@ -12,6 +12,8 @@
         (name: "Городской квартал", min: (1800,3900), max: (2640,4700), spawn: (1880,16,4120), target: (2270,54,4120)),
         (name: "Карьер и земляные укрытия", min: (4700,5100), max: (5540,5860), spawn: (4780,16,5300), target: (5140,26,5300)),
         (name: "Дальний рубеж", min: (8650,8600), max: (9490,9360), spawn: (8730,16,8800), target: (9090,50,8800)),
+        // Prepared with the other sectors; starting a battle only changes its actors.
+        (name: "Учебный бой", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3900,15,2400)),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
