@@ -1798,6 +1798,8 @@ pub mod thermal;
 #[path = "range_weapons.rs"]
 pub mod weapons;
 
+#[path = "range_ai.rs"]
+pub mod ai;
 #[path = "range_battle.rs"]
 pub mod battle;
 
@@ -1975,8 +1977,11 @@ impl BlastRange {
     ) -> Result<Self, String> {
         validator.validate(&layout).map_err(|e| e.to_string())?;
         config.unit_ablation_resistance = layout.unit_resistance;
+        let ai_tuning = self.battle.ai.tuning.clone();
         let Some(old) = self.layout.as_ref().filter(|old| old.size == layout.size) else {
-            return Ok(Self::build(config, Some(layout)));
+            let mut next = Self::build(config, Some(layout));
+            next.configure_enemy_ai(ai_tuning)?;
+            return Ok(next);
         };
         let areas = RangeTerrain::changed_areas(old, &layout);
         // Leave only a tiny placeholder in the scene being retired.
@@ -1990,13 +1995,9 @@ impl BlastRange {
         );
         world.max_edits_per_tick = config.edits_per_tick;
         let witness = config.unit_ablation_resistance > 0;
-        Ok(Self::build_in_world(
-            config,
-            Some(layout),
-            true,
-            witness,
-            world,
-        ))
+        let mut next = Self::build_in_world(config, Some(layout), true, witness, world);
+        next.configure_enemy_ai(ai_tuning)?;
+        Ok(next)
     }
     pub fn same_authored_terrain(&self, layout: &RangeLayout) -> bool {
         self.layout.as_ref().is_some_and(|old| {
@@ -2208,7 +2209,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(37);
+        b.u32(38);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2350,7 +2351,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37].contains(&version) {
+        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38].contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2670,7 +2671,18 @@ impl BlastRange {
             }
         }
         if version >= 36 {
-            r.battle.load(&mut s, &r.units, r.size, r.turret_limits)?;
+            let allied: Vec<_> = r
+                .layout
+                .as_ref()
+                .map(|l| l.units.iter().map(|u| u.allied).collect())
+                .unwrap_or_default();
+            r.battle.load(
+                &mut s,
+                &r.units,
+                r.size,
+                r.turret_limits,
+                (version, r.tick, &allied),
+            )?;
             if r.battle_mode() {
                 for (u, a) in r.units.iter_mut().zip(&r.battle.actors) {
                     u.update_pose(a.turret.angle);

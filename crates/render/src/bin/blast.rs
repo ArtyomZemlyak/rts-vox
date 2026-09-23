@@ -317,6 +317,7 @@ fn main() {
     let mut demo = false;
     let mut battle_preset = false;
     let mut battle_eight = false;
+    let mut ai_rules_file = None;
     let mut attack_unit: Option<usize> = None;
     let mut go: Option<[i32; 2]> = None;
     let mut record_dir = None;
@@ -354,6 +355,10 @@ fn main() {
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
             "--battle" => battle_preset = true,
+            "--ai-rules" => {
+                i += 1;
+                ai_rules_file = Some(args[i].clone());
+            }
             "--battle-eight" => {
                 battle_preset = true;
                 battle_eight = true;
@@ -548,6 +553,11 @@ fn main() {
         None,
     )
     .expect("valid range");
+    if let Some(file) = ai_rules_file {
+        let source = std::fs::read_to_string(&file).expect("--ai-rules file");
+        let tuning = modding::battle_ai::Tuning::from_ron(&source).expect("--ai-rules RON");
+        sim.configure_enemy_ai(tuning).expect("valid AI rules");
+    }
     if battle_preset && !edit {
         sim.start_battle().expect("two battle teams");
     }

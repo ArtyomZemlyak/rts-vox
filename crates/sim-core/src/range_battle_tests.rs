@@ -1,3 +1,6 @@
+use super::ai::{
+    AiOrder, Decision, Observation, Policy, Rules, UnitObservation, OBSERVATION_VERSION,
+};
 use super::*;
 use modding::range::RangeUnitDef;
 
@@ -27,6 +30,204 @@ fn arena(kind: RangeUnitKind) -> BlastRange {
         l,
     )
     .unwrap()
+}
+
+#[test]
+fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
+    let mut tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    tuning.switch_margin = 20;
+    let mut observation = Observation {
+        version: OBSERVATION_VERSION,
+        observed_tick: 20,
+        decision_tick: 30,
+        size: [640, 192, 640],
+        units: vec![
+            UnitObservation {
+                id: 0,
+                allied: true,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [100, 100],
+                ordered_target: None,
+            },
+            UnitObservation {
+                id: 1,
+                allied: true,
+                alive: true,
+                armed: false,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [350, 100],
+                ordered_target: None,
+            },
+            UnitObservation {
+                id: 2,
+                allied: false,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [230, 100],
+                ordered_target: Some(1),
+            },
+            UnitObservation {
+                id: 3,
+                allied: false,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [250, 100],
+                ordered_target: Some(1),
+            },
+        ],
+    };
+    let rules = Rules { tuning: &tuning };
+    assert_eq!(
+        rules.decide(&observation),
+        vec![
+            Decision {
+                actor: 2,
+                order: AiOrder::Attack(0)
+            },
+            Decision {
+                actor: 3,
+                order: AiOrder::Attack(0)
+            }
+        ]
+    );
+    observation.units[0].alive = false;
+    assert_eq!(
+        rules.decide(&observation),
+        vec![
+            Decision {
+                actor: 2,
+                order: AiOrder::Attack(1)
+            },
+            Decision {
+                actor: 3,
+                order: AiOrder::Attack(1)
+            }
+        ]
+    );
+    observation.units[0].alive = true;
+    observation.units[2].ordered_target = Some(0);
+    observation.units[3].ordered_target = Some(0);
+    observation.units[0].position = [265, 100];
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(0));
+}
+
+#[test]
+fn external_ai_plan_is_validated_scheduled_and_saved() {
+    let mut r = arena(RangeUnitKind::Tank);
+    assert!(r.enemy_ai_observation().is_none());
+    r.start_battle().unwrap();
+    let observation = r.enemy_ai_observation().unwrap();
+    assert_eq!(observation.version, OBSERVATION_VERSION);
+    assert_eq!(observation.decision_tick, r.tick);
+    assert!(r
+        .submit_enemy_ai_plan(
+            observation.decision_tick,
+            vec![Decision {
+                actor: 0,
+                order: AiOrder::Hold
+            }]
+        )
+        .is_err());
+    assert!(r
+        .submit_enemy_ai_plan(
+            observation.decision_tick,
+            vec![Decision {
+                actor: 1,
+                order: AiOrder::Attack(1)
+            }]
+        )
+        .is_err());
+    let plan = vec![Decision {
+        actor: 1,
+        order: AiOrder::Hold,
+    }];
+    r.submit_enemy_ai_plan(observation.decision_tick, plan.clone())
+        .unwrap();
+    assert!(r
+        .submit_enemy_ai_plan(observation.decision_tick, plan)
+        .is_err());
+    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert_eq!(r.state_hash(), restored.state_hash());
+    r.step();
+    restored.step();
+    assert_eq!(r.state_hash(), restored.state_hash());
+    assert_eq!(r.battle.actors[1].order, Order::Hold);
+    assert!(r
+        .submit_enemy_ai_plan(
+            observation.decision_tick,
+            vec![Decision {
+                actor: 1,
+                order: AiOrder::Auto
+            }]
+        )
+        .is_err());
+    for _ in 0..r.battle.ai.tuning.decision_ticks {
+        r.step();
+        restored.step();
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+    assert_eq!(
+        r.battle.actors[1].order,
+        Order::Attack(0),
+        "missing model plan must fall back to rules"
+    );
+}
+
+#[test]
+fn external_move_uses_the_regular_pathfinder_and_replays() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    let tick = r.enemy_ai_observation().unwrap().decision_tick;
+    assert!(r
+        .submit_enemy_ai_plan(
+            tick,
+            vec![Decision {
+                actor: 1,
+                order: AiOrder::Move([-1, 400]),
+            }],
+        )
+        .is_err());
+    r.submit_enemy_ai_plan(
+        tick,
+        vec![Decision {
+            actor: 1,
+            order: AiOrder::Move([480, 420]),
+        }],
+    )
+    .unwrap();
+    r.step();
+    assert_eq!(r.battle.actors[1].order, Order::Move);
+    assert!(r.units[1].motion.destination.is_some());
+    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..3 {
+        r.step();
+        restored.step();
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+}
+
+#[test]
+fn custom_enemy_rules_survive_snapshot() {
+    let mut r = arena(RangeUnitKind::Tank);
+    let mut tuning = r.battle.ai.tuning.clone();
+    tuning.decision_ticks = 8;
+    tuning.focus_fire = false;
+    assert!(r.configure_enemy_ai(tuning.clone()).is_ok());
+    assert_eq!(r.battle.ai.tuning, tuning);
+    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert_eq!(restored.battle.ai.tuning, tuning);
+    assert_eq!(restored.state_hash(), r.state_hash());
+    tuning.decision_ticks = 0;
+    assert!(r.configure_enemy_ai(tuning).is_err());
 }
 #[test]
 fn setup_is_quiet_and_commands_reject_enemy_and_friendly_fire_orders() {

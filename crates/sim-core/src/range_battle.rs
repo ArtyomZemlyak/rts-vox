@@ -1,5 +1,6 @@
 //! Bounded skirmish on the range's ordinary, fully damageable unit roster.
 //! Commands never exchange slots, matter containers or projectile ownership.
+use super::ai::{self, Policy};
 use super::*;
 use fx::blob::{Blob, Scan};
 use modding::range_battle::Tuning;
@@ -57,6 +58,7 @@ pub struct Battle {
     pub tuning: std::sync::Arc<Tuning>,
     pub shell_config: ExplosionConfig,
     bullet_config: ExplosionConfig,
+    pub(super) ai: ai::Controller,
 }
 impl Battle {
     pub fn new(units: &[RangeUnit], resistance: u32) -> Self {
@@ -96,6 +98,7 @@ impl Battle {
             tuning,
             shell_config,
             bullet_config,
+            ai: ai::Controller::new(),
         }
     }
     pub(super) fn working(&self) -> bool {
@@ -154,6 +157,7 @@ impl Battle {
             b.u64(w.energy);
             w.wave.save(b);
         }
+        self.ai.save(b);
     }
     pub(super) fn load(
         &mut self,
@@ -161,7 +165,9 @@ impl Battle {
         units: &[RangeUnit],
         size: [u32; 3],
         limits: crate::turret::Limits,
+        migration: (u32, u32, &[bool]),
     ) -> Option<()> {
+        let (version, tick, allied) = migration;
         self.phase = match s.u8() {
             0 => Phase::Setup,
             1 => Phase::Fighting,
@@ -251,6 +257,12 @@ impl Battle {
                 wave: Explosion::load(s, units, size, true)?,
             });
         }
+        if version >= 38 {
+            self.ai
+                .load(s, tick, self.phase == Phase::Fighting, size, allied)?;
+        } else {
+            self.ai.next_tick = tick;
+        }
         s.ok().then_some(())
     }
 }
@@ -281,6 +293,179 @@ fn aim_point(u: &RangeUnit) -> [i32; 3] {
 impl BlastRange {
     pub fn battle_mode(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.battle)
+    }
+    pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
+        &self.battle.ai.tuning
+    }
+    /// Rules are data-driven and can be replaced while setting up a battle.
+    /// Changing them during a fight starts a new decision cycle on this tick.
+    pub fn configure_enemy_ai(&mut self, tuning: modding::battle_ai::Tuning) -> Result<(), String> {
+        tuning.validate()?;
+        self.battle.ai.tuning = tuning;
+        self.battle.ai.next_tick = self.tick;
+        self.battle.ai.pending = None;
+        Ok(())
+    }
+    /// Snapshot for a rule engine or an asynchronous model runner. The caller
+    /// must return a plan tagged with `decision_tick`; a late plan is rejected.
+    pub fn enemy_ai_observation(&self) -> Option<ai::Observation> {
+        if !self.battle_mode() || self.battle.phase != Phase::Fighting {
+            return None;
+        }
+        Some(self.enemy_ai_observation_for(&self.battle))
+    }
+    fn enemy_ai_observation_for(&self, battle: &Battle) -> ai::Observation {
+        ai::Observation {
+            version: ai::OBSERVATION_VERSION,
+            observed_tick: self.tick,
+            decision_tick: battle.ai.next_tick,
+            size: self.size,
+            units: self
+                .units
+                .iter()
+                .enumerate()
+                .map(|(id, unit)| ai::UnitObservation {
+                    id,
+                    allied: self.allied(id),
+                    alive: unit.status.alive,
+                    armed: unit.status.weapon,
+                    mobile: unit.status.engine,
+                    kind: unit.kind,
+                    position: [
+                        unit.motion.pos[0].to_int_trunc(),
+                        unit.motion.pos[2].to_int_trunc(),
+                    ],
+                    ordered_target: match battle.actors[id].order {
+                        Order::Attack(target) => Some(target),
+                        _ => None,
+                    },
+                })
+                .collect(),
+        }
+    }
+    /// Accept one complete, slot-ordered enemy plan for the scheduled tick.
+    /// Validation happens before mutation; simulation falls back to rules if
+    /// no valid plan is available when that tick arrives.
+    pub fn submit_enemy_ai_plan(
+        &mut self,
+        decision_tick: u32,
+        plan: Vec<ai::Decision>,
+    ) -> Result<(), &'static str> {
+        if !self.battle_mode() || self.battle.phase != Phase::Fighting {
+            return Err("battle is not fighting");
+        }
+        if decision_tick != self.battle.ai.next_tick || decision_tick < self.tick {
+            return Err("stale or unscheduled AI tick");
+        }
+        if self.battle.ai.pending.is_some() {
+            return Err("AI plan already submitted");
+        }
+        let enemies: Vec<_> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(id, u)| !self.allied(*id) && u.status.alive)
+            .map(|(id, _)| id)
+            .collect();
+        if plan.len() != enemies.len() {
+            return Err("AI plan must cover every living enemy");
+        }
+        for (decision, id) in plan.iter().zip(enemies) {
+            if decision.actor != id {
+                return Err("AI plan actors must be in slot order");
+            }
+            match decision.order {
+                ai::AiOrder::Attack(target)
+                    if !self.allied(target)
+                        || !self.units.get(target).is_some_and(|u| u.status.alive) =>
+                {
+                    return Err("AI attack needs a living allied target");
+                }
+                ai::AiOrder::Move(p)
+                    if p[0] < 0
+                        || p[1] < 0
+                        || p[0] >= self.size[0] as i32
+                        || p[1] >= self.size[2] as i32 =>
+                {
+                    return Err("AI destination outside map");
+                }
+                _ => {}
+            }
+        }
+        self.battle.ai.pending = Some(plan);
+        Ok(())
+    }
+    fn battle_ai_tick(&mut self, battle: &mut Battle) {
+        if self.tick < battle.ai.next_tick {
+            return;
+        }
+        let observation = self.enemy_ai_observation_for(battle);
+        let rules = ai::Rules {
+            tuning: &battle.ai.tuning,
+        }
+        .decide(&observation);
+        let supplied = battle.ai.pending.take();
+        for fallback in rules {
+            let decision = supplied
+                .as_ref()
+                .and_then(|plan| plan.iter().find(|d| d.actor == fallback.actor))
+                .copied()
+                .unwrap_or(fallback);
+            if !self.apply_enemy_ai_decision(battle, decision) {
+                self.apply_enemy_ai_decision(battle, fallback);
+            }
+        }
+        battle.ai.next_tick = self.tick.saturating_add(battle.ai.tuning.decision_ticks);
+    }
+    fn apply_enemy_ai_decision(&mut self, battle: &mut Battle, decision: ai::Decision) -> bool {
+        let id = decision.actor;
+        if self.allied(id) || !self.units.get(id).is_some_and(|u| u.status.alive) {
+            return false;
+        }
+        let order = match decision.order {
+            ai::AiOrder::Attack(target) => {
+                if !self.allied(target) || !self.units.get(target).is_some_and(|u| u.status.alive) {
+                    return false;
+                }
+                Order::Attack(target)
+            }
+            ai::AiOrder::Move(_) => Order::Move,
+            ai::AiOrder::Hold => Order::Hold,
+            ai::AiOrder::Auto => Order::Auto,
+        };
+        if battle.actors[id].order == order && !matches!(decision.order, ai::AiOrder::Move(_)) {
+            return true;
+        }
+        if let ai::AiOrder::Move(p) = decision.order {
+            if battle.actors[id].order == Order::Move
+                && self.units[id].motion.destination == Some(p)
+            {
+                return true;
+            }
+            let others: Vec<_> = self
+                .units
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != id)
+                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                .collect();
+            let u = &mut self.units[id];
+            if !u
+                .motion
+                .move_to(&self.world, p, &u.body, &others, &self.rubble)
+            {
+                return false;
+            }
+        } else {
+            self.units[id].motion.stop();
+        }
+        let actor = &mut battle.actors[id];
+        actor.order = order;
+        actor.target = None;
+        actor.charge = None;
+        actor.burst = 0;
+        actor.pursuit = 0;
+        true
     }
     pub fn allied(&self, id: usize) -> bool {
         self.layout
@@ -316,6 +501,8 @@ impl BlastRange {
             u.motion.stop();
         }
         self.battle.phase = Phase::Fighting;
+        self.battle.ai.next_tick = self.tick;
+        self.battle.ai.pending = None;
         Ok(())
     }
     pub fn battle_order(&mut self, id: usize, order: Order, destination: Option<[i32; 2]>) -> bool {
@@ -394,11 +581,13 @@ impl BlastRange {
             tuning: self.battle.tuning.clone(),
             shell_config: self.battle.shell_config.clone(),
             bullet_config: self.battle.bullet_config.clone(),
+            ai: self.battle.ai.clone(),
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
         battle.traces.clear();
         if battle.phase == Phase::Fighting {
+            self.battle_ai_tick(&mut battle);
             self.battle_orders(&mut battle);
         }
         completed("battle_orders");
