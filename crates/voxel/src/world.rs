@@ -1096,6 +1096,7 @@ impl World {
         self.in_tick = s.bool();
         self.materialized = s.u64();
         let n = s.list(4);
+        let mut touched_columns = Vec::with_capacity(n);
         for _ in 0..n {
             let ci = s.u32() as usize;
             if ci >= self.chunks.len() {
@@ -1125,6 +1126,26 @@ impl World {
             p.widenings = 0;
             self.chunks[ci] = Some(Arc::new(p));
             self.refresh_bits_of(ci);
+            touched_columns.push(((ci as u32) % self.cx, (ci as u32) / (self.cx * self.cy)));
+        }
+        // The loaded chunk overrides generator occupancy. Rebuild only
+        // horizontal chunk columns that changed, after all Y layers have
+        // arrived; otherwise an earlier layer can hide a later one.
+        touched_columns.sort_unstable();
+        touched_columns.dedup();
+        for (cx, cz) in touched_columns {
+            for z in cz * CS as u32..((cz + 1) * CS as u32).min(self.nz) {
+                for x in cx * CS as u32..((cx + 1) * CS as u32).min(self.nx) {
+                    let top = (0..self.ny)
+                        .rev()
+                        .find(|&y| {
+                            let (word, mask) = self.bit_index(x, y, z);
+                            self.bits[word] & mask != 0
+                        })
+                        .map_or(0, |y| y + 1);
+                    self.ceiling[x as usize + self.nx as usize * z as usize] = top as u16;
+                }
+            }
         }
         self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
         self.applied = load_edits(s, self.nx, self.nz);
@@ -1728,6 +1749,29 @@ mod tests {
         }
         w.flush();
         check(&w, "после выборки до рамки");
+    }
+
+    #[test]
+    fn snapshot_restores_ceiling_after_raising_and_digging_columns() {
+        let mut original = world();
+        original.queue_edit(Edit::put(5, 40, 5, 3));
+        original.queue_dig(6, 29, 5);
+        original.queue_dig(6, 28, 5);
+        original.queue_edit(Edit::put(38, 43, 38, 3));
+        original.flush();
+        let mut bytes = fx::blob::Blob::new();
+        original.save(&mut bytes);
+        let mut restored = world();
+        assert!(restored.load(&mut fx::blob::Scan::new(&bytes.v)));
+        for z in 0..original.nz {
+            for x in 0..original.nx {
+                assert_eq!(
+                    original.column_ceiling(x, z),
+                    restored.column_ceiling(x, z),
+                    "column {x},{z}"
+                );
+            }
+        }
     }
 
     /// Нетронутый мир обязан совпадать с генератором во всех вокселях —

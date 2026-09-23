@@ -993,6 +993,23 @@ pub fn overlay(
                 }
             }
         }
+    } else if scene.sim.gun.status.alive {
+        // Stream rounds have a hard flight limit. Show that same limit in
+        // the solo range; ballistic shells have no single ground radius.
+        let reach = match scene.sim.config.delivery {
+            Delivery::Flame => Some(scene.sim.streams.tuning.flame.range),
+            Delivery::MachineGun => Some(scene.sim.streams.tuning.machine_gun.range),
+            Delivery::Blast => None,
+        };
+        if let Some(reach) = reach {
+            ground_range(
+                &mut giz,
+                &scene.sim,
+                [scene.sim.gun.at[0], scene.sim.gun.at[2]],
+                reach,
+                Color::srgba(0.48, 0.9, 1.0, 0.38),
+            );
+        }
     }
     // Domes: a wire sphere fading with the charge, red and low while down.
     let capacity = scene.sim.shield_tuning().capacity.max(1) as f32;

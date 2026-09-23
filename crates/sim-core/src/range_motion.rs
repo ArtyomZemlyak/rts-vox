@@ -1362,12 +1362,9 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
     if x < 0 || z < 0 || x >= w.nx as i32 || z >= w.nz as i32 {
         return 192;
     }
-    for y in (0..w.ny).rev() {
-        if w.solid(x as u32, y, z as u32) {
-            return y as i32 + 1;
-        }
-    }
-    0
+    // The world updates this ceiling on every applied edit; probing the
+    // height voxel by voxel here repeats that work for every foot contact.
+    w.column_ceiling(x as u32, z as u32) as i32
 }
 
 #[cfg(test)]
@@ -1777,6 +1774,70 @@ mod tests {
         assert!(peak > Fx::ZERO, "tank did not hop");
         assert!(m.hull.y.sub(level).abs() < Fx::from_ratio(1, 10));
         assert_eq!(m.shove, V3::ZERO);
+    }
+    #[test]
+    fn a_damaged_tank_shoved_into_a_crater_lands_without_entering_another_hull() {
+        let w = ground(12);
+        let mut body = voxel::unit::tank();
+        let original = crate::burst::chunk::Shape::from_body(&body);
+        let mut m = Motion::new([290, 16, 300], RangeUnitKind::Tank, &body);
+        for tick in 0..90 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        for z in 0..body.vol.nz as usize {
+            for y in 0..body.vol.ny as usize {
+                for x in 0..body.vol.nx as usize / 4 {
+                    if body.vol.get(x, y, z) && body.part_at(x, y, z) == voxel::Part::Armour {
+                        body.remove(x, y, z);
+                    }
+                }
+            }
+        }
+        let response = crate::mobility::Mobility::from_shapes(
+            &original,
+            &crate::burst::chunk::Shape::from_body(&body),
+            [body.vol.nx, body.vol.ny, body.vol.nz],
+            Fx::ONE,
+        );
+        assert!(response.inverse_mass > Fx::ONE);
+        let half = Obstacle::of(&m, &body).half;
+        let neighbour = Obstacle {
+            pos: [
+                Fx::from_int(290)
+                    .add(half[0].mul(Fx::from_int(2)))
+                    .add(Fx::from_int(8)),
+                Fx::from_int(16),
+                Fx::from_int(300),
+            ],
+            head: 0,
+            half,
+        };
+        let origin = m.pos;
+        m.impulse(&body, [264, 8, 300], 240_000);
+        let mut peak = m.pos[1];
+        for tick in 90..300 {
+            m.passive(
+                &w,
+                &nav::vehicle::Rubble::new(),
+                &body,
+                98,
+                response,
+                &[neighbour],
+            );
+            peak = peak.max(m.pos[1]);
+            assert_eq!(Obstacle::of(&m, &body).penetration(&neighbour), Fx::ZERO);
+            assert!(m.pos[1].abs() < Fx::from_int(64), "unbounded hop at {tick}");
+        }
+        assert!(m.pos[0] > origin[0], "no shove: {:?}", m.pos);
+        let gap = neighbour.pos[0]
+            .sub(m.pos[0])
+            .sub(half[0].mul(Fx::from_int(2)));
+        assert!(gap >= Fx::ZERO && gap < Fx::ONE, "missed contact: {gap:?}");
+        assert!(peak > origin[1], "no hop: {peak:?}");
+        assert!(m.pos[1] < origin[1].sub(Fx::ONE), "missed crater slope");
+        assert!(m.hull.load > Fx::ZERO, "no landing: {:?}", m.hull);
+        assert!(m.hull.vy.abs() < Fx::ONE, "still falling: {:?}", m.hull);
+        assert!(m.hull.up.y > Fx::from_ratio(95, 100), "did not settle");
     }
     /// A wide two-legged body stands on both legs, each foot carrying
     /// heel and toe; a buckled leg leaves one side, and the body falls onto
