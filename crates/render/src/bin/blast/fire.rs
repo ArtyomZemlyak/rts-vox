@@ -154,6 +154,29 @@ impl Effects {
                 self.shell_burst(Vec3::from(at.map(|v| v as f32)), now, sim.config.energy);
             }
         }
+        if !sim.battle_mode()
+            && sim.config.delivery == Delivery::Kinetic
+            && sim.tick == sim.impact_tick.saturating_add(1)
+        {
+            if let Some(at) = sim.impact {
+                let centre = Vec3::from(at.map(|v| v as f32));
+                for i in 0..10u32 {
+                    let seed = self.serial.wrapping_add(i * 17);
+                    self.add(
+                        centre,
+                        Vec3::new(
+                            noise(seed) * 26.0 - 13.0,
+                            noise(seed + 1) * 18.0 + 3.0,
+                            noise(seed + 2) * 26.0 - 13.0,
+                        ),
+                        now,
+                        0.18 + noise(seed + 3) * 0.12,
+                        0.55 + noise(seed + 4) * 0.8,
+                        false,
+                    );
+                }
+            }
+        }
         let tuning = &sim.streams.tuning;
         self.sources.resize(sim.units.len() + 1, (u64::MAX, None));
         for (id, u) in sim
@@ -630,6 +653,27 @@ mod tests {
             .count();
         assert!(hot >= 25 && smoke >= 10, "flash={hot} smoke={smoke}");
         assert!(effects.particles.len() <= CAP);
+    }
+    #[test]
+    fn solid_shell_contact_has_sparks_without_the_explosive_fireball() {
+        let mut r = BlastRange::new(weapon_config(false, false, 1000, Delivery::Kinetic));
+        let mut effects = Effects::default();
+        for _ in 0..240 {
+            r.step();
+            effects.capture(&r);
+            if r.impact.is_some() {
+                break;
+            }
+        }
+        assert!(r.impact.is_some(), "solid shell never landed");
+        let now = r.tick as f32 / 30.0;
+        let sparks = effects
+            .particles
+            .iter()
+            .filter(|p| p.born == now && !p.smoke)
+            .count();
+        assert_eq!(sparks, 10);
+        assert!(r.explosion.is_none());
     }
     #[test]
     fn a_new_impact_replaces_old_remnants_when_the_pool_is_full() {

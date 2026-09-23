@@ -12,6 +12,7 @@ pub enum ProjectileMotion {
 pub enum Delivery {
     #[default]
     Blast,
+    Kinetic,
     Flame,
     MachineGun,
 }

@@ -224,6 +224,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
+                    ("Бронебой", Action::Weapon(5)),
                     ("Огнемёт", Action::Weapon(3)),
                     ("Пулемёт", Action::Weapon(4)),
                 ],
@@ -550,6 +551,7 @@ pub fn actions(
                     let delivery = match w {
                         3 => Delivery::Flame,
                         4 => Delivery::MachineGun,
+                        5 => Delivery::Kinetic,
                         _ => Delivery::Blast,
                     };
                     let cfg = knobs::effective_config(
@@ -718,6 +720,7 @@ pub fn actions(
         let delivery = match w {
             3 => Delivery::Flame,
             4 => Delivery::MachineGun,
+            5 => Delivery::Kinetic,
             _ => Delivery::Blast,
         };
         scene.anni = w == 2;
@@ -729,12 +732,13 @@ pub fn actions(
         gas.params.origin = origin;
     }
 }
-/// The scene's weapon as the panel counts them: shell 0, energy bolt 1,
-/// annihilation bolt 2.
+/// Stable panel IDs: shell 0, energy 1, annihilation 2, flame 3,
+/// machine gun 4 and solid kinetic shot 5.
 fn weapon_of(scene: &Scene) -> u8 {
     match scene.sim.config.delivery {
         Delivery::Flame => return 3,
         Delivery::MachineGun => return 4,
+        Delivery::Kinetic => return 5,
         Delivery::Blast => {}
     }
     if scene.anni {
@@ -970,6 +974,7 @@ pub fn refresh(
                 scene.sim.stream_muzzles().len(),
                 scene.sim.streams.tuning.machine_gun.range / 10
             ),
+            Delivery::Kinetic => "Бронебойный · локальное пробитие".into(),
             Delivery::Blast => String::new(),
         }
     };

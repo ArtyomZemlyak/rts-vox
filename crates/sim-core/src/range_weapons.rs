@@ -110,6 +110,109 @@ pub(super) fn spread(mut delta: [Fx; 3], heading: [Fx; 3], serial: u32, milli: i
     delta
 }
 impl BlastRange {
+    /// A solid shot spends finite work along its incoming ray. Crossing a
+    /// thicker or more oblique face costs more cells; cover consumes the same
+    /// budget before the ray can reach a hull behind it. No radial wave is
+    /// created, so a blocked shot cannot damage nearby units.
+    pub(super) fn kinetic_impact(&mut self, at: [i32; 3]) {
+        let length = self
+            .velocity
+            .iter()
+            .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
+            .sqrt();
+        if length <= Fx::ZERO {
+            return;
+        }
+        let direction = self.velocity.map(|v| v.div(length));
+        let mut work = self.config.energy;
+        let mut previous = None;
+        let before: Vec<_> = self
+            .units
+            .iter()
+            .map(|u| (u.removed.len(), u.seg_removed.len()))
+            .collect();
+        self.matter.begin(self.config.material_energy_j, 1);
+        // Half-cell samples cannot skip a one-cell plate even at a diagonal.
+        // The 32-unit bound also makes an empty ray a fixed, small cost.
+        for i in 0..64 {
+            let distance = Fx::from_ratio(i, 2);
+            let p = std::array::from_fn(|a| {
+                Fx::from_int(at[a])
+                    .add(direction[a].mul(distance))
+                    .to_int_trunc()
+            });
+            if previous == Some(p) {
+                continue;
+            }
+            previous = Some(p);
+            if let Some(id) = self.units.iter().position(|u| u.solid(p)) {
+                let u = &mut self.units[id];
+                let Some((part, cell)) = u.hit(p) else {
+                    break;
+                };
+                if u.section_holds(part, cell.map(|v| v as u8)) {
+                    break;
+                }
+                let need = u.resistance(p, &self.config).max(1);
+                let spent = work.min(need);
+                if spent == need {
+                    let result = if part == 0 {
+                        self.matter.body(id, u, cell, &u.root_frame(cell[1]), at)
+                    } else {
+                        self.matter
+                            .body_segment(id, u, part - 1, cell, &u.seg_frames[part - 1], at)
+                    };
+                    if !matches!(result, matter::ClaimResult::Applied) {
+                        break;
+                    }
+                    if part == 0 {
+                        u.detached += 1;
+                    } else {
+                        u.seg_detached += 1;
+                    }
+                }
+                if part == 0 {
+                    u.receive_cell(cell, spent, &self.config);
+                } else {
+                    u.receive_seg_cell(part - 1, cell, spent, &self.config);
+                }
+                work -= spent;
+                if work == 0 {
+                    break;
+                }
+            } else {
+                let mat = material(&self.world, p);
+                if mat == 0 {
+                    continue;
+                }
+                let old = self.surface_work.get(&p).copied().unwrap_or(0);
+                let need = material_work(mat, &self.config).saturating_sub(old).max(1);
+                let spent = work.min(need);
+                if spent == need {
+                    if !matches!(
+                        self.matter.ground(&mut self.world, p, at),
+                        matter::ClaimResult::Applied
+                    ) {
+                        break;
+                    }
+                    self.surface_work.remove(&p);
+                } else {
+                    self.surface_work.insert(p, old.saturating_add(spent));
+                }
+                self.surface_changed.push(p);
+                work -= spent;
+                if work == 0 {
+                    break;
+                }
+            }
+        }
+        for (id, (u, old)) in self.units.iter_mut().zip(before).enumerate() {
+            if (u.removed.len(), u.seg_removed.len()) != old {
+                u.refresh_damage(id);
+            }
+        }
+    }
+
     /// Authored barrel ends, with independent connectivity for the two guns.
     pub fn stream_muzzles(&self) -> Vec<[Fx; 3]> {
         muzzles(&self.gun, self.turret.angle)
@@ -234,7 +337,7 @@ impl BlastRange {
     }
     pub(super) fn step_streams(&mut self) {
         self.streams.traces.clear();
-        if self.config.delivery == Delivery::Blast {
+        if matches!(self.config.delivery, Delivery::Blast | Delivery::Kinetic) {
             return;
         }
         let flame = self.config.delivery == Delivery::Flame;
@@ -370,6 +473,135 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn kinetic_range(blocks: Vec<modding::range::RangeBlock>) -> BlastRange {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        l.size = [640, 128, 640];
+        l.course = None;
+        l.blocks = blocks;
+        l.shields.clear();
+        l.units.truncate(1);
+        l.units[0].at = [285, 16, 336];
+        BlastRange::with_layout(c, l).unwrap()
+    }
+    fn plate(x: i32, end: i32, material: u16) -> modding::range::RangeBlock {
+        modding::range::RangeBlock {
+            min: [x, 32, 330],
+            max: [end, 60, 342],
+            material,
+        }
+    }
+    #[test]
+    fn solid_shell_spends_work_on_steel_without_creating_a_blast() {
+        let mut r = kinetic_range(vec![plate(230, 231, 3), plate(233, 234, 3)]);
+        r.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        r.kinetic_impact([230, 40, 336]);
+        r.world.flush();
+        assert_eq!(material(&r.world, [230, 40, 336]), 0);
+        assert_eq!(material(&r.world, [233, 40, 336]), 3);
+        assert_eq!(r.surface_work.get(&[233, 40, 336]), Some(&5500));
+        assert!(r.explosion.is_none());
+    }
+    #[test]
+    fn grazing_a_steel_plate_spends_more_work_than_a_square_hit() {
+        let mut square = kinetic_range(vec![plate(230, 231, 3)]);
+        square.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        square.kinetic_impact([230, 40, 330]);
+        assert!(square.surface_work.is_empty());
+
+        let mut grazing = kinetic_range(vec![plate(230, 231, 3)]);
+        grazing.velocity = [Fx::from_int(70), Fx::ZERO, Fx::from_int(280)];
+        grazing.kinetic_impact([230, 40, 330]);
+        assert_eq!(grazing.surface_work.get(&[230, 40, 331]), Some(&5500));
+        assert_eq!(grazing.units[0].removed.len(), 0);
+    }
+    #[test]
+    fn solid_shell_can_cut_concrete_but_thick_cover_exhausts_it() {
+        let mut r = kinetic_range(vec![plate(230, 239, 2)]);
+        r.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        r.kinetic_impact([230, 40, 336]);
+        r.world.flush();
+        assert_eq!(material(&r.world, [230, 40, 336]), 0);
+        assert_eq!(material(&r.world, [237, 40, 336]), 2);
+        assert_eq!(r.surface_work.get(&[237, 40, 336]), Some(&800));
+        assert_eq!(r.units[0].removed.len(), 0);
+    }
+    #[test]
+    fn solid_shell_damages_a_hull_only_when_cover_does_not_spend_its_work() {
+        let mut open = kinetic_range(vec![]);
+        let front = (230..320)
+            .find_map(|x| {
+                (28..65).find_map(|y| {
+                    (320..350)
+                        .find(|&z| open.units[0].solid([x, y, z]))
+                        .map(|z| [x, y, z])
+                })
+            })
+            .expect("front hull voxel");
+        open.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        open.kinetic_impact(front);
+        assert!(!open.units[0].removed.is_empty());
+        assert!(open.explosion.is_none());
+
+        let mut covered = kinetic_range(vec![modding::range::RangeBlock {
+            min: [front[0] - 5, front[1] - 5, front[2] - 5],
+            max: [front[0] - 2, front[1] + 6, front[2] + 6],
+            material: 3,
+        }]);
+        covered.velocity = open.velocity;
+        covered.kinetic_impact([front[0] - 5, front[1], front[2]]);
+        assert!(covered.units[0].removed.is_empty());
+        assert!(covered.explosion.is_none());
+    }
+    #[test]
+    fn ballistic_solid_shell_is_caught_by_a_shield_and_resumes_after_restore() {
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        l.course = None;
+        l.blocks.clear();
+        l.units.clear();
+        l.airburst_on_target = false;
+        l.shields = vec![modding::range::RangeShieldDef {
+            at: [l.target[0], 16, l.target[2]],
+            radius: 40,
+        }];
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), l).unwrap();
+        a.control();
+        assert!(a.order_ground_fire([392, 24, 336]));
+        for _ in 0..20 {
+            a.step();
+        }
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
+        let mut caught = false;
+        for _ in 0..180 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+            if !a.shield_hits.is_empty() {
+                caught = true;
+                break;
+            }
+        }
+        assert!(caught, "solid round missed the dome");
+        assert!(a.impact.is_none() && a.explosion.is_none());
+        assert!(a.shields[0].hits > 0);
+    }
+    #[test]
+    fn ballistic_solid_shell_hits_a_unit_without_a_fireball() {
+        let mut r = kinetic_range(vec![]);
+        r.control();
+        assert!(r.order_attack(0));
+        for _ in 0..240 {
+            r.step();
+            if r.impact.is_some() {
+                break;
+            }
+        }
+        assert!(r.impact.is_some(), "solid shot never landed");
+        assert!(!r.units[0].removed.is_empty(), "solid shot missed the hull");
+        assert!(r.explosion.is_none());
+        assert_eq!(r.heat.hot(), 0);
+    }
     fn range(delivery: Delivery, wall: bool, walker: bool) -> BlastRange {
         let mut c = ExplosionConfig::from_ron(if delivery == Delivery::Flame {
             include_str!("../../../data/flamethrower.ron")

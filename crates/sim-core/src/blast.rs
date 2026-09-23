@@ -1983,7 +1983,11 @@ impl BlastRange {
                 } else {
                     c.walker_speed
                 };
-                u.motion.step = c.step_height;
+                u.motion.step = if u.kind == RangeUnitKind::Tank {
+                    c.step_height
+                } else {
+                    c.walker_step_height
+                };
                 u.motion.arrival = c.arrival;
                 u.motion.alignment = c.turn_alignment_pct;
                 u.motion.replan = c.replan_ticks;
@@ -2680,7 +2684,7 @@ impl BlastRange {
         match self.config.delivery {
             modding::explosion::Delivery::Flame => Some(&self.streams.tuning.flame),
             modding::explosion::Delivery::MachineGun => Some(&self.streams.tuning.machine_gun),
-            modding::explosion::Delivery::Blast => None,
+            modding::explosion::Delivery::Blast | modding::explosion::Delivery::Kinetic => None,
         }
     }
     fn acquire_auto_target(&mut self) {
@@ -3016,7 +3020,10 @@ impl BlastRange {
             if self.tick == self.fire_tick
                 && self.gun.status.alive
                 && self.gun.status.weapon
-                && self.config.delivery == modding::explosion::Delivery::Blast
+                && matches!(
+                    self.config.delivery,
+                    modding::explosion::Delivery::Blast | modding::explosion::Delivery::Kinetic
+                )
             {
                 let from = self.muzzle();
                 let target = self.target();
@@ -3077,16 +3084,20 @@ impl BlastRange {
                 } else if let Some(at) = impact {
                     self.impact = Some(at);
                     self.impact_tick = self.tick;
-                    self.heat.deposit(
-                        &self.world,
-                        &self.matter.economy.mats,
-                        at,
-                        self.config.heat_units,
-                        self.config.heat_per_cell,
-                    );
-                    self.matter
-                        .begin(self.config.material_energy_j, self.config.fragment_box);
-                    self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
+                    if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                        self.kinetic_impact(at);
+                    } else {
+                        self.heat.deposit(
+                            &self.world,
+                            &self.matter.economy.mats,
+                            at,
+                            self.config.heat_units,
+                            self.config.heat_per_cell,
+                        );
+                        self.matter
+                            .begin(self.config.material_energy_j, self.config.fragment_box);
+                        self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
+                    }
                     self.shell = None;
                 } else if (0..3)
                     .any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32))
@@ -6458,6 +6469,24 @@ mod tests {
         assert_ne!(shell.unit_ablation_resistance, wanted);
         r.reconfigure(shell);
         assert_eq!(r.config.unit_ablation_resistance, wanted);
+    }
+    #[test]
+    fn course_keeps_the_walkers_higher_step_limit() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let course = layout.course.as_ref().unwrap();
+        let r = BlastRange::with_layout(config(), layout.clone()).unwrap();
+        assert_eq!(r.gun.motion.step, course.step_height);
+        for (u, def) in r.units.iter().zip(&layout.units) {
+            assert_eq!(
+                u.motion.step,
+                if def.kind == RangeUnitKind::Tank {
+                    course.step_height
+                } else {
+                    course.walker_step_height
+                }
+            );
+        }
+        assert!(r.units.iter().any(|u| u.kind == RangeUnitKind::Strider));
     }
     #[test]
     fn patrols_complete_two_laps_and_movement_resumes_exactly() {

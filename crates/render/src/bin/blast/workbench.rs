@@ -999,6 +999,7 @@ pub fn overlay(
         let reach = match scene.sim.config.delivery {
             Delivery::Flame => Some(scene.sim.streams.tuning.flame.range),
             Delivery::MachineGun => Some(scene.sim.streams.tuning.machine_gun.range),
+            Delivery::Kinetic => None,
             Delivery::Blast => None,
         };
         if let Some(reach) = reach {

@@ -152,10 +152,18 @@ fn weapon_config(energy: bool, anni: bool, power: u32, delivery: Delivery) -> Ex
     let mut c = ExplosionConfig::from_ron(match delivery {
         Delivery::Flame => include_str!("../../../../data/flamethrower.ron"),
         Delivery::MachineGun => include_str!("../../../../data/machine-gun.ron"),
+        Delivery::Kinetic => include_str!("../../../../data/kinetic-shell.ron"),
         Delivery::Blast => unreachable!(),
     })
-    .expect("stream weapon RON");
-    c.energy = power;
+    .expect("weapon RON");
+    c.energy = if delivery == Delivery::Kinetic {
+        (u64::from(c.energy) * u64::from(power) / 1000) as u32
+    } else {
+        power
+    };
+    if delivery == Delivery::Kinetic {
+        c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
+    }
     c
 }
 /// What the gas shader reads as the weapon: shell 0, energy bolt 1, the
@@ -414,9 +422,22 @@ fn main() {
             "--weapon" => {
                 i += 1;
                 (energy, anni) = match args.get(i).map(String::as_str) {
-                    Some("energy") => (true, false),
-                    Some("anni") => (true, true),
-                    Some("shell") => (false, false),
+                    Some("energy") => {
+                        delivery = Delivery::Blast;
+                        (true, false)
+                    }
+                    Some("anni") => {
+                        delivery = Delivery::Blast;
+                        (true, true)
+                    }
+                    Some("shell") => {
+                        delivery = Delivery::Blast;
+                        (false, false)
+                    }
+                    Some("kinetic") => {
+                        delivery = Delivery::Kinetic;
+                        (false, false)
+                    }
                     Some("flame") => {
                         delivery = Delivery::Flame;
                         (false, false)
@@ -425,7 +446,9 @@ fn main() {
                         delivery = Delivery::MachineGun;
                         (false, false)
                     }
-                    _ => panic!("--weapon expects shell, energy, anni, flame or machine-gun"),
+                    _ => panic!(
+                        "--weapon expects shell, kinetic, energy, anni, flame or machine-gun"
+                    ),
                 };
             }
             "--capture" | "--shots" => {
@@ -1598,8 +1621,10 @@ fn advance(
             0.0
         };
         for mut tr in &mut flash {
-            if scene.sim.config.delivery == Delivery::Blast
-                && !scene.energy
+            if matches!(
+                scene.sim.config.delivery,
+                Delivery::Blast | Delivery::Kinetic
+            ) && !scene.energy
                 && (0.0..0.1).contains(&recoil_age)
             {
                 tr.translation =
@@ -2133,7 +2158,10 @@ fn capture(
     if scene.paused || scene.last_capture == scene.frame {
         return;
     }
-    let fire = if scene.sim.config.delivery == Delivery::Blast {
+    let fire = if matches!(
+        scene.sim.config.delivery,
+        Delivery::Blast | Delivery::Kinetic
+    ) {
         scene.sim.fire_tick
     } else {
         scene.sim.config.fire_tick
@@ -2155,7 +2183,10 @@ fn capture(
             (540, "07-survivors"),
             (720, "08-aftermath"),
         ]
-    } else if scene.sim.config.delivery != Delivery::Blast {
+    } else if !matches!(
+        scene.sim.config.delivery,
+        Delivery::Blast | Delivery::Kinetic
+    ) {
         [
             (30, "00-ready"),
             (fire.saturating_sub(1), "01-aim"),
