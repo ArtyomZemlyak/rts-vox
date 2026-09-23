@@ -1,11 +1,13 @@
 // World units: 100 mm. Simulation: 30 ticks per second.
 (
     flame: (burst_ticks: 72, interval_ticks: 2, range: 300,
+        standoff_milli: 750,
         spread_milli: 70, work: 85, heat: 55, heat_radius: 2,
         fracture_j: 80000, reload_ticks: 20),
     // Six paired salvos per burst instead of ten: each shot is heavier,
     // while work and fracture energy over the full burst stay comparable.
     machine_gun: (burst_ticks: 30, interval_ticks: 5, range: 2400,
+        standoff_milli: 750,
         spread_milli: 3, work: 500, heat: 0, heat_radius: 0,
         fracture_j: 100000, reload_ticks: 12),
     smoke_engine_milli: 750, smoke_core_milli: 900, smoke_loss_milli: 180,

@@ -2653,6 +2653,9 @@ impl BlastRange {
     /// All placed range units are targets. Team rules belong to the battle
     /// scenario; this mode never retargets a manual order (ADR-338).
     pub fn set_auto_attack(&mut self, enabled: bool) {
+        if self.auto_attack && !enabled {
+            self.gun.motion.stop();
+        }
         if self.auto_attack || enabled {
             self.attack = None;
             // Cancel a charged but unfired automatic round. A flying round
@@ -2672,6 +2675,13 @@ impl BlastRange {
             .as_ref()
             .and_then(|r| r.course.as_ref())
             .map_or(0, |c| c.reload_ticks)
+    }
+    fn stream_tuning(&self) -> Option<&modding::range_weapon::Stream> {
+        match self.config.delivery {
+            modding::explosion::Delivery::Flame => Some(&self.streams.tuning.flame),
+            modding::explosion::Delivery::MachineGun => Some(&self.streams.tuning.machine_gun),
+            modding::explosion::Delivery::Blast => None,
+        }
     }
     fn acquire_auto_target(&mut self) {
         if !self.auto_attack {
@@ -2704,6 +2714,9 @@ impl BlastRange {
             .min()
             .map(|(_, id)| id);
         self.attack = None;
+        if self.stream_tuning().is_some() && self.gun.motion.destination.is_some() {
+            self.gun.motion.stop();
+        }
         if self.shell.is_none() && self.fire_tick >= self.tick {
             self.fire_tick = u32::MAX;
         }
@@ -2714,6 +2727,46 @@ impl BlastRange {
         {
             self.attack = chosen;
         }
+    }
+    /// A manually ordered stream weapon closes to a checked firing point.
+    /// Keep the saved route while its destination is still useful; restarting
+    /// the bounded planner each tick would strand the vehicle indefinitely.
+    fn keep_stream_target_in_range(&mut self, id: usize) -> bool {
+        let Some(stream) = self.stream_tuning() else {
+            return true;
+        };
+        let reach = stream.range;
+        let standoff = reach * stream.standoff_milli / 1000;
+        let from = self.gun.motion.pos;
+        let to = self.units[id].motion.pos;
+        let dx = to[0].sub(from[0]);
+        let dz = to[2].sub(from[2]);
+        let distance = dx.mul(dx).add(dz.mul(dz)).sqrt();
+        if distance <= Fx::from_int(reach) {
+            if self.gun.motion.destination.is_some() {
+                self.gun.motion.stop();
+            }
+            return true;
+        }
+        let approach = distance.sub(Fx::from_int(standoff)).div(distance);
+        let dest = [
+            from[0].add(dx.mul(approach)).to_int_trunc(),
+            from[2].add(dz.mul(approach)).to_int_trunc(),
+        ];
+        let changed = self.gun.motion.destination.is_none_or(|old| {
+            (old[0] - dest[0]).abs().max((old[1] - dest[1]).abs()) > reach - standoff
+        });
+        if changed {
+            let others: Vec<_> = self
+                .units
+                .iter()
+                .map(|u| motion::Obstacle::of(&u.motion, &u.body))
+                .collect();
+            self.gun
+                .motion
+                .move_to(&self.world, dest, &self.gun.body, &others, &self.rubble);
+        }
+        false
     }
     /// Отмена приказа: цель снята, машина останавливается.
     pub fn order_stop(&mut self) {
@@ -2901,10 +2954,18 @@ impl BlastRange {
             if let Some(id) = self.attack {
                 if !self.units[id].status.alive {
                     self.attack = None;
+                    if self.stream_tuning().is_some() && self.gun.motion.destination.is_some() {
+                        self.gun.motion.stop();
+                    }
                 } else {
+                    let in_range = self.keep_stream_target_in_range(id);
+                    if !in_range && self.shell.is_none() && self.fire_tick >= self.tick {
+                        self.fire_tick = u32::MAX;
+                    }
                     let reload = self.reload_ticks();
-                    if self.fire_tick == u32::MAX
-                        || (self.impact.is_some() && self.tick >= self.impact_tick + reload)
+                    if in_range
+                        && (self.fire_tick == u32::MAX
+                            || (self.impact.is_some() && self.tick >= self.impact_tick + reload))
                     {
                         self.refire();
                     }
@@ -3514,6 +3575,99 @@ mod tests {
         r.units[2].motion.pos[0] = Fx::from_int(310);
         r.acquire_auto_target();
         assert_eq!(r.attack, Some(2));
+    }
+    #[test]
+    fn auto_attack_detects_then_closes_to_the_active_weapon_range() {
+        let mut r = auto_range();
+        r.layout.as_mut().unwrap().auto_attack_range = 1200;
+        for unit in r.units.iter_mut().skip(1) {
+            unit.status.alive = false;
+        }
+        // Dead hulls remain physical cover; move the third target away so
+        // this test measures range and pursuit rather than occlusion.
+        r.units[2].motion.pos[2] = Fx::from_int(550);
+        let [x, _, z] = r.gun.motion.pos.map(Fx::to_int_trunc);
+        r.units[0].motion.pos[0] = Fx::from_int(x + 315);
+        r.units[0].motion.pos[2] = Fx::from_int(z);
+        r.reconfigure(
+            ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap(),
+        );
+        r.set_auto_attack(true);
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(0), "sensor did not see the target");
+        r.step();
+        assert!(r.gun.motion.destination.is_some(), "flame did not pursue");
+        assert_eq!(r.streams.emitted(), 0, "flame fired beyond its range");
+        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        for _ in 0..300 {
+            replay.step();
+            if replay.units[0].revision > 0 {
+                break;
+            }
+        }
+        assert!(replay.streams.emitted() > 0);
+        assert!(replay.units[0].revision > 0, "automatic approach never hit");
+        r.set_auto_attack(false);
+        assert!(r.gun.motion.destination.is_none(), "cancel kept the route");
+        r.units[0].motion.pos[0] = Fx::from_int(x + 250);
+        r.set_auto_attack(true);
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(0));
+
+        r.set_auto_attack(false);
+        r.units[0].motion.pos[0] = Fx::from_int(x + 350);
+        r.reconfigure(
+            ExplosionConfig::from_ron(include_str!("../../../data/machine-gun.ron")).unwrap(),
+        );
+        r.set_auto_attack(true);
+        r.acquire_auto_target();
+        assert_eq!(r.attack, Some(0), "machine gun lost its longer reach");
+        r.step();
+        assert!(
+            r.gun.motion.destination.is_none(),
+            "machine gun pursued in range"
+        );
+    }
+    #[test]
+    fn manual_flame_attack_approaches_before_firing_and_reaches_the_target() {
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/flamethrower.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.course.as_mut().unwrap().patrols.clear();
+        layout.course.as_mut().unwrap().ramps.clear();
+        layout.clear_min = [64, 240];
+        layout.clear_max = [480, 570];
+        layout.units.truncate(1);
+        layout.units[0].at = [443, 16, 336];
+        let mut r = BlastRange::with_layout(config, layout).unwrap();
+        r.control();
+        let start = r.gun.motion.pos[0];
+        assert!(r.order_attack(0));
+        r.step();
+        assert!(r.gun.motion.destination.is_some(), "no approach route");
+        assert_eq!(r.streams.emitted(), 0, "fired beyond flame range");
+        let mut abandoned = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        abandoned.units[0].status.alive = false;
+        abandoned.step();
+        assert!(abandoned.attack.is_none());
+        assert!(abandoned.gun.motion.destination.is_none());
+        let mut moving = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let old_destination = moving.gun.motion.destination;
+        moving.units[0].motion.pos[2] = Fx::from_int(546);
+        moving.step();
+        assert_ne!(moving.gun.motion.destination, old_destination);
+        for _ in 0..300 {
+            r.step();
+            if r.units[0].revision > 0 {
+                break;
+            }
+        }
+        assert!(r.gun.motion.pos[0] > start, "tank did not approach");
+        assert!(r.streams.emitted() > 0, "never fired from range");
+        assert!(r.units[0].revision > 0, "flame never touched the target");
     }
     #[test]
     fn manual_orders_cancel_automatic_charge_and_mode() {

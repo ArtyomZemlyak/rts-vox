@@ -5,6 +5,7 @@ pub struct Stream {
     pub burst_ticks: u32,
     pub interval_ticks: u32,
     pub range: i32,
+    pub standoff_milli: i32,
     pub spread_milli: i32,
     pub work: u32,
     pub heat: u32,
@@ -27,6 +28,7 @@ impl Tuning {
             if !(1..=300).contains(&s.burst_ticks)
                 || !(1..=30).contains(&s.interval_ticks)
                 || !(1..=3000).contains(&s.range)
+                || !(100..=950).contains(&s.standoff_milli)
                 || !(0..=150).contains(&s.spread_milli)
                 || !(1..=10000).contains(&s.work)
                 || s.heat > 100000
@@ -54,6 +56,10 @@ mod tests {
         let text = include_str!("../../../data/range-weapons.ron");
         let t = Tuning::from_ron(text).unwrap();
         assert!(t.machine_gun.range > t.flame.range);
+        assert!((100..=950).contains(&t.flame.standoff_milli));
         assert!(Tuning::from_ron(&text.replace("interval_ticks: 2", "interval_ticks: 0")).is_err());
+        assert!(
+            Tuning::from_ron(&text.replace("standoff_milli: 750", "standoff_milli: 0")).is_err()
+        );
     }
 }

@@ -268,40 +268,48 @@ impl Effects {
             let (a, b) = (point(trace.from), point(trace.to));
             if sim.config.delivery == Delivery::Flame {
                 let length = a.distance(b);
-                let steps = (length / 2.5).ceil().clamp(2.0, 6.0) as usize;
+                let axis = trace.serial.is_multiple_of(3);
+                let steps = if axis {
+                    (length / 2.2).ceil().clamp(3.0, 7.0) as usize
+                } else {
+                    2
+                };
+                let direction = (b - a).normalize_or_zero();
+                let side = Vec3::Y.cross(direction).normalize_or_zero();
+                let up = (Vec3::Y - direction * direction.y).normalize_or_zero();
                 let forward = if trace.hit {
                     Vec3::ZERO
                 } else {
-                    (b - a).normalize_or_zero() * 9.0
+                    direction * 9.0
                 };
                 for i in 0..steps {
                     let seed = trace.serial.wrapping_add(i as u32 * 17);
                     let t = (i as f32 + 0.5) / steps as f32;
-                    let curl = Vec3::new(
-                        noise(seed) - 0.5,
-                        noise(seed.wrapping_add(3)) - 0.5,
-                        noise(seed.wrapping_add(7)) - 0.5,
-                    ) * 4.2;
-                    // Closely spaced hot tongues hold one stream together.
-                    // At contact they turn upward instead of crossing cover.
+                    // The three physical rays are one visual jet: one ray
+                    // carries its body; the others roughen the silhouette.
+                    // Offsets stay across the travelled segment, so a hit
+                    // never draws a new flame beyond the contact plane.
+                    let curl = side * ((noise(seed) - 0.5) * 10.0)
+                        + up * ((noise(seed.wrapping_add(3)) - 0.5) * 7.0);
                     self.add_stream(
                         a.lerp(b, t) + curl,
-                        forward + Vec3::new(0.5, 4.5, 0.3),
+                        forward + side * 0.5 + up * 4.5,
                         now,
-                        0.22 + noise(seed.wrapping_add(11)) * 0.18,
-                        2.3 + noise(seed.wrapping_add(13)) * 2.9,
+                        if axis { 0.23 } else { 0.11 } + noise(seed.wrapping_add(11)) * 0.16,
+                        if axis { 2.9 } else { 1.25 }
+                            + noise(seed.wrapping_add(13)) * if axis { 3.1 } else { 1.5 },
                     );
-                    if i == steps / 2 {
+                    if axis && i.is_multiple_of(2) {
                         self.add_stream(
-                            a.lerp(b, t) + curl * 0.4,
-                            forward + Vec3::Y * 2.0,
+                            a.lerp(b, t) - curl * 0.45,
+                            forward + up * 2.0,
                             now,
-                            0.14,
-                            1.15,
+                            0.12 + noise(seed.wrapping_add(23)) * 0.11,
+                            1.0 + noise(seed.wrapping_add(29)) * 1.2,
                         );
                     }
                 }
-                if trace.hit && trace.serial.is_multiple_of(3) {
+                if trace.hit && axis {
                     self.plume(b, now, true, 0.9);
                 }
             } else {
@@ -694,6 +702,31 @@ mod tests {
         if trace.hit {
             assert!(along.iter().all(|&v| v <= length + 0.7));
         }
+    }
+    #[test]
+    fn flame_contact_visuals_drift_across_the_wall_instead_of_through_it() {
+        let cfg = weapon_config(false, false, 1000, Delivery::Flame);
+        let mut r = BlastRange::new(cfg);
+        r.tick = 1;
+        r.streams.traces.push(sim_core::blast::weapons::Trace {
+            from: [fx::Fx::ZERO, fx::Fx::from_int(20), fx::Fx::ZERO],
+            to: [fx::Fx::from_int(12), fx::Fx::from_int(23), fx::Fx::ZERO],
+            hit: true,
+            serial: 0,
+        });
+        let mut effects = Effects::default();
+        effects.capture(&r);
+        let trace = r.streams.traces[0];
+        let (a, b) = (point(trace.from), point(trace.to));
+        let direction = (b - a).normalize();
+        let length = a.distance(b);
+        let mut count = 0;
+        for p in effects.particles.iter().filter(|p| p.stream) {
+            count += 1;
+            assert!((p.at - a).dot(direction) < length);
+            assert!(p.velocity.dot(direction).abs() < 0.01);
+        }
+        assert!(count >= 6);
     }
     #[test]
     fn hot_metal_glows_and_smokes_without_structural_damage() {
