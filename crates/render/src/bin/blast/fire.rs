@@ -15,6 +15,7 @@ struct Particle {
     seed: u32,
     smoke: bool,
     stream: bool,
+    dust_material: u16,
 }
 #[derive(Resource, Default)]
 pub struct Effects {
@@ -23,6 +24,7 @@ pub struct Effects {
     smoke: Option<Handle<Mesh>>,
     serial: u32,
     last_frame: Option<f32>,
+    last_dust_tick: Option<u32>,
     sources: Vec<(u64, Option<[usize; 3]>)>,
     heat_spots: Vec<(HeatCell, u32)>,
 }
@@ -41,6 +43,7 @@ impl Effects {
         self.heat_spots.clear();
         self.serial = 0;
         self.last_frame = None;
+        self.last_dust_tick = None;
     }
     fn add(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32, smoke: bool) {
         if self.particles.len() >= CAP {
@@ -57,7 +60,20 @@ impl Effects {
             seed,
             smoke,
             stream: false,
+            dust_material: 0,
         });
+    }
+    fn add_dust(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32, mat: u16) {
+        // Track dust has its own budget and never fills the slots reserved
+        // for impacts, flame and damage smoke.
+        if self.particles.len() >= CAP - 100 {
+            return;
+        }
+        let before = self.particles.len();
+        self.add(at, velocity, now, life, edge, true);
+        if self.particles.len() > before {
+            self.particles[before].dust_material = mat;
+        }
     }
     fn add_stream(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32) {
         let before = self.particles.len();
@@ -375,6 +391,92 @@ impl Effects {
                 self.add(point(at), Vec3::ZERO, now, 0.11, 4.7, false);
             }
         }
+        self.capture_dust(sim, now);
+    }
+    fn capture_dust(&mut self, sim: &BlastRange, now: f32) {
+        let d = &sim.streams.tuning.dust;
+        if sim.tick == 0
+            || !sim.tick.is_multiple_of(d.interval_ticks)
+            || self.last_dust_tick == Some(sim.tick)
+        {
+            return;
+        }
+        self.last_dust_tick = Some(sim.tick);
+        let mut active = self
+            .particles
+            .iter()
+            .filter(|p| p.dust_material != 0)
+            .count();
+        for u in sim
+            .units
+            .iter()
+            .chain((!sim.battle_mode()).then_some(&sim.gun))
+        {
+            if u.kind != RangeUnitKind::Tank || !u.status.alive || !u.motion.hull.grounded() {
+                continue;
+            }
+            let speed = u.motion.drive.vel.abs().to_f64_lossy() as f32;
+            let turn = u.motion.drive.yaw_rate.abs() as f32;
+            if speed < d.min_speed as f32 && turn < d.min_turn_rate as f32 {
+                continue;
+            }
+            let motion = (speed / d.full_speed as f32)
+                .max(turn / d.full_turn_rate as f32)
+                .clamp(0.0, 1.0);
+            let nx = i32::from(u.body.vol.nx);
+            let nz = i32::from(u.body.vol.nz);
+            let rear = fx::Fx::from_ratio(nx * d.rear_milli, 1000);
+            let offset = fx::Fx::from_ratio(nz * d.lateral_milli, 1000);
+            for sign in [-1.0f32, 1.0] {
+                if active >= d.max_particles || self.particles.len() >= CAP - 100 {
+                    return;
+                }
+                let z = fx::Fx::from_ratio(nz, 2).add(offset.mul(fx::Fx::from_int(sign as i32)));
+                let p = u.pose.world([rear, fx::Fx::ZERO, z]);
+                let [x, y, z] = [p.x, p.y, p.z].map(fx::Fx::to_int_trunc);
+                let Some((mat, floor)) = (1..=d.floor_probe).find_map(|drop| {
+                    let floor = y - drop;
+                    let mat = sim_core::blast::material(&sim.world, [x, floor, z]);
+                    (mat != 0).then_some((mat, floor))
+                }) else {
+                    continue;
+                };
+                let strength = dust_strength(mat);
+                if strength == 0.0 {
+                    continue;
+                }
+                let scale = (0.4 + 0.6 * motion) * strength;
+                let forward = point([u.pose.x.x, u.pose.x.y, u.pose.x.z]);
+                let side = point([u.pose.z.x, u.pose.z.y, u.pose.z.z]);
+                let drift = -forward * (d.trail_milli as f32 / 1000.0 * motion)
+                    + Vec3::Y * (d.rise_milli as f32 / 1000.0 * scale)
+                    + side * (sign * turn / d.full_turn_rate as f32 * 2.0);
+                self.add_dust(
+                    Vec3::new(
+                        p.x.to_f64_lossy() as f32,
+                        floor as f32 + 2.0,
+                        p.z.to_f64_lossy() as f32,
+                    ),
+                    drift,
+                    now,
+                    d.life_milli as f32 / 1000.0 * (0.8 + 0.2 * motion),
+                    d.edge_milli as f32 / 1000.0
+                        * scale
+                        * (0.78 + 0.44 * noise(self.serial.wrapping_add(31))),
+                    mat,
+                );
+                active += 1;
+            }
+        }
+    }
+}
+fn dust_strength(mat: u16) -> f32 {
+    match mat {
+        1 | 7 => 1.0,
+        8 => 0.8,
+        6 => 0.6,
+        2 => 0.42,
+        _ => 0.0,
     }
 }
 fn cube(buf: &mut MeshBuf, at: Vec3, edge: f32, col: [f32; 4]) {
@@ -513,14 +615,31 @@ pub fn draw(
     let mut smoke = MeshBuf::default();
     for (p, at, t) in particles {
         if p.smoke {
-            let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
-            let shade = 0.085 + t * 0.09 + noise(p.seed) * 0.025;
-            cube(
-                &mut smoke,
-                at,
-                p.edge * (0.65 + t * 1.65),
-                [shade * 0.94, shade * 0.96, shade, fade * 0.25],
-            );
+            if p.dust_material != 0 {
+                let rgb = match p.dust_material {
+                    1 => [0.38, 0.31, 0.23],
+                    7 => [0.36, 0.34, 0.25],
+                    8 => [0.39, 0.36, 0.31],
+                    6 => [0.34, 0.34, 0.32],
+                    _ => [0.38, 0.36, 0.33],
+                };
+                let fade = (t * 9.0).min(1.0) * (1.0 - t).powi(2);
+                cube(
+                    &mut smoke,
+                    at,
+                    p.edge * (0.75 + t * 0.9),
+                    [rgb[0], rgb[1], rgb[2], fade * 0.34],
+                );
+            } else {
+                let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
+                let shade = 0.085 + t * 0.09 + noise(p.seed) * 0.025;
+                cube(
+                    &mut smoke,
+                    at,
+                    p.edge * (0.65 + t * 1.65),
+                    [shade * 0.94, shade * 0.96, shade, fade * 0.25],
+                );
+            }
         } else {
             let flicker = 0.85 + noise(p.seed.wrapping_add((t * 12.0) as u32)) * 0.15;
             let col = if p.stream && t < 0.25 {
@@ -628,6 +747,104 @@ fn fire_mesh(buf: &MeshBuf) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn moving_tracks_raise_bounded_ground_coloured_dust_once_per_tick() {
+        let mut r = BlastRange::new(config(false, false));
+        let mut effects = Effects::default();
+        r.tick = r.streams.tuning.dust.interval_ticks;
+        r.gun.motion.drive.vel = fx::Fx::from_int(30);
+        r.gun.update_pose(r.gun.motion.drive.head);
+        effects.capture(&r);
+        let dust: Vec<_> = effects
+            .particles
+            .iter()
+            .filter(|p| p.dust_material != 0)
+            .collect();
+        assert_eq!(dust.len(), 2);
+        assert!(dust.iter().all(|p| p.smoke && p.edge > 1.0));
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), 2, "one tick emitted twice");
+
+        r.gun.motion.drive.vel = fx::Fx::ZERO;
+        r.tick += r.streams.tuning.dust.interval_ticks;
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), 2, "stopped tracks made dust");
+        r.tick += 30;
+        effects.capture(&r);
+        assert!(effects.particles.is_empty(), "old dust did not clear");
+    }
+    #[test]
+    fn pivoting_tracks_raise_dust_and_keep_a_separate_particle_budget() {
+        let mut r = BlastRange::new(config(false, false));
+        r.streams.tuning.dust.max_particles = 4;
+        let mut effects = Effects::default();
+        r.tick = 3;
+        r.gun.motion.drive.yaw_rate = 90;
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), 2);
+        r.tick = 6;
+        effects.capture(&r);
+        r.tick = 9;
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), 4);
+        assert_eq!(dust_strength(3), 0.0, "steel should not shed soil");
+        assert!(dust_strength(7) > dust_strength(2));
+    }
+    #[test]
+    fn a_steel_floor_hides_the_soil_below_from_track_dust() {
+        let mut r = BlastRange::new(config(false, false));
+        let mut effects = Effects::default();
+        r.tick = 3;
+        r.gun.motion.drive.vel = fx::Fx::from_int(30);
+        effects.capture(&r);
+        let contacts: Vec<_> = effects
+            .particles
+            .iter()
+            .filter(|p| p.dust_material != 0)
+            .map(|p| {
+                [
+                    p.at.x.floor() as u32,
+                    (p.at.y - 2.0) as u32,
+                    p.at.z.floor() as u32,
+                ]
+            })
+            .collect();
+        assert_eq!(contacts.len(), 2);
+        for [x, y, z] in contacts {
+            r.world.queue_edit(voxel::world::Edit::put(x, y, z, 3));
+        }
+        r.world.flush();
+        effects.clear();
+        r.tick = 6;
+        effects.capture(&r);
+        assert!(effects.particles.is_empty());
+    }
+    #[test]
+    fn an_airborne_tank_does_not_raise_track_dust() {
+        let mut r = BlastRange::new(config(false, false));
+        r.tick = 3;
+        r.gun.motion.drive.vel = fx::Fx::from_int(30);
+        r.gun.motion.hull.load = fx::Fx::ZERO;
+        let mut effects = Effects::default();
+        effects.capture(&r);
+        assert!(effects.particles.is_empty());
+    }
+    #[test]
+    fn a_real_range_move_emits_track_dust() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let mut r = BlastRange::with_layout(config(false, false), layout).unwrap();
+        r.control();
+        assert!(r.order_move([250, 336]));
+        let mut effects = Effects::default();
+        let mut emitted = false;
+        for _ in 0..90 {
+            r.step();
+            effects.capture(&r);
+            emitted |= effects.particles.iter().any(|p| p.dust_material != 0);
+        }
+        assert!(emitted, "moving range tank raised no dust");
+    }
     #[test]
     fn shell_impact_starts_a_bounded_flash_before_the_slow_plume() {
         let mut r = BlastRange::new(config(false, false));
