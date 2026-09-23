@@ -29,6 +29,7 @@ impl Panel {
 pub enum Action {
     Play,
     BattlePreset,
+    BattleWorld,
     RangeMode,
     BattleStart,
     Side(bool),
@@ -150,7 +151,13 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             SectorLabel,
         ));
         let rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
-            (false, vec![("Бой 2×2 / расстановка", Action::BattlePreset)]),
+            (
+                false,
+                vec![
+                    ("Бой на всей карте", Action::BattleWorld),
+                    ("Бой 2×2 / расстановка", Action::BattlePreset),
+                ],
+            ),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (
                 false,
@@ -257,6 +264,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Бетон", Action::Tool(Tool::Concrete)),
                     ("Сталь", Action::Tool(Tool::Steel)),
                     ("Грунт", Action::Tool(Tool::Earth)),
+                    ("Расчистить", Action::Tool(Tool::Clear)),
                     ("Щит", Action::Tool(Tool::Shield)),
                 ],
             ),
@@ -403,6 +411,15 @@ pub fn actions(
         }
         scene.notice.clear();
         match action {
+            Action::BattleWorld => match edit.battle_world(scene.sim.config.clone()) {
+                Ok(()) => {
+                    scene.view = 1;
+                    scene.repeat = false;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                }
+                Err(e) => scene.notice = e,
+            },
             Action::BattlePreset => match edit.battle_preset(scene.sim.config.clone()) {
                 Ok(()) => {
                     scene.view = 1;
@@ -749,7 +766,7 @@ pub fn refresh(
     mut sectors: Query<&mut Text, (With<SectorLabel>, Without<Readout>)>,
 ) {
     for mut t in &mut sectors {
-        **t = edit.sector().map_or_else(
+        let sector = edit.sector().map_or_else(
             || "Испытательная площадка".into(),
             |z| {
                 format!(
@@ -760,6 +777,11 @@ pub fn refresh(
                 )
             },
         );
+        **t = if scene.sim.battle_mode() {
+            format!("Бой · {sector} · расстановка по всей карте")
+        } else {
+            sector
+        };
     }
     for (mut n, editor, range) in &mut rows {
         n.display = if (editor.is_none() || edit.editing)

@@ -1,0 +1,5 @@
+// Clearing above the natural ground for remote battle deployment, world units.
+(
+    clearing_side: 96,
+    clearing_height: 64,
+)

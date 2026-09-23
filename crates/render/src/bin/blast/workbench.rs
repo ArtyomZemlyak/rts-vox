@@ -16,6 +16,7 @@ pub enum Tool {
     Concrete,
     Steel,
     Earth,
+    Clear,
     Aim,
     Shield,
 }
@@ -171,6 +172,23 @@ impl Workshop {
         self.controlled = Some(0);
         self.pan = Vec2::ZERO;
         self.zoom = 0.85;
+        self.orbit = 0.0;
+        Ok(())
+    }
+    pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let mut layout = self.layout.clone().ok_or("No range layout")?;
+        layout.battle = true;
+        layout.units.clear();
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        self.commit(layout, config)?;
+        self.editing = true;
+        self.allied = true;
+        self.controlled = None;
+        self.selected = None;
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
         self.orbit = 0.0;
         Ok(())
     }
@@ -362,7 +380,8 @@ impl Workshop {
         let inside = |lo: [i32; 2], hi: [i32; 2]| {
             at[0] >= lo[0] && at[0] < hi[0] && at[2] >= lo[1] && at[2] < hi[1]
         };
-        let issue = if !inside(next.clear_min, next.clear_max)
+        let issue = if !next.battle
+            && !inside(next.clear_min, next.clear_max)
             && !next.course.as_ref().is_some_and(|c| inside(c.min, c.max))
             && !next.zones.iter().any(|z| inside(z.min, z.max))
         {
@@ -437,6 +456,31 @@ fn snap(v: f32) -> i32 {
     (v / 4.0).round() as i32 * 4
 }
 fn block(tool: Tool, at: [i32; 3], rotate: bool) -> RangeBlock {
+    if tool == Tool::Clear {
+        static CLEARING: std::sync::OnceLock<modding::range::RangeEditor> =
+            std::sync::OnceLock::new();
+        let cfg = CLEARING.get_or_init(|| {
+            modding::range::RangeEditor::from_ron(include_str!(
+                "../../../../../data/range-editor.ron"
+            ))
+            .expect("range editor clearing")
+        });
+        let half = cfg.clearing_side / 2;
+        let floor = if at[0] >= 0 && at[2] >= 0 {
+            sim_core::blast::range_height(at[0] as u32, at[2] as u32) as i32
+        } else {
+            at[1]
+        };
+        return RangeBlock {
+            min: [at[0] - half, floor, at[2] - half],
+            max: [
+                at[0] + cfg.clearing_side - half,
+                floor + cfg.clearing_height,
+                at[2] + cfg.clearing_side - half,
+            ],
+            material: 0,
+        };
+    }
     let (material, mut size) = match tool {
         Tool::Concrete => (2, [12, 44, 60]),
         Tool::Steel => (3, [16, 44, 60]),
@@ -484,10 +528,19 @@ fn relocate(layout: &mut RangeLayout, selected: Selection, at: [i32; 3]) {
             let b = &layout.blocks[i];
             let dx = at[0] - (b.min[0] + b.max[0]) / 2;
             let dz = at[2] - (b.min[2] + b.max[2]) / 2;
+            let dy = if b.material == 0 && at[0] >= 0 && at[2] >= 0 {
+                sim_core::blast::range_height(at[0] as u32, at[2] as u32) as i32 - b.min[1]
+            } else {
+                0
+            };
             for j in group(layout, i) {
                 let b = &mut layout.blocks[j];
                 b.min[0] += dx;
                 b.max[0] += dx;
+                if b.material == 0 {
+                    b.min[1] += dy;
+                    b.max[1] += dy;
+                }
                 b.min[2] += dz;
                 b.max[2] += dz;
             }
@@ -536,7 +589,17 @@ fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
             let b = sim
                 .layout
                 .as_ref()
-                .and_then(|l| l.blocks.iter().rposition(|b| b.contains(p)))
+                .and_then(|l| {
+                    l.blocks.iter().rposition(|b| {
+                        b.contains(p)
+                            || (b.material == 0
+                                && p[0] >= b.min[0]
+                                && p[0] < b.max[0]
+                                && p[2] >= b.min[2]
+                                && p[2] < b.max[2]
+                                && p[1] + 1 == b.min[1])
+                    })
+                })
                 .map(Selection::Block);
             // Open ground under a dome picks the dome.
             let dome = sim
@@ -1141,6 +1204,72 @@ mod tests {
         assert!(!edit.pending.as_ref().unwrap().1.battle);
         assert_eq!(edit.layout.as_ref().unwrap().units.len(), 4);
         assert!(edit.controlled.is_none());
+    }
+    #[test]
+    fn world_battle_places_both_sides_beyond_prepared_sectors() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let config = config(false, false);
+        let far = [7800, 16, 4000];
+        assert!(!layout.zones.iter().any(|z| z.contains([far[0], far[2]], 0)));
+        let blocks = layout.blocks.clone();
+        let mut edit = Workshop::new(Some(layout), false);
+        edit.battle_world(config.clone()).unwrap();
+        assert!(edit.editing);
+        assert!(edit.layout.as_ref().unwrap().battle);
+        assert!(edit.layout.as_ref().unwrap().units.is_empty());
+        assert_eq!(edit.layout.as_ref().unwrap().blocks, blocks);
+        edit.tool = Tool::Steel;
+        edit.preview(far, 60);
+        let preview = edit.preview.as_ref().unwrap();
+        assert_eq!(preview.issue, None, "{:?}", preview.issue);
+        edit.commit(preview.next.clone(), config.clone()).unwrap();
+        let remote_unit = [7860, sim_core::blast::range_height(7860, 4000) as i32, 4000];
+        edit.tool = Tool::Clear;
+        edit.preview(remote_unit, 60);
+        let preview = edit.preview.as_ref().unwrap();
+        assert_eq!(preview.issue, None, "{:?}", preview.issue);
+        edit.commit(preview.next.clone(), config.clone()).unwrap();
+        edit.tool = Tool::Tank;
+        edit.preview(remote_unit, 60);
+        let preview = edit.preview.as_ref().unwrap();
+        assert_eq!(preview.issue, None, "{:?}", preview.issue);
+        edit.commit(edit.preview.as_ref().unwrap().next.clone(), config.clone())
+            .unwrap();
+        assert!(!edit
+            .layout
+            .as_ref()
+            .unwrap()
+            .zones
+            .iter()
+            .any(|z| z.contains([remote_unit[0], remote_unit[2]], 0)));
+        for (allied, at) in [(true, [128, 16, 336]), (false, [1480, 16, 460])] {
+            edit.allied = allied;
+            edit.preview(at, 60);
+            let preview = edit.preview.as_ref().unwrap();
+            assert_eq!(preview.issue, None, "{:?}", preview.issue);
+            edit.commit(preview.next.clone(), config.clone()).unwrap();
+        }
+        let (_, placed) = edit.pending.take().unwrap();
+        assert_eq!(placed.units.len(), 3);
+        assert!(placed.units[0].allied && placed.units[1].allied && !placed.units[2].allied);
+        assert_eq!(
+            RangeLayout::from_ron(&placed.to_ron().unwrap()).unwrap(),
+            placed
+        );
+        let mut sim = BlastRange::with_layout(config, placed).unwrap();
+        let ground = remote_unit[1] as u32;
+        assert!(sim
+            .world
+            .solid(remote_unit[0] as u32, ground - 1, remote_unit[2] as u32));
+        assert!(!sim
+            .world
+            .solid(remote_unit[0] as u32, ground, remote_unit[2] as u32));
+        sim.start_battle().unwrap();
+        assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Fighting);
+        sim.step();
+        assert_eq!(sim.battle.actors[1].target, Some(2));
+        assert_eq!(sim.battle.actors[2].target, Some(1));
     }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {

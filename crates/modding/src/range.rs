@@ -4,6 +4,22 @@ use serde::{Deserialize, Serialize};
 pub const MAX_RANGE_BLOCKS: usize = 256;
 pub const MAX_RANGE_ZONES: usize = 12;
 
+/// Size of an authored clearing used for remote battle deployment.
+#[derive(Clone, Debug, Deserialize)]
+pub struct RangeEditor {
+    pub clearing_side: i32,
+    pub clearing_height: i32,
+}
+impl RangeEditor {
+    pub fn from_ron(s: &str) -> Result<Self, String> {
+        let c: Self = ron::from_str(s).map_err(|e| e.to_string())?;
+        if !(64..=256).contains(&c.clearing_side) || !(32..=160).contains(&c.clearing_height) {
+            return Err("invalid range editor clearing".into());
+        }
+        Ok(c)
+    }
+}
+
 /// A prepared sector of the same world, with an authored firing position.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeZone {
