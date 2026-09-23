@@ -44,6 +44,47 @@ fn noise(n: u32) -> f32 {
     let n = (n ^ (n >> 15)).wrapping_mul(0x846ca68b);
     (n ^ (n >> 16)) as f32 / u32::MAX as f32
 }
+fn smooth01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+/// A changing flame remains irregular, but its emitted radiance cannot jump
+/// between unrelated hash values or colour bands in a single render frame.
+fn flame_colour(p: &Particle, t: f32, now: f32) -> [f32; 4] {
+    let phase = now * 6.0 + noise(p.seed.wrapping_add(97)) * 7.0;
+    let step = phase.floor() as u32;
+    let blend = smooth01(phase.fract());
+    let flicker = 0.90
+        + 0.15
+            * (noise(p.seed.wrapping_add(step)) * (1.0 - blend)
+                + noise(p.seed.wrapping_add(step.wrapping_add(1))) * blend);
+    let (hot, warm, ember) = if p.stream {
+        (
+            Vec4::new(3.2, 1.15, 0.12, 0.74),
+            Vec4::new(2.3, 0.46, 0.015, 0.70),
+            Vec4::new(0.95, 0.11, 0.007, 0.18),
+        )
+    } else {
+        (
+            Vec4::new(5.8, 3.2, 0.55, 0.88),
+            Vec4::new(3.2, 0.75, 0.035, 0.82),
+            Vec4::new(1.3, 0.12, 0.009, 0.36),
+        )
+    };
+    let colour = hot
+        .lerp(warm, smooth01((t - 0.10) / 0.35))
+        .lerp(ember, smooth01((t - 0.48) / 0.38));
+    // Keep the explosive first frame bright; sustained fire grows into a new
+    // tongue and fades before that tongue is removed from the mesh.
+    let attack = if p.stream || p.life >= 0.45 {
+        0.55 + 0.45 * smooth01(t / 0.12)
+    } else {
+        1.0
+    };
+    let envelope = attack * (1.0 - smooth01((t - 0.78) / 0.22));
+    let radiance = colour * Vec4::new(flicker, flicker, flicker, 1.0) * envelope;
+    radiance.to_array()
+}
 fn point(p: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(p.map(|v| v.to_f64_lossy() as f32))
 }
@@ -761,21 +802,8 @@ pub fn draw(
                 );
             }
         } else {
-            let flicker = 0.85 + noise(p.seed.wrapping_add((t * 12.0) as u32)) * 0.15;
-            let col = if p.stream && t < 0.25 {
-                [3.2, 1.15, 0.12, 0.74]
-            } else if p.stream && t < 0.65 {
-                [2.3, 0.46, 0.015, 0.7]
-            } else if p.stream {
-                [0.95, 0.11, 0.007, (1.0 - t) * 1.3]
-            } else if t < 0.23 {
-                [5.8, 3.2, 0.55, 0.88]
-            } else if t < 0.58 {
-                [3.2, 0.75, 0.035, 0.82]
-            } else {
-                [1.3, 0.12, 0.009, (1.0 - t) * 1.8]
-            };
-            let edge = p.edge * (0.8 + (t * 3.0).sin() * 0.2) * (1.0 - t * 0.55) * flicker;
+            let col = flame_colour(p, t, now);
+            let edge = p.edge * (0.9 + (t * 3.0).sin() * 0.1) * (1.0 - t * 0.55);
             if p.stream {
                 // A flame packet travels as a ragged tongue. Extend its
                 // cuboid behind the current position so the ribbon joins up
@@ -881,6 +909,25 @@ fn fire_mesh(buf: &MeshBuf) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn burning_light_crosses_colour_and_noise_phases_without_a_flash() {
+        let mut effects = Effects::default();
+        effects.add(Vec3::ZERO, Vec3::ZERO, 0.0, 1.0, 1.0, false);
+        let mut particle = effects.particles[0];
+        for stream in [false, true] {
+            particle.stream = stream;
+            for boundary in [0.23, 0.25, 0.58, 0.65] {
+                let before = Vec4::from_array(flame_colour(&particle, boundary - 0.001, 0.4));
+                let after = Vec4::from_array(flame_colour(&particle, boundary + 0.001, 0.4));
+                assert!((after - before).abs().max_element() < 0.04);
+            }
+            let offset = noise(particle.seed.wrapping_add(97)) * 7.0;
+            let boundary = (offset.ceil() - offset) / 6.0;
+            let before = Vec4::from_array(flame_colour(&particle, 0.4, boundary - 0.0001));
+            let after = Vec4::from_array(flame_colour(&particle, 0.4, boundary + 0.0001));
+            assert!((after - before).abs().max_element() < 0.01);
+        }
+    }
     #[test]
     fn moving_tracks_raise_bounded_ground_coloured_dust_once_per_tick() {
         let mut r = BlastRange::new(config(false, false));
