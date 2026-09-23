@@ -114,6 +114,67 @@ fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
 }
 
 #[test]
+fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = [300, 361]
+        .map(|x| modding::range::RangeUnitDef {
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [x, FLOOR, 336],
+        })
+        .to_vec();
+    let mut outcomes = Vec::new();
+    for reverse in [false, true] {
+        if reverse {
+            layout.units.reverse();
+        }
+        let (source, target) = if reverse { (1, 0) } else { (0, 1) };
+        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        a.patrols_running = true;
+        for _ in 0..20 {
+            a.step();
+        }
+        let parked = a.units[target].motion.pos[0];
+        let mover = &mut a.units[source].motion;
+        mover.enabled = true;
+        mover.destination = Some([450, 336]);
+        mover.path = vec![[450, 336]];
+        for _ in 0..90 {
+            a.step();
+            let p = motion::Obstacle::of(&a.units[source].motion, &a.units[source].body);
+            let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
+            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        }
+        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        for _ in 0..180 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+            let p = motion::Obstacle::of(&a.units[source].motion, &a.units[source].body);
+            let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
+            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        }
+        assert!(
+            a.units[target].motion.pos[0] > parked.add(Fx::ONE),
+            "mover {:?}, target {:?}, start {parked:?}",
+            a.units[source].motion.pos,
+            a.units[target].motion.pos
+        );
+        outcomes.push((a.units[source].motion.pos[0], a.units[target].motion.pos[0]));
+    }
+    assert!(
+        outcomes[0].0.sub(outcomes[1].0).abs() < Fx::ONE
+            && outcomes[0].1.sub(outcomes[1].1).abs() < Fx::ONE,
+        "motor contact depends on slot order: {outcomes:?}"
+    );
+}
+
+#[test]
 fn solo_shooter_and_target_exchange_contact_shove() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     for gun_is_source in [false, true] {

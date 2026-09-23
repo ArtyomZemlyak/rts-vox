@@ -410,11 +410,11 @@ impl Motion {
             self.shove.scale(left.div(len))
         };
     }
-    /// Separate a refused burst shove into its contact-normal and sliding
-    /// parts. The range passes a mass-weighted part of the normal velocity
-    /// to the other hull in a stable second phase; terrain refusals still
-    /// spend the whole shove.
-    fn record_contact(&mut self, index: usize, other: &Obstacle) {
+    /// Separate a refused shove into its contact-normal and sliding parts.
+    /// A driven hull also offers the speed it had at the refused pose: its
+    /// drive is stopped by the collision, but the other hull receives part
+    /// of that normal speed in the range's stable second phase.
+    fn record_contact(&mut self, index: usize, other: &Obstacle, attempted: V3) {
         let line = V3::new(
             other.pos[0].sub(self.pos[0]),
             Fx::ZERO,
@@ -425,13 +425,14 @@ impl Motion {
             self.shove = V3::ZERO;
             return;
         }
-        let toward = self.shove.dot(line);
+        let toward = attempted.dot(line);
         if toward <= Fx::ZERO {
             self.shove = V3::ZERO;
             return;
         }
         let normal = line.scale(toward.div(distance2));
-        self.shove = self.shove.sub(normal);
+        let shove_toward = self.shove.dot(line).max(Fx::ZERO);
+        self.shove = self.shove.sub(line.scale(shove_toward.div(distance2)));
         self.contact = Some((index, normal));
     }
     pub(super) fn take_contact(&mut self) -> Option<(usize, V3)> {
@@ -542,7 +543,7 @@ impl Motion {
         } else {
             if terrain_allowed {
                 if let Some(index) = collision {
-                    self.record_contact(index, &others[index]);
+                    self.record_contact(index, &others[index], self.shove);
                 }
             } else {
                 self.shove = V3::ZERO;
@@ -1146,7 +1147,12 @@ impl Motion {
             self.blocked = true;
             if terrain_allowed {
                 if let Some(index) = collision {
-                    self.record_contact(index, &others[index]);
+                    let drive = V3::new(
+                        delta.dx.mul(Fx::from_int(30)),
+                        Fx::ZERO,
+                        delta.dz.mul(Fx::from_int(30)),
+                    );
+                    self.record_contact(index, &others[index], drive.add(self.shove));
                 }
             } else {
                 self.shove = V3::ZERO;
