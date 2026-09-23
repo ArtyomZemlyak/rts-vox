@@ -535,6 +535,22 @@ mod tests {
         assert!(a.regions[0].as_ref().unwrap().id > old_id);
     }
     #[test]
+    fn simultaneous_shell_hits_keep_both_sources_in_the_same_live_region() {
+        let mut a = Atmosphere::default();
+        a.emit_at(shot(150.0, false), 20);
+        a.emit_at(shot(180.0, false), 20);
+        advance(&mut a, 20);
+        let r = a.regions[0].as_ref().unwrap();
+        assert_eq!(a.regions.iter().flatten().count(), 1);
+        assert_eq!(r.deposits.len(), 2);
+        assert_eq!(r.deposits[0].step, 0);
+        assert_eq!(r.deposits[1].step, 0);
+        assert_ne!(r.deposits[0].serial, r.deposits[1].serial);
+        assert_eq!(r.deposits[0].params.source.x, 150.0);
+        assert_eq!(r.deposits[1].params.source.x, 180.0);
+        assert_eq!(r.params.source.x, 180.0);
+    }
+    #[test]
     fn overload_fades_before_recycling_and_upload_ack_does_not_kill_a_plume() {
         let mut a = Atmosphere::default();
         for i in 0..REGIONS {

@@ -222,8 +222,8 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             // Subcell detail rides upward with the plume. The coarse field owns
             // transport, silhouette, heat and constituent mass.
             let detail=sample.detail.x;
-            let occupancy=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail);
             let grain=sample.detail.y;
+            let occupancy=sample.detail.w;
             if occupancy>0.12+grain*0.15 {
                 let shade=0.37+0.63*max(0.0,dot(normal,sun));
                 let self_shadow=sample.detail.z;
