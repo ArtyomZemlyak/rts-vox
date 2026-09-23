@@ -14,11 +14,11 @@ fn hot(t:f32)->vec3<f32> {
             vec3(2.4,1.3,4.2),smoothstep(1.8,2.9,t));
     }
     if p.weapon.x>0.5 {
-        return mix(mix(vec3(0.07,0.11,0.18),vec3(0.45,0.8,1.8),smoothstep(0.9,1.7,t)),
-            vec3(9.0,11.0,14.0),smoothstep(1.8,2.9,t));
+        return mix(mix(vec3(0.07,0.11,0.18),vec3(0.35,0.75,2.0),smoothstep(0.9,1.7,t)),
+            vec3(3.5,6.2,11.0),smoothstep(1.9,3.0,t));
     }
-    let red=vec3(1.8,0.035,0.001);let orange=vec3(6.5,1.2,0.008);
-    let gold=vec3(8.0,3.7,0.18);let white=vec3(11.0,9.0,4.0);
+    let red=vec3(1.1,0.035,0.002);let orange=vec3(3.6,0.68,0.015);
+    let gold=vec3(5.0,2.1,0.12);let white=vec3(7.0,5.0,1.5);
     return mix(mix(red,orange,smoothstep(0.7,1.4,t)),mix(gold,white,smoothstep(2.5,3.1,t)),smoothstep(1.6,2.4,t));
 }
 fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
@@ -232,22 +232,23 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 let interior_glow=field(gas_pos+rd*2.5).x;
                 var inner_colour=select(vec3(0.26,0.048,0.004),vec3(0.04,0.07,0.12),p.weapon.x>0.5);
                 if p.weapon.x>1.5 {inner_colour=vec3(0.07,0.03,0.13);}
-                // A shell has a brief irregular fire front. Once the flash is
-                // gone the transported gas remains as dust and smoke instead
-                // of a uniformly luminous cube for several seconds.
+                // The flame breaks into uneven hot pockets. Local phase offsets
+                // let dark soot appear between them before the whole cloud cools.
                 var fire_phase=1.0;
                 if p.weapon.x<=0.5 {
-                    let flame_pattern=smoothstep(0.35,0.80,detail*0.75+grain*0.25);
+                    let flame_pattern=smoothstep(0.58,0.84,detail*0.58+grain*0.42);
                     let fire_end=mix(0.65,1.20,clamp((p.source.w-24.0)/56.0,0.0,1.0));
-                    fire_phase=(1.0-smoothstep(0.10,fire_end,age))*flame_pattern;
+                    fire_phase=(1.0-smoothstep(0.06,fire_end,age+(grain-0.5)*0.38))*flame_pattern;
                 }
                 let smoke=base*(0.23+shade*self_shadow*1.55)+
                     inner_colour*interior_glow*exp(-age*0.45)*fire_phase;
                 let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
+                let energy_mottle=smoothstep(0.30,0.83,detail*0.55+grain*0.45);
                 let glow=select(smoothstep(0.7,1.18,temperature)*fire_phase,
-                    smoothstep(1.0,1.9,temperature),p.weapon.x>0.5);
+                    smoothstep(1.0,2.25,temperature)*mix(0.26,1.0,energy_mottle),p.weapon.x>0.5);
                 let radiance=hot(select(min(temperature,2.35),temperature,p.weapon.x>0.5));
-                let colour=mix(smoke,radiance*(0.48+shade*0.52),glow);
+                let flame_light=select(0.30+shade*0.40,0.48+shade*0.52,p.weapon.x>0.5);
+                let colour=mix(smoke,radiance*flame_light,glow);
                 // Beer-Lambert extinction: a thin smoky edge stays transparent.
                 // A fixed 97% per display cell made smoke look like solid bricks.
                 // The look scales the extinction (ADR-283): p.weapon.w.

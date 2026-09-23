@@ -101,9 +101,27 @@ impl ExplosionConfig {
     /// Visual source volume follows charge strength, so its radius scales
     /// with the cube root rather than filling the fixed gas window at 4x.
     pub fn gas_radius_at_power(&self, power_milli: u32) -> i32 {
-        (f64::from(self.gas_source_radius) * (f64::from(power_milli) / 1000.0).cbrt())
-            .round()
-            .clamp(1.0, 128.0) as i32
+        let radius = self.gas_source_radius.clamp(1, 128) as u128;
+        let volume = radius * radius * radius * u128::from(power_milli);
+        // Find the first integral radius whose volume reaches the scaled
+        // source. Compare against the half-radius cube to round exactly.
+        let mut low = 1u128;
+        let mut high = 128u128;
+        while low < high {
+            let mid = (low + high) / 2;
+            if mid * mid * mid * 1000 >= volume {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        let halfway = 2 * low - 1;
+        let rounded = if volume * 8 >= halfway * halfway * halfway * 1000 {
+            low
+        } else {
+            low.saturating_sub(1)
+        };
+        rounded.clamp(1, 128) as i32
     }
 
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -176,5 +194,16 @@ mod display_tests {
             [500, 1000, 2000, 4000].map(|power| c.gas_radius_at_power(power)),
             [25, 32, 40, 51]
         );
+    }
+
+    #[test]
+    fn visual_gas_radius_rounds_at_half_cells_and_stays_bounded() {
+        let mut c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        c.gas_source_radius = 8;
+        assert_eq!(c.gas_radius_at_power(125), 4);
+        assert_eq!(c.gas_radius_at_power(177), 4);
+        assert_eq!(c.gas_radius_at_power(178), 5);
+        assert_eq!(c.gas_radius_at_power(0), 1);
+        assert_eq!(c.gas_radius_at_power(u32::MAX), 128);
     }
 }

@@ -30,20 +30,25 @@ fn noise(v:vec3<f32>)->f32 {
 struct DisplayCell { matter:vec4<f32>, detail:vec4<f32> };
 fn display_side()->u32 {return u32(ceil(f32(N)*p.origin.w/p.charge.z));}
 fn display_cell(vi:vec3<i32>)->DisplayCell {
-    let centre=(vec3<f32>(vi)+vec3(0.5))*p.charge.z;
+    // Some groups of eight display cells share one coarse gas sample. Their
+    // silhouette reads as a large smoke cube while the other cells retain
+    // the finer edge. The transport grid and its mass are untouched.
+    let cluster=vi/2;
+    let coarse=p.control.y>21.0 && all(vi>=vec3(0)) && hash(cluster)>0.77;
+    let sample_cell=select(vec3<f32>(vi)+vec3(0.5),vec3<f32>(cluster*2)+vec3(1.0),coarse);
+    let centre=sample_cell*p.charge.z;
     let gas_pos=centre/p.origin.w;let m=field(gas_pos);
     var detail=vec4(0.0);
     if gas_may_show(m) {
         detail.x=noise(gas_pos*1.15-vec3(0.0,p.weapon.y*0.9,0.0));
-        detail.y=hash(vi);
+        detail.y=hash(select(vi,cluster,coarse));
         detail.w=(m.w*1.1+m.y*0.22)*mix(0.38,1.55,detail.x);
         // Reuse the prepared noise to open irregular gaps in an older,
         // high-charge shell cloud. Evaluate this once per display voxel.
-        if p.weapon.x<=0.5 && p.source.w>32.0 {
+        if p.weapon.x<=0.5 && p.source.w>18.0 {
             let age=p.control.y/60.0;
-            let late=smoothstep(0.50,1.30,age);
-            let large=clamp((p.source.w-32.0)/19.0,0.0,1.0);
-            detail.w*=mix(1.0,0.65*smoothstep(0.15,0.85,detail.x),late*large*0.85);
+            let late=smoothstep(0.45,1.50,age);
+            detail.w*=mix(1.0,0.58*smoothstep(0.32,0.82,detail.x),late*0.8);
         }
         if detail.w>0.12+detail.y*0.15 {
             let sun=normalize(p.sun.xyz);

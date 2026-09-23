@@ -120,6 +120,7 @@ struct Ejecta {
     velocity: Vec3,
     life: f32,
 }
+const EJECTA_CAP: usize = 256;
 #[derive(Resource)]
 struct Art {
     cube: Handle<Mesh>,
@@ -1638,48 +1639,55 @@ fn advance(
             tr.translation = pivot + rotation * (g.base.translation - pivot - Vec3::X * recoil);
             tr.rotation = rotation * g.base.rotation;
         }
-        // Cosmetic ejecta are sampled from voxels actually removed this tick.
-        // They collide with the current terrain, but never become extra matter.
-        if let Some(at) = scene
-            .sim
-            .impact
-            .filter(|_| scene.sim.config.material_energy_j == 0)
-        {
-            for (i, e) in scene
-                .sim
-                .world
-                .edits()
+        // Small cosmetic chips are sampled only from actual terrain edits.
+        // Larger conserved pieces remain owned by the fragment simulation.
+        if let Some(at) = scene.sim.impact {
+            let room = EJECTA_CAP.saturating_sub(debris.iter_mut().count());
+            let per_tick = if scene.sim.config.material_energy_j == 0 {
+                16
+            } else {
+                8
+            };
+            let edits = scene.sim.world.edits();
+            for e in edits
                 .iter()
-                .enumerate()
-                .step_by(41)
-                .take(24)
+                .step_by((edits.len() / per_tick).max(1))
+                .take(room.min(per_tick))
             {
                 if e.mat != 0 {
                     continue;
                 }
                 let pos = Vec3::new(e.x as f32, e.y as f32 + 1.0, e.z as f32);
-                let seed = (e.x.wrapping_mul(73856093)
+                let hash = (e.x.wrapping_mul(73856093)
                     ^ e.y.wrapping_mul(19349663)
-                    ^ e.z.wrapping_mul(83492791)) as f32
-                    / 4294967296.0;
+                    ^ e.z.wrapping_mul(83492791)) as u32;
+                let seed = hash as f32 / u32::MAX as f32;
                 let delta =
                     (pos - Vec3::new(at[0] as f32, at[1] as f32, at[2] as f32)).normalize_or_zero();
-                let v = delta * (28.0 + seed * 40.0) + Vec3::Y * (30.0 + seed * 32.0);
+                let edge = if hash.is_multiple_of(13) {
+                    2.4 + seed * 1.8
+                } else if hash.is_multiple_of(3) {
+                    1.1 + seed * 1.3
+                } else {
+                    0.35 + seed * 0.8
+                };
+                let speed = 1.0 / (1.0 + edge * 0.18);
+                let v = (delta * (33.0 + seed * 54.0) + Vec3::Y * (27.0 + seed * 35.0)) * speed;
                 commands.spawn((
                     Mesh3d(art.cube.clone()),
-                    MeshMaterial3d(if i % (if scene.energy { 17 } else { 3 }) == 0 {
+                    MeshMaterial3d(if hash.is_multiple_of(if scene.energy { 17 } else { 11 }) {
                         art.ember.clone()
                     } else {
                         art.rock.clone()
                     }),
                     Transform::from_translation(pos).with_scale(Vec3::new(
-                        0.6 + seed * 1.8,
-                        0.5 + seed * 0.8,
-                        0.8 + seed,
+                        edge,
+                        edge * (0.65 + seed * 0.5),
+                        edge * (0.75 + (1.0 - seed) * 0.5),
                     )),
                     Ejecta {
                         velocity: v,
-                        life: 5.0,
+                        life: 2.4 + edge * 0.55,
                     },
                 ));
             }

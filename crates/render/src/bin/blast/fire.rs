@@ -3,6 +3,7 @@
 use super::*;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
+const BURST_PARTICLES: usize = 57;
 const TRACER_CAP: usize = 64;
 const TRACER_LIFE: f32 = 0.11;
 #[derive(Component)]
@@ -16,6 +17,7 @@ struct Particle {
     edge: f32,
     seed: u32,
     smoke: bool,
+    burst_dust: bool,
     stream: bool,
     dust_material: u16,
 }
@@ -69,6 +71,7 @@ impl Effects {
             edge,
             seed,
             smoke,
+            burst_dust: false,
             stream: false,
             dust_material: 0,
         });
@@ -90,6 +93,13 @@ impl Effects {
         self.add(at, velocity, now, life, edge, false);
         if self.particles.len() > before {
             self.particles[before].stream = true;
+        }
+    }
+    fn add_burst_dust(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32) {
+        let before = self.particles.len();
+        self.add(at, velocity, now, life, edge, true);
+        if self.particles.len() > before {
+            self.particles[before].burst_dust = true;
         }
     }
     fn plume(&mut self, at: Vec3, now: f32, fire: bool, scale: f32) {
@@ -123,40 +133,71 @@ impl Effects {
     fn shell_burst(&mut self, at: Vec3, now: f32, energy: u32) {
         // A full pool must not silently swallow a new impact. Particles are
         // stored in birth order, so recycle the oldest visual remnants first.
-        let needed = self.particles.len().saturating_add(35).saturating_sub(CAP);
+        let needed = self
+            .particles
+            .len()
+            .saturating_add(BURST_PARTICLES)
+            .saturating_sub(CAP);
         if needed > 0 {
             self.particles.drain(..needed);
         }
         let scale = (energy as f32 / 2300.0).sqrt().clamp(0.55, 1.8);
         self.add(at, Vec3::ZERO, now, 0.16, 9.0 * scale, false);
-        // Fast, short-lived flame tongues bridge the impact flash to the
-        // slower advected gas. These are light and soot, not solid debris.
+        // A ragged flash: a few broad tongues, many sharp sparks and unequal
+        // radial speeds. The transported gas, rather than these cubes, owns
+        // the sustained fireball.
         for i in 0..24u32 {
             let seed = self.serial.wrapping_add(i * 13);
-            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 0.6) / 24.0;
+            let angle = std::f32::consts::TAU * (i as f32 + (noise(seed) - 0.5) * 2.6) / 24.0;
             let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
-            let speed = (28.0 + noise(seed.wrapping_add(3)) * 34.0) * scale;
+            let broad = i.is_multiple_of(6);
+            let speed = (22.0 + noise(seed.wrapping_add(3)) * 53.0) * scale;
             self.add(
-                at + outward * (1.0 + noise(seed.wrapping_add(5)) * 2.0),
-                outward * speed + Vec3::Y * (9.0 + noise(seed.wrapping_add(7)) * 28.0),
+                at + outward * (1.0 + noise(seed.wrapping_add(5)) * 4.0),
+                outward * speed + Vec3::Y * (5.0 + noise(seed.wrapping_add(7)) * 39.0),
                 now,
-                0.18 + noise(seed.wrapping_add(11)) * 0.17,
-                (1.8 + noise(seed.wrapping_add(17)) * 2.3) * scale,
+                0.12 + noise(seed.wrapping_add(11)) * if broad { 0.31 } else { 0.19 },
+                (if broad { 4.5 } else { 1.1 }
+                    + noise(seed.wrapping_add(17)) * if broad { 3.5 } else { 2.7 })
+                    * scale,
                 false,
             );
         }
-        for i in 0..10u32 {
+        // Dense central chunks rise slowly; smaller soot blocks shear off
+        // around them. Different lifetimes keep the silhouette changing.
+        for i in 0..16u32 {
             let seed = self.serial.wrapping_add(i * 19);
-            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 0.7) / 10.0;
+            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 1.8) / 16.0;
             let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
+            let large = i.is_multiple_of(4);
             self.add(
-                at + outward * 2.0,
-                outward * (12.0 + noise(seed.wrapping_add(2)) * 16.0) * scale
-                    + Vec3::Y * (7.0 + noise(seed.wrapping_add(4)) * 10.0),
+                at + outward * (1.0 + noise(seed.wrapping_add(12)) * 5.0),
+                outward
+                    * (8.0 + noise(seed.wrapping_add(2)) * if large { 12.0 } else { 25.0 })
+                    * scale
+                    + Vec3::Y
+                        * (if large { 9.0 } else { 14.0 } + noise(seed.wrapping_add(4)) * 17.0),
                 now,
-                1.0 + noise(seed.wrapping_add(6)) * 0.9,
-                (3.0 + noise(seed.wrapping_add(8)) * 2.5) * scale,
+                (if large { 1.8 } else { 0.9 }) + noise(seed.wrapping_add(6)) * 1.0,
+                (if large { 8.0 } else { 2.7 }
+                    + noise(seed.wrapping_add(8)) * if large { 6.0 } else { 5.0 })
+                    * scale,
                 true,
+            );
+        }
+        // Low, earthy pressure front. It is deliberately sparse and
+        // translucent: the authoritative wave still decides what breaks.
+        for i in 0..16u32 {
+            let seed = self.serial.wrapping_add(i * 23);
+            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 1.4) / 16.0;
+            let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
+            self.add_burst_dust(
+                at + outward * (2.0 + noise(seed.wrapping_add(3)) * 4.0),
+                outward * (24.0 + noise(seed.wrapping_add(5)) * 37.0) * scale
+                    + Vec3::Y * (2.0 + noise(seed.wrapping_add(7)) * 11.0),
+                now,
+                0.45 + noise(seed.wrapping_add(9)) * 0.65,
+                (2.0 + noise(seed.wrapping_add(11)) * 6.0) * scale,
             );
         }
     }
@@ -695,14 +736,28 @@ pub fn draw(
                     p.edge * (0.75 + t * 0.9),
                     [rgb[0], rgb[1], rgb[2], fade * 0.34],
                 );
-            } else {
-                let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
-                let shade = 0.085 + t * 0.09 + noise(p.seed) * 0.025;
+            } else if p.burst_dust {
+                let fade = (t * 10.0).min(1.0) * (1.0 - t).powi(2);
+                let shade = 0.26 + noise(p.seed) * 0.09;
                 cube(
                     &mut smoke,
                     at,
-                    p.edge * (0.65 + t * 1.65),
-                    [shade * 0.94, shade * 0.96, shade, fade * 0.25],
+                    p.edge * (0.7 + t * 0.8),
+                    [shade, shade * 0.88, shade * 0.72, fade * 0.18],
+                );
+            } else {
+                let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
+                let shade = 0.14 + t * 0.11 + noise(p.seed) * 0.05;
+                cube(
+                    &mut smoke,
+                    at,
+                    p.edge * (0.65 + t * 1.35),
+                    [
+                        shade * 0.98,
+                        shade * 0.96,
+                        shade,
+                        fade * (0.14 + 0.07 * (1.0 - t)),
+                    ],
                 );
             }
         } else {
@@ -947,7 +1002,27 @@ mod tests {
             .iter()
             .filter(|p| p.born == now && p.smoke)
             .count();
-        assert!(hot >= 25 && smoke >= 10, "flash={hot} smoke={smoke}");
+        assert!(hot >= 25 && smoke >= 32, "flash={hot} smoke={smoke}");
+        let sizes: Vec<_> = effects
+            .particles
+            .iter()
+            .filter(|p| p.born == now && p.smoke && !p.burst_dust)
+            .map(|p| p.edge)
+            .collect();
+        let smallest = sizes.iter().copied().fold(f32::INFINITY, f32::min);
+        let largest = sizes.iter().copied().fold(0.0, f32::max);
+        assert!(
+            largest > smallest * 2.0,
+            "smoke cubes have no size range: {sizes:?}"
+        );
+        assert_eq!(
+            effects
+                .particles
+                .iter()
+                .filter(|p| p.born == now && p.burst_dust)
+                .count(),
+            16
+        );
         assert!(effects.particles.len() <= CAP);
     }
     #[test]
@@ -981,11 +1056,11 @@ mod tests {
         assert_eq!(effects.particles.len(), CAP);
         assert_eq!(
             effects.particles.iter().filter(|p| p.born == 1.0).count(),
-            35
+            BURST_PARTICLES
         );
         assert_eq!(
             effects.particles.iter().filter(|p| p.born == 0.0).count(),
-            CAP - 35
+            CAP - BURST_PARTICLES
         );
     }
     #[test]
