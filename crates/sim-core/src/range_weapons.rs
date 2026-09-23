@@ -110,6 +110,68 @@ pub(super) fn spread(mut delta: [Fx; 3], heading: [Fx; 3], serial: u32, milli: i
     delta
 }
 impl BlastRange {
+    /// A shallow strike against intact steel leaves a dent and turns the
+    /// round away from the exposed face. Its reduced speed also reduces the
+    /// finite penetration work available at a later contact.
+    pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
+        let Some(tuning) = &self.config.ricochet else {
+            return false;
+        };
+        if material(&self.world, at) != tuning.material || from == at {
+            return false;
+        }
+        let speed_sq = self
+            .velocity
+            .iter()
+            .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)));
+        if speed_sq < Fx::from_int(tuning.min_speed).mul(Fx::from_int(tuning.min_speed)) {
+            return false;
+        }
+        let speed = speed_sq.sqrt();
+        let need = material_work(tuning.material, &self.config);
+        let old = self.surface_work.get(&at).copied().unwrap_or(0);
+        if u64::from(old) * 1000 >= u64::from(need) * u64::from(tuning.max_preexisting_wear_milli) {
+            return false;
+        }
+        // A half-cell sweep can cross two voxel planes at a corner. Only
+        // faces with air immediately behind the crossing are exposed; this
+        // also keeps a tiny gravitational Y step from masquerading as a
+        // horizontal wall's top face.
+        let axis = (0..3)
+            .filter(|&a| from[a] != at[a])
+            .filter(|&a| {
+                let mut neighbour = at;
+                neighbour[a] = from[a];
+                material(&self.world, neighbour) == 0
+                    && !self.units.iter().any(|u| u.solid(neighbour))
+            })
+            .min_by_key(|&a| self.velocity[a].abs().raw());
+        let Some(axis) = axis else { return false };
+        if self.velocity[axis].abs()
+            >= speed.mul(Fx::from_ratio(tuning.max_normal_milli as i32, 1000))
+        {
+            return false;
+        }
+        let wear = (self.config.energy * tuning.wear_milli / 1000)
+            .max(1)
+            .min(need.saturating_sub(old).saturating_sub(1));
+        if wear == 0 {
+            return false;
+        }
+        self.surface_work.insert(at, old + wear);
+        self.surface_changed.push(at);
+        for a in 0..3 {
+            let reflected = if a == axis {
+                Fx::ZERO.sub(self.velocity[a])
+            } else {
+                self.velocity[a]
+            };
+            self.velocity[a] =
+                reflected.mul(Fx::from_ratio(tuning.speed_retention_milli as i32, 1000));
+        }
+        true
+    }
+
     /// A solid shot spends finite work along its incoming ray. Crossing a
     /// thicker or more oblique face costs more cells; cover consumes the same
     /// budget before the ray can reach a hull behind it. No radial wave is
@@ -124,7 +186,17 @@ impl BlastRange {
             return;
         }
         let direction = self.velocity.map(|v| v.div(length));
-        let mut work = self.config.energy;
+        let horizontal_sq = self.velocity[0]
+            .mul(self.velocity[0])
+            .add(self.velocity[2].mul(self.velocity[2]));
+        let launch_sq =
+            Fx::from_int(self.config.shell_speed).mul(Fx::from_int(self.config.shell_speed));
+        let remaining = horizontal_sq.div(launch_sq).min(Fx::ONE);
+        let mut work =
+            (u64::from(self.config.energy) * remaining.raw() as u64 / Fx::ONE.raw() as u64) as u32;
+        if work == 0 {
+            return;
+        }
         let mut previous = None;
         let before: Vec<_> = self
             .units
@@ -685,6 +757,81 @@ mod tests {
         grazing.kinetic_impact([230, 40, 330]);
         assert_eq!(grazing.surface_work.get(&[230, 40, 331]), Some(&5500));
         assert_eq!(grazing.units[0].removed.len(), 0);
+    }
+    #[test]
+    fn shallow_steel_contact_deflects_a_live_round_and_replays_exactly() {
+        let mut a = kinetic_range(vec![plate(230, 231, 3)]);
+        a.control();
+        a.shell = Some([
+            Fx::from_ratio(2292, 10),
+            Fx::from_int(40),
+            Fx::from_int(331),
+        ]);
+        a.velocity = [Fx::from_int(70), Fx::ZERO, Fx::from_int(280)];
+        a.step();
+        let hit = a.impact.expect("grazing shot never touched the plate");
+        assert_eq!(hit[0], 230);
+        assert!(a.shell.is_some(), "the round stopped instead of bouncing");
+        assert!(a.velocity[0] < Fx::ZERO && a.velocity[2] > Fx::ZERO);
+        assert_eq!(a.surface_work.get(&hit), Some(&(a.config.energy / 8)));
+        assert_eq!(
+            material(&a.world, hit),
+            3,
+            "a shallow hit bored through steel"
+        );
+        assert!(a.explosion.is_none());
+
+        let mut residual = kinetic_range(vec![plate(230, 231, 3)]);
+        residual.velocity = a.velocity;
+        residual.kinetic_impact(hit);
+        let remaining_work = residual.surface_work.get(&hit).copied().unwrap_or(0);
+        assert!(remaining_work > 0 && remaining_work < a.config.energy / 2);
+        assert!(
+            residual.world.queued() == 0,
+            "the bounced round got full work"
+        );
+
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        for _ in 0..80 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert!(a.shell.is_none(), "the bounced round never landed");
+    }
+    #[test]
+    fn square_steel_and_grazing_concrete_contacts_do_not_ricochet() {
+        let mut square = kinetic_range(vec![plate(230, 231, 3)]);
+        square.control();
+        square.shell = Some([Fx::from_int(225), Fx::from_int(40), Fx::from_int(336)]);
+        square.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        square.step();
+        assert!(square.shell.is_none());
+        square.world.flush();
+        assert_eq!(material(&square.world, square.impact.unwrap()), 0);
+
+        let mut concrete = kinetic_range(vec![plate(230, 231, 2)]);
+        concrete.control();
+        concrete.shell = Some([
+            Fx::from_ratio(2292, 10),
+            Fx::from_int(40),
+            Fx::from_int(331),
+        ]);
+        concrete.velocity = [Fx::from_int(70), Fx::ZERO, Fx::from_int(280)];
+        concrete.step();
+        assert!(concrete.shell.is_none());
+        assert!(concrete.velocity[0] > Fx::ZERO);
+        assert!(concrete.explosion.is_none());
+
+        let mut worn = kinetic_range(vec![plate(230, 231, 3)]);
+        worn.velocity = [Fx::from_int(70), Fx::ZERO, Fx::from_int(280)];
+        worn.surface_work
+            .insert([230, 40, 336], material_work(3, &worn.config) / 2);
+        assert!(!worn.kinetic_ricochet([230, 40, 336], [229, 40, 336]));
+        worn.config.steel_resistance = 1;
+        worn.surface_work.clear();
+        assert!(!worn.kinetic_ricochet([230, 40, 336], [229, 40, 336]));
+        assert!(worn.surface_work.is_empty());
     }
     #[test]
     fn solid_shell_can_cut_concrete_but_thick_cover_exhausts_it() {

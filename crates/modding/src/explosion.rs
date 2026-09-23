@@ -18,6 +18,18 @@ pub enum Delivery {
     MachineGun,
 }
 
+/// Optional material-specific deflection for a solid projectile. All
+/// percentages are thousandths, matching other weapon tuning values.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Ricochet {
+    pub material: u16,
+    pub min_speed: i32,
+    pub max_normal_milli: u32,
+    pub wear_milli: u32,
+    pub speed_retention_milli: u32,
+    pub max_preexisting_wear_milli: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExplosionConfig {
     #[serde(default)]
@@ -54,6 +66,8 @@ pub struct ExplosionConfig {
     pub edits_per_tick: usize,
     pub fire_tick: u32,
     pub shell_speed: i32,
+    #[serde(default)]
+    pub ricochet: Option<Ricochet>,
     pub gravity: i32,
     pub gas_cell_units: i32,
     /// Visible gas cube edge, in millimetres. Independent of the solver grid.
@@ -146,6 +160,15 @@ impl ExplosionConfig {
             || c.edits_per_tick == 0
             || c.edits_per_tick > 65536
             || !(1..=10000).contains(&c.shell_speed)
+            || c.ricochet.as_ref().is_some_and(|r| {
+                c.delivery != Delivery::Kinetic
+                    || !(1..=15).contains(&r.material)
+                    || !(1..=10000).contains(&r.min_speed)
+                    || !(1..=999).contains(&r.max_normal_milli)
+                    || !(1..=999).contains(&r.wear_milli)
+                    || !(1..=999).contains(&r.speed_retention_milli)
+                    || r.max_preexisting_wear_milli > 1000
+            })
             || !(1..=10000).contains(&c.gravity)
             || !(1..=8).contains(&c.gas_cell_units)
             || !(100..=1600).contains(&c.gas_display_mm)
@@ -205,5 +228,25 @@ mod display_tests {
         assert_eq!(c.gas_radius_at_power(178), 5);
         assert_eq!(c.gas_radius_at_power(0), 1);
         assert_eq!(c.gas_radius_at_power(u32::MAX), 128);
+    }
+
+    #[test]
+    fn ricochet_tuning_is_optional_and_rejects_invalid_energy_or_angle() {
+        let solid = include_str!("../../../data/kinetic-shell.ron");
+        let c = ExplosionConfig::from_ron(solid).unwrap();
+        assert_eq!(c.ricochet.as_ref().unwrap().material, 3);
+        assert!(
+            ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+                .unwrap()
+                .ricochet
+                .is_none()
+        );
+        for bad in [
+            solid.replace("max_normal_milli: 400", "max_normal_milli: 0"),
+            solid.replace("speed_retention_milli: 600", "speed_retention_milli: 1000"),
+            solid.replace("material: 3", "material: 16"),
+        ] {
+            assert!(ExplosionConfig::from_ron(&bad).is_err());
+        }
     }
 }

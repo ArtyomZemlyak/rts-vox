@@ -3154,22 +3154,25 @@ impl BlastRange {
                 let mut impact = None;
                 let mut caught = None;
                 let mut prev = p.map(Fx::to_int_trunc);
+                let mut last_free = p;
                 for s in 1..=span * 2 {
                     let f = Fx::from_ratio(s, span * 2);
-                    let v = std::array::from_fn(|a| p[a].add(q[a].sub(p[a]).mul(f)).to_int_trunc());
+                    let sample = std::array::from_fn(|a| p[a].add(q[a].sub(p[a]).mul(f)));
+                    let v = sample.map(Fx::to_int_trunc);
                     if let Some(i) = self.dome_crossed(prev, v) {
                         caught = Some((i, v));
                         break;
                     }
-                    prev = v;
                     if self.layout.as_ref().is_some_and(|r| {
                         !self.player && r.airburst_on_target && v[0] >= r.target[0]
                     }) || material(&self.world, v) != 0
                         || self.units.iter().any(|u| u.solid(v))
                     {
-                        impact = Some(v);
+                        impact = Some((v, prev, last_free));
                         break;
                     }
+                    prev = v;
+                    last_free = sample;
                 }
                 if let Some((i, at)) = caught {
                     // Spent against the dome: no impact, no crater, another
@@ -3177,11 +3180,16 @@ impl BlastRange {
                     self.absorb(i, at);
                     self.shell = None;
                     self.fire_tick = u32::MAX;
-                } else if let Some(at) = impact {
+                } else if let Some((at, from, last_free)) = impact {
                     self.impact = Some(at);
                     self.impact_tick = self.tick;
-                    if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                    if self.config.delivery == modding::explosion::Delivery::Kinetic
+                        && self.kinetic_ricochet(at, from)
+                    {
+                        self.shell = Some(last_free);
+                    } else if self.config.delivery == modding::explosion::Delivery::Kinetic {
                         self.kinetic_impact(at);
+                        self.shell = None;
                     } else {
                         self.heat.deposit(
                             &self.world,
@@ -3193,8 +3201,8 @@ impl BlastRange {
                         self.matter
                             .begin(self.config.material_energy_j, self.config.fragment_box);
                         self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
+                        self.shell = None;
                     }
-                    self.shell = None;
                 } else if (0..3)
                     .any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32))
                 {
