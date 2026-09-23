@@ -261,8 +261,9 @@ impl Motion {
     /// A burst's push on this hull (ADR-286, ADR-297, ADR-302): `newton_s`
     /// newton-seconds of the wave's pressure the body absorbed, landing on
     /// the point of the hull's box nearest the burst, at the burst's height
-    /// within the hull's — the face the wave met. A burst inside the box
-    /// pushes through the centre of mass. Returns the point.
+    /// within the hull's — the face the wave met. A burst inside the box,
+    /// or just below its footprint, pushes through the centre of mass.
+    /// Returns the point.
     pub fn impulse(&mut self, b: &UnitBody, at: [i32; 3], newton_s: u64) -> [i32; 3] {
         let shape = self.shape(b);
         let (c, s) = (
@@ -276,8 +277,10 @@ impl Motion {
         ];
         let (dx, dz) = (burst[0].sub(self.pos[0]), burst[2].sub(self.pos[2]));
         let half = shape.half.map(Fx::from_int);
-        let u = dx.mul(c).add(dz.mul(s)).max(half[0].neg()).min(half[0]);
-        let v = dz.mul(c).sub(dx.mul(s)).max(half[1].neg()).min(half[1]);
+        let local_x = dx.mul(c).add(dz.mul(s));
+        let local_z = dz.mul(c).sub(dx.mul(s));
+        let u = local_x.max(half[0].neg()).min(half[0]);
+        let v = local_z.max(half[1].neg()).min(half[1]);
         let bottom = self.pos[1];
         let top = bottom.add(Fx::from_int(shape.height));
         let mut through = [
@@ -286,7 +289,14 @@ impl Motion {
             self.pos[2].add(u.mul(s)).add(v.mul(c)),
         ]
         .map(Fx::to_int_trunc);
-        if through == at {
+        // A ground burst can be below the belly yet inside the hull's
+        // horizontal footprint. The closest point is then straight above
+        // the burst: treating its whole pressure as vertical launches an
+        // off-centre tank in place. The wave loads more of the underside
+        // toward the centre of mass, giving that push a horizontal part.
+        if through == at
+            || (burst[1] < bottom && local_x.abs() < half[0] && local_z.abs() < half[1])
+        {
             let r = crate::ride::ride_of(&self.chassis);
             through =
                 [self.pos[0], self.pos[1].add(r.clearance), self.pos[2]].map(Fx::to_int_trunc);
@@ -1740,6 +1750,33 @@ mod tests {
             "did not come down: {:?}",
             m.hull.y.sub(level)
         );
+    }
+    #[test]
+    fn an_off_centre_burst_under_a_tank_shoves_as_well_as_lifts() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        for tick in 0..5 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        let start = m.pos;
+        let level = m.hull.y;
+        // Under the front of the box, but well away from the centre.
+        // Previously the nearest point was directly above the burst and
+        // all of this impulse went into an implausible vertical hop.
+        let through = m.impulse(&body, [274, 15, 300], 120_000);
+        assert!(through[0] > 274, "no pressure span: {through:?}");
+        assert!(m.shove.x > Fx::ONE, "no lateral impulse: {:?}", m.shove);
+        assert!(m.hull.vy > Fx::ZERO, "no lift: {:?}", m.hull.vy);
+        let mut peak = Fx::ZERO;
+        for tick in 5..125 {
+            step(&mut m, &w, &body, &[], tick);
+            peak = peak.max(m.hull.y.sub(level));
+        }
+        assert!(m.pos[0] > start[0], "tank did not shift: {:?}", m.pos);
+        assert!(peak > Fx::ZERO, "tank did not hop");
+        assert!(m.hull.y.sub(level).abs() < Fx::from_ratio(1, 10));
+        assert_eq!(m.shove, V3::ZERO);
     }
     /// A wide two-legged body stands on both legs, each foot carrying
     /// heel and toe; a buckled leg leaves one side, and the body falls onto

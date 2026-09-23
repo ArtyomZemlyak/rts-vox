@@ -5038,6 +5038,49 @@ mod tests {
         );
         assert_eq!(u.motion.shove, phys::V3::ZERO);
     }
+    #[test]
+    fn a_strong_shell_under_the_tanks_nose_pushes_it_out_and_it_lands() {
+        let mut layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        layout.units = vec![modding::range::RangeUnitDef {
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [359, FLOOR, 312],
+        }];
+        layout.target = [329, FLOOR + 4, 312];
+        layout.blocks.clear();
+        layout.airburst_on_target = false;
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        let mut charge = config();
+        charge.energy *= 4;
+        let mut a = BlastRange::with_layout(charge, layout).unwrap();
+        for _ in 0..300 {
+            a.step();
+            if a.impact.is_some() {
+                break;
+            }
+        }
+        assert!(a.impact.is_some());
+        let start = a.units[0].motion.pos;
+        let level = a.units[0].motion.hull.y;
+        let mut rise = Fx::ZERO;
+        for _ in 0..150 {
+            a.step();
+            rise = rise.max(a.units[0].motion.hull.y.sub(level));
+        }
+        let u = &a.units[0];
+        assert!(u.status.alive);
+        assert!(u.motion.pos[0].sub(start[0]) > Fx::from_int(10));
+        assert!(
+            rise > Fx::from_ratio(1, 2) && rise < Fx::from_int(3),
+            "rise {rise:?}"
+        );
+        assert!(u.motion.hull.y.sub(level).abs() < Fx::from_ratio(1, 5));
+        assert_eq!(u.motion.shove, phys::V3::ZERO);
+    }
     /// Steel heated to its melting point runs off as a piece of steel
     /// (ADR-290): the cell is gone, the debris holds its matter, the ledger
     /// balances, and the count survives the snapshot; soil never melts.
