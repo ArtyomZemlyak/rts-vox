@@ -468,8 +468,10 @@ impl BlastRange {
                     .filter(|&i| hostile(i))
                     .min_by_key(|&i| (distance(i), i))
             };
-            if a.target != target {
+            let target_changed = a.target != target;
+            if target_changed {
                 a.charge = None;
+                a.pursuit = 0;
             }
             a.target = target;
             let mut p = if let Order::Ground(p) = a.order {
@@ -503,13 +505,12 @@ impl BlastRange {
                 a.charge = None;
                 if self.tick >= a.pursuit {
                     a.pursuit = self.tick + b.tuning.pursuit_ticks;
-                    let others: Vec<_> = self
-                        .units
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != id)
-                        .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
-                        .collect();
+                    // A kilometre search may need several slices. Reissuing
+                    // move_to here discarded its frontier every pursuit
+                    // period and the distant target could never be reached.
+                    if self.units[id].motion.searching() && !target_changed {
+                        continue;
+                    }
                     let length = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
                     // Aim for a firing position before the target hull, never its occupied centre.
                     let approach = length
@@ -520,9 +521,25 @@ impl BlastRange {
                         from[0].add(dx.mul(approach)).to_int_trunc(),
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
-                    let u = &mut self.units[id];
-                    u.motion
-                        .move_to(&self.world, dest, &u.body, &others, &self.rubble);
+                    let margin = range * (1000 - b.tuning.standoff_milli) / 1000;
+                    let changed = target_changed
+                        || self.units[id].motion.destination.is_none_or(|old| {
+                            let x = i64::from(dest[0] - old[0]);
+                            let z = i64::from(dest[1] - old[1]);
+                            x * x + z * z > i64::from(margin) * i64::from(margin)
+                        });
+                    if changed {
+                        let others: Vec<_> = self
+                            .units
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != id)
+                            .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
+                            .collect();
+                        let u = &mut self.units[id];
+                        u.motion
+                            .move_to(&self.world, dest, &u.body, &others, &self.rubble);
+                    }
                 }
                 continue;
             }

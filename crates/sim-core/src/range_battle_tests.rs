@@ -248,3 +248,74 @@ fn snapshot_rejects_projectile_positions_outside_the_range() {
     r.battle.rounds[0].pos[0] = Fx::from_int(1_000_000);
     assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_none());
 }
+
+#[test]
+fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.units = vec![
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [128, 16, 336],
+            allied: true,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [1480, 16, 460],
+            allied: false,
+        },
+    ];
+    if let Some(course) = &mut layout.course {
+        course.patrols.clear();
+    }
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    tuning.tank_range = 100;
+    tuning.pursuit_ticks = 1;
+    r.start_battle().unwrap();
+    r.step();
+    assert!(r.units[0].motion.searching(), "route was trivial");
+    for _ in 0..30 {
+        r.step();
+        if r.units[0].motion.frontier_nodes() > 0 || !r.units[0].motion.path.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        r.units[0].motion.frontier_nodes() > 0 || !r.units[0].motion.path.is_empty(),
+        "search never progressed: nodes={}, searching={}, destination={:?}, last_plan={:?}",
+        r.units[0].motion.frontier_nodes(),
+        r.units[0].motion.searching(),
+        r.units[0].motion.destination,
+        r.units[0].motion.last_plan
+    );
+}
+
+#[test]
+fn a_moving_target_changes_the_finished_pursuit_goal() {
+    let mut r = arena(RangeUnitKind::Tank);
+    let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    tuning.tank_range = 100;
+    tuning.pursuit_ticks = 1;
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.step();
+    for _ in 0..30 {
+        if !r.units[0].motion.searching() {
+            break;
+        }
+        r.step();
+    }
+    assert!(!r.units[0].motion.searching());
+    let before = r.units[0].motion.destination.expect("initial approach");
+    r.units[1].motion.pos[0] = Fx::from_int(520);
+    let head = r.battle.actors[1].turret.angle;
+    r.units[1].update_pose(head);
+    r.step();
+    let after = r.units[0].motion.destination.expect("updated approach");
+    assert!(after[0] > before[0] + 25, "{before:?} -> {after:?}");
+}

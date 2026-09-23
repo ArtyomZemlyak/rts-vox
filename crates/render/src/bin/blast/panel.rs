@@ -897,11 +897,23 @@ pub fn refresh(
         let controlled = edit
             .controlled
             .map_or_else(|| "не выбран".into(), |i| format!("№{}", i + 1));
+        let reach = selected
+            .and_then(|i| scene.sim.units.get(i))
+            .map(|u| {
+                let units = if u.kind == RangeUnitKind::Tank {
+                    scene.sim.battle.tuning.tank_range
+                } else {
+                    scene.sim.streams.tuning.machine_gun.range
+                };
+                format!("{} м", units / 10)
+            })
+            .unwrap_or_else(|| "выберите юнита".into());
         target = format!(
             "{phase}
 Свои: {own} · Враги: {enemy}
 Управление: {controlled}
 Танки — фугас · Шагоходы — два пулемёта
+Дальность выбранного: {reach}
 {target}"
         );
     }

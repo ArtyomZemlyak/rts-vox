@@ -918,6 +918,27 @@ fn ground_dash(
         giz.line(point(k), point(k + 1), colour);
     }
 }
+/// The range marker follows dug ground but does not climb tree crowns or
+/// walls. It is a distance guide; solid cover still blocks a shot.
+fn ground_range(giz: &mut Gizmos, sim: &BlastRange, at: [i32; 2], radius: i32, colour: Color) {
+    let mut previous = None;
+    for i in 0..=64 {
+        let angle = i as f32 * std::f32::consts::TAU / 64.0;
+        let x = (at[0] as f32 + angle.cos() * radius as f32).round() as i32;
+        let z = (at[1] as f32 + angle.sin() * radius as f32).round() as i32;
+        let next = if x >= 0 && z >= 0 && x < sim.size()[0] as i32 && z < sim.size()[2] as i32 {
+            let natural = sim_core::blast::range_height(x as u32, z as u32) as i32;
+            let floor = sim_core::blast::motion::floor(&sim.world, x, z).min(natural);
+            Some(Vec3::new(x as f32, floor as f32 + 0.7, z as f32))
+        } else {
+            None
+        };
+        if let (Some(a), Some(b)) = (previous, next) {
+            giz.line(a, b, colour);
+        }
+        previous = next;
+    }
+}
 fn bounds(giz: &mut Gizmos, min: Vec3, max: Vec3, color: Color) {
     giz.cube(
         Transform::from_translation((min + max) * 0.5).with_scale(max - min),
@@ -945,6 +966,24 @@ pub fn overlay(
                 Color::srgb(1.0, 0.3, 0.16)
             };
             giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), 24.0, color);
+            if edit.controlled == Some(i) || edit.selected == Some(Selection::Unit(i)) {
+                let reach = if u.kind == RangeUnitKind::Tank {
+                    scene.sim.battle.tuning.tank_range
+                } else {
+                    scene.sim.streams.tuning.machine_gun.range
+                };
+                ground_range(
+                    &mut giz,
+                    &scene.sim,
+                    [u.at[0], u.at[2]],
+                    reach,
+                    if scene.sim.allied(i) {
+                        Color::srgba(0.48, 0.9, 1.0, 0.38)
+                    } else {
+                        Color::srgba(1.0, 0.48, 0.25, 0.38)
+                    },
+                );
+            }
             if edit.controlled == Some(i) {
                 giz.circle(Isometry3d::new(p + Vec3::Y, flat), 27.0, Color::WHITE);
                 let mut from = [u.at[0], u.at[2]];
