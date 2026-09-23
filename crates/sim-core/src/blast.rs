@@ -3944,6 +3944,43 @@ mod tests {
         );
         assert!(high * 100 <= low * 125, "a ray is far off: {radii:?}");
     }
+    #[test]
+    fn heavy_shell_scars_steel_cover_without_hitting_the_sheltered_tank() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.course = None;
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
+        layout.units.truncate(1);
+        layout.units[0].at = [300, 16, 336];
+        layout.target = [286, 20, 336];
+        layout.blocks = vec![modding::range::RangeBlock {
+            min: [260, 0, 290],
+            max: [269, 64, 382],
+            material: 3,
+        }];
+        let mut stock = config();
+        let mut heavy = stock.clone();
+        heavy.energy *= 4;
+        heavy.material_energy_j *= 4;
+        for (c, should_chip) in [(&mut stock, false), (&mut heavy, true)] {
+            let mut sim = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+            for _ in 0..240 {
+                sim.step();
+            }
+            assert!(sim.impact.is_some());
+            assert_eq!(sim.removed > 0, should_chip);
+            assert_eq!(
+                sim.units[0].removed.len() + sim.units[0].seg_removed.len(),
+                0
+            );
+            assert!(sim.units[0].status.alive);
+            assert!(
+                !sim.surface_work.is_empty(),
+                "the exposed face has no scars"
+            );
+        }
+    }
     /// Trees are matter a tracked hull pushes over (ADR-271): the cut is paid
     /// by the vehicle, the crown falls for free, and nothing is erased.
     /// The default range as the capture script drives it: the player's

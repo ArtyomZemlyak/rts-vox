@@ -157,7 +157,11 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             let needs_light=any(direct*p.control.z*exp(-ground.t*p.sky.w)>vec3(LIGHT_EPSILON));
             if needs_soot || needs_light {
                 let visible=trace_terrain(pos+ground.normal*surface_offset,normalize(delta),max(0.0,length(delta)-5.0),true).material==0u;
-                if needs_soot && visible {bg=vec4(bg.rgb*(1.0-soot*0.85*p.control.z),bg.a);}
+                // Hot shell residue stains the surface without turning the
+                // entire crater black; a fuel-free energy bolt leaves dust
+                // rather than the same carbon ring.
+                let soot_strength=select(0.55,0.14,p.weapon.x>0.5);
+                if needs_soot && visible {bg=vec4(bg.rgb*(1.0-soot*soot_strength*p.control.z),bg.a);}
                 lit+=direct*select(0.06,1.0,visible);
             }
             if ground.material==1u && age>0.25 && r<24.0 {

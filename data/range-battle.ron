@@ -1,6 +1,6 @@
 // 30 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
 (
-    tank_power_milli: 500,
+    tank_power_milli: 1000,
     tank_reload_ticks: 90,
     tank_range: 700,
     pursuit_ticks: 60,

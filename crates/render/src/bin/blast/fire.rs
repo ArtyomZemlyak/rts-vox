@@ -14,6 +14,7 @@ struct Particle {
     edge: f32,
     seed: u32,
     smoke: bool,
+    stream: bool,
 }
 #[derive(Resource, Default)]
 pub struct Effects {
@@ -55,7 +56,15 @@ impl Effects {
             edge,
             seed,
             smoke,
+            stream: false,
         });
+    }
+    fn add_stream(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32) {
+        let before = self.particles.len();
+        self.add(at, velocity, now, life, edge, false);
+        if self.particles.len() > before {
+            self.particles[before].stream = true;
+        }
     }
     fn plume(&mut self, at: Vec3, now: f32, fire: bool, scale: f32) {
         let seed = self.serial;
@@ -85,19 +94,65 @@ impl Effects {
             );
         }
     }
+    fn shell_burst(&mut self, at: Vec3, now: f32, energy: u32) {
+        // A full pool must not silently swallow a new impact. Particles are
+        // stored in birth order, so recycle the oldest visual remnants first.
+        let needed = self.particles.len().saturating_add(35).saturating_sub(CAP);
+        if needed > 0 {
+            self.particles.drain(..needed);
+        }
+        let scale = (energy as f32 / 2300.0).sqrt().clamp(0.55, 1.8);
+        self.add(at, Vec3::ZERO, now, 0.16, 9.0 * scale, false);
+        // Fast, short-lived flame tongues bridge the impact flash to the
+        // slower advected gas. These are light and soot, not solid debris.
+        for i in 0..24u32 {
+            let seed = self.serial.wrapping_add(i * 13);
+            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 0.6) / 24.0;
+            let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
+            let speed = (28.0 + noise(seed.wrapping_add(3)) * 34.0) * scale;
+            self.add(
+                at + outward * (1.0 + noise(seed.wrapping_add(5)) * 2.0),
+                outward * speed + Vec3::Y * (9.0 + noise(seed.wrapping_add(7)) * 28.0),
+                now,
+                0.18 + noise(seed.wrapping_add(11)) * 0.17,
+                (1.8 + noise(seed.wrapping_add(17)) * 2.3) * scale,
+                false,
+            );
+        }
+        for i in 0..10u32 {
+            let seed = self.serial.wrapping_add(i * 19);
+            let angle = std::f32::consts::TAU * (i as f32 + noise(seed) * 0.7) / 10.0;
+            let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
+            self.add(
+                at + outward * 2.0,
+                outward * (12.0 + noise(seed.wrapping_add(2)) * 16.0) * scale
+                    + Vec3::Y * (7.0 + noise(seed.wrapping_add(4)) * 10.0),
+                now,
+                1.0 + noise(seed.wrapping_add(6)) * 0.9,
+                (3.0 + noise(seed.wrapping_add(8)) * 2.5) * scale,
+                true,
+            );
+        }
+    }
     pub fn capture(&mut self, sim: &BlastRange) {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
         for i in &sim.battle.impacts {
             let at = Vec3::from(i.at.map(|v| v as f32));
-            self.add(
-                at,
-                Vec3::Y * 3.0,
-                now,
-                if i.shell { 0.8 } else { 0.16 },
-                if i.shell { 9.0 } else { 1.8 },
-                false,
-            );
+            if i.shell {
+                self.shell_burst(at, now, sim.battle.shell_config.energy);
+            } else {
+                self.add(at, Vec3::Y * 3.0, now, 0.16, 1.8, false);
+            }
+        }
+        if !sim.battle_mode()
+            && sim.config.delivery == Delivery::Blast
+            && sim.config.motion != modding::explosion::ProjectileMotion::Direct
+            && sim.tick == sim.impact_tick.saturating_add(1)
+        {
+            if let Some(at) = sim.impact {
+                self.shell_burst(Vec3::from(at.map(|v| v as f32)), now, sim.config.energy);
+            }
         }
         let tuning = &sim.streams.tuning;
         self.sources.resize(sim.units.len() + 1, (u64::MAX, None));
@@ -213,36 +268,57 @@ impl Effects {
             let (a, b) = (point(trace.from), point(trace.to));
             if sim.config.delivery == Delivery::Flame {
                 let length = a.distance(b);
-                let steps = (length / 5.0).ceil().clamp(1.0, 3.0) as usize;
+                let steps = (length / 2.5).ceil().clamp(2.0, 6.0) as usize;
+                let forward = if trace.hit {
+                    Vec3::ZERO
+                } else {
+                    (b - a).normalize_or_zero() * 9.0
+                };
                 for i in 0..steps {
+                    let seed = trace.serial.wrapping_add(i as u32 * 17);
                     let t = (i as f32 + 0.5) / steps as f32;
-                    // Wake curls upward after the packet, but cannot extend past its contact.
-                    self.add(
-                        a.lerp(b, t),
-                        Vec3::new(0.5, 6.0, 0.3),
+                    let curl = Vec3::new(
+                        noise(seed) - 0.5,
+                        noise(seed.wrapping_add(3)) - 0.5,
+                        noise(seed.wrapping_add(7)) - 0.5,
+                    ) * 4.2;
+                    // Closely spaced hot tongues hold one stream together.
+                    // At contact they turn upward instead of crossing cover.
+                    self.add_stream(
+                        a.lerp(b, t) + curl,
+                        forward + Vec3::new(0.5, 4.5, 0.3),
                         now,
-                        0.28 + noise(trace.serial) * 0.25,
-                        2.4 + noise(trace.serial.wrapping_add(i as u32)) * 2.6,
-                        false,
+                        0.22 + noise(seed.wrapping_add(11)) * 0.18,
+                        2.3 + noise(seed.wrapping_add(13)) * 2.9,
                     );
+                    if i == steps / 2 {
+                        self.add_stream(
+                            a.lerp(b, t) + curl * 0.4,
+                            forward + Vec3::Y * 2.0,
+                            now,
+                            0.14,
+                            1.15,
+                        );
+                    }
                 }
                 if trace.hit && trace.serial.is_multiple_of(3) {
                     self.plume(b, now, true, 0.9);
                 }
             } else {
-                // Short luminous pieces show flight direction without drawing a permanent beam.
-                for i in 0..4 {
+                // A brief broken tracer shows the faster, heavier round at
+                // ordinary camera scale without turning its path into a beam.
+                for i in 0..6 {
                     self.add(
-                        b.lerp(a, i as f32 * 0.06),
+                        b.lerp(a, i as f32 * 0.035),
                         Vec3::ZERO,
                         now,
-                        0.075,
-                        0.65,
+                        0.11,
+                        1.05,
                         false,
                     );
                 }
                 if trace.hit {
-                    for i in 0..5 {
+                    for i in 0..7 {
                         let s = trace.serial.wrapping_add(i);
                         self.add(
                             b,
@@ -253,7 +329,7 @@ impl Effects {
                             ),
                             now,
                             0.25,
-                            0.55,
+                            0.9,
                             false,
                         );
                     }
@@ -265,7 +341,7 @@ impl Effects {
                 if !sim.streams.traces.iter().any(|t| t.from == at) {
                     continue;
                 }
-                self.add(point(at), Vec3::ZERO, now, 0.09, 3.8, false);
+                self.add(point(at), Vec3::ZERO, now, 0.11, 4.7, false);
             }
         }
     }
@@ -407,16 +483,22 @@ pub fn draw(
     for (p, at, t) in particles {
         if p.smoke {
             let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
-            let shade = 0.035 + t * 0.09 + noise(p.seed) * 0.025;
+            let shade = 0.085 + t * 0.09 + noise(p.seed) * 0.025;
             cube(
                 &mut smoke,
                 at,
                 p.edge * (0.65 + t * 1.65),
-                [shade * 0.94, shade * 0.96, shade, fade * 0.30],
+                [shade * 0.94, shade * 0.96, shade, fade * 0.25],
             );
         } else {
             let flicker = 0.85 + noise(p.seed.wrapping_add((t * 12.0) as u32)) * 0.15;
-            let col = if t < 0.23 {
+            let col = if p.stream && t < 0.25 {
+                [3.2, 1.15, 0.12, 0.74]
+            } else if p.stream && t < 0.65 {
+                [2.3, 0.46, 0.015, 0.7]
+            } else if p.stream {
+                [0.95, 0.11, 0.007, (1.0 - t) * 1.3]
+            } else if t < 0.23 {
                 [5.8, 3.2, 0.55, 0.88]
             } else if t < 0.58 {
                 [3.2, 0.75, 0.035, 0.82]
@@ -516,6 +598,49 @@ fn fire_mesh(buf: &MeshBuf) -> Mesh {
 mod tests {
     use super::*;
     #[test]
+    fn shell_impact_starts_a_bounded_flash_before_the_slow_plume() {
+        let mut r = BlastRange::new(config(false, false));
+        let mut effects = Effects::default();
+        for _ in 0..200 {
+            r.step();
+            effects.capture(&r);
+            if r.impact.is_some() {
+                break;
+            }
+        }
+        assert!(r.impact.is_some(), "the shell did not land");
+        let now = r.tick as f32 / 30.0;
+        let hot = effects
+            .particles
+            .iter()
+            .filter(|p| p.born == now && !p.smoke)
+            .count();
+        let smoke = effects
+            .particles
+            .iter()
+            .filter(|p| p.born == now && p.smoke)
+            .count();
+        assert!(hot >= 25 && smoke >= 10, "flash={hot} smoke={smoke}");
+        assert!(effects.particles.len() <= CAP);
+    }
+    #[test]
+    fn a_new_impact_replaces_old_remnants_when_the_pool_is_full() {
+        let mut effects = Effects::default();
+        for _ in 0..CAP {
+            effects.add(Vec3::ZERO, Vec3::ZERO, 0.0, 10.0, 1.0, true);
+        }
+        effects.shell_burst(Vec3::new(20.0, 0.0, 0.0), 1.0, 2300);
+        assert_eq!(effects.particles.len(), CAP);
+        assert_eq!(
+            effects.particles.iter().filter(|p| p.born == 1.0).count(),
+            35
+        );
+        assert_eq!(
+            effects.particles.iter().filter(|p| p.born == 0.0).count(),
+            CAP - 35
+        );
+    }
+    #[test]
     fn machine_gun_scene_emits_both_flashes_at_its_own_launch_time() {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
@@ -537,7 +662,37 @@ mod tests {
             assert!(effects
                 .particles
                 .iter()
-                .any(|p| p.at == point(at) && p.edge == 3.8));
+                .any(|p| p.at == point(at) && p.edge == 4.7));
+        }
+    }
+    #[test]
+    fn flame_fills_the_flown_segment_without_crossing_a_hit() {
+        let cfg = weapon_config(false, false, 1000, Delivery::Flame);
+        let mut r = BlastRange::new(cfg);
+        let mut effects = Effects::default();
+        for _ in 0..r.fire_tick + 8 {
+            r.step();
+            if !r.streams.traces.is_empty() {
+                effects.capture(&r);
+                break;
+            }
+        }
+        let trace = r.streams.traces.first().expect("flame packet did not fly");
+        let (a, b) = (point(trace.from), point(trace.to));
+        let direction = (b - a).normalize();
+        let length = a.distance(b);
+        let now = r.tick as f32 / 30.0;
+        let along: Vec<_> = effects
+            .particles
+            .iter()
+            .filter(|p| p.born == now && !p.smoke)
+            .map(|p| (p.at - a).dot(direction))
+            .collect();
+        assert!(along.len() >= 4, "flame must fill each packet path");
+        assert!(along.iter().any(|&v| v < length * 0.35));
+        assert!(along.iter().any(|&v| v > length * 0.65));
+        if trace.hit {
+            assert!(along.iter().all(|&v| v <= length + 0.7));
         }
     }
     #[test]

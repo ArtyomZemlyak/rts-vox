@@ -439,6 +439,23 @@ mod tests {
         );
     }
     #[test]
+    fn paired_machine_guns_keep_a_bounded_six_salvo_burst_and_real_hits() {
+        let mut r = range(Delivery::MachineGun, false, true);
+        for _ in 0..32 {
+            r.step();
+        }
+        assert_eq!(
+            r.streams.emitted(),
+            12,
+            "six salvos from two intact barrels"
+        );
+        assert!(
+            r.units[0].revision > 0,
+            "the slower burst missed the target"
+        );
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    #[test]
     fn flame_flight_cover_and_local_damage() {
         let mut open = range(Delivery::Flame, false, false);
         let mut wall = range(Delivery::Flame, true, false);

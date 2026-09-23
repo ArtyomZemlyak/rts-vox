@@ -9,7 +9,8 @@
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,
-    steel_resistance: 10000,
+    // Stock discharge leaves a dent, 2x stresses the face and 4x can tear it.
+    steel_resistance: 6000,
     unit_ablation_resistance: 180,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 4096,

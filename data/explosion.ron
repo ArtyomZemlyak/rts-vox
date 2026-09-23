@@ -8,7 +8,9 @@
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,
-    steel_resistance: 10000,
+    // Intact armor still stops the stock shell; repeated hits and a 4x
+    // charge can tear the exposed face instead of leaving it immaculate.
+    steel_resistance: 6000,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 4096,
     capture_cells_per_tick: 40000,
