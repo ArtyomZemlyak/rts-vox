@@ -27,7 +27,7 @@ pub struct Streams {
     pub left: u32,
     next: u32,
     cooldown: u32,
-    serial: u32,
+    pub(super) serial: u32,
     pub tuning: Tuning,
 }
 impl Default for Streams {
@@ -267,10 +267,7 @@ impl BlastRange {
     fn emit_stream(&mut self, tuning: &Stream) {
         let flame = self.config.delivery == Delivery::Flame;
         let muzzles = self.stream_muzzles();
-        for (barrel, from) in muzzles.into_iter().enumerate() {
-            if flame && barrel > 0 {
-                break;
-            }
+        for from in muzzles {
             for ray in 0..if flame { 3 } else { 1 } {
                 if self.streams.rounds.len() == MAX_ROUNDS {
                     return;
@@ -777,10 +774,12 @@ mod tests {
         assert_eq!(r.heat.hot(), 0);
     }
     fn range(delivery: Delivery, wall: bool, walker: bool) -> BlastRange {
-        let mut c = ExplosionConfig::from_ron(if delivery == Delivery::Flame {
-            include_str!("../../../data/flamethrower.ron")
-        } else {
-            include_str!("../../../data/machine-gun.ron")
+        let mut c = ExplosionConfig::from_ron(match delivery {
+            Delivery::Flame => include_str!("../../../data/flamethrower.ron"),
+            Delivery::MachineGun => include_str!("../../../data/machine-gun.ron"),
+            Delivery::Laser => include_str!("../../../data/laser.ron"),
+            Delivery::Kinetic => include_str!("../../../data/kinetic-shell.ron"),
+            Delivery::Blast => include_str!("../../../data/energy-cannon.ron"),
         })
         .unwrap();
         c.energy = 1000;
@@ -843,6 +842,74 @@ mod tests {
             r.stream_muzzles(),
             r.units[0].bounds()
         );
+    }
+    #[test]
+    fn walker_stream_weapons_use_both_muzzles() {
+        for delivery in [Delivery::MachineGun, Delivery::Flame, Delivery::Laser] {
+            let mut r = range(delivery, false, true);
+            let mut paired = false;
+            for _ in 0..40 {
+                r.step();
+                let muzzles = r.stream_muzzles();
+                paired |= muzzles.len() == 2
+                    && muzzles
+                        .iter()
+                        .all(|p| r.streams.traces.iter().any(|t| t.from == *p));
+                if paired {
+                    break;
+                }
+            }
+            assert!(paired, "{delivery:?} did not emit from both barrels");
+        }
+    }
+    #[test]
+    fn walker_heavy_weapons_alternate_connected_barrels() {
+        for delivery in [Delivery::Blast, Delivery::Kinetic] {
+            let mut r = range(delivery, false, true);
+            assert_eq!(r.stream_muzzles().len(), 2);
+            for index in 0..2 {
+                r.shell = None;
+                r.impact = None;
+                r.fire_tick = r.tick + 1;
+                for _ in 0..20 {
+                    r.step();
+                    if r.shell.is_some() {
+                        break;
+                    }
+                }
+                assert!(r.shell.is_some(), "{delivery:?} barrel {index} never fired");
+                assert_eq!(
+                    r.muzzle(),
+                    r.stream_muzzles()[index],
+                    "flight retains the fired barrel"
+                );
+                assert_eq!(
+                    r.shell.unwrap()[2],
+                    r.muzzle()[2],
+                    "{delivery:?} fired from the selected side"
+                );
+            }
+        }
+        let mut damaged = range(Delivery::Blast, false, true);
+        let path = damaged.gun.body.weapon_paths()[0];
+        for y in path.min[1]..path.max[1] {
+            for z in path.min[2]..path.max[2] {
+                damaged.gun.body.remove(33, usize::from(y), usize::from(z));
+            }
+        }
+        damaged.gun.update_response();
+        assert!(!damaged.gun.barrel_connected(0));
+        assert!(damaged.gun.barrel_connected(1));
+        assert_eq!(damaged.muzzle(), damaged.stream_muzzles()[0]);
+        damaged.fire_tick = damaged.tick + 1;
+        for _ in 0..20 {
+            damaged.step();
+            if damaged.shell.is_some() {
+                break;
+            }
+        }
+        assert!(damaged.shell.is_some(), "surviving barrel did not fire");
+        assert_eq!(damaged.muzzle(), damaged.stream_muzzles()[0]);
     }
     #[test]
     fn paired_machine_guns_keep_a_bounded_six_salvo_burst_and_real_hits() {

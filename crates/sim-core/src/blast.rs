@@ -227,6 +227,12 @@ impl HitFrames {
     }
 }
 impl RangeUnit {
+    pub fn barrel_connected(&self, index: usize) -> bool {
+        self.body.weapon_paths().get(index).is_some_and(|path| {
+            self.body
+                .barrel_connected(path, self.connectivity.reached_cols())
+        })
+    }
     pub fn new(at: [i32; 3]) -> Self {
         Self::of_kind(RangeUnitKind::Tank, at)
     }
@@ -1859,8 +1865,13 @@ impl BlastRange {
     }
     pub fn muzzle(&self) -> [Fx; 3] {
         if self.gun.kind == RangeUnitKind::Strider {
-            if let Some(p) = self.stream_muzzles().first() {
-                return *p;
+            let muzzles = self.stream_muzzles();
+            if !muzzles.is_empty() {
+                // Heavy rounds use one barrel per reload. Keep the launched
+                // barrel selected through flight and impact so its charge,
+                // projectile trail and flash all start at the same place.
+                let fired = u32::from(self.shell.is_some() || self.impact.is_some());
+                return muzzles[self.streams.serial.wrapping_sub(fired) as usize % muzzles.len()];
             }
         }
         let d = self.heading();
@@ -3055,6 +3066,9 @@ impl BlastRange {
                     self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
                 ];
                 self.shell = Some(from);
+                if self.gun.kind == RangeUnitKind::Strider {
+                    self.streams.serial = self.streams.serial.wrapping_add(1);
+                }
             }
             self.step_streams();
             if let Some(p) = self.shell {

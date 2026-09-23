@@ -18,7 +18,7 @@ use render::geom::MeshBuf;
 use render::occlusion::OcclusionPlugin;
 use render::recording::Recording;
 use render::{look, presentation};
-use sim_core::blast::{BlastRange, GUN, MUZZLE};
+use sim_core::blast::{BlastRange, GUN};
 #[path = "blast/bodies.rs"]
 mod bodies;
 #[path = "blast/damage_art.rs"]
@@ -114,7 +114,7 @@ struct BlastLight;
 #[derive(Component)]
 struct MuzzleFlash;
 #[derive(Component)]
-struct Emitter;
+struct Emitter(usize);
 #[derive(Component)]
 struct Ejecta {
     velocity: Vec3,
@@ -125,6 +125,7 @@ struct Art {
     cube: Handle<Mesh>,
     rock: Handle<StandardMaterial>,
     ember: Handle<StandardMaterial>,
+    coil: Handle<StandardMaterial>,
 }
 
 fn config(energy: bool, anni: bool) -> ExplosionConfig {
@@ -227,6 +228,17 @@ fn visible_gun_rotation(scene: &Scene, visual: &moving::Visual) -> Quat {
 }
 fn muzzle_vec(sim: &BlastRange) -> Vec3 {
     Vec3::from(sim.muzzle().map(|v| v.to_f64_lossy() as f32))
+}
+fn visible_muzzle(scene: &Scene, visual: &moving::Visual) -> Vec3 {
+    let current = moving::pose(&scene.sim.gun);
+    let visible = moving::visible(&scene.sim.gun, visual.previous.last(), scene);
+    let current_yaw =
+        -scene.sim.turret.angle as f32 * std::f32::consts::TAU / fx::angle::FULL as f32;
+    let current_rotation = render::realtime::hull_rotation(current.up, current_yaw);
+    let visible_rotation =
+        render::realtime::hull_rotation(visible.up, visible_gun_yaw(scene, visual));
+    visible.pos
+        + visible_rotation * (current_rotation.inverse() * (muzzle_vec(&scene.sim) - current.pos))
 }
 /// Radius of one burning voxel's flame, world units (P-22).
 const FLAME_RADIUS: f32 = 2.4;
@@ -1059,40 +1071,14 @@ fn setup(
     gun_art::spawn(&mut commands, &mut meshes, &finishes, &scene);
     commands.insert_resource(gun_art::Chassis(scene.sim.gun.kind));
     let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    {
-        let coil = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.05, 0.20, 0.38),
-            emissive: LinearRgba::new(0.10, 0.38, 0.85, 1.0),
-            metallic: 0.7,
-            perceptual_roughness: 0.24,
-            ..default()
-        });
-        // Two open emitter collars around the existing barrel, sharing recoil.
-        for x in [-8.0, -3.0] {
-            for (offset, size) in [
-                (Vec3::new(x, 3.0, 0.0), Vec3::new(1.3, 0.7, 6.7)),
-                (Vec3::new(x, -3.0, 0.0), Vec3::new(1.3, 0.7, 6.7)),
-                (Vec3::new(x, 0.0, 3.0), Vec3::new(1.3, 5.5, 0.7)),
-                (Vec3::new(x, 0.0, -3.0), Vec3::new(1.3, 5.5, 0.7)),
-            ] {
-                let base = Transform::from_translation(
-                    Vec3::new(MUZZLE[0] as f32, MUZZLE[1] as f32, MUZZLE[2] as f32) + offset,
-                )
-                .with_scale(size);
-                commands.spawn((
-                    Mesh3d(cube.clone()),
-                    MeshMaterial3d(coil.clone()),
-                    base,
-                    Emitter,
-                    Gun {
-                        base,
-                        turret: true,
-                        segment: None,
-                    },
-                ));
-            }
-        }
-    }
+    let coil = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.05, 0.20, 0.38),
+        emissive: LinearRgba::new(0.10, 0.38, 0.85, 1.0),
+        metallic: 0.7,
+        perceptual_roughness: 0.24,
+        ..default()
+    });
+    gun_art::emitters(&mut commands, &scene, &cube, &coil);
     let ember = materials.add(StandardMaterial {
         base_color: if scene.energy {
             Color::srgb(0.15, 0.5, 1.0)
@@ -1125,7 +1111,12 @@ fn setup(
         MuzzleFlash,
         NoFrustumCulling,
     ));
-    commands.insert_resource(Art { cube, rock, ember });
+    commands.insert_resource(Art {
+        cube,
+        rock,
+        ember,
+        coil,
+    });
     presentation::daylight(&mut commands, &mut mediums, sim_core::blast::FLOOR as f32);
     commands.spawn((
         PointLight {
@@ -1737,7 +1728,7 @@ fn advance(
 fn orient_gun(
     scene: Res<Scene>,
     visual: Res<moving::Visual>,
-    mut gun: Query<(&Gun, &mut Transform, &mut Visibility)>,
+    mut gun: Query<(&Gun, &mut Transform, &mut Visibility, Option<&Emitter>)>,
 ) {
     let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
     let pivot = pose.pos;
@@ -1753,12 +1744,14 @@ fn orient_gun(
     } else {
         0.0
     };
-    for (g, mut tr, mut visible) in &mut gun {
-        *visible = if scene.sim.battle_mode() {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+    for (g, mut tr, mut visible, emitter) in &mut gun {
+        let connected = emitter.is_none_or(|e| scene.sim.gun.barrel_connected(e.0));
+        *visible =
+            if scene.sim.battle_mode() || (emitter.is_some() && (!scene.energy || !connected)) {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
         if let Some(seg) = g.segment {
             if let Some(local) = segments.get(seg) {
                 *tr = *local;
@@ -1778,14 +1771,12 @@ fn weapon_art(
     scene: Res<Scene>,
     art: Res<Art>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut coils: Query<&mut Visibility, With<Emitter>>,
     mut last: Local<Option<bool>>,
 ) {
-    let visible_energy = scene.energy && !scene.sim.battle_mode();
-    if *last == Some(visible_energy) {
+    if *last == Some(scene.energy) {
         return;
     }
-    *last = Some(visible_energy);
+    *last = Some(scene.energy);
     if let Some(mut m) = materials.get_mut(&art.ember) {
         m.base_color = if scene.energy {
             Color::srgb(0.15, 0.5, 1.0)
@@ -1796,13 +1787,6 @@ fn weapon_art(
             LinearRgba::new(3.0, 4.5, 7.0, 1.0)
         } else {
             LinearRgba::new(32.0, 6.4, 0.2, 1.0)
-        };
-    }
-    for mut v in &mut coils {
-        *v = if visible_energy {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
         };
     }
 }
@@ -1826,9 +1810,8 @@ fn animate_energy(
     };
     let visual_tick = scene.sim.tick.saturating_sub(1) as f32 + fraction;
     gas.params.weapon.y = visual_tick / 30.0;
-    let pose = moving::visible(&scene.sim.gun, visual.previous.last(), &scene);
     let emitter =
-        pose.pos + Vec3::Y * 23.0 + visible_gun_rotation(&scene, &visual) * Vec3::X * 32.0;
+        visible_muzzle(&scene, &visual) + visible_gun_rotation(&scene, &visual) * Vec3::X * 2.0;
     gas.params.beam = emitter.extend(gas.params.beam.w);
     if let (Some(a), Some(b)) = (scene.previous_shell, scene.sim.shell) {
         let next = Vec3::from(b.map(|v| v.raw() as f32 / 4294967296.0));

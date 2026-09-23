@@ -85,13 +85,69 @@ pub fn spawn(
         body.segments.len()
     );
 }
+/// Build the energy collars from authored weapon paths, so a chassis switch
+/// places one pair around each actual barrel instead of the tank's old muzzle.
+pub fn emitters(
+    commands: &mut Commands,
+    scene: &Scene,
+    cube: &Handle<Mesh>,
+    coil: &Handle<StandardMaterial>,
+) {
+    let body = &scene.sim.gun.body;
+    let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
+    let centre = render::model::root_centre(body);
+    let origin = Vec3::from(GUN.map(|v| v as f32));
+    let radius = if scene.sim.gun.kind == RangeUnitKind::Strider {
+        2.35
+    } else {
+        3.0
+    };
+    for (barrel, path) in body.weapon_paths().iter().enumerate() {
+        if path.axis != 0 {
+            continue;
+        }
+        let muzzle = Vec3::new(
+            (f32::from(path.max[0]) + 1.0 - centre[0]) * scale,
+            (f32::from(path.min[1]) + f32::from(path.max[1])) * 0.5 * scale,
+            ((f32::from(path.min[2]) + f32::from(path.max[2])) * 0.5 - centre[2]) * scale,
+        );
+        for x in [-8.0, -3.0] {
+            for (offset, size) in [
+                (Vec3::new(x, radius, 0.0), Vec3::new(1.3, 0.7, radius * 2.2)),
+                (
+                    Vec3::new(x, -radius, 0.0),
+                    Vec3::new(1.3, 0.7, radius * 2.2),
+                ),
+                (Vec3::new(x, 0.0, radius), Vec3::new(1.3, radius * 2.2, 0.7)),
+                (
+                    Vec3::new(x, 0.0, -radius),
+                    Vec3::new(1.3, radius * 2.2, 0.7),
+                ),
+            ] {
+                let base = Transform::from_translation(origin + muzzle + offset).with_scale(size);
+                commands.spawn((
+                    Mesh3d(cube.clone()),
+                    MeshMaterial3d(coil.clone()),
+                    base,
+                    Emitter(barrel),
+                    Gun {
+                        base,
+                        turret: true,
+                        segment: None,
+                    },
+                ));
+            }
+        }
+    }
+}
 pub fn refresh(
     mut commands: Commands,
     scene: Res<Scene>,
-    art: Res<WitnessArt>,
+    witness: Res<WitnessArt>,
+    art: Res<Art>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut chassis: ResMut<Chassis>,
-    old: Query<Entity, (With<Gun>, Without<Emitter>)>,
+    old: Query<Entity, With<Gun>>,
 ) {
     if chassis.0 == scene.sim.gun.kind {
         return;
@@ -99,6 +155,7 @@ pub fn refresh(
     for e in &old {
         commands.entity(e).despawn();
     }
-    spawn(&mut commands, &mut meshes, &art.materials, &scene);
+    spawn(&mut commands, &mut meshes, &witness.materials, &scene);
+    emitters(&mut commands, &scene, &art.cube, &art.coil);
     chassis.0 = scene.sim.gun.kind;
 }
