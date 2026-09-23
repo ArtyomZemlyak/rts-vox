@@ -54,6 +54,108 @@ fn paused_patrols_do_not_pause_a_tanks_fall() {
 }
 
 #[test]
+fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = [300, 361]
+        .map(|x| modding::range::RangeUnitDef {
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [x, FLOOR, 336],
+        })
+        .to_vec();
+    let mut outcomes = Vec::new();
+    for reverse in [false, true] {
+        if reverse {
+            layout.units.reverse();
+        }
+        let (source, target) = if reverse { (1, 0) } else { (0, 1) };
+        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        a.patrols_running = false;
+        for _ in 0..20 {
+            a.step();
+        }
+        let original = a.units[target].motion.pos[0];
+        let body = a.units[source].body.clone();
+        a.units[source]
+            .motion
+            .impulse(&body, [254, FLOOR, 336], 120_000);
+        for _ in 0..3 {
+            a.step();
+        }
+        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        for _ in 0..90 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+            let p = motion::Obstacle::of(&a.units[source].motion, &a.units[source].body);
+            let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
+            assert!(
+                q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]),
+                "tanks entered each other"
+            );
+        }
+        assert!(
+            a.units[target].motion.pos[0] > original.add(Fx::ONE),
+            "the second tank received no contact shove: {:?}",
+            a.units[target].motion.pos
+        );
+        outcomes.push((a.units[source].motion.pos[0], a.units[target].motion.pos[0]));
+    }
+    assert!(
+        outcomes[0].0.sub(outcomes[1].0).abs() < Fx::ONE
+            && outcomes[0].1.sub(outcomes[1].1).abs() < Fx::ONE,
+        "contact depends on slot order: {outcomes:?}"
+    );
+}
+
+#[test]
+fn solo_shooter_and_target_exchange_contact_shove() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    for gun_is_source in [false, true] {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.course = None;
+        layout.blocks.clear();
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
+        layout.gun = [if gun_is_source { 300 } else { 361 }, FLOOR, 336];
+        layout.units.truncate(1);
+        layout.units[0].at = [if gun_is_source { 361 } else { 300 }, FLOOR, 336];
+        let mut r = BlastRange::with_layout(c.clone(), layout).unwrap();
+        r.patrols_running = false;
+        for _ in 0..20 {
+            r.step();
+        }
+        let original = if gun_is_source {
+            r.units[0].motion.pos[0]
+        } else {
+            r.gun.motion.pos[0]
+        };
+        if gun_is_source {
+            let body = r.gun.body.clone();
+            r.gun.motion.impulse(&body, [254, FLOOR, 336], 120_000);
+        } else {
+            let body = r.units[0].body.clone();
+            r.units[0].motion.impulse(&body, [254, FLOOR, 336], 120_000);
+        }
+        for _ in 0..90 {
+            r.step();
+        }
+        let target = if gun_is_source {
+            r.units[0].motion.pos[0]
+        } else {
+            r.gun.motion.pos[0]
+        };
+        assert!(target > original.add(Fx::ONE), "no transfer to target");
+    }
+}
+
+#[test]
 fn a_nearby_wall_cannot_lift_a_parked_tank() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();

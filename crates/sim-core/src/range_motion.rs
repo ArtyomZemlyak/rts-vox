@@ -114,6 +114,10 @@ pub struct Motion {
     /// the horizontal plane (ADR-286); the brakes and the terrain spend it.
     /// Saved.
     pub shove: V3,
+    /// Contact generated during this motion tick: index in `others` and
+    /// incoming velocity along the line to that hull. Consumed by the
+    /// range after all actors have committed their positions, never saved.
+    contact: Option<(usize, V3)>,
     /// Legs computed once from the body.
     rigs: Vec<crate::gait::LegRig>,
     /// Share of a buckled leg's rest reach its foot keeps, thousandths
@@ -225,6 +229,7 @@ impl Motion {
             legs_lost,
             legs_buckled,
             shove: V3::ZERO,
+            contact: None,
             rigs,
             fold_milli,
             collapse_pct,
@@ -405,6 +410,36 @@ impl Motion {
             self.shove.scale(left.div(len))
         };
     }
+    /// Separate a refused burst shove into its contact-normal and sliding
+    /// parts. The range passes a mass-weighted part of the normal velocity
+    /// to the other hull in a stable second phase; terrain refusals still
+    /// spend the whole shove.
+    fn record_contact(&mut self, index: usize, other: &Obstacle) {
+        let line = V3::new(
+            other.pos[0].sub(self.pos[0]),
+            Fx::ZERO,
+            other.pos[2].sub(self.pos[2]),
+        );
+        let distance2 = line.len_sq();
+        if distance2 == Fx::ZERO {
+            self.shove = V3::ZERO;
+            return;
+        }
+        let toward = self.shove.dot(line);
+        if toward <= Fx::ZERO {
+            self.shove = V3::ZERO;
+            return;
+        }
+        let normal = line.scale(toward.div(distance2));
+        self.shove = self.shove.sub(normal);
+        self.contact = Some((index, normal));
+    }
+    pub(super) fn take_contact(&mut self) -> Option<(usize, V3)> {
+        self.contact.take()
+    }
+    pub(super) fn receive_contact(&mut self, velocity: V3) {
+        self.shove = self.shove.add(velocity);
+    }
     /// The legs of this hull, in template order; empty for a tracked one.
     pub fn rigs(&self) -> &[crate::gait::LegRig] {
         &self.rigs
@@ -455,8 +490,9 @@ impl Motion {
         (support.len() >= 2).then_some((support, ground))
     }
     /// A parked hull's slide under a burst's shove (ADR-286): the same
-    /// acceptance as a driven move, and a refusal spends the shove. Returns
-    /// the accepted displacement.
+    /// acceptance as a driven move. Terrain spends a refused shove; a hull
+    /// contact passes part of it to that hull (ADR-359). Returns the accepted
+    /// displacement.
     fn slide(
         &mut self,
         w: &World,
@@ -481,19 +517,19 @@ impl Motion {
         let mut candidate = previous;
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().any(|p| {
+        let collision = others.iter().position(|p| {
             let penetration = candidate.penetration(p);
             penetration > Fx::ZERO && penetration >= previous.penetration(p)
         });
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
-        let allowed = (target.blocked == 0 || target.blocked < current.blocked)
+        let terrain_allowed = (target.blocked == 0 || target.blocked < current.blocked)
             && !target.tilt
             && x >= EDGE
             && z >= EDGE
             && x < w.nx as i32 - EDGE
             && z < w.nz as i32 - EDGE
-            && target.height.sub(current.height) <= Fx::from_int(self.step)
-            && !collision;
+            && target.height.sub(current.height) <= Fx::from_int(self.step);
+        let allowed = terrain_allowed && collision.is_none();
         let moved = if allowed {
             let d = V3::new(nx.sub(self.pos[0]), Fx::ZERO, nz.sub(self.pos[2]));
             self.pos[0] = nx;
@@ -504,7 +540,13 @@ impl Motion {
             };
             d
         } else {
-            self.shove = V3::ZERO;
+            if terrain_allowed {
+                if let Some(index) = collision {
+                    self.record_contact(index, &others[index]);
+                }
+            } else {
+                self.shove = V3::ZERO;
+            }
             V3::ZERO
         };
         self.brake_shove(&lim);
@@ -605,6 +647,7 @@ impl Motion {
         others: &[Obstacle],
     ) {
         self.cut.clear();
+        self.contact = None;
         let moved = self.slide(w, rubble, b, others, response);
         self.settle(w, rubble, b, gravity, response);
         self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
@@ -881,6 +924,7 @@ impl Motion {
         steady: bool,
     ) {
         self.cut.clear();
+        self.contact = None;
         if !self.enabled {
             // A parked hull that a burst pushed slides and rocks (ADR-286);
             // a parked walker still stands on its feet, and its hull on them.
@@ -1070,7 +1114,7 @@ impl Motion {
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
-        let collision = others.iter().any(|p| {
+        let collision = others.iter().position(|p| {
             let penetration = candidate.penetration(p);
             penetration > Fx::ZERO && penetration >= previous.penetration(p)
         });
@@ -1083,13 +1127,13 @@ impl Motion {
         let clear = (target.blocked == 0 || target.blocked < current.blocked)
             && !target.tilt
             && (self.escape_left > 0 || !target.steep || current.steep);
-        let allowed = clear
+        let terrain_allowed = clear
             && x >= EDGE
             && z >= EDGE
             && x < w.nx as i32 - EDGE
             && z < w.nz as i32 - EDGE
-            && target.height.sub(current.height) <= Fx::from_int(self.step)
-            && !collision;
+            && target.height.sub(current.height) <= Fx::from_int(self.step);
+        let allowed = terrain_allowed && collision.is_none();
         let path = if allowed {
             self.blocked = false;
             self.pos[0] = nx;
@@ -1100,7 +1144,13 @@ impl Motion {
             self.drive.head = old.head;
             self.drive.yaw_rate = 0;
             self.blocked = true;
-            self.shove = V3::ZERO;
+            if terrain_allowed {
+                if let Some(index) = collision {
+                    self.record_contact(index, &others[index]);
+                }
+            } else {
+                self.shove = V3::ZERO;
+            }
             Fx::ZERO
         };
         self.brake_shove(&lim);
@@ -1258,6 +1308,7 @@ impl Motion {
         self.load_version(s, true)
     }
     pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
+        self.contact = None;
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),
@@ -1838,6 +1889,38 @@ mod tests {
         assert!(m.hull.load > Fx::ZERO, "no landing: {:?}", m.hull);
         assert!(m.hull.vy.abs() < Fx::ONE, "still falling: {:?}", m.hull);
         assert!(m.hull.up.y > Fx::from_ratio(95, 100), "did not settle");
+    }
+    #[test]
+    fn a_concrete_wall_spends_the_shove_without_a_hull_contact() {
+        struct Wall;
+        impl voxel::Generator for Wall {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if (335..340).contains(&x) && (250..350).contains(&z) && y < 50 {
+                    2
+                } else {
+                    0
+                }
+            }
+        }
+        let w = World::new(640, 64, 640, 100, Box::new(Wall));
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([300, 16, 300], RangeUnitKind::Tank, &body);
+        for tick in 0..20 {
+            step(&mut m, &w, &body, &[], tick);
+        }
+        m.impulse(&body, [254, 16, 300], 120_000);
+        for tick in 20..100 {
+            step(&mut m, &w, &body, &[], tick);
+            assert!(m.take_contact().is_none(), "wall became a moving hull");
+        }
+        assert!(
+            m.pos[0] < Fx::from_int(305),
+            "crossed the wall: {:?}",
+            m.pos
+        );
+        assert_eq!(m.shove, V3::ZERO, "wall did not spend the shove");
     }
     /// A wide two-legged body stands on both legs, each foot carrying
     /// heel and toe; a buckled leg leaves one side, and the body falls onto

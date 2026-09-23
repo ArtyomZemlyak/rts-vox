@@ -2865,6 +2865,7 @@ impl BlastRange {
         // again next tick, in the same stable slot order.
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
+        let mut contacts = Vec::new();
         for (id, u) in self.units.iter_mut().enumerate() {
             u.motion.allow_start(starts > 0);
             {
@@ -2910,6 +2911,10 @@ impl BlastRange {
                 };
                 u.update_pose(head);
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
+                if let Some((other, velocity)) = u.motion.take_contact() {
+                    let target = if other < id { other } else { other + 1 };
+                    contacts.push((id, target, velocity));
+                }
             }
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
         }
@@ -2928,6 +2933,32 @@ impl BlastRange {
                 self.world_steady,
             );
             self.gun.update_pose(self.turret.angle);
+            if let Some((target, velocity)) = self.gun.motion.take_contact() {
+                contacts.push((self.units.len(), target, velocity));
+            }
+        }
+        // Position acceptance above remains in stable slot order. Transfer
+        // contact velocity only after every hull has moved, so an earlier
+        // slot does not gain a same-tick head start over a later one.
+        for (source, target, velocity) in contacts {
+            let mass = |id: usize| {
+                if id == self.units.len() {
+                    self.gun.motion.chassis.mass.max(1)
+                } else {
+                    self.units[id].motion.chassis.mass.max(1)
+                }
+            };
+            let source_mass = mass(source);
+            let target_mass = mass(target);
+            let transferred = velocity.scale(Fx::from_ratio(
+                source_mass,
+                source_mass.saturating_add(target_mass),
+            ));
+            if target == self.units.len() {
+                self.gun.motion.receive_contact(transferred);
+            } else {
+                self.units[target].motion.receive_contact(transferred);
+            }
         }
         // Tracked hulls cut the yielding matter they stand in; the crown that
         // hung from those cells follows over the next ticks.
