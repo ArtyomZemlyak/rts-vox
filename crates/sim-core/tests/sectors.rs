@@ -58,6 +58,7 @@ fn crop(mut r: RangeLayout, id: usize) -> RangeLayout {
         max: xz(zone.max),
         spawn: r.gun,
         target: r.target,
+        scenario: None,
         ..zone
     }];
     r.size = [1024, 192, 1024];

@@ -1450,6 +1450,7 @@ mod tests {
             max: [620, 625],
             spawn: [200, 16, 336],
             target: [392, 24, 336],
+            scenario: None,
         };
         w.layout.as_mut().unwrap().zones = vec![zone.clone(), zone];
         let before = w.layout.clone();
@@ -1788,7 +1789,7 @@ mod tests {
             .path
             .is_empty());
         app.world_mut()
-            .spawn((panel::Action::Scenario(0), Interaction::Pressed));
+            .spawn((panel::Action::Scenario(2), Interaction::Pressed));
         app.update();
         let edit = app.world().resource::<Workshop>();
         let (config, layout) = edit.pending.as_ref().expect("scenario did not rebuild");
@@ -1798,5 +1799,10 @@ mod tests {
         assert_eq!(config.delivery, Delivery::Blast);
         assert_eq!(app.world().resource::<Scene>().power, 500);
         assert!(!app.world().resource::<panel::Panel>().drive);
+        assert!(app
+            .world()
+            .resource::<panel::Panel>()
+            .scenario_run
+            .is_some());
     }
 }

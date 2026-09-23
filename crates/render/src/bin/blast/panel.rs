@@ -1,6 +1,104 @@
 //! Mouse-first controls for the one forest range.
 use super::*;
+use modding::range::{RangeScenario, RangeScenarioWeapon};
 use workbench::{Selection, Tool};
+
+const SCENARIO_GAP_TICKS: u32 = 30;
+
+struct ShotResult {
+    terrain: usize,
+    armor: usize,
+    lost_units: usize,
+    shield_hits: u32,
+}
+
+pub struct ScenarioRun {
+    title: String,
+    description: String,
+    targets: Vec<[i32; 3]>,
+    fired: usize,
+    completed: usize,
+    ready_at: Option<u32>,
+    baseline_terrain: usize,
+    baseline_armor: usize,
+    baseline_lost_units: usize,
+    baseline_shield_hits: u32,
+    results: Vec<ShotResult>,
+}
+impl ScenarioRun {
+    fn new(s: &RangeScenario) -> Self {
+        Self {
+            title: s.title.clone(),
+            description: s.description.clone(),
+            targets: s.shots.clone(),
+            fired: 1,
+            completed: 0,
+            ready_at: None,
+            baseline_terrain: 0,
+            baseline_armor: 0,
+            baseline_lost_units: 0,
+            baseline_shield_hits: 0,
+            results: Vec::new(),
+        }
+    }
+    fn progress(&mut self, sim: &mut BlastRange) {
+        if !sim.ready() {
+            return;
+        }
+        if self.completed < self.fired {
+            let armor: usize = sim
+                .units
+                .iter()
+                .map(|u| u.removed.len() + u.seg_removed.len())
+                .sum();
+            let shield_hits: u32 = sim.shields.iter().map(|s| s.hits).sum();
+            let lost_units = sim.units.iter().filter(|u| !u.status.alive).count();
+            self.results.push(ShotResult {
+                terrain: sim.removed.saturating_sub(self.baseline_terrain),
+                armor: armor.saturating_sub(self.baseline_armor),
+                lost_units: lost_units.saturating_sub(self.baseline_lost_units),
+                shield_hits: shield_hits.saturating_sub(self.baseline_shield_hits),
+            });
+            self.baseline_terrain = sim.removed;
+            self.baseline_armor = armor;
+            self.baseline_lost_units = lost_units;
+            self.baseline_shield_hits = shield_hits;
+            self.completed = self.fired;
+            self.ready_at = Some(sim.tick);
+        }
+        if self.completed < self.targets.len()
+            && self
+                .ready_at
+                .is_some_and(|t| sim.tick >= t.saturating_add(SCENARIO_GAP_TICKS))
+        {
+            sim.aim = Some(self.targets[self.completed]);
+            if sim.refire() {
+                self.fired = self.completed + 1;
+                self.ready_at = None;
+            }
+        }
+    }
+    fn readout(&self) -> String {
+        let mut text = format!(
+            "\nОпыт: {} · {}/{} выстрелов\n{}\n",
+            self.title,
+            self.completed,
+            self.targets.len(),
+            self.description
+        );
+        for (i, result) in self.results.iter().enumerate() {
+            text.push_str(&format!(
+                "{}: грунт −{}, броня −{}, потеряно {}, щит ×{}\n",
+                i + 1,
+                result.terrain,
+                result.armor,
+                result.lost_units,
+                result.shield_hits
+            ));
+        }
+        text
+    }
+}
 
 #[derive(Resource)]
 pub struct Panel {
@@ -10,6 +108,7 @@ pub struct Panel {
     pub blocked: bool,
     pub routes: bool,
     pub scenarios_open: bool,
+    pub scenario_run: Option<ScenarioRun>,
     keys: Vec<KeyCode>,
     pending: Option<(u8, u32)>,
 }
@@ -22,6 +121,7 @@ impl Panel {
             blocked: false,
             routes: true,
             scenarios_open: false,
+            scenario_run: None,
             keys: Vec::new(),
             pending: None,
         }
@@ -88,20 +188,21 @@ pub struct RangeOnly;
 #[derive(Component)]
 pub struct ScenarioOnly;
 
-// Stock, repeatable experiments. The selected sector supplies the authored
-// shooter and aim; loading from the stock file discards prior damage/edits.
-const SCENARIOS: [(&str, &str, u8, u32); 5] = [
-    ("Обрушение опоры", "Обрушение", 1, 500),
-    ("Броня за укрытием", "Укрытие и броня", 1, 1000),
-    ("Разрушение материалов", "Материалы", 0, 2000),
-    ("Проверка щита", "Энергетическая защита", 1, 1000),
-    ("Лес и склон", "Лес и крутой склон", 5, 1000),
-];
+fn scenario_weapon(weapon: RangeScenarioWeapon) -> (bool, bool, Delivery) {
+    match weapon {
+        RangeScenarioWeapon::Shell => (false, false, Delivery::Blast),
+        RangeScenarioWeapon::Energy => (true, false, Delivery::Blast),
+        RangeScenarioWeapon::Annihilation => (true, true, Delivery::Blast),
+        RangeScenarioWeapon::Kinetic => (false, false, Delivery::Kinetic),
+    }
+}
 
 pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Assets<Font>>) {
     if edit.layout.is_none() {
         return;
     }
+    let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))
+        .expect("stock scenario layout");
     let camera = commands
         .spawn((
             Camera2d,
@@ -166,7 +267,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             TextColor(Color::srgb(0.85, 0.76, 0.48)),
             SectorLabel,
         ));
-        let rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
+        let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
             (
                 false,
                 vec![
@@ -176,11 +277,6 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             ),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний ▾", Action::ScenarioMenu)]),
-            (false, vec![(SCENARIOS[0].0, Action::Scenario(0))]),
-            (false, vec![(SCENARIOS[1].0, Action::Scenario(1))]),
-            (false, vec![(SCENARIOS[2].0, Action::Scenario(2))]),
-            (false, vec![(SCENARIOS[3].0, Action::Scenario(3))]),
-            (false, vec![(SCENARIOS[4].0, Action::Scenario(4))]),
             (
                 false,
                 vec![
@@ -336,6 +432,12 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 ],
             ),
         ];
+        let scenario_rows = stock.zones.iter().enumerate().filter_map(|(id, zone)| {
+            zone.scenario
+                .as_ref()
+                .map(|s| (false, vec![(s.title.as_str(), Action::Scenario(id as u8))]))
+        });
+        rows.splice(3..3, scenario_rows);
         for (editor, row) in rows {
             let mut parent = p.spawn(Node {
                 width: percent(100),
@@ -442,6 +544,20 @@ pub fn actions(
             continue;
         }
         scene.notice.clear();
+        if !matches!(
+            action,
+            Action::Scenario(_)
+                | Action::ScenarioMenu
+                | Action::Pause
+                | Action::Orbit(_)
+                | Action::Zoom(_)
+                | Action::Pan(..)
+                | Action::Overview
+                | Action::Own
+                | Action::Target
+        ) {
+            panel.scenario_run = None;
+        }
         match action {
             Action::BattleWorld => match edit.battle_world(scene.sim.config.clone()) {
                 Ok(()) => {
@@ -712,52 +828,49 @@ pub fn actions(
             }
             Action::ScenarioMenu => panel.scenarios_open = !panel.scenarios_open,
             Action::Scenario(id) => {
-                if let Some(&(_, zone_name, weapon, power)) = SCENARIOS.get(id as usize) {
-                    let stock =
-                        RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"));
-                    match stock.and_then(|mut layout| {
-                        let zone = layout
-                            .zones
-                            .iter()
-                            .position(|z| z.name == zone_name)
-                            .ok_or("Unknown scenario sector")?;
-                        let selected = &layout.zones[zone];
-                        layout.gun = selected.spawn;
-                        layout.target = selected.target;
-                        layout.battle = false;
-                        let energy = weapon == 1 || weapon == 2;
-                        let anni = weapon == 2;
-                        let delivery = match weapon {
-                            5 => Delivery::Kinetic,
-                            _ => Delivery::Blast,
-                        };
-                        let config =
-                            knobs::effective_config(energy, anni, power, delivery, overrides);
-                        edit.commit(layout, config)?;
-                        Ok::<usize, String>(zone)
-                    }) {
-                        Ok(zone) => {
-                            edit.zone = zone;
-                            edit.editing = false;
-                            edit.selected = None;
-                            edit.controlled = None;
-                            edit.pan = Vec2::ZERO;
-                            edit.zoom = 1.0;
-                            edit.orbit = 0.0;
-                            panel.scenarios_open = false;
-                            panel.drive = false;
-                            panel.demo = false;
-                            panel.pending = None;
-                            panel.ground_fire = false;
-                            scene.energy = weapon == 1 || weapon == 2;
-                            scene.anni = weapon == 2;
-                            scene.power = power;
-                            scene.repeat = false;
-                            scene.view = 1;
-                            scene.layout_file = Some("data/range-km.ron".into());
-                        }
-                        Err(e) => scene.notice = e,
+                let stock = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"));
+                match stock.and_then(|mut layout| {
+                    let zone = layout
+                        .zones
+                        .get(id as usize)
+                        .ok_or("Unknown scenario sector")?;
+                    let scenario = zone.scenario.clone().ok_or("No scenario in sector")?;
+                    let (energy, anni, delivery) = scenario_weapon(scenario.weapon);
+                    layout.gun = zone.spawn;
+                    layout.target = zone.target;
+                    layout.battle = false;
+                    let config = knobs::effective_config(
+                        energy,
+                        anni,
+                        scenario.power_milli,
+                        delivery,
+                        overrides,
+                    );
+                    edit.commit(layout, config)?;
+                    Ok::<_, String>((scenario, energy, anni))
+                }) {
+                    Ok((scenario, energy, anni)) => {
+                        edit.zone = id as usize;
+                        edit.editing = false;
+                        edit.selected = None;
+                        edit.controlled = None;
+                        edit.pan = Vec2::ZERO;
+                        edit.zoom = 1.0;
+                        edit.orbit = 0.0;
+                        panel.scenarios_open = false;
+                        panel.drive = false;
+                        panel.demo = false;
+                        panel.pending = None;
+                        panel.ground_fire = false;
+                        panel.scenario_run = Some(ScenarioRun::new(&scenario));
+                        scene.energy = energy;
+                        scene.anni = anni;
+                        scene.power = scenario.power_milli;
+                        scene.repeat = false;
+                        scene.view = 1;
+                        scene.layout_file = Some("data/range-km.ron".into());
                     }
+                    Err(e) => scene.notice = e,
                 }
             }
             Action::Orbit(delta) => {
@@ -831,6 +944,27 @@ fn weapon_of(scene: &Scene) -> u8 {
         1
     } else {
         0
+    }
+}
+
+/// Resume an authored series only after the previous physical impact has
+/// finished. Manual control cancels automation without discarding damage.
+pub fn scenario_progress(
+    mut panel: ResMut<Panel>,
+    mut scene: ResMut<Scene>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    if scene.sim.player
+        || scene.sim.battle_mode()
+        || [KeyCode::KeyF, KeyCode::KeyR, KeyCode::F5, KeyCode::Enter]
+            .iter()
+            .any(|key| keys.just_pressed(*key))
+    {
+        panel.scenario_run = None;
+        return;
+    }
+    if let Some(run) = &mut panel.scenario_run {
+        run.progress(&mut scene.sim);
     }
 }
 pub fn release_keys(mut panel: ResMut<Panel>, mut keys: ResMut<ButtonInput<KeyCode>>) {
@@ -1080,6 +1214,11 @@ pub fn refresh(
     } else {
         "Заряд / выстрел / перезарядка"
     };
+    let scenario = panel
+        .scenario_run
+        .as_ref()
+        .map(ScenarioRun::readout)
+        .unwrap_or_default();
     for mut t in &mut text {
         let pieces = &scene.sim.matter.debris.fragments;
         let bodies = scene.sim.bodies.list.len();
@@ -1102,7 +1241,7 @@ pub fn refresh(
             .and_then(|s| s.progress())
             .map_or_else(String::new, |p| format!("Подготовка участка: {p}%\n"));
         *t = Text::new(format!(
-            "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{weapon_hint}\n{target}{shields}\n{}{debris}{}",
+            "{state} · {:.0} FPS · тик {:.1} мс\n\n{instructions}\n\n{readiness}\n{weapon_hint}\n{target}{shields}{scenario}\n{}{debris}{}",
             scene.fps,
             scene.step_us as f32 / 1000.0,
             if panel.pending.is_some() {
@@ -1144,5 +1283,71 @@ pub fn scroll(
                 ((node.content_size().y - node.size().y) * node.inverse_scale_factor()).max(0.0);
             pos.y = (pos.y + delta).clamp(0.0, max);
         }
+    }
+}
+
+#[cfg(test)]
+mod scenario_tests {
+    use super::*;
+
+    #[test]
+    fn a_series_waits_for_completion_and_keeps_the_damaged_world() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout).unwrap();
+        sim.tick = 1000;
+        sim.fire_tick = u32::MAX;
+        sim.removed = 7;
+        assert!(sim.ready());
+        let scenario = RangeScenario {
+            title: "Two hits".into(),
+            description: "Same world".into(),
+            weapon: RangeScenarioWeapon::Shell,
+            power_milli: 1000,
+            shots: vec![[392, 24, 336], [400, 24, 336]],
+        };
+        let mut run = ScenarioRun::new(&scenario);
+        run.progress(&mut sim);
+        run.progress(&mut sim);
+        assert_eq!(run.results.len(), 1);
+        assert_eq!(run.results[0].terrain, 7);
+        assert_eq!(run.fired, 1);
+        sim.tick += SCENARIO_GAP_TICKS;
+        run.progress(&mut sim);
+        assert_eq!(run.fired, 2);
+        assert_eq!(sim.aim, Some([400, 24, 336]));
+        assert!(!sim.ready());
+        assert_eq!(sim.removed, 7);
+    }
+
+    #[test]
+    fn a_two_shot_series_completes_on_the_live_damageable_range() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let mut config =
+            ExplosionConfig::from_ron(include_str!("../../../../../data/explosion.ron")).unwrap();
+        config.fire_tick = 10;
+        config.charge_ticks = 1;
+        let mut sim = BlastRange::with_layout(config, layout).unwrap();
+        let scenario = RangeScenario {
+            title: "Two hits".into(),
+            description: "Same world".into(),
+            weapon: RangeScenarioWeapon::Shell,
+            power_milli: 1000,
+            shots: vec![[392, 24, 336], [400, 24, 336]],
+        };
+        let mut run = ScenarioRun::new(&scenario);
+        for _ in 0..600 {
+            sim.step();
+            run.progress(&mut sim);
+            if run.results.len() == 2 {
+                break;
+            }
+        }
+        assert_eq!(run.results.len(), 2, "two impacts did not complete");
+        assert!(sim.tick > SCENARIO_GAP_TICKS);
+        assert_eq!(sim.aim, Some([400, 24, 336]));
     }
 }

@@ -28,11 +28,33 @@ pub struct RangeZone {
     pub max: [i32; 2],
     pub spawn: [i32; 3],
     pub target: [i32; 3],
+    /// Optional one-click experiment prepared for this sector.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<RangeScenario>,
 }
 impl RangeZone {
     pub fn contains(&self, p: [i32; 2], margin: i32) -> bool {
         (0..2).all(|a| p[a] >= self.min[a] + margin && p[a] < self.max[a] - margin)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RangeScenarioWeapon {
+    Shell,
+    Energy,
+    Annihilation,
+    Kinetic,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeScenario {
+    pub title: String,
+    pub description: String,
+    pub weapon: RangeScenarioWeapon,
+    pub power_milli: u32,
+    /// The first shot uses the sector's authored target; later shots keep
+    /// damage in the same world so their effects can be compared.
+    pub shots: Vec<[i32; 3]>,
 }
 pub const fn stock_gun() -> [i32; 3] {
     [128, 16, 336]
@@ -239,6 +261,18 @@ impl RangeLayout {
                     || [z.spawn, z.target]
                         .iter()
                         .any(|p| p[1] < 0 || p[1] >= size[1])
+                    || z.scenario.as_ref().is_some_and(|s| {
+                        s.title.trim().is_empty()
+                            || s.title.chars().count() > 48
+                            || s.description.trim().is_empty()
+                            || s.description.chars().count() > 160
+                            || !r.power_milli.contains(&s.power_milli)
+                            || !(1..=4).contains(&s.shots.len())
+                            || s.shots.first() != Some(&z.target)
+                            || s.shots.iter().any(|p| {
+                                !z.contains([p[0], p[2]], 0) || p[1] < 0 || p[1] >= size[1]
+                            })
+                    })
             })
             || r.shields.len() > 8
             || r.shields.iter().any(|s| {
@@ -294,6 +328,25 @@ impl RangeLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stock_scenarios_are_bounded_sequences_in_their_sectors() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        assert_eq!(
+            layout.zones.iter().filter(|z| z.scenario.is_some()).count(),
+            5
+        );
+        let mut invalid = layout.clone();
+        invalid.zones[0].scenario.as_mut().unwrap().shots[0][0] += 1;
+        assert!(invalid.validate().is_err());
+        invalid = layout;
+        invalid.zones[2]
+            .scenario
+            .as_mut()
+            .unwrap()
+            .shots
+            .push([i32::MAX, 0, 0]);
+        assert!(invalid.validate().is_err());
+    }
     #[test]
     fn older_course_defaults_keep_the_walkers_original_limits() {
         let old = include_str!("../../../data/range-cover.ron")

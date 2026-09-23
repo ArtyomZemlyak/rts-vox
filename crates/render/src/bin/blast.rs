@@ -705,6 +705,7 @@ fn main() {
                     knobs::actions,
                     workbench::input,
                     advance,
+                    panel::scenario_progress,
                     profile::stamp,
                     gun_art::refresh,
                     orient_gun,
@@ -1658,9 +1659,9 @@ fn advance(
                     continue;
                 }
                 let pos = Vec3::new(e.x as f32, e.y as f32 + 1.0, e.z as f32);
-                let hash = (e.x.wrapping_mul(73856093)
+                let hash = e.x.wrapping_mul(73856093)
                     ^ e.y.wrapping_mul(19349663)
-                    ^ e.z.wrapping_mul(83492791)) as u32;
+                    ^ e.z.wrapping_mul(83492791);
                 let seed = hash as f32 / u32::MAX as f32;
                 let delta =
                     (pos - Vec3::new(at[0] as f32, at[1] as f32, at[2] as f32)).normalize_or_zero();

@@ -30,6 +30,7 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
         max: [192, 528],
         spawn: [112, 16, 448],
         target: [164, 24, 448],
+        scenario: None,
     });
     next.course.as_mut().unwrap().ramps[0].max[1] += 2;
     cases.push(next.clone());
