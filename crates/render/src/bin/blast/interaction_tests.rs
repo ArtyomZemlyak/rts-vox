@@ -151,10 +151,28 @@ fn bench_range_interactions() {
     );
     let mark = Instant::now();
     sim = sim
-        .rebuilt_with_layout(config, sim.layout.clone().unwrap(), &edit.validator)
+        .rebuilt_with_layout(config.clone(), sim.layout.clone().unwrap(), &edit.validator)
         .unwrap();
     println!(
         "INTERACTION battle-repeat ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mut changed = sim.layout.clone().unwrap();
+    changed.blocks[0].material = 5;
+    let mark = Instant::now();
+    sim = sim
+        .rebuilt_with_layout(config.clone(), changed, &edit.validator)
+        .unwrap();
+    println!(
+        "INTERACTION one-block-material ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mark = Instant::now();
+    sim = sim
+        .rebuilt_with_layout(config.clone(), layout, &edit.validator)
+        .unwrap();
+    println!(
+        "INTERACTION block-revert ms={:.3}",
         mark.elapsed().as_secs_f64() * 1000.0
     );
     let mark = Instant::now();

@@ -774,6 +774,23 @@ struct Column {
     rock: Option<(u32, i32, i32)>,
 }
 
+/// The smallest contiguous edit after preserving equal ordered ends. This
+/// also confines insertions and removals in the middle of an authored list:
+/// later entries keep their override order and need no terrain rebuild.
+fn changed_span<T: PartialEq>(
+    old: &[T],
+    next: &[T],
+) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
+    let prefix = old.iter().zip(next).take_while(|(a, b)| a == b).count();
+    let suffix = old[prefix..]
+        .iter()
+        .rev()
+        .zip(next[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (prefix..old.len() - suffix, prefix..next.len() - suffix)
+}
+
 impl RangeTerrain {
     /// Conservative XZ domains of changes to authored terrain. Unit rosters,
     /// firing targets, route speeds and zone labels do not generate terrain.
@@ -787,10 +804,12 @@ impl RangeTerrain {
                 areas.push((r.clear_min.map(|v| v - 28), r.clear_max.map(|v| v + 28)));
             }
         }
-        if old.blocks != next.blocks {
-            for b in old.blocks.iter().chain(&next.blocks) {
-                areas.push(([b.min[0], b.min[2]], [b.max[0], b.max[2]]));
-            }
+        let (old_blocks, next_blocks) = changed_span(&old.blocks, &next.blocks);
+        for b in old.blocks[old_blocks]
+            .iter()
+            .chain(&next.blocks[next_blocks])
+        {
+            areas.push(([b.min[0], b.min[2]], [b.max[0], b.max[2]]));
         }
         for (a, b) in [(old, next), (next, old)] {
             for z in &a.zones {
@@ -806,12 +825,14 @@ impl RangeTerrain {
                 areas.push((c.min, c.max));
             }
         }
-        if old.course.as_ref().map(|c| &c.ramps) != next.course.as_ref().map(|c| &c.ramps) {
-            for c in old.course.iter().chain(&next.course) {
-                for r in &c.ramps {
-                    areas.push(([r.min[0], r.min[2]], [r.max[0], r.max[2]]));
-                }
-            }
+        let old_ramps = old.course.as_ref().map_or(&[][..], |c| c.ramps.as_slice());
+        let next_ramps = next.course.as_ref().map_or(&[][..], |c| c.ramps.as_slice());
+        let (old_changed, next_changed) = changed_span(old_ramps, next_ramps);
+        for r in old_ramps[old_changed]
+            .iter()
+            .chain(&next_ramps[next_changed])
+        {
+            areas.push(([r.min[0], r.min[2]], [r.max[0], r.max[2]]));
         }
         areas
     }

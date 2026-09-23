@@ -640,7 +640,10 @@ impl World {
     }
 
     fn restore_columns(&mut self, areas: &[([i32; 2], [i32; 2])]) {
-        let mut columns = std::collections::BTreeSet::new();
+        // None means authored geometry changed through the whole height;
+        // otherwise only these previously edited Y chunks need rebuilding.
+        let mut columns: std::collections::BTreeMap<(u32, u32), Option<Vec<u32>>> =
+            std::collections::BTreeMap::new();
         for &(lo, hi) in areas {
             let lo = [
                 lo[0].clamp(0, self.nx as i32) as u32,
@@ -655,40 +658,104 @@ impl World {
             }
             for z in lo[1] / CS as u32..hi[1].div_ceil(CS as u32) {
                 for x in lo[0] / CS as u32..hi[0].div_ceil(CS as u32) {
-                    columns.insert((x, z));
+                    columns.insert((x, z), None);
                 }
             }
         }
         for (i, chunk) in self.chunks.iter_mut().enumerate() {
             if chunk.take().is_some() {
-                columns.insert((i as u32 % self.cx, i as u32 / (self.cx * self.cy)));
+                let ci = i as u32;
+                if let Some(chunks) = columns
+                    .entry((ci % self.cx, ci / (self.cx * self.cy)))
+                    .or_insert_with(|| Some(Vec::new()))
+                {
+                    chunks.push(ci / self.cx % self.cy);
+                }
             }
         }
         let mut column = vec![AIR; self.ny as usize];
         let mut rows = vec![0u32; self.ny as usize];
-        for (cx, cz) in columns {
+        for ((cx, cz), changed_y) in columns {
             let x0 = cx * CS as u32;
             let x1 = ((cx + 1) * CS as u32).min(self.nx);
             let shift = x0 % 64;
             let mask = ((1u64 << (x1 - x0)) - 1) << shift;
+            let full_height = changed_y.is_none();
+            let segments = if let Some(mut chunks) = changed_y {
+                chunks.sort_unstable();
+                chunks.dedup();
+                chunks
+                    .into_iter()
+                    .map(|cy| (cy * CS as u32, ((cy + 1) * CS as u32).min(self.ny)))
+                    .collect::<Vec<_>>()
+            } else {
+                vec![(0, self.ny)]
+            };
             for z in cz * CS as u32..((cz + 1) * CS as u32).min(self.nz) {
                 rows.fill(0);
                 for x in x0..x1 {
-                    self.gen.column(x, z, 0, &mut column);
-                    for (row, &m) in rows.iter_mut().zip(&column) {
-                        *row |= u32::from(m != AIR) << (x - x0);
+                    for &(y0, y1) in &segments {
+                        self.gen
+                            .column(x, z, y0, &mut column[y0 as usize..y1 as usize]);
+                        for (row, &m) in rows[y0 as usize..y1 as usize]
+                            .iter_mut()
+                            .zip(&column[y0 as usize..y1 as usize])
+                        {
+                            *row |= u32::from(m != AIR) << (x - x0);
+                        }
                     }
-                    let top = column
-                        .iter()
-                        .rposition(|&m| m != AIR)
-                        .map_or(0, |y| y as u16 + 1);
-                    self.ceiling[x as usize + self.nx as usize * z as usize] = top;
+                    if full_height {
+                        let top = column
+                            .iter()
+                            .rposition(|&m| m != AIR)
+                            .map_or(0, |y| y as u16 + 1);
+                        self.ceiling[x as usize + self.nx as usize * z as usize] = top;
+                    }
                 }
                 // A chunk's 32 X cells share half of one occupancy word.
                 // Commit each row once, preserving its neighbouring half.
-                for (y, &row) in rows.iter().enumerate() {
-                    let (i, _) = self.bit_index(x0, y as u32, z);
-                    self.bits[i] = (self.bits[i] & !mask) | (u64::from(row) << shift);
+                for &(y0, y1) in &segments {
+                    for y in y0..y1 {
+                        let (i, _) = self.bit_index(x0, y, z);
+                        self.bits[i] =
+                            (self.bits[i] & !mask) | (u64::from(rows[y as usize]) << shift);
+                    }
+                }
+                if !full_height {
+                    // The edited layer might contain the old or the new
+                    // surface. If the old top was above all restored layers,
+                    // no edit could move it; otherwise nothing is solid above
+                    // the highest restored layer, so the search starts there.
+                    let highest_restored = segments.last().unwrap().1;
+                    let mut pending = 0u32;
+                    for x in x0..x1 {
+                        if u32::from(self.ceiling[x as usize + self.nx as usize * z as usize])
+                            <= highest_restored
+                        {
+                            pending |= 1 << (x - x0);
+                        }
+                    }
+                    for y in (0..highest_restored).rev() {
+                        let (i, _) = self.bit_index(x0, y, z);
+                        let mut fresh = ((self.bits[i] & mask) >> shift) as u32 & pending;
+                        while fresh != 0 {
+                            let bit = fresh.trailing_zeros();
+                            fresh &= fresh - 1;
+                            pending &= !(1 << bit);
+                            let x = x0 + bit;
+                            self.ceiling[x as usize + self.nx as usize * z as usize] =
+                                (y + 1) as u16;
+                        }
+                        if pending == 0 {
+                            break;
+                        }
+                    }
+                    while pending != 0 {
+                        let bit = pending.trailing_zeros();
+                        pending &= pending - 1;
+                        let x = x0 + bit;
+                        self.ceiling[x as usize + self.nx as usize * z as usize] = 0;
+                    }
                 }
             }
         }
@@ -1564,6 +1631,42 @@ mod tests {
 
     fn world() -> World {
         World::new(64, 48, 64, 1000, Box::new(Layers { h: 30 }))
+    }
+
+    #[test]
+    fn pristine_reset_restores_only_edited_layers_and_exact_tops() {
+        let mut w = World::new(64, 96, 64, 1000, Box::new(Layers { h: 70 }));
+        for (x, y, z, mat) in [
+            (5, 12, 5, AIR),
+            (6, 40, 5, AIR),
+            (7, 69, 5, AIR),
+            (8, 84, 5, 3),
+        ] {
+            w.queue_edit(Edit {
+                x,
+                y,
+                z,
+                mat,
+                by: NOBODY,
+            });
+        }
+        while w.queued() != 0 {
+            w.flush();
+        }
+        assert_eq!(w.column_ceiling(8, 5), 85);
+        assert_eq!(w.touched_chunks(), 3);
+        w.restore_pristine();
+        let fresh = World::new(64, 96, 64, 1000, Box::new(Layers { h: 70 }));
+        assert_eq!(w.bits(), fresh.bits());
+        assert_eq!(w.touched_chunks(), 0);
+        for z in 0..64 {
+            for x in 0..64 {
+                assert_eq!(w.column_ceiling(x, z), fresh.column_ceiling(x, z));
+            }
+        }
+        for (x, y, z) in [(5, 12, 5), (6, 40, 5), (7, 69, 5), (8, 84, 5)] {
+            assert_eq!(w.material(x, y, z), fresh.material(x, y, z));
+        }
     }
 
     /// Потолок колонки обязан отвечать ровно то, что ответил бы обход

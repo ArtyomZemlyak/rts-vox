@@ -11,13 +11,19 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
     let mut next = layout.clone();
     next.units[0].allied = true;
     cases.push(next.clone());
-    next.blocks.push(modding::range::RangeBlock {
-        min: [36, 16, 420],
-        max: [80, 32, 460],
-        material: 3,
-    });
+    next.blocks[0].material = 5;
     cases.push(next.clone());
-    next.blocks.pop();
+    next.blocks[0].material = layout.blocks[0].material;
+    next.blocks.insert(
+        1,
+        modding::range::RangeBlock {
+            min: [36, 16, 420],
+            max: [80, 32, 460],
+            material: 3,
+        },
+    );
+    cases.push(next.clone());
+    next.blocks.remove(1);
     next.zones.push(modding::range::RangeZone {
         name: "reset".into(),
         min: [64, 400],
