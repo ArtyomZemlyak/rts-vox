@@ -77,3 +77,50 @@ fn changing_generator_regions_updates_bounds_and_preserves_old_snapshot() {
     assert_eq!(old.material([40, 62, 35]), 0);
     assert_eq!(world.material(40, 62, 35), 3);
 }
+
+#[test]
+fn sparse_reset_restores_several_heights_in_one_column() {
+    let mut world = World::new(73, 67, 45, 100, Box::new(Terrain));
+    let pristine = World::new(73, 67, 45, 100, Box::new(Terrain));
+    for edit in [
+        Edit::dig(33, 4, 34),
+        Edit::put(33, 31, 34, 3),
+        Edit::put(33, 63, 34, 3),
+        Edit::dig(33, 63, 34),
+        Edit::put(65, 63, 43, 3),
+    ] {
+        world.queue_edit(edit);
+    }
+    while world.queued() > 0 {
+        world.flush();
+    }
+    assert!(world.reset_dirty.as_ref().is_some_and(|p| p.len() >= 4));
+    world.restore_pristine();
+    assert_eq!(world.bits, pristine.bits);
+    assert_eq!(world.ceiling, pristine.ceiling);
+    assert_eq!(world.touched_chunks(), 0);
+}
+
+#[test]
+fn loaded_or_untracked_chunks_take_the_full_reset_path() {
+    let mut world = World::new(73, 67, 45, 100, Box::new(Terrain));
+    let pristine = World::new(73, 67, 45, 100, Box::new(Terrain));
+    world.queue_dig(33, 4, 34);
+    world.queue_edit(Edit::put(65, 63, 43, 3));
+    world.flush();
+    let mut blob = fx::blob::Blob::new();
+    world.save(&mut blob);
+    let mut loaded = World::new(73, 67, 45, 100, Box::new(Terrain));
+    assert!(loaded.load(&mut fx::blob::Scan::new(&blob.v)));
+    assert!(loaded.reset_dirty.is_none());
+    loaded.restore_pristine();
+    assert_eq!(loaded.bits, pristine.bits);
+    assert_eq!(loaded.ceiling, pristine.ceiling);
+    assert_eq!(loaded.touched_chunks(), 0);
+
+    // Exhaustion of the optional hint takes the same conservative path.
+    world.reset_dirty = None;
+    world.restore_pristine();
+    assert_eq!(world.bits, pristine.bits);
+    assert_eq!(world.ceiling, pristine.ceiling);
+}

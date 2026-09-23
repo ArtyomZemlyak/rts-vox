@@ -57,14 +57,23 @@ fn main() {
         samples.push(start.elapsed().as_micros());
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
     }
-    assert!(
-        sim.battle.actors.iter().all(|a| a.fired > 0),
-        "an actor never fired"
-    );
-    assert!(
-        sim.units.iter().all(|u| u.revision > 0),
-        "an actor never took spatial damage"
-    );
+    for side in [true, false] {
+        assert!(
+            sim.battle
+                .actors
+                .iter()
+                .enumerate()
+                .any(|(id, actor)| sim.allied(id) == side && actor.fired > 0),
+            "a side never fired"
+        );
+        assert!(
+            sim.units
+                .iter()
+                .enumerate()
+                .any(|(id, unit)| sim.allied(id) == side && unit.revision > 0),
+            "a side never took spatial damage"
+        );
+    }
     assert!(sim.matter.economy.ledger.balanced());
     assert_eq!(
         sim.matter

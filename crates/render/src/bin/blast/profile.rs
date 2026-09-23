@@ -52,11 +52,13 @@ pub fn actions(
                 .layout
                 .clone()
                 .expect("action profile requires a range");
-            layout.units.push(modding::range::RangeUnitDef {
+            // The stock kilometre layout already fills all eight unit slots.
+            // Relocate one slot to exercise placement without exceeding the cap.
+            layout.units[0] = modding::range::RangeUnitDef {
                 kind: RangeUnitKind::Tank,
                 at: [1480, 16, 560],
                 allied: true,
-            });
+            };
             edit.commit(layout, config).expect("profile placement");
             edit.editing = true;
         }

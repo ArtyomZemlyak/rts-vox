@@ -161,6 +161,10 @@ pub struct World {
     gen: Arc<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Arc<Paletted>>>,
+    /// Exact applied positions since the last reset. Purely a reset
+    /// acceleration hint: loaded worlds and overflowing logs use the full
+    /// chunk-column rebuild. It is deliberately absent from snapshots.
+    reset_dirty: Option<Vec<[u32; 3]>>,
     cx: u32,
     cy: u32,
     /// Битовый объём занятости, плотный. Слово на 64 воксела по X.
@@ -420,6 +424,7 @@ impl World {
             in_tick: false,
             gen: Arc::from(g),
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
+            reset_dirty: Some(Vec::new()),
             cx,
             cy,
             bits,
@@ -621,7 +626,8 @@ impl World {
     }
 
     /// Restore the authored map without rebuilding untouched occupancy.
-    /// Only columns of materialized chunks need regenerating. Existing
+    /// When the edit log is complete, only changed cells need restoring;
+    /// otherwise the materialized chunk columns take the full path. Existing
     /// immutable snapshots retain their old edited chunks through Arc.
     pub fn restore_pristine(&mut self) {
         self.restore_columns(&[]);
@@ -640,6 +646,15 @@ impl World {
     }
 
     fn restore_columns(&mut self, areas: &[([i32; 2], [i32; 2])]) {
+        if areas.is_empty() {
+            if let Some(mut positions) = self.reset_dirty.take() {
+                self.restore_sparse_positions(&mut positions);
+                positions.clear();
+                self.reset_dirty = Some(positions);
+                self.finish_reset();
+                return;
+            }
+        }
         // None means authored geometry changed through the whole height;
         // otherwise only these previously edited Y chunks need rebuilding.
         let mut columns: std::collections::BTreeMap<(u32, u32), Option<Vec<u32>>> =
@@ -759,6 +774,48 @@ impl World {
                 }
             }
         }
+        self.reset_dirty = Some(Vec::new());
+        self.finish_reset();
+    }
+
+    fn restore_sparse_positions(&mut self, positions: &mut Vec<[u32; 3]>) {
+        positions.sort_unstable_by_key(|&[x, y, z]| (x, z, y));
+        positions.dedup();
+        let mut column = None;
+        for &[x, y, z] in positions.iter() {
+            if column != Some((x, z)) {
+                if let Some((old_x, old_z)) = column {
+                    self.refresh_ceiling(old_x, old_z);
+                }
+                column = Some((x, z));
+            }
+            let ci = self.chunk_index(x, y, z);
+            self.chunks[ci] = None;
+            let solid = self.gen.material(x, y, z) != AIR;
+            let (word, mask) = self.bit_index(x, y, z);
+            if solid {
+                self.bits[word] |= mask;
+            } else {
+                self.bits[word] &= !mask;
+            }
+        }
+        if let Some((x, z)) = column {
+            self.refresh_ceiling(x, z);
+        }
+    }
+
+    fn refresh_ceiling(&mut self, x: u32, z: u32) {
+        let top = (0..self.ny)
+            .rev()
+            .find(|&y| {
+                let (word, mask) = self.bit_index(x, y, z);
+                self.bits[word] & mask != 0
+            })
+            .map_or(0, |y| y + 1);
+        self.ceiling[x as usize + self.nx as usize * z as usize] = top as u16;
+    }
+
+    fn finish_reset(&mut self) {
         self.queue.clear();
         self.applied.clear();
         self.taken.clear();
@@ -979,6 +1036,17 @@ impl World {
             }
             self.ceiling[c] = top as u16;
         }
+        // Keeping the common sparse reset proportional to actual edits
+        // costs one append here. A long battle falls back to the proven
+        // full-chunk path instead of retaining an unbounded history.
+        const RESET_LOG_LIMIT: usize = 65_536;
+        if let Some(positions) = &mut self.reset_dirty {
+            if positions.len() < RESET_LOG_LIMIT {
+                positions.push([e.x, e.y, e.z]);
+            } else {
+                self.reset_dirty = None;
+            }
+        }
         Some(was)
     }
 
@@ -1095,6 +1163,8 @@ impl World {
         self.materialized_in_tick = s.usize();
         self.in_tick = s.bool();
         self.materialized = s.u64();
+        // The wire stores final chunk contents, not the edit history.
+        self.reset_dirty = None;
         let n = s.list(4);
         let mut touched_columns = Vec::with_capacity(n);
         for _ in 0..n {

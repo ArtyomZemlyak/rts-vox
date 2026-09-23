@@ -4,6 +4,7 @@ param(
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
+    [switch]$Gpu,
     [switch]$CheckBudget
 )
 $ErrorActionPreference = 'Stop'
@@ -41,6 +42,7 @@ try {
         $log = Join-Path $directory "$scenario.log"
         $err = Join-Path $directory "$scenario.err"
         $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+        if ($Gpu) { $arguments += '--profile-gpu' }
         # -Wait keeps the exit status available in Windows PowerShell 5.1 too.
         $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait
         if ($process.ExitCode -ne 0) { throw "$scenario failed; see $err" }

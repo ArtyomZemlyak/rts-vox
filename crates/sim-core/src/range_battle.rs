@@ -594,7 +594,7 @@ impl BlastRange {
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
         self.battle_flight(&mut battle);
         completed("battle_flight");
-        self.battle_waves(&mut battle);
+        self.battle_waves(&mut battle, &mut completed);
         completed("battle_waves");
         for (id, (u, old)) in self.units.iter_mut().zip(revisions).enumerate() {
             if u.revision != old {
@@ -950,7 +950,7 @@ impl BlastRange {
             }
         }
     }
-    fn battle_waves(&mut self, b: &mut Battle) {
+    fn battle_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
         let n = b.waves.len().max(1);
         for w in &mut b.waves {
             if w.wave.capturing() {
@@ -961,6 +961,7 @@ impl BlastRange {
                     &self.surface_work,
                     b.shell_config.capture_cells_per_tick / n,
                 );
+                completed("battle_capture");
             }
             if !w.wave.capturing() {
                 let old = self.matter.remaining_mj;
@@ -975,6 +976,7 @@ impl BlastRange {
                     &b.shell_config,
                     Some(&mut self.matter),
                 );
+                completed("battle_wave_step");
                 w.energy = self.matter.remaining_mj;
                 self.matter.remaining_mj = old;
                 for u in &mut self.units {
