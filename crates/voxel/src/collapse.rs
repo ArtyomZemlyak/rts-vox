@@ -136,11 +136,20 @@ pub struct CollapseStats {
     pub probe_skipped: usize,
 }
 
+#[derive(Clone, Copy)]
+struct CachedLink {
+    chunk: u32,
+    lab: u16,
+    source_lab: u16,
+}
+
 /// Компоненты одного чанка, как их видит граф.
 struct ChunkNodes {
     cached_edges: usize,
-    /// Derived adjacency by local component; avoids six face scans per visit.
-    links: Vec<Vec<(u32, u16)>>,
+    /// Derived adjacency grouped by local component. One link allocation
+    /// keeps each component's contacts consecutive during support walks.
+    links: Vec<CachedLink>,
+    link_starts: Vec<u32>,
     /// Local components without direct bedrock or conservative face anchors.
     /// A small mask handles the common one- or two-component terrain chunk.
     missing_mask: u64,
@@ -172,6 +181,7 @@ impl ChunkNodes {
         ChunkNodes {
             cached_edges: 0,
             links: Vec::new(),
+            link_starts: Vec::new(),
             missing_mask: 0,
             n: 0,
             faces: Default::default(),
@@ -191,6 +201,9 @@ impl ChunkNodes {
             Some(lab)
         })
         .chain(overflow.iter().copied())
+    }
+    fn links_for(&self, lab: usize) -> &[CachedLink] {
+        &self.links[self.link_starts[lab] as usize..self.link_starts[lab + 1] as usize]
     }
 }
 
@@ -855,19 +868,30 @@ impl CollapseLayer {
     fn cache_nodes(&mut self, i: usize) {
         let neighbours: [_; FACES] = std::array::from_fn(|f| self.neighbour(i, f));
         let nd = self.nodes[i].as_mut().expect("node cache");
-        nd.links.resize_with(nd.n, Vec::new);
-        for links in &mut nd.links {
-            links.clear();
-        }
+        nd.links.clear();
         for (f, neighbour) in neighbours.into_iter().enumerate() {
             if let Some(j) = neighbour {
                 for &(a, b) in &nd.edges[f] {
                     // A relabel can temporarily precede its face refresh.
-                    if let Some(links) = nd.links.get_mut(a as usize) {
-                        links.push((j as u32, b));
+                    if (a as usize) < nd.n {
+                        nd.links.push(CachedLink {
+                            chunk: j as u32,
+                            lab: b,
+                            source_lab: a,
+                        });
                     }
                 }
             }
+        }
+        // Stable sort retains the former face/edge order within a component.
+        nd.links.sort_by_key(|link| link.source_lab);
+        nd.link_starts.clear();
+        nd.link_starts.resize(nd.n + 1, 0);
+        for link in &nd.links {
+            nd.link_starts[link.source_lab as usize + 1] += 1;
+        }
+        for lab in 0..nd.n {
+            nd.link_starts[lab + 1] += nd.link_starts[lab];
         }
         let edges = if nd.n == 0 {
             0
@@ -965,7 +989,10 @@ impl CollapseLayer {
                     head += 1;
                     let i = chunk as usize;
                     let nd = self.nodes[i].as_ref().expect("known");
-                    for &(j, b) in &nd.links[lab as usize] {
+                    for &CachedLink {
+                        chunk: j, lab: b, ..
+                    } in nd.links_for(lab as usize)
+                    {
                         if self.nodes[j as usize].is_none() {
                             continue;
                         }
@@ -1229,12 +1256,8 @@ impl CollapseLayer {
             n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
             n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
             n += nd.ground.iter().map(|g| g.len() * 2).sum::<usize>();
-            n += nd.links.capacity() * std::mem::size_of::<Vec<(u32, u16)>>();
-            n += nd
-                .links
-                .iter()
-                .map(|l| l.capacity() * std::mem::size_of::<(u32, u16)>())
-                .sum::<usize>();
+            n += nd.links.capacity() * std::mem::size_of::<CachedLink>();
+            n += nd.link_starts.capacity() * std::mem::size_of::<u32>();
         }
         n += self
             .anchor_overflow
@@ -1649,6 +1672,32 @@ mod tests {
             restored.save(&mut after);
             assert_eq!(blob.v, after.v, "derived groups are not serialized");
         }
+    }
+
+    #[test]
+    fn flattened_links_keep_face_and_edge_order_with_interleaved_labels() {
+        let w = World::new(96, 96, 96, 1000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let i = c.index(1, 1, 1);
+        let left = c.neighbour(i, 0).unwrap() as u32;
+        let right = c.neighbour(i, 1).unwrap() as u32;
+        let mut nd = Box::new(ChunkNodes::new());
+        nd.n = 2;
+        nd.bedrock = vec![false; 2];
+        nd.edges[0] = vec![(1, 9), (0, 8), (1, 7)];
+        nd.edges[1] = vec![(0, 4), (1, 5)];
+        c.nodes[i] = Some(nd);
+        c.cache_nodes(i);
+        let nd = c.nodes[i].as_ref().unwrap();
+        assert_eq!(nd.link_starts, [0, 2, 5]);
+        let links = |lab| {
+            nd.links_for(lab)
+                .iter()
+                .map(|link| (link.chunk, link.lab))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(links(0), [(left, 8), (right, 4)]);
+        assert_eq!(links(1), [(left, 9), (left, 7), (right, 5)]);
     }
 
     #[test]
