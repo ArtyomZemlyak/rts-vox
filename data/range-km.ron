@@ -20,6 +20,7 @@
         (name: "Учебный бой", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3900,15,2400)),
         (name: "Лес и крутой склон", min: (6880,2000), max: (7720,2800), spawn: (6960,16,2110), target: (7500,24,2110),
             scenario: Some((title: "Лес и склон", description: "Бронебойный выстрел и патруль на крутом подъёме.", weapon: Kinetic, power_milli: 1000, patrols: true, shots: [(7500,24,2110)]))),
+        (name: "Перекрёсток", min: (6430,1320), max: (7130,1840), spawn: (6540,16,1400), target: (6870,32,1640)),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
@@ -221,6 +222,48 @@
         (min: (6730,16,840), max: (6744,38,960), material: 2),
         (min: (6740,42,850), max: (6840,48,866), material: 3),
         (min: (6830,16,850), max: (6840,46,866), material: 3),
+        // Field emitters sit outside the live dome and its west firing lane.
+        // Their different heights and one broken mast make the array readable
+        // from the RTS camera while each part remains destructible matter.
+        (min: (6400,0,745), max: (6440,26,785), material: 2),
+        (min: (6413,24,758), max: (6427,86,772), material: 3),
+        (min: (6407,78,752), max: (6433,86,778), material: 3),
+        (min: (6700,0,760), max: (6740,26,800), material: 2),
+        (min: (6713,24,773), max: (6727,72,787), material: 3),
+        (min: (6708,65,768), max: (6732,72,792), material: 3),
+        (min: (6405,0,1005), max: (6445,26,1045), material: 2),
+        (min: (6418,24,1018), max: (6432,41,1032), material: 3), // shattered mast
+        (min: (6700,0,1000), max: (6740,26,1040), material: 2),
+        (min: (6713,24,1013), max: (6727,80,1027), material: 3),
+        (min: (6708,73,1008), max: (6732,80,1032), material: 3),
+        // The laboratory roof reads as equipment rather than a bare slab.
+        (min: (6410,80,1130), max: (6520,84,1138), material: 3),
+        (min: (6410,80,1222), max: (6520,84,1230), material: 3),
+        (min: (6460,80,1170), max: (6490,94,1194), material: 3),
+        (min: (6496,80,1200), max: (6510,108,1214), material: 2),
+        // The shield road forks here toward the forest and the far range.
+        // A ruined control post and a small relay tower make the long
+        // transfer leg a place, not an empty corridor between test pads.
+        (min: (6500,0,1550), max: (6570,62,1625), material: 2),
+        (min: (6505,16,1555), max: (6565,58,1620), material: 0),
+        (min: (6565,16,1580), max: (6570,43,1600), material: 0),
+        (min: (6500,43,1560), max: (6505,55,1575), material: 0),
+        (min: (6538,58,1550), max: (6570,62,1625), material: 0),
+        (min: (6500,58,1550), max: (6538,65,1625), material: 3), // surviving half-roof
+        (min: (6575,0,1760), max: (6605,31,1790), material: 2),
+        (min: (6585,28,1770), max: (6595,100,1780), material: 3),
+        (min: (6565,92,1768), max: (6615,101,1782), material: 3),
+        (min: (7100,0,1530), max: (7114,45,1605), material: 2),
+        (min: (7100,0,1650), max: (7114,45,1730), material: 2),
+        (min: (7100,40,1530), max: (7114,48,1730), material: 3),
+        (min: (6920,16,1780), max: (6975,28,1810), material: 5), // abandoned stores
+        (min: (6945,28,1785), max: (6970,39,1805), material: 3),
+        // Flush steel drainage grates mark the three-way junction from above.
+        (min: (6638,16,1445), max: (6642,17,1493), material: 3),
+        (min: (6688,16,1455), max: (6692,17,1503), material: 3),
+        (min: (6770,16,1578), max: (6818,17,1582), material: 3),
+        (min: (6790,16,1638), max: (6838,17,1642), material: 3),
+        (min: (6890,16,1598), max: (6938,17,1602), material: 3),
         // Battle field: low traverses, a breached redoubt and a landmark mast.
         (min: (3470,16,2240), max: (3590,34,2258), material: 1),
         (min: (3470,16,2540), max: (3590,34,2558), material: 1),

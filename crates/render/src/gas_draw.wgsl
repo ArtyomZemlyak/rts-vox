@@ -39,10 +39,10 @@ fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
     }
     if m==4u {c=mix(vec3(0.032,0.063,0.018),vec3(0.13,0.19,0.035),grain*0.65+variation*0.22);}
     if m==5u {c=vec3(0.11,0.065,0.025);}
-    if m==6u {c=mix(vec3(0.15,0.16,0.145),vec3(0.30,0.27,0.21),variation*0.6);}
-    if m==7u {c=mix(vec3(0.055,0.081,0.024),vec3(0.19,0.165,0.058),smoothstep(0.40,1.05,variation));}
+    if m==6u {c=mix(vec3(0.12,0.135,0.125),vec3(0.26,0.23,0.18),variation*0.6);}
+    if m==7u {c=mix(vec3(0.045,0.093,0.027),vec3(0.20,0.22,0.070),smoothstep(0.40,1.05,variation));}
     if m==8u {
-        c=mix(vec3(0.14,0.113,0.075),vec3(0.26,0.225,0.155),variation*0.5);
+        c=mix(vec3(0.19,0.125,0.065),vec3(0.32,0.235,0.115),variation*0.5);
         let rut=min(abs(pos.z-324.5),abs(pos.z-347.5));
         if rut<3.0 && pos.x<158.0 {c*=0.51+0.18*step(0.5,fract(pos.x*0.58));}
     }

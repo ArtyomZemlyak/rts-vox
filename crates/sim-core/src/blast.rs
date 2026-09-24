@@ -7406,7 +7406,23 @@ mod tests {
                 assert_eq!(gen.material(x, y, z), 0, "road blocked at {x},{y},{z}");
             }
         }
+        assert!(gen.road_at(6750, 1490, 0));
+        assert_eq!(gen.material(6750, FLOOR as u32 - 1, 1490), 6);
+        assert_eq!(gen.material(6750, 40, 1490), 0);
         assert!(!gen.road_at(900, 600, 0));
+    }
+    #[test]
+    fn shield_emitters_leave_the_western_firing_lane_open() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        for x in (6180..6475).step_by(8) {
+            assert!(
+                !layout
+                    .blocks
+                    .iter()
+                    .any(|b| b.material != 0 && b.contains([x, 24, 880])),
+                "shield firing lane blocked at {x}"
+            );
+        }
     }
     #[test]
     fn road_centrelines_do_not_run_through_authored_walls() {

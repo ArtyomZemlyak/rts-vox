@@ -30,7 +30,13 @@ pub enum Selection {
 #[derive(Resource, Default)]
 pub struct ShieldFlashes {
     seen: u32,
-    live: Vec<(Vec3, u8)>,
+    live: Vec<ShieldFlash>,
+}
+struct ShieldFlash {
+    at: Vec3,
+    centre: Vec3,
+    tick: u32,
+    collapsed: bool,
 }
 #[derive(Component)]
 pub struct EditorCamera;
@@ -945,6 +951,33 @@ fn bounds(giz: &mut Gizmos, min: Vec3, max: Vec3, color: Color) {
         color,
     );
 }
+fn shield_field(giz: &mut Gizmos, centre: Vec3, radius: f32, charge: f32, tick: u32, eye: Vec3) {
+    let facing = (eye - centre).normalize_or_zero();
+    let phase = tick as f32 * 0.055;
+    for (band, (u, v)) in [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut previous = None;
+        for i in 0..=72 {
+            let angle = i as f32 * std::f32::consts::TAU / 72.0;
+            let ripple = 1.0
+                + 0.012
+                    * (angle * 7.0 + phase + band as f32).sin()
+                    * (angle * 11.0 - phase * 0.7).sin();
+            let point = centre + (u * angle.cos() + v * angle.sin()) * radius * ripple;
+            if let Some(prev) = previous {
+                if (i + band * 13) % 19 != 0 {
+                    let front = ((point - centre).dot(facing) * 0.5 / radius + 0.5).clamp(0.0, 1.0);
+                    let flow = 0.75 + 0.25 * (angle * 5.0 + phase + band as f32).sin();
+                    let alpha = (0.08 + front * (0.18 + charge * 0.35)) * flow;
+                    giz.line(prev, point, Color::srgba(0.32, 0.73, 1.0, alpha));
+                }
+            }
+            previous = Some(point);
+        }
+    }
+}
 pub fn overlay(
     mut giz: Gizmos,
     scene: Res<Scene>,
@@ -952,6 +985,7 @@ pub fn overlay(
     art: Res<WitnessArt>,
     panel: Res<panel::Panel>,
     mut flashes: ResMut<ShieldFlashes>,
+    camera: Query<&Transform, With<EditorCamera>>,
 ) {
     let flat = Quat::from_rotation_arc(Vec3::Z, Vec3::Y);
     if scene.sim.battle_mode() {
@@ -1013,8 +1047,12 @@ pub fn overlay(
             );
         }
     }
-    // Domes: a wire sphere fading with the charge, red and low while down.
+    // The charge keeps the idle field subdued; contacts travel along the
+    // actual dome surface instead of appearing as a free-floating flash.
     let capacity = scene.sim.shield_tuning().capacity.max(1) as f32;
+    let eye = camera
+        .single()
+        .map_or(Vec3::ZERO, |camera| camera.translation);
     for s in &scene.sim.shields {
         let c = Vec3::from(s.at.map(|v| v as f32));
         let (colour, radius) = if s.down > 0 {
@@ -1026,27 +1064,67 @@ pub fn overlay(
                 s.radius as f32,
             )
         };
-        giz.sphere(Isometry3d::from_translation(c), radius, colour)
-            .resolution(48);
+        if s.down > 0 {
+            giz.sphere(Isometry3d::from_translation(c), radius, colour)
+                .resolution(24);
+        } else {
+            shield_field(
+                &mut giz,
+                c,
+                radius,
+                s.charge as f32 / capacity,
+                scene.sim.tick,
+                eye,
+            );
+        }
         giz.circle(Isometry3d::new(c + Vec3::Y * 0.5, flat), radius, colour);
     }
     if flashes.seen != scene.sim.tick {
+        if scene.sim.tick < flashes.seen {
+            flashes.live.clear();
+        }
         flashes.seen = scene.sim.tick;
         for h in &scene.sim.shield_hits {
-            let ttl = if h.collapsed { 40 } else { 18 };
-            flashes.live.push((Vec3::from(h.at.map(|v| v as f32)), ttl));
+            if let Some(shield) = scene.sim.shields.get(h.shield) {
+                flashes.live.push(ShieldFlash {
+                    at: Vec3::from(h.at.map(|v| v as f32)),
+                    centre: Vec3::from(shield.at.map(|v| v as f32)),
+                    tick: scene.sim.tick,
+                    collapsed: h.collapsed,
+                });
+            }
         }
     }
-    for (p, ttl) in &mut flashes.live {
-        let t = (f32::from(*ttl) / 18.0).min(1.0);
+    for flash in &flashes.live {
+        let age = scene.sim.tick.saturating_sub(flash.tick);
+        let life = if flash.collapsed { 18 } else { 12 };
+        if age >= life {
+            continue;
+        }
+        let t = 1.0 - age as f32 / life as f32;
+        let normal = (flash.at - flash.centre).normalize_or(Vec3::Y);
+        let orientation = Quat::from_rotation_arc(Vec3::Z, normal);
+        let glow = if flash.collapsed {
+            Color::srgba(1.0, 0.47, 0.23, 0.85 * t)
+        } else {
+            Color::srgba(0.53, 0.88, 1.0, 0.88 * t)
+        };
         giz.sphere(
-            Isometry3d::from_translation(*p),
-            2.0 + (1.0 - t) * 6.0,
-            Color::srgba(1.0, 0.95, 0.6, t),
+            Isometry3d::from_translation(flash.at),
+            2.0 + 2.5 * (1.0 - t),
+            Color::srgba(1.0, 0.96, 0.8, t),
         );
-        *ttl -= 1;
+        let wave = 4.0 + (1.0 - t) * 34.0;
+        giz.circle(Isometry3d::new(flash.at, orientation), wave, glow);
+        giz.circle(
+            Isometry3d::new(flash.at, orientation),
+            wave * 0.68,
+            Color::srgba(0.55, 0.88, 1.0, 0.35 * t),
+        );
     }
-    flashes.live.retain(|(_, ttl)| *ttl > 0);
+    flashes.live.retain(|flash| {
+        scene.sim.tick.saturating_sub(flash.tick) < if flash.collapsed { 18 } else { 12 }
+    });
     if !edit.editing && !scene.sim.battle_mode() {
         let p = Vec3::from(scene.sim.gun.motion.pos.map(|v| v.to_f64_lossy() as f32));
         giz.circle(
