@@ -212,6 +212,35 @@ pub struct Move {
     pub dz: Fx,
 }
 
+/// Largest current-step speed whose full braking sequence fits `distance`.
+/// Includes this tick's movement, then v-b, v-2b, ... until rest. Inverting
+/// that sum avoids both a square root and a proportional crawl near a goal.
+pub(crate) fn stopping_speed(distance: Fx, brake: Fx, tps: i32, limit: Fx) -> Fx {
+    if distance <= Fx::ZERO || brake <= Fx::ZERO || tps <= 0 || limit <= Fx::ZERO {
+        return Fx::ZERO;
+    }
+    let budget = distance.raw() as u128 * tps as u128;
+    let b = brake.raw() as u128;
+    let cap = limit.raw() as u128;
+    let steps = cap.div_ceil(b);
+    let tail = |n: u128| b * (n * (n - 1) / 2);
+    if steps * cap - tail(steps) <= budget {
+        return limit;
+    }
+    // Find the braking interval containing the answer. Positive i64 inputs
+    // keep every product below 2^127, including a one-raw-unit brake.
+    let (mut lo, mut hi) = (1, steps);
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if b * (mid * (mid + 1) / 2) < budget {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Fx(((budget + tail(lo)) / lo).min(cap) as i64)
+}
+
 /// Один тик хода.
 ///
 /// `want` — куда машина хочет ехать (двоичный угол) или [`NO_WAY`].
@@ -322,6 +351,74 @@ mod tests {
 
     fn inv_tick() -> Fx {
         Fx::from_ratio(1, TICKS_PER_SECOND)
+    }
+
+    #[test]
+    fn stopping_speed_matches_exhaustive_discrete_braking() {
+        // Independent oracle: sum every positive velocity, not the inverse
+        // formula. Raw units also exercise rounding at each interval edge.
+        for b in [1, 3, 11, 40] {
+            for cap in [1, 7, 39, 121] {
+                for tps in [1, 7, 30] {
+                    for distance in 0..150 {
+                        let mut expected = 0;
+                        for speed in 1..=cap {
+                            let (mut v, mut sum) = (speed, 0);
+                            while v > 0 {
+                                sum += v;
+                                v -= b;
+                            }
+                            if sum <= distance * tps {
+                                expected = speed;
+                            }
+                        }
+                        assert_eq!(
+                            stopping_speed(Fx(distance), Fx(b), tps as i32, Fx(cap)),
+                            Fx(expected),
+                            "distance={distance}, brake={b}, tps={tps}, cap={cap}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(stopping_speed(Fx::ONE, Fx::ZERO, 30, Fx::MAX), Fx::ZERO);
+        assert_eq!(stopping_speed(Fx::ONE, Fx::ONE, 0, Fx::MAX), Fx::ZERO);
+        assert_eq!(stopping_speed(Fx::MIN, Fx::ONE, 30, Fx::MAX), Fx::ZERO);
+        assert_eq!(stopping_speed(Fx::MAX, Fx::MAX, i32::MAX, Fx::MAX), Fx::MAX);
+        let v = stopping_speed(Fx::MAX, Fx(1), 30, Fx::MAX).raw() as u128;
+        let budget = i64::MAX as u128 * 30;
+        assert!(v * (v + 1) / 2 <= budget);
+        assert!((v + 1) * (v + 2) / 2 > budget);
+    }
+
+    #[test]
+    fn discrete_braking_arrives_without_overshoot_or_erasing_momentum() {
+        let l = limits();
+        for factor in [Fx::from_ratio(1, 3), Fx::ONE, Fx::from_int(2)] {
+            for distance in [1, 5, 20, 80] {
+                let mut remaining = Fx::from_int(distance);
+                let mut d = Drive::default();
+                for _ in 0..300 {
+                    let target = stopping_speed(
+                        remaining,
+                        l.brake.mul(factor),
+                        TICKS_PER_SECOND,
+                        Fx::from_int(40),
+                    );
+                    let (next, step) = advance(d, 0, target, &l, factor, inv_tick());
+                    assert!(next.vel >= d.vel.sub(l.brake.mul(factor)));
+                    assert!(next.vel <= d.vel.add(l.accel.mul(factor)));
+                    remaining = remaining.sub(step.dx);
+                    assert!(remaining >= Fx::ZERO, "overshot by {remaining:?}");
+                    d = next;
+                }
+                assert!(
+                    remaining < Fx::from_ratio(1, 1000),
+                    "stopped short: {remaining:?}"
+                );
+                assert!(d.vel < Fx::from_ratio(1, 1000));
+            }
+        }
     }
 
     /// Разгон номинальной машины за тик, мировых единиц в секунду:

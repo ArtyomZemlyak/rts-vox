@@ -138,8 +138,9 @@ pub struct Motion {
     pub last_plan: [u32; 2],
     /// Columns scanned and surface samples taken by it (P-29).
     pub last_probe: [u64; 2],
-    /// A route search still walking its frontier (ADR-306). While one is
-    /// in flight the hull stands and the orders wait for it.
+    /// A route search still walking its frontier (ADR-306). An existing
+    /// route remains usable while its replacement is pending; every step
+    /// still checks the current terrain and hulls.
     hunt: Option<Box<nav::vehicle::Hunt>>,
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
@@ -738,6 +739,23 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
     ) -> bool {
+        // An explicit order supersedes the old route, even to the same point.
+        self.path.clear();
+        self.partial_path = false;
+        self.cursor = 0;
+        self.plan_to(w, to, b, others, rubble)
+    }
+    /// Replanning retains the current route while a replacement is pending.
+    /// A temporary blocker can leave before the search finishes; execution
+    /// may then resume under the same live collision checks as any move.
+    fn plan_to(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+    ) -> bool {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
         let half = shape.half.map(Fx::from_int);
@@ -763,9 +781,6 @@ impl Motion {
             .then_some(to);
         self.enabled = true;
         self.hunt = None;
-        self.path.clear();
-        self.partial_path = false;
-        self.cursor = 0;
         let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
             .with_rubble(rubble);
         match nav::vehicle::Hunt::start_bounded(
@@ -977,7 +992,7 @@ impl Motion {
         {
             if let Some(goal) = self.destination {
                 self.started = true;
-                self.move_to(w, goal, b, others, rubble);
+                self.plan_to(w, goal, b, others, rubble);
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
         }
@@ -1001,11 +1016,8 @@ impl Motion {
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
         let base_limits = Limits::of(&self.chassis, 30);
-        let brake = response
-            .limits(&base_limits, false)
-            .brake
-            .mul(self.drive_scale)
-            .mul(self.hull.load);
+        let drive_factor = self.drive_scale.mul(self.hull.load);
+        let brake = response.limits(&base_limits, false).brake.mul(drive_factor);
         if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
             let goal = self.path[self.cursor];
             let dx = Fx::from_int(goal[0]).sub(self.pos[0]);
@@ -1023,6 +1035,11 @@ impl Motion {
                 self.cursor += 1;
                 self.escape = 0;
                 let reached_end = self.cursor == self.path.len();
+                if reached_end {
+                    // A pending replacement must not revive a completed
+                    // order or overwrite the next prefix/patrol request.
+                    self.hunt = None;
+                }
                 if reached_end && self.partial_path {
                     // Keep the player's goal and patrol waypoint. The next tick
                     // requests a continuation under the normal start allowance.
@@ -1042,16 +1059,12 @@ impl Motion {
                 want = angle::atan2(dz.raw(), dx.raw());
                 speed = Fx::from_int(self.speed)
                     .mul(response.engine)
-                    .mul(response.traction)
-                    .min(dx.abs().max(dz.abs()).mul(Fx::from_int(2)));
+                    .mul(response.traction);
                 let alignment = angle::cos(angle::diff(want, self.drive.head)).max(Fx::ZERO);
-                // Reserve the actual stopping distance before a checked turn
-                // centre. Merely asking for 2*distance can brake too late.
+                // Keep the existing conservative axis-distance bound on
+                // diagonals. Braking includes this tick and the full tail.
                 let distance = dx.abs().max(dz.abs());
-                let stopping = brake.mul(Fx::from_int(60)).mul(distance);
-                if self.drive.vel.mul(self.drive.vel) > stopping {
-                    speed = Fx::ZERO;
-                }
+                speed = drive::stopping_speed(distance, brake, crate::TICKS_PER_SECOND, speed);
                 if alignment > Fx::from_ratio(self.alignment, 100)
                     && (self.drive.vel > Fx::ZERO
                         || angle::diff(want, self.drive.head).abs() <= base_limits.turn)
@@ -1081,6 +1094,7 @@ impl Motion {
             && engine
             && self.blocked_ticks >= self.navigation.recovery_ticks
             && self.escape_left == 0
+            && self.hunt.is_none()
             && self.escape < ESCAPES
         {
             if self.escape == 0 {
@@ -1125,14 +1139,8 @@ impl Motion {
         if current.crush > 0 {
             speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
         }
-        let (next, delta) = drive::advance(
-            old,
-            want,
-            speed,
-            &lim,
-            self.drive_scale.mul(self.hull.load),
-            Fx::from_ratio(1, 30),
-        );
+        let (next, delta) =
+            drive::advance(old, want, speed, &lim, drive_factor, Fx::from_ratio(1, 30));
         let previous = Obstacle::of(self, b);
         self.drive = next;
         // A burst's shove rides along with the drive's own step (ADR-286)
@@ -2245,6 +2253,138 @@ mod tests {
             }
         }
         assert!(arrived, "mover never passed the blocker: {:?}", mover.pos);
+    }
+    #[test]
+    fn a_cleared_crossing_resumes_the_route_while_its_replacement_is_pending() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let goal = [430, 300];
+        let mut mover = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        let blocker = Motion::new([280, 16, 300], RangeUnitKind::Tank, &body);
+        let other = Obstacle::of(&blocker, &body);
+        mover.enabled = true;
+        mover.destination = Some(goal);
+        mover.path = vec![goal];
+        mover.next_plan = 1000;
+        mover.navigation.search_nodes_per_tick = 1;
+        let mut tick = 0;
+        while !mover.searching() && tick < 100 {
+            step(&mut mover, &w, &body, &[other], tick);
+            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            tick += 1;
+        }
+        assert!(
+            mover.searching(),
+            "contact did not start a replacement search"
+        );
+        assert_eq!(
+            mover.path,
+            vec![goal],
+            "pending search discarded the usable route"
+        );
+        // A refused full-speed step may still leave room for a slower one.
+        // Let that settle so this fixture isolates waiting at the crossing.
+        for _ in 0..100 {
+            let before = mover.pos;
+            step(&mut mover, &w, &body, &[other], tick);
+            tick += 1;
+            assert_eq!(Obstacle::of(&mover, &body).penetration(&other), Fx::ZERO);
+            if mover.searching() && mover.pos[0] == before[0] && mover.pos[2] == before[2] {
+                break;
+            }
+        }
+        assert!(mover.searching());
+        mover.blocked_ticks = mover.navigation.recovery_ticks;
+        let stopped = mover.pos;
+        let mut saved = Blob::new();
+        mover.save(&mut saved);
+        let mut restored = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        restored.navigation = mover.navigation;
+        assert!(restored.load(&mut Scan::new(&saved.v)));
+        let release = tick + 1;
+        for current in tick..release {
+            for m in [&mut mover, &mut restored] {
+                step(m, &w, &body, &[other], current);
+                assert_eq!(Obstacle::of(m, &body).penetration(&other), Fx::ZERO);
+                assert!(m.searching());
+                assert_eq!(m.escape_left, 0, "recovery interrupted the pending search");
+            }
+            let mut a = Blob::new();
+            let mut b = Blob::new();
+            mover.save(&mut a);
+            restored.save(&mut b);
+            assert_eq!(a.v, b.v, "blocked replacement diverged after load");
+        }
+        // The crossing hull leaves. Resume immediately, without waiting for
+        // the distant replacement route or running an escape manoeuvre.
+        for current in release..release + 2 {
+            for m in [&mut mover, &mut restored] {
+                step(m, &w, &body, &[], current);
+                assert!(
+                    m.pos[0] > stopped[0],
+                    "free crossing still waits for planning"
+                );
+                assert_eq!(m.escape_left, 0);
+                assert_eq!(m.destination, Some(goal));
+            }
+            let mut a = Blob::new();
+            let mut b = Blob::new();
+            mover.save(&mut a);
+            restored.save(&mut b);
+            assert_eq!(a.v, b.v, "pending route diverged after load");
+        }
+        assert!(
+            !mover.searching(),
+            "moving hull kept a search from its old pose"
+        );
+        for current in release + 2..1000 {
+            step(&mut mover, &w, &body, &[], current);
+            if mover.destination.is_none() {
+                break;
+            }
+        }
+        assert!(
+            mover.destination.is_none(),
+            "retained route never reached the goal"
+        );
+    }
+    #[test]
+    fn arrival_and_explicit_orders_cancel_a_pending_route_replacement() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let goal = [202, 300];
+        let mut mover = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+        mover.enabled = true;
+        mover.destination = Some(goal);
+        mover.path = vec![goal];
+        mover.navigation.search_nodes_per_tick = 1;
+        assert!(mover.plan_to(&w, goal, &body, &[], &rubble));
+        assert!(mover.searching());
+        let mut retargeted = mover.clone();
+        step(&mut mover, &w, &body, &[], 0);
+        assert!(mover.destination.is_none());
+        assert!(!mover.searching(), "arrival kept the superseded search");
+        for tick in 1..10 {
+            step(&mut mover, &w, &body, &[], tick);
+            assert!(mover.destination.is_none());
+            assert_eq!(mover.cursor, mover.path.len());
+        }
+        // Even another explicit order to the same point discards the fallback.
+        for next in [goal, [200, 430]] {
+            let mut ordered = retargeted.clone();
+            assert!(ordered.move_to(&w, next, &body, &[], &rubble));
+            assert!(
+                ordered.path.is_empty(),
+                "explicit order kept the previous route"
+            );
+            assert_eq!(ordered.destination, Some(next));
+            assert!(ordered.searching());
+        }
+        retargeted.stop();
+        assert!(retargeted.path.is_empty());
+        assert!(!retargeted.searching());
+        assert!(retargeted.destination.is_none());
     }
     #[test]
     fn a_new_move_order_interrupts_the_old_escape_manoeuvre() {

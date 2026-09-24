@@ -11,8 +11,8 @@
     // manoeuvres (ADR-275): astern, ahead, then each turning both ways by
     // recovery_turn_deg, escape_ticks each at escape_speed_pct of full speed.
     recovery_ticks: 36,
-    // A newly arrived hull invalidates the old route immediately, while
-    // ordinary terrain refusals keep the normal bounded recovery cadence.
+    // A newly arrived hull requests a replacement promptly. The old route
+    // remains collision-checked and usable until that search answers.
     contact_replan_ticks: 2,
     escape_ticks: 42,
     escape_speed_pct: 30,
