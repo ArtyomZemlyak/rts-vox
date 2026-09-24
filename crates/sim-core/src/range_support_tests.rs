@@ -228,6 +228,68 @@ fn a_convoy_contact_uses_its_closing_speed() {
 }
 
 #[test]
+#[ignore = "P-54: simultaneous head-on driving contact still depends on unit slot order"]
+fn head_on_driving_contact_is_slot_independent() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = [300, 361]
+        .map(|x| modding::range::RangeUnitDef {
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [x, FLOOR, 336],
+        })
+        .to_vec();
+    let mut outcomes = Vec::new();
+    for reverse in [false, true] {
+        if reverse {
+            layout.units.reverse();
+        }
+        let (left, right) = if reverse { (1, 0) } else { (0, 1) };
+        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        a.patrols_running = true;
+        for _ in 0..20 {
+            a.step();
+        }
+        let mover = &mut a.units[left].motion;
+        mover.enabled = true;
+        mover.destination = Some([500, 336]);
+        mover.path = vec![[500, 336]];
+        mover.drive.vel = Fx::from_int(40);
+        let mover = &mut a.units[right].motion;
+        mover.enabled = true;
+        mover.destination = Some([100, 336]);
+        mover.path = vec![[100, 336]];
+        mover.drive.head = fx::angle::FULL / 2;
+        mover.drive.vel = Fx::from_int(40);
+        a.step();
+        let p = motion::Obstacle::of(&a.units[left].motion, &a.units[left].body);
+        let q = motion::Obstacle::of(&a.units[right].motion, &a.units[right].body);
+        assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        assert!(a.units[left].motion.shove.x < Fx::ZERO);
+        assert!(a.units[right].motion.shove.x > Fx::ZERO);
+        let mut replay = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        for _ in 0..60 {
+            a.step();
+            replay.step();
+            assert_eq!(a.state_hash(), replay.state_hash());
+            let p = motion::Obstacle::of(&a.units[left].motion, &a.units[left].body);
+            let q = motion::Obstacle::of(&a.units[right].motion, &a.units[right].body);
+            assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        }
+        outcomes.push((a.units[left].motion.pos[0], a.units[right].motion.pos[0]));
+    }
+    assert!(
+        outcomes[0].0.sub(outcomes[1].0).abs() < Fx::ONE
+            && outcomes[0].1.sub(outcomes[1].1).abs() < Fx::ONE,
+        "head-on contact depends on slot order: {outcomes:?}"
+    );
+}
+
+#[test]
 fn solo_shooter_and_target_exchange_contact_shove() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     for gun_is_source in [false, true] {
