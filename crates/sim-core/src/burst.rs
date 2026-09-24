@@ -58,6 +58,222 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn walked_shape_geometry(shape: u64, side: u8) -> (V3, ([Fx; 3], [Fx; 3])) {
+        let mut sum = [0; 3];
+        let mut lo = [i32::from(side) - 1; 3];
+        let mut hi = [0; 3];
+        for z in 0..side {
+            for y in 0..side {
+                for x in 0..side {
+                    let i = u32::from(x)
+                        + u32::from(side) * u32::from(y)
+                        + u32::from(side).pow(2) * u32::from(z);
+                    if shape & (1 << i) != 0 {
+                        for (a, value) in [x, y, z].map(i32::from).into_iter().enumerate() {
+                            sum[a] += value;
+                            lo[a] = lo[a].min(value);
+                            hi[a] = hi[a].max(value);
+                        }
+                    }
+                }
+            }
+        }
+        let centre = sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32));
+        (
+            v3(centre),
+            (
+                [0, 1, 2].map(|a| {
+                    Fx::from_int(lo[a])
+                        .sub(centre[a])
+                        .sub(Fx::from_ratio(49, 100))
+                }),
+                [0, 1, 2].map(|a| {
+                    Fx::from_int(hi[a])
+                        .sub(centre[a])
+                        .add(Fx::from_ratio(49, 100))
+                }),
+            ),
+        )
+    }
+    #[test]
+    fn bit_plane_geometry_matches_cell_walk_for_dense_sparse_and_empty_shapes() {
+        for side in 1..=4 {
+            let cells = u32::from(side).pow(3);
+            let full = u64::MAX >> (64 - cells);
+            let mut shapes = vec![0, full];
+            for i in 0..cells {
+                shapes.extend([1 << i, full ^ (1 << i)]);
+            }
+            if side <= 2 {
+                shapes.extend(0..=full);
+            } else {
+                let mut bits = 0x9d37_a518_6fc2_0be1u64;
+                for _ in 0..4096 {
+                    bits ^= bits << 13;
+                    bits ^= bits >> 7;
+                    bits ^= bits << 17;
+                    shapes.push(bits & full);
+                }
+            }
+            for shape in shapes {
+                let (centre, bounds) = walked_shape_geometry(shape, side);
+                assert_eq!(
+                    shape_centre(shape, side),
+                    centre,
+                    "side={side} shape={shape:x}"
+                );
+                assert_eq!(
+                    shape_bounds(shape, side),
+                    bounds,
+                    "side={side} shape={shape:x}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn settled_query_words_match_cells_across_negative_and_word_boundaries() {
+        for bottom in [-129, -65, -64, -1, 0, 1, 63, 64, 127] {
+            for height in [1, 2, 63, 64, 65, 131] {
+                let mut words = SettledQueries::default();
+                let mut cells = BTreeSet::new();
+                let boxes = [
+                    ([-2, bottom, 1], [0, bottom + height - 1, 2]),
+                    ([-1, bottom - 2, 0], [1, bottom + 2, 1]),
+                ];
+                // Repeated and overlapping requests must retain every bit.
+                for &(lo, hi) in boxes.iter().chain(boxes.iter().rev()) {
+                    words.include(lo, hi);
+                    for z in lo[2]..=hi[2] {
+                        for y in lo[1]..=hi[1] {
+                            for x in lo[0]..=hi[0] {
+                                cells.insert([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                for z in -1..=3 {
+                    for y in bottom - 3..=bottom + height.max(4) {
+                        for x in -3..=2 {
+                            let p = [x, y, z];
+                            assert_eq!(words.contains(p), cells.contains(&p), "{p:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(!SettledQueries::default().contains([0; 3]));
+    }
+    #[test]
+    fn settled_index_matches_unpacked_requests_and_preserves_piece_indices() {
+        let t = tuning().blast;
+        let hull = Hull {
+            pos: [Fx::from_int(8), Fx::ZERO, Fx::from_int(4)],
+            head: 2731,
+            half: [Fx::from_int(2); 2],
+            height: Fx::from_int(6),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ONE,
+        };
+        let mut fragments: Vec<_> = (0..48u32)
+            .map(|i| Fragment {
+                id: u64::from(i) + 1,
+                position: V3::new(
+                    Fx::from_ratio((i % 8) as i32 * 5 - 9, 2),
+                    Fx::from_ratio((i / 8) as i32 * 5 - 1, 2),
+                    Fx::from_int((i % 3) as i32 * 4),
+                ),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1,
+                count: 3,
+                shape: 7,
+                side: 2,
+                chunk: None,
+                held: i,
+                resting: i % 3 != 0,
+            })
+            .collect();
+        // Far sleepers and interleaved flying pieces leave gaps in the
+        // indices held by the grid. Its box table must not compact them.
+        fragments[1].position.x = Fx::from_int(1000);
+        for tick in [0, 1, u64::from(t.rest_check_ticks)] {
+            let world_boxes: Vec<_> = fragments
+                .iter()
+                .map(|f| {
+                    let (lo, hi) = f.bounds();
+                    let p = arr(f.position);
+                    (
+                        [0, 1, 2].map(|a| p[a].add(lo[a])),
+                        [0, 1, 2].map(|a| p[a].add(hi[a])),
+                    )
+                })
+                .collect();
+            let mut want = BTreeSet::new();
+            for (i, f) in fragments.iter().enumerate() {
+                if f.resting && !due(f.id, tick, &t) {
+                    continue;
+                }
+                let (lo, hi) = settled_cells(world_boxes[i].0, world_boxes[i].1);
+                for z in lo[2] - 1..=hi[2] + 1 {
+                    for y in lo[1] - 1..=hi[1] + 1 {
+                        for x in lo[0] - 1..=hi[0] + 1 {
+                            want.insert([x, y, z]);
+                        }
+                    }
+                }
+            }
+            let mut expected = BTreeMap::<_, Vec<u32>>::new();
+            for (i, f) in fragments.iter().enumerate() {
+                if !f.resting
+                    || hull_hit(arr(f.position), [Fx::ZERO; 3], [Fx::ZERO; 3], &[hull], 0).is_some()
+                {
+                    continue;
+                }
+                let (lo, hi) = settled_cells(world_boxes[i].0, world_boxes[i].1);
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            if want.contains(&[x, y, z]) {
+                                expected.entry([x, y, z]).or_default().push(i as u32);
+                            }
+                        }
+                    }
+                }
+            }
+            let index = Settled::of(&fragments, &[hull], tick, &t);
+            assert!(!expected.is_empty());
+            assert_eq!(index.cells, expected);
+            for (i, &(lo, hi)) in world_boxes.iter().enumerate() {
+                for skip in [i as u32, u32::MAX] {
+                    for from_above in [None, Some(lo[1]), Some(hi[1])] {
+                        let (c0, c1) = settled_cells(lo, hi);
+                        let hit = expected.iter().any(|(cell, pieces)| {
+                            (0..3).all(|a| cell[a] >= c0[a] && cell[a] <= c1[a])
+                                && pieces.iter().any(|&other| {
+                                    let (qlo, qhi) = world_boxes[other as usize];
+                                    other != skip
+                                        && from_above.is_none_or(|bottom| qhi[1] <= bottom)
+                                        && (0..3).all(|a| lo[a] < qhi[a] && qlo[a] < hi[a])
+                                })
+                        });
+                        assert_eq!(index.hit(lo, hi, skip, from_above), hit);
+                    }
+                }
+            }
+        }
+        for f in &mut fragments {
+            f.resting = false;
+        }
+        let empty = Settled::of(&fragments, &[], 0, &t);
+        assert!(empty.cells.is_empty() && empty.boxes.is_empty());
+        fragments[0].resting = true;
+        let sleeping = Settled::of(&fragments[..1], &[], 0, &t);
+        assert!(!due(fragments[0].id, 0, &t));
+        assert!(sleeping.cells.is_empty() && sleeping.boxes.is_empty());
+    }
     #[test]
     fn reduced_fragment_bounds_match_all_eight_rounded_corners() {
         for side in 1..=4 {
@@ -69,7 +285,7 @@ mod tests {
                 vec![1, 1 << (cells - 1), mask, mask & 0x9d37_a518_6fc2_0be1]
             };
             for shape in shapes {
-                let centre = arr(shape_centre(shape, side));
+                let centre = arr(walked_shape_geometry(shape, side).0);
                 let mut lo = [i32::from(side) - 1; 3];
                 let mut hi = [0; 3];
                 for i in 0..cells {
@@ -1440,17 +1656,34 @@ fn shape_cell(i: u32, side: u8) -> [i32; 3] {
     let i = i as i32;
     [i % s, (i / s) % s, i / (s * s)]
 }
+/// Bit masks of the four possible coordinate planes of each shape axis.
+/// Generated at compile time for all supported box sizes, including 3³.
+const SHAPE_PLANES: [[[u64; 4]; 3]; 4] = {
+    let mut sizes = [[[0; 4]; 3]; 4];
+    let mut s = 1;
+    while s <= 4 {
+        let mut i = 0;
+        while i < s * s * s {
+            sizes[s - 1][0][i % s] |= 1 << i;
+            sizes[s - 1][1][i / s % s] |= 1 << i;
+            sizes[s - 1][2][i / (s * s)] |= 1 << i;
+            i += 1;
+        }
+        s += 1;
+    }
+    sizes
+};
+fn shape_sums(shape: u64, planes: &[[u64; 4]; 3]) -> [i32; 3] {
+    planes.map(|p| {
+        (shape & p[1]).count_ones() as i32
+            + 2 * (shape & p[2]).count_ones() as i32
+            + 3 * (shape & p[3]).count_ones() as i32
+    })
+}
 /// Centre of mass of a piece in its box, cell units.
 pub fn shape_centre(shape: u64, side: u8) -> V3 {
-    let mut sum = [0i32; 3];
-    for i in 0..box_cells(side) {
-        if shape & (1 << i) != 0 {
-            let p = shape_cell(i, side);
-            for a in 0..3 {
-                sum[a] += p[a];
-            }
-        }
-    }
+    let planes = &SHAPE_PLANES[usize::from(side.clamp(1, 4)) - 1];
+    let sum = shape_sums(shape, planes);
     v3(sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32)))
 }
 /// Face-connected components of a mask, each a piece of its own.
@@ -1486,19 +1719,15 @@ fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
     out
 }
 fn shape_bounds(shape: u64, side: u8) -> ([Fx; 3], [Fx; 3]) {
-    let mut sum = [0; 3];
-    let mut lo = [i32::from(side.clamp(1, 4)) - 1; 3];
-    let mut hi = [0; 3];
-    for i in 0..box_cells(side) {
-        if shape & (1 << i) != 0 {
-            let p = shape_cell(i, side);
-            for a in 0..3 {
-                sum[a] += p[a];
-                lo[a] = lo[a].min(p[a]);
-                hi[a] = hi[a].max(p[a]);
-            }
-        }
-    }
+    let side = side.clamp(1, 4);
+    let planes = &SHAPE_PLANES[usize::from(side) - 1];
+    let sum = shape_sums(shape, planes);
+    let lo = planes.map(|p| {
+        p.iter()
+            .position(|mask| shape & mask != 0)
+            .unwrap_or(usize::from(side) - 1) as i32
+    });
+    let hi = planes.map(|p| p.iter().rposition(|mask| shape & mask != 0).unwrap_or(0) as i32);
     let centre = sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32));
     (
         std::array::from_fn(|a| {
@@ -2690,11 +2919,47 @@ pub(crate) struct Settled {
     /// Cell of `CELL` units to the indices of the pieces whose box covers
     /// it, in index order.
     cells: BTreeMap<[i32; 3], Vec<u32>>,
-    /// Box of each piece by index: low corner, high corner, in the world.
-    boxes: BTreeMap<u32, ([Fx; 3], [Fx; 3])>,
+    /// Frozen world boxes in original fragment order, including unindexed
+    /// pieces. The cell lists use those indices throughout the tick, even
+    /// when pieces wake or merge. Reuses the construction scratch buffer.
+    boxes: Vec<([Fx; 3], [Fx; 3])>,
 }
 /// Side of a cell of the settled index, world units.
 const SETTLED_CELL: i32 = 4;
+/// Membership-only query mask. A word covers 64 vertical index cells;
+/// insertion ORs a range instead of hashing every Y coordinate. No path
+/// iterates the hash table: contact order comes from the fragment slice.
+#[derive(Default)]
+struct SettledQueries(std::collections::HashMap<[i32; 3], u64>);
+impl SettledQueries {
+    fn include(&mut self, lo: [i32; 3], hi: [i32; 3]) {
+        let first = lo[1].div_euclid(64);
+        let last = hi[1].div_euclid(64);
+        for z in lo[2]..=hi[2] {
+            for word in first..=last {
+                let low = if word == first {
+                    lo[1].rem_euclid(64)
+                } else {
+                    0
+                };
+                let high = if word == last {
+                    hi[1].rem_euclid(64)
+                } else {
+                    63
+                };
+                let mask = (u64::MAX << low) & (u64::MAX >> (63 - high));
+                for x in lo[0]..=hi[0] {
+                    *self.0.entry([x, word, z]).or_default() |= mask;
+                }
+            }
+        }
+    }
+    fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
+        self.0
+            .get(&[x, y.div_euclid(64), z])
+            .is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
+    }
+}
 fn settled_cells(lo: [Fx; 3], hi: [Fx; 3]) -> ([i32; 3], [i32; 3]) {
     let cell = |v: Fx| v.to_int_trunc().div_euclid(SETTLED_CELL);
     (
@@ -2713,7 +2978,7 @@ impl Settled {
         }
         // Only membership is queried. Fragment insertion and contact order
         // still follow the ordered fragment slice, not the hash table.
-        let mut want = std::collections::HashSet::<[i32; 3]>::new();
+        let mut want = SettledQueries::default();
         let mut boxes = Vec::with_capacity(fragments.len());
         for f in fragments {
             let (low, high) = f.bounds();
@@ -2726,40 +2991,32 @@ impl Settled {
             }
             // A piece may reach a cell beside the one it is in.
             let (c0, c1) = settled_cells(lo, hi);
-            for z in c0[2] - 1..=c1[2] + 1 {
-                for y in c0[1] - 1..=c1[1] + 1 {
-                    for x in c0[0] - 1..=c1[0] + 1 {
-                        want.insert([x, y, z]);
-                    }
-                }
-            }
+            want.include(c0.map(|v| v - 1), c1.map(|v| v + 1));
         }
-        let mut out = Settled::default();
-        if want.is_empty() {
-            return out;
+        if want.0.is_empty() {
+            return Settled::default();
         }
+        let mut out = Settled {
+            cells: BTreeMap::new(),
+            boxes,
+        };
         for (i, f) in fragments.iter().enumerate() {
             if !f.resting {
                 continue;
             }
-            let (lo, hi) = boxes[i];
+            let (lo, hi) = out.boxes[i];
             if hull_hit(arr(f.position), [Fx::ZERO; 3], [Fx::ZERO; 3], hulls, 0).is_some() {
                 continue;
             }
             let (c0, c1) = settled_cells(lo, hi);
-            let mut held = false;
             for z in c0[2]..=c1[2] {
                 for y in c0[1]..=c1[1] {
                     for x in c0[0]..=c1[0] {
-                        if want.contains(&[x, y, z]) {
+                        if want.contains([x, y, z]) {
                             out.cells.entry([x, y, z]).or_default().push(i as u32);
-                            held = true;
                         }
                     }
                 }
-            }
-            if held {
-                out.boxes.insert(i as u32, (lo, hi));
             }
         }
         out
@@ -2781,9 +3038,7 @@ impl Settled {
                         if *i == skip {
                             continue;
                         }
-                        let Some((qlo, qhi)) = self.boxes.get(i) else {
-                            continue;
-                        };
+                        let (qlo, qhi) = self.boxes[*i as usize];
                         // Support is a top face reached from above, not
                         // an existing overlap. Otherwise two intersecting
                         // pieces can hold each other in mid-air forever.
