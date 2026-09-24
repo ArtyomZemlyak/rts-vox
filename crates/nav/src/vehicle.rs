@@ -450,7 +450,13 @@ impl<'a> Probe<'a> {
         s.span = s.span.min((s.half[0] - s.support[0]).max(0));
         self.pose(pos, head, s)
     }
-    pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+    /// Suspension only needs the four contact floors, not another full hull
+    /// clearance scan. Movement and planning still use the complete pose.
+    pub fn support_floors(&mut self, pos: [Fx; 2], head: i32, mut s: Shape) -> [Fx; 4] {
+        s.span = s.span.min((s.half[0] - s.support[0]).max(0));
+        self.contacts(pos, head, s).0
+    }
+    fn contacts(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> ([Fx; 4], bool) {
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let point = |x: i32, z: i32| {
             [
@@ -512,6 +518,11 @@ impl<'a> Probe<'a> {
                 }
             }
         }
+        (floors, steep)
+    }
+    pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        let (floors, steep) = self.contacts(pos, head, s);
+        let (c, sin) = (angle::cos(head), angle::sin(head));
         let height = floors
             .iter()
             .fold(Fx::ZERO, |a, b| a.add(*b))
@@ -1893,6 +1904,57 @@ mod tests {
             span: 25,
             ramp: Fx::from_ratio(3, 5),
         }
+    }
+    #[test]
+    fn suspension_floors_match_full_poses_without_scanning_the_belly() {
+        let terrains = [
+            world(true, true, true),
+            World::new(256, 64, 256, 100, Box::new(Cut)),
+            World::new(256, 64, 256, 100, Box::new(Forest)),
+        ];
+        let rubble = Rubble::from([([100, 100], 26), ([126, 72], 36)]);
+        for w in &terrains {
+            for yielding in [&[][..], &[7, 8][..]] {
+                for span in [0, 1, 25] {
+                    let mut shape = tank();
+                    shape.span = span;
+                    for at in [[100, 100], [126, 72], [180, 100], [2, 2], [254, 254]] {
+                        let pos = at.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 3)));
+                        for head in [0, angle::FULL / 7, angle::FULL / 4] {
+                            let mut full = Probe::around(w, yielding, pos, 96).with_rubble(&rubble);
+                            let mut contacts =
+                                Probe::around(w, yielding, pos, 96).with_rubble(&rubble);
+                            assert_eq!(
+                                contacts.support_floors(pos, head, shape),
+                                full.support_pose(pos, head, shape).floors,
+                                "at={at:?}, head={head}, span={span}, yielding={yielding:?}"
+                            );
+                            assert!(contacts.columns < full.columns);
+                            assert!(contacts.scans <= full.scans);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn suspension_observes_a_support_removed_before_the_next_tick() {
+        let mut w = world(false, false, false);
+        let pos = [Fx::from_int(100); 2];
+        let before = Probe::new(&w).support_floors(pos, 0, tank());
+        for z in 85..96 {
+            for x in 69..82 {
+                for y in 10..16 {
+                    w.queue_dig(x, y, z);
+                }
+            }
+        }
+        while w.queued() > 0 {
+            w.flush();
+        }
+        let after = Probe::new(&w).support_floors(pos, 0, tank());
+        assert!(after[0] < before[0], "a removed support kept its old floor");
+        assert_eq!(after, Probe::new(&w).support_pose(pos, 0, tank()).floors);
     }
     /// Flat soil with a one-metre ditch across x = 118..128 and a 30 cm
     /// ledge at x = 180.

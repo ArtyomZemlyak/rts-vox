@@ -7,7 +7,9 @@ pub(super) struct Bin {
     pub blocks: Vec<usize>,
     pub zones: Vec<usize>,
     pub ramps: Vec<usize>,
-    pub roads: Vec<usize>,
+    /// Road and segment indices, both in authored order. A nearby segment
+    /// must not bring the rest of a kilometre-long road into every query.
+    pub roads: Vec<(usize, usize)>,
 }
 pub(super) struct Index {
     nx: usize,
@@ -34,7 +36,7 @@ impl Index {
                 out.insert(z.min, z.max, |bin| bin.zones.push(i));
             }
             for (i, road) in r.roads.iter().enumerate() {
-                for segment in road.points.windows(2) {
+                for (segment_id, segment) in road.points.windows(2).enumerate() {
                     let pad = road.width / 2 + 20; // a crown can reach across the verge
                     let lo = [
                         segment[0][0].min(segment[1][0]) - pad,
@@ -44,11 +46,7 @@ impl Index {
                         segment[0][0].max(segment[1][0]) + pad + 1,
                         segment[0][1].max(segment[1][1]) + pad + 1,
                     ];
-                    out.insert(lo, hi, |bin| {
-                        if !bin.roads.contains(&i) {
-                            bin.roads.push(i);
-                        }
-                    });
+                    out.insert(lo, hi, |bin| bin.roads.push((i, segment_id)));
                 }
             }
             if let Some(c) = &r.course {

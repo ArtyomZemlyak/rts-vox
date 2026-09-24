@@ -887,22 +887,20 @@ impl RangeTerrain {
         let Some(layout) = &self.layout else {
             return false;
         };
-        self.index.at(x, z).roads.iter().any(|&i| {
+        self.index.at(x, z).roads.iter().any(|&(i, segment)| {
             let road = &layout.roads[i];
             let radius = (road.width / 2 + margin) as i128;
-            road.points.windows(2).any(|segment| {
-                let a = segment[0];
-                let b = segment[1];
-                let dx = (b[0] - a[0]) as i128;
-                let dz = (b[1] - a[1]) as i128;
-                let px = x as i128 - a[0] as i128;
-                let pz = z as i128 - a[1] as i128;
-                let len2 = dx * dx + dz * dz;
-                let dot = (px * dx + pz * dz).clamp(0, len2);
-                let ox = px * len2 - dx * dot;
-                let oz = pz * len2 - dz * dot;
-                ox * ox + oz * oz <= radius * radius * len2 * len2
-            })
+            let a = road.points[segment];
+            let b = road.points[segment + 1];
+            let dx = (b[0] - a[0]) as i128;
+            let dz = (b[1] - a[1]) as i128;
+            let px = x as i128 - a[0] as i128;
+            let pz = z as i128 - a[1] as i128;
+            let len2 = dx * dx + dz * dz;
+            let dot = (px * dx + pz * dz).clamp(0, len2);
+            let ox = px * len2 - dx * dot;
+            let oz = pz * len2 - dz * dot;
+            ox * ox + oz * oz <= radius * radius * len2 * len2
         })
     }
     /// Conservative XZ domains of changes to authored terrain. Unit rosters,
@@ -7395,6 +7393,72 @@ mod tests {
                 {
                     assert_eq!(mat, b.material, "authored block at {x},{y},{z}");
                 }
+            }
+        }
+    }
+    #[test]
+    fn road_segment_index_matches_all_segments_at_verges_caps_and_tile_edges() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        let mut points = std::collections::BTreeSet::new();
+        for x in (0..layout.size[0] as i32).step_by(128) {
+            for z in (0..layout.size[2] as i32).step_by(128) {
+                for offset in [-1, 0, 1] {
+                    points.insert([x + offset, z]);
+                    points.insert([x, z + offset]);
+                }
+            }
+        }
+        for road in &layout.roads {
+            for segment in road.points.windows(2) {
+                for t in 0..=8 {
+                    let at = [0, 1].map(|axis| {
+                        segment[0][axis] + (segment[1][axis] - segment[0][axis]) * t / 8
+                    });
+                    for margin in [0, 10, 20] {
+                        let radius = road.width / 2 + margin;
+                        for delta in [-1, 0, 1] {
+                            for axis in 0..2 {
+                                for sign in [-1, 1] {
+                                    let mut p = at;
+                                    p[axis] += sign * (radius + delta);
+                                    points.insert(p);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for [x, z] in points {
+            if x < 0 || z < 0 || x >= layout.size[0] as i32 || z >= layout.size[2] as i32 {
+                continue;
+            }
+            for margin in [0, 10, 20] {
+                let expected = layout.roads.iter().any(|road| {
+                    let radius = i128::from(road.width / 2 + margin);
+                    road.points.windows(2).any(|s| {
+                        let [dx, dz] = [0, 1].map(|i| i128::from(s[1][i] - s[0][i]));
+                        let px = i128::from(x - s[0][0]);
+                        let pz = i128::from(z - s[0][1]);
+                        let length = dx * dx + dz * dz;
+                        let dot = px * dx + pz * dz;
+                        // Independent endpoint/cross-product form of distance.
+                        if dot <= 0 {
+                            px * px + pz * pz <= radius * radius
+                        } else if dot >= length {
+                            (px - dx) * (px - dx) + (pz - dz) * (pz - dz) <= radius * radius
+                        } else {
+                            let cross = px * dz - pz * dx;
+                            cross * cross <= radius * radius * length
+                        }
+                    })
+                });
+                assert_eq!(
+                    gen.road_at(x as u32, z as u32, margin),
+                    expected,
+                    "{x},{z}+{margin}"
+                );
             }
         }
     }

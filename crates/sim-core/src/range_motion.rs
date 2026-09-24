@@ -627,9 +627,7 @@ impl Motion {
             nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
                 .with_rubble(rubble);
         let shape = self.shape(b);
-        let f = ground
-            .support_pose([self.pos[0], self.pos[2]], self.drive.head, shape)
-            .floors;
+        let f = ground.support_floors([self.pos[0], self.pos[2]], self.drive.head, shape);
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         let nominal = crate::ride::supports_of(&self.chassis);
@@ -1232,9 +1230,7 @@ impl Motion {
         }
         let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
-        let f = ground
-            .support_pose([self.pos[0], self.pos[2]], self.drive.head, shape)
-            .floors;
+        let f = ground.support_floors([self.pos[0], self.pos[2]], self.drive.head, shape);
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         // A walker stands on the legs it still has (ADR-280); a tracked
