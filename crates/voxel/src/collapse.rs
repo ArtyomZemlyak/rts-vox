@@ -205,6 +205,10 @@ pub struct CollapseLayer {
     /// Заякоренность на глобальный номер узла.
     reached: Vec<bool>,
     walk: Vec<(u32, u16)>,
+    /// Derived by resolve, consumed before any topology changes: only these
+    /// chunks can detach. Roots are valid only for nodes not in `reached`.
+    unsupported_chunks: Vec<u32>,
+    component_roots: Vec<u32>,
     #[cfg(test)]
     queue: Vec<u32>,
     /// Грани, которые надо пересчитать: `(чанк, грань)`.
@@ -284,6 +288,8 @@ impl CollapseLayer {
             known: Vec::new(),
             reached: Vec::new(),
             walk: Vec::new(),
+            unsupported_chunks: Vec::new(),
+            component_roots: Vec::new(),
             #[cfg(test)]
             queue: Vec::new(),
             face_todo: Vec::new(),
@@ -862,6 +868,8 @@ impl CollapseLayer {
         // Revisit only chunks whose local nodes still need a graph path.
         self.reached.fill(true);
         self.walk.clear();
+        self.unsupported_chunks.clear();
+        self.component_roots.resize(self.reached.len(), 0);
         for &ci in &self.needs_anchor {
             let i = ci as usize;
             if self.stale[i] {
@@ -921,9 +929,28 @@ impl CollapseLayer {
                     for &(chunk, lab) in &self.walk {
                         self.reached[(self.base[chunk as usize] + u32::from(lab)) as usize] = true;
                     }
+                } else {
+                    // An exhausted search contains the entire unsupported
+                    // component of the undirected graph. Keep its minimum
+                    // global ID, exactly as the former union-find did.
+                    let root = self
+                        .walk
+                        .iter()
+                        .map(|&(chunk, lab)| self.base[chunk as usize] + u32::from(lab))
+                        .min()
+                        .expect("search root");
+                    for &(chunk, lab) in &self.walk {
+                        self.component_roots
+                            [(self.base[chunk as usize] + u32::from(lab)) as usize] = root;
+                        self.unsupported_chunks.push(chunk);
+                    }
                 }
             }
         }
+        // Gathering must retain the original chunk/run/cell order, even if
+        // searches reached chunks in a different order.
+        self.unsupported_chunks.sort_unstable();
+        self.unsupported_chunks.dedup();
     }
 
     #[cfg(test)]
@@ -1025,50 +1052,8 @@ impl CollapseLayer {
         st: &mut CollapseStats,
     ) -> usize {
         st.probed += self.reached.len();
-        if self.reached.iter().all(|&r| r) {
+        if self.unsupported_chunks.is_empty() {
             return 0;
-        }
-
-        // Объединение незаякоренных узлов по рёбрам графа.
-        let n_nodes = self.reached.len();
-        let mut parent: Vec<u32> = (0..n_nodes as u32).collect();
-        for k in 0..self.known.len() {
-            let i = self.known[k] as usize;
-            let base = self.base[i];
-            let n = self.nodes[i].as_ref().expect("known").n;
-            if self.reached[base as usize..base as usize + n]
-                .iter()
-                .all(|&r| r)
-            {
-                continue;
-            }
-            for f in 0..FACES {
-                let Some(j) = self.neighbour(i, f) else {
-                    continue;
-                };
-                if self.nodes[j].as_ref().map(|d| d.n).unwrap_or(0) == 0 {
-                    continue;
-                }
-                let jbase = self.base[j];
-                // Рёбра читаются по индексу, а не копией вектора.
-                // Копия на каждую грань каждого чанка — это полторы
-                // тысячи выделений за раунд (ADR-129).
-                let m = self.nodes[i].as_ref().expect("known").edges[f].len();
-                for ei in 0..m {
-                    let (a, b) = self.nodes[i].as_ref().expect("known").edges[f][ei];
-                    let (ia, ib) = (base + a as u32, jbase + b as u32);
-                    if self.reached[ia as usize] || self.reached[ib as usize] {
-                        continue;
-                    }
-                    let (ra, rb) = (uf_find(&mut parent, ia), uf_find(&mut parent, ib));
-                    if ra != rb {
-                        // Меньший индекс становится корнем: ничьи
-                        // разрешаются индексом, а не порядком слияний.
-                        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-                        parent[hi as usize] = lo;
-                    }
-                }
-            }
         }
 
         // Состав групп. Обход по чанкам в порядке возрастания индекса,
@@ -1076,13 +1061,9 @@ impl CollapseLayer {
         let cs = CS as u32;
         let mut roots: Vec<u32> = Vec::new();
         let mut group_cells: Vec<Vec<(u32, u32, u32)>> = Vec::new();
-        for k in 0..self.known.len() {
-            let i = self.known[k] as usize;
+        for k in 0..self.unsupported_chunks.len() {
+            let i = self.unsupported_chunks[k] as usize;
             let base = self.base[i] as usize;
-            let n = self.nodes[i].as_ref().expect("known").n;
-            if (0..n).all(|l| self.reached[base + l]) {
-                continue;
-            }
             let (cx, cy, cz) = self.coords(i);
             let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
             let c = self.chunks[i].take().expect("chunk present");
@@ -1094,7 +1075,7 @@ impl CollapseLayer {
                 if self.reached[base + lab] {
                     continue;
                 }
-                let root = uf_find(&mut parent, (base + lab) as u32);
+                let root = self.component_roots[base + lab];
                 let gi = match roots.iter().position(|&x| x == root) {
                     Some(gi) => gi,
                     None => {
@@ -1350,6 +1331,7 @@ impl CollapseLayer {
 
 /// Поиск корня с укорачиванием пути. Свободная функция, потому что
 /// внутри метода она заняла бы `self` целиком.
+#[cfg(test)]
 fn uf_find(p: &mut [u32], mut a: u32) -> u32 {
     while p[a as usize] != a {
         p[a as usize] = p[p[a as usize] as usize];
@@ -1378,6 +1360,46 @@ mod tests {
     use super::*;
     use crate::bodies::test_gravity;
     use crate::store::{Mat, AIR};
+
+    /// Independent former detachment algorithm: scan all known chunks and
+    /// union their unsupported face edges. Also checks the sparse shortlist.
+    fn assert_unsupported_groups(c: &CollapseLayer) {
+        let mut parent: Vec<u32> = (0..c.reached.len() as u32).collect();
+        let mut chunks = Vec::new();
+        for &ci in &c.known {
+            let i = ci as usize;
+            let base = c.base[i];
+            let nd = c.nodes[i].as_ref().unwrap();
+            if c.reached[base as usize..base as usize + nd.n]
+                .iter()
+                .all(|&r| r)
+            {
+                continue;
+            }
+            chunks.push(ci);
+            for f in 0..FACES {
+                let Some(j) = c.neighbour(i, f) else {
+                    continue;
+                };
+                if c.nodes[j].as_ref().is_none_or(|n| n.n == 0) {
+                    continue;
+                }
+                for &(a, b) in &nd.edges[f] {
+                    let (ia, ib) = (base + u32::from(a), c.base[j] + u32::from(b));
+                    if !c.reached[ia as usize] && !c.reached[ib as usize] {
+                        let (ra, rb) = (uf_find(&mut parent, ia), uf_find(&mut parent, ib));
+                        parent[ra.max(rb) as usize] = ra.min(rb);
+                    }
+                }
+            }
+        }
+        assert_eq!(c.unsupported_chunks, chunks);
+        for (id, &anchored) in c.reached.iter().enumerate() {
+            if !anchored {
+                assert_eq!(c.component_roots[id], uf_find(&mut parent, id as u32));
+            }
+        }
+    }
 
     #[test]
     fn copied_occupancy_matches_cells_across_words_edges_and_edits() {
@@ -1475,6 +1497,7 @@ mod tests {
             c.resolve_reference(&mut reference);
             assert_eq!(c.reached, expected, "anchor query at tick {tick}");
             assert_eq!((fast.nodes, fast.edges), (reference.nodes, reference.edges));
+            assert_unsupported_groups(&c);
             b.step(&mut w);
         }
     }
@@ -1517,6 +1540,18 @@ mod tests {
                     }
                 }
             }
+            // Exercise complete unsupported islands (including cycles),
+            // fully anchored graphs and mixed conservative anchors.
+            if round % 8 <= 1 {
+                for i in 0..c.nodes.len() {
+                    let nd = c.nodes[i].as_mut().unwrap();
+                    nd.bedrock.fill(round % 8 == 1);
+                    for ground in &mut nd.ground {
+                        ground.clear();
+                    }
+                    c.stale[i] = false;
+                }
+            }
             c.rebuild_index();
             for i in 0..c.nodes.len() {
                 // Production face refresh stores pairs in this order.
@@ -1532,6 +1567,17 @@ mod tests {
             c.resolve_reference(&mut reference);
             assert_eq!(c.reached, reached, "graph {round}");
             assert_eq!((fast.nodes, fast.edges), (reference.nodes, reference.edges));
+            assert_unsupported_groups(&c);
+            let mut blob = fx::blob::Blob::new();
+            c.save(&mut blob);
+            let mut restored = CollapseLayer::new(&w);
+            assert!(restored.load(&mut fx::blob::Scan::new(&blob.v)));
+            restored.resolve(&mut CollapseStats::default());
+            assert_eq!(restored.reached, c.reached, "restored graph {round}");
+            assert_unsupported_groups(&restored);
+            let mut after = fx::blob::Blob::new();
+            restored.save(&mut after);
+            assert_eq!(blob.v, after.v, "derived groups are not serialized");
         }
     }
 
