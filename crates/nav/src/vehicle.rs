@@ -734,8 +734,9 @@ pub enum Hunting {
 /// several instead of stopping one. The poses it has probed are a memo of
 /// a pure function of the world, and they are not part of the search's
 /// answer: a search resumed with an empty memo reaches the same answer,
-/// as long as the world has not changed under it. A search whose world
-/// changed is dropped and begun again, never resumed.
+/// as long as the world has not changed under it. World changes invalidate
+/// the cached probes and restart an unfinished connection. A caller whose
+/// start position or heading changed must discard the search itself.
 #[derive(Clone)]
 pub struct Hunt {
     shape: Shape,
@@ -1031,6 +1032,11 @@ impl Hunt {
     /// Frontier still open and nodes expanded so far.
     pub fn nodes(&self) -> u32 {
         self.nodes
+    }
+    /// Swept edges were checked from this exact position and heading. A
+    /// displaced caller must request a new search rather than reuse them.
+    pub fn starts_at(&self, from: [Fx; 2], head: i32) -> bool {
+        self.from == from && self.head == head
     }
     /// One slice of a search that spans ticks: reuse its bounded pages and
     /// spend `budget` on target poses, swept poses or frontier nodes.

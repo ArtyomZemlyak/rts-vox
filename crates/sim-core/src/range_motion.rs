@@ -843,6 +843,14 @@ impl Motion {
         let Some(mut hunt) = self.hunt.take() else {
             return;
         };
+        if !hunt.starts_at([self.pos[0], self.pos[2]], self.drive.head) {
+            // Braking, contact impulses and escape manoeuvres can move a
+            // hull while its search is pending. Its checked first edge no
+            // longer starts here. Retain the order; restart through the
+            // normal shared allowance after any active escape ends.
+            self.next_plan = tick;
+            return;
+        }
         if !steady {
             hunt.forget_world();
         }
@@ -1461,6 +1469,64 @@ mod tests {
     use modding::range::RangeUnitKind;
     struct Ground {
         depth: i32,
+    }
+    #[test]
+    fn displaced_search_restarts_from_the_actual_pose_and_replays() {
+        let world = ground(0);
+        let body = voxel::unit::tank();
+        let goal = [430, 100];
+        let rubble = nav::vehicle::Rubble::new();
+        for displacement in 0..3 {
+            let mut motion = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+            motion.navigation.search_nodes_per_tick = 8;
+            assert!(motion.move_to(&world, goal, &body, &[], &rubble));
+            assert!(motion.searching(), "fixture needs an unfinished search");
+            match displacement {
+                0 => motion.pos[2] = Fx::from_int(180),
+                1 => motion.drive.head = angle::FULL / 4,
+                _ => {
+                    // A real contact impulse displaces the hull during the
+                    // drive phase, after this tick's search slice ran.
+                    let old_pos = motion.pos;
+                    motion.receive_contact(V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(20)));
+                    step(&mut motion, &world, &body, &[], 0);
+                    assert_ne!(motion.pos, old_pos);
+                    assert!(motion.searching());
+                }
+            }
+            let mut saved = Blob::new();
+            motion.save(&mut saved);
+            let mut restored = motion.clone();
+            assert!(restored.load(&mut Scan::new(&saved.v)));
+            for m in [&mut motion, &mut restored] {
+                m.allow_start(false);
+                step(m, &world, &body, &[], 1);
+                assert!(!m.searching(), "search still uses the previous pose");
+                assert!(m.path.is_empty());
+                assert_eq!(m.destination, Some(goal));
+            }
+            for tick in 2..1200 {
+                for m in [&mut motion, &mut restored] {
+                    m.allow_start(true);
+                    step(m, &world, &body, &[], tick);
+                }
+                let mut a = Blob::new();
+                let mut b = Blob::new();
+                motion.save(&mut a);
+                restored.save(&mut b);
+                assert_eq!(a.v, b.v, "replay at tick {tick}");
+                if motion.destination.is_none() {
+                    break;
+                }
+            }
+            assert!(motion.destination.is_none(), "restart did not reach goal");
+            for (axis, coordinate) in [0, 2].into_iter().zip(goal) {
+                assert!(
+                    motion.pos[axis].sub(Fx::from_int(coordinate)).abs()
+                        <= Fx::from_int(motion.arrival)
+                );
+            }
+        }
     }
     #[test]
     fn partial_routes_keep_the_order_and_patrol_waypoint_until_arrival() {

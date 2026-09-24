@@ -11,6 +11,8 @@
 //! state and `--no-crater` runs only the original terrain. `--inspect-motion`
 //! compares current, planner and rubble-free contacts at a block transition
 //! and at the end, plus nearby translations and rotations (not a full sweep).
+//! `--trace-interval n` samples the driving state every n ticks.
+//! `--park-patrols` keeps the other hulls parked to isolate terrain planning.
 use sim_core::blast::BlastRange;
 use std::time::Instant;
 
@@ -25,13 +27,18 @@ fn point(s: &str) -> [i32; 2] {
         .map(|v| v.trim().parse::<i32>().expect("integer"));
     [it.next().expect("x"), it.next().expect("z")]
 }
-fn range(search: Option<(usize, u32)>, layout: &modding::range::RangeLayout) -> BlastRange {
+fn range(
+    search: Option<(usize, u32)>,
+    layout: &modding::range::RangeLayout,
+    park_patrols: bool,
+) -> BlastRange {
     let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../../data/explosion.ron"
     ))
     .unwrap();
     let mut scene = BlastRange::with_layout(config, layout.clone()).unwrap();
     scene.control();
+    scene.patrols_running = !park_patrols;
     if let Some((nodes, pct)) = search {
         scene.gun.motion.set_search(nodes, pct);
     }
@@ -51,15 +58,19 @@ fn main() {
         arg(&args, "--targets").unwrap_or_else(|| "235,365;128,470;200,336;340,336".into());
     let crater = point(&arg(&args, "--crater").unwrap_or_else(|| "200,336".into()));
     let to = point(&arg(&args, "--to").unwrap_or_else(|| "260,336".into()));
+    let trace_interval: usize = arg(&args, "--trace-interval")
+        .map(|s| s.parse().expect("trace interval"))
+        .unwrap_or(0);
     let nodes: Option<usize> = arg(&args, "--nodes").and_then(|s| s.parse().ok());
     let pct: Option<u32> = arg(&args, "--heuristic").and_then(|s| s.parse().ok());
     let search =
         (nodes.is_some() || pct.is_some()).then(|| (nodes.unwrap_or(16000), pct.unwrap_or(100)));
+    let park_patrols = args.iter().any(|a| a == "--park-patrols");
 
     // Planning alone: the order's cost and whether a route came out.
     for t in targets.split(';').filter(|t| !t.is_empty()) {
         let target = point(t);
-        let mut scene = range(search, &layout);
+        let mut scene = range(search, &layout, park_patrols);
         if args.iter().any(|a| a == "--inspect-direct") {
             inspect_direct(&scene, target);
         }
@@ -96,7 +107,7 @@ fn main() {
         .into_iter()
         .filter(|v| !*v || !args.iter().any(|a| a == "--no-crater"))
     {
-        let mut scene = range(search, &layout);
+        let mut scene = range(search, &layout, park_patrols);
         let mut samples: Vec<(u128, usize)> = Vec::new();
         let mut tick = 0usize;
         if with_crater {
@@ -131,6 +142,14 @@ fn main() {
                 inspect_motion(&scene);
             }
             was_blocked = scene.gun.motion.blocked;
+            if trace_interval > 0 && tick.is_multiple_of(trace_interval) {
+                let m = &scene.gun.motion;
+                println!(
+                    "drive_state tick={tick} pos={:?} head={} velocity={:?} yaw_rate={} cursor={} next={:?} blocked={} searching={}",
+                    m.pos, m.drive.head, m.drive.vel, m.drive.yaw_rate,
+                    m.cursor, m.path.get(m.cursor), m.blocked, m.searching()
+                );
+            }
             if args.iter().any(|a| a == "--trace") && scene.gun.motion.path != last_path {
                 let m = &scene.gun.motion;
                 println!(
@@ -172,7 +191,7 @@ fn main() {
         sorted.sort_unstable();
         let n = sorted.len();
         println!(
-            "drive crater={with_crater} removed={} plan_ok={ok} plan_us={plan_us} path_len={} p50_us={} p99_us={} max_us={} slowest={} trail={} hash={:016x}",
+            "drive crater={with_crater} parked={park_patrols} removed={} plan_ok={ok} plan_us={plan_us} path_len={} p50_us={} p99_us={} max_us={} slowest={} trail={} hash={:016x}",
             scene.removed,
             scene.gun.motion.path.len(),
             sorted[n / 2],
@@ -268,6 +287,16 @@ fn inspect_motion(scene: &BlastRange) {
         actual.pose(from, m.drive.head, planned),
         bare.pose(from, m.drive.head, shape)
     );
+    for (id, unit) in scene.units.iter().enumerate() {
+        if unit.motion.pos[0].sub(m.pos[0]).abs() <= Fx::from_int(96)
+            && unit.motion.pos[2].sub(m.pos[2]).abs() <= Fx::from_int(96)
+        {
+            println!(
+                "probe neighbour={id} pos={:?} head={} velocity={:?}",
+                unit.motion.pos, unit.motion.drive.head, unit.motion.drive.vel
+            );
+        }
+    }
     for (sign, turn) in [
         (-30, 0),
         (30, 0),
