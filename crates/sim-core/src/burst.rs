@@ -59,6 +59,94 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 mod tests {
     use super::*;
     #[test]
+    fn reduced_fragment_bounds_match_all_eight_rounded_corners() {
+        for side in 1..=4 {
+            let cells = box_cells(side);
+            let mask = u64::MAX >> (64 - cells);
+            let shapes: Vec<_> = if side == 2 {
+                (1..=mask).collect()
+            } else {
+                vec![1, 1 << (cells - 1), mask, mask & 0x9d37_a518_6fc2_0be1]
+            };
+            for shape in shapes {
+                let centre = arr(shape_centre(shape, side));
+                let mut lo = [i32::from(side) - 1; 3];
+                let mut hi = [0; 3];
+                for i in 0..cells {
+                    if shape & (1 << i) != 0 {
+                        let p = shape_cell(i, side);
+                        for a in 0..3 {
+                            lo[a] = lo[a].min(p[a]);
+                            hi[a] = hi[a].max(p[a]);
+                        }
+                    }
+                }
+                let lo = [0, 1, 2].map(|a| {
+                    Fx::from_int(lo[a])
+                        .sub(centre[a])
+                        .sub(Fx::from_ratio(49, 100))
+                });
+                let hi = [0, 1, 2].map(|a| {
+                    Fx::from_int(hi[a])
+                        .sub(centre[a])
+                        .add(Fx::from_ratio(49, 100))
+                });
+                for mm in [1, 63, 100, 500, u16::MAX] {
+                    let scale = Fx::from_ratio(i32::from(mm), voxel::unit::WORLD_MM as i32);
+                    for turn in [0, 1, 2731, angle::FULL / 4, -11739] {
+                        let (c, s) = (angle::cos(turn), angle::sin(turn));
+                        let (cp, sp) = (angle::cos(turn / 3), angle::sin(turn / 3));
+                        let basis = [
+                            V3::new(c, Fx::ZERO, s),
+                            V3::UP,
+                            V3::new(s.neg(), Fx::ZERO, c),
+                        ]
+                        .map(|v| {
+                            V3::new(
+                                v.x,
+                                v.y.mul(cp).sub(v.z.mul(sp)),
+                                v.y.mul(sp).add(v.z.mul(cp)),
+                            )
+                        });
+                        let mut expected = ([Fx::MAX; 3], [Fx::MIN; 3]);
+                        for corner in 0..8 {
+                            let mut p = V3::ZERO;
+                            for a in 0..3 {
+                                let endpoint = if corner & (1 << a) == 0 { lo[a] } else { hi[a] };
+                                p = p.add(basis[a].scale(endpoint.mul(scale)));
+                            }
+                            for (a, value) in arr(p).into_iter().enumerate() {
+                                expected.0[a] = expected.0[a].min(value);
+                                expected.1[a] = expected.1[a].max(value);
+                            }
+                        }
+                        let fragment = Fragment {
+                            id: 1,
+                            position: V3::ZERO,
+                            velocity: V3::ZERO,
+                            material: 1,
+                            paint: None,
+                            mm,
+                            basis,
+                            mass_g: 1,
+                            count: shape.count_ones(),
+                            shape,
+                            side,
+                            chunk: None,
+                            held: 0,
+                            resting: false,
+                        };
+                        assert_eq!(
+                            fragment.bounds(),
+                            expected,
+                            "side={side} shape={shape:x} mm={mm} turn={turn}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn empty_corner_of_a_fragment_does_not_glue_it_to_a_wall() {
         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
         let t = tuning();
@@ -1313,20 +1401,18 @@ impl Fragment {
         }
         let (lo, hi) = shape_bounds(self.shape, self.side);
         let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
-        let mut low = [Fx::MAX; 3];
-        let mut high = [Fx::MIN; 3];
-        for mask in 0..8 {
-            let mut v = V3::ZERO;
-            for axis in 0..3 {
-                v = v.add(self.basis[axis].scale(if mask & (1 << axis) == 0 {
-                    lo[axis].mul(scale)
-                } else {
-                    hi[axis].mul(scale)
-                }));
-            }
-            for (axis, c) in arr(v).into_iter().enumerate() {
-                low[axis] = low[axis].min(c);
-                high[axis] = high[axis].max(c);
+        let mut low = [Fx::ZERO; 3];
+        let mut high = [Fx::ZERO; 3];
+        // Each corner sum chooses one endpoint independently per local
+        // axis. Reduce the already rounded endpoint products, then add in
+        // the original axis order: no centre/extent formula with different
+        // Q32 rounding, and no eight-corner transform.
+        for axis in 0..3 {
+            let a = arr(self.basis[axis].scale(lo[axis].mul(scale)));
+            let b = arr(self.basis[axis].scale(hi[axis].mul(scale)));
+            for component in 0..3 {
+                low[component] = low[component].add(a[component].min(b[component]));
+                high[component] = high[component].add(a[component].max(b[component]));
             }
         }
         (low, high)
@@ -1400,18 +1486,20 @@ fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
     out
 }
 fn shape_bounds(shape: u64, side: u8) -> ([Fx; 3], [Fx; 3]) {
-    let centre = arr(shape_centre(shape, side));
+    let mut sum = [0; 3];
     let mut lo = [i32::from(side.clamp(1, 4)) - 1; 3];
     let mut hi = [0; 3];
     for i in 0..box_cells(side) {
         if shape & (1 << i) != 0 {
             let p = shape_cell(i, side);
             for a in 0..3 {
+                sum[a] += p[a];
                 lo[a] = lo[a].min(p[a]);
                 hi[a] = hi[a].max(p[a]);
             }
         }
     }
+    let centre = sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32));
     (
         std::array::from_fn(|a| {
             Fx::from_int(lo[a])

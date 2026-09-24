@@ -1448,14 +1448,26 @@ impl Explosion {
         let half = n / 2;
         let origin = self.origin;
         let radius2 = (half * half) as i32;
+        let far = [0, 1, 2].map(|a| origin[a] + n as i32 * c.cell_units - 1);
         let queries: Vec<_> = units
             .iter()
-            .map(|u| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+            .filter_map(|u| {
+                let (lo, hi) = u.bounds();
+                (0..3)
+                    .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
+                    .then(|| {
+                        (
+                            u,
+                            lo,
+                            hi,
+                            HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta),
+                        )
+                    })
+            })
             .collect();
         // Bodies are asked only where they can be (ADR-296): one box test
         // per body instead of a pose-mapped lookup for every voxel of the
         // domain, and dents are looked up only where there is material.
-        let boxes: Vec<([i32; 3], [i32; 3])> = units.iter().map(|u| u.bounds()).collect();
         // Three questions used to be asked of every voxel of the domain,
         // and all three answer the same for a whole cell (ADR-310): which
         // bodies can reach into it, whether any dented voxel lies in it,
@@ -1464,7 +1476,6 @@ impl Explosion {
         // approximation — and at four charges the capture fell from 12.2
         // to 11.2 ms on a clean world and from 23.7 to 17.3 ms late in a
         // match, where the dent map has grown.
-        let far = [0, 1, 2].map(|a| origin[a] + (n as i32 - 1) * c.cell_units + c.cell_units - 1);
         let mut dented = vec![false; cells];
         for q in dents
             .range([origin[0], i32::MIN, i32::MIN]..=[far[0], i32::MAX, i32::MAX])
@@ -1484,8 +1495,14 @@ impl Explosion {
             .soil_resistance
             .max(c.concrete_resistance)
             .max(c.steel_resistance);
+        // Every body role uses this same monotone, clamped formula in
+        // unit_work. Dents can only lower resistance. Once the reduction
+        // reaches this bound, no remaining body sample can change it.
+        let unit_maximum = (u64::from(c.unit_ablation_resistance)
+            * u64::from(*c.unit_role_resistance_milli.iter().max().unwrap())
+            / 1000)
+            .clamp(1, 1_000_000) as u32;
         let mut cursor = World::mat_cursor();
-        let mut near: Vec<usize> = Vec::new();
         let mut spent = 0;
         let mut next = self.captured;
         while next < cells && spent < budget {
@@ -1509,12 +1526,6 @@ impl Explosion {
             }
             spent += 1;
             let end = [0, 1, 2].map(|a| p[a] + c.cell_units - 1);
-            near.clear();
-            for (i, (lo, hi)) in boxes.iter().enumerate() {
-                if (0..3).all(|a| end[a] >= lo[a] && p[a] <= hi[a]) {
-                    near.push(i);
-                }
-            }
             let look = dented[(z * n + y) * n + x];
             let mut r = 0;
             if p[1] < w.ny as i32 && end[1] >= 0 {
@@ -1561,14 +1572,20 @@ impl Explosion {
             }
             // Body resistance is independent of the terrain reduction. Ask
             // only the intersecting part of each box, including suspended parts.
-            for &i in &near {
-                let (lo, hi) = boxes[i];
+            'bodies: for (u, lo, hi, query) in &queries {
+                if r >= unit_maximum {
+                    break;
+                }
+                if (0..3).any(|a| end[a] < lo[a] || p[a] > hi[a]) {
+                    continue;
+                }
                 for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
                     for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
                         for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
-                            r = r.max(
-                                units[i].hit_resistance(queries[i].hit(&units[i], [wx, wy, wz]), c),
-                            );
+                            r = r.max(u.hit_resistance(query.hit(u, [wx, wy, wz]), c));
+                            if r >= unit_maximum {
+                                break 'bodies;
+                            }
                         }
                     }
                 }
@@ -7643,6 +7660,111 @@ mod tests {
         let (lo, hi) = r.units[0].bounds();
         let (_, armoured) = walk([0, 1, 2].map(|a| (lo[a] + hi[a]) / 2));
         assert!(armoured > 0, "no body reached into the domain");
+    }
+    #[test]
+    fn capture_bounds_and_saturation_match_full_walk_with_dented_overlapping_units() {
+        struct Ground;
+        impl Generator for Ground {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 16 || ((104..108).contains(&x) && (80..112).contains(&z) && y < 35) {
+                    2
+                } else {
+                    0
+                }
+            }
+        }
+        let world = World::new(192, 96, 192, 100, Box::new(Ground));
+        let mut units = vec![
+            RangeUnit::of_kind(RangeUnitKind::Tank, [96, 16, 96]),
+            RangeUnit::of_kind(RangeUnitKind::Strider, [104, 16, 96]),
+            RangeUnit::of_kind(RangeUnitKind::Tank, [900, 16, 900]),
+        ];
+        units[0].update_pose(2731);
+        units[1].update_pose(-5147);
+        // Dents in root cells and every segment exercise a bound that must
+        // remain conservative even when different parts have different work.
+        for u in &mut units {
+            for z in 0..u.body.vol.nz {
+                for y in 0..u.body.vol.ny {
+                    for x in 0..u.body.vol.nx {
+                        if u.body.vol.get(x as usize, y as usize, z as usize) && (x + z) % 3 == 0 {
+                            u.dents.insert([x, y, z], 97);
+                        }
+                    }
+                }
+            }
+            for (i, seg) in u.body.segments.iter().enumerate() {
+                for z in 0..seg.body.vol.nz {
+                    for y in 0..seg.body.vol.ny {
+                        for x in 0..seg.body.vol.nx {
+                            if seg.body.vol.get(x as usize, y as usize, z as usize) {
+                                u.seg_dents.insert((i as u8, [x, y, z]), 31);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let dents = SurfaceWork::from([([104, 20, 96], 380)]);
+        let mut body_hits = 0;
+        for (base, roles) in [
+            (0, [1000; 5]),
+            (180, [1000, 1800, 650, 1100, 350]),
+            (1_000_000, [1, 1000, 10000, 2, 7000]),
+        ] {
+            for edge in 1..=4 {
+                let mut c = config();
+                c.energy = 100;
+                c.half_cells = 4;
+                c.cell_units = edge;
+                c.unit_ablation_resistance = base;
+                c.unit_role_resistance_milli = roles;
+                let at = [100, 28, 96];
+                let mut captured = Explosion::begin(at, &c, &units);
+                while !captured.capture(&world, &c, &units, &dents, 17) {}
+                let n = captured.wave.size();
+                let half = (n / 2) as i32;
+                for z in 0..n {
+                    for y in 0..n {
+                        for x in 0..n {
+                            let q = [x as i32 - half, y as i32 - half, z as i32 - half];
+                            let mut expected = u32::MAX;
+                            if q.iter().map(|v| v * v).sum::<i32>() <= half * half {
+                                expected = 0;
+                                let p = [0, 1, 2].map(|a| at[a] + q[a] * edge);
+                                for dz in 0..edge {
+                                    for dy in 0..edge {
+                                        for dx in 0..edge {
+                                            let cell = [p[0] + dx, p[1] + dy, p[2] + dz];
+                                            expected = expected.max(
+                                                material_work(material(&world, cell), &c)
+                                                    .saturating_sub(
+                                                        dents.get(&cell).copied().unwrap_or(0),
+                                                    ),
+                                            );
+                                            for u in &units {
+                                                let resistance = u.resistance(cell, &c);
+                                                body_hits += usize::from(resistance > 0);
+                                                expected = expected.max(resistance);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            assert_eq!(
+                                captured.wave.resistance_at([x, y, z]),
+                                expected,
+                                "base={base}, edge={edge}, cell={x},{y},{z}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            body_hits > 100,
+            "the oracle never queried actual unit matter"
+        );
     }
     #[test]
     fn capture_clips_packed_rows_at_world_edges_for_every_cell_size() {
