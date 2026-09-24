@@ -360,11 +360,25 @@ impl<'a> Probe<'a> {
         let u = p[0].sub(Fx::from_int(x));
         let v = p[1].sub(Fx::from_int(z));
         let h00 = Fx::from_int(self.floor(x, z));
-        let h10 = Fx::from_int(self.floor(x + 1, z));
+        // A zero interpolation weight makes that neighbour irrelevant.
+        // Grid-aligned supports are common in the search; keep the exact
+        // arithmetic for fractional positions without reading unused rows.
+        let a = if u == Fx::ZERO {
+            h00
+        } else {
+            let h10 = Fx::from_int(self.floor(x + 1, z));
+            h00.add(h10.sub(h00).mul(u))
+        };
+        if v == Fx::ZERO {
+            return a;
+        }
         let h01 = Fx::from_int(self.floor(x, z + 1));
-        let h11 = Fx::from_int(self.floor(x + 1, z + 1));
-        let a = h00.add(h10.sub(h00).mul(u));
-        let b = h01.add(h11.sub(h01).mul(u));
+        let b = if u == Fx::ZERO {
+            h01
+        } else {
+            let h11 = Fx::from_int(self.floor(x + 1, z + 1));
+            h01.add(h11.sub(h01).mul(u))
+        };
         a.add(b.sub(a).mul(v))
     }
     /// Support height at `p`, and whether the ground along its contact
@@ -521,6 +535,15 @@ impl<'a> Probe<'a> {
         (floors, steep)
     }
     pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        self.probe_pose(pos, head, s, false)
+    }
+    /// Planning only consumes the full depth/crush counts of legal poses.
+    /// An illegal pose may stop at the first proof of refusal. Execution
+    /// still uses `pose`: decreasing penetration must retain exact counts.
+    fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        self.probe_pose(pos, head, s, true)
+    }
+    fn probe_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape, stop_on_refusal: bool) -> Pose {
         let (floors, steep) = self.contacts(pos, head, s);
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let height = floors
@@ -542,9 +565,18 @@ impl<'a> Probe<'a> {
             .mul(s.min_up)
             .mul(Fx::ONE.add(pitch.mul(pitch)).add(roll.mul(roll)))
             > Fx::ONE;
-        let mut blocked = 0;
+        let mut result = Pose {
+            height,
+            floors,
+            blocked: 0,
+            steep,
+            tilt,
+            crush: 0,
+        };
+        if stop_on_refusal && (steep || tilt) {
+            return result;
+        }
         let (lo, hi) = self.extent(pos, head, s);
-        let mut crush = 0;
         for z in lo[1]..=hi[1] {
             for (x, u, v) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
                 // Floor and yielding matter come from the same column answer.
@@ -558,23 +590,19 @@ impl<'a> Probe<'a> {
                 let local = height.add(pitch.mul(u)).add(roll.mul(v));
                 let belly = local.add(s.clearance.max(Fx::from_int(s.step)));
                 if ground > belly {
-                    blocked += 1;
+                    result.blocked += 1;
+                    if stop_on_refusal {
+                        return result;
+                    }
                 }
                 if low != u16::MAX
                     && Fx::from_int(i32::from(low)) < local.add(Fx::from_int(s.height))
                 {
-                    crush += 1;
+                    result.crush += 1;
                 }
             }
         }
-        Pose {
-            height,
-            floors,
-            blocked,
-            steep,
-            tilt,
-            crush,
-        }
+        result
     }
 }
 
@@ -583,7 +611,6 @@ pub struct Search {
     pub cell: i32,
     pub min: [i32; 2],
     pub max: [i32; 2],
-    /// Total graph work: popped nodes and exact edge poses.
     /// Total graph work: frontier pops, endpoint queries and swept edge poses.
     pub nodes: usize,
     /// Planner price of one crushed footprint column; a straight move costs 10.
@@ -965,7 +992,7 @@ impl Hunt {
                 *allowance -= 1;
                 self.probed += 1;
                 let q = p.map(Fx::from_int);
-                if !ground.pose(q, yaw, self.shape).refused() && clear(q, yaw) {
+                if clear(q, yaw) && !ground.route_pose(q, yaw, self.shape).refused() {
                     self.to = p;
                     let cell = [self.n, self.rows].map(|n| n as i32 - 1);
                     let end = [0, 1].map(|a| {
@@ -1505,11 +1532,15 @@ impl Hunt {
                 // Charge the logical query even on a memo hit: restored
                 // searches have empty caches but must finish on the same tick.
                 *allowance -= 1;
+                if !clear(q, next_yaw) {
+                    e.edge += 1;
+                    continue;
+                }
                 let pose = if let Some(p) = self.poses.get(&j) {
                     *p
                 } else {
                     self.probed += 1;
-                    let p = ground.pose(q, next_yaw, self.shape);
+                    let p = ground.route_pose(q, next_yaw, self.shape);
                     self.poses.insert(j, p);
                     p
                 };
@@ -1517,7 +1548,7 @@ impl Hunt {
                     + (pose.crush as u32)
                         .saturating_mul(self.cfg.crush_cost)
                         .min(self.cfg.crush_cap);
-                if next_cost >= self.cost(j) || pose.refused() || !clear(q, next_yaw) {
+                if next_cost >= self.cost(j) || pose.refused() {
                     e.edge += 1;
                     continue;
                 }
@@ -1621,6 +1652,128 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aligned_supports_skip_only_zero_weight_surface_neighbours() {
+        let w = world(true, true, true);
+        let rubble = Rubble::from([([128, 72], 40)]);
+        let mut full = Probe::new(&w).with_rubble(&rubble);
+        let mut fast = Probe::new(&w).with_rubble(&rubble);
+        for x in [-1, 0, 58, 82, 90, 127, 128, 255, 256] {
+            for z in [-1, 0, 56, 72, 83, 255, 256] {
+                for dx in [Fx::ZERO, Fx(1), Fx::from_ratio(1, 3)] {
+                    for dz in [Fx::ZERO, Fx(1), Fx::from_ratio(9, 10)] {
+                        let p = [Fx::from_int(x).add(dx), Fx::from_int(z).add(dz)];
+                        let x = p[0].to_int_trunc();
+                        let z = p[1].to_int_trunc();
+                        let u = p[0].sub(Fx::from_int(x));
+                        let v = p[1].sub(Fx::from_int(z));
+                        let h00 = Fx::from_int(full.floor(x, z));
+                        let h10 = Fx::from_int(full.floor(x + 1, z));
+                        let h01 = Fx::from_int(full.floor(x, z + 1));
+                        let h11 = Fx::from_int(full.floor(x + 1, z + 1));
+                        let a = h00.add(h10.sub(h00).mul(u));
+                        let b = h01.add(h11.sub(h01).mul(u));
+                        let before = fast.columns;
+                        assert_eq!(fast.surface(p), a.add(b.sub(a).mul(v)));
+                        let needed =
+                            (1 + u64::from(u != Fx::ZERO)) * (1 + u64::from(v != Fx::ZERO));
+                        assert_eq!(fast.columns - before, needed);
+                    }
+                }
+            }
+        }
+        assert!(fast.columns < full.columns);
+    }
+    #[test]
+    fn route_refusals_match_full_clearance_and_keep_legal_pose_counts() {
+        let worlds = [
+            world(false, false, false),
+            world(true, true, false),
+            world(false, false, true),
+            World::new(256, 64, 256, 100, Box::new(Forest)),
+        ];
+        let rubble = Rubble::from([([148, 110], 38), ([149, 110], 38)]);
+        let mut legal = 0;
+        let mut refused = 0;
+        let mut crushed = 0;
+        let mut saved_columns = 0;
+        for w in &worlds {
+            let mut full = Probe::with_yield(w, &[7, 8]).with_rubble(&rubble);
+            let mut fast = Probe::with_yield(w, &[7, 8]).with_rubble(&rubble);
+            for shape in [
+                tank(),
+                Shape {
+                    span: 0,
+                    step: 8,
+                    min_up: Fx::from_ratio(65, 100),
+                    ..tank()
+                },
+            ] {
+                for x in [24, 72, 110, 123, 148, 208, 248] {
+                    for z in [24, 72, 110, 123, 148, 208, 248] {
+                        for head in (0..angle::FULL).step_by(8192) {
+                            let at = [
+                                Fx::from_int(x).add(Fx::from_ratio(1, 3)),
+                                Fx::from_int(z).add(Fx::from_ratio(17, 19)),
+                            ];
+                            let expected = full.pose(at, head, shape);
+                            let actual = fast.route_pose(at, head, shape);
+                            assert_eq!(actual.refused(), expected.refused());
+                            assert_eq!(actual.height, expected.height);
+                            assert_eq!(actual.floors, expected.floors);
+                            assert_eq!(actual.steep, expected.steep);
+                            assert_eq!(actual.tilt, expected.tilt);
+                            if expected.refused() {
+                                refused += 1;
+                                assert!(actual.blocked <= expected.blocked);
+                                assert!(actual.crush <= expected.crush);
+                            } else {
+                                legal += 1;
+                                crushed += usize::from(expected.crush > 0);
+                                assert_eq!(actual.blocked, expected.blocked);
+                                assert_eq!(actual.crush, expected.crush);
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(fast.columns < full.columns);
+            saved_columns += full.columns - fast.columns;
+        }
+        assert!(legal > 100 && refused > 100 && crushed > 0);
+        assert!(saved_columns > 100_000);
+    }
+    #[test]
+    fn hull_refusal_spends_a_query_without_scanning_the_rejected_pose() {
+        let w = world(false, false, false);
+        let from = [60, 100].map(Fx::from_int);
+        let to = [200, 100].map(Fx::from_int);
+        let mut run = Connection::new(from, 0, to);
+        let mut ground = Probe::new(&w);
+        // One query establishes the initial height. The next checks the
+        // hull before asking terrain; it still consumes its logical work.
+        assert!(run
+            .advance(&mut ground, tank(), &|_, _| false, &mut 1)
+            .is_none());
+        let samples = ground.samples;
+        let columns = ground.columns;
+        let mut budget = 1;
+        assert_eq!(
+            run.advance(&mut ground, tank(), &|_, _| false, &mut budget),
+            Some(None)
+        );
+        assert_eq!(budget, 0);
+        assert_eq!(ground.samples, samples);
+        assert_eq!(ground.columns, columns);
+        // A new attempt after the hull leaves must probe the open ground.
+        run.restart();
+        let mut budget = usize::MAX;
+        assert!(run
+            .advance(&mut ground, tank(), &|_, _| true, &mut budget)
+            .unwrap()
+            .is_some());
+        assert!(ground.samples > samples);
+    }
     #[test]
     fn footprint_rows_match_individual_fixed_point_transforms() {
         let w = world(false, false, false);

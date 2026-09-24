@@ -1157,7 +1157,14 @@ impl Motion {
             .add(delta.dz)
             .add(self.shove.z.div(Fx::from_int(30)));
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
-        let target = ground.pose([nx, nz], next.head, shape);
+        // This probe only lives for the current tick. A stationary hull
+        // has the same clearance answer, but still gets fresh support,
+        // gravity and contact processing below.
+        let target = if nx == self.pos[0] && nz == self.pos[2] && next.head == old.head {
+            current
+        } else {
+            ground.pose([nx, nz], next.head, shape)
+        };
         let mut candidate = Obstacle::of(self, b);
         candidate.pos[0] = nx;
         candidate.pos[2] = nz;
@@ -1726,6 +1733,44 @@ mod tests {
             &nav::vehicle::Rubble::new(),
             true,
         );
+    }
+    #[test]
+    fn stationary_clearance_still_observes_destroyed_support_next_tick() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let mut w = ground(0);
+            let body = match kind {
+                RangeUnitKind::Tank => voxel::unit::tank(),
+                RangeUnitKind::Strider => voxel::unit::strider(),
+            };
+            let mut m = Motion::new([300, 16, 300], kind, &body);
+            m.enabled = true;
+            for tick in 0..20 {
+                step(&mut m, &w, &body, &[], tick);
+            }
+            let before = m.pos;
+            for x in 240..360 {
+                for z in 240..360 {
+                    for y in 8..16 {
+                        w.queue_dig(x, y, z);
+                    }
+                }
+            }
+            while w.queued() > 0 {
+                w.flush();
+            }
+            step(&mut m, &w, &body, &[], 20);
+            assert!(m.floors.iter().all(|h| *h == Fx::from_int(8)));
+            assert!(
+                m.hull.vy < Fx::ZERO,
+                "unsupported hull did not begin falling"
+            );
+            for tick in 21..140 {
+                step(&mut m, &w, &body, &[], tick);
+            }
+            assert_eq!([m.pos[0], m.pos[2]], [before[0], before[2]]);
+            assert!(m.pos[1] < before[1].sub(Fx::from_int(7)));
+            assert!(m.pos[1].sub(Fx::from_int(8)).abs() < Fx::from_ratio(1, 10));
+        }
     }
     #[test]
     fn early_separation_matches_all_four_contact_axes() {

@@ -56,7 +56,7 @@ impl Connection {
         while *allowance > 0 {
             *allowance -= 1;
             if self.cursor == 0 {
-                self.height = ground.pose(self.from, self.head, shape).height;
+                self.height = ground.route_pose(self.from, self.head, shape).height;
             } else {
                 let (p, h) = if self.cursor <= turns {
                     (
@@ -73,11 +73,11 @@ impl Connection {
                         yaw,
                     )
                 };
-                let next = ground.pose(p, h, shape);
-                if next.refused()
-                    || next.height.sub(self.height).abs() > Fx::from_int(shape.step)
-                    || !clear(p, h)
-                {
+                if !clear(p, h) {
+                    return Some(None);
+                }
+                let next = ground.route_pose(p, h, shape);
+                if next.refused() || next.height.sub(self.height).abs() > Fx::from_int(shape.step) {
                     return Some(None);
                 }
                 self.crush = if self.cursor <= turns {
