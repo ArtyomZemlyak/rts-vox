@@ -14,6 +14,7 @@
 //! Those sweeps report terrain refusals; nearby hulls are listed separately.
 //! `--trace-interval n` samples the driving state every n ticks.
 //! `--park-patrols` keeps the other hulls parked to isolate terrain planning.
+//! `--profile-motion` also reports the motion stage without changing its work.
 use sim_core::blast::BlastRange;
 use std::time::Instant;
 
@@ -67,6 +68,7 @@ fn main() {
     let search =
         (nodes.is_some() || pct.is_some()).then(|| (nodes.unwrap_or(16000), pct.unwrap_or(100)));
     let park_patrols = args.iter().any(|a| a == "--park-patrols");
+    let profile_motion = args.iter().any(|a| a == "--profile-motion");
 
     // Planning alone: the order's cost and whether a route came out.
     for t in targets.split(';').filter(|t| !t.is_empty()) {
@@ -110,6 +112,7 @@ fn main() {
     {
         let mut scene = range(search, &layout, park_patrols);
         let mut samples: Vec<(u128, usize)> = Vec::new();
+        let mut motion_samples = Vec::new();
         let mut tick = 0usize;
         if with_crater {
             assert!(
@@ -134,7 +137,18 @@ fn main() {
         let mut arrived = None;
         for _ in 0..ticks {
             let start = Instant::now();
-            scene.step();
+            if profile_motion {
+                let mut phase = start;
+                scene.step_observed(|name| {
+                    let now = Instant::now();
+                    if name == "motion" {
+                        motion_samples.push(now.duration_since(phase).as_nanos());
+                    }
+                    phase = now;
+                });
+            } else {
+                scene.step();
+            }
             samples.push((start.elapsed().as_micros(), tick));
             tick += 1;
             if arrived.is_none() && scene.gun.motion.destination.is_none() {
@@ -176,6 +190,17 @@ fn main() {
             }
         }
         println!("end destination={:?} partial={} pos={:?} head={} cursor={} searching={} last_plan={:?} arrived={arrived:?}",scene.gun.motion.destination,scene.gun.motion.partial_path,scene.gun.motion.pos.map(fx::Fx::to_int_trunc),scene.gun.motion.drive.head,scene.gun.motion.cursor,scene.gun.motion.searching(),scene.gun.motion.last_plan);
+        if !motion_samples.is_empty() {
+            motion_samples.sort_unstable();
+            let n = motion_samples.len();
+            println!(
+                "motion samples={n} mean_ns={} p50_ns={} p99_ns={} max_ns={}",
+                motion_samples.iter().sum::<u128>() / n as u128,
+                motion_samples[n / 2],
+                motion_samples[n * 99 / 100],
+                motion_samples[n - 1]
+            );
+        }
         if args.iter().any(|a| a == "--inspect-direct") {
             inspect_direct(&scene, to);
         }

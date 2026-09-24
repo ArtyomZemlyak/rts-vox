@@ -3147,7 +3147,7 @@ impl BlastRange {
             .collect();
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
-        // again next tick, in the same stable slot order.
+        // again next tick, in the same stable spatial order as motion below.
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
         let mut contacts = Vec::new();
@@ -3228,7 +3228,7 @@ impl BlastRange {
                 contacts.push((self.units.len(), target, velocity));
             }
         }
-        // Position acceptance above remains in stable slot order. Sample all
+        // Position acceptance above remains in stable spatial order. Sample all
         // contact velocities before transferring any shove: a hull touched
         // twice in one tick must not make the second contact order-dependent.
         let contact_state: Vec<_> = if contacts.is_empty() {

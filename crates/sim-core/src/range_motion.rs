@@ -42,21 +42,25 @@ impl Obstacle {
         let b = axes(other.head);
         let dot = |u: [Fx; 2], v: [Fx; 2]| u[0].mul(v[0]).add(u[1].mul(v[1]));
         let delta = [other.pos[0].sub(self.pos[0]), other.pos[2].sub(self.pos[2])];
-        a.iter()
-            .chain(&b)
-            .map(|n| {
-                let ra = dot(*n, a[0])
-                    .abs()
-                    .mul(self.half[0])
-                    .add(dot(*n, a[1]).abs().mul(self.half[1]));
-                let rb = dot(*n, b[0])
-                    .abs()
-                    .mul(other.half[0])
-                    .add(dot(*n, b[1]).abs().mul(other.half[1]));
-                ra.add(rb).sub(dot(delta, *n).abs()).max(Fx::ZERO)
-            })
-            .min()
-            .unwrap_or(Fx::ZERO)
+        let mut depth = Fx::MAX;
+        for n in a.iter().chain(&b) {
+            let ra = dot(*n, a[0])
+                .abs()
+                .mul(self.half[0])
+                .add(dot(*n, a[1]).abs().mul(self.half[1]));
+            let rb = dot(*n, b[0])
+                .abs()
+                .mul(other.half[0])
+                .add(dot(*n, b[1]).abs().mul(other.half[1]));
+            let overlap = ra.add(rb).sub(dot(delta, *n).abs());
+            // Zero is the minimum possible answer. Most pairs are far
+            // apart; a separating axis makes the other three unnecessary.
+            if overlap <= Fx::ZERO {
+                return Fx::ZERO;
+            }
+            depth = depth.min(overlap);
+        }
+        depth
     }
     fn overlaps(&self, other: &Self) -> bool {
         self.penetration(other) > Fx::ZERO
@@ -155,8 +159,9 @@ pub struct Motion {
     /// try cycles astern, ahead, then astern and ahead turning each way
     /// (ADR-275).
     escape: u32,
-    /// The last search could not leave the start pose (ADR-275).
-    stranded: bool,
+    /// A completed refusal needs recovery: either no start exit, or an
+    /// exhausted reachable pocket. Saved in the former stranded flag.
+    needs_recovery: bool,
     recovery_head: i32,
     recovery_origin: [Fx; 2],
     next_plan: u32,
@@ -252,7 +257,7 @@ impl Motion {
             blocked_ticks: 0,
             escape_left: 0,
             escape: 0,
-            stranded: false,
+            needs_recovery: false,
             recovery_head: 0,
             recovery_origin: [Fx::from_int(at[0]), Fx::from_int(at[2])],
             next_plan: 0,
@@ -799,7 +804,7 @@ impl Motion {
                 // the direct sweep and frontier resume on the next tick.
                 self.hunt = Some(hunt);
                 self.blocked = false;
-                self.stranded = false;
+                self.needs_recovery = false;
                 self.dry = false;
             }
         }
@@ -828,7 +833,7 @@ impl Motion {
         // near it is refused without a search and retried as before.
         self.dry = plan.exhausted && plan.nodes > 0;
         self.blocked = plan.path.is_empty();
-        self.stranded = plan.stranded;
+        self.needs_recovery = plan.stranded || self.dry;
         self.last_plan = [plan.nodes, plan.poses];
         self.last_probe = [plan.scans, plan.samples];
         self.partial_path = plan.partial;
@@ -924,7 +929,7 @@ impl Motion {
         self.blocked_ticks = 0;
         self.escape_left = 0;
         self.escape = 0;
-        self.stranded = false;
+        self.needs_recovery = false;
         self.next_plan = 0;
     }
     /// The footprint the range probes with, for diagnostics and tests.
@@ -1215,7 +1220,7 @@ impl Motion {
         // A dry search is a block even if its tiny reachable pocket contains
         // several cells. Only recovery can change the next search start.
         // A search still walking is not a block: the hull is waiting.
-        if (self.stranded || self.dry)
+        if self.needs_recovery
             && self.hunt.is_none()
             && self.destination.is_some()
             && self.path.is_empty()
@@ -1323,7 +1328,7 @@ impl Motion {
         b.u32(self.blocked_ticks);
         b.u32(self.escape_left);
         b.u32(self.escape);
-        b.bool(self.stranded);
+        b.bool(self.needs_recovery);
         b.i32(self.recovery_head);
         b.u32(self.next_plan);
         for list in [&self.path, &self.route] {
@@ -1362,6 +1367,7 @@ impl Motion {
     }
     pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
         self.contact = None;
+        self.dry = false;
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),
@@ -1385,7 +1391,7 @@ impl Motion {
         self.blocked_ticks = s.u32();
         self.escape_left = s.u32();
         self.escape = s.u32();
-        self.stranded = s.bool();
+        self.needs_recovery = s.bool();
         self.recovery_head = s.i32();
         self.next_plan = s.u32();
         for list in [&mut self.path, &mut self.route] {
@@ -1722,21 +1728,138 @@ mod tests {
         );
     }
     #[test]
-    fn a_dry_reachable_pocket_starts_recovery_without_declaring_start_stranded() {
+    fn early_separation_matches_all_four_contact_axes() {
+        // Keep the former all-axis calculation as the bitwise oracle. This
+        // covers both separated pairs and the exact positive overlap used
+        // when already intersecting hulls try to move apart.
+        fn reference(a: Obstacle, b: Obstacle) -> Fx {
+            let axes = |head| {
+                let (c, s) = (angle::cos(head), angle::sin(head));
+                [[c, s], [s.neg(), c]]
+            };
+            let aa = axes(a.head);
+            let bb = axes(b.head);
+            let dot = |u: [Fx; 2], v: [Fx; 2]| u[0].mul(v[0]).add(u[1].mul(v[1]));
+            let delta = [b.pos[0].sub(a.pos[0]), b.pos[2].sub(a.pos[2])];
+            aa.iter()
+                .chain(&bb)
+                .map(|axis| {
+                    let radius = |basis: [[Fx; 2]; 2], half: [Fx; 2]| {
+                        dot(*axis, basis[0])
+                            .abs()
+                            .mul(half[0])
+                            .add(dot(*axis, basis[1]).abs().mul(half[1]))
+                    };
+                    radius(aa, a.half)
+                        .add(radius(bb, b.half))
+                        .sub(dot(delta, *axis).abs())
+                        .max(Fx::ZERO)
+                })
+                .min()
+                .unwrap()
+        }
+        let offsets = [-801, -600, -599, -300, -1, 0, 1, 300, 599, 600, 801];
+        let mut touching = 0;
+        let mut apart = 0;
+        for heading in (0..angle::FULL).step_by(4096) {
+            for other_heading in (0..angle::FULL).step_by(4096) {
+                for x in offsets {
+                    for z in offsets {
+                        let a = Obstacle {
+                            pos: [Fx::from_ratio(1, 3), Fx::from_int(16), Fx::ZERO],
+                            head: heading,
+                            half: [Fx::from_int(30), Fx::from_ratio(151, 10)],
+                        };
+                        let b = Obstacle {
+                            pos: [
+                                a.pos[0].add(Fx::from_ratio(x, 10)),
+                                Fx::ZERO,
+                                Fx::from_ratio(z, 10),
+                            ],
+                            head: other_heading,
+                            half: [Fx::from_int(30), Fx::from_ratio(99, 10)],
+                        };
+                        let expected = reference(a, b);
+                        touching += usize::from(expected > Fx::ZERO);
+                        apart += usize::from(expected == Fx::ZERO);
+                        assert_eq!(a.penetration(&b), expected);
+                        assert_eq!(b.penetration(&a), reference(b, a));
+                    }
+                }
+            }
+        }
+        assert!(touching > 1000 && apart > 1000);
+    }
+    #[test]
+    fn a_dry_reachable_pocket_resumes_recovery_after_loading() {
         let w = ground(0);
         let body = voxel::unit::tank();
         let mut m = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
         m.enabled = true;
         m.destination = Some([430, 300]);
-        m.dry = true;
-        m.stranded = false;
-        m.next_plan = 1000;
+        let plan = nav::vehicle::plan(
+            nav::vehicle::Probe::new(&w),
+            m.shape(&body),
+            [m.pos[0], m.pos[2]],
+            m.drive.head,
+            m.destination.unwrap(),
+            m.search(&w),
+            |p, _| {
+                (p[0].sub(Fx::from_int(200)).abs() <= Fx::from_int(8)
+                    && p[1].sub(Fx::from_int(300)).abs() <= Fx::from_int(8))
+                    || p[0] >= Fx::from_int(350)
+            },
+        );
+        assert!(plan.exhausted && plan.nodes > 1 && plan.path.is_empty());
+        assert!(!plan.stranded, "the search must leave its initial cell");
+        m.take_plan(plan);
+        m.next_plan = m.replan_after_search();
         let from = m.pos;
-        for tick in 0..80 {
+        let mut replicas = Vec::new();
+        let mut escaped = false;
+        for tick in 0..600 {
+            if [
+                0,
+                1,
+                m.navigation.recovery_ticks - 1,
+                m.navigation.recovery_ticks + 4,
+                90,
+            ]
+            .contains(&tick)
+            {
+                let mut bytes = Blob::new();
+                m.save(&mut bytes);
+                for stale_dry in [false, true] {
+                    let mut restored = Motion::new([200, 16, 300], RangeUnitKind::Tank, &body);
+                    restored.dry = stale_dry;
+                    assert!(restored.load(&mut Scan::new(&bytes.v)));
+                    assert!(!restored.dry, "load retained an old scratch result");
+                    replicas.push(restored);
+                }
+            }
             step(&mut m, &w, &body, &[], tick);
+            escaped |= m.escape_left > 0;
+            let mut expected = Blob::new();
+            m.save(&mut expected);
+            for restored in &mut replicas {
+                step(restored, &w, &body, &[], tick);
+                let mut actual = Blob::new();
+                restored.save(&mut actual);
+                assert!(
+                    expected.v == actual.v,
+                    "recovery diverged after loading at tick {tick}"
+                );
+            }
+            if m.destination.is_none() {
+                break;
+            }
         }
-        assert!(m.escape > 0);
+        assert!(escaped, "dry pocket never started recovery");
         assert_ne!(m.pos, from, "dry pocket stayed idle forever");
+        assert!(
+            m.destination.is_none(),
+            "recovered hull never reached its goal"
+        );
     }
 
     #[test]
@@ -2203,9 +2326,9 @@ mod tests {
         assert_eq!(old, Fx::ZERO);
         assert!(
             a.destination.is_none() && b.destination.is_none(),
-            "a {:?} path {:?} search {:?} stranded {} escape {} blocked {} dry {} plan {:?}; b {:?} path {:?} search {:?} stranded {} escape {} blocked {} dry {} plan {:?}",
-            a.pos, a.path, a.hunt, a.stranded,a.escape,a.blocked,a.dry,a.last_plan,
-            b.pos, b.path, b.hunt,b.stranded,b.escape,b.blocked,b.dry,b.last_plan
+            "a {:?} path {:?} search {:?} needs_recovery {} escape {} blocked {} dry {} plan {:?}; b {:?} path {:?} search {:?} needs_recovery {} escape {} blocked {} dry {} plan {:?}",
+            a.pos, a.path, a.hunt, a.needs_recovery,a.escape,a.blocked,a.dry,a.last_plan,
+            b.pos, b.path, b.hunt,b.needs_recovery,b.escape,b.blocked,b.dry,b.last_plan
         );
     }
     #[test]
