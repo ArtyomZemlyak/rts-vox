@@ -2620,7 +2620,12 @@ impl Settled {
     /// their support (ADR-291). Pieces on a hull's roof (ADR-293) are left
     /// out: they ride, they are not ground.
     fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
-        let mut want: Vec<[i32; 3]> = Vec::new();
+        if !fragments.iter().any(|f| f.resting) {
+            return Settled::default();
+        }
+        // Only membership is queried. Fragment insertion and contact order
+        // still follow the ordered fragment slice, not the hash table.
+        let mut want = std::collections::HashSet::<[i32; 3]>::new();
         let mut boxes = Vec::with_capacity(fragments.len());
         for f in fragments {
             let (low, high) = f.bounds();
@@ -2636,7 +2641,7 @@ impl Settled {
             for z in c0[2] - 1..=c1[2] + 1 {
                 for y in c0[1] - 1..=c1[1] + 1 {
                     for x in c0[0] - 1..=c1[0] + 1 {
-                        want.push([x, y, z]);
+                        want.insert([x, y, z]);
                     }
                 }
             }
@@ -2645,8 +2650,6 @@ impl Settled {
         if want.is_empty() {
             return out;
         }
-        want.sort_unstable();
-        want.dedup();
         for (i, f) in fragments.iter().enumerate() {
             if !f.resting {
                 continue;
@@ -2660,7 +2663,7 @@ impl Settled {
             for z in c0[2]..=c1[2] {
                 for y in c0[1]..=c1[1] {
                     for x in c0[0]..=c1[0] {
-                        if want.binary_search(&[x, y, z]).is_ok() {
+                        if want.contains(&[x, y, z]) {
                             out.cells.entry([x, y, z]).or_default().push(i as u32);
                             held = true;
                         }
