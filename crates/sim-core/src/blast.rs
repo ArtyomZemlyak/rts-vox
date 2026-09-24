@@ -7425,6 +7425,21 @@ mod tests {
         }
     }
     #[test]
+    fn viaduct_has_a_clear_underpass_and_a_destructible_span_and_pillar() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        assert_eq!(layout.zones.last().unwrap().name, "Эстакада");
+        assert!(gen.road_at(8100, 3500, 0));
+        assert_eq!(gen.material(8100, 40, 3500), 0);
+        assert_eq!(gen.material(8100, 95, 3500), 2);
+        assert_eq!(gen.material(8290, 42, 3490), 2);
+        assert_eq!(gen.material(8140, 96, 3490), 2);
+        for x in (7800..8280).step_by(8) {
+            let z = 3590 - (x - 7800) * 100 / 490;
+            assert_eq!(gen.material(x, 42, z), 0, "firing lane blocked at {x},{z}");
+        }
+    }
+    #[test]
     fn road_centrelines_do_not_run_through_authored_walls() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
         for road in &layout.roads {

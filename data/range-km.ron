@@ -21,6 +21,8 @@
         (name: "Лес и крутой склон", min: (6880,2000), max: (7720,2800), spawn: (6960,16,2110), target: (7500,24,2110),
             scenario: Some((title: "Лес и склон", description: "Бронебойный выстрел и патруль на крутом подъёме.", weapon: Kinetic, power_milli: 1000, patrols: true, shots: [(7500,24,2110)]))),
         (name: "Перекрёсток", min: (6430,1320), max: (7130,1840), spawn: (6540,16,1400), target: (6870,32,1640)),
+        (name: "Эстакада", min: (7660,3150), max: (8510,3980), spawn: (7800,16,3590), target: (8140,96,3490),
+            scenario: Some((title: "Эстакада под огнём", description: "Первый выстрел повреждает пролёт, второй проверяет правую опору.", weapon: Energy, power_milli: 1000, shots: [(8140,96,3490),(8290,42,3490)]))),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
@@ -81,6 +83,7 @@
         (width: 48, points: [(6750,1490),(8100,2600),(8100,3500),(8200,5300),(8500,7100),(8730,8800)]),
         (width: 44, points: [(1880,4120),(2020,3960),(2650,3960),(2900,4400),(3900,4700),(4780,5300)]),
         (width: 44, points: [(4780,5300),(4850,5580),(5050,5800),(5600,5900),(7100,6500),(8050,7500),(8730,8800)]),
+        (width: 36, points: [(8100,3500),(7970,3580),(7800,3590)]),
     ],
     blocks: [
         (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
@@ -264,6 +267,52 @@
         (min: (6770,16,1578), max: (6818,17,1582), material: 3),
         (min: (6790,16,1638), max: (6838,17,1642), material: 3),
         (min: (6890,16,1598), max: (6938,17,1602), material: 3),
+        // Midway through the long northern road: a service viaduct above the
+        // driving strip. The near pillar is the scenario target; every beam,
+        // wall and store is authored solid matter, so a hit can break it.
+        (min: (7905,0,3475), max: (7925,94,3535), material: 2),
+        (min: (8280,0,3484), max: (8292,94,3500), material: 2),
+        (min: (7910,78,3470), max: (7935,96,3540), material: 3),
+        (min: (8270,78,3470), max: (8305,96,3540), material: 3),
+        (min: (7920,90,3480), max: (8290,101,3530), material: 2),
+        (min: (7920,101,3475), max: (8290,108,3483), material: 3),
+        (min: (7920,101,3527), max: (8290,108,3535), material: 3),
+        (min: (7980,101,3485), max: (8030,104,3525), material: 3),
+        (min: (8170,101,3485), max: (8220,104,3525), material: 3),
+        // One side has a damaged parapet and fallen blocks; the silhouette
+        // is deliberately asymmetrical from the RTS camera.
+        (min: (8030,101,3475), max: (8130,108,3483), material: 0),
+        (min: (8040,16,3380), max: (8100,27,3410), material: 6),
+        (min: (8150,16,3390), max: (8190,36,3420), material: 6),
+        // Repair yard west of the road, with a hollow workshop and two open
+        // loading bays. The road spur reaches it without a solid crossing.
+        (min: (7680,16,3220), max: (7830,82,3380), material: 2),
+        (min: (7686,16,3226), max: (7824,76,3374), material: 0),
+        (min: (7824,16,3250), max: (7830,58,3290), material: 0),
+        (min: (7824,16,3310), max: (7830,58,3350), material: 0),
+        (min: (7690,82,3230), max: (7820,89,3365), material: 3),
+        (min: (7700,89,3240), max: (7735,102,3270), material: 2),
+        (min: (7790,89,3320), max: (7815,114,3345), material: 3),
+        (min: (7750,16,3440), max: (7780,36,3480), material: 5),
+        (min: (7800,16,3400), max: (7835,45,3430), material: 3),
+        // Opposite yard: material stores, partial concrete revetment and a
+        // relay tower. They are alternate targets once the span has fallen.
+        (min: (8380,16,3670), max: (8450,56,3730), material: 5),
+        (min: (8388,56,3678), max: (8442,62,3722), material: 3),
+        (min: (8420,16,3550), max: (8440,102,3570), material: 3),
+        (min: (8395,94,3545), max: (8465,103,3575), material: 3),
+        (min: (8340,16,3800), max: (8360,49,3890), material: 2),
+        (min: (8340,16,3920), max: (8360,49,3970), material: 2),
+        (min: (8340,45,3800), max: (8360,53,3970), material: 3),
+        (min: (8400,16,3840), max: (8440,28,3870), material: 6),
+        // Broken terraces frame the service yard without touching the road.
+        // Their stepped outlines also distinguish this stop from flat pads.
+        (min: (8350,0,3210), max: (8500,32,3380), material: 1),
+        (min: (8380,30,3230), max: (8480,49,3350), material: 6),
+        (min: (8410,48,3260), max: (8470,65,3320), material: 6),
+        (min: (7690,0,3800), max: (7810,30,3930), material: 1),
+        (min: (7720,28,3830), max: (7790,43,3890), material: 6),
+        (min: (7840,16,3830), max: (7880,27,3870), material: 6),
         // Battle field: low traverses, a breached redoubt and a landmark mast.
         (min: (3470,16,2240), max: (3590,34,2258), material: 1),
         (min: (3470,16,2540), max: (3590,34,2558), material: 1),
