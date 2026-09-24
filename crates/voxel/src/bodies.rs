@@ -139,6 +139,21 @@ impl Body {
         })
     }
 
+    /// Source digs can span several bounded world flushes. Neither gravity
+    /// nor another collapse pass may consume the same cells while they drain.
+    pub fn awaiting_removal(&self, w: &World) -> bool {
+        !self.resting
+            && self.fallen == 0
+            && self.voxels.iter().any(|v| {
+                let (x, y, z) = (
+                    self.ox + i64::from(v.x),
+                    self.oy + i64::from(v.y),
+                    self.oz + i64::from(v.z),
+                );
+                x >= 0 && y >= 0 && z >= 0 && w.solid(x as u32, y as u32, z as u32)
+            })
+    }
+
     /// Может ли тело опуститься на воксель. Тест XZ-столбцов (ADR-037).
     pub fn can_fall(&self, w: &World) -> bool {
         if self.oy <= 0 {
@@ -345,18 +360,9 @@ impl Bodies {
                 i += 1;
                 continue;
             }
-            if self.list[i].fallen == 0 {
-                // Detachment digs use the world's bounded edit queue. A
-                // large piece waits for its source cells to drain, without
-                // adding a second delay to ordinary one-tick detachment.
-                let b = &self.list[i];
-                if b.voxels.iter().any(|v| {
-                    let (x, y, z) = b.world_of(*v);
-                    x >= 0 && y >= 0 && z >= 0 && w.solid(x as u32, y as u32, z as u32)
-                }) {
-                    i += 1;
-                    continue;
-                }
+            if self.list[i].awaiting_removal(w) {
+                i += 1;
+                continue;
             }
             self.list[i].advance_tilt(self.gravity);
             if self.list[i].can_fall(w) {

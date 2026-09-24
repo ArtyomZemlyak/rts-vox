@@ -15,22 +15,22 @@ fn support<'a>(w: &World, b: &'a RangeBlock, roof: &RangeBlock) -> Support<'a> {
     let x1 = b.max[0].min(roof.max[0]).max(0) as u32;
     let z0 = b.min[2].max(roof.min[2]).max(0) as u32;
     let z1 = b.max[2].min(roof.max[2]).max(0) as u32;
-    let mut area = u32::MAX;
-    for y in b.min[1].max(0) as u32..roof.min[1].max(0) as u32 {
-        let mut section = 0;
-        for z in z0..z1 {
-            for x in x0..x1 {
-                section += u32::from(w.material(x, y, z) == b.material);
+    let mut area = 0;
+    // Follow each column to the world foundation, including material changes.
+    // A steel cap overlapping the deck is not an independent support when the
+    // concrete pier below it has been severed. Stop at the first gap so empty
+    // space below broad caps is cheap to reject.
+    for z in z0..z1 {
+        for x in x0..x1 {
+            if (0..roof.min[1] as u32).rev().all(|y| w.solid(x, y, z)) {
+                area += 1;
             }
-        }
-        if section < area {
-            area = section;
         }
     }
     Support {
         block: b,
         centre: [(x0 as i32 + x1 as i32) / 2, (z0 as i32 + z1 as i32) / 2],
-        area: area.min((x1 - x0) * (z1 - z0)),
+        area,
     }
 }
 
@@ -50,8 +50,10 @@ pub(super) fn fracture(
         let sx = roof.max[0] - roof.min[0];
         let sz = roof.max[2] - roof.min[2];
         let thick = roof.max[1] - roof.min[1];
-        if !(48..=256).contains(&sx)
-            || !(48..=256).contains(&sz)
+        // Long narrow spans use the same maximum cell budget as square roofs.
+        if !(48..=512).contains(&sx)
+            || !(48..=512).contains(&sz)
+            || sx * sz > 256 * 256
             || !(2..=12).contains(&thick)
             || roof.min[1] <= 8
         {
@@ -85,8 +87,8 @@ pub(super) fn fracture(
             .iter()
             .filter(|b| {
                 b.material != 0
-                    && b.max[1] == roof.min[1]
-                    && b.min[1] < b.max[1]
+                    && b.max[1] >= roof.min[1]
+                    && b.min[1] < roof.min[1]
                     && b.min[0] < roof.max[0]
                     && b.max[0] > roof.min[0]
                     && b.min[2] < roof.max[2]
@@ -125,11 +127,17 @@ pub(super) fn fracture(
             if dx * dx + dz * dz <= span * span {
                 continue;
             }
-            if bodies
-                .list
-                .iter()
-                .any(|b| b.ox == x0 as i64 && b.oy == roof.min[1] as i64 && b.oz == z0 as i64)
-            {
+            if bodies.list.iter().any(|b| {
+                b.fallen == 0
+                    && b.oy <= roof.min[1] as i64
+                    && (b.ox..b.ox + i64::from(b.sx)).contains(&i64::from(centre[0]))
+                    && (b.oz..b.oz + i64::from(b.sz)).contains(&i64::from(centre[1]))
+                    && b.voxels.iter().any(|v| {
+                        b.ox + i64::from(v.x) == i64::from(centre[0])
+                            && b.oy + i64::from(v.y) == i64::from(roof.min[1])
+                            && b.oz + i64::from(v.z) == i64::from(centre[1])
+                    })
+            }) {
                 continue;
             }
             let y = roof.min[1] as u32;
@@ -146,33 +154,73 @@ pub(super) fn fracture(
                     }
                 }
             }
-            if cells.is_empty() || !bodies.detach(w, &cells) {
+            if cells.is_empty() {
                 continue;
             }
-            let b = bodies.list.last_mut().unwrap();
-            // Rotate about the edge toward the surviving support.
-            if dx.abs() >= dz.abs() {
-                b.tilt(2, dx.signum());
-            } else {
-                b.tilt(1, dz.signum());
-            }
-            torn += 1;
-        }
-        // Once a corner tears free, a severed/overloaded column below it
-        // crushes along its height. Leaving its disconnected upper stump in
-        // the voxel world would make the new plate land in the same tick.
-        if torn > before_roof {
-            for s in supports.iter().filter(|s| s.area < needed) {
-                for y in s.block.min[1].max(0)..roof.min[1] {
-                    for z in s.block.min[2].max(roof.min[2])..s.block.max[2].min(roof.max[2]) {
-                        for x in s.block.min[0].max(roof.min[0])..s.block.max[0].min(roof.max[0]) {
-                            if w.material(x as u32, y as u32, z as u32) == s.block.material {
-                                w.queue_edit(Edit::dig(x as u32, y as u32, z as u32));
+            // Low fittings resting on this plate (parapets, surface panels)
+            // tear at the same seam. Connectivity alone would leave a long
+            // rail cantilevered from the surviving half after its deck fell.
+            // Bound both overhang and height; tall structures keep their own
+            // connectivity handling rather than enlarging this plate pass.
+            let foot = [
+                if x0 == roof.min[0] { x0 - 16 } else { x0 },
+                if x1 == roof.max[0] { x1 + 16 } else { x1 },
+                if z0 == roof.min[2] { z0 - 16 } else { z0 },
+                if z1 == roof.max[2] { z1 + 16 } else { z1 },
+            ];
+            for fitting in layout.blocks.iter().filter(|b| {
+                b.material != 0
+                    && b.min[1] == roof.max[1]
+                    && b.max[1] - b.min[1] <= 32
+                    && b.min[0] < x1
+                    && b.max[0] > x0
+                    && b.min[2] < z1
+                    && b.max[2] > z0
+            }) {
+                for yy in fitting.min[1]..fitting.max[1] {
+                    for zz in fitting.min[2].max(foot[2])..fitting.max[2].min(foot[3]) {
+                        for xx in fitting.min[0].max(foot[0])..fitting.max[0].min(foot[1]) {
+                            if w.material(xx as u32, yy as u32, zz as u32) == fitting.material {
+                                cells.push((xx as u32, yy as u32, zz as u32));
                             }
                         }
                     }
                 }
             }
+            cells.sort_unstable();
+            cells.dedup();
+            if torn == before_roof && bodies.list.len() < bodies.max_bodies {
+                // Queue crushed supports BEFORE the plate's source digs.
+                // The bounded drain preserves order within each chunk: its
+                // cap must clear before the plate above can start falling,
+                // otherwise it immediately bakes onto that pending stump.
+                for s in supports.iter().filter(|s| s.area < needed) {
+                    for y in s.block.min[1].max(0)..s.block.max[1].min(roof.max[1]) {
+                        for z in s.block.min[2].max(roof.min[2] - 16)
+                            ..s.block.max[2].min(roof.max[2] + 16)
+                        {
+                            for x in s.block.min[0].max(roof.min[0] - 16)
+                                ..s.block.max[0].min(roof.max[0] + 16)
+                            {
+                                if w.material(x as u32, y as u32, z as u32) == s.block.material {
+                                    w.queue_edit(Edit::dig(x as u32, y as u32, z as u32));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !bodies.detach(w, &cells) {
+                continue;
+            }
+            let b = bodies.list.last_mut().unwrap();
+            // Rotate about the edge toward the surviving support.
+            if dx.abs() >= dz.abs() {
+                b.tilt(2, -dx.signum());
+            } else {
+                b.tilt(1, dz.signum());
+            }
+            torn += 1;
         }
     }
     torn
@@ -185,7 +233,6 @@ mod tests {
     use voxel::Generator;
 
     struct Canopy {
-        mat: u16,
         blocks: Vec<RangeBlock>,
     }
     impl Generator for Canopy {
@@ -193,15 +240,11 @@ mod tests {
             if y < 5 {
                 return 1;
             }
-            if self
-                .blocks
+            self.blocks
                 .iter()
-                .any(|b| b.material == self.mat && b.contains([x as i32, y as i32, z as i32]))
-            {
-                self.mat
-            } else {
-                0
-            }
+                .rev()
+                .find(|b| b.contains([x as i32, y as i32, z as i32]))
+                .map_or(0, |b| b.material)
         }
     }
     fn fixture(mat: u16) -> (RangeLayout, World, Bodies) {
@@ -240,7 +283,6 @@ mod tests {
             160,
             100_000,
             Box::new(Canopy {
-                mat,
                 blocks: layout.blocks.clone(),
             }),
         );
@@ -254,6 +296,122 @@ mod tests {
         }
         w.flush();
     }
+    #[test]
+    fn long_bridge_counts_overlapping_piers_and_not_their_floating_caps() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.blocks = vec![
+            RangeBlock {
+                min: [40, 5, 43],
+                max: [60, 94, 103],
+                material: 2,
+            },
+            RangeBlock {
+                min: [415, 5, 52],
+                max: [427, 94, 68],
+                material: 2,
+            },
+            RangeBlock {
+                min: [45, 78, 38],
+                max: [70, 96, 108],
+                material: 3,
+            },
+            RangeBlock {
+                min: [405, 78, 38],
+                max: [440, 96, 108],
+                material: 3,
+            },
+            RangeBlock {
+                min: [55, 90, 48],
+                max: [425, 101, 98],
+                material: 3,
+            },
+        ];
+        let mut w = World::new(
+            512,
+            128,
+            160,
+            200_000,
+            Box::new(Canopy {
+                blocks: layout.blocks.clone(),
+            }),
+        );
+        let mut bodies = Bodies::new(16, Fx::from_ratio(20, 900));
+        let materials = |mat| match mat {
+            2 => Some((140, 240, 5)),
+            3 => Some((500, 785, 10)),
+            _ => None,
+        };
+        w.queue_dig(415, 30, 52);
+        w.flush();
+        let edits = w.edits().to_vec();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, materials),
+            0,
+            "a small chip must not break the intact span"
+        );
+        for z in 52..68 {
+            for x in 415..427 {
+                w.queue_dig(x, 30, z);
+            }
+        }
+        w.flush();
+        let edits = w.edits().to_vec();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, materials),
+            2,
+            "the severed pier and its steel cap must not support the right half"
+        );
+        while w.queued() > 0 {
+            w.flush();
+        }
+        for _ in 0..24 {
+            bodies.step(&mut w);
+        }
+        assert!(
+            bodies
+                .list
+                .iter()
+                .any(|b| b.fallen > 0 && b.tilt_angle.abs() > 100),
+            "the broken span must tip and descend"
+        );
+        let slab = bodies.list.iter().find(|b| b.tilt_axis == 2).unwrap();
+        let end_y = |x| {
+            slab.world_of(voxel::bodies::BodyVoxel {
+                x,
+                y: 0,
+                z: 0,
+                mat: 0,
+            })
+            .1
+        };
+        assert!(
+            end_y(slab.sx - 1) < end_y(0),
+            "free end must drop below the end next to the surviving pier"
+        );
+        assert_eq!(
+            w.material(350, 95, 60),
+            0,
+            "detached deck stayed in the world"
+        );
+    }
+    #[test]
+    fn exhausted_body_pool_keeps_the_plate_and_support_stump() {
+        let (layout, mut w, mut bodies) = fixture(2);
+        bodies.max_bodies = 0;
+        cut(&mut w, [40, 35]);
+        let edits = w.edits().to_vec();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, |_| Some((
+                140, 240, 5
+            ))),
+            0
+        );
+        assert_eq!(w.queued(), 0, "refused fracture destroyed its support");
+        assert_eq!(w.material(44, 45, 39), 2);
+        assert_eq!(w.material(60, 55, 45), 2);
+    }
+
     #[test]
     fn one_lost_concrete_support_tears_and_tips_a_corner() {
         let (layout, mut w, mut bodies) = fixture(2);

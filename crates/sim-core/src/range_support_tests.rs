@@ -626,6 +626,127 @@ fn losing_three_legs_lowers_the_actual_geometry_and_stops_the_drive() {
 }
 
 #[test]
+fn viaduct_loses_a_severed_half_with_rails_and_overlapping_caps() {
+    let base = scene(RangeUnitKind::Tank);
+    let authored = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    for split in [false, true] {
+        let mut layout = base.layout.clone().unwrap();
+        layout.size = [512, 128, 256];
+        layout.clear_min = [0, 0];
+        layout.clear_max = [512, 256];
+        layout.gun = [120, 16, 180];
+        layout.target = [425, 42, 58];
+        layout.units.clear();
+        // Use the real map's deck, piers, caps and parapets, translated into a
+        // small world. A gap reproduces the original independent-span report.
+        layout.blocks = authored
+            .blocks
+            .iter()
+            .filter(|b| {
+                b.min[0] >= 7905
+                    && b.max[0] <= 8305
+                    && b.min[2] >= 3470
+                    && b.max[2] <= 3540
+                    && b.max[1] >= 90
+            })
+            .cloned()
+            .map(|mut b| {
+                for p in [&mut b.min, &mut b.max] {
+                    p[0] -= 7865;
+                    p[2] -= 3432;
+                }
+                b
+            })
+            .collect();
+        if split {
+            layout.blocks.push(modding::range::RangeBlock {
+                min: [231, 90, 43],
+                max: [239, 109, 103],
+                material: 0,
+            });
+        }
+        let mut r = BlastRange::with_layout(base.config.clone(), layout).unwrap();
+        r.control();
+        // Warm the support graph first: the connectivity solver can then
+        // claim a wholly disconnected half before the bending pass sees it.
+        r.world.queue_dig(416, 20, 52);
+        for _ in 0..20 {
+            r.step();
+        }
+        assert!(
+            r.world.solid(350, 95, 60),
+            "minor chip collapsed an intact pier"
+        );
+        for x in 415..427 {
+            for z in 52..68 {
+                // A disconnected, perfectly vertical pier cut by one cell
+                // legitimately settles back onto its lower stump. Remove
+                // that pier for the free-fall case; the continuous bridge
+                // instead exercises bending failure after a thin cut.
+                let cut = if split { 16..78 } else { 30..31 };
+                for y in cut {
+                    r.world.queue_dig(x, y, z);
+                }
+            }
+        }
+        let mut tilted = false;
+        let mut fell = false;
+        let mut replay: Option<BlastRange> = None;
+        for step in 0..180 {
+            r.step();
+            if r.bodies
+                .list
+                .iter()
+                .any(|b| b.tilt_axis != 0 && b.awaiting_removal(&r.world))
+            {
+                assert!(
+                    r.bodies.list.len() <= 2,
+                    "source matter detached twice (split={split})"
+                );
+            }
+            if let Some(copy) = &mut replay {
+                copy.step();
+                assert_eq!(
+                    r.state_hash(),
+                    copy.state_hash(),
+                    "pending fracture replay at {step}"
+                );
+            }
+            if step == 1 {
+                replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+            }
+            if step == 8 {
+                replay = None;
+            }
+            tilted |= r.bodies.list.iter().any(|b| b.tilt_angle.abs() > 100);
+            fell |= r.bodies.list.iter().any(|b| b.fallen > 0);
+        }
+        assert!(
+            fell && (split || tilted),
+            "viaduct did not fall and tip (split={split})"
+        );
+        assert!(
+            !r.world.solid(350, 95, 60),
+            "deck still hangs (split={split})"
+        );
+        assert!(
+            !r.world.solid(350, 104, 100),
+            "parapet still hangs (split={split})"
+        );
+        assert!(
+            r.world.solid(120, 95, 60),
+            "supported half disappeared (split={split})"
+        );
+        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        for _ in 0..6 {
+            r.step();
+            replay.step();
+            assert_eq!(r.state_hash(), replay.state_hash());
+        }
+    }
+}
+
+#[test]
 fn unsupported_concrete_outlives_neither_a_small_particle_pool_nor_a_partial_edit_drain() {
     let base = scene(RangeUnitKind::Tank);
     let mut layout = base.layout.unwrap();

@@ -3508,6 +3508,9 @@ impl BlastRange {
         if (!self.collapse_backlog.is_empty() || self.collapse.pending())
             && !wave_working
             && self.matter.debris.claims() == 0
+            // Plate fracture also owns cells whose source digs are still
+            // draining. Do not detach a second body from that same matter.
+            && !self.bodies.list.iter().any(|b| b.awaiting_removal(&self.world))
         {
             self.collapse.set_max_body_cells(self.collapse_cap);
             let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
@@ -7428,12 +7431,12 @@ mod tests {
     fn viaduct_has_a_clear_underpass_and_a_destructible_span_and_pillar() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
         let gen = RangeTerrain::new(true, Some(layout.clone()));
-        assert_eq!(layout.zones.last().unwrap().name, "Эстакада");
+        assert!(layout.zones.iter().any(|zone| zone.name == "Эстакада"));
         assert!(gen.road_at(8100, 3500, 0));
         assert_eq!(gen.material(8100, 40, 3500), 0);
-        assert_eq!(gen.material(8100, 95, 3500), 2);
+        assert_eq!(gen.material(8100, 95, 3500), 3);
         assert_eq!(gen.material(8290, 42, 3490), 2);
-        assert_eq!(gen.material(8140, 96, 3490), 2);
+        assert_eq!(gen.material(8140, 96, 3490), 3);
         for x in (7800..8280).step_by(8) {
             let z = 3590 - (x - 7800) * 100 / 490;
             assert_eq!(gen.material(x, 42, z), 0, "firing lane blocked at {x},{z}");
@@ -7443,7 +7446,7 @@ mod tests {
     fn timber_depot_has_clear_access_and_two_material_targets() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
         let gen = RangeTerrain::new(true, Some(layout.clone()));
-        assert_eq!(layout.zones.last().unwrap().name, "Лесной склад");
+        assert!(layout.zones.iter().any(|zone| zone.name == "Лесной склад"));
         assert!(gen.road_at(8317, 6000, 0));
         assert!(gen.road_at(8140, 6010, 0));
         assert_eq!(gen.material(8317, 40, 6000), 0);

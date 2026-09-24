@@ -9,6 +9,46 @@ type Face = ([i32; 3], [f32; 3], [[f32; 3]; 4]);
 #[derive(Component)]
 pub struct FallingBody(u64);
 
+// Evaluate once while building the exposed faces, in the source's coordinates.
+// Grain and panel seams then travel with the slab instead of swimming across it
+// as it tilts. This adds no meshes, textures or per-frame colour work.
+fn surface_colour(mat: u16, source: [i64; 3], normal: [f32; 3]) -> [f32; 4] {
+    let noise = |p: [i64; 3]| {
+        let mut h = (p[0] as u32).wrapping_mul(0x8da6_b343)
+            ^ (p[1] as u32).wrapping_mul(0xd816_3841)
+            ^ (p[2] as u32).wrapping_mul(0xcb1a_b31f);
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x85eb_ca6b);
+        h ^= h >> 13;
+        (h & 1023) as f32 / 1023.0
+    };
+    let grain = noise(source);
+    let stain = noise(source.map(|v| v.div_euclid(18)));
+    let mut c = fragments::material_colour(mat);
+    let mut shade = 0.82 + grain * 0.18 + stain * 0.12;
+    if mat == 3 {
+        let y = source[1] + i64::from(normal[1] > 0.5);
+        let z = source[2] + i64::from(normal[2] > 0.5);
+        if z.rem_euclid(12) == 0 || y.rem_euclid(10) == 0 {
+            shade *= 0.48;
+        }
+        let rust = ((stain - 0.66) / 0.34).clamp(0.0, 1.0) * 0.6;
+        let oxide = look::to_linear([0.39, 0.25, 0.14]);
+        for k in 0..3 {
+            c[k] += (oxide[k] - c[k]) * rust;
+        }
+    } else if mat == 2 && grain > 0.94 {
+        shade *= 0.68;
+    } else if mat == 5 {
+        // Long grain along the trunk; no regular checkerboard on end faces.
+        shade *= 0.80 + noise([source[0], source[1].div_euclid(24), source[2]]) * 0.28;
+    }
+    for channel in &mut c[..3] {
+        *channel *= shade;
+    }
+    c
+}
+
 pub fn draw(
     mut commands: Commands,
     scene: Res<Scene>,
@@ -137,7 +177,12 @@ pub fn draw(
                 let start = pos.len() as u32;
                 pos.extend(corners);
                 nrm.extend([normal; 4]);
-                col.extend([fragments::material_colour(v.mat); 4]);
+                let source = [
+                    b.ox + i64::from(v.x),
+                    b.oy + i64::from(b.fallen) + i64::from(v.y),
+                    b.oz + i64::from(v.z),
+                ];
+                col.extend([surface_colour(v.mat, source, normal); 4]);
                 idx.extend([start, start + 1, start + 2, start, start + 2, start + 3]);
             }
         }
