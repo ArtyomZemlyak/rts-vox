@@ -419,6 +419,9 @@ mod tests {
             "the piece did not come down: {:?}",
             f.position
         );
+        let wrecks: Vec<_> = e.wrecks.iter().filter(|w| w.held == held).collect();
+        assert_eq!(wrecks.len(), 1, "the pushed piece lost its wreck marker");
+        assert_eq!(wrecks[0].x, f.position.x.to_int_trunc());
         assert!(e.balanced());
     }
 
@@ -1970,6 +1973,8 @@ impl Bursts {
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
         let mut merged = BTreeSet::new();
+        let mut stale_wrecks = BTreeSet::new();
+        let mut landed = Vec::new();
         // Waking pieces count against the flying budget like new ones; a
         // piece without room waits for its next turn.
         let mut room = (t.max_flying as usize)
@@ -1991,8 +1996,7 @@ impl Bursts {
                         if f.resting {
                             f.resting = false;
                             room -= 1;
-                            let held = f.held;
-                            e.wrecks.retain(|w| w.held != held);
+                            stale_wrecks.insert(f.held);
                         }
                         let push = Fx::from_ratio(t.push_pct as i32, 100);
                         let along = V3::new(h.vel[0], Fx::ZERO, h.vel[2]).scale(push);
@@ -2013,12 +2017,11 @@ impl Bursts {
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
                 room -= 1;
-                let held = f.held;
-                e.wrecks.retain(|w| w.held != held);
+                stale_wrecks.insert(f.held);
             }
             if advance_fragment(f, world, t, gravity, hulls, &settled, i as u32) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
-                e.wrecks.push(Wreck {
+                landed.push(Wreck {
                     held: f.held,
                     x: p[0],
                     y: p[1],
@@ -2050,10 +2053,17 @@ impl Bursts {
         }
         if !merged.is_empty() {
             self.fragments.retain(|f| !merged.contains(&f.held));
-            e.wrecks.retain(|w| !merged.contains(&w.held));
-            for held in merged {
-                e.ledger.retire_empty_debris(held);
-            }
+            stale_wrecks.extend(merged.iter().copied());
+        }
+        // A waking piece can land again in this same tick. Remove its old
+        // wreck once, then append the newly landed one in fragment order.
+        if !stale_wrecks.is_empty() {
+            e.wrecks.retain(|w| !stale_wrecks.contains(&w.held));
+        }
+        e.wrecks
+            .extend(landed.into_iter().filter(|w| !merged.contains(&w.held)));
+        for held in merged {
+            e.ledger.retire_empty_debris(held);
         }
         for f in self.corpses.values_mut() {
             if f.resting
