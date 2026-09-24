@@ -519,7 +519,29 @@ fn the_simulation_has_no_hash_containers() {
     for c in sim_closure(&ms) {
         for (f, text) in production_sources(&root().join("crates").join(&c)) {
             for (n, line) in text.lines().enumerate() {
-                if is_code(line) && (line.contains("HashMap") || line.contains("HashSet")) {
+                // SettledQueries only inserts and tests membership. Contact
+                // order comes from the fragment slice, never from this map.
+                // Keep the exception tied to its exact declaration so a
+                // different hash container still fails this architecture test.
+                let membership_only = f.ends_with(Path::new("crates/sim-core/src/burst.rs"))
+                    && line.trim()
+                        == "struct SettledQueries(std::collections::HashMap<[i32; 3], u64>);";
+                if membership_only {
+                    let methods = text
+                        .split_once("impl SettledQueries {")
+                        .and_then(|(_, rest)| rest.split_once("\nfn settled_cells"))
+                        .expect("SettledQueries methods");
+                    assert_eq!(
+                        methods.0.matches("self.0").count(),
+                        2,
+                        "SettledQueries must remain membership-only"
+                    );
+                    assert!(methods.0.contains("self.0.entry(") && methods.0.contains(".get("));
+                }
+                if is_code(line)
+                    && (line.contains("HashMap") || line.contains("HashSet"))
+                    && !membership_only
+                {
                     bad.push(format!("{}:{}: {}", f.display(), n + 1, line.trim()));
                 }
             }

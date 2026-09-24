@@ -29,7 +29,7 @@
 use crate::bodies::Bodies;
 use crate::topo::{batch_cannot_split, Chunk as TopoChunk, Components, SplitBufs, CS};
 use crate::{Edit, World};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 /// Потолок на размер одного отвала в вокселях **по умолчанию**.
 ///
@@ -141,6 +141,9 @@ struct ChunkNodes {
     cached_edges: usize,
     /// Derived adjacency by local component; avoids six face scans per visit.
     links: Vec<Vec<(u32, u16)>>,
+    /// Local components without direct bedrock or conservative face anchors.
+    /// A small mask handles the common one- or two-component terrain chunk.
+    missing_mask: u64,
     /// Сколько компонент в чанке.
     n: usize,
     /// Метки компонент на граничных ячейках грани — **отрезками**,
@@ -169,6 +172,7 @@ impl ChunkNodes {
         ChunkNodes {
             cached_edges: 0,
             links: Vec::new(),
+            missing_mask: 0,
             n: 0,
             faces: Default::default(),
             bedrock: Vec::new(),
@@ -176,12 +180,29 @@ impl ChunkNodes {
             ground: Default::default(),
         }
     }
+    fn without_direct_anchor<'a>(&'a self, overflow: &'a [u16]) -> impl Iterator<Item = u16> + 'a {
+        let mut bits = self.missing_mask;
+        std::iter::from_fn(move || {
+            if bits == 0 {
+                return None;
+            }
+            let lab = bits.trailing_zeros() as u16;
+            bits &= bits - 1;
+            Some(lab)
+        })
+        .chain(overflow.iter().copied())
+    }
 }
 
 pub struct CollapseLayer {
     comps: Components,
     // Derived graph summaries; authoritative nodes keep the same wire format.
-    needs_anchor: BTreeSet<u32>,
+    /// Derived membership by chunk index. Sequential scans are cheaper than
+    /// walking a tree for every collapse tick on the kilometre range.
+    needs_anchor: Vec<u8>,
+    anchor_count: usize,
+    /// Rare chunks with more than 64 components keep their extra labels here.
+    anchor_overflow: BTreeMap<u32, Vec<u16>>,
     edge_count: usize,
     chunks: Vec<Option<Box<TopoChunk>>>,
     nx: u32,
@@ -272,7 +293,9 @@ impl CollapseLayer {
         let n = (nx * ny * nz) as usize;
         CollapseLayer {
             comps: Components::new(),
-            needs_anchor: BTreeSet::new(),
+            needs_anchor: vec![0; n],
+            anchor_count: 0,
+            anchor_overflow: BTreeMap::new(),
             edge_count: 0,
             chunks: (0..n).map(|_| None).collect(),
             nx,
@@ -853,12 +876,30 @@ impl CollapseLayer {
         };
         self.edge_count = self.edge_count - nd.cached_edges + edges;
         nd.cached_edges = edges;
-        let missing = (0..nd.n)
-            .any(|lab| !nd.bedrock[lab] && !nd.ground.iter().any(|g| g.contains(&(lab as u16))));
-        if missing {
-            self.needs_anchor.insert(i as u32);
+        nd.missing_mask = 0;
+        let mut overflow = Vec::new();
+        for lab in 0..nd.n {
+            if nd.bedrock[lab] || nd.ground.iter().any(|g| g.contains(&(lab as u16))) {
+                continue;
+            }
+            if lab < 64 {
+                nd.missing_mask |= 1u64 << lab;
+            } else {
+                overflow.push(lab as u16);
+            }
+        }
+        let missing = nd.missing_mask != 0 || !overflow.is_empty();
+        if overflow.is_empty() {
+            self.anchor_overflow.remove(&(i as u32));
         } else {
-            self.needs_anchor.remove(&(i as u32));
+            self.anchor_overflow.insert(i as u32, overflow);
+        }
+        if missing && self.needs_anchor[i] == 0 {
+            self.needs_anchor[i] = 1;
+            self.anchor_count += 1;
+        } else if !missing && self.needs_anchor[i] != 0 {
+            self.needs_anchor[i] = 0;
+            self.anchor_count -= 1;
         }
     }
 
@@ -870,18 +911,24 @@ impl CollapseLayer {
         self.walk.clear();
         self.unsupported_chunks.clear();
         self.component_roots.resize(self.reached.len(), 0);
-        for &ci in &self.needs_anchor {
-            let i = ci as usize;
+        for (i, &candidate) in self.needs_anchor.iter().enumerate() {
+            if candidate == 0 {
+                continue;
+            }
             if self.stale[i] {
                 continue;
             }
             let base = self.base[i] as usize;
             let nd = self.nodes[i].as_ref().expect("anchor cache");
-            self.reached[base..base + nd.n].copy_from_slice(&nd.bedrock);
-            for face in &nd.ground {
-                for &lab in face {
-                    self.reached[base + lab as usize] = true;
-                }
+            let overflow = if nd.n > 64 {
+                self.anchor_overflow
+                    .get(&(i as u32))
+                    .map_or(&[][..], Vec::as_slice)
+            } else {
+                &[][..]
+            };
+            for lab in nd.without_direct_anchor(overflow) {
+                self.reached[base + lab as usize] = false;
             }
         }
         st.nodes = st.nodes.max(self.reached.len());
@@ -891,9 +938,19 @@ impl CollapseLayer {
         // Visit only the remaining connected components of this undirected
         // graph, instead of expanding every grounded terrain node each tick.
         let mut seen = vec![false; self.reached.len()];
-        for &ci in &self.needs_anchor {
-            let start_chunk = ci as usize;
-            for start_lab in 0..self.nodes[start_chunk].as_ref().expect("anchor cache").n {
+        for (start_chunk, &candidate) in self.needs_anchor.iter().enumerate() {
+            if candidate == 0 {
+                continue;
+            }
+            let ci = start_chunk as u32;
+            let nd = self.nodes[start_chunk].as_ref().expect("anchor cache");
+            let overflow = if nd.n > 64 {
+                self.anchor_overflow.get(&ci).map_or(&[][..], Vec::as_slice)
+            } else {
+                &[][..]
+            };
+            for start_lab in nd.without_direct_anchor(overflow) {
+                let start_lab = start_lab as usize;
                 let start = self.base[start_chunk] as usize + start_lab;
                 if self.reached[start] || seen[start] {
                     continue;
@@ -1153,7 +1210,11 @@ impl CollapseLayer {
         if let Some(nd) = self.nodes[i].take() {
             self.edge_count -= nd.cached_edges;
         }
-        self.needs_anchor.remove(&(i as u32));
+        if self.needs_anchor[i] != 0 {
+            self.needs_anchor[i] = 0;
+            self.anchor_count -= 1;
+        }
+        self.anchor_overflow.remove(&(i as u32));
         if self.stale[i] {
             self.stale[i] = false;
             self.pending.retain(|&x| x as usize != i);
@@ -1163,7 +1224,7 @@ impl CollapseLayer {
     /// Память графа компонент — она растёт с числом тронутых чанков
     /// и обязана быть видна.
     pub fn graph_bytes(&self) -> usize {
-        let mut n = 0;
+        let mut n = self.needs_anchor.capacity();
         for nd in self.nodes.iter().flatten() {
             n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
             n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
@@ -1175,6 +1236,11 @@ impl CollapseLayer {
                 .map(|l| l.capacity() * std::mem::size_of::<(u32, u16)>())
                 .sum::<usize>();
         }
+        n += self
+            .anchor_overflow
+            .values()
+            .map(|v| v.capacity() * std::mem::size_of::<u16>() + 48)
+            .sum::<usize>();
         n
     }
 
@@ -1186,7 +1252,7 @@ impl CollapseLayer {
         [
             self.known.len(),
             self.reached.len(),
-            self.needs_anchor.len(),
+            self.anchor_count,
             self.edge_count,
         ]
     }
@@ -1307,7 +1373,9 @@ impl CollapseLayer {
                 None
             };
         }
-        self.needs_anchor.clear();
+        self.needs_anchor.fill(0);
+        self.anchor_count = 0;
+        self.anchor_overflow.clear();
         self.edge_count = 0;
         for i in 0..self.nodes.len() {
             if let Some(nd) = self.nodes[i].as_mut() {
@@ -1513,7 +1581,9 @@ mod tests {
         };
         for round in 0..256 {
             c.known.clear();
-            c.needs_anchor.clear();
+            c.needs_anchor.fill(0);
+            c.anchor_count = 0;
+            c.anchor_overflow.clear();
             c.edge_count = 0;
             for i in 0..c.nodes.len() {
                 let mut nd = Box::new(ChunkNodes::new());
@@ -1579,6 +1649,42 @@ mod tests {
             restored.save(&mut after);
             assert_eq!(blob.v, after.v, "derived groups are not serialized");
         }
+    }
+
+    #[test]
+    fn derived_anchors_cover_labels_beyond_the_inline_mask_after_loading() {
+        let w = World::new(32, 32, 32, 1000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut nd = Box::new(ChunkNodes::new());
+        nd.n = 70;
+        nd.bedrock = vec![false; nd.n];
+        nd.bedrock[3] = true;
+        nd.ground[0].push(68);
+        c.nodes[0] = Some(nd);
+        c.known.push(0);
+        c.rebuild_index();
+        c.cache_nodes(0);
+        assert_eq!(c.anchor_count, 1);
+        assert_eq!(
+            c.anchor_overflow.get(&0).unwrap().as_slice(),
+            &[64, 65, 66, 67, 69]
+        );
+        c.resolve(&mut CollapseStats::default());
+        let expected = c.reached.clone();
+        let mut reference = CollapseStats::default();
+        c.resolve_reference(&mut reference);
+        assert_eq!(c.reached, expected);
+        assert_unsupported_groups(&c);
+        let mut bytes = fx::blob::Blob::new();
+        c.save(&mut bytes);
+        let mut restored = CollapseLayer::new(&w);
+        assert!(restored.load(&mut fx::blob::Scan::new(&bytes.v)));
+        assert_eq!(restored.graph_size(), c.graph_size());
+        restored.resolve(&mut CollapseStats::default());
+        assert_eq!(restored.reached, expected);
+        let mut check = fx::blob::Blob::new();
+        restored.save(&mut check);
+        assert_eq!(check.v, bytes.v);
     }
 
     /// Мост: столб от дна до `DECK`, от него настил поперёк всей карты.
