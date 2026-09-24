@@ -228,7 +228,6 @@ fn a_convoy_contact_uses_its_closing_speed() {
 }
 
 #[test]
-#[ignore = "P-54: simultaneous head-on driving contact still depends on unit slot order"]
 fn head_on_driving_contact_is_slot_independent() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();

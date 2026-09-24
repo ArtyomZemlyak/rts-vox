@@ -3037,9 +3037,10 @@ impl BlastRange {
                     .min(self.shield_tuning.capacity);
             }
         }
-        // This small range commits motion in stable slot order. Later actors
-        // see accepted positions, so two approaching tanks cannot each consume
-        // the same free gap between the beginning and end of the tick.
+        // Commit motion in stable spatial order. Later actors see accepted
+        // positions, so two approaching tanks cannot each consume the same
+        // free gap. Physical contact must not depend on which unit was placed
+        // into the first battle slot.
         let before: Vec<[Fx; 3]> = self.units.iter().map(|u| u.motion.pos).collect();
         let gun_before = self.gun.motion.pos;
         let mut positions: Vec<_> = self
@@ -3053,7 +3054,13 @@ impl BlastRange {
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
         let mut contacts = Vec::new();
-        for (id, u) in self.units.iter_mut().enumerate() {
+        let mut motion_order: Vec<_> = (0..self.units.len()).collect();
+        motion_order.sort_unstable_by_key(|&id| {
+            let p = self.units[id].motion.pos;
+            (p[0], p[2], id)
+        });
+        for id in motion_order {
+            let u = &mut self.units[id];
             u.motion.allow_start(starts > 0);
             {
                 let others: Vec<_> = positions
