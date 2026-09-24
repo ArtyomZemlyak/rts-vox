@@ -1461,7 +1461,9 @@ fn advance(
         scene.frame += 1;
         let terrain_started = std::time::Instant::now();
         apply_terrain(&scene.sim, &mut gas, &unit_start);
+        let occupancy_started = std::time::Instant::now();
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
+        profile.measure(3, occupancy_started.elapsed());
         profile.measure(1, terrain_started.elapsed());
         if before.is_none() {
             if let Some(at) = scene.sim.impact {

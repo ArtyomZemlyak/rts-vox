@@ -14,6 +14,8 @@ pub struct Visual {
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,
+    /// Reuse the merged occupancy allocation from the previous tick.
+    scratch: Vec<usize>,
     #[cfg(test)]
     occupancy_rebuilds: usize,
     cached: Vec<Occupied>,
@@ -251,7 +253,9 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
         visual.cached.clear();
         visual.window = Some(*window);
     }
-    let mut next = Vec::with_capacity(visual.occupied.len());
+    let mut next = std::mem::take(&mut visual.scratch);
+    next.clear();
+    next.reserve(visual.occupied.len());
     for (id, u) in sim
         .units
         .iter()
@@ -270,27 +274,49 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
             {
                 visual.occupancy_rebuilds += 1;
             }
-            let mut cells = Vec::new();
+            let mut cells = visual
+                .cached
+                .get_mut(id)
+                .map_or_else(Vec::new, |old| std::mem::take(&mut old.cells));
+            cells.clear();
             unit_cells(u, window, &mut cells);
-            let value = Occupied {
-                turret_delta: u.turret_delta,
-                pose: u.pose,
-                segments: u.seg_frames.clone(),
-                revision: u.revision,
-                root_bits: u.body.vol.cols.clone(),
-                segment_bits: u
-                    .body
-                    .segments
-                    .iter()
-                    .map(|s| s.body.vol.cols.clone())
-                    .collect(),
-                gone: u.seg_gone.clone(),
-                cells,
-            };
             if id == visual.cached.len() {
-                visual.cached.push(value);
+                visual.cached.push(Occupied {
+                    turret_delta: u.turret_delta,
+                    pose: u.pose,
+                    segments: u.seg_frames.clone(),
+                    revision: u.revision,
+                    root_bits: u.body.vol.cols.clone(),
+                    segment_bits: u
+                        .body
+                        .segments
+                        .iter()
+                        .map(|s| s.body.vol.cols.clone())
+                        .collect(),
+                    gone: u.seg_gone.clone(),
+                    cells,
+                });
             } else {
-                visual.cached[id] = value;
+                let old = &mut visual.cached[id];
+                old.turret_delta = u.turret_delta;
+                old.pose = u.pose;
+                old.segments.clone_from(&u.seg_frames);
+                // Turning or driving changes the shadow cells, but leaves
+                // packed body geometry intact. Preserve its cached vectors
+                // until a damage revision actually changes.
+                if old.revision != u.revision {
+                    old.root_bits.clone_from(&u.body.vol.cols);
+                    if old.segment_bits.len() != u.body.segments.len() {
+                        old.segment_bits
+                            .resize_with(u.body.segments.len(), Vec::new);
+                    }
+                    for (bits, segment) in old.segment_bits.iter_mut().zip(&u.body.segments) {
+                        bits.clone_from(&segment.body.vol.cols);
+                    }
+                    old.gone.clone_from(&u.seg_gone);
+                }
+                old.revision = u.revision;
+                old.cells = cells;
             }
         }
         visual.cached[id].revision = u.revision;
@@ -305,6 +331,7 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     let shifted = v.window != Some(window);
     let next = cached_cells(sim, &window, v);
     if !shifted && next == v.occupied {
+        v.scratch = next;
         return;
     }
     let mut dirty = Vec::new();
@@ -357,7 +384,7 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     }
     gas.terrain_dirty.extend(spans);
     gas.terrain_revision += 1;
-    v.occupied = next;
+    v.scratch = std::mem::replace(&mut v.occupied, next);
 }
 pub fn animate(
     scene: Res<Scene>,

@@ -37,7 +37,7 @@ fn main() {
     sim.start_battle().unwrap();
     let mut samples = Vec::new();
     let mut peak_rounds = 0;
-    let mut phases = std::collections::BTreeMap::<&str, u128>::new();
+    let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
     let args: Vec<_> = std::env::args().collect();
     let ticks = args
         .windows(2)
@@ -51,8 +51,7 @@ fn main() {
             let now = Instant::now();
             let elapsed = now.duration_since(last).as_micros();
             last = now;
-            let peak = phases.entry(phase).or_default();
-            *peak = (*peak).max(elapsed);
+            phases.entry(phase).or_default().push(elapsed);
         });
         samples.push(start.elapsed().as_micros());
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
@@ -93,7 +92,13 @@ fn main() {
             u.at
         );
     }
-    for (name, us) in phases {
-        println!("phase={name} max_us={us}");
+    for (name, mut values) in phases {
+        values.sort_unstable();
+        println!(
+            "phase={name} p95_us={} p99_us={} max_us={}",
+            values[values.len() * 95 / 100],
+            values[values.len() * 99 / 100],
+            values[values.len() - 1]
+        );
     }
 }

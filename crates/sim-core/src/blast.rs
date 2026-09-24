@@ -1424,23 +1424,11 @@ impl Explosion {
                 dented[(cell[2] as usize * n + cell[1] as usize) * n + cell[0] as usize] = true;
             }
         }
-        // Air above a coarse column's highest solid cell needs no material
-        // queries. This ceiling reads authoritative occupancy, including edits.
-        let mut ceilings = vec![0u32; n * n];
-        for z in 0..n {
-            for x in 0..n {
-                for dz in 0..c.cell_units {
-                    for dx in 0..c.cell_units {
-                        let wx = origin[0] + x as i32 * c.cell_units + dx;
-                        let wz = origin[2] + z as i32 * c.cell_units + dz;
-                        if wx >= 0 && wz >= 0 && wx < w.nx as i32 && wz < w.nz as i32 {
-                            ceilings[z * n + x] =
-                                ceilings[z * n + x].max(w.column_ceiling(wx as u32, wz as u32));
-                        }
-                    }
-                }
-            }
-        }
+        // A sliced capture visits only part of the sphere this tick. Resolve
+        // an authoritative column ceiling when its first reachable cell needs
+        // terrain, then share it across heights in this call. An unvisited
+        // column (or one beyond the sphere) costs no occupancy queries.
+        let mut ceilings = vec![u32::MAX; n * n];
         let maximum = c
             .soil_resistance
             .max(c.concrete_resistance)
@@ -1478,28 +1466,43 @@ impl Explosion {
             }
             let look = dented[(z * n + y) * n + x];
             let mut r = 0;
-            if p[1] < ceilings[z * n + x] as i32 && end[1] >= 0 {
-                let x0 = p[0].max(0);
-                let x1 = (end[0] + 1).min(w.nx as i32);
-                'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
-                    for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
-                        if x1 <= x0 {
-                            continue;
+            if p[1] < w.ny as i32 && end[1] >= 0 {
+                let ceiling = &mut ceilings[z * n + x];
+                if *ceiling == u32::MAX {
+                    *ceiling = 0;
+                    for dz in 0..c.cell_units {
+                        for dx in 0..c.cell_units {
+                            let wx = p[0] + dx;
+                            let wz = p[2] + dz;
+                            if wx >= 0 && wz >= 0 && wx < w.nx as i32 && wz < w.nz as i32 {
+                                *ceiling = (*ceiling).max(w.column_ceiling(wx as u32, wz as u32));
+                            }
                         }
-                        let mut bits =
-                            w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
-                        while bits != 0 {
-                            let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
-                            bits &= bits - 1;
-                            let work = material_work(material_cached(w, &mut cursor, q), c);
-                            let dent = if look {
-                                dents.get(&q).copied().unwrap_or(0)
-                            } else {
-                                0
-                            };
-                            r = r.max(work.saturating_sub(dent));
-                            if r == maximum {
-                                break 'terrain;
+                    }
+                }
+                if p[1] < *ceiling as i32 {
+                    let x0 = p[0].max(0);
+                    let x1 = (end[0] + 1).min(w.nx as i32);
+                    'terrain: for wz in p[2].max(0)..(end[2] + 1).min(w.nz as i32) {
+                        for wy in p[1].max(0)..(end[1] + 1).min(w.ny as i32) {
+                            if x1 <= x0 {
+                                continue;
+                            }
+                            let mut bits =
+                                w.solid_bits(x0 as u32, wy as u32, wz as u32, (x1 - x0) as u32);
+                            while bits != 0 {
+                                let q = [x0 + bits.trailing_zeros() as i32, wy, wz];
+                                bits &= bits - 1;
+                                let work = material_work(material_cached(w, &mut cursor, q), c);
+                                let dent = if look {
+                                    dents.get(&q).copied().unwrap_or(0)
+                                } else {
+                                    0
+                                };
+                                r = r.max(work.saturating_sub(dent));
+                                if r == maximum {
+                                    break 'terrain;
+                                }
                             }
                         }
                     }
