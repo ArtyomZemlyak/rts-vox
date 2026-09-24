@@ -143,13 +143,60 @@ fn local_in(body: &UnitBody, p: [i32; 3], pose: &crate::damage::Frame) -> Option
         .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
         .then_some(q.map(|v| v as usize))
 }
+/// Exact integer-point form of `Frame::local(p + 0.5)`. The integer part of
+/// each world coordinate contributes `p * axis` without a Q32 multiply;
+/// the fractional offset and frame translation are constant for this pose.
+struct LocalMap {
+    base_xz: [i32; 2],
+    axes: [[i64; 3]; 3],
+    offset: [i64; 3],
+    scale: Fx,
+    centre: [Fx; 3],
+}
+impl LocalMap {
+    fn new(frame: &crate::damage::Frame) -> Self {
+        let base = [frame.base.x.raw(), frame.base.y.raw(), frame.base.z.raw()];
+        let bias = base.map(|v| (1i64 << 31).wrapping_sub(v));
+        let axes =
+            [frame.x, frame.y, frame.z].map(|axis| [axis.x.raw(), axis.y.raw(), axis.z.raw()]);
+        let offset = axes.map(|axis| {
+            (0..3).fold(0i64, |sum, a| {
+                sum.wrapping_add(((i128::from(bias[a]) * i128::from(axis[a])) >> 32) as i64)
+            })
+        });
+        Self {
+            base_xz: [frame.base.x.to_int_trunc(), frame.base.z.to_int_trunc()],
+            axes,
+            offset,
+            scale: frame.scale,
+            centre: frame.centre,
+        }
+    }
+    #[inline]
+    fn local_in(&self, body: &UnitBody, p: [i32; 3]) -> Option<[usize; 3]> {
+        if (p[0] - self.base_xz[0]).abs() > 80 || (p[2] - self.base_xz[1]).abs() > 80 {
+            return None;
+        }
+        let q = std::array::from_fn::<_, 3, _>(|a| {
+            let dot = (0..3).fold(self.offset[a], |sum, b| {
+                sum.wrapping_add(i64::from(p[b]).wrapping_mul(self.axes[a][b]))
+            });
+            (Fx(dot).mul(self.scale).add(self.centre[a]).raw() >> 32) as i32
+        });
+        let size = [body.vol.nx, body.vol.ny, body.vol.nz];
+        (0..3)
+            .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
+            .then_some(q.map(|v| v as usize))
+    }
+}
 /// Derived broad phase for a batch of voxel queries in one (possibly frozen)
 /// pose. Damage is read live; only transforms and enclosing boxes are cached.
 struct HitFrames {
-    root: crate::damage::Frame,
+    root: LocalMap,
     turret: crate::damage::Frame,
+    turret_map: LocalMap,
     shared_root: bool,
-    segments: Vec<crate::damage::Frame>,
+    segments: Vec<LocalMap>,
     boxes: Vec<([i32; 3], [i32; 3])>,
 }
 impl HitFrames {
@@ -180,22 +227,25 @@ impl HitFrames {
                 (lo, hi)
             })
             .collect();
+        let turret = crate::damage::turned(&root, delta, 0);
         Self {
-            root,
-            turret: crate::damage::turned(&root, delta, 0),
+            root: LocalMap::new(&root),
+            turret,
+            turret_map: LocalMap::new(&turret),
             shared_root: delta == 0,
-            segments: segments.to_vec(),
+            segments: segments.iter().map(LocalMap::new).collect(),
             boxes,
         }
     }
     fn hit(&self, u: &RangeUnit, p: [i32; 3]) -> Option<(usize, [usize; 3])> {
-        let cell = local_in(&u.body, p, &self.root);
+        let cell = self.root.local_in(&u.body, p);
         let cell = if self.shared_root {
             cell
         } else {
             cell.filter(|c| c[1] < usize::from(u.body.turret_y))
                 .or_else(|| {
-                    local_in(&u.body, p, &self.turret)
+                    self.turret_map
+                        .local_in(&u.body, p)
                         .filter(|c| c[1] >= usize::from(u.body.turret_y))
                 })
         };
@@ -217,7 +267,7 @@ impl HitFrames {
             {
                 continue;
             }
-            if let Some(c) = local_in(&seg.body, p, frame) {
+            if let Some(c) = frame.local_in(&seg.body, p) {
                 if seg.body.vol.get(c[0], c[1], c[2]) {
                     return Some((i + 1, c));
                 }
@@ -3815,6 +3865,44 @@ impl Explosion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_local_map_matches_frame_at_integer_voxels() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let unit = RangeUnit::of_kind(kind, [128, 16, 336]);
+            let frames = std::iter::once((&unit.body, unit.pose))
+                .chain(std::iter::once((
+                    &unit.body,
+                    crate::damage::turned(&unit.pose, 2713, 0),
+                )))
+                .chain(
+                    unit.body
+                        .segments
+                        .iter()
+                        .zip(&unit.seg_frames)
+                        .map(|(seg, frame)| (&seg.body, *frame)),
+                );
+            for (body, frame) in frames {
+                let map = LocalMap::new(&frame);
+                let centre = [
+                    frame.base.x.to_int_trunc(),
+                    frame.base.y.to_int_trunc(),
+                    frame.base.z.to_int_trunc(),
+                ];
+                for dz in (-20..=20).step_by(2) {
+                    for dy in (-10..=20).step_by(2) {
+                        for dx in (-20..=20).step_by(2) {
+                            let p = [centre[0] + dx, centre[1] + dy, centre[2] + dz];
+                            assert_eq!(
+                                map.local_in(body, p),
+                                local_in(body, p, &frame),
+                                "{kind:?} {p:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn contact_uses_closing_speed_between_two_moving_hulls() {
         let source = [Fx::ZERO; 3];
