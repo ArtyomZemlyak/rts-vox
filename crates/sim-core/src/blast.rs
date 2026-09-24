@@ -177,16 +177,21 @@ impl LocalMap {
         if (p[0] - self.base_xz[0]).abs() > 80 || (p[2] - self.base_xz[1]).abs() > 80 {
             return None;
         }
-        let q = std::array::from_fn::<_, 3, _>(|a| {
+        let mut q = [0; 3];
+        let size = [body.vol.nx, body.vol.ny, body.vol.nz];
+        // Most samples above or below the root need no horizontal mapping.
+        // Keep each accepted coordinate's original rounded arithmetic.
+        for a in [1, 0, 2] {
             let dot = (0..3).fold(self.offset[a], |sum, b| {
                 sum.wrapping_add(i64::from(p[b]).wrapping_mul(self.axes[a][b]))
             });
-            (Fx(dot).mul(self.scale).add(self.centre[a]).raw() >> 32) as i32
-        });
-        let size = [body.vol.nx, body.vol.ny, body.vol.nz];
-        (0..3)
-            .all(|a| q[a] >= 0 && q[a] < size[a] as i32)
-            .then_some(q.map(|v| v as usize))
+            let value = (Fx(dot).mul(self.scale).add(self.centre[a]).raw() >> 32) as i32;
+            if value < 0 || value >= size[a] as i32 {
+                return None;
+            }
+            q[a] = value as usize;
+        }
+        Some(q)
     }
 }
 /// Derived broad phase for a batch of voxel queries in one (possibly frozen)
@@ -238,6 +243,30 @@ impl HitFrames {
         }
     }
     fn hit(&self, u: &RangeUnit, p: [i32; 3]) -> Option<(usize, [usize; 3])> {
+        self.hit_parts(u, p, 0..self.boxes.len().min(u.body.segments.len()))
+    }
+    /// The same segment shortlist serves every voxel of a captured wave
+    /// cell. Retain source order and the point test in `hit_parts`.
+    fn parts_in(&self, u: &RangeUnit, lo: [i32; 3], hi: [i32; 3], out: &mut Vec<usize>) {
+        out.clear();
+        out.extend(
+            self.boxes
+                .iter()
+                .take(u.body.segments.len())
+                .enumerate()
+                .filter_map(|(i, (p, end))| {
+                    (!u.seg_gone.get(i).copied().unwrap_or(false)
+                        && (0..3).all(|a| hi[a] >= p[a] && lo[a] <= end[a]))
+                    .then_some(i)
+                }),
+        );
+    }
+    fn hit_parts(
+        &self,
+        u: &RangeUnit,
+        p: [i32; 3],
+        parts: impl IntoIterator<Item = usize>,
+    ) -> Option<(usize, [usize; 3])> {
         let cell = self.root.local_in(&u.body, p);
         let cell = if self.shared_root {
             cell
@@ -254,20 +283,15 @@ impl HitFrames {
                 return Some((0, c));
             }
         }
-        for (i, ((seg, frame), (lo, hi))) in u
-            .body
-            .segments
-            .iter()
-            .zip(&self.segments)
-            .zip(&self.boxes)
-            .enumerate()
-        {
+        for i in parts {
+            let (lo, hi) = self.boxes[i];
             if u.seg_gone.get(i).copied().unwrap_or(false)
                 || (0..3).any(|a| p[a] < lo[a] || p[a] > hi[a])
             {
                 continue;
             }
-            if let Some(c) = frame.local_in(&seg.body, p) {
+            let seg = &u.body.segments[i];
+            if let Some(c) = self.segments[i].local_in(&seg.body, p) {
                 if seg.body.vol.get(c[0], c[1], c[2]) {
                     return Some((i + 1, c));
                 }
@@ -1503,6 +1527,7 @@ impl Explosion {
             / 1000)
             .clamp(1, 1_000_000) as u32;
         let mut cursor = World::mat_cursor();
+        let mut parts = Vec::new();
         let mut spent = 0;
         let mut next = self.captured;
         while next < cells && spent < budget {
@@ -1579,10 +1604,14 @@ impl Explosion {
                 if (0..3).any(|a| end[a] < lo[a] || p[a] > hi[a]) {
                     continue;
                 }
+                query.parts_in(u, p, end, &mut parts);
                 for wz in p[2].max(lo[2])..=end[2].min(hi[2]) {
                     for wy in p[1].max(lo[1])..=end[1].min(hi[1]) {
                         for wx in p[0].max(lo[0])..=end[0].min(hi[0]) {
-                            r = r.max(u.hit_resistance(query.hit(u, [wx, wy, wz]), c));
+                            r = r.max(u.hit_resistance(
+                                query.hit_parts(u, [wx, wy, wz], parts.iter().copied()),
+                                c,
+                            ));
                             if r >= unit_maximum {
                                 break 'bodies;
                             }
@@ -5812,17 +5841,45 @@ mod tests {
                     u.seg_gone[0] = true;
                 }
                 let mut hits = 0;
-                for z in lo[2] - 1..=hi[2] + 1 {
-                    for y in lo[1] - 1..=hi[1] + 1 {
-                        for x in lo[0] - 1..=hi[0] + 1 {
-                            let p = [x, y, z];
-                            let reference = u.hit_with_turret(p, &pose, &segments, delta);
-                            assert_eq!(batch.hit(&u, p), reference, "at {p:?}, damaged={damaged}");
-                            hits += usize::from(reference.is_some());
+                let mut parts = Vec::new();
+                let mut pruned = false;
+                let mut segment_hits = 0;
+                for z in (lo[2] - 1..=hi[2] + 1).step_by(3) {
+                    for y in (lo[1] - 1..=hi[1] + 1).step_by(3) {
+                        for x in (lo[0] - 1..=hi[0] + 1).step_by(3) {
+                            let start = [x, y, z];
+                            let end = [0, 1, 2].map(|a| (start[a] + 2).min(hi[a] + 1));
+                            batch.parts_in(&u, start, end, &mut parts);
+                            pruned |= parts.len() < segments.len();
+                            assert!(parts.windows(2).all(|pair| pair[0] < pair[1]));
+                            for wz in start[2]..=end[2] {
+                                for wy in start[1]..=end[1] {
+                                    for wx in start[0]..=end[0] {
+                                        let p = [wx, wy, wz];
+                                        let reference =
+                                            u.hit_with_turret(p, &pose, &segments, delta);
+                                        assert_eq!(
+                                            batch.hit(&u, p),
+                                            reference,
+                                            "at {p:?}, damaged={damaged}"
+                                        );
+                                        assert_eq!(
+                                            batch.hit_parts(&u, p, parts.iter().copied()),
+                                            reference,
+                                            "cell {start:?}..{end:?}, at {p:?}, damaged={damaged}"
+                                        );
+                                        hits += usize::from(reference.is_some());
+                                        segment_hits += usize::from(
+                                            reference.is_some_and(|(part, _)| part > 0),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 assert!(hits > 100);
+                assert!(pruned && segment_hits > 0);
             }
         }
     }
