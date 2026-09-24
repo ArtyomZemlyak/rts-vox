@@ -1881,6 +1881,29 @@ pub struct BlastRange {
     collapse_cap: usize,
 }
 
+/// The refused source motion is already normal to the other hull. Subtract
+/// that hull's own motion on the same line: a convoy closing slowly should
+/// not shove like a head-on collision at the same engine speed.
+fn relative_contact_velocity(
+    incoming: phys::V3,
+    source: [Fx; 3],
+    target: [Fx; 3],
+    target_velocity: phys::V3,
+) -> phys::V3 {
+    let line = phys::V3::new(target[0].sub(source[0]), Fx::ZERO, target[2].sub(source[2]));
+    let distance2 = line.len_sq();
+    if distance2 == Fx::ZERO {
+        return phys::V3::ZERO;
+    }
+    let other_normal = line.scale(target_velocity.dot(line).div(distance2));
+    let relative = incoming.sub(other_normal);
+    if relative.dot(line) <= Fx::ZERO {
+        phys::V3::ZERO
+    } else {
+        relative
+    }
+}
+
 impl BlastRange {
     /// Known chunks, component nodes, chunks needing an anchor path and edges.
     pub fn support_graph_size(&self) -> [usize; 4] {
@@ -3101,10 +3124,36 @@ impl BlastRange {
                 contacts.push((self.units.len(), target, velocity));
             }
         }
-        // Position acceptance above remains in stable slot order. Transfer
-        // contact velocity only after every hull has moved, so an earlier
-        // slot does not gain a same-tick head start over a later one.
-        for (source, target, velocity) in contacts {
+        // Position acceptance above remains in stable slot order. Sample all
+        // contact velocities before transferring any shove: a hull touched
+        // twice in one tick must not make the second contact order-dependent.
+        let contact_state: Vec<_> = if contacts.is_empty() {
+            Vec::new()
+        } else {
+            (0..=self.units.len())
+                .map(|id| {
+                    let motion = if id == self.units.len() {
+                        &self.gun.motion
+                    } else {
+                        &self.units[id].motion
+                    };
+                    let velocity = phys::V3::new(
+                        fx::angle::cos(motion.drive.head).mul(motion.drive.vel),
+                        Fx::ZERO,
+                        fx::angle::sin(motion.drive.head).mul(motion.drive.vel),
+                    )
+                    .add(motion.shove);
+                    (motion.pos, velocity)
+                })
+                .collect()
+        };
+        for (source, target, incoming) in contacts {
+            let velocity = relative_contact_velocity(
+                incoming,
+                contact_state[source].0,
+                contact_state[target].0,
+                contact_state[target].1,
+            );
             let mass = |id: usize| {
                 if id == self.units.len() {
                     self.gun.motion.chassis.mass.max(1)
@@ -3759,6 +3808,20 @@ impl Explosion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn contact_uses_closing_speed_between_two_moving_hulls() {
+        let source = [Fx::ZERO; 3];
+        let target = [Fx::from_int(20), Fx::ZERO, Fx::ZERO];
+        let along = |speed| phys::V3::new(Fx::from_int(speed), Fx::ZERO, Fx::ZERO);
+        let stopped = relative_contact_velocity(along(10), source, target, along(0));
+        let convoy = relative_contact_velocity(along(10), source, target, along(8));
+        let head_on = relative_contact_velocity(along(10), source, target, along(-8));
+        let separating = relative_contact_velocity(along(10), source, target, along(12));
+        assert_eq!(stopped, along(10));
+        assert!(convoy.x > Fx::ZERO && convoy.x < stopped.x);
+        assert!(head_on.x > stopped.x);
+        assert_eq!(separating, phys::V3::ZERO);
+    }
     #[test]
     fn cached_stock_templates_keep_damage_private_to_each_unit() {
         for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {

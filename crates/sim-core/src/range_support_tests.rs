@@ -175,6 +175,59 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
 }
 
 #[test]
+fn a_convoy_contact_uses_its_closing_speed() {
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    layout.course = None;
+    layout.blocks.clear();
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = [300, 361]
+        .map(|x| modding::range::RangeUnitDef {
+            allied: false,
+            kind: RangeUnitKind::Tank,
+            at: [x, FLOOR, 336],
+        })
+        .to_vec();
+    let mut push = Vec::new();
+    for moving_target in [false, true] {
+        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        a.patrols_running = true;
+        for _ in 0..20 {
+            a.step();
+        }
+        let source = &mut a.units[0].motion;
+        source.enabled = true;
+        source.destination = Some([500, 336]);
+        source.path = vec![[500, 336]];
+        source.drive.vel = Fx::from_int(40);
+        if moving_target {
+            let target = &mut a.units[1].motion;
+            target.enabled = true;
+            target.destination = Some([500, 336]);
+            target.path = vec![[500, 336]];
+            target.drive.vel = Fx::from_int(20);
+        }
+        a.step();
+        push.push(a.units[1].motion.shove.x);
+        let p = motion::Obstacle::of(&a.units[0].motion, &a.units[0].body);
+        let q = motion::Obstacle::of(&a.units[1].motion, &a.units[1].body);
+        assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
+        let mut replay = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        for _ in 0..8 {
+            a.step();
+            replay.step();
+            assert_eq!(a.state_hash(), replay.state_hash());
+        }
+    }
+    assert!(push[0] > Fx::ZERO, "no contact with parked hull: {push:?}");
+    assert!(
+        push[1] > Fx::ZERO && push[1] < push[0],
+        "a following hull received the full parked-hull impact: {push:?}"
+    );
+}
+
+#[test]
 fn solo_shooter_and_target_exchange_contact_shove() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     for gun_is_source in [false, true] {
