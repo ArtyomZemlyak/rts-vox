@@ -62,6 +62,17 @@ fn main() {
                 .unwrap_or(include_str!("../../../../data/range-cover.ron")),
         )
         .unwrap();
+        if let Some(zone) = value("--zone") {
+            let index = zone
+                .parse::<usize>()
+                .expect("--zone: positive sector number");
+            let sector = layout
+                .zones
+                .get(index.checked_sub(1).expect("zones start at 1"))
+                .expect("--zone: sector in range layout");
+            layout.gun = sector.spawn;
+            layout.target = sector.target;
+        }
         if uncovered {
             layout.blocks.clear();
         }

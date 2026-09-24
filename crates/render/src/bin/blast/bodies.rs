@@ -2,7 +2,10 @@
 //! layer tore loose — wall, rock, a trunk — falls whole and is drawn as
 //! the cubes it is, until it lands and bakes back into the world.
 use super::*;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+
+#[path = "bodies/occupancy.rs"]
+mod occupancy;
 
 type Face = ([i32; 3], [f32; 3], [[f32; 3]; 4]);
 
@@ -92,12 +95,22 @@ pub fn draw(
         // One quad per exposed face. Merging an entire cube for every cell
         // gave a large fractured slab millions of hidden triangles and an
         // O(n²) mesh-build path on the frame where it detached.
-        let occupied: HashSet<_> = b.voxels.iter().map(|v| (v.x, v.y, v.z)).collect();
-        let mut pos = Vec::<[f32; 3]>::new();
-        let mut nrm = Vec::<[f32; 3]>::new();
-        let mut col = Vec::<[f32; 4]>::new();
-        let mut idx = Vec::<u32>::new();
-        for v in &b.voxels {
+        // Compute exposure once with bounded dense occupancy for compact
+        // bodies. Exact capacities avoid growing four large vertex buffers
+        // during the same frame that the simulation fractures the slab.
+        let exposed = occupancy::visible_faces(&b.voxels);
+        let face_count = exposed
+            .iter()
+            .map(|v| v.count_ones() as usize)
+            .sum::<usize>();
+        let mut pos = Vec::<[f32; 3]>::with_capacity(face_count * 4);
+        let mut nrm = Vec::<[f32; 3]>::with_capacity(face_count * 4);
+        let mut col = Vec::<[f32; 4]>::with_capacity(face_count * 4);
+        let mut idx = Vec::<u32>::with_capacity(face_count * 6);
+        for (v, visible) in b.voxels.iter().zip(exposed) {
+            if visible == 0 {
+                continue;
+            }
             let x = f32::from(v.x) - f32::from(b.pivot_x);
             let y = f32::from(v.y);
             let z = f32::from(v.z) - f32::from(b.pivot_z);
@@ -163,15 +176,8 @@ pub fn draw(
                     ],
                 ),
             ];
-            for (off, normal, corners) in faces {
-                let nx = i32::from(v.x) + off[0];
-                let ny = i32::from(v.y) + off[1];
-                let nz = i32::from(v.z) + off[2];
-                if nx >= 0
-                    && ny >= 0
-                    && nz >= 0
-                    && occupied.contains(&(nx as u16, ny as u16, nz as u16))
-                {
+            for (face, (_, normal, corners)) in faces.into_iter().enumerate() {
+                if visible & (1 << face) == 0 {
                     continue;
                 }
                 let start = pos.len() as u32;

@@ -1192,7 +1192,6 @@ impl Generator for RangeTerrain {
                 && z as i32 >= r.clear_min[1]
                 && (z as i32) < r.clear_max[1]
         });
-        let road = self.road_at(x, z, 0);
         if let Some(r) = &self.layout {
             if let Some(b) = self
                 .index
@@ -1206,6 +1205,10 @@ impl Generator for RangeTerrain {
                 return b.material;
             }
         }
+        // Authored matter (and authored air cutouts) overrides the ground.
+        // Large detached slabs query these cells repeatedly; road distances
+        // cannot affect their material and need not be evaluated first.
+        let road = self.road_at(x, z, 0);
         if let Some(c) = self.layout.as_ref().and_then(|r| r.course.as_ref()) {
             if (x as i32 >= c.min[0]
                 && (x as i32) < c.max[0]
