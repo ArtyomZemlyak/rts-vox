@@ -662,7 +662,7 @@ fn connects(
 pub struct Route {
     /// Turn points to the goal; empty when there is none.
     pub path: Vec<[i32; 2]>,
-    /// The budget ended before the goal. This path stops at a reached node;
+    /// The budget ended before the goal. This path stops on the live frontier;
     /// the caller must keep its goal and plan again from that endpoint.
     pub partial: bool,
     /// No move at all was open from the start pose: the hull stands where
@@ -773,9 +773,6 @@ pub struct Hunt {
     scans: u64,
     samples: u64,
     left_start: bool,
-    /// Derived from reached nodes; reconstructed on load, never new work.
-    /// Distance, path cost, stable node index resolve ties in that order.
-    nearest: (u64, u32, usize),
     prelude: Option<Prelude>,
     connection: Option<(usize, u32, Connection)>,
     expansion: Option<Expansion>,
@@ -916,7 +913,6 @@ impl Hunt {
             scans: 0,
             samples: 0,
             left_start: false,
-            nearest: (u64::MAX, 0, initial),
             prelude: Some(Prelude {
                 head,
                 goal_cursor: 0,
@@ -971,7 +967,6 @@ impl Hunt {
                 let q = p.map(Fx::from_int);
                 if !ground.pose(q, yaw, self.shape).refused() && clear(q, yaw) {
                     self.to = p;
-                    self.nearest = self.progress(self.initial, 0);
                     let cell = [self.n, self.rows].map(|n| n as i32 - 1);
                     let end = [0, 1].map(|a| {
                         (p[a] - self.anchor[a])
@@ -1251,7 +1246,6 @@ impl Hunt {
             scans: 0,
             samples: 0,
             left_start,
-            nearest: (u64::MAX, 0, initial),
             prelude: None,
             connection: None,
             expansion: None,
@@ -1267,7 +1261,6 @@ impl Hunt {
                 return None;
             }
             hunt.distance.insert(i, d);
-            hunt.nearest = hunt.nearest.min(hunt.progress(i, d));
             if p != u32::MAX {
                 hunt.previous.insert(i, p as usize);
             }
@@ -1384,9 +1377,8 @@ impl Hunt {
         }
         while self.prelude.is_none() && allowance > 0 {
             if self.spent >= self.cfg.nodes && self.connection.is_none() {
-                // Finish only completed edges. An unverified pending edge is
-                // never part of the returned prefix.
-                self.expansion = None;
+                // The reached source of a pending edge remains a frontier
+                // candidate; the unchecked destination never enters a prefix.
                 break;
             }
             if self.expansion.is_some() {
@@ -1446,20 +1438,15 @@ impl Hunt {
         self.samples += ground.samples.saturating_sub(samples);
         match found {
             Some(i) => Some(self.route_through(i, false)),
-            None if exhausted
-                || (self.spent >= self.cfg.nodes
-                    && self.connection.is_none()
-                    && self.expansion.is_none()) =>
-            {
+            None if exhausted || (self.spent >= self.cfg.nodes && self.connection.is_none()) => {
                 // A dry frontier is a proven refusal. A spent budget is not:
                 // retain useful, checked progress instead of discarding it.
-                let (distance, _, node) = self.nearest;
-                if !exhausted && node != self.initial && distance < self.progress(self.initial, 0).0
-                {
-                    Some(self.route_through(node, true))
-                } else {
-                    Some(self.empty(!self.left_start, exhausted))
+                if !exhausted {
+                    if let Some(node) = self.prefix_endpoint() {
+                        return Some(self.route_through(node, true));
+                    }
                 }
+                Some(self.empty(!self.left_start, exhausted))
             }
             None => None,
         }
@@ -1544,7 +1531,6 @@ impl Hunt {
                 None => break,
                 Some(Some(_)) => {
                     let (j, next_cost) = (*j, *next_cost);
-                    self.nearest = self.nearest.min(self.progress(j, next_cost));
                     self.distance.insert(j, next_cost);
                     self.previous.insert(j, e.node);
                     self.left_start |= j / 8 != self.initial / 8;
@@ -1574,6 +1560,21 @@ impl Hunt {
         let p = self.point(node / 8).map(Fx::to_int_trunc);
         let d = [0, 1].map(|a| (p[a] - self.to[a]).unsigned_abs() as u64);
         (d[0] * d[0] + d[1] * d[1], cost, node)
+    }
+
+    /// End a bounded prefix on the live frontier, not in a closer pocket
+    /// whose exits the search has already exhausted. All predecessors are
+    /// checked; ties use distance, path cost and stable node index. A detour
+    /// may initially lead away from the goal, so progress is not monotonic.
+    fn prefix_endpoint(&self) -> Option<usize> {
+        self.open
+            .iter()
+            .map(|Reverse((_, cost, node))| (*node, *cost))
+            .chain(self.expansion.iter().map(|e| (e.node, e.cost)))
+            .filter(|&(node, cost)| node / 8 != self.initial / 8 && cost == self.cost(node))
+            .map(|(node, cost)| self.progress(node, cost))
+            .min()
+            .map(|(_, _, node)| node)
     }
 
     /// The checked turn points to this node; only a completed final connection
@@ -2152,6 +2153,88 @@ mod tests {
             |_, _| true,
         );
         assert!(walker.is_empty(), "a hard hull passed through the wall");
+    }
+    #[test]
+    fn partial_path_does_not_end_in_an_already_explored_dead_end() {
+        let w = world(false, false, false);
+        // A narrow east-facing pocket points toward the goal, but the
+        // usable detour starts before it. A hull cannot pivot in the pocket.
+        let clear = |p: [Fx; 2], h: i32| {
+            let x = p[0].to_int_trunc();
+            let z = p[1].to_int_trunc();
+            !(x > 80 && x < 180 && (94..=106).contains(&z)) || (x < 120 && h == 0)
+        };
+        let cfg = Search {
+            nodes: 512,
+            ..search()
+        };
+        let answer = plan(
+            Probe::new(&w),
+            tank(),
+            [60, 100].map(Fx::from_int),
+            0,
+            [220, 100],
+            cfg,
+            clear,
+        );
+        assert!(
+            answer.partial,
+            "expected a bounded prefix: {:?}",
+            answer.path
+        );
+        let end = *answer.path.last().unwrap();
+        assert!(
+            !(end[0] > 80 && end[0] < 120 && (94..=106).contains(&end[1])),
+            "prefix enters an explored dead end: {:?}",
+            answer.path
+        );
+    }
+    #[test]
+    fn bounded_detour_can_start_by_moving_farther_from_the_goal() {
+        let w = world(false, false, false);
+        let clear = |p: [Fx; 2], _: i32| {
+            !(p[0] > Fx::from_int(120)
+                && p[0] < Fx::from_int(192)
+                && p[1] > Fx::from_int(64)
+                && p[1] < Fx::from_int(136))
+        };
+        let cfg = Search {
+            nodes: 512,
+            ..search()
+        };
+        let goal = [220, 100];
+        let mut at = [120, 100].map(Fx::from_int);
+        let mut head = 0;
+        for prefixes in 0..16 {
+            let answer = plan(Probe::new(&w), tank(), at, head, goal, cfg, clear);
+            assert!(!answer.path.is_empty(), "detour stalled at {at:?}");
+            if prefixes == 0 {
+                assert!(answer.partial);
+                let end = *answer.path.last().unwrap();
+                assert!(
+                    (end[0] - goal[0]).pow(2) + (end[1] - goal[1]).pow(2) > 100 * 100,
+                    "fixture must require moving away first: {:?}",
+                    answer.path
+                );
+            }
+            let mut probe = Probe::new(&w);
+            let shape = Shape {
+                span: tank().span + cfg.margin,
+                ..tank()
+            };
+            for point in &answer.path {
+                let to = point.map(Fx::from_int);
+                assert!(connects(&mut probe, shape, at, head, to, &clear).is_some());
+                head = angle::atan2(to[1].sub(at[1]).raw(), to[0].sub(at[0]).raw());
+                at = to;
+            }
+            if !answer.partial {
+                assert_eq!(at, goal.map(Fx::from_int));
+                assert!(prefixes > 0);
+                return;
+            }
+        }
+        panic!("detour did not finish: {at:?}");
     }
     #[test]
     fn spent_budget_returns_checked_progress_and_restores_the_same_endpoint() {

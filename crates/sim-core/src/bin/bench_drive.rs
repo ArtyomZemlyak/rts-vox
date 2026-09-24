@@ -10,7 +10,8 @@
 //! `--trace` reports path changes, `--inspect-state` prints the final motion
 //! state and `--no-crater` runs only the original terrain. `--inspect-motion`
 //! compares current, planner and rubble-free contacts at a block transition
-//! and at the end, plus nearby translations and rotations (not a full sweep).
+//! and at the end, plus nearby poses and the three swept initial graph exits.
+//! Those sweeps report terrain refusals; nearby hulls are listed separately.
 //! `--trace-interval n` samples the driving state every n ticks.
 //! `--park-patrols` keeps the other hulls parked to isolate terrain planning.
 use sim_core::blast::BlastRange;
@@ -130,11 +131,15 @@ fn main() {
         let mut trail = Vec::new();
         let mut last_path = Vec::new();
         let mut was_blocked = false;
+        let mut arrived = None;
         for _ in 0..ticks {
             let start = Instant::now();
             scene.step();
             samples.push((start.elapsed().as_micros(), tick));
             tick += 1;
+            if arrived.is_none() && scene.gun.motion.destination.is_none() {
+                arrived = Some(tick);
+            }
             if args.iter().any(|a| a == "--inspect-motion")
                 && scene.gun.motion.blocked
                 && !was_blocked
@@ -170,7 +175,7 @@ fn main() {
                 ));
             }
         }
-        println!("end destination={:?} partial={} pos={:?} head={} cursor={} searching={} last_plan={:?}",scene.gun.motion.destination,scene.gun.motion.partial_path,scene.gun.motion.pos.map(fx::Fx::to_int_trunc),scene.gun.motion.drive.head,scene.gun.motion.cursor,scene.gun.motion.searching(),scene.gun.motion.last_plan);
+        println!("end destination={:?} partial={} pos={:?} head={} cursor={} searching={} last_plan={:?} arrived={arrived:?}",scene.gun.motion.destination,scene.gun.motion.partial_path,scene.gun.motion.pos.map(fx::Fx::to_int_trunc),scene.gun.motion.drive.head,scene.gun.motion.cursor,scene.gun.motion.searching(),scene.gun.motion.last_plan);
         if args.iter().any(|a| a == "--inspect-direct") {
             inspect_direct(&scene, to);
         }
@@ -206,6 +211,10 @@ fn main() {
 
 /// Terrain-only diagnostic with the same swept positions as Connection.
 fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
+    inspect_connection(scene, target.map(fx::Fx::from_int), None);
+}
+
+fn inspect_connection(scene: &BlastRange, to: [fx::Fx; 2], heading: Option<i32>) {
     use fx::{angle, Fx};
     let config = modding::navigation::Navigation::from_ron(include_str!(
         "../../../../data/range-navigation.ron"
@@ -217,14 +226,15 @@ fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
         shape.span += config.plan_margin;
     }
     let from = [motion.pos[0], motion.pos[2]];
-    let to = target.map(Fx::from_int);
     let delta = [to[0].sub(from[0]), to[1].sub(from[1])];
     let head = motion.drive.head;
-    let yaw = if delta == [Fx::ZERO; 2] {
-        head
-    } else {
-        angle::atan2(delta[1].raw(), delta[0].raw())
-    };
+    let yaw = heading.unwrap_or_else(|| {
+        if delta == [Fx::ZERO; 2] {
+            head
+        } else {
+            angle::atan2(delta[1].raw(), delta[0].raw())
+        }
+    });
     let turn = angle::diff(yaw, head);
     let turns = ((i64::from(turn.abs()) * i64::from(shape.half[0] + shape.half[1]) * 7
         + i64::from(angle::FULL)
@@ -249,7 +259,7 @@ fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
         };
         let next = ground.pose(p, h, shape);
         if next.refused() || next.height.sub(old.height).abs() > Fx::from_int(shape.step) {
-            println!("direct to={target:?} refused_at={:?} yaw={h} pose={next:?} previous_height={:?} crushed={crush}",p.map(Fx::to_int_trunc),old.height);
+            println!("direct to={to:?} refused_at={p:?} yaw={h} pose={next:?} previous_height={:?} crushed={crush}",old.height);
             return;
         }
         crush = if i <= turns {
@@ -259,7 +269,7 @@ fn inspect_direct(scene: &BlastRange, target: [i32; 2]) {
         };
         old = next;
     }
-    println!("direct to={target:?} terrain_clear=true crushed={crush}");
+    println!("direct to={to:?} terrain_clear=true crushed={crush}");
 }
 
 fn inspect_motion(scene: &BlastRange) {
@@ -287,6 +297,26 @@ fn inspect_motion(scene: &BlastRange) {
         actual.pose(from, m.drive.head, planned),
         bare.pose(from, m.drive.head, shape)
     );
+    let direction = angle::norm(m.drive.head + angle::FULL / 16) / (angle::FULL / 8);
+    for turn in -1..=1 {
+        let yaw = angle::norm((direction + turn) * angle::FULL / 8);
+        let to = if turn == 0 {
+            let dir = [
+                [1, 0],
+                [1, 1],
+                [0, 1],
+                [-1, 1],
+                [-1, 0],
+                [-1, -1],
+                [0, -1],
+                [1, -1],
+            ][direction as usize];
+            [0, 1].map(|a| Fx::from_int(from[a].to_int_trunc() + dir[a] * config.cell_units))
+        } else {
+            from
+        };
+        inspect_connection(scene, to, Some(yaw));
+    }
     for (id, unit) in scene.units.iter().enumerate() {
         if unit.motion.pos[0].sub(m.pos[0]).abs() <= Fx::from_int(96)
             && unit.motion.pos[2].sub(m.pos[2]).abs() <= Fx::from_int(96)
