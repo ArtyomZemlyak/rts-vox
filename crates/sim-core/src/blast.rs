@@ -7440,6 +7440,25 @@ mod tests {
         }
     }
     #[test]
+    fn timber_depot_has_clear_access_and_two_material_targets() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let gen = RangeTerrain::new(true, Some(layout.clone()));
+        assert_eq!(layout.zones.last().unwrap().name, "Лесной склад");
+        assert!(gen.road_at(8317, 6000, 0));
+        assert!(gen.road_at(8140, 6010, 0));
+        assert_eq!(gen.material(8317, 40, 6000), 0);
+        assert_eq!(gen.material(8550, 84, 5990), 5);
+        assert_eq!(gen.material(8520, 34, 6260), 5);
+        for x in (7970..8470).step_by(10) {
+            let z = 6010 - (x - 7970) * 20 / 580;
+            assert_eq!(
+                gen.material(x, 42, z),
+                0,
+                "depot firing lane blocked at {x},{z}"
+            );
+        }
+    }
+    #[test]
     fn road_centrelines_do_not_run_through_authored_walls() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
         for road in &layout.roads {

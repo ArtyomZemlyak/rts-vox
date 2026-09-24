@@ -23,6 +23,8 @@
         (name: "Перекрёсток", min: (6430,1320), max: (7130,1840), spawn: (6540,16,1400), target: (6870,32,1640)),
         (name: "Эстакада", min: (7660,3150), max: (8510,3980), spawn: (7800,16,3590), target: (8140,96,3490),
             scenario: Some((title: "Эстакада под огнём", description: "Первый выстрел повреждает пролёт, второй проверяет правую опору.", weapon: Energy, power_milli: 1000, shots: [(8140,96,3490),(8290,42,3490)]))),
+        (name: "Лесной склад", min: (7840,5600), max: (8730,6500), spawn: (7970,16,6010), target: (8550,84,5990),
+            scenario: Some((title: "Обстрел склада", description: "Два выстрела по деревянной крыше и штабелю; сравните повреждения.", weapon: Energy, power_milli: 1000, shots: [(8550,84,5990),(8520,34,6260)]))),
     ],
     course: Some((
         min: (200, 400), max: (590, 625),
@@ -84,6 +86,7 @@
         (width: 44, points: [(1880,4120),(2020,3960),(2650,3960),(2900,4400),(3900,4700),(4780,5300)]),
         (width: 44, points: [(4780,5300),(4850,5580),(5050,5800),(5600,5900),(7100,6500),(8050,7500),(8730,8800)]),
         (width: 36, points: [(8100,3500),(7970,3580),(7800,3590)]),
+        (width: 36, points: [(8317,6000),(8140,6010),(7970,6010)]),
     ],
     blocks: [
         (min: (392, 0, 282), max: (408, 60, 390), material: 2), // concrete jacket
@@ -313,6 +316,49 @@
         (min: (7690,0,3800), max: (7810,30,3930), material: 1),
         (min: (7720,28,3830), max: (7790,43,3890), material: 6),
         (min: (7840,16,3830), max: (7880,27,3870), material: 6),
+        // Timber depot on the long road. The hollow warehouse, stock and
+        // crane are ordinary destructible matter; the side spur stays open.
+        (min: (8470,16,5850), max: (8640,80,6090), material: 5),
+        (min: (8476,16,5856), max: (8634,75,6084), material: 0),
+        (min: (8470,16,5910), max: (8477,59,5955), material: 0),
+        (min: (8470,16,5980), max: (8477,59,6020), material: 0),
+        (min: (8470,16,6045), max: (8477,59,6070), material: 0),
+        (min: (8480,80,5860), max: (8630,87,6078), material: 5),
+        (min: (8480,87,5860), max: (8630,92,5870), material: 3),
+        (min: (8480,87,6068), max: (8630,92,6078), material: 3),
+        (min: (8510,87,5920), max: (8550,92,5950), material: 3),
+        (min: (8580,80,6010), max: (8630,88,6078), material: 0), // broken roof corner
+        (min: (8480,87,5890), max: (8630,91,5896), material: 3),
+        (min: (8480,87,5925), max: (8630,91,5931), material: 3),
+        (min: (8480,87,5960), max: (8630,91,5966), material: 3),
+        (min: (8480,87,5995), max: (8630,91,6001), material: 3),
+        (min: (8480,87,6030), max: (8580,91,6036), material: 3),
+        (min: (8490,16,5960), max: (8500,77,5970), material: 3),
+        (min: (8600,16,5960), max: (8610,77,5970), material: 3),
+        // An old concrete dispatch post anchors the other side of the road.
+        (min: (7870,16,5680), max: (8020,72,5840), material: 2),
+        (min: (7876,16,5686), max: (8014,67,5834), material: 0),
+        (min: (8014,16,5740), max: (8021,45,5790), material: 0),
+        (min: (7880,72,5690), max: (8010,78,5830), material: 3),
+        (min: (7890,78,5700), max: (7935,90,5730), material: 2),
+        (min: (7980,78,5800), max: (8000,101,5820), material: 3),
+        // Two staggered timber stacks provide a second fire target.
+        (min: (8460,16,6200), max: (8560,34,6240), material: 5),
+        (min: (8470,34,6207), max: (8540,46,6233), material: 5),
+        (min: (8500,16,6250), max: (8610,31,6290), material: 5),
+        (min: (8510,31,6257), max: (8585,43,6283), material: 5),
+        (min: (8520,16,6320), max: (8590,27,6350), material: 5),
+        (min: (8500,31,6252), max: (8610,34,6256), material: 3),
+        (min: (8500,31,6284), max: (8610,34,6288), material: 3),
+        // Loader crane, split retaining walls, and a rocky forest edge.
+        (min: (8620,16,6260), max: (8634,108,6274), material: 3),
+        (min: (8560,99,6255), max: (8690,109,6279), material: 3),
+        (min: (8560,90,6263), max: (8572,100,6271), material: 3),
+        (min: (8080,16,6230), max: (8210,34,6250), material: 1),
+        (min: (8080,16,6360), max: (8210,34,6380), material: 1),
+        (min: (8120,34,6240), max: (8180,46,6250), material: 6),
+        (min: (8650,0,5660), max: (8710,34,5800), material: 1),
+        (min: (8670,32,5690), max: (8700,48,5770), material: 6),
         // Battle field: low traverses, a breached redoubt and a landmark mast.
         (min: (3470,16,2240), max: (3590,34,2258), material: 1),
         (min: (3470,16,2540), max: (3590,34,2558), material: 1),

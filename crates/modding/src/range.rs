@@ -1,8 +1,8 @@
 //! Bounded, integer-only fixtures for the live weapons proving ground.
 use serde::{Deserialize, Serialize};
 
-pub const MAX_RANGE_BLOCKS: usize = 256;
-pub const MAX_RANGE_ZONES: usize = 12;
+pub const MAX_RANGE_BLOCKS: usize = 384;
+pub const MAX_RANGE_ZONES: usize = 16;
 
 /// Size of an authored clearing used for remote battle deployment.
 #[derive(Clone, Debug, Deserialize)]
@@ -355,9 +355,11 @@ mod tests {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
         assert_eq!(
             layout.zones.iter().filter(|z| z.scenario.is_some()).count(),
-            5
+            7
         );
         assert!(layout.zones[9].scenario.as_ref().unwrap().patrols);
+        assert_eq!(layout.zones[11].scenario.as_ref().unwrap().shots.len(), 2);
+        assert_eq!(layout.zones[12].scenario.as_ref().unwrap().shots.len(), 2);
         let mut invalid = layout.clone();
         invalid.zones[0].scenario.as_mut().unwrap().shots[0][0] += 1;
         assert!(invalid.validate().is_err());
