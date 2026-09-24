@@ -18,6 +18,7 @@ struct Particle {
     seed: u32,
     smoke: bool,
     burst_dust: bool,
+    burst_flame: bool,
     stream: bool,
     dust_material: u16,
 }
@@ -113,6 +114,7 @@ impl Effects {
             seed,
             smoke,
             burst_dust: false,
+            burst_flame: false,
             stream: false,
             dust_material: 0,
         });
@@ -141,6 +143,13 @@ impl Effects {
         self.add(at, velocity, now, life, edge, true);
         if self.particles.len() > before {
             self.particles[before].burst_dust = true;
+        }
+    }
+    fn add_burst_flame(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32) {
+        let before = self.particles.len();
+        self.add(at, velocity, now, life, edge, false);
+        if self.particles.len() > before {
+            self.particles[before].burst_flame = true;
         }
     }
     fn plume(&mut self, at: Vec3, now: f32, fire: bool, scale: f32) {
@@ -193,7 +202,7 @@ impl Effects {
             let outward = Vec3::new(angle.cos(), 0.0, angle.sin());
             let broad = i.is_multiple_of(6);
             let speed = (22.0 + noise(seed.wrapping_add(3)) * 53.0) * scale;
-            self.add(
+            self.add_burst_flame(
                 at + outward * (1.0 + noise(seed.wrapping_add(5)) * 4.0),
                 outward * speed + Vec3::Y * (5.0 + noise(seed.wrapping_add(7)) * 39.0),
                 now,
@@ -201,7 +210,6 @@ impl Effects {
                 (if broad { 4.5 } else { 1.1 }
                     + noise(seed.wrapping_add(17)) * if broad { 3.5 } else { 2.7 })
                     * scale,
-                false,
             );
         }
         // Dense central chunks rise slowly; smaller soot blocks shear off
@@ -816,6 +824,19 @@ pub fn draw(
                     edge * 0.72,
                     col,
                 );
+            } else if p.burst_flame {
+                // Impact fragments have a direction. A short, uneven cuboid
+                // makes each hot tongue read as an outward jet rather than a
+                // ring of equally shaped fire blocks.
+                let axis = p.velocity.normalize_or_zero();
+                let stretch = 0.85 + noise(p.seed.wrapping_add(43)) * 1.45;
+                beam(
+                    &mut hot,
+                    at - axis * edge * stretch,
+                    at + axis * edge * 0.2,
+                    edge * (0.38 + noise(p.seed.wrapping_add(51)) * 0.27),
+                    col,
+                );
             } else {
                 cube(&mut hot, at, edge, col);
             }
@@ -1050,6 +1071,14 @@ mod tests {
             .filter(|p| p.born == now && p.smoke)
             .count();
         assert!(hot >= 25 && smoke >= 32, "flash={hot} smoke={smoke}");
+        assert_eq!(
+            effects
+                .particles
+                .iter()
+                .filter(|p| p.born == now && p.burst_flame)
+                .count(),
+            24
+        );
         let sizes: Vec<_> = effects
             .particles
             .iter()

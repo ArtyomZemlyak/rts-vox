@@ -14,8 +14,10 @@ fn hot(t:f32)->vec3<f32> {
             vec3(2.4,1.3,4.2),smoothstep(1.8,2.9,t));
     }
     if p.weapon.x>0.5 {
-        return mix(mix(vec3(0.07,0.11,0.18),vec3(0.35,0.75,2.0),smoothstep(0.9,1.7,t)),
-            vec3(3.5,6.2,11.0),smoothstep(1.9,3.0,t));
+        // A narrow silver-blue core sits inside a much larger, darker cloud.
+        // Broad white radiance erased the separate cubes in the impact.
+        return mix(mix(vec3(0.045,0.09,0.17),vec3(0.20,0.55,1.8),smoothstep(0.9,1.8,t)),
+            vec3(0.45,1.65,5.2),smoothstep(2.2,3.2,t));
     }
     let red=vec3(1.1,0.035,0.002);let orange=vec3(3.6,0.68,0.015);
     let gold=vec3(5.0,2.1,0.12);let white=vec3(7.0,5.0,1.5);
@@ -243,9 +245,9 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 let smoke=base*(0.23+shade*self_shadow*1.55)+
                     inner_colour*interior_glow*exp(-age*0.45)*fire_phase;
                 let temperature=m.x*1.6+0.3+(detail-0.45)*0.8;
-                let energy_mottle=smoothstep(0.30,0.83,detail*0.55+grain*0.45);
+                let energy_mottle=smoothstep(0.36,0.79,detail*0.55+grain*0.45);
                 let glow=select(smoothstep(0.7,1.18,temperature)*fire_phase,
-                    smoothstep(1.0,2.25,temperature)*mix(0.26,1.0,energy_mottle),p.weapon.x>0.5);
+                    smoothstep(1.15,2.55,temperature)*mix(0.08,1.0,energy_mottle),p.weapon.x>0.5);
                 let radiance=hot(select(min(temperature,2.35),temperature,p.weapon.x>0.5));
                 let flame_light=select(0.30+shade*0.40,0.48+shade*0.52,p.weapon.x>0.5);
                 let colour=mix(smoke,radiance*flame_light,glow);

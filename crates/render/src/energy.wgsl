@@ -24,11 +24,11 @@ fn energy_path(ro:vec3<f32>,rd:vec3<f32>,a:vec3<f32>,b:vec3<f32>,limit:f32,time:
     let side=normalize(cross(direction,vec3(0.13,1.0,0.31)));
     let up=cross(side,direction);
     for(var j=1;j<=16;j++) {
-        let u=f32(j)/16.0;let phase=f32(j)*5.13+floor(time*32.0)*1.73;
-        let spread=sin(u*3.14159)*(1.1+0.9*sin(phase*2.17));
+        let u=f32(j)/16.0;let phase=f32(j)*5.13+time*13.0;
+        let spread=sin(u*3.14159)*(0.8+1.3*abs(sin(phase*2.17)));
         let next=mix(a,b,u)+(side*sin(phase)+up*cos(phase*1.39))*spread;
         let s=energy_segment(ro,rd,last,next,limit);
-        let flicker=0.4+0.6*abs(sin(phase*0.71));
+        let flicker=(0.25+0.75*abs(sin(phase*0.71)))*(0.55+0.45*abs(sin(f32(j)*3.71)));
         glow+=(vec3(1.8,2.7,4.5)*exp(-s*s*45.0)+vec3(0.10,0.28,0.8)*exp(-s*s*2.5))*flicker;
         if (j&3)==0 {
             let branch=next+(side*cos(phase*2.3)+up*sin(phase*3.1))*3.4-direction*2.0;
