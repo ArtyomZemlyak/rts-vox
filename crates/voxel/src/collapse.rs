@@ -143,6 +143,13 @@ struct CachedLink {
     source_lab: u16,
 }
 
+#[derive(Clone, Copy)]
+struct AnchorCandidate {
+    chunk: u32,
+    lab: u16,
+    id: u32,
+}
+
 /// Компоненты одного чанка, как их видит граф.
 struct ChunkNodes {
     cached_edges: usize,
@@ -238,6 +245,8 @@ pub struct CollapseLayer {
     known: Vec<u32>,
     /// Заякоренность на глобальный номер узла.
     reached: Vec<bool>,
+    /// Ordered unresolved labels for this resolve pass; capacity is reused.
+    anchor_candidates: Vec<AnchorCandidate>,
     walk: Vec<(u32, u16)>,
     /// Derived by resolve, consumed before any topology changes: only these
     /// chunks can detach. Roots are valid only for nodes not in `reached`.
@@ -323,6 +332,7 @@ impl CollapseLayer {
             base: vec![0; n],
             known: Vec::new(),
             reached: Vec::new(),
+            anchor_candidates: Vec::new(),
             walk: Vec::new(),
             unsupported_chunks: Vec::new(),
             component_roots: Vec::new(),
@@ -932,6 +942,7 @@ impl CollapseLayer {
         // Most discovered terrain is already certified by direct bedrock.
         // Revisit only chunks whose local nodes still need a graph path.
         self.reached.fill(true);
+        self.anchor_candidates.clear();
         self.walk.clear();
         self.unsupported_chunks.clear();
         self.component_roots.resize(self.reached.len(), 0);
@@ -952,7 +963,13 @@ impl CollapseLayer {
                 &[][..]
             };
             for lab in nd.without_direct_anchor(overflow) {
-                self.reached[base + lab as usize] = false;
+                let id = base + lab as usize;
+                self.reached[id] = false;
+                self.anchor_candidates.push(AnchorCandidate {
+                    chunk: i as u32,
+                    lab,
+                    id: id as u32,
+                });
             }
         }
         st.nodes = st.nodes.max(self.reached.len());
@@ -962,72 +979,64 @@ impl CollapseLayer {
         // Visit only the remaining connected components of this undirected
         // graph, instead of expanding every grounded terrain node each tick.
         let mut seen = vec![false; self.reached.len()];
-        for (start_chunk, &candidate) in self.needs_anchor.iter().enumerate() {
-            if candidate == 0 {
+        for &AnchorCandidate {
+            chunk: ci,
+            lab: start_lab,
+            id: start,
+        } in &self.anchor_candidates
+        {
+            let start = start as usize;
+            if self.reached[start] || seen[start] {
                 continue;
             }
-            let ci = start_chunk as u32;
-            let nd = self.nodes[start_chunk].as_ref().expect("anchor cache");
-            let overflow = if nd.n > 64 {
-                self.anchor_overflow.get(&ci).map_or(&[][..], Vec::as_slice)
+            self.walk.clear();
+            self.walk.push((ci, start_lab));
+            seen[start] = true;
+            let mut anchored = false;
+            let mut head = 0;
+            'search: while head < self.walk.len() {
+                let (chunk, lab) = self.walk[head];
+                head += 1;
+                let i = chunk as usize;
+                let nd = self.nodes[i].as_ref().expect("known");
+                for &CachedLink {
+                    chunk: j, lab: b, ..
+                } in nd.links_for(lab as usize)
+                {
+                    if self.nodes[j as usize].is_none() {
+                        continue;
+                    }
+                    let nid = (self.base[j as usize] + u32::from(b)) as usize;
+                    if self.reached[nid] {
+                        anchored = true;
+                        // Every discovered node already has a path to
+                        // this search root. One certified anchor proves
+                        // them all; do not traverse the rest of the map.
+                        break 'search;
+                    } else if !seen[nid] {
+                        seen[nid] = true;
+                        self.walk.push((j, b));
+                    }
+                }
+            }
+            if anchored {
+                for &(chunk, lab) in &self.walk {
+                    self.reached[(self.base[chunk as usize] + u32::from(lab)) as usize] = true;
+                }
             } else {
-                &[][..]
-            };
-            for start_lab in nd.without_direct_anchor(overflow) {
-                let start_lab = start_lab as usize;
-                let start = self.base[start_chunk] as usize + start_lab;
-                if self.reached[start] || seen[start] {
-                    continue;
-                }
-                self.walk.clear();
-                self.walk.push((ci, start_lab as u16));
-                seen[start] = true;
-                let mut anchored = false;
-                let mut head = 0;
-                'search: while head < self.walk.len() {
-                    let (chunk, lab) = self.walk[head];
-                    head += 1;
-                    let i = chunk as usize;
-                    let nd = self.nodes[i].as_ref().expect("known");
-                    for &CachedLink {
-                        chunk: j, lab: b, ..
-                    } in nd.links_for(lab as usize)
-                    {
-                        if self.nodes[j as usize].is_none() {
-                            continue;
-                        }
-                        let nid = (self.base[j as usize] + u32::from(b)) as usize;
-                        if self.reached[nid] {
-                            anchored = true;
-                            // Every discovered node already has a path to
-                            // this search root. One certified anchor proves
-                            // them all; do not traverse the rest of the map.
-                            break 'search;
-                        } else if !seen[nid] {
-                            seen[nid] = true;
-                            self.walk.push((j, b));
-                        }
-                    }
-                }
-                if anchored {
-                    for &(chunk, lab) in &self.walk {
-                        self.reached[(self.base[chunk as usize] + u32::from(lab)) as usize] = true;
-                    }
-                } else {
-                    // An exhausted search contains the entire unsupported
-                    // component of the undirected graph. Keep its minimum
-                    // global ID, exactly as the former union-find did.
-                    let root = self
-                        .walk
-                        .iter()
-                        .map(|&(chunk, lab)| self.base[chunk as usize] + u32::from(lab))
-                        .min()
-                        .expect("search root");
-                    for &(chunk, lab) in &self.walk {
-                        self.component_roots
-                            [(self.base[chunk as usize] + u32::from(lab)) as usize] = root;
-                        self.unsupported_chunks.push(chunk);
-                    }
+                // An exhausted search contains the entire unsupported
+                // component of the undirected graph. Keep its minimum
+                // global ID, exactly as the former union-find did.
+                let root = self
+                    .walk
+                    .iter()
+                    .map(|&(chunk, lab)| self.base[chunk as usize] + u32::from(lab))
+                    .min()
+                    .expect("search root");
+                for &(chunk, lab) in &self.walk {
+                    self.component_roots[(self.base[chunk as usize] + u32::from(lab)) as usize] =
+                        root;
+                    self.unsupported_chunks.push(chunk);
                 }
             }
         }
@@ -1251,7 +1260,8 @@ impl CollapseLayer {
     /// Память графа компонент — она растёт с числом тронутых чанков
     /// и обязана быть видна.
     pub fn graph_bytes(&self) -> usize {
-        let mut n = self.needs_anchor.capacity();
+        let mut n = self.needs_anchor.capacity()
+            + self.anchor_candidates.capacity() * std::mem::size_of::<AnchorCandidate>();
         for nd in self.nodes.iter().flatten() {
             n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
             n += nd.edges.iter().map(|e| e.len() * 4).sum::<usize>();
