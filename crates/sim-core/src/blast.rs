@@ -770,6 +770,12 @@ pub struct RangeTerrain {
     index: range_index::Index,
     extended: bool,
     layout: Option<RangeLayout>,
+    tree_cache: Option<TreeCache>,
+}
+
+struct TreeCache {
+    width: usize,
+    cells: Vec<Option<(u32, u32, u32, u32)>>,
 }
 /// The range as it was before it could be bigger: everything inside this
 /// square keeps exactly the relief it had (ADR-320).
@@ -992,7 +998,43 @@ impl RangeTerrain {
             index: range_index::Index::new(layout.as_ref()),
             extended,
             layout,
+            tree_cache: None,
         }
+    }
+    fn tree_cell(&self, cx: u32, cz: u32) -> Option<(u32, u32, u32, u32)> {
+        let seed = cx.wrapping_mul(73856093) ^ cz.wrapping_mul(19349663);
+        let tx = cx * 28 + 8 + seed % 11;
+        let tz = cz * 28 + 8 + (seed >> 7) % 11;
+        let layout_tree = self.layout.as_ref().is_some_and(|r| {
+            tx as i32 >= r.clear_min[0] - 10
+                && (tx as i32) < r.clear_max[0] + 10
+                && tz as i32 >= r.clear_min[1] - 10
+                && (tz as i32) < r.clear_max[1] + 10
+        });
+        let unit_trees = self.extended && (328..425).contains(&tx) && (273..332).contains(&tz);
+        let shift = if self.extended { 160 } else { 0 };
+        (!layout_tree
+            && !unit_trees
+            && !self.road_at(tx, tz, 10)
+            && !(tx < 288 + shift && (298..=386).contains(&tz))
+            && !seed.is_multiple_of(5))
+        .then(|| (range_height(tx, tz), 19 + (seed >> 13) % 18, tx, tz))
+    }
+
+    // The initial occupancy build visits every column of a large map. Tree
+    // placement is constant across all 28x28 columns of one lattice cell;
+    // cache it for that build without adding work to the warm-reset path.
+    fn with_tree_cache(mut self, size: [u32; 3]) -> Self {
+        let width = size[0].div_ceil(28) as usize;
+        let height = size[2].div_ceil(28) as usize;
+        let mut cells = Vec::with_capacity(width * height);
+        for cz in 0..height as u32 {
+            for cx in 0..width as u32 {
+                cells.push(self.tree_cell(cx, cz));
+            }
+        }
+        self.tree_cache = Some(TreeCache { width, cells });
+        self
     }
     fn in_zone(&self, x: u32, z: u32) -> bool {
         self.layout.as_ref().is_some_and(|r| {
@@ -1076,30 +1118,13 @@ impl RangeTerrain {
         let target = self.layout.is_none()
             && (232 + shift..250 + shift).contains(&x)
             && (321..352).contains(&z);
-        let cx = x / 28;
-        let cz = z / 28;
-        let seed = cx.wrapping_mul(73856093) ^ cz.wrapping_mul(19349663);
-        let tx = cx * 28 + 8 + seed % 11;
-        let tz = cz * 28 + 8 + (seed >> 7) % 11;
-        let layout_tree = self.layout.as_ref().is_some_and(|r| {
-            tx as i32 >= r.clear_min[0] - 10
-                && (tx as i32) < r.clear_max[0] + 10
-                && tz as i32 >= r.clear_min[1] - 10
-                && (tz as i32) < r.clear_max[1] + 10
-        });
-        let unit_trees = self.extended && (328..425).contains(&tx) && (273..332).contains(&tz);
-        let tree = (!layout_tree
-            && !unit_trees
-            && !self.road_at(tx, tz, 10)
-            && !(tx < 288 + shift && (298..=386).contains(&tz))
-            && !seed.is_multiple_of(5))
-        .then(|| {
-            (
-                range_height(tx, tz),
-                19 + (seed >> 13) % 18,
-                x as i32 - tx as i32,
-                z as i32 - tz as i32,
-            )
+        let tree_cell = if let Some(cache) = &self.tree_cache {
+            cache.cells[(z / 28) as usize * cache.width + (x / 28) as usize]
+        } else {
+            self.tree_cell(x / 28, z / 28)
+        };
+        let tree = tree_cell.map(|(base, height, tx, tz)| {
+            (base, height, x as i32 - tx as i32, z as i32 - tz as i32)
         });
         let rock =
             (!road && !layout_pad && !unit_pad && !(x < 254 + shift && (319..354).contains(&z)))
@@ -1202,9 +1227,34 @@ impl Generator for RangeTerrain {
     /// world asks for every voxel of it, and that is where the time goes.
     fn column(&self, x: u32, z: u32, y0: u32, out: &mut [u16]) {
         let c = self.column_of(x, z);
-        for (i, o) in out.iter_mut().enumerate() {
+        // All authored and procedural solids have a finite top. The world
+        // builder requests the full 192-cell column, although most terrain
+        // ends below 60; do not run material precedence for empty sky.
+        let mut top = c.ground;
+        if let Some(h) = c.course {
+            top = top.max(h.max(0) as u32);
+        }
+        for &(_, hi, _) in &c.blocks {
+            top = top.max(hi.max(0) as u32);
+        }
+        if c.wall {
+            top = top.max(66);
+        }
+        if c.target {
+            top = top.max(45);
+        }
+        if let Some((base, tall, _, _)) = c.tree {
+            top = top.max(base.saturating_add(tall));
+        }
+        if let Some((stone, _, _)) = c.rock {
+            top = top.max(c.ground.saturating_add(2 + stone % 3));
+        }
+        let live = top.saturating_sub(y0).min(out.len() as u32) as usize;
+        let (material, sky) = out.split_at_mut(live);
+        for (i, o) in material.iter_mut().enumerate() {
             *o = self.at(&c, x, y0 + i as u32, z);
         }
+        sky.fill(0);
     }
     fn material(&self, x: u32, y: u32, z: u32) -> u16 {
         let shift = if self.extended { 160 } else { 0 };
@@ -2123,7 +2173,7 @@ impl BlastRange {
                 layout.size[1],
                 layout.size[2],
                 config.edits_per_tick,
-                Box::new(terrain),
+                Box::new(terrain.with_tree_cache(layout.size)),
             );
             completed("world");
             let witness = config.unit_ablation_resistance > 0;
@@ -2184,7 +2234,7 @@ impl BlastRange {
             size[1],
             size[2],
             config.edits_per_tick,
-            Box::new(RangeTerrain::new(extended, layout.clone())),
+            Box::new(RangeTerrain::new(extended, layout.clone()).with_tree_cache(size)),
         );
         Self::build_in_world(config, layout, extended, witness, world)
     }
@@ -7416,6 +7466,46 @@ mod tests {
                     "only {kinds:?} of the range's materials were seen"
                 );
             }
+        }
+    }
+    #[test]
+    fn cached_tree_columns_and_empty_sky_match_uncached_material() {
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let plain = RangeTerrain::new(true, Some(layout.clone()));
+        let cached = RangeTerrain::new(true, Some(layout.clone())).with_tree_cache(layout.size);
+        let mut columns = std::collections::BTreeSet::new();
+        for z in (0..layout.size[2]).step_by(397) {
+            for x in (0..layout.size[0]).step_by(331) {
+                columns.insert((x, z));
+            }
+        }
+        // Cover trunks, crowns, neighbouring cells and the last partial tile.
+        for (cx, cz) in [(0u32, 0u32), (12, 7), (75, 93), (200, 250), (356, 356)] {
+            let seed = cx.wrapping_mul(73856093u32) ^ cz.wrapping_mul(19349663u32);
+            let tx = cx * 28 + 8 + seed % 11;
+            let tz = cz * 28 + 8 + (seed >> 7) % 11;
+            for dz in -9..=9 {
+                for dx in -9..=9 {
+                    let x = tx as i32 + dx;
+                    let z = tz as i32 + dz;
+                    if x >= 0 && z >= 0 && x < layout.size[0] as i32 && z < layout.size[2] as i32 {
+                        columns.insert((x as u32, z as u32));
+                    }
+                }
+            }
+        }
+        let mut expected = [0u16; 192];
+        let mut actual = [0u16; 192];
+        for (x, z) in columns {
+            plain.column(x, z, 0, &mut expected);
+            cached.column(x, z, 0, &mut actual);
+            assert_eq!(actual, expected, "cached column {x},{z}");
+            // Material reads use the independent per-voxel path.
+            for (y, &mat) in actual.iter().enumerate() {
+                assert_eq!(mat, cached.material(x, y as u32, z), "{x},{y},{z}");
+            }
+            cached.column(x, z, 64, &mut actual[64..]);
+            assert_eq!(actual, expected, "offset column {x},{z}");
         }
     }
     #[test]

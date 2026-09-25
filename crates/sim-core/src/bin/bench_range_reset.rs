@@ -11,6 +11,18 @@ fn main() {
     let config = ExplosionConfig::from_ron(include_str!("../../../../data/energy-cannon.ron"))
         .expect("stock energy weapon");
     let mark = Instant::now();
+    let cold_validator = Validator::default();
+    println!(
+        "RESET cold-validator ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mark = Instant::now();
+    cold_validator.validate(&layout).expect("cold validation");
+    println!(
+        "RESET cold-validation ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mark = Instant::now();
     let mut sim = BlastRange::with_layout(config.clone(), layout.clone()).expect("range");
     println!(
         "RESET initial-world ms={:.3}",
