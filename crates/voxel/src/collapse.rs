@@ -965,6 +965,11 @@ impl CollapseLayer {
             for lab in nd.without_direct_anchor(overflow) {
                 let id = base + lab as usize;
                 self.reached[id] = false;
+                // Root is needed only for unresolved nodes after this pass.
+                // Reuse it as the traversal mark while searching: MAX means
+                // unseen, MAX-1 means visited, and an unsupported component
+                // receives its real root once the search is exhausted.
+                self.component_roots[id] = u32::MAX;
                 self.anchor_candidates.push(AnchorCandidate {
                     chunk: i as u32,
                     lab,
@@ -978,7 +983,6 @@ impl CollapseLayer {
         // Bedrock and the temporary conservative anchors are already known.
         // Visit only the remaining connected components of this undirected
         // graph, instead of expanding every grounded terrain node each tick.
-        let mut seen = vec![false; self.reached.len()];
         for &AnchorCandidate {
             chunk: ci,
             lab: start_lab,
@@ -986,12 +990,12 @@ impl CollapseLayer {
         } in &self.anchor_candidates
         {
             let start = start as usize;
-            if self.reached[start] || seen[start] {
+            if self.reached[start] || self.component_roots[start] != u32::MAX {
                 continue;
             }
             self.walk.clear();
             self.walk.push((ci, start_lab));
-            seen[start] = true;
+            self.component_roots[start] = u32::MAX - 1;
             let mut anchored = false;
             let mut head = 0;
             'search: while head < self.walk.len() {
@@ -1013,8 +1017,8 @@ impl CollapseLayer {
                         // this search root. One certified anchor proves
                         // them all; do not traverse the rest of the map.
                         break 'search;
-                    } else if !seen[nid] {
-                        seen[nid] = true;
+                    } else if self.component_roots[nid] == u32::MAX {
+                        self.component_roots[nid] = u32::MAX - 1;
                         self.walk.push((j, b));
                     }
                 }
