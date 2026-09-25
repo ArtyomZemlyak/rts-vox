@@ -88,6 +88,10 @@ pub struct Probe<'a> {
     /// Lowest and highest yielding cell above the floor; `[MAX, 0]` is none.
     /// Empty when nothing yields.
     yields: Vec<[u16; 2]>,
+    /// Hump interpolation for the current support length and fade. A probe
+    /// may check many poses of one hull; these weights do not depend on pose.
+    hump_weights: Vec<(Fx, Fx)>,
+    hump_key: (i32, i32),
     yielding: Vec<Mat>,
     rubble: Option<&'a Rubble>,
     /// Columns scanned, columns answered and surface samples taken since
@@ -136,6 +140,8 @@ impl<'a> Probe<'a> {
             } else {
                 vec![[u16::MAX, 0]; w * h]
             },
+            hump_weights: Vec::new(),
+            hump_key: (0, 0),
             yielding: yielding.to_vec(),
             rubble: None,
             scans: 0,
@@ -506,17 +512,24 @@ impl<'a> Probe<'a> {
             // belt at one wheel and out as it leaves at the other, so the
             // hull rides onto and off a summit instead of jumping.
             let fade = (s.span / 2).max(1);
+            let support = s.support[0];
+            if self.hump_key != (support, fade) {
+                self.hump_weights.clear();
+                for u in -support + 1..support {
+                    let t = Fx::from_int(u + support).div(Fx::from_int(2 * support.max(1)));
+                    let w = Fx::from_int((support - u.abs()).min(fade)).div(Fx::from_int(fade));
+                    self.hump_weights.push((t, w));
+                }
+                self.hump_key = (support, fade);
+            }
             for (rear, front, z) in [(0, 1, -1), (2, 3, 1)] {
                 let mut lift = Fx::ZERO;
                 let mut top = Fx::ZERO;
                 let mut u = -s.support[0] + 1;
                 while u < s.support[0] {
+                    let (t, w) = self.hump_weights[(u + support - 1) as usize];
                     let g = self.surface(point(u, z * s.support[1]));
-                    let t =
-                        Fx::from_int(u + s.support[0]).div(Fx::from_int(2 * s.support[0].max(1)));
                     let line = floors[rear].add(floors[front].sub(floors[rear]).mul(t));
-                    let w =
-                        Fx::from_int((s.support[0] - u.abs()).min(fade)).div(Fx::from_int(fade));
                     let excess = g.sub(line).mul(w);
                     if excess > lift {
                         lift = excess;
@@ -2063,6 +2076,38 @@ mod tests {
             height: 30,
             span: 25,
             ramp: Fx::from_ratio(3, 5),
+        }
+    }
+    #[test]
+    fn hump_weights_match_fixed_point_division_and_refresh_with_shape() {
+        let w = world(true, true, true);
+        let pos = [
+            Fx::from_int(126).add(Fx::from_ratio(1, 3)),
+            Fx::from_int(110).add(Fx::from_ratio(2, 5)),
+        ];
+        let mut reused = Probe::around(&w, &[], pos, 96);
+        for (span, support) in [(25, 25), (8, 9), (14, 25), (2, 9), (25, 25)] {
+            let shape = Shape {
+                span,
+                support: [support, 8],
+                ..tank()
+            };
+            let fade = (span / 2).max(1);
+            for head in [0, angle::FULL / 7, angle::FULL / 4] {
+                let actual = reused.contacts(pos, head, shape);
+                let expected = Probe::around(&w, &[], pos, 96).contacts(pos, head, shape);
+                assert_eq!(actual, expected);
+                assert_eq!(reused.hump_key, (support, fade));
+                for u in -support + 1..support {
+                    assert_eq!(
+                        reused.hump_weights[(u + support - 1) as usize],
+                        (
+                            Fx::from_int(u + support).div(Fx::from_int(2 * support.max(1))),
+                            Fx::from_int((support - u.abs()).min(fade)).div(Fx::from_int(fade)),
+                        )
+                    );
+                }
+            }
         }
     }
     #[test]
