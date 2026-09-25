@@ -219,7 +219,9 @@ pub struct CollapseLayer {
     // Derived graph summaries; authoritative nodes keep the same wire format.
     /// Derived membership by chunk index. Sequential scans are cheaper than
     /// walking a tree for every collapse tick on the kilometre range.
-    needs_anchor: Vec<u8>,
+    /// Chunks with components lacking a direct anchor, one bit per chunk.
+    /// Word order and low-bit order preserve increasing chunk index.
+    anchor_bits: Vec<u64>,
     anchor_count: usize,
     /// Rare chunks with more than 64 components keep their extra labels here.
     anchor_overflow: BTreeMap<u32, Vec<u16>>,
@@ -315,7 +317,7 @@ impl CollapseLayer {
         let n = (nx * ny * nz) as usize;
         CollapseLayer {
             comps: Components::new(),
-            needs_anchor: vec![0; n],
+            anchor_bits: vec![0; n.div_ceil(64)],
             anchor_count: 0,
             anchor_overflow: BTreeMap::new(),
             edge_count: 0,
@@ -928,11 +930,13 @@ impl CollapseLayer {
         } else {
             self.anchor_overflow.insert(i as u32, overflow);
         }
-        if missing && self.needs_anchor[i] == 0 {
-            self.needs_anchor[i] = 1;
+        let bit = 1u64 << (i % 64);
+        let word = &mut self.anchor_bits[i / 64];
+        if missing && *word & bit == 0 {
+            *word |= bit;
             self.anchor_count += 1;
-        } else if !missing && self.needs_anchor[i] != 0 {
-            self.needs_anchor[i] = 0;
+        } else if !missing && *word & bit != 0 {
+            *word &= !bit;
             self.anchor_count -= 1;
         }
     }
@@ -946,35 +950,37 @@ impl CollapseLayer {
         self.walk.clear();
         self.unsupported_chunks.clear();
         self.component_roots.resize(self.reached.len(), 0);
-        for (i, &candidate) in self.needs_anchor.iter().enumerate() {
-            if candidate == 0 {
-                continue;
-            }
-            if self.stale[i] {
-                continue;
-            }
-            let base = self.base[i] as usize;
-            let nd = self.nodes[i].as_ref().expect("anchor cache");
-            let overflow = if nd.n > 64 {
-                self.anchor_overflow
-                    .get(&(i as u32))
-                    .map_or(&[][..], Vec::as_slice)
-            } else {
-                &[][..]
-            };
-            for lab in nd.without_direct_anchor(overflow) {
-                let id = base + lab as usize;
-                self.reached[id] = false;
-                // Root is needed only for unresolved nodes after this pass.
-                // Reuse it as the traversal mark while searching: MAX means
-                // unseen, MAX-1 means visited, and an unsupported component
-                // receives its real root once the search is exhausted.
-                self.component_roots[id] = u32::MAX;
-                self.anchor_candidates.push(AnchorCandidate {
-                    chunk: i as u32,
-                    lab,
-                    id: id as u32,
-                });
+        for (wi, &word) in self.anchor_bits.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let i = wi * 64 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if self.stale[i] {
+                    continue;
+                }
+                let base = self.base[i] as usize;
+                let nd = self.nodes[i].as_ref().expect("anchor cache");
+                let overflow = if nd.n > 64 {
+                    self.anchor_overflow
+                        .get(&(i as u32))
+                        .map_or(&[][..], Vec::as_slice)
+                } else {
+                    &[][..]
+                };
+                for lab in nd.without_direct_anchor(overflow) {
+                    let id = base + lab as usize;
+                    self.reached[id] = false;
+                    // Root is needed only for unresolved nodes after this pass.
+                    // Reuse it as the traversal mark while searching: MAX means
+                    // unseen, MAX-1 means visited, and an unsupported component
+                    // receives its real root once the search is exhausted.
+                    self.component_roots[id] = u32::MAX;
+                    self.anchor_candidates.push(AnchorCandidate {
+                        chunk: i as u32,
+                        lab,
+                        id: id as u32,
+                    });
+                }
             }
         }
         st.nodes = st.nodes.max(self.reached.len());
@@ -1250,8 +1256,10 @@ impl CollapseLayer {
         if let Some(nd) = self.nodes[i].take() {
             self.edge_count -= nd.cached_edges;
         }
-        if self.needs_anchor[i] != 0 {
-            self.needs_anchor[i] = 0;
+        let bit = 1u64 << (i % 64);
+        let word = &mut self.anchor_bits[i / 64];
+        if *word & bit != 0 {
+            *word &= !bit;
             self.anchor_count -= 1;
         }
         self.anchor_overflow.remove(&(i as u32));
@@ -1264,7 +1272,7 @@ impl CollapseLayer {
     /// Память графа компонент — она растёт с числом тронутых чанков
     /// и обязана быть видна.
     pub fn graph_bytes(&self) -> usize {
-        let mut n = self.needs_anchor.capacity()
+        let mut n = self.anchor_bits.capacity() * std::mem::size_of::<u64>()
             + self.anchor_candidates.capacity() * std::mem::size_of::<AnchorCandidate>();
         for nd in self.nodes.iter().flatten() {
             n += nd.faces.iter().map(|v| v.len() * 6).sum::<usize>() + nd.bedrock.len();
@@ -1410,7 +1418,7 @@ impl CollapseLayer {
                 None
             };
         }
-        self.needs_anchor.fill(0);
+        self.anchor_bits.fill(0);
         self.anchor_count = 0;
         self.anchor_overflow.clear();
         self.edge_count = 0;
@@ -1578,6 +1586,42 @@ mod tests {
     }
 
     #[test]
+    fn anchor_bits_keep_chunk_order_across_word_boundaries_and_invalidation() {
+        let w = World::new(320, 64, 256, 1000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        for i in [0, 63, 64, 129, 159] {
+            let mut nd = Box::new(ChunkNodes::new());
+            nd.n = 1;
+            nd.bedrock.push(false);
+            c.nodes[i] = Some(nd);
+            c.known.push(i as u32);
+            c.cache_nodes(i);
+        }
+        assert_eq!(c.anchor_count, 5);
+        for i in [63, 64] {
+            c.nodes[i].as_mut().unwrap().bedrock[0] = true;
+            c.cache_nodes(i);
+        }
+        let (x, y, z) = c.coords(129);
+        c.invalidate_at(x * CS as u32, y * CS as u32, z * CS as u32);
+        assert_eq!(c.anchor_count, 2);
+        assert_eq!(c.anchor_bits[0] & 1, 1);
+        assert_eq!(c.anchor_bits[2] & (1 << 31), 1 << 31);
+        c.rebuild_index();
+        c.resolve(&mut CollapseStats::default());
+        assert_eq!(
+            c.anchor_candidates
+                .iter()
+                .map(|v| v.chunk)
+                .collect::<Vec<_>>(),
+            [0, 159]
+        );
+        let reached = c.reached.clone();
+        c.resolve_reference(&mut CollapseStats::default());
+        assert_eq!(c.reached, reached);
+    }
+
+    #[test]
     fn local_anchor_search_matches_full_flood_during_cuts_and_baking() {
         let mut w = World::new(96, 64, 64, 100_000, Box::new(Bridge));
         let mut c = CollapseLayer::new(&w);
@@ -1618,7 +1662,7 @@ mod tests {
         };
         for round in 0..256 {
             c.known.clear();
-            c.needs_anchor.fill(0);
+            c.anchor_bits.fill(0);
             c.anchor_count = 0;
             c.anchor_overflow.clear();
             c.edge_count = 0;
