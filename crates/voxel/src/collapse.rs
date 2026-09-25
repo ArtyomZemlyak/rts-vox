@@ -873,7 +873,8 @@ impl CollapseLayer {
             self.base[i] = total;
             total += self.nodes[i].as_ref().expect("known").n as u32;
         }
-        self.reached.clear();
+        // `resolve` initializes every live entry before reading it. Preserve
+        // the allocation and existing length when only component bases move.
         self.reached.resize(total as usize, false);
     }
 
@@ -989,7 +990,7 @@ impl CollapseLayer {
         // Bedrock and the temporary conservative anchors are already known.
         // Visit only the remaining connected components of this undirected
         // graph, instead of expanding every grounded terrain node each tick.
-        for &AnchorCandidate {
+        'candidate: for &AnchorCandidate {
             chunk: ci,
             lab: start_lab,
             id: start,
@@ -998,6 +999,21 @@ impl CollapseLayer {
             let start = start as usize;
             if self.reached[start] || self.component_roots[start] != u32::MAX {
                 continue;
+            }
+            // The common case is a single local component touching an
+            // already certified neighbour. Certify it without setting up a
+            // graph walk; only the remaining candidates need traversal.
+            let nd = self.nodes[ci as usize].as_ref().expect("known");
+            for &CachedLink {
+                chunk: j, lab: b, ..
+            } in nd.links_for(start_lab as usize)
+            {
+                if self.nodes[j as usize].is_some()
+                    && self.reached[(self.base[j as usize] + u32::from(b)) as usize]
+                {
+                    self.reached[start] = true;
+                    continue 'candidate;
+                }
             }
             self.walk.clear();
             self.walk.push((ci, start_lab));
