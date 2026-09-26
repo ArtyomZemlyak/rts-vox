@@ -50,7 +50,7 @@ impl crate::World {
         };
         let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
         self.bursts.next_id += 1;
-        let f = Fragment {
+        let mut f = Fragment {
             id: self.bursts.next_id,
             position: chunk.centre,
             velocity,
@@ -66,6 +66,10 @@ impl crate::World {
             held,
             resting: false,
         };
+        // A hull dead at the map edge hangs over it (ADR-428).
+        if let Some(g) = &self.ground {
+            f.keep_on_map([g.world.nx, g.world.nz]);
+        }
         assert!(self.bursts.corpses.insert(held, f).is_none());
     }
 }

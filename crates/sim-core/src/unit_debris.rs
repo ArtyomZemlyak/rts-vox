@@ -9,6 +9,7 @@ impl crate::World {
         changes: Vec<Change>,
         frames: &[Option<[Frame; 2]>],
     ) {
+        let columns = self.ground.as_ref().map(|g| [g.world.nx, g.world.nz]);
         let (Some(e), Some(bodies)) = (self.econ.as_mut(), self.material_bodies.as_mut()) else {
             return;
         };
@@ -68,7 +69,7 @@ impl crate::World {
                             .add(Fx::from_ratio(1, 2))
                             .add(local[a])
                     }));
-                    let f = Fragment {
+                    let mut f = Fragment {
                         id: 0,
                         position,
                         velocity: V3::ZERO,
@@ -84,6 +85,10 @@ impl crate::World {
                         held: container,
                         resting: false,
                     };
+                    // A hull at the map edge hangs cells over it (ADR-428).
+                    if let Some(columns) = columns {
+                        f.keep_on_map(columns);
+                    }
                     let energy = (change.motion_mj as u128 * count as u128
                         / (change.removed.len() + change.dented.len()).max(1) as u128)
                         as u64;
@@ -101,6 +106,7 @@ impl crate::World {
         sections: Vec<crate::damage::Separated>,
         frames: &[Option<[Frame; 2]>],
     ) {
+        let columns = self.ground.as_ref().map(|g| [g.world.nx, g.world.nz]);
         let (Some(e), Some(bodies)) = (self.econ.as_mut(), self.material_bodies.as_mut()) else {
             return;
         };
@@ -161,7 +167,7 @@ impl crate::World {
                 velocity
             };
             let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
-            let f = Fragment {
+            let mut f = Fragment {
                 id: 0,
                 position: chunk.centre,
                 velocity,
@@ -177,6 +183,9 @@ impl crate::World {
                 held: container,
                 resting: false,
             };
+            if let Some(columns) = columns {
+                f.keep_on_map(columns);
+            }
             // Inherited velocity belongs to the separated mass. Detachment adds
             // no launch energy; gravity does the subsequent work.
             self.bursts.emit_section(f);
@@ -277,6 +286,53 @@ mod tests {
                 .debris_mm3,
             volume
         );
+    }
+    /// A hull standing at the map edge hangs its rear over it; the pieces
+    /// its cells there become start over the map (ADR-428). Off it, the
+    /// edge held them and no save after them would load.
+    #[test]
+    fn pieces_of_a_hull_hanging_over_the_map_edge_start_on_the_map() {
+        struct Empty;
+        impl voxel::Generator for Empty {
+            fn material(&self, _x: u32, _y: u32, _z: u32) -> voxel::store::Mat {
+                0
+            }
+        }
+        let (mut w, id, cells) = fixture();
+        w.attach_ground(crate::ground::Ground::new(
+            voxel::World::new(128, 64, 128, 65536, Box::new(Empty)),
+            &w.tuning,
+        ));
+        w.units.x[id as usize] = 0;
+        let bodies = w.material_bodies.as_mut().unwrap();
+        let generation = bodies.state(id).unwrap().generation;
+        assert!(bodies.queue_cells(
+            id,
+            generation,
+            cells,
+            9_000_000_000,
+            10000,
+            IDENTITY[0],
+            w.tuning.impact.max_pending
+        ));
+        w.apply_material_damage();
+        assert!(!w.bursts.fragments.is_empty(), "no piece came off");
+        assert!(
+            w.bursts
+                .fragments
+                .iter()
+                .all(|f| f.position.x >= Fx::ZERO && f.position.z >= Fx::ZERO),
+            "a piece starts off the map"
+        );
+        let mut bytes = fx::blob::Blob::new();
+        w.bursts.save(&mut bytes);
+        let world = &w.ground.as_ref().unwrap().world;
+        assert!(crate::burst::Bursts::load(
+            &mut fx::blob::Scan::new(&bytes.v),
+            Some(world),
+            &w.tuning.blast
+        )
+        .is_some());
     }
     #[test]
     fn a_full_fragment_pool_defers_material_removal_until_it_has_room() {

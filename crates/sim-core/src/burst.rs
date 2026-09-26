@@ -1022,6 +1022,60 @@ mod tests {
             "the piece under the hull is no floor"
         );
     }
+    /// A piece dug from under a hull at the map edge leaves the hull's box
+    /// by the nearest side that keeps it on the map (ADR-428). By the
+    /// nearest side it left the map, the edge held it there, and no save
+    /// after it would load.
+    #[test]
+    fn a_piece_evicted_at_the_map_edge_stays_on_the_map() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        b.fragments.push(Fragment {
+            id: 1,
+            position: V3::new(Fx::from_ratio(1, 2), Fx::from_int(13), Fx::from_int(48)),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        b.next_id = 1;
+        // Its box reaches past the map edge at x = 0; the piece lies a
+        // unit and a half from the -x side and further from every other.
+        let hull = Hull {
+            pos: [Fx::from_int(2), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(2), Fx::from_int(6)],
+            height: Fx::from_int(3),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ZERO,
+        };
+        b.step_fragments(
+            &w,
+            &mut e,
+            &t.blast,
+            crate::gravity_per_tick(&t),
+            0,
+            Surroundings {
+                hulls: &[hull],
+                yielding: &[],
+            },
+        );
+        let x = b.fragments[0].position.x;
+        assert!(x > Fx::from_int(4), "the piece left by the far side: {x:?}");
+        let mut bytes = Blob::new();
+        b.save(&mut bytes);
+        assert!(Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t.blast).is_some());
+    }
     fn economy() -> Economy {
         let mats =
             modding::data::materials_from_ron(include_str!("../../../data/materials.ron")).unwrap();
@@ -1610,6 +1664,16 @@ pub const IDENTITY: [V3; 3] = [
     V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
 ];
 impl Fragment {
+    /// Keep the centre over the map (ADR-428). A save refuses a piece
+    /// whose centre lies off it, and one would get there: a hull at the
+    /// map edge hangs its cells over it. The box may still cross the edge;
+    /// the edge holds the piece where it lands.
+    pub(crate) fn keep_on_map(&mut self, columns: [u32; 2]) {
+        let last = |n: u32| Fx::from_int(n as i32).sub(Fx(1));
+        self.position.x = self.position.x.clamp(Fx::ZERO, last(columns[0]));
+        self.position.z = self.position.z.clamp(Fx::ZERO, last(columns[1]));
+        self.position.y = self.position.y.max(Fx::ZERO);
+    }
     /// The piece's box in its own turn, around its centre.
     pub fn bounds(&self) -> ([Fx; 3], [Fx; 3]) {
         if let Some(chunk) = &self.chunk {
@@ -3139,7 +3203,7 @@ fn advance_fragment(
     // up under the belly and lift the hull off the ground.
     for (i, h) in hulls.iter().enumerate() {
         if i < 64 && inside & (1 << i) != 0 {
-            evict(f, h, low, high);
+            evict(f, h, low, high, [bounds[0], bounds[2]]);
         }
     }
     for _ in 0..steps {
@@ -3229,8 +3293,10 @@ fn tumble(f: &mut Fragment, t: &Blast) {
     }
 }
 /// Move a piece out of a hull's box by the nearest side, in the hull's
-/// own frame, keeping its height (ADR-302).
-fn evict(f: &mut Fragment, h: &Hull, low: [Fx; 3], high: [Fx; 3]) {
+/// own frame, keeping its height (ADR-302). At the map edge the nearest
+/// side can lie off the map; the nearest one that keeps the centre on
+/// it is taken instead (ADR-428).
+fn evict(f: &mut Fragment, h: &Hull, low: [Fx; 3], high: [Fx; 3], columns: [u32; 2]) {
     let (c, s) = (fx::angle::cos(h.head), fx::angle::sin(h.head));
     let p = arr(f.position);
     let (dx, dz) = (p[0].sub(h.pos[0]), p[2].sub(h.pos[2]));
@@ -3240,16 +3306,41 @@ fn evict(f: &mut Fragment, h: &Hull, low: [Fx; 3], high: [Fx; 3]) {
     let clear = reach.add(Fx::from_ratio(1, 2));
     let out_u = h.half[0].add(clear);
     let out_v = h.half[1].add(clear);
-    let (nu, nv) = if out_u.sub(u.abs()) <= out_v.sub(v.abs()) {
-        (if u.raw() < 0 { out_u.neg() } else { out_u }, v)
-    } else {
-        (u, if v.raw() < 0 { out_v.neg() } else { out_v })
+    // The four sides, nearest first; a tie keeps this order.
+    let mut sides = [
+        (
+            out_u.sub(u.abs()),
+            [if u.raw() < 0 { out_u.neg() } else { out_u }, v],
+        ),
+        (
+            out_v.sub(v.abs()),
+            [u, if v.raw() < 0 { out_v.neg() } else { out_v }],
+        ),
+        (
+            out_u.add(u.abs()),
+            [if u.raw() < 0 { out_u } else { out_u.neg() }, v],
+        ),
+        (
+            out_v.add(v.abs()),
+            [u, if v.raw() < 0 { out_v } else { out_v.neg() }],
+        ),
+    ];
+    sides.sort_by_key(|side| side.0);
+    let at = |[nu, nv]: [Fx; 2]| {
+        [
+            h.pos[0].add(nu.mul(c)).sub(nv.mul(s)),
+            h.pos[2].add(nu.mul(s)).add(nv.mul(c)),
+        ]
     };
-    f.position = V3::new(
-        h.pos[0].add(nu.mul(c)).sub(nv.mul(s)),
-        p[1],
-        h.pos[2].add(nu.mul(s)).add(nv.mul(c)),
-    );
+    let on_map =
+        |q: [Fx; 2]| (0..2).all(|a| q[a] >= Fx::ZERO && q[a] < Fx::from_int(columns[a] as i32));
+    let q = sides
+        .iter()
+        .map(|side| at(side.1))
+        .find(|q| on_map(*q))
+        .unwrap_or_else(|| at(sides[0].1));
+    f.position = V3::new(q[0], p[1], q[1]);
+    f.keep_on_map(columns);
 }
 
 fn box_contact(
