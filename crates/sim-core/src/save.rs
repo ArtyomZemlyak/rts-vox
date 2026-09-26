@@ -163,6 +163,11 @@ pub fn load_with(
 
     let seed = s.u64();
     let params = load_params(&mut s);
+    // Мир строится из этих чисел сразу: испорченные уронили бы
+    // генератор, а не вернули ошибку (ADR-450).
+    if !params.valid() {
+        return Err(LoadError::Truncated);
+    }
     let side = s.u32();
     let per_side = s.usize();
     let nd = s.list(16);
@@ -995,6 +1000,29 @@ mod tests {
                 "обрезка на {cut} байте прошла незамеченной"
             );
         }
+    }
+
+    /// **Испорченные параметры мира — ошибка чтения, а не паника
+    /// генератора** (ADR-450). Мир строится из сида и параметров файла:
+    /// высота 4 роняла обрезку поверхности `clamp(8, ny - 8)`, огромный
+    /// шаг шума — сглаживание в `u64`.
+    #[test]
+    fn corrupt_world_params_are_an_error_not_a_panic() {
+        let small = worldgen::Params::sized(64, 64, 64);
+        let r = Reference::with_params(3, 40, tune(), guns(), small);
+        let full = save(&r);
+        // After the magic, the version and the seed: nx, ny, nz,
+        // base height, relief, feature.
+        let field = |k: usize| MAGIC.len() + 4 + 8 + 4 * k;
+        for (k, bad) in [(1, 4u32), (1, 0), (0, 1), (5, 3_000_000)] {
+            let mut b = full.clone();
+            b[field(k)..field(k) + 4].copy_from_slice(&bad.to_le_bytes());
+            assert!(
+                matches!(load(&b, tune(), guns()), Err(LoadError::Truncated)),
+                "field {k} = {bad} was not refused"
+            );
+        }
+        assert!(load(&full, tune(), guns()).is_ok());
     }
 
     fn tune() -> Tuning {
