@@ -101,7 +101,8 @@ pub fn save(r: &Reference) -> Vec<u8> {
     // случайных чисел.
     b.u64(r.seed);
     save_params(&mut b, &r.terrain.params);
-    b.u32(r.side);
+    // Место прежней «стороны мира» — ширина по X; читается и сверяется.
+    b.u32(r.terrain.params.nx);
     b.usize(r.per_side);
     b.u32(r.diggers.len() as u32);
     for d in &r.diggers {
@@ -174,7 +175,7 @@ pub fn load_with(
         })
         .collect();
     let rng = Rng::from_state(s.u64(), s.u64());
-    if !s.ok() {
+    if !s.ok() || side != params.nx {
         return Err(LoadError::Truncated);
     }
 
@@ -203,7 +204,6 @@ pub fn load_with(
 
     Ok(Reference {
         world,
-        side,
         per_side,
         terrain,
         diggers,

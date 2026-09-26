@@ -4392,6 +4392,16 @@ pub const REF_SIDE: u32 = 640;
 /// из `data/weapons.ron`, а не местами в массиве (ADR-192).
 pub const REF_WEAPON_IDS: [u16; 2] = [1, 2];
 
+/// Оружие стороны эталона — место в реестре вида из [`REF_WEAPON_IDS`].
+/// Одно на расстановку и на подкрепление (ADR-192, ADR-448).
+fn ref_weapon(world: &World, owner: u8) -> u16 {
+    let id = REF_WEAPON_IDS[owner as usize % REF_WEAPON_IDS.len()];
+    world
+        .weapons
+        .index_of(id)
+        .unwrap_or_else(|| panic!("вид оружия {id} не загружен")) as u16
+}
+
 /// Потолок затронутых вокселей за тик у мира эталонного сценария.
 /// Одно число на всех, кто собирает этот мир — из сида или из кэша
 /// карты (ADR-228): разный потолок — разный дренаж, то есть другая
@@ -4439,9 +4449,6 @@ pub fn ref_params() -> worldgen::Params {
 /// внутри него: разнеси её по вызывающим, и они разойдутся снова.
 pub struct Reference {
     pub world: World,
-    /// Сторона мира: копатели переселяются по ней, а мир у показа
-    /// и у гейта разный (ADR-172).
-    pub(crate) side: u32,
     /// Заявленная численность стороны. Бой затухает без подкреплений,
     /// и прогон на десять тысяч тиков восемь тысяч из них хеширует
     /// почти пустое поле (ADR-161).
@@ -4533,12 +4540,7 @@ impl Reference {
         // (ADR-192). Жребием тоже нельзя: разбор по виду попал бы
         // в зависимость от генератора случайных чисел.
         for k in 0..world.units.len() {
-            let id = REF_WEAPON_IDS[world.units.owner[k] as usize % REF_WEAPON_IDS.len()];
-            world.units.weapon[k] = world
-                .weapons
-                .index_of(id)
-                .unwrap_or_else(|| panic!("вид оружия {id} не загружен"))
-                as u16;
+            world.units.weapon[k] = ref_weapon(&world, world.units.owner[k]);
         }
 
         // Копатели ставятся на поверхность, вразнос по карте: копка
@@ -4558,7 +4560,6 @@ impl Reference {
         }
         Reference {
             world,
-            side: params.nx,
             per_side: units.max(1).div_ceil(2),
             terrain,
             diggers,
@@ -4601,12 +4602,12 @@ impl Reference {
         // расстановки обязан быть от данных, а не от хода боя.
         for owner in 0..2u8 {
             let have = live[owner as usize];
-            let kinds = self.world.weapons.len().max(1);
             for _ in 0..REF_REINFORCE.min(self.per_side.saturating_sub(have)) {
                 let id = spawn_in_line(&mut self.world, &mut self.rng, owner);
-                // Подкрепление вооружается как своя сторона, иначе
-                // строй со временем перемешал бы оружие.
-                self.world.units.weapon[id as usize] = (owner as usize % kinds) as u16;
+                // Подкрепление вооружается как своя сторона и тем же
+                // путём — номером вида, а не местом в реестре (ADR-448):
+                // иначе строй со временем перемешал бы оружие.
+                self.world.units.weapon[id as usize] = ref_weapon(&self.world, owner);
                 added = true;
             }
         }
@@ -4673,9 +4674,12 @@ impl Reference {
         }
         // Переселение — после обхода: земля занята заимствованием,
         // а порядок остаётся порядком в массиве, а не обхода.
+        // По обеим сторонам мира: карта не обязана быть квадратной
+        // (ADR-448).
+        let (wx, wz) = (self.terrain.params.nx, self.terrain.params.nz);
         for k in moved {
-            let x = self.rng.below(self.side) as i32;
-            let z = self.rng.below(self.side) as i32;
+            let x = self.rng.below(wx) as i32;
+            let z = self.rng.below(wz) as i32;
             let y = self.terrain.surface(x as u32, z as u32) as i32;
             self.diggers[k] = Digger {
                 x,
@@ -4690,6 +4694,24 @@ impl Reference {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A digger relocates within both sides of the map** (ADR-448).
+    /// Relocation drew both coordinates from the width, and on a map
+    /// shallower in z a digger landed off the map and dug nothing.
+    #[test]
+    fn a_digger_relocates_within_a_map_that_is_not_square() {
+        let p = worldgen::Params::sized(96, 48, 40);
+        let mut r = Reference::with_params(5, 20, test_tuning(), test_weapons(), p);
+        let mut fresh = 0;
+        let mut far = 0;
+        for _ in 0..120 {
+            r.tick();
+            fresh += r.diggers.iter().filter(|d| d.fresh).count();
+            far = far.max(r.diggers.iter().map(|d| d.z).max().unwrap_or(0));
+        }
+        assert!(fresh > r.diggers.len(), "no digger relocated");
+        assert!(far < 40, "a digger relocated to z = {far}, off the map");
+    }
 
     #[test]
     fn a_blocked_walker_does_not_advance_its_gait_or_fractional_position() {
