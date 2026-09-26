@@ -915,6 +915,60 @@ mod tests {
             below.position.y
         );
     }
+    /// **A fast piece stands on the piece below it too** (ADR-438). The
+    /// settled index held only the cells beside a flying piece's box,
+    /// and a piece thrown down at seven units a tick crossed the one
+    /// lying below it within the tick without asking about it, and sank
+    /// to the ground through it.
+    #[test]
+    fn a_fast_piece_stands_on_the_piece_below_it() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        let piece = |id, material, y: i32, vy: i32, resting| Fragment {
+            id,
+            position: V3::new(
+                Fx::from_int(48).add(Fx::from_ratio(1, 2)),
+                Fx::from_int(y),
+                Fx::from_int(48).add(Fx::from_ratio(1, 2)),
+            ),
+            velocity: V3::new(Fx::ZERO, Fx::from_int(vy), Fx::ZERO),
+            material,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 9600,
+            count: 8,
+            shape: 0xff,
+            side: 2,
+            chunk: None,
+            held,
+            resting,
+        };
+        b.fragments.push(piece(1, 1, 13, 0, true));
+        b.fragments.push(piece(2, 2, 21, -7, false));
+        for tick in 0..240 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        let (below, above) = (&b.fragments[0], &b.fragments[1]);
+        assert!(above.resting && below.resting, "still falling");
+        let (_, high) = below.bounds();
+        let (low, _) = above.bounds();
+        let top = below.position.y.add(high[1]);
+        let bottom = above.position.y.add(low[1]);
+        assert!(
+            bottom >= top.sub(Fx::from_ratio(1, 2)),
+            "the piece sank into the one below: bottom {bottom:?} against top {top:?}"
+        );
+    }
     #[test]
     fn overlapping_airborne_pieces_cannot_hold_each_other_up() {
         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
@@ -3068,8 +3122,15 @@ impl Settled {
             if f.resting && !due(f.id, tick, t) {
                 continue;
             }
-            // A piece may reach a cell beside the one it is in.
-            let (c0, c1) = settled_cells(lo, hi);
+            // Where the piece may get to this tick: its box swept by its
+            // velocity, and a cell beyond for what gravity adds (ADR-438).
+            // A cell beside the one it is in was all it asked about, and a
+            // piece moves up to two and a half cells a tick: a fast one
+            // fell through a settled piece outside the cells it asked for.
+            let v = arr(f.velocity);
+            let reach_lo = [0, 1, 2].map(|a| lo[a].add(v[a].min(Fx::ZERO)));
+            let reach_hi = [0, 1, 2].map(|a| hi[a].add(v[a].max(Fx::ZERO)));
+            let (c0, c1) = settled_cells(reach_lo, reach_hi);
             want.include(c0.map(|v| v - 1), c1.map(|v| v + 1));
         }
         if want.0.is_empty() {
