@@ -301,7 +301,7 @@ impl Heat {
     pub fn load(s: &mut Scan, w: &World, t: &HeatTuning) -> Option<Self> {
         let mut h = Self::default();
         let n = s.u32() as usize;
-        if n > (w.nx * w.ny * w.nz) as usize {
+        if n as u64 > cell_count(w.nx, w.ny, w.nz) {
             return None;
         }
         let mut previous = None;
@@ -340,6 +340,13 @@ impl Heat {
     }
 }
 
+/// Число ячеек мира в `u64`: у километровой карты 10000×192×10000
+/// оно за пределом `u32`, и произведение в `u32` паниковало при
+/// загрузке любого её снимка — `overflow-checks` включены во всех
+/// профилях.
+fn cell_count(nx: u32, ny: u32, nz: u32) -> u64 {
+    u64::from(nx) * u64::from(ny) * u64::from(nz)
+}
 fn inside(w: &World, p: [u32; 3]) -> bool {
     p[0] < w.nx && p[1] < w.ny && p[2] < w.nz
 }
@@ -363,6 +370,12 @@ fn neighbours(w: &World, p: [u32; 3]) -> Vec<[u32; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Объём километровой карты не помещается в `u32`.
+    #[test]
+    fn the_kilometre_map_volume_is_counted_without_overflow() {
+        assert_eq!(cell_count(10_000, 192, 10_000), 19_200_000_000);
+        assert!(cell_count(10_000, 192, 10_000) > u64::from(u32::MAX));
+    }
     #[test]
     fn occupied_rows_deposit_the_same_heat_as_the_voxel_reference() {
         let mut w = World::new(96, 64, 96, 100, Box::new(Flat));
