@@ -324,6 +324,12 @@ impl Bodies {
             self.refused += 1;
             return false;
         }
+        // A frame cell's dig never lands (ADR-034): the body would wait
+        // for it for ever. The collapse anchors what touches the frame
+        // (ADR-433); anyone else asking gets a refusal.
+        if cells.iter().any(|&(x, y, z)| w.on_frame(x, y, z)) {
+            return false;
+        }
         let Some(mut b) = Body::from_world_cells(w, cells) else {
             return false;
         };

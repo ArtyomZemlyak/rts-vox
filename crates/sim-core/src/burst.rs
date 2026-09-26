@@ -2333,10 +2333,13 @@ impl Bursts {
                     made += 1;
                     continue;
                 }
+                // No room for a piece: the cell stays in the world. Its
+                // detach dig is a transfer and drains first; so does this
+                // put-back, right behind it (ADR-431).
                 for i in 0..box_cells(side) {
                     if shape & (1 << i) != 0 {
                         let c = shape_cell(i, side);
-                        world.queue_edit(Edit::put(
+                        world.queue_transfer(Edit::put(
                             key[0] + c[0] as u32,
                             key[1] + c[1] as u32,
                             key[2] + c[2] as u32,

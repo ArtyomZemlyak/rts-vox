@@ -230,6 +230,10 @@ pub struct CollapseLayer {
     nx: u32,
     ny: u32,
     nz: u32,
+    /// The world's size in voxels across: its frame (ADR-034) anchors
+    /// what touches it (ADR-433). Derived from the world, not saved.
+    wx: u32,
+    wz: u32,
     dirty: Vec<u32>,
     stamp: Vec<u32>,
     epoch: u32,
@@ -325,6 +329,8 @@ impl CollapseLayer {
             nx,
             ny,
             nz,
+            wx: w.nx,
+            wz: w.nz,
             dirty: Vec::new(),
             stamp: vec![u32::MAX; n],
             epoch: 0,
@@ -661,7 +667,22 @@ impl CollapseLayer {
         nd.n = n;
         nd.bedrock.clear();
         nd.bedrock.resize(n, false);
-        let (_, cy, _) = self.coords(i);
+        let (cx, cy, cz) = self.coords(i);
+        // The map's frame cannot be dug or built (ADR-034): what touches
+        // it stands as on bedrock (ADR-433). Unanchored, a ledge against
+        // the side wall fell as a body whose frame cells never left the
+        // world, and the body waited for them for ever.
+        let cs = CS as u32;
+        let mut frame_x = 0u32;
+        if cx == 0 {
+            frame_x |= 1;
+        }
+        if cx == (self.wx - 1) / cs {
+            frame_x |= 1 << ((self.wx - 1) % cs);
+        }
+        let frame_z = |lz: usize| {
+            (cz == 0 && lz == 0) || (cz == (self.wz - 1) / cs && lz as u32 == (self.wz - 1) % cs)
+        };
         for (ri, r) in self.comps.runs.iter().enumerate() {
             let lab = self.comps.label[ri] as u16;
             let col = r.col as usize;
@@ -689,6 +710,9 @@ impl CollapseLayer {
             }
             // Коренная порода: самый низ мира держит всё, что на нём стоит.
             if cy == 0 && ly == 0 && m != 0 {
+                nd.bedrock[lab as usize] = true;
+            }
+            if m & frame_x != 0 || (m != 0 && frame_z(lz)) {
                 nd.bedrock[lab as usize] = true;
             }
         }
@@ -2107,6 +2131,57 @@ mod probe_equivalence {
             b.list.iter().map(|x| x.voxels.len()).sum::<usize>()
         );
         assert!(w.solid(20, 40, 20), "столб пропал из мира");
+    }
+
+    /// Полка у стены мира: висит в воздухе и держится только рамкой
+    /// x = 0.
+    struct Ledge;
+    impl crate::Generator for Ledge {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < 32 {
+                return 2;
+            }
+            if x < 6 && (20..24).contains(&z) && (40..42).contains(&y) {
+                3
+            } else {
+                AIR
+            }
+        }
+    }
+
+    /// **Рамка мира держит то, что её касается** (ADR-433). Рамку нельзя
+    /// ни снять, ни застроить (ADR-034). Каскад отрывал полку у стены
+    /// мира телом, правки её клеток на рамке отбрасывались, и тело ждало
+    /// их вечно — а на полигоне с ним вставал весь каскад.
+    #[test]
+    fn the_map_frame_holds_what_touches_it() {
+        let mut w = World::new(64, 96, 64, 100_000, Box::new(Ledge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(64, test_gravity());
+        w.queue_dig(5, 40, 21);
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        let mut gathered = usize::MAX;
+        for _ in 0..8 {
+            gathered = c.apply(&mut w, &edits, &mut b).gathered;
+            w.flush();
+        }
+        assert_eq!(
+            gathered, 0,
+            "the collapse still takes the ledge for unsupported"
+        );
+        assert!(
+            b.list.is_empty(),
+            "the ledge on the frame fell as a body of {} cells",
+            b.list.iter().map(|x| x.voxels.len()).sum::<usize>()
+        );
+        assert!(
+            w.solid(0, 40, 21) && w.solid(3, 41, 22),
+            "the ledge left the world"
+        );
+        // Nor does anyone else detach a frame cell: its dig would never land.
+        assert!(!b.detach(&mut w, &[(0, 40, 21), (1, 40, 21)]));
+        assert!(w.solid(1, 40, 21));
     }
 
     /// **Каскад с локальной проверкой и без обязан дать одно и то же.**
