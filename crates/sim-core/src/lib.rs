@@ -1142,6 +1142,11 @@ impl World {
     }
 
     /// Земля для чтения — рендеру и сценам.
+    /// Сторона мира по X и Z: у земли своя, без неё — [`WORLD`].
+    pub fn extent(&self) -> (i32, i32) {
+        self.ground.as_ref().map_or((WORLD, WORLD), |g| g.extent())
+    }
+
     pub fn ground(&self) -> Option<&ground::Ground> {
         self.ground.as_ref()
     }
@@ -1463,21 +1468,34 @@ impl World {
             self.orders_dropped += 1;
             return;
         }
+        // **Точка приказа проверяется до того, как станет состоянием.**
+        // Приказ приходит от игрока, мода и пира lockstep, а дальше его
+        // координаты идут в квадраты расстояний в `i32`: `MoveTo`
+        // с `x = 100 000` ронял фазу движения переполнением у всех
+        // клиентов сразу — ровно тот DoS, от которого канал приказов
+        // и заведён. Ход и атака с ходом прижимаются к краю мира:
+        // щелчок за картой — это «до края». Копка и стройка за краем
+        // смысла не имеют и отбрасываются (ADR-417).
+        let (ex, ez) = self.extent();
+        let ny = self.ground.as_ref().map(|g| g.world.ny as i32);
+        let inside = |x: i32, y: i32, z: i32| {
+            (0..ex).contains(&x) && (0..ez).contains(&z) && ny.is_none_or(|n| (0..n).contains(&y))
+        };
         let tick = self.tick as u32;
         let period = self.tuning.retarget_period;
         let u = &mut self.units;
         match o {
             Order::MoveTo { x, z, .. } => {
                 u.stance[i] = STANCE_MOVE;
-                u.goal_x[i] = x;
+                u.goal_x[i] = x.clamp(0, ex - 1);
                 u.goal_y[i] = 0;
-                u.goal_z[i] = z;
+                u.goal_z[i] = z.clamp(0, ez - 1);
             }
             Order::AttackMove { x, z, .. } => {
                 u.stance[i] = STANCE_ATTACK_MOVE;
-                u.goal_x[i] = x;
+                u.goal_x[i] = x.clamp(0, ex - 1);
                 u.goal_y[i] = 0;
-                u.goal_z[i] = z;
+                u.goal_z[i] = z.clamp(0, ez - 1);
             }
             Order::Hold { .. } => u.stance[i] = STANCE_HOLD,
             Order::Release { .. } => u.stance[i] = STANCE_FLOW,
@@ -1502,6 +1520,10 @@ impl World {
                 u.goal_z[i] = u.z[t];
             }
             Order::Dig { x, y, z, .. } => {
+                if !inside(x, y, z) {
+                    self.orders_dropped += 1;
+                    return;
+                }
                 u.stance[i] = STANCE_DIG;
                 u.goal_x[i] = x;
                 u.goal_y[i] = y;
@@ -1513,7 +1535,7 @@ impl World {
                 u.job[i] = NO_TARGET;
             }
             Order::Build { kind, x, z, .. } => {
-                if !self.place_site(i, kind, x, z) {
+                if !inside(x, 0, z) || !self.place_site(i, kind, x, z) {
                     self.orders_dropped += 1;
                     return;
                 }
@@ -5945,6 +5967,43 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
         assert!(x < 200, "юнит всё-таки ушёл по полю стороны: x={x}");
         assert_eq!(w.orders_applied, 1);
         assert_eq!(w.orders_dropped, 0);
+    }
+
+    /// **Точка приказа за краем мира не роняет симуляцию.**
+    ///
+    /// Координаты приказа шли в квадраты расстояний в `i32` как есть:
+    /// `MoveTo` с `x = 100 000` переполнял их в фазе движения у всех
+    /// клиентов lockstep. Ход прижимается к краю, копка и стройка
+    /// за краем отбрасываются (ADR-417).
+    #[test]
+    fn an_order_beyond_the_world_is_clamped_or_dropped() {
+        let t = test_tuning();
+        let (mut w, id) = lone_walker(t);
+        let i = id as usize;
+        w.push_order(Order::MoveTo {
+            unit: id,
+            x: 100_000,
+            z: i32::MIN,
+        });
+        w.push_order(Order::Dig {
+            unit: id,
+            x: 10,
+            y: i32::MIN,
+            z: 10,
+        });
+        w.push_order(Order::Build {
+            unit: id,
+            kind: 0,
+            x: -5,
+            z: 40,
+        });
+        for _ in 0..30 {
+            w.tick();
+        }
+        let (ex, _) = w.extent();
+        assert_eq!((w.units.goal_x[i], w.units.goal_z[i]), (ex - 1, 0));
+        assert_eq!(w.units.stance[i], STANCE_MOVE, "копка за краем принята");
+        assert_eq!((w.orders_applied, w.orders_dropped), (1, 2));
     }
 
     /// **Новый приказ отменяет прежний.**
