@@ -3942,7 +3942,8 @@ impl World {
             }
         }
         self.deaths += dead.len() as u64;
-        let frames = (!dead.is_empty())
+        let died = !dead.is_empty();
+        let frames = died
             .then(|| self.material_bodies.as_ref().map(|b| b.frames(&self.units)))
             .flatten();
         for i in dead {
@@ -3955,6 +3956,13 @@ impl World {
             });
             self.wreck(k, frames.as_ref().and_then(|f| f[k]));
             self.units.kill(i);
+        }
+        // «Живые» — это живые (ADR-436): список пересобирала только фаза
+        // `NavUpdate` в начале тика, и убитые здесь лежали в нём до
+        // следующего тика — `living()` и подкрепление между тиками
+        // считали мёртвых, а подкрепление запаздывало на тик.
+        if died {
+            self.units.refresh_live();
         }
         self.recount_outcome();
     }
@@ -4019,11 +4027,11 @@ impl World {
         let mut live = [0usize; MAX_OWNERS];
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
-            // **По `alive`, а не по списку живых.** Список пересобирает
-            // фаза `NavUpdate` в начале тика, а уборка идёт в конце:
-            // убитый этим тиком в списке ещё лежит, и исход отставал бы
-            // на тик. Отставание на тик — это разный исход у разных
-            // клиентов, если один из них на этом тике остановится.
+            // **По `alive`, а не по списку живых.** Уборка пересобирает
+            // список после убийств (ADR-436), но исход не должен зависеть
+            // от того, кто и когда его пересобрал: отставание на тик —
+            // это разный исход у разных клиентов, если один из них на
+            // этом тике остановится.
             if !self.units.alive[i] {
                 continue;
             }
@@ -4975,6 +4983,23 @@ mod tests {
     }
 
     /// Двое на плоскости, лицом к лицу, на заданном расстоянии.
+    /// **Убитый этим тиком не числится живым после тика** (ADR-436).
+    /// Список живых пересобирала только навигация в начале следующего
+    /// тика, и между тиками `living()` — а с ним подкрепление эталона —
+    /// считал мёртвых.
+    #[test]
+    fn the_dead_leave_the_living_in_the_tick_they_die() {
+        let mut w = World::new(1, 4, test_tuning());
+        let a = w.units.spawn(10, 10, 0, 0, 300);
+        let b = w.units.spawn(40, 10, 0, 0, 300);
+        w.units.refresh_live();
+        w.units.voxels[b as usize] = 0;
+        w.tick();
+        assert!(!w.units.alive[b as usize]);
+        assert_eq!(w.living(0), 1, "the dead unit is still counted");
+        assert_eq!(w.units.live(), &[a]);
+    }
+
     fn duel(t: Tuning, ws: modding::weapons::Weapons, apart: i32) -> World {
         let vw = voxel::World::new(320, 240, 320, 100_000, Box::new(Flat));
         let mut w = World::new(2, 8, t);
