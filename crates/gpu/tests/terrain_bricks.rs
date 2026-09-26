@@ -1,6 +1,7 @@
 //! Actual GPU checks for conservative empty-space skipping, including removal
 //! and wrapped storage. No hierarchy data returns to the simulation.
 use gpu::{as_bytes, Gpu};
+mod common;
 
 fn uniform(g: &Gpu, words: &[u32]) -> wgpu::Buffer {
     let b = g.device.create_buffer(&wgpu::BufferDescriptor {
@@ -149,9 +150,16 @@ fn query(@builtin(global_invocation_id) gid:vec3<u32>) {
             }
             assert_eq!(got[count + coarse], top);
         }
-        let mut params = vec![0f32; 88];
-        params[40..44].copy_from_slice(&[64.0, 32.0, 64.0, 0.0]);
-        params[44..48].copy_from_slice(&[origin[0] as f32, 0.0, origin[2] as f32, 32.0]);
+        let fields = common::Layout::of(include_str!("../../render/src/terrain_common.wgsl"));
+        let (dims, corner) = (fields.at("terrain"), fields.at("terrain_origin"));
+        let mut params = vec![0f32; fields.floats];
+        params[dims..dims + 4].copy_from_slice(&[64.0, 32.0, 64.0, 0.0]);
+        params[corner..corner + 4].copy_from_slice(&[
+            origin[0] as f32,
+            0.0,
+            origin[2] as f32,
+            32.0,
+        ]);
         let params = uniform(&g, &params.iter().map(|v| v.to_bits()).collect::<Vec<_>>());
         let mut rays = vec![];
         for y in [3.4, 7.7, 15.3, 21.3, 24.3, 25.3, 27.1] {

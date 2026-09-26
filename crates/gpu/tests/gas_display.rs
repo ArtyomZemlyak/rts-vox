@@ -1,5 +1,6 @@
 //! Cached display samples versus the original per-fragment formula on Vulkan.
 use gpu::Gpu;
+mod common;
 
 #[test]
 fn cached_smoke_samples_preserve_density_noise_and_self_shadow() {
@@ -37,9 +38,10 @@ fn check(@builtin(global_invocation_id) id:vec3<u32>) {
     let build = g.pipeline(&source, "build", "cached display");
     let check = g.pipeline(&source, "check", "direct display oracle");
     let gas = g.storage(48 * 48 * 48 * 32, "synthetic gas");
+    let layout = common::Layout::of(include_str!("../../render/src/terrain_common.wgsl"));
     let params = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 352,
+        size: layout.bytes(),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -91,11 +93,12 @@ fn check(@builtin(global_invocation_id) id:vec3<u32>) {
             })
             .collect();
         g.queue.write_buffer(&gas, 0, &values);
-        let mut p = [0f32; 88];
-        p[23] = 5.0; // origin.w: physical field cell
-        p[38] = edge; // charge.z: display cube
-        p[64..68].copy_from_slice(&[-0.55, 0.6, -0.55, 1.5]);
-        p[81] = round as f32 * 1.37; // weapon.y: moving detail
+        let mut p = vec![0f32; layout.floats];
+        p[layout.at("origin") + 3] = 5.0; // physical field cell
+        p[layout.at("charge") + 2] = edge; // display cube
+        let sun = layout.at("sun");
+        p[sun..sun + 4].copy_from_slice(&[-0.55, 0.6, -0.55, 1.5]);
+        p[layout.at("weapon") + 1] = round as f32 * 1.37; // moving detail
         g.queue.write_buffer(
             &params,
             0,

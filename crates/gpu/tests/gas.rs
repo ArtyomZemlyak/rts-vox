@@ -1,6 +1,17 @@
 //! Physical invariants of the visual solver, tested on an actual GPU.
 //! Float fields are not compared bit-for-bit across vendors. Readback here is
 //! test instrumentation; the game's gas renderer never reads its fields back.
+mod common;
+/// The solver and every terrain and smoke pass read one uniform buffer, filled
+/// from one Rust struct, so the two WGSL declarations of `Params` must agree
+/// field for field. Checked on the CPU, without a device.
+#[test]
+fn both_shader_declarations_of_the_params_agree() {
+    let solver = common::Layout::of(include_str!("../../render/src/gas.wgsl"));
+    let view = common::Layout::of(include_str!("../../render/src/terrain_common.wgsl"));
+    assert_eq!(solver.fields(), view.fields());
+    assert_eq!(solver.floats, view.floats);
+}
 #[test]
 fn gas_burns_rises_and_cannot_cross_a_sealed_wall() {
     check_field(false, false);
@@ -102,28 +113,29 @@ fn check_field(energy: bool, wide: bool) {
         .map(|i| u32::from(i % N == 18 || i / N % N < 3))
         .collect();
     g.queue.write_buffer(&mask, 0, gpu::as_bytes(&solid));
-    // The runtime layout of the params: the look vector (ADR-298) is the
-    // last, its x the ground glow. The corner of the terrain window
-    // (ADR-318) sits after the terrain vector, so everything past it is
-    // four floats further along than it used to be.
-    let mut p = vec![0.0f32; 88];
-    p[84] = 1.0;
-    p[23] = 1.0;
-    p[24..28].copy_from_slice(&[10.0, 12.0, 24.0, 4.0]);
+    // The runtime layout of the params, read from the shader by field name:
+    // look.x is the ground glow (ADR-298), origin.w the cell edge.
+    let fields = common::Layout::of(shader);
+    let (source, control) = (fields.at("source"), fields.at("control"));
+    let (chemistry, charge) = (fields.at("chemistry"), fields.at("charge"));
+    let mut p = vec![0.0f32; fields.floats];
+    p[fields.at("look")] = 1.0;
+    p[fields.at("origin") + 3] = 1.0;
+    p[source..source + 4].copy_from_slice(&[10.0, 12.0, 24.0, 4.0]);
     if wide {
-        p[27] = 12.0;
+        p[source + 3] = 12.0;
     }
-    p[28..32].copy_from_slice(&[1.0 / 60.0, 0.0, 1.0, 0.0]);
-    p[32..36].copy_from_slice(&[1.8, 0.65, 1.6, 2.9]);
-    p[36..40].copy_from_slice(&[1.8, 2.2, 0.3, 0.0]);
+    p[control..control + 4].copy_from_slice(&[1.0 / 60.0, 0.0, 1.0, 0.0]);
+    p[chemistry..chemistry + 4].copy_from_slice(&[1.8, 0.65, 1.6, 2.9]);
+    p[charge..charge + 4].copy_from_slice(&[1.8, 2.2, 0.3, 0.0]);
     if energy {
-        p[32..36].copy_from_slice(&[0.0, 1.25, 1.0, 3.4]);
-        p[36..40].copy_from_slice(&[0.0, 3.2, 0.3, 0.0]);
-        p[80] = 1.0;
+        p[chemistry..chemistry + 4].copy_from_slice(&[0.0, 1.25, 1.0, 3.4]);
+        p[charge..charge + 4].copy_from_slice(&[0.0, 3.2, 0.3, 0.0]);
+        p[fields.at("weapon")] = 1.0;
     }
     let params = g.device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
-        size: 352,
+        size: fields.bytes(),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -239,8 +251,8 @@ fn check_field(energy: bool, wide: bool) {
     }
     // Another detonation in the same field must preserve all old gas outside
     // its source, while adding heat/dust near the new source. No blank frame.
-    p[26] = 38.0;
-    p[31] = 1.0; // additive init, same binding layout as the runtime
+    p[source + 2] = 38.0;
+    p[control + 3] = 1.0; // additive init, same binding layout as the runtime
     let bits: Vec<u32> = p.iter().map(|v| v.to_bits()).collect();
     g.queue.write_buffer(&params, 0, gpu::as_bytes(&bits));
     let mut e = g.device.create_command_encoder(&Default::default());
@@ -269,8 +281,10 @@ fn check_field(energy: bool, wide: bool) {
             (i / N % N) as f32 + 0.5,
             (i / N / N) as f32 + 0.5,
         ];
-        let d2 = (0..3).map(|a| (pos[a] - p[24 + a]).powi(2)).sum::<f32>();
-        if d2 > (p[27] * 1.5).powi(2) && old[7] > 0.001 {
+        let d2 = (0..3)
+            .map(|a| (pos[a] - p[source + a]).powi(2))
+            .sum::<f32>();
+        if d2 > (p[source + 3] * 1.5).powi(2) && old[7] > 0.001 {
             assert_eq!(&old[4..], &new[4..], "new impact cleared an older plume");
             retained += 1;
         }
