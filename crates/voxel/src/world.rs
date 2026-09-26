@@ -160,6 +160,13 @@ pub struct World {
     /// Идёт ли тик. Тот, кто зовёт `flush` напрямую, тика не
     /// объявляет, и для него потолок остаётся на дренаж.
     in_tick: bool,
+    /// Сколько правок применено и просмотрено в текущем тике — по той
+    /// же причине, что материализации: потолок правок и потолок
+    /// просмотра считаются за тик, а не за дренаж (ADR-132, ADR-431).
+    /// В снимок не входят: тик начинается с `begin_tick`, дренаж вне
+    /// тика — с нуля.
+    applied_in_tick: usize,
+    examined_in_tick: usize,
     gen: Arc<dyn Generator + Send + Sync>,
     /// Слой изменений: `None` — чанк нетронут, материал у генератора.
     chunks: Vec<Option<Arc<Paletted>>>,
@@ -181,6 +188,13 @@ pub struct World {
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
+    /// Передачи материи между миром и телом (ADR-431): исходные ячейки
+    /// оторванного тела и запекание приземлившегося. Дренаж берёт их
+    /// первыми и целиком — их число ограничено тем, кто их ставит, —
+    /// чтобы клетки тела не стояли в мире за хвостом копки, где их
+    /// снимет копатель, а тело потом запечёт обратно. Своя очередь
+    /// FIFO: в голове общей поздний отрыв обгонял бы ранний.
+    transfers: std::collections::VecDeque<Edit>,
     /// Правки, применённые в текущем тике. Это и есть поток для рендера
     /// (ADR-103) и вход связности с навигацией.
     applied: Vec<Edit>,
@@ -424,6 +438,8 @@ impl World {
             max_materialize_per_tick: 4,
             materialized_in_tick: 0,
             in_tick: false,
+            applied_in_tick: 0,
+            examined_in_tick: 0,
             gen: Arc::from(g),
             chunks: (0..(cx * cy * cz) as usize).map(|_| None).collect(),
             reset_dirty: Some(Vec::new()),
@@ -433,6 +449,7 @@ impl World {
             ceiling,
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
+            transfers: std::collections::VecDeque::new(),
             applied: Vec::new(),
             taken: Vec::new(),
             completed: Vec::new(),
@@ -819,6 +836,9 @@ impl World {
 
     fn finish_reset(&mut self) {
         self.queue.clear();
+        self.transfers.clear();
+        self.applied_in_tick = 0;
+        self.examined_in_tick = 0;
         self.applied.clear();
         self.taken.clear();
         self.completed.clear();
@@ -876,6 +896,15 @@ impl World {
         }
     }
 
+    /// Поставить передачу материи между миром и телом (ADR-431): её
+    /// дренаж берёт раньше приказов и целиком. Рамка и то, что вне
+    /// мира, отбрасываются, как у приказа.
+    pub fn queue_transfer(&mut self, e: Edit) {
+        if self.inside(e.x, e.y, e.z) && !self.on_frame(e.x, e.y, e.z) {
+            self.transfers.push_back(e);
+        }
+    }
+
     pub fn queue_dig(&mut self, x: u32, y: u32, z: u32) {
         self.queue_edit(Edit::dig(x, y, z));
     }
@@ -894,7 +923,12 @@ impl World {
     }
 
     pub fn queued(&self) -> usize {
-        self.queue.len()
+        self.queue.len() + self.transfers.len()
+    }
+
+    /// Передачи между миром и телом, ждущие дренажа (ADR-431).
+    pub fn transfers_queued(&self) -> usize {
+        self.transfers.len()
     }
 
     /// Дренаж очереди в пределах потолка. Возвращает статистику;
@@ -903,11 +937,15 @@ impl World {
     pub fn begin_tick(&mut self) {
         self.in_tick = true;
         self.materialized_in_tick = 0;
+        self.applied_in_tick = 0;
+        self.examined_in_tick = 0;
     }
 
     pub fn flush(&mut self) -> FlushStats {
         if !self.in_tick {
             self.materialized_in_tick = 0;
+            self.applied_in_tick = 0;
+            self.examined_in_tick = 0;
         }
         self.applied.clear();
         self.taken.clear();
@@ -940,46 +978,36 @@ impl World {
         // Своего числа у потолка просмотра нет намеренно: тик
         // просматривает столько записей, сколько ему разрешено
         // применить правок.
+        // Передачи между миром и телом — первыми и целиком (ADR-431).
+        // Их держит потолок того, кто их ставит (тел за тик, клеток
+        // в теле), а не потолок дренажа: отложенная передача оставляет
+        // одну материю и в теле, и в мире. Свежий чанк им тоже не
+        // помеха, но в счёт материализаций тика идёт.
+        while let Some(e) = self.transfers.pop_front() {
+            st.examined += 1;
+            self.examined_in_tick += 1;
+            self.take(e, &mut st);
+        }
         let mut deferred = std::mem::take(&mut self.defer_buf);
         deferred.clear();
-        while st.applied < self.max_edits_per_tick
+        while self.applied_in_tick < self.max_edits_per_tick
             && deferred.len() < self.max_edits_per_tick
-            && st.examined < self.max_edits_per_tick
+            && self.examined_in_tick < self.max_edits_per_tick
         {
             let Some(e) = self.queue.pop_front() else {
                 break;
             };
             st.examined += 1;
+            self.examined_in_tick += 1;
             let ci = self.chunk_index(e.x, e.y, e.z);
-            let fresh = self.chunks[ci].is_none();
-            if fresh && self.materialized_in_tick >= self.max_materialize_per_tick {
+            if self.chunks[ci].is_none()
+                && self.materialized_in_tick >= self.max_materialize_per_tick
+            {
                 st.materialize_capped = true;
                 deferred.push(e);
                 continue;
             }
-            let previous = self.material(e.x, e.y, e.z);
-            self.completed.push((e, previous));
-            if e.expected_material()
-                .is_some_and(|expected| expected != previous)
-            {
-                st.noop += 1;
-                continue;
-            }
-            if let Some(was) = self.apply(e) {
-                if fresh {
-                    st.materialized += 1;
-                    self.materialized_in_tick += 1;
-                }
-                // Снятое — в список изъятого: экономика начислит его
-                // заказчику, а бесхозное отправит в объявленный сток.
-                if e.mat == AIR && was != AIR {
-                    self.taken.push((e.by, was));
-                }
-                self.applied.push(e);
-                st.applied += 1;
-            } else {
-                st.noop += 1;
-            }
+            self.take(e, &mut st);
         }
         // Отложенное возвращается в голову очереди: в следующем тике
         // дренаж начнёт с него, иначе свежий чанк ждал бы вечно.
@@ -990,6 +1018,36 @@ impl World {
         self.defer_buf = deferred;
         st.queued = self.queue.len();
         st
+    }
+
+    /// Применить одну правку дренажа и учесть её: в список завершённых,
+    /// изъятого и применённого, в счёт тика.
+    fn take(&mut self, e: Edit, st: &mut FlushStats) {
+        let fresh = self.chunks[self.chunk_index(e.x, e.y, e.z)].is_none();
+        let previous = self.material(e.x, e.y, e.z);
+        self.completed.push((e, previous));
+        if e.expected_material()
+            .is_some_and(|expected| expected != previous)
+        {
+            st.noop += 1;
+            return;
+        }
+        if let Some(was) = self.apply(e) {
+            if fresh {
+                st.materialized += 1;
+                self.materialized_in_tick += 1;
+            }
+            // Снятое — в список изъятого: экономика начислит его
+            // заказчику, а бесхозное отправит в объявленный сток.
+            if e.mat == AIR && was != AIR {
+                self.taken.push((e.by, was));
+            }
+            self.applied.push(e);
+            st.applied += 1;
+            self.applied_in_tick += 1;
+        } else {
+            st.noop += 1;
+        }
     }
 
     /// Применить одну правку. Возвращает материал, **который в вокселе
@@ -1155,6 +1213,19 @@ impl World {
         save_edits(b, self.nx, self.nz, &self.applied);
     }
 
+    /// Передачи между миром и телом, ещё не прошедшие дренаж (ADR-431).
+    /// Отдельно от [`World::save`]: формат слоя изменений прежний,
+    /// а очередь передач владелец снимка пишет в свой хвост.
+    pub fn save_transfers(&self, b: &mut fx::blob::Blob) {
+        let t: Vec<Edit> = self.transfers.iter().copied().collect();
+        save_edits(b, self.nx, self.nz, &t);
+    }
+
+    pub fn load_transfers(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.transfers = load_edits(s, self.nx, self.nz).into_iter().collect();
+        s.ok()
+    }
+
     /// Прочитать слой изменений в **уже построенный из генератора**
     /// мир. Размеры обязаны совпасть: чужой мир — это не «немного
     /// другой», это другой файл.
@@ -1221,6 +1292,8 @@ impl World {
         }
         self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
         self.applied = load_edits(s, self.nx, self.nz);
+        // Снимок старше очереди передач её не несёт: пустая.
+        self.transfers.clear();
         s.ok()
     }
 
@@ -1630,6 +1703,71 @@ mod tests {
             assert_eq!(w.material(c * 32 + 5, 5, 5), AIR, "чанк {c}");
         }
         assert_eq!(w.queued(), 0);
+    }
+
+    /// **Потолок правок считается за тик, а не за дренаж** (ADR-132,
+    /// ADR-431). Дренажей в тике три; потолок внутри одного вызова
+    /// пропускал втрое больше объявленного. Вне тика дренаж по-прежнему
+    /// считает с нуля.
+    #[test]
+    fn the_edit_ceiling_holds_across_the_drains_of_a_tick() {
+        let mut w = World::new(64, 32, 64, 1000, Box::new(Layers { h: 30 }));
+        w.max_edits_per_tick = 50;
+        for x in 1..63 {
+            for z in 1..4 {
+                w.queue_dig(x, 20, z);
+            }
+        }
+        w.begin_tick();
+        let applied: usize = (0..3).map(|_| w.flush().applied).sum();
+        assert_eq!(applied, 50, "three drains of one tick applied {applied}");
+        w.begin_tick();
+        assert_eq!(w.flush().applied, 50, "the next tick starts afresh");
+        // A world never driven by ticks: every drain counts on its own.
+        let mut untimed = World::new(64, 32, 64, 1000, Box::new(Layers { h: 30 }));
+        untimed.max_edits_per_tick = 50;
+        for x in 1..63 {
+            for z in 1..4 {
+                untimed.queue_dig(x, 20, z);
+            }
+        }
+        let applied: usize = (0..2).map(|_| untimed.flush().applied).sum();
+        assert_eq!(applied, 100);
+    }
+
+    /// **Передачи между миром и телом идут первыми и целиком**
+    /// (ADR-431): ни потолок правок, ни хвост приказов перед ними их не
+    /// задерживают, и порядок между ними — порядок постановки. Очередь
+    /// передач живёт в снимке своего владельца.
+    #[test]
+    fn transfers_drain_first_and_whole_behind_a_backlog() {
+        let mut w = World::new(64, 32, 64, 1000, Box::new(Layers { h: 30 }));
+        w.max_edits_per_tick = 10;
+        for x in 1..63 {
+            w.queue_dig(x, 20, 1);
+        }
+        for x in 1..31 {
+            w.queue_transfer(Edit::dig(x, 25, 5));
+        }
+        w.queue_transfer(Edit::put(5, 25, 5, 7));
+        let mut saved = fx::blob::Blob::new();
+        w.save_transfers(&mut saved);
+        w.begin_tick();
+        let st = w.flush();
+        assert_eq!(w.material(5, 25, 5), 7, "the later transfer ran first");
+        assert!((1..31)
+            .filter(|&x| x != 5)
+            .all(|x| w.material(x, 25, 5) == AIR));
+        assert_eq!(
+            st.applied, 31,
+            "transfers wait for nobody, orders for the ceiling"
+        );
+        assert!(w.solid(1, 20, 1), "an order got past the spent ceiling");
+        let mut back = World::new(64, 32, 64, 1000, Box::new(Layers { h: 30 }));
+        assert!(back.load_transfers(&mut fx::blob::Scan::new(&saved.v)));
+        assert_eq!(back.queued(), 31);
+        back.flush();
+        assert_eq!(back.material(5, 25, 5), 7);
     }
 
     /// Правки в уже материализованный чанк потолок не трогает: он

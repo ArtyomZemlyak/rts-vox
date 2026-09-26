@@ -2456,7 +2456,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(40);
+        b.u32(41);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2608,6 +2608,9 @@ impl BlastRange {
             self.world_changed.save(b);
             self.rubble_print.save(b);
         }
+        if version < 41 {
+            self.world.save_transfers(b);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2623,7 +2626,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=40).contains(&version) {
+        if !(27..=41).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2988,6 +2991,11 @@ impl BlastRange {
                 r.world_changed = nav::vehicle::Changed::everywhere();
             }
             r.rubble_print = nav::vehicle::RubblePrint::of(&r.current_rubble(), columns);
+        }
+        // Transfers between world and bodies still to drain (ADR-431);
+        // an older snapshot queued its detach digs with the orders.
+        if version >= 41 && !r.world.load_transfers(&mut s) {
+            return None;
         }
         (s.ok() && s.left() == 0).then_some(r)
     }

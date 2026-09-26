@@ -223,6 +223,13 @@ impl Ground {
         let (nx, nz) = (self.world.nx, self.world.nz);
         voxel::world::save_edits(b, nx, nz, &self.edits);
         voxel::world::save_edits(b, nx, nz, &self.carry);
+        // Transfers between world and bodies drain in the phase that
+        // queues them (ADR-431): between ticks there are none to write.
+        assert_eq!(
+            self.world.transfers_queued(),
+            0,
+            "a transfer outlived its tick"
+        );
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
@@ -704,6 +711,65 @@ mod tests {
             }
             AIR
         }
+    }
+
+    /// Маленький гриб: ножка три на три, шляпка семь на семь в два слоя.
+    struct Sprout;
+    impl voxel::Generator for Sprout {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < 40 {
+                return 2;
+            }
+            let (dx, dz) = (x.abs_diff(160), z.abs_diff(160));
+            if dx <= 1 && dz <= 1 && y < 50 {
+                return 3;
+            }
+            if dx <= 3 && dz <= 3 && (50..52).contains(&y) {
+                return 4;
+            }
+            AIR
+        }
+    }
+
+    /// **Оторванное тело уходит из мира в том же тике** (ADR-431), есть
+    /// хвост копки или нет. Его исходные клетки вставали в очередь за
+    /// приказами, и с хвостом стояли в мире тиками: копатель мог снять
+    /// клетку, которую тело потом запечёт обратно, — одна материя
+    /// дважды.
+    #[test]
+    fn a_torn_off_body_leaves_the_world_in_the_same_tick() {
+        let vw = voxel::World::new(320, 320, 320, 100, Box::new(Sprout));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
+        {
+            let g = w.ground.as_mut().expect("земля");
+            g.world.max_edits_per_tick = 100;
+            for z in 159..=161 {
+                for x in 159..=161 {
+                    g.world.queue_dig(x, 45, z);
+                }
+            }
+            // A backlog of digs far from the sprout, ten ticks' worth.
+            for z in 10..30 {
+                for x in 10..60 {
+                    g.world.queue_dig(x, 39, z);
+                }
+            }
+        }
+        let mut torn = None;
+        for tick in 0..60 {
+            w.tick();
+            let g = w.ground().expect("земля");
+            assert!(
+                g.bodies.list.iter().all(|b| !b.awaiting_removal(&g.world)),
+                "tick {tick}: a body's cells are still in the world"
+            );
+            if torn.is_none() && !g.bodies.list.is_empty() {
+                torn = Some(g.world.queued());
+            }
+        }
+        let backlog = torn.expect("the cap never came off");
+        assert!(backlog > 0, "no backlog stood in front of the body");
     }
 
     /// **Юнит на нависающей шляпке остаётся на ней**, а не

@@ -330,8 +330,11 @@ impl Bodies {
         b.id = self.next_id;
         self.next_id += 1;
         self.spawned.push(b.id);
+        // Its cells leave the world in the same drain, ahead of any
+        // backlog of orders (ADR-431): behind one a digger could take a
+        // cell the body will bake back when it lands.
         for &(x, y, z) in cells {
-            w.queue_edit(crate::Edit::dig(x, y, z));
+            w.queue_transfer(crate::Edit::dig(x, y, z));
         }
         self.list.push(b);
         true
@@ -401,10 +404,11 @@ impl Bodies {
                     oy: b.oy,
                     riders: b.riders.clone(),
                 });
+                // Back into the world in the same drain (ADR-431).
                 for v in &b.voxels {
                     let (x, y, z) = b.world_of(*v);
                     if x >= 0 && y >= 0 && z >= 0 {
-                        w.queue_edit(crate::Edit::put(x as u32, y as u32, z as u32, v.mat));
+                        w.queue_transfer(crate::Edit::put(x as u32, y as u32, z as u32, v.mat));
                     }
                 }
                 st.landed += 1;
@@ -631,8 +635,11 @@ mod tests {
         assert_eq!(solid, 8, "кубик не восстановился на полу");
     }
 
+    /// **Отрыв уходит из мира одним дренажем, каков бы ни был потолок
+    /// правок** (ADR-431), и тело падает со следующего шага, без лишнего
+    /// тика. Прежде клетки уходили по одной за дренаж, и тело их ждало.
     #[test]
-    fn partial_detachment_waits_for_its_cells_but_not_an_extra_tick() {
+    fn a_detachment_leaves_the_world_in_one_drain_whatever_the_ceiling() {
         let mut w = world();
         let cells: Vec<_> = (10..12)
             .flat_map(|z| (10..12).flat_map(move |y| (10..12).map(move |x| (x, y, z))))
@@ -645,15 +652,13 @@ mod tests {
         let mut bodies = Bodies::new(8, Fx::ONE);
         assert!(bodies.detach(&mut w, &cells));
         bodies.step(&mut w);
-        for _ in 1..cells.len() {
-            w.flush();
-            bodies.step(&mut w);
-            assert_eq!(bodies.list.len(), 1, "body baked into its undrained source");
-            assert_eq!(bodies.list[0].oy, 10);
-            assert_eq!(bodies.list[0].vy, Fx::ZERO);
-        }
+        assert!(
+            bodies.list[0].awaiting_removal(&w),
+            "the cells left before a drain"
+        );
         w.flush();
-        assert_eq!(w.queued(), 0);
+        assert_eq!(w.queued(), 0, "the ceiling held a cell of the body back");
+        assert!(!bodies.list[0].awaiting_removal(&w));
         bodies.step(&mut w);
         assert_eq!(bodies.list[0].fallen, 1, "extra delay after source cleared");
     }

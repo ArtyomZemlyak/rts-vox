@@ -190,10 +190,12 @@ pub(super) fn fracture(
             cells.sort_unstable();
             cells.dedup();
             if torn == before_roof && bodies.list.len() < bodies.max_bodies {
-                // Queue crushed supports BEFORE the plate's source digs.
-                // The bounded drain preserves order within each chunk: its
-                // cap must clear before the plate above can start falling,
-                // otherwise it immediately bakes onto that pending stump.
+                // Queue crushed supports BEFORE the plate's source digs,
+                // and in the same lane (ADR-431): the stump must clear
+                // before the plate above can start falling, otherwise it
+                // immediately bakes onto that pending stump. The lane of
+                // transfers drains in order and whole, ahead of orders, so
+                // both leave the world in one drain.
                 for s in supports.iter().filter(|s| s.area < needed) {
                     for y in s.block.min[1].max(0)..s.block.max[1].min(roof.max[1]) {
                         for z in s.block.min[2].max(roof.min[2] - 16)
@@ -203,7 +205,7 @@ pub(super) fn fracture(
                                 ..s.block.max[0].min(roof.max[0] + 16)
                             {
                                 if w.material(x as u32, y as u32, z as u32) == s.block.material {
-                                    w.queue_edit(Edit::dig(x as u32, y as u32, z as u32));
+                                    w.queue_transfer(Edit::dig(x as u32, y as u32, z as u32));
                                 }
                             }
                         }
