@@ -570,6 +570,12 @@ impl Motion {
             V3::ZERO
         };
         self.brake_shove(&lim);
+        // What yields to a shoved hull falls as it does to a driven one
+        // (ADR-452): slid into standing trunks, the hull stood in them
+        // until it next drove.
+        if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
+            self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
+        }
         moved
     }
     /// Whether the legs carry the hull: a tracked hull always, a walker
@@ -1684,6 +1690,48 @@ mod tests {
             "walker crossed the forest without felling a trunk"
         );
         assert!(m.destination.is_none(), "walker stopped at {:?}", m.pos);
+    }
+    /// **A shoved hull fells what it slides into** (ADR-452), as a driven
+    /// one does; slid into standing trunks, it stood in them until it
+    /// next drove.
+    #[test]
+    fn a_shoved_tank_fells_the_trees_it_slides_into() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if (100..106).contains(&x) && y < 42 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let w = World::new(256, 64, 256, 100, Box::new(Grove));
+        let body = voxel::unit::tank();
+        let mut m = Motion::new([60, 16, 128], RangeUnitKind::Tank, &body);
+        let mut felled = false;
+        for _ in 0..60 {
+            m.shove = V3::new(Fx::from_int(120), Fx::ZERO, Fx::ZERO);
+            m.cut.clear();
+            m.slide(
+                &w,
+                &nav::vehicle::Rubble::new(),
+                &body,
+                &[],
+                crate::mobility::Mobility::intact(true),
+            );
+            felled |= m.cut.iter().any(|&[x, y, z]| w.material(x, y, z) == 4);
+            if felled {
+                break;
+            }
+        }
+        assert!(
+            felled,
+            "slid into the grove without felling it: {:?}",
+            m.pos
+        );
     }
     #[test]
     fn walker_climbs_a_ridge_that_refuses_a_tank() {
