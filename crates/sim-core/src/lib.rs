@@ -3483,13 +3483,24 @@ impl World {
             // а число пар «копатель × обломок» в плотном случае растёт
             // квадратично (ADR-114). Упёршийся просмотр откладывается
             // на следующий тик: обломок никуда не денется.
-            if self.units.stance[i] == STANCE_DIG && !e.wrecks.is_empty() {
+            // **Реклейм — работа на месте.** Обломок сливается в бак
+            // только у копателя, стоящего у своего забоя; прежде
+            // проверялось лишь, что забой пришёлся на обломок, и
+            // краулер через всю карту осушал его в тот же тик, а затем,
+            // разгрузившись, снова — не сдвинувшись. Едущий к забою
+            // и бюджет просмотра не тратит (ADR-423).
+            let (ux, uz) = (self.units.x[i], self.units.z[i]);
+            let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
+            let at_face = {
+                let (ax, az) = ((ux - gx) as i64, (uz - gz) as i64);
+                ax * ax + az * az <= (reach as i64) * (reach as i64)
+            };
+            if self.units.stance[i] == STANCE_DIG && !e.wrecks.is_empty() && at_face {
                 if searches >= cap {
                     capped = true;
                     continue;
                 }
                 searches += 1;
-                let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
                 // Ничья — по **меньшему номеру обломка**, а не по
                 // порядку обхода (`CLAUDE.md`).
                 let mut best: Option<usize> = None;
@@ -3500,7 +3511,10 @@ impl World {
                     }
                     let (dx, dz) = ((w.x - gx) as i64, (w.z - gz) as i64);
                     let dd = dx * dx + dz * dz;
-                    if dd > (reach as i64) * (reach as i64) {
+                    let (ox, oz) = ((w.x - ux) as i64, (w.z - uz) as i64);
+                    if dd > (reach as i64) * (reach as i64)
+                        || ox * ox + oz * oz > (reach as i64) * (reach as i64)
+                    {
                         continue;
                     }
                     if dd < bd {

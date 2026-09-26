@@ -519,6 +519,42 @@ fn a_depot_raises_the_cap_and_its_death_lowers_it() {
     );
 }
 
+/// **Обломок не сливается в бак издалека** (ADR-423).
+///
+/// Реклейм проверял только, что забой пришёлся на обломок, но не где
+/// стоит копатель: краулер, посланный копать обломок через карту,
+/// осушал его в тот же тик и, разгрузившись, снова — не сдвинувшись.
+#[test]
+fn a_wreck_is_not_reclaimed_from_across_the_map() {
+    let mut w = world();
+    let dead = w.spawn_kind(60, 60, 0, TANK).expect("танк");
+    let taker = w.spawn_kind(560, 560, 0, CRAWLER).expect("краулер");
+    w.units.refresh_live();
+    w.units.voxels[dead as usize] = 0;
+    w.tick();
+    let (wx, wy, wz) = {
+        let e = w.econ.as_ref().expect("учёт");
+        assert_eq!(e.wrecks.len(), 1, "обломка не осталось");
+        (e.wrecks[0].x, e.wrecks[0].y, e.wrecks[0].z)
+    };
+    w.push_order(Order::Dig {
+        unit: taker,
+        x: wx,
+        y: wy,
+        z: wz,
+    });
+    for _ in 0..3 {
+        w.tick();
+    }
+    let e = w.econ.as_ref().expect("учёт");
+    assert_eq!(e.reclaimed, 0, "обломок слит в бак краулера за полкарты");
+    let (tx, tz) = (w.units.x[taker as usize], w.units.z[taker as usize]);
+    assert!(
+        (tx - wx).abs() > 100 || (tz - wz).abs() > 100,
+        "краулер доехал за три тика — проверка ничего не проверила"
+    );
+}
+
 /// **Подбитая машина оставляет обломок, и его можно реклеймить.**
 ///
 /// Реклейм — **та же операция, что копка** (ADR-017): приказ копать
