@@ -579,14 +579,34 @@ impl Foot {
                 // Predict touchdown plus half of the next stance and freeze
                 // it for the swing: terrain or velocity changes must not
                 // move the landing point while the foot is in the air.
-                let lead = g
-                    .duty
-                    .mul(Fx::from_ratio(1, 2))
-                    .add(ONE.sub(p))
-                    .div(s.cycles);
-                let yaw = Fx::from_int(s.angular).mul(lead).to_int_trunc();
+                //
+                // The lead is the drive's — `frac` cycles at its phase rate —
+                // and a walker barely stepping has thousands of ticks of it.
+                // The motion it scales is everything that moved the hull,
+                // a shove included: pushed while pivoting, a walker aimed its
+                // foot thousands of units away, where the fixed-point square
+                // of the reach wraps. The prediction goes no farther than
+                // twice the drive's own path by then, and the turn no more
+                // than half a turn; the products are taken whole (ADR-451).
+                let frac = g.duty.mul(Fx::from_ratio(1, 2)).add(ONE.sub(p));
+                let lead = |v: i128| v * i128::from(frac.raw()) / i128::from(s.cycles.raw());
+                let far = [s.linear.x, s.linear.y, s.linear.z].map(|c| lead(i128::from(c.raw())));
+                let limit = i128::from(frac.mul(g.stride).mul(Fx::from_int(2)).raw()).max(0);
+                let widest = far.iter().map(|c| c.abs()).max().unwrap_or(0);
+                let ahead = far.map(|c| {
+                    Fx(if widest > limit {
+                        c * limit / widest
+                    } else {
+                        c
+                    } as i64)
+                });
+                let half = i128::from(angle::FULL / 2);
+                let yaw = (lead(i128::from(s.angular) << 32) >> 32).clamp(-half, half) as i32;
                 let ankle = to_world(root, rig.ankle).sub(root.base);
-                let at = root.base.add(s.linear.scale(lead)).add(turned(ankle, yaw));
+                let at = root
+                    .base
+                    .add(V3::new(ahead[0], ahead[1], ahead[2]))
+                    .add(turned(ankle, yaw));
                 self.goal = rig.sole.contact(at, s.head.wrapping_add(yaw), s.floor);
             }
             self.clearance = rig.sole.clearance(
@@ -984,6 +1004,40 @@ mod tests {
         assert!(highest > g.lift.mul(fx(0.95)), "lift {highest:?}");
         assert!((last.unwrap().y.sub(r.ankle.y)).abs() < MILLI);
         assert!(foot.planted());
+    }
+
+    /// **A shoved walker aims its foot within reach** (ADR-451). The lead
+    /// to touchdown is the drive's; the motion it scaled included the
+    /// shove, and a walker barely stepping while pushed aimed its foot
+    /// eighty thousand units away — where the square of the distance
+    /// wraps and the root of it fails.
+    #[test]
+    fn a_shoved_walker_aims_its_foot_within_reach() {
+        let r = rig();
+        let g = gait();
+        let mut foot = Foot::default();
+        let root = hull(V3::ZERO, 0);
+        let s = Stance {
+            grounded: true,
+            root: &root,
+            head: 0,
+            phase: phase(0.95),
+            lift_scale: ONE,
+            linear: V3::new(fx(2.0), ZERO, ZERO),
+            angular: 900,
+            cycles: Fx::from_ratio(1, 100_000),
+            gait: &g,
+            floor: &flat,
+        };
+        let c = foot.step(&r, &s);
+        let reach = r.l1.add(r.l2).add(g.stride.mul(Fx::from_int(4)));
+        let d = foot.goal.pos.sub(root.base);
+        assert!(
+            d.x.abs() <= reach && d.z.abs() <= reach,
+            "the foot is aimed {:?} away",
+            (d.x, d.z)
+        );
+        assert!(c.pos.y.abs() < Fx::from_int(1000));
     }
 
     #[test]
