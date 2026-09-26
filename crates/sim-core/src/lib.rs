@@ -314,6 +314,40 @@ pub struct Units {
 
 pub const NO_TARGET: u32 = u32::MAX;
 
+/// Обломки по клеткам со стороной в досягаемость работы (ADR-441):
+/// всё, что в досягаемости от точки, лежит в девяти клетках вокруг
+/// её клетки. Собирается раз за фазу и только если кто-то спросит.
+struct WreckCells {
+    side: i32,
+    /// Клетка и номер обломка, по возрастанию.
+    cells: Vec<([i32; 2], u32)>,
+}
+
+impl WreckCells {
+    fn of(wrecks: &[economy::Wreck], reach: i32) -> WreckCells {
+        let side = reach.max(1);
+        let mut cells: Vec<([i32; 2], u32)> = wrecks
+            .iter()
+            .enumerate()
+            .map(|(wi, w)| ([w.x.div_euclid(side), w.z.div_euclid(side)], wi as u32))
+            .collect();
+        cells.sort_unstable();
+        WreckCells { side, cells }
+    }
+
+    /// Номера обломков в девяти клетках вокруг точки.
+    fn around(&self, x: i32, z: i32) -> impl Iterator<Item = usize> + '_ {
+        let (cx, cz) = (x.div_euclid(self.side), z.div_euclid(self.side));
+        (cx - 1..=cx + 1)
+            .flat_map(move |ax| (cz - 1..=cz + 1).map(move |az| [ax, az]))
+            .flat_map(move |key| {
+                let lo = self.cells.partition_point(|(c, _)| *c < key);
+                let hi = self.cells.partition_point(|(c, _)| *c <= key);
+                self.cells[lo..hi].iter().map(|&(_, wi)| wi as usize)
+            })
+    }
+}
+
 /// Настройки для тестов — **из того же файла**, по которому идёт игра.
 ///
 /// Не литералы: числа тика живут в `data/sim.ron` и больше нигде
@@ -3423,12 +3457,19 @@ impl World {
     }
 
     /// Шаги 2 и 3: реклейм обломков, поездка на склад и разгрузка.
+    ///
+    /// Оба поиска — склада и обломка у забоя — тратят один потолок за
+    /// тик (ADR-114), и очередь на них обслуживается с начала, которое
+    /// сдвигает тик (ADR-441). В неизменном порядке потолок доставался
+    /// бы одним и тем же: краулер, чей поиск склада каждый тик пуст,
+    /// навсегда запирал бы тех, кто за ним. Копатель у забоя встаёт
+    /// в очередь, только если у забоя есть обломок, — это проверка по
+    /// клеткам, а не просмотр всего списка.
     fn haul(&mut self) {
         let reach = self.tuning.work_reach;
-        let cap = self.tuning.max_dock_searches;
-        let (rn, rd) = (self.tuning.refine_num, self.tuning.refine_den);
-        let mut searches = 0u32;
-        let mut capped = false;
+        let cap = self.tuning.max_dock_searches as usize;
+        let mut near: Option<WreckCells> = None;
+        let mut need: Vec<u32> = Vec::new();
         for k in 0..self.units.live_ids.len() {
             let i = self.units.live_ids[k] as usize;
             let ki = self.units.kind[i];
@@ -3440,11 +3481,9 @@ impl World {
                 continue;
             }
             let e = self.econ.as_mut().expect("экономика");
-            let d = e.kinds.at(ki as usize);
-            if d.tank == 0 {
+            if e.kinds.at(ki as usize).tank == 0 {
                 continue;
             }
-            let owner = self.units.owner[i];
 
             // --- бак полон: везти на склад. Проверяется **до**
             //     реклейма: полному копателю обломок ни к чему,
@@ -3457,155 +3496,183 @@ impl World {
             // --- реклейм: копатель, чей забой пришёлся на обломок,
             //     сливает его тем же переводом, что и породу.
             //
-            // Просмотр обломков идёт из **того же бюджета**, что поиск
-            // склада: и там, и там копатель ищет, к чему приткнуться,
-            // а число пар «копатель × обломок» в плотном случае растёт
-            // квадратично (ADR-114). Упёршийся просмотр откладывается
-            // на следующий тик: обломок никуда не денется.
             // **Реклейм — работа на месте.** Обломок сливается в бак
             // только у копателя, стоящего у своего забоя; прежде
             // проверялось лишь, что забой пришёлся на обломок, и
             // краулер через всю карту осушал его в тот же тик, а затем,
             // разгрузившись, снова — не сдвинувшись. Едущий к забою
             // и бюджет просмотра не тратит (ADR-423).
-            let (ux, uz) = (self.units.x[i], self.units.z[i]);
-            let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
-            let at_face = {
-                let (ax, az) = ((ux - gx) as i64, (uz - gz) as i64);
-                ax * ax + az * az <= (reach as i64) * (reach as i64)
-            };
-            if self.units.stance[i] == STANCE_DIG && !e.wrecks.is_empty() && at_face {
-                if searches >= cap {
-                    capped = true;
-                    continue;
-                }
-                searches += 1;
-                // Ничья — по **меньшему номеру обломка**, а не по
-                // порядку обхода (`CLAUDE.md`).
-                let mut best: Option<usize> = None;
-                let mut bd = i64::MAX;
-                for (wi, w) in e.wrecks.iter().enumerate() {
-                    if e.ledger.held(w.held) == 0 {
-                        continue;
-                    }
-                    let (dx, dz) = ((w.x - gx) as i64, (w.z - gz) as i64);
-                    let dd = dx * dx + dz * dz;
-                    let (ox, oz) = ((w.x - ux) as i64, (w.z - uz) as i64);
-                    if dd > (reach as i64) * (reach as i64)
-                        || ox * ox + oz * oz > (reach as i64) * (reach as i64)
-                    {
-                        continue;
-                    }
-                    if dd < bd {
-                        bd = dd;
-                        best = Some(wi);
+            if self.units.stance[i] == STANCE_DIG {
+                let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
+                let (ax, az) = ((self.units.x[i] - gx) as i64, (self.units.z[i] - gz) as i64);
+                if !e.wrecks.is_empty() && ax * ax + az * az <= (reach as i64) * (reach as i64) {
+                    let cells = near.get_or_insert_with(|| WreckCells::of(&e.wrecks, reach));
+                    if cells.around(gx, gz).next().is_some() {
+                        need.push(i as u32);
                     }
                 }
-                if let Some(wi) = best {
-                    let from = e.wrecks[wi].held;
-                    let room = e.ledger.room(c);
-                    let n = e.ledger.transfer(from, c, room);
-                    e.reclaimed += n;
-                    // Набрал полный бак с обломка — тоже везти.
-                    if e.ledger.room(c) == 0 {
-                        self.units.stance[i] = STANCE_HAUL;
-                        self.units.job[i] = NO_TARGET;
-                    }
-                }
+                continue;
             }
-
             if self.units.stance[i] != STANCE_HAUL {
                 continue;
             }
-
-            // --- выбрать склад, если его нет или он погиб.
-            let mut dock = self.units.job[i];
-            let ok = (dock as usize) < self.units.alive.len()
-                && dock != NO_TARGET
-                && self.units.alive[dock as usize]
-                && self.units.owner[dock as usize] == owner
-                && self.units.site[dock as usize] == 0
-                && self.units.kind[dock as usize] != economy::NO_KIND
-                && e.kinds.at(self.units.kind[dock as usize] as usize).store > 0;
-            if !ok {
-                if searches >= cap {
-                    // Упёршийся поиск **откладывается**, а не теряется:
-                    // краулер ждёт тик и остаётся с грузом (ADR-114).
-                    capped = true;
-                    continue;
-                }
-                searches += 1;
-                dock = self.nearest_dock(i);
-                self.units.job[i] = dock;
-                let e = self.econ.as_mut().expect("экономика");
-                e.dock_searches += 1;
-                if dock == NO_TARGET {
-                    // Склада нет вовсе — копать дальше некуда, но
-                    // и ехать некуда: юнит стоит при забое с полным
-                    // баком. Это видно игроку и лечится складом.
-                    continue;
-                }
-            }
-            let (dx, dz) = (
-                self.units.x[dock as usize] - self.units.x[i],
-                self.units.z[dock as usize] - self.units.z[i],
-            );
-            self.units.goal_x[i] = self.units.x[dock as usize];
-            self.units.goal_y[i] = self.units.y[dock as usize];
-            self.units.goal_z[i] = self.units.z[dock as usize];
-            if dx * dx + dz * dz > reach * reach {
-                continue;
-            }
-
-            // --- разгрузка. Переработка с выходом меньше единицы —
-            //     тот самый сток, без которого партия не кончается.
-            let e = self.econ.as_mut().expect("экономика");
-            let cost = e.kinds.at(ki as usize).cost;
-            let body = self
-                .material_bodies
-                .as_ref()
-                .map_or(cost, |b| b.remaining_matter(i as u32, cost));
-            let cargo = e.ledger.held(c).saturating_sub(body);
-            if cargo > 0 {
-                let Some(bank) = e.banks.get(owner as usize).copied() else {
-                    continue;
-                };
-                // **Больше, чем влезет в запас, не перерабатывается.**
-                // Переработка списывает в сток всё взятое, что не ушло
-                // приёмнику: сдай полный бак в полный склад — и груз
-                // целиком уйдёт в «выход переработки < 1». Это был бы
-                // не сток, а уничтожение груза полным складом, и
-                // выглядело бы оно как работающая переработка.
-                //
-                // Отсюда: сколько руды брать, считается **от места**
-                // в запасе, а не от того, сколько её в баке.
-                let room = e.ledger.room(bank.stock);
-                let fits = room.saturating_mul(rd) / rn.max(1);
-                let want = cargo.min(fits);
-                if want > 0 {
-                    let got = e.ledger.refine(c, bank.stock, want, rn, rd);
-                    e.delivered += got;
-                }
-            }
-            // Разгрузился — обратно к забою. Забой запомнен приказом,
-            // а не тем местом, где кончился бак.
-            if e.ledger.held(c) <= body {
-                let (fx, fy, fz) = self.units.face[i];
-                if fy > 1 {
-                    self.units.stance[i] = STANCE_DIG;
-                    self.units.goal_x[i] = fx;
-                    self.units.goal_y[i] = fy;
-                    self.units.goal_z[i] = fz;
-                } else {
-                    self.units.stance[i] = STANCE_HOLD;
-                }
-                self.units.job[i] = NO_TARGET;
+            let dock = self.units.job[i];
+            if self.dock_ok(i, dock) {
+                self.deliver(i, dock);
+            } else {
+                need.push(i as u32);
             }
         }
-        if capped {
+
+        // Поиски — по потолку, с началом, сдвинутым тиком: сдвиг —
+        // чистая функция тика, то есть детерминирован. Упёршийся поиск
+        // **откладывается**, а не теряется: краулер ждёт тик и остаётся
+        // с грузом, обломок никуда не денется (ADR-114).
+        let n = need.len();
+        let take = cap.min(n);
+        if take < n {
             if let Some(e) = self.econ.as_mut() {
                 e.dock_capped += 1;
             }
+        }
+        let start = if n == 0 {
+            0
+        } else {
+            (self.tick as usize).wrapping_mul(take) % n
+        };
+        for step in 0..take {
+            let i = need[(start + step) % n] as usize;
+            if self.units.stance[i] == STANCE_DIG {
+                let cells = near.as_ref().expect("очередь реклейма без обломков");
+                self.reclaim(i, cells);
+                continue;
+            }
+            let dock = self.nearest_dock(i);
+            self.units.job[i] = dock;
+            self.econ.as_mut().expect("экономика").dock_searches += 1;
+            // Склада нет вовсе — копать дальше некуда, но и ехать
+            // некуда: юнит стоит при забое с полным баком. Это видно
+            // игроку и лечится складом.
+            if dock != NO_TARGET {
+                self.deliver(i, dock);
+            }
+        }
+    }
+
+    /// Слить в бак обломок у забоя. Ничья — по **меньшему номеру
+    /// обломка**, а не по порядку обхода (`CLAUDE.md`).
+    fn reclaim(&mut self, i: usize, cells: &WreckCells) {
+        let reach = self.tuning.work_reach as i64;
+        let c = self.units.store[i];
+        let (ux, uz) = (self.units.x[i], self.units.z[i]);
+        let (gx, gz) = (self.units.goal_x[i], self.units.goal_z[i]);
+        let e = self.econ.as_mut().expect("экономика");
+        let mut best: Option<(i64, usize)> = None;
+        for wi in cells.around(gx, gz) {
+            let w = &e.wrecks[wi];
+            if e.ledger.held(w.held) == 0 {
+                continue;
+            }
+            let (dx, dz) = ((w.x - gx) as i64, (w.z - gz) as i64);
+            let dd = dx * dx + dz * dz;
+            let (ox, oz) = ((w.x - ux) as i64, (w.z - uz) as i64);
+            if dd > reach * reach || ox * ox + oz * oz > reach * reach {
+                continue;
+            }
+            if best.is_none_or(|b| (dd, wi) < b) {
+                best = Some((dd, wi));
+            }
+        }
+        if let Some((_, wi)) = best {
+            let from = e.wrecks[wi].held;
+            let room = e.ledger.room(c);
+            let n = e.ledger.transfer(from, c, room);
+            e.reclaimed += n;
+            // Набрал полный бак с обломка — тоже везти.
+            if e.ledger.room(c) == 0 {
+                self.units.stance[i] = STANCE_HAUL;
+                self.units.job[i] = NO_TARGET;
+            }
+        }
+    }
+
+    /// Годится ли `dock` складом для `i`: живой, свой, достроенный
+    /// и с запасом.
+    fn dock_ok(&self, i: usize, dock: u32) -> bool {
+        let Some(e) = self.econ.as_ref() else {
+            return false;
+        };
+        let d = dock as usize;
+        dock != NO_TARGET
+            && d < self.units.alive.len()
+            && self.units.alive[d]
+            && self.units.owner[d] == self.units.owner[i]
+            && self.units.site[d] == 0
+            && self.units.kind[d] != economy::NO_KIND
+            && e.kinds.at(self.units.kind[d] as usize).store > 0
+    }
+
+    /// Ехать к складу и, доехав, разгрузиться.
+    fn deliver(&mut self, i: usize, dock: u32) {
+        let reach = self.tuning.work_reach;
+        let (rn, rd) = (self.tuning.refine_num, self.tuning.refine_den);
+        let (dx, dz) = (
+            self.units.x[dock as usize] - self.units.x[i],
+            self.units.z[dock as usize] - self.units.z[i],
+        );
+        self.units.goal_x[i] = self.units.x[dock as usize];
+        self.units.goal_y[i] = self.units.y[dock as usize];
+        self.units.goal_z[i] = self.units.z[dock as usize];
+        if dx * dx + dz * dz > reach * reach {
+            return;
+        }
+
+        // --- разгрузка. Переработка с выходом меньше единицы —
+        //     тот самый сток, без которого партия не кончается.
+        let ki = self.units.kind[i];
+        let c = self.units.store[i];
+        let owner = self.units.owner[i];
+        let e = self.econ.as_mut().expect("экономика");
+        let cost = e.kinds.at(ki as usize).cost;
+        let body = self
+            .material_bodies
+            .as_ref()
+            .map_or(cost, |b| b.remaining_matter(i as u32, cost));
+        let cargo = e.ledger.held(c).saturating_sub(body);
+        if cargo > 0 {
+            let Some(bank) = e.banks.get(owner as usize).copied() else {
+                return;
+            };
+            // **Больше, чем влезет в запас, не перерабатывается.**
+            // Переработка списывает в сток всё взятое, что не ушло
+            // приёмнику: сдай полный бак в полный склад — и груз
+            // целиком уйдёт в «выход переработки < 1». Это был бы
+            // не сток, а уничтожение груза полным складом, и
+            // выглядело бы оно как работающая переработка.
+            //
+            // Отсюда: сколько руды брать, считается **от места**
+            // в запасе, а не от того, сколько её в баке.
+            let room = e.ledger.room(bank.stock);
+            let fits = room.saturating_mul(rd) / rn.max(1);
+            let want = cargo.min(fits);
+            if want > 0 {
+                let got = e.ledger.refine(c, bank.stock, want, rn, rd);
+                e.delivered += got;
+            }
+        }
+        // Разгрузился — обратно к забою. Забой запомнен приказом,
+        // а не тем местом, где кончился бак.
+        if e.ledger.held(c) <= body {
+            let (fx, fy, fz) = self.units.face[i];
+            if fy > 1 {
+                self.units.stance[i] = STANCE_DIG;
+                self.units.goal_x[i] = fx;
+                self.units.goal_y[i] = fy;
+                self.units.goal_z[i] = fz;
+            } else {
+                self.units.stance[i] = STANCE_HOLD;
+            }
+            self.units.job[i] = NO_TARGET;
         }
     }
 

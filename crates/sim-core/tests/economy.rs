@@ -59,8 +59,11 @@ fn world() -> World {
 }
 
 fn sized_world(side: u32) -> World {
+    tuned_world(side, tuning())
+}
+
+fn tuned_world(side: u32, t: sim_core::Tuning) -> World {
     let vw = voxel::World::new(side, 64, side, 1 << 16, Box::new(Slab));
-    let t = tuning();
     let mut w = World::new(2, 64, t);
     w.attach_ground(Ground::new(vw, &t));
     w.attach_weapons(
@@ -675,5 +678,94 @@ fn a_full_tank_stops_the_digging() {
         e.balanced(),
         "материя не сходится: {}",
         e.ledger.imbalance()
+    );
+}
+
+/// Бак полон: переводом из земли, как копкой, и в стойке копки —
+/// возка начнётся с первого же тика.
+fn fill(w: &mut World, d: u32) {
+    let c = w.units.store[d as usize];
+    let e = w.econ.as_mut().expect("учёт");
+    let room = e.ledger.room(c);
+    e.ledger.reveal(e.ground, room);
+    e.ledger.transfer(e.ground, c, room);
+    w.units.stance[d as usize] = sim_core::STANCE_DIG;
+}
+
+/// **Пустой поиск склада не запирает соседа** (ADR-441).
+///
+/// Поиски склада идут из одного потолка за тик. В неизменном порядке
+/// потолок доставался одним и тем же: краулер стороны без склада искал
+/// впустую каждый тик раньше всех, и краулер за ним свой склад не
+/// находил никогда.
+#[test]
+fn a_search_in_vain_does_not_lock_out_the_next_crawler() {
+    let mut t = tuning();
+    t.max_dock_searches = 1;
+    let mut w = tuned_world(128, t);
+    // У стороны 1 склада нет, и её краулер стоит в списке первым.
+    let lost = w.spawn_kind(20, 20, 1, CRAWLER).expect("краулер");
+    let dep = w.spawn_kind(100, 100, 0, DEPOT).expect("склад");
+    let mine = w.spawn_kind(102, 100, 0, CRAWLER).expect("краулер");
+    w.units.refresh_live();
+    fill(&mut w, lost);
+    fill(&mut w, mine);
+    let _ = dep;
+    for _ in 0..4 {
+        w.tick();
+    }
+    assert!(
+        w.econ.as_ref().expect("учёт").delivered > 0,
+        "краулер со складом рядом так и не искал склад"
+    );
+}
+
+/// **Копатель без обломка у забоя поиска не тратит** (ADR-441).
+///
+/// Обломок у забоя ищется из того же потолка, что склад, и прежде его
+/// искал каждый копатель у забоя, пока где-то на карте есть обломок, —
+/// просматривая весь список.
+#[test]
+fn a_digger_with_no_wreck_at_its_face_spends_no_search() {
+    let mut t = tuning();
+    t.max_dock_searches = 1;
+    // Карта больше трёх досягаемостей работы: обломок в углу вне
+    // досягаемости и копателя, и склада.
+    let mut w = tuned_world(640, t);
+    let digger = w.spawn_kind(40, 40, 0, CRAWLER).expect("краулер");
+    let _dep = w.spawn_kind(320, 40, 0, DEPOT).expect("склад");
+    let full = w.spawn_kind(322, 40, 0, CRAWLER).expect("краулер");
+    w.units.refresh_live();
+    // Обломок — контейнер с материей, как у подбитой машины.
+    {
+        let e = w.econ.as_mut().expect("учёт");
+        let held = e.ledger.create(sim_core::matter::Kind::Debris, 0, u64::MAX);
+        e.ledger.reveal(e.ground, 1000);
+        e.ledger.transfer(e.ground, held, 1000);
+        e.wrecks.push(sim_core::economy::Wreck {
+            held,
+            x: 600,
+            y: TOP as i32,
+            z: 600,
+        });
+    }
+    // Копатель у своего забоя — в воздухе, копать там нечего.
+    let d = digger as usize;
+    w.units.stance[d] = sim_core::STANCE_DIG;
+    (w.units.goal_x[d], w.units.goal_y[d], w.units.goal_z[d]) =
+        (w.units.x[d], TOP as i32 + 10, w.units.z[d]);
+    fill(&mut w, full);
+    for _ in 0..3 {
+        w.tick();
+    }
+    let e = w.econ.as_ref().expect("учёт");
+    assert_eq!(
+        e.reclaimed, 0,
+        "обломок достали — проверка ничего не проверила"
+    );
+    assert_eq!(w.units.stance[d], sim_core::STANCE_DIG);
+    assert!(
+        e.delivered > 0,
+        "поиск склада отдан копателю, у забоя которого обломка нет"
     );
 }
