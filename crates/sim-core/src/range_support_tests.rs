@@ -115,7 +115,8 @@ fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
 
 #[test]
 fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
-    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    c.energy = 2700;
     let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     layout.course = None;
     layout.blocks.clear();

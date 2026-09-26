@@ -51,6 +51,9 @@ fn packed_material(q: vec3<i32>) -> vec2<u32> {
 fn raw_material(q:vec3<i32>)->u32 {return packed_material(q).y;}
 struct TerrainHit { t:f32, normal:vec3<f32>, material:u32 };
 fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
+    // The strategic map mesh owns distant ground. The local voxel window
+    // must not compete for depth with it at zoomed-out camera positions.
+    if p.terrain.w>0.5 {return TerrainHit(limit,vec3(0.0,1.0,0.0),0u);}
     // A parallel axis has no next face. Adding epsilon to the direction
     // changed its sign near zero and made horizontal rays crawl backwards.
     let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));

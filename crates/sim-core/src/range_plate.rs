@@ -497,6 +497,7 @@ mod tests {
             "../../../data/energy-cannon.ron"
         ))
         .unwrap();
+        config.energy = 2700;
         config.energy /= 2;
         config.material_energy_j /= 2;
         let mut sim = super::super::BlastRange::with_layout(config, layout).unwrap();

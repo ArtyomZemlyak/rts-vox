@@ -328,6 +328,19 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
 }
 pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     let window = gas.window;
+    gas.terrain_column_top
+        .resize((window.dims[0] * window.dims[2]) as usize, 0);
+    // The moving bodies share the terrain volume. Keep its conservative top
+    // above their highest occupied cell so a later toroidal window shift can
+    // clear old shadows without scanning the rest of the empty sky.
+    for unit in &sim.units {
+        let (_, hi) = unit.bounds();
+        gas.params.terrain_origin.w = gas
+            .params
+            .terrain_origin
+            .w
+            .max((hi[1] + 1).min(window.span(1).end) as f32);
+    }
     let shifted = v.window != Some(window);
     let next = cached_cells(sim, &window, v);
     if !shifted && next == v.occupied {
@@ -336,7 +349,14 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
     }
     let mut dirty = Vec::new();
     let words = Arc::make_mut(&mut gas.terrain_words);
+    let tops = &mut gas.terrain_column_top;
     let mut set = |i: usize, m: u32| {
+        if m == 15 {
+            let x = i % window.dims[0] as usize;
+            let z = i / (window.dims[0] * window.dims[1]) as usize;
+            let slot = x + z * window.dims[0] as usize;
+            tops[slot] = tops[slot].max((window.position(i)[1] + 1) as u16);
+        }
         let shift = (i % 8) * 4;
         let word = &mut words[i / 8];
         let new = (*word & !(15 << shift)) | (m << shift);

@@ -140,6 +140,9 @@ pub struct GasInput {
     pub params: GasParams,
     pub atmosphere: Atmosphere,
     pub terrain_words: Arc<Vec<u32>>,
+    /// Conservative occupied height per toroidal x/z slot. Main-world only;
+    /// extraction uploads words and does not copy this CPU work cache.
+    pub terrain_column_top: Vec<u16>,
     pub terrain_revision: u64,
     pub terrain_dirty: Vec<std::ops::Range<usize>>,
     /// Where the volume of terrain sits in the world (ADR-318).
@@ -170,6 +173,7 @@ impl Default for GasInput {
             params: GasParams::default(),
             atmosphere: Atmosphere::default(),
             terrain_words: Arc::new(vec![]),
+            terrain_column_top: Vec::new(),
             terrain_revision: 0,
             terrain_dirty: vec![],
             window: TerrainWindow::default(),
@@ -220,6 +224,7 @@ impl ExtractResource for GasInput {
             // Never share the full mutable terrain with the render world:
             // doing so makes Arc::make_mut copy 157 MB on each moving tick.
             terrain_words: Arc::new(Vec::new()),
+            terrain_column_top: Vec::new(),
             // One contiguous payload, even for 245760 disjoint rows of a
             // streamed x slab. A Vec allocation per row stalled extraction.
             patches: merged,

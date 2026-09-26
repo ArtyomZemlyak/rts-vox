@@ -111,11 +111,12 @@ fn bench_range_interactions() {
     let mut visual = moving::Visual::default();
     moving::before(&sim, &mut visual, &gas.window);
     let mut next = layout.clone();
-    next.units.push(modding::range::RangeUnitDef {
+    // The authored kilometre range already occupies every unit slot.
+    next.units[0] = modding::range::RangeUnitDef {
         kind: RangeUnitKind::Tank,
         at: [1480, 16, 560],
         allied: true,
-    });
+    };
     let mark = Instant::now();
     edit.commit(next, config.clone()).unwrap();
     let (pending_config, pending_layout) = edit.pending.take().unwrap();
@@ -185,6 +186,18 @@ fn bench_range_interactions() {
     recentre_terrain(&sim, &mut gas, [400, 16, 336]);
     println!(
         "INTERACTION return-sector ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mark = Instant::now();
+    recentre_terrain(&sim, &mut gas, [650, 16, 336]);
+    println!(
+        "INTERACTION one-step-pan ms={:.3}",
+        mark.elapsed().as_secs_f64() * 1000.0
+    );
+    let mark = Instant::now();
+    recentre_terrain(&sim, &mut gas, [400, 16, 336]);
+    println!(
+        "INTERACTION one-step-return ms={:.3}",
         mark.elapsed().as_secs_f64() * 1000.0
     );
     streaming::bench(&sim, &gas, [9090, 16, 8800]);

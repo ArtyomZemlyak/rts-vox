@@ -147,7 +147,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
                 // The annihilation strike (ADR-289) gives off a faint violet
                 // glimmer and swallows the light around the point it struck
                 // while its dark sphere lasts.
-                flash=vec3(0.9,0.35,1.7);reach=140.0;
+                flash=vec3(1.1,0.55,2.1);reach=400.0;
                 let grow=sin(min(age/0.55,1.0)*3.14159)*step(age,0.55);
                 let sphere=3.0+11.0*grow;
                 let swallow=(1.0-smoothstep(0.6*sphere,sphere,length(delta)))*grow;
@@ -182,7 +182,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         let charging=select(p.beam.w*p.beam.w,1.0,p.energy.w>0.0);
         var pulse=select(charging,5.0*exp(-p.control.y/60.0*select(1.15,4.0,p.weapon.x>0.5))*p.control.z,deposited);
         var tint=select(vec3(1.9,0.8,0.25),vec3(0.65,1.0,1.9),p.weapon.x>0.5);
-        if p.weapon.x>1.5 {tint=vec3(1.1,0.45,2.0);pulse*=select(1.0,0.25,deposited);}
+        if p.weapon.x>1.5 {tint=vec3(1.1,0.45,2.0);pulse*=select(1.0,0.7,deposited);}
         let direct=bg.rgb*tint*pulse*500.0/(60.0+dist*dist)*max(0.0,dot(world_normal,normalize(delta)));
         if any(direct>vec3(LIGHT_EPSILON)) {
             let visible=trace_terrain(world_pos+world_normal*0.15,normalize(delta),max(0.0,dist-3.0),false).material==0u;

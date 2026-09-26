@@ -40,8 +40,10 @@ fn surface_colour(mat: u16, source: [i64; 3], normal: [f32; 3]) -> [f32; 4] {
         for k in 0..3 {
             c[k] += (oxide[k] - c[k]) * rust;
         }
-    } else if mat == 2 && grain > 0.94 {
-        shade *= 0.68;
+    } else if mat == 2 {
+        // A detached slab is one concrete surface. Per-voxel grain made
+        // its continuous face read as thousands of loose particles.
+        shade = 0.94 + stain * 0.08 + grain * 0.015;
     } else if mat == 5 {
         // Long grain along the trunk; no regular checkerboard on end faces.
         shade *= 0.80 + noise([source[0], source[1].div_euclid(24), source[2]]) * 0.28;

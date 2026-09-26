@@ -9,7 +9,7 @@
     charge_ticks: 45,
     half_cells: 20,
     cell_units: 2,
-    energy: 2700,
+    energy: 4000,
     air_cost: 100,
     soil_resistance: 120,
     concrete_resistance: 120,

@@ -37,6 +37,8 @@ mod interaction_tests;
 mod knobs;
 #[path = "blast/moving.rs"]
 mod moving;
+#[path = "blast/overview.rs"]
+mod overview;
 #[path = "blast/panel.rs"]
 mod panel;
 #[path = "blast/profile.rs"]
@@ -70,6 +72,8 @@ struct Scene {
     acc: f32,
     repeat: bool,
     view: u8,
+    /// Deterministic zoom and pan path for the native camera stability capture.
+    camera_sweep: bool,
     /// Номер маршрута для `--view target`, считая с единицы.
     patrol: usize,
     previous_shell: Option<Vec3>,
@@ -300,6 +304,7 @@ fn main() {
     let mut anni = false;
     let mut repeat = false;
     let mut view = 0;
+    let mut camera_sweep = false;
     let mut zone = None;
     let mut requested_view = None;
     let mut patrol = None;
@@ -338,6 +343,7 @@ fn main() {
             }
             "--profile-gpu" => profile_gpu = true,
             "--profile-actions" => profile_actions = true,
+            "--camera-sweep" => camera_sweep = true,
             "--stock-tuning" => stock_tuning = true,
             "--gas-cell-mm" => {
                 i += 1;
@@ -421,7 +427,10 @@ fn main() {
                     Some("sheltered") => 3,
                     Some("gun") => 4,
                     Some("target") => 5,
-                    _ => panic!("--view expects auto, overview, exposed, sheltered, gun or target"),
+                    Some("map") => 6,
+                    _ => panic!(
+                        "--view expects auto, overview, exposed, sheltered, gun, target or map"
+                    ),
                 });
             }
             "--patrol" => {
@@ -593,8 +602,8 @@ fn main() {
     // полигона. Без `--range` ключ разбирался и молча ничего не делал —
     // запись уходила с автоматической камеры и кодом возврата 0 (ADR-268).
     assert!(
-        !(3..=5).contains(&view) || workshop.layout.is_some(),
-        "--view sheltered/gun/target needs --range"
+        !(3..=6).contains(&view) || workshop.layout.is_some(),
+        "--view sheltered/gun/target/map needs --range"
     );
     // Раскладка держит до восьми маршрутов, а ключ `--view target` сам по себе
     // называет только первый. `--patrol` называет остальные — и отказывает
@@ -678,6 +687,7 @@ fn main() {
             acc: 0.0,
             repeat,
             view,
+            camera_sweep,
             patrol,
             previous_shell: None,
             fps: 60.0,
@@ -732,8 +742,10 @@ fn main() {
                     fire::draw,
                     weapon_art,
                     animate_energy,
+                    overview::sync,
                     framing,
                     streaming::camera,
+                    overview::visibility,
                     workbench::camera,
                     workbench::ghost::update,
                     workbench::overlay,
@@ -784,6 +796,7 @@ fn wanted_window(sim: &BlastRange) -> TerrainWindow {
 fn fill_terrain(sim: &BlastRange, gas: &mut GasInput) {
     let window = wanted_window(sim);
     gas.terrain_words = Arc::new(vec![0u32; window.words()]);
+    gas.terrain_column_top = vec![0; (window.dims[0] * window.dims[2]) as usize];
     write_window(sim, gas, window, None);
 }
 
@@ -797,6 +810,8 @@ fn write_window(
     had: Option<TerrainWindow>,
 ) {
     let words = Arc::make_mut(&mut gas.terrain_words);
+    let tops = &mut gas.terrain_column_top;
+    tops.resize((window.dims[0] * window.dims[2]) as usize, 0);
     // Above a column's ceiling there is nothing to ask about (ADR-313):
     // the volume is 192 cells tall and the ground stands at twenty to
     // sixty, so four fifths of every column is sky and costs a nibble
@@ -820,7 +835,20 @@ fn write_window(
                 .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
                 .max()
                 .unwrap_or(window.origin[1]);
-            for y in window.span(1) {
+            // `terrain_origin.w` is a conservative ceiling for every old
+            // occupied cell. Newly exposed columns can only extend it to
+            // `next_top`; scanning the remaining empty sky on every eight-
+            // voxel camera nudge wasted most of this loop's work.
+            let slot = |x: i32| {
+                (x as u32 % window.dims[0] + window.dims[0] * (z as u32 % window.dims[2])) as usize
+            };
+            let old_top = xs
+                .clone()
+                .map(|x| u32::from(tops[slot(x)]))
+                .max()
+                .unwrap_or(0);
+            let scan_end = (old_top as i32).max(next_top).min(window.span(1).end);
+            for y in window.origin[1]..scan_end {
                 let mut x = xs.start;
                 while x < xs.end {
                     let i = window.index([x, y, z]).unwrap();
@@ -844,6 +872,7 @@ fn write_window(
             for x in xs.clone() {
                 let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
                 *highest = (*highest).max(top);
+                tops[slot(x)] = top.min(window.span(1).end) as u16;
                 let count = (top.min(window.span(1).end) - window.origin[1]).max(0) as usize;
                 sim.world.column(
                     x as u32,
@@ -1000,6 +1029,9 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         };
         if m != 0 {
             gas.params.terrain_origin.w = gas.params.terrain_origin.w.max((p[1] + 1) as f32);
+            let slot = (p[0] as u32 % window.dims[0]
+                + window.dims[0] * (p[2] as u32 % window.dims[2])) as usize;
+            gas.terrain_column_top[slot] = gas.terrain_column_top[slot].max((p[1] + 1) as u16);
         }
         words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
         dirty.insert(i / 8);
@@ -1930,6 +1962,36 @@ fn sector_frame(z: &modding::range::RangeZone, offset: Vec3, aspect: f32) -> (Ve
     )
 }
 
+fn whole_map_frame(size: [u32; 3], offset: Vec3, aspect: f32) -> (Vec3, f32) {
+    let aim = Vec3::new(size[0] as f32 * 0.5, 34.0, size[2] as f32 * 0.5);
+    let rotation = Transform::from_translation(offset)
+        .looking_at(Vec3::ZERO, Vec3::Y)
+        .rotation;
+    let right = rotation * Vec3::X;
+    let up = rotation * Vec3::Y;
+    let mut extent = Vec2::ZERO;
+    for x in [0.0, size[0] as f32] {
+        for y in [0.0, size[1] as f32] {
+            for z in [0.0, size[2] as f32] {
+                let p = Vec3::new(x, y, z) - aim;
+                extent = extent.max(Vec2::new(right.dot(p), up.dot(p)).abs());
+            }
+        }
+    }
+    (
+        aim,
+        (extent.y * 2.0).max(extent.x * 2.0 / aspect.max(0.1)) + 80.0,
+    )
+}
+
+fn orbit_offset(offset: Vec3, orbit: f32, pitch: f32) -> Vec3 {
+    let radius = offset.length();
+    let angle = (offset.y.atan2(Vec2::new(offset.x, offset.z).length()) + pitch)
+        .clamp(20.0f32.to_radians(), 80.0f32.to_radians());
+    let horizontal = Quat::from_rotation_y(orbit) * Vec3::new(offset.x, 0.0, offset.z).normalize();
+    horizontal * (radius * angle.cos()) + Vec3::Y * (radius * angle.sin())
+}
+
 fn window_height_limit(offset: Vec3, aspect: f32, size: [u32; 3]) -> f32 {
     let rotation = Transform::from_translation(offset)
         .looking_at(Vec3::ZERO, Vec3::Y)
@@ -1950,6 +2012,7 @@ fn framing(
     scene: Res<Scene>,
     workshop: Res<Workshop>,
     visual: Res<moving::Visual>,
+    stream: Res<streaming::Streaming>,
     mut camera: Query<(&mut Transform, &mut Projection, &Camera), With<GasCamera>>,
 ) {
     let age = if scene.sim.impact.is_some() {
@@ -2008,12 +2071,15 @@ fn framing(
                 if workshop.sector().is_some() {
                     offset.y = 420.0;
                 }
-                offset = Quat::from_rotation_y(workshop.orbit) * offset;
+                offset = orbit_offset(offset, workshop.orbit, workshop.pitch);
                 let (fitted, mut height) = workshop.sector().map_or_else(
                     || overview_frame(&scene.sim, aim, offset, aspect),
                     |z| sector_frame(z, offset, aspect),
                 );
                 aim = fitted;
+                if scene.view == 6 {
+                    (aim, height) = whole_map_frame(scene.sim.size(), offset, aspect);
+                }
                 if scene.view == 2 || scene.view == 3 {
                     let id = if scene.view == 3 { 1 } else { 0 };
                     aim = scene
@@ -2062,24 +2128,69 @@ fn framing(
                 let panel_fraction = camera.logical_viewport_size().map_or(0.2, |v| {
                     310.0 * (v.y / 860.0).clamp(0.65, 1.0) / v.x.max(640.0)
                 });
-                if scene.view == 1 {
+                if scene.view == 1 || scene.view == 6 {
                     height /= 1.0 - panel_fraction;
                 }
                 let right = Transform::from_translation(offset)
                     .looking_at(Vec3::ZERO, Vec3::Y)
                     .rotation
                     * Vec3::X;
-                height = (height * workshop.zoom).min(window_height_limit(
-                    offset,
-                    aspect,
-                    scene.sim.size(),
-                ));
+                let local_limit = window_height_limit(offset, aspect, scene.sim.size());
+                let (zoom, pan) = if scene.camera_sweep {
+                    let frame = scene.frame as f32;
+                    let zoom = if frame < 80.0 {
+                        1.0 + frame / 80.0 * 5.0
+                    } else if frame < 160.0 {
+                        6.0 - (frame - 80.0) / 80.0 * 5.0
+                    } else {
+                        1.0
+                    };
+                    (
+                        zoom,
+                        Vec2::new((frame - 160.0).clamp(0.0, 140.0) * 10.0, 0.0),
+                    )
+                } else {
+                    (workshop.zoom, workshop.pan)
+                };
+                height = if scene.view == 1 {
+                    // The authored sector is wider than the detailed GPU
+                    // window. Its default overview used to stop at this
+                    // limit; keep that sharp local view until the player
+                    // actually zooms out, then progress toward the map.
+                    (height * zoom).min(local_limit) + local_limit * (zoom - 1.0).max(0.0)
+                } else {
+                    height * zoom
+                };
+                if scene.view == 1 && height > local_limit {
+                    let (whole_aim, whole_height) =
+                        whole_map_frame(scene.sim.size(), offset, aspect);
+                    let full = whole_height / (1.0 - panel_fraction);
+                    let progress =
+                        ((height - local_limit) / (full - local_limit).max(1.0)).clamp(0.0, 1.0);
+                    aim = aim.lerp(whole_aim, progress);
+                }
+                let full_height =
+                    whole_map_frame(scene.sim.size(), offset, aspect).1 / (1.0 - panel_fraction);
+                height = height.min(full_height * 1.1);
                 aim -= right * height * aspect * panel_fraction * 0.5;
-                aim += Vec3::new(workshop.pan.x, 0.0, workshop.pan.y);
-                *transform = Transform::from_translation(aim + offset).looking_at(aim, Vec3::Y);
+                aim += Vec3::new(pan.x, 0.0, pan.y);
+                let eye_offset = if height > local_limit {
+                    offset.normalize() * (height * 1.15).max(offset.length())
+                } else {
+                    offset
+                };
+                *transform = Transform::from_translation(aim + eye_offset).looking_at(aim, Vec3::Y);
                 if let Projection::Orthographic(p) = &mut *projection {
                     p.scaling_mode = bevy::camera::ScalingMode::FixedVertical {
                         viewport_height: height,
+                    };
+                    // The kilometre overview needs a distant plane, but
+                    // using it in the local battle wastes depth precision
+                    // on tank panels and thin terrain faces while panning.
+                    p.far = if streaming::uses_overview(scene.sim.size(), height, stream.overview) {
+                        30_000.0
+                    } else {
+                        1200.0
                     };
                 }
             }

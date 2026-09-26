@@ -5,9 +5,23 @@ use super::*;
 
 const ROWS_PER_FRAME: i32 = 8;
 
+pub(super) fn uses_overview(size: [u32; 3], height: f32, was_overview: bool) -> bool {
+    if size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2] {
+        return false;
+    }
+    // A scroll wheel can hover on the boundary for several frames. Keep the
+    // selected renderer until the camera clears a distinct return threshold.
+    if was_overview {
+        height > 590.0
+    } else {
+        height >= 675.0
+    }
+}
+
 #[derive(Resource, Default)]
 pub struct Streaming {
     invalid: bool,
+    pub(super) overview: bool,
     job: Option<Job>,
     displayed: Option<(Transform, Projection)>,
     spare: Vec<u32>,
@@ -17,12 +31,13 @@ struct Job {
     generation: u64,
     row: i32,
     words: Vec<u32>,
+    tops: Vec<u16>,
     highest: i32,
     dirty: Vec<std::ops::Range<usize>>,
 }
 impl Streaming {
     pub fn loading(&self) -> bool {
-        self.invalid || self.job.is_some()
+        !self.overview && (self.invalid || self.job.is_some())
     }
     pub fn invalidate(&mut self) {
         self.invalid = true;
@@ -45,6 +60,8 @@ impl Job {
             for x in w.span(0) {
                 let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
                 self.highest = self.highest.max(top);
+                let slot = (x as u32 % w.dims[0] + w.dims[0] * (z as u32 % w.dims[2])) as usize;
+                self.tops[slot] = top.min(w.span(1).end) as u16;
                 let n = (top.min(w.span(1).end) - w.origin[1]).max(0) as usize;
                 sim.world
                     .column(x as u32, z as u32, w.origin[1] as u32, &mut column[..n]);
@@ -82,6 +99,24 @@ pub fn camera(
     let Ok((mut transform, mut projection)) = camera.single_mut() else {
         return;
     };
+    // A distant view is served by the coarse whole-map surface. Do not fill
+    // and upload a 157 MB detailed window every time the overview pans.
+    if matches!(
+        *projection,
+            Projection::Orthographic(ref p)
+                if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if uses_overview(scene.sim.size(), viewport_height, stream.overview))
+    ) {
+        if let Some(job) = stream.job.take() {
+            stream.spare = job.words;
+            stream.invalid = true;
+        }
+        stream.overview = true;
+        stream.displayed = None;
+        gas.params.terrain.w = 1.0;
+        return;
+    }
+    stream.overview = false;
+    gas.params.terrain.w = 0.0;
     let ray = transform.forward();
     let distance = (sim_core::blast::FLOOR as f32 - transform.translation.y) / ray.y.min(-0.01);
     let p = transform.translation + ray * distance;
@@ -120,6 +155,7 @@ pub fn camera(
             generation: scene.generation,
             row: want.origin[2],
             words,
+            tops: vec![0; (want.dims[0] * want.dims[2]) as usize],
             highest: 0,
             dirty: Vec::new(),
         });
@@ -136,6 +172,7 @@ pub fn camera(
             stream.spare = words;
         }
         gas.window = want;
+        gas.terrain_column_top = job.tops;
         gas.terrain_dirty.extend(job.dirty);
         gas.terrain_revision += 1;
         gas.params.terrain = Vec4::new(
@@ -159,9 +196,11 @@ pub fn camera(
         gas.advance(scene.sim.tick * 2);
         stream.invalid = false;
         stream.displayed = Some((*transform, projection.clone()));
-    } else if let Some((t, p)) = &stream.displayed {
-        *transform = *t;
-        *projection = p.clone();
+    } else if scene.sim.size()[0] <= TERRAIN_WINDOW[0] && scene.sim.size()[2] <= TERRAIN_WINDOW[2] {
+        if let Some((t, p)) = &stream.displayed {
+            *transform = *t;
+            *projection = p.clone();
+        }
     }
 }
 
@@ -173,6 +212,7 @@ pub(super) fn bench(sim: &BlastRange, gas: &GasInput, focus: [i32; 3]) {
         generation: 0,
         row: window.origin[2],
         words: vec![0; window.words()],
+        tops: vec![0; (window.dims[0] * window.dims[2]) as usize],
         highest: 0,
         dirty: Vec::new(),
     };
@@ -199,6 +239,15 @@ pub(super) fn bench(sim: &BlastRange, gas: &GasInput, focus: [i32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distant_surface_only_replaces_a_streamed_large_map() {
+        assert!(!uses_overview([640, 192, 640], 10_000.0, false));
+        assert!(!uses_overview([10_000, 192, 10_000], 674.0, false));
+        assert!(uses_overview([10_000, 192, 10_000], 675.0, false));
+        assert!(uses_overview([10_000, 192, 10_000], 600.0, true));
+        assert!(!uses_overview([10_000, 192, 10_000], 590.0, true));
+    }
     #[test]
     fn staged_rows_match_whole_window_after_wrapping_and_damage() {
         let mut sim = BlastRange::new(config(false, false));
@@ -221,6 +270,7 @@ mod tests {
             generation: 0,
             row: window.origin[2],
             words: before.clone(),
+            tops: vec![0; (window.dims[0] * window.dims[2]) as usize],
             highest: 0,
             dirty: Vec::new(),
         };

@@ -68,10 +68,10 @@ fn energy_ball(ro:vec3<f32>,rd:vec3<f32>,centre:vec3<f32>,radius:f32,limit:f32,t
 fn anni_warp(uv:vec2<f32>)->vec2<f32> {
     var centre=vec3(0.0);var strength=0.0;var radius=0.0;
     if p.energy.w>0.0 {
-        centre=p.energy.xyz;strength=0.09;radius=0.17;
+        centre=p.energy.xyz;strength=0.035;radius=0.13;
     } else if p.control.z>0.5 {
         let age=p.control.y/60.0;
-        if age<0.9 {centre=p.energy.xyz;strength=0.14*(1.0-age/0.9);radius=0.14+age*0.4;}
+        if age<0.9 {centre=p.energy.xyz;strength=0.065*(1.0-age/0.9);radius=0.12+age*0.3;}
     }
     if strength<=0.0 {return vec2(0.0);}
     let clip=p.clip_from_world*vec4(centre,1.0);
@@ -135,13 +135,20 @@ fn energy_effect(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->vec3<f32> {
         }
         if p.control.z>0.5 && p.energy.w<=0.0 {
             let age=p.control.y/60.0;
-            if age<0.7 {
+            if age<1.0 {
                 let centre=p.energy.xyz;
-                for(var j=0;j<7;j++) {
+                let distance=energy_segment(ro,rd,centre,centre,limit);
+                let ring_radius=3.0+age*46.0;
+                let ring_width=1.6+age*3.5;
+                let ring=exp(-pow((distance-ring_radius)/ring_width,2.0));
+                let flash=exp(-age*15.0)*exp(-distance*distance/130.0);
+                colour+=vec3(3.4,1.5,8.0)*ring*exp(-age*2.8);
+                colour+=vec3(5.0,3.0,9.0)*flash;
+                for(var j=0;j<11;j++) {
                     let a=f32(j)*2.39996+0.2*sin(f32(j)*9.7);
-                    let spread=9.0+age*40.0+5.0*sin(f32(j)*7.13);
+                    let spread=11.0+age*53.0+6.0*sin(f32(j)*7.13);
                     let end=centre+vec3(cos(a),0.3+0.5*abs(sin(a*3.0)),sin(a))*spread;
-                    colour+=energy_path(ro,rd,centre,end,limit,time+f32(j))*vec3(1.6,0.7,2.2)*exp(-age*6.0)*0.6;
+                    colour+=energy_path(ro,rd,centre,end,limit,time+f32(j))*vec3(1.6,0.7,2.2)*exp(-age*4.0)*0.7;
                 }
             }
         }

@@ -187,11 +187,13 @@ pub enum Action {
     Load,
     AssignRoute,
     Overview,
+    WholeMap,
     Zone(i32),
     RestartHere,
     ScenarioMenu,
     Scenario(u8),
     Orbit(f32),
+    Pitch(f32),
     Own,
     Target,
     Zoom(f32),
@@ -438,6 +440,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Обзор", Action::Overview),
+                    ("Вся карта", Action::WholeMap),
                     ("Мой юнит", Action::Own),
                     ("Мишень", Action::Target),
                 ],
@@ -448,17 +451,24 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("−", Action::Zoom(1.2)),
                     ("+", Action::Zoom(0.8)),
-                    ("←", Action::Pan(-24.0, 0.0)),
-                    ("→", Action::Pan(24.0, 0.0)),
+                    ("Влево", Action::Pan(-24.0, 0.0)),
+                    ("Вправо", Action::Pan(24.0, 0.0)),
                 ],
             ),
             (
                 false,
                 vec![
-                    ("Камера ↑", Action::Pan(0.0, -24.0)),
-                    ("Камера ↓", Action::Pan(0.0, 24.0)),
-                    ("↶", Action::Orbit(-0.25)),
-                    ("↷", Action::Orbit(0.25)),
+                    ("Вверх", Action::Pan(0.0, -24.0)),
+                    ("Вниз", Action::Pan(0.0, 24.0)),
+                    ("Поверн. -", Action::Orbit(-0.25)),
+                    ("Поверн. +", Action::Orbit(0.25)),
+                ],
+            ),
+            (
+                false,
+                vec![
+                    ("Наклон +", Action::Pitch(0.12)),
+                    ("Наклон -", Action::Pitch(-0.12)),
                 ],
             ),
         ];
@@ -580,9 +590,11 @@ pub fn actions(
                 | Action::ScenarioMenu
                 | Action::Pause
                 | Action::Orbit(_)
+                | Action::Pitch(_)
                 | Action::Zoom(_)
                 | Action::Pan(..)
                 | Action::Overview
+                | Action::WholeMap
                 | Action::Own
                 | Action::Target
         ) {
@@ -897,6 +909,7 @@ pub fn actions(
                         edit.pan = Vec2::ZERO;
                         edit.zoom = 1.0;
                         edit.orbit = 0.0;
+                        edit.pitch = 0.0;
                         panel.scenarios_open = false;
                         panel.drive = false;
                         panel.demo = false;
@@ -920,8 +933,14 @@ pub fn actions(
             Action::Orbit(delta) => {
                 edit.orbit = (edit.orbit + delta).rem_euclid(std::f32::consts::TAU)
             }
+            Action::Pitch(delta) => edit.pitch = (edit.pitch + delta).clamp(-0.6, 0.6),
             Action::Overview => {
                 scene.view = 1;
+                edit.pan = Vec2::ZERO;
+                edit.zoom = 1.0;
+            }
+            Action::WholeMap => {
+                scene.view = 6;
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 1.0;
             }
@@ -940,7 +959,7 @@ pub fn actions(
                 edit.pan = Vec2::ZERO;
                 edit.zoom = 1.0;
             }
-            Action::Zoom(z) => edit.zoom = (edit.zoom * z).clamp(0.3, 2.0),
+            Action::Zoom(z) => edit.zoom = (edit.zoom * z).clamp(0.3, 32.0),
             Action::Pan(x, z) => {
                 edit.pan_by(Vec2::new(x, z));
             }

@@ -3,8 +3,8 @@
 (
     half_cells: 20,
     cell_units: 2,
-    energy: 2300,
-    material_energy_j: 18000000,
+    energy: 3500,
+    material_energy_j: 45000000,
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,
@@ -20,7 +20,7 @@
     // Push on a hull: thousandths of a newton-second per unit of wave
     // pressure the body absorbed (ADR-297) - what dents the side throws
     // the machine, and a hull the wave never reached is not pushed.
-    hull_impulse_milli: 110,
+    hull_impulse_milli: 50,
     fire_tick: 45,
     shell_speed: 150,
     // The fireball lights fuel within thirty-two units: eighty heat at the

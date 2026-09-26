@@ -108,6 +108,7 @@ pub struct Workshop {
     pub zoom: f32,
     pub zone: usize,
     pub orbit: f32,
+    pub pitch: f32,
     rotate: bool,
     history: Vec<RangeLayout>,
     redo: Vec<RangeLayout>,
@@ -139,6 +140,7 @@ impl Workshop {
             controlled: None,
             zone,
             orbit: 0.0,
+            pitch: 0.0,
             tool: Tool::Select,
             selected,
             pan: Vec2::ZERO,
@@ -179,6 +181,7 @@ impl Workshop {
         self.pan = Vec2::ZERO;
         self.zoom = 0.85;
         self.orbit = 0.0;
+        self.pitch = 0.0;
         Ok(())
     }
     pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<(), String> {
@@ -196,6 +199,7 @@ impl Workshop {
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
         self.orbit = 0.0;
+        self.pitch = 0.0;
         Ok(())
     }
     pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
@@ -234,6 +238,7 @@ impl Workshop {
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
         self.orbit = 0.0;
+        self.pitch = 0.0;
         self.hover = None;
         self.preview = None;
     }
@@ -672,7 +677,7 @@ pub fn input(
             } else {
                 1.0
             };
-        edit.zoom = (edit.zoom * (-y * 0.08).exp()).clamp(0.3, 2.0);
+        edit.zoom = (edit.zoom * (-y * 0.08).exp()).clamp(0.3, 32.0);
     }
     let Ok(window) = windows.single() else { return };
     let cursor = window.cursor_position();
@@ -681,7 +686,10 @@ pub fn input(
     };
     if let (Some(a), Some(b)) = (edit.previous_cursor, cursor) {
         if !blocked && mouse.pressed(MouseButton::Middle) {
-            if let (Ok(ra), Ok(rb)) = (
+            if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+                edit.orbit = (edit.orbit + (b.x - a.x) * 0.006).rem_euclid(std::f32::consts::TAU);
+                edit.pitch = (edit.pitch + (a.y - b.y) * 0.006).clamp(-0.6, 0.6);
+            } else if let (Ok(ra), Ok(rb)) = (
                 camera.viewport_to_world(gt, a),
                 camera.viewport_to_world(gt, b),
             ) {
@@ -1683,6 +1691,7 @@ mod tests {
             acc: 0.0,
             repeat: false,
             view: 1,
+            camera_sweep: false,
             patrol: 1,
             previous_shell: None,
             fps: 60.0,
