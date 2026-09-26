@@ -208,24 +208,47 @@ impl Kinds {
     }
 
     /// Хеш набора типов. Мод, поменявший стоимость, меняет партию,
-    /// и это обязано быть видно (ADR-097).
+    /// и это обязано быть видно (ADR-097). FNV-1a по каждому полю,
+    /// влияющему на симуляцию, тело — по имени (ADR-429): прежняя
+    /// взвешенная сумма не видела ходовой, копки и тела.
     pub fn hash(&self) -> u64 {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
-        for (i, d) in self.defs.iter().enumerate() {
-            let mut w = 0u64;
-            w = w.wrapping_mul(31).wrapping_add(d.id as u64);
-            w = w.wrapping_mul(31).wrapping_add(d.voxels as u64);
-            w = w.wrapping_mul(31).wrapping_add(d.speed as u32 as u64);
-            w = w.wrapping_mul(31).wrapping_add(d.weapon as u64);
-            w = w.wrapping_mul(31).wrapping_add(d.cost);
-            w = w.wrapping_mul(31).wrapping_add(d.build_ticks as u64);
-            w = w.wrapping_mul(31).wrapping_add(d.tank);
-            w = w.wrapping_mul(31).wrapping_add(d.build_rate);
-            w = w.wrapping_mul(31).wrapping_add(d.store);
-            for p in &d.produces {
-                w = w.wrapping_mul(31).wrapping_add(*p as u64);
+        let mut eat = |bytes: &[u8]| {
+            for b in bytes {
+                h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
             }
-            h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
+        };
+        for d in &self.defs {
+            let KindDef {
+                id,
+                name: _,
+                body,
+                voxels,
+                speed,
+                chassis,
+                weapon,
+                cost,
+                build_ticks,
+                tank,
+                dig,
+                build_rate,
+                store,
+                produces,
+            } = d;
+            eat(&id.to_le_bytes());
+            eat(&(body.len() as u64).to_le_bytes());
+            eat(body.as_bytes());
+            eat(&voxels.to_le_bytes());
+            eat(&speed.to_le_bytes());
+            eat(&[*chassis as u8, u8::from(*dig)]);
+            eat(&weapon.to_le_bytes());
+            for v in [*cost, u64::from(*build_ticks), *tank, *build_rate, *store] {
+                eat(&v.to_le_bytes());
+            }
+            eat(&(produces.len() as u64).to_le_bytes());
+            for p in produces {
+                eat(&p.to_le_bytes());
+            }
         }
         h
     }
@@ -244,14 +267,9 @@ pub fn from_ron(s: &str, ticks_per_second: u32) -> Result<Kinds, String> {
     for r in f.kinds {
         // Скорость стройки — за **секунду** в файле и за **тик**
         // в памяти. Делится с округлением вверх: строитель, у которого
-        // вышло ноль за тик, не строил бы вовсе.
-        let per_tick = |per_sec: Amount| -> Amount {
-            if per_sec == 0 {
-                0
-            } else {
-                (per_sec / tps as Amount).max(1)
-            }
-        };
+        // вышло ноль за тик, не строил бы вовсе (ADR-429: прежний код
+        // делил вниз и поднимал только ноль).
+        let per_tick = |per_sec: Amount| -> Amount { per_sec.div_ceil(tps as Amount) };
         k.insert(KindDef {
             id: r.id,
             name: r.name,
@@ -379,6 +397,35 @@ mod tests {
         ] )"#;
         let e = from_ron(src, TPS).expect_err("копатель без бака прошёл");
         assert!(e.contains("бак"), "{e}");
+    }
+
+    /// **Хеш видит ходовую, копку и тело** (ADR-429): прежняя сумма
+    /// их не видела, и клиенты с разной ходовой шли как одинаковые.
+    #[test]
+    fn the_hash_sees_chassis_digging_and_body() {
+        let a = shipped().hash();
+        let changes: [fn(&mut KindDef); 3] = [
+            |d| d.chassis = ChassisKind::Walking,
+            |d| d.dig = !d.dig,
+            |d| d.body.push('x'),
+        ];
+        for (i, change) in changes.into_iter().enumerate() {
+            let mut k = shipped();
+            let at = k.index_of(1).unwrap();
+            change(&mut k.defs[at]);
+            assert_ne!(k.hash(), a, "change {i} did not move the hash");
+        }
+    }
+
+    /// Стройка за тик округляется вверх, как и написано (ADR-429):
+    /// 45 в секунду при тридцати тиках — два за тик, а не один.
+    #[test]
+    fn the_build_rate_per_tick_rounds_up() {
+        let text =
+            include_str!("../../../data/kinds.ron").replace("build_rate: 90000", "build_rate: 45");
+        let k = from_ron(&text, TPS).expect("разбор");
+        assert!(k.all().iter().any(|d| d.build_rate == 2));
+        assert!(k.all().iter().all(|d| d.build_rate != 1));
     }
 
     /// **Хеш видит смену стоимости.** Мод, поменявший цену танка,

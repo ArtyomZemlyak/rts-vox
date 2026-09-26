@@ -51,6 +51,9 @@ pub struct WeaponDef {
     pub range: i32,
 }
 
+/// Largest crater radius a weapon may declare, in voxels (ADR-429).
+pub const MAX_BLAST_RADIUS: i32 = 128;
+
 #[derive(Deserialize)]
 pub struct WeaponsFile {
     pub weapons: Vec<WeaponDef>,
@@ -104,12 +107,19 @@ impl Weapons {
         if self.defs.iter().any(|x| x.id == d.id) {
             return Err(WeaponError::Clash(d.id));
         }
-        if d.damage == 0 || d.reload == 0 || d.blast_radius < 0 || d.range < 0 || d.range > 10000 {
+        // The crater is a sphere walked cell by cell (ADR-429): its
+        // radius is bounded for every weapon, not only for one whose
+        // blast carries energy, or a bare radius overflows the squared
+        // distance and walks billions of cells on every hit.
+        if d.damage == 0
+            || d.reload == 0
+            || !(0..=MAX_BLAST_RADIUS).contains(&d.blast_radius)
+            || d.range < 0
+            || d.range > 10000
+        {
             return Err(WeaponError::Nonsense(d.id));
         }
-        if d.blast_energy_j > 0
-            && (!(1..=128).contains(&d.blast_radius) || d.kind != WeaponKind::Bolt)
-        {
+        if d.blast_energy_j > 0 && (d.blast_radius == 0 || d.kind != WeaponKind::Bolt) {
             return Err(WeaponError::Nonsense(d.id));
         }
         if d.kind == WeaponKind::Bolt && d.speed <= 0 {
@@ -194,6 +204,10 @@ mod tests {
             "( id: 1, kind: Bolt, speed: 40, damage: 0, reload: 30, blast_radius: 0, blast_damage: 0 )",
             "( id: 1, kind: Bolt, speed: 40, damage: 5, reload: 0, blast_radius: 0, blast_damage: 0 )",
             "( id: 1, kind: Bolt, speed: 0, damage: 5, reload: 5, blast_radius: 0, blast_damage: 0 )",
+            // A crater without blast energy is still walked cell by cell
+            // (ADR-429): 50000 overflowed its squared radius.
+            "( id: 1, kind: Bolt, speed: 40, damage: 5, reload: 5, blast_radius: 50000, blast_damage: 1 )",
+            "( id: 1, kind: Bolt, speed: 40, damage: 5, reload: 5, blast_radius: 129, blast_damage: 1 )",
         ] {
             let src = format!("( weapons: [ {bad} ] )");
             assert!(from_ron(&src).is_err(), "принято: {bad}");

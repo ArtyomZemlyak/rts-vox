@@ -6,15 +6,12 @@ pub struct Navigation {
     pub search_nodes: usize,
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
-    #[serde(default = "whole_search")]
     pub search_nodes_per_tick: usize,
     /// Searches the whole range may begin in one tick. Hulls beyond the
     /// ceiling retain their orders; each admitted start also has a work cap.
-    #[serde(default = "every_start")]
     pub searches_started_per_tick: usize,
     pub recovery_ticks: u32,
     /// Delay before replanning once another hull blocks an accepted route.
-    #[serde(default = "old_contact_replan")]
     pub contact_replan_ticks: u32,
     pub escape_ticks: u32,
     pub escape_speed_pct: i32,
@@ -24,29 +21,10 @@ pub struct Navigation {
     pub plan_margin: i32,
     /// Precision at a checked turn centre or intermediate route endpoint.
     /// Final order arrival keeps the course's ordinary arrival radius.
-    #[serde(default = "corner_arrival")]
     pub corner_arrival_mm: i32,
     /// Weight of the planner's distance estimate, percent; 100 is plain A*.
-    #[serde(default = "plain_heuristic")]
     pub heuristic_pct: u32,
     pub fell: Felling,
-}
-fn corner_arrival() -> i32 {
-    50
-}
-fn plain_heuristic() -> u32 {
-    100
-}
-/// Older data without a slice budget searches whole, as it used to.
-fn whole_search() -> usize {
-    usize::MAX
-}
-/// Older data begins every search the tick asks for, as it used to.
-fn every_start() -> usize {
-    usize::MAX
-}
-fn old_contact_replan() -> u32 {
-    90
 }
 /// What a hull pushes over instead of driving around.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -95,11 +73,24 @@ impl Navigation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every number is in the file (ADR-429): one left out is an error,
+    /// not a default in code. A missing slice budget used to lift the
+    /// per-tick ceiling on search work altogether.
     #[test]
-    fn older_navigation_keeps_its_replan_cadence() {
-        let old = include_str!("../../../data/range-navigation.ron")
-            .replace("contact_replan_ticks: 2,", "");
-        assert_eq!(Navigation::from_ron(&old).unwrap().contact_replan_ticks, 90);
+    fn a_navigation_file_missing_a_number_is_refused() {
+        for field in [
+            "search_nodes_per_tick: 96,",
+            "searches_started_per_tick: 1,",
+            "contact_replan_ticks: 2,",
+            "corner_arrival_mm: 50,",
+            "heuristic_pct: 200,",
+        ] {
+            let cut = include_str!("../../../data/range-navigation.ron").replace(field, "");
+            assert!(
+                Navigation::from_ron(&cut).is_err(),
+                "accepted without {field}"
+            );
+        }
         assert!(Navigation::from_ron(
             &include_str!("../../../data/range-navigation.ron")
                 .replace("contact_replan_ticks: 2", "contact_replan_ticks: 0")

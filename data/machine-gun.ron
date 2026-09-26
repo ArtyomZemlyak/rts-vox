@@ -6,6 +6,8 @@
     half_cells: 20,
     cell_units: 2,
     energy: 1000,
+    // No fracture budget: the burst annihilates what it takes.
+    material_energy_j: 0,
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,

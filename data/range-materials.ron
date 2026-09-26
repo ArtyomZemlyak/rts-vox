@@ -18,5 +18,7 @@
     (id: 7, density: 120, strength: 30, harmful: false, loose: true), // grass-covered soil
     (id: 8, density: 180, strength: 40, harmful: false, loose: true),
     // Inventory-only liquid fuel; range-fire.ron controls its finite combustion.
-    (id: 9, density: 80, strength: 0, harmful: false),
+    // Never a voxel, so its strength is never read; the loader asks one of
+    // every material but air (ADR-429).
+    (id: 9, density: 80, strength: 1, harmful: false),
 ])

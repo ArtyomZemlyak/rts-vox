@@ -43,7 +43,7 @@ pub struct ExplosionConfig {
     pub energy: u32,
     /// Zero is explicit annihilation; otherwise fracture and fragment motion
     /// share this finite budget, independently of the propagation envelope.
-    #[serde(default)]
+    /// Required: a forgotten field must not select annihilation (ADR-429).
     pub material_energy_j: u32,
     pub air_cost: u32,
     pub soil_resistance: u32,
@@ -53,15 +53,12 @@ pub struct ExplosionConfig {
     #[serde(default)]
     pub unit_ablation_resistance: u32,
     /// Armour, core, engine, weapon, sensor multipliers; 1000 = base work.
-    #[serde(default = "unit_roles")]
     pub unit_role_resistance_milli: [u32; 5],
     pub wave_work_per_tick: usize,
     /// Cells of the resistance grid captured in one tick (ADR-311). The
     /// capture of a charge that reaches further costs more ticks, not a
     /// longer one; cells the inscribed sphere cuts are free and do not
-    /// count. Presets from before the ceiling keep the whole grid of the
-    /// stock weapons in one tick.
-    #[serde(default = "capture_cells")]
+    /// count.
     pub capture_cells_per_tick: usize,
     pub edits_per_tick: usize,
     pub fire_tick: u32,
@@ -78,37 +75,20 @@ pub struct ExplosionConfig {
     pub gas_fuel_milli: i32,
     /// Authoritative heat left by the burst (ADR-277): every solid cell
     /// within this many units of the impact receives `heat_per_cell`.
-    #[serde(default)]
     pub heat_units: i32,
-    #[serde(default)]
     pub heat_per_cell: u32,
     pub gas_pressure_milli: i32,
     pub reaction_milli: i32,
     pub cooling_milli: i32,
     pub buoyancy_milli: i32,
     /// Cells per side of the box this weapon's debris pieces are grouped
-    /// in, `1..=4` (ADR-284). Older presets keep the two-cell box.
-    #[serde(default = "two_cells")]
+    /// in, `1..=4` (ADR-284).
     pub fragment_box: u32,
     /// Push on a hull, thousandths of a newton-second per unit of wave
     /// pressure the body absorbed (ADR-286, ADR-297): the pressure that
     /// dents and breaks the side is what throws the machine. Zero: the
     /// burst does not move hulls.
-    #[serde(default)]
     pub hull_impulse_milli: u32,
-}
-
-fn display_cell() -> u32 {
-    320
-}
-fn two_cells() -> u32 {
-    2
-}
-fn capture_cells() -> usize {
-    40000
-}
-fn unit_roles() -> [u32; 5] {
-    [1000; 5]
 }
 
 impl ExplosionConfig {
@@ -188,6 +168,11 @@ impl ExplosionConfig {
         }
         Ok(c)
     }
+}
+
+/// Display only: the renderer's gas cube, not a simulation number.
+fn display_cell() -> u32 {
+    320
 }
 
 #[cfg(test)]
