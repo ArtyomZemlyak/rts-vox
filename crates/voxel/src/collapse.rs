@@ -1261,6 +1261,36 @@ impl CollapseLayer {
 
     /// Пометить чанк как требующий пересборки: воксели тела вернулись
     /// в мир не правкой копки, а запеканием.
+    /// Совпадает ли копия мира у каскада с миром, если показать ей
+    /// ещё не показанные правки `unseen`.
+    ///
+    /// Каскад держит свою битовую карту каждого знакомого чанка и узнаёт
+    /// о мире **только** из правок, которые ему показали: одна применённая
+    /// и не показанная правка — и копия расходится навсегда, а подрезанное
+    /// в ней держится (ADR-421). Проверка для тестов и диагностики, не для
+    /// тика: она собирает каждый знакомый чанк из мира заново.
+    pub fn agrees_with(&self, w: &World, unseen: &[Edit]) -> bool {
+        let cs = CS as u32;
+        self.chunks.iter().enumerate().all(|(i, c)| {
+            let Some(c) = c else {
+                return true;
+            };
+            let (cx, cy, cz) = self.coords(i);
+            let mut mine = (**c).clone();
+            for e in unseen {
+                if (e.x / cs, e.y / cs, e.z / cs) == (cx, cy, cz) {
+                    let (x, y, z) = (
+                        (e.x % cs) as usize,
+                        (e.y % cs) as usize,
+                        (e.z % cs) as usize,
+                    );
+                    mine.set(x, y, z, e.mat != crate::store::AIR);
+                }
+            }
+            mine == *Self::build(w, cx, cy, cz)
+        })
+    }
+
     pub fn invalidate_at(&mut self, x: u32, y: u32, z: u32) {
         let cs = CS as u32;
         let (cx, cy, cz) = (x / cs, y / cs, z / cs);
