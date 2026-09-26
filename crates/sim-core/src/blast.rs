@@ -1523,20 +1523,21 @@ impl Explosion {
         let origin = self.origin;
         let radius2 = (half * half) as i32;
         let far = [0, 1, 2].map(|a| origin[a] + n as i32 * c.cell_units - 1);
+        // Bodies are captured where the wave will meet them: in the poses
+        // frozen when the burst began, as `step` hits them. A capture cut
+        // into slices would otherwise read a moving hull's armour where it
+        // has driven to, while the wave strikes its frozen cells as bare
+        // (ADR-445).
         let queries: Vec<_> = units
             .iter()
-            .filter_map(|u| {
-                let (lo, hi) = u.bounds();
+            .enumerate()
+            .filter_map(|(i, u)| {
+                let (pose, segs, delta) =
+                    (self.poses[i], &self.seg_poses[i], self.turret_deltas[i]);
+                let (lo, hi) = u.bounds_aimed(Some(&pose), segs, delta);
                 (0..3)
                     .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
-                    .then(|| {
-                        (
-                            u,
-                            lo,
-                            hi,
-                            HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta),
-                        )
-                    })
+                    .then(|| (u, lo, hi, HitFrames::new(u, pose, segs, delta)))
             })
             .collect();
         // Bodies are asked only where they can be (ADR-296): one box test
@@ -6225,6 +6226,45 @@ mod tests {
             }
         }
     }
+    /// **A capture cut into slices sees bodies where the wave will**
+    /// (ADR-445): in the poses frozen when the burst began. A hull that
+    /// drives on between slices leaves the grid as it is captured whole
+    /// at the start; captured in its new place, the grid depended on the
+    /// size of the slices (ADR-311).
+    #[test]
+    fn a_sliced_capture_holds_a_moving_hull_in_its_frozen_pose() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.patrols_running = false;
+        let at = a.units[0].motion.pos.map(|v| v.to_int_trunc());
+        let dents = SurfaceWork::new();
+        let whole = Explosion::with_damage(&a.world, at, &c, &a.units, &dents);
+        let mut sliced = Explosion::begin(at, &c, &a.units);
+        let n = sliced.wave.size();
+        assert!(!sliced.capture(&a.world, &c, &a.units, &dents, 500));
+        // The hull drives on before the rest of the grid is captured.
+        let head = a.units[0].motion.drive.head;
+        a.units[0].motion.pos[0] = a.units[0].motion.pos[0].add(Fx::from_int(40));
+        a.units[0].update_pose(head);
+        let moved = Explosion::with_damage(&a.world, at, &c, &a.units, &dents);
+        while !sliced.capture(&a.world, &c, &a.units, &dents, 500) {}
+        let cells = (0..n).flat_map(|z| (0..n).flat_map(move |y| (0..n).map(move |x| [x, y, z])));
+        assert!(
+            cells
+                .clone()
+                .any(|p| moved.wave.resistance_at(p) != whole.wave.resistance_at(p)),
+            "the hull's move does not show in the grid — nothing is tested"
+        );
+        for p in cells {
+            assert_eq!(
+                sliced.wave.resistance_at(p),
+                whole.wave.resistance_at(p),
+                "cell {p:?}"
+            );
+        }
+    }
+
     #[test]
     fn batched_hit_frames_preserve_live_damage_in_a_frozen_turned_pose() {
         for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
