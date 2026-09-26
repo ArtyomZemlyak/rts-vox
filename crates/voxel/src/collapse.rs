@@ -311,8 +311,16 @@ impl CollapseLayer {
     /// Отдельным вызовом, а не параметром конструктора: слой строят
     /// стенды и тесты самого `voxel`, у которых `Tuning` нет и быть
     /// не должно — крейт мира не знает про настройки игры (ADR-191).
+    ///
+    /// Больший потолок меняет ответ о куске, который прежний не пустил
+    /// падать, и разбор повторяется — если он уже что-то видел
+    /// (ADR-440).
     pub fn set_max_body_cells(&mut self, n: usize) {
-        self.max_body_cells = n.max(1);
+        let n = n.max(1);
+        if n > self.max_body_cells && self.chunks.iter().any(Option::is_some) {
+            self.recheck = true;
+        }
+        self.max_body_cells = n;
     }
 
     pub fn new(w: &World) -> CollapseLayer {
@@ -582,7 +590,11 @@ impl CollapseLayer {
         // Оторвав кусок, каскад мог лишить опоры что-то ещё. Разбор
         // повторяется **следующим тиком**, а не сейчас: замер говорит,
         // что повторный раунд не находит ничего, а стоит как первый.
-        self.recheck = torn_total > 0 || st.too_big > 0 || bodies.refused > refused_before;
+        // Отказ пула тел ждёт места, и место приходит без правки мира.
+        // Кусок сверх потолка — нет: его ответ меняют только правка
+        // рядом и другой потолок, и повтор каждого тика был бы
+        // потолком, срабатывающим каждый тик (ADR-440, ADR-116).
+        self.recheck = torn_total > 0 || bodies.refused > refused_before;
         st.rounds_capped = self.recheck;
         self.report(&mut st);
         st
@@ -1927,6 +1939,35 @@ mod tests {
         assert!(!w.solid(50, DECK, 8), "правая половина осталась");
         // Основание опоры ниже подреза стоит.
         assert!(w.solid(PIER, 2, 8), "низ опоры пропал");
+    }
+
+    /// **A piece too big to fall waits for a change** (ADR-440). Only an
+    /// edit near it or a larger cap changes its answer; asking again
+    /// every tick is a cap firing every tick (ADR-116).
+    #[test]
+    fn a_piece_too_big_to_fall_waits_for_a_change() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        c.set_max_body_cells(8);
+        let mut b = Bodies::new(16, test_gravity());
+        cut(&mut w, 4);
+        w.flush();
+        let mut edits: Vec<Edit> = w.edits().to_vec();
+        let mut too_big = 0;
+        for _ in 0..8 {
+            too_big += c.apply(&mut w, &edits, &mut b).too_big;
+            edits.clear();
+            if !c.pending() {
+                break;
+            }
+        }
+        assert!(too_big > 0, "the deck fitted under the cap");
+        assert!(b.list.is_empty());
+        assert!(!c.pending(), "the cascade asks about the deck every tick");
+        // A larger cap lets it fall without an edit.
+        c.set_max_body_cells(MAX_BODY_CELLS);
+        assert!(c.pending());
+        assert_eq!(c.apply(&mut w, &[], &mut b).detached, 1);
     }
 
     /// **Заякоренное не падает.** Тот же мост без подреза стоит,
