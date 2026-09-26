@@ -120,9 +120,36 @@ struct Occupied {
     root_bits: Vec<u64>,
     segment_bits: Vec<Vec<u64>>,
     gone: Vec<bool>,
+    /// World cells survive camera shifts; only posed geometry changes
+    /// require transforming the body's voxels again.
+    world_cells: Vec<[i32; 3]>,
+    bounds: Option<([i32; 3], [i32; 3])>,
     cells: Vec<usize>,
 }
 impl Occupied {
+    fn same_clip(&mut self, old: TerrainWindow, new: TerrainWindow) -> bool {
+        if old.dims != new.dims {
+            return false;
+        }
+        // Bounds are a camera optimization. Avoid adding a reduction to every
+        // simulation tick when moving actors never need their clip compared.
+        let (lo, hi) = *self.bounds.get_or_insert_with(|| {
+            self.world_cells
+                .iter()
+                .fold(([i32::MAX; 3], [i32::MIN; 3]), |(lo, hi), p| {
+                    (
+                        std::array::from_fn(|a| lo[a].min(p[a])),
+                        std::array::from_fn(|a| hi[a].max(p[a])),
+                    )
+                })
+        });
+        let contains = |w: TerrainWindow| w.holds(lo) && w.holds(hi);
+        let excludes =
+            |w: TerrainWindow| (0..3).any(|a| hi[a] < w.origin[a] || lo[a] >= w.span(a).end);
+        // Toroidal addresses depend on dimensions and world position, not
+        // the origin. Fully contained or fully excluded bodies keep theirs.
+        (contains(old) && contains(new)) || (excludes(old) && excludes(new))
+    }
     fn same_geometry(&self, u: &RangeUnit) -> bool {
         self.root_bits == u.body.vol.cols
             && self.gone == u.seg_gone
@@ -167,11 +194,13 @@ impl CellFrame {
     }
 }
 fn unit_cells(u: &RangeUnit, window: &TerrainWindow, out: &mut Vec<usize>) {
-    let mut push = |q: IVec3| {
+    unit_world_cells(u, |q| {
         if let Some(i) = window.index(q.to_array()) {
             out.push(i);
         }
-    };
+    });
+}
+fn unit_world_cells(u: &RangeUnit, mut push: impl FnMut(IVec3)) {
     let p = pose(u);
     let rot = render::realtime::hull_rotation(p.up, p.yaw);
     let centre = Vec3::from(render::model::root_centre(&u.body));
@@ -247,12 +276,12 @@ pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
     out
 }
 fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -> Vec<usize> {
-    if visual.window != Some(*window)
-        || visual.cached.len() != sim.units.len() + usize::from(!sim.battle_mode())
-    {
+    let previous_window = visual.window;
+    let shifted = previous_window != Some(*window);
+    if visual.cached.len() != sim.units.len() + usize::from(!sim.battle_mode()) {
         visual.cached.clear();
-        visual.window = Some(*window);
     }
+    visual.window = Some(*window);
     let mut next = std::mem::take(&mut visual.scratch);
     next.clear();
     next.reserve(visual.occupied.len());
@@ -262,24 +291,25 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
         .chain((!sim.battle_mode()).then_some(&sim.gun))
         .enumerate()
     {
-        if visual.cached.get(id).is_none_or(|old| {
+        let changed = visual.cached.get(id).is_none_or(|old| {
             old.turret_delta != u.turret_delta
                 || old.pose != u.pose
                 || old.segments != u.seg_frames
                 // Dents/heat update appearance but keep occupancy. Compare
                 // the small packed geometry only when its revision changed.
                 || (old.revision != u.revision && !old.same_geometry(u))
-        }) {
+        });
+        if changed {
             #[cfg(test)]
             {
                 visual.occupancy_rebuilds += 1;
             }
-            let mut cells = visual
+            let mut world_cells = visual
                 .cached
                 .get_mut(id)
-                .map_or_else(Vec::new, |old| std::mem::take(&mut old.cells));
-            cells.clear();
-            unit_cells(u, window, &mut cells);
+                .map_or_else(Vec::new, |old| std::mem::take(&mut old.world_cells));
+            world_cells.clear();
+            unit_world_cells(u, |p| world_cells.push(p.to_array()));
             if id == visual.cached.len() {
                 visual.cached.push(Occupied {
                     turret_delta: u.turret_delta,
@@ -294,7 +324,9 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
                         .map(|s| s.body.vol.cols.clone())
                         .collect(),
                     gone: u.seg_gone.clone(),
-                    cells,
+                    world_cells,
+                    bounds: None,
+                    cells: Vec::new(),
                 });
             } else {
                 let old = &mut visual.cached[id];
@@ -316,8 +348,19 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
                     old.gone.clone_from(&u.seg_gone);
                 }
                 old.revision = u.revision;
-                old.cells = cells;
+                old.world_cells = world_cells;
+                old.bounds = None;
             }
+        }
+        if changed
+            || (shifted
+                && previous_window.is_none_or(|old| !visual.cached[id].same_clip(old, *window)))
+        {
+            let cached = &mut visual.cached[id];
+            cached.cells.clear();
+            cached
+                .cells
+                .extend(cached.world_cells.iter().filter_map(|&p| window.index(p)));
         }
         visual.cached[id].revision = u.revision;
         next.extend_from_slice(&visual.cached[id].cells);
@@ -626,6 +669,54 @@ mod tests {
         sim.units[0].revision += 1;
         assert_eq!(cached_cells(&sim, &window, &mut v), cells(&sim, &window));
         assert_eq!(v.occupancy_rebuilds, initial + 2);
+    }
+
+    #[test]
+    fn camera_shifts_reclip_shadows_without_reposing_stationary_bodies() {
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+        let mut visual = Visual::default();
+        let windows = [
+            TerrainWindow {
+                origin: [96, 0, 256],
+                dims: [256, 192, 256],
+            },
+            TerrainWindow {
+                origin: [104, 0, 264],
+                dims: [256, 192, 256],
+            },
+            TerrainWindow {
+                origin: [360, 0, 264],
+                dims: [256, 192, 256],
+            },
+            TerrainWindow {
+                origin: [0, 0, 0],
+                dims: [64, 64, 64],
+            },
+            TerrainWindow {
+                origin: [96, 0, 256],
+                dims: [256, 192, 256],
+            },
+        ];
+        for window in &windows {
+            assert_eq!(cached_cells(&sim, window, &mut visual), cells(&sim, window));
+            assert_eq!(visual.occupancy_rebuilds, sim.units.len() + 1);
+        }
+        // A body damaged while out of view must not return with old shadows.
+        let outside = windows[3];
+        sim.units[0].body.vol.cols.fill(0);
+        sim.units[0].seg_gone.fill(true);
+        sim.units[0].revision += 1;
+        assert_eq!(
+            cached_cells(&sim, &outside, &mut visual),
+            cells(&sim, &outside)
+        );
+        assert_eq!(
+            cached_cells(&sim, &windows[0], &mut visual),
+            cells(&sim, &windows[0])
+        );
+        assert_eq!(visual.occupancy_rebuilds, sim.units.len() + 2);
     }
 
     #[test]
