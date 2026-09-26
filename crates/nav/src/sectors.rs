@@ -1797,7 +1797,7 @@ impl NavField {
             }
             Stage::FieldBegin => {
                 while self.owner < self.targets.len() {
-                    if let Some(node) = self.target_node(self.owner) {
+                    if let Some(node) = self.target_node(self.owner, nav.step()) {
                         field_begin(&self.wsg, &self.wg, &mut self.ws, node);
                         let (w, hh) = self.wg.dims();
                         self.wdir[self.owner].clear();
@@ -1828,15 +1828,19 @@ impl NavField {
 
     /// Узел, в который идут юниты владельца: верхний уровень клетки
     /// цели, а если там стоять негде — ближайшей, где можно.
-    fn target_node(&self, owner: usize) -> Option<u32> {
+    ///
+    /// Цель лежит в вокселях, граф — в нав-клетках, и перевод идёт
+    /// **шагом слоя** `step`. Здесь стояло деление на два — шаг
+    /// тестовых слоёв; в игре клетка десять вокселей, и на эталонной
+    /// карте цели обеих сторон уезжали в дальний угол сетки (ADR-418).
+    fn target_node(&self, owner: usize, step: u32) -> Option<u32> {
         let (tx, tz) = self.targets.get(owner).copied().flatten()?;
         let (w, hh) = self.wg.dims();
         if w == 0 || hh == 0 {
             return None;
         }
-        let step = SEC.max(1);
-        let _ = step;
-        let (cx0, cz0) = ((tx / 2).min(w - 1), (tz / 2).min(hh - 1));
+        let step = step.max(1);
+        let (cx0, cz0) = ((tx / step).min(w - 1), (tz / step).min(hh - 1));
         for r in 0..w.max(hh) {
             let mut best: Option<u32> = None;
             let (x0, x1) = (cx0.saturating_sub(r), (cx0 + r).min(w - 1));
@@ -2441,6 +2445,50 @@ mod tests {
             scan: 512,
             sectors: 2,
         }
+    }
+
+    /// Ровная земля: пол на `GY`, выше — воздух.
+    struct Plain;
+    impl voxel::Generator for Plain {
+        fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
+            if y < GY {
+                2
+            } else {
+                AIR
+            }
+        }
+    }
+
+    /// **Цель поля переводится в клетку шагом слоя.**
+    ///
+    /// `set_target` принимает воксели, а шаг нав-клетки приходит из
+    /// данных — в игре десять вокселей. Цель делилась на два: при шаге
+    /// восемь воксель (76, 20) попадал в клетку (11, 10) вместо (9, 2),
+    /// и поле вело туда (ADR-418).
+    #[test]
+    fn the_field_target_is_converted_with_the_layer_step() {
+        let w = voxel::World::new(96, 32, 96, 8192, Box::new(Plain));
+        let nav = NavLayer::new(&w, 4, 8, 1);
+        assert_eq!(nav.dims(), (12, 12));
+        let mut f = NavField::new(1);
+        f.set_target(0, 76, 20);
+        let mut guard = 0;
+        while !f.step(&nav, budget(), &h_exact_floor) {
+            guard += 1;
+            assert!(guard < 100_000, "поле не сошлось");
+        }
+        // Идём по полю из дальнего угла, пока есть направление.
+        let (mut cx, mut cz) = (1i32, 10i32);
+        for _ in 0..1000 {
+            let d = f.dir_at(0, cx as u32, cz as u32, 0);
+            if d == 255 {
+                break;
+            }
+            let (dx, dz) = crate::volume::SIDES[d as usize];
+            cx += dx;
+            cz += dz;
+        }
+        assert_eq!((cx, cz), (9, 2), "поле привело не в клетку цели");
     }
 
     /// **Сборка детерминирована**: два прогона дают тот же граф.
