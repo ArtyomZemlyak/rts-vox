@@ -491,8 +491,7 @@ fn version_34_loads_and_new_structure_jobs_reject_truncated_data() {
     let r = scene(RangeUnitKind::Tank);
     let bytes = r.snapshot();
     let mut tail = fx::blob::Blob::new();
-    r.save_structure(&mut tail);
-    r.battle.save(&mut tail);
+    r.save_after(&mut tail, 34);
     let mut old = bytes[..bytes.len() - tail.v.len()].to_vec();
     old[..4].copy_from_slice(&34u32.to_le_bytes());
     let copy = BlastRange::restore(r.config.clone(), &old).unwrap();

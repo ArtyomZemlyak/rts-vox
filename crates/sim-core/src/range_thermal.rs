@@ -469,11 +469,7 @@ mod tests {
         r.combustion = super::super::fire::Combustion::empty(r.units.len());
         let mut data = r.snapshot();
         let mut tail = Blob::new();
-        r.thermals.save(&mut tail);
-        r.heat_exchange.save(&mut tail);
-        r.combustion.save(&mut tail);
-        r.save_structure(&mut tail);
-        r.battle.save(&mut tail);
+        r.save_after(&mut tail, 31);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &data).unwrap();

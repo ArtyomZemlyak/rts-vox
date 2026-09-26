@@ -1877,6 +1877,23 @@ fn material_cached(w: &World, cursor: &mut voxel::world::MatCursor, p: [i32; 3])
     w.material_cached(cursor, p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
+/// FNV-1a over the rubble's columns in key order: equal maps print the
+/// same, and a change of any column or top changes the print but for a
+/// collision, which reads the same in every run (ADR-426).
+fn rubble_print(rubble: &nav::vehicle::Rubble) -> u64 {
+    rubble
+        .iter()
+        .flat_map(|([x, z], top)| {
+            let mut v = [0u8; 10];
+            v[..4].copy_from_slice(&x.to_le_bytes());
+            v[4..8].copy_from_slice(&z.to_le_bytes());
+            v[8..].copy_from_slice(&top.to_le_bytes());
+            v
+        })
+        .fold(0xcbf29ce484222325, |h, v| {
+            (h ^ u64::from(v)).wrapping_mul(0x100000001b3)
+        })
+}
 /// Whether a ballistic round is still inside the space it can come back
 /// from: the sides and the floor of the range bound it, the ceiling does not.
 ///
@@ -2024,6 +2041,10 @@ pub struct BlastRange {
     /// Columns of resting debris and their tops, rebuilt each tick from
     /// the pieces (ADR-292); derived, not saved.
     pub rubble: nav::vehicle::Rubble,
+    /// Fingerprint of `rubble` as the last step built it. In the snapshot:
+    /// whether the rubble changed under a pending route search reads the
+    /// same in a restored run as in the continuing one (ADR-426).
+    rubble_print: u64,
     /// The batch's support graph over the range's world (ADR-299): what
     /// the tick's edits leave hanging is dug out and becomes pieces.
     collapse: CollapseLayer,
@@ -2394,6 +2415,7 @@ impl BlastRange {
             ))
             .expect("heat tuning"),
             rubble: nav::vehicle::Rubble::new(),
+            rubble_print: rubble_print(&nav::vehicle::Rubble::new()),
             collapse,
             bodies,
             collapsed_cells: 0,
@@ -2450,7 +2472,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(38);
+        b.u32(39);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2570,13 +2592,34 @@ impl BlastRange {
         }
         self.bodies.save(&mut b);
         b.bool(self.world_steady);
-        self.streams.save(&mut b);
-        self.thermals.save(&mut b);
-        self.heat_exchange.save(&mut b);
-        self.combustion.save(&mut b);
-        self.save_structure(&mut b);
-        self.battle.save(&mut b);
+        self.save_after(&mut b, 30);
         b.v
+    }
+    /// The sections appended to the snapshot after `version`, in order:
+    /// the whole tail after the version-30 layout for a snapshot, and the
+    /// part a test cuts off to forge an older one.
+    fn save_after(&self, b: &mut fx::blob::Blob, version: u32) {
+        if version < 31 {
+            self.streams.save(b);
+        }
+        if version < 32 {
+            self.thermals.save(b);
+        }
+        if version < 33 {
+            self.heat_exchange.save(b);
+        }
+        if version < 34 {
+            self.combustion.save(b);
+        }
+        if version < 35 {
+            self.save_structure(b);
+        }
+        if version < 36 {
+            self.battle.save(b);
+        }
+        if version < 39 {
+            b.u64(self.rubble_print);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2592,7 +2635,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if ![27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38].contains(&version) {
+        if !(27..=39).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2939,6 +2982,13 @@ impl BlastRange {
                 }
             }
         }
+        // An older snapshot knows no rubble of its last step: the present
+        // one stands in, and a pending search keeps its memo as it did.
+        r.rubble_print = if version >= 39 {
+            s.u64()
+        } else {
+            rubble_print(&r.current_rubble())
+        };
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -2986,6 +3036,7 @@ impl BlastRange {
         self.control();
         self.attack = None;
         self.gun.motion.route.clear();
+        let rubble = self.current_rubble();
         self.gun.motion.move_to(
             &self.world,
             to,
@@ -2995,7 +3046,7 @@ impl BlastRange {
                 .iter()
                 .map(|u| motion::Obstacle::of(&u.motion, &u.body))
                 .collect::<Vec<_>>(),
-            &self.rubble,
+            &rubble,
         )
     }
     pub fn order_attack(&mut self, id: usize) -> bool {
@@ -3164,14 +3215,29 @@ impl BlastRange {
     pub fn step(&mut self) {
         self.step_observed(|_| {});
     }
-    /// Report completed phases to a read-only observer. The simulation never
-    /// reads clocks or consumes a result from it; benches own their timers.
-    pub fn step_observed(&mut self, mut completed: impl FnMut(&'static str)) {
-        self.surface_changed.clear();
-        self.shield_hits.clear();
-        // Resting debris is floor for this tick's motion (ADR-292), except
-        // a piece lying against a live hull's flank under that hull
-        // (ADR-302).
+    /// Resting debris is floor for this tick's motion (ADR-292), except
+    /// a piece lying against a live hull's flank under that hull
+    /// (ADR-302). `true` when the map changed since it was last built.
+    ///
+    /// A pending route search keeps its probed floors and poses across
+    /// ticks while the world is steady; the rubble is part of that floor,
+    /// and it changes without a single world edit — a piece coming to
+    /// rest, a hull moving beside one. A search restored from a snapshot
+    /// has no such memo and asks afresh, so a memo left from older rubble
+    /// found a different route than the restored run (ADR-426).
+    fn refresh_rubble(&mut self) -> bool {
+        self.rubble = self.current_rubble();
+        let print = rubble_print(&self.rubble);
+        let changed = print != self.rubble_print;
+        self.rubble_print = print;
+        changed
+    }
+    /// The rubble map of the present state, for a command given between
+    /// ticks. `self.rubble` is the map of the last step, derived and not
+    /// saved: a restored range holds none until it steps, so a move ordered
+    /// right after a restore planned over bare ground while the continuing
+    /// run planned over the heap (ADR-426).
+    fn current_rubble(&self) -> nav::vehicle::Rubble {
         let hulls: Vec<crate::burst::Hull> = self
             .units
             .iter()
@@ -3192,10 +3258,16 @@ impl BlastRange {
                 }
             })
             .collect();
-        self.rubble =
-            self.matter
-                .debris
-                .rubble(&self.world, &self.navigation.fell.materials, &hulls);
+        self.matter
+            .debris
+            .rubble(&self.world, &self.navigation.fell.materials, &hulls)
+    }
+    /// Report completed phases to a read-only observer. The simulation never
+    /// reads clocks or consumes a result from it; benches own their timers.
+    pub fn step_observed(&mut self, mut completed: impl FnMut(&'static str)) {
+        self.surface_changed.clear();
+        self.shield_hits.clear();
+        let rubble_steady = !self.refresh_rubble();
         completed("rubble");
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
@@ -3258,7 +3330,7 @@ impl BlastRange {
                         self.tick,
                         self.config.gravity,
                         &self.rubble,
-                        self.world_steady,
+                        self.world_steady && rubble_steady,
                     );
                 } else {
                     u.motion.passive(
@@ -3296,7 +3368,7 @@ impl BlastRange {
                 self.tick,
                 self.config.gravity,
                 &self.rubble,
-                self.world_steady,
+                self.world_steady && rubble_steady,
             );
             self.gun.update_pose(self.turret.angle);
             if let Some((target, velocity)) = self.gun.motion.take_contact() {
@@ -4303,12 +4375,7 @@ mod tests {
         r.combustion = fire::Combustion::empty(r.units.len());
         let mut bytes = r.snapshot();
         let mut tail = fx::blob::Blob::new();
-        r.streams.save(&mut tail);
-        r.thermals.save(&mut tail);
-        r.heat_exchange.save(&mut tail);
-        r.combustion.save(&mut tail);
-        r.save_structure(&mut tail);
-        r.battle.save(&mut tail);
+        r.save_after(&mut tail, 30);
         bytes.truncate(bytes.len() - tail.v.len());
         let mut s = fx::blob::Scan::new(&bytes);
         s.u32();
@@ -5724,6 +5791,123 @@ mod tests {
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.heat.melted_total, 1);
     }
+    /// A resting heap of `cells` concrete cells `mm` millimetres wide,
+    /// dropped onto the floor below `at`, its matter taken from the
+    /// ground. Through the emitter, so that the piece has an id a save
+    /// accepts; the container holds a voxel's worth per cell, as a
+    /// snapshot of the range requires.
+    fn drop_heap(a: &mut BlastRange, at: [i32; 3], mm: u16, cells: u64) {
+        let volume = cells * u64::from(mm).pow(3) / u64::from(voxel::unit::WORLD_MM).pow(3);
+        let held = a
+            .matter
+            .economy
+            .ledger
+            .create(crate::matter::Kind::Debris, 0, u64::MAX);
+        let amount = a.matter.economy.per_voxel(2) * cells;
+        let ground = a.matter.economy.ground;
+        a.matter.economy.ledger.reveal(ground, amount);
+        a.matter.economy.ledger.transfer(ground, held, amount);
+        let mut f = crate::burst::Fragment {
+            id: 0,
+            position: phys::V3::new(
+                Fx::from_int(at[0]),
+                Fx::from_int(at[1]),
+                Fx::from_int(at[2]),
+            ),
+            velocity: phys::V3::ZERO,
+            material: 2,
+            paint: None,
+            mm,
+            basis: [phys::V3::ZERO; 3],
+            mass_g: 2400 * volume,
+            count: cells as u32,
+            shape: 0,
+            side: 4,
+            chunk: None,
+            held,
+            resting: true,
+        };
+        crate::burst::heap(&mut f, &a.world);
+        let tuning = a.matter.tuning;
+        a.matter
+            .debris
+            .emit_body_fragment(f, phys::V3::ZERO, 0, &tuning);
+    }
+    /// The covered range, quiet: no patrols, no round.
+    fn quiet_cover() -> BlastRange {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
+        a.patrols_running = false;
+        a.fire_tick = u32::MAX;
+        a
+    }
+    /// **A move ordered right after a restore plans over the same rubble**
+    /// (ADR-426). The rubble map is derived and not saved; the restored
+    /// range held none until its next step, and a command given in between
+    /// planned over bare ground where the continuing run drove around the
+    /// heap.
+    #[test]
+    fn a_move_ordered_after_a_restore_sees_the_same_rubble() {
+        let mut a = BlastRange::new(config());
+        a.patrols_running = false;
+        let belt = a.gun.motion.shape(&a.gun.body).support[1];
+        // Half-metre cells: a heap taller than the belt's step.
+        drop_heap(&mut a, [GUN[0] + 30, FLOOR, GUN[2] + belt], 500, 32);
+        a.step();
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let goal = [GUN[0] + 60, GUN[2]];
+        assert!(a.order_move(goal));
+        assert!(b.order_move(goal));
+        for tick in 0..120 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+        }
+    }
+    /// **A search in flight forgets what it probed when the rubble
+    /// changes** (ADR-426). A heap coming to rest raises floors without a
+    /// world edit: the continuing run kept the floors it had probed where
+    /// the restored run, with no memo, asked afresh and met the heap.
+    #[test]
+    fn a_heap_landing_under_a_search_in_flight_is_seen_by_both_runs() {
+        for z in (346..=436).step_by(10) {
+            let mut a = quiet_cover();
+            assert!(a.order_move([128, 470]), "the order was refused");
+            assert!(a.gun.motion.searching(), "the route was found at once");
+            drop_heap(&mut a, [128, 16, z], 500, 32);
+            let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+            for tick in 0..40 {
+                a.step();
+                b.step();
+                assert_eq!(
+                    a.state_hash(),
+                    b.state_hash(),
+                    "heap at z {z}: diverged at {tick}"
+                );
+            }
+        }
+    }
+    /// **Whether the rubble changed reads the same after a restore**
+    /// (ADR-426). A search that forgets restarts its pending runs; the
+    /// restored run found its unsaved map empty, took standing rubble for
+    /// new and restarted where the continuing run walked on.
+    #[test]
+    fn a_search_restored_over_standing_rubble_walks_on_unchanged() {
+        let mut a = quiet_cover();
+        drop_heap(&mut a, [100, 16, 300], 500, 32);
+        a.step();
+        assert!(!a.rubble.is_empty(), "the heap is not rubble");
+        // Around the wall: a search of many slices.
+        assert!(a.order_move([450, 336]), "the order was refused");
+        assert!(a.gun.motion.searching(), "the route was found at once");
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        for tick in 0..40 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+        }
+    }
     /// A heap of resting debris under one belt is floor (ADR-292): the
     /// driven tank rides over it with its hull raised where a flat drive
     /// stays level, and still arrives.
@@ -5735,38 +5919,7 @@ mod tests {
             let goal = [GUN[0] + 60, GUN[2]];
             if heap {
                 let belt = a.gun.motion.shape(&a.gun.body).support[1];
-                let cells = 32;
-                let held = a
-                    .matter
-                    .economy
-                    .ledger
-                    .create(crate::matter::Kind::Debris, 0, u64::MAX);
-                let amount = a.matter.economy.per_voxel(2) * cells;
-                let ground = a.matter.economy.ground;
-                a.matter.economy.ledger.reveal(ground, amount);
-                a.matter.economy.ledger.transfer(ground, held, amount);
-                let mut f = crate::burst::Fragment {
-                    id: 9000,
-                    position: phys::V3::new(
-                        Fx::from_int(GUN[0] + 30),
-                        Fx::from_int(FLOOR),
-                        Fx::from_int(GUN[2] + belt),
-                    ),
-                    velocity: phys::V3::ZERO,
-                    material: 2,
-                    paint: None,
-                    mm: 100,
-                    basis: [phys::V3::ZERO; 3],
-                    mass_g: 2400 * cells,
-                    count: cells as u32,
-                    shape: 0,
-                    side: 4,
-                    chunk: None,
-                    held,
-                    resting: true,
-                };
-                crate::burst::heap(&mut f, &a.world);
-                a.matter.debris.fragments.push(f);
+                drop_heap(&mut a, [GUN[0] + 30, FLOOR, GUN[2] + belt], 100, 32);
                 a.rubble = a
                     .matter
                     .debris

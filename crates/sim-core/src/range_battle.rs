@@ -537,12 +537,11 @@ impl BlastRange {
                 .filter(|(i, _)| *i != id)
                 .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
                 .collect();
+            // Between ticks: the rubble of the present state (ADR-426).
+            let rubble = self.current_rubble();
             let u = &mut self.units[id];
             u.motion.route.clear();
-            if !u
-                .motion
-                .move_to(&self.world, p, &u.body, &others, &self.rubble)
-            {
+            if !u.motion.move_to(&self.world, p, &u.body, &others, &rubble) {
                 return false;
             }
         } else {

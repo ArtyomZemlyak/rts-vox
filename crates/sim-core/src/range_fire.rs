@@ -507,9 +507,7 @@ mod tests {
         r.matter = Matter::new(&r.units);
         let mut bytes = r.snapshot();
         let mut tail = Blob::new();
-        r.combustion.save(&mut tail);
-        r.save_structure(&mut tail);
-        r.battle.save(&mut tail);
+        r.save_after(&mut tail, 33);
         bytes.truncate(bytes.len() - tail.v.len());
         bytes[..4].copy_from_slice(&33u32.to_le_bytes());
         let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
