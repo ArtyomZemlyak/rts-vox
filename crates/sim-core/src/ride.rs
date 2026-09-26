@@ -199,7 +199,12 @@ mod tests {
             damping: 8,
             travel_cm: 25,
             clearance_cm: 25,
-            inertia: 4,
+            // `I/M` в квадратных мировых единицах, как в данных: радиус
+            // инерции около метра при опорах в два с половиной. Прежняя
+            // четвёрка осталась от единицы в метр; при нынешней в десять
+            // сантиметров вращение с ней неустойчиво, и тесты ниже
+            // проходили на перевороте нормали (ADR-416).
+            inertia: 125,
             ang_damp: 3,
             support_x_cm: 250,
             support_z_cm: 120,
@@ -282,8 +287,8 @@ mod tests {
         let (r, s) = (ride_of(&c), supports_of(&c));
         let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
         // Курс нулевой: нос смотрит по +X, значит опоры с `x > 0`
-        // это нос. Под ним пол выше на полметра.
-        let half = Fx::from_ratio(1, 2);
+        // это нос. Под ним пол выше на полметра — пять единиц.
+        let half = Fx::from_int(5);
         let floors = [half, half, Fx::ZERO, Fx::ZERO];
         for _ in 0..400 {
             step_hull(&mut up, &mut w, &mut load, &floors, 0, V3::ZERO, &r, &s, DT);
@@ -304,7 +309,7 @@ mod tests {
         let c = chassis();
         let (r, s) = (ride_of(&c), supports_of(&c));
         let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
-        let half = Fx::from_ratio(1, 2);
+        let half = Fx::from_int(5);
         let floors = [half, half, Fx::ZERO, Fx::ZERO];
         // Четверть оборота: нос смотрит по +Z.
         let quarter = angle::FULL / 4;
@@ -339,10 +344,11 @@ mod tests {
         let (r, s) = (ride_of(&c), supports_of(&c));
         let floors = [Fx::ZERO; 4];
         // Курс — четверть оборота, нос смотрит по +Z. Торможение —
-        // ускорение против хода, то есть по −Z.
+        // ускорение против хода, то есть по −Z: шесть метров в секунду
+        // за секунду, шестьдесят единиц.
         let quarter = angle::FULL / 4;
         let (mut up, mut w, mut load) = (V3::UP, V3::ZERO, Fx::ZERO);
-        let brake = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(-6));
+        let brake = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_int(-60));
         for _ in 0..300 {
             step_hull(
                 &mut up, &mut w, &mut load, &floors, quarter, brake, &r, &s, DT,

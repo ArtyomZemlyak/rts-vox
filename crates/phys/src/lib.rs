@@ -94,20 +94,31 @@ impl V3 {
         self.dot(self)
     }
 
-    /// Привести длину к единице **без корня**.
+    /// Привести длину к единице — у почти единичного вектора **без корня**.
     ///
     /// Первый порядок ряда: `n ← n · (3 − |n|²) / 2`. У единичного
     /// вектора это тождество, у почти единичного — шаг к единице,
     /// и за тик нормаль отклоняется на доли процента. Корень здесь
     /// был бы единственной дорогой операцией во всей физике
-    /// (ADR-071), и он не нужен.
+    /// (ADR-071), и на рабочем пути он не нужен.
     ///
-    /// Сходимость есть только вблизи единицы, поэтому длина
-    /// **зажимается**: вырожденный вектор чинится, а не уводит
-    /// итерацию в бесконечность.
+    /// **Шаг сохраняет направление только при `|n|² < 3`**: на трёх он
+    /// обнуляет вектор, а нулевая нормаль поглощающая — поворот её не
+    /// сдвигает, и корпус навсегда теряет «верх»; выше трёх шаг
+    /// разворачивает вектор, и корпус заваливается не в ту сторону.
+    /// Поэтому шаг берётся только в полосе `[1/4, 2]`, где множитель
+    /// не меньше половины, а вектор, ушедший за полосу, приводится
+    /// к единице честно, корнем: это вырожденный вход, а не каждый тик
+    /// (ADR-416). Нулевой вектор направления не имеет и остаётся нулём.
     pub fn renormalised(self) -> V3 {
-        let l2 = self.len_sq().max(Fx::from_ratio(1, 4)).min(Fx::from_int(4));
-        self.scale(Fx::from_int(3).sub(l2).mul(Fx::from_ratio(1, 2)))
+        let l2 = self.len_sq();
+        if l2 >= Fx::from_ratio(1, 4) && l2 <= Fx::from_int(2) {
+            return self.scale(Fx::from_int(3).sub(l2).mul(Fx::from_ratio(1, 2)));
+        }
+        if l2.raw() <= 0 {
+            return self;
+        }
+        self.scale(Fx::ONE.div(l2.sqrt()))
     }
 }
 
@@ -268,6 +279,27 @@ pub fn step(
     tx = tx.sub(r.clearance.mul(sway.z));
     tz = tz.add(r.clearance.mul(sway.x));
 
+    // **Момент инерции не меньше того, что держит явный шаг пружины**
+    // (ADR-416). Вращательная частота подвески — `k·Σr²/I`, и шаг
+    // `dt` устойчив, пока `dt²·k·Σr²/I` меньше четырёх. Урон уменьшает
+    // `I/M` вместе с массой (`Mobility::ride`), и у корпуса, от которого
+    // остался центр, опоры по углам раскачивали его сильнее с каждым
+    // тиком. Нижняя граница — с запасом вчетверо; у целой машины она
+    // на порядок ниже её момента и ничего не меняет.
+    let arm_max = supports
+        .iter()
+        .fold(Fx::ZERO, |m, s| m.max(s.x.mul(s.x).add(s.z.mul(s.z))));
+    let inertia = r
+        .inertia
+        .max(
+            r.stiffness
+                .mul(dt)
+                .mul(dt)
+                .mul(Fx::from_int(supports.len() as i32))
+                .mul(arm_max),
+        )
+        .max(Fx::from_ratio(1, 16));
+
     for (s, g) in supports.iter().zip(ground.iter()) {
         // Местные координаты опоры — в мировые. Поворот только вокруг
         // вертикали: наклон корпуса учитывается ниже, через нормаль.
@@ -305,12 +337,23 @@ pub fn step(
         // тяготение разогнало вниз, — и машина улетает за карту.
         // Предел читается физически: удар неупругий, и демпферу
         // хватит ровно того, чтобы погасить скорость точки в ноль.
-        // На опору приходится доля всей массы, отсюда деление
-        // на число опор.
-        let cap = vp
-            .abs()
-            .div(dt)
-            .div(Fx::from_int(supports.len().max(1) as i32));
+        //
+        // Сила на опоре `j` меняет скорость точки `i` не только
+        // подъёмом, но и поворотом: на `(1 + rᵢ·rⱼ/I)·dt` за тик.
+        // Прежний предел делил только на число опор, то есть знал
+        // один подъём; для тангажа та же сила действует через плечо
+        // на момент инерции, и облегчённый уроном корпус перелетал
+        // ноль каждый тик, качаясь сильнее (P-54, ADR-416). Строка
+        // этой подвижности по модулю, `Σⱼ |1 + rᵢ·rⱼ/I|`, по теореме
+        // Гершгорина не меньше любой моды — подъёма, тангажа, крена,
+        // при любом наборе касающихся опор. Для симметричных опор она
+        // совпадает с самой быстрой модой точно, и у машины, которой
+        // хватало прежнего предела, он не меняется. Скалярные
+        // произведения от курса не зависят: поворот их сохраняет.
+        let row = supports.iter().fold(Fx::ZERO, |a, o| {
+            a.add(inertia.add(s.x.mul(o.x)).add(s.z.mul(o.z)).abs())
+        });
+        let cap = vp.abs().mul(inertia).div(dt.mul(row).max(Fx(1)));
         // Предел **по модулю**, а не только вниз: несимметричный
         // демпфер гасит подъём сильнее, чем падение, и подвеска
         // входит в незатухающий цикл вместо покоя.
@@ -337,8 +380,8 @@ pub fn step(
     // Вращение. Демпфирование множителем, а не вычитанием: вычитание
     // при большом шаге меняет знак скорости и раскачивает корпус.
     let damp = Fx::ONE.sub(r.angular_damping.mul(dt)).max(Fx::ZERO);
-    c.w.x = c.w.x.add(tx.div(r.inertia).mul(dt)).mul(damp);
-    c.w.z = c.w.z.add(tz.div(r.inertia).mul(dt)).mul(damp);
+    c.w.x = c.w.x.add(tx.div(inertia).mul(dt)).mul(damp);
+    c.w.z = c.w.z.add(tz.div(inertia).mul(dt)).mul(damp);
 
     // Поворот нормали угловой скоростью и возврат её на единичную
     // длину. Порядок важен: нормировать до поворота значит нормировать
@@ -412,11 +455,25 @@ pub fn step(
         // прыгает меньше. Опоры, просевшие поровну или на ровном полу
         // (клевок при торможении), стороны не называют, и вся поправка
         // идёт в подъём; падающее тело только поднимается.
+        //
+        // «Сторона» — центр просевших опор дальше четверти самого
+        // короткого плеча, а не дальше четверти мировой единицы.
+        // Чтобы поднять точку `p` наклоном на `tilt`, нормаль
+        // поворачивается на `tilt/|p|`, и у точки в пяти сантиметрах
+        // от центра машины в три метра это десятки радиан за тик:
+        // на эталонной партии нормаль уходила до `|n|² ≈ 6` двадцать
+        // раз за тысячу тиков, и прежний шаг нормировки её разворачивал
+        // (ADR-416). С порогом поворот за тик не больше `4·tilt/|r|`.
+        let side2 = supports
+            .iter()
+            .fold(arm_max, |m, s| m.min(s.x.mul(s.x).add(s.z.mul(s.z))))
+            .mul(Fx::from_ratio(1, 16))
+            .max(Fx::from_ratio(1, 4));
         let mut lift = correction;
         if !falling && total.raw() > 0 {
             let (px, pz) = (mx.div(total), mz.div(total));
             let rho2 = px.mul(px).add(pz.mul(pz));
-            if rho2 > Fx::from_ratio(1, 4) {
+            if rho2 > side2 {
                 let tilt = correction.mul(r.settle_tilt);
                 let k = tilt.div(rho2);
                 let was = c.up;
@@ -515,6 +572,77 @@ mod tests {
 
     const DT: Fx = Fx::from_ratio(1, 30);
     const FLAT: Fx = Fx::ZERO;
+
+    /// Подвеска штатной гусеничной машины из `data/sim.ron` в мировых
+    /// единицах (ребро воксела — десять сантиметров): опоры 2,5 × 1,2 м,
+    /// ход 22 см, клиренс 45 см, `I/M` 125, тяготение 100.
+    fn stock_tracked() -> (Vec<Support>, Ride) {
+        let (a, b) = (Fx::from_int(25), Fx::from_int(12));
+        let s = vec![
+            Support::new(a, b),
+            Support::new(a, b.neg()),
+            Support::new(a.neg(), b),
+            Support::new(a.neg(), b.neg()),
+        ];
+        let travel = Fx::from_ratio(22, 10);
+        let gravity = Fx::from_int(100);
+        let r = Ride {
+            stiffness: Fx::from_int(2),
+            damping: Fx::ONE,
+            travel,
+            clearance: Fx::from_ratio(45, 10),
+            inertia: Fx::from_int(125),
+            gravity,
+            preload: gravity.div(Fx::from_int(4)),
+            angular_damping: Fx::from_int(4),
+            min_up: Fx::from_ratio(91, 100),
+            settle: travel.mul(Fx::from_ratio(35, 100)),
+            settle_tilt: Fx::from_ratio(1, 2),
+            settle_catch: Fx::from_ratio(30, 100),
+        };
+        (s, r)
+    }
+
+    /// **Повреждённый корпус не раскачивает сам себя.**
+    ///
+    /// Урон облегчает корпус, и `Mobility::ride` умножает жёсткость
+    /// и демпфер на отношение масс, до четырёх (ADR-305). Предел демпфера
+    /// на опоре гасил только подъём: для тангажа та же сила действует
+    /// через плечо опоры на момент инерции, и явный шаг перелетал ноль —
+    /// корпус качался с каждым тиком сильнее и подбрасывал себя
+    /// (P-54, ADR-416). Малое начальное вращение обязано затухнуть.
+    #[test]
+    fn a_lightened_hull_damps_its_own_pitch() {
+        let (s, mut r) = stock_tracked();
+        for (mass_ratio, inertia_ratio) in [(4, (1, 1)), (4, (1, 2)), (3, (2, 3))] {
+            r.stiffness = Fx::from_int(2 * mass_ratio);
+            r.damping = Fx::from_int(mass_ratio);
+            r.inertia = Fx::from_int(125).mul(Fx::from_ratio(inertia_ratio.0, inertia_ratio.1));
+            let mut c = Chassis::resting(FLAT, &r);
+            c.w = V3::new(Fx::ZERO, Fx::ZERO, Fx::from_ratio(1, 10));
+            let floor = vec![FLAT; s.len()];
+            let mut highest = c.y;
+            for _ in 0..300 {
+                step(&mut c, &s, &floor, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+                highest = highest.max(c.y);
+            }
+            let spin = c.w.x.abs().max(c.w.z.abs());
+            assert!(
+                spin < Fx::from_ratio(1, 100),
+                "×{mass_ratio}, I×{inertia_ratio:?}: вращение не затухло: {:?}",
+                c.w
+            );
+            assert!(
+                highest < r.clearance.add(r.travel),
+                "×{mass_ratio}, I×{inertia_ratio:?}: корпус подбросило до {highest:?}"
+            );
+            assert!(
+                c.load == Fx::ONE,
+                "корпус не стоит на всех опорах: {:?}",
+                c.load
+            );
+        }
+    }
 
     #[test]
     fn an_airborne_body_cannot_step_through_the_floor_at_high_speed() {
@@ -634,7 +762,16 @@ mod tests {
             want
         );
         assert!(c.up.y > Fx::from_ratio(9, 10), "корпус завалился набок");
-        assert!(c.w.x.abs() < Fx::from_ratio(1, 50), "не успокоился");
+        // Склон по X качает тангаж, то есть `w.z`; проверка одного
+        // `w.x` пропускала незатухающий тангаж (ADR-416).
+        assert!(
+            c.w.x.abs() < Fx::from_ratio(1, 50),
+            "не успокоился по крену"
+        );
+        assert!(
+            c.w.z.abs() < Fx::from_ratio(1, 50),
+            "не успокоился по тангажу"
+        );
     }
 
     /// **Нормаль остаётся единичной сколько угодно долго.**
@@ -657,6 +794,52 @@ mod tests {
                 l2
             );
         }
+    }
+
+    /// **Длинный вектор приводится к единице, а не разворачивается.**
+    ///
+    /// Шаг `(3 − |n|²)/2` обнуляет вектор при `|n|² = 3` и меняет его
+    /// знак выше; прежний зажим длины до четырёх пропускал оба случая
+    /// (ADR-416).
+    #[test]
+    fn a_long_vector_is_renormalised_without_flipping() {
+        let one = Fx::ONE;
+        for v in [
+            V3::new(one, one, one),
+            V3::new(Fx::from_int(2), Fx::ZERO, Fx::ZERO),
+            V3::new(Fx::ZERO, Fx::from_int(-7), Fx::from_int(24)),
+            V3::new(Fx::from_ratio(1, 10), Fx::ZERO, Fx::from_ratio(-1, 10)),
+        ] {
+            let n = v.renormalised();
+            assert!(
+                n.len_sq().sub(Fx::ONE).abs() < Fx::from_ratio(1, 1000),
+                "{v:?} → {n:?}: длина не единица"
+            );
+            assert!(n.dot(v).raw() > 0, "{v:?} → {n:?}: направление развёрнуто");
+        }
+        assert_eq!(V3::ZERO.renormalised(), V3::ZERO);
+    }
+
+    /// **Корпус, закрученный сверх меры, валится в сторону вращения.**
+    ///
+    /// Вращение вокруг оси X кладёт нормаль в +Z. При угловой скорости
+    /// в сорок пять радиан в секунду поворот за тик выводит длину
+    /// нормали за `√3`, и прежний шаг Ньютона разворачивал её: предел
+    /// завала затем клал корпус в −Z, против вращения (ADR-416).
+    #[test]
+    fn an_overspun_hull_tips_the_way_it_spins() {
+        let (s, r) = tracked();
+        // В воздухе: пол на сто единиц ниже, ни одна опора не касается.
+        let mut c = Chassis::resting(FLAT, &r);
+        c.w = V3::new(Fx::from_int(50), Fx::ZERO, Fx::ZERO);
+        let air = vec![Fx::from_int(-100); s.len()];
+        step(&mut c, &s, &air, (Fx::ONE, Fx::ZERO), V3::ZERO, &r, DT);
+        assert!(c.up.z.raw() > 0, "нормаль ушла против вращения: {:?}", c.up);
+        assert!(
+            c.up.y >= r.min_up.sub(Fx::from_ratio(1, 1000)),
+            "{:?}",
+            c.up
+        );
     }
 
     /// **Поворот машины поворачивает и её реакцию на склон.**
