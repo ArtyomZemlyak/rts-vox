@@ -1361,6 +1361,23 @@ impl World {
     /// Один тик на заданном числе воркеров. Хеш обязан совпадать
     /// при любом их числе (`CLAUDE.md`).
     pub fn tick_par(&mut self, threads: usize) -> u64 {
+        self.tick_observed(threads, |_, _| {})
+    }
+
+    /// Один тик: все пятнадцать фаз в объявленном порядке. Это тот же
+    /// тик на одном воркере: две копии цикла фаз расходились бы молча.
+    pub fn tick(&mut self) -> u64 {
+        self.tick_par(1)
+    }
+
+    /// Тик с наблюдателем: после каждой фазы `after` видит мир только
+    /// на чтение. Для проверок состояния, которого граница тика
+    /// не показывает; симуляция от наблюдателя не зависит.
+    pub(crate) fn tick_observed(
+        &mut self,
+        threads: usize,
+        mut after: impl FnMut(Phase, &World),
+    ) -> u64 {
         use std::time::Instant;
         let mut hash = 0u64;
         // События живут один тик: рендер читает их между тиками.
@@ -1384,43 +1401,11 @@ impl World {
                 Phase::Visibility => self.phase_visibility(),
                 Phase::Cleanup => self.phase_cleanup(),
                 Phase::Hash => hash = self.phase_hash(),
-                _ => {}
-            }
-            self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;
-        }
-        self.tick += 1;
-        hash
-    }
-
-    /// Один тик: все пятнадцать фаз в объявленном порядке.
-    pub fn tick(&mut self) -> u64 {
-        use std::time::Instant;
-        let mut hash = 0u64;
-        // События живут один тик: рендер читает их между тиками.
-        self.events.clear();
-        for (pi, &phase) in PHASES.iter().enumerate() {
-            let t0 = Instant::now();
-            match phase {
-                Phase::ApplyCommands => self.phase_commands(),
-                Phase::VoxelEdits => self.phase_ground_edits(),
-                Phase::Destruction => self.phase_ground_destruction(),
-                Phase::Bodies => self.phase_ground_bodies(),
-                Phase::NavUpdate => {
-                    self.profile_navigation();
-                }
-                Phase::Movement => {
-                    self.profile_movement(1);
-                }
-                Phase::Combat => self.phase_combat(),
-                Phase::Logistics => self.phase_logistics(),
-                Phase::Economy => self.phase_economy(),
-                Phase::Visibility => self.phase_visibility(),
-                Phase::Cleanup => self.phase_cleanup(),
-                Phase::Hash => hash = self.phase_hash(),
                 // Остальные — заглушки (ADR-048): существуют, ничего не делают.
                 _ => {}
             }
             self.phase_ns[pi] += t0.elapsed().as_nanos() as u64;
+            after(phase, self);
         }
         self.tick += 1;
         hash
@@ -1921,14 +1906,15 @@ impl World {
                 continue;
             }
             // Тела нет: приземлилось на этом шаге и само сказало,
-            // сколько пролетело.
-            let fallen = g
-                .bodies
-                .landed_log
-                .iter()
-                .find(|l| l.id == u.riding[i])
-                .map(|l| l.fallen)
-                .unwrap_or(0);
+            // сколько пролетело и где легло. Наездник ложится с ним
+            // (ADR-435): он стоял на высоте прошлого тика тела, на шаг
+            // выше места посадки, и падал этот шаг ещё раз сам — с уроном
+            // сверх полученного за полёт тела.
+            let landed = g.bodies.landed_log.iter().find(|l| l.id == u.riding[i]);
+            let fallen = landed.map_or(0, |l| l.fallen);
+            if let Some(l) = landed {
+                u.y[i] = (l.oy + u.ride_off[i].1 as i64).max(0) as i32;
+            }
             let hit = fall_damage(fallen, free, dmg);
             u.voxels[i] = u.voxels[i].saturating_sub(hit.min(u16::MAX as u32) as u16);
             g.stats.fall_damage += hit as u64;

@@ -853,6 +853,55 @@ mod tests {
         assert_eq!(w.units.riding[id], 0, "юнит остался на несуществующем теле");
     }
 
+    /// **Наездник ложится туда, куда легло его тело** (ADR-435). Тело
+    /// падает с ускорением, и последний его шаг — несколько вокселей;
+    /// наездник оставался на высоте прошлого тика тела, на этот шаг выше
+    /// посадки, и падал его ещё раз сам в фазе движения. Смотрится сразу
+    /// после фазы тел: к концу тика собственное падение это скрывает.
+    #[test]
+    fn a_rider_lands_where_its_body_lands() {
+        let vw = voxel::World::new(320, 320, 320, 100_000, Box::new(Mushroom));
+        let mut w = World::new(1, 4, test_tuning());
+        w.attach_ground(Ground::new(vw, &test_tuning()));
+        let id = w.units.spawn(160, 160, 0, 0, 300) as usize;
+        w.units.refresh_live();
+        w.tick();
+        assert_eq!(w.units.y[id], 220, "the unit did not stand on the cap");
+        // Cut so that the body's last step does not end on a whole voxel.
+        {
+            let g = w.ground.as_mut().expect("земля");
+            for y in 45..105 {
+                for z in 145..180 {
+                    for x in 145..180 {
+                        if g.world.solid(x, y, z) {
+                            g.world.queue_dig(x, y, z);
+                        }
+                    }
+                }
+            }
+        }
+        let mut landed = false;
+        for tick in 0..200 {
+            let riding = w.units.riding[id] != 0;
+            let mut hung = None;
+            w.tick_observed(1, |phase, w| {
+                if phase == crate::Phase::Bodies && riding && w.units.riding[id] == 0 {
+                    landed = true;
+                    let g = w.ground().expect("земля");
+                    let y = w.units.y[id] as u32;
+                    if !(g.world.solid(160, y - 1, 160) && !g.world.solid(160, y, 160)) {
+                        hung = Some(y);
+                    }
+                }
+            });
+            assert_eq!(
+                hung, None,
+                "tick {tick}: the rider hangs above the cap it came down on"
+            );
+        }
+        assert!(landed, "the cap never landed with its rider");
+    }
+
     /// **Дыра появляется в том же тике, где её прокопали**, и её видят
     /// связность и проходимость (`CLAUDE.md`). Это и есть смысл того,
     /// что фазы земли стоят в списке до навигации.
