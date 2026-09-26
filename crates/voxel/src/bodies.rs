@@ -16,9 +16,10 @@
 //! а остаётся в мире: это заметно игроку, но детерминировано, а
 //! «иногда падает, иногда нет» — десинк.
 
-use crate::store::Mat;
+use crate::store::{Mat, AIR, CS};
 use crate::World;
 use fx::Fx;
+use std::collections::BTreeMap;
 
 /// Воксель тела в его собственных координатах плюс материал.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -254,6 +255,94 @@ pub struct BodyStats {
     pub alive: usize,
     /// Куски, которым не хватило лимита и которые остались в мире.
     pub refused: usize,
+    /// Воксели приземлившихся тел, которым не нашлось свободной клетки:
+    /// столб полон до потолка мира (ADR-442).
+    pub spilled: usize,
+}
+
+/// Клетки, уже занятые на этом шаге: ждущие передачи в мир и запекание
+/// приземлившихся тел (ADR-442). По чанкам, битом на клетку.
+#[derive(Default)]
+struct Marks(BTreeMap<(u32, u32, u32), Box<[u64; CS * CS * CS / 64]>>);
+
+impl Marks {
+    /// Отметки ждущих передач: положенное в очередь передач займёт
+    /// клетку раньше запекания.
+    fn of_lane(w: &World) -> Marks {
+        let mut m = Marks::default();
+        for e in w.transfers() {
+            m.put(e.x, e.y, e.z, e.mat != AIR);
+        }
+        m
+    }
+
+    fn at(x: u32, y: u32, z: u32) -> ((u32, u32, u32), usize, u64) {
+        let c = CS as u32;
+        let i = ((y % c * c + z % c) * c + x % c) as usize;
+        ((x / c, y / c, z / c), i >> 6, 1 << (i & 63))
+    }
+
+    fn get(&self, x: u32, y: u32, z: u32) -> bool {
+        let (k, w, m) = Marks::at(x, y, z);
+        self.0.get(&k).is_some_and(|b| b[w] & m != 0)
+    }
+
+    fn put(&mut self, x: u32, y: u32, z: u32, on: bool) {
+        let (k, w, m) = Marks::at(x, y, z);
+        let b = self
+            .0
+            .entry(k)
+            .or_insert_with(|| Box::new([0; CS * CS * CS / 64]));
+        if on {
+            b[w] |= m;
+        } else {
+            b[w] &= !m;
+        }
+    }
+}
+
+/// Клетка, в которую ложится воксель приземлившегося тела (ADR-442).
+///
+/// Своя, если свободна; у наклонённой плиты — соседняя в плоскости
+/// наклона, куда округление поворота никого не положило; иначе —
+/// выше по столбу. Свободна клетка внутри мира и не на рамке, пустая
+/// в мире и не занятая на этом шаге: запекание ничего не затирает —
+/// ни породу, ни соседа по телу, ни ждущую передачу. Рамка и то, что
+/// за краем мира, сдвигаются внутрь. `None` — столб полон до потолка.
+fn landing_cell(w: &World, marks: &Marks, axis: u8, p: (i64, i64, i64)) -> Option<[u32; 3]> {
+    if w.nx < 3 || w.nz < 3 || w.ny < 2 {
+        return None;
+    }
+    let x = p.0.clamp(1, i64::from(w.nx) - 2) as u32;
+    let y = p.1.clamp(1, i64::from(w.ny) - 1) as u32;
+    let z = p.2.clamp(1, i64::from(w.nz) - 2) as u32;
+    let free = |x: u32, y: u32, z: u32| {
+        (1..w.nx - 1).contains(&x)
+            && (1..w.ny).contains(&y)
+            && (1..w.nz - 1).contains(&z)
+            && !w.solid(x, y, z)
+            && !marks.get(x, y, z)
+    };
+    if free(x, y, z) {
+        return Some([x, y, z]);
+    }
+    if axis != 0 {
+        // Вниз, в стороны по оси наклона, вверх.
+        for (along, dy) in [(0i32, -1i32), (-1, 0), (1, 0), (0, 1)] {
+            let (ny, a) = (y.wrapping_add_signed(dy), along);
+            let (nx, nz) = if axis == 1 {
+                (x, z.wrapping_add_signed(a))
+            } else {
+                (x.wrapping_add_signed(a), z)
+            };
+            if free(nx, ny, nz) {
+                return Some([nx, ny, nz]);
+            }
+        }
+    }
+    (y + 1..w.ny)
+        .find(|&yy| free(x, yy, z))
+        .map(|yy| [x, yy, z])
 }
 
 pub struct Bodies {
@@ -356,6 +445,7 @@ impl Bodies {
     /// только конечной высоты пропустила бы три пола из четырёх.
     pub fn step(&mut self, w: &mut World) -> BodyStats {
         let mut st = BodyStats::default();
+        let mut marks: Option<Marks> = None;
         self.landed_log.clear();
         let mut i = 0;
         while i < self.list.len() {
@@ -410,11 +500,16 @@ impl Bodies {
                     oy: b.oy,
                     riders: b.riders.clone(),
                 });
-                // Back into the world in the same drain (ADR-431).
+                // Back into the world in the same drain (ADR-431),
+                // each voxel into a cell of its own (ADR-442).
+                let marks = marks.get_or_insert_with(|| Marks::of_lane(w));
                 for v in &b.voxels {
-                    let (x, y, z) = b.world_of(*v);
-                    if x >= 0 && y >= 0 && z >= 0 {
-                        w.queue_transfer(crate::Edit::put(x as u32, y as u32, z as u32, v.mat));
+                    match landing_cell(w, marks, b.tilt_axis, b.world_of(*v)) {
+                        Some([x, y, z]) => {
+                            marks.put(x, y, z, true);
+                            w.queue_transfer(crate::Edit::put(x, y, z, v.mat));
+                        }
+                        None => st.spilled += 1,
                     }
                 }
                 st.landed += 1;
@@ -907,6 +1002,94 @@ mod tests {
         assert_eq!(
             bodies.list[0].world_of(bodies.list[0].voxels[0]),
             (10, 20, 30)
+        );
+    }
+
+    fn count(w: &World, mat: Mat) -> usize {
+        let mut n = 0;
+        for z in 0..w.nz {
+            for y in 0..w.ny {
+                for x in 0..w.nx {
+                    n += usize::from(w.material(x, y, z) == mat);
+                }
+            }
+        }
+        n
+    }
+
+    fn put_box(w: &mut World, lo: [u32; 3], hi: [u32; 3], mat: Mat) -> Vec<(u32, u32, u32)> {
+        let mut cells = Vec::new();
+        for z in lo[2]..hi[2] {
+            for y in lo[1]..hi[1] {
+                for x in lo[0]..hi[0] {
+                    w.queue_edit(crate::Edit::put(x, y, z, mat));
+                    cells.push((x, y, z));
+                }
+            }
+        }
+        w.flush();
+        cells
+    }
+
+    fn land(w: &mut World, bodies: &mut Bodies) -> BodyStats {
+        let mut total = BodyStats::default();
+        for _ in 0..400 {
+            let st = bodies.step(w);
+            w.flush();
+            total.landed += st.landed;
+            total.spilled += st.spilled;
+            if st.alive == 0 {
+                return total;
+            }
+        }
+        panic!("the body never landed");
+    }
+
+    /// **A tilted plate lands whole** (ADR-442). Rounding a turned grid
+    /// sends two voxels to one cell and leaves another empty; the bake
+    /// wrote the second voxel over the first, and the plate came down
+    /// short of matter.
+    #[test]
+    fn a_tilted_plate_lands_whole() {
+        let mut w = World::new(64, 48, 32, 100_000, Box::new(Flat { floor: 4 }));
+        let cells = put_box(&mut w, [8, 24, 10], [40, 26, 18], 3);
+        let mut bodies = Bodies::new(8, test_gravity());
+        assert!(bodies.detach(&mut w, &cells));
+        bodies.list[0].tilt(2, 1);
+        w.flush();
+        let st = land(&mut w, &mut bodies);
+        assert_eq!(st.landed, 1);
+        assert_eq!(st.spilled, 0);
+        assert_eq!(
+            count(&w, 3),
+            cells.len(),
+            "the plate lost matter as it baked"
+        );
+    }
+
+    /// **A landing body does not erase what stands in its way** (ADR-442).
+    /// A cell set inside the body's volume while it fell was overwritten
+    /// by the bake; now the body's voxel goes up the column instead.
+    #[test]
+    fn a_landing_body_does_not_erase_what_stands_in_its_way() {
+        let mut w = world();
+        let cells = put_box(&mut w, [10, 4, 10], [12, 6, 12], 3);
+        let mut bodies = Bodies::new(8, test_gravity());
+        assert!(bodies.detach(&mut w, &cells));
+        w.flush();
+        // It has come down onto the floor; someone builds inside its
+        // volume before it bakes.
+        bodies.list[0].fallen = 1;
+        w.queue_edit(crate::Edit::put(10, 5, 10, 4));
+        w.flush();
+        let st = land(&mut w, &mut bodies);
+        assert_eq!(st.spilled, 0);
+        assert_eq!(w.material(10, 5, 10), 4, "the bake overwrote the cell");
+        assert_eq!(count(&w, 3), cells.len());
+        assert_eq!(
+            w.material(10, 6, 10),
+            3,
+            "the voxel did not go up its column"
         );
     }
 }
