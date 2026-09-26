@@ -501,6 +501,61 @@ mod tests {
         assert!(e.balanced());
     }
 
+    /// **A waking piece does not take a claim's flying slot** (ADR-443).
+    /// A claim whose dig the edit ceiling deferred holds its slot into the
+    /// next tick; a piece woken meanwhile took it, and the claim's piece
+    /// then flew over the budget.
+    #[test]
+    fn a_waking_piece_waits_behind_a_claim() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let mut t = tuning();
+        t.blast.max_flying = 1;
+        w.queue_edit(Edit::put(48, 14, 48, 2));
+        w.flush();
+        let held = e.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+        b.fragments.push(Fragment {
+            id: 1,
+            position: centre([48, 16, 48]),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        let g = crate::gravity_per_tick(&t);
+        let mut tick = 0;
+        while !b.fragments[0].resting {
+            b.step_fragments(&w, &mut e, &t.blast, g, tick, Surroundings::NONE);
+            tick += 1;
+            assert!(tick < 300, "never rested");
+        }
+        // A claim takes the one flying slot; the shelf goes.
+        assert!(b.claim_voxel(&mut w, [20, 10, 20], 1, [20, 12, 20], 0, 1, &t.blast));
+        w.queue_edit(Edit::dig(48, 14, 48));
+        w.begin_tick();
+        w.flush();
+        for _ in 0..t.blast.rest_check_ticks * 2 {
+            b.step_fragments(&w, &mut e, &t.blast, g, tick, Surroundings::NONE);
+            tick += 1;
+            assert!(b.fragments[0].resting, "the piece took the claim's slot");
+        }
+        b.claims.clear();
+        let mut woke = false;
+        for _ in 0..t.blast.rest_check_ticks * 2 {
+            b.step_fragments(&w, &mut e, &t.blast, g, tick, Surroundings::NONE);
+            tick += 1;
+            woke |= !b.fragments[0].resting;
+        }
+        assert!(woke, "the piece never woke once the slot was free");
+    }
+
     /// Two pieces settling in one pile cell become one upright heap on the
     /// floor with a cell for each of theirs, and the heap is floor in its
     /// columns (ADR-292).
@@ -2426,9 +2481,12 @@ impl Bursts {
         let mut stale_wrecks = BTreeSet::new();
         let mut landed = Vec::new();
         // Waking pieces count against the flying budget like new ones; a
-        // piece without room waits for its next turn.
-        let mut room = (t.max_flying as usize)
-            .saturating_sub(self.fragments.iter().filter(|f| !f.resting).count());
+        // piece without room waits for its next turn. A claim holds its
+        // flying slot until its dig lands and it becomes a piece: a
+        // waking piece does not take it (ADR-443).
+        let mut room = (t.max_flying as usize).saturating_sub(
+            self.fragments.iter().filter(|f| !f.resting).count() + self.claims.len(),
+        );
         for i in 0..self.fragments.len() {
             let f = &mut self.fragments[i];
             if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || room > 0) {
