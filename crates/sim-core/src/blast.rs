@@ -1771,7 +1771,8 @@ impl Explosion {
                                         };
                                         match m.body(actor, u, cell, &frame, self.at) {
                                             matter::ClaimResult::Applied => u.detached += 1,
-                                            matter::ClaimResult::Unaffordable => apply = false,
+                                            matter::ClaimResult::Unaffordable
+                                            | matter::ClaimResult::Indestructible => apply = false,
                                             matter::ClaimResult::Deferred => return,
                                         }
                                     }
@@ -1803,7 +1804,8 @@ impl Explosion {
                                         self.at,
                                     ) {
                                         matter::ClaimResult::Applied => u.seg_detached += 1,
-                                        matter::ClaimResult::Unaffordable => apply = false,
+                                        matter::ClaimResult::Unaffordable
+                                        | matter::ClaimResult::Indestructible => apply = false,
                                         matter::ClaimResult::Deferred => return,
                                     }
                                 }
@@ -1828,7 +1830,8 @@ impl Explosion {
                             if let Some(m) = matter.as_deref_mut() {
                                 match m.ground(w, q, self.at) {
                                     matter::ClaimResult::Applied => (),
-                                    matter::ClaimResult::Unaffordable => apply = false,
+                                    matter::ClaimResult::Unaffordable
+                                    | matter::ClaimResult::Indestructible => apply = false,
                                     matter::ClaimResult::Deferred => return,
                                 }
                             } else {
@@ -6355,6 +6358,28 @@ mod tests {
             );
         }
         assert!(a.impact.is_some(), "the bolt never landed");
+    }
+    /// **The world's frame is not matter to claim** (ADR-420). A wave against
+    /// the edge of the map claimed frame voxels whose digs the edit queue
+    /// drops (ADR-034); the claims never cleared, so the collapse layer,
+    /// which waits for claims, stayed off for the rest of the match.
+    #[test]
+    fn a_blast_at_the_edge_of_the_world_leaves_no_stuck_claim() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut a = BlastRange::new(c);
+        a.control();
+        a.aim = Some([2, FLOOR, 336]);
+        assert!(a.refire());
+        for _ in 0..600 {
+            a.step();
+        }
+        assert!(a.impact.is_some(), "the shell never landed");
+        assert!(a.removed > 0, "the shell broke nothing");
+        assert_eq!(
+            a.matter.debris.claims(),
+            0,
+            "a claim on the world's frame never cleared"
+        );
     }
     /// Heat is state: a range restored mid-fire matches tick for tick, and
     /// one unit of heat more changes the hash.

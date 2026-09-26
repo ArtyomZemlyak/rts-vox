@@ -1785,9 +1785,15 @@ impl Bursts {
         side: u8,
         t: &Blast,
     ) -> bool {
+        // The edit queue drops digs on the world's frame (ADR-034); a claim
+        // there would never be confirmed and never released, and every
+        // wait on claims would wait forever (ADR-420). Callers check it
+        // first; this is the last line.
         if self.fragment_room(t) == 0
             || self.claims.len() >= t.max_claims as usize
             || self.claims.contains_key(&p)
+            || !world.inside(p[0], p[1], p[2])
+            || world.on_frame(p[0], p[1], p[2])
         {
             return false;
         }
@@ -2070,7 +2076,13 @@ impl Bursts {
                         continue;
                     }
                     let key = p.map(|v| v as u32);
-                    if self.claims.contains_key(&key) || !world.solid(key[0], key[1], key[2]) {
+                    // The frame takes no edit (ADR-034): a claim there would
+                    // never clear, and the energy paid for it would buy
+                    // nothing (ADR-420).
+                    if self.claims.contains_key(&key)
+                        || !world.solid(key[0], key[1], key[2])
+                        || world.on_frame(key[0], key[1], key[2])
+                    {
                         continue;
                     }
                     let material = world.material(key[0], key[1], key[2]);

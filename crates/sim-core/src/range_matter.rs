@@ -19,6 +19,19 @@ pub enum ClaimResult {
     Applied,
     Unaffordable,
     Deferred,
+    /// The world's frame (ADR-034): no edit reaches it, so no claim on it
+    /// could ever be confirmed or released (ADR-420).
+    Indestructible,
+}
+
+/// Whether an edit can reach this voxel: inside the world and off its frame
+/// (ADR-034). The edit queue drops the rest silently, so a claim on them
+/// would wait for a confirmation that never comes (ADR-420).
+fn claimable(w: &World, p: [i32; 3]) -> bool {
+    p.iter().all(|v| *v >= 0) && {
+        let [x, y, z] = p.map(|v| v as u32);
+        w.inside(x, y, z) && !w.on_frame(x, y, z)
+    }
 }
 
 pub struct Matter {
@@ -101,7 +114,11 @@ impl Matter {
         let mut cut = 0;
         for &p in cells {
             let m = w.material(p[0], p[1], p[2]);
-            if m == AIR || !f.materials.contains(&m) || self.debris.claimed(p) {
+            if m == AIR
+                || !f.materials.contains(&m)
+                || self.debris.claimed(p)
+                || !claimable(w, p.map(|v| v as i32))
+            {
                 continue;
             }
             let (cost, motion) = self.cost(m);
@@ -139,7 +156,11 @@ impl Matter {
             }
             let q = p.map(|v| v as u32);
             let m = w.material(q[0], q[1], q[2]);
-            if m == AIR || !f.materials.contains(&m) || self.debris.claimed(q) {
+            if m == AIR
+                || !f.materials.contains(&m)
+                || self.debris.claimed(q)
+                || w.on_frame(q[0], q[1], q[2])
+            {
                 continue;
             }
             // Felled wood crumbles in two-cell pieces whatever the weapon.
@@ -193,7 +214,7 @@ impl Matter {
     /// throw. `false` when the pool has no room; it then stays hot.
     pub fn melt(&mut self, w: &mut World, p: [u32; 3]) -> bool {
         let m = w.material(p[0], p[1], p[2]);
-        if m == 0 || self.economy.mats.get(m).is_none() {
+        if m == 0 || self.economy.mats.get(m).is_none() || !claimable(w, p.map(|v| v as i32)) {
             return false;
         }
         let at = p.map(|v| v as i32);
@@ -260,6 +281,9 @@ impl Matter {
         true
     }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
+        if !claimable(w, p) {
+            return ClaimResult::Indestructible;
+        }
         let m = material(w, p);
         let (cost, motion) = self.cost(m);
         if cost > self.remaining_mj {
