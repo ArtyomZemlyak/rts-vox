@@ -497,9 +497,14 @@ mod tests {
             "../../../data/energy-cannon.ron"
         ))
         .unwrap();
-        config.energy = 2700;
-        config.energy /= 2;
-        config.material_energy_j /= 2;
+        // Keep the live scenario strong enough to sever this support when
+        // the stock weapon is rebalanced. The fixture has the same slab
+        // thickness and column cross-section as the authored range.
+        let authored = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        let power = authored.zones[2].scenario.as_ref().unwrap().power_milli;
+        config.energy = config.energy * power / 1000;
+        config.material_energy_j =
+            (u64::from(config.material_energy_j) * u64::from(power) / 1000) as u32;
         let mut sim = super::super::BlastRange::with_layout(config, layout).unwrap();
         let mut tilted = false;
         for _ in 0..300 {
