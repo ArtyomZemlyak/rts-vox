@@ -1241,6 +1241,14 @@ impl World {
     /// и связаны эти подземелья не были (ADR-138).
     pub fn spawn_ground(&mut self, x: i32, z: i32, owner: u8, speed: i32, voxels: u16) -> u32 {
         let id = self.units.spawn(x, z, owner, speed, voxels);
+        // Слот мог принадлежать погибшей машине с материальным телом:
+        // её состояние переживает смерть и снимается только здесь.
+        // Юнит без типа тела не имеет, и разбитый корпус прежнего
+        // хозяина — без мотора, прицела и ядра — не его (ADR-424).
+        // Тип ставит своё тело следом (`spawn_kind_inner`).
+        if let Some(b) = self.material_bodies.as_mut() {
+            b.despawn(id);
+        }
         if let Some(g) = self.ground.as_ref() {
             let st = g.nav.step() as i32;
             let (gw, gh) = g.nav.dims();

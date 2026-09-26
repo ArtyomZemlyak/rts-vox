@@ -233,6 +233,32 @@ mod tests {
             .rebuild(&w.units.x, &w.units.z, &w.units.live_ids);
         w
     }
+    /// **Слот погибшей машины не передаёт её тело новому юниту**
+    /// (ADR-424). Юнит без типа, вставший в освободившийся слот,
+    /// наследовал разбитый корпус: без мотора и прицела, с уже
+    /// «мёртвым» состоянием, и первый же урон обнулял его.
+    #[test]
+    fn a_reused_slot_does_not_inherit_the_dead_hull() {
+        let mut w = fixture();
+        let id = w.units.live()[0];
+        w.units.voxels[id as usize] = 0;
+        w.tick();
+        assert!(!w.units.alive[id as usize], "машина не погибла");
+        let again = w.spawn_ground(40, 40, 1, 30, 99);
+        assert_eq!(again, id, "слот не переиспользован — проверять нечего");
+        w.units.refresh_live();
+        assert!(
+            w.material_bodies.as_ref().unwrap().state(again).is_none(),
+            "новый юнит получил тело погибшей машины"
+        );
+        for _ in 0..5 {
+            w.tick();
+        }
+        assert!(
+            w.units.alive[again as usize],
+            "новый юнит погиб от чужого корпуса"
+        );
+    }
     fn shot(w: &mut World, x: i32, y: i32, vx: i32) -> u32 {
         let id = w.shots.spawn(
             (x, y, 40),
