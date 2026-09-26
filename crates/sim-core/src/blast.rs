@@ -7052,6 +7052,49 @@ mod tests {
             BlastRange::restore(c, &a.snapshot()).unwrap().state_hash()
         );
     }
+    /// **A section job that ends without a commit hands on** (ADR-444).
+    /// Cells cut loose outside a running job's domain wait for the next
+    /// job; one that finished in a call with nothing to commit started
+    /// none, and they hung detached, with every snapshot refused.
+    #[test]
+    fn cells_cut_loose_behind_a_running_section_still_leave() {
+        let c = config();
+        let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        a.control();
+        a.patrols_running = false;
+        let u = &mut a.units[0];
+        // A job already past its last part holds the unit's section slot.
+        let mut spent = u.body.vol.clone();
+        spent.cols.iter_mut().for_each(|w| *w = 0);
+        u.section = Some(crate::damage::SectionJob::new(0, 0, spent));
+        for z in 0..30 {
+            for y in 0..30 {
+                if u.body.remove(54, y, z) {
+                    u.removed.push([54, y as u8, z as u8]);
+                }
+            }
+        }
+        u.revision = u.removed.len() as u64;
+        a.matter.annihilate_body(0, u.removed.len());
+        u.refresh_damage(0);
+        let detached = u.status.detached;
+        assert!(detached > 8, "nothing was cut loose");
+        a.matter.step_sections(&mut a.units);
+        assert!(
+            a.units[0].section.is_some(),
+            "the cut-loose cells were left without a job"
+        );
+        for _ in 0..40 {
+            a.step();
+            if a.units[0].status.detached == 0 {
+                break;
+            }
+        }
+        assert_eq!(a.units[0].status.detached, 0);
+        assert!(BlastRange::restore(c, &a.snapshot()).is_some());
+    }
+
     /// The owner's report: a directed-energy hit on a moving tank kept eating
     /// it for almost three seconds after the flash. The pieces cut loose were
     /// leaving one per tick while the wave waited on them (ADR-270).

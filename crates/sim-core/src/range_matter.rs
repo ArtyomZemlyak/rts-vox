@@ -658,10 +658,14 @@ impl Matter {
                 }
             }
             left -= start - budget;
-            if !job.finished() {
+            let finished = job.finished();
+            if !finished {
                 u.section = Some(job);
             }
-            if committed {
+            // A job that ends without a commit still hands on: what was
+            // cut loose outside its domain while it ran needs a job of
+            // its own, or it hangs detached for good (ADR-444).
+            if committed || finished {
                 u.refresh_damage(id);
             }
         }
