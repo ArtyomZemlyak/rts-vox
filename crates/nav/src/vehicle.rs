@@ -1455,6 +1455,7 @@ impl Hunt {
             || end >= cells / 8
             || cfg.cell <= 0
             || cfg.nodes == 0
+            || spent > cfg.nodes
         {
             return None;
         }
@@ -1499,6 +1500,22 @@ impl Hunt {
             if p != u32::MAX {
                 hunt.previous.insert(i, p as usize);
             }
+        }
+        // Every reached cell leads back to the start (ADR-432): a chain
+        // with a gap or a loop sent the route walk off the grid or round
+        // it forever, where a bad snapshot must simply not load.
+        let mut rooted = BTreeSet::from([initial]);
+        for &i in hunt.distance.keys() {
+            let mut chain = Vec::new();
+            let mut j = i;
+            while !rooted.contains(&j) {
+                if chain.len() >= hunt.distance.len() {
+                    return None;
+                }
+                chain.push(j);
+                j = *hunt.previous.get(&j)?;
+            }
+            rooted.extend(chain);
         }
         let open = s.u32() as usize;
         if open > cells || open > s.left() / 12 {
@@ -1831,13 +1848,18 @@ impl Hunt {
         if !partial && all.last() != Some(&self.to) {
             all.push(self.to);
         }
-        // Remove collinear grid points while retaining the exact turn centres.
+        // Remove collinear grid points while retaining the exact turn
+        // centres. A reversal is a turn too, though its cross product is
+        // zero like a straight line's: the hull drives on past it and
+        // pivots there, where the search found room to (ADR-432).
         let mut out = vec![];
         let mut before = self.from.map(Fx::to_int_trunc);
         for (i, p) in all.iter().enumerate() {
             let keep = i + 1 == all.len() || {
                 let q = all[i + 1];
-                (p[0] - before[0]) * (q[1] - p[1]) != (p[1] - before[1]) * (q[0] - p[0])
+                let a = [p[0] - before[0], p[1] - before[1]];
+                let b = [q[0] - p[0], q[1] - p[1]];
+                a[0] * b[1] != a[1] * b[0] || a[0] * b[0] + a[1] * b[1] < 0
             };
             if keep {
                 out.push(*p);
@@ -2763,6 +2785,80 @@ mod tests {
         );
         assert!(!route.is_empty());
         assert_eq!(route.last(), Some(&[200, 70]));
+    }
+    /// **A snapshot of a search whose cells do not lead back to its start,
+    /// or that spent more than its budget, does not load** (ADR-432).
+    /// The route walk followed such a chain off the grid or round a loop
+    /// forever, and the slice budget underflowed.
+    #[test]
+    fn a_corrupt_search_snapshot_is_refused() {
+        let w = world(false, true, false);
+        let mut ground = Probe::for_search(&w, &[], Columns::default());
+        let Hunting::Open(hunt) = Hunt::start_bounded(
+            &mut ground,
+            tank(),
+            [Fx::from_int(70); 2],
+            0,
+            [200, 200],
+            search(),
+            &|_, _| true,
+            24,
+        ) else {
+            panic!("the search answered at once");
+        };
+        let mut hunt = *hunt;
+        while hunt.distance.len() < 4 {
+            assert!(hunt
+                .advance_in(&w, &Rubble::new(), &|_, _| true, 24)
+                .is_none());
+        }
+        let bytes = |h: &Hunt| {
+            let mut b = fx::blob::Blob::new();
+            h.save(&mut b);
+            b.v
+        };
+        assert!(Hunt::load(&mut fx::blob::Scan::new(&bytes(&hunt)), &[]).is_some());
+        let reached: Vec<usize> = hunt
+            .distance
+            .keys()
+            .copied()
+            .filter(|&i| i != hunt.initial)
+            .collect();
+        let mut gap = hunt.clone();
+        gap.previous.remove(&reached[0]);
+        assert!(Hunt::load(&mut fx::blob::Scan::new(&bytes(&gap)), &[]).is_none());
+        let mut ring = hunt.clone();
+        ring.previous.insert(reached[0], reached[1]);
+        ring.previous.insert(reached[1], reached[0]);
+        assert!(Hunt::load(&mut fx::blob::Scan::new(&bytes(&ring)), &[]).is_none());
+        let mut spent = hunt.clone();
+        spent.spent = spent.cfg.nodes + 1;
+        assert!(Hunt::load(&mut fx::blob::Scan::new(&bytes(&spent)), &[]).is_none());
+    }
+    /// **A route that drives out of a gap and back keeps its pivot**
+    /// (ADR-432). The hull faces east inside a gap too narrow to turn in,
+    /// and the goal lies west: the search drives it out, pivots and comes
+    /// back. Every point lies on one line, and a reversal has a zero cross
+    /// product like a straight run, so the simplification dropped the
+    /// pivot and asked for a turn inside the gap the planner had refused.
+    #[test]
+    fn a_route_that_turns_back_keeps_its_pivot() {
+        let w = world(false, true, false);
+        let path = route(
+            Probe::new(&w),
+            tank(),
+            [Fx::from_int(70); 2],
+            0,
+            [40, 70],
+            search(),
+            |_, _| true,
+        );
+        assert!(!path.is_empty(), "no route out of the gap and back");
+        assert_eq!(path.last(), Some(&[40, 70]));
+        assert!(
+            path.iter().any(|p| p[0] > 82),
+            "the route turns about inside the gap: {path:?}"
+        );
     }
     #[test]
     fn a_single_voxel_obstacle_between_supports_blocks_the_full_hull() {
