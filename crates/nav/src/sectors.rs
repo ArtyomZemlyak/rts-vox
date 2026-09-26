@@ -285,6 +285,25 @@ impl SectorGraph {
     ///
     /// Нарезка дёшева и делается целиком; дорого — расстояния внутри
     /// секторов, и вот они считаются порциями (ADR-152).
+    /// Взять за основу пересборки граф `o`: его порталы, рёбра и нарезку.
+    ///
+    /// Поле держит два графа и меняет их местами при публикации, поэтому
+    /// рабочий граф — тот, что опубликован **два** цикла назад, а грязь
+    /// набрана за один. Сектор, задетый в позапрошлом цикле, переносился
+    /// из графа, который этой правки не видел, и поле через цикл
+    /// показывало то старую связность, то новую (ADR-425). С основой
+    /// из последнего опубликованного графа грязь цикла — точная дельта.
+    pub(crate) fn base_on(&mut self, o: &SectorGraph) {
+        self.sw = o.sw;
+        self.sh = o.sh;
+        self.w = o.w;
+        self.portals.clone_from(&o.portals);
+        self.starts.clone_from(&o.starts);
+        self.edges.clone_from(&o.edges);
+        self.sec_starts.clone_from(&o.sec_starts);
+        self.sec_portals.clone_from(&o.sec_portals);
+    }
+
     pub fn rebuild_begin(&mut self, g: &VolGraph, dirty: &[u32]) -> BuildStats {
         let (w, h) = g.dims();
         let first = self.w == 0;
@@ -1780,6 +1799,7 @@ impl NavField {
             }
             Stage::Label => {
                 if self.wg.label_step(b.scan) {
+                    self.wsg.base_on(&self.sg);
                     self.sec_st = self.wsg.rebuild_begin(&self.wg, &self.taken);
                     self.stage = Stage::Sectors;
                 }
@@ -2444,6 +2464,75 @@ mod tests {
             cells: 64,
             scan: 512,
             sectors: 2,
+        }
+    }
+
+    /// Стена поперёк карты с обходом у северного края: восток
+    /// достижим только вокруг, пока в стене нет проёма.
+    struct Detour;
+    impl voxel::Generator for Detour {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < GY || ((46..50).contains(&x) && z < 88 && y < GY + 8) {
+                2
+            } else {
+                AIR
+            }
+        }
+    }
+
+    /// **Сектор, задетый два цикла назад, не переносится устаревшим**
+    /// (ADR-425). Граф секторов пересобирается в буфере, опубликованном
+    /// два цикла назад, а грязь набирается за один: проём, пробитый
+    /// в стене перед вторым циклом, в третьем переносился из графа
+    /// первого — со стеной, и поле снова вело в обход. Проём внутри
+    /// среднего сектора не трогает его порталы, поэтому сектор
+    /// переиспользуется. После циклов поле сверяется с посчитанным
+    /// с нуля.
+    #[test]
+    fn a_sector_dug_two_cycles_ago_is_not_reused_stale() {
+        let mut w = voxel::World::new(96, 64, 96, 100_000, Box::new(Detour));
+        let mut nav = NavLayer::new(&w, 4, 2, 1);
+        let mut inc = NavField::new(1);
+        inc.set_target(0, 90, 48);
+        let run = |f: &mut NavField, nav: &NavLayer| {
+            let mut guard = 0;
+            while !f.step(nav, budget(), &h_exact_floor) {
+                guard += 1;
+                assert!(guard < 100_000, "поле не сошлось");
+            }
+        };
+        run(&mut inc, &nav);
+        // Проём в стене внутри среднего сектора, вдали от его границ.
+        for y in GY..GY + 8 {
+            for z in 44..52 {
+                for x in 46..50 {
+                    w.queue_dig(x, y, z);
+                }
+            }
+        }
+        w.flush();
+        nav.apply(&w, w.edits());
+        let (cw, _) = nav.dims();
+        for e in w.edits() {
+            inc.mark_cell(e.x / 2, e.z / 2, cw);
+        }
+        let mut fresh = NavField::new(1);
+        fresh.set_target(0, 90, 48);
+        run(&mut fresh, &nav);
+        for cycle in 2..=4 {
+            run(&mut inc, &nav);
+            let (w2, h2) = fresh.g.dims();
+            let mut diff = 0;
+            for cz in 0..h2 {
+                for cx in 0..w2 {
+                    for li in 0..MAX_LEVELS {
+                        if inc.dir_at(0, cx, cz, li) != fresh.dir_at(0, cx, cz, li) {
+                            diff += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(diff, 0, "цикл {cycle}: поле разошлось с посчитанным с нуля");
         }
     }
 
