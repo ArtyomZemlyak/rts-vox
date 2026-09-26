@@ -666,6 +666,12 @@ impl Motion {
     ) {
         self.cut.clear();
         self.contact = None;
+        // Nothing drives a parked hull (ADR-434): its position already
+        // stops advancing, and a speed kept from the last driven tick
+        // led the aim at a standing target, went into contacts and
+        // spilled pieces, and came back at once when driving resumed.
+        self.drive.vel = Fx::ZERO;
+        self.drive.yaw_rate = 0;
         let moved = self.slide(w, rubble, b, others, response);
         self.settle(w, rubble, b, gravity, response);
         self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);

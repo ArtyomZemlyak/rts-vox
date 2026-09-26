@@ -6000,6 +6000,40 @@ mod tests {
         let b = BlastRange::restore(a.config.clone(), &bytes).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
     }
+    /// **A parked hull has no speed** (ADR-434). Stopping the patrols
+    /// parks the tanks where they stand, but their drive kept the last
+    /// patrol speed: the aim led a standing tank by it and missed.
+    #[test]
+    fn a_parked_patrol_tank_is_not_led_by_its_old_speed() {
+        let mut a = quiet_cover();
+        a.patrols_running = true;
+        for _ in 0..300 {
+            a.step();
+            if a.units[2].motion.drive.vel > Fx::from_int(10) {
+                break;
+            }
+        }
+        assert!(
+            a.units[2].motion.drive.vel > Fx::from_int(10),
+            "the patrol never got going"
+        );
+        a.toggle_patrols();
+        a.step();
+        let u = &a.units[2];
+        assert_eq!(
+            u.motion.drive.vel,
+            Fx::ZERO,
+            "the parked tank keeps its speed"
+        );
+        assert_eq!(u.motion.drive.yaw_rate, 0);
+        a.attack = Some(2);
+        let core = u.world_pos([
+            u.body.core.0 as usize,
+            u.body.core.1 as usize,
+            u.body.core.2 as usize,
+        ]);
+        assert_eq!(a.target(), core, "the aim leads a standing tank");
+    }
     /// A heap of resting debris under one belt is floor (ADR-292): the
     /// driven tank rides over it with its hull raised where a flat drive
     /// stays level, and still arrives.
