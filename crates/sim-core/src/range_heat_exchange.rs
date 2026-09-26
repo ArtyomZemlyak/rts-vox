@@ -188,29 +188,44 @@ impl BlastRange {
             if !intersects(bounds[id], from, to) {
                 continue;
             }
-            let mut volume = |body: &UnitBody, frame: &Frame, part: u8| {
-                let (a, b) = (frame.local(vec(from)), frame.local(vec(to)));
-                for at in ray_cells([body.vol.nx, body.vol.ny, body.vol.nz], a, b) {
-                    let p = Cell {
-                        unit: id as u16,
-                        part,
-                        at,
-                    };
-                    // The player's range gun is an opaque body, even though
-                    // its damage/heat ledger is not part of the target list.
-                    let site = (id < self.units.len()).then_some(Site::Body(p));
-                    if (source.is_none() || site != source)
-                        && body.vol.get(at[0] as usize, at[1] as usize, at[2] as usize)
-                    {
-                        take(entry(a, b, at), site);
-                        break;
+            // `rows` bounds the layers traced in this frame: the root's
+            // cells from the turret ring up sit in the turned frame, as
+            // `Cell::world`, hits and bounds place them (ADR-449).
+            let mut volume =
+                |body: &UnitBody, frame: &Frame, part: u8, rows: std::ops::Range<u8>| {
+                    let (a, b) = (frame.local(vec(from)), frame.local(vec(to)));
+                    for at in ray_cells([body.vol.nx, body.vol.ny, body.vol.nz], a, b) {
+                        if !rows.contains(&at[1]) {
+                            continue;
+                        }
+                        let p = Cell {
+                            unit: id as u16,
+                            part,
+                            at,
+                        };
+                        // The player's range gun is an opaque body, even though
+                        // its damage/heat ledger is not part of the target list.
+                        let site = (id < self.units.len()).then_some(Site::Body(p));
+                        if (source.is_none() || site != source)
+                            && body.vol.get(at[0] as usize, at[1] as usize, at[2] as usize)
+                        {
+                            take(entry(a, b, at), site);
+                            break;
+                        }
                     }
-                }
-            };
-            volume(&u.body, &u.pose, 0);
+                };
+            let ny = u.body.vol.ny;
+            if u.turret_delta == 0 {
+                volume(&u.body, &u.pose, 0, 0..ny);
+            } else {
+                let ring = u.body.turret_y.min(ny);
+                volume(&u.body, &u.pose, 0, 0..ring);
+                let turned = crate::damage::turned(&u.pose, u.turret_delta, 0);
+                volume(&u.body, &turned, 0, ring..ny);
+            }
             for (i, s) in u.body.segments.iter().enumerate() {
                 if !u.seg_gone[i] {
-                    volume(&s.body, &u.seg_frames[i], i as u8 + 1);
+                    volume(&s.body, &u.seg_frames[i], i as u8 + 1, 0..s.body.vol.ny);
                 }
             }
         }
@@ -506,6 +521,56 @@ mod tests {
         r.exchange_heat();
         assert_eq!(r.thermals.heat(p), 32);
     }
+    /// **A traversed turret is met where it points** (ADR-449). The
+    /// root was traced whole in the hull frame, so a turret turned aside
+    /// was probed at its straight-ahead place: contact with what touches
+    /// the real turret was missed and a ghost one found.
+    #[test]
+    fn a_traversed_turret_is_met_where_it_points() {
+        let mut r = fixture(&[], &[]);
+        let mut tank =
+            super::super::RangeUnit::of_kind(super::super::RangeUnitKind::Tank, [300, 40, 300]);
+        // The root alone: the turret ring and above sit in the turned frame.
+        tank.body.segments.clear();
+        tank.seg_gone.clear();
+        tank.update_pose(fx::angle::FULL / 4);
+        assert_ne!(tank.turret_delta, 0);
+        // The turret cell that swings farthest from where it stood.
+        let ring = usize::from(tank.body.turret_y);
+        let (mut tip, mut far) = (None, -1i64);
+        for y in ring..usize::from(tank.body.vol.ny) {
+            for z in 0..usize::from(tank.body.vol.nz) {
+                for x in 0..usize::from(tank.body.vol.nx) {
+                    if !tank.body.vol.get(x, y, z) {
+                        continue;
+                    }
+                    let l = [x, y, z].map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2)));
+                    let (w, s) = (tank.root_frame(y).world(l), tank.pose.world(l));
+                    let d = (w.x.sub(s.x).raw() >> 32).pow(2) + (w.z.sub(s.z).raw() >> 32).pow(2);
+                    if d > far {
+                        (tip, far) = (Some(w), d);
+                    }
+                }
+            }
+        }
+        let tip = tip.expect("a turret cell");
+        let at = [tip.x, tip.y, tip.z];
+        let from = [at[0], at[1].add(Fx::from_int(12)), at[2]];
+        let to = [at[0], at[1].sub(Fx::from_int(12)), at[2]];
+        r.units = vec![tank];
+        let bounds: Vec<_> = r
+            .units
+            .iter()
+            .chain(std::iter::once(&r.gun))
+            .map(|u| u.bounds())
+            .collect();
+        let hit = r.first_contact(None, from, to, &bounds);
+        assert!(
+            matches!(hit, Some((_, Some(Site::Body(c)))) if usize::from(c.at[1]) >= ring),
+            "the turned turret was not met: {hit:?}"
+        );
+    }
+
     #[test]
     fn player_gun_is_opaque_even_without_target_heat_storage() {
         let mut r = fixture(&[[100, 32, 100], [103, 32, 100]], &[]);
