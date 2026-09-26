@@ -508,11 +508,18 @@ impl CollapseLayer {
             // не рассматривает. Нижний ряд чанков исключён отдельно —
             // там снятие может отнять у компоненты коренную породу,
             // а это меняет заземление, не меняя состава.
+            // И только у чанка **с одной компонентой**. Проверка знает
+            // про расщепление, но не про порядок меток: снятая целиком
+            // компонента или её первый в обходе пробег меняют номера
+            // остальных, а сбор отрыва строит метки заново и читает
+            // по ним «дошли» и «корень», посчитанные по старым. Стоящий
+            // на породе столб отрывался телом (ADR-422). У одной
+            // компоненты номер один — ноль — и сдвигаться нечему.
             let skip = self.use_split_probe
                 && only_removals
                 && !bottom_row
                 && !self.removed.is_empty()
-                && self.nodes[i].is_some()
+                && self.nodes[i].as_ref().is_some_and(|nd| nd.n == 1)
                 && batch_cannot_split(&c, &self.removed, &mut self.split);
             self.chunks[i] = Some(c);
             if skip {
@@ -2045,6 +2052,61 @@ mod probe_equivalence {
             w.flush();
         }
         (trace, fired)
+    }
+
+    /// Чанк (0, 1, 0) с двумя компонентами: нарост P в два воксела на его
+    /// нижней грани, стоящий на породе соседнего чанка, и столб Q от
+    /// породы. P раньше в порядке обхода и получает метку 0.
+    struct NubAndPillar;
+    impl crate::Generator for NubAndPillar {
+        fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+            if y < 32 {
+                return 2;
+            }
+            let nub = (x, z) == (5, 5) && y < 34;
+            let pillar = (x, z) == (20, 20) && y < 46;
+            if nub || pillar {
+                3
+            } else {
+                AIR
+            }
+        }
+    }
+
+    /// **Исчезнувшая компонента не переименовывает соседнюю** (ADR-422).
+    ///
+    /// Проверка расщепления пропускала переразметку, если оболочка
+    /// снятого пуста, — а она пуста и тогда, когда снята компонента
+    /// целиком. Сбор отрыва строил метки заново: столб Q становился
+    /// меткой 0 и читал «не дошли» у пропавшего нароста P — стоящий
+    /// на породе столб отрывался телом.
+    #[test]
+    fn a_vanished_component_does_not_rename_its_neighbour() {
+        let mut w = World::new(64, 96, 64, 100_000, Box::new(NubAndPillar));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(64, test_gravity());
+        // Знакомим каскад с чанком: наращиваем столб на воксель.
+        w.queue_edit(Edit::put(20, 46, 20, 3));
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        c.apply(&mut w, &edits, &mut b);
+        w.flush();
+        assert!(b.list.is_empty(), "стоящее оторвалось до подкопа");
+        // Снимаем нарост целиком.
+        w.queue_dig(5, 32, 5);
+        w.queue_dig(5, 33, 5);
+        w.flush();
+        let edits: Vec<Edit> = w.edits().to_vec();
+        for _ in 0..8 {
+            c.apply(&mut w, &edits, &mut b);
+            w.flush();
+        }
+        assert!(
+            b.list.is_empty(),
+            "столб на породе оторван телом из {} вокселей",
+            b.list.iter().map(|x| x.voxels.len()).sum::<usize>()
+        );
+        assert!(w.solid(20, 40, 20), "столб пропал из мира");
     }
 
     /// **Каскад с локальной проверкой и без обязан дать одно и то же.**
