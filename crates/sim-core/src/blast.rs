@@ -3775,13 +3775,20 @@ impl BlastRange {
             self.bodies.spawned.clear();
             if let Some(layout) = &self.layout {
                 let before = self.bodies.list.len();
-                plate::fracture(layout, &mut self.world, &mut self.bodies, &edits, |mat| {
-                    self.matter
-                        .economy
-                        .mats
-                        .get(mat)
-                        .map(|m| (m.strength, m.density, m.bend_span))
-                });
+                plate::fracture(
+                    layout,
+                    &mut self.world,
+                    &mut self.bodies,
+                    &edits,
+                    &mut crumbs,
+                    |mat| {
+                        self.matter
+                            .economy
+                            .mats
+                            .get(mat)
+                            .map(|m| (m.strength, m.density, m.bend_span))
+                    },
+                );
                 self.collapsed_cells += self.bodies.list[before..]
                     .iter()
                     .map(|b| b.voxels.len() as u64)
@@ -3790,8 +3797,10 @@ impl BlastRange {
             }
         }
         if !crumbs.is_empty() {
-            // Crumbled cells are removed matter now held by pieces, or
-            // sunk; the layer's digs are nobody's and not counted below.
+            // Crumbled cells — the layer's loose ones and the supports a
+            // tearing plate crushed (ADR-439) — are removed matter now
+            // held by pieces, or sunk; their digs are nobody's and not
+            // counted below.
             let returned = if battle_mode || self.config.material_energy_j > 0 {
                 self.matter.collapse(&mut self.world, &crumbs).1
             } else {

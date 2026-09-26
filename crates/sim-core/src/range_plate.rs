@@ -2,7 +2,13 @@
 //! cannot tell a three-legged roof from a four-legged one: the plate can still
 //! reach ground while a corner is carrying more bending load than it can bear.
 use modding::range::{RangeBlock, RangeLayout};
-use voxel::{bodies::Bodies, world::Edit, World};
+use std::collections::{BTreeMap, BTreeSet};
+use voxel::{
+    bodies::Bodies,
+    store::{Mat, AIR},
+    world::Edit,
+    World,
+};
 
 struct Support<'a> {
     block: &'a RangeBlock,
@@ -34,15 +40,69 @@ fn support<'a>(w: &World, b: &'a RangeBlock, roof: &RangeBlock) -> Support<'a> {
     }
 }
 
+/// A plate that tears crushes the supports too weak to carry it
+/// (ADR-439). Their matter crumbles: each cell joins `crumbs`, which the
+/// caller turns into pieces or sinks, and leaves the world through the
+/// lane of transfers ahead of the plate's own digs (ADR-431) — or the
+/// plate would bake onto the stump the moment it starts to fall. Inside
+/// the slab's box the slab's material is the slab: it stays with a
+/// quadrant that holds or falls with the one that tears. A cell already
+/// leaving the world, as a body's source or as a crumb, is not taken
+/// twice, and the world's frame is never taken (ADR-433).
+fn crush<'a>(
+    w: &mut World,
+    roof: &RangeBlock,
+    weak: impl Iterator<Item = &'a Support<'a>>,
+    crumbs: &mut Vec<([u32; 3], Mat)>,
+) {
+    let mut leaving = BTreeSet::new();
+    for e in w.transfers() {
+        if e.mat == AIR {
+            leaving.insert([e.x, e.y, e.z]);
+        } else {
+            leaving.remove(&[e.x, e.y, e.z]);
+        }
+    }
+    // By cell, not by support: overlapping supports share cells.
+    let mut cells = BTreeMap::new();
+    for s in weak {
+        for y in s.block.min[1].max(0)..s.block.max[1].min(roof.max[1]) {
+            for z in
+                s.block.min[2].max(roof.min[2] - 16).max(0)..s.block.max[2].min(roof.max[2] + 16)
+            {
+                for x in s.block.min[0].max(roof.min[0] - 16).max(0)
+                    ..s.block.max[0].min(roof.max[0] + 16)
+                {
+                    let p = [x as u32, y as u32, z as u32];
+                    let m = w.material(p[0], p[1], p[2]);
+                    if m == s.block.material
+                        && !(m == roof.material && roof.contains([x, y, z]))
+                        && !w.on_frame(p[0], p[1], p[2])
+                        && !leaving.contains(&p)
+                    {
+                        cells.insert(p, m);
+                    }
+                }
+            }
+        }
+    }
+    for (p, m) in cells {
+        w.queue_transfer(Edit::dig(p[0], p[1], p[2]));
+        crumbs.push((p, m));
+    }
+}
+
 /// Fracture plate quadrants whose bending span exceeds their material limit.
 /// Material strength/density and plate thickness set the allowable span;
 /// support cross-section sets the compressive capacity. Only plates near this
 /// tick's edits are visited, so the kilometre map has no per-frame plate pass.
+/// The supports a tearing plate crushes go to `crumbs` ([`crush`]).
 pub(super) fn fracture(
     layout: &RangeLayout,
     w: &mut World,
     bodies: &mut Bodies,
     edits: &[Edit],
+    crumbs: &mut Vec<([u32; 3], Mat)>,
     material: impl Fn(u16) -> Option<(u32, u32, u32)>,
 ) -> usize {
     let mut torn = 0;
@@ -107,7 +167,7 @@ pub(super) fn fracture(
         }
         let mx = roof.min[0] + sx / 2;
         let mz = roof.min[2] + sz / 2;
-        let before_roof = torn;
+        let mut crushed = false;
         for q in 0..4 {
             let x0 = if q & 1 == 0 { roof.min[0] } else { mx };
             let x1 = if q & 1 == 0 { mx } else { roof.max[0] };
@@ -189,28 +249,15 @@ pub(super) fn fracture(
             }
             cells.sort_unstable();
             cells.dedup();
-            if torn == before_roof && bodies.list.len() < bodies.max_bodies {
-                // Queue crushed supports BEFORE the plate's source digs,
-                // and in the same lane (ADR-431): the stump must clear
-                // before the plate above can start falling, otherwise it
-                // immediately bakes onto that pending stump. The lane of
-                // transfers drains in order and whole, ahead of orders, so
-                // both leave the world in one drain.
-                for s in supports.iter().filter(|s| s.area < needed) {
-                    for y in s.block.min[1].max(0)..s.block.max[1].min(roof.max[1]) {
-                        for z in s.block.min[2].max(roof.min[2] - 16)
-                            ..s.block.max[2].min(roof.max[2] + 16)
-                        {
-                            for x in s.block.min[0].max(roof.min[0] - 16)
-                                ..s.block.max[0].min(roof.max[0] + 16)
-                            {
-                                if w.material(x as u32, y as u32, z as u32) == s.block.material {
-                                    w.queue_transfer(Edit::dig(x as u32, y as u32, z as u32));
-                                }
-                            }
-                        }
-                    }
-                }
+            // A quadrant on the world's frame is anchored (ADR-433): it
+            // does not tear, and nothing is crushed for it.
+            if cells.iter().any(|&(x, y, z)| w.on_frame(x, y, z)) {
+                continue;
+            }
+            // Once a roof, and before the first quadrant's own digs.
+            if !crushed && bodies.list.len() < bodies.max_bodies {
+                crushed = true;
+                crush(w, roof, supports.iter().filter(|s| s.area < needed), crumbs);
             }
             if !bodies.detach(w, &cells) {
                 continue;
@@ -348,7 +395,14 @@ mod tests {
         w.flush();
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, materials),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                materials
+            ),
             0,
             "a small chip must not break the intact span"
         );
@@ -360,7 +414,14 @@ mod tests {
         w.flush();
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, materials),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                materials
+            ),
             2,
             "the severed pier and its steel cap must not support the right half"
         );
@@ -404,9 +465,14 @@ mod tests {
         cut(&mut w, [40, 35]);
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, |_| Some((
-                140, 240, 5
-            ))),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                |_| Some((140, 240, 5))
+            ),
             0
         );
         assert_eq!(w.queued(), 0, "refused fracture destroyed its support");
@@ -420,9 +486,14 @@ mod tests {
         cut(&mut w, [40, 35]);
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, |_| Some((
-                140, 240, 5
-            ))),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                |_| Some((140, 240, 5))
+            ),
             1
         );
         assert_eq!(bodies.list[0].voxels.len(), 80 * 57 * 8);
@@ -449,23 +520,170 @@ mod tests {
         );
         assert!(bodies.list[0].fallen > 0);
     }
+    fn count(w: &World, mat: Mat) -> usize {
+        let mut n = 0;
+        for z in 0..w.nz {
+            for y in 0..w.ny {
+                for x in 0..w.nx {
+                    n += usize::from(w.material(x, y, z) == mat);
+                }
+            }
+        }
+        n
+    }
+
+    /// **A crushed support crumbles; it does not vanish** (ADR-439).
+    /// Every cell a tearing plate takes is in the plate or in the crumbs,
+    /// and a weak post under a quadrant that holds leaves the slab over it
+    /// whole: inside the slab's box the slab's material is the slab.
+    #[test]
+    fn a_crushed_support_crumbles_and_leaves_the_slab_over_it() {
+        let (mut layout, _, mut bodies) = fixture(2);
+        // A post too thin to carry anything, up through the slab, under
+        // the quadrant that holds.
+        layout.blocks.insert(
+            4,
+            RangeBlock {
+                min: [150, 5, 100],
+                max: [152, 60, 102],
+                material: 2,
+            },
+        );
+        let mut w = World::new(
+            224,
+            80,
+            160,
+            100_000,
+            Box::new(Canopy {
+                blocks: layout.blocks.clone(),
+            }),
+        );
+        cut(&mut w, [40, 35]);
+        let before = count(&w, 2);
+        let edits = w.edits().to_vec();
+        let mut crumbs = Vec::new();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, &mut crumbs, |_| Some(
+                (140, 240, 5)
+            )),
+            1
+        );
+        while w.queued() > 0 {
+            w.flush();
+        }
+        let held: usize = bodies.list.iter().map(|b| b.voxels.len()).sum();
+        assert_eq!(
+            count(&w, 2) + held + crumbs.len(),
+            before,
+            "matter vanished or doubled"
+        );
+        // The severed pier, 46 layers of 10×10, and the post below the
+        // slab, 47 layers of 2×2.
+        assert_eq!(crumbs.len(), 46 * 100 + 47 * 4);
+        assert!(crumbs.iter().all(|&(_, m)| m == 2));
+        assert_eq!(
+            w.material(151, 55, 101),
+            2,
+            "the post took the slab over it"
+        );
+    }
+
+    /// **A cell already leaving the world is not taken twice** (ADR-439).
+    /// The piece of a pier the cascade tore off this tick holds its own
+    /// matter; the crush must not hand the same cells to the crumbs.
+    #[test]
+    fn a_support_piece_already_falling_is_not_crushed_again() {
+        let (layout, mut w, mut bodies) = fixture(2);
+        cut(&mut w, [40, 35]);
+        for z in 35..45 {
+            for x in 40..50 {
+                w.queue_dig(x, 20, z);
+            }
+        }
+        w.flush();
+        let before = count(&w, 2);
+        let piece: Vec<_> = (21..30)
+            .flat_map(|y| (35..45).flat_map(move |z| (40..50).map(move |x| (x, y, z))))
+            .collect();
+        assert!(bodies.detach(&mut w, &piece));
+        let edits = w.edits().to_vec();
+        let mut crumbs = Vec::new();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, &mut crumbs, |_| Some(
+                (140, 240, 5)
+            )),
+            1
+        );
+        while w.queued() > 0 {
+            w.flush();
+        }
+        let held: usize = bodies.list.iter().map(|b| b.voxels.len()).sum();
+        assert_eq!(
+            count(&w, 2) + held + crumbs.len(),
+            before,
+            "matter vanished or doubled"
+        );
+        assert_eq!(crumbs.len(), 45 * 100 - 9 * 100);
+    }
+
+    /// **A quadrant on the world's frame crushes nothing** (ADR-433,
+    /// ADR-439): the frame anchors it, so it cannot tear, and its
+    /// supports stay standing.
+    #[test]
+    fn a_quadrant_on_the_frame_crushes_nothing() {
+        let (mut layout, _, mut bodies) = fixture(2);
+        layout.blocks[4].min[0] = 0;
+        layout.blocks[4].max[0] = 160;
+        let mut w = World::new(
+            224,
+            80,
+            160,
+            100_000,
+            Box::new(Canopy {
+                blocks: layout.blocks.clone(),
+            }),
+        );
+        cut(&mut w, [40, 35]);
+        let edits = w.edits().to_vec();
+        let mut crumbs = Vec::new();
+        assert_eq!(
+            fracture(&layout, &mut w, &mut bodies, &edits, &mut crumbs, |_| Some(
+                (140, 240, 5)
+            )),
+            0
+        );
+        assert!(crumbs.is_empty());
+        assert_eq!(w.queued(), 0);
+        assert_eq!(w.material(44, 45, 39), 2);
+    }
+
     #[test]
     fn steel_span_holds_one_missing_support_but_not_two_on_a_side() {
         let (layout, mut w, mut bodies) = fixture(3);
         cut(&mut w, [40, 35]);
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, |_| Some((
-                500, 785, 10
-            ))),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                |_| Some((500, 785, 10))
+            ),
             0
         );
         cut(&mut w, [40, 110]);
         let edits = w.edits().to_vec();
         assert_eq!(
-            fracture(&layout, &mut w, &mut bodies, &edits, |_| Some((
-                500, 785, 10
-            ))),
+            fracture(
+                &layout,
+                &mut w,
+                &mut bodies,
+                &edits,
+                &mut Vec::new(),
+                |_| Some((500, 785, 10))
+            ),
             2
         );
     }
