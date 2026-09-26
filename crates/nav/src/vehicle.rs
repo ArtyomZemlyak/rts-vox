@@ -11,7 +11,7 @@ use connection::Connection;
 use fx::{angle, Fx};
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
 };
 use voxel::{
     store::{Mat, AIR},
@@ -59,12 +59,172 @@ impl Pose {
 /// world units (ADR-292): an overlay the probe adds to the world's floor,
 /// so that contacts, feet and the planner all stand on the same heaps.
 pub type Rubble = BTreeMap<[i32; 2], u16>;
+/// Columns that changed under a pending search, by cache page (ADR-427):
+/// the pages a drain's applied edits touched and those where the rubble
+/// map differs from the last step's. A search keeps what it cached
+/// elsewhere and restarts only a check whose checked part lies on one of
+/// them. `all` stands for a change nobody located.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct Changed {
+    all: bool,
+    pages: BTreeSet<[i32; 2]>,
+}
+impl Changed {
+    /// A change somewhere on the map, place unknown.
+    pub fn everywhere() -> Self {
+        Self {
+            all: true,
+            pages: BTreeSet::new(),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        !self.all && self.pages.is_empty()
+    }
+    /// The page holding column `(x, z)` changed.
+    pub fn column(&mut self, x: i32, z: i32) {
+        self.pages.insert(page_of(x, z));
+    }
+    pub fn merge(&mut self, other: &Changed) {
+        self.all |= other.all;
+        self.pages.extend(other.pages.iter().copied());
+    }
+    fn page(&self, key: [i32; 2]) -> bool {
+        self.all || self.pages.contains(&key)
+    }
+    /// Whether a change meets the box of columns `lo..=hi`.
+    pub fn touches(&self, lo: [i32; 2], hi: [i32; 2]) -> bool {
+        if self.all {
+            return true;
+        }
+        let (a, b) = (page_of(lo[0], lo[1]), page_of(hi[0], hi[1]));
+        self.pages
+            .range([a[0], i32::MIN]..=[b[0], i32::MAX])
+            .any(|p| (a[1]..=b[1]).contains(&p[1]))
+    }
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.bool(self.all);
+        b.u32(self.pages.len() as u32);
+        for p in &self.pages {
+            b.i32(p[0]);
+            b.i32(p[1]);
+        }
+    }
+    /// `size` is the world in columns; a page off it is refused.
+    pub fn load(s: &mut fx::blob::Scan, size: [u32; 2]) -> Option<Self> {
+        let all = s.bool();
+        let across = pages_across(size);
+        let count = s.u32() as usize;
+        if count > across[0] as usize * across[1] as usize {
+            return None;
+        }
+        let mut pages = BTreeSet::new();
+        for _ in 0..count {
+            let p = [s.i32(), s.i32()];
+            if !(0..2).all(|a| (0..across[a]).contains(&p[a])) || !pages.insert(p) {
+                return None;
+            }
+        }
+        s.ok().then_some(Self { all, pages })
+    }
+}
+/// Prints of a rubble map by cache page (ADR-427): FNV-1a over the page's
+/// columns in key order. Two maps whose prints differ on a page differ
+/// there; equal prints are equal columns but for a collision, which reads
+/// the same in every run. A few words a page, small enough for a snapshot,
+/// where the map itself is not.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct RubblePrint(BTreeMap<[i32; 2], u64>);
+impl RubblePrint {
+    /// Columns off the `size` of the world are left out: no probe reads
+    /// them.
+    pub fn of(rubble: &Rubble, size: [u32; 2]) -> Self {
+        let mut pages = BTreeMap::new();
+        for (&[x, z], &top) in rubble {
+            if x < 0 || z < 0 || x >= size[0] as i32 || z >= size[1] as i32 {
+                continue;
+            }
+            let h = pages
+                .entry(page_of(x, z))
+                .or_insert(0xcbf2_9ce4_8422_2325u64);
+            for byte in x
+                .to_le_bytes()
+                .into_iter()
+                .chain(z.to_le_bytes())
+                .chain(top.to_le_bytes())
+            {
+                *h = (*h ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        Self(pages)
+    }
+    /// Mark in `changed` every page where `self` and `next` differ.
+    pub fn changes(&self, next: &Self, changed: &mut Changed) {
+        for (key, print) in &self.0 {
+            if next.0.get(key) != Some(print) {
+                changed.pages.insert(*key);
+            }
+        }
+        for key in next.0.keys() {
+            if !self.0.contains_key(key) {
+                changed.pages.insert(*key);
+            }
+        }
+    }
+    pub fn save(&self, b: &mut fx::blob::Blob) {
+        b.u32(self.0.len() as u32);
+        for (p, print) in &self.0 {
+            b.i32(p[0]);
+            b.i32(p[1]);
+            b.u64(*print);
+        }
+    }
+    pub fn load(s: &mut fx::blob::Scan, size: [u32; 2]) -> Option<Self> {
+        let across = pages_across(size);
+        let count = s.u32() as usize;
+        if count > across[0] as usize * across[1] as usize {
+            return None;
+        }
+        let mut pages = BTreeMap::new();
+        for _ in 0..count {
+            let p = [s.i32(), s.i32()];
+            let print = s.u64();
+            if !(0..2).all(|a| (0..across[a]).contains(&p[a])) || pages.insert(p, print).is_some() {
+                return None;
+            }
+        }
+        s.ok().then_some(Self(pages))
+    }
+}
+fn page_of(x: i32, z: i32) -> [i32; 2] {
+    [x, z].map(|v| v.div_euclid(PAGE_SIDE as i32))
+}
+fn pages_across(size: [u32; 2]) -> [i32; 2] {
+    size.map(|n| n.div_ceil(PAGE_SIDE as u32).min(i32::MAX as u32) as i32)
+}
+/// How far from a pose's position the columns it reads can lie, per axis:
+/// the footprint or the supports, whichever reaches further, the contact
+/// run along the heading, the corner patch (no wider than the step) and
+/// the neighbour a surface sample blends in.
+fn reach(s: Shape) -> i32 {
+    s.half[0].max(s.support[0]) + s.half[1].max(s.support[1]) + s.span.max(0) + s.step.max(0) + 2
+}
 /// Cached column answers for a suspended search. Pages are bounded and moved
-/// into the next probe; none survive a world edit or enter authoritative saves.
+/// into the next probe; none survives a change on it or enters a save.
 #[derive(Clone, Default)]
 pub struct Columns {
     pages: Vec<Option<ColumnPage>>,
     replacement: Vec<u8>,
+}
+impl Columns {
+    /// Drop the pages a change touched; the rest still answer for the
+    /// world as it is (ADR-427).
+    fn forget(&mut self, changed: &Changed) {
+        for slot in &mut self.pages {
+            if slot.as_ref().is_some_and(|p| changed.page(p.key)) {
+                *slot = None;
+            }
+        }
+    }
 }
 // Four-way set-associative pages bound a search cache independently of map or route size.
 // Eviction only repeats a pure query, never changes the search's work allowance.
@@ -774,9 +934,10 @@ pub enum Hunting {
 /// several instead of stopping one. The poses it has probed are a memo of
 /// a pure function of the world, and they are not part of the search's
 /// answer: a search resumed with an empty memo reaches the same answer,
-/// as long as the world has not changed under it. World changes invalidate
-/// the cached probes and restart an unfinished connection. A caller whose
-/// start position or heading changed must discard the search itself.
+/// as long as the world has not changed under it. A change invalidates
+/// the cached probes on its pages and restarts an unfinished connection
+/// that checked them. A caller whose start position or heading changed
+/// must discard the search itself.
 #[derive(Clone)]
 pub struct Hunt {
     shape: Shape,
@@ -788,8 +949,8 @@ pub struct Hunt {
     /// Materials the probe of each slice treats as yielding.
     yielding: Vec<Mat>,
     /// What the slices before this one scanned. Answers about the world,
-    /// so only as good as the world they came from: [`Hunt::forget_world`]
-    /// drops them when it changes, and the search itself carries on.
+    /// so only as good as the world they came from: [`Hunt::forget`] drops
+    /// the changed pages, and the search itself carries on.
     columns: Columns,
     n: usize,
     rows: usize,
@@ -1088,26 +1249,60 @@ impl Hunt {
         self.columns = ground.take_columns();
         result
     }
-    /// The world changed under the search: everything scanned or probed in
-    /// the world as it was goes, the search itself stays. Its answers are
-    /// a pure function of the world, so a search that forgets them finds
-    /// what it would have found without them (P-29).
-    pub fn forget_world(&mut self) {
-        self.columns = Columns::default();
-        self.poses.clear();
+    /// The world or the rubble changed under the search (ADR-306,
+    /// ADR-427). What it scanned or probed on the changed pages goes; a
+    /// check whose checked part lies on one starts over, and so does the
+    /// goal ring if a candidate it refused stood there. A change elsewhere
+    /// leaves the search as it was: a long check finishes while a battle
+    /// digs the other side of the map. The answers are a pure function of
+    /// the world, so a search that forgets them finds what it would have
+    /// found without them (P-29).
+    pub fn forget(&mut self, changed: &Changed) {
+        if changed.is_empty() {
+            return;
+        }
+        self.columns.forget(changed);
+        let r = reach(self.shape);
+        let stale: Vec<usize> = self
+            .poses
+            .keys()
+            .copied()
+            .filter(|j| {
+                let p = self.point(j / 8).map(Fx::to_int_trunc);
+                changed.touches([p[0] - r, p[1] - r], [p[0] + 1 + r, p[1] + 1 + r])
+            })
+            .collect();
+        for j in stale {
+            self.poses.remove(&j);
+        }
+        let shape = self.shape;
+        let touched = |run: &Connection| {
+            run.checked(shape)
+                .is_some_and(|(lo, hi)| changed.touches(lo, hi))
+        };
+        let ring = 4 * self.cfg.cell + r;
+        let to = self.to;
         if let Some(pending) = &mut self.prelude {
             if let Some(run) = &mut pending.straight {
-                run.restart();
-            } else {
+                if touched(run) {
+                    run.restart();
+                }
+            } else if pending.goal_cursor > 0
+                && changed.touches([to[0] - ring, to[1] - ring], [to[0] + ring, to[1] + ring])
+            {
                 pending.goal_cursor = 0;
             }
         }
         if let Some((_, _, run)) = &mut self.connection {
-            run.restart();
+            if touched(run) {
+                run.restart();
+            }
         }
         if let Some(e) = &mut self.expansion {
             if let Some((_, _, run)) = &mut e.pending {
-                run.restart();
+                if touched(run) {
+                    run.restart();
+                }
             }
         }
     }
@@ -2179,6 +2374,47 @@ mod tests {
     /// A resting heap of debris raises the probe's floor in its columns
     /// only, and a hull whose step is lower than the heap is refused over
     /// it while a hull that steps higher is not (ADR-292).
+    /// Changes are found by cache page, and both the pages and the
+    /// rubble's prints survive a save; a page off the map is refused
+    /// (ADR-427).
+    #[test]
+    fn a_change_is_found_by_its_page_and_survives_a_save() {
+        let mut c = Changed::default();
+        assert!(c.is_empty());
+        c.column(40, 70);
+        assert!(c.touches([32, 64], [32, 64]));
+        assert!(c.touches([0, 0], [100, 100]));
+        assert!(!c.touches([0, 0], [31, 200]));
+        assert!(!c.touches([64, 0], [200, 200]));
+        assert!(Changed::everywhere().touches([0, 0], [0, 0]));
+        let mut b = fx::blob::Blob::new();
+        c.save(&mut b);
+        let back = Changed::load(&mut fx::blob::Scan::new(&b.v), [128, 128]);
+        assert_eq!(back, Some(c.clone()));
+        assert!(Changed::load(&mut fx::blob::Scan::new(&b.v), [32, 32]).is_none());
+
+        let old = Rubble::from([([40, 70], 20), ([100, 5], 3)]);
+        let mut new = old.clone();
+        new.insert([41, 70], 18);
+        new.remove(&[100, 5]);
+        // Off the map: no probe reads it, no page changes.
+        new.insert([500, 5], 9);
+        let (before, after) = (
+            RubblePrint::of(&old, [128, 128]),
+            RubblePrint::of(&new, [128, 128]),
+        );
+        let mut changed = Changed::default();
+        before.changes(&after, &mut changed);
+        assert_eq!(changed.pages, BTreeSet::from([[1, 2], [3, 0]]));
+        let mut none = Changed::default();
+        after.changes(&after.clone(), &mut none);
+        assert!(none.is_empty());
+        let mut b = fx::blob::Blob::new();
+        after.save(&mut b);
+        let back = RubblePrint::load(&mut fx::blob::Scan::new(&b.v), [128, 128]);
+        assert_eq!(back, Some(after));
+        assert!(RubblePrint::load(&mut fx::blob::Scan::new(&b.v), [40, 40]).is_none());
+    }
     #[test]
     fn rubble_raises_the_floor_of_its_columns_and_blocks_a_hull_below_its_step() {
         let w = world(false, false, false);

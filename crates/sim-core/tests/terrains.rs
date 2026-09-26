@@ -228,7 +228,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
             tick,
             98,
             &nav::vehicle::Rubble::new(),
-            true,
+            &nav::vehicle::Changed::default(),
         );
         if trace && (old_path != m.path || (m.blocked && out.blocked < 3)) {
             eprintln!("tick={tick} {kind:?} pos={:?} head={} vel={:?} blocked={} path={:?} cursor={} partial={}", m.pos, m.drive.head, m.drive.vel, m.blocked, m.path, m.cursor, m.partial_path);
@@ -337,7 +337,7 @@ fn probe_poses_along_the_run() {
                 tick,
                 98,
                 &nav::vehicle::Rubble::new(),
-                true,
+                &nav::vehicle::Changed::default(),
             );
             if m.blocked && shown < 12 {
                 shown += 1;

@@ -858,7 +858,7 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
         tick: u32,
-        steady: bool,
+        changed: &nav::vehicle::Changed,
     ) {
         let Some(mut hunt) = self.hunt.take() else {
             return;
@@ -871,9 +871,7 @@ impl Motion {
             self.next_plan = tick;
             return;
         }
-        if !steady {
-            hunt.forget_world();
-        }
+        hunt.forget(changed);
         let half = self.shape(b).half.map(Fx::from_int);
         let clear = |p: [Fx; 2], head: i32| {
             !others.iter().any(|o| {
@@ -975,7 +973,7 @@ impl Motion {
         tick: u32,
         gravity: i32,
         rubble: &nav::vehicle::Rubble,
-        steady: bool,
+        changed: &nav::vehicle::Changed,
     ) {
         self.cut.clear();
         self.contact = None;
@@ -988,7 +986,7 @@ impl Motion {
         let engine = engine && response.traction > Fx::ZERO && self.carried();
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
-        self.hunt_step(w, b, others, rubble, tick, steady);
+        self.hunt_step(w, b, others, rubble, tick, changed);
         if self.hunt.is_none()
             && self.escape_left == 0
             && (self.blocked || self.path.is_empty())
@@ -1731,7 +1729,7 @@ mod tests {
             tick,
             98,
             &nav::vehicle::Rubble::new(),
-            true,
+            &nav::vehicle::Changed::default(),
         );
     }
     #[test]

@@ -33,6 +33,32 @@ impl Connection {
             crush: 0,
         }
     }
+    /// The columns the samples checked so far may have read, as a box;
+    /// `None` before the first sample (ADR-427). A change outside it
+    /// leaves what the run has checked as it was.
+    pub fn checked(&self, shape: Shape) -> Option<([i32; 2], [i32; 2])> {
+        if self.cursor == 0 {
+            return None;
+        }
+        let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
+        let turns = turn_samples(angle::diff(self.yaw, self.head), shape);
+        let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
+        let last = self.cursor - 1;
+        let at = if last <= turns {
+            self.from
+        } else {
+            let f = Fx::from_ratio(last - turns, steps);
+            [
+                self.from[0].add(delta[0].mul(f)),
+                self.from[1].add(delta[1].mul(f)),
+            ]
+        };
+        let r = reach(shape);
+        Some((
+            [0, 1].map(|a| self.from[a].min(at[a]).to_int_trunc() - r),
+            [0, 1].map(|a| self.from[a].max(at[a]).to_int_trunc() + 1 + r),
+        ))
+    }
     pub fn restart(&mut self) {
         self.cursor = 0;
         self.height = Fx::ZERO;

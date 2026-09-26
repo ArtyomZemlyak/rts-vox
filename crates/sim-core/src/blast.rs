@@ -1877,23 +1877,6 @@ fn material_cached(w: &World, cursor: &mut voxel::world::MatCursor, p: [i32; 3])
     w.material_cached(cursor, p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
-/// FNV-1a over the rubble's columns in key order: equal maps print the
-/// same, and a change of any column or top changes the print but for a
-/// collision, which reads the same in every run (ADR-426).
-fn rubble_print(rubble: &nav::vehicle::Rubble) -> u64 {
-    rubble
-        .iter()
-        .flat_map(|([x, z], top)| {
-            let mut v = [0u8; 10];
-            v[..4].copy_from_slice(&x.to_le_bytes());
-            v[4..8].copy_from_slice(&z.to_le_bytes());
-            v[8..].copy_from_slice(&top.to_le_bytes());
-            v
-        })
-        .fold(0xcbf29ce484222325, |h, v| {
-            (h ^ u64::from(v)).wrapping_mul(0x100000001b3)
-        })
-}
 /// Whether a ballistic round is still inside the space it can come back
 /// from: the sides and the floor of the range bound it, the ceiling does not.
 ///
@@ -2041,10 +2024,10 @@ pub struct BlastRange {
     /// Columns of resting debris and their tops, rebuilt each tick from
     /// the pieces (ADR-292); derived, not saved.
     pub rubble: nav::vehicle::Rubble,
-    /// Fingerprint of `rubble` as the last step built it. In the snapshot:
-    /// whether the rubble changed under a pending route search reads the
-    /// same in a restored run as in the continuing one (ADR-426).
-    rubble_print: u64,
+    /// Prints of `rubble` by page as the last step built it (ADR-426,
+    /// ADR-427). In the snapshot: the pages the rubble changed on read the
+    /// same in a restored run as in the continuing one.
+    rubble_print: nav::vehicle::RubblePrint,
     /// The batch's support graph over the range's world (ADR-299): what
     /// the tick's edits leave hanging is dug out and becomes pieces.
     collapse: CollapseLayer,
@@ -2053,9 +2036,10 @@ pub struct BlastRange {
     pub bodies: Bodies,
     /// Cells that fell for want of support. In the snapshot and the hash.
     pub collapsed_cells: u64,
-    /// No edit reached the world on the last drain (ADR-306): a route
-    /// search in flight may keep what it scanned. In the snapshot.
-    world_steady: bool,
+    /// Pages the last drain's applied edits touched (ADR-306, ADR-427): a
+    /// route search in flight keeps what it scanned elsewhere. In the
+    /// snapshot.
+    world_changed: nav::vehicle::Changed,
     /// Edits the layer has not seen yet: it waits for the wave's claims
     /// to clear and for room in the piece pool, and takes them in a batch.
     /// The latest edit per cell. In the snapshot.
@@ -2415,11 +2399,11 @@ impl BlastRange {
             ))
             .expect("heat tuning"),
             rubble: nav::vehicle::Rubble::new(),
-            rubble_print: rubble_print(&nav::vehicle::Rubble::new()),
+            rubble_print: nav::vehicle::RubblePrint::default(),
             collapse,
             bodies,
             collapsed_cells: 0,
-            world_steady: true,
+            world_changed: nav::vehicle::Changed::default(),
             collapse_backlog: BTreeMap::new(),
             collapse_cap: stock.max_body_cells as usize,
         };
@@ -2472,7 +2456,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(39);
+        b.u32(40);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2591,7 +2575,9 @@ impl BlastRange {
             b.u32(u32::from(e.mat));
         }
         self.bodies.save(&mut b);
-        b.bool(self.world_steady);
+        // Whether the last drain applied nothing; before version 40 all
+        // that was known of it.
+        b.bool(self.world_changed.is_empty());
         self.save_after(&mut b, 30);
         b.v
     }
@@ -2617,8 +2603,10 @@ impl BlastRange {
         if version < 36 {
             self.battle.save(b);
         }
-        if version < 39 {
-            b.u64(self.rubble_print);
+        // Version 39 held one print of the whole rubble map here.
+        if version < 40 {
+            self.world_changed.save(b);
+            self.rubble_print.save(b);
         }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
@@ -2635,7 +2623,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=39).contains(&version) {
+        if !(27..=40).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2916,7 +2904,7 @@ impl BlastRange {
         if !r.bodies.load_version(&mut s, version >= 37) {
             return None;
         }
-        r.world_steady = s.bool();
+        let steady = s.bool();
         if version >= 31 {
             r.streams.load(&mut s)?;
         }
@@ -2982,13 +2970,25 @@ impl BlastRange {
                 }
             }
         }
-        // An older snapshot knows no rubble of its last step: the present
-        // one stands in, and a pending search keeps its memo as it did.
-        r.rubble_print = if version >= 39 {
-            s.u64()
+        let columns = [r.size[0], r.size[2]];
+        if version >= 40 {
+            r.world_changed = nav::vehicle::Changed::load(&mut s, columns)?;
+            r.rubble_print = nav::vehicle::RubblePrint::load(&mut s, columns)?;
+            if r.world_changed.is_empty() != steady {
+                return None;
+            }
         } else {
-            rubble_print(&r.current_rubble())
-        };
+            // An older snapshot knows only whether the last drain changed
+            // the world, not where, and no rubble of its last step: the
+            // present rubble stands in for it.
+            if version == 39 {
+                s.u64();
+            }
+            if !steady {
+                r.world_changed = nav::vehicle::Changed::everywhere();
+            }
+            r.rubble_print = nav::vehicle::RubblePrint::of(&r.current_rubble(), columns);
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -3217,18 +3217,21 @@ impl BlastRange {
     }
     /// Resting debris is floor for this tick's motion (ADR-292), except
     /// a piece lying against a live hull's flank under that hull
-    /// (ADR-302). `true` when the map changed since it was last built.
+    /// (ADR-302). Returns where the floor changed since the last step:
+    /// the pages the last drain's edits touched and those the rubble
+    /// changed on (ADR-427).
     ///
     /// A pending route search keeps its probed floors and poses across
-    /// ticks while the world is steady; the rubble is part of that floor,
-    /// and it changes without a single world edit — a piece coming to
-    /// rest, a hull moving beside one. A search restored from a snapshot
-    /// has no such memo and asks afresh, so a memo left from older rubble
-    /// found a different route than the restored run (ADR-426).
-    fn refresh_rubble(&mut self) -> bool {
+    /// ticks; the rubble is part of that floor, and it changes without a
+    /// single world edit — a piece coming to rest, a hull moving beside
+    /// one. A search restored from a snapshot has no such memo and asks
+    /// afresh, so a memo left from older rubble found a different route
+    /// than the restored run (ADR-426).
+    fn refresh_rubble(&mut self) -> nav::vehicle::Changed {
         self.rubble = self.current_rubble();
-        let print = rubble_print(&self.rubble);
-        let changed = print != self.rubble_print;
+        let print = nav::vehicle::RubblePrint::of(&self.rubble, [self.size[0], self.size[2]]);
+        let mut changed = self.world_changed.clone();
+        self.rubble_print.changes(&print, &mut changed);
         self.rubble_print = print;
         changed
     }
@@ -3267,7 +3270,7 @@ impl BlastRange {
     pub fn step_observed(&mut self, mut completed: impl FnMut(&'static str)) {
         self.surface_changed.clear();
         self.shield_hits.clear();
-        let rubble_steady = !self.refresh_rubble();
+        let changed = self.refresh_rubble();
         completed("rubble");
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
@@ -3330,7 +3333,7 @@ impl BlastRange {
                         self.tick,
                         self.config.gravity,
                         &self.rubble,
-                        self.world_steady && rubble_steady,
+                        &changed,
                     );
                 } else {
                     u.motion.passive(
@@ -3368,7 +3371,7 @@ impl BlastRange {
                 self.tick,
                 self.config.gravity,
                 &self.rubble,
-                self.world_steady && rubble_steady,
+                &changed,
             );
             self.gun.update_pose(self.turret.angle);
             if let Some((target, velocity)) = self.gun.motion.take_contact() {
@@ -3679,7 +3682,11 @@ impl BlastRange {
             }
         }
         self.step_unit_heat();
-        self.world_steady = self.world.flush().applied == 0;
+        self.world.flush();
+        self.world_changed = nav::vehicle::Changed::default();
+        for e in self.world.edits() {
+            self.world_changed.column(e.x as i32, e.z as i32);
+        }
         completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
@@ -4440,7 +4447,7 @@ mod tests {
                     tick,
                     config().gravity,
                     &rubble,
-                    true,
+                    &nav::vehicle::Changed::default(),
                 );
             }
         }
@@ -5907,6 +5914,83 @@ mod tests {
             b.step();
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
         }
+    }
+    /// **Edits far from a search leave it alone** (ADR-427). Any applied
+    /// edit used to restart every unfinished check, so a check longer than
+    /// a tick's slice never finished while something was dug each tick
+    /// anywhere on the map. Only a change on a page the check has read
+    /// restarts it now.
+    #[test]
+    fn a_search_finishes_while_the_far_side_of_the_map_is_dug() {
+        fn answer(dig: bool) -> (u32, Vec<[i32; 2]>) {
+            let mut a = quiet_cover();
+            assert!(a.order_move([128, 470]), "the order was refused");
+            let mut ticks = 0;
+            while a.gun.motion.searching() && ticks < 400 {
+                if dig {
+                    let x = 600 - ticks % 16;
+                    a.world.queue_edit(voxel::world::Edit::dig(x, 15, 600));
+                }
+                a.step();
+                if dig {
+                    assert!(!a.world.edits().is_empty(), "nothing was dug at {ticks}");
+                }
+                ticks += 1;
+            }
+            (ticks, a.gun.motion.path.clone())
+        }
+        let (quiet, path) = answer(false);
+        assert!(quiet > 0 && !path.is_empty(), "no route to the woods");
+        let (busy, busy_path) = answer(true);
+        assert_eq!(busy, quiet, "digging far away delayed the answer");
+        assert_eq!(busy_path, path);
+    }
+    /// A search restored while the world changes near it and far from it
+    /// walks on as the continuing one (ADR-427): the pages the last drain
+    /// touched are in the snapshot.
+    #[test]
+    fn a_search_restored_while_digging_near_and_far_answers_the_same() {
+        fn dig(r: &mut BlastRange, tick: u32) {
+            r.world
+                .queue_edit(voxel::world::Edit::dig(600 - tick % 16, 15, 600));
+            if tick % 2 == 1 {
+                r.world
+                    .queue_edit(voxel::world::Edit::dig(170 + tick % 8, 15, 360));
+            }
+        }
+        let mut a = quiet_cover();
+        assert!(a.order_move([450, 336]), "the order was refused");
+        // The last drain before the snapshot digs near the search too.
+        for tick in 0..4 {
+            dig(&mut a, tick);
+            a.step();
+        }
+        assert!(a.gun.motion.searching(), "the search ended early");
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        for tick in 4..60 {
+            dig(&mut a, tick);
+            dig(&mut b, tick);
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+        }
+    }
+    /// A version-39 snapshot, with one print of the whole rubble map and
+    /// no change pages, still loads (ADR-427).
+    #[test]
+    fn range_version_39_restores_without_change_pages() {
+        let mut a = quiet_cover();
+        a.step();
+        let mut bytes = a.snapshot();
+        let mut tail = fx::blob::Blob::new();
+        a.save_after(&mut tail, 39);
+        bytes.truncate(bytes.len() - tail.v.len());
+        let mut print = fx::blob::Blob::new();
+        print.u64(0x1234);
+        bytes.extend_from_slice(&print.v);
+        bytes[..4].copy_from_slice(&39u32.to_le_bytes());
+        let b = BlastRange::restore(a.config.clone(), &bytes).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash());
     }
     /// A heap of resting debris under one belt is floor (ADR-292): the
     /// driven tank rides over it with its hull raised where a flat drive
@@ -7496,7 +7580,7 @@ mod tests {
                 tick,
                 a.config.gravity,
                 &a.rubble,
-                true,
+                &nav::vehicle::Changed::default(),
             );
         }
         assert!(!a.gun.motion.searching());
@@ -7513,7 +7597,7 @@ mod tests {
             b.gun.motion.replan + 20,
             b.config.gravity,
             &b.rubble,
-            true,
+            &nav::vehicle::Changed::default(),
         );
         assert!(!b.gun.motion.path.is_empty());
         a.gun.motion.stop();
@@ -7527,7 +7611,7 @@ mod tests {
             a.gun.motion.replan,
             a.config.gravity,
             &a.rubble,
-            true,
+            &nav::vehicle::Changed::default(),
         );
         assert!(a.gun.motion.path.is_empty());
         assert_eq!(a.gun.motion.destination, None);
