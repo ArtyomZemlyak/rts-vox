@@ -80,9 +80,14 @@ impl Fx {
 
     /// Квадратный корень. `sqrt(x) = isqrt(raw << 32)`, потому что
     /// `sqrt(raw/2^32) * 2^32 = sqrt(raw * 2^32)`.
+    ///
+    /// Отрицательный аргумент — паника **во всех профилях** (ADR-447):
+    /// `debug_assert` паниковал только в отладке, а в выпуске знаковое
+    /// расширение давало мусор, и отладка с выпуском расходились —
+    /// ровно то, что `overflow-checks` во всех профилях запрещает.
     #[inline]
     pub fn sqrt(self) -> Fx {
-        debug_assert!(self.0 >= 0, "sqrt отрицательного");
+        assert!(self.0 >= 0, "sqrt отрицательного");
         let widened = (self.0 as u128) << FRAC_BITS;
         Fx(widened.isqrt() as i64)
     }
@@ -98,10 +103,14 @@ impl Fx {
     ///
     /// Монотонность сохраняется (`isqrt` монотонен, сдвиг монотонен),
     /// поэтому функция пригодна там, где на ней стоит неподвижная точка.
+    ///
+    /// Вне диапазона — паника во всех профилях, как у `sqrt` (ADR-447).
     #[inline]
     pub fn sqrt_fast(self) -> Fx {
-        debug_assert!(self.0 >= 0, "sqrt отрицательного");
-        debug_assert!(self.0 < (1i64 << 56), "sqrt_fast: аргумент вне диапазона");
+        assert!(
+            (0..1i64 << 56).contains(&self.0),
+            "sqrt_fast: аргумент вне диапазона"
+        );
         Fx((((self.0 as u64) << 8).isqrt() << 12) as i64)
     }
 
@@ -216,6 +225,20 @@ mod tests {
                 (v as f64).sqrt() as i32
             );
         }
+    }
+
+    /// **Отрицательный корень паникует в любом профиле** (ADR-447);
+    /// в выпуске `debug_assert` молчал, и корень возвращал мусор.
+    #[test]
+    #[should_panic(expected = "sqrt отрицательного")]
+    fn sqrt_of_a_negative_panics_in_every_profile() {
+        let _ = Fx::from_int(-1).sqrt();
+    }
+
+    #[test]
+    #[should_panic(expected = "вне диапазона")]
+    fn sqrt_fast_out_of_range_panics_in_every_profile() {
+        let _ = Fx(1i64 << 56).sqrt_fast();
     }
 
     #[test]
