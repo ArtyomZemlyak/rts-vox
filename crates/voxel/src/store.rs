@@ -365,11 +365,16 @@ impl Paletted {
         *w = (*w & !(mask << sh)) | ((pi as u32) << sh);
     }
 
+    /// Удвоить ширину индекса: четыре бита держат шестнадцать
+    /// материалов, восемь — 256, шестнадцать — любой `Mat` (ADR-446).
+    /// Палитра только растёт, и чанк, видевший 257 материалов, требует
+    /// третьей ширины: на восьми битах 257-й индекс заходил в биты
+    /// соседней клетки либо обнулялся в воздух.
     fn widen(&mut self) {
         let old_bits = self.bits;
         let old = std::mem::take(&mut self.data);
-        self.bits = 8;
-        self.data = vec![0u32; CS * CS * CS / 4];
+        self.bits = old_bits * 2;
+        self.data = vec![0u32; CS * CS * CS * self.bits as usize / 32];
         let old_per = 32 / old_bits as usize;
         let old_mask = (1u32 << old_bits) - 1;
         for i in 0..CS * CS * CS {
@@ -530,6 +535,28 @@ mod tests {
             p.widenings > 0,
             "расширение не случилось — тест его не проверил"
         );
+        for y in 0..CS {
+            for z in 0..CS {
+                for x in 0..CS {
+                    assert_eq!(p.get(x, y, z), d.get(x, y, z), "({x},{y},{z})");
+                }
+            }
+        }
+    }
+
+    /// **Чанк держит больше 256 материалов** (ADR-446). `Mat` — шестнадцать
+    /// бит, потому что вариантов больше 256 (ADR-094); индекс палитры
+    /// останавливался на восьми.
+    #[test]
+    fn a_chunk_holds_more_than_256_materials() {
+        let mut d = Dense::new();
+        let mut p = Paletted::new();
+        for i in 0..600usize {
+            let (x, y, z) = (i % CS, (i / CS) % CS, i / (CS * CS));
+            let m = (i as Mat % 300) + 1;
+            d.set(x, y, z, m);
+            p.set(x, y, z, m);
+        }
         for y in 0..CS {
             for z in 0..CS {
                 for x in 0..CS {
