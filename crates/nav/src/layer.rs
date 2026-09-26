@@ -442,6 +442,25 @@ impl NavLayer {
         (self.w, self.h)
     }
 
+    /// Клетка мирового столбца `(x, z)`: `x / step` (ADR-437). `None`
+    /// вне сетки — отрицательный столбец или полоса за последней целой
+    /// клеткой, когда сторона мира не кратна клетке. Единственное
+    /// отображение мира в клетки: четыре своих у симуляции расходились.
+    pub fn cell_of(&self, x: i32, z: i32) -> Option<(u32, u32)> {
+        if x < 0 || z < 0 {
+            return None;
+        }
+        let (cx, cz) = (x as u32 / self.step, z as u32 / self.step);
+        (cx < self.w && cz < self.h).then_some((cx, cz))
+    }
+
+    /// Ближайшая к столбцу клетка сетки: [`NavLayer::cell_of`], а за краем
+    /// сетки — крайняя клетка.
+    pub fn cell_near(&self, x: i32, z: i32) -> (u32, u32) {
+        let near = |v: i32, n: u32| (v.max(0) as u32 / self.step).min(n.saturating_sub(1));
+        (near(x, self.w), near(z, self.h))
+    }
+
     pub fn floor_at(&self, cx: u32, cz: u32) -> u16 {
         self.floor[self.idx(cx, cz)]
     }
@@ -805,6 +824,30 @@ mod tests {
             assert_eq!(got.top, fresh.top);
         }
         assert!(changes > 0, "the edit stream never changed navigation");
+    }
+
+    /// **Одна клетка на столбец** (ADR-437): `x / step`, без клетки за
+    /// последней целой, когда сторона мира не кратна клетке; ближайшая —
+    /// та же, а за краем сетки крайняя.
+    #[test]
+    fn a_column_maps_to_one_cell() {
+        let w = World::new(95, 40, 64, 16, Box::new(Caves));
+        let l = NavLayer::new(&w, 4, 10, 1);
+        assert_eq!(l.dims(), (9, 6));
+        assert_eq!(l.cell_of(0, 0), Some((0, 0)));
+        assert_eq!(l.cell_of(89, 59), Some((8, 5)));
+        assert_eq!(
+            l.cell_of(90, 10),
+            None,
+            "the strip past the last whole cell"
+        );
+        assert_eq!(l.cell_of(-1, 10), None);
+        assert_eq!(l.cell_near(90, 10), (8, 1));
+        assert_eq!(l.cell_near(-5, 64), (0, 5));
+        for x in 0..90 {
+            assert_eq!(l.cell_of(x, 0), Some(((x / 10) as u32, 0)));
+            assert_eq!(l.cell_near(x, 0), ((x / 10) as u32, 0));
+        }
     }
 
     /// **Параллельная сборка даёт то же, что клетка за клеткой**, включая

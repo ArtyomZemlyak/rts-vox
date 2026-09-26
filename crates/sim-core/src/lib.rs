@@ -829,19 +829,13 @@ fn want_way(
         // Без приказа юнит идёт по полю своей стороны.
         STANCE_FLOW => {
             let d = match vol {
-                Some((nav, field)) => {
-                    let st = nav.step() as i32;
-                    let (gw, gh) = nav.dims();
-                    let (cx, cz) = ((ux / st).max(0) as u32, (uz / st).max(0) as u32);
-                    if cx >= gw || cz >= gh {
-                        255
-                    } else {
-                        match nav.level_index_near(cx, cz, u.y[i]) {
-                            Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
-                            None => 255,
-                        }
-                    }
-                }
+                Some((nav, field)) => match nav.cell_of(ux, uz) {
+                    None => 255,
+                    Some((cx, cz)) => match nav.level_index_near(cx, cz, u.y[i]) {
+                        Some(li) => field.dir_at(u.owner[i] as usize % 2, cx, cz, li),
+                        None => 255,
+                    },
+                },
                 None => {
                     let (cx, cz) = (
                         (ux / NAV_CELL).clamp(0, NAV as i32 - 1) as usize,
@@ -882,15 +876,11 @@ fn slope_percent(
     climb: i32,
     descend: i32,
 ) -> i32 {
-    let st = nav.step() as i32;
-    if x < 0 || z < 0 {
+    let Some((cx, cz)) = nav.cell_of(x, z) else {
         return 100;
-    }
-    let (cx, cz) = (x / st, z / st);
+    };
+    let (cx, cz) = (cx as i32, cz as i32);
     let (gw, gh) = nav.dims();
-    if cx >= gw as i32 || cz >= gh as i32 {
-        return 100;
-    }
     let half = Fx::from_ratio(1, 2).raw();
     let rumb = |v: Fx| -> i32 {
         if v.raw() > half {
@@ -1096,15 +1086,9 @@ impl World {
         let Some(g) = self.ground.as_ref() else {
             return 255;
         };
-        let st = g.nav.step() as i32;
-        let (gw, gh) = g.nav.dims();
-        let (cx, cz) = (
-            (self.units.x[i] / st).max(0) as u32,
-            (self.units.z[i] / st).max(0) as u32,
-        );
-        if cx >= gw || cz >= gh {
+        let Some((cx, cz)) = g.nav.cell_of(self.units.x[i], self.units.z[i]) else {
             return 255;
-        }
+        };
         match g.nav.level_index_near(cx, cz, self.units.y[i]) {
             Some(li) => self
                 .nav_field
@@ -1250,10 +1234,7 @@ impl World {
             b.despawn(id);
         }
         if let Some(g) = self.ground.as_ref() {
-            let st = g.nav.step() as i32;
-            let (gw, gh) = g.nav.dims();
-            let (cx, cz) = ((x / st).max(0) as u32, (z / st).max(0) as u32);
-            if cx < gw && cz < gh {
+            if let Some((cx, cz)) = g.nav.cell_of(x, z) {
                 let t = g.nav.top_at(cx, cz);
                 if t != nav::layer::NO_FLOOR {
                     self.units.y[id as usize] = t as i32;
@@ -1325,9 +1306,10 @@ impl World {
         };
         // Правки тика метят секторы: пересобирать надо задетые.
         let (gw, _) = g.nav.dims();
-        let step = g.nav.step();
         for e in g.edits() {
-            self.nav_field.mark_cell(e.x / step, e.z / step, gw);
+            if let Some((cx, cz)) = g.nav.cell_of(e.x as i32, e.z as i32) {
+                self.nav_field.mark_cell(cx, cz, gw);
+            }
         }
         let nav = &self.ground.as_ref().expect("земля").nav;
         if self.nav_field.step(nav, b, &h_exact_floor) {
@@ -1995,7 +1977,6 @@ impl World {
         };
         let nav = &g.nav;
         let (ex, ez) = g.extent();
-        let (nw, nh) = nav.dims();
         let dt = Fx::from_ratio(1, TICKS_PER_SECOND);
         let (mut impact_damage, mut longest_fall) = (0u64, 0u32);
         for k in 0..self.units.live_ids.len() {
@@ -2024,14 +2005,11 @@ impl World {
                 let rz = sp.x.mul(hs).add(sp.z.mul(hc));
                 let px = (self.units.x[i] + rx.to_int_trunc()).clamp(0, ex - 1) as u32;
                 let pz = (self.units.z[i] + rz.to_int_trunc()).clamp(0, ez - 1) as u32;
-                // Размер нав-клетки берётся **у самого слоя**, а не
-                // из постоянной: он приходит из данных, и при другом
-                // ребре воксела постоянная промахивается мимо сетки
-                // в пять раз — выход за край на первом же тике.
-                let (cx, cz) = (
-                    (px * nw / ex.max(1) as u32).min(nw - 1),
-                    (pz * nh / ez.max(1) as u32).min(nh - 1),
-                );
+                // Клетка — у самого слоя, тем же отображением, что у хода
+                // и поля (ADR-437). Пропорция `px * nw / ex` расходилась
+                // с ним, когда сторона мира не кратна клетке, и опора
+                // у нижнего края клетки читала пол соседней.
+                let (cx, cz) = nav.cell_near(px as i32, pz as i32);
                 // Уровень **ближайший к машине**, а не первый: юнит
                 // может стоять на крыше, и пол под ней — не пол ямы
                 // (ADR-136).
@@ -2405,19 +2383,8 @@ impl World {
                 z1 = z0;
                 drop_horizontal = true;
             }
-            if let Some((nav, (ex, ez))) = terrain {
-                let st = nav.step() as i32;
-                let (gw, gh) = nav.dims();
-                let cell = |x: i32, z: i32| -> Option<(u32, u32)> {
-                    if x < 0 || z < 0 || x >= ex || z >= ez {
-                        return None;
-                    }
-                    let (cx, cz) = ((x / st) as u32, (z / st) as u32);
-                    if cx >= gw || cz >= gh {
-                        return None;
-                    }
-                    Some((cx, cz))
-                };
+            if let Some((nav, _)) = terrain {
+                let cell = |x: i32, z: i32| nav.cell_of(x, z);
                 let mut y = u.y[i];
                 let here = cell(x0, z0);
                 // **Опора исчезла — юнит падает** (ADR-036). Правило одно
@@ -4983,6 +4950,46 @@ mod tests {
     }
 
     /// Двое на плоскости, лицом к лицу, на заданном расстоянии.
+    /// **Опора подвески читает свою клетку** (ADR-437). Сторона мира в
+    /// 512 не кратна клетке в 10: подвеска считала клетку пропорцией
+    /// `px * nw / ex`, и у нижнего края клеток дальнего конца карты опора
+    /// читала пол соседней. Танк стоит носом на уступе: его передние
+    /// опоры над уступом, и корпус обязан задрать нос.
+    #[test]
+    fn a_support_reads_the_cell_it_stands_in() {
+        struct Plateau;
+        impl voxel::Generator for Plateau {
+            fn material(&self, x: u32, y: u32, _z: u32) -> voxel::store::Mat {
+                if y < 16 || (x >= 490 && y < 20) {
+                    2
+                } else {
+                    0
+                }
+            }
+        }
+        let t = test_tuning();
+        let mut w = World::new(1, 4, t);
+        w.attach_ground(ground::Ground::new(
+            voxel::World::new(512, 64, 512, 100_000, Box::new(Plateau)),
+            &t,
+        ));
+        let id = w.units.spawn(465, 256, 0, 30, 300) as usize;
+        w.units.refresh_live();
+        for _ in 0..30 {
+            w.tick();
+        }
+        assert_eq!(
+            (w.units.x[id], w.units.head[id]),
+            (465, 0),
+            "the tank moved"
+        );
+        assert!(
+            w.units.up[id].x < Fx::from_ratio(-1, 50),
+            "the front supports read the floor below the step: up {:?}",
+            w.units.up[id]
+        );
+    }
+
     /// **Убитый этим тиком не числится живым после тика** (ADR-436).
     /// Список живых пересобирала только навигация в начале следующего
     /// тика, и между тиками `living()` — а с ним подкрепление эталона —

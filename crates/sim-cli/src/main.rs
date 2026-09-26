@@ -447,7 +447,6 @@ fn main() -> ExitCode {
                     u.kind[i],u.x[i],u.y[i],u.z[i],u.heave[i].to_f64_lossy(),u.body_vy(i).to_f64_lossy(),
                     u.fall_from[i],u.riding[i],u.load[i].to_f64_lossy());
                 if let Some(g) = r.world.ground() {
-                    let (nw, nh) = g.nav.dims();
                     let (ex, ez) = g.extent();
                     let (hc, hs) = sim_core::ride::heading_of(u.head[i]);
                     let floors = sim_core::ride::supports_of(r.world.tuning.chassis(u.chassis[i]))
@@ -456,10 +455,7 @@ fn main() -> ExitCode {
                                 .clamp(0, ex - 1) as u32;
                             let z = (u.z[i] + s.x.mul(hs).add(s.z.mul(hc)).to_int_trunc())
                                 .clamp(0, ez - 1) as u32;
-                            let (cx, cz) = (
-                                (x * nw / ex as u32).min(nw - 1),
-                                (z * nh / ez as u32).min(nh - 1),
-                            );
+                            let (cx, cz) = g.nav.cell_near(x as i32, z as i32);
                             g.nav
                                 .levels_at(cx, cz)
                                 .iter()
