@@ -2788,13 +2788,22 @@ impl BlastRange {
             // A lost leg is a shed thigh, and the motion's own record of it
             // must agree; a buckled leg is one whose links lost the buckling
             // share, unless it is gone altogether.
+            // A dead body folds every leg (`refresh_damage`, ADR-304), so
+            // its record is "buckled" whatever the links' structure says;
+            // requiring the structure here refused every snapshot taken
+            // after a walker died of core damage.
             let buckled = u.integrity_model.buckled(&u.body);
             for (li, leg) in u.body.legs.iter().enumerate() {
                 let lost = u.seg_gone[leg.thigh as usize];
                 if u.motion.legs_lost.get(li).copied() != Some(lost) {
                     return None;
                 }
-                if !lost && u.motion.legs_buckled.get(li).copied() != buckled.get(li).copied() {
+                let want = if u.status.alive {
+                    buckled.get(li).copied()
+                } else {
+                    Some(true)
+                };
+                if !lost && u.motion.legs_buckled.get(li).copied() != want {
                     return None;
                 }
             }
@@ -5350,6 +5359,15 @@ mod tests {
             "a dead walker's legs did not all fold: {:?}",
             a.units[0].motion.legs_buckled
         );
+        // Folded by death, not by broken links: the snapshot still loads
+        // and replays bit for bit.
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot())
+            .expect("the snapshot of a dead walker does not load");
+        for _ in 0..30 {
+            a.step();
+            b.step();
+        }
+        assert_eq!(a.state_hash(), b.state_hash(), "the restored walker diverged");
         for _ in 0..90 {
             a.step();
         }
