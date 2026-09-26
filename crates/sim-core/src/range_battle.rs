@@ -223,9 +223,12 @@ impl Battle {
             let pos = std::array::from_fn(|_| s.fx());
             let velocity = std::array::from_fn(|_| s.fx());
             let distance = s.fx();
+            // A lobbed shell flies above the world (`in_flight_bounds`); its
+            // remaining flight, at most 10 000, bounds how high.
+            let above = |k: usize| if k == 1 { 10_000 } else { 384 };
             if owner >= units.len()
                 || (0..3).any(|k| {
-                    pos[k] < Fx::from_int(-384) || pos[k] > Fx::from_int(size[k] as i32 + 384)
+                    pos[k] < Fx::from_int(-384) || pos[k] > Fx::from_int(size[k] as i32 + above(k))
                 })
                 || distance <= Fx::ZERO
                 || distance > Fx::from_int(10000)
@@ -941,9 +944,9 @@ impl BlastRange {
             } else {
                 r.pos = to;
                 r.distance = r.distance.sub(travel);
+                let gravity = if r.shell { b.shell_config.gravity } else { 0 };
                 if r.distance > Fx::ZERO
-                    && (0..3)
-                        .all(|k| to[k] >= Fx::ZERO && to[k] < Fx::from_int(self.size[k] as i32))
+                    && super::in_flight_bounds(to, self.size, r.velocity[1], gravity)
                 {
                     b.rounds.push(r);
                 }

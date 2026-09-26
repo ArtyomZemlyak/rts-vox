@@ -264,6 +264,60 @@ fn both_tanks_fire_and_take_real_spatial_damage() {
     assert!(r.matter.economy.ledger.balanced());
     assert!(r.battle.waves.len() <= r.battle.tuning.max_waves);
 }
+/// **A lobbed shell over the world ceiling comes back down.** The firing
+/// solution rises `g·T²/8` above the muzzle; past the ceiling the round used
+/// to retire as a miss, so every target in the far part of a tank's reach
+/// was out of reach. A low ceiling and a long lane reproduce it: the tanks
+/// stand 460 apart, and the shell tops out about 150 in a 128-high world.
+#[test]
+fn a_shell_lobbed_over_the_ceiling_still_lands() {
+    let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+    l.battle = true;
+    l.size = [640, 128, 640];
+    l.blocks.clear();
+    l.shields.clear();
+    l.course = None;
+    l.clear_min = [64, 64];
+    l.clear_max = [600, 600];
+    l.units = [(100, true), (560, false)]
+        .map(|(x, allied)| RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [x, 16, 336],
+            allied,
+        })
+        .to_vec();
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        l,
+    )
+    .unwrap();
+    r.start_battle().unwrap();
+    let mut above = false;
+    for _ in 0..750 {
+        r.step();
+        above |= r
+            .battle
+            .rounds
+            .iter()
+            .any(|round| round.shell && round.pos[1] >= Fx::from_int(128));
+    }
+    assert!(
+        above,
+        "no shell rose over the ceiling: the lane is too short"
+    );
+    assert!(
+        r.units.iter().all(|u| u.revision > 0),
+        "a shell over the ceiling never landed: damage {:?}",
+        r.units.iter().map(|u| u.revision).collect::<Vec<_>>()
+    );
+    let mut b = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..60 {
+        r.step();
+        b.step();
+    }
+    assert_eq!(r.state_hash(), b.state_hash());
+}
+
 #[test]
 fn dual_machine_guns_keep_owner_and_survive_stop() {
     let mut r = arena(RangeUnitKind::Strider);

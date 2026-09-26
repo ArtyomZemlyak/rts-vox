@@ -1874,6 +1874,19 @@ fn material_cached(w: &World, cursor: &mut voxel::world::MatCursor, p: [i32; 3])
     w.material_cached(cursor, p[0] as u32, p[1] as u32, p[2] as u32)
 }
 
+/// Whether a ballistic round is still inside the space it can come back
+/// from: the sides and the floor of the range bound it, the ceiling does not.
+///
+/// The firing solution lobs a shell over `g·T²/8` above its muzzle, and at
+/// the far third of a tank's reach that is higher than the world: a shell
+/// retired at the ceiling silently missed every such target. Above the world
+/// there is nothing to hit and gravity brings it back; only a round rising
+/// with no gravity to return it is retired there (ADR-419).
+fn in_flight_bounds(q: [Fx; 3], size: [u32; 3], vy: Fx, gravity: i32) -> bool {
+    (0..3).all(|a| q[a] >= Fx::ZERO && (a == 1 || q[a] < Fx::from_int(size[a] as i32)))
+        && (q[1] < Fx::from_int(size[1] as i32) || (gravity > 0 || vy < Fx::ZERO))
+}
+
 pub fn material(w: &World, p: [i32; 3]) -> u16 {
     if p[0] < 0
         || p[1] < 0
@@ -3482,9 +3495,7 @@ impl BlastRange {
                         self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
                         self.shell = None;
                     }
-                } else if (0..3)
-                    .any(|a| q[a] < Fx::ZERO || q[a] >= Fx::from_int(self.size[a] as i32))
-                {
+                } else if !in_flight_bounds(q, self.size, self.velocity[1], gravity) {
                     // A miss retires at the map boundary, allowing another order.
                     self.shell = None;
                     self.fire_tick = u32::MAX;
@@ -5367,7 +5378,11 @@ mod tests {
             a.step();
             b.step();
         }
-        assert_eq!(a.state_hash(), b.state_hash(), "the restored walker diverged");
+        assert_eq!(
+            a.state_hash(),
+            b.state_hash(),
+            "the restored walker diverged"
+        );
         for _ in 0..90 {
             a.step();
         }
