@@ -19,6 +19,8 @@
 
 use std::sync::Arc;
 
+#[path = "columns.rs"]
+pub mod columns;
 #[cfg(test)]
 #[path = "world_reset_tests.rs"]
 mod reset_tests;

@@ -1890,7 +1890,7 @@ mod tests {
         assert_eq!(layout.target, layout.zones[2].target);
         assert_eq!(config.delivery, Delivery::Blast);
         assert!(layout.course.as_ref().unwrap().patrols.is_empty());
-        assert_eq!(app.world().resource::<Scene>().power, 500);
+        assert_eq!(app.world().resource::<Scene>().power, 1000);
         assert!(!app.world().resource::<panel::Panel>().drive);
         assert!(app
             .world()

@@ -23,12 +23,15 @@ fn hot(t:f32)->vec3<f32> {
     let gold=vec3(5.0,2.1,0.12);let white=vec3(7.0,5.0,1.5);
     return mix(mix(red,orange,smoothstep(0.7,1.4,t)),mix(gold,white,smoothstep(2.5,3.1,t)),smoothstep(1.6,2.4,t));
 }
-fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>)->vec3<f32> {
+fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>,footprint:f32)->vec3<f32> {
     let steel_damage=code>=9u && code<=11u;
     let concrete_damage=code>=12u && code<=14u;
     let m=select(select(code,3u,steel_damage),2u,concrete_damage);
-    let grain=hash(vec3<i32>(floor(pos-normal*0.04)));
-    let variation=noise(pos*0.09)+0.45*noise(pos*0.027);
+    // Integrate subpixel grain toward its mean instead of letting camera
+    // motion turn one-voxel material speckles into screen-wide shimmer.
+    let grain=mix(hash(vec3<i32>(floor(pos-normal*0.04))),0.5,smoothstep(0.65,2.0,footprint));
+    let variation=mix(noise(pos*0.09),0.5,smoothstep(0.3,0.9,footprint*0.09))
+        +0.45*mix(noise(pos*0.027),0.5,smoothstep(0.3,0.9,footprint*0.027));
     var c=vec3(0.14,0.082,0.038);
     if m==2u {c=vec3(0.22,0.23,0.21);}
     if m==3u {
@@ -86,7 +89,9 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
     let surface_offset=select(0.12,0.45,m>=9u && m<=11u);
     let shadow=trace_terrain(pos+normal*surface_offset,sun,240.0,true).material>0u;
     let diffuse=max(0.0,dot(normal,sun))*select(1.0,0.025,shadow);
-    let c=surface_colour(m,pos,normal);
+    let vertical_scale=length(vec3(p.clip_from_world[0].y,p.clip_from_world[1].y,p.clip_from_world[2].y));
+    let footprint=2.0/(vertical_scale*f32(textureDimensions(depth).y));
+    let c=surface_colour(m,pos,normal,footprint);
     let ambient=vec3(0.26,0.34,0.44)*(0.4+0.6*max(0.0,normal.y));
     var lit=c*(ambient+vec3(1.0,0.81,0.54)*diffuse*p.sun.w);
     if p.weapon.x>0.5 && (p.energy.w>0.0 || p.beam.w>0.0) {
@@ -97,7 +102,9 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
             *max(0.06,dot(normal,normalize(delta)))*select(0.04,1.0,visible);
     }
-    let fog=1.0-exp(-length(pos-near.xyz/near.w)*p.sky.w);
+    // Orthographic zoom is magnification, not kilometres of extra haze.
+    // Keep the existing close-view atmosphere and bound its zoom contribution.
+    let fog=1.0-exp(-length(pos-near.xyz/near.w)*p.sky.w*min(1.0,250.0*vertical_scale));
     return vec4(mix(lit,p.sky.rgb,fog),1.0);
 }
 @fragment fn fragment(input:In)->@location(0) vec4<f32> {

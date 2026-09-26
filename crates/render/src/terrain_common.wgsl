@@ -4,7 +4,7 @@ struct Params {
     control: vec4<f32>, chemistry: vec4<f32>, charge: vec4<f32>, terrain: vec4<f32>,
     terrain_origin: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
-    energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>,
+    energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, look:vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: Params;
 @group(0) @binding(5) var<storage, read> terrain: array<u32>;
@@ -48,12 +48,27 @@ fn packed_material(q: vec3<i32>) -> vec2<u32> {
     let word=terrain[i/8u];
     return vec2(word,(word>>((i&7u)*4u))&15u);
 }
-fn raw_material(q:vec3<i32>)->u32 {return packed_material(q).y;}
+fn local_contains(pos:vec3<f32>)->bool {
+    return all(pos>=p.terrain_origin.xyz) && all(pos<p.terrain_origin.xyz+p.terrain.xyz);
+}
+fn distant_word(q:vec2<u32>,span:u32)->u32 {
+    return terrain[u32(p.distant_bounds.w)+(q.x+u32(p.distant.x)*q.y)*4u+span];
+}
+fn span_material(word:u32,y:f32)->u32 {
+    return select((word>>16u)&15u,(word>>20u)&15u,y>=f32(word>>24u));
+}
+fn raw_material(q:vec3<i32>)->u32 {
+    if local_contains(vec3<f32>(q)) {return packed_material(q).y;}
+    if p.distant.w<0.5 || any(q<vec3(0)) || any(vec3<f32>(q)>=p.distant_bounds.xyz) {return 0u;}
+    let cell=vec2<u32>(vec2<f32>(q.xz)/p.distant.z);
+    for(var i=0u;i<4u;i++) {
+        let word=distant_word(cell,i);
+        if q.y>=i32(word&255u) && q.y<i32((word>>8u)&255u) {return span_material(word,f32(q.y));}
+    }
+    return 0u;
+}
 struct TerrainHit { t:f32, normal:vec3<f32>, material:u32 };
-fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
-    // The strategic map mesh owns distant ground. The local voxel window
-    // must not compete for depth with it at zoomed-out camera positions.
-    if p.terrain.w>0.5 {return TerrainHit(limit,vec3(0.0,1.0,0.0),0u);}
+fn trace_local(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
     // A parallel axis has no next face. Adding epsilon to the direction
     // changed its sign near zero and made horizontal rays crawl backwards.
     let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
@@ -111,4 +126,59 @@ fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
         t+=d+0.002;
     }
     return TerrainHit(limit,normal,0u);
+}
+
+// Column DDA: exact vertical faces, bounded horizontal sampling. Local and
+// distant domains are disjoint, including for shadows, so they cannot fight
+// over depth. They share materials, lighting, prepass and postprocessing.
+fn trace_distant(ro:vec3<f32>,rd:vec3<f32>,limit:f32)->TerrainHit {
+    let miss=TerrainHit(limit,vec3(0.0,1.0,0.0),0u);
+    if p.distant.w<0.5 {return miss;}
+    let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));
+    let a=min(-ro*inv,(p.distant_bounds.xyz-ro)*inv);
+    let b=max(-ro*inv,(p.distant_bounds.xyz-ro)*inv);
+    var t=max(0.0,max(a.x,max(a.y,a.z)));
+    let end=min(limit,min(b.x,min(b.y,b.z)));
+    let edge=p.distant.z;
+    for(var j=0;j<2048;j++) {
+        if t>=end {break;}
+        let pos=ro+rd*(t+0.004);
+        if local_contains(pos) {
+            let face=select(p.terrain_origin.xyz,p.terrain_origin.xyz+p.terrain.xyz,rd>vec3(0.0));
+            let exits=select((face-ro)*inv,vec3(1e30),rd==vec3(0.0));
+            t=min(exits.x,min(exits.y,exits.z))+0.005;
+            continue;
+        }
+        let q=vec2<i32>(floor(pos.xz/edge));
+        if any(q<vec2(0)) || any(q>=vec2<i32>(p.distant.xy)) {break;}
+        let lo=vec2<f32>(q)*edge;let hi=min(lo+vec2(edge),p.distant_bounds.xz);
+        let aa=(lo-ro.xz)*inv.xz;let bb=(hi-ro.xz)*inv.xz;
+        let near=min(aa,bb);let far=max(aa,bb);
+        let column_end=min(far.x,far.y);
+        var best=miss;
+        for(var k=0u;k<4u;k++) {
+            let word=distant_word(vec2<u32>(q),k);
+            if word==0u {continue;}
+            let ys=(vec2(f32(word&255u),f32((word>>8u)&255u))-vec2(ro.y))*inv.y;
+            let begin=max(near.x,max(near.y,min(ys.x,ys.y)));
+            let finish=min(column_end,max(ys.x,ys.y));
+            let hit=max(t,begin);
+            if hit>=min(end,best.t) || hit>finish {continue;}
+            let point=ro+rd*(hit+0.005);
+            if local_contains(point) {continue;}
+            var normal=vec3(0.0,-sign(rd.y),0.0);
+            if near.x>=near.y && near.x>=min(ys.x,ys.y) {normal=vec3(-sign(rd.x),0.0,0.0);}
+            else if near.y>=min(ys.x,ys.y) {normal=vec3(0.0,0.0,-sign(rd.z));}
+            best=TerrainHit(hit,normal,span_material(word,point.y));
+        }
+        if best.material>0u {return best;}
+        t=column_end+0.005;
+    }
+    return miss;
+}
+fn trace_terrain(ro:vec3<f32>,rd:vec3<f32>,limit:f32,shadow:bool)->TerrainHit {
+    let close=trace_local(ro,rd,limit,shadow);
+    let distant=trace_distant(ro,rd,close.t);
+    if distant.material>0u {return distant;}
+    return close;
 }

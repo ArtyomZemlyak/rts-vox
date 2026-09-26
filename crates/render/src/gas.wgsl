@@ -12,7 +12,7 @@ struct Params {
     terrain_origin: vec4<f32>,
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>,
-    look: vec4<f32>,
+    look: vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
 };
 struct Cell { flow: vec4<f32>, matter: vec4<f32> }; // v.xyz, pressure; excess kelvin/1000, fuel, O2, soot
 @group(0) @binding(0) var<uniform> p: Params;

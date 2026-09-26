@@ -138,7 +138,10 @@ pub fn begin(
     mut gas: ResMut<GasInput>,
     mut p: ResMut<Profile>,
 ) {
-    if p.output.is_none() || !gas.ready.load(Ordering::Relaxed) {
+    if p.output.is_none()
+        || !gas.ready.load(Ordering::Relaxed)
+        || (p.start.is_none() && gas.params.distant.z > 0.0 && gas.params.distant.w < 0.5)
+    {
         return;
     }
     let now = time.elapsed_secs_f64();

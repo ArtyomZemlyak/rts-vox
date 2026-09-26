@@ -713,6 +713,7 @@ fn main() {
         .insert_resource(profiler)
         .insert_resource(gas)
         .init_resource::<streaming::Streaming>()
+        .init_resource::<overview::Distant>()
         .add_plugins((GasPlugin, OcclusionPlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))
         .add_systems(
@@ -744,8 +745,8 @@ fn main() {
                     animate_energy,
                     overview::sync,
                     framing,
+                    overview::atmosphere,
                     streaming::camera,
-                    overview::visibility,
                     workbench::camera,
                     workbench::ghost::update,
                     workbench::overlay,
@@ -829,7 +830,12 @@ fn write_window(
         // old and new slab needs no write, allocation or GPU upload.
         assert!(window.dims[0].is_multiple_of(8));
         assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
+        let dx = window.dims[0] as usize;
+        let dy = window.dims[1] as usize;
+        let row_words = dx / 8;
+        let slab_words = row_words * dy;
         for z in zs.clone() {
+            let z_words = z as usize % window.dims[2] as usize * slab_words;
             let next_top = xs
                 .clone()
                 .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
@@ -851,9 +857,10 @@ fn write_window(
             for y in window.origin[1]..scan_end {
                 let mut x = xs.start;
                 while x < xs.end {
-                    let i = window.index([x, y, z]).unwrap();
-                    let n = (xs.end - x).min(window.dims[0] as i32 - x % window.dims[0] as i32);
-                    let span = i / 8..(i + n as usize) / 8;
+                    let wrapped_x = x as usize % dx;
+                    let n = (xs.end - x).min((dx - wrapped_x) as i32);
+                    let i = z_words + y as usize % dy * row_words + wrapped_x / 8;
+                    let span = i..i + n as usize / 8;
                     if had.is_none() || y < next_top || words[span.clone()].iter().any(|w| *w != 0)
                     {
                         if had.is_some() {
@@ -880,13 +887,19 @@ fn write_window(
                     window.origin[1] as u32,
                     &mut column[..count],
                 );
-                for (dy, &material) in column[..count].iter().enumerate() {
-                    let y = window.origin[1] + dy as i32;
-                    let q = [x, y, z];
-                    let i = window.index(q).unwrap();
-                    let m = surface_material(sim, q, material);
-                    let shift = (i % 8) * 4;
-                    words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
+                let wrapped_x = x as usize % dx;
+                let shift = (wrapped_x % 8) * 4;
+                let base = z_words + wrapped_x / 8;
+                let mut word = base + window.origin[1] as usize % dy * row_words;
+                for &material in &column[..count] {
+                    // Entering rows were cleared above. A column has a fixed
+                    // nibble and advances by one packed row, not three modulo
+                    // operations plus a bounds query for every voxel.
+                    words[word] |= u32::from(material) << shift;
+                    word += row_words;
+                    if word >= base + slab_words {
+                        word -= slab_words;
+                    }
                 }
             }
             // A toroidal slot often receives exactly the material it already
@@ -903,6 +916,29 @@ fn write_window(
                     }
                 }
                 dirty.push(i..i + 1);
+            }
+        }
+        // Surface work is sparse and ordered by X. Apply only actual dents in
+        // this entering slab; a BTree lookup at every intact voxel dominated
+        // camera panning after the first shot. Publish dents even if the raw
+        // toroidal word happened to match its previous value.
+        for (p, _) in sim
+            .surface_work
+            .range([xs.start, i32::MIN, i32::MIN]..[xs.end, i32::MIN, i32::MIN])
+        {
+            if !zs.contains(&p[2]) {
+                continue;
+            }
+            let Some(i) = window.index(*p) else {
+                continue;
+            };
+            let shift = (i % 8) * 4;
+            let material = ((words[i / 8] >> shift) & 15) as u16;
+            let m = surface_material(sim, *p, material);
+            let changed = (words[i / 8] & !(15 << shift)) | (m << shift);
+            if changed != words[i / 8] {
+                words[i / 8] = changed;
+                dirty.push(i / 8..i / 8 + 1);
             }
         }
     };
@@ -990,6 +1026,19 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
         .collect();
     if sim.world.edits().is_empty() && unit_edits.is_empty() && sim.surface_changed.is_empty() {
         return;
+    }
+    // Distant columns must also receive edits outside the detailed window.
+    if gas.params.distant.z > 0.0 {
+        let step = gas.params.distant.z as u32;
+        for e in sim.world.edits() {
+            gas.distant_edits.insert([e.x / step, e.z / step]);
+        }
+        for p in &sim.surface_changed {
+            if p[0] >= 0 && p[2] >= 0 {
+                gas.distant_edits
+                    .insert([p[0] as u32 / step, p[2] as u32 / step]);
+            }
+        }
     }
     // Most crater edits are nowhere near a unit. Its enclosing box also
     // includes the turned turret and articulated segments, so rejecting here
@@ -1420,7 +1469,9 @@ fn advance(
     if !gas.ready.load(Ordering::Relaxed) {
         return;
     }
-    if streaming.loading() {
+    if streaming.loading()
+        || (scene.out.is_some() && gas.params.distant.z > 0.0 && gas.params.distant.w < 0.5)
+    {
         scene.skip_delta = true;
         return;
     }
@@ -2174,11 +2225,10 @@ fn framing(
                 height = height.min(full_height * 1.1);
                 aim -= right * height * aspect * panel_fraction * 0.5;
                 aim += Vec3::new(pan.x, 0.0, pan.y);
-                let eye_offset = if height > local_limit {
-                    offset.normalize() * (height * 1.15).max(offset.length())
-                } else {
-                    offset
-                };
+                // Continuous at the local-window limit: the old branch jumped
+                // the eye hundreds of units, abruptly changing atmospheric depth.
+                let eye_offset =
+                    offset.normalize() * (offset.length() + (height - local_limit).max(0.0) * 1.15);
                 *transform = Transform::from_translation(aim + eye_offset).looking_at(aim, Vec3::Y);
                 if let Projection::Orthographic(p) = &mut *projection {
                     p.scaling_mode = bevy::camera::ScalingMode::FixedVertical {
@@ -2187,7 +2237,7 @@ fn framing(
                     // The kilometre overview needs a distant plane, but
                     // using it in the local battle wastes depth precision
                     // on tank panels and thin terrain faces while panning.
-                    p.far = if streaming::uses_overview(scene.sim.size(), height, stream.overview) {
+                    p.far = if streaming::map_scale(scene.sim.size(), height, stream.map_scale) {
                         30_000.0
                     } else {
                         1200.0

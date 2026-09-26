@@ -3,6 +3,7 @@
 
 mod bricks;
 mod display;
+pub mod distant;
 mod regions;
 pub use regions::Atmosphere;
 use regions::REGIONS;
@@ -59,6 +60,10 @@ pub struct GasParams {
     /// Picture knobs of the overlay (ADR-298): `x` scales the residual
     /// glow of heated ground after a shell.
     pub look: Vec4,
+    /// Distant column count X/Z, horizontal stride, readiness.
+    pub distant: Vec4,
+    /// World extents xyz; word offset in the combined terrain buffer w.
+    pub distant_bounds: Vec4,
 }
 impl Default for GasParams {
     fn default() -> Self {
@@ -79,6 +84,8 @@ impl Default for GasParams {
             beam: Vec4::ZERO,
             weapon: Vec4::ZERO,
             look: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            distant: Vec4::ZERO,
+            distant_bounds: Vec4::ZERO,
         }
     }
 }
@@ -144,6 +151,8 @@ pub struct GasInput {
     /// extraction uploads words and does not copy this CPU work cache.
     pub terrain_column_top: Vec<u16>,
     pub terrain_revision: u64,
+    pub distant_uploads: distant::Uploads,
+    pub distant_edits: std::collections::BTreeSet<[u32; 2]>,
     pub terrain_dirty: Vec<std::ops::Range<usize>>,
     /// Where the volume of terrain sits in the world (ADR-318).
     pub window: TerrainWindow,
@@ -175,6 +184,8 @@ impl Default for GasInput {
             terrain_words: Arc::new(vec![]),
             terrain_column_top: Vec::new(),
             terrain_revision: 0,
+            distant_uploads: default(),
+            distant_edits: default(),
             terrain_dirty: vec![],
             window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
@@ -230,6 +241,8 @@ impl ExtractResource for GasInput {
             patches: merged,
             patch_words,
             terrain_revision: source.terrain_revision,
+            distant_uploads: source.distant_uploads.clone(),
+            distant_edits: default(),
             terrain_dirty: Vec::new(),
             window: source.window,
             ready: source.ready.clone(),
@@ -530,6 +543,7 @@ struct Pipeline {
     regions: [Option<GpuRegion>; REGIONS],
     terrain: Buffer,
     terrain_revision: u64,
+    distant_revision: u64,
     bricks: bricks::Bricks,
     display: display::DisplayPipeline,
     ready_frames: u32,
@@ -778,7 +792,7 @@ fn init(
     });
     let terrain = device.create_buffer(&BufferDescriptor {
         label: Some("packed terrain materials"),
-        size: (TERRAIN_WORDS * 4) as u64,
+        size: ((TERRAIN_WORDS + distant::WORDS) * 4) as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -802,6 +816,7 @@ fn init(
         display: display::DisplayPipeline::new(&cache, shaders.display.clone()),
         terrain,
         terrain_revision: 0,
+        distant_revision: 0,
         ready_frames: 0,
         terrain_layout,
         terrain_prepass,
@@ -933,6 +948,21 @@ fn prepare(
             .uploaded
             .store(input.terrain_revision, Ordering::Release);
     }
+    if pipeline.distant_revision != input.distant_uploads.revision {
+        for (offset, words) in &input.distant_uploads.patches {
+            assert!(*offset + words.len() <= distant::WORDS);
+            queue.write_buffer(
+                &pipeline.terrain,
+                ((TERRAIN_WORDS + offset) * 4) as u64,
+                le_bytes(words).as_ref(),
+            );
+        }
+        pipeline.distant_revision = input.distant_uploads.revision;
+        input
+            .distant_uploads
+            .acknowledged
+            .store(input.distant_uploads.revision, Ordering::Release);
+    }
     let after_upload = started.map_or(0, |t| t.elapsed().as_nanos() as u64);
     let terrain_buffer = pipeline.terrain.clone();
     pipeline.bricks.prepare(
@@ -962,6 +992,8 @@ fn prepare(
         p.sky = params.sky;
         p.terrain = params.terrain;
         p.terrain_origin = params.terrain_origin;
+        p.distant = params.distant;
+        p.distant_bounds = params.distant_bounds;
         p.weapon.y = params.weapon.y;
         p.weapon.w = params.weapon.w;
         p.look = params.look;

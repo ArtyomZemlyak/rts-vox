@@ -5,13 +5,13 @@ use super::*;
 
 const ROWS_PER_FRAME: i32 = 8;
 
-pub(super) fn uses_overview(size: [u32; 3], height: f32, was_overview: bool) -> bool {
+pub(super) fn map_scale(size: [u32; 3], height: f32, was_map_scale: bool) -> bool {
     if size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2] {
         return false;
     }
     // A scroll wheel can hover on the boundary for several frames. Keep the
-    // selected renderer until the camera clears a distinct return threshold.
-    if was_overview {
+    // detail-streaming policy until the camera clears a return threshold.
+    if was_map_scale {
         height > 590.0
     } else {
         height >= 675.0
@@ -21,7 +21,7 @@ pub(super) fn uses_overview(size: [u32; 3], height: f32, was_overview: bool) -> 
 #[derive(Resource, Default)]
 pub struct Streaming {
     invalid: bool,
-    pub(super) overview: bool,
+    pub(super) map_scale: bool,
     job: Option<Job>,
     displayed: Option<(Transform, Projection)>,
     spare: Vec<u32>,
@@ -37,7 +37,7 @@ struct Job {
 }
 impl Streaming {
     pub fn loading(&self) -> bool {
-        !self.overview && (self.invalid || self.job.is_some())
+        !self.map_scale && (self.invalid || self.job.is_some())
     }
     pub fn invalidate(&mut self) {
         self.invalid = true;
@@ -99,23 +99,23 @@ pub fn camera(
     let Ok((mut transform, mut projection)) = camera.single_mut() else {
         return;
     };
-    // A distant view is served by the coarse whole-map surface. Do not fill
-    // and upload a 157 MB detailed window every time the overview pans.
+    // At map scale leave the detailed window in place. The same raytracer
+    // continues into compact world columns outside it; no picture replacement.
     if matches!(
         *projection,
             Projection::Orthographic(ref p)
-                if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if uses_overview(scene.sim.size(), viewport_height, stream.overview))
+                if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if map_scale(scene.sim.size(), viewport_height, stream.map_scale))
     ) {
         if let Some(job) = stream.job.take() {
             stream.spare = job.words;
             stream.invalid = true;
         }
-        stream.overview = true;
+        stream.map_scale = true;
         stream.displayed = None;
-        gas.params.terrain.w = 1.0;
+        gas.params.terrain.w = 0.0;
         return;
     }
-    stream.overview = false;
+    stream.map_scale = false;
     gas.params.terrain.w = 0.0;
     let ray = transform.forward();
     let distance = (sim_core::blast::FLOOR as f32 - transform.translation.y) / ray.y.min(-0.01);
@@ -241,12 +241,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn distant_surface_only_replaces_a_streamed_large_map() {
-        assert!(!uses_overview([640, 192, 640], 10_000.0, false));
-        assert!(!uses_overview([10_000, 192, 10_000], 674.0, false));
-        assert!(uses_overview([10_000, 192, 10_000], 675.0, false));
-        assert!(uses_overview([10_000, 192, 10_000], 600.0, true));
-        assert!(!uses_overview([10_000, 192, 10_000], 590.0, true));
+    fn map_scale_hysteresis_only_suspends_streaming_on_large_maps() {
+        assert!(!map_scale([640, 192, 640], 10_000.0, false));
+        assert!(!map_scale([10_000, 192, 10_000], 674.0, false));
+        assert!(map_scale([10_000, 192, 10_000], 675.0, false));
+        assert!(map_scale([10_000, 192, 10_000], 600.0, true));
+        assert!(!map_scale([10_000, 192, 10_000], 590.0, true));
     }
     #[test]
     fn staged_rows_match_whole_window_after_wrapping_and_damage() {
@@ -254,6 +254,9 @@ mod tests {
         for p in [[72, 8, 96], [91, 11, 110], [122, 12, 100]] {
             sim.world.queue_dig(p[0], p[1], p[2]);
         }
+        sim.world
+            .queue_edit(voxel::world::Edit::put(104, 20, 96, 3));
+        sim.surface_work.insert([104, 20, 96], 380);
         sim.world.flush();
         let window = TerrainWindow {
             origin: [64, 0, 80],
@@ -280,6 +283,26 @@ mod tests {
         }
         assert_eq!(steps, 8);
         assert_eq!(&job.words, direct.terrain_words.as_ref());
+        for origin in [[0, 0, 0], [56, 0, 72], [72, 0, 88]] {
+            let mut streamed = GasInput::default();
+            streamed.terrain_words = Arc::new(vec![0; window.words()]);
+            let previous = TerrainWindow {
+                origin,
+                dims: window.dims,
+            };
+            write_window(&sim, &mut streamed, previous, None);
+            let mut patched = streamed.terrain_words.as_ref().clone();
+            streamed.terrain_dirty.clear();
+            write_window(&sim, &mut streamed, window, Some(previous));
+            assert_eq!(streamed.terrain_words, direct.terrain_words);
+            for r in &streamed.terrain_dirty {
+                patched[r.clone()].copy_from_slice(&streamed.terrain_words[r.clone()]);
+            }
+            assert_eq!(
+                patched, job.words,
+                "streamed dents must be included in upload patches"
+            );
+        }
         let mut uploaded = before;
         for r in job.dirty {
             uploaded[r.clone()].copy_from_slice(&job.words[r]);

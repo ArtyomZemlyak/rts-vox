@@ -1,159 +1,244 @@
-//! A cheap distant surface for the kilometre map. The detailed voxel window
-//! remains authoritative near the camera; this mesh replaces it at map scale.
+//! Distant terrain reads the same world and uses the same shader as the local
+//! voxel window. No alternate mesh, palette, sky or zoom-triggered replacement.
 use super::*;
+use render::gas::distant::{self, SPANS};
+use std::sync::{atomic::AtomicBool, mpsc, Mutex};
+use voxel::world::columns::Columns;
 
-const GRID: u32 = 40;
-
-fn patch(x: u32, z: u32) -> f32 {
-    let (gx, gz) = (x / 280, z / 280);
-    let (u, v) = ((x % 280) as f32 / 280.0, (z % 280) as f32 / 280.0);
-    let (u, v) = (u * u * (3.0 - 2.0 * u), v * v * (3.0 - 2.0 * v));
-    let sample = |dx: u32, dz: u32| {
-        let k = (gx + dx).wrapping_mul(1_664_525) ^ (gz + dz).wrapping_mul(1_013_904_223);
-        (k.wrapping_mul(747_796_405) >> 16) as f32 / 65_535.0
-    };
-    let a = sample(0, 0) * (1.0 - u) + sample(1, 0) * u;
-    let b = sample(0, 1) * (1.0 - u) + sample(1, 1) * u;
-    a * (1.0 - v) + b * v
+#[derive(Resource, Default)]
+pub struct Distant {
+    key: Option<([u32; 3], u64)>,
+    job: Option<Job>,
+    words: Vec<u32>,
+    upload: usize,
+    dirty: BTreeSet<[u32; 2]>,
+}
+struct Job {
+    receiver: Mutex<mpsc::Receiver<Vec<u32>>>,
+    cancel: Arc<AtomicBool>,
+}
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
-#[derive(Component)]
-pub struct FarTerrain {
-    size: [u32; 3],
-}
-
-fn surface(size: [u32; 3]) -> Mesh {
-    let (nx, nz) = (size[0].div_ceil(GRID), size[2].div_ceil(GRID));
-    let width = (nx + 1) as usize;
-    let mut positions = Vec::with_capacity(width * (nz + 1) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut colours = Vec::with_capacity(positions.capacity());
-    let mut indices = Vec::with_capacity((nx * nz * 6) as usize);
-    for iz in 0..=nz {
-        let z = (iz * GRID).min(size[2] - 1);
-        for ix in 0..=nx {
-            let x = (ix * GRID).min(size[0] - 1);
-            let h = sim_core::blast::range_height(x, z).min(size[1] - 1) as f32;
-            let xm = x.saturating_sub(GRID).max(1);
-            let zm = z.saturating_sub(GRID).max(1);
-            let xp = (x + GRID).min(size[0] - 1);
-            let zp = (z + GRID).min(size[2] - 1);
-            let dx = sim_core::blast::range_height(xp, z) as f32
-                - sim_core::blast::range_height(xm, z) as f32;
-            let dz = sim_core::blast::range_height(x, zp) as f32
-                - sim_core::blast::range_height(x, zm) as f32;
-            let n = Vec3::new(
-                -dx / (xp - xm).max(1) as f32,
-                1.0,
-                -dz / (zp - zm).max(1) as f32,
-            )
-            .normalize();
-            // Smooth macro variation keeps the terrain legible from a whole-
-            // map view, without a grid of hard-edged coloured squares.
-            let t = ((patch(x, z) - 0.37) * 2.6).clamp(0.0, 1.0);
-            let grass = [0.08, 0.18, 0.07];
-            let earth = [0.19, 0.15, 0.09];
-            let rock = [0.18, 0.18, 0.15];
-            let shade = (0.78 + 0.22 * n.dot(Vec3::new(-0.4, 0.8, -0.4))).clamp(0.55, 1.0);
-            let c = if h > 37.0 {
-                rock
-            } else {
-                std::array::from_fn(|i| grass[i] * (1.0 - t) + earth[i] * t)
-            };
-            positions.push([x as f32, h - 1.0, z as f32]);
-            normals.push(n.to_array());
-            colours.push([c[0] * shade, c[1] * shade, c[2] * shade, 1.0]);
+fn build(source: Columns, size: [u32; 3], cancel: &AtomicBool) -> Vec<u32> {
+    let [nx, nz, step] = distant::grid(size);
+    let mut words = vec![0; nx as usize * nz as usize * SPANS];
+    let mut column = vec![0; size[1] as usize];
+    for z in 0..nz {
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        for x in 0..nx {
+            source.column(
+                (x * step + step / 2).min(size[0] - 1),
+                (z * step + step / 2).min(size[2] - 1),
+                &mut column,
+            );
+            let i = (x + nx * z) as usize * SPANS;
+            words[i..i + SPANS].copy_from_slice(&distant::encode(&column));
         }
     }
-    for iz in 0..nz {
-        for ix in 0..nx {
-            let a = iz * (nx + 1) + ix;
-            let b = a + 1;
-            let c = a + nx + 1;
-            let d = c + 1;
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colours)
-    .with_inserted_indices(Indices::U32(indices))
+    words
 }
 
-pub fn sync(
-    mut commands: Commands,
-    scene: Res<Scene>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    far: Query<(Entity, &FarTerrain)>,
-) {
+pub fn sync(scene: Res<Scene>, mut far: ResMut<Distant>, mut gas: ResMut<GasInput>) {
     let size = scene.sim.size();
-    if far.iter().any(|(_, f)| f.size == size) {
+    let key = (size, scene.generation);
+    gas.distant_uploads.retire();
+    if far.key != Some(key) {
+        let keep_visible = far.key.is_some_and(|k| k.0 == size) && gas.params.distant.w > 0.5;
+        *far = Distant {
+            key: Some(key),
+            ..default()
+        };
+        gas.params.distant = Vec4::ZERO;
+        gas.distant_edits.clear();
+        if (size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2]) || size[1] > 255 {
+            return;
+        }
+        let [nx, nz, step] = distant::grid(size);
+        gas.params.distant = Vec4::new(
+            nx as f32,
+            nz as f32,
+            step as f32,
+            if keep_visible { 1.0 } else { 0.0 },
+        );
+        gas.params.distant_bounds = Vec4::new(
+            size[0] as f32,
+            size[1] as f32,
+            size[2] as f32,
+            render::gas::TERRAIN_WORDS as f32,
+        );
+        let source = Columns::capture(&scene.sim.world);
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        std::thread::Builder::new()
+            .name("distant-terrain".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let words = build(source, size, &worker_cancel);
+                if !worker_cancel.load(Ordering::Relaxed) {
+                    println!(
+                        "DISTANT built {} columns in {:.2}s",
+                        words.len() / SPANS,
+                        started.elapsed().as_secs_f32()
+                    );
+                    let _ = sender.send(words);
+                }
+            })
+            .expect("distant terrain worker");
+        far.job = Some(Job {
+            receiver: Mutex::new(receiver),
+            cancel,
+        });
+    }
+    far.dirty.extend(std::mem::take(&mut gas.distant_edits));
+    let result = far
+        .job
+        .as_ref()
+        .and_then(|job| job.receiver.lock().unwrap().try_recv().ok());
+    if let Some(words) = result {
+        far.job = None;
+        far.words = words;
+    }
+    if far.words.is_empty() {
         return;
     }
-    for (entity, _) in &far {
-        commands.entity(entity).despawn();
+    let [nx, nz, step] = distant::grid(size);
+    // Incremental crater/building edits also reach the far picture. A worker
+    // snapshot may be older than these edits, so apply them before publication.
+    let mut column = vec![0; size[1] as usize];
+    let mut changed: Vec<std::ops::Range<usize>> = Vec::new();
+    for _ in 0..512 {
+        let Some(q) = far.dirty.pop_first() else {
+            break;
+        };
+        if q[0] >= nx || q[1] >= nz {
+            continue;
+        }
+        let x = (q[0] * step + step / 2).min(size[0] - 1);
+        let z = (q[1] * step + step / 2).min(size[2] - 1);
+        scene.sim.world.column(x, z, 0, &mut column);
+        for (y, m) in column.iter_mut().enumerate() {
+            *m = surface_material(&scene.sim, [x as i32, y as i32, z as i32], *m) as u16;
+        }
+        let i = (q[0] + nx * q[1]) as usize * SPANS;
+        let next = distant::encode(&column);
+        if far.words[i..i + SPANS] != next {
+            far.words[i..i + SPANS].copy_from_slice(&next);
+            if i < far.upload {
+                changed.push(i..i + SPANS);
+            }
+        }
     }
-    if size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2] {
-        return;
+    changed.sort_unstable_by_key(|r| r.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in changed {
+        if let Some(last) = merged.last_mut() {
+            if r.start <= last.end + 32 {
+                last.end = last.end.max(r.end);
+                continue;
+            }
+        }
+        merged.push(r);
     }
-    let mesh = meshes.add(surface(size));
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        unlit: true,
-        fog_enabled: false,
-        perceptual_roughness: 1.0,
-        cull_mode: None,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        FarTerrain { size },
-        Visibility::Hidden,
-    ));
+    for r in merged {
+        gas.distant_uploads.push(r.start, &far.words[r]);
+    }
+    // Limit startup/reset transfer to 4 MiB per frame. Panning uploads nothing.
+    let end = (far.upload + 1024 * 1024).min(far.words.len());
+    if end > far.upload {
+        gas.distant_uploads
+            .push(far.upload, &far.words[far.upload..end]);
+        far.upload = end;
+    }
+    if far.upload == far.words.len() && far.dirty.is_empty() {
+        gas.params.distant.w = 1.0;
+    }
 }
 
-pub fn visibility(
-    stream: Res<streaming::Streaming>,
-    mut far: Query<&mut Visibility, With<FarTerrain>>,
+/// An RTS orthographic zoom changes magnification, not the weather. Keep the
+/// authored near-view atmosphere and continuously rescale its optical distance
+/// as the camera backs away. Never remove/reinsert the sky/IBL components.
+pub fn atmosphere(
+    camera: Query<&Transform, With<GasCamera>>,
+    mut atmospheres: Query<&mut GlobalTransform, With<bevy::light::Atmosphere>>,
 ) {
-    // Never draw both the coarse surface and the detailed raymarched volume.
-    // They intersect on slopes, and their depth ordering changes with camera
-    // movement. The streaming job keeps the old detailed view visible until
-    // the next window is ready; it is not a reason to show the overview.
-    let show = stream.overview;
-    for mut visibility in &mut far {
-        *visibility = if show {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+    let Ok(camera) = camera.single() else {
+        return;
+    };
+    let ground = sim_core::blast::FLOOR as f32;
+    let zoom = ((camera.translation.y - ground) / 420.0).max(1.0);
+    let k = zoom / look::scene().haze_metres_per_voxel;
+    for mut transform in &mut atmospheres {
+        *transform = GlobalTransform::from(
+            Transform::from_scale(Vec3::splat(k)).with_translation(Vec3::new(
+                0.0,
+                ground - 6_360_000.0 * k,
+                0.0,
+            )),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn overview_mesh_covers_all_four_map_corners() {
-        let size = [10_000, 192, 10_000];
-        let mesh = surface(size);
-        let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap();
-        let bevy::mesh::VertexAttributeValues::Float32x3(positions) = positions else {
-            panic!("positions")
-        };
-        assert_eq!(positions.first().unwrap()[0], 0.0);
-        assert_eq!(positions.first().unwrap()[2], 0.0);
-        assert_eq!(positions.last().unwrap()[0], 9999.0);
-        assert_eq!(positions.last().unwrap()[2], 9999.0);
+    fn distant_columns_read_authored_materials_and_actual_destruction() {
+        use voxel::world::{Edit, Generator, World};
+        struct Authored;
+        impl Generator for Authored {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 10 {
+                    1
+                } else if y == 10 {
+                    if z < 16 {
+                        8
+                    } else {
+                        7
+                    }
+                } else if (16..32).contains(&x) && (20..24).contains(&y) {
+                    3
+                } else if (40..48).contains(&x) && (30..40).contains(&y) {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let size = [64, 64, 64];
+        let mut world = World::new(64, 64, 64, 10000, Box::new(Authored));
+        world.queue_edit(Edit::dig(22, 22, 22));
+        world.flush();
+        let words = build(Columns::capture(&world), size, &AtomicBool::new(false));
+        let [nx, nz, step] = distant::grid(size);
+        for z in 0..nz {
+            for x in 0..nx {
+                let i = (x + nx * z) as usize * SPANS;
+                for y in 0..64 {
+                    let actual = words[i..i + SPANS]
+                        .iter()
+                        .find(|w| y >= (**w & 255) && y < ((**w >> 8) & 255))
+                        .map_or(0, |w| {
+                            if y >= (*w >> 24) {
+                                (*w >> 20) & 15
+                            } else {
+                                (*w >> 16) & 15
+                            }
+                        });
+                    assert_eq!(
+                        actual,
+                        u32::from(world.material(x * step + step / 2, y, z * step + step / 2))
+                    );
+                }
+            }
+        }
     }
-
     #[test]
     fn full_map_fits_at_each_orbit_and_pitch() {
         let size = [10_000, 192, 10_000];
@@ -178,22 +263,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn prepared_sector_starts_in_detailed_mode() {
-        let layout =
-            modding::range::RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))
-                .unwrap();
-        let offset = orbit_offset(Vec3::new(-155.0, 420.0, 320.0), 0.0, 0.0);
-        let (_, fit) = sector_frame(&layout.zones[0], offset, 16.0 / 9.0);
-        let fitted_height = fit / 0.8;
-        let limit = window_height_limit(offset, 16.0 / 9.0, layout.size);
-        let height = fitted_height.min(limit);
-        assert!(
-            !streaming::uses_overview(layout.size, height, false),
-            "prepared sector height {height}, local window limit {limit} unexpectedly uses the coarse map"
-        );
-        assert!(streaming::uses_overview(layout.size, limit * 1.2, false));
     }
 }
