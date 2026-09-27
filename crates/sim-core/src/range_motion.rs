@@ -1,6 +1,7 @@
 //! Mobile actors on the forest range. Shared drive and suspension, integer
 //! route planning against the current destructible voxel world.
 use crate::drive::{self, Drive, Limits};
+use crate::TICKS_PER_SECOND as TICKS;
 use fx::{
     angle,
     blob::{Blob, Scan},
@@ -524,14 +525,14 @@ impl Motion {
         if self.shove.len_sq() == Fx::ZERO {
             return V3::ZERO;
         }
-        let lim = response.limits(&Limits::of(&self.chassis, 30), true);
+        let lim = response.limits(&Limits::of(&self.chassis, TICKS), true);
         let mut ground =
             nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
                 .with_rubble(rubble);
         let shape = self.shape(b);
         let current = ground.pose([self.pos[0], self.pos[2]], self.drive.head, shape);
-        let nx = self.pos[0].add(self.shove.x.div(Fx::from_int(30)));
-        let nz = self.pos[2].add(self.shove.z.div(Fx::from_int(30)));
+        let nx = self.pos[0].add(self.shove.x.div(Fx::from_int(TICKS)));
+        let nz = self.pos[2].add(self.shove.z.div(Fx::from_int(TICKS)));
         let target = ground.pose([nx, nz], self.drive.head, shape);
         let previous = Obstacle::of(self, b);
         let mut candidate = previous;
@@ -654,7 +655,7 @@ impl Motion {
             (hc, hs),
             V3::ZERO,
             &r,
-            Fx::from_ratio(1, 30),
+            Fx::from_ratio(1, TICKS),
         );
         self.pos[1] = self
             .hull
@@ -1088,7 +1089,7 @@ impl Motion {
         }
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
-        let base_limits = Limits::of(&self.chassis, 30);
+        let base_limits = Limits::of(&self.chassis, TICKS);
         let drive_factor = self.drive_scale.mul(self.hull.load);
         let brake = response.limits(&base_limits, false).brake.mul(drive_factor);
         if alive && engine && self.escape_left == 0 && self.cursor < self.path.len() {
@@ -1212,18 +1213,24 @@ impl Motion {
         if current.crush > 0 {
             speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
         }
-        let (next, delta) =
-            drive::advance(old, want, speed, &lim, drive_factor, Fx::from_ratio(1, 30));
+        let (next, delta) = drive::advance(
+            old,
+            want,
+            speed,
+            &lim,
+            drive_factor,
+            Fx::from_ratio(1, TICKS),
+        );
         let previous = Obstacle::of(self, b);
         self.drive = next;
         // A burst's shove rides along with the drive's own step (ADR-286)
         // and is spent by the brakes, or by the terrain if it refuses.
         let nx = self.pos[0]
             .add(delta.dx)
-            .add(self.shove.x.div(Fx::from_int(30)));
+            .add(self.shove.x.div(Fx::from_int(TICKS)));
         let nz = self.pos[2]
             .add(delta.dz)
-            .add(self.shove.z.div(Fx::from_int(30)));
+            .add(self.shove.z.div(Fx::from_int(TICKS)));
         let (x, z) = (nx.to_int_trunc(), nz.to_int_trunc());
         // This probe only lives for the current tick. A stationary hull
         // has the same clearance answer, but still gets fresh support,
@@ -1260,7 +1267,7 @@ impl Motion {
             self.blocked = false;
             self.pos[0] = nx;
             self.pos[2] = nz;
-            next.vel.div(Fx::from_int(30))
+            next.vel.div(Fx::from_int(TICKS))
         } else {
             self.drive.vel = Fx::ZERO;
             self.drive.head = old.head;
@@ -1277,9 +1284,9 @@ impl Motion {
                             .min(tick.saturating_add(self.navigation.contact_replan_ticks));
                     }
                     let drive = V3::new(
-                        delta.dx.mul(Fx::from_int(30)),
+                        delta.dx.mul(Fx::from_int(TICKS)),
                         Fx::ZERO,
-                        delta.dz.mul(Fx::from_int(30)),
+                        delta.dz.mul(Fx::from_int(TICKS)),
                     );
                     self.record_contact(index, &others[index], drive.add(self.shove));
                 }
@@ -1336,7 +1343,7 @@ impl Motion {
             .unwrap_or_else(|| (nominal.to_vec(), floors.to_vec()));
         let r = self.ride_now(b, gravity, response);
         let sway = crate::ride::sway_of(
-            self.drive.vel.sub(old.vel).mul(Fx::from_int(30)),
+            self.drive.vel.sub(old.vel).mul(Fx::from_int(TICKS)),
             self.drive.vel,
             angle::diff(self.drive.head, old.head),
             self.drive.head,
@@ -1348,7 +1355,7 @@ impl Motion {
             (hc, hs),
             sway,
             &r,
-            Fx::from_ratio(1, 30),
+            Fx::from_ratio(1, TICKS),
         );
         self.pos[1] = self
             .hull
