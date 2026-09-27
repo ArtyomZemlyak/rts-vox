@@ -1886,6 +1886,18 @@ fn material_cached(w: &World, cursor: &mut voxel::world::MatCursor, p: [i32; 3])
 /// retired at the ceiling silently missed every such target. Above the world
 /// there is nothing to hit and gravity brings it back; only a round rising
 /// with no gravity to return it is retired there (ADR-419).
+/// Whether a round read from a snapshot is one flight can hold (ADR-459):
+/// within the margin around the range that a round may leave it by, a
+/// lobbed one up to its highest arc (at most its remaining flight of ten
+/// thousand), and no faster on any axis than ten thousand units a second.
+/// A corrupt place overflowed the dome and body tests, and a corrupt speed
+/// turned the swept flight into a billion steps.
+fn restored_round(pos: [Fx; 3], velocity: [Fx; 3], size: [u32; 3]) -> bool {
+    let above = |k: usize| if k == 1 { 10_000 } else { 384 };
+    (0..3)
+        .all(|k| pos[k] >= Fx::from_int(-384) && pos[k] <= Fx::from_int(size[k] as i32 + above(k)))
+        && velocity.iter().all(|v| v.abs() <= Fx::from_int(10_000))
+}
 fn in_flight_bounds(q: [Fx; 3], size: [u32; 3], vy: Fx, gravity: i32) -> bool {
     (0..3).all(|a| q[a] >= Fx::ZERO && (a == 1 || q[a] < Fx::from_int(size[a] as i32)))
         && (q[1] < Fx::from_int(size[1] as i32) || (gravity > 0 || vy < Fx::ZERO))
@@ -2664,7 +2676,11 @@ impl BlastRange {
         }
         r.auto_attack = version >= 30 && s.bool();
         if s.bool() {
-            r.aim = Some(std::array::from_fn(|_| s.i32()));
+            let aim: [i32; 3] = std::array::from_fn(|_| s.i32());
+            if (0..3).any(|k| !(-384..=r.size[k] as i32 + 384).contains(&aim[k])) {
+                return None;
+            }
+            r.aim = Some(aim);
         }
         r.fire_tick = fire_tick;
         r.tick = s.u32();
@@ -2672,6 +2688,9 @@ impl BlastRange {
             r.shell = Some(std::array::from_fn(|_| s.fx()));
         }
         r.velocity = std::array::from_fn(|_| s.fx());
+        if !restored_round(r.shell.unwrap_or_default(), r.velocity, r.size) {
+            return None;
+        }
         if s.bool() {
             r.impact = Some(std::array::from_fn(|_| s.i32()));
         }
@@ -2913,6 +2932,14 @@ impl BlastRange {
         let steady = s.bool();
         if version >= 31 {
             r.streams.load(&mut s)?;
+            if !r
+                .streams
+                .rounds
+                .iter()
+                .all(|x| restored_round(x.pos, x.velocity, r.size))
+            {
+                return None;
+            }
         }
         if version >= 32 {
             r.thermals.load(&mut s, &r.units, &r.thermal_tuning)?;
@@ -6008,6 +6035,37 @@ mod tests {
             b.step();
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
         }
+    }
+    /// **A snapshot with a round flight cannot hold is refused**
+    /// (ADR-459). A corrupt place or speed of the gun's shell or of a
+    /// stream round, or a corrupt aim, overflowed the dome and body tests
+    /// or swept a billion steps a tick; the restore now answers `None`.
+    #[test]
+    fn a_snapshot_with_an_impossible_round_is_refused() {
+        let restores = |r: &BlastRange| BlastRange::restore(config(), &r.snapshot()).is_some();
+        let far = Fx::from_int(1_000_000);
+        let mut r = BlastRange::new(config());
+        r.shell = Some([Fx::from_int(200), Fx::from_int(30), Fx::from_int(336)]);
+        r.velocity = [Fx::from_int(280), Fx::ZERO, Fx::ZERO];
+        assert!(restores(&r), "a round in flight was refused");
+        r.shell = Some([far, Fx::from_int(30), Fx::from_int(336)]);
+        assert!(!restores(&r), "a shell far off the range loaded");
+        r.shell = None;
+        r.velocity = [Fx::from_int(50_000), Fx::ZERO, Fx::ZERO];
+        assert!(!restores(&r), "an impossible speed loaded");
+        r.velocity = [Fx::ZERO; 3];
+        r.streams.rounds.push(weapons::Round {
+            pos: [far, Fx::ZERO, Fx::ZERO],
+            velocity: [Fx::ZERO; 3],
+            distance: Fx::ONE,
+            serial: 0,
+        });
+        assert!(!restores(&r), "a stream round far off the range loaded");
+        r.streams.rounds.clear();
+        r.aim = Some([i32::MAX, 0, 0]);
+        assert!(!restores(&r), "an aim off the range loaded");
+        r.aim = None;
+        assert!(restores(&r));
     }
     /// A version-39 snapshot, with one print of the whole rubble map and
     /// no change pages, still loads (ADR-427).

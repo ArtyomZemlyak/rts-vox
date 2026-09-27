@@ -258,16 +258,10 @@ impl Battle {
             let pos = std::array::from_fn(|_| s.fx());
             let velocity = std::array::from_fn(|_| s.fx());
             let distance = s.fx();
-            // A lobbed shell flies above the world (`in_flight_bounds`); its
-            // remaining flight, at most 10 000, bounds how high.
-            let above = |k: usize| if k == 1 { 10_000 } else { 384 };
             if owner >= units.len()
-                || (0..3).any(|k| {
-                    pos[k] < Fx::from_int(-384) || pos[k] > Fx::from_int(size[k] as i32 + above(k))
-                })
+                || !super::restored_round(pos, velocity, size)
                 || distance <= Fx::ZERO
                 || distance > Fx::from_int(10000)
-                || velocity.iter().any(|v| v.abs() > Fx::from_int(10000))
             {
                 return None;
             }
