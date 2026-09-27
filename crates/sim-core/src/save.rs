@@ -526,6 +526,7 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
         return Err(LoadError::Truncated);
     }
     load_econ(s, w)?;
+    check_references(w)?;
     if s.bool() {
         if version < 11 {
             return Err(LoadError::Version {
@@ -571,6 +572,47 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
         }
     }
     if !s.ok() {
+        return Err(LoadError::Truncated);
+    }
+    Ok(())
+}
+
+/// Номера, которые тик читает без проверки, указывают туда, где есть
+/// что прочитать (ADR-463): сторона юнита — в своё поле потока, тип —
+/// в таблицу типов, контейнер юнита, земли, склада, обломка и заготовки
+/// завода — в учёт, слоты заводов и недостроев — в юниты, заказ завода —
+/// в таблицу типов. Заводы и недострои идут по возрастанию слота, как
+/// их держит экономика. Испорченное значение — отказ загрузки, а не
+/// индекс за границей на первом тике.
+fn check_references(w: &World) -> Result<(), LoadError> {
+    let u = &w.units;
+    let n = u.x.len();
+    if u.owner.iter().any(|&o| usize::from(o) >= w.flow.len()) {
+        return Err(LoadError::Truncated);
+    }
+    let Some(e) = &w.econ else {
+        return Ok(());
+    };
+    let kinds = e.kinds.len();
+    let kind = |k: u16| usize::from(k) < kinds;
+    let container = |c: crate::matter::ContainerId| e.ledger.try_get(c).is_some();
+    let slot = |i: u32| (i as usize) < n;
+    if u.kind
+        .iter()
+        .any(|&k| k != crate::economy::NO_KIND && !kind(k))
+        || u.store
+            .iter()
+            .any(|&c| c != crate::economy::NO_CONTAINER && !container(c))
+        || !container(e.ground)
+        || e.banks.iter().any(|b| !container(b.stock))
+        || e.wrecks.iter().any(|w| !container(w.held))
+        || e.sites.iter().any(|&i| !slot(i))
+        || e.sites.windows(2).any(|p| p[0] >= p[1])
+        || e.lines
+            .iter()
+            .any(|l| !slot(l.unit) || !container(l.held) || l.queue.iter().any(|&k| !kind(k)))
+        || e.lines.windows(2).any(|p| p[0].unit >= p[1].unit)
+    {
         return Err(LoadError::Truncated);
     }
     Ok(())
@@ -806,14 +848,61 @@ fn load_units(s: &mut Scan, u: &mut Units, version: u32) -> Result<(), LoadError
     let nf = s.list(12);
     u.face = (0..nf).map(|_| (s.i32(), s.i32(), s.i32())).collect();
     u.job = s.u32s();
-    if !s.ok()
-        || u.x.len() != n
-        || u.heave.len() != n
-        || u.heave_v.len() != n
-        || u.speed.len() != n
-        || u.fall_from.len() != n
-        || u.fall_f.len() != n
-        || u.fall_v.len() != n
+    // Every column is one slot long, and the slot numbers the tick reads
+    // without a check lie within the columns (ADR-463): a live list,
+    // ascending; a free list of dead slots, each once; targets.
+    let columns = [
+        u.x.len(),
+        u.y.len(),
+        u.z.len(),
+        u.fx.len(),
+        u.fz.len(),
+        u.owner.len(),
+        u.speed.len(),
+        u.head.len(),
+        u.vel.len(),
+        u.chassis.len(),
+        u.up.len(),
+        u.spin.len(),
+        u.load.len(),
+        u.voxels.len(),
+        u.alive.len(),
+        u.target.len(),
+        u.riding.len(),
+        u.ride_off.len(),
+        u.fall_from.len(),
+        u.fall_v.len(),
+        u.fall_f.len(),
+        u.next_search.len(),
+        u.next_shot.len(),
+        u.weapon.len(),
+        u.stance.len(),
+        u.goal_x.len(),
+        u.goal_y.len(),
+        u.goal_z.len(),
+        u.accel.len(),
+        u.yaw_step.len(),
+        u.yaw_rate.len(),
+        u.gait.len(),
+        u.heave.len(),
+        u.heave_v.len(),
+        u.kind.len(),
+        u.store.len(),
+        u.site.len(),
+        u.face.len(),
+        u.job.len(),
+    ];
+    if !s.ok() || columns.iter().any(|&c| c != n) {
+        return Err(LoadError::Truncated);
+    }
+    let slot = |i: u32| (i as usize) < n;
+    let mut freed = vec![false; n];
+    if u.live_ids.iter().any(|&i| !slot(i))
+        || u.live_ids.windows(2).any(|p| p[0] >= p[1])
+        || u.target.iter().any(|&t| t != crate::NO_TARGET && !slot(t))
+        || u.free.iter().any(|&i| {
+            !slot(i) || u.alive[i as usize] || std::mem::replace(&mut freed[i as usize], true)
+        })
     {
         return Err(LoadError::Truncated);
     }
@@ -1023,6 +1112,139 @@ mod tests {
             );
         }
         assert!(load(&full, tune(), guns()).is_ok());
+    }
+
+    /// **Испорченная ссылка — ошибка чтения, а не паника первого тика**
+    /// (ADR-463). Каждая порча вносится в живую партию, сохраняется
+    /// и отвергается загрузкой: слот за концом столбцов, неупорядоченный
+    /// список живых, живой юнит в свободном списке, сторона без поля
+    /// потока, лишний элемент одного столбца; с экономикой — тип за
+    /// таблицей, контейнер за учётом, слот завода и недостроя за концом
+    /// юнитов. Целые сохранения читаются.
+    #[test]
+    fn a_corrupt_reference_is_an_error_not_a_panic() {
+        type Spoil = Box<dyn Fn(&mut World)>;
+        let small = worldgen::Params::sized(64, 64, 64);
+        let econ = || {
+            let kinds = modding::kinds::from_ron(
+                include_str!("../../../data/kinds.ron"),
+                crate::TICKS_PER_SECOND as u32,
+            )
+            .expect("data/kinds.ron");
+            let mats =
+                modding::data::materials_from_ron(include_str!("../../../data/materials.ron"))
+                    .expect("data/materials.ron");
+            (kinds, mats)
+        };
+        let game = |economy: bool| {
+            let mut r = Reference::with_params(3, 40, tune(), guns(), small);
+            if economy {
+                let (kinds, mats) = econ();
+                r.world.attach_economy(kinds, mats);
+                // A factory with an order: a production line and its
+                // container, a unit with a kind and a store.
+                let f = r.world.spawn_kind(32, 32, 0, 10).expect("a factory");
+                r.world.push_order(Order::Produce { unit: f, kind: 1 });
+            }
+            for _ in 0..5 {
+                r.tick();
+            }
+            r
+        };
+        let read = |buf: &[u8], economy: bool| {
+            load_with(buf, tune(), guns(), economy.then(econ)).map(|_| ())
+        };
+        let n = game(false).world.units.x.len() as u32;
+        let plain: Vec<(&str, Spoil)> = vec![
+            ("target", Box::new(move |w| w.units.target[0] = n + 3)),
+            ("live slot", Box::new(move |w| w.units.live_ids.push(n))),
+            ("live order", Box::new(|w| w.units.live_ids.swap(0, 1))),
+            (
+                "free alive",
+                Box::new(|w| {
+                    let i = w.units.live_ids[0];
+                    w.units.free.push(i);
+                }),
+            ),
+            ("owner", Box::new(|w| w.units.owner[0] = 2)),
+            ("column", Box::new(|w| w.units.goal_x.push(0))),
+        ];
+        let far = 1 << 24;
+        let with_economy: Vec<(&str, Spoil)> = vec![
+            (
+                "kind",
+                Box::new(|w| {
+                    let k = w.econ.as_ref().unwrap().kinds.len() as u16;
+                    let f = w
+                        .units
+                        .kind
+                        .iter()
+                        .position(|&k| k != crate::economy::NO_KIND);
+                    w.units.kind[f.unwrap()] = k;
+                }),
+            ),
+            (
+                "store",
+                Box::new(move |w| {
+                    let f = w
+                        .units
+                        .store
+                        .iter()
+                        .position(|&c| c != crate::economy::NO_CONTAINER);
+                    w.units.store[f.unwrap()] = far;
+                }),
+            ),
+            (
+                "ground",
+                Box::new(move |w| w.econ.as_mut().unwrap().ground = far),
+            ),
+            (
+                "bank",
+                Box::new(move |w| w.econ.as_mut().unwrap().banks[0].stock = far),
+            ),
+            (
+                "wreck",
+                Box::new(move |w| {
+                    w.econ.as_mut().unwrap().wrecks.push(crate::economy::Wreck {
+                        held: far,
+                        x: 8,
+                        y: 8,
+                        z: 8,
+                    })
+                }),
+            ),
+            (
+                "site",
+                Box::new(move |w| w.econ.as_mut().unwrap().sites.push(n + 9)),
+            ),
+            (
+                "line slot",
+                Box::new(move |w| w.econ.as_mut().unwrap().lines[0].unit = n + 9),
+            ),
+            (
+                "line kind",
+                Box::new(|w| {
+                    let e = w.econ.as_mut().unwrap();
+                    let k = e.kinds.len() as u16;
+                    e.lines[0].queue.push_back(k);
+                }),
+            ),
+            (
+                "line store",
+                Box::new(move |w| w.econ.as_mut().unwrap().lines[0].held = far),
+            ),
+        ];
+        for (economy, cases) in [(false, plain), (true, with_economy)] {
+            assert!(read(&save(&game(economy)), economy).is_ok());
+            for (name, spoil) in &cases {
+                let mut r = game(economy);
+                spoil(&mut r.world);
+                assert!(
+                    matches!(read(&save(&r), economy), Err(LoadError::Truncated)),
+                    "{name} was not refused"
+                );
+            }
+        }
     }
 
     fn tune() -> Tuning {
