@@ -1058,9 +1058,14 @@ impl Motion {
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
         self.hunt_step(w, b, others, rubble, tick, changed);
+        // A partial route is a prefix the budget ran out on, planned
+        // around whatever stood there then: the hull searches again on its
+        // cadence while it drives it and takes the new route up (ADR-467).
         if self.hunt.is_none()
             && self.escape_left == 0
-            && (self.blocked || self.path.is_empty())
+            && (self.blocked
+                || self.path.is_empty()
+                || (self.partial_path && self.cursor < self.path.len()))
             && tick >= self.next_plan
             && self.may_start
         {

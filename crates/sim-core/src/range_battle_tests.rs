@@ -895,3 +895,74 @@ fn a_moving_target_changes_the_finished_pursuit_goal() {
     let after = r.units[0].motion.destination.expect("updated approach");
     assert!(after[0] > before[0] + 25, "{before:?} -> {after:?}");
 }
+
+/// **Tank squads crossing the field all engage** (ADR-467, P-63). Four
+/// tanks a side in two columns start from opposite corners of the
+/// training ground, out of range, and all attack one target a side. The
+/// allies lined up with the target used to drive for the same firing
+/// position and jostle there, and a tank boxed in by its standing allies
+/// crawled a weaving partial route long after they had driven off: two
+/// never fired in 1500 ticks and one fired at tick 1356. Every tank fires
+/// within 700 ticks now, and the firing positions of one side keep the
+/// data's spacing.
+#[test]
+fn tank_squads_crossing_the_field_all_engage() {
+    let t = modding::range_battle::Tuning::from_ron(include_str!("../../../data/range-battle.ron"))
+        .unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.gun = t.zone.spawn;
+    layout.target = t.zone.target;
+    layout.zones.push(t.zone.clone());
+    if let Some(course) = &mut layout.course {
+        course.patrols.clear();
+    }
+    layout.units = [true, false]
+        .into_iter()
+        .flat_map(|allied| {
+            (0..4).map(move |k| {
+                let (dx, dz) = (80 * (k % 2), 80 * (k / 2));
+                RangeUnitDef {
+                    kind: RangeUnitKind::Tank,
+                    allied,
+                    at: if allied {
+                        [3240 + dx, 16, 2060 + dz]
+                    } else {
+                        [4060 - dx, 16, 2740 - dz]
+                    },
+                }
+            })
+        })
+        .collect();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut a = BlastRange::with_layout(config, layout).unwrap();
+    a.start_battle().unwrap();
+    let spacing = i64::from(a.battle.tuning.firing_spacing);
+    let mut first = vec![None; a.units.len()];
+    for tick in 0..700 {
+        a.step();
+        for (id, shot) in first.iter_mut().enumerate() {
+            if a.battle.actors[id].fired > 0 {
+                shot.get_or_insert(tick);
+            }
+        }
+        // Firing positions of one side keep their spacing.
+        for i in 0..a.units.len() {
+            for j in i + 1..a.units.len() {
+                if a.allied(i) != a.allied(j) {
+                    continue;
+                }
+                if let (Some(p), Some(q)) =
+                    (a.units[i].motion.destination, a.units[j].motion.destination)
+                {
+                    let (x, z) = (i64::from(p[0] - q[0]), i64::from(p[1] - q[1]));
+                    assert!(
+                        x * x + z * z >= spacing * spacing,
+                        "tick {tick}: firing positions of {i} and {j} too close: {p:?} {q:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(first.iter().all(Option::is_some), "first shots: {first:?}");
+}

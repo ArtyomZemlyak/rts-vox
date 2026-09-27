@@ -5,6 +5,10 @@
     tank_range: 700,
     pursuit_ticks: 60,
     standoff_milli: 750,
+    // Pursuers attacking one target take firing positions a tank's length
+    // and a margin apart (ADR-467): allies lined up with the target would
+    // otherwise all drive for the same point before it.
+    firing_spacing: 70,
     max_rounds: 64,
     max_waves: 4,
     // Какой снаряд танк заряжает по цели (ADR-456): бронебойный

@@ -20,6 +20,10 @@ pub struct Tuning {
     pub tank_range: i32,
     pub pursuit_ticks: u32,
     pub standoff_milli: i32,
+    /// World units a pursuer keeps its firing position from the points
+    /// its allies hold; zero takes the position along the line to the
+    /// target whoever holds it (ADR-467).
+    pub firing_spacing: i32,
     pub max_rounds: usize,
     pub max_waves: usize,
     pub tank_ammo: TankAmmo,
@@ -34,6 +38,7 @@ impl Tuning {
             || !(100..=3000).contains(&t.tank_range)
             || !(1..=300).contains(&t.pursuit_ticks)
             || !(100..=950).contains(&t.standoff_milli)
+            || !(0..=1000).contains(&t.firing_spacing)
             || !(2..=128).contains(&t.max_rounds)
             || !(1..=8).contains(&t.max_waves)
             || [t.tank_ammo.tank, t.tank_ammo.strider, t.tank_ammo.ground]

@@ -586,6 +586,74 @@ impl BlastRange {
         a.pursuit = 0;
         true
     }
+    /// A firing position for `id` on the arc through `natural` around
+    /// `target`, a `spacing` from the points its allies hold — where they
+    /// drive, or where they stand (ADR-467). Allies lined up with the
+    /// target would all drive for the same point before it and jostle
+    /// there. The position along the line is kept when it is free;
+    /// otherwise the arc is walked a chord of `spacing` at a time, each
+    /// count of chords on the positive turn first, up to six each way;
+    /// with none free, the position along the line.
+    fn firing_point(
+        &self,
+        id: usize,
+        target: [i32; 2],
+        natural: [i32; 2],
+        spacing: i32,
+    ) -> [i32; 2] {
+        let side = self.allied(id);
+        let held: Vec<[i32; 2]> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|&(j, u)| j != id && u.status.alive && self.allied(j) == side)
+            .map(|(_, u)| {
+                u.motion.destination.unwrap_or([
+                    u.motion.pos[0].to_int_trunc(),
+                    u.motion.pos[2].to_int_trunc(),
+                ])
+            })
+            .collect();
+        let free = |p: [i32; 2]| {
+            held.iter().all(|h| {
+                let (x, z) = (i64::from(p[0] - h[0]), i64::from(p[1] - h[1]));
+                x * x + z * z >= i64::from(spacing) * i64::from(spacing)
+            })
+        };
+        let arm = [natural[0] - target[0], natural[1] - target[1]].map(Fx::from_int);
+        let radius = arm[0].mul(arm[0]).add(arm[1].mul(arm[1])).sqrt();
+        if spacing == 0 || free(natural) || radius < Fx::from_int(spacing) {
+            return natural;
+        }
+        // The angle of a chord of `spacing`, in binary turns: its arc in
+        // radians is about the spacing over the radius.
+        let chord = Fx::from_int(spacing)
+            .div(radius)
+            .mul(Fx::from_ratio(fx::angle::FULL, 1))
+            .div(Fx::from_ratio(314_159_265, 50_000_000))
+            .to_int_trunc();
+        let far = [self.size[0] as i32, self.size[2] as i32];
+        for k in 1..=6 {
+            for sign in [1, -1] {
+                let turn = sign * k * chord;
+                let (c, s) = (fx::angle::cos(turn), fx::angle::sin(turn));
+                let p = [
+                    Fx::from_int(target[0])
+                        .add(arm[0].mul(c))
+                        .sub(arm[1].mul(s))
+                        .to_int_trunc(),
+                    Fx::from_int(target[1])
+                        .add(arm[0].mul(s))
+                        .add(arm[1].mul(c))
+                        .to_int_trunc(),
+                ];
+                if (0..2).all(|a| (0..far[a]).contains(&p[a])) && free(p) {
+                    return p;
+                }
+            }
+        }
+        natural
+    }
     pub fn battle_counts(&self) -> [usize; 2] {
         let mut n = [0; 2];
         for (i, u) in self.units.iter().enumerate() {
@@ -758,6 +826,7 @@ impl BlastRange {
                         from[0].add(dx.mul(approach)).to_int_trunc(),
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
+                    let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
                     let margin = range * (1000 - b.tuning.standoff_milli) / 1000;
                     let changed = target_changed
                         || self.units[id].motion.destination.is_none_or(|old| {
