@@ -4,7 +4,7 @@ use super::*;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
 const BURST_PARTICLES: usize = 57;
-const TRACER_CAP: usize = 64;
+const TRACER_CAP: usize = 512;
 const TRACER_LIFE: f32 = 0.11;
 #[derive(Component)]
 pub(super) struct Layer(bool);
@@ -258,7 +258,7 @@ impl Effects {
             let at = Vec3::from(i.at.map(|v| v as f32));
             if i.shell {
                 self.shell_burst(at, now, sim.battle.shell_config.energy);
-            } else {
+            } else if i.kinetic {
                 self.add(at, Vec3::Y * 3.0, now, 0.16, 1.8, false);
             }
         }
@@ -453,36 +453,10 @@ impl Effects {
                     self.plume(b, now, true, 0.9);
                 }
             } else {
-                if let Some(tail) = tracer_tail(a, b) {
-                    if self.tracers.len() == TRACER_CAP {
-                        self.tracers.remove(0);
-                    }
-                    self.tracers.push(Tracer {
-                        tail,
-                        head: b,
-                        born: now,
-                    });
-                }
-                if trace.hit {
-                    for i in 0..7 {
-                        let s = trace.serial.wrapping_add(i);
-                        self.add(
-                            b,
-                            Vec3::new(
-                                noise(s) * 22.0 - 11.0,
-                                8.0 + noise(s + 1) * 18.0,
-                                noise(s + 2) * 22.0 - 11.0,
-                            ),
-                            now,
-                            0.25,
-                            0.9,
-                            false,
-                        );
-                    }
-                }
+                self.capture_bullet(trace, now);
             }
         }
-        if sim.config.delivery == Delivery::MachineGun {
+        if sim.config.delivery == Delivery::MachineGun && !sim.battle_mode() {
             for at in sim.stream_muzzles() {
                 if !sim.streams.traces.iter().any(|t| t.from == at) {
                     continue;
@@ -490,7 +464,58 @@ impl Effects {
                 self.add(point(at), Vec3::ZERO, now, 0.11, 4.7, false);
             }
         }
+        for trace in &sim.battle.traces {
+            self.capture_bullet(trace, now);
+        }
+        if sim.battle_mode() {
+            for (id, unit) in sim.units.iter().enumerate() {
+                if unit.kind != RangeUnitKind::Strider {
+                    continue;
+                }
+                for at in sim.battle_muzzles(id) {
+                    if sim
+                        .battle
+                        .traces
+                        .iter()
+                        .any(|t| t.serial == id as u32 && t.from == at)
+                    {
+                        self.add(point(at), Vec3::ZERO, now, 0.11, 4.7, false);
+                    }
+                }
+            }
+        }
         self.capture_dust(sim, now);
+    }
+    /// One tracer and impact style for the selectable gun and every battle actor.
+    fn capture_bullet(&mut self, trace: &sim_core::blast::weapons::Trace, now: f32) {
+        let (a, b) = (point(trace.from), point(trace.to));
+        if let Some(tail) = tracer_tail(a, b) {
+            if self.tracers.len() == TRACER_CAP {
+                self.tracers.remove(0);
+            }
+            self.tracers.push(Tracer {
+                tail,
+                head: b,
+                born: now,
+            });
+        }
+        if trace.hit {
+            for i in 0..7 {
+                let s = trace.serial.wrapping_add(i);
+                self.add(
+                    b,
+                    Vec3::new(
+                        noise(s) * 22.0 - 11.0,
+                        8.0 + noise(s + 1) * 18.0,
+                        noise(s + 2) * 22.0 - 11.0,
+                    ),
+                    now,
+                    0.25,
+                    0.9,
+                    false,
+                );
+            }
+        }
     }
     fn capture_dust(&mut self, sim: &BlastRange, now: f32) {
         let d = &sim.streams.tuning.dust;
@@ -716,7 +741,7 @@ pub fn draw(
             }
         }
     }
-    if scene.sim.config.delivery == Delivery::MachineGun && !scene.sim.battle_mode() {
+    if scene.sim.config.delivery == Delivery::MachineGun || scene.sim.battle_mode() {
         for tracer in &fx.tracers {
             let fade = (1.0 - (now - tracer.born) / TRACER_LIFE).clamp(0.0, 1.0);
             // The short streak remains visible across render frames. Its head
@@ -739,32 +764,14 @@ pub fn draw(
     }
     if scene.sim.battle_mode() {
         let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
-        for r in &scene.sim.battle.rounds {
+        for r in scene.sim.battle.rounds.iter().filter(|r| r.shell) {
             let t = if scene.realtime {
                 (scene.acc * 30.0).clamp(0.0, 1.0)
             } else {
                 1.0
             };
             let at = point(r.previous).lerp(point(r.pos), t);
-            cube(
-                &mut hot,
-                at,
-                if r.shell { 2.0 } else { 0.8 },
-                [6.0, 3.2, 0.55, 1.0],
-            );
-        }
-        for trace in &scene.sim.battle.traces {
-            let from = point(trace.from);
-            let to = point(trace.to);
-            let n = ((to - from).length() / 2.0).ceil().clamp(1.0, 48.0) as usize;
-            for i in 0..n {
-                cube(
-                    &mut hot,
-                    from.lerp(to, i as f32 / n as f32),
-                    0.65,
-                    [4.0, 2.1, 0.25, 0.85],
-                );
-            }
+            cube(&mut hot, at, 2.0, [6.0, 3.2, 0.55, 1.0]);
         }
     }
     let mut smoke = MeshBuf::default();
@@ -1169,8 +1176,77 @@ mod tests {
         }
         r.step();
         effects.capture(&r);
-        assert_eq!(effects.tracers.len(), 2, "short trails remain visible");
+        assert!(
+            effects.tracers.len() >= 2,
+            "short trails remain visible during flight"
+        );
     }
+    #[test]
+    fn battle_walkers_capture_the_same_tracers_and_paired_muzzle_flashes() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.course = None;
+        layout.units = vec![
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Strider,
+                at: [170, 16, 336],
+                allied: true,
+            },
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Strider,
+                at: [450, 16, 336],
+                allied: false,
+            },
+        ];
+        // The scene's selected experimental weapon must not affect battle effects.
+        let cfg = weapon_config(false, false, 1000, Delivery::Blast);
+        let mut sim = range_sim(cfg, Some(&layout), false, None).unwrap();
+        sim.start_battle().unwrap();
+        for _ in 0..120 {
+            sim.step();
+            if !sim.battle.traces.is_empty() {
+                break;
+            }
+        }
+        assert!(!sim.battle.traces.is_empty());
+        let mut effects = Effects::default();
+        effects.capture(&sim);
+        assert_eq!(effects.tracers.len(), sim.battle.traces.len());
+        let mut flashes = 0;
+        for id in 0..sim.units.len() {
+            for at in sim.battle_muzzles(id) {
+                if sim
+                    .battle
+                    .traces
+                    .iter()
+                    .any(|t| t.serial == id as u32 && t.from == at)
+                {
+                    assert!(effects
+                        .particles
+                        .iter()
+                        .any(|p| p.at == point(at) && p.edge == 4.7));
+                    flashes += 1;
+                }
+            }
+        }
+        assert!(
+            flashes >= 2,
+            "the walker must flash at both connected muzzles"
+        );
+        for trace in &sim.battle.traces {
+            let mut reference = Effects::default();
+            reference.capture_bullet(trace, sim.tick as f32 / 30.0);
+            let expected = reference.tracers.first().unwrap();
+            assert!(effects
+                .tracers
+                .iter()
+                .any(|t| t.tail == expected.tail && t.head == expected.head));
+        }
+    }
+
     #[test]
     fn machine_gun_tracer_ends_at_the_real_bullet_and_stays_short() {
         let from = Vec3::new(0.0, 4.0, 0.0);

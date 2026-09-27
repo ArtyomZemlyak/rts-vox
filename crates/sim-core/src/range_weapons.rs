@@ -520,12 +520,7 @@ impl BlastRange {
                 if !flame || ray > 0 {
                     delta = spread(delta, self.heading(), id, tuning.spread_milli);
                 }
-                let len = delta
-                    .iter()
-                    .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
-                    .sqrt()
-                    .max(Fx::ONE);
-                let velocity = delta.map(|v| v.div(len).mul(Fx::from_int(self.config.shell_speed)));
+                let velocity = flight_velocity(delta, self.config.shell_speed);
                 self.streams.rounds.push(Round {
                     pos: from,
                     velocity,
@@ -739,6 +734,16 @@ impl BlastRange {
             }
         }
     }
+}
+
+/// Shared finite-packet speed for trials and battle, including elevated targets.
+pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
+    let len = delta
+        .iter()
+        .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
+        .sqrt()
+        .max(Fx::ONE);
+    delta.map(|v| v.div(len).mul(Fx::from_int(speed)))
 }
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
@@ -1355,15 +1360,15 @@ mod tests {
         assert_eq!(damaged.muzzle(), damaged.stream_muzzles()[0]);
     }
     #[test]
-    fn paired_machine_guns_keep_a_bounded_six_salvo_burst_and_real_hits() {
+    fn paired_machine_guns_keep_a_bounded_fifteen_salvo_burst_and_real_hits() {
         let mut r = range(Delivery::MachineGun, false, true);
         for _ in 0..32 {
             r.step();
         }
         assert_eq!(
             r.streams.emitted(),
-            12,
-            "six salvos from two intact barrels"
+            30,
+            "fifteen salvos from two intact barrels"
         );
         assert!(
             r.units[0].revision > 0,
@@ -1455,6 +1460,9 @@ mod tests {
             "wood did not catch fire"
         );
         let mut s = range(Delivery::MachineGun, false, true);
+        // This tests interception, not depletion. Match the tuning to the
+        // strong fixture: recharge otherwise clamps its charge to stock 4000.
+        s.shield_tuning.capacity = 100000;
         s.shields.push(RangeShield::new(
             &modding::range::RangeShieldDef {
                 at: [285, 16, 336],

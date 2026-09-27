@@ -340,6 +340,13 @@ impl BlastRange {
             }
         }))
     }
+    /// Connected barrels in the actor's current posed weapon, for muzzle effects.
+    pub fn battle_muzzles(&self, id: usize) -> Vec<[Fx; 3]> {
+        match (self.units.get(id), self.battle.actors.get(id)) {
+            (Some(unit), Some(actor)) => weapons::muzzles(unit, actor.turret.angle),
+            _ => Vec::new(),
+        }
+    }
     pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
         Some(match self.battle_weapon(id)? {
             Delivery::MachineGun => self.streams.tuning.machine_gun.range,
@@ -947,7 +954,11 @@ impl BlastRange {
                     .sqrt()
                     .div(Fx::from_int(speed))
                     .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
-                let mut velocity = delta.map(|v| v.div(time));
+                let mut velocity = if shell {
+                    delta.map(|v| v.div(time))
+                } else {
+                    weapons::flight_velocity(delta, speed)
+                };
                 if shell {
                     velocity[1] = velocity[1].add(
                         Fx::from_int(config.gravity)
@@ -970,11 +981,12 @@ impl BlastRange {
             if shell {
                 a.next = self.tick + b.tuning.tank_reload_ticks;
             } else {
+                let remaining = stream.burst_ticks.saturating_sub(a.burst);
                 a.burst += stream.interval_ticks;
                 a.next = self.tick
                     + if a.burst >= stream.burst_ticks {
                         a.burst = 0;
-                        stream.reload_ticks
+                        remaining.saturating_sub(1) + stream.reload_ticks
                     } else {
                         stream.interval_ticks
                     };

@@ -1044,3 +1044,53 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     let old = BlastRange::restore(r.config.clone(), &old).unwrap();
     assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
 }
+
+#[test]
+fn battle_machine_guns_use_paired_finite_flight_and_shared_burst_timing() {
+    let mut r = arena(RangeUnitKind::Strider);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    // Empty elevated point: measure speed and cadence without a destroyed target
+    // ending the fight, or the opponent damaging a barrel between salvos.
+    assert!(r.battle_order(0, Order::Ground([540, 100, 336]), None));
+    let tuning = r.streams.tuning.machine_gun.clone();
+    let speed = r.battle.bullet_config.shell_speed;
+    let mut shots = Vec::new();
+    for _ in 0..180 {
+        let before = r.battle.actors[0].fired;
+        r.step();
+        if r.battle.actors[0].fired != before {
+            shots.push(r.tick);
+            if shots.len() == 1 {
+                let rounds: Vec<_> = r.battle.rounds.iter().filter(|p| p.owner == 0).collect();
+                assert_eq!(rounds.len(), 2, "both barrels must emit a live bullet");
+                assert_ne!(rounds[0].previous, rounds[1].previous);
+                for round in rounds {
+                    let length = round
+                        .velocity
+                        .iter()
+                        .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
+                        .sqrt();
+                    assert!((length.sub(Fx::from_int(speed))).abs() < Fx::ONE);
+                    assert!(
+                        round.pos[0] < Fx::from_int(540),
+                        "hit before the bullet arrived"
+                    );
+                }
+            }
+        }
+        if shots.len() == 16 {
+            break;
+        }
+    }
+    assert_eq!(shots.len(), 16, "a full burst plus its next opening salvo");
+    assert!(shots[..15]
+        .windows(2)
+        .all(|s| s[1] - s[0] == tuning.interval_ticks));
+    assert_eq!(
+        shots[15] - shots[0],
+        tuning.burst_ticks - 1 + tuning.reload_ticks
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
