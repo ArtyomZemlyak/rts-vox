@@ -184,6 +184,42 @@ impl Workshop {
         self.pitch = 0.0;
         Ok(())
     }
+    pub fn skirmish(&mut self, id: u8, config: ExplosionConfig) -> Result<String, String> {
+        let preset = modding::range_skirmish::Skirmish::from_ron(match id {
+            0 => include_str!("../../../../../data/skirmish-breakthrough.ron"),
+            1 => include_str!("../../../../../data/skirmish-pincer.ron"),
+            _ => return Err("Неизвестный сценарий боя".into()),
+        })?;
+        let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
+        layout.battle = true;
+        layout.units = preset.units;
+        layout.gun = preset.zone.spawn;
+        layout.target = preset.zone.target;
+        layout.blocks.extend(preset.blocks);
+        // Replace the existing flat battle sector, keeping one coherent map.
+        let stock = modding::range_battle::Tuning::from_ron(include_str!(
+            "../../../../../data/range-battle.ron"
+        ))?;
+        let zone = layout
+            .zones
+            .iter()
+            .position(|z| z.name == stock.zone.name)
+            .ok_or("Нет боевого участка")?;
+        layout.zones[zone] = preset.zone;
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        self.commit(layout, config)?;
+        self.zone = zone;
+        self.editing = true;
+        self.selected = Some(Selection::Unit(0));
+        self.controlled = Some(0);
+        self.pan = Vec2::ZERO;
+        self.zoom = 0.85;
+        self.orbit = 0.0;
+        self.pitch = 0.0;
+        Ok(preset.briefing)
+    }
     pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<(), String> {
         let mut layout = self.layout.clone().ok_or("No range layout")?;
         layout.battle = true;
@@ -1008,12 +1044,8 @@ pub fn overlay(
                 Color::srgb(1.0, 0.3, 0.16)
             };
             giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), 24.0, color);
-            if edit.controlled == Some(i) || edit.selected == Some(Selection::Unit(i)) {
-                let reach = if u.kind == RangeUnitKind::Tank {
-                    scene.sim.battle.tuning.tank_range
-                } else {
-                    scene.sim.streams.tuning.machine_gun.range
-                };
+            if panel.ranges {
+                let reach = scene.sim.battle_attack_range(i).unwrap_or(0);
                 ground_range(
                     &mut giz,
                     &scene.sim,
@@ -1035,7 +1067,7 @@ pub fn overlay(
                 }
             }
         }
-    } else if scene.sim.gun.status.alive {
+    } else if scene.sim.gun.status.alive && panel.ranges {
         // Stream rounds have a hard flight limit. Show that same limit in
         // the solo range; ballistic shells have no single ground radius.
         let reach = match scene.sim.config.delivery {

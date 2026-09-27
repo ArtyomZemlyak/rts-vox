@@ -4,6 +4,11 @@ use modding::range::{RangeScenario, RangeScenarioWeapon};
 use std::collections::BTreeMap;
 use workbench::{Selection, Tool};
 
+#[path = "panel/hud.rs"]
+pub mod hud;
+#[path = "panel/minimap.rs"]
+pub mod minimap;
+
 const SCENARIO_GAP_TICKS: u32 = 30;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -136,6 +141,10 @@ pub struct Panel {
     pub blocked: bool,
     pub routes: bool,
     pub scenarios_open: bool,
+    pub drawer: u8,
+    pub ranges: bool,
+    pub battle_launch: bool,
+    pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
     history: BTreeMap<u8, Vec<ShotResult>>,
     keys: Vec<KeyCode>,
@@ -149,7 +158,11 @@ impl Panel {
             ground_fire: false,
             blocked: false,
             routes: true,
-            scenarios_open: false,
+            scenarios_open: true,
+            drawer: 0,
+            ranges: true,
+            battle_launch: false,
+            briefing: String::new(),
             scenario_run: None,
             history: BTreeMap::new(),
             keys: Vec::new(),
@@ -159,6 +172,11 @@ impl Panel {
 }
 #[derive(Component, Clone, Copy, PartialEq)]
 pub enum Action {
+    Drawer(u8),
+    Ranges,
+    SelectUnit(usize),
+    BattleWeapon(Option<Delivery>),
+    Skirmish(u8),
     Play,
     BattlePreset,
     BattleWorld,
@@ -256,17 +274,21 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         ..default()
     };
     knobs::build(&mut commands, camera, &text_font);
+    hud::build(&mut commands, camera, &text_font);
+    minimap::build(&mut commands, camera, &text_font);
     let mut root = commands.spawn((
         PanelRoot,
+        hud::Drawer,
         ScrollPanel,
         ScrollPosition::default(),
         bevy::ui::RelativeCursorPosition::default(),
         Node {
             position_type: PositionType::Absolute,
-            left: px(16),
-            top: px(16),
-            width: px(282),
-            max_height: percent(96),
+            right: px(16),
+            top: px(76),
+            width: px(330),
+            bottom: px(236),
+            display: Display::None,
             overflow: Overflow::scroll_y(),
             padding: UiRect::all(px(14)),
             row_gap: px(5),
@@ -281,7 +303,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
     ));
     root.with_children(|p| {
         p.spawn((
-            Text::new("ПОЛИГОН / 01"),
+            Text::new("ЦЕНТР УПРАВЛЕНИЯ"),
             TextFont {
                 font_size: FontSize::Px(23.0),
                 ..text_font.clone()
@@ -289,7 +311,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             TextColor(Color::srgb(0.83, 0.94, 0.93)),
         ));
         p.spawn((
-            Text::new("Ходовые испытания и разрушения"),
+            Text::new("Операции на километровой карте"),
             text_font.clone(),
             TextColor(Color::srgb(0.48, 0.65, 0.68)),
         ));
@@ -300,6 +322,14 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             SectorLabel,
         ));
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
+            (
+                false,
+                vec![("Прорыв укреплений · 3 на 3", Action::Skirmish(0))],
+            ),
+            (
+                false,
+                vec![("Встреча в окружении · 3 против 4", Action::Skirmish(1))],
+            ),
             (
                 false,
                 vec![
@@ -479,12 +509,14 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         });
         rows.splice(3..3, scenario_rows);
         for (editor, row) in rows {
+            let section = hud::section(editor, row[0].1);
             let mut parent = p.spawn(Node {
                 width: percent(100),
                 flex_shrink: 0.0,
                 column_gap: px(6),
                 ..default()
             });
+            parent.insert(hud::DrawerSection(section));
             if editor {
                 parent.insert(EditorOnly);
             }
@@ -536,6 +568,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             text_font,
             TextColor(Color::srgb(0.61, 0.77, 0.78)),
             Readout,
+            hud::DrawerSection(5),
         ));
     });
 }
@@ -563,7 +596,7 @@ pub fn actions(
     let overrides = overrides.as_deref().unwrap_or(&stock);
     let factor = windows
         .single()
-        .map_or(1.0, |w| (w.height() / 860.0).clamp(0.65, 1.0));
+        .map_or(1.0, |w| hud::scale(Vec2::new(w.width(), w.height())));
     if let Some(mut scale) = scale {
         scale.0 = factor;
     }
@@ -586,7 +619,12 @@ pub fn actions(
         scene.notice.clear();
         if !matches!(
             action,
-            Action::Scenario(_)
+            Action::Drawer(_)
+                | Action::Ranges
+                | Action::Settings
+                | Action::SelectUnit(_)
+                | Action::NextOwn
+                | Action::Scenario(_)
                 | Action::ScenarioMenu
                 | Action::Pause
                 | Action::Orbit(_)
@@ -600,7 +638,46 @@ pub fn actions(
         ) {
             panel.scenario_run = None;
         }
+        if matches!(
+            action,
+            Action::BattleWorld | Action::BattlePreset | Action::RangeMode | Action::Scenario(_)
+        ) {
+            panel.briefing.clear();
+            panel.battle_launch = false;
+        }
         match action {
+            Action::Drawer(id) => panel.drawer = if panel.drawer == id { 0 } else { id },
+            Action::Ranges => panel.ranges = !panel.ranges,
+            Action::SelectUnit(id) => {
+                if scene.sim.battle_mode()
+                    && scene.sim.allied(id)
+                    && scene.sim.units.get(id).is_some_and(|u| u.status.alive)
+                {
+                    edit.controlled = Some(id);
+                    edit.selected = Some(Selection::Unit(id));
+                }
+            }
+            Action::BattleWeapon(weapon) => {
+                if let Some(id) = edit.controlled {
+                    if !scene.sim.set_battle_weapon(id, weapon) {
+                        scene.notice = "Выберите свой действующий танк".into();
+                    }
+                }
+            }
+            Action::Skirmish(id) => match edit.skirmish(id, scene.sim.config.clone()) {
+                Ok(briefing) => {
+                    panel.briefing = briefing;
+                    panel.battle_launch = true;
+                    panel.drawer = 0;
+                    panel.pending = None;
+                    panel.drive = true;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                    scene.repeat = false;
+                    scene.view = 1;
+                }
+                Err(e) => scene.notice = e,
+            },
             Action::BattleWorld => match edit.battle_world(scene.sim.config.clone()) {
                 Ok(()) => {
                     scene.view = 1;
@@ -1015,8 +1092,19 @@ fn weapon_of(scene: &Scene) -> u8 {
 pub fn scenario_progress(
     mut panel: ResMut<Panel>,
     mut scene: ResMut<Scene>,
+    mut edit: ResMut<Workshop>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
+    if panel.battle_launch && edit.pending.is_none() && scene.sim.battle_mode() {
+        match scene.sim.start_battle() {
+            Ok(()) => {
+                edit.editing = false;
+                scene.paused = false;
+            }
+            Err(e) => scene.notice = e.into(),
+        }
+        panel.battle_launch = false;
+    }
     if scene.sim.player
         || scene.sim.battle_mode()
         || [KeyCode::KeyF, KeyCode::KeyR, KeyCode::F5, KeyCode::Enter]
@@ -1059,8 +1147,14 @@ pub fn refresh(
             Option<&EditorOnly>,
             Option<&RangeOnly>,
             Option<&ScenarioOnly>,
+            Option<&hud::DrawerSection>,
         ),
-        Or<(With<EditorOnly>, With<RangeOnly>, With<ScenarioOnly>)>,
+        Or<(
+            With<EditorOnly>,
+            With<RangeOnly>,
+            With<ScenarioOnly>,
+            With<hud::DrawerSection>,
+        )>,
     >,
     mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
     mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
@@ -1084,10 +1178,11 @@ pub fn refresh(
             sector
         };
     }
-    for (mut n, editor, range, scenario) in &mut rows {
+    for (mut n, editor, range, scenario, section) in &mut rows {
         n.display = if (editor.is_none() || edit.editing)
             && (range.is_none() || !scene.sim.battle_mode())
             && (scenario.is_none() || panel.scenarios_open)
+            && section.is_none_or(|s| s.0 == panel.drawer)
         {
             Display::Flex
         } else {
@@ -1096,6 +1191,13 @@ pub fn refresh(
     }
     for (a, interaction, mut color) in &mut buttons {
         let active = match *a {
+            Action::Drawer(id) => panel.drawer == id,
+            Action::Ranges => panel.ranges,
+            Action::SelectUnit(id) => edit.controlled == Some(id),
+            Action::BattleWeapon(w) => edit
+                .controlled
+                .and_then(|id| scene.sim.battle.actors.get(id))
+                .is_some_and(|a| a.weapon == w),
             Action::Side(own) => edit.allied == own,
             Action::BattleStart => {
                 scene.sim.battle.phase == sim_core::blast::battle::Phase::Fighting
@@ -1105,7 +1207,15 @@ pub fn refresh(
             Action::Edit => edit.editing,
             Action::Pause => scene.paused,
             Action::Fire => panel.ground_fire,
-            Action::AutoAttack => scene.sim.auto_attack,
+            Action::AutoAttack => {
+                if scene.sim.battle_mode() {
+                    edit.controlled
+                        .and_then(|i| scene.sim.battle.actors.get(i))
+                        .is_some_and(|a| a.order == sim_core::blast::battle::Order::Auto)
+                } else {
+                    scene.sim.auto_attack
+                }
+            }
             Action::Chassis(k) => k == scene.sim.gun.kind,
             Action::Weapon(w) => w == panel.pending.map_or(weapon_of(&scene), |v| v.0),
             Action::Power(p) => p == panel.pending.map_or(scene.power, |v| v.1),
@@ -1202,12 +1312,10 @@ pub fn refresh(
             .map_or_else(|| "не выбран".into(), |i| format!("№{}", i + 1));
         let reach = selected
             .and_then(|i| scene.sim.units.get(i))
-            .map(|u| {
-                let units = if u.kind == RangeUnitKind::Tank {
-                    scene.sim.battle.tuning.tank_range
-                } else {
-                    scene.sim.streams.tuning.machine_gun.range
-                };
+            .map(|_u| {
+                let units = selected
+                    .and_then(|i| scene.sim.battle_attack_range(i))
+                    .unwrap_or(0);
                 format!("{} м", units / 10)
             })
             .unwrap_or_else(|| "выберите юнита".into());
@@ -1215,7 +1323,7 @@ pub fn refresh(
             "{phase}
 Свои: {own} · Враги: {enemy}
 Управление: {controlled}
-Танки — фугас · Шагоходы — два пулемёта
+Танки — выбор боеприпаса · Шагоходы — два пулемёта
 Дальность выбранного: {reach}
 {target}"
         );

@@ -330,3 +330,6 @@ mod tests {
         assert_ne!(a.hash(), b.hash());
     }
 }
+
+/// Authored battles for the live range HUD.
+pub mod range_skirmish;

@@ -30,6 +30,8 @@ pub struct Actor {
     pursuit: u32,
     burst: u32,
     pub fired: u32,
+    /// None selects ammunition by target; explicit choices belong to this actor.
+    pub weapon: Option<Delivery>,
 }
 pub struct Round {
     pub owner: usize,
@@ -112,6 +114,7 @@ impl Battle {
                     pursuit: 0,
                     burst: 0,
                     fired: 0,
+                    weapon: None,
                 })
                 .collect(),
             rounds: Vec::new(),
@@ -127,13 +130,6 @@ impl Battle {
     }
     pub(super) fn working(&self) -> bool {
         !self.waves.is_empty()
-    }
-    fn range(&self, kind: RangeUnitKind, streams: &weapons::Streams) -> i32 {
-        if kind == RangeUnitKind::Tank {
-            self.tuning.tank_range
-        } else {
-            streams.tuning.machine_gun.range
-        }
     }
     pub(super) fn save(&self, b: &mut Blob) {
         b.u8(match self.phase {
@@ -327,6 +323,51 @@ fn aim_point(u: &RangeUnit) -> [i32; 3] {
 impl BlastRange {
     pub fn battle_mode(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.battle)
+    }
+    /// Effective loadout, shared by aiming, HUD and range indicators.
+    pub fn battle_weapon(&self, id: usize) -> Option<Delivery> {
+        let u = self.units.get(id)?;
+        let a = self.battle.actors.get(id)?;
+        if u.kind == RangeUnitKind::Strider {
+            return Some(Delivery::MachineGun);
+        }
+        Some(a.weapon.unwrap_or_else(|| {
+            let ammo = self.battle.tuning.tank_ammo;
+            match (a.order, a.target.and_then(|t| self.units.get(t))) {
+                (Order::Ground(_), _) | (_, None) => ammo.ground,
+                (_, Some(t)) if t.kind == RangeUnitKind::Tank => ammo.tank,
+                _ => ammo.strider,
+            }
+        }))
+    }
+    pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
+        Some(match self.battle_weapon(id)? {
+            Delivery::MachineGun => self.streams.tuning.machine_gun.range,
+            Delivery::Kinetic => self.battle.tuning.kinetic_range,
+            _ => self.battle.tuning.tank_range,
+        })
+    }
+    /// Switching ammunition keeps the current order and reload deadline.
+    /// Rounds already in flight retain their original configuration.
+    pub fn set_battle_weapon(&mut self, id: usize, weapon: Option<Delivery>) -> bool {
+        if !self.battle_mode()
+            || !self.allied(id)
+            || self
+                .units
+                .get(id)
+                .is_none_or(|u| !u.status.alive || u.kind != RangeUnitKind::Tank)
+            || weapon.is_some_and(|w| !matches!(w, Delivery::Blast | Delivery::Kinetic))
+        {
+            return false;
+        }
+        let Some(actor) = self.battle.actors.get_mut(id) else {
+            return false;
+        };
+        if actor.weapon != weapon {
+            actor.weapon = weapon;
+            actor.charge = None;
+        }
+        true
     }
     pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
         &self.battle.ai.tuning
@@ -729,7 +770,6 @@ impl BlastRange {
                 continue;
             }
             let kind = self.units[id].kind;
-            let range = b.range(kind, &self.streams);
             let from = self.units[id].motion.pos;
             let distance = |other: usize| {
                 let p = self.units[other].motion.pos;
@@ -775,7 +815,14 @@ impl BlastRange {
                         RangeUnitKind::Strider => ammo.strider,
                     },
                 };
-                choice == Delivery::Kinetic
+                a.weapon.unwrap_or(choice) == Delivery::Kinetic
+            };
+            let range = if kind != RangeUnitKind::Tank {
+                stream.range
+            } else if kinetic {
+                b.tuning.kinetic_range
+            } else {
+                b.tuning.tank_range
             };
             let config = if kind != RangeUnitKind::Tank {
                 &b.bullet_config

@@ -1,0 +1,17 @@
+(
+ title: "Прорыв укреплений",
+ briefing: "3 на 3. Пробейте бетонную линию или обойдите её с фланга. Фугас разрушает укрытия, бронебойный поражает танки. Победа: уничтожить противника.",
+ zone: (name: "Прорыв укреплений", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3900,15,2400)),
+ units: [
+  (kind: Tank, allied: true, at: (3350,16,2250)),
+  (kind: Tank, allied: true, at: (3350,16,2500)),
+  (kind: Strider, allied: true, at: (3470,16,2400)),
+  (kind: Tank, allied: false, at: (3910,16,2250)),
+  (kind: Tank, allied: false, at: (3910,16,2510)),
+  (kind: Strider, allied: false, at: (3840,16,2390)),
+ ],
+ blocks: [
+  (min: (3720,16,2150), max: (3734,50,2320), material: 2),
+  (min: (3720,16,2450), max: (3734,50,2620), material: 2),
+ ],
+)

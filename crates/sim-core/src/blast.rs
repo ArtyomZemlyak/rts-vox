@@ -2564,7 +2564,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(41);
+        b.u32(42);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2719,6 +2719,16 @@ impl BlastRange {
         if version < 41 {
             self.world.save_transfers(b);
         }
+        if version < 42 {
+            for actor in &self.battle.actors {
+                b.u8(match actor.weapon {
+                    None => 0,
+                    Some(modding::explosion::Delivery::Blast) => 1,
+                    Some(modding::explosion::Delivery::Kinetic) => 2,
+                    _ => unreachable!(),
+                });
+            }
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2734,7 +2744,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=41).contains(&version) {
+        if !(27..=42).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3119,6 +3129,19 @@ impl BlastRange {
         // an older snapshot queued its detach digs with the orders.
         if version >= 41 && !r.world.load_transfers(&mut s) {
             return None;
+        }
+        if version >= 42 {
+            for (actor, unit) in r.battle.actors.iter_mut().zip(&r.units) {
+                actor.weapon = match s.u8() {
+                    0 => None,
+                    1 => Some(modding::explosion::Delivery::Blast),
+                    2 => Some(modding::explosion::Delivery::Kinetic),
+                    _ => return None,
+                };
+                if unit.kind != RangeUnitKind::Tank && actor.weapon.is_some() {
+                    return None;
+                }
+            }
         }
         (s.ok() && s.left() == 0).then_some(r)
     }

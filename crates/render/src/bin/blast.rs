@@ -322,6 +322,9 @@ fn main() {
     let mut demo = false;
     let mut battle_preset = false;
     let mut battle_eight = false;
+    let mut skirmish = None;
+    let mut hud_drawer = 0;
+    let mut window_size = [1600, 900];
     let mut ai_rules_file = None;
     let mut attack_unit: Option<usize> = None;
     let mut go: Option<[i32; 2]> = None;
@@ -360,7 +363,21 @@ fn main() {
                 i += 1;
                 profile_seconds = args[i].parse().expect("profile seconds");
             }
+            "--window" => {
+                i += 1;
+                let (w, h) = args[i].split_once(',').expect("--window width,height");
+                window_size = [w.parse().expect("width"), h.parse().expect("height")];
+                assert!(window_size[0] >= 960 && window_size[1] >= 540);
+            }
             "--battle" => battle_preset = true,
+            "--skirmish" => {
+                i += 1;
+                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0 or 1"));
+            }
+            "--hud-drawer" => {
+                i += 1;
+                hud_drawer = args[i].parse::<u8>().expect("drawer number");
+            }
             "--ai-rules" => {
                 i += 1;
                 ai_rules_file = Some(args[i].clone());
@@ -555,6 +572,22 @@ fn main() {
         anni = false;
         drive = true;
     }
+    let mut battle_briefing = String::new();
+    if let Some(id) = skirmish {
+        battle_briefing = workshop
+            .skirmish(id, config(false, false))
+            .expect("valid skirmish");
+        workshop.pending = None;
+        workshop.editing = edit;
+        battle_preset = true;
+        drive = true;
+        energy = false;
+        anni = false;
+        view = 1;
+    }
+    let mut hud = panel::Panel::new(drive, demo);
+    hud.briefing = battle_briefing;
+    hud.drawer = hud_drawer;
     let mut sim = range_sim(
         weapon_config(energy, anni, power, delivery),
         workshop.layout.as_ref(),
@@ -646,20 +679,22 @@ fn main() {
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
     configure_gas(&sim, energy, anni, &mut gas);
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
-            resolution:
-                bevy::window::WindowResolution::new(1600, 900).with_scale_factor_override(1.0),
-            present_mode: if realtime && profile_output.is_none() {
-                PresentMode::AutoVsync
-            } else {
-                PresentMode::AutoNoVsync
-            },
+    app.add_plugins(
+        DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
+                resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
+                    .with_scale_factor_override(1.0),
+                present_mode: if realtime && profile_output.is_none() {
+                    PresentMode::AutoVsync
+                } else {
+                    PresentMode::AutoNoVsync
+                },
+                ..default()
+            }),
             ..default()
         }),
-        ..default()
-    }));
+    );
     if profile_gpu {
         app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
     }
@@ -703,7 +738,7 @@ fn main() {
             skip_delta: true,
             notice: String::new(),
         })
-        .insert_resource(panel::Panel::new(drive, demo))
+        .insert_resource(hud)
         .insert_resource(knobs::Overrides::new(settings, stock_tuning))
         .init_resource::<moving::Visual>()
         .init_resource::<fire::Effects>()
@@ -723,6 +758,7 @@ fn main() {
                 profile::actions,
                 (
                     panel::actions,
+                    panel::minimap::update,
                     panel::scroll,
                     knobs::actions,
                     workbench::input,
@@ -751,6 +787,7 @@ fn main() {
                     workbench::ghost::update,
                     workbench::overlay,
                     panel::refresh,
+                    panel::hud::refresh,
                     knobs::refresh,
                     panel::release_keys,
                     record,
@@ -2175,17 +2212,20 @@ fn framing(
                         height = 150.0;
                     }
                 }
-                // Reserve the sidebar's width in the fitted overview.
-                let panel_fraction = camera.logical_viewport_size().map_or(0.2, |v| {
-                    310.0 * (v.y / 860.0).clamp(0.65, 1.0) / v.x.max(640.0)
-                });
+                // Reserve the top bar and command deck; the map stays centred
+                // in the usable field instead of beside the old left sidebar.
+                let viewport = camera
+                    .logical_viewport_size()
+                    .unwrap_or(Vec2::new(1600.0, 900.0));
+                let ui_scale = panel::hud::scale(viewport);
+                let panel_fraction = 310.0 * ui_scale / viewport.y.max(1.0);
                 if scene.view == 1 || scene.view == 6 {
                     height /= 1.0 - panel_fraction;
                 }
-                let right = Transform::from_translation(offset)
+                let screen_up = Transform::from_translation(offset)
                     .looking_at(Vec3::ZERO, Vec3::Y)
                     .rotation
-                    * Vec3::X;
+                    * Vec3::Y;
                 let local_limit = window_height_limit(offset, aspect, scene.sim.size());
                 let (zoom, pan) = if scene.camera_sweep {
                     let frame = scene.frame as f32;
@@ -2223,7 +2263,7 @@ fn framing(
                 let full_height =
                     whole_map_frame(scene.sim.size(), offset, aspect).1 / (1.0 - panel_fraction);
                 height = height.min(full_height * 1.1);
-                aim -= right * height * aspect * panel_fraction * 0.5;
+                aim -= screen_up * height * (238.0 - 72.0) * ui_scale / viewport.y.max(1.0) * 0.5;
                 aim += Vec3::new(pan.x, 0.0, pan.y);
                 // Continuous at the local-window limit: the old branch jumped
                 // the eye hundreds of units, abruptly changing atmospheric depth.

@@ -1,0 +1,18 @@
+(
+ title: "Встреча в окружении",
+ briefing: "3 против 4. Вражеские группы наступают с двух сторон. Сосредоточьте огонь на одном фланге и не дайте окружить танк. Победа: уничтожить противника.",
+ zone: (name: "Встреча в окружении", min: (3200,2000), max: (4100,2800), spawn: (3630,16,2400), target: (3980,15,2400)),
+ units: [
+  (kind: Tank, allied: true, at: (3610,16,2370)),
+  (kind: Strider, allied: true, at: (3620,16,2240)),
+  (kind: Strider, allied: true, at: (3620,16,2510)),
+  (kind: Tank, allied: false, at: (3280,16,2220)),
+  (kind: Strider, allied: false, at: (3280,16,2530)),
+  (kind: Tank, allied: false, at: (3980,16,2540)),
+  (kind: Strider, allied: false, at: (3980,16,2220)),
+ ],
+ blocks: [
+  (min: (3510,16,2290), max: (3550,31,2310), material: 2),
+  (min: (3690,16,2440), max: (3730,31,2460), material: 2),
+ ],
+)

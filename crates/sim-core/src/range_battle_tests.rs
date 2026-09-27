@@ -634,6 +634,7 @@ fn aim_follows_surviving_core_instead_of_shooting_through_a_hole() {
 fn auto_approaches_when_out_of_range_and_dead_order_returns_to_auto() {
     let mut r = arena(RangeUnitKind::Tank);
     std::sync::Arc::make_mut(&mut r.battle.tuning).tank_range = 100;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).kinetic_range = 100;
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     let before = r.units[0].at;
@@ -690,6 +691,7 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
     .unwrap();
     let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
     tuning.tank_range = 100;
+    tuning.kinetic_range = 100;
     tuning.pursuit_ticks = 1;
     r.start_battle().unwrap();
     r.step();
@@ -737,8 +739,11 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
     // A short reach: the pursuer has to close in on each target in turn.
-    let short =
-        |r: &mut BlastRange| std::sync::Arc::make_mut(&mut r.battle.tuning).tank_range = 150;
+    let short = |r: &mut BlastRange| {
+        let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
+        tuning.tank_range = 150;
+        tuning.kinetic_range = 150;
+    };
     short(&mut a);
     a.start_battle().unwrap();
     // The targets shuttle between two points each and never stop.
@@ -876,6 +881,7 @@ fn a_moving_target_changes_the_finished_pursuit_goal() {
     let mut r = arena(RangeUnitKind::Tank);
     let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
     tuning.tank_range = 100;
+    tuning.kinetic_range = 100;
     tuning.pursuit_ticks = 1;
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
@@ -965,4 +971,76 @@ fn tank_squads_crossing_the_field_all_engage() {
         }
     }
     assert!(first.iter().all(Option::is_some), "first shots: {first:?}");
+}
+
+#[test]
+fn manual_ammunition_preserves_cooldown_order_and_snapshot() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.actors[0].order = Order::Attack(1);
+    r.battle.actors[0].next = 123;
+    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    assert_eq!(r.battle.actors[0].next, 123);
+    assert_eq!(r.battle.actors[0].order, Order::Attack(1));
+    assert_eq!(r.battle_attack_range(0), Some(r.battle.tuning.tank_range));
+    assert!(!r.set_battle_weapon(1, Some(Delivery::Blast)));
+    assert!(!r.set_battle_weapon(0, Some(Delivery::Laser)));
+    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert_eq!(
+        r.battle_attack_range(0),
+        Some(r.battle.tuning.kinetic_range)
+    );
+    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert_eq!(r.state_hash(), restored.state_hash());
+    assert_eq!(restored.battle.actors[0].weapon, Some(Delivery::Kinetic));
+    assert!(r.set_battle_weapon(0, None));
+    let mut walker = arena(RangeUnitKind::Strider);
+    assert!(!walker.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert_eq!(
+        walker.battle_attack_range(0),
+        Some(walker.streams.tuning.machine_gun.range)
+    );
+}
+
+#[test]
+fn manually_selected_shell_is_fired_even_at_a_tank() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    let round = (0..180).find_map(|_| {
+        r.step();
+        r.battle
+            .rounds
+            .iter()
+            .find(|p| p.owner == 0)
+            .map(|p| (p.shell, p.kinetic))
+    });
+    assert_eq!(round, Some((true, false)));
+    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert!(r.battle.rounds.iter().any(|p| p.owner == 0 && !p.kinetic));
+}
+
+#[test]
+fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    t.tank_range = 100;
+    t.kinetic_range = 400;
+    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    r.step();
+    assert!(r.units[0].motion.destination.is_none());
+    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    r.step();
+    assert!(r.units[0].motion.destination.is_some());
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    let mut old = r.snapshot();
+    old[..4].copy_from_slice(&41u32.to_le_bytes());
+    old.truncate(old.len() - r.battle.actors.len());
+    let old = BlastRange::restore(r.config.clone(), &old).unwrap();
+    assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
 }

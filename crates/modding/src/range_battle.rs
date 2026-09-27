@@ -18,6 +18,7 @@ pub struct Tuning {
     pub tank_power_milli: u32,
     pub tank_reload_ticks: u32,
     pub tank_range: i32,
+    pub kinetic_range: i32,
     pub pursuit_ticks: u32,
     pub standoff_milli: i32,
     /// World units a pursuer keeps its firing position from the points
@@ -36,6 +37,7 @@ impl Tuning {
         if !(100..=4000).contains(&t.tank_power_milli)
             || !(1..=1800).contains(&t.tank_reload_ticks)
             || !(100..=3000).contains(&t.tank_range)
+            || !(100..=3000).contains(&t.kinetic_range)
             || !(1..=300).contains(&t.pursuit_ticks)
             || !(100..=950).contains(&t.standoff_milli)
             || !(0..=1000).contains(&t.firing_spacing)
