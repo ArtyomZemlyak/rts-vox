@@ -185,6 +185,8 @@ pub struct World {
     /// бит. Навигация искала пол колонки обходом от неба — сто семьдесят
     /// четыре пустые ячейки на колонку полигона.
     ceiling: Vec<u16>,
+    /// Derived 8x8-column terrain tiles; a write invalidates its tile immediately.
+    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2])>>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
@@ -447,6 +449,9 @@ impl World {
             cy,
             bits,
             ceiling,
+            floor_tiles: (0..nx.div_ceil(8) as usize * nz.div_ceil(8) as usize)
+                .map(|_| std::sync::OnceLock::new())
+                .collect(),
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
             transfers: std::collections::VecDeque::new(),
@@ -469,6 +474,60 @@ impl World {
         u32::from(self.ceiling[x as usize + self.nx as usize * z as usize])
     }
 
+    /// Prepare the shared traversal surface during map loading, before orders.
+    /// Fixed workers fill disjoint tiles; values are independent of scheduling.
+    pub fn prepare_navigation(&self, yielding: [Mat; 2]) {
+        let columns = self.nx.div_ceil(8);
+        let rows = self.nz.div_ceil(8);
+        let band = rows.div_ceil(FILL_THREADS as u32).max(1);
+        std::thread::scope(|scope| {
+            for first in (0..rows).step_by(band as usize) {
+                scope.spawn(move || {
+                    for z in first..(first + band).min(rows) {
+                        for x in 0..columns {
+                            self.floor_tile(x, z, yielding);
+                        }
+                    }
+                });
+            }
+        });
+    }
+    /// Terrain heights excluding the two crushable materials. An alternate
+    /// material profile remains correct without replacing the resident cache.
+    pub fn floor_tile(&self, x: u32, z: u32, yielding: [Mat; 2]) -> Option<[u16; 2]> {
+        if x >= self.nx.div_ceil(8) || z >= self.nz.div_ceil(8) {
+            return None;
+        }
+        let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
+        let scan = || {
+            let mut bounds = [u16::MAX, 0];
+            let mut cursor = Self::mat_cursor();
+            for z in z * 8..((z + 1) * 8).min(self.nz) {
+                for x in x * 8..((x + 1) * 8).min(self.nx) {
+                    let mut top = 0;
+                    for y in (0..self.column_ceiling(x, z)).rev() {
+                        if !self.solid(x, y, z) {
+                            continue;
+                        }
+                        let material = self.material_cached(&mut cursor, x, y, z);
+                        if material != AIR && !yielding.contains(&material) {
+                            top = (y + 1) as u16;
+                            break;
+                        }
+                    }
+                    bounds[0] = bounds[0].min(top);
+                    bounds[1] = bounds[1].max(top);
+                }
+            }
+            bounds
+        };
+        let &(key, bounds) = self.floor_tiles[i].get_or_init(|| (yielding, scan()));
+        Some(if key == yielding { bounds } else { scan() })
+    }
+    fn forget_floor_tile(&mut self, x: u32, z: u32) {
+        let i = (x / 8) as usize + self.nx.div_ceil(8) as usize * (z / 8) as usize;
+        self.floor_tiles[i].take();
+    }
     #[inline]
     pub fn inside(&self, x: u32, y: u32, z: u32) -> bool {
         x < self.nx && y < self.ny && z < self.nz
@@ -710,6 +769,11 @@ impl World {
         let mut column = vec![AIR; self.ny as usize];
         let mut rows = vec![0u32; self.ny as usize];
         for ((cx, cz), changed_y) in columns {
+            for z in (cz * CS as u32..((cz + 1) * CS as u32).min(self.nz)).step_by(8) {
+                for x in (cx * CS as u32..((cx + 1) * CS as u32).min(self.nx)).step_by(8) {
+                    self.forget_floor_tile(x, z);
+                }
+            }
             let x0 = cx * CS as u32;
             let x1 = ((cx + 1) * CS as u32).min(self.nx);
             let shift = x0 % 64;
@@ -824,6 +888,7 @@ impl World {
     }
 
     fn refresh_ceiling(&mut self, x: u32, z: u32) {
+        self.forget_floor_tile(x, z);
         let top = (0..self.ny)
             .rev()
             .find(|&y| {
@@ -1067,6 +1132,7 @@ impl World {
         if was == e.mat {
             return None;
         }
+        self.forget_floor_tile(e.x, e.z);
         let ci = self.chunk_index(e.x, e.y, e.z);
         self.materialize(ci);
         if let Some(c) = &mut self.chunks[ci] {
@@ -1293,6 +1359,7 @@ impl World {
                             self.bits[word] & mask != 0
                         })
                         .map_or(0, |y| y + 1);
+                    self.forget_floor_tile(x, z);
                     self.ceiling[x as usize + self.nx as usize * z as usize] = top as u16;
                 }
             }

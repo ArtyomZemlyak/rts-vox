@@ -818,6 +818,34 @@ impl Motion {
             .then_some(to);
         self.enabled = true;
         self.hunt = None;
+        if !self.blocked
+            && !self.needs_recovery
+            && self.route.is_empty()
+            // Finish a checked local bypass before returning to the global map.
+            && (!self.partial_path || self.cursor >= self.path.len())
+            && clear(to.map(Fx::from_int), self.drive.head)
+            && self.destination.is_some()
+            && (0..2).any(|a| {
+                from[a].sub(Fx::from_int(to[a])).abs()
+                    >= Fx::from_int(self.navigation.global_min_distance)
+            })
+        {
+            if let Some(plan) = nav::vehicle::coarse::plan(
+                w,
+                rubble,
+                shape,
+                from,
+                to,
+                nav::vehicle::coarse::Config {
+                    cell: self.navigation.global_cell_units,
+                    nodes: self.navigation.global_nodes,
+                    yielding: self.navigation.fell.materials,
+                },
+            ) {
+                self.take_plan(plan);
+                return true;
+            }
+        }
         let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
             .with_rubble(rubble);
         match nav::vehicle::Hunt::start_bounded(
@@ -1014,8 +1042,14 @@ impl Motion {
     pub fn started_search(&self) -> bool {
         self.started
     }
-    /// Planner budget and weight, for benches and tests; the data sets them.
+    /// Override the global graph allowance (zero selects the oriented planner).
+    pub fn set_global_search_limit(&mut self, nodes: usize) {
+        self.navigation.global_nodes = nodes;
+    }
+    /// Fine planner budget and weight, for benches and tests; the data sets them.
     pub fn set_search(&mut self, nodes: usize, heuristic_pct: u32) {
+        // Explicit fine-search diagnostics bypass the whole-map planner.
+        self.navigation.global_nodes = 0;
         self.navigation.search_nodes = nodes;
         self.navigation.heuristic_pct = heuristic_pct;
     }
@@ -1615,6 +1649,7 @@ mod tests {
         let rubble = nav::vehicle::Rubble::new();
         for displacement in 0..3 {
             let mut motion = Motion::new([60, 16, 100], RangeUnitKind::Tank, &body);
+            motion.navigation.global_nodes = 0; // Exercise the resumable fine planner.
             motion.navigation.search_nodes_per_tick = 8;
             assert!(motion.move_to(&world, goal, &body, &[], &rubble));
             assert!(motion.searching(), "fixture needs an unfinished search");
@@ -1919,6 +1954,44 @@ mod tests {
             &nav::vehicle::Rubble::new(),
             &nav::vehicle::Changed::default(),
         );
+    }
+    #[test]
+    fn a_whole_map_order_is_immediate_drives_to_the_end_and_replays() {
+        let world = World::new(10000, 32, 256, 100, Box::new(Ground { depth: 0 }));
+        world.prepare_navigation([4, 5]);
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let body = if kind == RangeUnitKind::Tank {
+                voxel::unit::tank()
+            } else {
+                voxel::unit::strider()
+            };
+            let mut motion = Motion::new([64, 16, 128], kind, &body);
+            let goal = [9800, 128];
+            assert!(motion.move_to(&world, goal, &body, &[], &nav::vehicle::Rubble::new()));
+            assert!(!motion.searching());
+            assert!(!motion.partial_path);
+            assert_eq!(motion.path.last(), Some(&goal));
+            let mut saved = Blob::new();
+            motion.save(&mut saved);
+            let mut restored = Motion::new([64, 16, 128], kind, &body);
+            assert!(restored.load(&mut Scan::new(&saved.v)));
+            let mut arrived = false;
+            for tick in 0..22000 {
+                step(&mut motion, &world, &body, &[], tick);
+                step(&mut restored, &world, &body, &[], tick);
+                assert_eq!(motion.pos, restored.pos);
+                if motion.destination.is_none() {
+                    arrived = true;
+                    break;
+                }
+            }
+            assert!(arrived, "{kind:?} stopped at {:?}", motion.pos);
+            let mut a = Blob::new();
+            let mut b = Blob::new();
+            motion.save(&mut a);
+            restored.save(&mut b);
+            assert_eq!(a.v, b.v);
+        }
     }
     #[test]
     fn stationary_clearance_still_observes_destroyed_support_next_tick() {
@@ -2726,6 +2799,7 @@ mod tests {
         }
         assert_eq!(m.drive.vel, full, "the fixture needs a hull at full speed");
         let (route, goal) = (m.path.clone(), [580, 420]);
+        m.navigation.global_nodes = 0; // Exercise the resumable fine planner.
         m.navigation.search_nodes_per_tick = 8;
         assert!(m.retarget(&w, goal, &body, &[], &rubble));
         assert!(
@@ -2813,6 +2887,7 @@ mod tests {
         mover.enabled = true;
         mover.destination = Some(goal);
         mover.path = vec![goal];
+        mover.navigation.global_nodes = 0; // Exercise the resumable fine planner.
         mover.navigation.search_nodes_per_tick = 1;
         assert!(mover.plan_to(&w, goal, &body, &[], &rubble));
         assert!(mover.searching());

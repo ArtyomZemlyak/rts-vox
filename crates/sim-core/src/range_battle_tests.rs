@@ -694,7 +694,11 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
     tuning.kinetic_range = 100;
     tuning.pursuit_ticks = 1;
     r.start_battle().unwrap();
+    r.units[0].motion.set_global_search_limit(0);
     r.step();
+    r.units[0]
+        .motion
+        .set_global_search_limit(r.navigation.global_nodes);
     assert!(r.units[0].motion.searching(), "route was trivial");
     for _ in 0..30 {
         r.step();
@@ -721,15 +725,20 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
 /// taken in the middle of the chase.
 #[test]
 fn a_long_pursuit_reaches_targets_that_keep_moving() {
-    long_pursuit(false);
+    long_pursuit(false, false);
 }
 
 #[test]
 fn a_long_pursuit_with_shared_search_budget_reaches_moving_targets() {
-    long_pursuit(true);
+    long_pursuit(true, false);
 }
 
-fn long_pursuit(borrow_idle: bool) {
+#[test]
+fn whole_map_routes_pursue_targets_with_immediate_move_orders_and_replay() {
+    long_pursuit(true, true);
+}
+
+fn long_pursuit(borrow_idle: bool, global: bool) {
     let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
     layout.battle = true;
     if let Some(course) = &mut layout.course {
@@ -755,6 +764,14 @@ fn long_pursuit(borrow_idle: bool) {
         // This measures pursuit, not lethality. Keep both moving targets
         // alive for the whole route and replay even as stock ammunition evolves.
         r.battle.kinetic_config.energy = 1;
+        if !global {
+            // Keep the suspended-frontier regressions on the fine planner
+            // for both pursuer and targets. Instant target orders change
+            // their trajectory too, so test that case independently.
+            for unit in &mut r.units {
+                unit.motion.set_global_search_limit(0);
+            }
+        }
         if !borrow_idle {
             // Preserve the original slow-frontier regression: multiple
             // route replacements must complete while the hull is at speed.
@@ -788,13 +805,14 @@ fn long_pursuit(borrow_idle: bool) {
     for tick in 0..2400 {
         steer(&mut a);
         let searching = a.units[0].motion.searching();
+        let previous_goal = a.units[0].motion.destination;
         a.step();
         let m = &a.units[0].motion;
         restarts += usize::from(m.started_search());
-        // A search that answered with a route to the new goal while the
-        // hull was driving at more than half its speed.
+        // A deferred or immediate route to a new goal is accepted while
+        // the hull is driving at more than half its speed.
         taken_at_speed += usize::from(
-            searching
+            (searching || previous_goal != m.destination)
                 && !m.searching()
                 && m.path.last().copied() == m.destination
                 && m.drive.vel > cruise,
@@ -833,11 +851,11 @@ fn long_pursuit(borrow_idle: bool) {
         "the route search restarted {restarts} times"
     );
     assert!(
-        first_shot.is_some_and(|t| t < 800),
+        first_shot.is_some_and(|t| t < if global { 1300 } else { 800 }),
         "first shot at {first_shot:?}"
     );
     assert!(
-        a.battle.actors[0].fired >= 10,
+        a.battle.actors[0].fired >= if global { 8 } else { 10 },
         "fired {}",
         a.battle.actors[0].fired
     );

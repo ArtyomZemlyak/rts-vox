@@ -1,5 +1,11 @@
 (
     cell_units: 8,
+    // Whole-map corridors share 8x8 terrain summaries prepared at load.
+    // The two frontiers share this expansion cap; local recovery remains exact.
+    global_cell_units: 32,
+    global_nodes: 16384,
+    // Below eight coarse cells, use the oriented search for local maneuvers.
+    global_min_distance: 256,
     search_nodes: 16000,
     // Graph work counts popped nodes, endpoint queries and swept edge poses.
     // Work per tick also includes goal selection and direct/final connections.

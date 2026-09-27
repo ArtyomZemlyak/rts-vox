@@ -146,3 +146,69 @@ fn a_reset_keeps_the_configured_materialization_cap() {
         assert_eq!(world.max_materialize_per_tick, 9);
     }
 }
+
+#[test]
+fn navigation_tiles_track_material_replacement_reset_and_snapshot_load() {
+    let mut w = World::new(73, 67, 45, 100, Box::new(Terrain));
+    let compare = |w: &World| {
+        for key in [[4, 5], [2, 5]] {
+            for z in 0..w.nz.div_ceil(8) {
+                for x in 0..w.nx.div_ceil(8) {
+                    let mut expected = [u16::MAX, 0];
+                    for z in z * 8..((z + 1) * 8).min(w.nz) {
+                        for x in x * 8..((x + 1) * 8).min(w.nx) {
+                            let top = (0..w.ny)
+                                .rev()
+                                .find(|&y| {
+                                    let m = w.material(x, y, z);
+                                    m != AIR && !key.contains(&m)
+                                })
+                                .map_or(0, |y| (y + 1) as u16);
+                            expected[0] = expected[0].min(top);
+                            expected[1] = expected[1].max(top);
+                        }
+                    }
+                    assert_eq!(w.floor_tile(x, z, key), Some(expected));
+                }
+            }
+        }
+    };
+    w.prepare_navigation([4, 5]);
+    compare(&w);
+    w.queue_edit(Edit::put(12, 30, 14, 4));
+    w.flush();
+    compare(&w);
+    // Same ceiling, different traversability: foliage becomes steel.
+    w.queue_edit(Edit::put(12, 30, 14, 3));
+    w.flush();
+    compare(&w);
+    let mut blob = fx::blob::Blob::new();
+    w.save(&mut blob);
+    w.restore_pristine();
+    compare(&w);
+    assert!(w.load(&mut fx::blob::Scan::new(&blob.v)));
+    compare(&w);
+    w.queue_edit(Edit::dig(12, 30, 14));
+    w.flush();
+    compare(&w);
+}
+
+#[test]
+fn navigation_tiles_follow_generator_region_replacement() {
+    struct Level(u32);
+    impl Generator for Level {
+        fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
+            if y < self.0 {
+                2
+            } else {
+                AIR
+            }
+        }
+    }
+    let mut w = World::new(80, 32, 48, 100, Box::new(Level(6)));
+    w.prepare_navigation([4, 5]);
+    assert_eq!(w.floor_tile(5, 2, [4, 5]), Some([6, 6]));
+    w.reset_generator_regions(Box::new(Level(12)), &[([32, 0], [64, 48])]);
+    assert_eq!(w.floor_tile(5, 2, [4, 5]), Some([12, 12]));
+    assert_eq!(w.floor_tile(0, 2, [4, 5]), Some([6, 6]));
+}

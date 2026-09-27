@@ -6,6 +6,7 @@
 //! floor is the terrain beneath them, and the pose reports how many footprint
 //! columns hold such matter inside the hull height, so the caller can crush
 //! it and the planner can price the detour.
+pub mod coarse;
 mod connection;
 use connection::Connection;
 use fx::{angle, Fx};

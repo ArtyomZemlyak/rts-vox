@@ -3,6 +3,9 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct Navigation {
     pub cell_units: i32,
+    pub global_cell_units: i32,
+    pub global_nodes: usize,
+    pub global_min_distance: i32,
     pub search_nodes: usize,
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
@@ -53,7 +56,11 @@ pub struct Felling {
 impl Navigation {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let n: Self = ron::from_str(text).map_err(|e| e.to_string())?;
-        if n.searches_started_per_tick == 0
+        if !(8..=128).contains(&n.global_cell_units)
+            || !(n.global_cell_units as u32).is_power_of_two()
+            || !(64..=32768).contains(&n.global_nodes)
+            || !(0..=16384).contains(&n.global_min_distance)
+            || n.searches_started_per_tick == 0
             || !(1..=51200).contains(&n.search_nodes_per_tick)
             || !(1..=51200).contains(&n.search_resume_budget)
             || !(1..=n.search_resume_budget).contains(&n.search_resume_per_unit)
@@ -90,6 +97,9 @@ mod tests {
     #[test]
     fn a_navigation_file_missing_a_number_is_refused() {
         for field in [
+            "global_cell_units: 32,",
+            "global_nodes: 16384,",
+            "global_min_distance: 256,",
             "search_nodes_per_tick: 96,",
             "search_resume_budget: 768,",
             "search_resume_per_unit: 192,",

@@ -2417,6 +2417,12 @@ impl BlastRange {
         world: World,
         completed: &mut impl FnMut(&'static str),
     ) -> Self {
+        let navigation = modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .expect("navigation");
+        world.prepare_navigation(navigation.fell.materials);
+        completed("navigation");
         let size = [world.nx, world.ny, world.nz];
         let stock =
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
@@ -2527,10 +2533,7 @@ impl BlastRange {
                     .expect("turret limits"),
                 crate::TICKS_PER_SECOND,
             ),
-            navigation: modding::navigation::Navigation::from_ron(include_str!(
-                "../../../data/range-navigation.ron"
-            ))
-            .expect("navigation"),
+            navigation,
             shields,
             shield_hits: Vec::new(),
             shield_tuning,
@@ -3015,6 +3018,7 @@ impl BlastRange {
         if !r.world.load(&mut s) {
             return None;
         }
+        r.world.prepare_navigation(r.navigation.fell.materials);
         r.matter.load(&mut s, &r.world, &r.units)?;
         if r.surface_work.iter().any(|(p, work)| {
             let m = material(&r.world, *p);
@@ -4290,6 +4294,16 @@ impl Explosion {
 
 #[cfg(test)]
 mod tests {
+    // Snapshot/frontier regressions deliberately select a suspended fine search.
+    // Restore the runtime configuration before saving or advancing either copy.
+    fn fine_order(r: &mut super::BlastRange, goal: [i32; 2]) -> bool {
+        r.gun.motion.set_global_search_limit(0);
+        let accepted = r.order_move(goal);
+        r.gun
+            .motion
+            .set_global_search_limit(r.navigation.global_nodes);
+        accepted
+    }
     use super::*;
 
     #[test]
@@ -6096,7 +6110,7 @@ mod tests {
     fn a_heap_landing_under_a_search_in_flight_is_seen_by_both_runs() {
         for z in (346..=436).step_by(10) {
             let mut a = quiet_cover();
-            assert!(a.order_move([128, 470]), "the order was refused");
+            assert!(fine_order(&mut a, [128, 470]), "the order was refused");
             assert!(a.gun.motion.searching(), "the route was found at once");
             drop_heap(&mut a, [128, 16, z], 500, 32);
             let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
@@ -6122,7 +6136,7 @@ mod tests {
         a.step();
         assert!(!a.rubble.is_empty(), "the heap is not rubble");
         // Around the wall: a search of many slices.
-        assert!(a.order_move([450, 336]), "the order was refused");
+        assert!(fine_order(&mut a, [450, 336]), "the order was refused");
         assert!(a.gun.motion.searching(), "the route was found at once");
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         for tick in 0..40 {
@@ -6140,7 +6154,7 @@ mod tests {
     fn a_search_finishes_while_the_far_side_of_the_map_is_dug() {
         fn answer(dig: bool) -> (u32, Vec<[i32; 2]>) {
             let mut a = quiet_cover();
-            assert!(a.order_move([128, 470]), "the order was refused");
+            assert!(fine_order(&mut a, [128, 470]), "the order was refused");
             let mut ticks = 0;
             while a.gun.motion.searching() && ticks < 400 {
                 if dig {
@@ -6175,7 +6189,7 @@ mod tests {
             }
         }
         let mut a = quiet_cover();
-        assert!(a.order_move([450, 336]), "the order was refused");
+        assert!(fine_order(&mut a, [450, 336]), "the order was refused");
         // The last drain before the snapshot digs near the search too.
         for tick in 0..4 {
             dig(&mut a, tick);
@@ -6838,7 +6852,7 @@ mod tests {
         a.patrols_running = false;
         a.fire_tick = u32::MAX;
         let start = a.gun.motion.pos;
-        assert!(a.order_move([128, 470]), "the order was refused");
+        assert!(fine_order(&mut a, [128, 470]), "the order was refused");
         assert!(
             a.gun.motion.searching(),
             "the woods were found in one tick: {:?}",
@@ -8067,7 +8081,7 @@ mod tests {
         // the straight run to it is walked pose by pose. The frontier
         // waits for the next tick, so one tick never pays for both.
         let mut r = BlastRange::new(config());
-        assert!(r.order_move([128, 470]), "the order was refused");
+        assert!(fine_order(&mut r, [128, 470]), "the order was refused");
         assert!(
             r.gun.motion.searching(),
             "the goal answered at once; this test needs one that does not"

@@ -90,7 +90,7 @@ fn main() {
         }
         assert!(!scene.gun.motion.searching(), "search never completed");
         println!(
-            "plan to=({},{}) ok={ok} us={us} slices={slices} max_slice_us={slice_us} nodes={} poses={} scans={} samples={} path_len={} blocked={}",
+            "plan to=({},{}) ok={ok} us={us} slices={slices} max_slice_us={slice_us} nodes={} poses={} scans={} samples={} path_len={} blocked={} partial={}",
             target[0],
             target[1],
             scene.gun.motion.last_plan[0],
@@ -98,7 +98,8 @@ fn main() {
             scene.gun.motion.last_probe[0],
             scene.gun.motion.last_probe[1],
             scene.gun.motion.path.len(),
-            scene.gun.motion.blocked
+            scene.gun.motion.blocked,
+            scene.gun.motion.partial_path
         );
     }
     if args.iter().any(|a| a == "--plan-only") {
