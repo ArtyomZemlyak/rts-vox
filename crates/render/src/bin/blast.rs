@@ -49,6 +49,8 @@ mod streaming;
 mod witness;
 #[path = "blast/workbench.rs"]
 mod workbench;
+#[path = "blast/wreck.rs"]
+mod wreck;
 use damage_art::SkinBindings;
 use std::collections::BTreeSet;
 use std::sync::{atomic::Ordering, Arc};
@@ -98,9 +100,10 @@ struct Witness(usize, Transform, Option<usize>, bool);
 #[derive(Resource)]
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
+    burned_materials: [Handle<StandardMaterial>; look::FINISHES],
     pristine: Arc<[voxel::unit::UnitBody; 2]>,
     skins: Arc<[SkinBindings; 2]>,
-    seen: Vec<Option<(usize, u64, RangeUnitKind)>>,
+    seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
     next_mesh: usize,
@@ -1181,6 +1184,7 @@ fn setup(
     let finishes = render::unit_surface::materials(&mut images, &mut materials);
     commands.insert_resource(WitnessArt {
         materials: finishes.clone(),
+        burned_materials: wreck::materials(&finishes, &mut materials),
         skins: Arc::new([
             SkinBindings::new(&voxel::unit::tank()),
             SkinBindings::new(&voxel::unit::strider()),
@@ -1435,6 +1439,7 @@ fn advance(
             kind = None;
         }
         moving::before(&scene.sim, &mut visual, &gas.window);
+        fire_fx.before(&scene.sim);
         let mut keep_terrain = false;
         let mut rebuild = |config, layout: RangeLayout| {
             keep_terrain = !streaming.loading()
@@ -1569,6 +1574,7 @@ fn advance(
             scene.previous_shell = Some(muzzle_vec(&scene.sim));
         }
         moving::before(&scene.sim, &mut visual, &gas.window);
+        fire_fx.before(&scene.sim);
         if panel.demo {
             if scene.sim.tick == 20 {
                 scene.sim.order_move([235, 365]);

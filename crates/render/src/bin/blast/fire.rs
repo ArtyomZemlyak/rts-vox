@@ -5,10 +5,14 @@ use sim_core::blast::battle::Weapon as BattleWeapon;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
 const BURST_PARTICLES: usize = 57;
+const DEATH_PARTICLES: usize = 41;
+const DEATH_LIGHTS: usize = 8;
 const TRACER_CAP: usize = 512;
 const TRACER_LIFE: f32 = 0.11;
 #[derive(Component)]
 pub(super) struct Layer(bool);
+#[derive(Component)]
+pub(super) struct DeathLight(usize);
 #[derive(Clone, Copy)]
 struct Particle {
     at: Vec3,
@@ -31,6 +35,8 @@ struct Tracer {
 }
 #[derive(Resource, Default)]
 pub struct Effects {
+    alive: Vec<bool>,
+    deaths: Vec<(Vec3, f32)>,
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
     energy_impacts: Vec<(sim_core::blast::battle::Impact, u32)>,
@@ -91,8 +97,21 @@ fn flame_colour(p: &Particle, t: f32, now: f32) -> [f32; 4] {
 fn point(p: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(p.map(|v| v.to_f64_lossy() as f32))
 }
+/// Vent the presentation above the compartment, not inside opaque armour.
+fn destruction_origin(u: &sim_core::blast::RangeUnit) -> Vec3 {
+    let mut cell = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
+    if let Some(y) = (0..usize::from(u.body.vol.ny))
+        .rev()
+        .find(|&y| u.body.vol.get(cell[0], y, cell[2]))
+    {
+        cell[1] = y + 2;
+    }
+    Vec3::from(u.world_pos(cell).map(|v| v as f32)) + Vec3::Y
+}
 impl Effects {
     pub fn clear(&mut self) {
+        self.alive.clear();
+        self.deaths.clear();
         self.particles.clear();
         self.tracers.clear();
         self.energy_impacts.clear();
@@ -101,6 +120,72 @@ impl Effects {
         self.serial = 0;
         self.last_frame = None;
         self.last_dust_tick = None;
+    }
+    /// Capture the live flags before the first tick too; loading a wreck
+    /// establishes a baseline, it does not replay its destruction.
+    pub fn before(&mut self, sim: &BlastRange) {
+        self.alive.clear();
+        self.alive.extend(
+            sim.units
+                .iter()
+                .chain((!sim.battle_mode()).then_some(&sim.gun))
+                .map(|u| u.status.alive),
+        );
+    }
+    fn destruction(&mut self, at: Vec3, now: f32) {
+        let needed = self
+            .particles
+            .len()
+            .saturating_add(DEATH_PARTICLES)
+            .saturating_sub(CAP);
+        self.particles.drain(..needed);
+        if self.deaths.len() == DEATH_LIGHTS {
+            self.deaths.remove(0);
+        }
+        self.deaths.push((at, now));
+        self.add(at, Vec3::ZERO, now, 0.14, 16.0, false);
+        for i in 0..18u32 {
+            let seed = self.serial.wrapping_add(i * 13);
+            let angle = std::f32::consts::TAU * (i as f32 + noise(seed)) / 18.0;
+            let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
+            self.add_burst_flame(
+                at + radial * 4.0,
+                radial * (10.0 + noise(seed + 1) * 22.0) + Vec3::Y * (9.0 + noise(seed + 2) * 20.0),
+                now,
+                0.24 + noise(seed + 3) * 0.32,
+                3.0 + noise(seed + 4) * 7.0,
+            );
+        }
+        for i in 0..12u32 {
+            let seed = self.serial.wrapping_add(i * 17);
+            self.add(
+                at,
+                Vec3::new(
+                    noise(seed) * 60.0 - 30.0,
+                    12.0 + noise(seed + 1) * 32.0,
+                    noise(seed + 2) * 60.0 - 30.0,
+                ),
+                now,
+                0.3 + noise(seed + 3) * 0.5,
+                0.5 + noise(seed + 4),
+                false,
+            );
+        }
+        for i in 0..10u32 {
+            let seed = self.serial.wrapping_add(i * 19);
+            self.add(
+                at + Vec3::new(noise(seed) * 12.0 - 6.0, 4.0, noise(seed + 1) * 12.0 - 6.0),
+                Vec3::new(
+                    noise(seed + 2) * 8.0 - 4.0,
+                    9.0 + noise(seed + 3) * 9.0,
+                    noise(seed + 4) * 8.0 - 4.0,
+                ),
+                now,
+                1.2 + noise(seed + 5) * 1.2,
+                5.0 + noise(seed + 6) * 5.0,
+                true,
+            );
+        }
     }
     fn add(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32, smoke: bool) {
         if self.particles.len() >= CAP {
@@ -256,6 +341,7 @@ impl Effects {
     pub fn capture(&mut self, sim: &BlastRange) {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
+        self.deaths.retain(|(_, born)| now - born < 0.45);
         self.tracers.retain(|p| now - p.born < TRACER_LIFE);
         self.energy_impacts
             .retain(|(_, tick)| sim.tick.saturating_sub(*tick) <= 30);
@@ -314,6 +400,14 @@ impl Effects {
             .enumerate()
         {
             let dead = !u.status.alive;
+            if dead && self.alive.get(id) == Some(&true) {
+                self.destruction(destruction_origin(u), now);
+            }
+            if id >= self.alive.len() {
+                self.alive.push(u.status.alive);
+            } else {
+                self.alive[id] = u.status.alive;
+            }
             let removed = u.removed.len() + u.seg_removed.len();
             let remaining = u.body.solid_count() as usize
                 + u.body
@@ -757,8 +851,26 @@ pub fn draw(
     camera: Query<&Transform, With<Camera3d>>,
     bodies: Query<(&Witness, &Transform)>,
     mut layers: Query<(&Layer, &mut Visibility)>,
+    mut death_lights: Query<
+        (&DeathLight, &mut PointLight, &mut Transform),
+        (Without<Camera3d>, Without<Witness>),
+    >,
 ) {
     if fx.fire.is_none() {
+        for i in 0..DEATH_LIGHTS {
+            commands.spawn((
+                DeathLight(i),
+                PointLight {
+                    intensity: 0.0,
+                    color: Color::srgb(1.0, 0.43, 0.10),
+                    range: 95.0,
+                    radius: 4.0,
+                    shadow_maps_enabled: false,
+                    ..default()
+                },
+                Transform::default(),
+            ));
+        }
         for smoke in [false, true] {
             let handle = meshes.add(fire_mesh(&MeshBuf::default()));
             let material = materials.add(StandardMaterial {
@@ -792,6 +904,15 @@ pub fn draw(
             (scene.acc * 30.0).clamp(0.0, 1.0)
         })
         / 30.0;
+    for (slot, mut light, mut transform) in &mut death_lights {
+        if let Some(&(at, born)) = fx.deaths.get(slot.0) {
+            let t = ((now - born) / 0.45).clamp(0.0, 1.0);
+            light.intensity = 14_000_000.0 * (1.0 - smooth01(t));
+            transform.translation = at;
+        } else {
+            light.intensity = 0.0;
+        }
+    }
     if fx.last_frame == Some(now) {
         return;
     }
@@ -1499,6 +1620,55 @@ mod tests {
         assert!(fire_mesh(&b)
             .asset_usage
             .contains(RenderAssetUsages::MAIN_WORLD));
+    }
+    #[test]
+    fn destruction_flash_vents_above_the_opaque_roof() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let u = sim_core::blast::RangeUnit::of_kind(kind, [300, 16, 300]);
+            let core = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
+            let roof = (0..usize::from(u.body.vol.ny))
+                .rev()
+                .find(|&y| u.body.vol.get(core[0], y, core[2]))
+                .unwrap();
+            let top = u.world_pos([core[0], roof, core[2]])[1] as f32;
+            assert!(destruction_origin(&u).y > top);
+        }
+    }
+    #[test]
+    fn destruction_is_one_bounded_burst_not_an_endless_fuel_source() {
+        let mut r = BlastRange::new(config(true, false));
+        let mut effects = Effects::default();
+        effects.before(&r);
+        r.units[0].status.alive = false;
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), DEATH_PARTICLES);
+        assert_eq!(effects.deaths.len(), 1);
+        assert!(effects.particles.iter().any(|p| p.burst_flame));
+        assert!(effects.particles.iter().any(|p| p.smoke && p.edge >= 5.0));
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), DEATH_PARTICLES);
+        r.tick = 90;
+        effects.capture(&r);
+        assert!(effects.particles.is_empty() && effects.deaths.is_empty());
+        effects.clear();
+        effects.before(&r); // A loaded wreck is a baseline, not a new death.
+        effects.capture(&r);
+        assert!(effects.particles.is_empty());
+        r.units[0].status.alive = true;
+        effects.before(&r); // Reset/replacement can die independently.
+        r.units[0].status.alive = false;
+        effects.capture(&r);
+        assert_eq!(effects.particles.len(), DEATH_PARTICLES);
+    }
+    #[test]
+    fn simultaneous_destructions_keep_the_particle_and_light_caps() {
+        let mut fx = Effects::default();
+        for i in 0..100 {
+            fx.destruction(Vec3::new(i as f32, 0.0, 0.0), 0.0);
+        }
+        assert_eq!(fx.particles.len(), CAP);
+        assert_eq!(fx.deaths.len(), DEATH_LIGHTS);
+        assert_eq!(fx.deaths.last().unwrap().0.x, 99.0);
     }
     #[test]
     fn healthy_damaged_and_destroyed_units_have_distinct_effects() {

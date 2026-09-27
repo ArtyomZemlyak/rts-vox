@@ -4,7 +4,7 @@ use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use sim_core::blast::RangeUnit;
 use std::collections::BTreeMap;
 
-type Revision = (usize, u64, RangeUnitKind);
+pub(super) type Revision = (usize, u64, RangeUnitKind, bool);
 pub(super) struct Pending {
     revision: Revision,
     task: Task<Vec<Built>>,
@@ -17,6 +17,7 @@ struct Built {
     turret: bool,
 }
 struct Snapshot {
+    dead: bool,
     body: voxel::unit::UnitBody,
     dents: BTreeMap<[u8; 3], u32>,
     segment_dents: BTreeMap<(u8, [u8; 3]), u32>,
@@ -27,6 +28,7 @@ struct Snapshot {
 impl From<&RangeUnit> for Snapshot {
     fn from(u: &RangeUnit) -> Self {
         Self {
+            dead: !u.status.alive,
             body: u.body.clone(),
             allied: None,
             dents: u.dents.clone(),
@@ -174,6 +176,9 @@ fn build(
                     }
                 }
             }
+            if unit.dead {
+                wreck::charred(buf);
+            }
             result.push(Built {
                 mesh: mesh(buf),
                 finish: k,
@@ -232,7 +237,7 @@ pub(super) fn update(
     mut art: ResMut<WitnessArt>,
     debris_art: Res<Art>,
     mut meshes: ResMut<Assets<Mesh>>,
-    old: Query<(Entity, &Witness)>,
+    mut old: Query<(Entity, &Witness, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     if art.generation != scene.generation {
         art.pending.clear();
@@ -240,8 +245,15 @@ pub(super) fn update(
         art.emitted.clear();
         art.generation = scene.generation;
     }
-    for (entity, w) in &old {
-        if w.0 >= scene.sim.units.len() {
+    for (entity, w, mut material) in &mut old {
+        if let Some(unit) = scene.sim.units.get(w.0) {
+            if !unit.status.alive {
+                // Darken immediately while the bounded mesh worker bakes soot.
+                if let Some(finish) = art.materials.iter().position(|m| *m == material.0) {
+                    material.0 = art.burned_materials[finish].clone();
+                }
+            }
+        } else {
             commands.entity(entity).despawn();
         }
     }
@@ -285,7 +297,7 @@ pub(super) fn update(
                 // A reset invalidates all jobs above. Damage may have advanced
                 // while this job ran: show this completed revision, then build
                 // the latest one; never restart an in-flight job every tick.
-                for (entity, w) in &old {
+                for (entity, w, _) in &old {
                     if w.0 == id {
                         commands.entity(entity).despawn();
                     }
@@ -296,7 +308,11 @@ pub(super) fn update(
                     transform.translation += base;
                     commands.spawn((
                         Mesh3d(meshes.add(b.mesh)),
-                        MeshMaterial3d(art.materials[b.finish].clone()),
+                        MeshMaterial3d(if unit.status.alive {
+                            art.materials[b.finish].clone()
+                        } else {
+                            art.burned_materials[b.finish].clone()
+                        }),
                         transform,
                         Witness(id, b.local, b.segment, b.turret),
                     ));
@@ -312,7 +328,12 @@ pub(super) fn update(
         }
         let id = (first + offset) % count;
         let unit = &scene.sim.units[id];
-        let revision = (unit.removed.len(), unit.revision, unit.kind);
+        let revision = (
+            unit.removed.len(),
+            unit.revision,
+            unit.kind,
+            !unit.status.alive,
+        );
         if art.seen[id] == Some(revision) || art.pending[id].is_some() {
             continue;
         }
@@ -340,6 +361,44 @@ pub(super) fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn destruction_chars_every_root_and_segment_without_erasing_geometry() {
+        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+            let unit = RangeUnit::of_kind(kind, [300, 16, 300]);
+            let pristine = unit.body.clone();
+            let skins = SkinBindings::new(&pristine);
+            let clean = Snapshot::from(&unit);
+            let mut dead = Snapshot::from(&unit);
+            dead.dead = true; // No dent revision: alive state itself invalidates the finish.
+            let config = scaled_config(true, false, 1000);
+            let clean = build(&clean, 0, &pristine, &skins, &config);
+            let dead = build(&dead, 0, &pristine, &skins, &config);
+            assert_eq!(clean.len(), dead.len());
+            assert!(dead.iter().any(|p| p.segment.is_some()));
+            for (a, b) in clean.iter().zip(&dead) {
+                assert_eq!(
+                    a.mesh.attribute(Mesh::ATTRIBUTE_POSITION),
+                    b.mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                );
+                assert_eq!(
+                    a.mesh.attribute(Mesh::ATTRIBUTE_UV_0),
+                    b.mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+                );
+                let bevy::mesh::VertexAttributeValues::Float32x4(colours) =
+                    b.mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap()
+                else {
+                    panic!("colours");
+                };
+                assert!(colours
+                    .iter()
+                    .all(|c| c[0] <= 0.14 && c[1] <= c[0] && c[2] <= c[1] && c[3] == 1.0));
+                assert_ne!(
+                    a.mesh.attribute(Mesh::ATTRIBUTE_COLOR),
+                    b.mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+                );
+            }
+        }
+    }
     #[test]
     fn damaged_tank_plate_changes_its_own_visible_mesh() {
         let pristine = voxel::unit::tank();

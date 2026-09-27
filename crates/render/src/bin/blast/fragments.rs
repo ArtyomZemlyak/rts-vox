@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::BTreeMap;
 #[derive(Component)]
-pub struct Piece(u64, u64);
+pub struct Piece(u64, u64, bool);
 #[derive(Default)]
 pub struct Cache {
     meshes: BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
@@ -38,11 +38,18 @@ pub fn draw(
     let fragments = &scene.sim.matter.debris.fragments;
     let ids: BTreeMap<_, _> = fragments
         .iter()
-        .map(|f| (f.id, f.chunk.as_ref().map_or(0, |c| c.hash())))
+        .map(|f| {
+            (
+                f.id,
+                f.chunk.as_ref().map_or((0, false), |c| {
+                    (c.hash(), !scene.sim.units[c.template as usize].status.alive)
+                }),
+            )
+        })
         .collect();
     let mut entities = BTreeMap::new();
     for (e, p, _) in &mut old {
-        if ids.get(&p.0) != Some(&p.1) {
+        if ids.get(&p.0) != Some(&(p.1, p.2)) {
             commands.entity(e).despawn();
             cache.chunks.remove(&p.0);
         } else {
@@ -85,18 +92,31 @@ pub fn draw(
                 continue;
             }
             chunk_builds += 1;
-            let kind = scene.sim.units[chunk.template as usize].kind;
+            let unit = &scene.sim.units[chunk.template as usize];
+            let dead = !unit.status.alive;
+            let kind = unit.kind;
             let template = &art.pristine[usize::from(kind == RangeUnitKind::Strider)];
             let mut handles = Vec::new();
             commands
-                .spawn((Piece(f.id, chunk.hash()), transform, Visibility::default()))
+                .spawn((
+                    Piece(f.id, chunk.hash(), dead),
+                    transform,
+                    Visibility::default(),
+                ))
                 .with_children(|parent| {
-                    for (finish, buf) in render::model::section_to_mesh(template, chunk) {
+                    for (finish, mut buf) in render::model::section_to_mesh(template, chunk) {
+                        if dead {
+                            wreck::charred(&mut buf);
+                        }
                         let handle = meshes.add(super::mesh(&buf));
                         handles.push(handle.clone());
                         parent.spawn((
                             Mesh3d(handle),
-                            MeshMaterial3d(art.materials[finish].clone()),
+                            MeshMaterial3d(if dead {
+                                art.burned_materials[finish].clone()
+                            } else {
+                                art.materials[finish].clone()
+                            }),
                             Transform::default(),
                         ));
                     }
@@ -163,7 +183,7 @@ pub fn draw(
             })
             .clone();
         commands.spawn((
-            Piece(f.id, 0),
+            Piece(f.id, 0, false),
             Mesh3d(mesh),
             MeshMaterial3d(material),
             transform,
