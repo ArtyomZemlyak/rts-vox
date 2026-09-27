@@ -442,6 +442,119 @@ fn pristine_parts_are_attached_and_a_melted_plate_sheds_only_its_loose_half() {
     assert!(r.matter.economy.ledger.balanced());
 }
 
+/// **A thrown section tumbles and lands on its turned box** (ADR-468).
+/// The loose half of a melted plate leaves unturned: its cells are placed
+/// by the segment frame it had, and a basis of that frame's axes turned
+/// it twice on screen. Thrown sideways it turns as it flies, slower than
+/// a crumb, and comes to rest with the bottom of its turned box on the
+/// ground; dropped, it does not turn at all.
+#[test]
+fn a_thrown_section_tumbles_and_lands_on_its_turned_box() {
+    for thrown in [false, true] {
+        let mut r = scene(RangeUnitKind::Tank);
+        let (ny, nz) = {
+            let b = &r.units[0].body.segments[0].body;
+            (b.vol.ny, b.vol.nz)
+        };
+        r.thermal_tuning.cooling_milli = 0;
+        r.thermal_tuning.conduction_milli = 0;
+        for z in 0..nz {
+            for y in 0..ny {
+                r.thermals.deposit(
+                    thermal::Cell {
+                        unit: 0,
+                        part: 1,
+                        at: [4, y, z],
+                    },
+                    4000,
+                    &r.thermal_tuning,
+                );
+            }
+        }
+        r.step_unit_heat();
+        let section = |r: &BlastRange| {
+            r.matter
+                .debris
+                .fragments
+                .iter()
+                .position(|f| f.chunk.as_ref().is_some_and(|c| c.segment == Some(0)))
+        };
+        let mut i = None;
+        for _ in 0..120 {
+            r.step();
+            i = section(&r);
+            if i.is_some() {
+                break;
+            }
+        }
+        let i = i.expect("the plate never left");
+        // A piece turns about the axis its number picks; take a number, still
+        // unique, that turns this one about a level axis, where the turn
+        // shows in how it lands.
+        let id = r.matter.debris.next_id + 3 - r.matter.debris.next_id % 3;
+        r.matter.debris.next_id = id;
+        let f = &mut r.matter.debris.fragments[i];
+        f.id = id;
+        assert_eq!(f.basis, crate::burst::IDENTITY, "a section leaves unturned");
+        assert!(!f.resting);
+        if thrown {
+            f.velocity.x = Fx::from_ratio(90, crate::TICKS_PER_SECOND);
+            f.velocity.y = Fx::from_ratio(60, crate::TICKS_PER_SECOND);
+        }
+        let mut turned = false;
+        for _ in 0..600 {
+            r.step();
+            let f = r
+                .matter
+                .debris
+                .fragments
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap();
+            turned |= f.basis != crate::burst::IDENTITY;
+            if f.resting {
+                break;
+            }
+        }
+        let f = r
+            .matter
+            .debris
+            .fragments
+            .iter()
+            .find(|f| f.id == id)
+            .unwrap();
+        assert!(f.resting, "the section never landed");
+        assert_eq!(turned, thrown, "thrown {thrown}: turned {turned}");
+        // Rows of a rotation stay unit length and square to each other.
+        let dot = |a: phys::V3, b: phys::V3| a.x.mul(b.x).add(a.y.mul(b.y)).add(a.z.mul(b.z));
+        for a in 0..3 {
+            assert!(dot(f.basis[a], f.basis[a]).sub(Fx::ONE).abs() < Fx::from_ratio(1, 100));
+            assert!(dot(f.basis[a], f.basis[(a + 1) % 3]).abs() < Fx::from_ratio(1, 100));
+        }
+        // On the ground by its turned box, not sunk into it or hanging:
+        // the lowest corner of the section's box as its basis turns it.
+        let (lo, hi) = f.chunk.as_ref().unwrap().bounds;
+        let bottom = (0..8)
+            .map(|corner: usize| {
+                (0..3).fold(f.position.y, |y, a| {
+                    let v = if corner & (1 << a) == 0 { lo[a] } else { hi[a] };
+                    y.add(f.basis[a].y.mul(v))
+                })
+            })
+            .min()
+            .unwrap();
+        let floor = Fx::from_int(r.world.column_ceiling(
+            f.position.x.to_int_trunc() as u32,
+            f.position.z.to_int_trunc() as u32,
+        ) as i32);
+        assert!(
+            bottom.sub(floor).abs() <= Fx::ONE,
+            "thrown {thrown}: box bottom {bottom:?} on a floor at {floor:?}"
+        );
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
 #[test]
 fn partial_segment_extraction_waits_for_room_and_replays_after_loading() {
     let mut r = scene(RangeUnitKind::Strider);

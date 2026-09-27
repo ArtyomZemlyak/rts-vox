@@ -518,7 +518,10 @@ impl Matter {
                         material: 3,
                         paint: Some([1, 0, 0]),
                         mm,
-                        basis: [frame.x, frame.y, frame.z],
+                        // Its cells are placed by the captured segment frame:
+                        // the basis is the turn since it left (ADR-468), and
+                        // the frame's axes here turned it twice.
+                        basis: crate::burst::IDENTITY,
                         mass_g: u64::from(density)
                             * u64::from(self.tuning.density_kg_m3_per_density)
                             * u64::from(mm).pow(3)

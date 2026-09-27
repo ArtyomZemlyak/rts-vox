@@ -1941,7 +1941,7 @@ pub struct Bursts {
     claims: BTreeMap<[u32; 3], Claim>,
     pub fragments: Vec<Fragment>,
     pub corpses: BTreeMap<u32, Fragment>,
-    next_id: u64,
+    pub(crate) next_id: u64,
     pub removed: u64,
     pub spent_mj: u64,
     pub motion_mj: u64,
@@ -1967,11 +1967,18 @@ impl Fragment {
     }
     /// The piece's box in its own turn, around its centre.
     pub fn bounds(&self) -> ([Fx; 3], [Fx; 3]) {
-        if let Some(chunk) = &self.chunk {
-            return chunk.bounds;
-        }
-        let (lo, hi) = shape_bounds(self.shape, self.side);
-        let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
+        // A section's box is already in world axes about its centre, as its
+        // captured frames placed its cells; its basis is the turn since it
+        // left, and the box turns with it (ADR-468). On the identity basis
+        // a section starts with, the sums below give the box unchanged.
+        let (lo, hi) = match &self.chunk {
+            Some(chunk) => chunk.bounds,
+            None => {
+                let (lo, hi) = shape_bounds(self.shape, self.side);
+                let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
+                (lo.map(|v| v.mul(scale)), hi.map(|v| v.mul(scale)))
+            }
+        };
         let mut low = [Fx::ZERO; 3];
         let mut high = [Fx::ZERO; 3];
         // Each corner sum chooses one endpoint independently per local
@@ -1979,8 +1986,8 @@ impl Fragment {
         // the original axis order: no centre/extent formula with different
         // Q32 rounding, and no eight-corner transform.
         for axis in 0..3 {
-            let a = arr(self.basis[axis].scale(lo[axis].mul(scale)));
-            let b = arr(self.basis[axis].scale(hi[axis].mul(scale)));
+            let a = arr(self.basis[axis].scale(lo[axis]));
+            let b = arr(self.basis[axis].scale(hi[axis]));
             for component in 0..3 {
                 low[component] = low[component].add(a[component].min(b[component]));
                 high[component] = high[component].add(a[component].max(b[component]));
@@ -2709,7 +2716,7 @@ impl Bursts {
                 room -= 1;
                 stale_wrecks.insert(f.held);
             }
-            if advance_fragment(f, world, t, gravity, hulls, &settled, i as u32) {
+            if advance_fragment(f, world, t, gravity, hulls, &settled, i as u32, true) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
                 landed.push(Wreck {
                     held: f.held,
@@ -2773,7 +2780,17 @@ impl Bursts {
             {
                 f.resting = false;
             }
-            advance_fragment(f, world, t, gravity, &[], &Settled::default(), u32::MAX);
+            // A dead hull lies as it fell: whole hulls do not tumble.
+            advance_fragment(
+                f,
+                world,
+                t,
+                gravity,
+                &[],
+                &Settled::default(),
+                u32::MAX,
+                false,
+            );
         }
         for w in &mut e.wrecks {
             if let Some(f) = self.corpses.get(&w.held) {
@@ -3563,6 +3580,7 @@ fn hull_hit(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull], skip: u64) 
     })
 }
 /// Common translation/contact step for fragments and persistent dead hulls.
+#[allow(clippy::too_many_arguments)]
 fn advance_fragment(
     f: &mut Fragment,
     world: &voxel::World,
@@ -3571,6 +3589,7 @@ fn advance_fragment(
     hulls: &[Hull],
     settled: &Settled,
     skip: u32,
+    spin: bool,
 ) -> bool {
     if f.resting {
         return false;
@@ -3644,7 +3663,9 @@ fn advance_fragment(
             &mut supported,
         );
     }
-    tumble(f, t);
+    if spin {
+        tumble(f, t);
+    }
     let sleep = Fx::from_ratio(
         t.sleep_mm_s as i32,
         voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
@@ -3749,7 +3770,7 @@ fn substeps(
 /// a piece that lands keeps the face it landed on. A piece dropped into
 /// place with no speed does not turn at all.
 fn tumble(f: &mut Fragment, t: &Blast) {
-    if t.spin_deg_s == 0 || f.chunk.is_some() {
+    if t.spin_deg_s == 0 {
         return;
     }
     // The spin comes from the throw, not from the fall: a piece dropped
@@ -3763,12 +3784,23 @@ fn tumble(f: &mut Fragment, t: &Blast) {
         .sqrt();
     // Degrees a second for each unit of speed a tick, into binary angle
     // a tick: `deg × FULL / 360 / ticks`.
-    let turn = speed
-        .mul(Fx::from_ratio(
-            t.spin_deg_s as i32 * (fx::angle::FULL / 360),
-            crate::TICKS_PER_SECOND,
-        ))
-        .to_int_trunc();
+    let mut rate = speed.mul(Fx::from_ratio(
+        t.spin_deg_s as i32 * (fx::angle::FULL / 360),
+        crate::TICKS_PER_SECOND,
+    ));
+    // A section turns as fast as a piece whose surface moves as fast: the
+    // rate of a piece a unit across, over the section's half-width in
+    // units (ADR-468). A turret does not spin like a crumb.
+    if let Some(chunk) = &f.chunk {
+        let (lo, hi) = chunk.bounds;
+        let half = (0..3)
+            .map(|a| hi[a].sub(lo[a]))
+            .max()
+            .unwrap_or(Fx::ZERO)
+            .div(Fx::from_int(2));
+        rate = rate.div(half.max(Fx::ONE));
+    }
+    let turn = rate.to_int_trunc();
     if turn == 0 {
         return;
     }
