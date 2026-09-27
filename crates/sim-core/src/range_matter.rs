@@ -311,61 +311,7 @@ impl Matter {
         pose: &crate::damage::Frame,
         at: [i32; 3],
     ) -> ClaimResult {
-        let (cost, motion) = self.cost(3);
-        if cost > self.remaining_mj {
-            return ClaimResult::Unaffordable;
-        }
-        if self.debris.fragment_room(&self.tuning) == 0 {
-            return ClaimResult::Deferred;
-        }
-        let position = pose.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
-        let mut direction = position.sub(V3::new(
-            Fx::from_int(at[0]),
-            Fx::from_int(at[1]),
-            Fx::from_int(at[2]),
-        ));
-        direction.y = direction.y.add(
-            Fx::from_ratio(self.tuning.lift_pct as i32, 100)
-                .mul(direction.x.abs().add(direction.z.abs())),
-        );
-        if direction.len_sq() == Fx::ZERO {
-            direction = pose.y;
-        }
-        let amount = self.economy.per_voxel(3);
-        let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
-        assert_eq!(
-            self.economy.ledger.transfer(self.bodies[id], held, amount),
-            amount
-        );
-        let d = self.economy.mats.get(3).unwrap();
-        let mass_g = u64::from(d.density)
-            * u64::from(self.tuning.density_kg_m3_per_density)
-            * u64::from(u.body.mm).pow(3)
-            / 1_000_000;
-        let [x, y, z] = cell;
-        self.debris.emit_body_fragment(
-            Fragment {
-                id: 0,
-                position,
-                velocity: V3::ZERO,
-                material: 3,
-                paint: Some([1, u.body.finish_at(x, y, z), u.body.part_at(x, y, z) as u8]),
-                mm: u.body.mm,
-                basis: [pose.x, pose.y, pose.z],
-                mass_g,
-                count: 1,
-                shape: 1,
-                side: 2,
-                chunk: None,
-                held,
-                resting: false,
-            },
-            direction,
-            motion,
-            &self.tuning,
-        );
-        self.pay(cost);
-        ClaimResult::Applied
+        self.claim_cell(id, &u.body, cell, pose, Some(at))
     }
     pub fn body_container(&self, id: usize) -> u32 {
         self.bodies[id]
@@ -381,27 +327,85 @@ impl Matter {
         frame: &crate::damage::Frame,
         at: [i32; 3],
     ) -> ClaimResult {
+        self.claim_cell(id, &u.body.segments[seg].body, cell, frame, Some(at))
+    }
+    /// A cell crushed where two hulls met (ADR-455): it pays the fracture
+    /// alone and falls from where it stood instead of being thrown.
+    /// `part` 0 is the root, `k` the segment `k - 1`.
+    pub fn crush(
+        &mut self,
+        id: usize,
+        u: &RangeUnit,
+        part: usize,
+        cell: [usize; 3],
+        frame: &crate::damage::Frame,
+    ) -> ClaimResult {
+        let body = if part == 0 {
+            &u.body
+        } else {
+            &u.body.segments[part - 1].body
+        };
+        self.claim_cell(id, body, cell, frame, None)
+    }
+    /// What crushing one body cell costs, millijoules: the fracture
+    /// without the share a thrown piece carries (ADR-455).
+    pub fn crush_price(&self) -> u64 {
         let (cost, motion) = self.cost(3);
+        cost - motion
+    }
+    /// Work beside a burst in flight pays from a budget of its own
+    /// (ADR-455): the burst's remaining energy is set aside for the call
+    /// and given back after it, so a crash in mid-burst neither spends nor
+    /// refills what the burst has left.
+    pub fn aside<R>(&mut self, mj: u64, work: impl FnOnce(&mut Self) -> R) -> R {
+        let burst = std::mem::replace(&mut self.remaining_mj, mj);
+        self.supplied_mj += mj;
+        let r = work(self);
+        self.remaining_mj = burst;
+        r
+    }
+    /// One body cell leaves as a piece of its own and its matter moves
+    /// from the body's container into the piece. Thrown from `from` with
+    /// the kinetic share of its price, or, crushed, with no speed and for
+    /// the fracture alone.
+    fn claim_cell(
+        &mut self,
+        id: usize,
+        body: &voxel::unit::UnitBody,
+        cell: [usize; 3],
+        frame: &crate::damage::Frame,
+        from: Option<[i32; 3]>,
+    ) -> ClaimResult {
+        let (mut cost, mut motion) = self.cost(3);
+        if from.is_none() {
+            (cost, motion) = (cost - motion, 0);
+        }
         if cost > self.remaining_mj {
             return ClaimResult::Unaffordable;
         }
         if self.debris.fragment_room(&self.tuning) == 0 {
             return ClaimResult::Deferred;
         }
-        let body = &u.body.segments[seg].body;
         let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
-        let mut direction = position.sub(V3::new(
-            Fx::from_int(at[0]),
-            Fx::from_int(at[1]),
-            Fx::from_int(at[2]),
-        ));
-        direction.y = direction.y.add(
-            Fx::from_ratio(self.tuning.lift_pct as i32, 100)
-                .mul(direction.x.abs().add(direction.z.abs())),
-        );
-        if direction.len_sq() == Fx::ZERO {
-            direction = frame.y;
-        }
+        let direction = match from {
+            Some(at) => {
+                let mut direction = position.sub(V3::new(
+                    Fx::from_int(at[0]),
+                    Fx::from_int(at[1]),
+                    Fx::from_int(at[2]),
+                ));
+                direction.y = direction.y.add(
+                    Fx::from_ratio(self.tuning.lift_pct as i32, 100)
+                        .mul(direction.x.abs().add(direction.z.abs())),
+                );
+                if direction.len_sq() == Fx::ZERO {
+                    frame.y
+                } else {
+                    direction
+                }
+            }
+            None => frame.y,
+        };
         let amount = self.economy.per_voxel(3);
         let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
         assert_eq!(

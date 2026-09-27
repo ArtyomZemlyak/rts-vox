@@ -214,6 +214,14 @@ pub struct Blast {
     /// единицу скорости в тик (ADR-309). Ось выбирается по номеру куска,
     /// осевший больше не крутится. Ноль — куски летят не поворачиваясь.
     pub spin_deg_s: u32,
+    /// Доля энергии, которую теряют два сошедшихся корпуса, уходящая на
+    /// разрушение металла там, где они коснулись, в процентах (ADR-455);
+    /// остальное уходит в тепло, подвеску и грунт. Ноль — удар не ломает.
+    pub contact_deform_pct: u32,
+    /// Скорость сближения корпусов, ниже которой удар ничего не ломает,
+    /// мм/с (ADR-455): машина, упёршаяся в соседнюю, толкает её, а не
+    /// крошит.
+    pub contact_min_mm_s: u32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -467,6 +475,7 @@ impl Tuning {
             || b.sleep_mm_s == 0
             || b.rest_check_ticks == 0
             || b.push_up_pct > 100
+            || b.contact_deform_pct > 100
         {
             return Err(TuningError::Ron(
                 "invalid blast domain, energy or work budgets".into(),

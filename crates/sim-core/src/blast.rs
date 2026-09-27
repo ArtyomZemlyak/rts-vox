@@ -1961,6 +1961,8 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_contact.rs"]
+mod contact;
 #[path = "range_fire.rs"]
 pub mod fire;
 #[path = "range_heat_exchange.rs"]
@@ -3410,6 +3412,10 @@ impl BlastRange {
                 })
                 .collect()
         };
+        // A pair meets once, however many of its hulls the other refused:
+        // head-on each carries its own speed along the line, and the
+        // closing speed is their sum (ADR-455).
+        let mut impacts: BTreeMap<(usize, usize), phys::V3> = BTreeMap::new();
         for (source, target, incoming) in contacts {
             let velocity = relative_contact_velocity(
                 incoming,
@@ -3417,6 +3423,13 @@ impl BlastRange {
                 contact_state[target].0,
                 contact_state[target].1,
             );
+            let (pair, along) = if source < target {
+                ((source, target), velocity)
+            } else {
+                ((target, source), phys::V3::ZERO.sub(velocity))
+            };
+            let closing = impacts.entry(pair).or_insert(phys::V3::ZERO);
+            *closing = closing.add(along);
             let mass = |id: usize| {
                 if id == self.units.len() {
                     self.gun.motion.chassis.mass.max(1)
@@ -3435,6 +3448,9 @@ impl BlastRange {
             } else {
                 self.units[target].motion.receive_contact(transferred);
             }
+        }
+        for ((a, b), closing) in impacts {
+            self.contact_damage(a, b, closing);
         }
         // Hulls cut yielding vegetation along their path; the crown that
         // hung from those cells follows over the next ticks.
