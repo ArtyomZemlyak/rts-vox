@@ -358,6 +358,8 @@ pub struct Probe<'a> {
     /// may check many poses of one hull; these weights do not depend on pose.
     hump_weights: Vec<(Fx, Fx)>,
     hump_key: (i32, i32),
+    /// Grade depends on the hull's tilt limit, not its pose or the terrain.
+    grade_cache: Option<(Fx, Fx)>,
     yielding: Vec<Mat>,
     rubble: Option<&'a Rubble>,
     /// Columns scanned, columns answered and surface samples taken since
@@ -408,6 +410,7 @@ impl<'a> Probe<'a> {
             },
             hump_weights: Vec::new(),
             hump_key: (0, 0),
+            grade_cache: None,
             yielding: yielding.to_vec(),
             rubble: None,
             scans: 0,
@@ -667,12 +670,18 @@ impl<'a> Probe<'a> {
             Fx::from_int(self.world.nx as i32 - 1),
             Fx::from_int(self.world.nz as i32 - 1),
         );
-        let mut samples = Vec::with_capacity(2 * s.span.max(0) as usize);
+        // Only two reductions are needed after the bridging level is known:
+        // the highest ramp-adjusted support and the minimum level that would
+        // make every sample climbable. No per-contact sample allocation.
+        let mut required_level = Fx::MIN;
         let mut level = base;
+        let step = Fx::from_int(s.step);
         // A point support sees no grade: a belt shorter than two units has
         // no line to sample.
         for k in 1..=(if s.span >= 2 { s.span } else { 0 }) {
             let d = Fx::from_int(k);
+            let ramp_drop = s.ramp.mul(d);
+            let climb = step.max(grade.mul(d));
             let mut pair = [None; 2];
             for (i, sign) in [-1, 1].into_iter().enumerate() {
                 let q = [
@@ -685,7 +694,8 @@ impl<'a> Probe<'a> {
                 }
                 let there = self.surface(q);
                 pair[i] = Some(there);
-                samples.push((d, there));
+                height = height.max(there.sub(ramp_drop));
+                required_level = required_level.max(there.sub(climb));
             }
             // Bridging: the belt between neighbouring wheels lies on the
             // ground either side of a hollow narrower than half the contact.
@@ -695,8 +705,7 @@ impl<'a> Probe<'a> {
             }
         }
         height = height.max(level);
-        let mut steep = false;
-        let step = Fx::from_int(s.step);
+        let mut steep = required_level > level;
         // The contact patch: nearby ground counts with the same approach
         // slope as ground ahead, or a corner sample would lift the support
         // onto a ledge at once and undo the run-up. A step under the edge
@@ -716,14 +725,6 @@ impl<'a> Probe<'a> {
                 p[1].add(half.mul(Fx::from_int(z))),
             ]);
             if s.span >= 2 && corner.sub(mid) > step {
-                steep = true;
-            }
-        }
-        for (d, there) in samples {
-            height = height.max(there.sub(s.ramp.mul(d)));
-            // One obstacle up to the step height is climbed; a longer rise
-            // must stay within the grade the belt can hold.
-            if there.sub(level) > step.max(grade.mul(d)) {
                 steep = true;
             }
         }
@@ -762,7 +763,14 @@ impl<'a> Probe<'a> {
         );
         // tan of the tilt limit: the steepest grade the contact may climb.
         let m = s.min_up.max(Fx::from_ratio(1, 100));
-        let grade = Fx::ONE.sub(m.mul(m)).max(Fx::ZERO).sqrt().div(m);
+        let grade = match self.grade_cache {
+            Some((key, grade)) if key == m => grade,
+            _ => {
+                let grade = Fx::ONE.sub(m.mul(m)).max(Fx::ZERO).sqrt().div(m);
+                self.grade_cache = Some((m, grade));
+                grade
+            }
+        };
         let mut steep = false;
         let mut floors = [(-1, -1), (1, -1), (-1, 1), (1, 1)].map(|(x, z)| {
             let p = point(x * s.support[0], z * s.support[1]);
@@ -2000,6 +2008,142 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    impl Probe<'_> {
+        fn reference_contact(
+            &mut self,
+            p: [Fx; 2],
+            radius: Fx,
+            dir: [Fx; 2],
+            s: Shape,
+            grade: Fx,
+        ) -> (Fx, bool) {
+            let base = self.surface(p);
+            let mut height = base;
+            let (nx, nz) = (
+                Fx::from_int(self.world.nx as i32 - 1),
+                Fx::from_int(self.world.nz as i32 - 1),
+            );
+            let mut samples = Vec::with_capacity(2 * s.span.max(0) as usize);
+            let mut level = base;
+            // A point support sees no grade: a belt shorter than two units has
+            // no line to sample.
+            for k in 1..=(if s.span >= 2 { s.span } else { 0 }) {
+                let d = Fx::from_int(k);
+                let mut pair = [None; 2];
+                for (i, sign) in [-1, 1].into_iter().enumerate() {
+                    let q = [
+                        p[0].add(dir[0].mul(d).mul(Fx::from_int(sign))),
+                        p[1].add(dir[1].mul(d).mul(Fx::from_int(sign))),
+                    ];
+                    // The map edge is not a cliff; the hull check keeps it out.
+                    if q[0] < Fx::ZERO || q[1] < Fx::ZERO || q[0] >= nx || q[1] >= nz {
+                        continue;
+                    }
+                    let there = self.surface(q);
+                    pair[i] = Some(there);
+                    samples.push((d, there));
+                }
+                // Bridging: the belt between neighbouring wheels lies on the
+                // ground either side of a hollow narrower than half the contact.
+                // A wider hollow is followed, the wheel drops into it.
+                if let (Some(a), Some(b), true) = (pair[0], pair[1], 2 * k <= s.span) {
+                    level = level.max(a.min(b));
+                }
+            }
+            height = height.max(level);
+            let mut steep = false;
+            let step = Fx::from_int(s.step);
+            // The contact patch: nearby ground counts with the same approach
+            // slope as ground ahead, or a corner sample would lift the support
+            // onto a ledge at once and undo the run-up. A step under the edge
+            // of the patch, higher than the step limit within half the patch,
+            // is refused like one under the belt: a boulder under one track
+            // edge is not ridden by the corner and refused by the belt a
+            // degree later. A slope across the patch is left to the tilt limit.
+            let half = radius.div(Fx::from_int(2));
+            for (x, z) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                let corner = self.surface([
+                    p[0].add(radius.mul(Fx::from_int(x))),
+                    p[1].add(radius.mul(Fx::from_int(z))),
+                ]);
+                height = height.max(corner.sub(s.ramp.mul(radius)));
+                let mid = self.surface([
+                    p[0].add(half.mul(Fx::from_int(x))),
+                    p[1].add(half.mul(Fx::from_int(z))),
+                ]);
+                if s.span >= 2 && corner.sub(mid) > step {
+                    steep = true;
+                }
+            }
+            for (d, there) in samples {
+                height = height.max(there.sub(s.ramp.mul(d)));
+                // One obstacle up to the step height is climbed; a longer rise
+                // must stay within the grade the belt can hold.
+                if there.sub(level) > step.max(grade.mul(d)) {
+                    steep = true;
+                }
+            }
+            (height, steep)
+        }
+    }
+    #[test]
+    fn contact_reductions_match_two_pass_support_on_rough_ground() {
+        let w = world(true, true, true);
+        let mut actual = Probe::new(&w);
+        let mut reference = Probe::new(&w);
+        for span in [0, 1, 2, 7, 25] {
+            for step in [0, 1, 4, 8] {
+                let shape = Shape {
+                    span,
+                    step,
+                    ..tank()
+                };
+                for at in [[1, 1], [60, 70], [90, 72], [128, 110], [254, 254]] {
+                    for fraction in [Fx::ZERO, Fx(1), Fx::from_ratio(2, 3)] {
+                        let p = at.map(|n| Fx::from_int(n).add(fraction));
+                        for head in [0, angle::FULL / 7, angle::FULL / 4] {
+                            for grade in [Fx::ZERO, Fx::from_ratio(3, 4)] {
+                                let dir = [angle::cos(head), angle::sin(head)];
+                                let got = actual.contact(p, Fx::from_int(2), dir, shape, grade);
+                                let want = reference.reference_contact(
+                                    p,
+                                    Fx::from_int(2),
+                                    dir,
+                                    shape,
+                                    grade,
+                                );
+                                assert_eq!(
+                                    got, want,
+                                    "span={span} step={step} p={p:?} head={head} grade={grade:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(actual.samples, reference.samples);
+        assert_eq!(actual.columns, reference.columns);
+    }
+
+    #[test]
+    fn cached_grade_tracks_changed_tilt_limits() {
+        let w = world(true, true, true);
+        let mut reused = Probe::new(&w);
+        for at in [[90, 72], [125, 100], [80, 90]] {
+            for limit in [91, 70, 100, 85, 0, 91] {
+                let shape = Shape {
+                    min_up: Fx::from_ratio(limit, 100),
+                    ..tank()
+                };
+                let pos = at.map(Fx::from_int);
+                assert_eq!(
+                    reused.contacts(pos, 0, shape),
+                    Probe::new(&w).contacts(pos, 0, shape)
+                );
+            }
+        }
+    }
     #[test]
     fn aligned_supports_skip_only_zero_weight_surface_neighbours() {
         let w = world(true, true, true);
