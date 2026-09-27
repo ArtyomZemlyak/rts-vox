@@ -195,6 +195,12 @@ pub struct Blast {
     pub body_energy_pct: u32,
     pub body_resistance_ppm: u32,
     pub lift_pct: u32,
+    /// Direction jitter relative to the radial vector, percent.
+    pub scatter_pct: u32,
+    /// Minimum retained launch speed; the rest dissipates, percent.
+    pub speed_min_pct: u32,
+    /// Chance a fracture box is split into smaller boxes, percent.
+    pub small_piece_pct: u32,
     pub max_speed_mm_s: u32,
     pub drag_pct: u32,
     pub bounce_pct: u32,
@@ -466,6 +472,9 @@ impl Tuning {
             || b.body_energy_pct > 100
             || b.body_resistance_ppm == 0
             || b.motion_pct >= 100
+            || b.scatter_pct > 100
+            || b.speed_min_pct > 100
+            || b.small_piece_pct > 100
             || b.lift_pct > 100
             || b.max_speed_mm_s == 0
             || b.max_speed_mm_s > 120000

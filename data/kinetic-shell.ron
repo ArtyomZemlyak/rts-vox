@@ -19,7 +19,7 @@
     wave_work_per_tick: 4096,
     capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
-    fragment_box: 1,
+    fragment_box: 4,
     hull_impulse_milli: 0,
     fire_tick: 45,
     shell_speed: 560,

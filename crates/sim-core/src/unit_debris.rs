@@ -32,22 +32,29 @@ impl crate::World {
             let cost = e.kinds.at(ki as usize).cost;
             let volume = template.volume_mm3().max(1);
             let cell_volume = (template.mm as u64).pow(3);
-            let mut groups: BTreeMap<([u8; 3], [u8; 3], usize), u8> = BTreeMap::new();
+            let mut groups: BTreeMap<([u32; 3], [u8; 3], usize, u8), u64> = BTreeMap::new();
             for p in &change.removed {
                 let [x, y, z] = p.map(|v| v as usize);
-                let origin = p.map(|v| v / 2 * 2);
-                let sub = (p[0] - origin[0]) + 2 * (p[1] - origin[1]) + 4 * (p[2] - origin[2]);
+                let p32 = p.map(u32::from);
+                let (origin, side) = fracture_box(
+                    p32,
+                    self.tuning.blast.fragment_box as u8,
+                    &self.tuning.blast,
+                );
+                let s = u32::from(side);
+                let sub =
+                    (p32[0] - origin[0]) + s * (p32[1] - origin[1]) + s * s * (p32[2] - origin[2]);
                 let paint = [
                     self.units.owner[id],
                     template.finish_at(x, y, z),
                     template.part_at(x, y, z) as u8,
                 ];
                 let layer = usize::from(template.turret_y > 0 && p[1] >= template.turret_y);
-                *groups.entry((origin, paint, layer)).or_default() |= 1 << sub;
+                *groups.entry((origin, paint, layer, side)).or_default() |= 1 << sub;
             }
             let density = self.tuning.chassis(self.units.chassis[id]).density.max(1) as u64;
-            for ((origin, paint, layer), whole) in groups {
-                for shape in shape_components(u64::from(whole), 2) {
+            for ((origin, paint, layer, side), whole) in groups {
+                for shape in shape_components(whole, side) {
                     let count = shape.count_ones();
                     let before = (cost as u128 * state.debris_mm3 as u128 / volume as u128) as u64;
                     state.debris_mm3 += count as u64 * cell_volume;
@@ -63,7 +70,7 @@ impl crate::World {
                     let cap = e.ledger.get(held).cap;
                     assert_eq!(e.ledger.lower_cap(held, cap.saturating_sub(amount)), 0);
                     let frame = frames[layer];
-                    let local = arr(shape_centre(shape, 2));
+                    let local = arr(shape_centre(shape, side));
                     let position = frame.world(std::array::from_fn(|a| {
                         Fx::from_int(origin[a] as i32)
                             .add(Fx::from_ratio(1, 2))
@@ -80,7 +87,7 @@ impl crate::World {
                         mass_g: (density * cell_volume / 1_000_000).max(1) * count as u64,
                         count,
                         shape,
-                        side: 2,
+                        side,
                         chunk: None,
                         held: container,
                         resting: false,

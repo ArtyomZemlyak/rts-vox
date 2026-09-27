@@ -34,7 +34,11 @@ fn claimable(w: &World, p: [i32; 3]) -> bool {
     }
 }
 
+#[path = "range_fracture.rs"]
+mod fracture;
+
 pub struct Matter {
+    batch: Option<fracture::Batch>,
     pub debris: Bursts,
     /// Cells per side of the current weapon's debris pieces (ADR-284).
     fragment_box: u8,
@@ -75,6 +79,7 @@ impl Matter {
             })
             .collect();
         Self {
+            batch: None,
             debris: Bursts::default(),
             fragment_box: 2,
             economy,
@@ -315,7 +320,7 @@ impl Matter {
         pose: &crate::damage::Frame,
         at: [i32; 3],
     ) -> ClaimResult {
-        self.claim_cell(id, &u.body, cell, pose, Some(at))
+        self.claim_cell(id, 0, &u.body, cell, pose, Some(at))
     }
     pub fn body_container(&self, id: usize) -> u32 {
         self.bodies[id]
@@ -331,7 +336,14 @@ impl Matter {
         frame: &crate::damage::Frame,
         at: [i32; 3],
     ) -> ClaimResult {
-        self.claim_cell(id, &u.body.segments[seg].body, cell, frame, Some(at))
+        self.claim_cell(
+            id,
+            seg + 1,
+            &u.body.segments[seg].body,
+            cell,
+            frame,
+            Some(at),
+        )
     }
     /// A cell crushed where two hulls met (ADR-455): it pays the fracture
     /// alone and falls from where it stood instead of being thrown.
@@ -349,7 +361,7 @@ impl Matter {
         } else {
             &u.body.segments[part - 1].body
         };
-        self.claim_cell(id, body, cell, frame, None)
+        self.claim_cell(id, part, body, cell, frame, None)
     }
     /// What crushing one body cell costs, millijoules: the fracture
     /// without the share a thrown piece carries (ADR-455).
@@ -375,6 +387,7 @@ impl Matter {
     fn claim_cell(
         &mut self,
         id: usize,
+        part: usize,
         body: &voxel::unit::UnitBody,
         cell: [usize; 3],
         frame: &crate::damage::Frame,
@@ -443,6 +456,17 @@ impl Matter {
             motion,
             &self.tuning,
         );
+        if let Some(batch) = &mut self.batch {
+            batch.record(
+                self.debris.fragments.len() - 1,
+                id,
+                part,
+                cell,
+                *frame,
+                self.fragment_box,
+                &self.tuning,
+            );
+        }
         self.pay(cost);
         ClaimResult::Applied
     }
@@ -731,6 +755,7 @@ impl Matter {
         );
     }
     pub fn save(&self, b: &mut Blob) {
+        assert!(self.batch.is_none(), "fracture batches are atomic");
         b.u8(self.fragment_box);
         b.u64(self.remaining_mj);
         b.u64(self.supplied_mj);

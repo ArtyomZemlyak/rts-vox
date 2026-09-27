@@ -333,7 +333,7 @@ const WEAPON: [Knob; 13] = [
         1_000_000.0,
     ),
 ];
-const DEBRIS: [Knob; 11] = [
+const DEBRIS: [Knob; 14] = [
     k(
         "debris.drag_pct",
         Group::Debris,
@@ -397,6 +397,30 @@ const DEBRIS: [Knob; 11] = [
         1.0,
         1.0,
         32.0,
+    ),
+    k(
+        "debris.scatter_pct",
+        Group::Debris,
+        "Разброс направления, %",
+        5.0,
+        0.0,
+        100.0,
+    ),
+    k(
+        "debris.speed_min_pct",
+        Group::Debris,
+        "Минимум скорости обломков, %",
+        5.0,
+        0.0,
+        100.0,
+    ),
+    k(
+        "debris.small_piece_pct",
+        Group::Debris,
+        "Доля мелких зон раскола, %",
+        5.0,
+        0.0,
+        100.0,
     ),
     k(
         "debris.lift_pct",
@@ -777,6 +801,9 @@ fn debris_get(t: &modding::tuning::Blast, f: &str) -> Option<f64> {
         "push_up_pct" => f64::from(t.push_up_pct),
         "rest_check_ticks" => f64::from(t.rest_check_ticks),
         "pile_cell" => f64::from(t.pile_cell),
+        "scatter_pct" => f64::from(t.scatter_pct),
+        "speed_min_pct" => f64::from(t.speed_min_pct),
+        "small_piece_pct" => f64::from(t.small_piece_pct),
         "lift_pct" => f64::from(t.lift_pct),
         "motion_pct" => f64::from(t.motion_pct),
         "max_flying" => f64::from(t.max_flying),
@@ -793,6 +820,9 @@ fn debris_set(t: &mut modding::tuning::Blast, f: &str, v: f64) {
         "push_up_pct" => t.push_up_pct = u(v).min(100),
         "rest_check_ticks" => t.rest_check_ticks = u(v).max(1),
         "pile_cell" => t.pile_cell = u(v).max(1),
+        "scatter_pct" => t.scatter_pct = u(v).min(100),
+        "speed_min_pct" => t.speed_min_pct = u(v).min(100),
+        "small_piece_pct" => t.small_piece_pct = u(v).min(100),
         "lift_pct" => t.lift_pct = u(v).min(100),
         "motion_pct" => t.motion_pct = u(v).min(99),
         "max_flying" => t.max_flying = u(v).clamp(1, t.max_fragments),

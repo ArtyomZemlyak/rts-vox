@@ -15,8 +15,8 @@
     wave_work_per_tick: 4096,
     capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
-    // A shell throws pieces of up to three cells a side (ADR-284).
-    fragment_box: 3,
+    // Connected large fragments mixed with smaller chips (ADR-475).
+    fragment_box: 4,
     // Push on a hull: thousandths of a newton-second per unit of wave
     // pressure the body absorbed (ADR-297) - what dents the side throws
     // the machine, and a hull the wave never reached is not pushed.

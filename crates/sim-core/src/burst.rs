@@ -58,6 +58,46 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scattered_impulses_are_varied_replayable_and_never_add_energy() {
+        let t = tuning().blast;
+        let direction = V3::new(Fx::from_int(3), Fx::from_int(2), Fx::ONE);
+        let mut velocities = BTreeSet::new();
+        let mut speeds = BTreeSet::new();
+        for id in 1..128 {
+            let v = scattered_launch(id, direction, Fx::ONE, &t);
+            assert_eq!(v, scattered_launch(id, direction, Fx::ONE, &t));
+            assert!(v.len_sq() <= Fx::ONE);
+            velocities.insert(arr(v).map(Fx::raw));
+            speeds.insert(v.len_sq().raw());
+        }
+        assert!(velocities.len() > 120 && speeds.len() > 60);
+        assert_eq!(scattered_launch(1, direction, Fx::ZERO, &t), V3::ZERO);
+    }
+    #[test]
+    fn fracture_partition_contains_both_large_chunks_and_small_chips() {
+        let t = tuning().blast;
+        let mut groups = BTreeMap::<([u32; 3], u8), u64>::new();
+        for z in 0..16 {
+            for y in 0..8 {
+                for x in 0..16 {
+                    let p = [x, y, z];
+                    let (origin, side) = fracture_box(p, 4, &t);
+                    let s = u32::from(side);
+                    let bit = x - origin[0] + s * (y - origin[1]) + s * s * (z - origin[2]);
+                    let mask = groups.entry((origin, side)).or_default();
+                    assert_eq!(*mask & (1 << bit), 0);
+                    *mask |= 1 << bit;
+                }
+            }
+        }
+        assert!(groups.values().any(|m| m.count_ones() == 64));
+        assert!(groups.values().any(|m| m.count_ones() == 8));
+        assert_eq!(
+            groups.values().map(|m| m.count_ones()).sum::<u32>(),
+            16 * 8 * 16
+        );
+    }
     fn walked_shape_geometry(shape: u64, side: u8) -> (V3, ([Fx; 3], [Fx; 3])) {
         let mut sum = [0; 3];
         let mut lo = [i32::from(side) - 1; 3];
@@ -2206,6 +2246,52 @@ fn arr(v: V3) -> [Fx; 3] {
 fn v3(a: [Fx; 3]) -> V3 {
     V3::new(a[0], a[1], a[2])
 }
+/// A coarse box chooses either its full extent or half-sized sub-boxes.
+/// All cells agree on that partition; no overlapping or disconnected solids
+/// are invented. Seeded locally, so replay needs no new RNG state.
+pub(crate) fn fracture_box(p: [u32; 3], max_side: u8, t: &Blast) -> ([u32; 3], u8) {
+    let max_side = u32::from(max_side.clamp(1, 4));
+    let tile = p.map(|v| v / max_side);
+    let mut seed = 0;
+    for v in tile {
+        mix(&mut seed, u64::from(v));
+    }
+    let mut rng = fx::rng::Rng::new(seed, 475);
+    let side = if rng.below(100) < t.small_piece_pct {
+        (max_side / 2).max(1)
+    } else {
+        max_side
+    };
+    let base = tile.map(|v| v * max_side);
+    (
+        std::array::from_fn(|a| base[a] + (p[a] - base[a]) / side * side),
+        side as u8,
+    )
+}
+
+/// Disorder redirects the finite impulse and only reduces its speed.
+fn scattered_launch(id: u64, direction: V3, speed: Fx, t: &Blast) -> V3 {
+    let span = direction
+        .x
+        .abs()
+        .max(direction.y.abs())
+        .max(direction.z.abs());
+    if span == Fx::ZERO || speed == Fx::ZERO {
+        return V3::ZERO;
+    }
+    let mut rng = fx::rng::Rng::new(id, 476);
+    let spread = t.scatter_pct as i32;
+    let jitter = v3(std::array::from_fn(|_| {
+        span.mul(Fx::from_ratio(rng.range(-spread, spread), 100))
+    }));
+    let mut direction = direction.add(jitter);
+    if direction.len_sq() == Fx::ZERO {
+        direction = V3::UP;
+    }
+    let speed = speed.mul(Fx::from_ratio(rng.range(t.speed_min_pct as i32, 100), 100));
+    direction.scale(speed.div(direction.len_sq().sqrt()))
+}
+
 /// Cells of a piece's box.
 fn box_cells(side: u8) -> u32 {
     u32::from(side.clamp(1, 4)).pow(3)
@@ -2247,7 +2333,7 @@ pub fn shape_centre(shape: u64, side: u8) -> V3 {
     v3(sum.map(|v| Fx::from_ratio(v, shape.count_ones().max(1) as i32)))
 }
 /// Face-connected components of a mask, each a piece of its own.
-fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
+pub(crate) fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
     let s = u32::from(side.clamp(1, 4));
     let strides = [1, s, s * s];
     let n = box_cells(side);
@@ -2404,7 +2490,7 @@ impl Bursts {
                         t.max_speed_mm_s as i32,
                         voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
                     ));
-            f.velocity = direction.scale(speed.div(norm.sqrt()));
+            f.velocity = scattered_launch(self.next_id + 1, direction, speed, t);
         }
         // Truncate toward zero for this diagnostic: rounding a negative axis
         // away from zero could report more kinetic energy than was reserved.
@@ -2693,8 +2779,8 @@ impl Bursts {
             if old == AIR || old != expected {
                 continue;
             }
-            let side = u32::from(claim.side.clamp(1, 4));
-            let origin = key.map(|v| v / side * side);
+            let (origin, side) = fracture_box(key, claim.side, t);
+            let side = u32::from(side);
             let sub = (key[0] - origin[0])
                 + side * (key[1] - origin[1])
                 + side * side * (key[2] - origin[2]);
@@ -2749,7 +2835,6 @@ impl Bursts {
                     .mul(direction.x.abs().add(direction.z.abs())),
             )
             .add(Fx::ONE);
-        let norm = direction.len_sq().sqrt();
         // speed² in (world units/tick)², computed before Fx to avoid overflow.
         let denom = mass_g.max(1) as u128
             * (voxel::unit::WORLD_MM as u128).pow(2)
@@ -2761,7 +2846,9 @@ impl Bursts {
                 t.max_speed_mm_s as i32,
                 voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
             ));
-        let velocity = direction.scale(speed.div(norm));
+        let mut velocity = scattered_launch(self.next_id + 1, direction, speed, t);
+        // Ground reflection keeps ejecta above the surface after scatter too.
+        velocity.y = velocity.y.abs();
         let mm_s = arr(velocity).map(|v| {
             v.mul(Fx::from_int(
                 voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
@@ -4054,11 +4141,13 @@ fn tumble(f: &mut Fragment, t: &Blast) {
             .div(Fx::from_int(2));
         rate = rate.div(half.max(Fx::ONE));
     }
-    let turn = rate.to_int_trunc();
+    let mut rng = fx::rng::Rng::new(f.id, 477);
+    rate = rate.mul(Fx::from_ratio(rng.range(t.speed_min_pct as i32, 100), 100));
+    let turn = rate.to_int_trunc() * if rng.below(2) == 0 { -1 } else { 1 };
     if turn == 0 {
         return;
     }
-    let axis = (f.id % 3) as usize;
+    let axis = rng.below(3) as usize;
     let (c, s) = (fx::angle::cos(turn), fx::angle::sin(turn));
     let (i, j) = ((axis + 1) % 3, (axis + 2) % 3);
     for row in &mut f.basis {

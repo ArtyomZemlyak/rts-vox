@@ -416,7 +416,9 @@ impl BlastRange {
             .map(|u| (u.removed.len(), u.seg_removed.len()))
             .collect();
         let burst = (self.matter.remaining_mj, self.matter.fragment_box());
-        self.matter.begin(config.material_energy_j, 1);
+        self.matter
+            .begin(config.material_energy_j, config.fragment_box);
+        self.matter.begin_body_batch();
         // Half-cell samples cannot skip a one-cell plate even at a diagonal.
         // The 32-unit bound also makes an empty ray a fixed, small cost.
         for i in 0..64 {
@@ -499,6 +501,7 @@ impl BlastRange {
         if let (Some(tuning), Some(work)) = (&config.spall, lateral) {
             self.kinetic_spall(&seeds, work, tuning.radius, at, config);
         }
+        self.matter.finish_body_batch();
         self.matter.remaining_mj = burst.0;
         self.matter.fragment_size(u32::from(burst.1));
         for (id, (u, old)) in self.units.iter_mut().zip(before).enumerate() {

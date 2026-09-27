@@ -1782,6 +1782,25 @@ impl Explosion {
         c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
     ) {
+        if let Some(m) = matter.as_deref_mut() {
+            m.begin_body_batch();
+        }
+        self.step_inner(w, budget, units, dents, changed, c, matter.as_deref_mut());
+        if let Some(m) = matter {
+            m.finish_body_batch();
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn step_inner(
+        &mut self,
+        w: &mut World,
+        budget: usize,
+        units: &mut [RangeUnit],
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
+        mut matter: Option<&mut matter::Matter>,
+    ) {
         if self.pending.is_empty() {
             self.pending.extend(self.wave.advance_contacts(budget));
         }
@@ -5751,40 +5770,32 @@ mod tests {
         );
         assert!(a.matter.economy.ledger.balanced());
     }
-    /// A shell's debris comes in pieces up to three cells a side, a bolt's
-    /// within two (ADR-284): the weapon names the box.
+    /// A material shell keeps large connected fragments alongside chips.
     #[test]
-    fn a_shell_throws_bigger_pieces_than_a_bolt() {
-        let mut shell = BlastRange::new(config());
-        assert_eq!(shell.config.fragment_box, 3);
-        for _ in 0..400 {
-            shell.step();
+    fn shell_throws_a_mix_of_connected_sizes_and_restores_it() {
+        {
+            let config = config();
+            let mut range = BlastRange::new(config);
+            let (mut large, mut small) = (false, false);
+            for _ in 0..400 {
+                range.step();
+                for f in &range.matter.debris.fragments {
+                    if f.chunk.is_some() || f.resting {
+                        continue;
+                    }
+                    large |= f.count > 8;
+                    small |= f.count <= 4;
+                    assert_eq!(crate::burst::shape_components(f.shape, f.side), [f.shape]);
+                }
+            }
+            assert!(
+                large && small,
+                "missing mixed sizes: large={large}, small={small}"
+            );
+            assert!(range.matter.economy.ledger.balanced());
+            let restored = BlastRange::restore(range.config.clone(), &range.snapshot()).unwrap();
+            assert_eq!(range.state_hash(), restored.state_hash());
         }
-        let pieces = &shell.matter.debris.fragments;
-        assert!(pieces.iter().any(|f| f.side == 3), "no three-cell pieces");
-        assert!(
-            pieces.iter().any(|f| f.side == 3 && f.count > 8),
-            "no piece bigger than a two-cell box could hold"
-        );
-        assert!(pieces.iter().all(|f| f.chunk.is_some()
-            || f.side == 3
-            || f.material == 3
-            || (f.resting && f.side == 4)));
-        let mut bolt = BlastRange::new(
-            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
-        );
-        assert_eq!(bolt.config.fragment_box, 2);
-        for _ in 0..400 {
-            bolt.step();
-        }
-        assert!(bolt
-            .matter
-            .debris
-            .fragments
-            .iter()
-            .all(|f| f.side == 2 || (f.resting && f.side == 4)));
-        let b = BlastRange::restore(shell.config.clone(), &shell.snapshot()).unwrap();
-        assert_eq!(shell.state_hash(), b.state_hash());
     }
     /// The annihilation bolt (ADR-285) takes matter whatever its strength
     /// and leaves no debris: everything it removes goes to the annihilation
