@@ -4,6 +4,8 @@
     tank_reload_ticks: 90,
     tank_range: 700,
     kinetic_range: 900,
+    energy_range: 1200,
+    anni_range: 1000,
     pursuit_ticks: 60,
     standoff_milli: 750,
     // Pursuers attacking one target take firing positions a tank's length

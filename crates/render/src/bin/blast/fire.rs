@@ -1,6 +1,7 @@
 //! Bounded cubic combustion: hot torn tongues, cooling embers and coarse smoke.
 //! Pure presentation; body integrity and stream contacts come from sim-core.
 use super::*;
+use sim_core::blast::battle::Weapon as BattleWeapon;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
 const BURST_PARTICLES: usize = 57;
@@ -32,6 +33,7 @@ struct Tracer {
 pub struct Effects {
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
+    energy_impacts: Vec<(sim_core::blast::battle::Impact, u32)>,
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
@@ -93,6 +95,7 @@ impl Effects {
     pub fn clear(&mut self) {
         self.particles.clear();
         self.tracers.clear();
+        self.energy_impacts.clear();
         self.sources.clear();
         self.heat_spots.clear();
         self.serial = 0;
@@ -254,11 +257,19 @@ impl Effects {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
         self.tracers.retain(|p| now - p.born < TRACER_LIFE);
+        self.energy_impacts
+            .retain(|(_, tick)| sim.tick.saturating_sub(*tick) <= 30);
         for i in &sim.battle.impacts {
+            if i.weapon.energetic() {
+                if self.energy_impacts.len() == 8 {
+                    self.energy_impacts.remove(0);
+                }
+                self.energy_impacts.push((*i, sim.tick));
+            }
             let at = Vec3::from(i.at.map(|v| v as f32));
-            if i.shell {
+            if i.weapon == BattleWeapon::Blast {
                 self.shell_burst(at, now, sim.battle.shell_config.energy);
-            } else if i.kinetic {
+            } else if i.weapon == BattleWeapon::Kinetic {
                 self.add(at, Vec3::Y * 3.0, now, 0.16, 1.8, false);
             }
         }
@@ -517,6 +528,82 @@ impl Effects {
             }
         }
     }
+    pub fn battle_energy(
+        &self,
+        sim: &BlastRange,
+        fraction: f32,
+        params: &mut render::gas::GasParams,
+    ) {
+        use render::gas::{EnergySource, ENERGY_SOURCES};
+        params.energy_count = Vec4::new(0.0, 0.0, 0.0, f32::from(sim.battle_mode()));
+        if !sim.battle_mode() {
+            return;
+        }
+        let now = sim.tick.saturating_sub(1) as f32 + fraction;
+        let mut count = 0;
+        let mut push = |weapon: BattleWeapon, energy: Vec4, beam: Vec4, control: Vec4| {
+            if count == ENERGY_SOURCES {
+                return;
+            }
+            params.energy_sources[count] = EnergySource {
+                energy,
+                beam,
+                control,
+                weapon: Vec4::new(
+                    if weapon == BattleWeapon::Annihilation {
+                        2.0
+                    } else {
+                        1.0
+                    },
+                    now / 30.0,
+                    0.0,
+                    0.0,
+                ),
+            };
+            count += 1;
+        };
+        for r in sim.battle.rounds.iter().filter(|r| r.weapon.energetic()) {
+            let at = point(r.previous).lerp(point(r.pos), fraction);
+            let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
+            push(
+                r.weapon,
+                at.extend(2.8),
+                (at - direction * 80.0).extend(0.0),
+                Vec4::ZERO,
+            );
+        }
+        for id in 0..sim.units.len() {
+            let Some(weapon) = sim.battle_weapon(id).filter(|w| w.energetic()) else {
+                continue;
+            };
+            let Some(deadline) = sim.battle_charge(id) else {
+                continue;
+            };
+            if !sim.units[id].status.alive {
+                continue;
+            }
+            let Some(muzzle) = sim.battle_muzzles(id).first().copied() else {
+                continue;
+            };
+            let duration = sim.battle.config(weapon).charge_ticks.max(1) as f32;
+            let charge = (1.0 - (deadline as f32 - now) / duration).clamp(0.0, 1.0);
+            push(weapon, Vec4::ZERO, point(muzzle).extend(charge), Vec4::ZERO);
+        }
+        for (impact, tick) in self.energy_impacts.iter().rev() {
+            let age = (now - *tick as f32).max(0.0) / 30.0;
+            if age >= 1.0 {
+                continue;
+            }
+            let at = Vec3::from(impact.at.map(|v| v as f32));
+            push(
+                impact.weapon,
+                at.extend(0.0),
+                at.extend(0.0),
+                Vec4::new(0.0, age * 60.0, 1.0, 0.0),
+            );
+        }
+        params.energy_count.x = count as f32;
+    }
     fn capture_dust(&mut self, sim: &BlastRange, now: f32) {
         let d = &sim.streams.tuning.dust;
         if sim.tick == 0
@@ -764,7 +851,13 @@ pub fn draw(
     }
     if scene.sim.battle_mode() {
         let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
-        for r in scene.sim.battle.rounds.iter().filter(|r| r.shell) {
+        for r in scene
+            .sim
+            .battle
+            .rounds
+            .iter()
+            .filter(|r| matches!(r.weapon, BattleWeapon::Blast | BattleWeapon::Kinetic))
+        {
             let t = if scene.realtime {
                 (scene.acc * 30.0).clamp(0.0, 1.0)
             } else {
@@ -1245,6 +1338,53 @@ mod tests {
                 .iter()
                 .any(|t| t.tail == expected.tail && t.head == expected.head));
         }
+    }
+
+    #[test]
+    fn mixed_energy_impacts_keep_independent_visual_kinds_and_lifetimes() {
+        use sim_core::blast::battle::Impact;
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        let mut sim = range_sim(config(false, false), Some(&layout), false, None).unwrap();
+        sim.tick = 100;
+        sim.battle.impacts = vec![
+            Impact {
+                at: [200, 20, 300],
+                weapon: BattleWeapon::Energy,
+            },
+            Impact {
+                at: [400, 20, 300],
+                weapon: BattleWeapon::Annihilation,
+            },
+        ];
+        let mut effects = Effects::default();
+        effects.capture(&sim);
+        let mut params = render::gas::GasParams::default();
+        effects.battle_energy(&sim, 1.0, &mut params);
+        assert_eq!(params.energy_count.x, 2.0);
+        assert_eq!(params.energy_sources[0].weapon.x, 2.0);
+        assert_eq!(params.energy_sources[1].weapon.x, 1.0);
+        assert_ne!(
+            params.energy_sources[0].energy,
+            params.energy_sources[1].energy
+        );
+        sim.tick += 12;
+        sim.battle.impacts.clear();
+        effects.capture(&sim);
+        effects.battle_energy(&sim, 1.0, &mut params);
+        assert_eq!(
+            params.energy_count.x, 2.0,
+            "a later tick discarded live impacts"
+        );
+        sim.tick += 30;
+        effects.capture(&sim);
+        effects.battle_energy(&sim, 1.0, &mut params);
+        assert_eq!(params.energy_count.x, 0.0);
+        assert_eq!(
+            params.energy_count.w, 1.0,
+            "empty battle must not draw the solo gun"
+        );
     }
 
     #[test]

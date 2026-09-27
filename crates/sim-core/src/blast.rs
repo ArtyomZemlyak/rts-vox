@@ -1852,7 +1852,9 @@ impl Explosion {
                                 );
                                 let mut apply = true;
                                 if hit.pressure >= need && hit.pressure > 0 {
-                                    if let Some(m) = matter.as_deref_mut() {
+                                    if let Some(m) =
+                                        matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
+                                    {
                                         let frame = if cell[1] >= usize::from(u.body.turret_y) {
                                             queries[actor].turret
                                         } else {
@@ -1883,7 +1885,9 @@ impl Explosion {
                                 .saturating_sub(u.seg_dent(seg, cell));
                             let mut apply = true;
                             if hit.pressure >= need && hit.pressure > 0 {
-                                if let Some(m) = matter.as_deref_mut() {
+                                if let Some(m) =
+                                    matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
+                                {
                                     match m.body_segment(
                                         actor,
                                         u,
@@ -1916,13 +1920,20 @@ impl Explosion {
                             .saturating_add(hit.pressure);
                         let mut apply = true;
                         if total >= material_work(m, c) {
-                            if let Some(m) = matter.as_deref_mut() {
+                            if let Some(m) =
+                                matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
+                            {
                                 match m.ground(w, q, self.at) {
                                     matter::ClaimResult::Applied => (),
                                     matter::ClaimResult::Unaffordable
                                     | matter::ClaimResult::Indestructible => apply = false,
                                     matter::ClaimResult::Deferred => return,
                                 }
+                            } else if matter
+                                .as_ref()
+                                .is_some_and(|m| m.debris.claimed(q.map(|v| v as u32)))
+                            {
+                                apply = false;
                             } else {
                                 w.queue_edit(voxel::world::Edit::dig_if(
                                     q[0] as u32,
@@ -2564,7 +2575,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(42);
+        b.u32(43);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2721,12 +2732,7 @@ impl BlastRange {
         }
         if version < 42 {
             for actor in &self.battle.actors {
-                b.u8(match actor.weapon {
-                    None => 0,
-                    Some(modding::explosion::Delivery::Blast) => 1,
-                    Some(modding::explosion::Delivery::Kinetic) => 2,
-                    _ => unreachable!(),
-                });
+                b.u8(actor.weapon.map_or(0, |w| w as u8));
             }
         }
     }
@@ -2744,7 +2750,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=42).contains(&version) {
+        if !(27..=43).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3134,8 +3140,10 @@ impl BlastRange {
             for (actor, unit) in r.battle.actors.iter_mut().zip(&r.units) {
                 actor.weapon = match s.u8() {
                     0 => None,
-                    1 => Some(modding::explosion::Delivery::Blast),
-                    2 => Some(modding::explosion::Delivery::Kinetic),
+                    1 => Some(battle::Weapon::Blast),
+                    2 => Some(battle::Weapon::Kinetic),
+                    3 if version >= 43 => Some(battle::Weapon::Energy),
+                    4 if version >= 43 => Some(battle::Weapon::Annihilation),
                     _ => return None,
                 };
                 if unit.kind != RangeUnitKind::Tank && actor.weapon.is_some() {

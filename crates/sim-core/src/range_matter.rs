@@ -691,6 +691,16 @@ impl Matter {
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
     ) {
+        // Unclaimed compare-and-remove edits are ablation, even alongside a
+        // conventional wave. Claimed edits belong to debris, not this sink.
+        for &(edit, old) in w.completed() {
+            if edit.expected_material() == Some(old)
+                && old != AIR
+                && !self.debris.claimed([edit.x, edit.y, edit.z])
+            {
+                self.annihilate_cells(&[([edit.x, edit.y, edit.z], old)]);
+            }
+        }
         self.debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
         for &(by, mat) in w.taken() {
@@ -700,7 +710,7 @@ impl Matter {
             // falls as a body, crumbles into pieces, or was sunk already.
             let sink = if by == crate::heat::FIRE {
                 Sink::Combustion
-            } else if by == voxel::world::NOBODY {
+            } else if by == voxel::world::NOBODY || by & 0xffff0000 == 0xfffe0000 {
                 continue;
             } else if !material {
                 Sink::Annihilation

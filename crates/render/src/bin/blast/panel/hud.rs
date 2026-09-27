@@ -247,8 +247,10 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 p.spawn((row(), BattleLoadout)).with_children(|p| {
                     for (name, w) in [
                         ("По цели", None),
-                        ("Фугас", Some(Delivery::Blast)),
-                        ("Бронебойный", Some(Delivery::Kinetic)),
+                        ("Фугас", Some(BattleWeapon::Blast)),
+                        ("Бронебойный", Some(BattleWeapon::Kinetic)),
+                        ("Энергия", Some(BattleWeapon::Energy)),
+                        ("Аннигиляция", Some(BattleWeapon::Annihilation)),
                     ] {
                         button(p, font, name, Action::BattleWeapon(w));
                     }
@@ -327,15 +329,16 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             ));
         });
 }
-fn weapon_name(w: Delivery) -> &'static str {
+fn weapon_name(w: BattleWeapon) -> &'static str {
     match w {
-        Delivery::Blast => "Фугас",
-        Delivery::Kinetic => "Бронебойный",
-        Delivery::MachineGun => "Два пулемёта",
-        Delivery::Flame => "Огнемёт",
-        Delivery::Laser => "Лазер",
+        BattleWeapon::Blast => "Фугас",
+        BattleWeapon::Kinetic => "Бронебойный",
+        BattleWeapon::MachineGun => "Два пулемёта",
+        BattleWeapon::Energy => "Энергопушка",
+        BattleWeapon::Annihilation => "Аннигиляционная пушка",
     }
 }
+
 pub fn refresh(
     scene: Res<Scene>,
     edit: Res<Workshop>,
@@ -471,7 +474,9 @@ pub fn refresh(
                         |(i, _)| {
                             format!(
                                 "{} · дальность {} м\nСмена заряда сохраняет перезарядку",
-                                weapon_name(scene.sim.battle_weapon(i).unwrap_or(Delivery::Blast)),
+                                weapon_name(
+                                    scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
+                                ),
                                 scene.sim.battle_attack_range(i).unwrap_or(0) / 10
                             )
                         },
@@ -583,11 +588,18 @@ mod tests {
         let mut app = app();
         click(&mut app, Action::BattleStart);
         click(&mut app, Action::SelectUnit(0));
-        click(&mut app, Action::BattleWeapon(Some(Delivery::Kinetic)));
+        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Kinetic)));
         assert_eq!(
             app.world().resource::<Scene>().sim.battle.actors[0].weapon,
-            Some(Delivery::Kinetic)
+            Some(BattleWeapon::Kinetic)
         );
+        for weapon in [BattleWeapon::Energy, BattleWeapon::Annihilation] {
+            click(&mut app, Action::BattleWeapon(Some(weapon)));
+            assert_eq!(
+                app.world().resource::<Scene>().sim.battle_weapon(0),
+                Some(weapon)
+            );
+        }
         click(&mut app, Action::Stop);
         assert_eq!(
             app.world().resource::<Scene>().sim.battle.actors[0].order,

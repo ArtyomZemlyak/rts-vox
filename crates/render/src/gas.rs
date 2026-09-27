@@ -37,6 +37,16 @@ pub const GAS_CELLS: usize = GAS_N * GAS_N * GAS_N;
 /// the size of the window, not of the world.
 pub const TERRAIN_WORDS: usize = 1280 * 192 * 1280 / 8;
 
+pub const ENERGY_SOURCES: usize = 24;
+/// Independent charging muzzles, flying bolts and recent impacts.
+#[derive(Clone, Copy, Default, ShaderType)]
+pub struct EnergySource {
+    pub energy: Vec4,
+    pub beam: Vec4,
+    pub weapon: Vec4,
+    pub control: Vec4,
+}
+
 #[derive(Clone, Copy, ShaderType)]
 pub struct GasParams {
     pub world_from_clip: Mat4,
@@ -64,6 +74,8 @@ pub struct GasParams {
     pub distant: Vec4,
     /// World extents xyz; word offset in the combined terrain buffer w.
     pub distant_bounds: Vec4,
+    pub energy_count: Vec4,
+    pub energy_sources: [EnergySource; ENERGY_SOURCES],
 }
 impl Default for GasParams {
     fn default() -> Self {
@@ -86,6 +98,8 @@ impl Default for GasParams {
             look: Vec4::new(1.0, 0.0, 0.0, 0.0),
             distant: Vec4::ZERO,
             distant_bounds: Vec4::ZERO,
+            energy_count: Vec4::ZERO,
+            energy_sources: [EnergySource::default(); ENERGY_SOURCES],
         }
     }
 }

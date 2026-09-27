@@ -23,6 +23,25 @@ fn hot(t:f32)->vec3<f32> {
     let gold=vec3(5.0,2.1,0.12);let white=vec3(7.0,5.0,1.5);
     return mix(mix(red,orange,smoothstep(0.7,1.4,t)),mix(gold,white,smoothstep(2.5,3.1,t)),smoothstep(1.6,2.4,t));
 }
+// Local lighting from all live battle bolts; impact lighting stays with each
+// atmosphere region. Reject negligible lights before a visibility query.
+fn battle_energy_light(pos:vec3<f32>,normal:vec3<f32>,albedo:vec3<f32>,gain:f32,offset:f32)->vec3<f32> {
+    var light=vec3(0.0);
+    for(var i=0u;i<min(u32(p.energy_count.x),24u);i++) {
+        let e=p.energy_sources[i];
+        if e.energy.w<=0.0 && e.beam.w<=0.0 {continue;}
+        let centre=select(e.beam.xyz,e.energy.xyz,e.energy.w>0.0);
+        let delta=centre-pos;let dist=max(length(delta),0.001);let direction=delta/dist;
+        let strength=select(e.beam.w*e.beam.w,1.0,e.energy.w>0.0);
+        let tint=select(vec3(0.65,1.0,1.9),vec3(1.1,0.45,2.0),e.weapon.x>1.5);
+        let direct=albedo*tint*strength*gain/(60.0+dist*dist)*max(0.0,dot(normal,direction));
+        if any(direct>vec3(LIGHT_EPSILON)) {
+            let visible=trace_terrain(pos+normal*offset,direction,max(0.0,dist-3.0),false).material==0u;
+            if visible {light+=direct;}
+        }
+    }
+    return light;
+}
 fn surface_colour(code:u32,pos:vec3<f32>,normal:vec3<f32>,footprint:f32)->vec3<f32> {
     let steel_damage=code>=9u && code<=11u;
     let concrete_damage=code>=12u && code<=14u;
@@ -102,6 +121,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
         lit+=vec3(0.65,1.0,1.9)*strength*125.0/(60.0+dot(delta,delta))
             *max(0.06,dot(normal,normalize(delta)))*select(0.04,1.0,visible);
     }
+    lit+=battle_energy_light(pos,normal,vec3(1.0),125.0,surface_offset);
     // Orthographic zoom is magnification, not kilometres of extra haze.
     // Keep the existing close-view atmosphere and bound its zoom contribution.
     let fog=1.0-exp(-length(pos-near.xyz/near.w)*p.sky.w*min(1.0,250.0*vertical_scale));
@@ -109,7 +129,7 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
 }
 @fragment fn fragment(input:In)->@location(0) vec4<f32> {
     var bg=textureSampleLevel(scene,scene_sampler,input.uv,0.0);
-    if p.weapon.x>1.5 && p.control.w<0.5 {
+    if (p.weapon.x>1.5 || p.energy_count.x>0.0) && p.control.w<0.5 {
         // The annihilation bolt refracts what is behind it, each channel a
         // little differently (ADR-285).
         let warp=anni_warp(input.uv);
@@ -196,9 +216,12 @@ fn gas_shadow(pos:vec3<f32>,sun:vec3<f32>)->f32 {
             if visible {bg=vec4(bg.rgb+direct,1.0);}
         }
     }
+    if p.control.w<0.5 && p.energy_count.x>0.0 && d>0.0 && (m==0u || m==15u) {
+        bg=vec4(bg.rgb+battle_energy_light(world_pos,world_normal,bg.rgb,500.0,0.15),bg.a);
+    }
     // The annihilation bolt swallows what is behind its core before any
     // light is added (ADR-289).
-    if p.control.w<0.5 && p.weapon.x>1.5 {bg=vec4(bg.rgb*(1.0-anni_absorb(ro,rd,maxdist)),bg.a);}
+    if p.control.w<0.5 && (p.weapon.x>1.5 || p.energy_count.x>0.0) {bg=vec4(bg.rgb*(1.0-anni_absorb(ro,rd,maxdist)),bg.a);}
     if p.control.w<0.5 {bg=vec4(bg.rgb+energy_effect(ro,rd,maxdist),1.0);}
     if p.control.w<0.0 || p.control.z<0.001 {return bg;}
     let inv=1.0/select(vec3(1e-30),rd,rd!=vec3(0.0));

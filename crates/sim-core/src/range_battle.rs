@@ -5,6 +5,42 @@ use super::*;
 use fx::blob::{Blob, Scan};
 use modding::{explosion::Delivery, range_battle::Tuning};
 
+/// Weapon identity survives selection changes, flight and delayed wave work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Weapon {
+    MachineGun = 0,
+    Blast = 1,
+    Kinetic = 2,
+    Energy = 3,
+    Annihilation = 4,
+}
+impl Weapon {
+    pub fn from_code(code: u8) -> Option<Self> {
+        Some(match code {
+            0 => Self::MachineGun,
+            1 => Self::Blast,
+            2 => Self::Kinetic,
+            3 => Self::Energy,
+            4 => Self::Annihilation,
+            _ => return None,
+        })
+    }
+    fn ammo(delivery: Delivery) -> Self {
+        if delivery == Delivery::Kinetic {
+            Self::Kinetic
+        } else {
+            Self::Blast
+        }
+    }
+    pub fn energetic(self) -> bool {
+        matches!(self, Self::Energy | Self::Annihilation)
+    }
+    pub fn bursts(self) -> bool {
+        matches!(self, Self::Blast | Self::Energy | Self::Annihilation)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     Setup,
@@ -31,14 +67,11 @@ pub struct Actor {
     burst: u32,
     pub fired: u32,
     /// None selects ammunition by target; explicit choices belong to this actor.
-    pub weapon: Option<Delivery>,
+    pub weapon: Option<Weapon>,
 }
 pub struct Round {
     pub owner: usize,
-    /// A tank's round: ballistic, either kind (ADR-456).
-    pub shell: bool,
-    /// The tank's round is armour-piercing, not high-explosive (ADR-456).
-    pub kinetic: bool,
+    pub weapon: Weapon,
     pub pos: [Fx; 3],
     pub previous: [Fx; 3],
     velocity: [Fx; 3],
@@ -48,20 +81,18 @@ impl Round {
     /// A high-explosive shell: its impact starts a wave, and waves are
     /// bounded with the shells still in flight.
     fn bursts(&self) -> bool {
-        self.shell && !self.kinetic
+        self.weapon.bursts()
     }
 }
 pub struct Burst {
+    weapon: Weapon,
     wave: Explosion,
     energy: u64,
 }
 #[derive(Clone, Copy)]
 pub struct Impact {
     pub at: [i32; 3],
-    /// A high-explosive shell burst here.
-    pub shell: bool,
-    /// An armour-piercing round struck or glanced here (ADR-456).
-    pub kinetic: bool,
+    pub weapon: Weapon,
 }
 pub struct Battle {
     pub phase: Phase,
@@ -75,6 +106,8 @@ pub struct Battle {
     /// The tank's armour-piercing round (ADR-456).
     pub kinetic_config: ExplosionConfig,
     bullet_config: ExplosionConfig,
+    pub energy_config: ExplosionConfig,
+    pub anni_config: ExplosionConfig,
     pub(super) ai: ai::Controller,
 }
 impl Battle {
@@ -101,6 +134,15 @@ impl Battle {
         let mut bullet_config =
             ExplosionConfig::from_ron(include_str!("../../../data/machine-gun.ron")).unwrap();
         bullet_config.unit_ablation_resistance = resistance;
+        let energetic = |text| {
+            let mut c = ExplosionConfig::from_ron(text).expect("energy weapon tuning");
+            c.energy = c.energy * tuning.tank_power_milli / 1000;
+            c.material_energy_j =
+                (u64::from(c.material_energy_j) * u64::from(tuning.tank_power_milli) / 1000) as u32;
+            c
+        };
+        let energy_config = energetic(include_str!("../../../data/energy-cannon.ron"));
+        let anni_config = energetic(include_str!("../../../data/anni-cannon.ron"));
         Self {
             phase: Phase::Setup,
             actors: units
@@ -125,7 +167,27 @@ impl Battle {
             shell_config,
             kinetic_config,
             bullet_config,
+            energy_config,
+            anni_config,
             ai: ai::Controller::new(),
+        }
+    }
+    pub fn config(&self, weapon: Weapon) -> &ExplosionConfig {
+        match weapon {
+            Weapon::Blast => &self.shell_config,
+            Weapon::Kinetic => &self.kinetic_config,
+            Weapon::Energy => &self.energy_config,
+            Weapon::Annihilation => &self.anni_config,
+            Weapon::MachineGun => &self.bullet_config,
+        }
+    }
+    fn range(&self, weapon: Weapon, machine_gun: i32) -> i32 {
+        match weapon {
+            Weapon::Blast => self.tuning.tank_range,
+            Weapon::Kinetic => self.tuning.kinetic_range,
+            Weapon::Energy => self.tuning.energy_range,
+            Weapon::Annihilation => self.tuning.anni_range,
+            Weapon::MachineGun => machine_gun,
         }
     }
     pub(super) fn working(&self) -> bool {
@@ -168,11 +230,7 @@ impl Battle {
             b.usize(r.owner);
             // Earlier snapshots wrote a bool here: 0 and 1 keep their
             // meaning, 2 is the armour-piercing round (ADR-456).
-            b.u8(match (r.shell, r.kinetic) {
-                (false, _) => 0,
-                (true, false) => 1,
-                (true, true) => 2,
-            });
+            b.u8(r.weapon as u8);
             for v in r.pos.into_iter().chain(r.velocity) {
                 b.fx(v);
             }
@@ -180,6 +238,7 @@ impl Battle {
         }
         b.usize(self.waves.len());
         for w in &self.waves {
+            b.u8(w.weapon as u8);
             b.u64(w.energy);
             w.wave.save(b);
         }
@@ -245,12 +304,10 @@ impl Battle {
         }
         for _ in 0..n {
             let owner = s.usize();
-            let (shell, kinetic) = match s.u8() {
-                0 => (false, false),
-                1 => (true, false),
-                2 => (true, true),
-                _ => return None,
-            };
+            let weapon = Weapon::from_code(s.u8())?;
+            if version < 43 && weapon.energetic() {
+                return None;
+            }
             let pos = std::array::from_fn(|_| s.fx());
             let velocity = std::array::from_fn(|_| s.fx());
             let distance = s.fx();
@@ -263,8 +320,7 @@ impl Battle {
             }
             self.rounds.push(Round {
                 owner,
-                shell,
-                kinetic,
+                weapon,
                 pos,
                 previous: pos,
                 velocity,
@@ -278,11 +334,20 @@ impl Battle {
             return None;
         }
         for _ in 0..n {
+            let weapon = if version >= 43 {
+                Weapon::from_code(s.u8())?
+            } else {
+                Weapon::Blast
+            };
+            if !weapon.bursts() {
+                return None;
+            }
             let energy = s.u64();
-            if energy > u64::from(self.shell_config.material_energy_j) * 1000 {
+            if energy > u64::from(self.config(weapon).material_energy_j) * 1000 {
                 return None;
             }
             self.waves.push(Burst {
+                weapon,
                 energy,
                 wave: Explosion::load(s, units, size, true)?,
             });
@@ -325,22 +390,25 @@ impl BlastRange {
         self.layout.as_ref().is_some_and(|l| l.battle)
     }
     /// Effective loadout, shared by aiming, HUD and range indicators.
-    pub fn battle_weapon(&self, id: usize) -> Option<Delivery> {
+    pub fn battle_weapon(&self, id: usize) -> Option<Weapon> {
         let u = self.units.get(id)?;
         let a = self.battle.actors.get(id)?;
         if u.kind == RangeUnitKind::Strider {
-            return Some(Delivery::MachineGun);
+            return Some(Weapon::MachineGun);
         }
         Some(a.weapon.unwrap_or_else(|| {
             let ammo = self.battle.tuning.tank_ammo;
-            match (a.order, a.target.and_then(|t| self.units.get(t))) {
+            Weapon::ammo(match (a.order, a.target.and_then(|t| self.units.get(t))) {
                 (Order::Ground(_), _) | (_, None) => ammo.ground,
                 (_, Some(t)) if t.kind == RangeUnitKind::Tank => ammo.tank,
                 _ => ammo.strider,
-            }
+            })
         }))
     }
     /// Connected barrels in the actor's current posed weapon, for muzzle effects.
+    pub fn battle_charge(&self, id: usize) -> Option<u32> {
+        self.battle.actors.get(id)?.charge
+    }
     pub fn battle_muzzles(&self, id: usize) -> Vec<[Fx; 3]> {
         match (self.units.get(id), self.battle.actors.get(id)) {
             (Some(unit), Some(actor)) => weapons::muzzles(unit, actor.turret.angle),
@@ -348,22 +416,22 @@ impl BlastRange {
         }
     }
     pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
-        Some(match self.battle_weapon(id)? {
-            Delivery::MachineGun => self.streams.tuning.machine_gun.range,
-            Delivery::Kinetic => self.battle.tuning.kinetic_range,
-            _ => self.battle.tuning.tank_range,
-        })
+        Some(self.battle.range(
+            self.battle_weapon(id)?,
+            self.streams.tuning.machine_gun.range,
+        ))
     }
+
     /// Switching ammunition keeps the current order and reload deadline.
     /// Rounds already in flight retain their original configuration.
-    pub fn set_battle_weapon(&mut self, id: usize, weapon: Option<Delivery>) -> bool {
+    pub fn set_battle_weapon(&mut self, id: usize, weapon: Option<Weapon>) -> bool {
         if !self.battle_mode()
             || !self.allied(id)
             || self
                 .units
                 .get(id)
                 .is_none_or(|u| !u.status.alive || u.kind != RangeUnitKind::Tank)
-            || weapon.is_some_and(|w| !matches!(w, Delivery::Blast | Delivery::Kinetic))
+            || weapon == Some(Weapon::MachineGun)
         {
             return false;
         }
@@ -731,6 +799,8 @@ impl BlastRange {
             shell_config: self.battle.shell_config.clone(),
             kinetic_config: self.battle.kinetic_config.clone(),
             bullet_config: self.battle.bullet_config.clone(),
+            energy_config: self.battle.energy_config.clone(),
+            anni_config: self.battle.anni_config.clone(),
             ai: self.battle.ai.clone(),
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
@@ -813,30 +883,31 @@ impl BlastRange {
             }
             a.target = target;
             // A tank loads for what it aims at (ADR-456).
-            let kinetic = kind == RangeUnitKind::Tank && {
+            let weapon = if kind == RangeUnitKind::Tank {
                 let ammo = b.tuning.tank_ammo;
                 let choice = match (a.order, target) {
                     (Order::Ground(_), _) | (_, None) => ammo.ground,
-                    (_, Some(t)) => match self.units[t].kind {
-                        RangeUnitKind::Tank => ammo.tank,
-                        RangeUnitKind::Strider => ammo.strider,
-                    },
+                    (_, Some(t)) if self.units[t].kind == RangeUnitKind::Tank => ammo.tank,
+                    _ => ammo.strider,
                 };
-                a.weapon.unwrap_or(choice) == Delivery::Kinetic
-            };
-            let range = if kind != RangeUnitKind::Tank {
-                stream.range
-            } else if kinetic {
-                b.tuning.kinetic_range
+                a.weapon.unwrap_or(Weapon::ammo(choice))
             } else {
-                b.tuning.tank_range
+                Weapon::MachineGun
             };
-            let config = if kind != RangeUnitKind::Tank {
-                &b.bullet_config
-            } else if kinetic {
-                &b.kinetic_config
-            } else {
-                &b.shell_config
+            let range = match weapon {
+                Weapon::Blast => b.tuning.tank_range,
+                Weapon::Kinetic => b.tuning.kinetic_range,
+                Weapon::Energy => b.tuning.energy_range,
+                Weapon::Annihilation => b.tuning.anni_range,
+                Weapon::MachineGun => stream.range,
+            };
+            // Borrow individual config fields independently of the mutable actor.
+            let config = match weapon {
+                Weapon::Blast => &b.shell_config,
+                Weapon::Kinetic => &b.kinetic_config,
+                Weapon::Energy => &b.energy_config,
+                Weapon::Annihilation => &b.anni_config,
+                Weapon::MachineGun => &b.bullet_config,
             };
             let mut p = if let Order::Ground(p) = a.order {
                 p
@@ -916,7 +987,7 @@ impl BlastRange {
             if shell {
                 let charge = *a.charge.get_or_insert(self.tick + config.charge_ticks);
                 if self.tick < charge
-                    || (!kinetic
+                    || (weapon.bursts()
                         && b.waves.len() + b.rounds.iter().filter(|r| r.bursts()).count()
                             >= b.tuning.max_waves)
                 {
@@ -954,12 +1025,13 @@ impl BlastRange {
                     .sqrt()
                     .div(Fx::from_int(speed))
                     .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
-                let mut velocity = if shell {
+                let ballistic = shell && !weapon.energetic();
+                let mut velocity = if ballistic {
                     delta.map(|v| v.div(time))
                 } else {
                     weapons::flight_velocity(delta, speed)
                 };
-                if shell {
+                if ballistic {
                     velocity[1] = velocity[1].add(
                         Fx::from_int(config.gravity)
                             .mul(time)
@@ -968,8 +1040,7 @@ impl BlastRange {
                 }
                 b.rounds.push(Round {
                     owner: id,
-                    shell,
-                    kinetic,
+                    weapon,
                     pos: muzzle,
                     previous: muzzle,
                     velocity,
@@ -999,14 +1070,13 @@ impl BlastRange {
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
-            let gravity = match (r.shell, r.kinetic) {
-                (false, _) => 0,
-                (true, false) => b.shell_config.gravity,
-                (true, true) => b.kinetic_config.gravity,
+            let config = b.config(r.weapon).clone();
+            let gravity = if r.weapon == Weapon::MachineGun || r.weapon.energetic() {
+                0
+            } else {
+                config.gravity
             };
-            if r.shell {
-                r.velocity[1] = r.velocity[1].sub(Fx::from_int(gravity).mul(dt));
-            }
+            r.velocity[1] = r.velocity[1].sub(Fx::from_int(gravity).mul(dt));
             let delta = r.velocity.map(|v| v.mul(dt));
             let from = r.pos.map(Fx::to_int_trunc);
             let to = std::array::from_fn::<_, 3, _>(|a| r.pos[a].add(delta[a]).to_int_trunc());
@@ -1059,7 +1129,7 @@ impl BlastRange {
             let to = hit
                 .map(|p| p.map(Fx::from_int))
                 .unwrap_or_else(|| std::array::from_fn(|k| r.pos[k].add(delta[k])));
-            if !r.shell {
+            if r.weapon == Weapon::MachineGun {
                 b.traces.push(weapons::Trace {
                     from: r.pos,
                     to,
@@ -1069,10 +1139,10 @@ impl BlastRange {
             }
             if let Some(at) = hit {
                 if let Some(i) = shield {
-                    let work = match (r.shell, r.kinetic) {
-                        (false, _) => stream.work,
-                        (true, false) => b.shell_config.energy,
-                        (true, true) => b.kinetic_config.energy,
+                    let work = if r.weapon == Weapon::MachineGun {
+                        stream.work
+                    } else {
+                        config.energy
                     };
                     let drained = self.shields[i].charge.min(work);
                     self.shields[i].charge -= drained;
@@ -1087,13 +1157,12 @@ impl BlastRange {
                         drained,
                         collapsed,
                     });
-                } else if r.kinetic {
+                } else if r.weapon == Weapon::Kinetic {
                     // A solid round glances off or spends its work along
                     // its line, as the single gun's (ADR-454, ADR-456).
                     b.impacts.push(Impact {
                         at,
-                        shell: false,
-                        kinetic: true,
+                        weapon: r.weapon,
                     });
                     let mut velocity = r.velocity;
                     if self.ricochet(at, prev, &mut velocity, &b.kinetic_config) {
@@ -1106,29 +1175,27 @@ impl BlastRange {
                     } else {
                         self.kinetic_hit(at, r.velocity, &b.kinetic_config);
                     }
-                } else if r.shell {
+                } else if r.weapon.bursts() {
                     let old = self.matter.remaining_mj;
-                    self.matter.begin(
-                        b.shell_config.material_energy_j,
-                        b.shell_config.fragment_box,
-                    );
+                    self.matter
+                        .begin(config.material_energy_j, config.fragment_box);
                     let energy = self.matter.remaining_mj;
                     self.matter.remaining_mj = old;
                     b.waves.push(Burst {
-                        wave: Explosion::begin(at, &b.shell_config, &self.units),
+                        weapon: r.weapon,
+                        wave: Explosion::begin(at, &config, &self.units),
                         energy,
                     });
                     self.heat.deposit(
                         &self.world,
                         &self.matter.economy.mats,
                         at,
-                        b.shell_config.heat_units,
-                        b.shell_config.heat_per_cell,
+                        config.heat_units,
+                        config.heat_per_cell,
                     );
                     b.impacts.push(Impact {
                         at,
-                        shell: true,
-                        kinetic: false,
+                        weapon: r.weapon,
                     });
                 } else {
                     self.stream_contact(
@@ -1140,8 +1207,7 @@ impl BlastRange {
                     );
                     b.impacts.push(Impact {
                         at,
-                        shell: false,
-                        kinetic: false,
+                        weapon: r.weapon,
                     });
                 }
             } else {
@@ -1158,29 +1224,47 @@ impl BlastRange {
     fn battle_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
         let n = b.waves.len().max(1);
         for w in &mut b.waves {
+            let config = match w.weapon {
+                Weapon::Energy => &b.energy_config,
+                Weapon::Annihilation => &b.anni_config,
+                _ => &b.shell_config,
+            };
             if w.wave.capturing() {
                 w.wave.capture(
                     &self.world,
-                    &b.shell_config,
+                    config,
                     &self.units,
                     &self.surface_work,
-                    b.shell_config.capture_cells_per_tick / n,
+                    config.capture_cells_per_tick / n,
                 );
                 completed("battle_capture");
             }
             if !w.wave.capturing() {
                 let old = self.matter.remaining_mj;
                 self.matter.remaining_mj = w.energy;
-                self.matter.fragment_size(b.shell_config.fragment_box);
+                self.matter.fragment_size(config.fragment_box);
+                let before: Vec<_> = self
+                    .units
+                    .iter()
+                    .map(|u| (u.removed.len(), u.seg_removed.len()))
+                    .collect();
                 w.wave.step(
                     &mut self.world,
-                    b.shell_config.wave_work_per_tick / n,
+                    config.wave_work_per_tick / n,
                     &mut self.units,
                     &mut self.surface_work,
                     &mut self.surface_changed,
-                    &b.shell_config,
+                    config,
                     Some(&mut self.matter),
                 );
+                if config.material_energy_j == 0 {
+                    for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
+                        self.matter.annihilate_body(
+                            id,
+                            u.removed.len() - root + u.seg_removed.len() - seg,
+                        );
+                    }
+                }
                 completed("battle_wave_step");
                 w.energy = self.matter.remaining_mj;
                 self.matter.remaining_mj = old;
@@ -1189,8 +1273,7 @@ impl BlastRange {
                         u.motion.impulse(
                             &u.body,
                             w.wave.at,
-                            u64::from(u.absorbed) * u64::from(b.shell_config.hull_impulse_milli)
-                                / 1000,
+                            u64::from(u.absorbed) * u64::from(config.hull_impulse_milli) / 1000,
                         );
                     }
                     u.absorbed = 0;

@@ -308,11 +308,10 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
     let mut above = false;
     for _ in 0..750 {
         r.step();
-        above |= r
-            .battle
-            .rounds
-            .iter()
-            .any(|round| round.shell && round.pos[1] >= Fx::from_int(128));
+        above |=
+            r.battle.rounds.iter().any(|round| {
+                (round.weapon != Weapon::MachineGun) && round.pos[1] >= Fx::from_int(128)
+            });
     }
     assert!(
         above,
@@ -445,8 +444,7 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
             .map(Fx::from_int);
         a.battle.rounds.push(Round {
             owner,
-            shell: true,
-            kinetic: false,
+            weapon: Weapon::Blast,
             pos: p,
             previous: p,
             velocity: [Fx::ZERO; 3],
@@ -484,11 +482,12 @@ fn a_tank_loads_armour_piercing_for_a_tank_and_high_explosive_for_a_walker() {
         r.battle.actors[1].order = Order::Hold;
         let fired = (0..600).find_map(|_| {
             r.step();
-            r.battle
-                .rounds
-                .iter()
-                .find(|x| x.owner == 0)
-                .map(|x| (x.shell, x.kinetic))
+            r.battle.rounds.iter().find(|x| x.owner == 0).map(|x| {
+                (
+                    (x.weapon != Weapon::MachineGun),
+                    (x.weapon == Weapon::Kinetic),
+                )
+            })
         });
         assert_eq!(fired, Some((true, kinetic)), "against a {enemy:?}");
     }
@@ -518,22 +517,24 @@ fn a_battle_armour_piercing_round_breaks_the_hull_without_a_wave() {
     let speed = Fx::from_int(a.battle.kinetic_config.shell_speed);
     a.battle.rounds.push(Round {
         owner: 0,
-        shell: true,
-        kinetic: true,
+        weapon: Weapon::Kinetic,
         pos: from,
         previous: from,
         velocity: [speed, Fx::ZERO, Fx::ZERO],
         distance: Fx::from_int(400),
     });
     let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
-    assert!(b.battle.rounds[0].kinetic, "the round lost its kind");
+    assert!(
+        (b.battle.rounds[0].weapon == Weapon::Kinetic),
+        "the round lost its kind"
+    );
     let whole = a.units[1].removed.len();
     let mut struck = false;
     for _ in 0..10 {
         a.step();
         b.step();
         assert_eq!(a.state_hash(), b.state_hash());
-        struck |= a.battle.impacts.iter().any(|i| i.kinetic && !i.shell);
+        struck |= a.battle.impacts.iter().any(|i| i.weapon == Weapon::Kinetic);
     }
     assert!(struck, "no armour-piercing impact");
     assert!(a.battle.waves.is_empty(), "the solid round started a wave");
@@ -570,8 +571,7 @@ fn a_battle_armour_piercing_round_glances_off_a_hull_side() {
             .add(f.z.scale(Fx::from_int(40)));
     a.battle.rounds.push(Round {
         owner: 0,
-        shell: true,
-        kinetic: true,
+        weapon: Weapon::Kinetic,
         pos: start,
         previous: start,
         velocity: [v.x, v.y, v.z],
@@ -579,7 +579,7 @@ fn a_battle_armour_piercing_round_glances_off_a_hull_side() {
     });
     a.step();
     assert!(
-        a.battle.impacts.iter().any(|i| i.kinetic),
+        a.battle.impacts.iter().any(|i| i.weapon == Weapon::Kinetic),
         "the round never touched the hull"
     );
     let round = a.battle.rounds.iter().find(|r| r.owner == 0);
@@ -979,23 +979,23 @@ fn manual_ammunition_preserves_cooldown_order_and_snapshot() {
     r.start_battle().unwrap();
     r.battle.actors[0].order = Order::Attack(1);
     r.battle.actors[0].next = 123;
-    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Blast)));
     assert_eq!(r.battle.actors[0].next, 123);
     assert_eq!(r.battle.actors[0].order, Order::Attack(1));
     assert_eq!(r.battle_attack_range(0), Some(r.battle.tuning.tank_range));
-    assert!(!r.set_battle_weapon(1, Some(Delivery::Blast)));
-    assert!(!r.set_battle_weapon(0, Some(Delivery::Laser)));
-    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert!(!r.set_battle_weapon(1, Some(Weapon::Blast)));
+    assert!(!r.set_battle_weapon(0, Some(Weapon::MachineGun)));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
     assert_eq!(
         r.battle_attack_range(0),
         Some(r.battle.tuning.kinetic_range)
     );
     let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
     assert_eq!(r.state_hash(), restored.state_hash());
-    assert_eq!(restored.battle.actors[0].weapon, Some(Delivery::Kinetic));
+    assert_eq!(restored.battle.actors[0].weapon, Some(Weapon::Kinetic));
     assert!(r.set_battle_weapon(0, None));
     let mut walker = arena(RangeUnitKind::Strider);
-    assert!(!walker.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert!(!walker.set_battle_weapon(0, Some(Weapon::Kinetic)));
     assert_eq!(
         walker.battle_attack_range(0),
         Some(walker.streams.tuning.machine_gun.range)
@@ -1008,18 +1008,23 @@ fn manually_selected_shell_is_fired_even_at_a_tank() {
     r.start_battle().unwrap();
     r.battle.ai.next_tick = u32::MAX;
     r.battle.actors[1].order = Order::Hold;
-    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Blast)));
     let round = (0..180).find_map(|_| {
         r.step();
-        r.battle
-            .rounds
-            .iter()
-            .find(|p| p.owner == 0)
-            .map(|p| (p.shell, p.kinetic))
+        r.battle.rounds.iter().find(|p| p.owner == 0).map(|p| {
+            (
+                (p.weapon != Weapon::MachineGun),
+                (p.weapon == Weapon::Kinetic),
+            )
+        })
     });
     assert_eq!(round, Some((true, false)));
-    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
-    assert!(r.battle.rounds.iter().any(|p| p.owner == 0 && !p.kinetic));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
+    assert!(r
+        .battle
+        .rounds
+        .iter()
+        .any(|p| p.owner == 0 && p.weapon != Weapon::Kinetic));
 }
 
 #[test]
@@ -1031,10 +1036,10 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
     t.tank_range = 100;
     t.kinetic_range = 400;
-    assert!(r.set_battle_weapon(0, Some(Delivery::Kinetic)));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
     r.step();
     assert!(r.units[0].motion.destination.is_none());
-    assert!(r.set_battle_weapon(0, Some(Delivery::Blast)));
+    assert!(r.set_battle_weapon(0, Some(Weapon::Blast)));
     r.step();
     assert!(r.units[0].motion.destination.is_some());
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
@@ -1093,4 +1098,122 @@ fn battle_machine_guns_use_paired_finite_flight_and_shared_burst_timing() {
         tuning.burst_ticks - 1 + tuning.reload_ticks
     );
     assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
+    for weapon in [Weapon::Energy, Weapon::Annihilation] {
+        let mut r = arena(RangeUnitKind::Tank);
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        r.battle.ai.next_tick = u32::MAX;
+        assert!(r.set_battle_weapon(0, Some(weapon)));
+        assert!(r.battle_order(0, Order::Attack(1), None));
+        for _ in 0..160 {
+            r.step();
+            if !r.battle.rounds.is_empty() {
+                break;
+            }
+        }
+        let shot = r.battle.rounds.first().expect("energy charge never fired");
+        assert_eq!(shot.weapon, weapon);
+        let velocity = shot.velocity;
+        let next = r.battle.actors[0].next;
+        assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
+        assert_eq!(r.battle.actors[0].next, next);
+        assert!(r.battle_order(0, Order::Hold, None));
+        r.step();
+        if let Some(shot) = r.battle.rounds.first() {
+            assert_eq!(shot.weapon, weapon);
+            assert_eq!(shot.velocity, velocity, "direct bolt gained gravity");
+        }
+        // A valid future AI deadline for snapshot validation, with quiet enemies.
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        let mut replay =
+            BlastRange::restore(r.config.clone(), &r.snapshot()).expect("in-flight snapshot");
+        let mut impact = false;
+        let mut wave = false;
+        for _ in 0..120 {
+            r.step();
+            replay.step();
+            assert_eq!(r.state_hash(), replay.state_hash());
+            impact |= r.battle.impacts.iter().any(|i| i.weapon == weapon);
+            if r.battle.waves.iter().any(|w| w.weapon == weapon) {
+                wave = true;
+                // Restore during the delayed wave as well, not just during flight.
+                replay = BlastRange::restore(r.config.clone(), &r.snapshot())
+                    .expect("typed wave snapshot");
+            }
+        }
+        assert!(impact && wave, "bolt never produced its typed impact/wave");
+        assert!(
+            r.units[1].annihilated_mm3() > 0,
+            "energy wave did no ablative work"
+        );
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
+    let mut r = arena(RangeUnitKind::Tank);
+    for (weapon, range) in [(Weapon::Energy, 1200), (Weapon::Annihilation, 1000)] {
+        assert!(r.set_battle_weapon(0, Some(weapon)));
+        assert_eq!(r.battle_attack_range(0), Some(range));
+        let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        assert_eq!(restored.battle_weapon(0), Some(weapon));
+    }
+    r.set_battle_weapon(0, Some(Weapon::Kinetic));
+    // No active waves: 42 and 43 have the same bytes for legacy ammunition.
+    let mut old = r.snapshot();
+    old[..4].copy_from_slice(&42u32.to_le_bytes());
+    assert_eq!(
+        BlastRange::restore(r.config.clone(), &old)
+            .unwrap()
+            .battle_weapon(0),
+        Some(Weapon::Kinetic)
+    );
+    r.set_battle_weapon(0, Some(Weapon::Annihilation));
+    let mut invalid = r.snapshot();
+    invalid[..4].copy_from_slice(&42u32.to_le_bytes());
+    assert!(BlastRange::restore(r.config.clone(), &invalid).is_none());
+}
+
+#[test]
+fn mixed_annihilation_and_shell_waves_keep_their_material_accounting() {
+    let mut r = arena(RangeUnitKind::Tank);
+    // Setup suppresses orders, but already flying rounds and waves keep working.
+    for (weapon, x) in [(Weapon::Annihilation, 280), (Weapon::Blast, 370)] {
+        let at = [x, 25, 430].map(Fx::from_int);
+        r.battle.rounds.push(Round {
+            owner: 0,
+            weapon,
+            pos: at,
+            previous: at,
+            velocity: [Fx::ZERO, Fx::from_int(-1200), Fx::ZERO],
+            distance: Fx::from_int(1000),
+        });
+    }
+    let mut kinds = Vec::new();
+    for _ in 0..8 {
+        r.step();
+        kinds.extend(r.battle.impacts.iter().map(|i| i.weapon));
+    }
+    assert!(kinds.contains(&Weapon::Annihilation) && kinds.contains(&Weapon::Blast));
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..100 {
+        r.step();
+        replay.step();
+        assert_eq!(r.state_hash(), replay.state_hash());
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    assert!(r.removed > 0);
+    assert!(
+        r.matter.economy.ledger.sunk_total() > 0,
+        "ablated terrain was not accounted"
+    );
+    assert!(
+        r.matter.spent_mj > 0,
+        "ordinary shell lost its fracture budget"
+    );
 }

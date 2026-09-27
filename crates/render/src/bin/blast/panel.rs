@@ -1,6 +1,7 @@
 //! Mouse-first controls for the one forest range.
 use super::*;
 use modding::range::{RangeScenario, RangeScenarioWeapon};
+use sim_core::blast::battle::Weapon as BattleWeapon;
 use std::collections::BTreeMap;
 use workbench::{Selection, Tool};
 
@@ -175,7 +176,7 @@ pub enum Action {
     Drawer(u8),
     Ranges,
     SelectUnit(usize),
-    BattleWeapon(Option<Delivery>),
+    BattleWeapon(Option<BattleWeapon>),
     Skirmish(u8),
     Play,
     BattlePreset,

@@ -1,5 +1,6 @@
 // Visual gas. World units and simulation cells are independent of display voxels.
 // Double buffering: every invocation reads the same previous state.
+struct EnergySource { energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>, control:vec4<f32> };
 struct Params {
     world_from_clip: mat4x4<f32>,
     camera: vec4<f32>,
@@ -13,6 +14,7 @@ struct Params {
     clip_from_world: mat4x4<f32>, sun: vec4<f32>, sky: vec4<f32>,
     energy:vec4<f32>, beam:vec4<f32>, weapon:vec4<f32>,
     look: vec4<f32>, distant:vec4<f32>, distant_bounds:vec4<f32>,
+    energy_count:vec4<f32>, energy_sources:array<EnergySource,24>,
 };
 struct Cell { flow: vec4<f32>, matter: vec4<f32> }; // v.xyz, pressure; excess kelvin/1000, fuel, O2, soot
 @group(0) @binding(0) var<uniform> p: Params;

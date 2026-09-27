@@ -321,6 +321,7 @@ fn main() {
     let mut drive = false;
     let mut demo = false;
     let mut battle_preset = false;
+    let mut battle_weapon = None;
     let mut battle_eight = false;
     let mut skirmish = None;
     let mut hud_drawer = 0;
@@ -370,6 +371,14 @@ fn main() {
                 assert!(window_size[0] >= 960 && window_size[1] >= 540);
             }
             "--battle" => battle_preset = true,
+            "--battle-weapon" => {
+                i += 1;
+                battle_weapon = Some(match args[i].as_str() {
+                    "energy" => sim_core::blast::battle::Weapon::Energy,
+                    "anni" => sim_core::blast::battle::Weapon::Annihilation,
+                    _ => panic!("--battle-weapon energy|anni"),
+                });
+            }
             "--skirmish" => {
                 i += 1;
                 skirmish = Some(args[i].parse::<u8>().expect("skirmish 0 or 1"));
@@ -599,6 +608,17 @@ fn main() {
         let source = std::fs::read_to_string(&file).expect("--ai-rules file");
         let tuning = modding::battle_ai::Tuning::from_ron(&source).expect("--ai-rules RON");
         sim.configure_enemy_ai(tuning).expect("valid AI rules");
+    }
+    if let Some(weapon) = battle_weapon {
+        assert!(
+            sim.battle_mode(),
+            "--battle-weapon requires a battle layout"
+        );
+        for id in 0..sim.units.len() {
+            if sim.allied(id) && sim.units[id].kind == RangeUnitKind::Tank {
+                assert!(sim.set_battle_weapon(id, Some(weapon)));
+            }
+        }
     }
     if battle_preset && !edit {
         sim.start_battle().expect("two battle teams");
@@ -1559,12 +1579,36 @@ fn advance(
         }
         let started = std::time::Instant::now();
         scene.sim.step();
-        for impact in scene.sim.battle.impacts.iter().filter(|i| i.shell) {
+        for impact in scene
+            .sim
+            .battle
+            .impacts
+            .iter()
+            .filter(|i| i.weapon.bursts())
+        {
             let mut params = gas.params;
-            let c = &scene.sim.battle.shell_config;
+            let c = scene.sim.battle.config(impact.weapon);
             params.control.z = 1.0;
             params.control.y = 0.0;
-            params.weapon.x = 0.0;
+            params.weapon.x = match impact.weapon {
+                sim_core::blast::battle::Weapon::Energy => 1.0,
+                sim_core::blast::battle::Weapon::Annihilation => 2.0,
+                _ => 0.0,
+            };
+            params.chemistry = Vec4::new(
+                c.reaction_milli as f32 / 1000.0,
+                c.cooling_milli as f32 / 1000.0,
+                c.buoyancy_milli as f32 / 1000.0,
+                c.gas_temperature_k as f32 / 1000.0,
+            );
+            params.charge = Vec4::new(
+                c.gas_fuel_milli as f32 / 1000.0,
+                c.gas_pressure_milli as f32 / 1000.0,
+                c.gas_display_mm as f32 / voxel::unit::WORLD_MM as f32,
+                0.0,
+            );
+            params.energy = Vec3::from(impact.at.map(|v| v as f32)).extend(0.0);
+            params.beam = Vec4::ZERO;
             params.source = gas
                 .surface_source(Vec3::from(impact.at.map(|v| v as f32)), Vec3::Y)
                 .extend(c.gas_source_radius as f32);
@@ -1906,6 +1950,7 @@ fn weapon_art(
     }
 }
 fn animate_energy(
+    effects: Res<fire::Effects>,
     mut scene: ResMut<Scene>,
     visual: Res<moving::Visual>,
     workshop: Res<Workshop>,
@@ -1923,6 +1968,7 @@ fn animate_energy(
     } else {
         1.0
     };
+    effects.battle_energy(&scene.sim, fraction, &mut gas.params);
     let visual_tick = scene.sim.tick.saturating_sub(1) as f32 + fraction;
     gas.params.weapon.y = visual_tick / 30.0;
     let emitter =
