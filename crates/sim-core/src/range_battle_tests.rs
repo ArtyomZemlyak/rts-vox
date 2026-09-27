@@ -1258,3 +1258,70 @@ fn stock_battle_kinetic_kills_a_frontal_tank() {
         assert!(r.matter.economy.ledger.balanced());
     }
 }
+
+/// Exercise the default enemy policy, pursuit and live motion together. A
+/// short reach makes the enemy walk around the wall before it can engage.
+fn enemy_detours_to_firing_range(kind: RangeUnitKind) {
+    let mut r = arena_of([RangeUnitKind::Tank, kind]);
+    let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    t.kinetic_range = 100;
+    r.streams.tuning.machine_gun.range = 100;
+    for x in 300..310 {
+        for y in 16..90 {
+            for z in 260..410 {
+                r.world.queue_edit(voxel::Edit::put(x, y, z, 3));
+            }
+        }
+    }
+    while r.world.queued() > 0 {
+        r.world.flush();
+    }
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Hold, None));
+    let mut detoured = false;
+    let mut first_shot = None;
+    let mut blocked = 0;
+    let mut firing_position = None;
+    for tick in 0..1800 {
+        r.step();
+        let m = &r.units[1].motion;
+        if let Some(goal) = m.destination {
+            if let Some(prior) = firing_position {
+                assert_eq!(goal, prior, "a stationary target moved our firing position");
+            } else {
+                firing_position = Some(goal);
+            }
+        }
+        let x = m.pos[0].to_int_trunc();
+        let z = m.pos[2].to_int_trunc();
+        detoured |= (280..330).contains(&x) && !(240..430).contains(&z);
+        blocked += usize::from(m.blocked);
+        assert!(r.units[1].status.alive);
+        if r.battle.actors[1].fired > 0 {
+            first_shot = Some(tick);
+            break;
+        }
+    }
+    assert!(detoured, "{kind:?} never went around the wall");
+    assert!(
+        first_shot.is_some(),
+        "{kind:?} never engaged: at={:?}, blocked={blocked}, dest={:?}, path={:?}",
+        r.units[1].at,
+        r.units[1].motion.destination,
+        r.units[1].motion.path
+    );
+    eprintln!(
+        "enemy detour {kind:?}: first_shot={first_shot:?}, blocked_ticks={blocked}, at={:?}",
+        r.units[1].at
+    );
+}
+
+#[test]
+fn enemy_tank_detours_around_cover_and_engages() {
+    enemy_detours_to_firing_range(RangeUnitKind::Tank);
+}
+
+#[test]
+fn enemy_walker_detours_around_cover_and_engages() {
+    enemy_detours_to_firing_range(RangeUnitKind::Strider);
+}

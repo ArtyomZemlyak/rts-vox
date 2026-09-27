@@ -952,12 +952,15 @@ impl BlastRange {
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
                     let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
-                    let margin = range * (1000 - b.tuning.standoff_milli) / 1000;
+                    // Keep a usable firing position when our own detour changes
+                    // the approach angle. Comparing the new radial point with
+                    // the old one replanned even against a stationary target.
+                    // A moving target still invalidates it on leaving its reach.
                     let changed = target_changed
                         || self.units[id].motion.destination.is_none_or(|old| {
-                            let x = i64::from(dest[0] - old[0]);
-                            let z = i64::from(dest[1] - old[1]);
-                            x * x + z * z > i64::from(margin) * i64::from(margin)
+                            let x = i64::from(p[0]) - i64::from(old[0]);
+                            let z = i64::from(p[2]) - i64::from(old[1]);
+                            x * x + z * z > i64::from(range) * i64::from(range)
                         });
                     if changed {
                         let others: Vec<_> = self
