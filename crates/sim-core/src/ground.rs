@@ -269,6 +269,18 @@ impl Ground {
             h = h.wrapping_add(w.wrapping_mul(i as u64 + 1));
         }
         h = h.wrapping_add((self.bodies.list.len() as u64).wrapping_mul(0x9E37_79B9));
+        // Падающее тело — состояние: где оно, как быстро падает и сколько
+        // пролетело, решает, куда и когда оно ляжет. Хвост очереди правок
+        // тоже: он ляжет в мир следующими тиками (ADR-116, ADR-453).
+        for (k, b) in self.bodies.list.iter().enumerate() {
+            let mut w = b.id;
+            for v in [b.ox, b.oy, b.oz, b.vy.raw(), b.fy.raw()] {
+                w = w.wrapping_mul(31).wrapping_add(v as u64);
+            }
+            w = w.wrapping_mul(31).wrapping_add(u64::from(b.fallen));
+            h = h.wrapping_add(w.wrapping_mul(k as u64 + 1).rotate_left(17));
+        }
+        h = h.wrapping_add((self.world.queued() as u64).wrapping_mul(0x85EB_CA6B));
         h
     }
 }
@@ -1005,6 +1017,30 @@ mod tests {
         };
         assert_ne!(run(true), run(false), "хеш не заметил копки");
         assert_eq!(run(true), run(true), "хеш не воспроизводим");
+    }
+
+    /// **Падающее тело и хвост очереди входят в хеш земли** (ADR-453):
+    /// хешировались только правки тика и число тел, и тело, падающее
+    /// у двух клиентов с разной скоростью, было не видно до приземления.
+    #[test]
+    fn a_falling_body_and_the_queue_are_part_of_the_ground_hash() {
+        let mut w = world_with_ground();
+        let g = w.ground.as_mut().expect("земля");
+        for y in TOP..TOP + 2 {
+            g.world.queue_edit(voxel::Edit::put(50, y + 10, 50, 2));
+        }
+        g.world.flush();
+        assert!(g
+            .bodies
+            .detach(&mut g.world, &[(50, TOP + 10, 50), (50, TOP + 11, 50)]));
+        g.world.flush();
+        let base = g.hash();
+        g.bodies.list[0].vy = g.bodies.list[0].vy.add(fx::Fx::ONE);
+        assert_ne!(g.hash(), base, "the hash missed the body's fall speed");
+        g.bodies.list[0].vy = g.bodies.list[0].vy.sub(fx::Fx::ONE);
+        assert_eq!(g.hash(), base);
+        g.world.queue_dig(10, TOP - 1, 10);
+        assert_ne!(g.hash(), base, "the hash missed the edit backlog");
     }
 
     /// Мир без земли ведёт себя ровно как раньше: фазы земли — те же

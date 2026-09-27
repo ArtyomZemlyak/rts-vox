@@ -4182,6 +4182,16 @@ impl World {
             w = w
                 .wrapping_mul(31)
                 .wrapping_add(self.units.heave_v[i].raw() as u64);
+            // Сроки выстрела и пересмотра цели переживают тик и решают,
+            // когда юнит выстрелит и кого выберет: не войди они в хеш,
+            // перезарядку можно было бы переписать и увидеть тот же хеш,
+            // пока не выстрелит — тиками позже (ADR-116, ADR-453).
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(u64::from(self.units.next_shot[i]));
+            w = w
+                .wrapping_mul(31)
+                .wrapping_add(u64::from(self.units.next_search[i]));
             // Приказ — состояние: он переживает тик и задаёт движение,
             // а состояние, не входящее в хеш, можно переписать целиком
             // и увидеть тот же хеш до бита (ADR-116).
@@ -6276,6 +6286,24 @@ reload: 8, blast_radius: 0, blast_damage: 0 ) ] )",
             "одинаковые приказы разошлись по хешу"
         );
         assert_ne!(run(80, 400), run(400, 80), "разные приказы дали один хеш");
+    }
+
+    /// **Сроки выстрела и пересмотра цели входят в хеш тика** (ADR-453):
+    /// они переживают тик и решают, когда юнит выстрелит и кого выберет.
+    /// Не входя в хеш, расхождение в них было видно тиками позже —
+    /// выстрелом.
+    #[test]
+    fn reload_and_search_timers_are_part_of_the_tick_hash() {
+        let mut w = World::new(2, 16, test_tuning());
+        populate(&mut w, 40, 5);
+        w.tick();
+        let i = w.units.live_ids[0] as usize;
+        let base = w.phase_hash();
+        w.units.next_shot[i] += 1;
+        assert_ne!(w.phase_hash(), base, "the hash missed the reload timer");
+        w.units.next_shot[i] -= 1;
+        w.units.next_search[i] += 1;
+        assert_ne!(w.phase_hash(), base, "the hash missed the search timer");
     }
 
     /// **Потолок откладывает остаток, а не теряет его.**
