@@ -227,9 +227,7 @@ mod tests {
             }
             let mut expected = BTreeMap::<_, Vec<u32>>::new();
             for (i, f) in fragments.iter().enumerate() {
-                if !f.resting
-                    || hull_hit(arr(f.position), [Fx::ZERO; 3], [Fx::ZERO; 3], &[hull], 0).is_some()
-                {
+                if !f.resting || hull.carries(world_boxes[i].0[1], f.position) {
                     continue;
                 }
                 let (lo, hi) = settled_cells(world_boxes[i].0, world_boxes[i].1);
@@ -666,6 +664,110 @@ mod tests {
             "the pile sank into the rock under it: bottom {bottom:?}"
         );
         assert!(e.balanced());
+    }
+
+    /// **A piece lying on a piece is floor at its top** (ADR-458). The
+    /// rubble map took only what the world held, and a pile on a rock
+    /// piece was missing: the hull met the rock and not the pile on it.
+    /// A piece whose support is gone is still no floor.
+    #[test]
+    fn a_stacked_piece_is_floor_and_a_hovering_one_is_not() {
+        let (mut b, mut e) = (Bursts::default(), economy());
+        let w = world();
+        let piece = |e: &mut Economy, id, position, material, shape, side| Fragment {
+            id,
+            position,
+            velocity: V3::ZERO,
+            material,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape,
+            side,
+            chunk: None,
+            held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+            resting: true,
+        };
+        // A rock block on the ground, 48..52 by 12..16 by 48..52, a soil
+        // piece on it, and one left hanging at 20 over bare ground.
+        let rock = V3::new(Fx::from_int(50), Fx::from_int(14), Fx::from_int(50));
+        b.fragments.push(piece(&mut e, 1, rock, 2, u64::MAX, 4));
+        b.fragments
+            .push(piece(&mut e, 2, centre([49, 16, 49]), 1, 1, 1));
+        b.fragments
+            .push(piece(&mut e, 3, centre([60, 20, 60]), 1, 1, 1));
+        let rubble = b.rubble(&w, &[], &[]);
+        assert_eq!(rubble.get(&[50, 50]), Some(&16), "the rock is not floor");
+        assert_eq!(
+            rubble.get(&[49, 49]),
+            Some(&17),
+            "the stacked piece is not floor"
+        );
+        assert_eq!(rubble.get(&[60, 60]), None, "a hanging piece is floor");
+    }
+
+    /// **A piece on a roof holds nothing** (ADR-293, ADR-458): what falls
+    /// on it lands on the roof. The test for a rider asked whether the
+    /// piece's centre lay inside the hull's box, and a piece on a roof
+    /// has it above: riders held what fell on them.
+    #[test]
+    fn a_piece_on_a_roof_holds_nothing() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        let hull = Hull {
+            pos: [Fx::from_int(48), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(6)],
+            height: Fx::from_int(3),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ZERO,
+        };
+        let piece = |e: &mut Economy, id, at: [u32; 3], material| Fragment {
+            id,
+            position: centre(at),
+            velocity: V3::ZERO,
+            material,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+            resting: false,
+        };
+        // A rider on the roof at 15, and a piece of another matter
+        // dropped onto it from above.
+        b.fragments.push(piece(&mut e, 1, [48, 17, 48], 1));
+        let around = Surroundings {
+            hulls: &[hull],
+            yielding: &[],
+        };
+        let g = crate::gravity_per_tick(&t);
+        let mut tick = 0;
+        while !b.fragments[0].resting {
+            b.step_fragments(&w, &mut e, &t.blast, g, tick, around);
+            tick += 1;
+            assert!(tick < 300, "the rider never rested");
+        }
+        b.fragments.push(piece(&mut e, 2, [48, 22, 48], 2));
+        while !b.fragments[1].resting {
+            b.step_fragments(&w, &mut e, &t.blast, g, tick, around);
+            tick += 1;
+            assert!(tick < 300, "the second piece never rested");
+        }
+        let bottom = |f: &Fragment| f.position.y.add(f.bounds().0[1]);
+        assert!(
+            bottom(&b.fragments[1]) < bottom(&b.fragments[0]).add(Fx::from_ratio(1, 2)),
+            "the rider held the piece: {:?} over {:?}",
+            b.fragments[1].position,
+            b.fragments[0].position
+        );
     }
 
     /// A piece falling onto a live hull rests on its roof, and when the
@@ -1763,6 +1865,14 @@ impl Hull {
         let v = dz.mul(c).sub(dx.mul(s));
         u.abs() <= self.half[0] && v.abs() <= self.half[1]
     }
+    /// Whether a piece whose box bottom is `bottom` and centre `centre`
+    /// rides on the hull (ADR-293, ADR-458): its centre over the box and
+    /// its bottom no lower than the support probe's half unit under the
+    /// roof — on the roof, or on what lies on it.
+    pub fn carries(&self, bottom: Fx, centre: V3) -> bool {
+        self.covers_point([centre.x, centre.z])
+            && bottom >= self.pos[1].add(self.height).sub(Fx::from_ratio(1, 2))
+    }
     /// Whether the column's centre lies under the hull's box.
     pub fn covers(&self, x: i32, z: i32) -> bool {
         self.covers_point([
@@ -2677,12 +2787,34 @@ impl Bursts {
         hulls: &[Hull],
     ) -> nav::vehicle::Rubble {
         let mut out = nav::vehicle::Rubble::new();
-        for f in self.fragments.iter().filter(|f| {
-            f.resting
-                && f.chunk.is_none()
-                && !yielding.contains(&f.material)
-                && supported(f, world, &[], &Settled::default(), u32::MAX)
-        }) {
+        // Floor is what something holds: the world, or a resting piece
+        // under it — a pile on a rock piece is floor at the pile's top.
+        // Only the world was asked, and a stacked piece was missing from
+        // the map (ADR-458). A piece on a roof, or one whose support was
+        // taken and whose turn to fall has not come, is not floor.
+        let mut floor = Vec::new();
+        let mut stacked = Vec::new();
+        for (i, f) in self.fragments.iter().enumerate() {
+            if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
+                continue;
+            }
+            if supported(f, world, &[], &Settled::default(), u32::MAX) {
+                floor.push(i);
+            } else {
+                stacked.push(i);
+            }
+        }
+        if !stacked.is_empty() {
+            let settled = Settled::around(&self.fragments, hulls, |i, _| {
+                stacked.binary_search(&i).is_ok()
+            });
+            floor.extend(
+                stacked
+                    .into_iter()
+                    .filter(|&i| supported(&self.fragments[i], world, &[], &settled, i as u32)),
+            );
+        }
+        for f in floor.into_iter().map(|i| &self.fragments[i]) {
             let (low, high) = f.bounds();
             let p = arr(f.position);
             // Floor of the bottom corners, ceiling of the top: the columns
@@ -3247,6 +3379,15 @@ impl Settled {
     /// their support (ADR-291). Pieces on a hull's roof (ADR-293) are left
     /// out: they ride, they are not ground.
     fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
+        Self::around(fragments, hulls, |_, f| !f.resting || due(f.id, tick, t))
+    }
+    /// The resting pieces around those `asks` picks, by index and piece;
+    /// a hull's riders left out as in [`Settled::of`].
+    fn around(
+        fragments: &[Fragment],
+        hulls: &[Hull],
+        asks: impl Fn(usize, &Fragment) -> bool,
+    ) -> Settled {
         if !fragments.iter().any(|f| f.resting) {
             return Settled::default();
         }
@@ -3254,13 +3395,13 @@ impl Settled {
         // still follow the ordered fragment slice, not the hash table.
         let mut want = SettledQueries::default();
         let mut boxes = Vec::with_capacity(fragments.len());
-        for f in fragments {
+        for (i, f) in fragments.iter().enumerate() {
             let (low, high) = f.bounds();
             let p = arr(f.position);
             let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
             boxes.push((lo, hi));
-            if f.resting && !due(f.id, tick, t) {
+            if !asks(i, f) {
                 continue;
             }
             // Where the piece may get to this tick: its box swept by its
@@ -3286,7 +3427,10 @@ impl Settled {
                 continue;
             }
             let (lo, hi) = out.boxes[i];
-            if hull_hit(arr(f.position), [Fx::ZERO; 3], [Fx::ZERO; 3], hulls, 0).is_some() {
+            // The test asked whether the piece's centre lay inside a
+            // hull's box, and the centre of a piece on a roof lies above
+            // it: riders held what fell on them (ADR-458).
+            if hulls.iter().any(|h| h.carries(lo[1], f.position)) {
                 continue;
             }
             let (c0, c1) = settled_cells(lo, hi);
