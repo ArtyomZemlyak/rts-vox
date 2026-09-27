@@ -300,6 +300,94 @@ impl HitFrames {
         None
     }
 }
+/// A live unit as the pieces meet it (ADR-469): its voxels in its pose,
+/// asked through the pose's frames derived at the first question. A
+/// piece against the hull asks the same cells substep after substep, and
+/// the pieces thrown off one hull ask its cells together: past
+/// `ASKED_BEFORE_KNOWN` questions in a step, each cell of the unit's box
+/// is asked once and remembered, and a cell outside the box is none of
+/// the unit's.
+struct UnitVoxels<'a> {
+    unit: &'a RangeUnit,
+    frames: std::cell::OnceCell<HitFrames>,
+    asked: std::cell::Cell<u32>,
+    known: std::cell::OnceCell<KnownCells>,
+}
+/// Questions a unit's voxels answer directly in a step before its cells
+/// are remembered (ADR-469): remembering costs the box's bits.
+const ASKED_BEFORE_KNOWN: u32 = 256;
+/// The cells of a unit's box asked this step: two bits a cell, asked and
+/// solid, over the box `lo`, `size` (ADR-469).
+struct KnownCells {
+    lo: [i32; 3],
+    size: [i64; 3],
+    bits: std::cell::RefCell<Vec<u64>>,
+}
+impl<'a> UnitVoxels<'a> {
+    fn of(unit: &'a RangeUnit) -> Self {
+        Self {
+            unit,
+            frames: std::cell::OnceCell::new(),
+            asked: std::cell::Cell::new(0),
+            known: std::cell::OnceCell::new(),
+        }
+    }
+    /// The unit's hull for the pieces (ADR-293): its motion box, how far
+    /// it moved this tick from `was`, and these voxels.
+    fn hull(&self, was: Option<&[Fx; 3]>) -> crate::burst::Hull<'_> {
+        let u = self.unit;
+        let o = motion::Obstacle::of(&u.motion, &u.body);
+        crate::burst::Hull {
+            pos: o.pos,
+            head: o.head,
+            half: o.half,
+            height: Fx::from_ratio(
+                u.body.vol.ny as i32 * u.body.mm as i32,
+                voxel::unit::WORLD_MM as i32,
+            ),
+            vel: was.map_or([Fx::ZERO; 3], |was| [0, 1, 2].map(|k| o.pos[k].sub(was[k]))),
+            step: Fx::from_int(u.motion.step),
+            solid: Some(crate::burst::Solid(self)),
+        }
+    }
+}
+impl crate::burst::Voxels for UnitVoxels<'_> {
+    fn solid(&self, p: [i32; 3]) -> bool {
+        let u = self.unit;
+        let frames = self
+            .frames
+            .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta));
+        let asked = self.asked.get();
+        if asked < ASKED_BEFORE_KNOWN {
+            self.asked.set(asked + 1);
+            return frames.hit(u, p).is_some();
+        }
+        let known = self.known.get_or_init(|| {
+            let (lo, hi) = u.bounds();
+            let size: [i64; 3] = std::array::from_fn(|a| i64::from(hi[a]) - i64::from(lo[a]) + 1);
+            let cells = size.iter().product::<i64>() as usize;
+            KnownCells {
+                lo,
+                size,
+                bits: std::cell::RefCell::new(vec![0; cells.div_ceil(32)]),
+            }
+        });
+        let q: [i64; 3] = std::array::from_fn(|a| i64::from(p[a]) - i64::from(known.lo[a]));
+        if (0..3).any(|a| q[a] < 0 || q[a] >= known.size[a]) {
+            return false;
+        }
+        let i = ((q[1] * known.size[2] + q[2]) * known.size[0] + q[0]) as usize;
+        let (word, shift) = (i / 32, 2 * (i % 32));
+        let mut bits = known.bits.borrow_mut();
+        let cell = bits[word] >> shift & 3;
+        if cell & 1 != 0 {
+            return cell & 2 != 0;
+        }
+        let solid = frames.hit(u, p).is_some();
+        bits[word] |= (1 | u64::from(solid) << 1) << shift;
+        solid
+    }
+}
 impl RangeUnit {
     pub fn barrel_connected(&self, index: usize) -> bool {
         self.body.weapon_paths().get(index).is_some_and(|path| {
@@ -3291,26 +3379,14 @@ impl BlastRange {
     /// right after a restore planned over bare ground while the continuing
     /// run planned over the heap (ADR-426).
     fn current_rubble(&self) -> nav::vehicle::Rubble {
-        let hulls: Vec<crate::burst::Hull> = self
+        let live: Vec<UnitVoxels> = self
             .units
             .iter()
             .chain((!self.battle_mode()).then_some(&self.gun))
             .filter(|u| u.status.alive)
-            .map(|u| {
-                let o = motion::Obstacle::of(&u.motion, &u.body);
-                crate::burst::Hull {
-                    pos: o.pos,
-                    head: o.head,
-                    half: o.half,
-                    height: Fx::from_ratio(
-                        u.body.vol.ny as i32 * u.body.mm as i32,
-                        voxel::unit::WORLD_MM as i32,
-                    ),
-                    vel: [Fx::ZERO; 3],
-                    step: Fx::from_int(u.motion.step),
-                }
-            })
+            .map(UnitVoxels::of)
             .collect();
+        let hulls: Vec<crate::burst::Hull> = live.iter().map(|v| v.hull(None)).collect();
         self.matter
             .debris
             .rubble(&self.world, &self.navigation.fell.materials, &hulls)
@@ -3878,27 +3954,16 @@ impl BlastRange {
         self.matter.shed_segments_budget(&mut self.units, work);
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
         // they drive into (ADR-294); the dead lie as debris.
-        let hulls: Vec<crate::burst::Hull> = self
+        let live: Vec<(UnitVoxels, &[Fx; 3])> = self
             .units
             .iter()
             .zip(&before)
             .chain((!battle_mode).then_some((&self.gun, &gun_before)))
             .filter(|(u, _)| u.status.alive)
-            .map(|(u, was)| {
-                let o = motion::Obstacle::of(&u.motion, &u.body);
-                crate::burst::Hull {
-                    pos: o.pos,
-                    head: o.head,
-                    half: o.half,
-                    height: Fx::from_ratio(
-                        u.body.vol.ny as i32 * u.body.mm as i32,
-                        voxel::unit::WORLD_MM as i32,
-                    ),
-                    vel: [0, 1, 2].map(|k| o.pos[k].sub(was[k])),
-                    step: Fx::from_int(u.motion.step),
-                }
-            })
+            .map(|(u, was)| (UnitVoxels::of(u), was))
             .collect();
+        let hulls: Vec<crate::burst::Hull> =
+            live.iter().map(|(v, was)| v.hull(Some(was))).collect();
         self.matter.flush(
             &self.world,
             battle_mode || self.config.material_energy_j > 0,
@@ -6249,6 +6314,87 @@ mod tests {
             low < roof.sub(Fx::from_int(2)),
             "the piece never fell: {low:?}"
         );
+    }
+    /// A piece falling onto the parked tank's rear deck rests on the deck,
+    /// below the top of the tank's box by the turret's height (ADR-469),
+    /// and rides there: no heap under the tank, nothing for the settled.
+    #[test]
+    fn a_piece_falling_onto_the_rear_deck_rests_on_the_deck() {
+        let mut a = BlastRange::new(config());
+        a.patrols_running = false;
+        let u = &a.gun;
+        let roof = u.motion.pos[1].add(Fx::from_ratio(
+            u.body.vol.ny as i32 * u.body.mm as i32,
+            voxel::unit::WORLD_MM as i32,
+        ));
+        // The middle of the rear deck, and the top of the hull under the
+        // piece's box: the four columns its corners fall in.
+        let [x, _, z] = u.world_pos([6, 0, 15]);
+        let deck = (0..2)
+            .flat_map(|dx| (0..2).map(move |dz| [x + dx, z + dz]))
+            .filter_map(|[cx, cz]| {
+                (0..roof.to_int_trunc() + 2)
+                    .rev()
+                    .find(|&y| u.solid([cx, y, cz]))
+            })
+            .max()
+            .expect("no deck under the piece")
+            + 1;
+        assert!(
+            Fx::from_int(deck + 8) < roof,
+            "the deck at {deck} is not below the roof {roof:?}"
+        );
+        let held = a
+            .matter
+            .economy
+            .ledger
+            .create(crate::matter::Kind::Debris, 0, u64::MAX);
+        let amount = a.matter.economy.per_voxel(2);
+        let ground = a.matter.economy.ground;
+        a.matter.economy.ledger.reveal(ground, amount);
+        a.matter.economy.ledger.transfer(ground, held, amount);
+        let half = Fx::from_ratio(1, 2);
+        a.matter.debris.fragments.push(crate::burst::Fragment {
+            id: 9001,
+            position: phys::V3::new(
+                Fx::from_int(x).add(half),
+                roof.add(Fx::from_int(6)),
+                Fx::from_int(z).add(half),
+            ),
+            velocity: phys::V3::ZERO,
+            material: 2,
+            paint: None,
+            mm: 100,
+            basis: crate::burst::IDENTITY,
+            mass_g: 2400,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held,
+            resting: false,
+        });
+        let mut rested = None;
+        for _ in 0..300 {
+            a.step();
+            let f = a.matter.debris.fragments.iter().find(|f| f.id == 9001);
+            let f = f.expect("the piece is gone");
+            if f.resting {
+                rested = Some(f.position.y.sub(half));
+                break;
+            }
+        }
+        let bottom = rested.expect("the piece never rested");
+        assert!(
+            bottom >= Fx::from_int(deck) && bottom < Fx::from_int(deck).add(half),
+            "not on the deck at {deck}: {bottom:?}"
+        );
+        for _ in 0..30 {
+            a.step();
+        }
+        let f = a.matter.debris.fragments.iter().find(|f| f.id == 9001);
+        assert!(f.is_some_and(|f| f.resting), "the piece left the deck");
+        assert!(a.rubble.is_empty(), "a piece on the deck is a heap");
     }
     /// A unit's box holds every cell the wave can hit, on a driving unit
     /// with its pose and on a parked one, segments included (ADR-296).

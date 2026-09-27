@@ -173,6 +173,7 @@ mod tests {
             height: Fx::from_int(6),
             vel: [Fx::ZERO; 3],
             step: Fx::ONE,
+            solid: None,
         };
         let mut fragments: Vec<_> = (0..48u32)
             .map(|i| Fragment {
@@ -724,6 +725,7 @@ mod tests {
             height: Fx::from_int(3),
             vel: [Fx::ZERO; 3],
             step: Fx::ZERO,
+            solid: None,
         };
         let piece = |e: &mut Economy, id, at: [u32; 3], material| Fragment {
             id,
@@ -770,6 +772,101 @@ mod tests {
         );
     }
 
+    /// **A piece meets a hull where it meets the hull's voxels**
+    /// (ADR-469), not its box: dropped over the deck, it rests on the deck
+    /// under the turret's height and rides there; over the turret, on the
+    /// turret; thrown across above the deck, it passes the box's side and
+    /// stops at the turret; and one lying under the belly still leaves the
+    /// box by the nearest side (ADR-302).
+    #[test]
+    fn a_piece_meets_the_hulls_voxels_and_not_its_box() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.flush();
+        // A deck at 14..16 over the whole footprint, a turret at 16..22
+        // over the middle, and the belly clear under the deck.
+        let shape = |[x, y, z]: [i32; 3]| {
+            let over = |lo, hi| (lo..hi).contains(&x) && (lo..hi).contains(&z);
+            over(42, 54) && (14..16).contains(&y) || over(46, 50) && (16..22).contains(&y)
+        };
+        let hull = Hull {
+            pos: [Fx::from_int(48), Fx::from_int(12), Fx::from_int(48)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(6)],
+            height: Fx::from_int(10),
+            vel: [Fx::ZERO; 3],
+            step: Fx::ZERO,
+            solid: Some(Solid(&shape)),
+        };
+        let around = Surroundings {
+            hulls: &[hull],
+            yielding: &[],
+        };
+        let g = crate::gravity_per_tick(&t);
+        let mut tick = 0;
+        let mut rest = |b: &mut Bursts, e: &mut Economy, at: [u32; 3], velocity: V3| {
+            b.fragments.clear();
+            b.fragments.push(Fragment {
+                id: 1,
+                position: centre(at),
+                velocity,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1200,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+                resting: false,
+            });
+            let start = tick;
+            while !b.fragments[0].resting {
+                b.step_fragments(&w, e, &t.blast, g, tick, around);
+                tick += 1;
+                assert!(tick - start < 300, "the piece from {at:?} never rested");
+            }
+            let f = &b.fragments[0];
+            (f.position, f.position.y.add(f.bounds().0[1]))
+        };
+        let (at, bottom) = rest(&mut b, &mut e, [44, 30, 48], V3::ZERO);
+        assert!(
+            bottom >= Fx::from_int(16) && bottom < Fx::from_ratio(33, 2),
+            "not on the deck: {at:?}"
+        );
+        assert!(hull.carries(bottom, at), "the deck does not carry it");
+        let (at, bottom) = rest(&mut b, &mut e, [48, 30, 48], V3::ZERO);
+        assert!(
+            bottom >= Fx::from_int(22) && bottom < Fx::from_ratio(45, 2),
+            "not on the turret: {at:?}"
+        );
+        // Across above the deck, from afar and from the box's very side,
+        // where the piece's box lies in the hull's and its centre outside.
+        for (from, speed) in [
+            ([34, 18, 48], Fx::from_int(2)),
+            ([41, 18, 48], Fx::from_ratio(1, 2)),
+        ] {
+            let across = V3::new(speed, Fx::ZERO, Fx::ZERO);
+            let (at, bottom) = rest(&mut b, &mut e, from, across);
+            assert!(
+                at.x > Fx::from_int(42) && at.x < Fx::from_int(46),
+                "did not stop between the box's side and the turret: {at:?}"
+            );
+            assert!(
+                bottom >= Fx::from_int(16) && bottom < Fx::from_ratio(33, 2),
+                "not on the deck: {at:?}"
+            );
+        }
+        b.fragments[0].position = centre([44, 12, 48]);
+        b.fragments[0].resting = false;
+        b.step_fragments(&w, &mut e, &t.blast, g, tick, around);
+        let at = b.fragments[0].position;
+        assert!(at.x < Fx::from_int(42), "stayed under the belly: {at:?}");
+        assert!(e.balanced());
+    }
+
     /// A piece falling onto a live hull rests on its roof, and when the
     /// hull is gone from under it, it falls to the ground (ADR-293).
     #[test]
@@ -801,6 +898,7 @@ mod tests {
             height: Fx::from_int(3),
             vel: [Fx::ZERO; 3],
             step: Fx::ZERO,
+            solid: None,
         };
         let mut tick = 0;
         while !b.fragments[0].resting {
@@ -886,6 +984,7 @@ mod tests {
             height: Fx::from_int(3),
             vel: [Fx::from_ratio(1, 2), Fx::ZERO, Fx::ZERO],
             step: Fx::ZERO,
+            solid: None,
         };
         let mut tick = 0;
         let mut moved = false;
@@ -1270,6 +1369,7 @@ mod tests {
             height: Fx::from_int(3),
             vel: [Fx::ZERO; 3],
             step: Fx::from_int(4),
+            solid: None,
         };
         let free = b.rubble(&w, &[], &[]);
         assert!(
@@ -1326,6 +1426,7 @@ mod tests {
             height: Fx::from_int(3),
             vel: [Fx::ZERO; 3],
             step: Fx::ZERO,
+            solid: None,
         };
         b.step_fragments(
             &w,
@@ -1846,7 +1947,7 @@ struct Claim {
 /// far it moved this tick, and a moving hull bulldozes the pieces it
 /// drives into (ADR-294).
 #[derive(Clone, Copy, Debug)]
-pub struct Hull {
+pub struct Hull<'a> {
     pub pos: [Fx; 3],
     pub head: i32,
     pub half: [Fx; 2],
@@ -1855,12 +1956,82 @@ pub struct Hull {
     /// The rise the hull climbs rather than pushes: a piece no taller
     /// than this above the hull's bottom is floor to it (ADR-292).
     pub step: Fx,
+    /// The hull's own voxels, as it stands now — turned turret, lost
+    /// cells and segments with it (ADR-469). A piece meets the hull only
+    /// where it meets them; without them the box is the hull.
+    pub solid: Option<Solid<'a>>,
 }
-impl Hull {
+/// A hull's voxels as world cells (ADR-469).
+pub trait Voxels {
+    /// Whether the world cell `p` lies in the hull's voxels.
+    fn solid(&self, p: [i32; 3]) -> bool;
+}
+impl<F: Fn([i32; 3]) -> bool> Voxels for F {
+    fn solid(&self, p: [i32; 3]) -> bool {
+        self(p)
+    }
+}
+/// A hull's voxels for the pieces (ADR-469).
+#[derive(Clone, Copy)]
+pub struct Solid<'a>(pub &'a dyn Voxels);
+impl std::fmt::Debug for Solid<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Solid")
+    }
+}
+/// The most cells a piece's box asks of a hull's voxels, wherever it
+/// lies; a larger piece — a whole section — meets a hull by its box
+/// (ADR-469).
+const SOLID_SAMPLES: i64 = 64;
+/// The most cells of the box a piece sweeps in a tick asked of a hull's
+/// voxels at once; past it, each substep asks its own (ADR-469).
+const SWEPT_SAMPLES: i64 = 512;
+/// Whether a piece's box `low..high` meets hulls by their voxels
+/// (ADR-469): nowhere does it cover more than `SOLID_SAMPLES` cells —
+/// `floor(extent) + 2` along each axis at most.
+fn by_voxels(low: [Fx; 3], high: [Fx; 3]) -> bool {
+    (0..3).fold(1i64, |n, a| {
+        n * (high[a].sub(low[a]).to_int_trunc() as i64 + 2)
+    }) <= SOLID_SAMPLES
+}
+impl Hull<'_> {
+    /// Whether the world box `lo..hi` shares a cell with the hull's voxels
+    /// (ADR-469): the cells it covers, floor of each corner, as the
+    /// world's are asked. Without the voxels, or past `cap` cells, it does.
+    fn meets(&self, lo: [Fx; 3], hi: [Fx; 3], cap: i64) -> bool {
+        let Some(Solid(voxels)) = self.solid else {
+            return true;
+        };
+        let lo = lo.map(|v| (v.raw() >> 32) as i32);
+        let hi = hi.map(|v| (v.raw() >> 32) as i32);
+        let cells = (0..3).fold(1i64, |n, a| n * i64::from(hi[a] - lo[a] + 1));
+        if cells > cap {
+            return true;
+        }
+        (lo[1]..=hi[1])
+            .any(|y| (lo[2]..=hi[2]).any(|z| (lo[0]..=hi[0]).any(|x| voxels.solid([x, y, z]))))
+    }
+    /// Whether a piece's box at `p`, lying within the hull's box, meets
+    /// the hull (ADR-469): its voxels, or its box for a piece too large
+    /// to ask them.
+    fn meets_piece(&self, p: [Fx; 3], low: [Fx; 3], high: [Fx; 3]) -> bool {
+        !by_voxels(low, high)
+            || self.meets(
+                std::array::from_fn(|a| p[a].add(low[a])),
+                std::array::from_fn(|a| p[a].add(high[a])),
+                i64::MAX,
+            )
+    }
     /// Whether a point of the ground plane lies under the hull's box.
     pub fn covers_point(&self, p: [Fx; 2]) -> bool {
-        let (c, s) = (fx::angle::cos(self.head), fx::angle::sin(self.head));
         let (dx, dz) = (p[0].sub(self.pos[0]), p[1].sub(self.pos[2]));
+        // The turned box lies within `half[0] + half[1]` of its centre
+        // along both world axes: most points are farther.
+        let round = self.half[0].add(self.half[1]);
+        if dx.abs() > round || dz.abs() > round {
+            return false;
+        }
+        let (c, s) = (fx::angle::cos(self.head), fx::angle::sin(self.head));
         let u = dx.mul(c).add(dz.mul(s));
         let v = dz.mul(c).sub(dx.mul(s));
         u.abs() <= self.half[0] && v.abs() <= self.half[1]
@@ -1880,13 +2051,40 @@ impl Hull {
             [self.pos[0].add(extent[0]), self.pos[2].add(extent[1])],
         )
     }
+    /// The top of the hull's lowest voxel in the world column under
+    /// `centre` (ADR-469); the box's top without the voxels. `None` where
+    /// the centre is not over the box or the column holds no voxel.
+    fn lowest(&self, centre: V3) -> Option<Fx> {
+        if !self.covers_point([centre.x, centre.z]) {
+            return None;
+        }
+        let top = self.pos[1].add(self.height);
+        let Some(Solid(voxels)) = self.solid else {
+            return Some(top);
+        };
+        let [x, z] = [centre.x, centre.z].map(|v| (v.raw() >> 32) as i32);
+        let base = (self.pos[1].raw() >> 32) as i32;
+        (base..-(top.neg().raw() >> 32) as i32)
+            .find(|&y| voxels.solid([x, y, z]))
+            .map(|y| Fx::from_int(y + 1))
+    }
     /// Whether a piece whose box bottom is `bottom` and centre `centre`
     /// rides on the hull (ADR-293, ADR-458): its centre over the box and
     /// its bottom no lower than the support probe's half unit under the
-    /// roof — on the roof, or on what lies on it.
+    /// roof — on the roof, or on what lies on it. The roof is the hull's
+    /// voxels in the column under the centre (ADR-469): a piece on the
+    /// rear deck rides there, and one under the belly does not.
     pub fn carries(&self, bottom: Fx, centre: V3) -> bool {
-        self.covers_point([centre.x, centre.z])
-            && bottom >= self.pos[1].add(self.height).sub(Fx::from_ratio(1, 2))
+        let reach = bottom.add(Fx::from_ratio(1, 2));
+        self.lowest(centre).is_some_and(|roof| roof <= reach)
+    }
+    /// Whether a piece whose box bottom is `bottom` and centre `centre`
+    /// lies under the hull (ADR-302, ADR-469): its centre over the box
+    /// and the hull's voxels in that column all above it — under the
+    /// belly, or dug from under it.
+    fn shelters(&self, bottom: Fx, centre: V3) -> bool {
+        let reach = bottom.add(Fx::from_ratio(1, 2));
+        self.lowest(centre).is_some_and(|roof| roof > reach)
     }
     /// Whether the column's centre lies under the hull's box.
     pub fn covers(&self, x: i32, z: i32) -> bool {
@@ -1902,7 +2100,7 @@ impl Hull {
 /// (ADR-294). The batch has neither.
 #[derive(Clone, Copy)]
 pub struct Surroundings<'a> {
-    pub hulls: &'a [Hull],
+    pub hulls: &'a [Hull<'a>],
     pub yielding: &'a [Mat],
 }
 impl Surroundings<'static> {
@@ -2822,7 +3020,8 @@ impl Bursts {
         // under it — a pile on a rock piece is floor at the pile's top.
         // Only the world was asked, and a stacked piece was missing from
         // the map (ADR-458). A piece on a roof, or one whose support was
-        // taken and whose turn to fall has not come, is not floor.
+        // taken and whose turn to fall has not come, is not floor; one a
+        // hull carries is not asked about the pieces (ADR-469).
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
         for (i, f) in self.fragments.iter().enumerate() {
@@ -2831,7 +3030,10 @@ impl Bursts {
             }
             if supported(f, world, &[], &Settled::default(), u32::MAX) {
                 floor.push(i);
-            } else {
+            } else if !hulls
+                .iter()
+                .any(|h| h.carries(f.position.y.add(f.bounds().0[1]), f.position))
+            {
                 stacked.push(i);
             }
         }
@@ -3504,13 +3706,23 @@ impl Settled {
                 continue;
             }
             let (lo, hi) = out.boxes[i];
+            let (c0, c1) = settled_cells(lo, hi);
+            let cells = || {
+                (c0[2]..=c1[2]).flat_map(move |z| {
+                    (c0[1]..=c1[1]).flat_map(move |y| (c0[0]..=c1[0]).map(move |x| [x, y, z]))
+                })
+            };
+            if !cells().any(|c| want.contains(c)) {
+                continue;
+            }
             // The test asked whether the piece's centre lay inside a
             // hull's box, and the centre of a piece on a roof lies above
-            // it: riders held what fell on them (ADR-458).
+            // it: riders held what fell on them (ADR-458). Asked of the
+            // pieces the queries reach alone: a hull's voxels answer it
+            // (ADR-469).
             if hulls.iter().any(|h| h.carries(lo[1], f.position)) {
                 continue;
             }
-            let (c0, c1) = settled_cells(lo, hi);
             for z in c0[2]..=c1[2] {
                 for y in c0[1]..=c1[1] {
                     for x in c0[0]..=c1[0] {
@@ -3561,7 +3773,25 @@ impl Settled {
 /// extent against the hull's height, its horizontal reach against the
 /// hull's footprint in the hull's own frame. A turned piece counts its
 /// longest horizontal reach in every direction.
-fn hull_hit(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull], skip: u64) -> Option<&Hull> {
+fn hull_hit<'h, 's>(
+    p: [Fx; 3],
+    low: [Fx; 3],
+    high: [Fx; 3],
+    hulls: &'h [Hull<'s>],
+    skip: u64,
+) -> Option<&'h Hull<'s>> {
+    hull_box_hit(p, low, high, hulls, skip, true)
+}
+/// [`hull_hit`] by the hulls' boxes alone, or with their voxels when
+/// `exact` (ADR-469).
+fn hull_box_hit<'h, 's>(
+    p: [Fx; 3],
+    low: [Fx; 3],
+    high: [Fx; 3],
+    hulls: &'h [Hull<'s>],
+    skip: u64,
+    exact: bool,
+) -> Option<&'h Hull<'s>> {
     if hulls.is_empty() {
         return None;
     }
@@ -3576,7 +3806,10 @@ fn hull_hit(p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], hulls: &[Hull], skip: u64) 
         let dz = p[2].sub(h.pos[2]);
         let u = dx.mul(c).add(dz.mul(s));
         let v = dz.mul(c).sub(dx.mul(s));
-        (u.abs() <= h.half[0].add(reach) && v.abs() <= h.half[1].add(reach)).then_some(h)
+        (u.abs() <= h.half[0].add(reach)
+            && v.abs() <= h.half[1].add(reach)
+            && (!exact || h.meets_piece(p, low, high)))
+        .then_some(h)
     })
 }
 /// Common translation/contact step for fragments and persistent dead hulls.
@@ -3615,22 +3848,28 @@ fn advance_fragment(
     let delta = arr(f.velocity.scale(Fx::from_ratio(1, steps as i32)));
     let mut supported = false;
     let (low, high) = f.bounds();
-    // Hulls the piece already overlaps do not pen it in (ADR-294): it may
-    // leave them, and only entering one is a contact.
+    // A piece in a live hull's box and under its voxels — born there, from
+    // a cell dug under the hull — leaves by the nearest side before it
+    // flies (ADR-302, ADR-469): the blast throws it out from under the
+    // hull rather than letting it pile up under the belly and lift the
+    // hull off the ground. Hulls the piece so leaves, or already meets,
+    // do not pen it in (ADR-294): it may leave them, and only entering
+    // one is a contact.
     let start = arr(f.position);
-    let inside = hulls.iter().enumerate().fold(0u64, |m, (i, h)| {
-        if i < 64 && hull_hit(start, low, high, std::slice::from_ref(h), 0).is_some() {
-            m | (1 << i)
-        } else {
-            m
+    let (mut inside, mut under) = (0u64, 0u64);
+    for (i, h) in hulls.iter().enumerate().take(64) {
+        if hull_box_hit(start, low, high, std::slice::from_ref(h), 0, false).is_none() {
+            continue;
         }
-    });
-    // A piece inside a live hull's box — born there, from a cell dug under
-    // the hull — leaves by the nearest side before it flies (ADR-302): the
-    // blast throws it out from under the hull rather than letting it pile
-    // up under the belly and lift the hull off the ground.
-    for (i, h) in hulls.iter().enumerate() {
-        if i < 64 && inside & (1 << i) != 0 {
+        if h.shelters(start[1].add(low[1]), f.position) {
+            under |= 1 << i;
+            inside |= 1 << i;
+        } else if h.meets_piece(start, low, high) {
+            inside |= 1 << i;
+        }
+    }
+    for (i, h) in hulls.iter().enumerate().take(64) {
+        if under & (1 << i) != 0 {
             evict(f, h, low, high, [bounds[0], bounds[2]]);
         }
     }
@@ -3644,8 +3883,9 @@ fn advance_fragment(
         std::array::from_fn(|a| from[a].add(delta[a].mul(Fx::from_int(steps as i32))));
     let swept_lo: [Fx; 3] = std::array::from_fn(|a| from[a].min(to[a]).add(low[a]));
     let swept_hi: [Fx; 3] = std::array::from_fn(|a| from[a].max(to[a]).add(high[a]));
+    let (near, apart) = hull_near(from, to, low, high, hulls, inside);
     if !box_contact(world, [Fx::ZERO; 3], swept_lo, swept_hi, bounds)
-        && !hull_near(from, to, low, high, hulls, inside)
+        && !near
         && !settled.hit(swept_lo, swept_hi, skip, None)
     {
         f.position = v3(to);
@@ -3659,7 +3899,7 @@ fn advance_fragment(
             skip,
             steps,
             delta,
-            inside,
+            apart,
             &mut supported,
         );
     }
@@ -3679,11 +3919,13 @@ fn advance_fragment(
 }
 
 /// Whether a piece moving from `from` to `to` with its box `low..high`
-/// may meet a live hull it does not already overlap: the hull's height
-/// against the swept vertical extent, and the world box around the
-/// hull's footprint, widened by the piece's reach and a unit for the
-/// rounding of the hull's own frame, against the centre's swept box. A
-/// bound from outside: [`hull_hit`] decides the contact itself.
+/// may meet a live hull it does not already overlap (`skip`): the hull's
+/// height against the swept vertical extent, and the world box around
+/// the hull's footprint, widened by the piece's reach and a unit for the
+/// rounding of the hull's own frame, against the centre's swept box; and
+/// the swept box against the hull's voxels (ADR-469). A bound from
+/// outside: [`hull_hit`] decides the contact itself. With it, `skip` and
+/// the first 64 hulls that no substep can meet.
 fn hull_near(
     from: [Fx; 3],
     to: [Fx; 3],
@@ -3691,24 +3933,36 @@ fn hull_near(
     high: [Fx; 3],
     hulls: &[Hull],
     skip: u64,
-) -> bool {
+) -> (bool, u64) {
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (
         from[1].min(to[1]).add(low[1]),
         from[1].max(to[1]).add(high[1]),
     );
-    hulls.iter().enumerate().any(|(i, h)| {
-        if (i < 64 && skip & (1 << i) != 0) || top < h.pos[1] || bottom > h.pos[1].add(h.height) {
-            return false;
+    let exact = by_voxels(low, high);
+    let swept_lo: [Fx; 3] = std::array::from_fn(|a| from[a].min(to[a]).add(low[a]));
+    let swept_hi: [Fx; 3] = std::array::from_fn(|a| from[a].max(to[a]).add(high[a]));
+    let (mut near, mut apart) = (false, skip);
+    for (i, h) in hulls.iter().enumerate() {
+        if i < 64 && skip & (1 << i) != 0 {
+            continue;
         }
-        let (c, s) = (angle::cos(h.head).abs(), angle::sin(h.head).abs());
-        let (a, b) = (h.half[0].add(reach), h.half[1].add(reach));
-        let extent = [a.mul(c).add(b.mul(s)), a.mul(s).add(b.mul(c))].map(|e| e.add(Fx::ONE));
-        [(0, 0), (2, 1)].iter().all(|&(k, e)| {
-            from[k].min(to[k]) <= h.pos[k].add(extent[e])
-                && from[k].max(to[k]) >= h.pos[k].sub(extent[e])
-        })
-    })
+        let reaches = top >= h.pos[1] && bottom <= h.pos[1].add(h.height) && {
+            let (c, s) = (angle::cos(h.head).abs(), angle::sin(h.head).abs());
+            let (a, b) = (h.half[0].add(reach), h.half[1].add(reach));
+            let extent = [a.mul(c).add(b.mul(s)), a.mul(s).add(b.mul(c))].map(|e| e.add(Fx::ONE));
+            [(0, 0), (2, 1)].iter().all(|&(k, e)| {
+                from[k].min(to[k]) <= h.pos[k].add(extent[e])
+                    && from[k].max(to[k]) >= h.pos[k].sub(extent[e])
+            })
+        };
+        if reaches && (!exact || h.meets(swept_lo, swept_hi, SWEPT_SAMPLES)) {
+            near = true;
+        } else if i < 64 {
+            apart |= 1 << i;
+        }
+    }
+    (near, apart)
 }
 
 /// The substeps of [`advance_fragment`] when the piece may meet
