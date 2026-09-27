@@ -114,10 +114,14 @@ impl BlastRange {
     /// round away from the exposed face. Its reduced speed also reduces the
     /// finite penetration work available at a later contact.
     pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
-        let Some(tuning) = &self.config.ricochet else {
+        let Some(tuning) = self.config.ricochet.clone() else {
             return false;
         };
-        if material(&self.world, at) != tuning.material || from == at {
+        if from == at {
+            return false;
+        }
+        let unit = self.units.iter().position(|u| u.solid(at));
+        if unit.is_none() && material(&self.world, at) != tuning.material {
             return false;
         }
         let speed_sq = self
@@ -128,6 +132,9 @@ impl BlastRange {
             return false;
         }
         let speed = speed_sq.sqrt();
+        if let Some(id) = unit {
+            return self.armour_ricochet(id, at, &tuning, speed);
+        }
         let need = material_work(tuning.material, &self.config);
         let old = self.surface_work.get(&at).copied().unwrap_or(0);
         if u64::from(old) * 1000 >= u64::from(need) * u64::from(tuning.max_preexisting_wear_milli) {
@@ -169,6 +176,143 @@ impl BlastRange {
             self.velocity[a] =
                 reflected.mul(Fx::from_ratio(tuning.speed_retention_milli as i32, 1000));
         }
+        true
+    }
+
+    /// The same shallow strike against a machine's intact armour (ADR-454).
+    /// The surface is the armour's own, in the frame of the part it belongs
+    /// to — hull, turned turret or segment — and its normal is taken from
+    /// the armour around the struck cell, so a sloped plate turns the round
+    /// by its slope, not by the world grid or by one voxel step. Other
+    /// roles take the round by the ordinary finite work of `kinetic_impact`.
+    fn armour_ricochet(
+        &mut self,
+        id: usize,
+        at: [i32; 3],
+        tuning: &modding::explosion::Ricochet,
+        speed: Fx,
+    ) -> bool {
+        let u = &self.units[id];
+        let Some((part, cell)) = u.hit(at) else {
+            return false;
+        };
+        let (body, frame) = if part == 0 {
+            (&u.body, u.root_frame(cell[1]))
+        } else {
+            (&u.body.segments[part - 1].body, u.seg_frames[part - 1])
+        };
+        if body.part_at(cell[0], cell[1], cell[2]) != voxel::Part::Armour {
+            return false;
+        }
+        let need = unit_work(body, cell, &self.config);
+        let old = if part == 0 {
+            u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0)
+        } else {
+            u.seg_dent(part - 1, cell)
+        };
+        if u64::from(old) * 1000 >= u64::from(need) * u64::from(tuning.max_preexisting_wear_milli) {
+            return false;
+        }
+        // The surface as the round meets it: four probes parallel to the
+        // round, half a cell to each side of the struck cell's centre, in
+        // the part's
+        // own cells. Where they first meet the body gives the plane the
+        // round strikes — a plate stepped in voxels by its slope, not by
+        // the step one probe happened to meet, and never a hollow behind
+        // the plate. A probe that meets nothing (the round clips an edge)
+        // leaves the round to the ordinary hit.
+        type V = crate::damage::V3;
+        let size = [body.vol.nx, body.vol.ny, body.vol.nz].map(i64::from);
+        let solid = |p: V| {
+            let q = [p.x, p.y, p.z].map(|c| c.raw() >> 32);
+            (0..3).all(|a| q[a] >= 0 && q[a] < size[a])
+                && body.vol.get(q[0] as usize, q[1] as usize, q[2] as usize)
+        };
+        let unit_of = |d: V| {
+            let n = d.len_sq().sqrt();
+            (n > Fx::ZERO).then(|| d.scale(Fx::ONE.div(n)))
+        };
+        let v = V::new(self.velocity[0], self.velocity[1], self.velocity[2]);
+        let Some(r) = unit_of(V::new(frame.x.dot(v), frame.y.dot(v), frame.z.dot(v))) else {
+            return false;
+        };
+        let least = [r.x, r.y, r.z]
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, c)| c.abs().raw())
+            .map_or(0, |(a, _)| a);
+        let e = [
+            V::new(Fx::ONE, Fx::ZERO, Fx::ZERO),
+            V::new(Fx::ZERO, Fx::ONE, Fx::ZERO),
+            V::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
+        ];
+        let Some(u) = unit_of(r.cross(e[least])) else {
+            return false;
+        };
+        let w = r.cross(u);
+        let half = Fx::from_ratio(1, 2);
+        let centre = V::new(
+            Fx::from_int(cell[0] as i32).add(half),
+            Fx::from_int(cell[1] as i32).add(half),
+            Fx::from_int(cell[2] as i32).add(half),
+        );
+        let step = r.scale(Fx::from_ratio(1, 8));
+        let depth = |side: V| -> Option<i32> {
+            let mut p = centre
+                .add(side.scale(Fx::from_ratio(1, 2)))
+                .sub(r.scale(Fx::from_int(8)));
+            (0..320).find(|_| {
+                p = p.add(step);
+                solid(p)
+            })
+        };
+        let (Some(up), Some(un), Some(wp), Some(wn)) = (
+            depth(u),
+            depth(u.scale(Fx::from_int(-1))),
+            depth(w),
+            depth(w.scale(Fx::from_int(-1))),
+        ) else {
+            return false;
+        };
+        // Eighth-cell steps, a cell between the probes of a pair.
+        let tangent =
+            |along: V, far: i32, near: i32| along.add(r.scale(Fx::from_ratio(far - near, 8)));
+        let n = tangent(u, up, un).cross(tangent(w, wp, wn));
+        let n = if n.dot(r) > Fx::ZERO {
+            n.scale(Fx::from_int(-1))
+        } else {
+            n
+        };
+        let n = frame
+            .x
+            .scale(n.x)
+            .add(frame.y.scale(n.y))
+            .add(frame.z.scale(n.z));
+        let Some(normal) = unit_of(n) else {
+            return false;
+        };
+        let into = normal.dot(v);
+        if into >= Fx::ZERO
+            || into.abs() >= speed.mul(Fx::from_ratio(tuning.max_normal_milli as i32, 1000))
+        {
+            return false;
+        }
+        let wear = (self.config.energy * tuning.wear_milli / 1000)
+            .max(1)
+            .min(need.saturating_sub(old).saturating_sub(1));
+        if wear == 0 {
+            return false;
+        }
+        let config = self.config.clone();
+        let u = &mut self.units[id];
+        if part == 0 {
+            u.receive_cell(cell, wear, &config);
+        } else {
+            u.receive_seg_cell(part - 1, cell, wear, &config);
+        }
+        let reflected = v.sub(normal.scale(into.add(into)));
+        let keep = Fx::from_ratio(tuning.speed_retention_milli as i32, 1000);
+        self.velocity = [reflected.x, reflected.y, reflected.z].map(|c| c.mul(keep));
         true
     }
 
@@ -799,6 +943,135 @@ mod tests {
         }
         assert!(a.shell.is_none(), "the bounced round never landed");
     }
+    /// The tank's side belt: armour two cells high along the whole hull
+    /// on its `-z` face (local `y` 11 and 12). The struck cell on its
+    /// lower row, the world cell and the free one outside it.
+    fn hull_side(r: &BlastRange) -> ([i32; 3], [i32; 3], [usize; 3]) {
+        let u = &r.units[0];
+        let cell = [30, 11, 0];
+        for x in cell[0] - 3..=cell[0] + 8 {
+            for y in 11..=12 {
+                assert!(u.body.vol.get(x, y, 0));
+                assert_eq!(u.body.part_at(x, y, 0), voxel::Part::Armour);
+            }
+        }
+        let p = u.world_pos(cell);
+        assert_eq!(
+            u.hit(p),
+            Some((0, cell)),
+            "the belt is not where the test looks"
+        );
+        (p, [p[0], p[1], p[2] - 1], cell)
+    }
+
+    /// **A shallow strike deflects off a machine's intact armour**
+    /// (ADR-454), as it does off steel: the plate is dented, not bored,
+    /// and the round leaves turned off the plate's own face. A square
+    /// strike on the same face goes in.
+    #[test]
+    fn a_shallow_strike_deflects_off_hull_armour() {
+        let mut r = kinetic_range(vec![]);
+        let (at, from, cell) = hull_side(&r);
+        r.velocity = [Fx::from_int(280), Fx::ZERO, Fx::from_int(40)];
+        assert!(
+            r.kinetic_ricochet(at, from),
+            "the hull took a grazing round"
+        );
+        assert!(
+            r.velocity[2] < Fx::ZERO,
+            "the round was not turned off the plate"
+        );
+        assert!(r.velocity[0] > Fx::ZERO && r.velocity[0] < Fx::from_int(280));
+        // The glance deposits an eighth of the round's work, and never the
+        // whole cell's: a dent, not a hole.
+        let key = cell.map(|v| v as u8);
+        let need = unit_work(&r.units[0].body, cell, &r.config);
+        assert_eq!(
+            r.units[0].dents.get(&key),
+            Some(&(r.config.energy / 8).min(need - 1))
+        );
+        assert!(r.units[0].removed.is_empty());
+
+        let mut square = kinetic_range(vec![]);
+        square.velocity = [Fx::ZERO, Fx::ZERO, Fx::from_int(280)];
+        assert!(!square.kinetic_ricochet(at, from));
+        assert!(square.units[0].dents.is_empty());
+    }
+
+    /// **A turned hull deflects by its own side** (ADR-454): the face is
+    /// the hull's, in its frame, not the world grid's. A round grazing
+    /// along a hull yawed by 30° leaves with its component across the
+    /// side reversed and its component along it kept, both scaled by the
+    /// retained speed.
+    #[test]
+    fn a_turned_hull_deflects_by_its_own_side() {
+        let mut r = kinetic_range(vec![]);
+        let yaw = fx::angle::FULL / 12;
+        r.units[0].motion.drive.head = yaw;
+        r.units[0].update_pose(yaw);
+        let u = &r.units[0];
+        // The side belt, as in `hull_side`.
+        let cell = [30, 11, 0];
+        let at = u.world_pos(cell);
+        let frame = u.root_frame(cell[1]);
+        let v = frame
+            .x
+            .scale(Fx::from_int(280))
+            .add(frame.z.scale(Fx::from_int(40)));
+        r.velocity = [v.x, v.y, v.z];
+        assert!(r.kinetic_ricochet(at, [at[0], at[1], at[2] - 1]));
+        let out = crate::damage::V3::new(r.velocity[0], r.velocity[1], r.velocity[2]);
+        let near = |got: Fx, want: i32| (got.sub(Fx::from_int(want))).abs() < Fx::from_int(2);
+        assert!(
+            near(out.dot(frame.x), 168),
+            "along the side: {:?}",
+            out.dot(frame.x)
+        );
+        assert!(
+            near(out.dot(frame.z), -24),
+            "across the side: {:?}",
+            out.dot(frame.z)
+        );
+    }
+
+    /// **A live round glances off the hull and flies on** (ADR-454), and
+    /// the run after the glance replays exactly from a snapshot.
+    #[test]
+    fn a_live_round_glances_off_the_hull_and_replays_exactly() {
+        let mut a = kinetic_range(vec![]);
+        a.control();
+        let (at, _, _) = hull_side(&a);
+        // A hair outside the plate, drifting into it at a shallow angle:
+        // the side is not flat further on, and a round meeting the front
+        // of a step there is a square hit.
+        let start = [
+            Fx::from_int(at[0]).add(Fx::from_ratio(1, 10)),
+            Fx::from_int(at[1]).add(Fx::from_ratio(1, 2)),
+            Fx::from_int(at[2]).sub(Fx::from_ratio(3, 20)),
+        ];
+        assert!(!a.units[0].solid(start.map(Fx::to_int_trunc)));
+        a.shell = Some(start);
+        a.velocity = [Fx::from_int(280), Fx::ZERO, Fx::from_int(40)];
+        a.step();
+        assert!(a.impact.is_some(), "the round never touched the hull");
+        assert!(a.shell.is_some(), "the round stopped in the hull");
+        assert!(
+            a.velocity[2] < Fx::ZERO,
+            "the round was not turned off the plate"
+        );
+        assert!(
+            a.units[0].removed.is_empty(),
+            "a glancing round bored the hull"
+        );
+        assert!(!a.units[0].dents.is_empty());
+        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        for _ in 0..60 {
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+    }
+
     #[test]
     fn square_steel_and_grazing_concrete_contacts_do_not_ricochet() {
         let mut square = kinetic_range(vec![plate(230, 231, 3)]);
