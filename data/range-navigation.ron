@@ -29,6 +29,14 @@
     // 300 — but at 300 the terrain series lost five runs of 176 on the
     // crater rim, where a greedy search hugs the refusals; at 200 none.
     heuristic_pct: 200,
+    // A hull given a new goal while under way keeps driving its route, or
+    // brakes, while the new search runs; the search holds while the hull is
+    // within this many units of where it began, and the new route is taken
+    // up from where the hull has got to (ADR-462). Four seconds of full
+    // tank speed. Measured 27.09.2026 on the km range: a pursuit's search
+    // under way answered in 51, 106 and 167 ticks; at 64 units none landed
+    // before the hull drove out of reach, and each was spent for nothing.
+    retarget_units: 160,
     // Foliage and trunk of range-materials.ron. A hull cuts what it
     // overlaps; the connected crown within the radius falls without a cut.
     // A tree crossing at 60% speed costs about 10/0.6 = 17 instead of 10.

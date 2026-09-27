@@ -936,8 +936,9 @@ pub enum Hunting {
 /// answer: a search resumed with an empty memo reaches the same answer,
 /// as long as the world has not changed under it. A change invalidates
 /// the cached probes on its pages and restarts an unfinished connection
-/// that checked them. A caller whose start position or heading changed
-/// must discard the search itself.
+/// that checked them. The answer is a route from the start pose: a caller
+/// whose position or heading changed either discards the search itself or
+/// takes the route up from where it has got to (ADR-462).
 #[derive(Clone)]
 pub struct Hunt {
     shape: Shape,
@@ -1233,6 +1234,10 @@ impl Hunt {
     /// displaced caller must request a new search rather than reuse them.
     pub fn starts_at(&self, from: [Fx; 2], head: i32) -> bool {
         self.from == from && self.head == head
+    }
+    /// Where the search began.
+    pub fn origin(&self) -> [Fx; 2] {
+        self.from
     }
     /// One slice of a search that spans ticks: reuse its bounded pages and
     /// spend `budget` on target poses, swept poses or frontier nodes.

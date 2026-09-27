@@ -852,6 +852,52 @@ impl Motion {
         self.path = plan.path;
         self.cursor = 0;
     }
+    /// A route searched from `from` taken up by a hull that moved on while
+    /// the search ran (ADR-462): a turn point near the search's start that
+    /// the hull has already passed, being past it along the leg that
+    /// leaves it, is skipped, so the hull does not turn back for it. Only
+    /// those within the reach a search holds for: farther on, and the
+    /// route's end, are followed as planned.
+    fn take_up(&mut self, from: [Fx; 2]) {
+        let here = [self.pos[0], self.pos[2]];
+        if here == from {
+            return;
+        }
+        let reach = Fx::from_int(self.navigation.retarget_units);
+        let point = |p: [i32; 2]| p.map(Fx::from_int);
+        while self.cursor + 1 < self.path.len() {
+            let (turn, next) = (
+                point(self.path[self.cursor]),
+                point(self.path[self.cursor + 1]),
+            );
+            let near = [turn[0].sub(from[0]), turn[1].sub(from[1])];
+            let passed = [here[0].sub(turn[0]), here[1].sub(turn[1])];
+            let leg = [next[0].sub(turn[0]), next[1].sub(turn[1])];
+            if near[0].mul(near[0]).add(near[1].mul(near[1])) > reach.mul(reach)
+                || passed[0].mul(leg[0]).add(passed[1].mul(leg[1])) <= Fx::ZERO
+            {
+                break;
+            }
+            self.cursor += 1;
+        }
+    }
+    /// A new goal for a hull already under way (ADR-462): it keeps driving
+    /// its route while the new search runs, and takes the new route up
+    /// from where it has got to. A hull with no route left, blocked or
+    /// escaping is ordered as by [`Motion::move_to`].
+    pub fn retarget(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+    ) -> bool {
+        if self.cursor >= self.path.len() || self.blocked || self.escape_left > 0 {
+            return self.move_to(w, to, b, others, rubble);
+        }
+        self.plan_to(w, to, b, others, rubble)
+    }
     /// Whether a route search is still walking its frontier (ADR-306).
     pub fn searching(&self) -> bool {
         self.hunt.is_some()
@@ -876,12 +922,23 @@ impl Motion {
             return;
         };
         if !hunt.starts_at([self.pos[0], self.pos[2]], self.drive.head) {
-            // Braking, contact impulses and escape manoeuvres can move a
-            // hull while its search is pending. Its checked first edge no
-            // longer starts here. Retain the order; restart through the
-            // normal shared allowance after any active escape ends.
-            self.next_plan = tick;
-            return;
+            // A hull driving on its route or braking while the new search
+            // runs moves by design: the search holds while the hull is
+            // within `retarget_units` of where it began, and the new route
+            // is taken up from where it has got to (ADR-462). Restarting at
+            // every displacement dropped a search sliced over ticks on
+            // each tick of a braking hull: a start on every tick of the
+            // braking and a full stop for every new goal of a pursuit. An
+            // escape manoeuvre, or a hull carried further, still starts
+            // over: retain the order and restart through the normal shared
+            // allowance after the escape.
+            let from = hunt.origin();
+            let (dx, dz) = (self.pos[0].sub(from[0]), self.pos[2].sub(from[1]));
+            let reach = Fx::from_int(self.navigation.retarget_units);
+            if self.escape_left > 0 || dx.mul(dx).add(dz.mul(dz)) > reach.mul(reach) {
+                self.next_plan = tick;
+                return;
+            }
         }
         hunt.forget(changed);
         let half = self.shape(b).half.map(Fx::from_int);
@@ -900,6 +957,7 @@ impl Motion {
                 // The cadence of the next try counts from the answer, not
                 // from the question (ADR-306).
                 self.take_plan(plan);
+                self.take_up(hunt.origin());
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
             None => self.hunt = Some(hunt),
@@ -1501,8 +1559,13 @@ mod tests {
     struct Ground {
         depth: i32,
     }
+    /// A search holds while its hull stays within `retarget_units` of
+    /// where it began, turned in place or shoved by a contact, and starts
+    /// over from the actual pose once the hull is carried farther (ADR-399,
+    /// ADR-462). Either way the order is kept and reached, and a restored
+    /// copy replays byte for byte.
     #[test]
-    fn displaced_search_restarts_from_the_actual_pose_and_replays() {
+    fn a_displaced_search_holds_within_reach_and_restarts_past_it() {
         let world = ground(0);
         let body = voxel::unit::tank();
         let goal = [430, 100];
@@ -1512,8 +1575,9 @@ mod tests {
             motion.navigation.search_nodes_per_tick = 8;
             assert!(motion.move_to(&world, goal, &body, &[], &rubble));
             assert!(motion.searching(), "fixture needs an unfinished search");
+            let reach = motion.navigation.retarget_units;
             match displacement {
-                0 => motion.pos[2] = Fx::from_int(180),
+                0 => motion.pos[2] = Fx::from_int(100 + reach + 1),
                 1 => motion.drive.head = angle::FULL / 4,
                 _ => {
                     // A real contact impulse displaces the hull during the
@@ -1532,7 +1596,11 @@ mod tests {
             for m in [&mut motion, &mut restored] {
                 m.allow_start(false);
                 step(m, &world, &body, &[], 1);
-                assert!(!m.searching(), "search still uses the previous pose");
+                if displacement == 0 {
+                    assert!(!m.searching(), "search still uses the previous pose");
+                } else {
+                    assert!(m.searching(), "a search within reach started over");
+                }
                 assert!(m.path.is_empty());
                 assert_eq!(m.destination, Some(goal));
             }
@@ -2553,9 +2621,12 @@ mod tests {
             restored.save(&mut b);
             assert_eq!(a.v, b.v, "pending route diverged after load");
         }
+        // The hull is still within the reach of the search it waited on:
+        // the search holds, and its route is taken up from where the hull
+        // has got to (ADR-462).
         assert!(
-            !mover.searching(),
-            "moving hull kept a search from its old pose"
+            mover.searching(),
+            "a hull within reach dropped its pending search"
         );
         for current in release + 2..1000 {
             step(&mut mover, &w, &body, &[], current);
@@ -2567,6 +2638,104 @@ mod tests {
             mover.destination.is_none(),
             "retained route never reached the goal"
         );
+    }
+    /// **A retargeted hull drives on and takes the new route up where it
+    /// has got to** (ADR-462). A tank at full speed given a new goal keeps
+    /// its route while the new one is searched over several ticks, never
+    /// slows for the search, takes the new route up at speed and does not
+    /// turn back for the turn points it has passed.
+    #[test]
+    fn a_retargeted_hull_drives_on_and_takes_up_the_new_route() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let mut m = Motion::new([60, 16, 200], RangeUnitKind::Tank, &body);
+        assert!(m.move_to(&w, [580, 200], &body, &[], &rubble));
+        let full = Fx::from_int(m.speed);
+        let mut tick = 0;
+        while m.drive.vel < full && tick < 300 {
+            m.allow_start(true);
+            step(&mut m, &w, &body, &[], tick);
+            tick += 1;
+        }
+        assert_eq!(m.drive.vel, full, "the fixture needs a hull at full speed");
+        let (route, goal) = (m.path.clone(), [580, 420]);
+        m.navigation.search_nodes_per_tick = 8;
+        assert!(m.retarget(&w, goal, &body, &[], &rubble));
+        assert!(
+            m.searching(),
+            "the fixture needs a search over several ticks"
+        );
+        assert_eq!(m.path, route, "the route driven was dropped for the search");
+        let mut previous = m.pos;
+        let mut ticks = 0;
+        while m.searching() && ticks < 200 {
+            m.allow_start(true);
+            step(&mut m, &w, &body, &[], tick);
+            // On the tick the answer comes the hull turns onto it.
+            if m.searching() {
+                assert_eq!(m.drive.vel, full, "the hull slowed for the search");
+            }
+            assert!(m.pos[0] > previous[0]);
+            previous = m.pos;
+            tick += 1;
+            ticks += 1;
+        }
+        assert!(ticks > 1 && !m.searching(), "searched for {ticks} ticks");
+        assert_eq!(m.path.last(), Some(&goal), "the new route was not taken up");
+        assert_eq!(m.destination, Some(goal));
+        // Taken up where the hull has got to: it drives on towards the
+        // goal and never back past where it took the route up.
+        let taken = m.pos;
+        for _ in 0..600 {
+            if m.destination.is_none() {
+                break;
+            }
+            m.allow_start(true);
+            step(&mut m, &w, &body, &[], tick);
+            assert!(m.pos[0] >= taken[0], "turned back to {:?}", m.pos);
+            tick += 1;
+        }
+        assert!(m.destination.is_none(), "the new goal was not reached");
+        for (axis, coordinate) in [0, 2].into_iter().zip(goal) {
+            assert!(m.pos[axis].sub(Fx::from_int(coordinate)).abs() <= Fx::from_int(m.arrival));
+        }
+    }
+    /// A route taken up away from where its search began skips only the
+    /// turn points near that start which the hull has passed; a turn
+    /// still ahead, one beyond the reach of the search, and the route's
+    /// end are kept (ADR-462).
+    #[test]
+    fn a_route_taken_up_skips_only_the_turns_passed_near_its_start() {
+        let body = voxel::unit::tank();
+        let from = [Fx::from_int(90), Fx::from_int(200)];
+        let reach = Motion::new([90, 16, 200], RangeUnitKind::Tank, &body)
+            .navigation
+            .retarget_units;
+        let cursor = |here: [i32; 2], path: Vec<[i32; 2]>| {
+            let mut m = Motion::new([here[0], 16, here[1]], RangeUnitKind::Tank, &body);
+            m.path = path;
+            m.take_up(from);
+            m.cursor
+        };
+        // Passed on the way: skipped, and so is the next one passed.
+        assert_eq!(cursor([150, 200], vec![[110, 200], [300, 400]]), 1);
+        assert_eq!(
+            cursor([150, 200], vec![[110, 200], [130, 210], [300, 400]]),
+            2
+        );
+        // Still ahead of the hull.
+        assert_eq!(cursor([100, 200], vec![[110, 200], [300, 400]]), 0);
+        // Beyond the reach of the search from its start.
+        let far = 90 + reach + 1;
+        assert_eq!(
+            cursor([far + 40, 200], vec![[far, 200], [far + 200, 400]]),
+            0
+        );
+        // The end of the route, however far the hull has driven past it.
+        assert_eq!(cursor([150, 200], vec![[110, 200]]), 0);
+        // A hull that has not moved takes the route whole.
+        assert_eq!(cursor([90, 200], vec![[90, 200], [300, 400]]), 0);
     }
     #[test]
     fn arrival_and_explicit_orders_cancel_a_pending_route_replacement() {

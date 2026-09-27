@@ -774,8 +774,10 @@ impl BlastRange {
                             .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
                             .collect();
                         let u = &mut self.units[id];
+                        // Under way, the hull drives on while the new
+                        // route is searched (ADR-462).
                         u.motion
-                            .move_to(&self.world, dest, &u.body, &others, &self.rubble);
+                            .retarget(&self.world, dest, &u.body, &others, &self.rubble);
                     }
                 }
                 continue;

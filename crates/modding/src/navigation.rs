@@ -24,6 +24,9 @@ pub struct Navigation {
     pub corner_arrival_mm: i32,
     /// Weight of the planner's distance estimate, percent; 100 is plain A*.
     pub heuristic_pct: u32,
+    /// How far a hull may get from where its search began, driving on or
+    /// braking, before the search starts over, world units (ADR-462).
+    pub retarget_units: i32,
     pub fell: Felling,
 }
 /// What a hull pushes over instead of driving around.
@@ -57,6 +60,7 @@ impl Navigation {
             || !(0..=60).contains(&n.recovery_turn_deg)
             || !(0..=16).contains(&n.plan_margin)
             || !(1..=500).contains(&n.corner_arrival_mm)
+            || !(0..=256).contains(&n.retarget_units)
             || n.fell.materials.contains(&0)
             || !(1..=32).contains(&n.fell.radius)
             || !(1..=8192).contains(&n.fell.cells_per_tick)
@@ -84,6 +88,7 @@ mod tests {
             "contact_replan_ticks: 2,",
             "corner_arrival_mm: 50,",
             "heuristic_pct: 200,",
+            "retarget_units: 160,",
         ] {
             let cut = include_str!("../../../data/range-navigation.ron").replace(field, "");
             assert!(

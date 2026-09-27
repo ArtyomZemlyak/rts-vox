@@ -710,6 +710,116 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
     );
 }
 
+/// **A long pursuit reaches targets that keep moving** (P-56, ADR-462).
+/// A tank with a short reach sets out across the training ground after
+/// two tanks that drive back and forth and never stop. Each new goal of
+/// the pursuit is searched while the hull drives on: it takes the new
+/// route up at speed instead of stopping for it, closes to its reach
+/// again and again and fires; the run replays bit for bit from a snapshot
+/// taken in the middle of the chase.
+#[test]
+fn a_long_pursuit_reaches_targets_that_keep_moving() {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    if let Some(course) = &mut layout.course {
+        course.patrols.clear();
+    }
+    let unit = |at: [i32; 3], allied| RangeUnitDef {
+        kind: RangeUnitKind::Tank,
+        at,
+        allied,
+    };
+    layout.units = vec![
+        unit([3260, 16, 2080], true),
+        unit([3900, 16, 2080], false),
+        unit([3900, 16, 2760], false),
+    ];
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
+    // A short reach: the pursuer has to close in on each target in turn.
+    let short =
+        |r: &mut BlastRange| std::sync::Arc::make_mut(&mut r.battle.tuning).tank_range = 150;
+    short(&mut a);
+    a.start_battle().unwrap();
+    // The targets shuttle between two points each and never stop.
+    let legs = [[[3900, 2480], [3900, 2080]], [[3450, 2760], [3900, 2760]]];
+    let steer = |r: &mut BlastRange| {
+        if r.battle.ai.pending.is_some() || r.battle.ai.next_tick < r.tick {
+            return;
+        }
+        let leg = (r.tick / 300) as usize % 2;
+        let plan: Vec<_> = [1usize, 2]
+            .into_iter()
+            .filter(|&id| r.units[id].status.alive)
+            .map(|id| Decision {
+                actor: id,
+                order: AiOrder::Move(legs[id - 1][leg]),
+            })
+            .collect();
+        let tick = r.battle.ai.next_tick;
+        r.submit_enemy_ai_plan(tick, plan).unwrap();
+    };
+    let start = a.units[0].motion.pos;
+    let cruise = Fx::from_int(a.units[0].motion.speed / 2);
+    let (mut restarts, mut taken_at_speed, mut first_shot) = (0, 0, None);
+    let mut replay = None;
+    for tick in 0..2400 {
+        steer(&mut a);
+        let searching = a.units[0].motion.searching();
+        a.step();
+        let m = &a.units[0].motion;
+        restarts += usize::from(m.started_search());
+        // A search that answered with a route to the new goal while the
+        // hull was driving at more than half its speed.
+        taken_at_speed += usize::from(
+            searching
+                && !m.searching()
+                && m.path.last().copied() == m.destination
+                && m.drive.vel > cruise,
+        );
+        if a.battle.actors[0].fired > 0 {
+            first_shot.get_or_insert(tick);
+        }
+        if let Some(b) = replay.as_mut().filter(|_| tick < 1500) {
+            steer(b);
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+        }
+        if tick == 1200 {
+            let mut b = BlastRange::restore(config.clone(), &a.snapshot()).unwrap();
+            short(&mut b);
+            replay = Some(b);
+        }
+    }
+    let travelled = (a.units[0].motion.pos[0].sub(start[0]).to_int_trunc()).abs()
+        + (a.units[0].motion.pos[2].sub(start[2]).to_int_trunc()).abs();
+    assert!(
+        travelled > 400,
+        "the pursuer stayed near its start: {travelled}"
+    );
+    // Stopping for every new goal and restarting the search on every
+    // tick of braking, the pursuer started 139 searches and fired first
+    // at tick 1137; holding the search but still stopping for it, it
+    // fired first at 1665 and six rounds in all. Now 589 and fifteen.
+    assert!(
+        taken_at_speed >= 2,
+        "routes taken up at speed: {taken_at_speed}"
+    );
+    assert!(
+        restarts <= 10,
+        "the route search restarted {restarts} times"
+    );
+    assert!(
+        first_shot.is_some_and(|t| t < 800),
+        "first shot at {first_shot:?}"
+    );
+    assert!(
+        a.battle.actors[0].fired >= 10,
+        "fired {}",
+        a.battle.actors[0].fired
+    );
+}
+
 #[test]
 fn a_moving_target_changes_the_finished_pursuit_goal() {
     let mut r = arena(RangeUnitKind::Tank);
