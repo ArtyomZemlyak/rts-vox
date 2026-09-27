@@ -58,6 +58,171 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ADR-479 implementation retained as the differential oracle.
+    impl Bursts {
+        fn reference_rubble(
+            &self,
+            world: &voxel::World,
+            yielding: &[Mat],
+            hulls: &[Hull],
+        ) -> nav::vehicle::Rubble {
+            // Floor is what something holds: the world, or a resting piece
+            // under it — a pile on a rock piece is floor at the pile's top.
+            // Only the world was asked, and a stacked piece was missing from
+            // the map (ADR-458). A piece on a roof, or one whose support was
+            // taken and whose turn to fall has not come, is not floor; one a
+            // hull carries is not asked about the pieces (ADR-469).
+            let mut floor = Vec::new();
+            let mut stacked = Vec::new();
+            for (i, f) in self.fragments.iter().enumerate() {
+                if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
+                    continue;
+                }
+                if supported(f, world, &[], &Settled::default(), u32::MAX) {
+                    floor.push(i);
+                } else if !hulls
+                    .iter()
+                    .any(|h| h.carries(f.position.y.add(f.bounds().0[1]), f.position))
+                {
+                    stacked.push(i);
+                }
+            }
+            if !stacked.is_empty() {
+                let settled = Settled::around(&self.fragments, hulls, |i, _| {
+                    stacked.binary_search(&i).is_ok()
+                });
+                floor.extend(
+                    stacked
+                        .into_iter()
+                        .filter(|&i| supported(&self.fragments[i], world, &[], &settled, i as u32)),
+                );
+            }
+            // A hull covers no column outside the box around its footprint:
+            // a piece far from every hull asks none of them (ADR-465).
+            let reach: Vec<([Fx; 2], [Fx; 2])> = hulls.iter().map(Hull::footprint_box).collect();
+            let mut against: Vec<&Hull> = Vec::with_capacity(hulls.len());
+            // The columns with their tops, gathered and sorted, and the map
+            // built from them at once: thousands of single insertions into
+            // the tree cost a millisecond a step on a battlefield (ADR-465).
+            let mut columns: Vec<([i32; 2], u16)> = Vec::new();
+            for f in floor.into_iter().map(|i| &self.fragments[i]) {
+                let (low, high) = f.bounds();
+                let p = arr(f.position);
+                // Floor of the bottom corners, ceiling of the top: the columns
+                // the box covers and the height it reaches.
+                let lo = [p[0].add(low[0]), p[2].add(low[2])].map(|v| (v.raw() >> 32) as i32);
+                let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
+                let top = -(p[1].add(high[1]).neg().raw() >> 32);
+                let top = top.clamp(0, i64::from(u16::MAX)) as u16;
+                against.clear();
+                against.extend(hulls.iter().zip(&reach).filter_map(|(h, (b0, b1))| {
+                    let near = (0..2).all(|a| {
+                        Fx::from_int(lo[a]) <= b1[a] && Fx::from_int(hi[a]).add(Fx::ONE) >= b0[a]
+                    });
+                    (near && !h.covers_point([p[0], p[2]])).then_some(h)
+                }));
+                for z in lo[1].max(0)..=hi[1] {
+                    for x in lo[0].max(0)..=hi[0] {
+                        if against.iter().any(|h| h.covers(x, z)) {
+                            continue;
+                        }
+                        columns.push(([x, z], top));
+                    }
+                }
+            }
+            // A column under several pieces holds the highest top.
+            sort_columns(&mut columns);
+            columns.dedup_by(|later, kept| {
+                let same = later.0 == kept.0;
+                if same {
+                    kept.1 = kept.1.max(later.1);
+                }
+                same
+            });
+            nav::vehicle::Rubble::from_sorted(columns)
+        }
+    }
+    #[test]
+    fn rubble_reused_boxes_match_reference_after_support_and_hull_changes() {
+        let (mut b, mut w) = (Bursts::default(), world());
+        for i in 0..192u32 {
+            let side = (i % 4 + 1) as u8;
+            let full = u64::MAX >> (64 - u32::from(side).pow(3));
+            let shape = if i % 3 == 0 {
+                full & 0x9d37_a518_6fc2_0be1
+            } else {
+                full
+            };
+            let turn = (i % 7) as i32 * 2731;
+            let (c, s) = (angle::cos(turn), angle::sin(turn));
+            b.fragments.push(Fragment {
+                id: u64::from(i) + 1,
+                position: V3::new(
+                    Fx::from_int(32 + (i % 8) as i32 * 4),
+                    Fx::from_int(12 + (i / 64) as i32 * 4).add(Fx::from_ratio(i32::from(side), 2)),
+                    Fx::from_int(32 + (i / 8 % 8) as i32 * 4),
+                ),
+                velocity: V3::ZERO,
+                material: (i % 3 + 1) as Mat,
+                paint: None,
+                mm: 100,
+                basis: [
+                    V3::new(c, Fx::ZERO, s),
+                    V3::UP,
+                    V3::new(s.neg(), Fx::ZERO, c),
+                ],
+                mass_g: 1200,
+                count: shape.count_ones(),
+                shape,
+                side,
+                chunk: None,
+                held: 0,
+                resting: i % 5 != 0,
+            });
+        }
+        let solid = |[x, y, z]: [i32; 3]| {
+            (42..54).contains(&x) && (42..54).contains(&z) && (14..16).contains(&y)
+        };
+        for pass in 0..4 {
+            let hull = Hull {
+                pos: [
+                    Fx::from_int(48 + pass * 3),
+                    Fx::from_int(12),
+                    Fx::from_int(48),
+                ],
+                head: pass * 2731,
+                half: [Fx::from_int(6), Fx::from_int(6)],
+                height: Fx::from_int(10),
+                vel: [Fx::ZERO; 3],
+                step: Fx::from_int(4),
+                solid: (pass % 2 == 0).then_some(Solid(&solid)),
+            };
+            for hulls in [&[][..], std::slice::from_ref(&hull)] {
+                for yielding in [&[][..], &[1][..], &[1, 2, 3][..]] {
+                    assert_eq!(
+                        b.rubble(&w, yielding, hulls),
+                        b.reference_rubble(&w, yielding, hulls)
+                    );
+                }
+            }
+            // Queries after digging and fragment movement cannot reuse an
+            // earlier result, even when no simulation tick has elapsed.
+            for x in 32 + pass * 8..40 + pass * 8 {
+                for z in 32..64 {
+                    for y in 8..12 {
+                        w.queue_edit(Edit::dig(x as u32, y, z));
+                    }
+                }
+            }
+            w.flush();
+            for (i, f) in b.fragments.iter_mut().enumerate() {
+                if i % 7 == 0 {
+                    f.resting = !f.resting;
+                    f.position.y = f.position.y.add(Fx::ONE);
+                }
+            }
+        }
+    }
     #[test]
     fn scattered_impulses_are_varied_replayable_and_never_add_energy() {
         let t = tuning().blast;
@@ -3109,30 +3274,49 @@ impl Bursts {
         // the map (ADR-458). A piece on a roof, or one whose support was
         // taken and whose turn to fall has not come, is not floor; one a
         // hull carries is not asked about the pieces (ADR-469).
+        // Reuse local boxes only within this immutable query: support edits,
+        // hull movement and fragment changes are visible on the next call.
+        let mut bounds = vec![None; self.fragments.len()];
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
         for (i, f) in self.fragments.iter().enumerate() {
             if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
                 continue;
             }
-            if supported(f, world, &[], &Settled::default(), u32::MAX) {
+            let (low, high) = f.bounds();
+            bounds[i] = Some((low, high));
+            let mut p = arr(f.position);
+            p[1] = p[1].sub(Fx::from_ratio(1, 2));
+            if fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz]) {
                 floor.push(i);
             } else if !hulls
                 .iter()
-                .any(|h| h.carries(f.position.y.add(f.bounds().0[1]), f.position))
+                .any(|h| h.carries(f.position.y.add(low[1]), f.position))
             {
                 stacked.push(i);
             }
         }
         if !stacked.is_empty() {
-            let settled = Settled::around(&self.fragments, hulls, |i, _| {
-                stacked.binary_search(&i).is_ok()
-            });
-            floor.extend(
-                stacked
-                    .into_iter()
-                    .filter(|&i| supported(&self.fragments[i], world, &[], &settled, i as u32)),
+            let settled = Settled::around_bounds(
+                &self.fragments,
+                hulls,
+                |i, _| stacked.binary_search(&i).is_ok(),
+                |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
             );
+            // These pieces already failed the world support test above.
+            // No world or hull changes occur while this query is running.
+            floor.extend(stacked.into_iter().filter(|&i| {
+                let f = &self.fragments[i];
+                let (low, high) = bounds[i].unwrap();
+                let mut p = arr(f.position);
+                p[1] = p[1].sub(Fx::from_ratio(1, 2));
+                settled.hit(
+                    [0, 1, 2].map(|a| p[a].add(low[a])),
+                    [0, 1, 2].map(|a| p[a].add(high[a])),
+                    i as u32,
+                    Some(f.position.y.add(low[1])),
+                )
+            }));
         }
         // A hull covers no column outside the box around its footprint:
         // a piece far from every hull asks none of them (ADR-465).
@@ -3142,8 +3326,9 @@ impl Bursts {
         // built from them at once: thousands of single insertions into
         // the tree cost a millisecond a step on a battlefield (ADR-465).
         let mut columns: Vec<([i32; 2], u16)> = Vec::new();
-        for f in floor.into_iter().map(|i| &self.fragments[i]) {
-            let (low, high) = f.bounds();
+        for i in floor {
+            let f = &self.fragments[i];
+            let (low, high) = bounds[i].unwrap();
             let p = arr(f.position);
             // Floor of the bottom corners, ceiling of the top: the columns
             // the box covers and the height it reaches.
@@ -3754,6 +3939,16 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool,
     ) -> Settled {
+        Self::around_bounds(fragments, hulls, asks, |_, f| f.bounds())
+    }
+    /// A caller that already measured pieces can supply the same local
+    /// boxes. They must describe this exact immutable fragment slice.
+    fn around_bounds(
+        fragments: &[Fragment],
+        hulls: &[Hull],
+        asks: impl Fn(usize, &Fragment) -> bool,
+        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]),
+    ) -> Settled {
         if !fragments.iter().any(|f| f.resting) {
             return Settled::default();
         }
@@ -3762,7 +3957,7 @@ impl Settled {
         let mut want = SettledQueries::default();
         let mut boxes = Vec::with_capacity(fragments.len());
         for (i, f) in fragments.iter().enumerate() {
-            let (low, high) = f.bounds();
+            let (low, high) = bounds(i, f);
             let p = arr(f.position);
             let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
