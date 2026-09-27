@@ -5,6 +5,9 @@ use modding::{
     explosion::Delivery,
     range_weapon::{Stream, Tuning},
 };
+#[path = "range_laser.rs"]
+mod laser;
+
 const MAX_ROUNDS: usize = 128;
 
 #[derive(Clone, Debug)]
@@ -469,6 +472,8 @@ impl BlastRange {
             self.streams.serial = serial.wrapping_add(1);
             let mut previous = from.map(Fx::to_int_trunc);
             let mut end = from;
+            let mut free_end = from;
+            let mut contact = None;
             let mut hit = false;
             // Half-cell samples cannot skip a thin plate at a diagonal. Stop
             // at the first surface, so a wall protects the hull behind it.
@@ -490,11 +495,14 @@ impl BlastRange {
                 }
                 if material(&self.world, p) != 0 || self.units.iter().any(|u| u.solid(p)) {
                     self.stream_contact(p, tuning, true, self.gun.at, &self.config.clone());
+                    contact = Some(p);
                     hit = true;
                     break;
                 }
                 previous = p;
+                free_end = point;
             }
+            self.laser_halo(from, free_end, contact, tuning);
             self.streams.traces.push(Trace {
                 from,
                 to: end,
@@ -795,6 +803,131 @@ mod tests {
         l.units[0].at = [285, 16, 336];
         BlastRange::with_layout(c, l).unwrap()
     }
+    #[test]
+    fn laser_halo_heats_exposed_surfaces_with_falloff_and_not_through_them() {
+        let block = |min, max| modding::range::RangeBlock {
+            min,
+            max,
+            material: 3,
+        };
+        let mut r = laser_range(vec![
+            block([200, 100, 338], [201, 101, 340]),
+            block([210, 100, 339], [211, 101, 340]),
+            block([220, 100, 340], [221, 101, 341]),
+            block([245, 100, 336], [246, 101, 337]),
+        ]);
+        let centre = |p: [i32; 3]| p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+        let tuning = r.streams.tuning.laser.clone();
+        r.laser_halo(
+            centre([180, 100, 336]),
+            centre([240, 100, 336]),
+            None,
+            &tuning,
+        );
+        assert_eq!(r.heat.cell([200, 100, 338]).heat, 30);
+        assert_eq!(r.heat.cell([210, 100, 339]).heat, 17);
+        assert_eq!(
+            r.heat.cell([200, 100, 339]).heat,
+            0,
+            "steel must shade its far side"
+        );
+        assert_eq!(r.heat.cell([220, 100, 340]).heat, 0, "outside radius");
+        assert_eq!(r.heat.cell([245, 100, 336]).heat, 0, "past segment end");
+        // An immediately blocked muzzle has no free flight length, but its
+        // surrounding exposed contact patch must still receive heat.
+        r.laser_halo(
+            centre([200, 100, 336]),
+            centre([200, 100, 336]),
+            None,
+            &tuning,
+        );
+        assert_eq!(r.heat.cell([200, 100, 338]).heat, 60);
+        let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        assert_eq!(r.state_hash(), restored.state_hash());
+        for _ in 0..3 {
+            r.step();
+            restored.step();
+            assert_eq!(
+                r.state_hash(),
+                restored.state_hash(),
+                "halo heat lost on restore"
+            );
+        }
+    }
+
+    #[test]
+    fn laser_halo_grazes_armour_but_never_heats_its_own_gun() {
+        let mut r = laser_range(vec![]);
+        let (at, _, cell) = hull_side(&r);
+        let centre = |p: [i32; 3]| p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+        let tuning = r.streams.tuning.laser.clone();
+        r.laser_halo(
+            centre([at[0] - 8, at[1], at[2] - 2]),
+            centre([at[0] + 8, at[1], at[2] - 2]),
+            None,
+            &tuning,
+        );
+        let cell = thermal::Cell {
+            unit: 0,
+            part: 0,
+            at: cell.map(|v| v as u8),
+        };
+        assert!(
+            r.thermals.heat(cell) > 0,
+            "grazing beam missed nearby armour"
+        );
+        assert!(
+            r.thermals.heat(cell) <= tuning.heat,
+            "pose samples stacked heat"
+        );
+        r.units.clear();
+        r.thermals = Default::default();
+        let (lo, hi) = r.gun.bounds();
+        r.laser_halo(centre(lo), centre(hi), None, &tuning);
+        assert_eq!(
+            r.thermals.hot(),
+            0,
+            "firing unit entered its own thermal halo"
+        );
+        assert!(r.gun.removed.is_empty());
+    }
+
+    #[test]
+    fn laser_halo_is_blocked_by_a_shield_even_off_axis() {
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+        let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        l.course = None;
+        l.units.clear();
+        l.blocks = vec![modding::range::RangeBlock {
+            min: [285, 100, 374],
+            max: [286, 101, 375],
+            material: 3,
+        }];
+        l.shields = vec![modding::range::RangeShieldDef {
+            at: [285, 100, 336],
+            radius: 40,
+        }];
+        let mut r = BlastRange::with_layout(c, l).unwrap();
+        let tuning = r.streams.tuning.laser.clone();
+        let centre = |p: [i32; 3]| p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+        // Beam is outside the dome, the plate is inside its thermal radius.
+        r.laser_halo(
+            centre([275, 100, 377]),
+            centre([295, 100, 377]),
+            None,
+            &tuning,
+        );
+        assert_eq!(r.heat.cell([285, 100, 374]).heat, 0);
+        r.shields.clear();
+        r.laser_halo(
+            centre([275, 100, 377]),
+            centre([295, 100, 377]),
+            None,
+            &tuning,
+        );
+        assert!(r.heat.cell([285, 100, 374]).heat > 0);
+    }
+
     #[test]
     fn laser_slowly_melts_a_steel_wall_without_hurting_the_sheltered_unit() {
         let mut r = laser_range(vec![modding::range::RangeBlock {

@@ -821,6 +821,10 @@ pub fn draw(
         for trace in &scene.sim.streams.traces {
             let from = point(trace.from);
             let to = point(trace.to);
+            let heat_width = scene.sim.streams.tuning.laser.heat_radius as f32 * 2.0;
+            if heat_width > 0.0 {
+                beam(&mut hot, from, to, heat_width, [1.6, 0.035, 0.012, 0.055]);
+            }
             beam(&mut hot, from, to, 2.4, [2.8, 0.06, 0.025, 0.18]);
             beam(&mut hot, from, to, 0.65, [7.0, 0.36, 0.25, 0.92]);
             if trace.hit {
