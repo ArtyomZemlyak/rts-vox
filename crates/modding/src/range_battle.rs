@@ -39,7 +39,7 @@ impl Tuning {
             || [t.tank_ammo.tank, t.tank_ammo.strider, t.tank_ammo.ground]
                 .iter()
                 .any(|d| !matches!(d, Delivery::Blast | Delivery::Kinetic))
-            || t.units.len() > 8
+            || t.units.len() > crate::range::MAX_RANGE_UNITS
             || !t.units.iter().any(|u| u.allied)
             || !t.units.iter().any(|u| !u.allied)
         {

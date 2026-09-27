@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_RANGE_BLOCKS: usize = 384;
+/// Machines a range layout places, both sides together.
+pub const MAX_RANGE_UNITS: usize = 8;
 pub const MAX_RANGE_ZONES: usize = 16;
 
 /// Size of an authored clearing used for remote battle deployment.
@@ -231,7 +233,7 @@ impl RangeLayout {
             .any(|v| !(128..=16384).contains(v) || v % 16 != 0)
             || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
-            || r.units.len() > 8
+            || r.units.len() > MAX_RANGE_UNITS
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
             || r.roads.len() > 16

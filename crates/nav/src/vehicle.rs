@@ -58,7 +58,83 @@ impl Pose {
 /// Columns where resting debris stands and the height of its top, in
 /// world units (ADR-292): an overlay the probe adds to the world's floor,
 /// so that contacts, feet and the planner all stand on the same heaps.
-pub type Rubble = BTreeMap<[i32; 2], u16>;
+///
+/// Columns in ascending order, read by binary search (ADR-465). The map
+/// is rebuilt from the pieces every step, and a battlefield holds some
+/// fifteen thousand columns: built into a tree they cost more than half
+/// a millisecond a step, built from sorted columns at once almost none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Rubble(Vec<([i32; 2], u16)>);
+impl Rubble {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// From columns in strictly ascending order, as a sorted and deduplicated
+    /// gather gives them.
+    pub fn from_sorted(columns: Vec<([i32; 2], u16)>) -> Self {
+        debug_assert!(columns.windows(2).all(|p| p[0].0 < p[1].0));
+        Self(columns)
+    }
+    pub fn get(&self, at: &[i32; 2]) -> Option<&u16> {
+        self.0
+            .binary_search_by(|(c, _)| c.cmp(at))
+            .ok()
+            .map(|i| &self.0[i].1)
+    }
+    pub fn contains_key(&self, at: &[i32; 2]) -> bool {
+        self.get(at).is_some()
+    }
+    /// Set the top of a column, returning the one it replaced.
+    pub fn insert(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
+        match self.0.binary_search_by(|(c, _)| c.cmp(&at)) {
+            Ok(i) => Some(std::mem::replace(&mut self.0[i].1, top)),
+            Err(i) => {
+                self.0.insert(i, (at, top));
+                None
+            }
+        }
+    }
+    /// Clear a column, returning its top.
+    pub fn remove(&mut self, at: &[i32; 2]) -> Option<u16> {
+        let i = self.0.binary_search_by(|(c, _)| c.cmp(at)).ok()?;
+        Some(self.0.remove(i).1)
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    /// Columns and tops in ascending column order.
+    pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
+        self.0.iter().map(|(c, t)| (c, t))
+    }
+}
+/// A later entry for a column replaces an earlier one, as insertion does.
+impl FromIterator<([i32; 2], u16)> for Rubble {
+    fn from_iter<I: IntoIterator<Item = ([i32; 2], u16)>>(items: I) -> Self {
+        let mut r = Self::new();
+        for (at, top) in items {
+            r.insert(at, top);
+        }
+        r
+    }
+}
+impl<const N: usize> From<[([i32; 2], u16); N]> for Rubble {
+    fn from(items: [([i32; 2], u16); N]) -> Self {
+        items.into_iter().collect()
+    }
+}
+impl<'a> IntoIterator for &'a Rubble {
+    type Item = (&'a [i32; 2], &'a u16);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, ([i32; 2], u16)>,
+        fn(&'a ([i32; 2], u16)) -> (&'a [i32; 2], &'a u16),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter().map(|(c, t)| (c, t))
+    }
+}
 /// Columns that changed under a pending search, by cache page (ADR-427):
 /// the pages a drain's applied edits touched and those where the rubble
 /// map differs from the last step's. A search keeps what it cached
@@ -137,15 +213,42 @@ pub struct RubblePrint(BTreeMap<[i32; 2], u64>);
 impl RubblePrint {
     /// Columns off the `size` of the world are left out: no probe reads
     /// them.
+    ///
+    /// The map runs in column order, so the pages of one band of
+    /// `PAGE_SIDE` columns along X fill together: their prints are kept
+    /// by the band's page along Z and handed on when the band ends, in
+    /// page order, each page hashing its columns in the map's order as
+    /// before (ADR-465). A lookup in a tree per column cost a third of a
+    /// millisecond a step on a battlefield.
     pub fn of(rubble: &Rubble, size: [u32; 2]) -> Self {
-        let mut pages = BTreeMap::new();
+        const SEED: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut band = vec![SEED; pages_across(size)[1].max(0) as usize];
+        let mut touched: Vec<usize> = Vec::new();
+        let mut pages: Vec<([i32; 2], u64)> = Vec::new();
+        let mut current = None;
+        let mut hand_on = |bx: i32, band: &mut [u64], touched: &mut Vec<usize>| {
+            touched.sort_unstable();
+            for &bz in touched.iter() {
+                pages.push(([bx, bz as i32], std::mem::replace(&mut band[bz], SEED)));
+            }
+            touched.clear();
+        };
         for (&[x, z], &top) in rubble {
             if x < 0 || z < 0 || x >= size[0] as i32 || z >= size[1] as i32 {
                 continue;
             }
-            let h = pages
-                .entry(page_of(x, z))
-                .or_insert(0xcbf2_9ce4_8422_2325u64);
+            let [bx, bz] = page_of(x, z);
+            if current != Some(bx) {
+                if let Some(done) = current {
+                    hand_on(done, &mut band, &mut touched);
+                }
+                current = Some(bx);
+            }
+            let bz = bz as usize;
+            if band[bz] == SEED && !touched.contains(&bz) {
+                touched.push(bz);
+            }
+            let h = &mut band[bz];
             for byte in x
                 .to_le_bytes()
                 .into_iter()
@@ -155,7 +258,10 @@ impl RubblePrint {
                 *h = (*h ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
             }
         }
-        Self(pages)
+        if let Some(done) = current {
+            hand_on(done, &mut band, &mut touched);
+        }
+        Self(pages.into_iter().collect())
     }
     /// Mark in `changed` every page where `self` and `next` differ.
     pub fn changes(&self, next: &Self, changed: &mut Changed) {

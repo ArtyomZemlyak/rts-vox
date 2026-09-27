@@ -17,28 +17,43 @@ fn main() {
     if let Some(c) = &mut layout.course {
         c.patrols.clear();
     }
-    if std::env::args().any(|a| a == "--eight") {
-        let more: Vec<_> = layout
-            .units
-            .iter()
-            .cloned()
-            .map(|mut u| {
-                u.at[2] += 90;
+    // `--units N`: N/4 groups of the stock four; each pair of groups takes
+    // a column, the stock one, one further out and one further in;
+    // `--eight` is `--units 8`.
+    let args: Vec<_> = std::env::args().collect();
+    let units = args
+        .windows(2)
+        .find(|w| w[0] == "--units")
+        .map(|w| w[1].parse::<usize>().expect("units"))
+        .unwrap_or(if args.iter().any(|a| a == "--eight") {
+            8
+        } else {
+            4
+        });
+    assert!(
+        units % 4 == 0 && (4..=24.min(modding::range::MAX_RANGE_UNITS)).contains(&units),
+        "units: 4, 8 .. the layout's limit, at most 24"
+    );
+    let stock = layout.units.clone();
+    layout.units = (0..units / 4)
+        .flat_map(|k| {
+            let (dx, dz) = ([0, 70, -70][k / 2], 90 * (k as i32 % 2));
+            stock.iter().cloned().map(move |mut u| {
+                u.at[0] += if u.allied { -dx } else { dx };
+                u.at[2] += dz;
                 u
             })
-            .collect();
-        layout.units.extend(more);
-    }
+        })
+        .collect();
     let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
         "../../../../data/explosion.ron"
     ))
     .unwrap();
-    let mut sim = BlastRange::with_layout(config, layout).unwrap();
+    let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
     sim.start_battle().unwrap();
     let mut samples = Vec::new();
     let mut peak_rounds = 0;
     let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
-    let args: Vec<_> = std::env::args().collect();
     let ticks = args
         .windows(2)
         .find(|w| w[0] == "--ticks")
@@ -95,7 +110,8 @@ fn main() {
     for (name, mut values) in phases {
         values.sort_unstable();
         println!(
-            "phase={name} p95_us={} p99_us={} max_us={}",
+            "phase={name} mean_us={} p95_us={} p99_us={} max_us={}",
+            values.iter().sum::<u128>() / values.len() as u128,
             values[values.len() * 95 / 100],
             values[values.len() * 99 / 100],
             values[values.len() - 1]

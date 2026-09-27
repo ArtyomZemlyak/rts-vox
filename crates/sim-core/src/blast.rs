@@ -2043,6 +2043,10 @@ pub struct BlastRange {
     /// ADR-427). In the snapshot: the pages the rubble changed on read the
     /// same in a restored run as in the continuing one.
     rubble_print: nav::vehicle::RubblePrint,
+    /// Whether `rubble` is the map `rubble_print` was built from: false
+    /// until the first step of a new or restored range, whose `rubble`
+    /// holds nothing (ADR-465). Derived, not saved.
+    rubble_fresh: bool,
     /// The batch's support graph over the range's world (ADR-299): what
     /// the tick's edits leave hanging is dug out and becomes pieces.
     collapse: CollapseLayer,
@@ -2415,6 +2419,7 @@ impl BlastRange {
             .expect("heat tuning"),
             rubble: nav::vehicle::Rubble::new(),
             rubble_print: nav::vehicle::RubblePrint::default(),
+            rubble_fresh: false,
             collapse,
             bodies,
             collapsed_cells: 0,
@@ -3266,11 +3271,18 @@ impl BlastRange {
     /// afresh, so a memo left from older rubble found a different route
     /// than the restored run (ADR-426).
     fn refresh_rubble(&mut self) -> nav::vehicle::Changed {
-        self.rubble = self.current_rubble();
-        let print = nav::vehicle::RubblePrint::of(&self.rubble, [self.size[0], self.size[2]]);
+        let rubble = self.current_rubble();
         let mut changed = self.world_changed.clone();
-        self.rubble_print.changes(&print, &mut changed);
-        self.rubble_print = print;
+        // The print is a function of the map: an unchanged map has the
+        // print it had and changes no page (ADR-465). Most steps leave
+        // the heap as it lay.
+        if !(self.rubble_fresh && rubble == self.rubble) {
+            let print = nav::vehicle::RubblePrint::of(&rubble, [self.size[0], self.size[2]]);
+            self.rubble_print.changes(&print, &mut changed);
+            self.rubble_print = print;
+        }
+        self.rubble = rubble;
+        self.rubble_fresh = true;
         changed
     }
     /// The rubble map of the present state, for a command given between

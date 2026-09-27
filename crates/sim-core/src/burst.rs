@@ -1865,6 +1865,21 @@ impl Hull {
         let v = dz.mul(c).sub(dx.mul(s));
         u.abs() <= self.half[0] && v.abs() <= self.half[1]
     }
+    /// The world box around the hull's footprint, a unit wider than the
+    /// turned rectangle for the rounding of its frame (ADR-465): no point
+    /// outside it lies under the hull.
+    pub fn footprint_box(&self) -> ([Fx; 2], [Fx; 2]) {
+        let (c, s) = (
+            fx::angle::cos(self.head).abs(),
+            fx::angle::sin(self.head).abs(),
+        );
+        let [a, b] = self.half;
+        let extent = [a.mul(c).add(b.mul(s)), a.mul(s).add(b.mul(c))].map(|e| e.add(Fx::ONE));
+        (
+            [self.pos[0].sub(extent[0]), self.pos[2].sub(extent[1])],
+            [self.pos[0].add(extent[0]), self.pos[2].add(extent[1])],
+        )
+    }
     /// Whether a piece whose box bottom is `bottom` and centre `centre`
     /// rides on the hull (ADR-293, ADR-458): its centre over the box and
     /// its bottom no lower than the support probe's half unit under the
@@ -2786,7 +2801,6 @@ impl Bursts {
         yielding: &[Mat],
         hulls: &[Hull],
     ) -> nav::vehicle::Rubble {
-        let mut out = nav::vehicle::Rubble::new();
         // Floor is what something holds: the world, or a resting piece
         // under it — a pile on a rock piece is floor at the pile's top.
         // Only the world was asked, and a stacked piece was missing from
@@ -2814,6 +2828,14 @@ impl Bursts {
                     .filter(|&i| supported(&self.fragments[i], world, &[], &settled, i as u32)),
             );
         }
+        // A hull covers no column outside the box around its footprint:
+        // a piece far from every hull asks none of them (ADR-465).
+        let reach: Vec<([Fx; 2], [Fx; 2])> = hulls.iter().map(Hull::footprint_box).collect();
+        let mut against: Vec<&Hull> = Vec::with_capacity(hulls.len());
+        // The columns with their tops, gathered and sorted, and the map
+        // built from them at once: thousands of single insertions into
+        // the tree cost a millisecond a step on a battlefield (ADR-465).
+        let mut columns: Vec<([i32; 2], u16)> = Vec::new();
         for f in floor.into_iter().map(|i| &self.fragments[i]) {
             let (low, high) = f.bounds();
             let p = arr(f.position);
@@ -2823,21 +2845,32 @@ impl Bursts {
             let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
             let top = -(p[1].add(high[1]).neg().raw() >> 32);
             let top = top.clamp(0, i64::from(u16::MAX)) as u16;
-            let against: Vec<&Hull> = hulls
-                .iter()
-                .filter(|h| !h.covers_point([p[0], p[2]]))
-                .collect();
+            against.clear();
+            against.extend(hulls.iter().zip(&reach).filter_map(|(h, (b0, b1))| {
+                let near = (0..2).all(|a| {
+                    Fx::from_int(lo[a]) <= b1[a] && Fx::from_int(hi[a]).add(Fx::ONE) >= b0[a]
+                });
+                (near && !h.covers_point([p[0], p[2]])).then_some(h)
+            }));
             for z in lo[1].max(0)..=hi[1] {
                 for x in lo[0].max(0)..=hi[0] {
                     if against.iter().any(|h| h.covers(x, z)) {
                         continue;
                     }
-                    let cell = out.entry([x, z]).or_insert(0);
-                    *cell = (*cell).max(top);
+                    columns.push(([x, z], top));
                 }
             }
         }
-        out
+        // A column under several pieces holds the highest top.
+        sort_columns(&mut columns);
+        columns.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.max(later.1);
+            }
+            same
+        });
+        nav::vehicle::Rubble::from_sorted(columns)
     }
     /// Before empty wreck containers are released/reused, remove their geometry.
     pub fn sweep(&mut self, e: &Economy) {
@@ -3317,6 +3350,33 @@ fn supported(
             Some(f.position.y.add(low[1])),
         )
 }
+/// Columns in ascending column order, stably (ADR-465): four passes of
+/// a byte each, over Z and then X. The columns of the rubble map lie in
+/// `0..65536` on both axes, as a map is no wider than 16384; a comparison
+/// sort of a battlefield's fifteen thousand columns cost more than half a
+/// millisecond a step.
+fn sort_columns(columns: &mut Vec<([i32; 2], u16)>) {
+    debug_assert!(columns
+        .iter()
+        .all(|(c, _)| c.iter().all(|v| (0..1 << 16).contains(v))));
+    let mut out = vec![([0, 0], 0u16); columns.len()];
+    for (axis, shift) in [(1, 0), (1, 8), (0, 0), (0, 8)] {
+        let digit = |c: &([i32; 2], u16)| ((c.0[axis] >> shift) & 0xff) as usize;
+        let mut start = [0usize; 257];
+        for c in columns.iter() {
+            start[digit(c) + 1] += 1;
+        }
+        for d in 0..256 {
+            start[d + 1] += start[d];
+        }
+        for c in columns.iter() {
+            let d = digit(c);
+            out[start[d]] = *c;
+            start[d] += 1;
+        }
+        std::mem::swap(columns, &mut out);
+    }
+}
 /// The boxes of resting pieces, in the cells a flying piece may reach
 /// (ADR-308). Built once a tick: a piece that landed is ground for the
 /// next one, and without this they fall through one another.
@@ -3533,7 +3593,7 @@ fn advance_fragment(
         .map(|v| v.abs().mul(Fx::from_int(2)).to_int_trunc() as usize + 1)
         .max()
         .unwrap();
-    let mut delta = arr(f.velocity.scale(Fx::from_ratio(1, steps as i32)));
+    let delta = arr(f.velocity.scale(Fx::from_ratio(1, steps as i32)));
     let mut supported = false;
     let (low, high) = f.bounds();
     // Hulls the piece already overlaps do not pen it in (ADR-294): it may
@@ -3555,6 +3615,99 @@ fn advance_fragment(
             evict(f, h, low, high, [bounds[0], bounds[2]]);
         }
     }
+    // Most pieces in flight meet nothing in a tick (ADR-465): when the box
+    // they sweep through all the substeps is clear of the world, of every
+    // hull they do not already overlap and of the settled pieces, no
+    // substep is refused, and where they get to is the substeps' sum —
+    // the same bits, without asking each substep again.
+    let from = arr(f.position);
+    let to: [Fx; 3] =
+        std::array::from_fn(|a| from[a].add(delta[a].mul(Fx::from_int(steps as i32))));
+    let swept_lo: [Fx; 3] = std::array::from_fn(|a| from[a].min(to[a]).add(low[a]));
+    let swept_hi: [Fx; 3] = std::array::from_fn(|a| from[a].max(to[a]).add(high[a]));
+    if !box_contact(world, [Fx::ZERO; 3], swept_lo, swept_hi, bounds)
+        && !hull_near(from, to, low, high, hulls, inside)
+        && !settled.hit(swept_lo, swept_hi, skip, None)
+    {
+        f.position = v3(to);
+    } else {
+        substeps(
+            f,
+            world,
+            t,
+            hulls,
+            settled,
+            skip,
+            steps,
+            delta,
+            inside,
+            &mut supported,
+        );
+    }
+    tumble(f, t);
+    let sleep = Fx::from_ratio(
+        t.sleep_mm_s as i32,
+        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+    );
+    if supported && f.velocity.len_sq() <= sleep.mul(sleep) {
+        f.velocity = V3::ZERO;
+        f.resting = true;
+        return true;
+    }
+    false
+}
+
+/// Whether a piece moving from `from` to `to` with its box `low..high`
+/// may meet a live hull it does not already overlap: the hull's height
+/// against the swept vertical extent, and the world box around the
+/// hull's footprint, widened by the piece's reach and a unit for the
+/// rounding of the hull's own frame, against the centre's swept box. A
+/// bound from outside: [`hull_hit`] decides the contact itself.
+fn hull_near(
+    from: [Fx; 3],
+    to: [Fx; 3],
+    low: [Fx; 3],
+    high: [Fx; 3],
+    hulls: &[Hull],
+    skip: u64,
+) -> bool {
+    let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
+    let (bottom, top) = (
+        from[1].min(to[1]).add(low[1]),
+        from[1].max(to[1]).add(high[1]),
+    );
+    hulls.iter().enumerate().any(|(i, h)| {
+        if (i < 64 && skip & (1 << i) != 0) || top < h.pos[1] || bottom > h.pos[1].add(h.height) {
+            return false;
+        }
+        let (c, s) = (angle::cos(h.head).abs(), angle::sin(h.head).abs());
+        let (a, b) = (h.half[0].add(reach), h.half[1].add(reach));
+        let extent = [a.mul(c).add(b.mul(s)), a.mul(s).add(b.mul(c))].map(|e| e.add(Fx::ONE));
+        [(0, 0), (2, 1)].iter().all(|&(k, e)| {
+            from[k].min(to[k]) <= h.pos[k].add(extent[e])
+                && from[k].max(to[k]) >= h.pos[k].sub(extent[e])
+        })
+    })
+}
+
+/// The substeps of [`advance_fragment`] when the piece may meet
+/// something: half a voxel at most per axis, each refused move bouncing
+/// its axis and rubbing the others.
+#[allow(clippy::too_many_arguments)]
+fn substeps(
+    f: &mut Fragment,
+    world: &voxel::World,
+    t: &Blast,
+    hulls: &[Hull],
+    settled: &Settled,
+    skip: u32,
+    steps: usize,
+    mut delta: [Fx; 3],
+    inside: u64,
+    supported: &mut bool,
+) {
+    let bounds = [world.nx, world.ny, world.nz];
+    let (low, high) = f.bounds();
     for _ in 0..steps {
         for axis in 0..3 {
             if delta[axis] == Fx::ZERO {
@@ -3571,7 +3724,7 @@ fn advance_fragment(
                     (axis == 1 && delta[axis] < Fx::ZERO).then_some(f.position.y.add(low[1])),
                 );
             if blocked {
-                supported |= axis == 1 && delta[axis] < Fx::ZERO;
+                *supported |= axis == 1 && delta[axis] < Fx::ZERO;
                 delta[axis] = Fx::ZERO;
                 let mut velocity = arr(f.velocity);
                 velocity[axis] = velocity[axis]
@@ -3588,17 +3741,6 @@ fn advance_fragment(
             }
         }
     }
-    tumble(f, t);
-    let sleep = Fx::from_ratio(
-        t.sleep_mm_s as i32,
-        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-    );
-    if supported && f.velocity.len_sq() <= sleep.mul(sleep) {
-        f.velocity = V3::ZERO;
-        f.resting = true;
-        return true;
-    }
-    false
 }
 
 /// A flying piece tumbles (ADR-309): it turns about one of its own axes,
