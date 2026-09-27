@@ -611,6 +611,63 @@ mod tests {
         assert!(e.balanced());
     }
 
+    /// **A pile grows on what its piece rests on** (ADR-457). A merge
+    /// dropped the pile onto the world under its centre: a soil piece
+    /// lying on a rock piece sank into the rock when a second soil piece
+    /// settled in its pile cell.
+    #[test]
+    fn a_pile_merged_on_a_resting_piece_stays_on_it() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        // A ledge of the world, four high, for the second soil piece.
+        for y in 12..16 {
+            w.queue_edit(Edit::put(54, y, 49, 2));
+        }
+        w.flush();
+        let piece = |e: &mut Economy, id, position, material, shape, side, count| Fragment {
+            id,
+            position,
+            velocity: V3::ZERO,
+            material,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1200 * u64::from(count),
+            count,
+            shape,
+            side,
+            chunk: None,
+            held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+            resting: true,
+        };
+        // A rock block on the ground, 48..52 by 12..16 by 48..52; a soil
+        // piece on it; another on the ledge, in the same pile cell.
+        let rock = V3::new(Fx::from_int(50), Fx::from_int(14), Fx::from_int(50));
+        b.fragments.push(piece(&mut e, 1, rock, 2, u64::MAX, 4, 64));
+        b.fragments
+            .push(piece(&mut e, 2, centre([49, 16, 49]), 1, 1, 1, 1));
+        b.fragments
+            .push(piece(&mut e, 3, centre([54, 16, 49]), 1, 1, 1, 1));
+        b.step_fragments(
+            &w,
+            &mut e,
+            &t.blast,
+            crate::gravity_per_tick(&t),
+            0,
+            Surroundings::NONE,
+        );
+        assert_eq!(b.fragments.len(), 2, "the soil pieces did not merge");
+        let pile = &b.fragments[1];
+        assert_eq!((pile.material, pile.count), (1, 2));
+        assert!(pile.resting);
+        let bottom = pile.position.y.add(pile.bounds().0[1]);
+        assert!(
+            bottom >= Fx::from_int(16) && bottom < Fx::from_ratio(33, 2),
+            "the pile sank into the rock under it: bottom {bottom:?}"
+        );
+        assert!(e.balanced());
+    }
+
     /// A piece falling onto a live hull rests on its roof, and when the
     /// hull is gone from under it, it falls to the ground (ADR-293).
     #[test]
@@ -2553,7 +2610,18 @@ impl Bursts {
                 e.ledger.transfer(from.held, to.held, u64::MAX);
                 to.mass_g += from.mass_g;
                 to.count += from.count;
-                heap(to, world);
+                // The pile grows where the piece it grows on rests: on
+                // the world, whose top the support probe reaches half a
+                // unit under the piece, it sits on that top; on a settled
+                // piece or a roof, its bottom stays where the piece's was.
+                // Dropped onto the world under its centre whatever held
+                // it, it sank into the piece or the hull (ADR-457).
+                let bottom = to.position.y.add(to.bounds().0[1]);
+                restack(to);
+                match world_floor(to, world) {
+                    Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
+                    _ => to.position.y = bottom.sub(to.bounds().0[1]),
+                }
                 merged.insert(from.held);
             } else {
                 piles.insert(key, i);
@@ -3035,11 +3103,43 @@ impl Bursts {
     }
 }
 
-/// A pile with more than one piece in it is a heap (ADR-292): its cells
-/// fill a four-cell box from the bottom layer up, upright, standing on the
-/// world under its centre, so that it has the height its matter takes.
-/// Matter beyond the box stays in the container; the box only saturates.
+/// A pile stood on the world under its centre: how tests lay one down.
+#[cfg(test)]
 pub(crate) fn heap(f: &mut Fragment, world: &voxel::World) {
+    restack(f);
+    if let Some(floor) = world_floor(f, world) {
+        seat(f, floor);
+    }
+}
+/// Stands a restacked pile with its bottom layer on `floor`.
+fn seat(f: &mut Fragment, floor: Fx) {
+    let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+    let centre = arr(shape_centre(f.shape, 4));
+    f.position.y = floor.add(centre[1].add(Fx::from_ratio(1, 2)).mul(scale));
+}
+/// The top of the world under a piece's centre, looking down from its
+/// height; `None` off the map.
+fn world_floor(f: &Fragment, world: &voxel::World) -> Option<Fx> {
+    let p = arr(f.position);
+    let (x, z) = ((p[0].raw() >> 32) as i32, (p[2].raw() >> 32) as i32);
+    if x < 0 || z < 0 || x as u32 >= world.nx || z as u32 >= world.nz {
+        return None;
+    }
+    let mut y = (p[1].raw() >> 32).clamp(0, i64::from(world.ny) - 1) as i32;
+    while y >= 0 {
+        if world.solid(x as u32, y as u32, z as u32) {
+            return Some(Fx::from_int(y + 1));
+        }
+        y -= 1;
+    }
+    Some(Fx::ZERO)
+}
+/// A pile with more than one piece in it is a heap (ADR-292): its cells
+/// fill a four-cell box from the bottom layer up, upright, so that it has
+/// the height its matter takes. Matter beyond the box stays in the
+/// container; the box only saturates. Where it stands is the caller's
+/// (ADR-457).
+fn restack(f: &mut Fragment) {
     let n = f.count.min(box_cells(4));
     let mut shape = 0u64;
     let mut placed = 0;
@@ -3056,23 +3156,6 @@ pub(crate) fn heap(f: &mut Fragment, world: &voxel::World) {
     f.shape = shape;
     f.side = 4;
     f.basis = IDENTITY;
-    let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
-    let p = arr(f.position);
-    let (x, z) = ((p[0].raw() >> 32) as i32, (p[2].raw() >> 32) as i32);
-    if x < 0 || z < 0 || x as u32 >= world.nx || z as u32 >= world.nz {
-        return;
-    }
-    let mut floor = 0;
-    let mut y = (p[1].raw() >> 32).clamp(0, i64::from(world.ny) - 1) as i32;
-    while y >= 0 {
-        if world.solid(x as u32, y as u32, z as u32) {
-            floor = y + 1;
-            break;
-        }
-        y -= 1;
-    }
-    let centre = arr(shape_centre(shape, 4));
-    f.position.y = Fx::from_int(floor).add(centre[1].add(Fx::from_ratio(1, 2)).mul(scale));
 }
 /// A resting piece looks under itself every `rest_check_ticks` ticks
 /// (ADR-291), the pieces spread over the period by id so that no tick
