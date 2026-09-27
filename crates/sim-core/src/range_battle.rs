@@ -3,7 +3,7 @@
 use super::ai::{self, Policy};
 use super::*;
 use fx::blob::{Blob, Scan};
-use modding::range_battle::Tuning;
+use modding::{explosion::Delivery, range_battle::Tuning};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -33,11 +33,21 @@ pub struct Actor {
 }
 pub struct Round {
     pub owner: usize,
+    /// A tank's round: ballistic, either kind (ADR-456).
     pub shell: bool,
+    /// The tank's round is armour-piercing, not high-explosive (ADR-456).
+    pub kinetic: bool,
     pub pos: [Fx; 3],
     pub previous: [Fx; 3],
     velocity: [Fx; 3],
     distance: Fx,
+}
+impl Round {
+    /// A high-explosive shell: its impact starts a wave, and waves are
+    /// bounded with the shells still in flight.
+    fn bursts(&self) -> bool {
+        self.shell && !self.kinetic
+    }
 }
 pub struct Burst {
     wave: Explosion,
@@ -46,7 +56,10 @@ pub struct Burst {
 #[derive(Clone, Copy)]
 pub struct Impact {
     pub at: [i32; 3],
+    /// A high-explosive shell burst here.
     pub shell: bool,
+    /// An armour-piercing round struck or glanced here (ADR-456).
+    pub kinetic: bool,
 }
 pub struct Battle {
     pub phase: Phase,
@@ -57,6 +70,8 @@ pub struct Battle {
     pub traces: Vec<weapons::Trace>,
     pub tuning: std::sync::Arc<Tuning>,
     pub shell_config: ExplosionConfig,
+    /// The tank's armour-piercing round (ADR-456).
+    pub kinetic_config: ExplosionConfig,
     bullet_config: ExplosionConfig,
     pub(super) ai: ai::Controller,
 }
@@ -73,6 +88,14 @@ impl Battle {
             * u64::from(tuning.tank_power_milli)
             / 1000) as u32;
         shell_config.unit_ablation_resistance = resistance;
+        // The same tank's power drives either round.
+        let mut kinetic_config =
+            ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        kinetic_config.energy = kinetic_config.energy * tuning.tank_power_milli / 1000;
+        kinetic_config.material_energy_j = (u64::from(kinetic_config.material_energy_j)
+            * u64::from(tuning.tank_power_milli)
+            / 1000) as u32;
+        kinetic_config.unit_ablation_resistance = resistance;
         let mut bullet_config =
             ExplosionConfig::from_ron(include_str!("../../../data/machine-gun.ron")).unwrap();
         bullet_config.unit_ablation_resistance = resistance;
@@ -97,6 +120,7 @@ impl Battle {
             traces: Vec::new(),
             tuning,
             shell_config,
+            kinetic_config,
             bullet_config,
             ai: ai::Controller::new(),
         }
@@ -146,7 +170,13 @@ impl Battle {
         b.usize(self.rounds.len());
         for r in &self.rounds {
             b.usize(r.owner);
-            b.bool(r.shell);
+            // Earlier snapshots wrote a bool here: 0 and 1 keep their
+            // meaning, 2 is the armour-piercing round (ADR-456).
+            b.u8(match (r.shell, r.kinetic) {
+                (false, _) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+            });
             for v in r.pos.into_iter().chain(r.velocity) {
                 b.fx(v);
             }
@@ -219,7 +249,12 @@ impl Battle {
         }
         for _ in 0..n {
             let owner = s.usize();
-            let shell = s.bool();
+            let (shell, kinetic) = match s.u8() {
+                0 => (false, false),
+                1 => (true, false),
+                2 => (true, true),
+                _ => return None,
+            };
             let pos = std::array::from_fn(|_| s.fx());
             let velocity = std::array::from_fn(|_| s.fx());
             let distance = s.fx();
@@ -239,6 +274,7 @@ impl Battle {
             self.rounds.push(Round {
                 owner,
                 shell,
+                kinetic,
                 pos,
                 previous: pos,
                 velocity,
@@ -246,7 +282,8 @@ impl Battle {
             });
         }
         let n = s.usize();
-        if n.saturating_add(self.rounds.iter().filter(|r| r.shell).count()) > self.tuning.max_waves
+        if n.saturating_add(self.rounds.iter().filter(|r| r.bursts()).count())
+            > self.tuning.max_waves
         {
             return None;
         }
@@ -582,6 +619,7 @@ impl BlastRange {
             traces: Vec::new(),
             tuning: self.battle.tuning.clone(),
             shell_config: self.battle.shell_config.clone(),
+            kinetic_config: self.battle.kinetic_config.clone(),
             bullet_config: self.battle.bullet_config.clone(),
             ai: self.battle.ai.clone(),
         };
@@ -665,6 +703,25 @@ impl BlastRange {
                 a.pursuit = 0;
             }
             a.target = target;
+            // A tank loads for what it aims at (ADR-456).
+            let kinetic = kind == RangeUnitKind::Tank && {
+                let ammo = b.tuning.tank_ammo;
+                let choice = match (a.order, target) {
+                    (Order::Ground(_), _) | (_, None) => ammo.ground,
+                    (_, Some(t)) => match self.units[t].kind {
+                        RangeUnitKind::Tank => ammo.tank,
+                        RangeUnitKind::Strider => ammo.strider,
+                    },
+                };
+                choice == Delivery::Kinetic
+            };
+            let config = if kind != RangeUnitKind::Tank {
+                &b.bullet_config
+            } else if kinetic {
+                &b.kinetic_config
+            } else {
+                &b.shell_config
+            };
             let mut p = if let Order::Ground(p) = a.order {
                 p
             } else if let Some(other) = target {
@@ -674,12 +731,7 @@ impl BlastRange {
             };
             if let Some(other) = target.filter(|_| !matches!(a.order, Order::Ground(_))) {
                 let u = &self.units[other];
-                let speed = if kind == RangeUnitKind::Tank {
-                    b.shell_config.shell_speed
-                } else {
-                    b.bullet_config.shell_speed
-                };
-                let time = distance(other).sqrt().div(Fx::from_int(speed));
+                let time = distance(other).sqrt().div(Fx::from_int(config.shell_speed));
                 let travel = u.motion.drive.vel.mul(time);
                 p[0] += travel
                     .mul(fx::angle::cos(u.motion.drive.head))
@@ -743,12 +795,11 @@ impl BlastRange {
             }
             let shell = kind == RangeUnitKind::Tank;
             if shell {
-                let charge = *a
-                    .charge
-                    .get_or_insert(self.tick + b.shell_config.charge_ticks);
+                let charge = *a.charge.get_or_insert(self.tick + config.charge_ticks);
                 if self.tick < charge
-                    || b.waves.len() + b.rounds.iter().filter(|r| r.shell).count()
-                        >= b.tuning.max_waves
+                    || (!kinetic
+                        && b.waves.len() + b.rounds.iter().filter(|r| r.bursts()).count()
+                            >= b.tuning.max_waves)
                 {
                     continue;
                 }
@@ -757,11 +808,7 @@ impl BlastRange {
             if muzzles.is_empty() || b.rounds.len() + muzzles.len() > b.tuning.max_rounds {
                 continue;
             }
-            let speed = if shell {
-                b.shell_config.shell_speed
-            } else {
-                b.bullet_config.shell_speed
-            };
+            let speed = config.shell_speed;
             for (barrel, muzzle) in muzzles
                 .into_iter()
                 .take(if shell { 1 } else { 2 })
@@ -791,7 +838,7 @@ impl BlastRange {
                 let mut velocity = delta.map(|v| v.div(time));
                 if shell {
                     velocity[1] = velocity[1].add(
-                        Fx::from_int(b.shell_config.gravity)
+                        Fx::from_int(config.gravity)
                             .mul(time)
                             .mul(Fx::from_ratio(1, 2)),
                     );
@@ -799,6 +846,7 @@ impl BlastRange {
                 b.rounds.push(Round {
                     owner: id,
                     shell,
+                    kinetic,
                     pos: muzzle,
                     previous: muzzle,
                     velocity,
@@ -827,8 +875,13 @@ impl BlastRange {
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
+            let gravity = match (r.shell, r.kinetic) {
+                (false, _) => 0,
+                (true, false) => b.shell_config.gravity,
+                (true, true) => b.kinetic_config.gravity,
+            };
             if r.shell {
-                r.velocity[1] = r.velocity[1].sub(Fx::from_int(b.shell_config.gravity).mul(dt));
+                r.velocity[1] = r.velocity[1].sub(Fx::from_int(gravity).mul(dt));
             }
             let delta = r.velocity.map(|v| v.mul(dt));
             let from = r.pos.map(Fx::to_int_trunc);
@@ -857,12 +910,11 @@ impl BlastRange {
             let mut hit = None;
             let mut shield = None;
             let mut prev = r.pos.map(Fx::to_int_trunc);
+            let mut last_free = r.pos;
             for i in 1..=steps {
-                let p = std::array::from_fn(|k| {
-                    r.pos[k]
-                        .add(delta[k].mul(Fx::from_ratio(i, steps)))
-                        .to_int_trunc()
-                });
+                let q: [Fx; 3] =
+                    std::array::from_fn(|k| r.pos[k].add(delta[k].mul(Fx::from_ratio(i, steps))));
+                let p = q.map(Fx::to_int_trunc);
                 if let Some(s) = self.dome_crossed(prev, p) {
                     shield = Some(s);
                     hit = Some(p);
@@ -878,6 +930,7 @@ impl BlastRange {
                     break;
                 }
                 prev = p;
+                last_free = q;
             }
             let to = hit
                 .map(|p| p.map(Fx::from_int))
@@ -892,10 +945,10 @@ impl BlastRange {
             }
             if let Some(at) = hit {
                 if let Some(i) = shield {
-                    let work = if r.shell {
-                        b.shell_config.energy
-                    } else {
-                        stream.work
+                    let work = match (r.shell, r.kinetic) {
+                        (false, _) => stream.work,
+                        (true, false) => b.shell_config.energy,
+                        (true, true) => b.kinetic_config.energy,
                     };
                     let drained = self.shields[i].charge.min(work);
                     self.shields[i].charge -= drained;
@@ -910,6 +963,25 @@ impl BlastRange {
                         drained,
                         collapsed,
                     });
+                } else if r.kinetic {
+                    // A solid round glances off or spends its work along
+                    // its line, as the single gun's (ADR-454, ADR-456).
+                    b.impacts.push(Impact {
+                        at,
+                        shell: false,
+                        kinetic: true,
+                    });
+                    let mut velocity = r.velocity;
+                    if self.ricochet(at, prev, &mut velocity, &b.kinetic_config) {
+                        r.velocity = velocity;
+                        r.pos = last_free;
+                        r.distance = r.distance.sub(travel);
+                        if r.distance > Fx::ZERO {
+                            b.rounds.push(r);
+                        }
+                    } else {
+                        self.kinetic_hit(at, r.velocity, &b.kinetic_config);
+                    }
                 } else if r.shell {
                     let old = self.matter.remaining_mj;
                     self.matter.begin(
@@ -929,7 +1001,11 @@ impl BlastRange {
                         b.shell_config.heat_units,
                         b.shell_config.heat_per_cell,
                     );
-                    b.impacts.push(Impact { at, shell: true });
+                    b.impacts.push(Impact {
+                        at,
+                        shell: true,
+                        kinetic: false,
+                    });
                 } else {
                     self.stream_contact(
                         at,
@@ -938,12 +1014,15 @@ impl BlastRange {
                         self.units[r.owner].at,
                         &b.bullet_config,
                     );
-                    b.impacts.push(Impact { at, shell: false });
+                    b.impacts.push(Impact {
+                        at,
+                        shell: false,
+                        kinetic: false,
+                    });
                 }
             } else {
                 r.pos = to;
                 r.distance = r.distance.sub(travel);
-                let gravity = if r.shell { b.shell_config.gravity } else { 0 };
                 if r.distance > Fx::ZERO
                     && super::in_flight_bounds(to, self.size, r.velocity[1], gravity)
                 {

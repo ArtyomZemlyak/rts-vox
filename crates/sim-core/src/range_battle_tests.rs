@@ -2,9 +2,15 @@ use super::ai::{
     AiOrder, Decision, Observation, Policy, Rules, UnitObservation, OBSERVATION_VERSION,
 };
 use super::*;
+use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
 fn arena(kind: RangeUnitKind) -> BlastRange {
+    arena_of([kind, kind])
+}
+
+/// An allied unit of the first kind facing an enemy of the second.
+fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
     let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     l.battle = true;
     l.size = [640, 192, 640];
@@ -15,12 +21,12 @@ fn arena(kind: RangeUnitKind) -> BlastRange {
     l.clear_max = [600, 600];
     l.units = vec![
         RangeUnitDef {
-            kind,
+            kind: kinds[0],
             at: [170, 16, 336],
             allied: true,
         },
         RangeUnitDef {
-            kind,
+            kind: kinds[1],
             at: [450, 16, 336],
             allied: false,
         },
@@ -291,6 +297,13 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
         l,
     )
     .unwrap();
+    // The lob is the high-explosive shell's (ADR-456).
+    let high_explosive = |r: &mut BlastRange| {
+        std::sync::Arc::make_mut(&mut r.battle.tuning)
+            .tank_ammo
+            .tank = Delivery::Blast;
+    };
+    high_explosive(&mut r);
     r.start_battle().unwrap();
     let mut above = false;
     for _ in 0..750 {
@@ -311,6 +324,7 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
         r.units.iter().map(|u| u.revision).collect::<Vec<_>>()
     );
     let mut b = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    high_explosive(&mut b);
     for _ in 0..60 {
         r.step();
         b.step();
@@ -341,7 +355,16 @@ fn dual_machine_guns_keep_owner_and_survive_stop() {
 }
 #[test]
 fn replay_with_multiple_projectiles_and_waves() {
+    // Waves are the high-explosive shell's: tank against tank loads it
+    // here, whatever the data choose (ADR-456). Tuning is data, not
+    // snapshot, so the restored copy is told the same.
+    let high_explosive = |r: &mut BlastRange| {
+        std::sync::Arc::make_mut(&mut r.battle.tuning)
+            .tank_ammo
+            .tank = Delivery::Blast;
+    };
     let mut a = arena(RangeUnitKind::Tank);
+    high_explosive(&mut a);
     a.start_battle().unwrap();
     for _ in 0..180 {
         a.step();
@@ -351,12 +374,16 @@ fn replay_with_multiple_projectiles_and_waves() {
     }
     assert!(!a.battle.rounds.is_empty());
     let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+    high_explosive(&mut b);
     assert_eq!(a.state_hash(), b.state_hash());
+    let mut waves = 0;
     for _ in 0..150 {
         a.step();
         b.step();
         assert_eq!(a.state_hash(), b.state_hash());
+        waves = waves.max(a.battle.waves.len());
     }
+    assert!(waves > 0, "the replay carried no wave");
 }
 #[test]
 fn cover_blocks_enemy_machine_gun_and_winner_is_reported() {
@@ -419,6 +446,7 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
         a.battle.rounds.push(Round {
             owner,
             shell: true,
+            kinetic: false,
             pos: p,
             previous: p,
             velocity: [Fx::ZERO; 3],
@@ -435,6 +463,138 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
     }
     assert!(a.units.iter().all(|u| u.revision > 0));
     assert!(a.matter.economy.ledger.balanced());
+}
+
+/// **A tank loads for what it aims at** (ADR-456). Battle tanks fired
+/// the high-explosive shell at everything; the armour-piercing round
+/// flew only from the single gun.
+#[test]
+fn a_tank_loads_armour_piercing_for_a_tank_and_high_explosive_for_a_walker() {
+    for (enemy, kinetic) in [(RangeUnitKind::Tank, true), (RangeUnitKind::Strider, false)] {
+        let mut r = arena_of([RangeUnitKind::Tank, enemy]);
+        std::sync::Arc::make_mut(&mut r.battle.tuning).tank_ammo =
+            modding::range_battle::TankAmmo {
+                tank: Delivery::Kinetic,
+                strider: Delivery::Blast,
+                ground: Delivery::Blast,
+            };
+        r.start_battle().unwrap();
+        // The enemy stands and holds its fire.
+        r.battle.ai.next_tick = u32::MAX;
+        r.battle.actors[1].order = Order::Hold;
+        let fired = (0..600).find_map(|_| {
+            r.step();
+            r.battle
+                .rounds
+                .iter()
+                .find(|x| x.owner == 0)
+                .map(|x| (x.shell, x.kinetic))
+        });
+        assert_eq!(fired, Some((true, kinetic)), "against a {enemy:?}");
+    }
+}
+
+/// **The battle's armour-piercing round breaks the hull along its line,
+/// with no wave** (ADR-456), and keeps its kind through a snapshot.
+#[test]
+fn a_battle_armour_piercing_round_breaks_the_hull_without_a_wave() {
+    let mut a = arena(RangeUnitKind::Tank);
+    a.start_battle().unwrap();
+    // The enemy holds until its next decision, after the test.
+    a.battle.ai.next_tick = a.tick + a.battle.ai.tuning.decision_ticks;
+    for actor in &mut a.battle.actors {
+        actor.order = Order::Hold;
+    }
+    let u = &a.units[1];
+    let core = u
+        .world_pos([
+            u.body.core.0 as usize,
+            u.body.core.1 as usize,
+            u.body.core.2 as usize,
+        ])
+        .map(Fx::from_int);
+    // Level, forty units short of the core, at the round's own speed.
+    let from = [core[0].sub(Fx::from_int(40)), core[1], core[2]];
+    let speed = Fx::from_int(a.battle.kinetic_config.shell_speed);
+    a.battle.rounds.push(Round {
+        owner: 0,
+        shell: true,
+        kinetic: true,
+        pos: from,
+        previous: from,
+        velocity: [speed, Fx::ZERO, Fx::ZERO],
+        distance: Fx::from_int(400),
+    });
+    let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+    assert!(b.battle.rounds[0].kinetic, "the round lost its kind");
+    let whole = a.units[1].removed.len();
+    let mut struck = false;
+    for _ in 0..10 {
+        a.step();
+        b.step();
+        assert_eq!(a.state_hash(), b.state_hash());
+        struck |= a.battle.impacts.iter().any(|i| i.kinetic && !i.shell);
+    }
+    assert!(struck, "no armour-piercing impact");
+    assert!(a.battle.waves.is_empty(), "the solid round started a wave");
+    assert!(a.units[1].removed.len() > whole, "the hull was not broken");
+    assert!(a.battle.rounds.is_empty());
+    assert!(a.matter.economy.ledger.balanced());
+}
+
+/// **The battle's armour-piercing round glances off a hull's side as the
+/// single gun's does** (ADR-454, ADR-456): it flies on, turned off the
+/// plate, and the plate keeps a dent, not a hole.
+#[test]
+fn a_battle_armour_piercing_round_glances_off_a_hull_side() {
+    let mut a = arena(RangeUnitKind::Tank);
+    a.start_battle().unwrap();
+    a.battle.ai.next_tick = a.tick + a.battle.ai.tuning.decision_ticks;
+    for actor in &mut a.battle.actors {
+        actor.order = Order::Hold;
+    }
+    // The side belt of the ADR-454 tests, in the enemy hull's own frame.
+    let u = &a.units[1];
+    let cell = [30, 11, 0];
+    assert_eq!(u.body.part_at(30, 11, 0), voxel::Part::Armour);
+    let f = u.root_frame(cell[1]);
+    let centre = f.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
+    // A hair outside the plate, drifting into it at a shallow angle.
+    let start = centre
+        .add(f.x.scale(Fx::from_ratio(1, 10)))
+        .sub(f.z.scale(Fx::from_ratio(13, 20)));
+    let start = [start.x, start.y, start.z];
+    assert!(!u.solid(start.map(Fx::to_int_trunc)));
+    let v =
+        f.x.scale(Fx::from_int(280))
+            .add(f.z.scale(Fx::from_int(40)));
+    a.battle.rounds.push(Round {
+        owner: 0,
+        shell: true,
+        kinetic: true,
+        pos: start,
+        previous: start,
+        velocity: [v.x, v.y, v.z],
+        distance: Fx::from_int(400),
+    });
+    a.step();
+    assert!(
+        a.battle.impacts.iter().any(|i| i.kinetic),
+        "the round never touched the hull"
+    );
+    let round = a.battle.rounds.iter().find(|r| r.owner == 0);
+    let round = round.expect("the round stopped in the hull");
+    let turned = f.z.dot(phys::V3::new(
+        round.velocity[0],
+        round.velocity[1],
+        round.velocity[2],
+    ));
+    assert!(turned < Fx::ZERO, "the round was not turned off the plate");
+    assert!(
+        a.units[1].removed.is_empty(),
+        "a glancing round bored the hull"
+    );
+    assert!(!a.units[1].dents.is_empty());
 }
 
 #[test]

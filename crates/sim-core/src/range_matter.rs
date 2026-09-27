@@ -174,6 +174,10 @@ impl Matter {
     pub(super) fn fragment_size(&mut self, size: u32) {
         self.fragment_box = size.clamp(1, 4) as u8;
     }
+    /// Cells per side of the box the current burst's pieces are grouped in.
+    pub(super) fn fragment_box(&self) -> u8 {
+        self.fragment_box
+    }
     pub fn begin(&mut self, joules: u32, fragment_box: u32) {
         self.fragment_box = fragment_box.clamp(1, 4) as u8;
         self.remaining_mj = u64::from(joules) * 1000;

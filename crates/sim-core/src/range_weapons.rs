@@ -110,11 +110,28 @@ pub(super) fn spread(mut delta: [Fx; 3], heading: [Fx; 3], serial: u32, milli: i
     delta
 }
 impl BlastRange {
+    /// The single gun's round against what it met: [`Self::ricochet`].
+    pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
+        let config = self.config.clone();
+        let mut velocity = self.velocity;
+        let turned = self.ricochet(at, from, &mut velocity, &config);
+        self.velocity = velocity;
+        turned
+    }
+
     /// A shallow strike against intact steel leaves a dent and turns the
     /// round away from the exposed face. Its reduced speed also reduces the
-    /// finite penetration work available at a later contact.
-    pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
-        let Some(tuning) = self.config.ricochet.clone() else {
+    /// finite penetration work available at a later contact. Any solid
+    /// round with the weapon that fired it: the single gun's or a battle
+    /// tank's (ADR-456).
+    pub(super) fn ricochet(
+        &mut self,
+        at: [i32; 3],
+        from: [i32; 3],
+        velocity: &mut [Fx; 3],
+        config: &ExplosionConfig,
+    ) -> bool {
+        let Some(tuning) = config.ricochet.clone() else {
             return false;
         };
         if from == at {
@@ -124,18 +141,15 @@ impl BlastRange {
         if unit.is_none() && material(&self.world, at) != tuning.material {
             return false;
         }
-        let speed_sq = self
-            .velocity
-            .iter()
-            .fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)));
+        let speed_sq = velocity.iter().fold(Fx::ZERO, |sum, v| sum.add(v.mul(*v)));
         if speed_sq < Fx::from_int(tuning.min_speed).mul(Fx::from_int(tuning.min_speed)) {
             return false;
         }
         let speed = speed_sq.sqrt();
         if let Some(id) = unit {
-            return self.armour_ricochet(id, at, &tuning, speed);
+            return self.armour_ricochet(id, at, &tuning, speed, velocity, config);
         }
-        let need = material_work(tuning.material, &self.config);
+        let need = material_work(tuning.material, config);
         let old = self.surface_work.get(&at).copied().unwrap_or(0);
         if u64::from(old) * 1000 >= u64::from(need) * u64::from(tuning.max_preexisting_wear_milli) {
             return false;
@@ -152,14 +166,12 @@ impl BlastRange {
                 material(&self.world, neighbour) == 0
                     && !self.units.iter().any(|u| u.solid(neighbour))
             })
-            .min_by_key(|&a| self.velocity[a].abs().raw());
+            .min_by_key(|&a| velocity[a].abs().raw());
         let Some(axis) = axis else { return false };
-        if self.velocity[axis].abs()
-            >= speed.mul(Fx::from_ratio(tuning.max_normal_milli as i32, 1000))
-        {
+        if velocity[axis].abs() >= speed.mul(Fx::from_ratio(tuning.max_normal_milli as i32, 1000)) {
             return false;
         }
-        let wear = (self.config.energy * tuning.wear_milli / 1000)
+        let wear = (config.energy * tuning.wear_milli / 1000)
             .max(1)
             .min(need.saturating_sub(old).saturating_sub(1));
         if wear == 0 {
@@ -167,14 +179,10 @@ impl BlastRange {
         }
         self.surface_work.insert(at, old + wear);
         self.surface_changed.push(at);
-        for a in 0..3 {
-            let reflected = if a == axis {
-                Fx::ZERO.sub(self.velocity[a])
-            } else {
-                self.velocity[a]
-            };
-            self.velocity[a] =
-                reflected.mul(Fx::from_ratio(tuning.speed_retention_milli as i32, 1000));
+        let keep = Fx::from_ratio(tuning.speed_retention_milli as i32, 1000);
+        for (a, v) in velocity.iter_mut().enumerate() {
+            let reflected = if a == axis { Fx::ZERO.sub(*v) } else { *v };
+            *v = reflected.mul(keep);
         }
         true
     }
@@ -191,6 +199,8 @@ impl BlastRange {
         at: [i32; 3],
         tuning: &modding::explosion::Ricochet,
         speed: Fx,
+        velocity: &mut [Fx; 3],
+        config: &ExplosionConfig,
     ) -> bool {
         let u = &self.units[id];
         let Some((part, cell)) = u.hit(at) else {
@@ -204,7 +214,7 @@ impl BlastRange {
         if body.part_at(cell[0], cell[1], cell[2]) != voxel::Part::Armour {
             return false;
         }
-        let need = unit_work(body, cell, &self.config);
+        let need = unit_work(body, cell, config);
         let old = if part == 0 {
             u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0)
         } else {
@@ -232,7 +242,7 @@ impl BlastRange {
             let n = d.len_sq().sqrt();
             (n > Fx::ZERO).then(|| d.scale(Fx::ONE.div(n)))
         };
-        let v = V::new(self.velocity[0], self.velocity[1], self.velocity[2]);
+        let v = V::new(velocity[0], velocity[1], velocity[2]);
         let Some(r) = unit_of(V::new(frame.x.dot(v), frame.y.dot(v), frame.z.dot(v))) else {
             return false;
         };
@@ -297,22 +307,21 @@ impl BlastRange {
         {
             return false;
         }
-        let wear = (self.config.energy * tuning.wear_milli / 1000)
+        let wear = (config.energy * tuning.wear_milli / 1000)
             .max(1)
             .min(need.saturating_sub(old).saturating_sub(1));
         if wear == 0 {
             return false;
         }
-        let config = self.config.clone();
         let u = &mut self.units[id];
         if part == 0 {
-            u.receive_cell(cell, wear, &config);
+            u.receive_cell(cell, wear, config);
         } else {
-            u.receive_seg_cell(part - 1, cell, wear, &config);
+            u.receive_seg_cell(part - 1, cell, wear, config);
         }
         let reflected = v.sub(normal.scale(into.add(into)));
         let keep = Fx::from_ratio(tuning.speed_retention_milli as i32, 1000);
-        self.velocity = [reflected.x, reflected.y, reflected.z].map(|c| c.mul(keep));
+        *velocity = [reflected.x, reflected.y, reflected.z].map(|c| c.mul(keep));
         true
     }
 
@@ -321,23 +330,34 @@ impl BlastRange {
     /// budget before the ray can reach a hull behind it. No radial wave is
     /// created, so a blocked shot cannot damage nearby units.
     pub(super) fn kinetic_impact(&mut self, at: [i32; 3]) {
-        let length = self
-            .velocity
+        let config = self.config.clone();
+        self.kinetic_hit(at, self.velocity, &config);
+    }
+
+    /// [`Self::kinetic_impact`] for any solid round, with the weapon that
+    /// fired it (ADR-456). The hit pays from a budget of its own: a burst
+    /// in flight keeps what it has left.
+    pub(super) fn kinetic_hit(
+        &mut self,
+        at: [i32; 3],
+        velocity: [Fx; 3],
+        config: &ExplosionConfig,
+    ) {
+        let length = velocity
             .iter()
             .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
             .sqrt();
         if length <= Fx::ZERO {
             return;
         }
-        let direction = self.velocity.map(|v| v.div(length));
-        let horizontal_sq = self.velocity[0]
-            .mul(self.velocity[0])
-            .add(self.velocity[2].mul(self.velocity[2]));
-        let launch_sq =
-            Fx::from_int(self.config.shell_speed).mul(Fx::from_int(self.config.shell_speed));
+        let direction = velocity.map(|v| v.div(length));
+        let horizontal_sq = velocity[0]
+            .mul(velocity[0])
+            .add(velocity[2].mul(velocity[2]));
+        let launch_sq = Fx::from_int(config.shell_speed).mul(Fx::from_int(config.shell_speed));
         let remaining = horizontal_sq.div(launch_sq).min(Fx::ONE);
         let mut work =
-            (u64::from(self.config.energy) * remaining.raw() as u64 / Fx::ONE.raw() as u64) as u32;
+            (u64::from(config.energy) * remaining.raw() as u64 / Fx::ONE.raw() as u64) as u32;
         if work == 0 {
             return;
         }
@@ -347,7 +367,8 @@ impl BlastRange {
             .iter()
             .map(|u| (u.removed.len(), u.seg_removed.len()))
             .collect();
-        self.matter.begin(self.config.material_energy_j, 1);
+        let burst = (self.matter.remaining_mj, self.matter.fragment_box());
+        self.matter.begin(config.material_energy_j, 1);
         // Half-cell samples cannot skip a one-cell plate even at a diagonal.
         // The 32-unit bound also makes an empty ray a fixed, small cost.
         for i in 0..64 {
@@ -369,7 +390,7 @@ impl BlastRange {
                 if u.section_holds(part, cell.map(|v| v as u8)) {
                     break;
                 }
-                let need = u.resistance(p, &self.config).max(1);
+                let need = u.resistance(p, config).max(1);
                 let spent = work.min(need);
                 if spent == need {
                     let result = if part == 0 {
@@ -388,9 +409,9 @@ impl BlastRange {
                     }
                 }
                 if part == 0 {
-                    u.receive_cell(cell, spent, &self.config);
+                    u.receive_cell(cell, spent, config);
                 } else {
-                    u.receive_seg_cell(part - 1, cell, spent, &self.config);
+                    u.receive_seg_cell(part - 1, cell, spent, config);
                 }
                 work -= spent;
                 if work == 0 {
@@ -402,7 +423,7 @@ impl BlastRange {
                     continue;
                 }
                 let old = self.surface_work.get(&p).copied().unwrap_or(0);
-                let need = material_work(mat, &self.config).saturating_sub(old).max(1);
+                let need = material_work(mat, config).saturating_sub(old).max(1);
                 let spent = work.min(need);
                 if spent == need {
                     if !matches!(
@@ -422,6 +443,8 @@ impl BlastRange {
                 }
             }
         }
+        self.matter.remaining_mj = burst.0;
+        self.matter.fragment_size(u32::from(burst.1));
         for (id, (u, old)) in self.units.iter_mut().zip(before).enumerate() {
             if (u.removed.len(), u.seg_removed.len()) != old {
                 u.refresh_damage(id);

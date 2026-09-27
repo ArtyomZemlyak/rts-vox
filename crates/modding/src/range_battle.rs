@@ -1,6 +1,17 @@
 //! Small, bounded skirmishes on the existing range.
+use crate::explosion::Delivery;
 use crate::range::{RangeUnitDef, RangeZone};
 use serde::Deserialize;
+
+/// Which round a tank loads for what it aims at (ADR-456): `Blast` is the
+/// high-explosive shell, `Kinetic` the armour-piercing one.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct TankAmmo {
+    pub tank: Delivery,
+    pub strider: Delivery,
+    /// A point on the ground, and a tank with no target.
+    pub ground: Delivery,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Tuning {
@@ -11,6 +22,7 @@ pub struct Tuning {
     pub standoff_milli: i32,
     pub max_rounds: usize,
     pub max_waves: usize,
+    pub tank_ammo: TankAmmo,
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
 }
@@ -24,6 +36,9 @@ impl Tuning {
             || !(100..=950).contains(&t.standoff_milli)
             || !(2..=128).contains(&t.max_rounds)
             || !(1..=8).contains(&t.max_waves)
+            || [t.tank_ammo.tank, t.tank_ammo.strider, t.tank_ammo.ground]
+                .iter()
+                .any(|d| !matches!(d, Delivery::Blast | Delivery::Kinetic))
             || t.units.len() > 8
             || !t.units.iter().any(|u| u.allied)
             || !t.units.iter().any(|u| !u.allied)
