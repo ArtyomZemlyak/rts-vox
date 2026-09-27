@@ -20,7 +20,7 @@ pub struct Visual {
     occupancy_rebuilds: usize,
     cached: Vec<Occupied>,
     window: Option<TerrainWindow>,
-    rigs: Vec<LegRig>,
+    rigs: Vec<Vec<LegRig>>,
 }
 /// Keep the previous shadow cells so replacement actors remove old silhouettes.
 pub fn reset(v: &mut Visual) {
@@ -455,10 +455,15 @@ pub fn animate(
     mut query: Query<(&Witness, &mut Transform)>,
 ) {
     if v.rigs.is_empty() {
-        let b = voxel::unit::strider();
-        v.rigs = gait::rigs_of(&b, 0.01, &render::model::segment_frames(&b, 0.01));
+        v.rigs = [
+            voxel::unit::tank(),
+            voxel::unit::strider(),
+            voxel::unit::spider(),
+        ]
+        .iter()
+        .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
+        .collect();
     }
-    let rigs = &v.rigs;
     let t = fraction(&scene);
     let mut poses = Vec::new();
     let mut legs = Vec::new();
@@ -469,7 +474,8 @@ pub fn animate(
         // The range plants the feet (ADR-279); the picture interpolates
         // their contacts between ticks and poses the links with the same
         // two-link solve the simulation uses.
-        if u.kind == RangeUnitKind::Strider {
+        if u.kind != RangeUnitKind::Tank {
+            let rigs = &v.rigs[u.kind.index()];
             let rot = render::realtime::hull_rotation(p.up, p.yaw);
             for (j, rig) in rigs.iter().enumerate() {
                 let Some(now) = u
@@ -515,7 +521,7 @@ pub fn animate(
         let rotation = render::realtime::hull_rotation(p.up, yaw);
         let mut local = w.1;
         if let Some(seg) = w.2 {
-            for (i, r) in rigs.iter().enumerate() {
+            for (i, r) in v.rigs[scene.sim.units[w.0].kind.index()].iter().enumerate() {
                 if let (Some(role), Some(lp)) = (r.role(seg), legs[w.0].get(i)) {
                     let f = lp.part(role);
                     local.translation = f.pos;
@@ -533,7 +539,7 @@ pub fn animate(
 /// Player links use the same foot interpolation as target walkers.
 pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     let u = &scene.sim.gun;
-    if u.kind != RangeUnitKind::Strider {
+    if u.kind == RangeUnitKind::Tank {
         return Vec::new();
     }
     let root = render::realtime::hull_rotation(p.up, p.yaw);

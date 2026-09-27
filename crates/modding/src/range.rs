@@ -70,6 +70,17 @@ pub enum RangeUnitKind {
     #[default]
     Tank,
     Strider,
+    Spider,
+}
+
+impl RangeUnitKind {
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Tank => 0,
+            Self::Strider => 1,
+            Self::Spider => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]

@@ -6,7 +6,7 @@ param(
     [switch]$Battle,
     [ValidateRange(1, 12)][int]$Zone = 1,
     [ValidateSet('energy', 'shell', 'kinetic', 'anni', 'laser', 'flame', 'machine-gun')][string]$Weapon = 'energy',
-    [ValidateSet('tank', 'walker')][string]$Chassis = 'tank'
+    [ValidateSet('tank', 'walker', 'spider')][string]$Chassis = 'tank'
 )
 # ASCII only: Windows PowerShell 5.1 reads a .ps1 without a BOM as ANSI.
 $ErrorActionPreference = 'Stop'

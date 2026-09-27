@@ -14,6 +14,7 @@ pub enum Weapon {
     Kinetic = 2,
     Energy = 3,
     Annihilation = 4,
+    Laser = 5,
 }
 impl Weapon {
     pub fn from_code(code: u8) -> Option<Self> {
@@ -23,6 +24,7 @@ impl Weapon {
             2 => Self::Kinetic,
             3 => Self::Energy,
             4 => Self::Annihilation,
+            5 => Self::Laser,
             _ => return None,
         })
     }
@@ -101,6 +103,8 @@ pub struct Battle {
     waves: Vec<Burst>,
     pub impacts: Vec<Impact>,
     pub traces: Vec<weapons::Trace>,
+    pub lasers: Vec<weapons::Trace>,
+    pub laser_config: ExplosionConfig,
     pub tuning: std::sync::Arc<Tuning>,
     pub shell_config: ExplosionConfig,
     /// The tank's armour-piercing round (ADR-456).
@@ -163,6 +167,9 @@ impl Battle {
             waves: Vec::new(),
             impacts: Vec::new(),
             traces: Vec::new(),
+            lasers: Vec::new(),
+            laser_config: ExplosionConfig::from_ron(include_str!("../../../data/laser.ron"))
+                .expect("laser"),
             tuning,
             shell_config,
             kinetic_config,
@@ -179,6 +186,7 @@ impl Battle {
             Weapon::Energy => &self.energy_config,
             Weapon::Annihilation => &self.anni_config,
             Weapon::MachineGun => &self.bullet_config,
+            Weapon::Laser => &self.laser_config,
         }
     }
     fn range(&self, weapon: Weapon, machine_gun: i32) -> i32 {
@@ -188,6 +196,7 @@ impl Battle {
             Weapon::Energy => self.tuning.energy_range,
             Weapon::Annihilation => self.tuning.anni_range,
             Weapon::MachineGun => machine_gun,
+            Weapon::Laser => motion::spider_tuning().laser.range,
         }
     }
     pub(super) fn working(&self) -> bool {
@@ -305,7 +314,7 @@ impl Battle {
         for _ in 0..n {
             let owner = s.usize();
             let weapon = Weapon::from_code(s.u8())?;
-            if version < 43 && weapon.energetic() {
+            if weapon == Weapon::Laser || (version < 43 && weapon.energetic()) {
                 return None;
             }
             let pos = std::array::from_fn(|_| s.fx());
@@ -393,6 +402,9 @@ impl BlastRange {
     pub fn battle_weapon(&self, id: usize) -> Option<Weapon> {
         let u = self.units.get(id)?;
         let a = self.battle.actors.get(id)?;
+        if u.kind == RangeUnitKind::Spider {
+            return Some(Weapon::Laser);
+        }
         if u.kind == RangeUnitKind::Strider {
             return Some(Weapon::MachineGun);
         }
@@ -431,7 +443,7 @@ impl BlastRange {
                 .units
                 .get(id)
                 .is_none_or(|u| !u.status.alive || u.kind != RangeUnitKind::Tank)
-            || weapon == Some(Weapon::MachineGun)
+            || matches!(weapon, Some(Weapon::MachineGun | Weapon::Laser))
         {
             return false;
         }
@@ -795,6 +807,8 @@ impl BlastRange {
             waves: Vec::new(),
             impacts: Vec::new(),
             traces: Vec::new(),
+            lasers: Vec::new(),
+            laser_config: self.battle.laser_config.clone(),
             tuning: self.battle.tuning.clone(),
             shell_config: self.battle.shell_config.clone(),
             kinetic_config: self.battle.kinetic_config.clone(),
@@ -806,6 +820,7 @@ impl BlastRange {
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
         battle.traces.clear();
+        battle.lasers.clear();
         if battle.phase == Phase::Fighting {
             self.battle_ai_tick(&mut battle);
             self.battle_orders(&mut battle);
@@ -891,6 +906,8 @@ impl BlastRange {
                     _ => ammo.strider,
                 };
                 a.weapon.unwrap_or(Weapon::ammo(choice))
+            } else if kind == RangeUnitKind::Spider {
+                Weapon::Laser
             } else {
                 Weapon::MachineGun
             };
@@ -900,6 +917,7 @@ impl BlastRange {
                 Weapon::Energy => b.tuning.energy_range,
                 Weapon::Annihilation => b.tuning.anni_range,
                 Weapon::MachineGun => stream.range,
+                Weapon::Laser => motion::spider_tuning().laser.range,
             };
             // Borrow individual config fields independently of the mutable actor.
             let config = match weapon {
@@ -908,6 +926,7 @@ impl BlastRange {
                 Weapon::Energy => &b.energy_config,
                 Weapon::Annihilation => &b.anni_config,
                 Weapon::MachineGun => &b.bullet_config,
+                Weapon::Laser => &b.laser_config,
             };
             let mut p = if let Order::Ground(p) = a.order {
                 p
@@ -916,7 +935,9 @@ impl BlastRange {
             } else {
                 continue;
             };
-            if let Some(other) = target.filter(|_| !matches!(a.order, Order::Ground(_))) {
+            if let Some(other) =
+                target.filter(|_| weapon != Weapon::Laser && !matches!(a.order, Order::Ground(_)))
+            {
                 let u = &self.units[other];
                 let time = distance(other).sqrt().div(Fx::from_int(config.shell_speed));
                 let travel = u.motion.drive.vel.mul(time);
@@ -984,6 +1005,28 @@ impl BlastRange {
             a.turret.step(angle, self.turret_limits);
             self.units[id].update_pose(a.turret.angle);
             if self.tick < a.next || !a.turret.aligned(angle, self.turret_limits) {
+                continue;
+            }
+            if weapon == Weapon::Laser {
+                let tuning = motion::spider_tuning();
+                let ready = *a.charge.get_or_insert(self.tick + tuning.charge_ticks);
+                if self.tick < ready {
+                    continue;
+                }
+                let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
+                if let Some(from) = muzzles.first().copied() {
+                    b.lasers
+                        .push(self.laser_ray(from, p, Some(id), &tuning.laser, config));
+                    a.fired = a.fired.wrapping_add(1);
+                    a.burst += 1;
+                    if a.burst >= tuning.laser.burst_ticks {
+                        a.burst = 0;
+                        a.charge = None;
+                        a.next = self.tick + tuning.laser.reload_ticks;
+                    } else {
+                        a.next = self.tick + tuning.laser.interval_ticks;
+                    }
+                }
                 continue;
             }
             let shell = kind == RangeUnitKind::Tank;

@@ -95,7 +95,7 @@ pub fn draw(
             let unit = &scene.sim.units[chunk.template as usize];
             let dead = !unit.status.alive;
             let kind = unit.kind;
-            let template = &art.pristine[usize::from(kind == RangeUnitKind::Strider)];
+            let template = &art.pristine[kind.index()];
             let mut handles = Vec::new();
             commands
                 .spawn((

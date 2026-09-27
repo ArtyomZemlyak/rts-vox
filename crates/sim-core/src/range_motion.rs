@@ -191,11 +191,19 @@ pub(super) fn resume_share(
     let offset = (rank + count - tick as usize % count) % count;
     (total / count + usize::from(offset < total % count)).min(cap)
 }
+pub(super) fn spider_tuning() -> &'static modding::spider::Tuning {
+    static T: std::sync::OnceLock<modding::spider::Tuning> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        modding::spider::Tuning::from_ron(include_str!("../../../data/spider.ron"))
+            .expect("spider tuning")
+    })
+}
 impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
         let t = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning");
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank => t.tracked,
+            modding::range::RangeUnitKind::Spider => spider_tuning().chassis,
             _ => t.walking,
         };
         let r = crate::ride::ride_of(&chassis);
@@ -238,12 +246,16 @@ impl Motion {
             enabled: false,
             blocked: false,
             chassis,
-            speed: if kind == modding::range::RangeUnitKind::Tank {
+            speed: if kind == modding::range::RangeUnitKind::Spider {
+                spider_tuning().speed
+            } else if kind == modding::range::RangeUnitKind::Tank {
                 c.tank_speed
             } else {
                 c.walker_speed
             },
-            step: if kind == modding::range::RangeUnitKind::Tank {
+            step: if kind == modding::range::RangeUnitKind::Spider {
+                spider_tuning().step
+            } else if kind == modding::range::RangeUnitKind::Tank {
                 c.step_height
             } else {
                 c.walker_step_height
@@ -2000,6 +2012,7 @@ mod tests {
             let body = match kind {
                 RangeUnitKind::Tank => voxel::unit::tank(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
+                RangeUnitKind::Spider => voxel::unit::spider(),
             };
             let mut m = Motion::new([300, 16, 300], kind, &body);
             m.enabled = true;
@@ -2173,6 +2186,7 @@ mod tests {
             let body = match kind {
                 RangeUnitKind::Tank => voxel::unit::tank(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
+                RangeUnitKind::Spider => voxel::unit::spider(),
             };
             for axis in [0, 1] {
                 let mut m = Motion::new([590, 16, 590], kind, &body);
@@ -3034,6 +3048,7 @@ mod tests {
                     let body = match kind {
                         RangeUnitKind::Tank => voxel::unit::tank(),
                         RangeUnitKind::Strider => voxel::unit::strider(),
+                        RangeUnitKind::Spider => voxel::unit::spider(),
                     };
                     let (start, end) = if reverse { (410, 230) } else { (230, 410) };
                     let mut m = Motion::new([start, 16, 300], kind, &body);

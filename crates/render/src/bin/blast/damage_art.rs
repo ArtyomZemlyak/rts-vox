@@ -118,6 +118,7 @@ mod tests {
                 let kind = match u.kind {
                     modding::range::RangeUnitKind::Tank => 0,
                     modding::range::RangeUnitKind::Strider => 1,
+                    modding::range::RangeUnitKind::Spider => 2,
                 };
                 let pristine = &templates[kind];
                 pristine

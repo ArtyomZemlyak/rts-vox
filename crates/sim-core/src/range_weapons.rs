@@ -517,54 +517,75 @@ impl BlastRange {
     }
     fn emit_laser(&mut self, tuning: &Stream) {
         for from in self.stream_muzzles() {
-            let target = self.target();
-            let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
-            let length = delta.iter().fold(Fx::ZERO, |n, v| n.add(v.mul(*v))).sqrt();
-            if length <= Fx::ZERO {
+            let trace = self.laser_ray(from, self.target(), None, tuning, &self.config.clone());
+            self.streams.traces.push(trace);
+        }
+    }
+    /// One shared laser path for the test gun and battle actors. Ownership
+    /// excludes the emitter from both the core ray and radial surface heat.
+    pub(super) fn laser_ray(
+        &mut self,
+        from: [Fx; 3],
+        target: [i32; 3],
+        owner: Option<usize>,
+        tuning: &Stream,
+        config: &ExplosionConfig,
+    ) -> Trace {
+        let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
+        let length = delta
+            .iter()
+            .fold(Fx::ZERO, |n, v| n.add(v.mul(*v)))
+            .sqrt()
+            .max(Fx::ONE);
+        let direction = delta.map(|v| v.div(length));
+        let serial = self.streams.serial;
+        self.streams.serial = serial.wrapping_add(1);
+        let mut previous = from.map(Fx::to_int_trunc);
+        let (mut end, mut free_end, mut contact, mut hit) = (from, from, None, false);
+        for i in 1..=tuning.range * 2 {
+            let point =
+                std::array::from_fn(|a| from[a].add(direction[a].mul(Fx::from_ratio(i, 2))));
+            let p = point.map(Fx::to_int_trunc);
+            if (0..3).any(|a| p[a] < 0 || p[a] >= self.size[a] as i32) {
+                break;
+            }
+            end = point;
+            if p == previous {
                 continue;
             }
-            let direction = delta.map(|v| v.div(length));
-            let serial = self.streams.serial;
-            self.streams.serial = serial.wrapping_add(1);
-            let mut previous = from.map(Fx::to_int_trunc);
-            let mut end = from;
-            let mut free_end = from;
-            let mut contact = None;
-            let mut hit = false;
-            // Half-cell samples cannot skip a thin plate at a diagonal. Stop
-            // at the first surface, so a wall protects the hull behind it.
-            for i in 1..=tuning.range * 2 {
-                let distance = Fx::from_ratio(i, 2);
-                let point = std::array::from_fn(|a| from[a].add(direction[a].mul(distance)));
-                let p = point.map(Fx::to_int_trunc);
-                if (0..3).any(|a| p[a] < 0 || p[a] >= self.size[a] as i32) {
-                    break;
-                }
-                end = point;
-                if p == previous {
-                    continue;
-                }
-                if let Some(shield) = self.dome_crossed(previous, p) {
-                    self.absorb_work(shield, p, tuning.work);
-                    hit = true;
-                    break;
-                }
-                if material(&self.world, p) != 0 || self.units.iter().any(|u| u.solid(p)) {
-                    self.stream_contact(p, tuning, true, self.gun.at, &self.config.clone());
-                    contact = Some(p);
-                    hit = true;
-                    break;
-                }
-                previous = p;
-                free_end = point;
+            if let Some(shield) = self.dome_crossed(previous, p) {
+                self.absorb_work(shield, p, tuning.work);
+                hit = true;
+                break;
             }
-            self.laser_halo(from, free_end, contact, tuning);
-            self.streams.traces.push(Trace {
-                from,
-                to: end,
-                hit,
-                serial,
-            });
+            if material(&self.world, p) != 0
+                || self
+                    .units
+                    .iter()
+                    .enumerate()
+                    .any(|(id, u)| Some(id) != owner && u.solid(p))
+            {
+                self.stream_contact_owned(
+                    p,
+                    tuning,
+                    true,
+                    from.map(Fx::to_int_trunc),
+                    config,
+                    owner,
+                );
+                contact = Some(p);
+                hit = true;
+                break;
+            }
+            previous = p;
+            free_end = point;
+        }
+        self.laser_halo_owned(from, free_end, contact, tuning, owner);
+        Trace {
+            from,
+            to: end,
+            hit,
+            serial,
         }
     }
     fn emit_stream(&mut self, tuning: &Stream) {
@@ -602,7 +623,23 @@ impl BlastRange {
         at: [i32; 3],
         config: &ExplosionConfig,
     ) {
-        if let Some(id) = self.units.iter().position(|u| u.solid(p)) {
+        self.stream_contact_owned(p, tuning, flame, at, config, None);
+    }
+    fn stream_contact_owned(
+        &mut self,
+        p: [i32; 3],
+        tuning: &Stream,
+        flame: bool,
+        at: [i32; 3],
+        config: &ExplosionConfig,
+        owner: Option<usize>,
+    ) {
+        if let Some(id) = self
+            .units
+            .iter()
+            .enumerate()
+            .position(|(id, u)| Some(id) != owner && u.solid(p))
+        {
             let u = &mut self.units[id];
             let Some((part, cell)) = u.hit(p) else {
                 return;
@@ -648,7 +685,7 @@ impl BlastRange {
             }
         } else if material(&self.world, p) != 0 {
             if flame {
-                if self.config.delivery == Delivery::Laser {
+                if config.delivery == Delivery::Laser {
                     let mat = material(&self.world, p);
                     if self
                         .matter

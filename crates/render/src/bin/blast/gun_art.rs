@@ -97,10 +97,10 @@ pub fn emitters(
     let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
     let centre = render::model::root_centre(body);
     let origin = Vec3::from(GUN.map(|v| v as f32));
-    let radius = if scene.sim.gun.kind == RangeUnitKind::Strider {
-        2.35
-    } else {
-        3.0
+    let radius = match scene.sim.gun.kind {
+        RangeUnitKind::Strider => 2.35,
+        RangeUnitKind::Tank => 3.0,
+        RangeUnitKind::Spider => 12.0,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {
         if path.axis != 0 {

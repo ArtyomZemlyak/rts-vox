@@ -25,6 +25,7 @@ pub mod range_fire;
 pub mod range_weapon;
 pub mod shield;
 pub mod skirmish;
+pub mod spider;
 pub mod tuning;
 pub mod turret;
 pub mod unit_heat;

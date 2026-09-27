@@ -938,18 +938,33 @@ pub fn draw(
             .total_cmp(&eye.distance_squared(a.1))
     });
     let mut hot = MeshBuf::default();
+    for trace in &scene.sim.battle.lasers {
+        let from = point(trace.from);
+        let to = point(trace.to);
+        beam(&mut hot, from, to, 10.0, [1.8, 0.025, 0.018, 0.09]);
+        beam(&mut hot, from, to, 4.8, [5.0, 0.12, 0.04, 0.30]);
+        beam(&mut hot, from, to, 1.9, [12.0, 2.8, 0.8, 0.95]);
+        if trace.hit {
+            cube(&mut hot, to, 6.0, [9.0, 1.8, 0.3, 0.9]);
+        }
+    }
     if scene.sim.config.delivery == Delivery::Laser && !scene.sim.battle_mode() {
         for trace in &scene.sim.streams.traces {
             let from = point(trace.from);
             let to = point(trace.to);
+            let size = if scene.sim.gun.kind == RangeUnitKind::Spider {
+                3.0
+            } else {
+                1.0
+            };
             let heat_width = scene.sim.streams.tuning.laser.heat_radius as f32 * 2.0;
             if heat_width > 0.0 {
                 beam(&mut hot, from, to, heat_width, [1.6, 0.035, 0.012, 0.055]);
             }
-            beam(&mut hot, from, to, 2.4, [2.8, 0.06, 0.025, 0.18]);
-            beam(&mut hot, from, to, 0.65, [7.0, 0.36, 0.25, 0.92]);
+            beam(&mut hot, from, to, 2.4 * size, [2.8, 0.06, 0.025, 0.18]);
+            beam(&mut hot, from, to, 0.65 * size, [7.0, 0.36, 0.25, 0.92]);
             if trace.hit {
-                cube(&mut hot, to, 2.5, [5.0, 0.65, 0.18, 0.75]);
+                cube(&mut hot, to, 2.5 * size, [5.0, 0.65, 0.18, 0.75]);
             }
         }
     }

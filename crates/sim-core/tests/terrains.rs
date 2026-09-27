@@ -191,6 +191,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
     let body = match kind {
         RangeUnitKind::Tank => voxel::unit::tank(),
         RangeUnitKind::Strider => voxel::unit::strider(),
+        RangeUnitKind::Spider => voxel::unit::spider(),
     };
     let yaw = angle::norm(heading + if back { angle::FULL / 2 } else { 0 });
     let dir = [angle::cos(yaw), angle::sin(yaw)];
@@ -302,6 +303,7 @@ fn probe_poses_along_the_run() {
         let body = match kind {
             RangeUnitKind::Tank => voxel::unit::tank(),
             RangeUnitKind::Strider => voxel::unit::strider(),
+            RangeUnitKind::Spider => voxel::unit::spider(),
         };
         let m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
         let shape = m.probe_shape(&body);

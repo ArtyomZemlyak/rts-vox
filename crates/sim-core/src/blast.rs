@@ -403,10 +403,12 @@ impl RangeUnit {
         // instance. Copy their prepared voxel data instead of redrawing the
         // same shapes for every placement and battle reset.
         static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static SPIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
             RangeUnitKind::Strider => STRIDER.get_or_init(voxel::unit::strider).clone(),
+            RangeUnitKind::Spider => SPIDER.get_or_init(voxel::unit::spider).clone(),
         };
         let mut connectivity = CoreBufs::new();
         let integrity_model = crate::integrity::Model::new(&body);
@@ -2277,7 +2279,7 @@ impl BlastRange {
         [x.div(length), Fx::ZERO, z.div(length)]
     }
     pub fn muzzle(&self) -> [Fx; 3] {
-        if self.gun.kind == RangeUnitKind::Strider {
+        if self.gun.kind != RangeUnitKind::Tank {
             let muzzles = self.stream_muzzles();
             if !muzzles.is_empty() {
                 // Heavy rounds use one barrel per reload. Keep the launched
@@ -2461,12 +2463,16 @@ impl BlastRange {
         completed("units");
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
-                u.motion.speed = if u.kind == RangeUnitKind::Tank {
+                u.motion.speed = if u.kind == RangeUnitKind::Spider {
+                    motion::spider_tuning().speed
+                } else if u.kind == RangeUnitKind::Tank {
                     c.tank_speed
                 } else {
                     c.walker_speed
                 };
-                u.motion.step = if u.kind == RangeUnitKind::Tank {
+                u.motion.step = if u.kind == RangeUnitKind::Spider {
+                    motion::spider_tuning().step
+                } else if u.kind == RangeUnitKind::Tank {
                     c.step_height
                 } else {
                     c.walker_step_height
@@ -2492,10 +2498,14 @@ impl BlastRange {
                 .collect()
         });
         let battle = battle::Battle::new(&units, config.unit_ablation_resistance);
+        let mut streams = weapons::Streams::default();
+        if gun.kind == RangeUnitKind::Spider {
+            streams.tuning.laser = motion::spider_tuning().laser.clone();
+        }
         let mut result = Self {
             battle,
             combustion,
-            streams: weapons::Streams::default(),
+            streams,
             heat_exchange: heat_exchange::Exchange::default(),
             thermals: thermal::Thermals::default(),
             thermal_tuning: modding::unit_heat::Tuning::from_ron(include_str!(
@@ -2601,7 +2611,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(43);
+        b.u32(44);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2776,7 +2786,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=43).contains(&version) {
+        if !(27..=44).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3736,7 +3746,7 @@ impl BlastRange {
                     ]
                 };
                 self.shell = Some(from);
-                if self.gun.kind == RangeUnitKind::Strider {
+                if self.gun.kind != RangeUnitKind::Tank {
                     self.streams.serial = self.streams.serial.wrapping_add(1);
                 }
             }

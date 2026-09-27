@@ -338,6 +338,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Бой 2×2 / расстановка", Action::BattlePreset),
                 ],
             ),
+            (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний ▾", Action::ScenarioMenu)]),
             (
@@ -416,6 +417,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Танк / сброс", Action::Chassis(RangeUnitKind::Tank)),
                     ("Шагоход / сброс", Action::Chassis(RangeUnitKind::Strider)),
+                    (
+                        "Паук / тяжёлый лазер",
+                        Action::Chassis(RangeUnitKind::Spider),
+                    ),
                 ],
             ),
             (
@@ -439,6 +444,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Добавить танк", Action::Tool(Tool::Tank)),
                     ("Шагоход", Action::Tool(Tool::Strider)),
+                    ("Паук · тяжёлый лазер", Action::Tool(Tool::Spider)),
                 ],
             ),
             (
@@ -810,10 +816,10 @@ pub fn actions(
                 panel.pending = None;
                 if let Some(mut layout) = edit.layout.clone() {
                     layout.gun_kind = kind;
-                    let w = if kind == RangeUnitKind::Strider {
-                        4
-                    } else {
-                        weapon_of(&scene)
+                    let w = match kind {
+                        RangeUnitKind::Strider => 4,
+                        RangeUnitKind::Spider => 6,
+                        RangeUnitKind::Tank => weapon_of(&scene),
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,

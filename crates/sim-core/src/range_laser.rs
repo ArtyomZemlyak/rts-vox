@@ -46,12 +46,23 @@ impl BlastRange {
         false
     }
 
+    #[cfg(test)]
     pub(super) fn laser_halo(
         &mut self,
         from: [Fx; 3],
         to: [Fx; 3],
         contact: Option<[i32; 3]>,
         tuning: &Stream,
+    ) {
+        self.laser_halo_owned(from, to, contact, tuning, None);
+    }
+    pub(super) fn laser_halo_owned(
+        &mut self,
+        from: [Fx; 3],
+        to: [Fx; 3],
+        contact: Option<[i32; 3]>,
+        tuning: &Stream,
+        owner: Option<usize>,
     ) {
         let radius = tuning.heat_radius;
         if radius == 0 || tuning.heat == 0 {
@@ -68,7 +79,18 @@ impl BlastRange {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let axial_length = if d[axis] == 0 { 1 } else { d[axis] };
-        let bounds: Vec<_> = self.units.iter().map(RangeUnit::bounds).collect();
+        let bounds: Vec<_> = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(id, u)| {
+                if Some(id) == owner {
+                    ([i32::MAX; 3], [i32::MIN; 3])
+                } else {
+                    u.bounds()
+                }
+            })
+            .collect();
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));
         let mut doses = BTreeMap::<thermal::Cell, u32>::new();
         let r2 = i64::from(radius * 16).pow(2);

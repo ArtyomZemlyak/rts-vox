@@ -76,21 +76,21 @@ impl Footprint {
 }
 
 pub struct Validator {
-    footprints: [Footprint; 4],
+    footprints: [std::sync::OnceLock<Footprint>; 6],
 }
 impl Default for Validator {
     fn default() -> Self {
         Self {
-            footprints: [
-                Footprint::of(RangeUnitKind::Tank, 0),
-                Footprint::of(RangeUnitKind::Strider, 0),
-                Footprint::of(RangeUnitKind::Tank, fx::angle::FULL / 2),
-                Footprint::of(RangeUnitKind::Strider, fx::angle::FULL / 2),
-            ],
+            footprints: std::array::from_fn(|_| std::sync::OnceLock::new()),
         }
     }
 }
 impl Validator {
+    fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
+        self.footprints[kind.index() + usize::from(reverse) * 3]
+            .get_or_init(|| Footprint::of(kind, if reverse { fx::angle::FULL / 2 } else { 0 }))
+    }
+
     /// Collision checks cover at most nine template footprints; the terrain
     /// index itself scales with the authored map. Layered blocks retain
     /// their last-writer material semantics.
@@ -102,20 +102,16 @@ impl Validator {
     pub(super) fn prepare(&self, layout: &RangeLayout) -> Result<RangeTerrain, Rejection> {
         layout.validate().map_err(Rejection::Layout)?;
         let terrain = RangeTerrain::new(true, Some(layout.clone()));
-        let mut units = vec![(
-            &self.footprints[usize::from(layout.gun_kind == RangeUnitKind::Strider)],
-            layout.gun,
-        )];
+        let mut units = vec![(self.footprint(layout.gun_kind, false), layout.gun)];
         if layout.battle {
             units.clear();
         }
-        units.extend(layout.units.iter().map(|u| {
-            (
-                &self.footprints[usize::from(u.kind == RangeUnitKind::Strider)
-                    + usize::from(layout.battle && !u.allied) * 2],
-                u.at,
-            )
-        }));
+        units.extend(
+            layout
+                .units
+                .iter()
+                .map(|u| (self.footprint(u.kind, layout.battle && !u.allied), u.at)),
+        );
         for (i, &(shape, at)) in units.iter().enumerate() {
             if (0..3)
                 .any(|a| at[a] + shape.min[a] < 0 || at[a] + shape.max[a] > layout.size[a] as i32)
@@ -170,7 +166,8 @@ mod tests {
         assert_eq!(v.validate(&r), Err(Rejection::Units));
         r.units.pop();
         let gun = RangeUnit::new(GUN);
-        let p = v.footprints[0]
+        let p = v
+            .footprint(RangeUnitKind::Tank, false)
             .columns
             .iter()
             .find_map(|(p, ys)| {
@@ -190,7 +187,7 @@ mod tests {
     #[test]
     fn shared_bounding_boxes_are_allowed_when_occupied_cells_do_not_overlap() {
         let v = Validator::default();
-        let f = &v.footprints[1];
+        let f = v.footprint(RangeUnitKind::Strider, false);
         // Four narrow feet leave room underneath the raised walker hull.
         assert!(!f.columns.is_empty());
         let mut r = layout();

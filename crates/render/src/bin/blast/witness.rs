@@ -179,6 +179,10 @@ fn build(
             if unit.dead {
                 wreck::charred(buf);
             }
+            let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
+            for p in &mut buf.pos {
+                *p = p.map(|v| v * scale);
+            }
             result.push(Built {
                 mesh: mesh(buf),
                 finish: k,
@@ -345,6 +349,7 @@ pub(super) fn update(
         let kind = match unit.kind {
             RangeUnitKind::Tank => 0,
             RangeUnitKind::Strider => 1,
+            RangeUnitKind::Spider => 2,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
@@ -363,7 +368,11 @@ mod tests {
     use super::*;
     #[test]
     fn destruction_chars_every_root_and_segment_without_erasing_geometry() {
-        for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+        for kind in [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+        ] {
             let unit = RangeUnit::of_kind(kind, [300, 16, 300]);
             let pristine = unit.body.clone();
             let skins = SkinBindings::new(&pristine);

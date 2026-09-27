@@ -1650,6 +1650,222 @@ pub fn strider() -> UnitBody {
     u
 }
 
+/// Giant eight-legged assault platform, with a single axial laser and
+/// independently damageable articulated legs. Coarser 200 mm armour keeps
+/// its large silhouette affordable without inflating the voxel count.
+pub fn spider() -> UnitBody {
+    let mut u = UnitBody::new_scaled(88, 52, 80, 4, 200);
+    for y in 25..40 {
+        let inset = (y as i32 - 32).abs() / 2;
+        fill_f(
+            &mut u,
+            ((16 + inset) as usize, (72 - inset) as usize),
+            (y, y + 1),
+            ((20 + inset) as usize, (60 - inset) as usize),
+            Part::Armour,
+            if y % 5 == 0 { FINISH_GUN } else { FINISH_PLATE },
+        );
+    }
+    for (row, hx) in [22i32, 34, 54, 66].into_iter().enumerate() {
+        for hz in [24i32, 56] {
+            let kx = hx + if hx < 44 { -7 } else { 7 };
+            let kz = if hz < 40 { 9 } else { 71 };
+            let ax = hx + if hx < 44 { -10 } else { 10 };
+            let az = if hz < 40 { 5 } else { 75 };
+            ball(&mut u, (hx, 31, hz), 5, Part::Armour);
+            mark_ball(&mut u, (hx, 31, hz), 5, FINISH_STEEL);
+            let first = u.segments.len() as u8;
+            for (origin, end, length, width) in [
+                ((hx, 31, hz), (kx, 18, kz), 22usize, 6usize),
+                ((kx, 18, kz), (ax, 4, az), 16usize, 5usize),
+            ] {
+                let mut link = UnitBody::new_scaled(length as u8, width as u8, width as u8, 1, 200);
+                fill_f(
+                    &mut link,
+                    (0, length),
+                    (0, width),
+                    (0, width),
+                    Part::Armour,
+                    FINISH_PLATE,
+                );
+                mark(&mut link, (0, 3), (0, width), (0, width), FINISH_GUN);
+                mark(
+                    &mut link,
+                    (length - 3, length),
+                    (0, width),
+                    (0, width),
+                    FINISH_STEEL,
+                );
+                mark(
+                    &mut link,
+                    (4, length - 3),
+                    (width - 1, width),
+                    (2, 3),
+                    FINISH_STEEL,
+                );
+                u.push_segment(
+                    Attach::aimed(
+                        (origin.0 as i16, origin.1, origin.2 as i16),
+                        (0, (width / 2) as u8, (width / 2) as u8),
+                        (
+                            end.0 - origin.0,
+                            i32::from(end.1 - origin.1),
+                            end.2 - origin.2,
+                        ),
+                    ),
+                    link,
+                );
+            }
+            for (p, radius) in [((kx, 18, kz), 4), ((ax, 4, az), 3)] {
+                let edge = (radius * 2 + 1) as usize;
+                let mut joint = UnitBody::new_scaled(edge as u8, edge as u8, edge as u8, 1, 200);
+                ball(&mut joint, (radius, radius, radius), radius, Part::Armour);
+                mark_ball(&mut joint, (radius, radius, radius), radius, FINISH_STEEL);
+                u.push_segment(
+                    Attach::flat(
+                        (p.0 as i16, p.1, p.2 as i16),
+                        (radius as u8, radius as u8, radius as u8),
+                    ),
+                    joint,
+                );
+            }
+            let mut foot = UnitBody::new_scaled(12, 4, 8, 1, 200);
+            fill_f(
+                &mut foot,
+                (0, 12),
+                (0, 2),
+                (0, 8),
+                Part::Armour,
+                FINISH_RUBBER,
+            );
+            fill_f(
+                &mut foot,
+                (2, 10),
+                (2, 4),
+                (1, 7),
+                Part::Armour,
+                FINISH_PLATE,
+            );
+            u.push_segment(Attach::flat((ax as i16, 4, az as i16), (6, 4, 4)), foot);
+            // Alternate diagonally across the four support phases; two legs
+            // per quadrant preserve support after losing just one leg.
+            let support = u8::from(hx < 44) * 2 + u8::from(hz < 40);
+            u.push_leg(Leg {
+                hip: (hx as i16, 31, hz as i16),
+                knee: (kx as i16, 18, kz as i16),
+                ankle: (ax as i16, 4, az as i16),
+                thigh: first,
+                shin: first + 1,
+                knee_ball: Some(first + 2),
+                ankle_ball: Some(first + 3),
+                foot: Some(first + 4),
+                support,
+            });
+            u.push_load_path(WeaponPath {
+                min: [(hx - 3) as u8, 28, (hz - 3) as u8],
+                max: [(hx + 4) as u8, 36, (hz + 4) as u8],
+                axis: 1,
+            });
+            // Raised paired radiator fins separate the leg roots from the hull.
+            fill_f(
+                &mut u,
+                ((hx - 3) as usize, (hx + 4) as usize),
+                (38, 41),
+                (29 + row % 2, 32 + row % 2),
+                Part::Armour,
+                FINISH_STEEL,
+            );
+        }
+    }
+    fill_f(
+        &mut u,
+        (18, 30),
+        (28, 37),
+        (29, 51),
+        Part::Engine,
+        FINISH_GUN,
+    );
+    for x in (18..31).step_by(3) {
+        fill_f(
+            &mut u,
+            (x, x + 1),
+            (39, 43),
+            (29, 51),
+            Part::Armour,
+            FINISH_STEEL,
+        );
+    }
+    ball(&mut u, (48, 40, 40), 9, Part::Armour);
+    plated_turret(
+        &mut u,
+        (34, 65),
+        (41, 49),
+        (28, 52),
+        (6, 3),
+        TURN / 16,
+        7,
+        2,
+        true,
+        Part::Armour,
+        FINISH_PLATE,
+    );
+    cyl_f(
+        &mut u,
+        0,
+        (58, 88),
+        (45, 40),
+        5,
+        0,
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    for x in [62, 68, 74, 82] {
+        cyl_f(
+            &mut u,
+            0,
+            (x, x + 2),
+            (45, 40),
+            6,
+            0,
+            Part::Weapon,
+            FINISH_STEEL,
+        );
+    }
+    fill_f(
+        &mut u,
+        (86, 88),
+        (43, 48),
+        (38, 43),
+        Part::Weapon,
+        FINISH_OPTIC,
+    );
+    fill_f(
+        &mut u,
+        (54, 61),
+        (49, 51),
+        (33, 47),
+        Part::Sensor,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (60, 62),
+        (49, 51),
+        (35, 45),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    fill(&mut u, (40, 49), (29, 38), (35, 45), Part::Core);
+    let mut u = seat(u, "паук");
+    u.turret_y = 40;
+    u.push_weapon_path(WeaponPath {
+        min: [56, 42, 37],
+        max: [88, 49, 44],
+        axis: 0,
+    });
+    u
+}
+
 /// Широкое двуногое тело для проверок опор (ADR-288): плита корпуса на
 /// двух ногах по бортам с длинными ступнями, чтобы каждая нога несла и
 /// пятку, и носок своей стороны. Без двух ног оно не стоит: смятая нога
@@ -2237,5 +2453,20 @@ mod wreck_tests {
                 "форме обломка нечем держать собственную материю тела"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod spider_tests {
+    use super::*;
+    #[test]
+    fn spider_has_eight_articulated_legs_and_one_connected_heavy_weapon() {
+        let body = spider();
+        assert_eq!(body.legs.len(), 8);
+        assert_eq!(body.weapon_paths.len(), 1);
+        assert!(body.segments.len() >= 40);
+        assert!(body.volume_mm3() > tank().volume_mm3() * 4);
+        let status = body.status(&mut CoreBufs::new());
+        assert!(status.alive && status.engine && status.weapon, "{status:?}");
     }
 }

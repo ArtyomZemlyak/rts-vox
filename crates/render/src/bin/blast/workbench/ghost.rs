@@ -76,6 +76,7 @@ pub fn setup(
     for (kind, body) in [
         (RangeUnitKind::Tank, voxel::unit::tank()),
         (RangeUnitKind::Strider, voxel::unit::strider()),
+        (RangeUnitKind::Spider, voxel::unit::spider()),
     ] {
         commands.spawn((
             Mesh3d(meshes.add(mesh(&template(&body)))),

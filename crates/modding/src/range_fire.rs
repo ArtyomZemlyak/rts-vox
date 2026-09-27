@@ -11,6 +11,7 @@ pub struct Tuning {
     pub material: u16,
     pub tank: Reservoir,
     pub walker: Reservoir,
+    pub spider: Reservoir,
     pub burn_ml_per_tick: u32,
     pub heat_per_ml: u32,
     pub ignition: u32,
@@ -31,7 +32,7 @@ impl Tuning {
             || !(1..=900).contains(&t.fade_ticks)
             || !(1..=300).contains(&t.gravity)
             || !(1..=240).contains(&t.max_speed)
-            || [&t.tank, &t.walker].iter().any(|r| {
+            || [&t.tank, &t.walker, &t.spider].iter().any(|r| {
                 !(1..=1000000).contains(&r.fuel_ml) || !r.fuel_ml.is_multiple_of(t.burn_ml_per_tick)
             })
         {
@@ -43,6 +44,7 @@ impl Tuning {
         match kind {
             crate::range::RangeUnitKind::Tank => &self.tank,
             crate::range::RangeUnitKind::Strider => &self.walker,
+            crate::range::RangeUnitKind::Spider => &self.spider,
         }
     }
     /// Whole economic quantities: no fractional matter disappears on burning.

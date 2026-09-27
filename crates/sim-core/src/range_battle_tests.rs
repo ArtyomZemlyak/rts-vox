@@ -1358,3 +1358,76 @@ fn enemy_tank_detours_around_cover_and_engages() {
 fn enemy_walker_detours_around_cover_and_engages() {
     enemy_detours_to_firing_range(RangeUnitKind::Strider);
 }
+
+#[test]
+fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replays() {
+    let mut r = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank]);
+    assert_eq!(r.units[0].motion.feet.len(), 8);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    let step = |r: &mut BlastRange| {
+        if r.battle.phase == Phase::Fighting && r.battle.ai.pending.is_none() {
+            let plan = if r.units[1].status.alive {
+                vec![Decision {
+                    actor: 1,
+                    order: AiOrder::Hold,
+                }]
+            } else {
+                Vec::new()
+            };
+            r.submit_enemy_ai_plan(r.battle.ai.next_tick, plan).unwrap();
+        }
+        r.step();
+    };
+    assert!(r.battle_order(0, Order::Move, Some([300, 200])));
+    let mut swung = vec![false; 8];
+    for _ in 0..1200 {
+        step(&mut r);
+        for (i, f) in r.units[0].motion.feet.iter().enumerate() {
+            swung[i] |= !f.planted();
+        }
+        if r.units[0].motion.destination.is_none() {
+            break;
+        }
+    }
+    assert!(
+        r.units[0].motion.destination.is_none(),
+        "spider stuck at {:?}",
+        r.units[0].motion.pos
+    );
+    assert!(swung.iter().all(|v| *v), "legs never swung: {swung:?}");
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
+    assert_eq!(
+        r.battle_attack_range(0),
+        Some(motion::spider_tuning().laser.range)
+    );
+    let own = r.units[0].body.volume_mm3();
+    let victim = r.units[1].body.volume_mm3();
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let mut beams = 0;
+    let mut replay = None;
+    for tick in 0..360 {
+        step(&mut r);
+        beams += r.battle.lasers.len();
+        if tick == 50 {
+            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+        } else if let Some(other) = replay.as_mut() {
+            step(other);
+            assert_eq!(
+                r.state_hash(),
+                other.state_hash(),
+                "laser replay tick {tick}"
+            );
+        }
+    }
+    assert!(beams > 20, "laser never sustained: {beams}");
+    assert!(
+        r.units[1].body.volume_mm3() < victim,
+        "laser did not melt armour"
+    );
+    assert_eq!(
+        r.units[0].body.volume_mm3(),
+        own,
+        "own laser damaged spider"
+    );
+}

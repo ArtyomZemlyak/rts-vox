@@ -821,6 +821,7 @@ impl Matter {
                 .map(|u| match u.kind {
                     modding::range::RangeUnitKind::Tank => voxel::unit::tank(),
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
+                    modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                 })
                 .collect(),
         );

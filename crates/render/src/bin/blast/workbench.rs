@@ -13,6 +13,7 @@ pub enum Tool {
     Select,
     Tank,
     Strider,
+    Spider,
     Concrete,
     Steel,
     Earth,
@@ -188,6 +189,7 @@ impl Workshop {
         let preset = modding::range_skirmish::Skirmish::from_ron(match id {
             0 => include_str!("../../../../../data/skirmish-breakthrough.ron"),
             1 => include_str!("../../../../../data/skirmish-pincer.ron"),
+            2 => include_str!("../../../../../data/skirmish-spider.ron"),
             _ => return Err("Неизвестный сценарий боя".into()),
         })?;
         let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
@@ -399,11 +401,13 @@ impl Workshop {
                 relocate(&mut next, s, at);
                 s
             }
-            Tool::Tank | Tool::Strider => {
+            Tool::Tank | Tool::Strider | Tool::Spider => {
                 next.units.push(RangeUnitDef {
                     allied: self.allied,
                     kind: if self.tool == Tool::Tank {
                         RangeUnitKind::Tank
+                    } else if self.tool == Tool::Spider {
+                        RangeUnitKind::Spider
                     } else {
                         RangeUnitKind::Strider
                     },
@@ -1043,7 +1047,11 @@ pub fn overlay(
             } else {
                 Color::srgb(1.0, 0.3, 0.16)
             };
-            giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), 24.0, color);
+            let radius = (u.body.vol.nx.max(u.body.vol.nz) as f32 * u.body.mm as f32
+                / voxel::unit::WORLD_MM as f32
+                * 0.6)
+                .max(24.0);
+            giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
             if panel.ranges {
                 let reach = scene.sim.battle_attack_range(i).unwrap_or(0);
                 ground_range(
@@ -1059,7 +1067,11 @@ pub fn overlay(
                 );
             }
             if edit.controlled == Some(i) {
-                giz.circle(Isometry3d::new(p + Vec3::Y, flat), 27.0, Color::WHITE);
+                giz.circle(
+                    Isometry3d::new(p + Vec3::Y, flat),
+                    radius + 3.0,
+                    Color::WHITE,
+                );
                 let mut from = [u.at[0], u.at[2]];
                 for &to in u.motion.path.iter().skip(u.motion.cursor) {
                     ground_dash(&mut giz, &scene.sim, from, to, 0.8, color);
@@ -1329,7 +1341,7 @@ pub fn overlay(
                 }
                 Selection::Unit(i) => {
                     let u = &preview.next.units[i];
-                    let body = &art.pristine[usize::from(u.kind == RangeUnitKind::Strider)];
+                    let body = &art.pristine[u.kind.index()];
                     let size =
                         Vec3::new(body.vol.nx as f32, body.vol.ny as f32, body.vol.nz as f32);
                     let lo = Vec3::from(u.at.map(|v| v as f32))
@@ -1632,6 +1644,21 @@ mod tests {
         );
         assert_eq!(w.target_unit(Some(4), 1), Some(4), "explicit attack wins");
     }
+    #[test]
+    fn spider_skirmish_preserves_the_map_and_places_both_armies() {
+        let (mut workshop, config) = fixture();
+        let briefing = workshop.skirmish(2, config).unwrap();
+        assert!(!briefing.is_empty());
+        let layout = workshop.layout.as_ref().unwrap();
+        assert!(layout.battle);
+        assert_eq!(layout.units[0].kind, RangeUnitKind::Spider);
+        assert!(layout.units[0].allied);
+        assert_eq!(layout.units.len(), 5);
+        assert!(layout.zones.len() > 5);
+        assert_eq!(workshop.controlled, Some(0));
+        assert!(workshop.pending.is_some());
+    }
+
     fn fixture() -> (Workshop, ExplosionConfig) {
         (
             Workshop::new(

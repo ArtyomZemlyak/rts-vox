@@ -336,6 +336,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
         BattleWeapon::MachineGun => "Два пулемёта",
         BattleWeapon::Energy => "Энергопушка",
         BattleWeapon::Annihilation => "Аннигиляционная пушка",
+        BattleWeapon::Laser => "Тяжёлый лазер",
     }
 }
 
@@ -409,7 +410,9 @@ pub fn refresh(
                     .map_or_else(String::new, |u| {
                         format!(
                             "{} {:02} · {}%",
-                            if u.kind == RangeUnitKind::Tank {
+                            if u.kind == RangeUnitKind::Spider {
+                                "П"
+                            } else if u.kind == RangeUnitKind::Tank {
                                 "Т"
                             } else {
                                 "Ш"
@@ -447,7 +450,9 @@ pub fn refresh(
                 |(id, u)| {
                     format!(
                         "{} {}  ·  {}\nЯдро {}%   Ходовая {}%",
-                        if u.kind == RangeUnitKind::Tank {
+                        if u.kind == RangeUnitKind::Spider {
+                            "ПАУК"
+                        } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
                         } else {
                             "ШАГОХОД"
