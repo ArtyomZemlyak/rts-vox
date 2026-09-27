@@ -30,6 +30,13 @@ pub struct Ricochet {
     pub max_preexisting_wear_milli: u32,
 }
 
+/// Finite lateral work carried by fragments behind a penetrated surface.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Spall {
+    pub radius: u8,
+    pub work_milli: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExplosionConfig {
     #[serde(default)]
@@ -65,6 +72,8 @@ pub struct ExplosionConfig {
     pub shell_speed: i32,
     #[serde(default)]
     pub ricochet: Option<Ricochet>,
+    #[serde(default)]
+    pub spall: Option<Spall>,
     pub gravity: i32,
     pub gas_cell_units: i32,
     /// Visible gas cube edge, in millimetres. Independent of the solver grid.
@@ -149,6 +158,11 @@ impl ExplosionConfig {
                     || !(1..=999).contains(&r.speed_retention_milli)
                     || r.max_preexisting_wear_milli > 1000
             })
+            || c.spall.as_ref().is_some_and(|s| {
+                c.delivery != Delivery::Kinetic
+                    || !(1..=4).contains(&s.radius)
+                    || !(1..=900).contains(&s.work_milli)
+            })
             || !(1..=10000).contains(&c.gravity)
             || !(1..=8).contains(&c.gas_cell_units)
             || !(100..=1600).contains(&c.gas_display_mm)
@@ -213,6 +227,28 @@ mod display_tests {
         assert_eq!(c.gas_radius_at_power(178), 5);
         assert_eq!(c.gas_radius_at_power(0), 1);
         assert_eq!(c.gas_radius_at_power(u32::MAX), 128);
+    }
+
+    #[test]
+    fn spall_is_optional_kinetic_only_and_has_a_bounded_radius_and_budget() {
+        let text = include_str!("../../../data/kinetic-shell.ron");
+        let c = ExplosionConfig::from_ron(text).unwrap();
+        assert_eq!(c.spall.as_ref().unwrap().radius, 3);
+        assert!(
+            ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron"))
+                .unwrap()
+                .spall
+                .is_none()
+        );
+        for bad in [
+            text.replace("radius: 3", "radius: 0"),
+            text.replace("radius: 3", "radius: 5"),
+            text.replace("work_milli: 750", "work_milli: 0"),
+            text.replace("work_milli: 750", "work_milli: 1000"),
+            text.replace("delivery: Kinetic", "delivery: Blast"),
+        ] {
+            assert!(ExplosionConfig::from_ron(&bad).is_err());
+        }
     }
 
     #[test]

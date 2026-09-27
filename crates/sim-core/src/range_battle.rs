@@ -361,7 +361,7 @@ impl Battle {
         s.ok().then_some(())
     }
 }
-fn aim_point(u: &RangeUnit) -> [i32; 3] {
+pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
     let origin = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
     let size = usize::from(u.body.core_size);
     let dims = [u.body.vol.nx, u.body.vol.ny, u.body.vol.nz].map(usize::from);
@@ -1026,12 +1026,14 @@ impl BlastRange {
                     .div(Fx::from_int(speed))
                     .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
                 let ballistic = shell && !weapon.energetic();
-                let mut velocity = if ballistic {
+                let mut velocity = if weapon == Weapon::Kinetic {
+                    weapons::kinetic_velocity(muzzle, p, config)
+                } else if ballistic {
                     delta.map(|v| v.div(time))
                 } else {
                     weapons::flight_velocity(delta, speed)
                 };
-                if ballistic {
+                if ballistic && weapon != Weapon::Kinetic {
                     velocity[1] = velocity[1].add(
                         Fx::from_int(config.gravity)
                             .mul(time)
@@ -1105,6 +1107,7 @@ impl BlastRange {
             let mut shield = None;
             let mut prev = r.pos.map(Fx::to_int_trunc);
             let mut last_free = r.pos;
+            let mut contact = r.pos;
             for i in 1..=steps {
                 let q: [Fx; 3] =
                     std::array::from_fn(|k| r.pos[k].add(delta[k].mul(Fx::from_ratio(i, steps))));
@@ -1112,6 +1115,7 @@ impl BlastRange {
                 if let Some(s) = self.dome_crossed(prev, p) {
                     shield = Some(s);
                     hit = Some(p);
+                    contact = q;
                     break;
                 }
                 if material(&self.world, p) != 0
@@ -1121,6 +1125,7 @@ impl BlastRange {
                     })
                 {
                     hit = Some(p);
+                    contact = q;
                     break;
                 }
                 prev = p;
@@ -1173,7 +1178,7 @@ impl BlastRange {
                             b.rounds.push(r);
                         }
                     } else {
-                        self.kinetic_hit(at, r.velocity, &b.kinetic_config);
+                        self.kinetic_hit_at(at, contact, r.velocity, &b.kinetic_config);
                     }
                 } else if r.weapon.bursts() {
                     let old = self.matter.remaining_mj;

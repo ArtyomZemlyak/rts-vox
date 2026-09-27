@@ -2198,11 +2198,15 @@ impl BlastRange {
     pub fn target(&self) -> [i32; 3] {
         if let Some(id) = self.attack {
             if let Some(u) = self.units.get(id) {
-                let mut p = u.world_pos([
-                    u.body.core.0 as usize,
-                    u.body.core.1 as usize,
-                    u.body.core.2 as usize,
-                ]);
+                let mut p = if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                    battle::aim_point(u)
+                } else {
+                    u.world_pos([
+                        u.body.core.0 as usize,
+                        u.body.core.1 as usize,
+                        u.body.core.2 as usize,
+                    ])
+                };
                 let dx = Fx::from_int(p[0]).sub(self.gun.motion.pos[0]);
                 let dz = Fx::from_int(p[2]).sub(self.gun.motion.pos[2]);
                 let time = if self.config.delivery == modding::explosion::Delivery::Laser {
@@ -3669,14 +3673,18 @@ impl BlastRange {
                     .sqrt()
                     .div(Fx::from_int(self.config.shell_speed))
                     .max(Fx::from_ratio(1, 1000));
-                self.velocity = [
-                    self.heading()[0].mul(Fx::from_int(self.config.shell_speed)),
-                    Fx::from_int(target[1])
-                        .sub(from[1])
-                        .div(time)
-                        .add(Fx::from_int(gravity).mul(time).mul(Fx::from_ratio(1, 2))),
-                    self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
-                ];
+                self.velocity = if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                    weapons::kinetic_velocity(from, target, &self.config)
+                } else {
+                    [
+                        self.heading()[0].mul(Fx::from_int(self.config.shell_speed)),
+                        Fx::from_int(target[1])
+                            .sub(from[1])
+                            .div(time)
+                            .add(Fx::from_int(gravity).mul(time).mul(Fx::from_ratio(1, 2))),
+                        self.heading()[2].mul(Fx::from_int(self.config.shell_speed)),
+                    ]
+                };
                 self.shell = Some(from);
                 if self.gun.kind == RangeUnitKind::Strider {
                     self.streams.serial = self.streams.serial.wrapping_add(1);
@@ -3709,7 +3717,7 @@ impl BlastRange {
                     }) || material(&self.world, v) != 0
                         || self.units.iter().any(|u| u.solid(v))
                     {
-                        impact = Some((v, prev, last_free));
+                        impact = Some((v, prev, last_free, sample));
                         break;
                     }
                     prev = v;
@@ -3721,7 +3729,7 @@ impl BlastRange {
                     self.absorb(i, at);
                     self.shell = None;
                     self.fire_tick = u32::MAX;
-                } else if let Some((at, from, last_free)) = impact {
+                } else if let Some((at, from, last_free, contact)) = impact {
                     self.impact = Some(at);
                     self.impact_tick = self.tick;
                     if self.config.delivery == modding::explosion::Delivery::Kinetic
@@ -3729,7 +3737,8 @@ impl BlastRange {
                     {
                         self.shell = Some(last_free);
                     } else if self.config.delivery == modding::explosion::Delivery::Kinetic {
-                        self.kinetic_impact(at);
+                        let config = self.config.clone();
+                        self.kinetic_hit_at(at, contact, self.velocity, &config);
                         self.shell = None;
                     } else {
                         self.heat.deposit(

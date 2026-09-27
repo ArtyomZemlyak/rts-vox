@@ -15,7 +15,7 @@
     max_rounds: 64,
     max_waves: 4,
     // Какой снаряд танк заряжает по цели (ADR-456): бронебойный
-    // (`Kinetic`, kinetic-shell.ron) пробивает корпус по линии удара,
+    // (`Kinetic`, kinetic-shell.ron) пробивает корпус и скалывает соседние воксели,
     // фугас (`Blast`) рвёт волной ноги шагохода и укрытие.
     tank_ammo: (tank: Kinetic, strider: Blast, ground: Blast),
     zone: (name: "Учебный бой", min: (3200,2000), max: (4100,2800),

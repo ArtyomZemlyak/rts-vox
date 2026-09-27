@@ -7,6 +7,8 @@ use modding::{
 };
 #[path = "range_laser.rs"]
 mod laser;
+#[path = "range_spall.rs"]
+mod spall;
 
 const MAX_ROUNDS: usize = 128;
 
@@ -112,6 +114,33 @@ pub(super) fn spread(mut delta: [Fx; 3], heading: [Fx; 3], serial: u32, milli: i
     delta[2] = delta[2].add(heading[0].mul(side));
     delta
 }
+/// Shared cell-centred ballistic launch for solid rounds in trials and battle.
+/// Gravity is integrated before position, so the lift includes half a tick.
+pub(super) fn kinetic_velocity(
+    from: [Fx; 3],
+    target: [i32; 3],
+    config: &ExplosionConfig,
+) -> [Fx; 3] {
+    let delta: [Fx; 3] = std::array::from_fn(|a| {
+        Fx::from_int(target[a])
+            .add(Fx::from_ratio(1, 2))
+            .sub(from[a])
+    });
+    let time = delta[0]
+        .mul(delta[0])
+        .add(delta[2].mul(delta[2]))
+        .sqrt()
+        .div(Fx::from_int(config.shell_speed))
+        .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
+    let mut velocity = delta.map(|v| v.div(time));
+    velocity[1] = velocity[1].add(
+        Fx::from_int(config.gravity)
+            .mul(time.add(Fx::from_ratio(1, crate::TICKS_PER_SECOND)))
+            .mul(Fx::from_ratio(1, 2)),
+    );
+    velocity
+}
+
 impl BlastRange {
     /// The single gun's round against what it met: [`Self::ricochet`].
     pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
@@ -330,19 +359,33 @@ impl BlastRange {
 
     /// A solid shot spends finite work along its incoming ray. Crossing a
     /// thicker or more oblique face costs more cells; cover consumes the same
-    /// budget before the ray can reach a hull behind it. No radial wave is
-    /// created, so a blocked shot cannot damage nearby units.
+    /// budget before the ray can reach a hull behind it. A configured share
+    /// fractures neighbours of the pierced channel in that hull; no blast
+    /// wave is created and blocked shots cannot damage sheltered units.
+    #[cfg(test)]
     pub(super) fn kinetic_impact(&mut self, at: [i32; 3]) {
         let config = self.config.clone();
         self.kinetic_hit(at, self.velocity, &config);
     }
 
-    /// [`Self::kinetic_impact`] for any solid round, with the weapon that
-    /// fired it (ADR-456). The hit pays from a budget of its own: a burst
-    /// in flight keeps what it has left.
+    /// Cell-aligned contact for isolated material tests.
+    #[cfg(test)]
     pub(super) fn kinetic_hit(
         &mut self,
         at: [i32; 3],
+        velocity: [Fx; 3],
+        config: &ExplosionConfig,
+    ) {
+        self.kinetic_hit_at(at, at.map(Fx::from_int), velocity, config);
+    }
+
+    /// Keep the swept contact's sub-cell coordinates: rounding down at the
+    /// plate used to shift the whole internal channel below/beside the aim.
+    /// Work belongs to this round, independently of other waves in flight.
+    pub(super) fn kinetic_hit_at(
+        &mut self,
+        at: [i32; 3],
+        origin: [Fx; 3],
         velocity: [Fx; 3],
         config: &ExplosionConfig,
     ) {
@@ -365,6 +408,8 @@ impl BlastRange {
             return;
         }
         let mut previous = None;
+        let mut lateral = None;
+        let mut seeds = Vec::new();
         let before: Vec<_> = self
             .units
             .iter()
@@ -376,16 +421,20 @@ impl BlastRange {
         // The 32-unit bound also makes an empty ray a fixed, small cost.
         for i in 0..64 {
             let distance = Fx::from_ratio(i, 2);
-            let p = std::array::from_fn(|a| {
-                Fx::from_int(at[a])
-                    .add(direction[a].mul(distance))
-                    .to_int_trunc()
-            });
+            let p =
+                std::array::from_fn(|a| origin[a].add(direction[a].mul(distance)).to_int_trunc());
             if previous == Some(p) {
                 continue;
             }
             previous = Some(p);
             if let Some(id) = self.units.iter().position(|u| u.solid(p)) {
+                if lateral.is_none() {
+                    if let Some(s) = &config.spall {
+                        let share = (u64::from(work) * u64::from(s.work_milli) / 1000) as u32;
+                        lateral = Some(share);
+                        work -= share;
+                    }
+                }
                 let u = &mut self.units[id];
                 let Some((part, cell)) = u.hit(p) else {
                     break;
@@ -410,6 +459,7 @@ impl BlastRange {
                     } else {
                         u.seg_detached += 1;
                     }
+                    seeds.push((id, part, cell));
                 }
                 if part == 0 {
                     u.receive_cell(cell, spent, config);
@@ -445,6 +495,9 @@ impl BlastRange {
                     break;
                 }
             }
+        }
+        if let (Some(tuning), Some(work)) = (&config.spall, lateral) {
+            self.kinetic_spall(&seeds, work, tuning.radius, at, config);
         }
         self.matter.remaining_mj = burst.0;
         self.matter.fragment_size(u32::from(burst.1));
@@ -776,7 +829,14 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
 mod tests {
     use super::*;
     fn kinetic_range(blocks: Vec<modding::range::RangeBlock>) -> BlastRange {
-        let c = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        let mut c =
+            ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
+        // Fixed isolated penetration/ricochet fixture. Stock balance is tested separately.
+        c.energy = 12000;
+        c.material_energy_j = 1800000;
+        c.shell_speed = 280;
+        c.spall = None;
+        c.unit_role_resistance_milli[1] = 1800;
         let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         l.size = [640, 128, 640];
         l.course = None;
@@ -1039,6 +1099,138 @@ mod tests {
             assert_eq!(a.state_hash(), b.state_hash());
         }
     }
+    fn stock_kinetic_range() -> BlastRange {
+        let mut r = kinetic_range(vec![]);
+        r.reconfigure(
+            ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap(),
+        );
+        r.units[0].motion.drive.head = fx::angle::HALF;
+        r.units[0].update_pose(fx::angle::HALF);
+        r.control();
+        r
+    }
+
+    #[test]
+    fn stock_kinetic_auto_aim_kills_front_armour_and_survives_restore() {
+        let mut r = stock_kinetic_range();
+        assert_eq!(r.config.shell_speed, 560);
+        assert!(r.order_attack(0));
+        let mut hits = 0;
+        let mut last = u32::MAX;
+        let mut restored = None;
+        for _ in 0..300 {
+            r.step();
+            if let Some(b) = &mut restored {
+                let b: &mut BlastRange = b;
+                b.step();
+                assert_eq!(r.state_hash(), b.state_hash());
+            }
+            if r.impact.is_some() && r.impact_tick != last {
+                last = r.impact_tick;
+                hits += 1;
+                if hits == 1 {
+                    restored = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+                }
+            }
+            if !r.units[0].status.alive {
+                break;
+            }
+        }
+        assert!(!r.units[0].status.alive);
+        assert_eq!(hits, 2);
+        assert_eq!(r.units[0].annihilated_mm3(), 0);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+
+    #[test]
+    fn stock_kinetic_kills_front_armour_with_three_different_aim_points() {
+        let mut r = stock_kinetic_range();
+        let mut contacts = Vec::new();
+        for (shot, offset) in [-3, 3, 0].into_iter().enumerate() {
+            let u = &r.units[0];
+            let half = usize::from(u.body.core_size) / 2;
+            let mut aim = u.world_pos([
+                u.body.core.0 as usize + half,
+                u.body.core.1 as usize + half,
+                u.body.core.2 as usize + half,
+            ]);
+            aim[2] += offset;
+            assert!(r.order_ground_fire(aim));
+            let mut hit = false;
+            for _ in 0..240 {
+                r.step();
+                if r.impact.is_some() && r.impact_tick == r.tick - 1 {
+                    hit = true;
+                    contacts.push(r.impact.unwrap());
+                    break;
+                }
+            }
+            assert!(hit);
+            r.order_stop();
+            for _ in 0..240 {
+                if r.ready() {
+                    break;
+                }
+                r.step();
+            }
+            assert_eq!(r.units[0].status.alive, shot < 2, "shot {}", shot + 1);
+        }
+        assert!(contacts.windows(2).all(|p| p[0] != p[1]));
+        assert!(r.matter.economy.ledger.balanced());
+        assert!(r.explosion.is_none());
+    }
+
+    #[test]
+    fn stock_kinetic_spall_keeps_cover_and_a_finite_work_budget() {
+        let mut r = stock_kinetic_range();
+        let config = r.config.clone();
+        let (at, _, _) = hull_side(&r);
+        r.kinetic_hit(
+            at,
+            [Fx::ZERO, Fx::ZERO, Fx::from_int(config.shell_speed)],
+            &config,
+        );
+        let u = &r.units[0];
+        assert!(u.removed.iter().any(|p| p[0] != 30), "no lateral fracture");
+        let spent: u64 = u
+            .removed
+            .iter()
+            .map(|p| u64::from(unit_work(&u.body, p.map(usize::from), &config)))
+            .sum::<u64>()
+            + u.dents.values().map(|v| u64::from(*v)).sum::<u64>()
+            + u.seg_removed
+                .iter()
+                .map(|(part, p)| {
+                    u64::from(unit_work(
+                        &u.body.segments[*part as usize].body,
+                        p.map(usize::from),
+                        &config,
+                    ))
+                })
+                .sum::<u64>()
+            + u.seg_dents.values().map(|v| u64::from(*v)).sum::<u64>();
+        assert!(
+            spent <= u64::from(config.energy),
+            "spall created free work: {spent}"
+        );
+        assert_eq!(u.annihilated_mm3(), 0);
+        assert!(r.matter.economy.ledger.balanced());
+
+        let mut covered = kinetic_range(vec![modding::range::RangeBlock {
+            min: [230, 16, 320],
+            max: [242, 60, 352],
+            material: 3,
+        }]);
+        covered.reconfigure(config.clone());
+        covered.kinetic_hit(
+            [230, 23, 336],
+            [Fx::from_int(config.shell_speed), Fx::ZERO, Fx::ZERO],
+            &config,
+        );
+        assert!(covered.units[0].removed.is_empty());
+        assert!(covered.units[0].dents.is_empty());
+    }
+
     #[test]
     fn solid_shell_spends_work_on_steel_without_creating_a_blast() {
         let mut r = kinetic_range(vec![plate(230, 231, 3), plate(233, 234, 3)]);
@@ -1465,7 +1657,8 @@ mod tests {
                     "flight retains the fired barrel"
                 );
                 assert_eq!(
-                    r.shell.unwrap()[2],
+                    r.shell.unwrap()[2]
+                        .sub(r.velocity[2].mul(Fx::from_ratio(1, crate::TICKS_PER_SECOND))),
                     r.muzzle()[2],
                     "{delivery:?} fired from the selected side"
                 );

@@ -1,4 +1,4 @@
-// A solid tank round. Work is spent only on the impact ray, not a blast wave.
+// A solid tank round. Finite work is shared by penetration and local armour spall.
 // Crossing a sloped or thick plate consumes more cells; fragments are real
 // removed matter. World unit = 100 mm, simulation = 30 ticks/second.
 (
@@ -7,21 +7,23 @@
     charge_ticks: 12,
     half_cells: 20,
     cell_units: 2,
-    energy: 12000,
-    material_energy_j: 1800000,
+    // 2x launch speed, 4x finite work; armour stays harder than internal core.
+    energy: 48000,
+    material_energy_j: 5400000,
     air_cost: 100,
     soil_resistance: 1200,
     concrete_resistance: 1600,
     steel_resistance: 6500,
     unit_ablation_resistance: 180,
-    unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
+    unit_role_resistance_milli: (1000, 700, 650, 1100, 350),
     wave_work_per_tick: 4096,
     capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
     fragment_box: 1,
     hull_impulse_milli: 0,
     fire_tick: 45,
-    shell_speed: 280,
+    shell_speed: 560,
+    spall: Some((radius: 3, work_milli: 750)),
     ricochet: Some((
         material: 3,
         min_speed: 80,

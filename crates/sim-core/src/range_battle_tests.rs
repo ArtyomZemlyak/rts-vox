@@ -743,6 +743,9 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
         let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
         tuning.tank_range = 150;
         tuning.kinetic_range = 150;
+        // This measures pursuit, not lethality. Keep both moving targets
+        // alive for the whole route and replay even as stock ammunition evolves.
+        r.battle.kinetic_config.energy = 1;
     };
     short(&mut a);
     a.start_battle().unwrap();
@@ -942,6 +945,9 @@ fn tank_squads_crossing_the_field_all_engage() {
         .collect();
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut a = BlastRange::with_layout(config, layout).unwrap();
+    // Keep the focus targets alive until every pursuer has found a firing
+    // position; stock lethality has independent frontal-hit regressions.
+    a.battle.kinetic_config.energy = 1;
     a.start_battle().unwrap();
     let spacing = i64::from(a.battle.tuning.firing_spacing);
     let mut first = vec![None; a.units.len()];
@@ -1216,4 +1222,39 @@ fn mixed_annihilation_and_shell_waves_keep_their_material_accounting() {
         r.matter.spent_mj > 0,
         "ordinary shell lost its fracture budget"
     );
+}
+
+#[test]
+fn stock_battle_kinetic_kills_a_frontal_tank() {
+    for (distance, expected) in [(280, [24, 126]), (500, [36, 138]), (800, [52, 154])] {
+        let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+        layout.size[0] = 1024;
+        layout.clear_max[0] = 1000;
+        layout.units[1].at[0] = layout.units[0].at[0] + distance;
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r = BlastRange::with_layout(config, layout).unwrap();
+        r.start_battle().unwrap();
+        r.units[1].motion.drive.head = fx::angle::HALF;
+        r.units[1].update_pose(fx::angle::HALF);
+        r.battle.actors[1].turret.angle = fx::angle::HALF;
+        r.battle.actors[1].order = Order::Hold;
+        assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
+        r.battle.actors[0].order = Order::Attack(1);
+        let mut hits = Vec::new();
+        for _ in 0..900 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            if r.battle.impacts.iter().any(|p| p.weapon == Weapon::Kinetic) {
+                hits.push(r.tick);
+            }
+            if !r.units[1].status.alive {
+                break;
+            }
+        }
+        assert!(!r.units[1].status.alive, "hits {hits:?}");
+        println!("distance={distance} hits={hits:?}");
+        assert_eq!(hits, expected, "distance={distance}");
+        assert!(r.matter.economy.ledger.balanced());
+    }
 }
