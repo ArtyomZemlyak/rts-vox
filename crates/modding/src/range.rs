@@ -2,8 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_RANGE_BLOCKS: usize = 384;
-/// Machines a range layout places, both sides together.
-pub const MAX_RANGE_UNITS: usize = 8;
+/// Machines a range layout places, both sides together (ADR-466).
+pub const MAX_RANGE_UNITS: usize = 16;
 pub const MAX_RANGE_ZONES: usize = 16;
 
 /// Size of an authored clearing used for remote battle deployment.
@@ -401,8 +401,15 @@ mod tests {
         let mut r = good.clone();
         r.zones = vec![r.zones[0].clone(); MAX_RANGE_ZONES + 1];
         assert!(r.validate().is_err());
-        r = good;
+        r = good.clone();
         r.blocks = vec![r.blocks[0].clone(); MAX_RANGE_BLOCKS + 1];
+        assert!(r.validate().is_err());
+        // Sixteen machines a side pair may place; a seventeenth is refused
+        // by the catalogue before any placement is checked (ADR-466).
+        r = good;
+        r.units = vec![r.units[0].clone(); MAX_RANGE_UNITS];
+        assert!(r.validate().is_ok());
+        r.units.push(r.units[0].clone());
         assert!(r.validate().is_err());
     }
 }

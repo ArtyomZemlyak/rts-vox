@@ -820,6 +820,57 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
     );
 }
 
+/// **Sixteen machines fight the training battle** (ADR-466, P-55). The
+/// stock four of the training battle in four groups, the layout's limit:
+/// both sides fire and take damage, and the fight replays bit for bit
+/// from a snapshot taken in its middle.
+#[test]
+fn sixteen_machines_fight_the_training_battle_and_replay() {
+    let t = modding::range_battle::Tuning::from_ron(include_str!("../../../data/range-battle.ron"))
+        .unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.gun = t.zone.spawn;
+    layout.target = t.zone.target;
+    layout.zones.push(t.zone.clone());
+    if let Some(course) = &mut layout.course {
+        course.patrols.clear();
+    }
+    layout.units = (0..4)
+        .flat_map(|k: i32| {
+            let (dx, dz) = (70 * (k / 2), 90 * (k % 2));
+            t.units.iter().cloned().map(move |mut u| {
+                u.at[0] += if u.allied { -dx } else { dx };
+                u.at[2] += dz;
+                u
+            })
+        })
+        .collect();
+    assert_eq!(layout.units.len(), modding::range::MAX_RANGE_UNITS);
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
+    a.start_battle().unwrap();
+    for _ in 0..360 {
+        a.step();
+    }
+    let mut b = BlastRange::restore(config, &a.snapshot()).unwrap();
+    for tick in 0..90 {
+        a.step();
+        b.step();
+        assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
+    }
+    for side in [true, false] {
+        assert!(
+            (0..a.units.len()).any(|id| a.allied(id) == side && a.battle.actors[id].fired > 0),
+            "a side never fired"
+        );
+        assert!(
+            (0..a.units.len()).any(|id| a.allied(id) == side && a.units[id].revision > 0),
+            "a side took no damage"
+        );
+    }
+}
+
 #[test]
 fn a_moving_target_changes_the_finished_pursuit_goal() {
     let mut r = arena(RangeUnitKind::Tank);
