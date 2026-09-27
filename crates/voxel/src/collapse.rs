@@ -1583,6 +1583,9 @@ impl CollapseLayer {
                 None
             };
         }
+        if !self.references_hold() {
+            return false;
+        }
         self.anchor_bits.fill(0);
         self.anchor_count = 0;
         self.anchor_overflow.clear();
@@ -1604,6 +1607,52 @@ impl CollapseLayer {
         self.reached.clear();
         self.reached.resize(total, false);
         s.ok()
+    }
+}
+
+impl CollapseLayer {
+    /// Всё, что обход графа читает по номеру, указывает туда, где есть
+    /// что прочитать (ADR-464): очередь переразметки и фронтир — чанки
+    /// мира; размеченные — по возрастанию, у каждого узлы, и нумерация
+    /// их узлов подряд, как её собирает `rebuild_index`; отрезки граней
+    /// лежат в грани, их метки, метки опоры и рёбер — узлы своего чанка,
+    /// второй конец ребра — узел соседа за этой гранью.
+    fn references_hold(&self) -> bool {
+        let chunks = self.chunks.len();
+        let n = |i: usize| self.nodes[i].as_ref().map_or(0, |nd| nd.n);
+        if self
+            .pending
+            .iter()
+            .chain(&self.frontier)
+            .chain(&self.known)
+            .any(|&i| i as usize >= chunks)
+            || self.known.windows(2).any(|p| p[0] >= p[1])
+        {
+            return false;
+        }
+        let mut total = 0u32;
+        for &ci in &self.known {
+            let i = ci as usize;
+            if n(i) == 0 || self.base[i] != total {
+                return false;
+            }
+            total = total.saturating_add(n(i) as u32);
+        }
+        (0..chunks).all(|i| {
+            let Some(nd) = self.nodes[i].as_ref() else {
+                return true;
+            };
+            let label = |l: u16| usize::from(l) < nd.n;
+            (0..FACES).all(|f| {
+                let far = self.neighbour(i, f).map_or(0, n);
+                nd.faces[f].iter().all(|&(start, len, l)| {
+                    usize::from(start) + usize::from(len) <= CS * CS && label(l)
+                }) && nd.ground[f].iter().all(|&l| label(l))
+                    && nd.edges[f]
+                        .iter()
+                        .all(|&(a, b)| label(a) && usize::from(b) < far)
+            })
+        })
     }
 }
 
@@ -1784,6 +1833,104 @@ mod tests {
         let reached = c.reached.clone();
         c.resolve_reference(&mut CollapseStats::default());
         assert_eq!(c.reached, reached);
+    }
+
+    /// **Испорченный снимок графа — отказ загрузки, а не паника обхода**
+    /// (ADR-464). Граф моста с блоком на настиле сохраняется целым и с каждой
+    /// порчей по отдельности: чанк за картой в очереди, фронтире или
+    /// размеченных, размеченные не по возрастанию, сдвинутая нумерация,
+    /// метка отрезка грани, опоры или ребра за узлами чанка, второй
+    /// конец ребра за узлами соседа, отрезок за гранью.
+    #[test]
+    fn a_corrupt_graph_snapshot_is_refused() {
+        let graph = || {
+            let mut w = World::new(96, 64, 64, 100_000, Box::new(Bridge));
+            let mut c = CollapseLayer::new(&w);
+            let mut b = Bodies::new(16, test_gravity());
+            // A block set on the deck: the graph takes in the chunks
+            // around it, deck and pier with their faces and edges.
+            w.queue_edit(Edit::put(50, DECK + 1, 8, 2));
+            for _ in 0..8 {
+                w.flush();
+                let edits = w.edits().to_vec();
+                c.apply(&mut w, &edits, &mut b);
+                b.step(&mut w);
+            }
+            c
+        };
+        let w = World::new(96, 64, 64, 100_000, Box::new(Bridge));
+        let c = graph();
+        assert!(c.known.len() >= 2, "the fixture needs a graph");
+        let (i, f) = (0..c.nodes.len())
+            .flat_map(|i| (0..FACES).map(move |f| (i, f)))
+            .find(|&(i, f)| {
+                c.nodes[i]
+                    .as_ref()
+                    .is_some_and(|nd| !nd.edges[f].is_empty())
+            })
+            .expect("the fixture needs an edge");
+        let reads = |c: &CollapseLayer| {
+            let mut blob = fx::blob::Blob::new();
+            c.save(&mut blob);
+            CollapseLayer::new(&w).load(&mut fx::blob::Scan::new(&blob.v))
+        };
+        assert!(reads(&c));
+        let chunks = c.chunks.len() as u32;
+        fn node(c: &mut CollapseLayer, i: usize) -> &mut ChunkNodes {
+            c.nodes[i].as_mut().unwrap()
+        }
+        type Spoil = Box<dyn Fn(&mut CollapseLayer)>;
+        let spoils: Vec<(&str, Spoil)> = vec![
+            ("pending", Box::new(move |c| c.pending.push(chunks))),
+            ("frontier", Box::new(move |c| c.frontier.push(chunks))),
+            ("known chunk", Box::new(move |c| c.known.push(chunks))),
+            ("known order", Box::new(|c| c.known.swap(0, 1))),
+            (
+                "numbering",
+                Box::new(|c| {
+                    let k = c.known[1] as usize;
+                    c.base[k] += 1;
+                }),
+            ),
+            (
+                "face label",
+                Box::new(move |c| {
+                    let n = node(c, i).n as u16;
+                    node(c, i).faces[f].push((0, 1, n));
+                }),
+            ),
+            (
+                "face extent",
+                Box::new(move |c| node(c, i).faces[f].push(((CS * CS) as u16, 1, 0))),
+            ),
+            (
+                "ground label",
+                Box::new(move |c| {
+                    let n = node(c, i).n as u16;
+                    node(c, i).ground[f].push(n);
+                }),
+            ),
+            (
+                "edge label",
+                Box::new(move |c| {
+                    let n = node(c, i).n as u16;
+                    node(c, i).edges[f].push((n, 0));
+                }),
+            ),
+            (
+                "edge far label",
+                Box::new(move |c| {
+                    let j = c.neighbour(i, f).unwrap();
+                    let far = c.nodes[j].as_ref().unwrap().n as u16;
+                    node(c, i).edges[f].push((0, far));
+                }),
+            ),
+        ];
+        for (name, spoil) in &spoils {
+            let mut bad = graph();
+            spoil(&mut bad);
+            assert!(!reads(&bad), "{name} was not refused");
+        }
     }
 
     #[test]

@@ -124,3 +124,25 @@ fn loaded_or_untracked_chunks_take_the_full_reset_path() {
     assert_eq!(world.bits, pristine.bits);
     assert_eq!(world.ceiling, pristine.ceiling);
 }
+
+/// **Сброс не трогает настроек мира** (ADR-464): потолок
+/// материализации — данные, а не состояние, и восстановление карты
+/// прежде ставило вместо него четыре из конструктора, по обоим путям
+/// сброса.
+#[test]
+fn a_reset_keeps_the_configured_materialization_cap() {
+    let mut world = World::new(73, 67, 45, 100, Box::new(Terrain));
+    world.max_materialize_per_tick = 9;
+    for restore in [false, true] {
+        world.queue_edit(Edit::put(33, 30, 34, 3));
+        while world.queued() > 0 {
+            world.flush();
+        }
+        if restore {
+            world.reset_generator_regions(Box::new(Terrain), &[([0, 0], [73, 45])]);
+        } else {
+            world.restore_pristine();
+        }
+        assert_eq!(world.max_materialize_per_tick, 9);
+    }
+}

@@ -100,8 +100,10 @@ pub fn line_of_sight(w: &World, from: (i32, i32, i32), to: (i32, i32, i32)) -> L
     // Поймано тестом `visibility_is_symmetric`.
     let (from, to) = if from <= to { (from, to) } else { (to, from) };
     let (mut clear, mut blocked_at) = (true, to);
+    // Outside the world is air on every side (ADR-464): a sample below
+    // zero is not the boundary cell, as one past the far side is not.
     let steps = walk(from, to, |x, y, z| {
-        if w.solid(x.max(0) as u32, y.max(0) as u32, z.max(0) as u32) {
+        if x >= 0 && y >= 0 && z >= 0 && w.solid(x as u32, y as u32, z as u32) {
             clear = false;
             blocked_at = (x, y, z);
             false
@@ -157,6 +159,31 @@ mod tests {
         let r = line_of_sight(&w, (5, 20, 20), (60, 20, 20));
         assert!(!r.clear);
         assert_eq!(r.blocked_at.0, 32, "остановились не на стене: {r:?}");
+    }
+
+    /// **За миром воздух с любой стороны** (ADR-464). Отрезок за краем
+    /// карты у нуля читал граничный воксель вместо пустоты и считался
+    /// закрытым, а такой же у дальнего края — открытым.
+    #[test]
+    fn outside_the_world_is_air_on_every_side() {
+        // Solid boundary columns on both sides, as a generated map has.
+        struct Frame;
+        impl Generator for Frame {
+            fn material(&self, x: u32, _y: u32, _z: u32) -> Mat {
+                if x == 0 || x == 63 {
+                    2
+                } else {
+                    AIR
+                }
+            }
+        }
+        let w = World::new(64, 64, 64, 100_000, Box::new(Frame));
+        assert!(line_of_sight(&w, (-9, 20, 20), (-2, 20, 20)).clear);
+        assert!(line_of_sight(&w, (66, 20, 20), (73, 20, 20)).clear);
+        assert!(line_of_sight(&w, (5, -9, 20), (5, -2, 20)).clear);
+        // The walls themselves still stand in the way.
+        assert!(!line_of_sight(&w, (-9, 20, 20), (5, 20, 20)).clear);
+        assert!(!line_of_sight(&w, (58, 20, 20), (73, 20, 20)).clear);
     }
 
     /// **Дыра в стене открывает линию — в тот же вызов.** Никакого

@@ -846,7 +846,6 @@ impl World {
         self.materialized = 0;
         self.materialized_in_tick = 0;
         self.in_tick = false;
-        self.max_materialize_per_tick = 4;
     }
 
     /// Материализовать чанк из генератора — цена первой правки в нём.
@@ -1228,7 +1227,9 @@ impl World {
     }
 
     pub fn load_transfers(&mut self, s: &mut fx::blob::Scan) -> bool {
-        self.transfers = load_edits(s, self.nx, self.nz).into_iter().collect();
+        self.transfers = load_edits(s, self.nx, self.ny, self.nz)
+            .into_iter()
+            .collect();
         s.ok()
     }
 
@@ -1296,8 +1297,10 @@ impl World {
                 }
             }
         }
-        self.queue = load_edits(s, self.nx, self.nz).into_iter().collect();
-        self.applied = load_edits(s, self.nx, self.nz);
+        self.queue = load_edits(s, self.nx, self.ny, self.nz)
+            .into_iter()
+            .collect();
+        self.applied = load_edits(s, self.nx, self.ny, self.nz);
         // Снимок старше очереди передач её не несёт: пустая.
         self.transfers.clear();
         s.ok()
@@ -1379,8 +1382,11 @@ pub fn save_edits(b: &mut fx::blob::Blob, nx: u32, nz: u32, e: &[Edit]) {
     }
 }
 
-pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
+pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, ny: u32, nz: u32) -> Vec<Edit> {
     let total = s.u32() as usize;
+    // A cell past the top of the world would index past the occupancy
+    // volume when the edit is applied (ADR-464).
+    let cells = u64::from(nx) * u64::from(ny) * u64::from(nz);
     let nruns = s.list(4);
     let mut out = Vec::with_capacity(total.min(1 << 24));
     let mut prev = 0i64;
@@ -1393,7 +1399,11 @@ pub fn load_edits(s: &mut fx::blob::Scan, nx: u32, nz: u32) -> Vec<Edit> {
         // начало отрезка или отрезок длиннее всего списка. Молча
         // вернуть пустоту нельзя — обрезанный файл прочитался бы
         // как пустая очередь, то есть как другая партия.
-        if start < 0 || n > total as u64 || out.len() as u64 + n > total as u64 {
+        if start < 0
+            || n > total as u64
+            || out.len() as u64 + n > total as u64
+            || start as u64 + n > cells
+        {
             s.spoil();
             return Vec::new();
         }
@@ -1424,6 +1434,28 @@ mod codec_tests {
     use super::*;
     use fx::blob::{Blob, Scan};
     use fx::rng::Rng;
+
+    /// **Правка выше мира — испорченный файл** (ADR-464): воксель за
+    /// верхом объёма при применении правки читался бы мимо битового
+    /// объёма, то есть паникой, а не ошибкой чтения.
+    #[test]
+    fn an_edit_above_the_world_is_refused() {
+        let mut b = Blob::new();
+        let above = Edit {
+            x: 3,
+            y: 64,
+            z: 5,
+            mat: 2,
+            by: 0,
+        };
+        save_edits(&mut b, 64, 64, &[above]);
+        let mut s = Scan::new(&b.v);
+        assert!(load_edits(&mut s, 64, 64, 64).is_empty());
+        assert!(!s.ok());
+        let mut s = Scan::new(&b.v);
+        assert_eq!(load_edits(&mut s, 64, 65, 64), vec![above]);
+        assert!(s.ok());
+    }
 
     /// **Сжатие отрезками не имеет права менять ни состав, ни порядок.**
     ///
@@ -1495,7 +1527,7 @@ mod codec_tests {
             let mut b = Blob::new();
             save_edits(&mut b, nx, nz, &want);
             let mut s = Scan::new(&b.v);
-            let got = load_edits(&mut s, nx, nz);
+            let got = load_edits(&mut s, nx, ny, nz);
             assert!(s.ok());
             assert_eq!(got, want, "случай {case}");
         }
@@ -1507,7 +1539,7 @@ mod codec_tests {
         let mut b = Blob::new();
         save_edits(&mut b, 64, 64, &[]);
         let mut s = Scan::new(&b.v);
-        assert!(load_edits(&mut s, 64, 64).is_empty());
+        assert!(load_edits(&mut s, 64, 64, 64).is_empty());
         assert!(s.ok());
     }
 
@@ -1531,7 +1563,7 @@ mod codec_tests {
         save_edits(&mut b, 64, 64, &want);
         for cut in 0..b.v.len() {
             let mut s = Scan::new(&b.v[..cut]);
-            let got = load_edits(&mut s, 64, 64);
+            let got = load_edits(&mut s, 64, 64, 64);
             assert!(
                 !s.ok() || got == want,
                 "обрезка на {cut} байте дала {} правок и не пожаловалась",

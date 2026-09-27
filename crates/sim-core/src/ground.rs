@@ -246,9 +246,9 @@ impl Ground {
         if !self.collapse.load(s) {
             return false;
         }
-        let (nx, nz) = (self.world.nx, self.world.nz);
-        self.edits = voxel::world::load_edits(s, nx, nz);
-        self.carry = voxel::world::load_edits(s, nx, nz);
+        let (nx, ny, nz) = (self.world.nx, self.world.ny, self.world.nz);
+        self.edits = voxel::world::load_edits(s, nx, ny, nz);
+        self.carry = voxel::world::load_edits(s, nx, ny, nz);
         s.ok()
     }
 
