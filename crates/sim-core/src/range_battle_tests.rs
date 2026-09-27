@@ -721,6 +721,15 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
 /// taken in the middle of the chase.
 #[test]
 fn a_long_pursuit_reaches_targets_that_keep_moving() {
+    long_pursuit(false);
+}
+
+#[test]
+fn a_long_pursuit_with_shared_search_budget_reaches_moving_targets() {
+    long_pursuit(true);
+}
+
+fn long_pursuit(borrow_idle: bool) {
     let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
     layout.battle = true;
     if let Some(course) = &mut layout.course {
@@ -746,6 +755,11 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
         // This measures pursuit, not lethality. Keep both moving targets
         // alive for the whole route and replay even as stock ammunition evolves.
         r.battle.kinetic_config.energy = 1;
+        if !borrow_idle {
+            // Preserve the original slow-frontier regression: multiple
+            // route replacements must complete while the hull is at speed.
+            r.navigation.search_resume_per_unit = r.navigation.search_nodes_per_tick;
+        }
     };
     short(&mut a);
     a.start_battle().unwrap();
@@ -801,6 +815,7 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
     }
     let travelled = (a.units[0].motion.pos[0].sub(start[0]).to_int_trunc()).abs()
         + (a.units[0].motion.pos[2].sub(start[2]).to_int_trunc()).abs();
+    eprintln!("pursuit borrowed={borrow_idle} first_shot={first_shot:?} restarts={restarts} moving_replacements={taken_at_speed} shots={}", a.battle.actors[0].fired);
     assert!(
         travelled > 400,
         "the pursuer stayed near its start: {travelled}"
@@ -810,7 +825,7 @@ fn a_long_pursuit_reaches_targets_that_keep_moving() {
     // at tick 1137; holding the search but still stopping for it, it
     // fired first at 1665 and six rounds in all. Now 589 and fifteen.
     assert!(
-        taken_at_speed >= 2,
+        taken_at_speed >= if borrow_idle { 1 } else { 2 },
         "routes taken up at speed: {taken_at_speed}"
     );
     assert!(

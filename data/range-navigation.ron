@@ -4,6 +4,10 @@
     // Graph work counts popped nodes, endpoint queries and swept edge poses.
     // Work per tick also includes goal selection and direct/final connections.
     search_nodes_per_tick: 96,
+    // Pending searches share this total, with a per-hull ceiling. A lone
+    // search answers sooner; sixteen searches cannot multiply its peak by 16.
+    search_resume_budget: 768,
+    search_resume_per_unit: 192,
     // Starts admitted per tick. Already-running searches keep their own
     // bounded slice; a hull beyond this start allowance retains its order.
     searches_started_per_tick: 1,

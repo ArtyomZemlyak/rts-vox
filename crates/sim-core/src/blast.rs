@@ -3480,6 +3480,33 @@ impl BlastRange {
         // again next tick, in the same stable spatial order as motion below.
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
+        // Share continuation work before stepping any hull. Slot-order ranks
+        // and tick-based remainders survive saves without scheduler state.
+        let searching = |m: &motion::Motion| m.enabled && m.searching();
+        let count = self.units.iter().filter(|u| searching(&u.motion)).count()
+            + usize::from(!battle_mode && searching(&self.gun.motion));
+        let mut rank = 0;
+        for m in self
+            .units
+            .iter_mut()
+            .map(|u| &mut u.motion)
+            .chain((!battle_mode).then_some(&mut self.gun.motion))
+        {
+            let work = if searching(m) {
+                let work = motion::resume_share(
+                    self.navigation.search_resume_budget,
+                    self.navigation.search_resume_per_unit,
+                    count,
+                    rank,
+                    self.tick,
+                );
+                rank += 1;
+                work
+            } else {
+                0
+            };
+            m.allow_resume(work);
+        }
         let mut contacts = Vec::new();
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
@@ -6819,8 +6846,8 @@ mod tests {
         );
         assert!(a.gun.motion.path.is_empty());
         // Mid-search: a restored range carries the same frontier.
-        // The legal direct forest path now needs only two slices. Save
-        // immediately after its bounded first slice, before it finishes.
+        // Save after the bounded initial slice. A continuation borrowing
+        // idle capacity may already finish on the first following tick.
         assert!(a.gun.motion.searching(), "the search ended too early");
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
@@ -6833,8 +6860,7 @@ mod tests {
                 answered = Some(i);
             }
         }
-        let at = answered.expect("the search never ended");
-        assert!(at > 0, "the search did not span ticks");
+        answered.expect("the search never ended");
         assert!(!a.gun.motion.path.is_empty(), "no route to the woods");
         assert_eq!(a.gun.motion.path, b.gun.motion.path);
         assert!(

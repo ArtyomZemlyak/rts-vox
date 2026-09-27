@@ -7,6 +7,10 @@ pub struct Navigation {
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
     pub search_nodes_per_tick: usize,
+    /// Aggregate continuation work across the range, shared by pending hunts.
+    pub search_resume_budget: usize,
+    /// An isolated hunt may borrow idle capacity up to this ceiling.
+    pub search_resume_per_unit: usize,
     /// Searches the whole range may begin in one tick. Hulls beyond the
     /// ceiling retain their orders; each admitted start also has a work cap.
     pub searches_started_per_tick: usize,
@@ -50,6 +54,9 @@ impl Navigation {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let n: Self = ron::from_str(text).map_err(|e| e.to_string())?;
         if n.searches_started_per_tick == 0
+            || !(1..=51200).contains(&n.search_nodes_per_tick)
+            || !(1..=51200).contains(&n.search_resume_budget)
+            || !(1..=n.search_resume_budget).contains(&n.search_resume_per_unit)
             || !(2..=16).contains(&n.cell_units)
             || !(n.cell_units as u32).is_power_of_two()
             || !(64..=51200).contains(&n.search_nodes)
@@ -84,6 +91,8 @@ mod tests {
     fn a_navigation_file_missing_a_number_is_refused() {
         for field in [
             "search_nodes_per_tick: 96,",
+            "search_resume_budget: 768,",
+            "search_resume_per_unit: 192,",
             "searches_started_per_tick: 1,",
             "contact_replan_ticks: 2,",
             "corner_arrival_mm: 50,",

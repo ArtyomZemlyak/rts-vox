@@ -171,7 +171,25 @@ pub struct Motion {
     /// are scratch for the tick, not state: the range sets them before
     /// every step, and a hull stepped by anything else may always begin.
     may_start: bool,
+    /// Per-tick continuation allowance assigned by the range. Scratch,
+    /// recomputed before motion after loading; standalone callers use tuning.
+    resume_budget: Option<usize>,
     started: bool,
+}
+/// Fair continuation shares in stable slot order. Rotate the remainder so
+/// even a total smaller than the number of hunts cannot starve a slot.
+pub(super) fn resume_share(
+    total: usize,
+    cap: usize,
+    count: usize,
+    rank: usize,
+    tick: u32,
+) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let offset = (rank + count - tick as usize % count) % count;
+    (total / count + usize::from(offset < total % count)).min(cap)
 }
 impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
@@ -263,6 +281,7 @@ impl Motion {
             recovery_origin: [Fx::from_int(at[0]), Fx::from_int(at[2])],
             next_plan: 0,
             may_start: true,
+            resume_budget: None,
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -919,6 +938,16 @@ impl Motion {
         tick: u32,
         changed: &nav::vehicle::Changed,
     ) {
+        let slice = self
+            .resume_budget
+            .unwrap_or(self.navigation.search_nodes_per_tick);
+        if slice == 0 {
+            // Changes must still invalidate cached terrain during a skipped slice.
+            if let Some(hunt) = &mut self.hunt {
+                hunt.forget(changed);
+            }
+            return;
+        }
         let Some(mut hunt) = self.hunt.take() else {
             return;
         };
@@ -952,7 +981,6 @@ impl Motion {
                 })
             })
         };
-        let slice = self.navigation.search_nodes_per_tick.max(1);
         match hunt.advance_in(w, rubble, &clear, slice) {
             Some(plan) => {
                 // The cadence of the next try counts from the answer, not
@@ -976,6 +1004,9 @@ impl Motion {
     /// May this hull begin a search this tick, and did it. The range
     /// hands the permission out under a ceiling (ADR-312); a hull refused
     /// keeps its order and asks again next tick.
+    pub(super) fn allow_resume(&mut self, work: usize) {
+        self.resume_budget = Some(work);
+    }
     pub fn allow_start(&mut self, may: bool) {
         self.may_start = may;
         self.started = false;
@@ -1730,6 +1761,29 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn search_shares_are_bounded_fair_and_borrow_idle_capacity() {
+        assert_eq!(resume_share(768, 192, 1, 0, 0), 192);
+        assert_eq!(resume_share(768, 192, 16, 0, 0), 48);
+        for count in 1..=17 {
+            for total in [1, 7, 96, 768] {
+                let mut granted = vec![0; count];
+                for tick in 0..count as u32 {
+                    let shares: Vec<_> = (0..count)
+                        .map(|rank| resume_share(total, 192, count, rank, tick))
+                        .collect();
+                    assert!(shares.iter().sum::<usize>() <= total);
+                    assert!(shares.iter().all(|&work| work <= 192));
+                    for (sum, work) in granted.iter_mut().zip(shares) {
+                        *sum += work;
+                    }
+                }
+                assert!(granted.iter().all(|&work| work > 0), "starved: {granted:?}");
+                assert!(granted.windows(2).all(|pair| pair[0] == pair[1]));
+            }
+        }
+    }
+
     fn ground(depth: i32) -> World {
         World::new(640, 64, 640, 100, Box::new(Ground { depth }))
     }

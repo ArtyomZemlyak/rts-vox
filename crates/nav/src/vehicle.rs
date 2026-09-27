@@ -856,6 +856,11 @@ impl<'a> Probe<'a> {
             return result;
         }
         let (lo, hi) = self.extent(pos, head, s);
+        // A level hull has one belly plane. Flat ground dominates range
+        // searches; avoid two fixed-point products per footprint column.
+        let level = pitch == Fx::ZERO && roll == Fx::ZERO;
+        let clearance = s.clearance.max(Fx::from_int(s.step));
+        let hull_height = Fx::from_int(s.height);
         for z in lo[1]..=hi[1] {
             for (x, u, v) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
                 // Floor and yielding matter come from the same column answer.
@@ -866,17 +871,19 @@ impl<'a> Probe<'a> {
                     .map(|(floor, [low, _])| (i32::from(floor), low))
                     .unwrap_or((self.world.ny as i32, u16::MAX));
                 let ground = Fx::from_int(floor);
-                let local = height.add(pitch.mul(u)).add(roll.mul(v));
-                let belly = local.add(s.clearance.max(Fx::from_int(s.step)));
+                let local = if level {
+                    height
+                } else {
+                    height.add(pitch.mul(u)).add(roll.mul(v))
+                };
+                let belly = local.add(clearance);
                 if ground > belly {
                     result.blocked += 1;
                     if stop_on_refusal {
                         return result;
                     }
                 }
-                if low != u16::MAX
-                    && Fx::from_int(i32::from(low)) < local.add(Fx::from_int(s.height))
-                {
+                if low != u16::MAX && Fx::from_int(i32::from(low)) < local.add(hull_height) {
                     result.crush += 1;
                 }
             }
