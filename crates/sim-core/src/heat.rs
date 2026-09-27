@@ -106,6 +106,12 @@ impl Heat {
     }
     /// A burst: fuel within `radius` of `at` receives up to `per_cell`,
     /// falling off with the square of the distance to nothing at the edge.
+    ///
+    /// The shares are gathered in the map's own key order and join it in
+    /// one merge (ADR-461). A shell over the concrete floor heats some
+    /// forty thousand meltable cells, and inserting them one at a time
+    /// cost seven milliseconds of the impact tick. Every cell still
+    /// receives one share, so how they join decides nothing.
     pub fn deposit(
         &mut self,
         w: &World,
@@ -118,42 +124,78 @@ impl Heat {
             return;
         }
         let r2 = radius * radius;
-        let x0 = (at[0] - radius).max(0);
-        let x1 = (at[0] + radius + 1).min(w.nx as i32);
         let mut cursor = World::mat_cursor();
-        for z in (at[2] - radius).max(0)..(at[2] + radius + 1).min(w.nz as i32) {
+        let mut takes = (AIR, false);
+        let mut shares: Vec<([u32; 3], u32)> = Vec::new();
+        // The key orders by x, then y, then z: so does the walk.
+        for x in (at[0] - radius).max(0)..(at[0] + radius + 1).min(w.nx as i32) {
+            let x2 = (x - at[0]).pow(2);
             for y in (at[1] - radius).max(0)..(at[1] + radius + 1).min(w.ny as i32) {
-                let yz2 = (y - at[1]).pow(2) + (z - at[2]).pow(2);
-                if yz2 >= r2 {
+                let xy2 = x2 + (y - at[1]).pow(2);
+                if xy2 >= r2 {
                     continue;
                 }
-                // Enumerate occupied bits in the original +X order; empty air
-                // never reaches material generation or the heat ledger.
-                for begin in (x0..x1).step_by(64) {
-                    let mut bits = w.solid_bits(
-                        begin as u32,
-                        y as u32,
-                        z as u32,
-                        (x1 - begin).min(64) as u32,
-                    );
-                    while bits != 0 {
-                        let x = begin + bits.trailing_zeros() as i32;
-                        bits &= bits - 1;
-                        let d2 = (x - at[0]).pow(2) + yz2;
-                        if d2 >= r2 {
-                            continue;
-                        }
-                        let p = [x as u32, y as u32, z as u32];
-                        let m = w.material_cached(&mut cursor, p[0], p[1], p[2]);
-                        if m == AIR || mats.get(m).is_none_or(|d| d.kindling == 0 && d.melt == 0) {
-                            continue;
-                        }
-                        let share = (u64::from(per_cell) * (r2 - d2) as u64 / r2 as u64) as u32;
-                        self.add(w, p, share);
+                let reach = (r2 - xy2 - 1).isqrt();
+                for z in (at[2] - reach).max(0)..(at[2] + reach + 1).min(w.nz as i32) {
+                    let p = [x as u32, y as u32, z as u32];
+                    if !w.solid(p[0], p[1], p[2]) {
+                        continue;
+                    }
+                    let m = w.material_cached(&mut cursor, p[0], p[1], p[2]);
+                    if takes.0 != m {
+                        takes = (
+                            m,
+                            m != AIR && mats.get(m).is_some_and(|d| d.kindling > 0 || d.melt > 0),
+                        );
+                    }
+                    if !takes.1 {
+                        continue;
+                    }
+                    let d2 = xy2 + (z - at[2]).pow(2);
+                    let share = (u64::from(per_cell) * (r2 - d2) as u64 / r2 as u64) as u32;
+                    if share > 0 {
+                        shares.push((p, share));
                     }
                 }
             }
         }
+        // A few shares into a large ledger go one at a time; otherwise the
+        // two ordered runs merge in one pass and the tree is built once.
+        if shares.len().saturating_mul(8) < self.cells.len() {
+            for (p, h) in shares {
+                let c = self.cells.entry(p).or_default();
+                c.heat = c.heat.saturating_add(h).min(HEAT_CAP);
+            }
+            return;
+        }
+        let cell = |heat: u32| HeatCell {
+            heat: heat.min(HEAT_CAP),
+            ..HeatCell::default()
+        };
+        let mut hot = std::mem::take(&mut self.cells).into_iter().peekable();
+        let mut new = shares.into_iter().peekable();
+        let mut merged = Vec::with_capacity(hot.len() + new.len());
+        loop {
+            let order = match (hot.peek(), new.peek()) {
+                (Some((a, _)), Some((b, _))) => a.cmp(b),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => break,
+            };
+            match order {
+                std::cmp::Ordering::Less => merged.extend(hot.next()),
+                std::cmp::Ordering::Greater => {
+                    merged.extend(new.next().map(|(p, h)| (p, cell(h))));
+                }
+                std::cmp::Ordering::Equal => {
+                    let (p, mut c) = hot.next().expect("peeked");
+                    let (_, h) = new.next().expect("peeked");
+                    c.heat = c.heat.saturating_add(h).min(HEAT_CAP);
+                    merged.push((p, c));
+                }
+            }
+        }
+        self.cells = merged.into_iter().collect();
     }
     /// One tick over at most `cells_per_tick` hot cells. `claimed` names
     /// cells another process already owns; they wait untouched.
@@ -383,9 +425,17 @@ mod tests {
         w.queue_edit(voxel::Edit::put(65, 21, 32, 3));
         w.flush();
         let registry = mats();
-        for at in [[32, 20, 32], [64, 20, 32], [-4, 8, 1], [92, 63, 94]] {
-            let mut reference = Heat::default();
-            let mut actual = Heat::default();
+        // Bursts one after another into the same ledger: the first joins an
+        // empty map, the rest merge with cells already hot (ADR-461).
+        let mut reference = Heat::default();
+        let mut actual = Heat::default();
+        for at in [
+            [32, 20, 32],
+            [64, 20, 32],
+            [-4, 8, 1],
+            [92, 63, 94],
+            [40, 18, 30],
+        ] {
             let radius: i32 = 32;
             let r2 = radius * radius;
             for z in at[2] - radius..=at[2] + radius {
