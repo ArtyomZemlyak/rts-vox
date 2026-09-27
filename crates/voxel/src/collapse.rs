@@ -262,9 +262,17 @@ pub struct CollapseLayer {
     queue: Vec<u32>,
     /// Грани, которые надо пересчитать: `(чанк, грань)`.
     face_todo: Vec<(u32, u8)>,
-    /// Чанки, до которых достаёт контакт, но которые ещё не размечены.
-    /// Пока чанк здесь, контакт с ним считается заземляющим.
+    /// Чанки, которые графу нужно втянуть (ADR-460): соседи правленых
+    /// чанков — правка могла лишить опоры то, что за их гранями, — и
+    /// неразмеченные соседи компонент, у которых нет пути к коренной
+    /// породе по размеченному графу. Контакт с любым неразмеченным чанком
+    /// считается заземляющим — это оценка сверху, — и уточнять её нужно
+    /// только там, где на ней одной что-то может держаться.
     frontier: Vec<u32>,
+    /// Буферы обхода от коренной породы для фронтира: заякоренность
+    /// по глобальному номеру узла и очередь.
+    rooted: Vec<bool>,
+    rooted_walk: Vec<(u32, u16)>,
     /// Потолок втягивания за тик.
     pub max_promote_per_tick: usize,
     /// Потолок переразметок за тик.
@@ -363,6 +371,8 @@ impl CollapseLayer {
             gathered: 0,
             built: 0,
             frontier: Vec::new(),
+            rooted: Vec::new(),
+            rooted_walk: Vec::new(),
             max_promote_per_tick: DEFAULT_PROMOTE_PER_TICK,
             max_relabel_per_tick: DEFAULT_RELABEL_PER_TICK,
             use_split_probe: true,
@@ -594,6 +604,8 @@ impl CollapseLayer {
         // Кусок сверх потолка — нет: его ответ меняют только правка
         // рядом и другой потолок, и повтор каждого тика был бы
         // потолком, срабатывающим каждый тик (ADR-440, ADR-116).
+        // Отрыв меняет граф: безопорное ищется заново.
+        self.extend_frontier();
         self.recheck = torn_total > 0 || bodies.refused > refused_before;
         st.rounds_capped = self.recheck;
         self.report(&mut st);
@@ -614,6 +626,19 @@ impl CollapseLayer {
     /// появления: иначе состав графа зависел бы от порядка обхода
     /// правок, то есть от того, куда игрок кликнул раньше.
     fn promote(&mut self, w: &World) -> usize {
+        // What lay past an edited chunk's faces may have stood on the
+        // cells the edit took, whether or not anything still touches it:
+        // the neighbours are taken in (ADR-460).
+        for k in 0..self.dirty.len() {
+            let i = self.dirty[k] as usize;
+            for f in 0..FACES {
+                if let Some(j) = self.neighbour(i, f) {
+                    if self.nodes[j].is_none() {
+                        self.frontier.push(j as u32);
+                    }
+                }
+            }
+        }
         let mut done = 0usize;
         // Втягивание идёт **пачками**, а не по чанку.
         //
@@ -623,13 +648,11 @@ impl CollapseLayer {
         // находятся при пересчёте граней, поэтому раунды нужны, но их
         // единицы, а не десятки.
         while done < self.max_promote_per_tick {
-            self.frontier.sort_unstable();
-            self.frontier.dedup();
+            self.extend_frontier();
             let batch: Vec<u32> = self
                 .frontier
                 .iter()
                 .copied()
-                .filter(|&i| self.nodes[i as usize].is_none())
                 .take(self.max_promote_per_tick - done)
                 .collect();
             if batch.is_empty() {
@@ -644,17 +667,75 @@ impl CollapseLayer {
                 self.mark_faces(i);
                 done += 1;
             }
-            // Every selected chunk now has nodes. Filter known entries in
-            // one pass instead of searching the whole batch per frontier
-            // entry; the next round and the final cleanup use this same
-            // predicate, so neither promotion order nor saved state changes.
             self.frontier.retain(|&i| self.nodes[i as usize].is_none());
             self.rebuild_index();
             self.refresh_faces(w);
         }
-        // Всё, что уже в графе, с фронтира уходит.
-        self.frontier.retain(|&i| self.nodes[i as usize].is_none());
+        self.extend_frontier();
         done
+    }
+
+    /// Добавить во фронтир неразмеченных соседей тех компонент, до которых
+    /// от коренной породы не доходит путь по размеченным узлам (ADR-460).
+    /// Контакт с неразмеченным держит такую компоненту только оценкой
+    /// сверху, и уточнить её может лишь втягивание соседа. Компонента
+    /// на породе держится, что бы ни лежало за её прочими гранями, и
+    /// соседей не тянет: прежде тянула любая, и граф после первой правки
+    /// заливал весь сплошной грунт карты по потолку втягивания за тик,
+    /// а разбор каждого тика шёл по растущему графу. Фронтир остаётся
+    /// по возрастанию номера чанка, без размеченных.
+    fn extend_frontier(&mut self) {
+        let total = self.reached.len();
+        self.rooted.clear();
+        self.rooted.resize(total, false);
+        self.rooted_walk.clear();
+        for &ci in &self.known {
+            let i = ci as usize;
+            let nd = self.nodes[i].as_ref().expect("known");
+            for lab in 0..nd.n {
+                if nd.bedrock[lab] {
+                    self.rooted[self.base[i] as usize + lab] = true;
+                    self.rooted_walk.push((ci, lab as u16));
+                }
+            }
+        }
+        while let Some((ci, lab)) = self.rooted_walk.pop() {
+            let nd = self.nodes[ci as usize].as_ref().expect("known");
+            for &CachedLink {
+                chunk: j, lab: b, ..
+            } in nd.links_for(lab as usize)
+            {
+                if self.nodes[j as usize].is_none() {
+                    continue;
+                }
+                let id = (self.base[j as usize] + u32::from(b)) as usize;
+                if !self.rooted[id] {
+                    self.rooted[id] = true;
+                    self.rooted_walk.push((j, b));
+                }
+            }
+        }
+        for &ci in &self.known {
+            let i = ci as usize;
+            let nd = self.nodes[i].as_ref().expect("known");
+            let base = self.base[i] as usize;
+            for f in 0..FACES {
+                if nd.ground[f]
+                    .iter()
+                    .all(|&a| self.rooted[base + usize::from(a)])
+                {
+                    continue;
+                }
+                if let Some(j) = self.neighbour(i, f) {
+                    if self.nodes[j].is_none() {
+                        self.frontier.push(j as u32);
+                    }
+                }
+            }
+        }
+        self.frontier.sort_unstable();
+        self.frontier.dedup();
+        self.frontier.retain(|&i| self.nodes[i as usize].is_none());
     }
 
     /// Разметить компоненты чанка заново и обновить его грани.
@@ -856,11 +937,10 @@ impl CollapseLayer {
                 }
                 nd.edges[f].sort_unstable();
             }
-            Some(j) => {
+            Some(_) => {
                 // Сосед ещё не в графе. Контакт с ним считается
-                // заземляющим — это оценка сверху, — а сам он ставится
-                // в очередь на втягивание.
-                let mut contact = false;
+                // заземляющим — это оценка сверху; нужно ли его
+                // втягивать, решает фронтир (ADR-460).
                 let (dx, dy, dz) = FACE_DIR[f];
                 for seg in 0..nd.faces[f].len() {
                     let (start, len, a) = nd.faces[f][seg];
@@ -877,15 +957,11 @@ impl CollapseLayer {
                         }
                         if w.solid(sx as u32, sy as u32, sz as u32) {
                             nd.ground[f].push(a);
-                            contact = true;
                             break;
                         }
                     }
                 }
                 nd.ground[f].sort_unstable();
-                if contact && !self.frontier.contains(&(j as u32)) {
-                    self.frontier.push(j as u32);
-                }
             }
         }
         self.nodes[i] = Some(nd);
@@ -1939,6 +2015,78 @@ mod tests {
         assert!(!w.solid(50, DECK, 8), "правая половина осталась");
         // Основание опоры ниже подреза стоит.
         assert!(w.solid(PIER, 2, 8), "низ опоры пропал");
+    }
+
+    /// **A cut on a chunk's face drops what stood past it** (ADR-460).
+    /// Cut at the top row of its chunk, the pier leaves nothing touching
+    /// the chunk above: that chunk was taken in only as the neighbour of
+    /// a component in contact with it, and the pier's top with the deck
+    /// hung in the air for ever. The neighbours of an edited chunk are
+    /// taken in; past them, only what has no path to bedrock pulls more.
+    #[test]
+    fn a_cut_on_a_chunk_face_drops_what_stood_past_it() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16, test_gravity());
+        cut(&mut w, CS as u32 - 1);
+        w.flush();
+        let mut edits: Vec<Edit> = w.edits().to_vec();
+        let mut detached = 0;
+        for _ in 0..4 {
+            detached += c.apply(&mut w, &edits, &mut b).detached;
+            edits.clear();
+            if !c.pending() {
+                break;
+            }
+        }
+        assert_eq!(detached, 1, "what stood past the cut stayed up");
+        w.flush();
+        assert!(!w.solid(PIER, DECK, 8), "the pier's top stayed");
+        assert!(!w.solid(50, DECK, 8), "the deck stayed");
+        assert!(
+            w.solid(PIER, CS as u32 - 2, 8),
+            "the pier under the cut went"
+        );
+    }
+
+    /// **Terrain standing on bedrock pulls nothing in** (ADR-460). Every
+    /// component in contact with an unknown chunk used to take it in, so
+    /// one edit in solid ground flooded the whole of it into the graph at
+    /// the promotion cap a tick, for as long as there was ground left.
+    #[test]
+    fn an_edit_in_solid_ground_does_not_flood_the_graph() {
+        struct Solid;
+        impl crate::Generator for Solid {
+            fn material(&self, _x: u32, y: u32, _z: u32) -> Mat {
+                if y < 40 {
+                    2
+                } else {
+                    AIR
+                }
+            }
+        }
+        let mut w = World::new(256, 64, 256, 1_000_000, Box::new(Solid));
+        let mut c = CollapseLayer::new(&w);
+        c.max_promote_per_tick = 8;
+        let mut b = Bodies::new(16, test_gravity());
+        w.queue_dig(128, 39, 128);
+        w.flush();
+        let mut edits: Vec<Edit> = w.edits().to_vec();
+        for _ in 0..64 {
+            c.apply(&mut w, &edits, &mut b);
+            edits.clear();
+            if !c.pending() {
+                break;
+            }
+        }
+        assert!(!c.pending(), "the graph is still being taken in");
+        // The edited chunk, its six neighbours and what they stand on.
+        assert!(
+            c.known.len() <= 16,
+            "the graph flooded: {} chunks",
+            c.known.len()
+        );
+        assert!(b.list.is_empty());
     }
 
     /// **A piece too big to fall waits for a change** (ADR-440). Only an
