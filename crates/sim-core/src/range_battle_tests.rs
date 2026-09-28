@@ -241,7 +241,10 @@ fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
             },
         ],
     };
-    let rules = Rules { tuning: &tuning };
+    let rules = Rules {
+        tuning: &tuning,
+        controlled_allied: false,
+    };
     assert_eq!(
         rules.decide(&observation),
         vec![
@@ -335,7 +338,11 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
         },
     ];
     assert_eq!(
-        Rules { tuning: &tuning }.decide(&Observation {
+        Rules {
+            tuning: &tuning,
+            controlled_allied: false
+        }
+        .decide(&Observation {
             version: OBSERVATION_VERSION,
             observed_tick: 20,
             decision_tick: 30,
@@ -350,7 +357,11 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
     units[0].alive = false;
     units[1].alive = false;
     assert_eq!(
-        Rules { tuning: &tuning }.decide(&Observation {
+        Rules {
+            tuning: &tuning,
+            controlled_allied: false
+        }
+        .decide(&Observation {
             version: OBSERVATION_VERSION,
             observed_tick: 40,
             decision_tick: 50,
@@ -362,6 +373,65 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
             order: AiOrder::Attack(4),
         }]
     );
+}
+
+#[test]
+fn autonomous_battle_orders_both_sides_and_replays() {
+    let mut r = arena(RangeUnitKind::Tank);
+    assert!(r.set_ai_vs_ai(true));
+    r.start_battle().unwrap();
+    r.step();
+    assert_eq!(r.battle.actors[0].order, Order::Attack(1));
+    assert_eq!(r.battle.actors[1].order, Order::Attack(0));
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert!(replay.battle.autonomous);
+    for _ in 0..20 {
+        r.step();
+        replay.step();
+        assert_eq!(r.state_hash(), replay.state_hash());
+    }
+}
+
+#[test]
+fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
+    let tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    let unit = |id, allied, x| UnitObservation {
+        id,
+        allied,
+        alive: true,
+        armed: true,
+        mobile: true,
+        kind: RangeUnitKind::Tank,
+        position: [x, 100],
+        ordered_target: None,
+    };
+    let observation = Observation {
+        version: OBSERVATION_VERSION,
+        observed_tick: 0,
+        decision_tick: 0,
+        size: [10000, 192, 10000],
+        units: vec![
+            unit(0, true, 100),
+            unit(1, true, 9000),
+            unit(2, false, 200),
+            unit(3, false, 8900),
+        ],
+    };
+    let red = Rules {
+        tuning: &tuning,
+        controlled_allied: false,
+    }
+    .decide(&observation);
+    let blue = Rules {
+        tuning: &tuning,
+        controlled_allied: true,
+    }
+    .decide(&observation);
+    assert_eq!(red[0].order, AiOrder::Attack(0));
+    assert_eq!(red[1].order, AiOrder::Attack(1));
+    assert_eq!(blue[0].order, AiOrder::Attack(2));
+    assert_eq!(blue[1].order, AiOrder::Attack(3));
 }
 
 #[test]
@@ -1483,7 +1553,7 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&41u32.to_le_bytes());
-    old.truncate(old.len() - r.battle.actors.len() - 1);
+    old.truncate(old.len() - r.battle.actors.len() - 2);
     let old = BlastRange::restore(r.config.clone(), &old).unwrap();
     assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
 }
@@ -1605,6 +1675,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     // No active waves: 42 and 43 have the same bytes for legacy ammunition.
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&42u32.to_le_bytes());
+    old.pop(); // Version 46's autonomous battle flag is absent from 42.
     old.pop(); // Version 45's manual-route flag is absent from 42.
     assert_eq!(
         BlastRange::restore(r.config.clone(), &old)
@@ -1615,6 +1686,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     r.set_battle_weapon(0, Some(Weapon::Annihilation));
     let mut invalid = r.snapshot();
     invalid[..4].copy_from_slice(&42u32.to_le_bytes());
+    invalid.pop();
     invalid.pop();
     assert!(BlastRange::restore(r.config.clone(), &invalid).is_none());
 }

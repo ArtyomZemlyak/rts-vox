@@ -327,6 +327,7 @@ fn main() {
     let mut battle_weapon = None;
     let mut battle_eight = false;
     let mut world_battle = false;
+    let mut ai_vs_ai = false;
     let mut skirmish = None;
     let mut hud_drawer = 0;
     let mut window_size = [1600, 900];
@@ -376,6 +377,7 @@ fn main() {
             }
             "--battle" => battle_preset = true,
             "--world-battle" => world_battle = true,
+            "--ai-vs-ai" => ai_vs_ai = true,
             "--battle-weapon" => {
                 i += 1;
                 battle_weapon = Some(match args[i].as_str() {
@@ -625,6 +627,10 @@ fn main() {
         None,
     )
     .expect("valid range");
+    if ai_vs_ai {
+        assert!(world_battle, "--ai-vs-ai requires --world-battle");
+        assert!(sim.set_ai_vs_ai(true));
+    }
     if let Some(file) = ai_rules_file {
         let source = std::fs::read_to_string(&file).expect("--ai-rules file");
         let tuning = modding::battle_ai::Tuning::from_ron(&source).expect("--ai-rules RON");

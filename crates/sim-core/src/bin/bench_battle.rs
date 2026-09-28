@@ -9,6 +9,12 @@ fn main() {
     let replay = args.iter().any(|a| a == "--replay");
     let world_battle = assault || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
+    let trace = args.iter().any(|a| a == "--trace");
+    let ai_vs_ai = args.iter().any(|a| a == "--ai-vs-ai");
+    assert!(
+        !ai_vs_ai || world_battle,
+        "--ai-vs-ai requires --world or --assault"
+    );
     let until_end = assault || args.iter().any(|a| a == "--until-end");
     let mut layout =
         modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
@@ -73,6 +79,9 @@ fn main() {
     ))
     .unwrap();
     let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
+    if ai_vs_ai {
+        assert!(sim.set_ai_vs_ai(true));
+    }
     sim.start_battle().unwrap();
     if assault {
         assert!(sim.set_battle_weapon(1, Some(Weapon::Annihilation)));
@@ -83,6 +92,7 @@ fn main() {
     let mut assault_shots = 0;
     let mut assault_weapon = true;
     let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
+    let mut impact_bins = std::collections::BTreeMap::<(u8, i32, i32), u32>::new();
     let ticks = args
         .windows(2)
         .find(|w| w[0] == "--ticks")
@@ -110,6 +120,8 @@ fn main() {
             last = now;
             phases.entry(phase).or_default().push(elapsed);
         });
+        // Measure the authoritative tick, excluding optional replay and log I/O.
+        samples.push(start.elapsed().as_micros());
         if replay && sim.tick == snapshot_tick {
             let bytes = sim.snapshot();
             println!(
@@ -138,8 +150,14 @@ fn main() {
                 }
             }
         }
-        samples.push(start.elapsed().as_micros());
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
+        if trace {
+            for impact in &sim.battle.impacts {
+                *impact_bins
+                    .entry((impact.weapon as u8, impact.at[0] / 200, impact.at[2] / 200))
+                    .or_default() += 1;
+            }
+        }
         if assault {
             let fired = sim.battle.actors[1].fired;
             if fired != assault_shots
@@ -169,6 +187,30 @@ fn main() {
                 sim.battle_counts(),
                 sim.battle_base_integrity()
             );
+        }
+        if trace && sim.tick % 600 == 0 {
+            println!(
+                "trace tick={} phase={:?} bases={:?}",
+                sim.tick,
+                sim.battle.phase,
+                sim.battle_base_integrity()
+            );
+            let mut hotspots: Vec<_> = std::mem::take(&mut impact_bins).into_iter().collect();
+            hotspots.sort_by_key(|&(key, count)| (std::cmp::Reverse(count), key));
+            println!(
+                "  impact_hotspots={:?}",
+                hotspots.into_iter().take(5).collect::<Vec<_>>()
+            );
+            for (id, u) in sim.units.iter().enumerate() {
+                if u.kind.emplacement() || !u.status.alive {
+                    continue;
+                }
+                let a = &sim.battle.actors[id];
+                println!("  side={} unit={id} at=({}, {}) order={:?} target={:?} dest={:?} vel={} path={}/{} searching={} blocked={} fired={} damage={}",
+                    if sim.allied(id) { "blue" } else { "red" }, u.at[0], u.at[2], a.order, a.target,
+                    u.motion.destination, u.motion.drive.vel.to_int_trunc(), u.motion.cursor,
+                    u.motion.path.len(), u.motion.searching(), u.motion.blocked, a.fired, u.revision);
+            }
         }
         if until_end && sim.battle.phase != sim_core::blast::battle::Phase::Fighting {
             break;

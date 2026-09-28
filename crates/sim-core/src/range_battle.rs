@@ -113,6 +113,8 @@ pub struct Battle {
     pub energy_config: ExplosionConfig,
     pub anni_config: ExplosionConfig,
     pub(super) ai: ai::Controller,
+    /// Both teams use the same deterministic decision clock in spectator mode.
+    pub autonomous: bool,
 }
 impl Battle {
     pub fn new(units: &[RangeUnit], resistance: u32) -> Self {
@@ -181,6 +183,7 @@ impl Battle {
             energy_config,
             anni_config,
             ai: ai::Controller::new(),
+            autonomous: false,
         }
     }
     pub fn config(&self, weapon: Weapon) -> &ExplosionConfig {
@@ -481,6 +484,14 @@ impl BlastRange {
     pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
         &self.battle.ai.tuning
     }
+    /// Enable autonomous orders for both teams before the fight starts.
+    pub fn set_ai_vs_ai(&mut self, enabled: bool) -> bool {
+        if !self.battle_mode() || self.battle.phase != Phase::Setup {
+            return false;
+        }
+        self.battle.autonomous = enabled;
+        true
+    }
     /// Rules are data-driven and can be replaced while setting up a battle.
     /// Changing them during a fight starts a new decision cycle on this tick.
     pub fn configure_enemy_ai(&mut self, tuning: modding::battle_ai::Tuning) -> Result<(), String> {
@@ -586,8 +597,16 @@ impl BlastRange {
         let observation = self.enemy_ai_observation_for(battle);
         let rules = ai::Rules {
             tuning: &battle.ai.tuning,
+            controlled_allied: false,
         }
         .decide(&observation);
+        let allied_rules = battle.autonomous.then(|| {
+            ai::Rules {
+                tuning: &battle.ai.tuning,
+                controlled_allied: true,
+            }
+            .decide(&observation)
+        });
         let supplied = battle.ai.pending.take();
         for fallback in rules {
             let decision = supplied
@@ -595,20 +614,32 @@ impl BlastRange {
                 .and_then(|plan| plan.iter().find(|d| d.actor == fallback.actor))
                 .copied()
                 .unwrap_or(fallback);
-            if !self.apply_enemy_ai_decision(battle, decision) {
-                self.apply_enemy_ai_decision(battle, fallback);
+            if !self.apply_ai_decision(battle, decision, false) {
+                self.apply_ai_decision(battle, fallback, false);
+            }
+        }
+        if let Some(rules) = allied_rules {
+            for decision in rules {
+                self.apply_ai_decision(battle, decision, true);
             }
         }
         battle.ai.next_tick = self.tick.saturating_add(battle.ai.tuning.decision_ticks);
     }
-    fn apply_enemy_ai_decision(&mut self, battle: &mut Battle, decision: ai::Decision) -> bool {
+    fn apply_ai_decision(
+        &mut self,
+        battle: &mut Battle,
+        decision: ai::Decision,
+        side: bool,
+    ) -> bool {
         let id = decision.actor;
-        if self.allied(id) || !self.units.get(id).is_some_and(|u| u.status.alive) {
+        if self.allied(id) != side || !self.units.get(id).is_some_and(|u| u.status.alive) {
             return false;
         }
         let order = match decision.order {
             ai::AiOrder::Attack(target) => {
-                if !self.allied(target) || !self.units.get(target).is_some_and(|u| u.status.alive) {
+                if self.allied(target) == side
+                    || !self.units.get(target).is_some_and(|u| u.status.alive)
+                {
                     return false;
                 }
                 Order::Attack(target)
@@ -810,6 +841,66 @@ impl BlastRange {
         }
         natural
     }
+    /// Try short lateral firing positions when a hill hides a target that is
+    /// already inside weapon range. This runs only on the pursuit cadence.
+    fn visible_flank(
+        &self,
+        id: usize,
+        target: [i32; 3],
+        natural: [i32; 2],
+        muzzle_y: i32,
+        pursuit_ticks: u32,
+    ) -> [i32; 2] {
+        let here = [
+            self.units[id].motion.pos[0].to_int_trunc(),
+            self.units[id].motion.pos[2].to_int_trunc(),
+        ];
+        let vx = Fx::from_int(target[0] - here[0]);
+        let vz = Fx::from_int(target[2] - here[1]);
+        let length = vx.mul(vx).add(vz.mul(vz)).sqrt().max(Fx::ONE);
+        let side = [Fx::ZERO.sub(vz.div(length)), vx.div(length)];
+        let start = if (self.tick / pursuit_ticks.max(1) + id as u32) & 1 == 0 {
+            1
+        } else {
+            -1
+        };
+        let muzzle_above_floor = muzzle_y - motion::floor(&self.world, here[0], here[1]);
+        let mut fallback = natural;
+        for distance in [180, 320, 500] {
+            for sign in [start, -start] {
+                let offset = Fx::from_int(distance * sign);
+                let candidate = [
+                    Fx::from_int(natural[0])
+                        .add(side[0].mul(offset))
+                        .to_int_trunc(),
+                    Fx::from_int(natural[1])
+                        .add(side[1].mul(offset))
+                        .to_int_trunc(),
+                ];
+                if candidate[0] < 16
+                    || candidate[1] < 16
+                    || candidate[0] >= self.size[0] as i32 - 16
+                    || candidate[1] >= self.size[2] as i32 - 16
+                {
+                    continue;
+                }
+                if fallback == natural {
+                    fallback = candidate;
+                }
+                let y = motion::floor(&self.world, candidate[0], candidate[1]) + muzzle_above_floor;
+                if voxel::los::line_of_sight(
+                    &self.world,
+                    (candidate[0], y, candidate[1]),
+                    (target[0], target[1], target[2]),
+                )
+                .clear
+                {
+                    return candidate;
+                }
+            }
+        }
+        fallback
+    }
     pub fn battle_counts(&self) -> [usize; 2] {
         let mut n = [0; 2];
         for (i, u) in self.units.iter().enumerate() {
@@ -867,6 +958,7 @@ impl BlastRange {
             energy_config: self.battle.energy_config.clone(),
             anni_config: self.battle.anni_config.clone(),
             ai: self.battle.ai.clone(),
+            autonomous: self.battle.autonomous,
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
@@ -1038,7 +1130,28 @@ impl BlastRange {
             self.units[id].update_pose(a.turret.angle);
             let in_range =
                 dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
-            if !in_range {
+            // Bullets and penetrators cannot help by firing into a hill.
+            // Check the actual muzzle ray only after entering range; the
+            // normal projectile sweep remains authoritative for a hit.
+            let blocked_direct = in_range
+                && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic)
+                && !kind.emplacement()
+                && !matches!(a.order, Order::Ground(_))
+                && weapons::muzzles(&self.units[id], a.turret.angle)
+                    .first()
+                    .is_some_and(|muzzle| {
+                        !voxel::los::line_of_sight(
+                            &self.world,
+                            (
+                                muzzle[0].to_int_trunc(),
+                                muzzle[1].to_int_trunc(),
+                                muzzle[2].to_int_trunc(),
+                            ),
+                            (p[0], p[1], p[2]),
+                        )
+                        .clear
+                    });
+            if !in_range || blocked_direct {
                 a.charge = None;
                 if kind.emplacement() {
                     continue;
@@ -1056,26 +1169,40 @@ impl BlastRange {
                     if self.units[id].motion.searching() && !target_changed {
                         continue;
                     }
+                    let needs_detour = self.units[id].motion.blocked;
                     let length = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
                     // Aim for a firing position before the target hull, never its occupied centre.
-                    let approach = length
-                        .sub(Fx::from_ratio(range * b.tuning.standoff_milli, 1000))
-                        .max(Fx::ZERO)
-                        .div(length);
+                    let standoff = if blocked_direct {
+                        (range / 3).min(200)
+                    } else {
+                        range * b.tuning.standoff_milli / 1000
+                    };
+                    let approach = length.sub(Fx::from_int(standoff)).max(Fx::ZERO).div(length);
                     let dest = [
                         from[0].add(dx.mul(approach)).to_int_trunc(),
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
                     let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
+                    let dest = if blocked_direct || needs_detour {
+                        let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
+                            .first()
+                            .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
+                        self.visible_flank(id, p, dest, muzzle_y, b.tuning.pursuit_ticks)
+                    } else {
+                        dest
+                    };
                     // Keep a usable firing position when our own detour changes
                     // the approach angle. Comparing the new radial point with
                     // the old one replanned even against a stationary target.
                     // A moving target still invalidates it on leaving its reach.
                     let changed = target_changed
+                        || needs_detour
+                        || (blocked_direct && self.units[id].motion.destination.is_none())
                         || self.units[id].motion.destination.is_none_or(|old| {
                             let x = i64::from(p[0]) - i64::from(old[0]);
                             let z = i64::from(p[2]) - i64::from(old[1]);
-                            x * x + z * z > i64::from(range) * i64::from(range)
+                            let reach = if blocked_direct { 200 } else { range };
+                            x * x + z * z > i64::from(reach) * i64::from(reach)
                         });
                     if changed {
                         let others: Vec<_> = self

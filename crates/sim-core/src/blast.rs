@@ -2629,7 +2629,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(45);
+        b.u32(46);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2792,6 +2792,9 @@ impl BlastRange {
         if version < 45 {
             b.bool(self.manual_route);
         }
+        if version < 46 {
+            b.bool(self.battle.autonomous);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2807,7 +2810,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=45).contains(&version) {
+        if !(27..=46).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3220,6 +3223,9 @@ impl BlastRange {
         }
         if version >= 45 {
             r.manual_route = s.bool();
+        }
+        if version >= 46 {
+            r.battle.autonomous = s.bool();
         }
         (s.ok() && s.left() == 0).then_some(r)
     }

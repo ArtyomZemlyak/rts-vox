@@ -49,6 +49,9 @@ pub trait Policy {
 
 pub struct Rules<'a> {
     pub tuning: &'a Tuning,
+    /// Which team's orders this policy is producing. The observation keeps
+    /// absolute allegiance so a model adapter can use the same input.
+    pub controlled_allied: bool,
 }
 
 impl Rules<'_> {
@@ -57,69 +60,67 @@ impl Rules<'_> {
             + (i64::from(a.position[1]) - i64::from(b.position[1])).abs()
     }
 
-    fn score(&self, target: &UnitObservation, enemies: &[&UnitObservation]) -> i64 {
-        enemies
-            .iter()
-            .map(|u| Self::distance(u, target))
-            .sum::<i64>()
+    fn score(
+        &self,
+        actor: &UnitObservation,
+        target: &UnitObservation,
+        allies: &[&UnitObservation],
+    ) -> i64 {
+        let support = if self.tuning.focus_fire {
+            allies
+                .iter()
+                .filter(|u| {
+                    u.id != actor.id
+                        && u.ordered_target == Some(target.id)
+                        && Self::distance(u, actor) <= 600
+                })
+                .count()
+                .min(2) as i64
+        } else {
+            0
+        };
+        Self::distance(actor, target)
             - i64::from(self.tuning.armed_bonus) * i64::from(target.armed)
             - i64::from(self.tuning.mobile_bonus) * i64::from(target.mobile)
+            - support * i64::from(self.tuning.switch_margin)
     }
 }
 
 impl Policy for Rules<'_> {
     fn decide(&self, observation: &Observation) -> Vec<Decision> {
-        let enemies: Vec<_> = observation
+        let allies: Vec<_> = observation
             .units
             .iter()
-            .filter(|u| !u.allied && u.alive && (u.armed || u.mobile))
+            .filter(|u| u.allied == self.controlled_allied && u.alive && (u.armed || u.mobile))
             .collect();
         let targets: Vec<_> = observation
             .units
             .iter()
-            .filter(|u| u.allied && u.alive)
+            .filter(|u| u.allied != self.controlled_allied && u.alive)
             .collect();
         if targets.is_empty() {
             return Vec::new();
         }
-        let shared = if self.tuning.focus_fire {
-            let best = targets
-                .iter()
-                .min_by_key(|u| (self.score(u, &enemies), u.id))
-                .expect("nonempty targets");
-            let prior = enemies
-                .iter()
-                .filter_map(|u| u.ordered_target)
-                .find(|id| targets.iter().any(|u| u.id == *id));
-            let selected = prior
-                .and_then(|id| targets.iter().find(|u| u.id == id))
-                .filter(|old| {
-                    self.score(old, &enemies)
-                        <= self.score(best, &enemies) + i64::from(self.tuning.switch_margin)
-                })
-                .unwrap_or(best);
-            Some(selected.id)
-        } else {
-            None
-        };
-        enemies
+        allies
             .iter()
             .map(|u| Decision {
                 actor: u.id,
-                order: AiOrder::Attack(shared.unwrap_or_else(|| {
+                order: AiOrder::Attack({
+                    let best = targets
+                        .iter()
+                        .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                        .expect("nonempty targets");
                     targets
                         .iter()
-                        .min_by_key(|v| {
-                            (
-                                Self::distance(u, v)
-                                    - i64::from(self.tuning.armed_bonus) * i64::from(v.armed)
-                                    - i64::from(self.tuning.mobile_bonus) * i64::from(v.mobile),
-                                v.id,
-                            )
+                        .find(|v| Some(v.id) == u.ordered_target)
+                        .filter(|old| {
+                            self.score(u, old, &allies)
+                                <= self.score(u, best, &allies)
+                                    + i64::from(self.tuning.switch_margin)
                         })
-                        .expect("nonempty targets")
+                        .unwrap_or(best)
                         .id
-                })),
+                }),
             })
             .collect()
     }

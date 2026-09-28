@@ -145,6 +145,7 @@ pub struct Panel {
     pub drawer: u8,
     pub ranges: bool,
     pub battle_launch: bool,
+    pub battle_auto: bool,
     pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
     history: BTreeMap<u8, Vec<ShotResult>>,
@@ -163,6 +164,7 @@ impl Panel {
             drawer: 0,
             ranges: true,
             battle_launch: false,
+            battle_auto: false,
             briefing: String::new(),
             scenario_run: None,
             history: BTreeMap::new(),
@@ -181,6 +183,7 @@ pub enum Action {
     Play,
     BattlePreset,
     BattleWorld,
+    BattleWorldAuto,
     RangeMode,
     BattleStart,
     Side(bool),
@@ -335,6 +338,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Бой на всей карте", Action::BattleWorld),
+                    ("ИИ против ИИ · вся карта", Action::BattleWorldAuto),
                     ("Бой 2×2 / расстановка", Action::BattlePreset),
                 ],
             ),
@@ -655,10 +659,15 @@ pub fn actions(
         }
         if matches!(
             action,
-            Action::BattleWorld | Action::BattlePreset | Action::RangeMode | Action::Scenario(_)
+            Action::BattleWorld
+                | Action::BattleWorldAuto
+                | Action::BattlePreset
+                | Action::RangeMode
+                | Action::Scenario(_)
         ) {
             panel.briefing.clear();
             panel.battle_launch = false;
+            panel.battle_auto = false;
         }
         match action {
             Action::Drawer(id) => panel.drawer = if panel.drawer == id { 0 } else { id },
@@ -693,20 +702,23 @@ pub fn actions(
                 }
                 Err(e) => scene.notice = e,
             },
-            Action::BattleWorld => match edit.battle_world(scene.sim.config.clone()) {
-                Ok(briefing) => {
-                    panel.briefing = briefing;
-                    panel.battle_launch = true;
-                    panel.drawer = 0;
-                    panel.pending = None;
-                    panel.drive = true;
-                    scene.view = 1;
-                    scene.repeat = false;
-                    panel.demo = false;
-                    panel.ground_fire = false;
+            Action::BattleWorld | Action::BattleWorldAuto => {
+                match edit.battle_world(scene.sim.config.clone()) {
+                    Ok(briefing) => {
+                        panel.battle_auto = action == Action::BattleWorldAuto;
+                        panel.briefing = briefing;
+                        panel.battle_launch = true;
+                        panel.drawer = 0;
+                        panel.pending = None;
+                        panel.drive = true;
+                        scene.view = 1;
+                        scene.repeat = false;
+                        panel.demo = false;
+                        panel.ground_fire = false;
+                    }
+                    Err(e) => scene.notice = e,
                 }
-                Err(e) => scene.notice = e,
-            },
+            }
             Action::BattlePreset => match edit.battle_preset(scene.sim.config.clone()) {
                 Ok(()) => {
                     scene.view = 1;
@@ -1135,6 +1147,9 @@ pub fn scenario_progress(
     keys: Res<ButtonInput<KeyCode>>,
 ) {
     if panel.battle_launch && edit.pending.is_none() && scene.sim.battle_mode() {
+        if panel.battle_auto {
+            scene.sim.set_ai_vs_ai(true);
+        }
         match scene.sim.start_battle() {
             Ok(()) => {
                 panel.briefing.clear();
@@ -1144,6 +1159,7 @@ pub fn scenario_progress(
             Err(e) => scene.notice = e.into(),
         }
         panel.battle_launch = false;
+        panel.battle_auto = false;
     }
     if scene.sim.player
         || scene.sim.battle_mode()
@@ -1343,6 +1359,9 @@ pub fn refresh(
         let [own, enemy] = scene.sim.battle_counts();
         let phase = match scene.sim.battle.phase {
             sim_core::blast::battle::Phase::Setup => "Расставьте отряды и нажмите «Начать бой»",
+            sim_core::blast::battle::Phase::Fighting if scene.sim.battle.autonomous => {
+                "БОЙ · ИИ × ИИ"
+            }
             sim_core::blast::battle::Phase::Fighting => "БОЙ",
             sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
             sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
