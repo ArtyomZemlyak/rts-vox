@@ -435,6 +435,107 @@ fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
 }
 
 #[test]
+fn ai_does_not_cancel_a_blocked_hulls_escape_manoeuvre() {
+    let mut r = arena(RangeUnitKind::Tank);
+    std::sync::Arc::make_mut(&mut r.battle.tuning).kinetic_range = 100;
+    r.start_battle().unwrap();
+    r.battle.autonomous = true;
+    r.battle.actors[0].order = Order::Attack(1);
+    r.battle.actors[0].target = Some(1);
+    r.units[0].motion.destination = Some([250, 336]);
+    r.units[0].motion.blocked = true;
+    assert!(r.units[0].motion.recovering());
+    r.battle_tick();
+    assert_eq!(r.units[0].motion.destination, Some([250, 336]));
+    assert!(r.units[0].motion.recovering());
+}
+
+#[test]
+fn artillery_attacks_the_base_until_an_armed_defender_is_close() {
+    let tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    let mut observation = Observation {
+        version: OBSERVATION_VERSION,
+        observed_tick: 0,
+        decision_tick: 0,
+        size: [10000, 192, 10000],
+        units: vec![
+            UnitObservation {
+                id: 0,
+                allied: true,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Artillery,
+                position: [1000, 1000],
+                ordered_target: None,
+            },
+            UnitObservation {
+                id: 1,
+                allied: false,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [4000, 4000],
+                ordered_target: None,
+            },
+            UnitObservation {
+                id: 2,
+                allied: false,
+                alive: true,
+                armed: false,
+                mobile: false,
+                kind: RangeUnitKind::Base,
+                position: [8500, 8500],
+                ordered_target: None,
+            },
+        ],
+    };
+    let rules = Rules {
+        tuning: &tuning,
+        controlled_allied: true,
+    };
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(2));
+    observation.units[1].position = [1800, 1200];
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(1));
+}
+
+#[test]
+fn strategic_road_waypoints_reach_both_command_sectors() {
+    let roads = RangeLayout::from_ron(include_str!("../../../data/range-km.ron"))
+        .unwrap()
+        .roads;
+    for (mut from, goal) in [([1460, 760], [8820, 8870]), ([8900, 8650], [1530, 630])] {
+        let mut visited = std::collections::BTreeSet::new();
+        for _ in 0..100 {
+            let Some(next) = ai::road_waypoint(&roads, from, goal) else {
+                break;
+            };
+            assert_ne!(next, from);
+            assert!(visited.insert(next), "road guidance looped at {next:?}");
+            from = next;
+        }
+        assert!(
+            (from[0] - goal[0]).abs() + (from[1] - goal[1]).abs() < 500,
+            "road guidance stopped at {from:?}, goal {goal:?}"
+        );
+    }
+    // The northern switchback used to keep siege artillery circling the
+    // junction marker around (2930, 590) instead of taking the next leg.
+    let next = ai::road_waypoint(&roads, [2833, 558], [8820, 8870]).unwrap();
+    assert!(
+        next[1] > 590,
+        "artillery must enter the outgoing road: {next:?}"
+    );
+    let next = ai::road_waypoint(&roads, [4366, 773], [8820, 8870]).unwrap();
+    assert!(
+        next[0] > 4450,
+        "a broad turn must not send the hull back: {next:?}"
+    );
+}
+
+#[test]
 fn external_ai_plan_is_validated_scheduled_and_saved() {
     let mut r = arena(RangeUnitKind::Tank);
     assert!(r.enemy_ai_observation().is_none());

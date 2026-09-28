@@ -986,6 +986,17 @@ impl Motion {
     pub fn searching(&self) -> bool {
         self.hunt.is_some()
     }
+    /// A refused route owns the hull until its bounded escape sequence ends.
+    /// Changing the goal meanwhile resets the attempt counter and prevents
+    /// the unit from ever finishing a manoeuvre on difficult terrain.
+    pub fn recovering(&self) -> bool {
+        self.escape_left > 0 || (self.blocked && self.escape < ESCAPES)
+    }
+    /// Diagnostic state for movement traces: attempts begun and ticks left
+    /// in the current manoeuvre.
+    pub fn recovery_state(&self) -> [u32; 2] {
+        [self.escape, self.escape_left]
+    }
     /// Cells the search in flight has expanded so far; zero when none is
     /// in flight or when it has not walked yet (ADR-314).
     pub fn frontier_nodes(&self) -> u32 {

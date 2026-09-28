@@ -3,6 +3,7 @@
 use super::*;
 use fx::blob::{Blob, Scan};
 use modding::battle_ai::Tuning;
+use modding::range::RangeRoad;
 
 pub const OBSERVATION_VERSION: u32 = 1;
 
@@ -45,6 +46,131 @@ pub struct Decision {
 /// Returned decisions must still pass `submit_enemy_ai_plan` validation.
 pub trait Policy {
     fn decide(&self, observation: &Observation) -> Vec<Decision>;
+}
+
+/// One short, authored-road waypoint toward a distant objective. Roads are
+/// only a strategic corridor: Motion still checks the complete vehicle and
+/// terrain before accepting any step. No simulation state or floating point
+/// estimate is hidden in this choice.
+pub(super) fn road_waypoint(
+    roads: &[RangeRoad],
+    from: [i32; 2],
+    goal: [i32; 2],
+) -> Option<[i32; 2]> {
+    let mut nodes = Vec::<[i32; 2]>::new();
+    let mut edges = Vec::<(usize, usize, i64)>::new();
+    let mut segments = Vec::<(usize, usize, i32)>::new();
+    let distance = |a: [i32; 2], b: [i32; 2]| -> i64 {
+        i64::from((a[0] - b[0]).abs()) + i64::from((a[1] - b[1]).abs())
+    };
+    let squared = |a: [i32; 2], b: [i32; 2]| -> i64 {
+        let dx = i64::from(a[0] - b[0]);
+        let dz = i64::from(a[1] - b[1]);
+        dx * dx + dz * dz
+    };
+    for road in roads {
+        for pair in road.points.windows(2) {
+            let mut ids = [0; 2];
+            for (k, &point) in pair.iter().enumerate() {
+                ids[k] = nodes.iter().position(|&p| p == point).unwrap_or_else(|| {
+                    nodes.push(point);
+                    nodes.len() - 1
+                });
+            }
+            edges.push((ids[0], ids[1], distance(pair[0], pair[1])));
+            segments.push((ids[0], ids[1], road.width));
+        }
+    }
+    let end = (0..nodes.len()).min_by_key(|&i| (squared(nodes[i], goal), i))?;
+    let mut costs = vec![i64::MAX; nodes.len()];
+    let mut visited = vec![false; nodes.len()];
+    costs[end] = 0;
+    for _ in 0..nodes.len() {
+        let Some(i) = (0..nodes.len())
+            .filter(|&i| !visited[i])
+            .min_by_key(|&i| (costs[i], i))
+        else {
+            break;
+        };
+        if costs[i] == i64::MAX {
+            break;
+        }
+        visited[i] = true;
+        for &(a, b, length) in &edges {
+            let j = if a == i {
+                b
+            } else if b == i {
+                a
+            } else {
+                continue;
+            };
+            costs[j] = costs[j].min(costs[i].saturating_add(length));
+        }
+    }
+    let project = |a: [i32; 2], b: [i32; 2]| {
+        let d = [i64::from(b[0] - a[0]), i64::from(b[1] - a[1])];
+        let p = [i64::from(from[0] - a[0]), i64::from(from[1] - a[1])];
+        let length = d[0] * d[0] + d[1] * d[1];
+        if length == 0 {
+            return a;
+        }
+        let dot = (p[0] * d[0] + p[1] * d[1]).clamp(0, length);
+        [
+            a[0] + (d[0] * dot / length) as i32,
+            a[1] + (d[1] * dot / length) as i32,
+        ]
+    };
+    let &(a, b, width) = segments.iter().min_by_key(|&&(a, b, _)| {
+        let q = project(nodes[a], nodes[b]);
+        (squared(q, from), a, b)
+    })?;
+    let q = project(nodes[a], nodes[b]);
+    // Corners and large hulls can sit outside the narrow painted strip while
+    // still following it. A smaller tolerance alternated between returning
+    // to the centre line and advancing to the next junction forever.
+    if squared(q, from) > i64::from(width.max(160)).pow(2) {
+        return Some(q);
+    }
+    let end_cost = |i: usize| costs[i].saturating_add(distance(q, nodes[i]));
+    let toward = if (end_cost(a), a) <= (end_cost(b), b) {
+        a
+    } else {
+        b
+    };
+    // A hull need not drive through the exact centre of a junction. On a
+    // switchback the authored point may sit against the steep inside edge;
+    // accepting the outgoing road as soon as the hull is near the junction
+    // lets the local planner pick a passable arc around it.
+    let junction_reach = 160;
+    let (start, next) = if squared(q, nodes[toward]) <= i64::from(junction_reach).pow(2) {
+        let next = edges
+            .iter()
+            .filter_map(|&(a, b, length)| {
+                let j = if a == toward {
+                    b
+                } else if b == toward {
+                    a
+                } else {
+                    return None;
+                };
+                (costs[j] < costs[toward]).then_some((j, length))
+            })
+            .min_by_key(|&(j, length)| (costs[j].saturating_add(length), j))?
+            .0;
+        (nodes[toward], nodes[next])
+    } else {
+        (q, nodes[toward])
+    };
+    let d = [next[0] - start[0], next[1] - start[1]];
+    let length = d[0].abs().max(d[1].abs()).max(1);
+    // Long chords cut across the outside of bends and can ask the local
+    // planner to climb terrain outside the cleared road. Keep the next
+    // objective close enough to the authored strip.
+    let step = length.min(240);
+    Some([
+        start[0] + d[0] * step / length,
+        start[1] + d[1] * step / length,
+    ])
 }
 
 pub struct Rules<'a> {
@@ -106,20 +232,48 @@ impl Policy for Rules<'_> {
             .map(|u| Decision {
                 actor: u.id,
                 order: AiOrder::Attack({
-                    let best = targets
-                        .iter()
-                        .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                        .expect("nonempty targets");
-                    targets
-                        .iter()
-                        .find(|v| Some(v.id) == u.ordered_target)
-                        .filter(|old| {
-                            self.score(u, old, &allies)
-                                <= self.score(u, best, &allies)
-                                    + i64::from(self.tuning.switch_margin)
-                        })
-                        .unwrap_or(best)
-                        .id
+                    // Mobile artillery is the siege arm. It advances on the
+                    // command objective instead of chasing a distant scout,
+                    // but engages armed defenders in its immediate sector.
+                    let siege = (u.kind == RangeUnitKind::Artillery && u.armed)
+                        .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
+                        .flatten();
+                    if let Some(base) = siege {
+                        let threat_radius = 1200
+                            + if u.ordered_target == Some(base.id) {
+                                0
+                            } else {
+                                self.tuning.switch_margin
+                            };
+                        if let Some(threat) = targets
+                            .iter()
+                            .filter(|v| {
+                                v.kind != RangeUnitKind::Base
+                                    && v.armed
+                                    && Self::distance(u, v) <= i64::from(threat_radius)
+                            })
+                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                        {
+                            threat.id
+                        } else {
+                            base.id
+                        }
+                    } else {
+                        let best = targets
+                            .iter()
+                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                            .expect("nonempty targets");
+                        targets
+                            .iter()
+                            .find(|v| Some(v.id) == u.ordered_target)
+                            .filter(|old| {
+                                self.score(u, old, &allies)
+                                    <= self.score(u, best, &allies)
+                                        + i64::from(self.tuning.switch_margin)
+                            })
+                            .unwrap_or(best)
+                            .id
+                    }
                 }),
             })
             .collect()

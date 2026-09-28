@@ -850,6 +850,7 @@ impl BlastRange {
         natural: [i32; 2],
         muzzle_y: i32,
         pursuit_ticks: u32,
+        spacing: i32,
     ) -> [i32; 2] {
         let here = [
             self.units[id].motion.pos[0].to_int_trunc(),
@@ -865,6 +866,20 @@ impl BlastRange {
             -1
         };
         let muzzle_above_floor = muzzle_y - motion::floor(&self.world, here[0], here[1]);
+        let free = |p: [i32; 2]| {
+            self.units.iter().enumerate().all(|(other, u)| {
+                if other == id || !u.status.alive || self.allied(other) != self.allied(id) {
+                    return true;
+                }
+                let held = u.motion.destination.unwrap_or([
+                    u.motion.pos[0].to_int_trunc(),
+                    u.motion.pos[2].to_int_trunc(),
+                ]);
+                let dx = i64::from(p[0] - held[0]);
+                let dz = i64::from(p[1] - held[1]);
+                dx * dx + dz * dz >= i64::from(spacing) * i64::from(spacing)
+            })
+        };
         let mut fallback = natural;
         for distance in [180, 320, 500] {
             for sign in [start, -start] {
@@ -881,6 +896,7 @@ impl BlastRange {
                     || candidate[1] < 16
                     || candidate[0] >= self.size[0] as i32 - 16
                     || candidate[1] >= self.size[2] as i32 - 16
+                    || !free(candidate)
                 {
                     continue;
                 }
@@ -1169,8 +1185,40 @@ impl BlastRange {
                     if self.units[id].motion.searching() && !target_changed {
                         continue;
                     }
+                    if b.autonomous && self.units[id].motion.recovering() && !target_changed {
+                        continue;
+                    }
                     let needs_detour = self.units[id].motion.blocked;
                     let length = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
+                    let road_goal = if b.autonomous
+                        && kind == RangeUnitKind::Artillery
+                        && target.is_some_and(|other| self.units[other].kind == RangeUnitKind::Base)
+                        && length > Fx::from_int(range * 2)
+                    {
+                        self.layout.as_ref().and_then(|layout| {
+                            ai::road_waypoint(
+                                &layout.roads,
+                                [from[0].to_int_trunc(), from[2].to_int_trunc()],
+                                [p[0], p[2]],
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    // Follow a short road leg to arrival. Reissuing an order
+                    // for a moving siege unit would throw away its frontier.
+                    if road_goal.is_some()
+                        && !target_changed
+                        && !needs_detour
+                        && self.units[id].motion.destination.is_some_and(|old| {
+                            let here = [from[0].to_int_trunc(), from[2].to_int_trunc()];
+                            let x = i64::from(here[0] - old[0]);
+                            let z = i64::from(here[1] - old[1]);
+                            x * x + z * z > 160 * 160
+                        })
+                    {
+                        continue;
+                    }
                     // Aim for a firing position before the target hull, never its occupied centre.
                     let standoff = if blocked_direct {
                         (range / 3).min(200)
@@ -1183,11 +1231,18 @@ impl BlastRange {
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
                     let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
-                    let dest = if blocked_direct || needs_detour {
+                    let dest = if blocked_direct || needs_detour && road_goal.is_none() {
                         let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
                             .first()
                             .map_or(from[1].to_int_trunc(), |m| m[1].to_int_trunc());
-                        self.visible_flank(id, p, dest, muzzle_y, b.tuning.pursuit_ticks)
+                        self.visible_flank(
+                            id,
+                            p,
+                            dest,
+                            muzzle_y,
+                            b.tuning.pursuit_ticks,
+                            b.tuning.firing_spacing,
+                        )
                     } else {
                         dest
                     };
@@ -1195,15 +1250,22 @@ impl BlastRange {
                     // the approach angle. Comparing the new radial point with
                     // the old one replanned even against a stationary target.
                     // A moving target still invalidates it on leaving its reach.
-                    let changed = target_changed
-                        || needs_detour
-                        || (blocked_direct && self.units[id].motion.destination.is_none())
-                        || self.units[id].motion.destination.is_none_or(|old| {
-                            let x = i64::from(p[0]) - i64::from(old[0]);
-                            let z = i64::from(p[2]) - i64::from(old[1]);
-                            let reach = if blocked_direct { 200 } else { range };
-                            x * x + z * z > i64::from(reach) * i64::from(reach)
-                        });
+                    let dest = road_goal.unwrap_or(dest);
+                    let changed = if road_goal.is_some() {
+                        target_changed
+                            || needs_detour
+                            || self.units[id].motion.destination != Some(dest)
+                    } else {
+                        target_changed
+                            || needs_detour
+                            || (blocked_direct && self.units[id].motion.destination.is_none())
+                            || self.units[id].motion.destination.is_none_or(|old| {
+                                let x = i64::from(p[0]) - i64::from(old[0]);
+                                let z = i64::from(p[2]) - i64::from(old[1]);
+                                let reach = if blocked_direct { 200 } else { range };
+                                x * x + z * z > i64::from(reach) * i64::from(reach)
+                            })
+                    };
                     if changed {
                         let others: Vec<_> = self
                             .units
