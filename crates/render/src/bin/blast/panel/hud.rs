@@ -20,8 +20,12 @@ pub struct BriefingCard;
 pub struct RosterStrip;
 #[derive(Component)]
 pub struct CommandDeck;
-pub fn scale(size: Vec2) -> f32 {
-    (size.y / 860.0).min(size.x / 1280.0).clamp(0.7, 1.0)
+#[derive(Component)]
+pub struct HeaderBrand;
+/// The compact layout handles the supported 960×540 window without shrinking
+/// labels and click targets along with the rest of the interface.
+pub fn scale(_size: Vec2) -> f32 {
+    1.0
 }
 
 pub fn section(editor: bool, a: Action) -> u8 {
@@ -76,7 +80,7 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
         Button,
         action,
         Node {
-            min_height: px(34),
+            min_height: px(38),
             padding: UiRect::axes(px(12), px(7)),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
@@ -126,7 +130,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 left: px(16),
                 right: px(16),
                 top: px(12),
-                height: px(52),
+                height: px(56),
                 padding: UiRect::axes(px(16), px(7)),
                 border: UiRect::bottom(px(2)),
                 align_items: AlignItems::Center,
@@ -137,13 +141,16 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             camera,
         ))
         .with_children(|p| {
-            label(
+            let brand = label(
                 p,
                 font,
                 "RTS / ПОЛИГОН",
                 19.0,
                 Color::srgb(0.83, 0.94, 0.94),
             );
+            p.commands()
+                .entity(brand)
+                .insert((HeaderBrand, Visibility::Visible));
             p.spawn((
                 Text::new(""),
                 font.clone(),
@@ -360,32 +367,48 @@ pub fn refresh(
         Option<&BriefingCard>,
         Option<&RosterStrip>,
         Option<&CommandDeck>,
+        Option<&HeaderBrand>,
     )>,
 ) {
     let battle = scene.sim.battle_mode();
-    let compact = windows.single().is_ok_and(|w| w.width() < 1100.0);
+    let (compact, hide_brand) = windows.single().map_or((false, false), |w| {
+        (w.width() < 1280.0 || w.height() < 760.0, w.width() < 1280.0)
+    });
     let selected = if battle {
         edit.controlled
             .and_then(|i| scene.sim.units.get(i).map(|u| (i, u)))
     } else {
         Some((usize::MAX, &scene.sim.gun))
     };
-    for (mut node, drawer, roster, loadout, solo, battle_button, action, briefing, strip, deck) in
-        &mut nodes
+    for (
+        mut node,
+        drawer,
+        roster,
+        loadout,
+        solo,
+        battle_button,
+        action,
+        briefing,
+        strip,
+        deck,
+        brand,
+    ) in &mut nodes
     {
         if deck.is_some() {
-            let height = px(if compact { 200 } else { 160 });
+            let height = px(if compact { 210 } else { 160 });
             if node.height != height {
                 node.height = height;
             }
         }
         if strip.is_some() {
-            let bottom = px(if compact { 224 } else { 184 });
+            let bottom = px(if compact { 234 } else { 184 });
             if node.bottom != bottom {
                 node.bottom = bottom;
             }
         }
-        let visible = if drawer.is_some() {
+        let visible = if brand.is_some() {
+            Some(!hide_brand)
+        } else if drawer.is_some() {
             Some(panel.drawer != 0)
         } else if let Some(Roster(i)) = roster {
             Some(

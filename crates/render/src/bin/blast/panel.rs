@@ -483,8 +483,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
-                    ("−", Action::Zoom(1.2)),
-                    ("+", Action::Zoom(0.8)),
+                    ("Зум −", Action::Zoom(1.2)),
+                    ("Зум +", Action::Zoom(0.8)),
                     ("Влево", Action::Pan(-24.0, 0.0)),
                     ("Вправо", Action::Pan(24.0, 0.0)),
                 ],
@@ -494,8 +494,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Вверх", Action::Pan(0.0, -24.0)),
                     ("Вниз", Action::Pan(0.0, 24.0)),
-                    ("Вр. -", Action::Orbit(-0.25)),
-                    ("Вр. +", Action::Orbit(0.25)),
+                    ("Вращ. -", Action::Orbit(-0.25)),
+                    ("Вращ. +", Action::Orbit(0.25)),
                 ],
             ),
             (

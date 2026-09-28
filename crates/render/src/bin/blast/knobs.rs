@@ -1096,7 +1096,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
             ));
             p.spawn((
                 Text::new(
-                    "−/+ меняют значение; колесо прокручивает; щелчок по числу — точный ввод, Enter",
+                    "↓ Ещё параметры ниже · колесо прокручивает; −/+ меняют значение; щелчок по числу — точный ввод, Enter",
                 ),
                 TextFont {
                     font_size: FontSize::Px(12.0),
