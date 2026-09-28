@@ -829,6 +829,7 @@ pub(crate) fn leg(
         ankle_ball: Some(ankle_ball),
         foot: None,
         support,
+        phase_shift_pct: 0,
     });
 }
 

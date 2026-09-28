@@ -1381,10 +1381,22 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
     };
     assert!(r.battle_order(0, Order::Move, Some([300, 200])));
     let mut swung = vec![false; 8];
+    let mut swing_patterns = std::collections::BTreeSet::new();
     for _ in 0..1200 {
         step(&mut r);
+        let mut pattern = 0u8;
         for (i, f) in r.units[0].motion.feet.iter().enumerate() {
             swung[i] |= !f.planted();
+            pattern |= u8::from(!f.planted()) << i;
+        }
+        swing_patterns.insert(pattern);
+        for (a, b) in [(0, 2), (1, 3), (4, 6), (5, 7)] {
+            assert_ne!(
+                pattern & (1 << a | 1 << b),
+                1 << a | 1 << b,
+                "both feet of support {} lifted",
+                r.units[0].body.legs[a].support
+            );
         }
         if r.units[0].motion.destination.is_none() {
             break;
@@ -1396,6 +1408,10 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
         r.units[0].motion.pos
     );
     assert!(swung.iter().all(|v| *v), "legs never swung: {swung:?}");
+    assert!(
+        swing_patterns.len() >= 5,
+        "legs still move in synchronized groups: {swing_patterns:?}"
+    );
     assert_eq!(r.battle_weapon(0), Some(Weapon::Laser));
     assert_eq!(
         r.battle_attack_range(0),

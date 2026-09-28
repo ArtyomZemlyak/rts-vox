@@ -367,8 +367,10 @@ pub struct LegRig {
     pub knee_ball: Option<usize>,
     pub ankle_ball: Option<usize>,
     pub foot: Option<usize>,
-    /// Which suspension support the leg answers to: its phase offset.
+    /// Which suspension support the leg answers to.
     pub support: usize,
+    /// Individual phase relative to that support, in binary turns.
+    pub phase_shift: i32,
     pub sole: Sole,
 }
 
@@ -420,6 +422,7 @@ pub fn rigs_of(b: &UnitBody) -> Vec<LegRig> {
                 ankle_ball: l.ankle_ball.map(usize::from),
                 foot: l.foot.map(usize::from),
                 support: usize::from(l.support),
+                phase_shift: (i64::from(l.phase_shift_pct) * i64::from(angle::FULL) / 100) as i32,
                 sole: l
                     .foot
                     .and_then(|i| b.segments.get(usize::from(i)))
@@ -556,7 +559,10 @@ impl Foot {
         }
         let g = s.gait;
         let p = Fx::from_ratio(
-            angle::norm(s.phase.wrapping_sub(g.offset[rig.support.min(3)])),
+            angle::norm(
+                s.phase
+                    .wrapping_sub(g.offset[rig.support.min(3)].wrapping_add(rig.phase_shift)),
+            ),
             angle::FULL,
         );
         let swing = p >= g.duty;
@@ -823,6 +829,7 @@ mod tests {
             ankle_ball: None,
             foot: None,
             support: 3,
+            phase_shift: 0,
             sole: Sole::point(ankle.y),
         }
     }

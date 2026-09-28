@@ -77,8 +77,10 @@ pub struct LegRig {
     pub knee_ball: Option<usize>,
     pub ankle_ball: Option<usize>,
     pub foot: Option<usize>,
-    /// Какой опоре подвески отвечает нога — по ней берётся сдвиг фазы.
+    /// Какой опоре подвески отвечает нога.
     pub support: usize,
+    /// Собственный сдвиг фазы относительно опоры.
+    pub phase_shift: f32,
     pub sole: Sole,
 }
 
@@ -165,6 +167,7 @@ pub fn rigs_of(b: &UnitBody, per_mm: f32, frames: &[SegFrame]) -> Vec<LegRig> {
                 ankle_ball: l.ankle_ball.map(|v| v as usize),
                 foot: l.foot.map(|v| v as usize),
                 support: l.support as usize,
+                phase_shift: l.phase_shift_pct as f32 / 100.0,
                 sole: l
                     .foot
                     .and_then(|i| b.segments.get(i as usize))
@@ -271,7 +274,7 @@ impl FootPlant {
             return pose;
         }
         let g = s.params;
-        let p = (s.phase - g.offset[rig.support.min(3)]).rem_euclid(1.0);
+        let p = (s.phase - g.offset[rig.support.min(3)] - rig.phase_shift).rem_euclid(1.0);
         let swing = p >= g.duty;
         let yaw = s.rot.to_euler(bevy::math::EulerRot::YXZ).0;
         if self.anchor.is_none()
@@ -359,7 +362,10 @@ impl LegRig {
     /// Поза ноги на кадре.
     pub fn pose(&self, s: &Stance<'_>) -> LegPose {
         let g = s.params;
-        let (off, lift) = foot_curve(s.phase - g.offset[self.support.min(3)], g);
+        let (off, lift) = foot_curve(
+            s.phase - g.offset[self.support.min(3)] - self.phase_shift,
+            g,
+        );
         let lift = lift * s.lift_scale.clamp(0.0, 1.0);
         // Цель ступни: покой плюс ход вдоль носа корпуса, в мире.
         let want = self.ankle + Vec3::X * off;
@@ -591,6 +597,7 @@ mod tests {
             ankle_ball: None,
             foot: None,
             support: 3,
+            phase_shift: 0.0,
             sole: Sole::point(ankle.y),
         }
     }

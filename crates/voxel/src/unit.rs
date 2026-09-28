@@ -296,7 +296,8 @@ pub struct Segment {
 /// на кадре, решает походка рендера по фазе шага из симуляции;
 /// длины звеньев берутся из расстояний между шарнирами. Номера —
 /// места в `segments`. Опора — которой из четырёх опор подвески
-/// нога отвечает: по ней ступня получает сдвиг фазы.
+/// нога отвечает. Собственный сдвиг фазы позволяет нескольким ногам одной
+/// опоры переставляться независимо.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Leg {
     pub hip: (i16, i16, i16),
@@ -311,6 +312,7 @@ pub struct Leg {
     /// Ступня — на конце голени, плоско по миру.
     pub foot: Option<u8>,
     pub support: u8,
+    pub phase_shift_pct: u8,
 }
 
 impl UnitBody {
@@ -1451,6 +1453,7 @@ pub fn strider() -> UnitBody {
                 ankle_ball: Some(first + 3),
                 foot: Some(first + 4),
                 support,
+                phase_shift_pct: 0,
             });
             // Root joint is material in the body; animated leg links are
             // separate geometry and do not substitute for this attachment.
@@ -1747,8 +1750,9 @@ pub fn spider() -> UnitBody {
                 FINISH_PLATE,
             );
             u.push_segment(Attach::flat((ax as i16, 4, az as i16), (6, 4, 4)), foot);
-            // Alternate diagonally across the four support phases; two legs
-            // per quadrant preserve support after losing just one leg.
+            // Two legs per suspension quadrant, but not a synchronized pair:
+            // the second leg starts 38% of a cycle later. With a 25% swing,
+            // one foot in each quadrant stays planted at every phase.
             let support = u8::from(hx < 44) * 2 + u8::from(hz < 40);
             u.push_leg(Leg {
                 hip: (hx as i16, 31, hz as i16),
@@ -1760,6 +1764,7 @@ pub fn spider() -> UnitBody {
                 ankle_ball: Some(first + 3),
                 foot: Some(first + 4),
                 support,
+                phase_shift_pct: if hx == 34 || hx == 66 { 38 } else { 0 },
             });
             u.push_load_path(WeaponPath {
                 min: [(hx - 3) as u8, 28, (hz - 3) as u8],
@@ -1922,6 +1927,7 @@ pub fn biped() -> UnitBody {
             ankle_ball: Some(first + 3),
             foot: Some(first + 4),
             support,
+            phase_shift_pct: 0,
         });
         u.push_load_path(WeaponPath {
             min: [(hx - 3) as u8, 25, (hz - 3) as u8],
@@ -2463,6 +2469,18 @@ mod spider_tests {
     fn spider_has_eight_articulated_legs_and_one_connected_heavy_weapon() {
         let body = spider();
         assert_eq!(body.legs.len(), 8);
+        let support_offsets = [0, 50, 25, 75];
+        let phases: std::collections::BTreeSet<_> = body
+            .legs
+            .iter()
+            .map(|leg| (support_offsets[leg.support as usize] + leg.phase_shift_pct as i32) % 100)
+            .collect();
+        assert_eq!(phases.len(), 8, "every leg needs its own step phase");
+        for (a, b) in [(0, 2), (1, 3), (4, 6), (5, 7)] {
+            assert_eq!(body.legs[a].support, body.legs[b].support);
+            assert_eq!(body.legs[a].phase_shift_pct, 0);
+            assert_eq!(body.legs[b].phase_shift_pct, 38);
+        }
         assert_eq!(body.weapon_paths.len(), 1);
         assert!(body.segments.len() >= 40);
         assert!(body.volume_mm3() > tank().volume_mm3() * 4);
