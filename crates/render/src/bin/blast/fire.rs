@@ -717,7 +717,10 @@ impl Effects {
             .iter()
             .chain((!sim.battle_mode()).then_some(&sim.gun))
         {
-            if u.kind != RangeUnitKind::Tank || !u.status.alive || !u.motion.hull.grounded() {
+            if !matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                || !u.status.alive
+                || !u.motion.hull.grounded()
+            {
                 continue;
             }
             let speed = u.motion.drive.vel.abs().to_f64_lossy() as f32;

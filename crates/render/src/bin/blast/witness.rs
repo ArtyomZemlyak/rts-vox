@@ -350,6 +350,9 @@ pub(super) fn update(
             RangeUnitKind::Tank => 0,
             RangeUnitKind::Strider => 1,
             RangeUnitKind::Spider => 2,
+            RangeUnitKind::Artillery => 3,
+            RangeUnitKind::TurretT1 => 4,
+            RangeUnitKind::TurretT2 => 5,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
@@ -372,6 +375,9 @@ mod tests {
             RangeUnitKind::Tank,
             RangeUnitKind::Strider,
             RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+            RangeUnitKind::TurretT1,
+            RangeUnitKind::TurretT2,
         ] {
             let unit = RangeUnit::of_kind(kind, [300, 16, 300]);
             let pristine = unit.body.clone();
@@ -383,7 +389,10 @@ mod tests {
             let clean = build(&clean, 0, &pristine, &skins, &config);
             let dead = build(&dead, 0, &pristine, &skins, &config);
             assert_eq!(clean.len(), dead.len());
-            assert!(dead.iter().any(|p| p.segment.is_some()));
+            assert!(dead.iter().any(|p| p.segment.is_none()));
+            if !pristine.segments.is_empty() {
+                assert!(dead.iter().any(|p| p.segment.is_some()));
+            }
             for (a, b) in clean.iter().zip(&dead) {
                 assert_eq!(
                     a.mesh.attribute(Mesh::ATTRIBUTE_POSITION),

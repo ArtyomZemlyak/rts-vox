@@ -202,7 +202,10 @@ impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
         let t = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning");
         let chassis = match kind {
-            modding::range::RangeUnitKind::Tank => t.tracked,
+            modding::range::RangeUnitKind::Tank
+            | modding::range::RangeUnitKind::Artillery
+            | modding::range::RangeUnitKind::TurretT1
+            | modding::range::RangeUnitKind::TurretT2 => t.tracked,
             modding::range::RangeUnitKind::Spider => spider_tuning().chassis,
             _ => t.walking,
         };
@@ -246,26 +249,42 @@ impl Motion {
             enabled: false,
             blocked: false,
             chassis,
-            speed: if kind == modding::range::RangeUnitKind::Spider {
+            speed: if kind.emplacement() {
+                0
+            } else if kind == modding::range::RangeUnitKind::Spider {
                 spider_tuning().speed
-            } else if kind == modding::range::RangeUnitKind::Tank {
+            } else if matches!(
+                kind,
+                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+            ) {
                 c.tank_speed
             } else {
                 c.walker_speed
             },
-            step: if kind == modding::range::RangeUnitKind::Spider {
+            step: if kind.emplacement() {
+                0
+            } else if kind == modding::range::RangeUnitKind::Spider {
                 spider_tuning().step
-            } else if kind == modding::range::RangeUnitKind::Tank {
+            } else if matches!(
+                kind,
+                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+            ) {
                 c.step_height
             } else {
                 c.walker_step_height
             },
-            terrain_tilt_pct: if kind == modding::range::RangeUnitKind::Tank {
+            terrain_tilt_pct: if matches!(
+                kind,
+                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+            ) {
                 c.tank_terrain_tilt_pct
             } else {
                 c.walker_terrain_tilt_pct
             },
-            terrain_approach_pct: if kind == modding::range::RangeUnitKind::Tank {
+            terrain_approach_pct: if matches!(
+                kind,
+                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+            ) {
                 c.tank_terrain_approach_pct
             } else {
                 c.walker_terrain_approach_pct
@@ -2013,6 +2032,9 @@ mod tests {
                 RangeUnitKind::Tank => voxel::unit::tank(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
+                RangeUnitKind::Artillery => voxel::unit::artillery(),
+                RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
+                RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
             };
             let mut m = Motion::new([300, 16, 300], kind, &body);
             m.enabled = true;
@@ -2187,6 +2209,9 @@ mod tests {
                 RangeUnitKind::Tank => voxel::unit::tank(),
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
+                RangeUnitKind::Artillery => voxel::unit::artillery(),
+                RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
+                RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
             };
             for axis in [0, 1] {
                 let mut m = Motion::new([590, 16, 590], kind, &body);
@@ -3049,6 +3074,9 @@ mod tests {
                         RangeUnitKind::Tank => voxel::unit::tank(),
                         RangeUnitKind::Strider => voxel::unit::strider(),
                         RangeUnitKind::Spider => voxel::unit::spider(),
+                        RangeUnitKind::Artillery => voxel::unit::artillery(),
+                        RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
+                        RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                     };
                     let (start, end) = if reverse { (410, 230) } else { (230, 410) };
                     let mut m = Motion::new([start, 16, 300], kind, &body);

@@ -270,6 +270,59 @@ fn both_tanks_fire_and_take_real_spatial_damage() {
     assert!(r.matter.economy.ledger.balanced());
     assert!(r.battle.waves.len() <= r.battle.tuning.max_waves);
 }
+
+#[test]
+fn artillery_drives_and_fires_high_explosive_by_default() {
+    let mut r = arena_of([RangeUnitKind::Artillery, RangeUnitKind::Tank]);
+    assert!(r.units[0].status.alive && r.units[0].status.engine && r.units[0].status.weapon);
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Blast));
+    assert_eq!(r.battle_weapon(1), Some(Weapon::Kinetic));
+    assert_eq!(
+        r.units[0].body.extent_mm().0,
+        voxel::unit::tank().extent_mm().0
+    );
+    assert_eq!(r.battle_muzzles(0).len(), 1);
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Move, Some([230, 336])));
+    let start = r.units[0].at;
+    for _ in 0..300 {
+        r.step();
+    }
+    assert!(r.units[0].at[0] > start[0], "artillery did not drive");
+    assert!(r.battle.actors[0].fired > 0, "artillery did not fire");
+    assert!(r
+        .battle
+        .impacts
+        .iter()
+        .all(|i| i.weapon != Weapon::MachineGun));
+}
+
+#[test]
+fn stationary_turrets_traverse_fire_and_refuse_move_orders() {
+    for (kind, weapon) in [
+        (RangeUnitKind::TurretT1, Weapon::Kinetic),
+        (RangeUnitKind::TurretT2, Weapon::Energy),
+    ] {
+        let mut r = arena_of([kind, RangeUnitKind::Tank]);
+        assert!(r.units[0].status.alive && r.units[0].status.weapon);
+        assert!(!r.units[0].status.engine);
+        assert_eq!(r.battle_weapon(0), Some(weapon));
+        assert_eq!(r.battle_muzzles(0).len(), 1);
+        r.start_battle().unwrap();
+        r.battle.ai.next_tick = u32::MAX;
+        r.battle.actors[1].order = Order::Hold;
+        assert!(!r.battle_order(0, Order::Move, Some([200, 336])));
+        assert!(r.battle_order(0, Order::Attack(1), None));
+        let start = r.units[0].at;
+        for _ in 0..350 {
+            r.step();
+        }
+        assert_eq!(r.units[0].at, start, "{kind:?} left its emplacement");
+        assert!(r.battle.actors[0].fired > 0, "{kind:?} did not fire");
+        let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        assert_eq!(r.state_hash(), restored.state_hash());
+    }
+}
 /// **A lobbed shell over the world ceiling comes back down.** The firing
 /// solution rises `g·T²/8` above the muzzle; past the ceiling the round used
 /// to retire as a miss, so every target in the far part of a tank's reach
@@ -299,9 +352,9 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
     .unwrap();
     // The lob is the high-explosive shell's (ADR-456).
     let high_explosive = |r: &mut BlastRange| {
-        std::sync::Arc::make_mut(&mut r.battle.tuning)
-            .tank_ammo
-            .tank = Delivery::Blast;
+        for actor in &mut r.battle.actors {
+            actor.weapon = Some(Weapon::Blast);
+        }
     };
     high_explosive(&mut r);
     r.start_battle().unwrap();
@@ -354,13 +407,12 @@ fn dual_machine_guns_keep_owner_and_survive_stop() {
 }
 #[test]
 fn replay_with_multiple_projectiles_and_waves() {
-    // Waves are the high-explosive shell's: tank against tank loads it
-    // here, whatever the data choose (ADR-456). Tuning is data, not
-    // snapshot, so the restored copy is told the same.
+    // Explicitly equip both tanks with high-explosive rounds: new tanks
+    // otherwise start with armour-piercing ammunition.
     let high_explosive = |r: &mut BlastRange| {
-        std::sync::Arc::make_mut(&mut r.battle.tuning)
-            .tank_ammo
-            .tank = Delivery::Blast;
+        for actor in &mut r.battle.actors {
+            actor.weapon = Some(Weapon::Blast);
+        }
     };
     let mut a = arena(RangeUnitKind::Tank);
     high_explosive(&mut a);
@@ -572,9 +624,8 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
     assert!(a.matter.economy.ledger.balanced());
 }
 
-/// **A tank loads for what it aims at** (ADR-456). Battle tanks fired
-/// the high-explosive shell at everything; the armour-piercing round
-/// flew only from the single gun.
+/// Auto ammunition remains available when the player selects "by target";
+/// new tanks otherwise start with armour-piercing rounds.
 #[test]
 fn a_tank_loads_armour_piercing_for_a_tank_and_high_explosive_for_a_walker() {
     for (enemy, kinetic) in [(RangeUnitKind::Tank, true), (RangeUnitKind::Strider, false)] {
@@ -585,6 +636,7 @@ fn a_tank_loads_armour_piercing_for_a_tank_and_high_explosive_for_a_walker() {
                 strider: Delivery::Blast,
                 ground: Delivery::Blast,
             };
+        assert!(r.set_battle_weapon(0, None));
         r.start_battle().unwrap();
         // The enemy stands and holds its fire.
         r.battle.ai.next_tick = u32::MAX;
@@ -1184,7 +1236,7 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
     t.tank_range = 100;
     t.kinetic_range = 400;
-    assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Kinetic));
     r.step();
     assert!(r.units[0].motion.destination.is_none());
     assert!(r.set_battle_weapon(0, Some(Weapon::Blast)));
@@ -1383,7 +1435,7 @@ fn stock_battle_kinetic_kills_a_frontal_tank() {
         r.units[1].update_pose(fx::angle::HALF);
         r.battle.actors[1].turret.angle = fx::angle::HALF;
         r.battle.actors[1].order = Order::Hold;
-        assert!(r.set_battle_weapon(0, Some(Weapon::Kinetic)));
+        assert_eq!(r.battle_weapon(0), Some(Weapon::Kinetic));
         r.battle.actors[0].order = Order::Attack(1);
         let mut hits = Vec::new();
         for _ in 0..900 {

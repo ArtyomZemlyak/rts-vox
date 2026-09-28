@@ -459,6 +459,9 @@ pub fn animate(
             voxel::unit::tank(),
             voxel::unit::strider(),
             voxel::unit::spider(),
+            voxel::unit::artillery(),
+            voxel::unit::turret_t1(),
+            voxel::unit::turret_t2(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
@@ -474,7 +477,13 @@ pub fn animate(
         // The range plants the feet (ADR-279); the picture interpolates
         // their contacts between ticks and poses the links with the same
         // two-link solve the simulation uses.
-        if u.kind != RangeUnitKind::Tank {
+        if !matches!(
+            u.kind,
+            RangeUnitKind::Tank
+                | RangeUnitKind::Artillery
+                | RangeUnitKind::TurretT1
+                | RangeUnitKind::TurretT2
+        ) {
             let rigs = &v.rigs[u.kind.index()];
             let rot = render::realtime::hull_rotation(p.up, p.yaw);
             for (j, rig) in rigs.iter().enumerate() {
@@ -539,7 +548,13 @@ pub fn animate(
 /// Player links use the same foot interpolation as target walkers.
 pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
     let u = &scene.sim.gun;
-    if u.kind == RangeUnitKind::Tank {
+    if matches!(
+        u.kind,
+        RangeUnitKind::Tank
+            | RangeUnitKind::Artillery
+            | RangeUnitKind::TurretT1
+            | RangeUnitKind::TurretT2
+    ) {
         return Vec::new();
     }
     let root = render::realtime::hull_rotation(p.up, p.yaw);

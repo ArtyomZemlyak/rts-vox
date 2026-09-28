@@ -339,6 +339,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 ],
             ),
             (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
+            (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -418,6 +419,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Танк", Action::Chassis(RangeUnitKind::Tank)),
                     ("Шагоход", Action::Chassis(RangeUnitKind::Strider)),
                     ("Паук", Action::Chassis(RangeUnitKind::Spider)),
+                    ("Артиллерия", Action::Chassis(RangeUnitKind::Artillery)),
                 ],
             ),
             (
@@ -442,6 +444,14 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Танк", Action::Tool(Tool::Tank)),
                     ("Шагоход", Action::Tool(Tool::Strider)),
                     ("Паук", Action::Tool(Tool::Spider)),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    ("Артиллерия", Action::Tool(Tool::Artillery)),
+                    ("Турель T1", Action::Tool(Tool::TurretT1)),
+                    ("Турель T2", Action::Tool(Tool::TurretT2)),
                 ],
             ),
             (
@@ -818,7 +828,10 @@ pub fn actions(
                     let w = match kind {
                         RangeUnitKind::Strider => 4,
                         RangeUnitKind::Spider => 6,
-                        RangeUnitKind::Tank => weapon_of(&scene),
+                        RangeUnitKind::Tank => 5,
+                        RangeUnitKind::Artillery => 0,
+                        RangeUnitKind::TurretT1 => 5,
+                        RangeUnitKind::TurretT2 => 1,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,

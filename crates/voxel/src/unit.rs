@@ -1289,6 +1289,217 @@ pub fn tank() -> UnitBody {
     u
 }
 
+/// Tracked self-propelled artillery. It shares the tank's 6×3 m footprint,
+/// but the tall rear ammunition bustle and elevated howitzer distinguish it
+/// at the RTS camera distance. Every visible part is damageable geometry.
+pub fn artillery() -> UnitBody {
+    let mut u = UnitBody::new_scaled(60, 32, 30, 4, BODY_MM);
+    let a = Part::Armour;
+    running_gear(&mut u, (2, 58), 10, (1, 7), a);
+    running_gear(&mut u, (2, 58), 10, (23, 29), a);
+
+    // Low tracked hull, broad front armour and separate engine bay.
+    fill(&mut u, (4, 53), (2, 12), (7, 23), a);
+    fill(&mut u, (3, 55), (11, 14), (3, 27), a);
+    fill_f(&mut u, (50, 57), (8, 15), (6, 24), a, FINISH_PLATE);
+    for z in [0, 29] {
+        for x in [12, 27, 42] {
+            fill_f(&mut u, (x, x + 10), (8, 12), (z, z + 1), a, FINISH_PLATE);
+            fill_f(
+                &mut u,
+                (x + 1, x + 2),
+                (10, 12),
+                (z, z + 1),
+                a,
+                FINISH_STEEL,
+            );
+        }
+    }
+    fill(&mut u, (6, 19), (4, 12), (9, 21), Part::Engine);
+    for z in (9..21).step_by(4) {
+        mark(&mut u, (7, 18), (13, 14), (z, z + 2), FINISH_GUN);
+    }
+    exhaust(&mut u, (0, 4), (12, 9), 1, Part::Engine);
+    exhaust(&mut u, (0, 4), (12, 20), 1, Part::Engine);
+    fill(&mut u, (27, 34), (5, 12), (12, 18), Part::Core);
+
+    // The fighting compartment is taller and farther aft than the tank's
+    // turret. Its square bustle carries boxed charges and spare track links.
+    ring(&mut u, (32, 15), 12, 9, (14, 16), a);
+    fill_f(&mut u, (17, 46), (16, 24), (6, 24), a, FINISH_PLATE);
+    fill_f(&mut u, (13, 22), (18, 25), (7, 23), a, FINISH_STEEL);
+    fill_f(&mut u, (18, 42), (24, 26), (8, 22), a, FINISH_PLATE);
+    for z in [7, 22] {
+        fill_f(&mut u, (20, 41), (21, 23), (z, z + 1), a, FINISH_STEEL);
+        for x in [23, 31, 39] {
+            fill_f(&mut u, (x, x + 1), (22, 26), (z, z + 1), a, FINISH_GUN);
+        }
+    }
+    for z in [10, 19] {
+        crate_box(&mut u, (14, 21), (25, 28), (z, z + 5), a);
+    }
+    hatch(&mut u, (27, 11), 3, 26, a);
+    fill_f(
+        &mut u,
+        (37, 41),
+        (26, 28),
+        (11, 15),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+
+    // A continuous breech and rising barrel let connectivity damage disable
+    // this specific gun. The thick muzzle brake makes its role legible.
+    fill(&mut u, (35, 46), (20, 27), (12, 18), Part::Weapon);
+    for (x, y) in [(45, 23), (50, 24), (55, 25)] {
+        fill_f(
+            &mut u,
+            (x, (x + 6).min(60)),
+            (y, y + 3),
+            (13, 17),
+            Part::Weapon,
+            FINISH_GUN,
+        );
+    }
+    fill_f(
+        &mut u,
+        (56, 60),
+        (24, 29),
+        (12, 18),
+        Part::Weapon,
+        FINISH_STEEL,
+    );
+    carve(&mut u, (58, 60), (26, 27), (14, 16));
+    fill_f(&mut u, (42, 47), (18, 21), (10, 20), a, FINISH_STEEL);
+    for z in [11, 18] {
+        fill_f(&mut u, (5, 13), (15, 16), (z, z + 1), a, FINISH_STEEL);
+    }
+
+    let mut u = seat(u, "артиллерия");
+    u.turret_y = 16;
+    u.push_weapon_path(WeaponPath {
+        min: [35, 20, 12],
+        max: [60, 29, 18],
+        axis: 0,
+    });
+    u
+}
+
+/// T1 point-defence turret: a low armoured socket and one conventional gun.
+/// The base stays fixed; only the upper voxels traverse toward a target.
+pub fn turret_t1() -> UnitBody {
+    let mut u = UnitBody::new_scaled(36, 30, 36, 3, BODY_MM);
+    let a = Part::Armour;
+    fill_f(&mut u, (2, 34), (1, 5), (2, 34), a, FINISH_STEEL);
+    fill_f(&mut u, (5, 31), (5, 12), (5, 31), a, FINISH_PLATE);
+    fill(&mut u, (14, 22), (5, 13), (14, 22), Part::Core);
+    ring(&mut u, (18, 18), 12, 8, (12, 14), a);
+    fill_f(&mut u, (9, 27), (14, 23), (10, 26), a, FINISH_PLATE);
+    fill_f(&mut u, (10, 26), (23, 25), (11, 25), a, FINISH_STEEL);
+    fill_f(
+        &mut u,
+        (24, 31),
+        (18, 23),
+        (14, 22),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (29, 36),
+        (19, 22),
+        (16, 20),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (33, 36),
+        (18, 23),
+        (15, 21),
+        Part::Weapon,
+        FINISH_STEEL,
+    );
+    fill_f(
+        &mut u,
+        (11, 16),
+        (25, 27),
+        (16, 20),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    let mut u = seat(u, "турель T1");
+    u.turret_y = 13;
+    u.push_weapon_path(WeaponPath {
+        min: [24, 18, 14],
+        max: [36, 23, 22],
+        axis: 0,
+    });
+    u
+}
+
+/// T2 emplacement: a heavier, wider socket and a single energy cannon.
+pub fn turret_t2() -> UnitBody {
+    let mut u = UnitBody::new_scaled(48, 42, 48, 5, BODY_MM);
+    let a = Part::Armour;
+    fill_f(&mut u, (2, 46), (1, 6), (2, 46), a, FINISH_STEEL);
+    fill_f(&mut u, (6, 42), (6, 15), (6, 42), a, FINISH_PLATE);
+    fill(&mut u, (18, 30), (6, 17), (18, 30), Part::Core);
+    ring(&mut u, (24, 24), 16, 10, (15, 18), a);
+    fill_f(&mut u, (10, 38), (18, 31), (11, 37), a, FINISH_PLATE);
+    fill_f(&mut u, (13, 35), (31, 34), (14, 34), a, FINISH_STEEL);
+    for z in [9, 36] {
+        fill_f(&mut u, (13, 34), (20, 28), (z, z + 3), a, FINISH_STEEL);
+    }
+    fill_f(
+        &mut u,
+        (30, 40),
+        (24, 31),
+        (19, 29),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (39, 48),
+        (26, 30),
+        (21, 27),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (44, 48),
+        (24, 32),
+        (19, 29),
+        Part::Weapon,
+        FINISH_STEEL,
+    );
+    fill_f(
+        &mut u,
+        (17, 23),
+        (34, 37),
+        (20, 28),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    // Paired exposed capacitor towers identify the energy emplacement even
+    // from a high RTS camera, while the cannon remains one damageable barrel.
+    for z in [8, 34] {
+        fill_f(&mut u, (14, 22), (28, 39), (z, z + 6), a, FINISH_STEEL);
+        fill_f(&mut u, (15, 21), (39, 41), (z + 1, z + 5), a, FINISH_CORE);
+        fill_f(&mut u, (16, 20), (33, 35), (z, z + 6), a, FINISH_CORE);
+    }
+    let mut u = seat(u, "турель T2");
+    u.turret_y = 17;
+    u.push_weapon_path(WeaponPath {
+        min: [30, 24, 19],
+        max: [48, 32, 29],
+        axis: 0,
+    });
+    u
+}
+
 /// Шагоход: второе ванильное тело. 4.0 × 5.0 × 4.0 м при вокселе
 /// 100 мм — том 40×50×40.
 ///

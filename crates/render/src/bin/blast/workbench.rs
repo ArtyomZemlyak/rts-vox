@@ -14,6 +14,9 @@ pub enum Tool {
     Tank,
     Strider,
     Spider,
+    Artillery,
+    TurretT1,
+    TurretT2,
     Concrete,
     Steel,
     Earth,
@@ -190,6 +193,7 @@ impl Workshop {
             0 => include_str!("../../../../../data/skirmish-breakthrough.ron"),
             1 => include_str!("../../../../../data/skirmish-pincer.ron"),
             2 => include_str!("../../../../../data/skirmish-spider.ron"),
+            3 => include_str!("../../../../../data/skirmish-turrets.ron"),
             _ => return Err("Неизвестный сценарий боя".into()),
         })?;
         let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
@@ -217,7 +221,7 @@ impl Workshop {
         self.selected = Some(Selection::Unit(0));
         self.controlled = Some(0);
         self.pan = Vec2::ZERO;
-        self.zoom = 0.85;
+        self.zoom = if id == 3 { 1.35 } else { 0.85 };
         self.orbit = 0.0;
         self.pitch = 0.0;
         Ok(preset.briefing)
@@ -401,13 +405,24 @@ impl Workshop {
                 relocate(&mut next, s, at);
                 s
             }
-            Tool::Tank | Tool::Strider | Tool::Spider => {
+            Tool::Tank
+            | Tool::Strider
+            | Tool::Spider
+            | Tool::Artillery
+            | Tool::TurretT1
+            | Tool::TurretT2 => {
                 next.units.push(RangeUnitDef {
                     allied: self.allied,
                     kind: if self.tool == Tool::Tank {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::Artillery {
+                        RangeUnitKind::Artillery
+                    } else if self.tool == Tool::TurretT1 {
+                        RangeUnitKind::TurretT1
+                    } else if self.tool == Tool::TurretT2 {
+                        RangeUnitKind::TurretT2
                     } else {
                         RangeUnitKind::Strider
                     },
@@ -1657,6 +1672,38 @@ mod tests {
         assert!(layout.zones.len() > 5);
         assert_eq!(workshop.controlled, Some(0));
         assert!(workshop.pending.is_some());
+    }
+
+    #[test]
+    fn turret_skirmish_loads_both_emplacements_and_mobile_artillery() {
+        let (mut workshop, config) = fixture();
+        let briefing = workshop.skirmish(3, config.clone()).unwrap();
+        assert!(briefing.contains("T1") && briefing.contains("T2"));
+        let layout = workshop.layout.as_ref().unwrap();
+        assert!(layout.battle);
+        assert_eq!(layout.units.len(), 6);
+        assert!(layout
+            .units
+            .iter()
+            .any(|u| u.kind == RangeUnitKind::Artillery && u.allied));
+        assert!(layout
+            .units
+            .iter()
+            .any(|u| u.kind == RangeUnitKind::TurretT1 && !u.allied));
+        assert!(layout
+            .units
+            .iter()
+            .any(|u| u.kind == RangeUnitKind::TurretT2 && !u.allied));
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_battle().unwrap();
+        for _ in 0..240 {
+            sim.step();
+        }
+        assert!(sim.battle.actors[1].fired > 0, "artillery never fired");
+        assert!(
+            sim.battle.actors[4].fired > 0,
+            "T2 energy cannon never fired"
+        );
     }
 
     fn fixture() -> (Workshop, ExplosionConfig) {

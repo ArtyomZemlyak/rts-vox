@@ -147,7 +147,10 @@ impl Generator for Ground {
 fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
     // tan of the tilt limits in sim.ron: 91 % and 84 % of up.
     let grade_pct = match kind {
-        RangeUnitKind::Tank => 45,
+        RangeUnitKind::Tank
+        | RangeUnitKind::Artillery
+        | RangeUnitKind::TurretT1
+        | RangeUnitKind::TurretT2 => 45,
         RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
     };
     match t {
@@ -192,6 +195,9 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::Tank => voxel::unit::tank(),
         RangeUnitKind::Strider => voxel::unit::strider(),
         RangeUnitKind::Spider => voxel::unit::spider(),
+        RangeUnitKind::Artillery => voxel::unit::artillery(),
+        RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
+        RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
     };
     let yaw = angle::norm(heading + if back { angle::FULL / 2 } else { 0 });
     let dir = [angle::cos(yaw), angle::sin(yaw)];
@@ -304,6 +310,9 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::Tank => voxel::unit::tank(),
             RangeUnitKind::Strider => voxel::unit::strider(),
             RangeUnitKind::Spider => voxel::unit::spider(),
+            RangeUnitKind::Artillery => voxel::unit::artillery(),
+            RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
+            RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
         };
         let m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
         let shape = m.probe_shape(&body);

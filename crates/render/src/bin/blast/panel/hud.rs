@@ -419,8 +419,10 @@ pub fn refresh(
         } else if loadout.is_some() {
             Some(
                 battle
-                    && selected
-                        .is_some_and(|(_, u)| u.kind == RangeUnitKind::Tank && u.status.alive),
+                    && selected.is_some_and(|(_, u)| {
+                        matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                            && u.status.alive
+                    }),
             )
         } else if solo.is_some() {
             Some(!battle)
@@ -459,6 +461,12 @@ pub fn refresh(
                                 "П"
                             } else if u.kind == RangeUnitKind::Tank {
                                 "Т"
+                            } else if u.kind == RangeUnitKind::Artillery {
+                                "А"
+                            } else if u.kind == RangeUnitKind::TurretT1 {
+                                "1"
+                            } else if u.kind == RangeUnitKind::TurretT2 {
+                                "2"
                             } else {
                                 "Ш"
                             },
@@ -506,6 +514,12 @@ pub fn refresh(
                             "ПАУК"
                         } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
+                        } else if u.kind == RangeUnitKind::Artillery {
+                            "АРТИЛЛЕРИЯ"
+                        } else if u.kind == RangeUnitKind::TurretT1 {
+                            "ТУРЕЛЬ T1"
+                        } else if u.kind == RangeUnitKind::TurretT2 {
+                            "ТУРЕЛЬ T2"
                         } else {
                             "ШАГОХОД"
                         },
@@ -527,7 +541,7 @@ pub fn refresh(
             2 => {
                 if battle {
                     selected.map_or_else(
-                        || "Выберите танк для смены боеприпаса".into(),
+                        || "Выберите танк или артиллерию для смены боеприпаса".into(),
                         |(i, u)| {
                             format!(
                                 "{} · дальность {} м\n{}",
@@ -535,7 +549,8 @@ pub fn refresh(
                                     scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
                                 ),
                                 scene.sim.battle_attack_range(i).unwrap_or(0) / 10,
-                                if u.kind == RangeUnitKind::Tank {
+                                if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                                {
                                     "Смена заряда сохраняет перезарядку"
                                 } else {
                                     "Ведёт огонь во время движения"

@@ -42,9 +42,14 @@ impl Tuning {
     }
     pub fn reservoir(&self, kind: crate::range::RangeUnitKind) -> &Reservoir {
         match kind {
-            crate::range::RangeUnitKind::Tank => &self.tank,
+            crate::range::RangeUnitKind::Tank | crate::range::RangeUnitKind::Artillery => {
+                &self.tank
+            }
             crate::range::RangeUnitKind::Strider => &self.walker,
             crate::range::RangeUnitKind::Spider => &self.spider,
+            crate::range::RangeUnitKind::TurretT1 | crate::range::RangeUnitKind::TurretT2 => {
+                &self.tank
+            }
         }
     }
     /// Whole economic quantities: no fractional matter disappears on burning.

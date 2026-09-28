@@ -109,7 +109,14 @@ mod tests {
         for _ in 0..250 {
             range.step();
         }
-        let templates = [voxel::unit::tank(), voxel::unit::strider()];
+        let templates = [
+            voxel::unit::tank(),
+            voxel::unit::strider(),
+            voxel::unit::spider(),
+            voxel::unit::artillery(),
+            voxel::unit::turret_t1(),
+            voxel::unit::turret_t2(),
+        ];
         let bindings = templates.each_ref().map(SkinBindings::new);
         let lost: Vec<u32> = range
             .units
@@ -119,6 +126,9 @@ mod tests {
                     modding::range::RangeUnitKind::Tank => 0,
                     modding::range::RangeUnitKind::Strider => 1,
                     modding::range::RangeUnitKind::Spider => 2,
+                    modding::range::RangeUnitKind::Artillery => 3,
+                    modding::range::RangeUnitKind::TurretT1 => 4,
+                    modding::range::RangeUnitKind::TurretT2 => 5,
                 };
                 let pristine = &templates[kind];
                 pristine

@@ -71,6 +71,9 @@ pub enum RangeUnitKind {
     Tank,
     Strider,
     Spider,
+    Artillery,
+    TurretT1,
+    TurretT2,
 }
 
 impl RangeUnitKind {
@@ -79,7 +82,14 @@ impl RangeUnitKind {
             Self::Tank => 0,
             Self::Strider => 1,
             Self::Spider => 2,
+            Self::Artillery => 3,
+            Self::TurretT1 => 4,
+            Self::TurretT2 => 5,
         }
+    }
+
+    pub const fn emplacement(self) -> bool {
+        matches!(self, Self::TurretT1 | Self::TurretT2)
     }
 }
 

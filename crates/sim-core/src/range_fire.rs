@@ -74,6 +74,11 @@ impl Combustion {
             .validate_density(density)
             .expect("exact fuel quantities");
         for (id, u) in units.iter().enumerate() {
+            // Fixed emplacements have no mobile fuel tank. Their armour may
+            // glow and burn from heat, but there is no invented fuel stock.
+            if u.kind.emplacement() {
+                continue;
+            }
             let def = f.tuning.reservoir(u.kind);
             let [x, y, z] = def.at.map(usize::from);
             assert!(
@@ -183,7 +188,8 @@ impl Combustion {
             } else {
                 None
             };
-            if (burning || spill.is_some()) && held.is_none()
+            if u.kind.emplacement() && held.is_some()
+                || (burning || spill.is_some()) && held.is_none()
                 || burning && held.is_some_and(|id| matter.economy.ledger.get(id).held == 0)
             {
                 return None;

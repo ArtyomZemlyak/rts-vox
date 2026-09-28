@@ -101,6 +101,9 @@ pub fn emitters(
         RangeUnitKind::Strider => 2.35,
         RangeUnitKind::Tank => 3.0,
         RangeUnitKind::Spider => 12.0,
+        RangeUnitKind::Artillery => 3.0,
+        RangeUnitKind::TurretT1 => 2.1,
+        RangeUnitKind::TurretT2 => 3.5,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {
         if path.axis != 0 {

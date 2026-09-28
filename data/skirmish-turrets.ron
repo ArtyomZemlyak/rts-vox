@@ -1,0 +1,17 @@
+(
+ title: "Штурм турелей T1/T2",
+ briefing: "Танк с бронебойным и самоходная артиллерия с фугасом наступают на укреплённые T1 и T2. T1 стреляет обычным снарядом, T2 — энергией. Турели держат позицию и могут быть разрушены по частям.",
+ zone: (name: "Штурм турелей T1/T2", min: (3200,2000), max: (4100,2800), spawn: (3280,16,2400), target: (3880,15,2400)),
+ units: [
+  (kind: Tank, allied: true, at: (3340,16,2260)),
+  (kind: Artillery, allied: true, at: (3320,16,2460)),
+  (kind: Strider, allied: true, at: (3460,16,2460)),
+  (kind: TurretT1, allied: false, at: (3790,16,2220)),
+  (kind: TurretT2, allied: false, at: (3910,16,2410)),
+  (kind: Tank, allied: false, at: (3830,16,2600)),
+ ],
+ blocks: [
+  (min: (3720,16,2310), max: (3732,44,2350), material: 2),
+  (min: (3780,16,2490), max: (3792,44,2530), material: 2),
+ ],
+)

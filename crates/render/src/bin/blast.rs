@@ -101,8 +101,8 @@ struct Witness(usize, Transform, Option<usize>, bool);
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
     burned_materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: Arc<[voxel::unit::UnitBody; 3]>,
-    skins: Arc<[SkinBindings; 3]>,
+    pristine: Arc<[voxel::unit::UnitBody; 6]>,
+    skins: Arc<[SkinBindings; 6]>,
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
@@ -384,7 +384,7 @@ fn main() {
             }
             "--skirmish" => {
                 i += 1;
-                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0, 1 or 2"));
+                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0, 1, 2 or 3"));
             }
             "--hud-drawer" => {
                 i += 1;
@@ -475,7 +475,10 @@ fn main() {
                     "tank" => RangeUnitKind::Tank,
                     "walker" => RangeUnitKind::Strider,
                     "spider" => RangeUnitKind::Spider,
-                    _ => panic!("--chassis tank|walker|spider"),
+                    "artillery" => RangeUnitKind::Artillery,
+                    "t1" => RangeUnitKind::TurretT1,
+                    "t2" => RangeUnitKind::TurretT2,
+                    _ => panic!("--chassis tank|walker|spider|artillery|t1|t2"),
                 });
             }
             "--weapon" => {
@@ -1191,11 +1194,17 @@ fn setup(
             SkinBindings::new(&voxel::unit::tank()),
             SkinBindings::new(&voxel::unit::strider()),
             SkinBindings::new(&voxel::unit::spider()),
+            SkinBindings::new(&voxel::unit::artillery()),
+            SkinBindings::new(&voxel::unit::turret_t1()),
+            SkinBindings::new(&voxel::unit::turret_t2()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
             voxel::unit::strider(),
             voxel::unit::spider(),
+            voxel::unit::artillery(),
+            voxel::unit::turret_t1(),
+            voxel::unit::turret_t2(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

@@ -403,10 +403,16 @@ impl RangeUnit {
         // instance. Copy their prepared voxel data instead of redrawing the
         // same shapes for every placement and battle reset.
         static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static SPIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
+            RangeUnitKind::Artillery => ARTILLERY.get_or_init(voxel::unit::artillery).clone(),
+            RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
+            RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
             RangeUnitKind::Strider => STRIDER.get_or_init(voxel::unit::strider).clone(),
             RangeUnitKind::Spider => SPIDER.get_or_init(voxel::unit::spider).clone(),
         };
@@ -2466,16 +2472,20 @@ impl BlastRange {
         completed("units");
         if let Some(c) = layout.as_ref().and_then(|r| r.course.as_ref()) {
             for u in units.iter_mut().chain(std::iter::once(&mut gun)) {
-                u.motion.speed = if u.kind == RangeUnitKind::Spider {
+                u.motion.speed = if u.kind.emplacement() {
+                    0
+                } else if u.kind == RangeUnitKind::Spider {
                     motion::spider_tuning().speed
-                } else if u.kind == RangeUnitKind::Tank {
+                } else if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) {
                     c.tank_speed
                 } else {
                     c.walker_speed
                 };
-                u.motion.step = if u.kind == RangeUnitKind::Spider {
+                u.motion.step = if u.kind.emplacement() {
+                    0
+                } else if u.kind == RangeUnitKind::Spider {
                     motion::spider_tuning().step
-                } else if u.kind == RangeUnitKind::Tank {
+                } else if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) {
                     c.step_height
                 } else {
                     c.walker_step_height
@@ -2485,8 +2495,10 @@ impl BlastRange {
                 u.motion.replan = c.replan_ticks;
             }
             for p in &c.patrols {
-                units[p.unit].motion.route = p.points.clone();
-                units[p.unit].motion.enabled = true;
+                if !units[p.unit].kind.emplacement() {
+                    units[p.unit].motion.route = p.points.clone();
+                    units[p.unit].motion.enabled = true;
+                }
             }
         }
         let mut matter = matter::Matter::new(&units);
@@ -3150,6 +3162,13 @@ impl BlastRange {
                 r.turret_limits,
                 (version, r.tick, &allied),
             )?;
+            if version < 42 {
+                // Earlier snapshots had no explicit loadout. Restore their
+                // target-based ammunition instead of the new tank default.
+                for actor in &mut r.battle.actors {
+                    actor.weapon = None;
+                }
+            }
             if r.battle_mode() {
                 for (u, a) in r.units.iter_mut().zip(&r.battle.actors) {
                     u.update_pose(a.turret.angle);
@@ -3190,7 +3209,9 @@ impl BlastRange {
                     4 if version >= 43 => Some(battle::Weapon::Annihilation),
                     _ => return None,
                 };
-                if unit.kind != RangeUnitKind::Tank && actor.weapon.is_some() {
+                if !matches!(unit.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                    && actor.weapon.is_some()
+                {
                     return None;
                 }
             }
@@ -3241,6 +3262,9 @@ impl BlastRange {
         self.player = true;
     }
     pub fn order_move(&mut self, to: [i32; 2]) -> bool {
+        if self.gun.kind.emplacement() {
+            return false;
+        }
         self.control();
         self.gun.motion.route.clear();
         let rubble = self.current_rubble();

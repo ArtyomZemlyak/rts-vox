@@ -160,7 +160,11 @@ impl Battle {
                     pursuit: 0,
                     burst: 0,
                     fired: 0,
-                    weapon: None,
+                    weapon: match u.kind {
+                        RangeUnitKind::Tank => Some(Weapon::Kinetic),
+                        RangeUnitKind::Artillery => Some(Weapon::Blast),
+                        _ => None,
+                    },
                 })
                 .collect(),
             rounds: Vec::new(),
@@ -408,11 +412,24 @@ impl BlastRange {
         if u.kind == RangeUnitKind::Strider {
             return Some(Weapon::MachineGun);
         }
+        if u.kind == RangeUnitKind::Artillery {
+            return Some(a.weapon.unwrap_or(Weapon::Blast));
+        }
+        if u.kind == RangeUnitKind::TurretT1 {
+            return Some(Weapon::Kinetic);
+        }
+        if u.kind == RangeUnitKind::TurretT2 {
+            return Some(Weapon::Energy);
+        }
         Some(a.weapon.unwrap_or_else(|| {
             let ammo = self.battle.tuning.tank_ammo;
             Weapon::ammo(match (a.order, a.target.and_then(|t| self.units.get(t))) {
                 (Order::Ground(_), _) | (_, None) => ammo.ground,
-                (_, Some(t)) if t.kind == RangeUnitKind::Tank => ammo.tank,
+                (_, Some(t))
+                    if matches!(t.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) =>
+                {
+                    ammo.tank
+                }
                 _ => ammo.strider,
             })
         }))
@@ -439,10 +456,9 @@ impl BlastRange {
     pub fn set_battle_weapon(&mut self, id: usize, weapon: Option<Weapon>) -> bool {
         if !self.battle_mode()
             || !self.allied(id)
-            || self
-                .units
-                .get(id)
-                .is_none_or(|u| !u.status.alive || u.kind != RangeUnitKind::Tank)
+            || self.units.get(id).is_none_or(|u| {
+                !u.status.alive || !matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+            })
             || matches!(weapon, Some(Weapon::MachineGun | Weapon::Laser))
         {
             return false;
@@ -599,6 +615,9 @@ impl BlastRange {
             return true;
         }
         if let ai::AiOrder::Move(p) = decision.order {
+            if self.units[id].kind.emplacement() {
+                return false;
+            }
             if battle.actors[id].order == Order::Move
                 && self.units[id].motion.destination == Some(p)
             {
@@ -686,6 +705,9 @@ impl BlastRange {
             }
         }
         if order == Order::Move {
+            if self.units[id].kind.emplacement() {
+                return false;
+            }
             let Some(p) = destination else {
                 return false;
             };
@@ -902,10 +924,23 @@ impl BlastRange {
                 let ammo = b.tuning.tank_ammo;
                 let choice = match (a.order, target) {
                     (Order::Ground(_), _) | (_, None) => ammo.ground,
-                    (_, Some(t)) if self.units[t].kind == RangeUnitKind::Tank => ammo.tank,
+                    (_, Some(t))
+                        if matches!(
+                            self.units[t].kind,
+                            RangeUnitKind::Tank | RangeUnitKind::Artillery
+                        ) =>
+                    {
+                        ammo.tank
+                    }
                     _ => ammo.strider,
                 };
                 a.weapon.unwrap_or(Weapon::ammo(choice))
+            } else if kind == RangeUnitKind::Artillery {
+                a.weapon.unwrap_or(Weapon::Blast)
+            } else if kind == RangeUnitKind::TurretT1 {
+                Weapon::Kinetic
+            } else if kind == RangeUnitKind::TurretT2 {
+                Weapon::Energy
             } else if kind == RangeUnitKind::Spider {
                 Weapon::Laser
             } else {
@@ -959,6 +994,9 @@ impl BlastRange {
                 dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
             if !in_range {
                 a.charge = None;
+                if kind.emplacement() {
+                    continue;
+                }
                 // A move order owns its route. Track and fire at hostiles that
                 // enter range, but never turn the move into an attack pursuit.
                 if a.order == Order::Move {
@@ -1035,7 +1073,13 @@ impl BlastRange {
                 }
                 continue;
             }
-            let shell = kind == RangeUnitKind::Tank;
+            let shell = matches!(
+                kind,
+                RangeUnitKind::Tank
+                    | RangeUnitKind::Artillery
+                    | RangeUnitKind::TurretT1
+                    | RangeUnitKind::TurretT2
+            );
             if shell {
                 let charge = *a.charge.get_or_insert(self.tick + config.charge_ticks);
                 if self.tick < charge

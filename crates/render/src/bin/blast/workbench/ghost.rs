@@ -77,6 +77,9 @@ pub fn setup(
         (RangeUnitKind::Tank, voxel::unit::tank()),
         (RangeUnitKind::Strider, voxel::unit::strider()),
         (RangeUnitKind::Spider, voxel::unit::spider()),
+        (RangeUnitKind::Artillery, voxel::unit::artillery()),
+        (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
+        (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
     ] {
         commands.spawn((
             Mesh3d(meshes.add(mesh(&template(&body)))),
