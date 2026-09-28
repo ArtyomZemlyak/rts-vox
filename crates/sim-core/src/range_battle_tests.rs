@@ -114,6 +114,9 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
     )
     .unwrap();
     battle.start_battle().unwrap();
+    let restored = BlastRange::restore(battle.config.clone(), &battle.snapshot())
+        .expect("battle with both command bases restores before the first hit");
+    assert_eq!(battle.state_hash(), restored.state_hash());
     battle.battle.actors[1].order = Order::Hold;
     battle.battle.ai.next_tick = u32::MAX;
     assert!(battle.set_battle_weapon(0, Some(Weapon::Annihilation)));
@@ -144,6 +147,45 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
         battle.battle.actors[0].fired,
         battle.units[3].revision
     );
+    let restored = BlastRange::restore(battle.config.clone(), &battle.snapshot())
+        .expect("battle with a destroyed command base restores");
+    assert_eq!(battle.state_hash(), restored.state_hash());
+}
+
+#[test]
+fn enemy_annihilation_hit_on_our_base_causes_defeat() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.units[0].at = [100, 16, 500];
+    layout.units[1].at = [350, 16, 120];
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [150, 16, 120],
+        allied: true,
+    });
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [480, 16, 550],
+        allied: false,
+    });
+    let mut battle = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    battle.start_battle().unwrap();
+    battle.units[0].status.alive = false;
+    battle.battle.actors[0].order = Order::Hold;
+    battle.battle.actors[1].weapon = Some(Weapon::Annihilation);
+    for _ in 0..600 {
+        battle.step();
+        if battle.battle.phase != Phase::Fighting {
+            break;
+        }
+    }
+    assert_eq!(battle.battle.phase, Phase::Defeat);
+    assert_eq!(battle.battle.actors[1].order, Order::Attack(2));
+    assert!(battle.units[3].status.alive);
+    assert_eq!(battle.battle_base_integrity().unwrap()[0], 0);
 }
 
 #[test]
@@ -240,7 +282,7 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
         modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
     tuning.armed_bonus = 0;
     tuning.mobile_bonus = 0;
-    let units = vec![
+    let mut units = vec![
         UnitObservation {
             id: 0,
             allied: true,
@@ -281,6 +323,16 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
             position: [550, 100],
             ordered_target: None,
         },
+        UnitObservation {
+            id: 4,
+            allied: true,
+            alive: true,
+            armed: false,
+            mobile: false,
+            kind: RangeUnitKind::Base,
+            position: [50, 100],
+            ordered_target: None,
+        },
     ];
     assert_eq!(
         Rules { tuning: &tuning }.decide(&Observation {
@@ -288,11 +340,26 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
             observed_tick: 20,
             decision_tick: 30,
             size: [640, 192, 640],
-            units,
+            units: units.clone(),
         }),
         vec![Decision {
             actor: 2,
             order: AiOrder::Attack(0),
+        }]
+    );
+    units[0].alive = false;
+    units[1].alive = false;
+    assert_eq!(
+        Rules { tuning: &tuning }.decide(&Observation {
+            version: OBSERVATION_VERSION,
+            observed_tick: 40,
+            decision_tick: 50,
+            size: [640, 192, 640],
+            units,
+        }),
+        vec![Decision {
+            actor: 2,
+            order: AiOrder::Attack(4),
         }]
     );
 }

@@ -1372,7 +1372,8 @@ pub fn artillery() -> UnitBody {
     carve(&mut u, (58, 60), (26, 27), (14, 16));
     fill_f(&mut u, (42, 47), (18, 21), (10, 20), a, FINISH_STEEL);
     for z in [11, 18] {
-        fill_f(&mut u, (5, 13), (15, 16), (z, z + 1), a, FINISH_STEEL);
+        // Bolt the rail down to the hull at y=13 instead of floating above it.
+        fill_f(&mut u, (5, 13), (13, 16), (z, z + 1), a, FINISH_STEEL);
     }
 
     let mut u = seat(u, "артиллерия");
@@ -1540,7 +1541,9 @@ pub fn command_base() -> UnitBody {
     // large surfaces without introducing a non-physical decorative mesh.
     carve(&mut u, (70, 80), (7, 23), (34, 46));
     for z in [23, 30, 47, 54] {
-        fill_f(&mut u, (10, 15), (23, 29), (z, z + 3), a, FINISH_GUN);
+        // Reach the main shell at x=16; a one-cell gap left all four
+        // shutter groups detached even before the base took damage.
+        fill_f(&mut u, (10, 16), (23, 29), (z, z + 3), a, FINISH_GUN);
     }
     for x in [29, 50] {
         fill_f(
@@ -1559,10 +1562,29 @@ pub fn command_base() -> UnitBody {
 mod command_base_tests {
     use super::*;
     #[test]
+    fn battle_templates_begin_with_supported_root_voxels() {
+        for (name, body) in [
+            ("tank", tank()),
+            ("artillery", artillery()),
+            ("turret T1", turret_t1()),
+            ("turret T2", turret_t2()),
+            ("base", command_base()),
+            ("strider", strider()),
+            ("spider", spider()),
+        ] {
+            assert_eq!(
+                body.status(&mut CoreBufs::new()).detached,
+                0,
+                "{name} has unsupported starting pieces"
+            );
+        }
+    }
+    #[test]
     fn command_base_is_stationary_and_loses_when_its_core_is_destroyed() {
         let mut base = command_base();
         let status = base.status(&mut CoreBufs::new());
         assert!(status.alive && !status.engine && !status.weapon);
+        assert_eq!(status.detached, 0, "base has unsupported starting pieces");
         let (x, y, z) = base.core;
         for dz in 0..base.core_size as usize {
             for dy in 0..base.core_size as usize {

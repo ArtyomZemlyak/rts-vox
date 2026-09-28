@@ -237,6 +237,14 @@ impl Workshop {
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
         }
+        let centre = [layout.size[0] as i32 / 2, layout.size[2] as i32 / 2];
+        let focus = layout
+            .units
+            .iter()
+            .filter(|u| u.allied && !u.kind.emplacement())
+            .min_by_key(|u| (u.at[0] - centre[0]).abs() + (u.at[2] - centre[1]).abs())
+            .map(|u| [u.at[0], u.at[2]]);
+        let focus_zone = focus.and_then(|at| layout.zones.iter().position(|z| z.contains(at, 0)));
         let controlled = layout
             .units
             .iter()
@@ -246,6 +254,9 @@ impl Workshop {
         self.allied = true;
         self.controlled = controlled;
         self.selected = self.controlled.map(Selection::Unit);
+        if let Some(zone) = focus_zone {
+            self.zone = zone;
+        }
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
         self.orbit = 0.0;
@@ -1448,6 +1459,7 @@ mod tests {
         assert!(briefing.contains("баз"));
         assert!(edit.editing);
         assert!(edit.layout.as_ref().unwrap().battle);
+        assert!(edit.sector().unwrap().contains([4850, 5580], 0));
         assert_eq!(edit.layout.as_ref().unwrap().units.len(), 12);
         assert_eq!(edit.controlled, Some(1));
         assert_eq!(

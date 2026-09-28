@@ -1,12 +1,15 @@
 //! Bounded battle load, including real damage, concurrent waves and bookkeeping.
+use sim_core::blast::battle::{Order, Phase, Weapon};
 use sim_core::blast::BlastRange;
 use std::time::Instant;
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
-    let world_battle = args.iter().any(|a| a == "--world");
+    let assault = args.iter().any(|a| a == "--assault");
+    let replay = args.iter().any(|a| a == "--replay");
+    let world_battle = assault || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
-    let until_end = args.iter().any(|a| a == "--until-end");
+    let until_end = assault || args.iter().any(|a| a == "--until-end");
     let mut layout =
         modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
             .unwrap();
@@ -30,6 +33,11 @@ fn main() {
         ))
         .unwrap()
         .units;
+        if assault {
+            // Isolate a real cross-map route and base kill from the large
+            // firefight. Keep authored positions and the unchanged terrain.
+            layout.units = [0, 4, 6].map(|id| layout.units[id].clone()).into();
+        }
     } else {
         layout.gun = t.zone.spawn;
         layout.target = t.zone.target;
@@ -66,14 +74,33 @@ fn main() {
     .unwrap();
     let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
     sim.start_battle().unwrap();
+    if assault {
+        assert!(sim.set_battle_weapon(1, Some(Weapon::Annihilation)));
+        assert!(sim.battle_order(1, Order::Attack(2), None));
+    }
     let mut samples = Vec::new();
     let mut peak_rounds = 0;
+    let mut assault_shots = 0;
+    let mut assault_weapon = true;
     let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
     let ticks = args
         .windows(2)
         .find(|w| w[0] == "--ticks")
         .map_or(900, |w| w[1].parse::<usize>().expect("ticks"));
     assert!(ticks > 0);
+    let snapshot_tick = args
+        .windows(2)
+        .find(|w| w[0] == "--snapshot-tick")
+        .map_or(300, |w| w[1].parse::<u32>().expect("snapshot tick"));
+    assert!(
+        !replay || snapshot_tick > 0,
+        "snapshot tick must be positive"
+    );
+    assert!(
+        !replay || ticks >= snapshot_tick as usize + 300,
+        "replay requires 300 ticks after the snapshot"
+    );
+    let mut restored = None;
     for _ in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -83,9 +110,58 @@ fn main() {
             last = now;
             phases.entry(phase).or_default().push(elapsed);
         });
+        if replay && sim.tick == snapshot_tick {
+            let bytes = sim.snapshot();
+            println!(
+                "snapshot tick={} bytes={} layout_bytes={}",
+                sim.tick,
+                bytes.len(),
+                sim.layout.as_ref().unwrap().to_ron().unwrap().len()
+            );
+            let replica = BlastRange::restore(sim.config.clone(), &bytes)
+                .expect("world battle snapshot restores");
+            assert_eq!(sim.state_hash(), replica.state_hash());
+            restored = Some(replica);
+        } else if let Some(replica) = &mut restored {
+            if sim.tick <= snapshot_tick + 300 {
+                replica.step();
+                if sim.tick == snapshot_tick + 300 {
+                    assert_eq!(sim.state_hash(), replica.state_hash(), "replay final tick");
+                    if world_battle && !assault {
+                        assert_eq!(
+                            [sim.units[0].at[0], sim.units[0].at[2]],
+                            [1530, 630],
+                            "allied command base was pushed off its foundation"
+                        );
+                    }
+                    println!("replay tick={} hash={:016x}", sim.tick, sim.state_hash());
+                }
+            }
+        }
         samples.push(start.elapsed().as_micros());
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
-        if world_battle && progress && sim.tick % 3000 == 0 {
+        if assault {
+            let fired = sim.battle.actors[1].fired;
+            if fired != assault_shots
+                || !sim.battle.impacts.is_empty()
+                || (assault_weapon && !sim.units[1].status.weapon)
+            {
+                println!(
+                    "assault tick={} tank={:?} target={:?} fired={} impacts={:?} weapon={} damage={} base={:?}",
+                    sim.tick,
+                    sim.units[1].at,
+                    sim.battle.actors[1].target,
+                    fired,
+                    sim.battle.impacts.iter().map(|i| i.at).collect::<Vec<_>>(),
+                    sim.units[1].status.weapon,
+                    sim.units[1].revision,
+                    sim.battle_base_integrity()
+                );
+            }
+            assault_shots = fired;
+            assault_weapon = sim.units[1].status.weapon;
+        }
+        if world_battle && (progress || assault) && sim.tick % 3000 == 0 {
             println!(
                 "progress tick={} phase={:?} alive={:?} bases={:?}",
                 sim.tick,
@@ -98,30 +174,34 @@ fn main() {
             break;
         }
     }
-    for side in [true, false] {
-        assert!(
-            sim.battle
-                .actors
-                .iter()
-                .enumerate()
-                .any(|(id, actor)| sim.allied(id) == side && actor.fired > 0),
-            "a side never fired"
-        );
-        assert!(
-            sim.units
-                .iter()
-                .enumerate()
-                .any(|(id, unit)| sim.allied(id) == side && unit.revision > 0),
-            "a side never took spatial damage"
-        );
+    if !assault {
+        for side in [true, false] {
+            assert!(
+                sim.battle
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .any(|(id, actor)| sim.allied(id) == side && actor.fired > 0),
+                "a side never fired"
+            );
+            assert!(
+                sim.units
+                    .iter()
+                    .enumerate()
+                    .any(|(id, unit)| sim.allied(id) == side && unit.revision > 0),
+                "a side never took spatial damage"
+            );
+        }
     }
     assert!(sim.matter.economy.ledger.balanced());
-    assert_eq!(
-        sim.matter
-            .economy
-            .sunk(sim_core::matter::Sink::Annihilation),
-        0
-    );
+    if !assault {
+        assert_eq!(
+            sim.matter
+                .economy
+                .sunk(sim_core::matter::Sink::Annihilation),
+            0
+        );
+    }
     samples.sort_unstable();
     let count = samples.len();
     println!("ticks={} units={} phase={:?} alive={:?} bases={:?} shots={:?} damage={:?} peak_rounds={} p50_us={} p95_us={} p99_us={} max_us={} hash={:016x}",sim.tick,sim.units.len(),sim.battle.phase,sim.battle_counts(),sim.battle_base_integrity(),sim.battle.actors.iter().map(|a|a.fired).collect::<Vec<_>>(),sim.units.iter().map(|u|u.revision).collect::<Vec<_>>(),peak_rounds,samples[count/2],samples[count*95/100],samples[count*99/100],samples[count-1],sim.state_hash());
@@ -154,6 +234,13 @@ fn main() {
             values[values.len() * 95 / 100],
             values[values.len() * 99 / 100],
             values[values.len() - 1]
+        );
+    }
+    if assault {
+        assert_eq!(
+            sim.battle.phase,
+            Phase::Victory,
+            "cross-map assault did not finish"
         );
     }
 }

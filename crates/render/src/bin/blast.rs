@@ -601,7 +601,7 @@ fn main() {
         drive = true;
         energy = false;
         anni = false;
-        view = 6;
+        view = 1;
     }
     if let Some(id) = skirmish {
         battle_briefing = workshop

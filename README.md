@@ -44,9 +44,12 @@ Bevy 0.19.1). Все проверки и тесты выполняются в п
 означает поражение независимо от оставшихся машин. Базы отмечены на
 тактической карте, их прочность показана в интерфейсе. Состав и позиции
 находятся в `data/battle-world.ron`.
+Камера начинает с передового участка; кнопка «Вся карта» показывает оба рубежа.
 Прямой запуск: `target/release/blast.exe --range data/range-km.ron --world-battle --realtime`.
 Для повторяемой проверки ИИ и физики без окна:
 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\cargo-local.ps1 run --release -p sim-core --bin bench_battle -- --world --ticks 12000 --until-end --progress`.
+Короткая проверка сохранения и повторения этого боя: тот же запуск с
+`--world --replay --ticks 650` вместо длинного списка флагов.
 
 ## Основная карта — полигон
 

@@ -700,7 +700,7 @@ pub fn actions(
                     panel.drawer = 0;
                     panel.pending = None;
                     panel.drive = true;
-                    scene.view = 6;
+                    scene.view = 1;
                     scene.repeat = false;
                     panel.demo = false;
                     panel.ground_fire = false;

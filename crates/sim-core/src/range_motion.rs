@@ -401,7 +401,9 @@ impl Motion {
         through: [i32; 3],
         newton_s: u64,
     ) {
-        if newton_s == 0 {
+        // Emplacements are anchored to the ground; damage still applies to
+        // their voxels, but a shell must not shove the whole command base.
+        if newton_s == 0 || self.speed == 0 {
             return;
         }
         let r = crate::ride::ride_of(&self.chassis);
@@ -510,7 +512,9 @@ impl Motion {
         self.contact.take()
     }
     pub(super) fn receive_contact(&mut self, velocity: V3) {
-        self.shove = self.shove.add(velocity);
+        if self.speed != 0 {
+            self.shove = self.shove.add(velocity);
+        }
     }
     /// The legs of this hull, in template order; empty for a tracked one.
     pub fn rigs(&self) -> &[crate::gait::LegRig] {
@@ -1665,6 +1669,17 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
 mod tests {
     use super::*;
     use modding::range::RangeUnitKind;
+    #[test]
+    fn command_base_is_anchored_under_contact_and_blast_impulse() {
+        let body = voxel::unit::command_base();
+        let mut motion = Motion::new([100, 16, 100], RangeUnitKind::Base, &body);
+        assert_eq!(motion.speed, 0);
+        motion.receive_contact(V3::new(Fx::from_int(50), Fx::ZERO, Fx::from_int(40)));
+        motion.impulse_through(&body, [90, 16, 100], [95, 16, 100], 1_000_000);
+        assert_eq!(motion.shove, V3::ZERO);
+        assert_eq!(motion.hull.vy, Fx::ZERO);
+        assert_eq!(motion.pos.map(Fx::to_int_trunc), [100, 16, 100]);
+    }
     struct Ground {
         depth: i32,
     }
