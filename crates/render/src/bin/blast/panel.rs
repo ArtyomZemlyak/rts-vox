@@ -340,7 +340,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             ),
             (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
-            (false, vec![("Сценарии испытаний ▾", Action::ScenarioMenu)]),
+            (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
                 false,
                 vec![
@@ -415,12 +415,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
-                    ("Танк / сброс", Action::Chassis(RangeUnitKind::Tank)),
-                    ("Шагоход / сброс", Action::Chassis(RangeUnitKind::Strider)),
-                    (
-                        "Паук / тяжёлый лазер",
-                        Action::Chassis(RangeUnitKind::Spider),
-                    ),
+                    ("Танк", Action::Chassis(RangeUnitKind::Tank)),
+                    ("Шагоход", Action::Chassis(RangeUnitKind::Strider)),
+                    ("Паук", Action::Chassis(RangeUnitKind::Spider)),
                 ],
             ),
             (
@@ -442,9 +439,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 true,
                 vec![
-                    ("Добавить танк", Action::Tool(Tool::Tank)),
+                    ("Танк", Action::Tool(Tool::Tank)),
                     ("Шагоход", Action::Tool(Tool::Strider)),
-                    ("Паук · тяжёлый лазер", Action::Tool(Tool::Spider)),
+                    ("Паук", Action::Tool(Tool::Spider)),
                 ],
             ),
             (
@@ -453,7 +450,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Бетон", Action::Tool(Tool::Concrete)),
                     ("Сталь", Action::Tool(Tool::Steel)),
                     ("Грунт", Action::Tool(Tool::Earth)),
-                    ("Расчистить", Action::Tool(Tool::Clear)),
+                    ("Стереть", Action::Tool(Tool::Clear)),
                     ("Щит", Action::Tool(Tool::Shield)),
                 ],
             ),
@@ -477,9 +474,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Обзор", Action::Overview),
-                    ("Вся карта", Action::WholeMap),
-                    ("Мой юнит", Action::Own),
-                    ("Мишень", Action::Target),
+                    ("Карта", Action::WholeMap),
+                    ("Юнит", Action::Own),
+                    ("Цель", Action::Target),
                 ],
             ),
             (false, vec![("Настройки", Action::Settings)]),
@@ -497,8 +494,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Вверх", Action::Pan(0.0, -24.0)),
                     ("Вниз", Action::Pan(0.0, 24.0)),
-                    ("Поверн. -", Action::Orbit(-0.25)),
-                    ("Поверн. +", Action::Orbit(0.25)),
+                    ("Вр. -", Action::Orbit(-0.25)),
+                    ("Вр. +", Action::Orbit(0.25)),
                 ],
             ),
             (
@@ -716,6 +713,8 @@ pub fn actions(
             },
             Action::BattleStart => match scene.sim.start_battle() {
                 Ok(()) => {
+                    panel.briefing.clear();
+                    panel.drawer = 0;
                     edit.editing = false;
                     scene.paused = false;
                     panel.drive = true;
@@ -858,7 +857,13 @@ pub fn actions(
             Action::Tool(t) => {
                 edit.tool = t;
             }
-            Action::Delete => key(KeyCode::Delete, &mut panel),
+            Action::Delete => {
+                if edit.selected.is_some() {
+                    key(KeyCode::Delete, &mut panel);
+                } else {
+                    scene.notice = "Сначала выберите объект для удаления".into();
+                }
+            }
             Action::Rotate => key(KeyCode::KeyQ, &mut panel),
             Action::Undo | Action::Redo => {
                 key(KeyCode::ControlLeft, &mut panel);
@@ -921,6 +926,8 @@ pub fn actions(
                     ) {
                         scene.notice = e;
                     }
+                } else {
+                    scene.notice = "Сначала выберите юнит для маршрута".into();
                 }
             }
             Action::Save => key(KeyCode::F6, &mut panel),
@@ -1105,6 +1112,7 @@ pub fn scenario_progress(
     if panel.battle_launch && edit.pending.is_none() && scene.sim.battle_mode() {
         match scene.sim.start_battle() {
             Ok(()) => {
+                panel.briefing.clear();
                 edit.editing = false;
                 scene.paused = false;
             }
@@ -1244,11 +1252,12 @@ pub fn refresh(
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
     } else if scene.sim.battle_mode() {
         "ЛКМ — выбрать своего
-ПКМ — движение / атака врага"
+ПКМ — движение / атака врага
+На ходу стреляет по целям в радиусе"
     } else if panel.ground_fire {
         "Укажите точку выстрела на карте"
     } else if scene.sim.auto_attack {
-        "Автоатака — живые мишени в радиусе\nПКМ — перейти к ручному приказу"
+        "Автоатака — мишени в радиусе\nПКМ — ехать и продолжать стрельбу"
     } else {
         "ПКМ по земле — ехать\nПКМ по юниту — атаковать\nЛКМ — осмотреть мишень"
     };

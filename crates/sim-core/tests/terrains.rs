@@ -148,7 +148,7 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
     // tan of the tilt limits in sim.ron: 91 % and 84 % of up.
     let grade_pct = match kind {
         RangeUnitKind::Tank => 45,
-        RangeUnitKind::Strider => 65,
+        RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
     };
     match t {
         Terrain::Trench { depth, .. } => depth <= 4 || eighth == 2,

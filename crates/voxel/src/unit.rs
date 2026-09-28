@@ -1669,6 +1669,44 @@ pub fn spider() -> UnitBody {
             if y % 5 == 0 { FINISH_GUN } else { FINISH_PLATE },
         );
     }
+    // Sacrificial side skirts and a layered crown put real armour voxels
+    // between incoming fire and the engine/core. Leave the eight hip joints
+    // exposed enough to remain individually damageable.
+    for y in 27..39 {
+        let inset = (y as i32 - 33).abs() / 3;
+        for z in [(17 + inset, 23), (57, 63 - inset)] {
+            fill_f(
+                &mut u,
+                (26, 62),
+                (y, y + 1),
+                (z.0 as usize, z.1 as usize),
+                Part::Armour,
+                if y % 4 == 0 {
+                    FINISH_STEEL
+                } else {
+                    FINISH_PLATE
+                },
+            );
+        }
+    }
+    fill_f(
+        &mut u,
+        (29, 60),
+        (40, 43),
+        (26, 54),
+        Part::Armour,
+        FINISH_PLATE,
+    );
+    for x in [30, 42, 54] {
+        fill_f(
+            &mut u,
+            (x, x + 2),
+            (43, 45),
+            (28, 52),
+            Part::Armour,
+            FINISH_STEEL,
+        );
+    }
     for (row, hx) in [22i32, 34, 54, 66].into_iter().enumerate() {
         for hz in [24i32, 56] {
             let kx = hx + if hx < 44 { -7 } else { 7 };
@@ -2486,5 +2524,18 @@ mod spider_tests {
         assert!(body.volume_mm3() > tank().volume_mm3() * 4);
         let status = body.status(&mut CoreBufs::new());
         assert!(status.alive && status.engine && status.weapon, "{status:?}");
+    }
+
+    #[test]
+    fn spider_skirts_and_crown_cover_its_vital_compartments() {
+        let body = spider();
+        for z in [19, 21, 59, 61] {
+            assert_eq!(body.part_at(44, 33, z), Part::Armour);
+        }
+        assert_eq!(body.part_at(44, 41, 40), Part::Armour);
+        assert_eq!(body.part_at(42, 44, 40), Part::Armour);
+        assert_eq!(body.part_at(44, 33, 40), Part::Core);
+        let status = body.status(&mut CoreBufs::new());
+        assert!(status.alive && status.engine && status.weapon);
     }
 }

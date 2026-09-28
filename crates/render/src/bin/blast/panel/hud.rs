@@ -18,8 +18,10 @@ pub struct BattleButton;
 pub struct BriefingCard;
 #[derive(Component)]
 pub struct RosterStrip;
+#[derive(Component)]
+pub struct CommandDeck;
 pub fn scale(size: Vec2) -> f32 {
-    (size.y / 860.0).min(size.x / 1280.0).clamp(0.5, 1.0)
+    (size.y / 860.0).min(size.x / 1280.0).clamp(0.7, 1.0)
 }
 
 pub fn section(editor: bool, a: Action) -> u8 {
@@ -169,7 +171,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 left: px(16),
                 right: px(16),
                 bottom: px(16),
-                height: px(188),
+                height: px(160),
                 padding: UiRect::all(px(14)),
                 column_gap: px(20),
                 border: UiRect::top(px(2)),
@@ -177,6 +179,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             },
             camera,
         ))
+        .insert(CommandDeck)
         .with_children(|p| {
             p.spawn(Node {
                 width: percent(30),
@@ -285,7 +288,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 position_type: PositionType::Absolute,
                 left: px(182),
                 right: px(16),
-                bottom: px(212),
+                bottom: px(184),
                 padding: UiRect::all(px(6)),
                 column_gap: px(5),
                 max_width: percent(96),
@@ -344,6 +347,7 @@ pub fn refresh(
     scene: Res<Scene>,
     edit: Res<Workshop>,
     panel: Res<Panel>,
+    windows: Query<&Window>,
     mut text: Query<(&HudText, &mut Text)>,
     mut nodes: Query<(
         &mut Node,
@@ -355,18 +359,32 @@ pub fn refresh(
         Option<&Action>,
         Option<&BriefingCard>,
         Option<&RosterStrip>,
+        Option<&CommandDeck>,
     )>,
 ) {
     let battle = scene.sim.battle_mode();
+    let compact = windows.single().is_ok_and(|w| w.width() < 1100.0);
     let selected = if battle {
         edit.controlled
             .and_then(|i| scene.sim.units.get(i).map(|u| (i, u)))
     } else {
         Some((usize::MAX, &scene.sim.gun))
     };
-    for (mut node, drawer, roster, loadout, solo, battle_button, action, briefing, strip) in
+    for (mut node, drawer, roster, loadout, solo, battle_button, action, briefing, strip, deck) in
         &mut nodes
     {
+        if deck.is_some() {
+            let height = px(if compact { 200 } else { 160 });
+            if node.height != height {
+                node.height = height;
+            }
+        }
+        if strip.is_some() {
+            let bottom = px(if compact { 224 } else { 184 });
+            if node.bottom != bottom {
+                node.bottom = bottom;
+            }
+        }
         let visible = if drawer.is_some() {
             Some(panel.drawer != 0)
         } else if let Some(Roster(i)) = roster {
@@ -390,7 +408,11 @@ pub fn refresh(
                         || scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup),
             )
         } else if briefing.is_some() {
-            Some(battle || !scene.notice.is_empty() || !panel.briefing.is_empty())
+            Some(
+                !scene.notice.is_empty()
+                    || (battle && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup)
+                    || (!battle && !panel.briefing.is_empty()),
+            )
         } else if strip.is_some() {
             Some(battle && scene.sim.battle_counts()[0] > 0)
         } else {
@@ -432,7 +454,14 @@ pub fn refresh(
             0 => {
                 if battle {
                     let [a, b] = scene.sim.battle_counts();
-                    format!("СВОИ {a}  /  ВРАГИ {b}  ·  ИИ АКТИВЕН")
+                    let phase = match scene.sim.battle.phase {
+                        sim_core::blast::battle::Phase::Setup => "РАССТАНОВКА",
+                        sim_core::blast::battle::Phase::Fighting => "ИИ АКТИВЕН",
+                        sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
+                        sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
+                        sim_core::blast::battle::Phase::Draw => "НИЧЬЯ",
+                    };
+                    format!("СВОИ {a}  /  ВРАГИ {b}  ·  {phase}")
                 } else {
                     format!(
                         "1 КМ  ·  {:.0} FPS  ·  {}",
@@ -476,13 +505,18 @@ pub fn refresh(
                 if battle {
                     selected.map_or_else(
                         || "Выберите танк для смены боеприпаса".into(),
-                        |(i, _)| {
+                        |(i, u)| {
                             format!(
-                                "{} · дальность {} м\nСмена заряда сохраняет перезарядку",
+                                "{} · дальность {} м\n{}",
                                 weapon_name(
                                     scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
                                 ),
-                                scene.sim.battle_attack_range(i).unwrap_or(0) / 10
+                                scene.sim.battle_attack_range(i).unwrap_or(0) / 10,
+                                if u.kind == RangeUnitKind::Tank {
+                                    "Смена заряда сохраняет перезарядку"
+                                } else {
+                                    "Ведёт огонь во время движения"
+                                }
                             )
                         },
                     )
@@ -591,7 +625,14 @@ mod tests {
     #[test]
     fn hud_selects_tank_ammunition_and_issues_orders() {
         let mut app = app();
+        {
+            let mut panel = app.world_mut().resource_mut::<Panel>();
+            panel.briefing = "Тактическая сводка".into();
+            panel.drawer = 1;
+        }
         click(&mut app, Action::BattleStart);
+        assert!(app.world().resource::<Panel>().briefing.is_empty());
+        assert_eq!(app.world().resource::<Panel>().drawer, 0);
         click(&mut app, Action::SelectUnit(0));
         click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Kinetic)));
         assert_eq!(
@@ -636,6 +677,7 @@ mod tests {
                 BlastRange::with_layout(cfg, layout).unwrap();
             app.update();
             assert!(!app.world().resource::<Panel>().battle_launch);
+            assert!(app.world().resource::<Panel>().briefing.is_empty());
             assert!(!app.world().resource::<Workshop>().editing);
             let mut scene = app.world_mut().resource_mut::<Scene>();
             assert_eq!(scene.sim.battle_counts(), expected);
@@ -652,5 +694,30 @@ mod tests {
                 .enumerate()
                 .any(|(i, a)| !scene.sim.allied(i) && a.target.is_some()));
         }
+    }
+
+    #[test]
+    fn editor_buttons_explain_missing_selection_and_reach_spider_tool() {
+        let mut app = app();
+        app.world_mut().resource_mut::<Workshop>().editing = true;
+        click(&mut app, Action::Tool(Tool::Spider));
+        assert_eq!(app.world().resource::<Workshop>().tool, Tool::Spider);
+        click(&mut app, Action::Delete);
+        assert!(app
+            .world()
+            .resource::<Scene>()
+            .notice
+            .contains("выберите объект"));
+        click(&mut app, Action::AssignRoute);
+        assert!(app
+            .world()
+            .resource::<Scene>()
+            .notice
+            .contains("выберите юнит"));
+        click(&mut app, Action::Undo);
+        assert!(app
+            .world()
+            .resource::<ButtonInput<KeyCode>>()
+            .pressed(KeyCode::KeyZ));
     }
 }

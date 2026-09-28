@@ -2379,6 +2379,23 @@ fn capture(
     let Some(dir) = scene.out.clone() else {
         return;
     };
+    // Editor captures have no simulation ticks. Save the actual paused UI
+    // once and give the asynchronous screenshot writer time to finish.
+    if scene.paused {
+        if scene.captured == 0 {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(format!("{dir}/0000.png")));
+            scene.captured = 1;
+        } else {
+            scene.wait += 1;
+            if scene.wait == 35 {
+                println!("CAPTURE complete: {} images", scene.captured);
+                exit.write(AppExit::Success);
+            }
+        }
+        return;
+    }
     if scene.frame >= scene.finish {
         scene.wait += 1;
         if scene.wait == 35 {
@@ -2397,7 +2414,7 @@ fn capture(
         }
         return;
     }
-    if scene.paused || scene.last_capture == scene.frame {
+    if scene.last_capture == scene.frame {
         return;
     }
     let fire = if matches!(

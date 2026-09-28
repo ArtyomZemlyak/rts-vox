@@ -2143,8 +2143,11 @@ pub struct BlastRange {
     pub player: bool,
     pub patrols_running: bool,
     pub attack: Option<usize>,
-    /// Automatically acquire a live range target; manual orders disable it.
+    /// Automatically acquire a live range target; moving keeps it enabled.
     pub auto_attack: bool,
+    /// A player-issued route survives aiming and automatic target changes.
+    /// Stream pursuit routes may still stop or replan at firing distance.
+    manual_route: bool,
     pub aim: Option<[i32; 3]>,
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
@@ -2518,6 +2521,7 @@ impl BlastRange {
             patrols_running: true,
             attack: None,
             auto_attack: false,
+            manual_route: false,
             aim: None,
             world,
             size,
@@ -2611,7 +2615,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(44);
+        b.u32(45);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2771,6 +2775,9 @@ impl BlastRange {
                 b.u8(actor.weapon.map_or(0, |w| w as u8));
             }
         }
+        if version < 45 {
+            b.bool(self.manual_route);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2786,7 +2793,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=44).contains(&version) {
+        if !(27..=45).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3188,6 +3195,9 @@ impl BlastRange {
                 }
             }
         }
+        if version >= 45 {
+            r.manual_route = s.bool();
+        }
         (s.ok() && s.left() == 0).then_some(r)
     }
 
@@ -3231,12 +3241,10 @@ impl BlastRange {
         self.player = true;
     }
     pub fn order_move(&mut self, to: [i32; 2]) -> bool {
-        self.set_auto_attack(false);
         self.control();
-        self.attack = None;
         self.gun.motion.route.clear();
         let rubble = self.current_rubble();
-        self.gun.motion.move_to(
+        let accepted = self.gun.motion.move_to(
             &self.world,
             to,
             &self.gun.body,
@@ -3246,7 +3254,9 @@ impl BlastRange {
                 .map(|u| motion::Obstacle::of(&u.motion, &u.body))
                 .collect::<Vec<_>>(),
             &rubble,
-        )
+        );
+        self.manual_route = accepted && self.gun.motion.destination.is_some();
+        accepted
     }
     pub fn order_attack(&mut self, id: usize) -> bool {
         if id >= self.units.len() || !self.units[id].status.alive {
@@ -3255,13 +3265,12 @@ impl BlastRange {
         self.set_auto_attack(false);
         self.control();
         self.attack = Some(id);
-        self.gun.motion.stop();
         true
     }
     /// All placed range units are targets. Team rules belong to the battle
     /// scenario; this mode never retargets a manual order (ADR-338).
     pub fn set_auto_attack(&mut self, enabled: bool) {
-        if self.auto_attack && !enabled {
+        if self.auto_attack && !enabled && !self.manual_route && self.stream_tuning().is_some() {
             self.gun.motion.stop();
         }
         if self.auto_attack || enabled {
@@ -3275,7 +3284,6 @@ impl BlastRange {
         self.auto_attack = enabled && self.layout.is_some();
         if self.auto_attack {
             self.control();
-            self.gun.motion.stop();
         }
     }
     fn reload_ticks(&self) -> u32 {
@@ -3323,7 +3331,10 @@ impl BlastRange {
             .min()
             .map(|(_, id)| id);
         self.attack = None;
-        if self.stream_tuning().is_some() && self.gun.motion.destination.is_some() {
+        if self.stream_tuning().is_some()
+            && !self.manual_route
+            && self.gun.motion.destination.is_some()
+        {
             self.gun.motion.stop();
         }
         if self.shell.is_none() && self.fire_tick >= self.tick {
@@ -3352,10 +3363,15 @@ impl BlastRange {
         let dz = to[2].sub(from[2]);
         let distance = dx.mul(dx).add(dz.mul(dz)).sqrt();
         if distance <= Fx::from_int(reach) {
-            if self.gun.motion.destination.is_some() {
+            if !self.manual_route && self.gun.motion.destination.is_some() {
                 self.gun.motion.stop();
             }
             return true;
+        }
+        // An explicit move keeps its destination while the turret tracks the
+        // target. Once that route finishes, a stream weapon can pursue again.
+        if self.manual_route && self.gun.motion.destination.is_some() {
+            return false;
         }
         let approach = distance.sub(Fx::from_int(standoff)).div(distance);
         let dest = [
@@ -3381,6 +3397,7 @@ impl BlastRange {
     pub fn order_stop(&mut self) {
         self.set_auto_attack(false);
         self.attack = None;
+        self.manual_route = false;
         self.gun.motion.stop();
         self.streams.left = 0;
         if self.shell.is_none() {
@@ -3681,13 +3698,16 @@ impl BlastRange {
             completed("motion");
         }
         if !battle_mode {
+            if self.gun.motion.destination.is_none() {
+                self.manual_route = false;
+            }
             self.acquire_auto_target();
             let target_angle = self.aim_angle();
             self.turret.step(target_angle, self.turret_limits);
             if let Some(id) = self.attack {
                 if !self.units[id].status.alive {
                     self.attack = None;
-                    if self.stream_tuning().is_some() && self.gun.motion.destination.is_some() {
+                    if !self.manual_route && self.stream_tuning().is_some() {
                         self.gun.motion.stop();
                     }
                 } else {
@@ -4559,7 +4579,7 @@ mod tests {
         assert!(r.units[0].revision > 0, "flame never touched the target");
     }
     #[test]
-    fn manual_orders_cancel_automatic_charge_and_mode() {
+    fn stop_or_attack_replaces_auto_fire_but_a_move_keeps_it() {
         for command in 0..4 {
             let mut r = auto_range();
             r.set_auto_attack(true);
@@ -4580,8 +4600,15 @@ mod tests {
                     assert!(r.order_ground_fire([320, 16, 336]));
                 }
             }
-            assert!(!r.auto_attack);
-            if command < 2 {
+            if command == 1 {
+                assert!(r.auto_attack);
+                assert_eq!(r.attack, Some(0));
+                assert_ne!(r.fire_tick, u32::MAX);
+                assert!(r.gun.motion.destination.is_some());
+            } else {
+                assert!(!r.auto_attack);
+            }
+            if command == 0 {
                 assert!(r.attack.is_none());
                 assert_eq!(r.fire_tick, u32::MAX, "cancelled charge still fires");
             }
@@ -4595,6 +4622,46 @@ mod tests {
         let shell = r.shell;
         r.set_auto_attack(false);
         assert_eq!(r.shell, shell, "turning off erased an airborne round");
+    }
+    #[test]
+    fn solo_weapons_keep_firing_during_an_explicit_route() {
+        for (name, ron) in [
+            ("energy", include_str!("../../../data/energy-cannon.ron")),
+            ("flame", include_str!("../../../data/flamethrower.ron")),
+            ("machine gun", include_str!("../../../data/machine-gun.ron")),
+            ("laser", include_str!("../../../data/laser.ron")),
+        ] {
+            let mut r = auto_range();
+            r.reconfigure(ExplosionConfig::from_ron(ron).unwrap());
+            r.set_auto_attack(true);
+            assert!(r.order_move([300, 520]), "{name}");
+            let start = r.gun.motion.pos;
+            let mut firing_on_route = false;
+            for _ in 0..240 {
+                let before = r.streams.emitted();
+                let shell_before = r.shell.is_some();
+                r.step();
+                firing_on_route |= r.gun.motion.pos != start
+                    && r.gun.motion.destination.is_some()
+                    && (r.streams.emitted() > before || (!shell_before && r.shell.is_some()));
+                if firing_on_route {
+                    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+                    assert_eq!(restored.state_hash(), r.state_hash(), "{name}");
+                    break;
+                }
+            }
+            assert!(
+                firing_on_route,
+                "{name} never fired while moving: tick={} attack={:?} fire={} shell={} emitted={} destination={:?} pos={:?}",
+                r.tick,
+                r.attack,
+                r.fire_tick,
+                r.shell.is_some(),
+                r.streams.emitted(),
+                r.gun.motion.destination,
+                r.gun.motion.pos,
+            );
+        }
     }
     #[test]
     fn automatic_fire_damages_a_target_and_resumes_bit_for_bit() {

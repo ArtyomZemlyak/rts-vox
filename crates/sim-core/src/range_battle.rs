@@ -618,7 +618,7 @@ impl BlastRange {
             {
                 return false;
             }
-        } else {
+        } else if order == Order::Hold {
             self.units[id].motion.stop();
         }
         let actor = &mut battle.actors[id];
@@ -703,7 +703,7 @@ impl BlastRange {
             if !u.motion.move_to(&self.world, p, &u.body, &others, &rubble) {
                 return false;
             }
-        } else {
+        } else if order == Order::Hold {
             self.units[id].motion.stop();
         }
         let a = &mut self.battle.actors[id];
@@ -880,7 +880,7 @@ impl BlastRange {
             {
                 a.order = Order::Auto;
             }
-            if a.order == Order::Hold || a.order == Order::Move {
+            if a.order == Order::Hold {
                 a.target = None;
                 continue;
             }
@@ -950,10 +950,20 @@ impl BlastRange {
             }
             let dx = Fx::from_int(p[0]).sub(from[0]);
             let dz = Fx::from_int(p[2]).sub(from[2]);
+            // Traverse independently of the hull and before entering range,
+            // so a moving unit does not wait to begin slewing its turret.
+            let angle = fx::angle::atan2(dz.raw(), dx.raw());
+            a.turret.step(angle, self.turret_limits);
+            self.units[id].update_pose(a.turret.angle);
             let in_range =
                 dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
             if !in_range {
                 a.charge = None;
+                // A move order owns its route. Track and fire at hostiles that
+                // enter range, but never turn the move into an attack pursuit.
+                if a.order == Order::Move {
+                    continue;
+                }
                 if self.tick >= a.pursuit {
                     a.pursuit = self.tick + b.tuning.pursuit_ticks;
                     // A kilometre search may need several slices. Reissuing
@@ -1000,10 +1010,6 @@ impl BlastRange {
                 }
                 continue;
             }
-            self.units[id].motion.stop();
-            let angle = fx::angle::atan2(dz.raw(), dx.raw());
-            a.turret.step(angle, self.turret_limits);
-            self.units[id].update_pose(a.turret.angle);
             if self.tick < a.next || !a.turret.aligned(angle, self.turret_limits) {
                 continue;
             }

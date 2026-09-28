@@ -1063,12 +1063,16 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
         .spawn((
             SettingsRoot,
             super::panel::PanelRoot,
+            super::panel::ScrollPanel,
+            ScrollPosition::default(),
             bevy::ui::RelativeCursorPosition::default(),
             Node {
                 position_type: PositionType::Absolute,
                 left: px(310),
-                top: px(16),
+                top: px(76),
+                bottom: px(224),
                 width: px(330),
+                overflow: Overflow::scroll_y(),
                 padding: UiRect::all(px(12)),
                 row_gap: px(4),
                 flex_direction: FlexDirection::Column,
@@ -1092,7 +1096,7 @@ pub fn build(commands: &mut Commands, camera: Entity, text_font: &TextFont) {
             ));
             p.spawn((
                 Text::new(
-                    "Щелчок по числу — ввод с клавиатуры, Enter; − и + на шаг, с Shift на десять",
+                    "−/+ меняют значение; колесо прокручивает; щелчок по числу — точный ввод, Enter",
                 ),
                 TextFont {
                     font_size: FontSize::Px(12.0),

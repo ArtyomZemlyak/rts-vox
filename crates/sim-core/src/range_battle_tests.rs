@@ -427,6 +427,115 @@ fn manual_move_preserves_identity_and_actually_drives() {
 }
 
 #[test]
+fn every_battle_chassis_can_fire_during_a_move_order() {
+    for kind in [
+        RangeUnitKind::Tank,
+        RangeUnitKind::Strider,
+        RangeUnitKind::Spider,
+    ] {
+        let mut r = arena_of([kind, RangeUnitKind::Tank]);
+        r.start_battle().unwrap();
+        r.battle.ai.next_tick = u32::MAX;
+        r.battle.actors[1].order = Order::Hold;
+        assert!(r.battle_order(0, Order::Move, Some([260, 430])), "{kind:?}");
+        let start = r.units[0].motion.pos;
+        let mut fired_while_moving = false;
+        for _ in 0..180 {
+            let before = r.battle.actors[0].fired;
+            r.step();
+            if r.battle.actors[0].fired > before
+                && r.units[0].motion.pos != start
+                && r.units[0].motion.destination.is_some()
+            {
+                fired_while_moving = true;
+                break;
+            }
+        }
+        assert!(fired_while_moving, "{kind:?} did not shoot on its route");
+        assert_eq!(r.battle.actors[0].order, Order::Move);
+    }
+}
+
+#[test]
+fn enemy_ai_move_orders_keep_firing_for_every_chassis() {
+    for kind in [
+        RangeUnitKind::Tank,
+        RangeUnitKind::Strider,
+        RangeUnitKind::Spider,
+    ] {
+        let mut r = arena_of([RangeUnitKind::Tank, kind]);
+        r.start_battle().unwrap();
+        r.battle.actors[0].order = Order::Hold;
+        let tick = r.enemy_ai_observation().unwrap().decision_tick;
+        r.submit_enemy_ai_plan(
+            tick,
+            vec![Decision {
+                actor: 1,
+                order: AiOrder::Move([360, 430]),
+            }],
+        )
+        .unwrap();
+        r.step();
+        assert_eq!(r.battle.actors[1].order, Order::Move);
+        r.battle.ai.next_tick = u32::MAX;
+        let start = r.units[1].motion.pos;
+        let mut fired_while_moving = false;
+        for _ in 0..180 {
+            let before = r.battle.actors[1].fired;
+            r.step();
+            fired_while_moving |= r.battle.actors[1].fired > before
+                && r.units[1].motion.pos != start
+                && r.units[1].motion.destination.is_some();
+            if fired_while_moving {
+                break;
+            }
+        }
+        assert!(
+            fired_while_moving,
+            "enemy {kind:?} stopped shooting on the move"
+        );
+    }
+}
+
+#[test]
+fn attack_order_keeps_an_existing_battle_route() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Move, Some([260, 430])));
+    let route = r.units[0].motion.destination;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    assert_eq!(r.units[0].motion.destination, route);
+    let mut shot = false;
+    for _ in 0..180 {
+        let before = r.battle.actors[0].fired;
+        r.step();
+        shot |= r.battle.actors[0].fired > before && r.units[0].motion.destination.is_some();
+    }
+    assert!(shot, "explicit attack stopped the moving tank");
+}
+
+#[test]
+fn ground_fire_keeps_an_existing_battle_route() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Move, Some([260, 430])));
+    let route = r.units[0].motion.destination;
+    assert!(r.battle_order(0, Order::Ground([450, 16, 336]), None));
+    assert_eq!(r.units[0].motion.destination, route);
+    let mut shot = false;
+    for _ in 0..180 {
+        let before = r.battle.actors[0].fired;
+        r.step();
+        shot |= r.battle.actors[0].fired > before && r.units[0].motion.destination.is_some();
+    }
+    assert!(shot, "ground fire stopped the moving tank");
+}
+
+#[test]
 fn simultaneous_impacts_keep_both_waves_and_replay() {
     let mut a = arena(RangeUnitKind::Tank);
     a.start_battle().unwrap();
@@ -1084,7 +1193,7 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&41u32.to_le_bytes());
-    old.truncate(old.len() - r.battle.actors.len());
+    old.truncate(old.len() - r.battle.actors.len() - 1);
     let old = BlastRange::restore(r.config.clone(), &old).unwrap();
     assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
 }
@@ -1206,6 +1315,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     // No active waves: 42 and 43 have the same bytes for legacy ammunition.
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&42u32.to_le_bytes());
+    old.pop(); // Version 45's manual-route flag is absent from 42.
     assert_eq!(
         BlastRange::restore(r.config.clone(), &old)
             .unwrap()
@@ -1215,6 +1325,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     r.set_battle_weapon(0, Some(Weapon::Annihilation));
     let mut invalid = r.snapshot();
     invalid[..4].copy_from_slice(&42u32.to_le_bytes());
+    invalid.pop();
     assert!(BlastRange::restore(r.config.clone(), &invalid).is_none());
 }
 
@@ -1365,6 +1476,8 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
     assert_eq!(r.units[0].motion.feet.len(), 8);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
+    // Keep the gait trial separate from the now-active move-order laser.
+    r.units[0].status.weapon = false;
     let step = |r: &mut BlastRange| {
         if r.battle.phase == Phase::Fighting && r.battle.ai.pending.is_none() {
             let plan = if r.units[1].status.alive {
@@ -1417,6 +1530,7 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
         r.battle_attack_range(0),
         Some(motion::spider_tuning().laser.range)
     );
+    r.units[0].status.weapon = true;
     let own = r.units[0].body.volume_mm3();
     let victim = r.units[1].body.volume_mm3();
     assert!(r.battle_order(0, Order::Attack(1), None));
