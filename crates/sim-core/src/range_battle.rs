@@ -406,6 +406,9 @@ impl BlastRange {
     pub fn battle_weapon(&self, id: usize) -> Option<Weapon> {
         let u = self.units.get(id)?;
         let a = self.battle.actors.get(id)?;
+        if u.kind == RangeUnitKind::Base {
+            return None;
+        }
         if u.kind == RangeUnitKind::Spider {
             return Some(Weapon::Laser);
         }
@@ -426,7 +429,10 @@ impl BlastRange {
             Weapon::ammo(match (a.order, a.target.and_then(|t| self.units.get(t))) {
                 (Order::Ground(_), _) | (_, None) => ammo.ground,
                 (_, Some(t))
-                    if matches!(t.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) =>
+                    if matches!(
+                        t.kind,
+                        RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::Base
+                    ) =>
                 {
                     ammo.tank
                 }
@@ -813,6 +819,29 @@ impl BlastRange {
         }
         n
     }
+    /// Health of each command base, when both sides have one. A destroyed
+    /// base remains in the layout and reports zero health.
+    pub fn battle_base_integrity(&self) -> Option<[i32; 2]> {
+        let layout = self.layout.as_ref()?;
+        let mut health = [None, None];
+        for (i, def) in layout.units.iter().enumerate() {
+            if def.kind == RangeUnitKind::Base {
+                let side = usize::from(!def.allied);
+                let unit = self.units.get(i)?;
+                let value = if unit.status.alive {
+                    unit.integrity
+                        .core
+                        .mul(Fx::from_int(100))
+                        .to_int_trunc()
+                        .clamp(1, 100)
+                } else {
+                    0
+                };
+                health[side] = Some(health[side].unwrap_or(0).max(value));
+            }
+        }
+        Some([health[0]?, health[1]?])
+    }
     #[cfg(test)]
     pub(super) fn battle_tick(&mut self) {
         self.battle_tick_observed(|_| {});
@@ -859,14 +888,24 @@ impl BlastRange {
             }
         }
         completed("battle_damage");
-        if battle.phase == Phase::Fighting && battle.rounds.is_empty() && battle.waves.is_empty() {
-            let n = self.battle_counts();
-            battle.phase = match n {
-                [0, 0] => Phase::Draw,
-                [0, _] => Phase::Defeat,
-                [_, 0] => Phase::Victory,
-                _ => Phase::Fighting,
-            };
+        if battle.phase == Phase::Fighting {
+            // A base is the objective itself: an unrelated round still in
+            // flight must not postpone the outcome indefinitely.
+            if let Some([own, enemy]) = self.battle_base_integrity() {
+                battle.phase = match (own > 0, enemy > 0) {
+                    (false, false) => Phase::Draw,
+                    (false, true) => Phase::Defeat,
+                    (true, false) => Phase::Victory,
+                    (true, true) => Phase::Fighting,
+                };
+            } else if battle.rounds.is_empty() && battle.waves.is_empty() {
+                battle.phase = match self.battle_counts() {
+                    [0, 0] => Phase::Draw,
+                    [0, _] => Phase::Defeat,
+                    [_, 0] => Phase::Victory,
+                    _ => Phase::Fighting,
+                };
+            }
             if battle.phase != Phase::Fighting {
                 for u in &mut self.units {
                     u.motion.stop();
@@ -927,7 +966,7 @@ impl BlastRange {
                     (_, Some(t))
                         if matches!(
                             self.units[t].kind,
-                            RangeUnitKind::Tank | RangeUnitKind::Artillery
+                            RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::Base
                         ) =>
                     {
                         ammo.tank

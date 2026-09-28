@@ -825,6 +825,7 @@ impl Matter {
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                     modding::range::RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                     modding::range::RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+                    modding::range::RangeUnitKind::Base => voxel::unit::command_base(),
                 })
                 .collect(),
         );

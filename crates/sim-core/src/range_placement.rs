@@ -76,7 +76,7 @@ impl Footprint {
 }
 
 pub struct Validator {
-    footprints: [std::sync::OnceLock<Footprint>; 12],
+    footprints: [std::sync::OnceLock<Footprint>; 14],
 }
 impl Default for Validator {
     fn default() -> Self {
@@ -87,11 +87,11 @@ impl Default for Validator {
 }
 impl Validator {
     fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
-        self.footprints[kind.index() + usize::from(reverse) * 6]
+        self.footprints[kind.index() + usize::from(reverse) * 7]
             .get_or_init(|| Footprint::of(kind, if reverse { fx::angle::FULL / 2 } else { 0 }))
     }
 
-    /// Collision checks cover at most twelve template footprints; the terrain
+    /// Collision checks cover at most fourteen template footprints; the terrain
     /// index itself scales with the authored map. Layered blocks retain
     /// their last-writer material semantics.
     pub fn validate(&self, layout: &RangeLayout) -> Result<(), Rejection> {

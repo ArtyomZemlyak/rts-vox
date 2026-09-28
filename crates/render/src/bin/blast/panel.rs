@@ -452,6 +452,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Артиллерия", Action::Tool(Tool::Artillery)),
                     ("Турель T1", Action::Tool(Tool::TurretT1)),
                     ("Турель T2", Action::Tool(Tool::TurretT2)),
+                    ("База", Action::Tool(Tool::Base)),
                 ],
             ),
             (
@@ -693,8 +694,13 @@ pub fn actions(
                 Err(e) => scene.notice = e,
             },
             Action::BattleWorld => match edit.battle_world(scene.sim.config.clone()) {
-                Ok(()) => {
-                    scene.view = 1;
+                Ok(briefing) => {
+                    panel.briefing = briefing;
+                    panel.battle_launch = true;
+                    panel.drawer = 0;
+                    panel.pending = None;
+                    panel.drive = true;
+                    scene.view = 6;
                     scene.repeat = false;
                     panel.demo = false;
                     panel.ground_fire = false;
@@ -736,7 +742,12 @@ pub fn actions(
                         .units
                         .iter()
                         .enumerate()
-                        .find(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+                        .find(|(i, u)| {
+                            scene.sim.allied(*i)
+                                && u.status.alive
+                                && u.status.engine
+                                && u.status.weapon
+                        })
                         .map(|(i, _)| i);
                 }
                 Err(e) => scene.notice = e.into(),
@@ -832,6 +843,7 @@ pub fn actions(
                         RangeUnitKind::Artillery => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
+                        RangeUnitKind::Base => 0,
                     };
                     let delivery = match w {
                         3 => Delivery::Flame,

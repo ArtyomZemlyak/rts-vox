@@ -47,9 +47,9 @@ impl Tuning {
             }
             crate::range::RangeUnitKind::Strider => &self.walker,
             crate::range::RangeUnitKind::Spider => &self.spider,
-            crate::range::RangeUnitKind::TurretT1 | crate::range::RangeUnitKind::TurretT2 => {
-                &self.tank
-            }
+            crate::range::RangeUnitKind::TurretT1
+            | crate::range::RangeUnitKind::TurretT2
+            | crate::range::RangeUnitKind::Base => &self.tank,
         }
     }
     /// Whole economic quantities: no fractional matter disappears on burning.

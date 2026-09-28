@@ -316,6 +316,13 @@ pub fn update(
             Display::None
         };
         if let Some(u) = unit {
+            let width = if u.kind == RangeUnitKind::Base {
+                10.0
+            } else {
+                5.0
+            };
+            node.width = px(width);
+            node.height = px(width);
             node.left = percent(100.0 * u.motion.pos[0].to_f64_lossy() as f32 / size[0] as f32);
             node.top = percent(100.0 * u.motion.pos[2].to_f64_lossy() as f32 / size[2] as f32);
             color.0 = if *i == modding::range::MAX_RANGE_UNITS || scene.sim.allied(*i) {

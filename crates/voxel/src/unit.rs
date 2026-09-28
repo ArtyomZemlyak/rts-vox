@@ -1500,6 +1500,81 @@ pub fn turret_t2() -> UnitBody {
     u
 }
 
+/// Destructible command base for the map-wide battle. The broad foundation,
+/// corner bastions and raised command crown keep it readable at RTS height;
+/// the sheltered core determines whether the base is still operational.
+pub fn command_base() -> UnitBody {
+    let mut u = UnitBody::new_scaled(80, 58, 80, 8, BODY_MM);
+    let a = Part::Armour;
+    fill_f(&mut u, (2, 78), (1, 6), (2, 78), a, FINISH_STEEL);
+    fill_f(&mut u, (7, 73), (6, 16), (7, 73), a, FINISH_PLATE);
+    for x in [7, 61] {
+        for z in [7, 61] {
+            fill_f(&mut u, (x, x + 12), (16, 38), (z, z + 12), a, FINISH_PLATE);
+            fill_f(
+                &mut u,
+                (x + 2, x + 10),
+                (38, 41),
+                (z + 2, z + 10),
+                a,
+                FINISH_STEEL,
+            );
+        }
+    }
+    fill_f(&mut u, (16, 64), (16, 41), (16, 64), a, FINISH_PLATE);
+    fill(&mut u, (31, 49), (16, 39), (31, 49), Part::Core);
+    fill_f(&mut u, (19, 61), (41, 46), (19, 61), a, FINISH_STEEL);
+    fill_f(&mut u, (25, 55), (46, 51), (25, 55), a, FINISH_PLATE);
+    fill_f(
+        &mut u,
+        (33, 47),
+        (51, 55),
+        (33, 47),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    for z in [20, 56] {
+        fill_f(&mut u, (28, 52), (45, 48), (z, z + 4), a, FINISH_CORE);
+    }
+    // Recessed entrance, cooling shutters and antenna groups break up the
+    // large surfaces without introducing a non-physical decorative mesh.
+    carve(&mut u, (70, 80), (7, 23), (34, 46));
+    for z in [23, 30, 47, 54] {
+        fill_f(&mut u, (10, 15), (23, 29), (z, z + 3), a, FINISH_GUN);
+    }
+    for x in [29, 50] {
+        fill_f(
+            &mut u,
+            (x, x + 2),
+            (51, 58),
+            (29, 31),
+            Part::Sensor,
+            FINISH_STEEL,
+        );
+    }
+    seat(u, "командная база")
+}
+
+#[cfg(test)]
+mod command_base_tests {
+    use super::*;
+    #[test]
+    fn command_base_is_stationary_and_loses_when_its_core_is_destroyed() {
+        let mut base = command_base();
+        let status = base.status(&mut CoreBufs::new());
+        assert!(status.alive && !status.engine && !status.weapon);
+        let (x, y, z) = base.core;
+        for dz in 0..base.core_size as usize {
+            for dy in 0..base.core_size as usize {
+                for dx in 0..base.core_size as usize {
+                    base.remove(x as usize + dx, y as usize + dy, z as usize + dz);
+                }
+            }
+        }
+        assert!(!base.status(&mut CoreBufs::new()).alive);
+    }
+}
+
 /// Шагоход: второе ванильное тело. 4.0 × 5.0 × 4.0 м при вокселе
 /// 100 мм — том 40×50×40.
 ///

@@ -17,6 +17,7 @@ pub enum Tool {
     Artillery,
     TurretT1,
     TurretT2,
+    Base,
     Concrete,
     Steel,
     Earth,
@@ -226,23 +227,30 @@ impl Workshop {
         self.pitch = 0.0;
         Ok(preset.briefing)
     }
-    pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<(), String> {
+    pub fn battle_world(&mut self, config: ExplosionConfig) -> Result<String, String> {
+        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+            "../../../../../data/battle-world.ron"
+        ))?;
         let mut layout = self.layout.clone().ok_or("No range layout")?;
         layout.battle = true;
-        layout.units.clear();
+        layout.units = preset.units;
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
         }
+        let controlled = layout
+            .units
+            .iter()
+            .position(|u| u.allied && !u.kind.emplacement());
         self.commit(layout, config)?;
         self.editing = true;
         self.allied = true;
-        self.controlled = None;
-        self.selected = None;
+        self.controlled = controlled;
+        self.selected = self.controlled.map(Selection::Unit);
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
         self.orbit = 0.0;
         self.pitch = 0.0;
-        Ok(())
+        Ok(preset.briefing)
     }
     pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
         let mut layout = self.layout.clone().ok_or("No range layout")?;
@@ -410,7 +418,8 @@ impl Workshop {
             | Tool::Spider
             | Tool::Artillery
             | Tool::TurretT1
-            | Tool::TurretT2 => {
+            | Tool::TurretT2
+            | Tool::Base => {
                 next.units.push(RangeUnitDef {
                     allied: self.allied,
                     kind: if self.tool == Tool::Tank {
@@ -423,6 +432,8 @@ impl Workshop {
                         RangeUnitKind::TurretT1
                     } else if self.tool == Tool::TurretT2 {
                         RangeUnitKind::TurretT2
+                    } else if self.tool == Tool::Base {
+                        RangeUnitKind::Base
                     } else {
                         RangeUnitKind::Strider
                     },
@@ -1416,11 +1427,39 @@ mod tests {
         let far = [7800, 16, 4000];
         assert!(!layout.zones.iter().any(|z| z.contains([far[0], far[2]], 0)));
         let blocks = layout.blocks.clone();
+        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+            "../../../../../data/battle-world.ron"
+        ))
+        .unwrap();
+        let mut probe = layout.clone();
+        probe.battle = true;
+        probe.units.clear();
+        if let Some(course) = &mut probe.course {
+            course.patrols.clear();
+        }
+        for unit in preset.units {
+            probe.units.push(unit.clone());
+            sim_core::blast::placement::Validator::default()
+                .validate(&probe)
+                .unwrap_or_else(|e| panic!("world battle placement {unit:?}: {e:?}"));
+        }
         let mut edit = Workshop::new(Some(layout), false);
-        edit.battle_world(config.clone()).unwrap();
+        let briefing = edit.battle_world(config.clone()).unwrap();
+        assert!(briefing.contains("баз"));
         assert!(edit.editing);
         assert!(edit.layout.as_ref().unwrap().battle);
-        assert!(edit.layout.as_ref().unwrap().units.is_empty());
+        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 12);
+        assert_eq!(edit.controlled, Some(1));
+        assert_eq!(
+            edit.layout
+                .as_ref()
+                .unwrap()
+                .units
+                .iter()
+                .filter(|u| u.kind == RangeUnitKind::Base)
+                .count(),
+            2
+        );
         assert_eq!(edit.layout.as_ref().unwrap().blocks, blocks);
         edit.tool = Tool::Steel;
         edit.preview(far, 60);
@@ -1454,8 +1493,8 @@ mod tests {
             edit.commit(preview.next.clone(), config.clone()).unwrap();
         }
         let (_, placed) = edit.pending.take().unwrap();
-        assert_eq!(placed.units.len(), 3);
-        assert!(placed.units[0].allied && placed.units[1].allied && !placed.units[2].allied);
+        assert_eq!(placed.units.len(), 15);
+        assert!(placed.units[12].allied && placed.units[13].allied && !placed.units[14].allied);
         assert_eq!(
             RangeLayout::from_ron(&placed.to_ron().unwrap()).unwrap(),
             placed
@@ -1471,8 +1510,9 @@ mod tests {
         sim.start_battle().unwrap();
         assert_eq!(sim.battle.phase, sim_core::blast::battle::Phase::Fighting);
         sim.step();
-        assert_eq!(sim.battle.actors[1].target, Some(2));
-        assert_eq!(sim.battle.actors[2].target, Some(1));
+        assert_eq!(sim.battle_base_integrity(), Some([100, 100]));
+        assert!(sim.battle.actors[12].target.is_some());
+        assert!(sim.battle.actors[14].target.is_some());
     }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {

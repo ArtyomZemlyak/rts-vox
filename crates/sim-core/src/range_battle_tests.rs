@@ -39,6 +39,53 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
 }
 
 #[test]
+fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [150, 16, 120],
+        allied: true,
+    });
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [480, 16, 550],
+        allied: false,
+    });
+    let mut battle = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    assert_eq!(battle.battle_base_integrity(), Some([100, 100]));
+    assert_eq!(battle.battle_weapon(3), None);
+    assert!(!battle.units[3].status.weapon && !battle.units[3].status.engine);
+    battle.battle.actors[0].order = Order::Attack(3);
+    battle.battle.actors[0].target = Some(3);
+    assert_eq!(battle.battle_weapon(0), Some(Weapon::Kinetic));
+    battle.start_battle().unwrap();
+    let in_flight = [Fx::from_int(300), Fx::from_int(150), Fx::from_int(300)];
+    battle.battle.rounds.push(Round {
+        owner: 0,
+        weapon: Weapon::Kinetic,
+        pos: in_flight,
+        previous: in_flight,
+        velocity: [Fx::from_int(1), Fx::ZERO, Fx::ZERO],
+        distance: Fx::from_int(100),
+    });
+    battle.units[3].status.alive = false;
+    battle.battle_tick();
+    assert!(battle.units[1].status.alive);
+    assert!(!battle.battle.rounds.is_empty());
+    assert_eq!(battle.battle_base_integrity(), Some([100, 0]));
+    assert_eq!(battle.battle.phase, Phase::Victory);
+    battle.battle.phase = Phase::Fighting;
+    battle.units[3].status.alive = true;
+    battle.units[2].status.alive = false;
+    battle.battle_tick();
+    assert_eq!(battle.battle.phase, Phase::Defeat);
+}
+
+#[test]
 fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
     let mut tuning =
         modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();

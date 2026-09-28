@@ -104,6 +104,7 @@ pub fn emitters(
         RangeUnitKind::Artillery => 3.0,
         RangeUnitKind::TurretT1 => 2.1,
         RangeUnitKind::TurretT2 => 3.5,
+        RangeUnitKind::Base => 4.0,
     };
     for (barrel, path) in body.weapon_paths().iter().enumerate() {
         if path.axis != 0 {

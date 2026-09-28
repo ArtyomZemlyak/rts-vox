@@ -467,6 +467,8 @@ pub fn refresh(
                                 "1"
                             } else if u.kind == RangeUnitKind::TurretT2 {
                                 "2"
+                            } else if u.kind == RangeUnitKind::Base {
+                                "Б"
                             } else {
                                 "Ш"
                             },
@@ -492,7 +494,11 @@ pub fn refresh(
                         sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
                         sim_core::blast::battle::Phase::Draw => "НИЧЬЯ",
                     };
-                    format!("СВОИ {a}  /  ВРАГИ {b}  ·  {phase}")
+                    if let Some([own, enemy]) = scene.sim.battle_base_integrity() {
+                        format!("БАЗЫ: СВОЯ {own}% / ВРАГ {enemy}%  ·  {phase}")
+                    } else {
+                        format!("СВОИ {a}  /  ВРАГИ {b}  ·  {phase}")
+                    }
                 } else {
                     format!(
                         "1 КМ  ·  {:.0} FPS  ·  {}",
@@ -508,6 +514,18 @@ pub fn refresh(
             1 => selected.map_or_else(
                 || "Выберите свой юнит".into(),
                 |(id, u)| {
+                    if u.kind == RangeUnitKind::Base {
+                        return format!(
+                            "БАЗА {:02}  ·  {}\nЯдро {}%   ·   ЦЕЛЬ БОЯ",
+                            id + 1,
+                            if u.status.alive {
+                                "В СТРОЮ"
+                            } else {
+                                "УНИЧТОЖЕНА"
+                            },
+                            u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
+                        );
+                    }
                     format!(
                         "{} {}  ·  {}\nЯдро {}%   Ходовая {}%",
                         if u.kind == RangeUnitKind::Spider {

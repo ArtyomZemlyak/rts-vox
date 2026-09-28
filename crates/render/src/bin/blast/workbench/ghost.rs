@@ -80,6 +80,7 @@ pub fn setup(
         (RangeUnitKind::Artillery, voxel::unit::artillery()),
         (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
         (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
+        (RangeUnitKind::Base, voxel::unit::command_base()),
     ] {
         commands.spawn((
             Mesh3d(meshes.add(mesh(&template(&body)))),

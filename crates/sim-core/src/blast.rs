@@ -406,6 +406,7 @@ impl RangeUnit {
         static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static BASE: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static SPIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static STRIDER: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         let body = match kind {
@@ -413,6 +414,7 @@ impl RangeUnit {
             RangeUnitKind::Artillery => ARTILLERY.get_or_init(voxel::unit::artillery).clone(),
             RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
             RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
+            RangeUnitKind::Base => BASE.get_or_init(voxel::unit::command_base).clone(),
             RangeUnitKind::Strider => STRIDER.get_or_init(voxel::unit::strider).clone(),
             RangeUnitKind::Spider => SPIDER.get_or_init(voxel::unit::spider).clone(),
         };

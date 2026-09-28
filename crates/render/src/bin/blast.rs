@@ -101,8 +101,8 @@ struct Witness(usize, Transform, Option<usize>, bool);
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
     burned_materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: Arc<[voxel::unit::UnitBody; 6]>,
-    skins: Arc<[SkinBindings; 6]>,
+    pristine: Arc<[voxel::unit::UnitBody; 7]>,
+    skins: Arc<[SkinBindings; 7]>,
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
@@ -326,6 +326,7 @@ fn main() {
     let mut battle_preset = false;
     let mut battle_weapon = None;
     let mut battle_eight = false;
+    let mut world_battle = false;
     let mut skirmish = None;
     let mut hud_drawer = 0;
     let mut window_size = [1600, 900];
@@ -374,6 +375,7 @@ fn main() {
                 assert!(window_size[0] >= 960 && window_size[1] >= 540);
             }
             "--battle" => battle_preset = true,
+            "--world-battle" => world_battle = true,
             "--battle-weapon" => {
                 i += 1;
                 battle_weapon = Some(match args[i].as_str() {
@@ -589,6 +591,18 @@ fn main() {
         drive = true;
     }
     let mut battle_briefing = String::new();
+    if world_battle {
+        battle_briefing = workshop
+            .battle_world(config(false, false))
+            .expect("world battle needs the kilometre range");
+        workshop.pending = None;
+        workshop.editing = edit;
+        battle_preset = true;
+        drive = true;
+        energy = false;
+        anni = false;
+        view = 6;
+    }
     if let Some(id) = skirmish {
         battle_briefing = workshop
             .skirmish(id, config(false, false))
@@ -635,7 +649,9 @@ fn main() {
     }
     if drive {
         sim.control();
-        view = 1;
+        if !world_battle {
+            view = 1;
+        }
     }
     if let Some(p) = go {
         assert!(sim.order_move(p), "--move: no route to {p:?}");
@@ -1197,6 +1213,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::artillery()),
             SkinBindings::new(&voxel::unit::turret_t1()),
             SkinBindings::new(&voxel::unit::turret_t2()),
+            SkinBindings::new(&voxel::unit::command_base()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1205,6 +1222,7 @@ fn setup(
             voxel::unit::artillery(),
             voxel::unit::turret_t1(),
             voxel::unit::turret_t2(),
+            voxel::unit::command_base(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

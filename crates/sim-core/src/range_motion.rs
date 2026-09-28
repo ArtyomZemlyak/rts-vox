@@ -205,7 +205,8 @@ impl Motion {
             modding::range::RangeUnitKind::Tank
             | modding::range::RangeUnitKind::Artillery
             | modding::range::RangeUnitKind::TurretT1
-            | modding::range::RangeUnitKind::TurretT2 => t.tracked,
+            | modding::range::RangeUnitKind::TurretT2
+            | modding::range::RangeUnitKind::Base => t.tracked,
             modding::range::RangeUnitKind::Spider => spider_tuning().chassis,
             _ => t.walking,
         };
@@ -2035,6 +2036,7 @@ mod tests {
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+                RangeUnitKind::Base => voxel::unit::command_base(),
             };
             let mut m = Motion::new([300, 16, 300], kind, &body);
             m.enabled = true;
@@ -2212,6 +2214,7 @@ mod tests {
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+                RangeUnitKind::Base => voxel::unit::command_base(),
             };
             for axis in [0, 1] {
                 let mut m = Motion::new([590, 16, 590], kind, &body);
@@ -3077,6 +3080,7 @@ mod tests {
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+                        RangeUnitKind::Base => voxel::unit::command_base(),
                     };
                     let (start, end) = if reverse { (410, 230) } else { (230, 410) };
                     let mut m = Motion::new([start, 16, 300], kind, &body);

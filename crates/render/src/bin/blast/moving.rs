@@ -462,6 +462,7 @@ pub fn animate(
             voxel::unit::artillery(),
             voxel::unit::turret_t1(),
             voxel::unit::turret_t2(),
+            voxel::unit::command_base(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))
@@ -483,6 +484,7 @@ pub fn animate(
                 | RangeUnitKind::Artillery
                 | RangeUnitKind::TurretT1
                 | RangeUnitKind::TurretT2
+                | RangeUnitKind::Base
         ) {
             let rigs = &v.rigs[u.kind.index()];
             let rot = render::realtime::hull_rotation(p.up, p.yaw);
@@ -554,6 +556,7 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
             | RangeUnitKind::Artillery
             | RangeUnitKind::TurretT1
             | RangeUnitKind::TurretT2
+            | RangeUnitKind::Base
     ) {
         return Vec::new();
     }
