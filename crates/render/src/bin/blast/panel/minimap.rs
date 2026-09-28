@@ -1,14 +1,22 @@
 //! A map of actual terrain columns; clicking changes the existing camera pan.
 use super::*;
 use bevy::asset::RenderAssetUsages;
+use bevy::math::Rot2;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::ui::FocusPolicy;
 #[derive(Component, Default)]
 pub struct MiniMap {
     generation: Option<u64>,
 }
 #[derive(Component)]
 pub struct Marker(usize);
+#[derive(Component)]
+pub struct ViewEdge {
+    index: usize,
+    thickness: f32,
+}
 const SIDE: u32 = 96;
+const MAP_PIXELS: f32 = 142.0;
 pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
     commands
         .spawn((
@@ -17,7 +25,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             Node {
                 position_type: PositionType::Absolute,
                 left: px(16),
-                bottom: px(212),
+                bottom: px(234),
                 width: px(154),
                 height: px(176),
                 padding: UiRect::all(px(5)),
@@ -45,12 +53,34 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 MiniMap::default(),
                 bevy::ui::RelativeCursorPosition::default(),
                 Node {
-                    width: px(142),
-                    height: px(142),
+                    width: px(MAP_PIXELS),
+                    height: px(MAP_PIXELS),
+                    overflow: Overflow::clip(),
                     ..default()
                 },
             ))
             .with_children(|p| {
+                // Two strokes keep the view outline legible over both pale
+                // roads and dark woods. They pass clicks through to the map.
+                for index in 0..8 {
+                    for (thickness, color) in [
+                        (4.0, Color::srgba(0.015, 0.04, 0.05, 0.95)),
+                        (2.0, Color::srgb(1.0, 0.87, 0.41)),
+                    ] {
+                        p.spawn((
+                            ViewEdge { index, thickness },
+                            FocusPolicy::Pass,
+                            UiTransform::default(),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                display: Display::None,
+                                height: px(thickness),
+                                ..default()
+                            },
+                            BackgroundColor(color),
+                        ));
+                    }
+                }
                 for i in 0..=modding::range::MAX_RANGE_UNITS {
                     p.spawn((
                         Marker(i),
@@ -67,6 +97,136 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 }
             });
         });
+}
+
+/// Intersect the current orthographic frustum with the range's ground plane.
+/// The four resulting corners preserve camera orbit and pitch on the map.
+fn ground_footprint(
+    transform: &Transform,
+    projection: &Projection,
+    viewport: Vec2,
+) -> Option<[Vec2; 4]> {
+    let Projection::Orthographic(ortho) = projection else {
+        return None;
+    };
+    let bevy::camera::ScalingMode::FixedVertical { viewport_height } = ortho.scaling_mode else {
+        return None;
+    };
+    if viewport.x <= 0.0 || viewport.y <= 0.0 {
+        return None;
+    }
+    let height = viewport_height * ortho.scale;
+    let width = height * viewport.x / viewport.y;
+    let right = transform.rotation * Vec3::X;
+    let up = transform.rotation * Vec3::Y;
+    let forward = transform.rotation * Vec3::NEG_Z;
+    if forward.y >= -0.01 {
+        return None;
+    }
+    let ground = sim_core::blast::FLOOR as f32;
+    Some(std::array::from_fn(|i| {
+        let (x, y) = [(-1.0, 1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)][i];
+        let origin = transform.translation + right * (x * width * 0.5) + up * (y * height * 0.5);
+        let point = origin + forward * ((ground - origin.y) / forward.y);
+        Vec2::new(point.x, point.z)
+    }))
+}
+
+/// Clip a projected view against the unit square of the tactical map.
+/// A four-corner view can yield up to eight edges after clipping.
+fn clip_to_map(corners: [Vec2; 4]) -> Vec<Vec2> {
+    let mut polygon = corners.to_vec();
+    for (axis, limit, greater) in [
+        (0, 0.0, true),
+        (0, 1.0, false),
+        (1, 0.0, true),
+        (1, 1.0, false),
+    ] {
+        if polygon.is_empty() {
+            break;
+        }
+        let mut next = Vec::with_capacity(8);
+        let mut previous = *polygon.last().unwrap();
+        let mut was_inside = if greater {
+            previous[axis] >= limit
+        } else {
+            previous[axis] <= limit
+        };
+        for current in polygon.iter().copied() {
+            let inside = if greater {
+                current[axis] >= limit
+            } else {
+                current[axis] <= limit
+            };
+            if inside != was_inside {
+                let t = (limit - previous[axis]) / (current[axis] - previous[axis]);
+                next.push(previous.lerp(current, t));
+            }
+            if inside {
+                next.push(current);
+            }
+            previous = current;
+            was_inside = inside;
+        }
+        polygon = next;
+    }
+    polygon
+        .into_iter()
+        .map(|p| p.clamp(Vec2::ZERO, Vec2::ONE))
+        .collect()
+}
+
+pub fn update_view(
+    scene: Res<Scene>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &Transform, &Projection), With<GasCamera>>,
+    mut edges: Query<(&ViewEdge, &mut Node, &mut UiTransform)>,
+    mut previous: Local<Vec<Vec2>>,
+) {
+    let Some((camera, transform, projection)) = cameras.iter().next() else {
+        return;
+    };
+    let viewport = camera
+        .logical_viewport_size()
+        .or_else(|| {
+            windows
+                .single()
+                .ok()
+                .map(|w| Vec2::new(w.width(), w.height()))
+        })
+        .unwrap_or(Vec2::new(1600.0, 900.0));
+    let size = scene.sim.size();
+    let polygon = ground_footprint(transform, projection, viewport)
+        .map(|corners| {
+            clip_to_map(corners.map(|p| Vec2::new(p.x / size[0] as f32, p.y / size[2] as f32)))
+        })
+        .unwrap_or_default();
+    let pixels: Vec<Vec2> = polygon.into_iter().map(|p| p * MAP_PIXELS).collect();
+    if pixels.len() == previous.len()
+        && pixels
+            .iter()
+            .zip(previous.iter())
+            .all(|(a, b)| a.distance_squared(*b) < 0.04)
+    {
+        return;
+    }
+    for (edge, mut node, mut transform) in &mut edges {
+        if pixels.len() < 3 || edge.index >= pixels.len() {
+            node.display = Display::None;
+            continue;
+        }
+        let start = pixels[edge.index];
+        let end = pixels[(edge.index + 1) % pixels.len()];
+        let delta = end - start;
+        let length = delta.length();
+        let middle = (start + end) * 0.5;
+        node.display = Display::Flex;
+        node.left = px(middle.x - length * 0.5);
+        node.top = px(middle.y - edge.thickness * 0.5);
+        node.width = px(length);
+        transform.rotation = Rot2::radians(delta.y.atan2(delta.x));
+    }
+    *previous = pixels;
 }
 pub fn update(
     mut scene: ResMut<Scene>,
@@ -187,5 +347,36 @@ mod tests {
             destination(Vec2::new(2.0, -1.0), size),
             Vec2::new(10000.0, 0.0)
         );
+    }
+
+    #[test]
+    fn camera_footprint_follows_orbit_and_clips_to_the_map() {
+        let projection = Projection::Orthographic(OrthographicProjection {
+            scaling_mode: bevy::camera::ScalingMode::FixedVertical {
+                viewport_height: 100.0,
+            },
+            ..OrthographicProjection::default_3d()
+        });
+        let transform = Transform::from_xyz(500.0, 400.0, 800.0)
+            .looking_at(Vec3::new(500.0, 16.0, 500.0), Vec3::Y);
+        let corners = ground_footprint(&transform, &projection, Vec2::new(800.0, 600.0)).unwrap();
+        let centre = corners.iter().copied().sum::<Vec2>() / 4.0;
+        assert!((centre - Vec2::new(500.0, 500.0)).length() < 0.01);
+        let rotated = Transform::from_xyz(800.0, 400.0, 500.0)
+            .looking_at(Vec3::new(500.0, 16.0, 500.0), Vec3::Y);
+        let rotated_corners =
+            ground_footprint(&rotated, &projection, Vec2::new(800.0, 600.0)).unwrap();
+        assert!((corners[0] - rotated_corners[0]).length() > 10.0);
+
+        let clipped = clip_to_map([
+            Vec2::new(-1.0, -1.0),
+            Vec2::new(2.0, -1.0),
+            Vec2::new(2.0, 2.0),
+            Vec2::new(-1.0, 2.0),
+        ]);
+        assert_eq!(clipped.len(), 4);
+        assert!(clipped
+            .iter()
+            .all(|p| (0.0..=1.0).contains(&p.x) && (0.0..=1.0).contains(&p.y)));
     }
 }

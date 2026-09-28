@@ -805,6 +805,7 @@ fn main() {
                     animate_energy,
                     overview::sync,
                     framing,
+                    panel::minimap::update_view,
                     overview::atmosphere,
                     streaming::camera,
                     workbench::camera,
