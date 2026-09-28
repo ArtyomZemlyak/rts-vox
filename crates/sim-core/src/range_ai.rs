@@ -227,54 +227,142 @@ impl Policy for Rules<'_> {
         if targets.is_empty() {
             return Vec::new();
         }
+        let own_base = observation
+            .units
+            .iter()
+            .find(|u| {
+                u.allied == self.controlled_allied && u.alive && u.kind == RangeUnitKind::Base
+            })
+            .map(|u| u.position);
+        let field_strength =
+            |units: &[&UnitObservation]| units.iter().filter(|u| u.mobile && u.armed).count();
+        let field_roster = |side: bool| {
+            observation
+                .units
+                .iter()
+                .filter(|u| {
+                    u.allied == side
+                        && matches!(
+                            u.kind,
+                            RangeUnitKind::Tank
+                                | RangeUnitKind::Artillery
+                                | RangeUnitKind::Strider
+                                | RangeUnitKind::Spider
+                        )
+                })
+                .count()
+        };
+        let allied_field = field_strength(&allies);
+        let enemy_field = field_strength(&targets);
+        let outnumbered = allied_field < enemy_field
+            || (allied_field == enemy_field
+                && field_roster(self.controlled_allied) < field_roster(!self.controlled_allied));
+        // A smaller field army keeps one nearby mobile defender at its base.
+        // Forward units remain committed to the fight; an absent rear guard
+        // does not pull a distant unit away from contact.
+        let guard = own_base.filter(|_| outnumbered).and_then(|base| {
+            allies
+                .iter()
+                .filter(|u| {
+                    u.mobile
+                        && u.armed
+                        && u.kind != RangeUnitKind::Artillery
+                        && (i64::from(u.position[0] - base[0]).abs()
+                            + i64::from(u.position[1] - base[1]).abs())
+                            <= 1500
+                })
+                .min_by_key(|u| {
+                    (
+                        i64::from(u.position[0] - base[0]).abs()
+                            + i64::from(u.position[1] - base[1]).abs(),
+                        u.id,
+                    )
+                })
+                .map(|u| u.id)
+        });
+        let guard_post = own_base.map(|base| {
+            let delta = [
+                i64::from(observation.size[0] / 2) - i64::from(base[0]),
+                i64::from(observation.size[2] / 2) - i64::from(base[1]),
+            ];
+            let length = delta[0].abs().max(delta[1].abs()).max(1);
+            [
+                (i64::from(base[0]) + delta[0] * 300 / length) as i32,
+                (i64::from(base[1]) + delta[1] * 300 / length) as i32,
+            ]
+        });
         allies
             .iter()
             .map(|u| Decision {
                 actor: u.id,
-                order: AiOrder::Attack({
-                    // Mobile artillery is the siege arm. It advances on the
-                    // command objective instead of chasing a distant scout,
-                    // but engages armed defenders in its immediate sector.
-                    let siege = (u.kind == RangeUnitKind::Artillery && u.armed)
-                        .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
-                        .flatten();
-                    if let Some(base) = siege {
-                        let threat_radius = 1200
-                            + if u.ordered_target == Some(base.id) {
-                                0
-                            } else {
-                                self.tuning.switch_margin
-                            };
-                        if let Some(threat) = targets
-                            .iter()
-                            .filter(|v| {
-                                v.kind != RangeUnitKind::Base
-                                    && v.armed
-                                    && Self::distance(u, v) <= i64::from(threat_radius)
-                            })
-                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                        {
-                            threat.id
-                        } else {
-                            base.id
-                        }
-                    } else {
-                        let best = targets
-                            .iter()
-                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                            .expect("nonempty targets");
+                order: if guard == Some(u.id) {
+                    if let Some(base) = own_base {
                         targets
                             .iter()
-                            .find(|v| Some(v.id) == u.ordered_target)
-                            .filter(|old| {
-                                self.score(u, old, &allies)
-                                    <= self.score(u, best, &allies)
-                                        + i64::from(self.tuning.switch_margin)
+                            .filter(|v| {
+                                v.armed
+                                    && v.kind != RangeUnitKind::Base
+                                    && (i64::from(v.position[0] - base[0]).abs()
+                                        + i64::from(v.position[1] - base[1]).abs())
+                                        <= if u.ordered_target == Some(v.id) {
+                                            2200
+                                        } else {
+                                            1800
+                                        }
                             })
-                            .unwrap_or(best)
-                            .id
+                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                            .map_or(AiOrder::Move(guard_post.unwrap()), |v| {
+                                AiOrder::Attack(v.id)
+                            })
+                    } else {
+                        AiOrder::Auto
                     }
-                }),
+                } else {
+                    AiOrder::Attack({
+                        // Mobile artillery is the siege arm. It advances on the
+                        // command objective instead of chasing a distant scout,
+                        // but engages armed defenders in its immediate sector.
+                        let siege = (u.kind == RangeUnitKind::Artillery && u.armed)
+                            .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
+                            .flatten();
+                        if let Some(base) = siege {
+                            let threat_radius = 1200
+                                + if u.ordered_target == Some(base.id) {
+                                    0
+                                } else {
+                                    self.tuning.switch_margin
+                                };
+                            if let Some(threat) = targets
+                                .iter()
+                                .filter(|v| {
+                                    v.kind != RangeUnitKind::Base
+                                        && v.armed
+                                        && Self::distance(u, v) <= i64::from(threat_radius)
+                                })
+                                .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                            {
+                                threat.id
+                            } else {
+                                base.id
+                            }
+                        } else {
+                            let best = targets
+                                .iter()
+                                .min_by_key(|v| (self.score(u, v, &allies), v.id))
+                                .expect("nonempty targets");
+                            targets
+                                .iter()
+                                .find(|v| Some(v.id) == u.ordered_target)
+                                .filter(|old| {
+                                    self.score(u, old, &allies)
+                                        <= self.score(u, best, &allies)
+                                            + i64::from(self.tuning.switch_margin)
+                                })
+                                .unwrap_or(best)
+                                .id
+                        }
+                    })
+                },
             })
             .collect()
     }

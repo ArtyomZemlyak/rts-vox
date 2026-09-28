@@ -11,6 +11,10 @@ fn main() {
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
     let ai_vs_ai = args.iter().any(|a| a == "--ai-vs-ai");
+    let balance = args
+        .windows(2)
+        .find(|w| w[0] == "--balance")
+        .map_or("even", |w| w[1].as_str());
     assert!(
         !ai_vs_ai || world_battle,
         "--ai-vs-ai requires --world or --assault"
@@ -39,12 +43,32 @@ fn main() {
         ))
         .unwrap()
         .units;
+        let selected: &[usize] = match balance {
+            "even" => &[],
+            // Bases and the central contact remain fixed; the missing rear
+            // reinforcement or forward escort changes the local force ratio.
+            "blue-light" => &[0, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            "red-light" => &[0, 1, 2, 3, 4, 5, 6, 9, 10, 11],
+            "blue-front-light" => &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11],
+            "red-front-light" => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            _ => {
+                panic!("--balance: even, blue-light, red-light, blue-front-light, red-front-light")
+            }
+        };
+        if !selected.is_empty() {
+            layout.units = selected
+                .iter()
+                .map(|&id| layout.units[id].clone())
+                .collect();
+        }
         if assault {
+            assert_eq!(balance, "even", "--assault uses its fixed roster");
             // Isolate a real cross-map route and base kill from the large
             // firefight. Keep authored positions and the unchanged terrain.
             layout.units = [0, 4, 6].map(|id| layout.units[id].clone()).into();
         }
     } else {
+        assert_eq!(balance, "even", "--balance requires --world");
         layout.gun = t.zone.spawn;
         layout.target = t.zone.target;
         layout.zones.push(t.zone);

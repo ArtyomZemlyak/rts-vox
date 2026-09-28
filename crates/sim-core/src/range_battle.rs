@@ -655,10 +655,16 @@ impl BlastRange {
             if self.units[id].kind.emplacement() {
                 return false;
             }
-            if battle.actors[id].order == Order::Move
-                && self.units[id].motion.destination == Some(p)
-            {
-                return true;
+            if battle.actors[id].order == Order::Move {
+                let motion = &self.units[id].motion;
+                let dx = i64::from(motion.pos[0].to_int_trunc() - p[0]);
+                let dz = i64::from(motion.pos[2].to_int_trunc() - p[1]);
+                let arrival = i64::from(motion.arrival.max(1));
+                if motion.destination == Some(p)
+                    || (motion.destination.is_none() && dx * dx + dz * dz <= arrival * arrival)
+                {
+                    return true;
+                }
             }
             let others: Vec<_> = self
                 .units
@@ -1052,7 +1058,9 @@ impl BlastRange {
             };
             let a = &mut b.actors[id];
             if matches!(a.order, Order::Attack(i) if !hostile(i))
-                || (a.order == Order::Move && self.units[id].motion.destination.is_none())
+                || (a.order == Order::Move
+                    && self.units[id].motion.destination.is_none()
+                    && !b.autonomous)
             {
                 a.order = Order::Auto;
             }

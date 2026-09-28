@@ -502,6 +502,82 @@ fn artillery_attacks_the_base_until_an_armed_defender_is_close() {
 }
 
 #[test]
+fn outnumbered_army_keeps_a_rear_guard_without_abandoning_its_siege() {
+    let tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    let unit = |id, allied, kind, position| UnitObservation {
+        id,
+        allied,
+        alive: true,
+        armed: kind != RangeUnitKind::Base,
+        mobile: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::TurretT1),
+        kind,
+        position,
+        ordered_target: None,
+    };
+    let mut observation = Observation {
+        version: OBSERVATION_VERSION,
+        observed_tick: 0,
+        decision_tick: 0,
+        size: [10000, 192, 10000],
+        units: vec![
+            unit(0, true, RangeUnitKind::Base, [1000, 1000]),
+            unit(1, true, RangeUnitKind::Tank, [1100, 1000]),
+            unit(2, true, RangeUnitKind::Artillery, [1200, 900]),
+            unit(3, true, RangeUnitKind::Tank, [5000, 5000]),
+            unit(4, false, RangeUnitKind::Base, [9000, 9000]),
+            unit(5, false, RangeUnitKind::Tank, [6000, 6000]),
+            unit(6, false, RangeUnitKind::Tank, [6200, 6000]),
+            unit(7, false, RangeUnitKind::Strider, [6400, 6000]),
+            unit(8, false, RangeUnitKind::Artillery, [9000, 8500]),
+        ],
+    };
+    let rules = Rules {
+        tuning: &tuning,
+        controlled_allied: true,
+    };
+    let orders = rules.decide(&observation);
+    assert_eq!(orders[0].order, AiOrder::Move([1300, 1300]));
+    assert_eq!(orders[1].order, AiOrder::Attack(4));
+    assert!(matches!(orders[2].order, AiOrder::Attack(_)));
+    observation.units[5].position = [1500, 1300];
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(5));
+    observation.units[1].ordered_target = Some(5);
+    observation.units[5].position = [2800, 1300];
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(5));
+    observation.units[1].ordered_target = None;
+    assert_eq!(
+        rules.decide(&observation)[0].order,
+        AiOrder::Move([1300, 1300])
+    );
+    observation.units[5].position = [6000, 6000];
+    observation.units[6].alive = false;
+    assert_eq!(
+        rules.decide(&observation)[0].order,
+        AiOrder::Move([1300, 1300])
+    );
+    observation.units[7].alive = false;
+    assert!(matches!(
+        rules.decide(&observation)[0].order,
+        AiOrder::Attack(_)
+    ));
+}
+
+#[test]
+fn autonomous_guard_does_not_chase_across_the_map_after_arriving() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.battle.autonomous = true;
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[0].order = Order::Move;
+    r.units[0].motion.destination = None;
+    r.battle_tick();
+    assert_eq!(r.battle.actors[0].order, Order::Move);
+    assert_eq!(r.units[0].motion.destination, None);
+    assert_eq!(r.battle.actors[0].target, Some(1));
+}
+
+#[test]
 fn strategic_road_waypoints_reach_both_command_sectors() {
     let roads = RangeLayout::from_ron(include_str!("../../../data/range-km.ron"))
         .unwrap()
