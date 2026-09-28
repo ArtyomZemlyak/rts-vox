@@ -4,9 +4,9 @@
  units: [
   (kind: Base, allied: true, at: (1530,16,630)),
   (kind: Tank, allied: true, at: (1630,16,520)),
-  (kind: Artillery, allied: true, at: (1660,16,750)),
+  (kind: Artillery, allied: true, at: (1460,16,760)),
   (kind: TurretT1, allied: true, at: (1550,16,450)),
-  (kind: Tank, allied: true, at: (4850,16,5300)),
+  (kind: Tank, allied: true, at: (4850,16,5580)),
   (kind: Strider, allied: true, at: (4850,16,5460)),
   (kind: Base, allied: false, at: (8820,16,8870)),
   (kind: Tank, allied: false, at: (8750,16,8730)),

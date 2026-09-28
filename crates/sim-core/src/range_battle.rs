@@ -896,6 +896,13 @@ impl BlastRange {
                     (false, false) => Phase::Draw,
                     (false, true) => Phase::Defeat,
                     (true, false) => Phase::Victory,
+                    (true, true)
+                        if battle.rounds.is_empty()
+                            && battle.waves.is_empty()
+                            && !self.units.iter().any(|u| u.status.alive && u.status.weapon) =>
+                    {
+                        Phase::Draw
+                    }
                     (true, true) => Phase::Fighting,
                 };
             } else if battle.rounds.is_empty() && battle.waves.is_empty() {

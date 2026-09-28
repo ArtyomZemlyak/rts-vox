@@ -753,6 +753,42 @@ mod tests {
     }
 
     #[test]
+    fn world_battle_button_loads_bases_and_starts_both_armies() {
+        let mut app = app();
+        click(&mut app, Action::BattleWorld);
+        assert_eq!(app.world().resource::<Scene>().view, 6);
+        assert!(app.world().resource::<Panel>().battle_launch);
+        assert!(app.world().resource::<Panel>().briefing.contains("баз"));
+        let (config, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .expect("world battle rebuild");
+        assert_eq!(layout.units.len(), 12);
+        app.world_mut().resource_mut::<Scene>().sim =
+            BlastRange::with_layout(config, layout).unwrap();
+        app.update();
+        let scene = app.world().resource::<Scene>();
+        assert_eq!(scene.sim.battle_counts(), [6, 6]);
+        assert_eq!(scene.sim.battle_base_integrity(), Some([100, 100]));
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+        assert!(!app.world().resource::<Workshop>().editing);
+        assert_eq!(app.world().resource::<Workshop>().controlled, Some(1));
+        assert!(!app.world().resource::<Panel>().battle_launch);
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        assert!(scene
+            .sim
+            .battle_order(1, sim_core::blast::battle::Order::Attack(6), None));
+        scene.sim.step();
+        assert_eq!(scene.sim.battle.actors[1].target, Some(6));
+        assert!(scene.sim.units[1].motion.destination.is_some());
+    }
+
+    #[test]
     fn editor_buttons_explain_missing_selection_and_reach_spider_tool() {
         let mut app = app();
         app.world_mut().resource_mut::<Workshop>().editing = true;

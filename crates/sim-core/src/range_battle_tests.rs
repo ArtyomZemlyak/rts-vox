@@ -83,6 +83,67 @@ fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
     battle.units[2].status.alive = false;
     battle.battle_tick();
     assert_eq!(battle.battle.phase, Phase::Defeat);
+    battle.battle.phase = Phase::Fighting;
+    battle.battle.rounds.clear();
+    battle.battle.waves.clear();
+    battle.units[0].status.alive = false;
+    battle.units[1].status.alive = false;
+    battle.units[2].status.alive = true;
+    battle.units[3].status.alive = true;
+    battle.battle_tick();
+    assert_eq!(battle.battle.phase, Phase::Draw);
+}
+
+#[test]
+fn annihilation_hit_on_base_ends_a_real_battle() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.units[1].at = [500, 16, 500];
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [150, 16, 120],
+        allied: true,
+    });
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [450, 16, 336],
+        allied: false,
+    });
+    let mut battle = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    battle.start_battle().unwrap();
+    battle.battle.actors[1].order = Order::Hold;
+    battle.battle.ai.next_tick = u32::MAX;
+    assert!(battle.set_battle_weapon(0, Some(Weapon::Annihilation)));
+    assert!(battle.battle_order(0, Order::Attack(3), None));
+    let mut hit = false;
+    for _ in 0..600 {
+        battle.step();
+        hit |= battle
+            .battle
+            .impacts
+            .iter()
+            .any(|i| i.weapon == Weapon::Annihilation);
+        if battle.battle.phase != Phase::Fighting {
+            break;
+        }
+    }
+    assert!(hit, "annihilation bolt never reached the command base");
+    assert!(
+        battle.units[1].status.alive,
+        "enemy armour must survive the base objective"
+    );
+    assert_eq!(
+        battle.battle.phase,
+        Phase::Victory,
+        "base alive={} core={} shots={} damage={}",
+        battle.units[3].status.alive,
+        battle.units[3].integrity.core.to_f64_lossy(),
+        battle.battle.actors[0].fired,
+        battle.units[3].revision
+    );
 }
 
 #[test]
@@ -171,6 +232,69 @@ fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
     observation.units[3].ordered_target = Some(0);
     observation.units[0].position = [265, 100];
     assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(0));
+}
+
+#[test]
+fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
+    let mut tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    tuning.armed_bonus = 0;
+    tuning.mobile_bonus = 0;
+    let units = vec![
+        UnitObservation {
+            id: 0,
+            allied: true,
+            alive: true,
+            armed: true,
+            mobile: true,
+            kind: RangeUnitKind::Tank,
+            position: [100, 100],
+            ordered_target: None,
+        },
+        UnitObservation {
+            id: 1,
+            allied: true,
+            alive: true,
+            armed: true,
+            mobile: true,
+            kind: RangeUnitKind::Tank,
+            position: [500, 100],
+            ordered_target: None,
+        },
+        UnitObservation {
+            id: 2,
+            allied: false,
+            alive: true,
+            armed: true,
+            mobile: true,
+            kind: RangeUnitKind::Tank,
+            position: [230, 100],
+            ordered_target: None,
+        },
+        UnitObservation {
+            id: 3,
+            allied: false,
+            alive: true,
+            armed: false,
+            mobile: false,
+            kind: RangeUnitKind::Base,
+            position: [550, 100],
+            ordered_target: None,
+        },
+    ];
+    assert_eq!(
+        Rules { tuning: &tuning }.decide(&Observation {
+            version: OBSERVATION_VERSION,
+            observed_tick: 20,
+            decision_tick: 30,
+            size: [640, 192, 640],
+            units,
+        }),
+        vec![Decision {
+            actor: 2,
+            order: AiOrder::Attack(0),
+        }]
+    );
 }
 
 #[test]

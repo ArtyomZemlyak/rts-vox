@@ -1513,6 +1513,18 @@ mod tests {
         assert_eq!(sim.battle_base_integrity(), Some([100, 100]));
         assert!(sim.battle.actors[12].target.is_some());
         assert!(sim.battle.actors[14].target.is_some());
+        assert!(sim.battle_order(4, sim_core::blast::battle::Order::Move, Some([5050, 5800])));
+        let front = sim.units[4].at;
+        for _ in 0..180 {
+            sim.step();
+        }
+        assert!(sim.units[2].at[1] < 30, "artillery climbed onto a roof");
+        assert!(
+            sim.units[4].at[0] > front[0] + 40 || sim.units[4].at[2] > front[2] + 40,
+            "front tank stalled on the road: {:?} -> {:?}",
+            front,
+            sim.units[4].at
+        );
     }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {

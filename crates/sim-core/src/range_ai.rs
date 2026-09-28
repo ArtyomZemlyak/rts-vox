@@ -72,7 +72,7 @@ impl Policy for Rules<'_> {
         let enemies: Vec<_> = observation
             .units
             .iter()
-            .filter(|u| !u.allied && u.alive)
+            .filter(|u| !u.allied && u.alive && (u.armed || u.mobile))
             .collect();
         let targets: Vec<_> = observation
             .units
