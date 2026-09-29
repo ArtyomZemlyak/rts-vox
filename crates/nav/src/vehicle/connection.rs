@@ -72,6 +72,19 @@ impl Connection {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
     ) -> Option<Option<usize>> {
+        self.advance_with_endpoints(ground, shape, clear, allowance, None, None)
+    }
+    /// The search has already probed both nodes of an edge. Reuse their exact
+    /// poses while charging the same logical queries for bounded progress.
+    pub fn advance_with_endpoints(
+        &mut self,
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        allowance: &mut usize,
+        origin_pose: Option<Pose>,
+        target_pose: Option<Pose>,
+    ) -> Option<Option<usize>> {
         let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
         let yaw = self.yaw;
         let turn = angle::diff(yaw, self.head);
@@ -82,7 +95,10 @@ impl Connection {
         while *allowance > 0 {
             *allowance -= 1;
             if self.cursor == 0 {
-                self.height = ground.route_pose(self.from, self.head, shape).height;
+                self.height = origin_pose.map_or_else(
+                    || ground.route_pose(self.from, self.head, shape).height,
+                    |pose| pose.height,
+                );
             } else {
                 let (p, h) = if self.cursor <= turns {
                     (
@@ -102,7 +118,15 @@ impl Connection {
                 if !clear(p, h) {
                     return Some(None);
                 }
-                let next = ground.route_pose(p, h, shape);
+                // A zero-angle turn's first sample is exactly the source
+                // pose again. Reuse its full clearance and crush answer.
+                let next = if self.cursor == turns + steps {
+                    target_pose.unwrap_or_else(|| ground.route_pose(p, h, shape))
+                } else if turn == 0 && self.cursor == 1 {
+                    origin_pose.unwrap_or_else(|| ground.route_pose(p, h, shape))
+                } else {
+                    ground.route_pose(p, h, shape)
+                };
                 if next.refused() || next.height.sub(self.height).abs() > Fx::from_int(shape.step) {
                     return Some(None);
                 }

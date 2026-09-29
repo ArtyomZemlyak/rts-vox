@@ -2054,7 +2054,16 @@ impl Hunt {
             }
             let (j, next_cost, run) = e.pending.as_mut().unwrap();
             let before = *allowance;
-            let answer = run.advance(ground, self.shape, clear, allowance);
+            let origin_pose = self.poses.get(&e.node).copied();
+            let target_pose = self.poses.get(j).copied();
+            let answer = run.advance_with_endpoints(
+                ground,
+                self.shape,
+                clear,
+                allowance,
+                origin_pose,
+                target_pose,
+            );
             self.probed += (before - *allowance) as u32;
             match answer {
                 None => break,
@@ -2555,6 +2564,39 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn an_edge_reuses_probed_endpoints_without_changing_clearance_or_budget() {
+        let w = world(false, false, true);
+        let from = [116, 72].map(Fx::from_int);
+        let to = [124, 72].map(Fx::from_int);
+        let shape = tank();
+        let mut endpoints = Probe::new(&w);
+        let start = endpoints.route_pose(from, 0, shape);
+        let end = endpoints.route_pose(to, 0, shape);
+        let mut plain = Probe::new(&w);
+        let mut cached = Probe::new(&w);
+        let mut a = Connection::sweep(from, 0, to, 0);
+        let mut b = a.clone();
+        let mut left_a = usize::MAX;
+        let mut left_b = usize::MAX;
+        let expected = a.advance(&mut plain, shape, &|_, _| true, &mut left_a);
+        let actual = b.advance_with_endpoints(
+            &mut cached,
+            shape,
+            &|_, _| true,
+            &mut left_b,
+            Some(start),
+            Some(end),
+        );
+        assert_eq!(actual, expected);
+        assert_eq!(left_b, left_a);
+        let mut saved_a = fx::blob::Blob::new();
+        let mut saved_b = fx::blob::Blob::new();
+        a.save(&mut saved_a);
+        b.save(&mut saved_b);
+        assert_eq!(saved_b.v, saved_a.v);
+        assert!(cached.samples < plain.samples);
     }
     #[test]
     fn bounded_prelude_and_finish_restore_on_the_same_slice() {
