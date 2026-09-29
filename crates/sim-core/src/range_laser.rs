@@ -2,13 +2,17 @@
 use super::*;
 
 impl BlastRange {
-    fn laser_cell(&self, p: [i32; 3], bounds: &[([i32; 3], [i32; 3])]) -> Option<thermal::Cell> {
-        bounds.iter().enumerate().find_map(|(id, (lo, hi))| {
+    fn laser_cell(
+        &self,
+        p: [i32; 3],
+        bounds: &[(usize, ([i32; 3], [i32; 3]))],
+    ) -> Option<thermal::Cell> {
+        bounds.iter().find_map(|(id, (lo, hi))| {
             if (0..3).any(|a| p[a] < lo[a] || p[a] > hi[a]) {
                 return None;
             }
-            self.units[id].hit(p).map(|(part, at)| thermal::Cell {
-                unit: id as u16,
+            self.units[*id].hit(p).map(|(part, at)| thermal::Cell {
+                unit: *id as u16,
                 part: part as u8,
                 at: at.map(|v| v as u8),
             })
@@ -22,7 +26,7 @@ impl BlastRange {
         source: [i64; 3],
         target: [i32; 3],
         cell: Option<thermal::Cell>,
-        bounds: &[([i32; 3], [i32; 3])],
+        bounds: &[(usize, ([i32; 3], [i32; 3]))],
     ) -> bool {
         let delta: [i64; 3] = std::array::from_fn(|a| i64::from(target[a]) * 16 + 8 - source[a]);
         let steps = (delta.iter().map(|v| v.abs()).max().unwrap() + 3) / 4;
@@ -79,16 +83,27 @@ impl BlastRange {
         let u = (axis + 1) % 3;
         let v = (axis + 2) % 3;
         let axial_length = if d[axis] == 0 { 1 } else { d[axis] };
+        // Only bodies inside the enclosing halo box can address any of its
+        // surface cells or obstruct a short radial visibility ray.
+        let margin = 2 * radius + 2;
+        let region_lo = [0, 1, 2].map(|i| {
+            (a[i].min(b[i]).div_euclid(16) as i32 - margin).min(contact.map_or(i32::MAX, |p| p[i]))
+        });
+        let region_hi = [0, 1, 2].map(|i| {
+            (a[i].max(b[i]).div_euclid(16) as i32 + margin).max(contact.map_or(i32::MIN, |p| p[i]))
+        });
         let bounds: Vec<_> = self
             .units
             .iter()
             .enumerate()
-            .map(|(id, u)| {
+            .filter_map(|(id, u)| {
                 if Some(id) == owner {
-                    ([i32::MAX; 3], [i32::MIN; 3])
-                } else {
-                    u.bounds()
+                    return None;
                 }
+                let box_at = u.bounds();
+                (0..3)
+                    .all(|i| box_at.0[i] <= region_hi[i] && box_at.1[i] >= region_lo[i])
+                    .then_some((id, box_at))
             })
             .collect();
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));

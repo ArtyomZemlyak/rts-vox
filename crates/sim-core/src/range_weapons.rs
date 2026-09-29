@@ -538,6 +538,26 @@ impl BlastRange {
             .sqrt()
             .max(Fx::ONE);
         let direction = delta.map(|v| v.div(length));
+        // A ray can only meet bodies whose enclosing boxes cross its full
+        // segment. Build that short, slot-ordered list once; testing every
+        // distant articulated body at every half-voxel was the hot path.
+        let start = from.map(Fx::to_int_trunc);
+        let far = std::array::from_fn::<_, 3, _>(|a| {
+            from[a]
+                .add(direction[a].mul(Fx::from_int(tuning.range)))
+                .to_int_trunc()
+        });
+        let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
+        let near: Vec<_> = boxes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, (lo, hi))| {
+                (Some(id) != owner
+                    && (0..3)
+                        .all(|a| start[a].min(far[a]) <= hi[a] && start[a].max(far[a]) >= lo[a]))
+                .then_some(id)
+            })
+            .collect();
         let serial = self.streams.serial;
         self.streams.serial = serial.wrapping_add(1);
         let mut previous = from.map(Fx::to_int_trunc);
@@ -559,11 +579,10 @@ impl BlastRange {
                 break;
             }
             if material(&self.world, p) != 0
-                || self
-                    .units
-                    .iter()
-                    .enumerate()
-                    .any(|(id, u)| Some(id) != owner && u.solid(p))
+                || near.iter().any(|&id| {
+                    let (lo, hi) = boxes[id];
+                    (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
+                })
             {
                 self.stream_contact_owned(
                     p,
