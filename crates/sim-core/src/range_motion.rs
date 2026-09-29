@@ -821,6 +821,29 @@ impl Motion {
         self.cursor = 0;
         self.plan_to(w, to, b, others, rubble)
     }
+    /// Accept a group order without starting every hull's route search in the
+    /// input frame. The normal motion scheduler starts these searches under
+    /// `searches_started_per_tick`, using the world as it is on that tick.
+    pub fn queue_move(&mut self, w: &World, to: [i32; 2]) -> bool {
+        let far = [w.nx as i32 - EDGE, w.nz as i32 - EDGE];
+        if !(0..2).all(|a| (EDGE..far[a]).contains(&to[a])) {
+            return false;
+        }
+        self.route.clear();
+        self.path.clear();
+        self.partial_path = false;
+        self.cursor = 0;
+        self.hunt = None;
+        self.destination = Some(to);
+        self.enabled = true;
+        self.blocked = false;
+        self.needs_recovery = false;
+        self.blocked_ticks = 0;
+        self.escape = 0;
+        self.escape_left = 0;
+        self.next_plan = 0;
+        true
+    }
     /// Only nearby hulls matter to a contact detour. A distant actor is
     /// handled if and when the moving hull reaches it, not by this search.
     fn local_blockers(

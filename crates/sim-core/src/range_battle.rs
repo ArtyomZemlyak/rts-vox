@@ -785,6 +785,40 @@ impl BlastRange {
         a.pursuit = 0;
         true
     }
+    /// Accept a formation immediately. Route searches begin during motion
+    /// ticks, under the existing global start budget, instead of multiplying
+    /// one input-frame stall by the selected unit count.
+    pub fn battle_group_move(
+        &mut self,
+        destinations: &[(usize, [i32; 2])],
+        fallback: [i32; 2],
+    ) -> usize {
+        if !self.battle_mode() || self.battle.phase != Phase::Fighting {
+            return 0;
+        }
+        let mut accepted = 0;
+        for &(id, target) in destinations {
+            if !self.allied(id)
+                || !self.units.get(id).is_some_and(|u| u.status.alive)
+                || self.units[id].kind.emplacement()
+            {
+                continue;
+            }
+            let unit = &mut self.units[id];
+            let moved = unit.motion.queue_move(&self.world, target)
+                || unit.motion.queue_move(&self.world, fallback);
+            if moved {
+                let actor = &mut self.battle.actors[id];
+                actor.order = Order::Move;
+                actor.target = None;
+                actor.charge = None;
+                actor.burst = 0;
+                actor.pursuit = 0;
+                accepted += 1;
+            }
+        }
+        accepted
+    }
     /// A firing position for `id` on the arc through `natural` around
     /// `target`, a `spacing` from the points its allies hold — where they
     /// drive, or where they stand (ADR-467). Allies lined up with the

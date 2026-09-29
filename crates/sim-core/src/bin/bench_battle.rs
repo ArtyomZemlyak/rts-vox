@@ -151,6 +151,76 @@ fn main() {
         assert!(sim.set_ai_vs_ai(true));
     }
     sim.start_battle().unwrap();
+    if args.iter().any(|a| a == "--group-order-bench") {
+        assert!(world_battle, "--group-order-bench requires --world");
+        let ids: Vec<_> = sim
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(i, u)| sim.allied(*i) && !u.kind.emplacement())
+            .map(|(i, _)| i)
+            .collect();
+        let columns = (1..=ids.len()).find(|n| n * n >= ids.len()).unwrap() as i32;
+        let rows = (ids.len() as i32 + columns - 1) / columns;
+        let destinations: Vec<_> = ids
+            .iter()
+            .enumerate()
+            .map(|(slot, &id)| {
+                let (col, row) = (slot as i32 % columns, slot as i32 / columns);
+                (
+                    id,
+                    [
+                        5000 + (2 * col - columns + 1) * 45,
+                        5000 + (2 * row - rows + 1) * 45,
+                    ],
+                )
+            })
+            .collect();
+        let no_group = args.iter().any(|a| a == "--no-group");
+        let now = Instant::now();
+        let accepted = if no_group {
+            0
+        } else {
+            sim.battle_group_move(&destinations, [5000, 5000])
+        };
+        println!(
+            "group_move_us={} mobile={} accepted={accepted}",
+            now.elapsed().as_micros(),
+            ids.len()
+        );
+        let mut ticks = Vec::with_capacity(ids.len() + 1);
+        let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
+        for _ in 0..=ids.len() {
+            let now = Instant::now();
+            let mut last = now;
+            sim.step_observed(|phase| {
+                let at = Instant::now();
+                phases
+                    .entry(phase)
+                    .or_default()
+                    .push(at.duration_since(last).as_micros());
+                last = at;
+            });
+            ticks.push(now.elapsed().as_micros());
+        }
+        ticks.sort_unstable();
+        println!(
+            "group_first_ticks_us_median={} p95={} max={}",
+            ticks[ticks.len() / 2],
+            ticks[ticks.len() * 95 / 100],
+            ticks[ticks.len() - 1]
+        );
+        let mut phase_p95: Vec<_> = phases
+            .into_iter()
+            .map(|(name, mut samples)| {
+                samples.sort_unstable();
+                (name, samples[samples.len() * 95 / 100])
+            })
+            .collect();
+        phase_p95.sort_unstable_by_key(|&(_, us)| std::cmp::Reverse(us));
+        println!("group_first_ticks_phase_p95_us={phase_p95:?}");
+        return;
+    }
     if assault {
         assert!(sim.set_battle_weapon(1, Some(Weapon::Annihilation)));
         assert!(sim.battle_order(1, Order::Attack(2), None));

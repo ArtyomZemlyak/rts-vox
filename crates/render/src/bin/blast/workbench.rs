@@ -801,20 +801,21 @@ pub fn issue_battle_group_order(
         .unwrap_or(1) as i32;
     let rows = (movers.len() as i32 + columns - 1) / columns;
     let size = sim.size();
-    let mut accepted = 0;
-    for (slot, id) in movers.into_iter().enumerate() {
-        let (col, row) = (slot as i32 % columns, slot as i32 / columns);
-        let target = [
-            (centre[0] + (2 * col - columns + 1) * 45).clamp(0, size[0] as i32 - 1),
-            (centre[1] + (2 * row - rows + 1) * 45).clamp(0, size[2] as i32 - 1),
-        ];
-        if sim.battle_order(id, Order::Move, Some(target))
-            || (target != centre && sim.battle_order(id, Order::Move, Some(centre)))
-        {
-            accepted += 1;
-        }
-    }
-    accepted
+    let destinations: Vec<_> = movers
+        .into_iter()
+        .enumerate()
+        .map(|(slot, id)| {
+            let (col, row) = (slot as i32 % columns, slot as i32 / columns);
+            (
+                id,
+                [
+                    (centre[0] + (2 * col - columns + 1) * 45).clamp(0, size[0] as i32 - 1),
+                    (centre[1] + (2 * row - rows + 1) * 45).clamp(0, size[2] as i32 - 1),
+                ],
+            )
+        })
+        .collect();
+    sim.battle_group_move(&destinations, centre)
 }
 
 fn battle_units_in_screen_rect(

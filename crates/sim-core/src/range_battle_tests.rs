@@ -39,6 +39,42 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
 }
 
 #[test]
+fn group_move_queues_every_unit_under_the_search_start_budget() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Strider,
+        at: [170, 16, 440],
+        allied: true,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut grouped = BlastRange::with_layout(config, layout).unwrap();
+    grouped.start_battle().unwrap();
+    let destinations = [(0, [530, 350]), (2, [500, 430])];
+    let fallback = [400, 400];
+    let new = grouped.battle_group_move(&destinations, fallback);
+    assert_eq!(new, 2);
+    for &(id, destination) in &destinations {
+        assert_eq!(grouped.battle.actors[id].order, Order::Move);
+        assert_eq!(grouped.units[id].motion.destination, Some(destination));
+        assert!(!grouped.units[id].motion.searching());
+    }
+    grouped.step();
+    assert_eq!(
+        grouped
+            .units
+            .iter()
+            .filter(|u| u.motion.started_search())
+            .count(),
+        1
+    );
+    assert_eq!(grouped.battle_group_move(&[(0, [-2, 350])], fallback), 1);
+    assert_eq!(grouped.units[0].motion.destination, Some(fallback));
+    assert!(grouped.battle_order(0, Order::Hold, None));
+    assert_eq!(grouped.units[0].motion.destination, None);
+}
+
+#[test]
 fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units.push(RangeUnitDef {
