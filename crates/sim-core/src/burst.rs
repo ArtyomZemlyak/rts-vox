@@ -3163,6 +3163,7 @@ impl Bursts {
         around: Surroundings<'_>,
     ) {
         let (hulls, yielding) = (around.hulls, around.yielding);
+        let motion = FragmentMotion::new(t);
         // What has already landed is ground for what is still falling
         // (ADR-308), gathered once for the whole tick.
         let settled = Settled::of(&self.fragments, hulls, tick, t);
@@ -3199,13 +3200,9 @@ impl Bursts {
                             room -= 1;
                             stale_wrecks.insert(f.held);
                         }
-                        let push = Fx::from_ratio(t.push_pct as i32, 100);
-                        let along = V3::new(h.vel[0], Fx::ZERO, h.vel[2]).scale(push);
-                        let lift = along
-                            .len_sq()
-                            .sqrt()
-                            .mul(Fx::from_ratio(t.push_up_pct as i32, 100));
-                        f.velocity = V3::new(along.x, h.vel[1].mul(push).add(lift), along.z);
+                        let along = V3::new(h.vel[0], Fx::ZERO, h.vel[2]).scale(motion.push);
+                        let lift = along.len_sq().sqrt().mul(motion.push_up);
+                        f.velocity = V3::new(along.x, h.vel[1].mul(motion.push).add(lift), along.z);
                     }
                 }
             }
@@ -3220,7 +3217,9 @@ impl Bursts {
                 room -= 1;
                 stale_wrecks.insert(f.held);
             }
-            if advance_fragment(f, world, t, gravity, hulls, &settled, i as u32, true) {
+            if advance_fragment(
+                f, world, t, &motion, gravity, hulls, &settled, i as u32, true,
+            ) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
                 landed.push(Wreck {
                     held: f.held,
@@ -3289,6 +3288,7 @@ impl Bursts {
                 f,
                 world,
                 t,
+                &motion,
                 gravity,
                 &[],
                 &Settled::default(),
@@ -4155,12 +4155,48 @@ fn hull_box_hit<'h, 's>(
         .then_some(h)
     })
 }
+/// Coefficients common to every piece in one fixed tick. Constructing them
+/// once avoids thousands of identical Q32.32 integer divisions in a battle.
+struct FragmentMotion {
+    push: Fx,
+    push_up: Fx,
+    drag: Fx,
+    max_speed: Fx,
+    sleep: Fx,
+    bounce: Fx,
+    friction: Fx,
+    spin_rate: Fx,
+}
+impl FragmentMotion {
+    fn new(t: &Blast) -> Self {
+        Self {
+            push: Fx::from_ratio(t.push_pct as i32, 100),
+            push_up: Fx::from_ratio(t.push_up_pct as i32, 100),
+            drag: Fx::from_ratio(t.drag_pct as i32, 100),
+            max_speed: Fx::from_ratio(
+                t.max_speed_mm_s as i32,
+                voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+            ),
+            sleep: Fx::from_ratio(
+                t.sleep_mm_s as i32,
+                voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
+            ),
+            bounce: Fx::from_ratio(t.bounce_pct as i32, 100),
+            friction: Fx::from_ratio(t.friction_pct as i32, 100),
+            spin_rate: Fx::from_ratio(
+                t.spin_deg_s as i32 * (fx::angle::FULL / 360),
+                crate::TICKS_PER_SECOND,
+            ),
+        }
+    }
+}
 /// Common translation/contact step for fragments and persistent dead hulls.
 #[allow(clippy::too_many_arguments)]
 fn advance_fragment(
     f: &mut Fragment,
     world: &voxel::World,
     t: &Blast,
+    motion: &FragmentMotion,
     gravity: Fx,
     hulls: &[Hull],
     settled: &Settled,
@@ -4173,11 +4209,8 @@ fn advance_fragment(
     let bounds = [world.nx, world.ny, world.nz];
 
     f.velocity.y = f.velocity.y.sub(gravity);
-    f.velocity = f.velocity.scale(Fx::from_ratio(t.drag_pct as i32, 100));
-    let vmax = Fx::from_ratio(
-        t.max_speed_mm_s as i32,
-        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-    );
+    f.velocity = f.velocity.scale(motion.drag);
+    let vmax = motion.max_speed;
     if f.velocity.len_sq() > vmax.mul(vmax) {
         f.velocity = f.velocity.scale(vmax.div(f.velocity.len_sq().sqrt()));
     }
@@ -4236,7 +4269,7 @@ fn advance_fragment(
         substeps(
             f,
             world,
-            t,
+            motion,
             hulls,
             settled,
             skip,
@@ -4247,12 +4280,9 @@ fn advance_fragment(
         );
     }
     if spin {
-        tumble(f, t);
+        tumble(f, t, motion);
     }
-    let sleep = Fx::from_ratio(
-        t.sleep_mm_s as i32,
-        voxel::unit::WORLD_MM as i32 * crate::TICKS_PER_SECOND,
-    );
+    let sleep = motion.sleep;
     if supported && f.velocity.len_sq() <= sleep.mul(sleep) {
         f.velocity = V3::ZERO;
         f.resting = true;
@@ -4332,7 +4362,7 @@ fn hull_near(
 fn substeps(
     f: &mut Fragment,
     world: &voxel::World,
-    t: &Blast,
+    motion: &FragmentMotion,
     hulls: &[Hull],
     settled: &Settled,
     skip: u32,
@@ -4362,12 +4392,10 @@ fn substeps(
                 *supported |= axis == 1 && delta[axis] < Fx::ZERO;
                 delta[axis] = Fx::ZERO;
                 let mut velocity = arr(f.velocity);
-                velocity[axis] = velocity[axis]
-                    .neg()
-                    .mul(Fx::from_ratio(t.bounce_pct as i32, 100));
+                velocity[axis] = velocity[axis].neg().mul(motion.bounce);
                 for (k, value) in velocity.iter_mut().enumerate() {
                     if k != axis {
-                        *value = value.mul(Fx::from_ratio(t.friction_pct as i32, 100));
+                        *value = value.mul(motion.friction);
                     }
                 }
                 f.velocity = v3(velocity);
@@ -4383,7 +4411,7 @@ fn substeps(
 /// the piece already carries, so nothing is added to what is saved, and
 /// a piece that lands keeps the face it landed on. A piece dropped into
 /// place with no speed does not turn at all.
-fn tumble(f: &mut Fragment, t: &Blast) {
+fn tumble(f: &mut Fragment, t: &Blast, motion: &FragmentMotion) {
     if t.spin_deg_s == 0 {
         return;
     }
@@ -4398,10 +4426,7 @@ fn tumble(f: &mut Fragment, t: &Blast) {
         .sqrt();
     // Degrees a second for each unit of speed a tick, into binary angle
     // a tick: `deg × FULL / 360 / ticks`.
-    let mut rate = speed.mul(Fx::from_ratio(
-        t.spin_deg_s as i32 * (fx::angle::FULL / 360),
-        crate::TICKS_PER_SECOND,
-    ));
+    let mut rate = speed.mul(motion.spin_rate);
     // A section turns as fast as a piece whose surface moves as fast: the
     // rate of a piece a unit across, over the section's half-width in
     // units (ADR-468). A turret does not spin like a crumb.
