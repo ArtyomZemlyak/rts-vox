@@ -32,6 +32,8 @@ pub struct WorldBattle {
     pub title: String,
     pub briefing: String,
     pub units: Vec<RangeUnitDef>,
+    #[serde(default)]
+    pub blocks: Vec<RangeBlock>,
 }
 impl WorldBattle {
     pub fn from_ron(src: &str) -> Result<Self, String> {
@@ -39,6 +41,7 @@ impl WorldBattle {
         if battle.title.trim().is_empty()
             || battle.briefing.trim().is_empty()
             || battle.units.len() > crate::range::MAX_RANGE_UNITS
+            || battle.blocks.len() > crate::range::MAX_RANGE_BLOCKS
             || [true, false].iter().any(|&side| {
                 battle
                     .units

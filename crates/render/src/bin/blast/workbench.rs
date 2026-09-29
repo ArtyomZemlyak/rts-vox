@@ -7,6 +7,17 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use modding::range::{RangeBlock, RangeShieldDef, RangeUnitDef};
 
+fn world_battle_blocks() -> Result<Vec<RangeBlock>, String> {
+    Ok(modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        "../../../../../data/battle-world.ron"
+    ))?
+    .blocks)
+}
+
+fn remove_world_battle_blocks(layout: &mut RangeLayout, blocks: &[RangeBlock]) {
+    layout.blocks.retain(|block| !blocks.contains(block));
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub enum Tool {
     #[default]
@@ -165,6 +176,7 @@ impl Workshop {
             "../../../../../data/range-battle.ron"
         ))?;
         let mut layout = self.layout.clone().ok_or("No range layout")?;
+        remove_world_battle_blocks(&mut layout, &world_battle_blocks()?);
         layout.battle = true;
         layout.units = tuning.units;
         layout.gun = tuning.zone.spawn;
@@ -232,8 +244,10 @@ impl Workshop {
             "../../../../../data/battle-world.ron"
         ))?;
         let mut layout = self.layout.clone().ok_or("No range layout")?;
+        remove_world_battle_blocks(&mut layout, &preset.blocks);
         layout.battle = true;
         layout.units = preset.units;
+        layout.blocks.extend(preset.blocks);
         if let Some(course) = &mut layout.course {
             course.patrols.clear();
         }
@@ -265,6 +279,7 @@ impl Workshop {
     }
     pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
         let mut layout = self.layout.clone().ok_or("No range layout")?;
+        remove_world_battle_blocks(&mut layout, &world_battle_blocks()?);
         layout.battle = false;
         self.commit(layout, config)?;
         self.controlled = None;
@@ -1445,14 +1460,28 @@ mod tests {
         let mut probe = layout.clone();
         probe.battle = true;
         probe.units.clear();
+        probe.blocks.extend(preset.blocks.clone());
         if let Some(course) = &mut probe.course {
             course.patrols.clear();
         }
-        for unit in preset.units {
-            probe.units.push(unit.clone());
-            sim_core::blast::placement::Validator::default()
-                .validate(&probe)
-                .unwrap_or_else(|e| panic!("world battle placement {unit:?}: {e:?}"));
+        probe.units = preset.units.clone();
+        sim_core::blast::placement::Validator::default()
+            .validate(&probe)
+            .expect("whole-map battle placement");
+        for allied in [true, false] {
+            let side: Vec<_> = preset.units.iter().filter(|u| u.allied == allied).collect();
+            assert_eq!(side.len(), 30);
+            for kind in [
+                RangeUnitKind::Base,
+                RangeUnitKind::Tank,
+                RangeUnitKind::Strider,
+                RangeUnitKind::Spider,
+                RangeUnitKind::Artillery,
+                RangeUnitKind::TurretT1,
+                RangeUnitKind::TurretT2,
+            ] {
+                assert!(side.iter().any(|u| u.kind == kind), "missing {kind:?}");
+            }
         }
         let mut edit = Workshop::new(Some(layout), false);
         let briefing = edit.battle_world(config.clone()).unwrap();
@@ -1460,7 +1489,7 @@ mod tests {
         assert!(edit.editing);
         assert!(edit.layout.as_ref().unwrap().battle);
         assert!(edit.sector().unwrap().contains([4850, 5580], 0));
-        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 12);
+        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 60);
         assert_eq!(edit.controlled, Some(1));
         assert_eq!(
             edit.layout
@@ -1472,7 +1501,11 @@ mod tests {
                 .count(),
             2
         );
-        assert_eq!(edit.layout.as_ref().unwrap().blocks, blocks);
+        assert!(edit.layout.as_ref().unwrap().blocks.starts_with(&blocks));
+        assert_eq!(
+            edit.layout.as_ref().unwrap().blocks.len(),
+            blocks.len() + preset.blocks.len()
+        );
         edit.tool = Tool::Steel;
         edit.preview(far, 60);
         let preview = edit.preview.as_ref().unwrap();
@@ -1505,13 +1538,22 @@ mod tests {
             edit.commit(preview.next.clone(), config.clone()).unwrap();
         }
         let (_, placed) = edit.pending.take().unwrap();
-        assert_eq!(placed.units.len(), 15);
-        assert!(placed.units[12].allied && placed.units[13].allied && !placed.units[14].allied);
+        assert_eq!(placed.units.len(), 63);
+        assert!(placed.units[60].allied && placed.units[61].allied && !placed.units[62].allied);
         assert_eq!(
             RangeLayout::from_ron(&placed.to_ron().unwrap()).unwrap(),
             placed
         );
-        let mut sim = BlastRange::with_layout(config, placed).unwrap();
+        // Keep this long movement check at its original 15-unit size. The
+        // full 60-unit build and combat start are exercised by the HUD test.
+        let mut sim_layout = placed;
+        sim_layout.units = sim_layout
+            .units
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, u)| (i < 12 || i >= 60).then_some(u))
+            .collect();
+        let mut sim = BlastRange::with_layout(config, sim_layout).unwrap();
         let ground = remote_unit[1] as u32;
         assert!(sim
             .world
@@ -1537,6 +1579,8 @@ mod tests {
             front,
             sim.units[4].at
         );
+        edit.range_mode(sim.config.clone()).unwrap();
+        assert_eq!(edit.layout.as_ref().unwrap().blocks, blocks);
     }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {

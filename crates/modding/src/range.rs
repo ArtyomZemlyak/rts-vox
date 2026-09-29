@@ -2,8 +2,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAX_RANGE_BLOCKS: usize = 384;
-/// Machines a range layout places, both sides together (ADR-466).
-pub const MAX_RANGE_UNITS: usize = 16;
+/// Machines a range layout places, both sides together (ADR-487).
+pub const MAX_RANGE_UNITS: usize = 64;
 pub const MAX_RANGE_ZONES: usize = 16;
 
 /// Size of an authored clearing used for remote battle deployment.

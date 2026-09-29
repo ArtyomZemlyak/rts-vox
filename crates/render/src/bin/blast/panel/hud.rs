@@ -22,6 +22,7 @@ pub struct RosterStrip;
 pub struct CommandDeck;
 #[derive(Component)]
 pub struct HeaderBrand;
+pub const ROSTER_PAGE_SIZE: usize = 8;
 /// The compact layout handles the supported 960×540 window without shrinking
 /// labels and click targets along with the rest of the interface.
 pub fn scale(_size: Vec2) -> f32 {
@@ -306,10 +307,14 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         ))
         .insert(RosterStrip)
         .with_children(|p| {
+            button(p, font, "◀", Action::RosterPage(-1));
+            let label = label(p, font, "", 13.0, Color::srgb(0.86, 0.93, 0.94));
+            p.commands().entity(label).insert(HudText(5));
             for id in 0..modding::range::MAX_RANGE_UNITS {
                 let e = button(p, font, &format!("Юнит {}", id + 1), Action::SelectUnit(id));
                 p.commands().entity(e).insert(Roster(id));
             }
+            button(p, font, "▶", Action::RosterPage(1));
         });
     commands
         .spawn((
@@ -380,10 +385,20 @@ pub fn refresh(
     } else {
         Some((usize::MAX, &scene.sim.gun))
     };
+    let roster: Vec<_> = scene
+        .sim
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+        .map(|(i, _)| i)
+        .collect();
+    let pages = roster.len().div_ceil(ROSTER_PAGE_SIZE).max(1);
+    let page = panel.roster_page % pages;
     for (
         mut node,
         drawer,
-        roster,
+        roster_button,
         loadout,
         solo,
         battle_button,
@@ -410,12 +425,17 @@ pub fn refresh(
             Some(!hide_brand)
         } else if drawer.is_some() {
             Some(panel.drawer != 0)
-        } else if let Some(Roster(i)) = roster {
+        } else if let Some(Roster(i)) = roster_button {
             Some(
                 battle
-                    && scene.sim.allied(*i)
-                    && scene.sim.units.get(*i).is_some_and(|u| u.status.alive),
+                    && roster
+                        .iter()
+                        .skip(page * ROSTER_PAGE_SIZE)
+                        .take(ROSTER_PAGE_SIZE)
+                        .any(|id| id == i),
             )
+        } else if matches!(action, Some(Action::RosterPage(_))) {
+            Some(battle && pages > 1)
         } else if loadout.is_some() {
             Some(
                 battle
@@ -449,6 +469,7 @@ pub fn refresh(
     }
     for (id, mut t) in &mut text {
         let value = match id.0 {
+            5 => format!("{}/{}", page + 1, pages),
             n if n >= 100 => {
                 scene
                     .sim
@@ -765,12 +786,13 @@ mod tests {
             .pending
             .take()
             .expect("world battle rebuild");
-        assert_eq!(layout.units.len(), 12);
+        assert_eq!(layout.units.len(), 60);
+        let block_count = layout.blocks.len();
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle_counts(), [6, 6]);
+        assert_eq!(scene.sim.battle_counts(), [30, 30]);
         assert_eq!(scene.sim.battle_base_integrity(), Some([100, 100]));
         assert_eq!(
             scene.sim.battle.phase,
@@ -779,6 +801,13 @@ mod tests {
         assert!(!app.world().resource::<Workshop>().editing);
         assert_eq!(app.world().resource::<Workshop>().controlled, Some(1));
         assert!(!app.world().resource::<Panel>().battle_launch);
+        click(&mut app, Action::RosterPage(1));
+        assert_eq!(app.world().resource::<Panel>().roster_page, 1);
+        click(&mut app, Action::SelectUnit(21));
+        click(&mut app, Action::NextOwn);
+        assert_eq!(app.world().resource::<Workshop>().controlled, Some(22));
+        assert_eq!(app.world().resource::<Panel>().roster_page, 2);
+        click(&mut app, Action::SelectUnit(1));
         let mut scene = app.world_mut().resource_mut::<Scene>();
         assert!(scene
             .sim
@@ -794,12 +823,13 @@ mod tests {
             .pending
             .take()
             .expect("world battle reset rebuild");
-        assert_eq!(layout.units.len(), 12);
+        assert_eq!(layout.units.len(), 60);
+        assert_eq!(layout.blocks.len(), block_count);
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
         let scene = app.world().resource::<Scene>();
-        assert_eq!(scene.sim.battle_counts(), [6, 6]);
+        assert_eq!(scene.sim.battle_counts(), [30, 30]);
         assert_eq!(scene.sim.battle_base_integrity(), Some([100, 100]));
         assert_eq!(
             scene.sim.battle.phase,

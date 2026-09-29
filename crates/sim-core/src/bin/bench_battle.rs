@@ -71,27 +71,30 @@ fn main() {
             !args.iter().any(|a| a == "--units" || a == "--eight"),
             "--world uses its authored roster"
         );
-        layout.units = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
             "../../../../data/battle-world.ron"
         ))
-        .unwrap()
-        .units;
-        let selected: &[usize] = match balance {
+        .unwrap();
+        layout.units = preset.units;
+        layout.blocks.extend(preset.blocks);
+        let omitted: &[usize] = match balance {
             "even" => &[],
-            // Bases and the central contact remain fixed; the missing rear
-            // reinforcement or forward escort changes the local force ratio.
-            "blue-light" => &[0, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-            "red-light" => &[0, 1, 2, 3, 4, 5, 6, 9, 10, 11],
-            "blue-front-light" => &[0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11],
-            "red-front-light" => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            // Keep the full authored battle and remove only a few mobile
+            // reinforcements, so balance runs still exercise the large map.
+            "blue-light" => &[1, 4, 5, 15, 19, 21],
+            "red-light" => &[7, 10, 11, 37, 41, 45],
+            "blue-front-light" => &[4, 5, 21],
+            "red-front-light" => &[10, 11, 45],
             _ => {
                 panic!("--balance: even, blue-light, red-light, blue-front-light, red-front-light")
             }
         };
-        if !selected.is_empty() {
-            layout.units = selected
-                .iter()
-                .map(|&id| layout.units[id].clone())
+        if !omitted.is_empty() {
+            layout.units = layout
+                .units
+                .into_iter()
+                .enumerate()
+                .filter_map(|(id, unit)| (!omitted.contains(&id)).then_some(unit))
                 .collect();
         }
         if assault {

@@ -1763,7 +1763,7 @@ fn sixteen_machines_fight_the_training_battle_and_replay() {
             })
         })
         .collect();
-    assert_eq!(layout.units.len(), modding::range::MAX_RANGE_UNITS);
+    assert_eq!(layout.units.len(), 16);
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
     a.start_battle().unwrap();

@@ -146,6 +146,7 @@ pub struct Panel {
     pub ranges: bool,
     pub battle_launch: bool,
     pub battle_auto: bool,
+    pub roster_page: usize,
     pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
     history: BTreeMap<u8, Vec<ShotResult>>,
@@ -165,6 +166,7 @@ impl Panel {
             ranges: true,
             battle_launch: false,
             battle_auto: false,
+            roster_page: 0,
             briefing: String::new(),
             scenario_run: None,
             history: BTreeMap::new(),
@@ -178,6 +180,7 @@ pub enum Action {
     Drawer(u8),
     Ranges,
     SelectUnit(usize),
+    RosterPage(i32),
     BattleWeapon(Option<BattleWeapon>),
     Skirmish(u8),
     Play,
@@ -642,6 +645,7 @@ pub fn actions(
                 | Action::Ranges
                 | Action::Settings
                 | Action::SelectUnit(_)
+                | Action::RosterPage(_)
                 | Action::NextOwn
                 | Action::Scenario(_)
                 | Action::ScenarioMenu
@@ -680,6 +684,18 @@ pub fn actions(
                     edit.controlled = Some(id);
                     edit.selected = Some(Selection::Unit(id));
                 }
+            }
+            Action::RosterPage(delta) => {
+                let count = scene
+                    .sim
+                    .units
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+                    .count();
+                let pages = count.div_ceil(hud::ROSTER_PAGE_SIZE).max(1);
+                panel.roster_page =
+                    (panel.roster_page as i32 + delta).rem_euclid(pages as i32) as usize;
             }
             Action::BattleWeapon(weapon) => {
                 if let Some(id) = edit.controlled {
@@ -779,6 +795,17 @@ pub fn actions(
                         .map(|i| (start + i) % n)
                         .find(|&i| scene.sim.allied(i) && scene.sim.units[i].status.alive);
                     edit.selected = edit.controlled.map(Selection::Unit);
+                    if let Some(id) = edit.controlled {
+                        panel.roster_page = scene
+                            .sim
+                            .units
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+                            .position(|(i, _)| i == id)
+                            .unwrap_or(0)
+                            / hud::ROSTER_PAGE_SIZE;
+                    }
                 }
             }
             Action::Play => {
