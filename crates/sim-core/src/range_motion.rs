@@ -69,6 +69,9 @@ impl Obstacle {
 }
 /// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
 const ESCAPES: u32 = 6;
+// One spider edge probes a much wider footprint than a tank edge. The shared
+// node allowance is therefore not a shared time allowance in a large battle.
+const SPIDER_SEARCH_SLICE: usize = 32;
 /// Farthest a burst pushes a hull, world units from its centre (ADR-286).
 const IMPULSE_REACH: i32 = 64;
 /// How far from the edge of the world an order may still be given, world
@@ -138,6 +141,9 @@ pub struct Motion {
     // must not silently resize the motor each movement tick.
     drive_scale: Fx,
     navigation: modding::navigation::Navigation,
+    /// Maximum graph work per tick for this hull's footprint, derived from
+    /// its kind and therefore restored with the body rather than serialized.
+    search_slice_limit: usize,
     /// Nodes expanded and poses probed by the last plan: diagnostics, not
     /// state.
     pub last_plan: [u32; 2],
@@ -304,6 +310,11 @@ impl Motion {
             fold_milli,
             collapse_pct,
             navigation,
+            search_slice_limit: if kind == modding::range::RangeUnitKind::Spider {
+                SPIDER_SEARCH_SLICE
+            } else {
+                usize::MAX
+            },
             yielding,
             blocked_ticks: 0,
             escape_left: 0,
@@ -944,7 +955,10 @@ impl Motion {
             to,
             self.search(w),
             &clear,
-            self.navigation.search_nodes_per_tick.max(1),
+            self.navigation
+                .search_nodes_per_tick
+                .min(self.search_slice_limit)
+                .max(1),
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
             nav::vehicle::Hunting::Open(hunt) => {
@@ -1133,7 +1147,7 @@ impl Motion {
     /// hands the permission out under a ceiling (ADR-312); a hull refused
     /// keeps its order and asks again next tick.
     pub(super) fn allow_resume(&mut self, work: usize) {
-        self.resume_budget = Some(work);
+        self.resume_budget = Some(work.min(self.search_slice_limit));
     }
     pub fn allow_start(&mut self, may: bool) {
         self.may_start = may;

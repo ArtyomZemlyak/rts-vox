@@ -113,6 +113,9 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
 struct Occupied {
+    /// The body left the terrain window; its world cells must be rebuilt on
+    /// re-entry because its pose or damage may have changed offscreen.
+    hidden: bool,
     turret_delta: i32,
     pose: sim_core::damage::Frame,
     segments: Vec<sim_core::damage::Frame>,
@@ -291,8 +294,19 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
         .chain((!sim.battle_mode()).then_some(&sim.gun))
         .enumerate()
     {
+        if let Some(old) = visual.cached.get_mut(id) {
+            let (lo, hi) = u.bounds();
+            if (0..3).any(|a| {
+                hi[a] < window.origin[a] || lo[a] >= window.origin[a] + window.dims[a] as i32
+            }) {
+                old.hidden = true;
+                old.cells.clear();
+                continue;
+            }
+        }
         let changed = visual.cached.get(id).is_none_or(|old| {
-            old.turret_delta != u.turret_delta
+            old.hidden
+                || old.turret_delta != u.turret_delta
                 || old.pose != u.pose
                 || old.segments != u.seg_frames
                 // Dents/heat update appearance but keep occupancy. Compare
@@ -312,6 +326,7 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
             unit_world_cells(u, |p| world_cells.push(p.to_array()));
             if id == visual.cached.len() {
                 visual.cached.push(Occupied {
+                    hidden: false,
                     turret_delta: u.turret_delta,
                     pose: u.pose,
                     segments: u.seg_frames.clone(),
@@ -330,6 +345,7 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
                 });
             } else {
                 let old = &mut visual.cached[id];
+                old.hidden = false;
                 old.turret_delta = u.turret_delta;
                 old.pose = u.pose;
                 old.segments.clone_from(&u.seg_frames);
@@ -696,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_shifts_reclip_shadows_without_reposing_stationary_bodies() {
+    fn camera_shifts_cull_and_restore_shadows_without_stale_poses() {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
         let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
@@ -723,10 +739,18 @@ mod tests {
                 dims: [256, 192, 256],
             },
         ];
-        for window in &windows {
+        let initial = sim.units.len() + 1;
+        for (step, window) in windows.iter().enumerate() {
+            let before = visual.occupancy_rebuilds;
             assert_eq!(cached_cells(&sim, window, &mut visual), cells(&sim, window));
-            assert_eq!(visual.occupancy_rebuilds, sim.units.len() + 1);
+            if step == 0 {
+                assert_eq!(visual.occupancy_rebuilds, initial);
+            } else if step == 3 {
+                assert_eq!(visual.occupancy_rebuilds, before);
+            }
         }
+        assert!(visual.occupancy_rebuilds > initial);
+        let restored = visual.occupancy_rebuilds;
         // A body damaged while out of view must not return with old shadows.
         let outside = windows[3];
         sim.units[0].body.vol.cols.fill(0);
@@ -740,7 +764,13 @@ mod tests {
             cached_cells(&sim, &windows[0], &mut visual),
             cells(&sim, &windows[0])
         );
-        assert_eq!(visual.occupancy_rebuilds, sim.units.len() + 2);
+        assert!(visual.occupancy_rebuilds > restored);
+        let returned = visual.occupancy_rebuilds;
+        assert_eq!(
+            cached_cells(&sim, &windows[0], &mut visual),
+            cells(&sim, &windows[0])
+        );
+        assert_eq!(visual.occupancy_rebuilds, returned);
     }
 
     #[test]
