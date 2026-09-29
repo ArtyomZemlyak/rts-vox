@@ -4134,26 +4134,29 @@ fn hull_box_hit<'h, 's>(
     let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
     let (bottom, top) = (p[1].add(low[1]), p[1].add(high[1]));
     hulls.iter().enumerate().find_map(|(i, h)| {
-        if (i < 64 && skip & (1 << i) != 0) || top < h.pos[1] || bottom > h.pos[1].add(h.height) {
+        if (i < 64 && skip & (1 << i) != 0) || !hull_box_overlap(p, reach, bottom, top, h) {
             return None;
         }
-        let dx = p[0].sub(h.pos[0]);
-        let dz = p[2].sub(h.pos[2]);
-        // A rotated rectangle cannot extend further than the sum of its
-        // half-axes on either world axis. Most debris is far from a hull;
-        // reject it before the local-frame products and voxel probe.
-        let extent = h.half[0].add(h.half[1]).add(reach);
-        if dx.abs() > extent || dz.abs() > extent {
-            return None;
-        }
-        let (c, s) = (angle::cos(h.head), angle::sin(h.head));
-        let u = dx.mul(c).add(dz.mul(s));
-        let v = dz.mul(c).sub(dx.mul(s));
-        (u.abs() <= h.half[0].add(reach)
-            && v.abs() <= h.half[1].add(reach)
-            && (!exact || h.meets_piece(p, low, high)))
-        .then_some(h)
+        (!exact || h.meets_piece(p, low, high)).then_some(h)
     })
+}
+#[inline]
+fn hull_box_overlap(p: [Fx; 3], reach: Fx, bottom: Fx, top: Fx, h: &Hull<'_>) -> bool {
+    if top < h.pos[1] || bottom > h.pos[1].add(h.height) {
+        return false;
+    }
+    let dx = p[0].sub(h.pos[0]);
+    let dz = p[2].sub(h.pos[2]);
+    // A rotated rectangle cannot extend further than the sum of its
+    // half-axes on either world axis. Most debris is far from a hull.
+    let extent = h.half[0].add(h.half[1]).add(reach);
+    if dx.abs() > extent || dz.abs() > extent {
+        return false;
+    }
+    let (c, s) = (angle::cos(h.head), angle::sin(h.head));
+    let u = dx.mul(c).add(dz.mul(s));
+    let v = dz.mul(c).sub(dx.mul(s));
+    u.abs() <= h.half[0].add(reach) && v.abs() <= h.half[1].add(reach)
 }
 /// Coefficients common to every piece in one fixed tick. Constructing them
 /// once avoids thousands of identical Q32.32 integer divisions in a battle.
@@ -4233,8 +4236,10 @@ fn advance_fragment(
     // one is a contact.
     let start = arr(f.position);
     let (mut inside, mut under) = (0u64, 0u64);
+    let reach = low[0].abs().max(high[0]).max(low[2].abs()).max(high[2]);
+    let (bottom, top) = (start[1].add(low[1]), start[1].add(high[1]));
     for (i, h) in hulls.iter().enumerate().take(64) {
-        if hull_box_hit(start, low, high, std::slice::from_ref(h), 0, false).is_none() {
+        if !hull_box_overlap(start, reach, bottom, top, h) {
             continue;
         }
         if h.shelters(start[1].add(low[1]), f.position) {
