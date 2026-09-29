@@ -18,6 +18,8 @@ pub struct Tuning {
     pub tank_power_milli: u32,
     pub tank_reload_ticks: u32,
     pub tank_range: i32,
+    #[serde(default = "default_artillery_range")]
+    pub artillery_range: i32,
     pub kinetic_range: i32,
     pub energy_range: i32,
     pub anni_range: i32,
@@ -33,12 +35,16 @@ pub struct Tuning {
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
 }
+fn default_artillery_range() -> i32 {
+    1800
+}
 impl Tuning {
     pub fn from_ron(s: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(s).map_err(|e| e.to_string())?;
         if !(100..=4000).contains(&t.tank_power_milli)
             || !(1..=1800).contains(&t.tank_reload_ticks)
             || !(100..=3000).contains(&t.tank_range)
+            || !(100..=3000).contains(&t.artillery_range)
             || !(100..=3000).contains(&t.kinetic_range)
             || !(100..=3000).contains(&t.energy_range)
             || !(100..=3000).contains(&t.anni_range)
@@ -57,5 +63,19 @@ impl Tuning {
             return Err("invalid battle tuning".into());
         }
         Ok(t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artillery_range_has_a_legacy_default_and_rejects_invalid_values() {
+        let shipped = include_str!("../../../data/range-battle.ron");
+        let old = shipped.replace("artillery_range: 1800,", "");
+        assert_eq!(Tuning::from_ron(&old).unwrap().artillery_range, 1800);
+        let invalid = shipped.replace("artillery_range: 1800,", "artillery_range: 0,");
+        assert!(Tuning::from_ron(&invalid).is_err());
     }
 }

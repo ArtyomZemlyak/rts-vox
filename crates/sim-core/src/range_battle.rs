@@ -116,6 +116,20 @@ pub struct Battle {
     /// Both teams use the same deterministic decision clock in spectator mode.
     pub autonomous: bool,
 }
+fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gun: i32) -> i32 {
+    if kind == RangeUnitKind::Artillery && weapon == Weapon::Blast {
+        return tuning.artillery_range;
+    }
+    match weapon {
+        Weapon::Blast => tuning.tank_range,
+        Weapon::Kinetic => tuning.kinetic_range,
+        Weapon::Energy => tuning.energy_range,
+        Weapon::Annihilation => tuning.anni_range,
+        Weapon::MachineGun => machine_gun,
+        Weapon::Laser => motion::spider_tuning().laser.range,
+    }
+}
+
 impl Battle {
     pub fn new(units: &[RangeUnit], resistance: u32) -> Self {
         let tuning = std::sync::Arc::new(
@@ -194,16 +208,6 @@ impl Battle {
             Weapon::Annihilation => &self.anni_config,
             Weapon::MachineGun => &self.bullet_config,
             Weapon::Laser => &self.laser_config,
-        }
-    }
-    fn range(&self, weapon: Weapon, machine_gun: i32) -> i32 {
-        match weapon {
-            Weapon::Blast => self.tuning.tank_range,
-            Weapon::Kinetic => self.tuning.kinetic_range,
-            Weapon::Energy => self.tuning.energy_range,
-            Weapon::Annihilation => self.tuning.anni_range,
-            Weapon::MachineGun => machine_gun,
-            Weapon::Laser => motion::spider_tuning().laser.range,
         }
     }
     pub(super) fn working(&self) -> bool {
@@ -454,7 +458,9 @@ impl BlastRange {
         }
     }
     pub fn battle_attack_range(&self, id: usize) -> Option<i32> {
-        Some(self.battle.range(
+        Some(attack_range(
+            &self.battle.tuning,
+            self.units.get(id)?.kind,
             self.battle_weapon(id)?,
             self.streams.tuning.machine_gun.range,
         ))
@@ -1035,11 +1041,25 @@ impl BlastRange {
                                     Weapon::Annihilation,
                                 ]
                                 .into_iter()
-                                .map(|w| battle.range(w, self.streams.tuning.machine_gun.range))
+                                .map(|w| {
+                                    attack_range(
+                                        &battle.tuning,
+                                        u.kind,
+                                        w,
+                                        self.streams.tuning.machine_gun.range,
+                                    )
+                                })
                                 .max()
                                 .unwrap_or(0)
                             },
-                            |w| battle.range(w, self.streams.tuning.machine_gun.range),
+                            |w| {
+                                attack_range(
+                                    &battle.tuning,
+                                    u.kind,
+                                    w,
+                                    self.streams.tuning.machine_gun.range,
+                                )
+                            },
                         ) + 128;
                         u.status.alive
                             && u.status.weapon
@@ -1155,14 +1175,7 @@ impl BlastRange {
             } else {
                 Weapon::MachineGun
             };
-            let range = match weapon {
-                Weapon::Blast => b.tuning.tank_range,
-                Weapon::Kinetic => b.tuning.kinetic_range,
-                Weapon::Energy => b.tuning.energy_range,
-                Weapon::Annihilation => b.tuning.anni_range,
-                Weapon::MachineGun => stream.range,
-                Weapon::Laser => motion::spider_tuning().laser.range,
-            };
+            let range = attack_range(&b.tuning, kind, weapon, stream.range);
             // Borrow individual config fields independently of the mutable actor.
             let config = match weapon {
                 Weapon::Blast => &b.shell_config,

@@ -1720,6 +1720,22 @@ fn manual_ammunition_preserves_cooldown_order_and_snapshot() {
 }
 
 #[test]
+fn artillery_high_explosive_outreaches_energy_turrets_but_other_ammo_keeps_its_range() {
+    let mut battle = arena(RangeUnitKind::Artillery);
+    assert_eq!(battle.battle_weapon(0), Some(Weapon::Blast));
+    assert_eq!(
+        battle.battle_attack_range(0),
+        Some(battle.battle.tuning.artillery_range)
+    );
+    assert!(battle.battle.tuning.artillery_range > battle.battle.tuning.energy_range);
+    assert!(battle.set_battle_weapon(0, Some(Weapon::Kinetic)));
+    assert_eq!(
+        battle.battle_attack_range(0),
+        Some(battle.battle.tuning.kinetic_range)
+    );
+}
+
+#[test]
 fn manually_selected_shell_is_fired_even_at_a_tank() {
     let mut r = arena(RangeUnitKind::Tank);
     r.start_battle().unwrap();

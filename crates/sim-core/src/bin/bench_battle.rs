@@ -14,6 +14,15 @@ fn main() {
     let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
+    let expect_phase =
+        args.windows(2)
+            .find(|w| w[0] == "--expect-phase")
+            .map(|w| match w[1].as_str() {
+                "victory" => Phase::Victory,
+                "defeat" => Phase::Defeat,
+                "draw" => Phase::Draw,
+                _ => panic!("--expect-phase: victory, defeat or draw"),
+            });
     let ai_vs_ai = args.iter().any(|a| a == "--ai-vs-ai");
     let balance = args
         .windows(2)
@@ -23,7 +32,10 @@ fn main() {
         !ai_vs_ai || world_battle,
         "--ai-vs-ai requires --world, --assault or --siege"
     );
-    let until_end = assault || siege.is_some() || args.iter().any(|a| a == "--until-end");
+    let until_end = assault
+        || siege.is_some()
+        || expect_phase.is_some()
+        || args.iter().any(|a| a == "--until-end");
     assert!(
         !assault || siege.is_none(),
         "--assault and --siege are exclusive"
@@ -284,6 +296,12 @@ fn main() {
         assert_eq!(sim.battle.phase, expected, "{side} siege did not finish");
         assert!(sim.battle.actors[attacker].fired > 0, "siege never fired");
         assert!(!sim.units[target].status.alive, "target base survived");
+    }
+    if let Some(expected) = expect_phase {
+        assert_eq!(
+            sim.battle.phase, expected,
+            "battle did not reach expected phase"
+        );
     }
     assert!(sim.matter.economy.ledger.balanced());
     if !world_battle {
