@@ -14,6 +14,19 @@ fn main() {
     let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
+    let focus = args
+        .windows(2)
+        .find(|w| w[0] == "--focus-unit")
+        .map(|w| w[1].parse::<usize>().expect("focus unit"));
+    let focus_from = args
+        .windows(2)
+        .find(|w| w[0] == "--focus-from")
+        .map_or(0, |w| w[1].parse::<u32>().expect("focus from"));
+    let focus_every = args
+        .windows(2)
+        .find(|w| w[0] == "--focus-every")
+        .map_or(30, |w| w[1].parse::<u32>().expect("focus every"));
+    assert!(focus_every > 0);
     let expect_phase =
         args.windows(2)
             .find(|w| w[0] == "--expect-phase")
@@ -263,6 +276,18 @@ fn main() {
                     u.motion.destination, u.motion.drive.vel.to_int_trunc(), u.motion.cursor,
                     u.motion.path.len(), u.motion.searching(), u.motion.blocked, u.motion.recovery_state(),
                     u.mobility.engine.to_f64_lossy(), u.mobility.traction.to_f64_lossy(), a.fired, u.revision);
+            }
+        }
+        if let Some(id) = focus.filter(|&id| id < sim.units.len()) {
+            if sim.tick >= focus_from && sim.tick % focus_every == 0 {
+                let u = &sim.units[id];
+                let a = &sim.battle.actors[id];
+                println!("focus tick={} unit={} at={:?} alive={} weapon_ok={} order={:?} target={:?} ammo={:?} range={:?} fired={} damage={} motor={} traction={} dest={:?} path={}/{} searching={} blocked={} recovery={:?}",
+                    sim.tick, id, u.at, u.status.alive, u.status.weapon, a.order, a.target,
+                    sim.battle_weapon(id), sim.battle_attack_range(id), a.fired,
+                    u.revision, u.mobility.engine.to_f64_lossy(), u.mobility.traction.to_f64_lossy(),
+                    u.motion.destination, u.motion.cursor, u.motion.path.len(), u.motion.searching(),
+                    u.motion.blocked, u.motion.recovery_state());
             }
         }
         if until_end && sim.battle.phase != sim_core::blast::battle::Phase::Fighting {

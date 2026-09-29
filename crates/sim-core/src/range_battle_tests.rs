@@ -169,6 +169,92 @@ fn stranded_gun_does_not_keep_a_remote_base_assault_fighting() {
 }
 
 #[test]
+fn northern_base_approach_lets_an_assault_tank_answer_the_turret() {
+    let mut battle = northern_base_battle();
+    for _ in 0..2000 {
+        battle.step();
+        if battle.battle.actors[3].fired > 0 {
+            assert_eq!(battle.battle.actors[3].target, Some(1),
+                "first assault shot ignored the defending turret: tick={}, at={:?}, turret_shots={}",
+                battle.tick, battle.units[3].at, battle.battle.actors[1].fired);
+            break;
+        }
+        if !battle.units[3].status.alive {
+            break;
+        }
+    }
+    assert!(battle.battle.actors[3].fired > 0, "tank failed to answer: at={:?}, order={:?}, target={:?}, turret_shots={}, revision={}, dest={:?}, blocked={}",
+        battle.units[3].at, battle.battle.actors[3].order, battle.battle.actors[3].target,
+        battle.battle.actors[1].fired, battle.units[3].revision,
+        battle.units[3].motion.destination, battle.units[3].motion.blocked);
+}
+
+fn northern_base_battle() -> BlastRange {
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    if let Some(course) = &mut layout.course {
+        course.patrols.clear();
+    }
+    layout.units = vec![
+        RangeUnitDef {
+            kind: RangeUnitKind::Base,
+            at: [1530, 16, 630],
+            allied: true,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::TurretT1,
+            at: [1550, 16, 450],
+            allied: true,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Base,
+            at: [8820, 16, 8870],
+            allied: false,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [3000, 16, 760],
+            allied: false,
+        },
+    ];
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut battle = BlastRange::with_layout(config, layout).unwrap();
+    assert!(battle.set_ai_vs_ai(true));
+    battle.start_battle().unwrap();
+    battle
+}
+
+#[test]
+fn tank_eventually_recovers_after_northern_turret_hits_its_tracks() {
+    let mut battle = northern_base_battle();
+    for _ in 0..1500 {
+        battle.step();
+        if battle.units[3].revision > 0 {
+            break;
+        }
+    }
+    assert!(
+        battle.units[3].revision > 0,
+        "turret never hit the approaching tank"
+    );
+    assert!(battle.units[3].status.alive && battle.units[3].mobility.traction > Fx::ZERO);
+    battle.battle.ai.next_tick = u32::MAX;
+    battle.battle.actors[1].order = Order::Hold;
+    let hit = battle.units[3].at;
+    let shots_at_hit = battle.battle.actors[3].fired;
+    for _ in 0..900 {
+        battle.step();
+    }
+    let now = battle.units[3].at;
+    let moved = (now[0] - hit[0]).abs() + (now[2] - hit[2]).abs();
+    assert!(moved > 80,
+        "damaged tank stayed trapped: hit={hit:?}, now={now:?}, shots_after_hit={}, traction={}, path={:?}, blocked={}, recovery={:?}",
+        battle.battle.actors[3].fired - shots_at_hit, battle.units[3].mobility.traction.to_f64_lossy(),
+        battle.units[3].motion.path, battle.units[3].motion.blocked,
+        battle.units[3].motion.recovery_state());
+}
+
+#[test]
 fn annihilation_hit_on_base_ends_a_real_battle() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units[1].at = [500, 16, 500];
