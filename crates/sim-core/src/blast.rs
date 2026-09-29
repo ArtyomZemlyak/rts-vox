@@ -1010,7 +1010,44 @@ fn changed_span<T: PartialEq>(
     (prefix..old.len() - suffix, prefix..next.len() - suffix)
 }
 
+const ROAD_GRADE_SHOULDER: i32 = 80;
+
 impl RangeTerrain {
+    // A road must be a drivable cut through procedural hills, including at
+    // the edge of an authored flat zone. Fade the cut into the surrounding
+    // terrain so it does not create a vertical wall along the verge.
+    fn road_ground(&self, x: u32, z: u32, natural: u32) -> u32 {
+        if natural <= FLOOR as u32 {
+            return natural;
+        }
+        let Some(layout) = &self.layout else {
+            return natural;
+        };
+        let mut edge = ROAD_GRADE_SHOULDER as f64;
+        for &(i, segment) in &self.index.at(x, z).roads {
+            let road = &layout.roads[i];
+            let a = road.points[segment];
+            let b = road.points[segment + 1];
+            let dx = (b[0] - a[0]) as f64;
+            let dz = (b[1] - a[1]) as f64;
+            let along = (((x as i32 - a[0]) as f64 * dx + (z as i32 - a[1]) as f64 * dz)
+                / (dx * dx + dz * dz))
+                .clamp(0.0, 1.0);
+            let offset_x = x as f64 - (a[0] as f64 + along * dx);
+            let offset_z = z as f64 - (a[1] as f64 + along * dz);
+            edge = edge.min(offset_x.hypot(offset_z) - f64::from(road.width / 2));
+        }
+        if edge <= 0.0 {
+            FLOOR as u32
+        } else if edge < ROAD_GRADE_SHOULDER as f64 {
+            FLOOR as u32
+                + ((natural - FLOOR as u32) as f64 * edge / ROAD_GRADE_SHOULDER as f64).round()
+                    as u32
+        } else {
+            natural
+        }
+    }
+
     fn road_at(&self, x: u32, z: u32, margin: i32) -> bool {
         let Some(layout) = &self.layout else {
             return false;
@@ -1053,7 +1090,7 @@ impl RangeTerrain {
         let (old_roads, next_roads) = changed_span(&old.roads, &next.roads);
         for road in old.roads[old_roads].iter().chain(&next.roads[next_roads]) {
             for segment in road.points.windows(2) {
-                let pad = road.width / 2 + 20;
+                let pad = road.width / 2 + ROAD_GRADE_SHOULDER;
                 areas.push((
                     [
                         segment[0][0].min(segment[1][0]) - pad,
@@ -1116,7 +1153,14 @@ impl RangeTerrain {
             && !self.road_at(tx, tz, 10)
             && !(tx < 288 + shift && (298..=386).contains(&tz))
             && !seed.is_multiple_of(5))
-        .then(|| (range_height(tx, tz), 19 + (seed >> 13) % 18, tx, tz))
+        .then(|| {
+            (
+                self.road_ground(tx, tz, range_height(tx, tz)),
+                19 + (seed >> 13) % 18,
+                tx,
+                tz,
+            )
+        })
     }
 
     // The initial occupancy build visits every column of a large map. Tree
@@ -1206,7 +1250,7 @@ impl RangeTerrain {
             if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
                 FLOOR as u32
             } else {
-                range_height(x, z)
+                self.road_ground(x, z, range_height(x, z))
             };
         let lane = (322..351).contains(&z) && x < 254 + shift;
         let wall = self.layout.is_none()
@@ -1429,7 +1473,7 @@ impl Generator for RangeTerrain {
         let h = if layout_pad || unit_pad || (self.extended && x < 448 && (298..387).contains(&z)) {
             FLOOR as u32
         } else {
-            range_height(x, z)
+            self.road_ground(x, z, range_height(x, z))
         };
         if y < h {
             let lane = (322..351).contains(&z) && x < 254 + shift;
@@ -1483,7 +1527,7 @@ impl Generator for RangeTerrain {
             && !(tx < 288 + shift && (298..=386).contains(&tz))
             && !seed.is_multiple_of(5)
         {
-            let base = range_height(tx, tz);
+            let base = self.road_ground(tx, tz, range_height(tx, tz));
             let tall = 19 + (seed >> 13) % 18;
             let dx = x as i32 - tx as i32;
             let dz = z as i32 - tz as i32;
@@ -8530,11 +8574,17 @@ mod tests {
         // hills and the procedural forest would otherwise fill the gap.
         for (x, z) in [(900, 420), (3900, 730)] {
             assert!(gen.road_at(x, z, 0));
-            let ground = range_height(x, z);
+            let ground = FLOOR as u32;
             assert_eq!(gen.material(x, ground - 1, z), 8);
             for y in ground..ground + 48 {
                 assert_eq!(gen.material(x, y, z), 0, "road blocked at {x},{y},{z}");
             }
+        }
+        // The north road leaves the flat mobility course beside a natural
+        // ridge here; its centerline must not form a step.
+        for x in (5180..5580).step_by(20) {
+            let z = 800 + (x - 5200).max(0) * 80 / 980;
+            assert_eq!(gen.column_of(x as u32, z as u32).ground, FLOOR as u32);
         }
         assert!(gen.road_at(6750, 1490, 0));
         assert_eq!(gen.material(6750, FLOOR as u32 - 1, 1490), 6);

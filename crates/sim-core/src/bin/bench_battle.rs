@@ -6,8 +6,12 @@ use std::time::Instant;
 fn main() {
     let args: Vec<_> = std::env::args().collect();
     let assault = args.iter().any(|a| a == "--assault");
+    let siege = args
+        .windows(2)
+        .find(|w| w[0] == "--siege")
+        .map(|w| w[1].as_str());
     let replay = args.iter().any(|a| a == "--replay");
-    let world_battle = assault || args.iter().any(|a| a == "--world");
+    let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
     let ai_vs_ai = args.iter().any(|a| a == "--ai-vs-ai");
@@ -17,9 +21,13 @@ fn main() {
         .map_or("even", |w| w[1].as_str());
     assert!(
         !ai_vs_ai || world_battle,
-        "--ai-vs-ai requires --world or --assault"
+        "--ai-vs-ai requires --world, --assault or --siege"
     );
-    let until_end = assault || args.iter().any(|a| a == "--until-end");
+    let until_end = assault || siege.is_some() || args.iter().any(|a| a == "--until-end");
+    assert!(
+        !assault || siege.is_none(),
+        "--assault and --siege are exclusive"
+    );
     let mut layout =
         modding::range::RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
             .unwrap();
@@ -66,6 +74,14 @@ fn main() {
             // Isolate a real cross-map route and base kill from the large
             // firefight. Keep authored positions and the unchanged terrain.
             layout.units = [0, 4, 6].map(|id| layout.units[id].clone()).into();
+        } else if let Some(side) = siege {
+            assert_eq!(balance, "even", "--siege uses its fixed roster");
+            let ids = match side {
+                "blue" => [0, 2, 6],
+                "red" => [0, 6, 8],
+                _ => panic!("--siege: blue or red"),
+            };
+            layout.units = ids.map(|id| layout.units[id].clone()).into();
         }
     } else {
         assert_eq!(balance, "even", "--balance requires --world");
@@ -103,7 +119,7 @@ fn main() {
     ))
     .unwrap();
     let mut sim = BlastRange::with_layout(config, layout).unwrap_or_else(|e| panic!("layout: {e}"));
-    if ai_vs_ai {
+    if ai_vs_ai || siege.is_some() {
         assert!(sim.set_ai_vs_ai(true));
     }
     sim.start_battle().unwrap();
@@ -240,7 +256,7 @@ fn main() {
             break;
         }
     }
-    if !assault {
+    if !assault && siege.is_none() {
         for side in [true, false] {
             assert!(
                 sim.battle
@@ -259,8 +275,18 @@ fn main() {
             );
         }
     }
+    if let Some(side) = siege {
+        let (expected, attacker, target) = if side == "blue" {
+            (Phase::Victory, 1, 2)
+        } else {
+            (Phase::Defeat, 2, 0)
+        };
+        assert_eq!(sim.battle.phase, expected, "{side} siege did not finish");
+        assert!(sim.battle.actors[attacker].fired > 0, "siege never fired");
+        assert!(!sim.units[target].status.alive, "target base survived");
+    }
     assert!(sim.matter.economy.ledger.balanced());
-    if !assault {
+    if !world_battle {
         assert_eq!(
             sim.matter
                 .economy

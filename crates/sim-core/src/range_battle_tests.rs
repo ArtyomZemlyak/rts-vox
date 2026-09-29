@@ -95,6 +95,38 @@ fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
 }
 
 #[test]
+fn distant_stationary_garrisons_draw_after_the_mobile_attackers_are_gone() {
+    let mut layout = arena_of([RangeUnitKind::TurretT1, RangeUnitKind::TurretT2])
+        .layout
+        .unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [150, 16, 120],
+        allied: true,
+    });
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Base,
+        at: [480, 16, 550],
+        allied: false,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut near = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+    near.start_battle().unwrap();
+    near.battle_tick();
+    assert_eq!(near.battle.phase, Phase::Fighting);
+
+    layout.size = [1808, 192, 640];
+    layout.clear_max = [1700, 600];
+    layout.units[1].at = [1600, 16, 336];
+    layout.units[3].at = [1600, 16, 550];
+    let mut far = BlastRange::with_layout(config, layout).unwrap();
+    far.start_battle().unwrap();
+    far.battle_tick();
+    assert_eq!(far.battle.phase, Phase::Draw);
+}
+
+#[test]
 fn annihilation_hit_on_base_ends_a_real_battle() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units[1].at = [500, 16, 500];

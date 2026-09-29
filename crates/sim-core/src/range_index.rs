@@ -1,5 +1,6 @@
 //! Static broad phase for authored range geometry. Candidate order is the
 //! original data order, so overlapping solids and air cutouts keep last-writer semantics.
+use super::ROAD_GRADE_SHOULDER;
 use modding::range::RangeLayout;
 const TILE: usize = 128;
 #[derive(Clone, Default)]
@@ -37,7 +38,7 @@ impl Index {
             }
             for (i, road) in r.roads.iter().enumerate() {
                 for (segment_id, segment) in road.points.windows(2).enumerate() {
-                    let pad = road.width / 2 + 20; // a crown can reach across the verge
+                    let pad = road.width / 2 + ROAD_GRADE_SHOULDER;
                     let lo = [
                         segment[0][0].min(segment[1][0]) - pad,
                         segment[0][1].min(segment[1][1]) - pad,

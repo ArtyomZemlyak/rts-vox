@@ -75,8 +75,8 @@
         (kind: Strider, at: (7090,16,2460)), // patrol climbs the steep lane
     ],
     shields: [(at: (6555,16,880), radius: 80)],
-    // Cut-through tracks follow the hill surface; every branch leads to a
-    // different destructive or mobility trial on this one continuous map.
+    // Cut-through tracks have graded shoulders across procedural ridges;
+    // every branch leads to a different trial on this continuous map.
     roads: [
         (width: 52, points: [(128,336),(180,500),(640,500),(900,420),(1480,460),(1600,340),(2160,340),(2930,590),(3000,760),(3650,760),(4490,660),(4520,790),(5200,800),(6180,880)]),
         (width: 48, points: [(2930,590),(3090,1500),(3280,2400),(2700,3200),(1880,4120)]),

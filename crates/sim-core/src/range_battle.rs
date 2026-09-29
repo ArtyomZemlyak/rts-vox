@@ -1006,6 +1006,52 @@ impl BlastRange {
             // A base is the objective itself: an unrelated round still in
             // flight must not postpone the outcome indefinitely.
             if let Some([own, enemy]) = self.battle_base_integrity() {
+                // A disabled attacker and two distant garrisons cannot ever
+                // reach either base. Keep nearby stationary gunfights alive,
+                // but do not leave a whole-map AI battle in Fighting forever.
+                let mobile_gun = self.units.iter().any(|u| {
+                    u.status.alive && u.status.engine && u.status.weapon && !u.kind.emplacement()
+                });
+                let stationary_target_in_range = !mobile_gun && {
+                    self.units.iter().enumerate().any(|(id, u)| {
+                        let weapon = match u.kind {
+                            RangeUnitKind::Base => None,
+                            RangeUnitKind::Spider => Some(Weapon::Laser),
+                            RangeUnitKind::Strider => Some(Weapon::MachineGun),
+                            RangeUnitKind::TurretT1 => Some(Weapon::Kinetic),
+                            RangeUnitKind::TurretT2 => Some(Weapon::Energy),
+                            RangeUnitKind::Artillery => {
+                                Some(battle.actors[id].weapon.unwrap_or(Weapon::Blast))
+                            }
+                            // An immobilized tank may still switch ammunition.
+                            RangeUnitKind::Tank => None,
+                        };
+                        let range = weapon.map_or_else(
+                            || {
+                                [
+                                    Weapon::Blast,
+                                    Weapon::Kinetic,
+                                    Weapon::Energy,
+                                    Weapon::Annihilation,
+                                ]
+                                .into_iter()
+                                .map(|w| battle.range(w, self.streams.tuning.machine_gun.range))
+                                .max()
+                                .unwrap_or(0)
+                            },
+                            |w| battle.range(w, self.streams.tuning.machine_gun.range),
+                        ) + 128;
+                        u.status.alive
+                            && u.status.weapon
+                            && self.units.iter().enumerate().any(|(other_id, other)| {
+                                other.status.alive && self.allied(id) != self.allied(other_id) && {
+                                    let dx = i64::from(u.at[0] - other.at[0]);
+                                    let dz = i64::from(u.at[2] - other.at[2]);
+                                    dx * dx + dz * dz <= i64::from(range) * i64::from(range)
+                                }
+                            })
+                    })
+                };
                 battle.phase = match (own > 0, enemy > 0) {
                     (false, false) => Phase::Draw,
                     (false, true) => Phase::Defeat,
@@ -1013,7 +1059,8 @@ impl BlastRange {
                     (true, true)
                         if battle.rounds.is_empty()
                             && battle.waves.is_empty()
-                            && !self.units.iter().any(|u| u.status.alive && u.status.weapon) =>
+                            && !mobile_gun
+                            && !stationary_target_in_range =>
                     {
                         Phase::Draw
                     }
