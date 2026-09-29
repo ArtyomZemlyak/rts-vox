@@ -12,7 +12,7 @@ use connection::Connection;
 use fx::{angle, Fx};
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
 };
 use voxel::{
     store::{Mat, AIR},
@@ -1160,9 +1160,9 @@ pub struct Hunt {
     /// map (ADR-316): a route search reaches thousands, and a map of a
     /// kilometre has twelve million, which at the poses alone is most of a
     /// gigabyte for every order given.
-    distance: BTreeMap<usize, u32>,
-    previous: BTreeMap<usize, usize>,
-    poses: BTreeMap<usize, Pose>,
+    distance: HashMap<usize, u32>,
+    previous: HashMap<usize, usize>,
+    poses: HashMap<usize, Pose>,
     open: BinaryHeap<Reverse<(u32, u32, usize)>>,
     /// Graph work spent, expansions made, poses probed.
     spent: usize,
@@ -1280,9 +1280,9 @@ impl Hunt {
         ];
         let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
         let initial = start * 8 + start_dir;
-        let mut distance = BTreeMap::new();
-        let previous = BTreeMap::new();
-        let poses = BTreeMap::new();
+        let mut distance = HashMap::new();
+        let previous = HashMap::new();
+        let poses = HashMap::new();
         let mut open = BinaryHeap::new();
         distance.insert(initial, 0);
         open.push(Reverse((0, 0, initial)));
@@ -1563,7 +1563,9 @@ impl Hunt {
         // A map keeps them in the order of the cell, which is the order
         // the dense array was written in before (ADR-316).
         b.u32(self.distance.len() as u32);
-        for (&i, &d) in &self.distance {
+        let mut reached: Vec<_> = self.distance.iter().collect();
+        reached.sort_unstable_by_key(|(&i, _)| i);
+        for (&i, &d) in reached {
             b.u32(i as u32);
             b.u32(d);
             b.u32(self.previous.get(&i).copied().unwrap_or(usize::MAX) as u32);
@@ -1673,9 +1675,9 @@ impl Hunt {
             anchor,
             initial,
             end,
-            distance: BTreeMap::new(),
-            previous: BTreeMap::new(),
-            poses: BTreeMap::new(),
+            distance: HashMap::new(),
+            previous: HashMap::new(),
+            poses: HashMap::new(),
             open: BinaryHeap::new(),
             spent,
             nodes,
