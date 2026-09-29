@@ -417,12 +417,10 @@ impl<'a> Probe<'a> {
             z0: lo[1],
             w,
             h,
-            heights: vec![u16::MAX; w * h],
-            yields: if yielding.is_empty() {
-                Vec::new()
-            } else {
-                vec![[u16::MAX, 0]; w * h]
-            },
+            // A prepared flat pose needs no columns at all. Allocate the
+            // dense cache only if an exact column query actually follows.
+            heights: Vec::new(),
+            yields: Vec::new(),
             hump_weights: Vec::new(),
             hump_key: (0, 0),
             grade_cache: None,
@@ -548,6 +546,12 @@ impl<'a> Probe<'a> {
         let (dx, dz) = (x - self.x0, z - self.z0);
         if dx < 0 || dz < 0 || dx as usize >= self.w || dz as usize >= self.h {
             return Some(self.scan(x, z));
+        }
+        if self.heights.is_empty() {
+            self.heights = vec![u16::MAX; self.w * self.h];
+            if !self.yielding.is_empty() {
+                self.yields = vec![[u16::MAX, 0]; self.w * self.h];
+            }
         }
         let i = dx as usize + self.w * dz as usize;
         if self.heights[i] == u16::MAX {
@@ -773,6 +777,9 @@ impl<'a> Probe<'a> {
     /// clearance scan. Movement and planning still use the complete pose.
     pub fn support_floors(&mut self, pos: [Fx; 2], head: i32, mut s: Shape) -> [Fx; 4] {
         s.span = s.span.min((s.half[0] - s.support[0]).max(0));
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose.floors;
+        }
         self.contacts(pos, head, s).0
     }
     fn contacts(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> ([Fx; 4], bool) {
@@ -854,12 +861,23 @@ impl<'a> Probe<'a> {
         (floors, steep)
     }
     pub fn pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose;
+        }
         self.probe_pose(pos, head, s, false)
     }
     /// Planning only consumes the full depth/crush counts of legal poses.
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
     fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose;
+        }
+        self.probe_pose(pos, head, s, true)
+    }
+    /// The prepared tiles prove the complete support and belly footprint is
+    /// one bare height. The proof is the same for driving and route search.
+    fn flat_pose(&self, pos: [Fx; 2], s: Shape) -> Option<Pose> {
         // A prepared tile box can prove that every contact sample and every
         // footprint column sees the same bare floor. Do not repeat hundreds
         // of contact and belly probes for a turn on level, empty ground.
@@ -873,19 +891,19 @@ impl<'a> Probe<'a> {
                 if !self.rubble.is_some_and(|rubble| rubble.touches(lo, hi)) {
                     if let Some(h) = self.world.prepared_flat_area(lo, hi, [*a, *b]) {
                         let h = Fx::from_int(i32::from(h));
-                        return Pose {
+                        return Some(Pose {
                             height: h,
                             floors: [h; 4],
                             blocked: 0,
                             steep: false,
                             tilt: false,
                             crush: 0,
-                        };
+                        });
                     }
                 }
             }
         }
-        self.probe_pose(pos, head, s, true)
+        None
     }
     fn probe_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape, stop_on_refusal: bool) -> Pose {
         let (floors, steep) = self.contacts(pos, head, s);
@@ -2615,6 +2633,14 @@ mod tests {
         let mut shortcut = Probe::with_yield(&w, &[4, 5]);
         shortcut.route_pose(at, 0, s);
         assert_eq!(shortcut.samples, 0, "flat pose still scanned contacts");
+        let mut driven = Probe::with_yield(&w, &[4, 5]);
+        driven.pose(at, 0, s);
+        driven.support_floors(at, 0, s);
+        assert_eq!(driven.samples, 0, "flat drive still scanned contacts");
+        assert!(
+            driven.heights.is_empty(),
+            "flat drive allocated a column cache"
+        );
         let compare = |w: &World, rubble: &Rubble| {
             for pos in [at, [Fx::from_int(126), Fx::from_int(130)]] {
                 for head in [0, angle::FULL / 8, angle::FULL / 4, angle::FULL * 3 / 8] {
@@ -2622,6 +2648,14 @@ mod tests {
                     let mut full = Probe::with_yield(w, &[4, 5]).with_rubble(rubble);
                     let a = fast.route_pose(pos, head, s);
                     let b = full.probe_pose(pos, head, s, true);
+                    assert_eq!(
+                        (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+                        (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)
+                    );
+                    let mut driven = Probe::with_yield(w, &[4, 5]).with_rubble(rubble);
+                    let mut driven_full = Probe::with_yield(w, &[4, 5]).with_rubble(rubble);
+                    let a = driven.pose(pos, head, s);
+                    let b = driven_full.probe_pose(pos, head, s, false);
                     assert_eq!(
                         (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
                         (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)

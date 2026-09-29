@@ -1,11 +1,13 @@
 param(
     [ValidateRange(5, 3600)][int]$Seconds = 30,
-    [ValidateSet('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
+    [ValidateSet('battle', 'battle-eight', 'world-battle', 'energy', 'shell', 'clouds', 'drive', 'stream', 'flame', 'actions')]
     [string[]]$Scenarios = @('battle', 'battle-eight', 'energy', 'shell', 'clouds', 'drive', 'flame'),
     [string]$Output = '',
     [switch]$SkipBuild,
     [switch]$Gpu,
-    [switch]$CheckBudget
+    [switch]$CheckBudget,
+    [ValidateRange(30, 1000)][int]$TargetFps = 120,
+    [switch]$CheckEveryFrame
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -24,12 +26,14 @@ try {
     New-Item -ItemType Directory -Force $directory | Out-Null
     $binary = Join-Path $repo 'target/release/blast.exe'
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Build the release range first.' }
+    $budgetMs = 1000.0 / $TargetFps
     # Run sequentially: competing windows or video readback invalidate timings.
     $report = foreach ($scenario in $Scenarios) {
         $extra = switch ($scenario) {
             'actions'     { @('--drive', '--view', 'overview', '--realtime', '--profile-actions') }
             'battle'       { @('--battle') }
             'battle-eight' { @('--battle-eight') }
+            'world-battle' { @('--world-battle', '--ai-vs-ai') }
             'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
             'shell'        { @('--weapon', 'shell', '--power', '4000', '--view', 'overview') }
             'clouds'       { @('--drive', '--profile-clouds', '8') }
@@ -68,22 +72,24 @@ try {
         $mean = ($times | Measure-Object -Average).Average
         $result = [pscustomobject]@{
             Scenario = $scenario
+            TargetFps = $TargetFps
             Frames = $times.Count
             MeanFps = [Math]::Round(1000.0 / $mean, 1)
             P95ms = [Math]::Round($times[[int][Math]::Floor($times.Count * 0.95)], 3)
             P99ms = [Math]::Round($p99, 3)
             MaxMs = [Math]::Round($times[-1], 3)
-            FramesOver833 = @($times | Where-Object { $_ -gt (1000.0 / 120.0) }).Count
-            MeetsP99 = $p99 -le (1000.0 / 120.0)
+            FramesOverBudget = @($times | Where-Object { $_ -gt $budgetMs }).Count
+            MeetsP99 = $p99 -le $budgetMs
+            MeetsEveryFrame = $times[-1] -le $budgetMs
         }
-        Write-Host "$scenario`: p99=$($result.P99ms) ms, max=$($result.MaxMs) ms, frames over budget=$($result.FramesOver833)"
+        Write-Host "$scenario`: p99=$($result.P99ms) ms, max=$($result.MaxMs) ms, frames over ${TargetFps} FPS budget=$($result.FramesOverBudget)"
         $result
     }
     $report | Export-Csv -LiteralPath (Join-Path $directory 'summary.csv') -NoTypeInformation -Encoding UTF8
     $report | Format-Table -AutoSize
     Write-Host "Results: $directory"
-    if ($CheckBudget -and @($report | Where-Object { -not $_.MeetsP99 }).Count -gt 0) {
-        throw 'The 120 FPS p99 budget was exceeded; maxima and slow frames are retained in summary.csv.'
+    if ($CheckBudget -and @($report | Where-Object { -not $_.MeetsP99 -or ($CheckEveryFrame -and -not $_.MeetsEveryFrame) }).Count -gt 0) {
+        throw "The $TargetFps FPS budget was exceeded; maxima and slow frames are retained in summary.csv."
     }
 } finally {
     Pop-Location
