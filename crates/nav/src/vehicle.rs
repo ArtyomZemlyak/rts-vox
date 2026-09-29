@@ -449,10 +449,27 @@ impl<'a> Probe<'a> {
     fn scan(&self, x: i32, z: i32) -> (u16, [u16; 2]) {
         let mut floor = 0;
         let mut span = [u16::MAX, 0];
+        let ceiling = self.world.column_ceiling(x as u32, z as u32);
+        // The resident 8x8 navigation tile gives the exact floor of every
+        // column when its lower and upper bounds agree. If this column's
+        // ceiling is that floor, it cannot hide yielding matter above it.
+        if let [a, b] = self.yielding.as_slice() {
+            if self
+                .world
+                .prepared_floor_tile(x as u32 / 8, z as u32 / 8, [*a, *b])
+                .is_some_and(|bounds| bounds[0] == bounds[1] && u32::from(bounds[0]) == ceiling)
+            {
+                floor = ceiling as u16;
+                if let Some(top) = self.rubble.and_then(|r| r.get(&[x, z])) {
+                    floor = floor.max(*top);
+                }
+                return (floor, span);
+            }
+        }
         // The walk starts at the column's own ceiling, not at the sky
         // (ADR-313): above it there is nothing, and on the range that was
         // a hundred and seventy-four empty cells every time.
-        for y in (0..self.world.column_ceiling(x as u32, z as u32)).rev() {
+        for y in (0..ceiling).rev() {
             if !self.world.solid(x as u32, y, z as u32) {
                 continue;
             }
@@ -2829,6 +2846,41 @@ mod tests {
                 0
             }
         }
+    }
+    #[test]
+    fn flat_tile_floor_shortcut_matches_columns_after_edits_and_rubble() {
+        let mut w = World::new(256, 64, 256, 100, Box::new(Forest));
+        w.prepare_navigation([7, 8]);
+        let mut rubble = Rubble::new();
+        rubble.insert([113, 98], 21);
+        let check = |w: &World, rubble: &Rubble| {
+            let probe = Probe::with_yield(w, &[7, 8]).with_rubble(rubble);
+            for z in 96..105 {
+                for x in 112..133 {
+                    let mut expected = (0, [u16::MAX, 0]);
+                    for y in (0..w.column_ceiling(x, z)).rev() {
+                        if !w.solid(x, y, z) {
+                            continue;
+                        }
+                        if [7, 8].contains(&w.material(x, y, z)) {
+                            expected.1[0] = expected.1[0].min(y as u16);
+                            expected.1[1] = expected.1[1].max(y as u16);
+                        } else {
+                            expected.0 = y as u16 + 1;
+                            break;
+                        }
+                    }
+                    expected.0 = expected
+                        .0
+                        .max(rubble.get(&[x as i32, z as i32]).copied().unwrap_or(0));
+                    assert_eq!(probe.scan(x as i32, z as i32), expected, "column {x},{z}");
+                }
+            }
+        };
+        check(&w, &rubble);
+        w.queue_edit(voxel::Edit::put(113, 27, 98, 3));
+        w.flush();
+        check(&w, &rubble);
     }
     #[test]
     fn yielding_trees_are_crushed_by_a_tracked_hull_and_avoided_by_others() {

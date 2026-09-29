@@ -524,6 +524,17 @@ impl World {
         let &(key, bounds) = self.floor_tiles[i].get_or_init(|| (yielding, scan()));
         Some(if key == yielding { bounds } else { scan() })
     }
+    /// Use only an already prepared tile with the requested material profile.
+    /// A fine terrain probe must not pay for a fresh 8x8 scan on a live tick.
+    pub fn prepared_floor_tile(&self, x: u32, z: u32, yielding: [Mat; 2]) -> Option<[u16; 2]> {
+        if x >= self.nx.div_ceil(8) || z >= self.nz.div_ceil(8) {
+            return None;
+        }
+        let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
+        self.floor_tiles[i]
+            .get()
+            .and_then(|(key, bounds)| (*key == yielding).then_some(*bounds))
+    }
     fn forget_floor_tile(&mut self, x: u32, z: u32) {
         let i = (x / 8) as usize + self.nx.div_ceil(8) as usize * (z / 8) as usize;
         self.floor_tiles[i].take();

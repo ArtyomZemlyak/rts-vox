@@ -206,9 +206,13 @@ fn navigation_tiles_follow_generator_region_replacement() {
         }
     }
     let mut w = World::new(80, 32, 48, 100, Box::new(Level(6)));
+    assert_eq!(w.prepared_floor_tile(5, 2, [4, 5]), None);
     w.prepare_navigation([4, 5]);
+    assert_eq!(w.prepared_floor_tile(5, 2, [4, 5]), Some([6, 6]));
+    assert_eq!(w.prepared_floor_tile(5, 2, [2, 5]), None);
     assert_eq!(w.floor_tile(5, 2, [4, 5]), Some([6, 6]));
     w.reset_generator_regions(Box::new(Level(12)), &[([32, 0], [64, 48])]);
+    assert_eq!(w.prepared_floor_tile(5, 2, [4, 5]), None);
     assert_eq!(w.floor_tile(5, 2, [4, 5]), Some([12, 12]));
     assert_eq!(w.floor_tile(0, 2, [4, 5]), Some([6, 6]));
 }
