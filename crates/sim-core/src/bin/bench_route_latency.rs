@@ -214,6 +214,7 @@ fn main() {
                             cell,
                             nodes: r.navigation.global_nodes,
                             yielding: r.navigation.fell.materials,
+                            local_grade: false,
                         },
                     );
                     (

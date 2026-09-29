@@ -144,6 +144,8 @@ pub struct Motion {
     /// Maximum graph work per tick for this hull's footprint, derived from
     /// its kind and therefore restored with the body rather than serialized.
     search_slice_limit: usize,
+    /// Reconstructed from the unit kind, never a mutable search state.
+    coarse_local_grade: bool,
     /// Nodes expanded and poses probed by the last plan: diagnostics, not
     /// state.
     pub last_plan: [u32; 2],
@@ -315,6 +317,7 @@ impl Motion {
             } else {
                 usize::MAX
             },
+            coarse_local_grade: kind == modding::range::RangeUnitKind::Spider,
             yielding,
             blocked_ticks: 0,
             escape_left: 0,
@@ -939,6 +942,7 @@ impl Motion {
                     cell: self.navigation.global_cell_units,
                     nodes: self.navigation.global_nodes,
                     yielding: self.navigation.fell.materials,
+                    local_grade: self.coarse_local_grade,
                 },
             ) {
                 self.take_plan(plan);

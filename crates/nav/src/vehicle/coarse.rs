@@ -7,6 +7,9 @@ pub struct Config {
     pub cell: i32,
     pub nodes: usize,
     pub yielding: [Mat; 2],
+    /// Wide articulated legs may climb a gradual grade across their broad
+    /// footprint; a tracked belt still needs the strict combined height.
+    pub local_grade: bool,
 }
 
 pub fn plan(
@@ -77,39 +80,78 @@ pub fn plan(
         };
         *pile = (*pile).max(top);
     }
+    let tile = |x: i32, z: i32| {
+        let [bottom, mut top] = world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
+        if !debris_dense.is_empty() {
+            top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
+        } else if !debris_pages.is_empty() {
+            let (x, z) = (x as usize, z as usize);
+            if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
+                top = top.max(page[z % PAGE * PAGE + x % PAGE]);
+            }
+        }
+        [bottom, top]
+    };
     let clear = |a: [i32; 2], b: [i32; 2]| -> bool {
         let lo = [0, 1].map(|k| a[k].min(b[k]) - radius);
         let hi = [0, 1].map(|k| a[k].max(b[k]) + radius);
         if lo[0] < 1 || lo[1] < 1 || hi[0] >= world.nx as i32 - 1 || hi[1] >= world.nz as i32 - 1 {
             return false;
         }
-        let mut low = u16::MAX;
-        let mut high = 0;
-        for z in lo[1] / 8..=hi[1] / 8 {
-            for x in lo[0] / 8..=hi[0] / 8 {
-                let [bottom, mut top] = world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
-                if !debris_dense.is_empty() {
-                    top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
-                } else if !debris_pages.is_empty() {
-                    let (x, z) = (x as usize, z as usize);
-                    if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
-                        top = top.max(page[z % PAGE * PAGE + x % PAGE]);
+        if cfg.local_grade {
+            for z in lo[1] / 8..=hi[1] / 8 {
+                for x in lo[0] / 8..=hi[0] / 8 {
+                    let [bottom, top] = tile(x, z);
+                    if i32::from(top) - i32::from(bottom) > shape.step {
+                        return false;
+                    }
+                    for (nx, nz) in [(x - 1, z), (x, z - 1)] {
+                        if nx < lo[0] / 8 || nz < lo[1] / 8 {
+                            continue;
+                        }
+                        let [next_bottom, next_top] = tile(nx, nz);
+                        if i32::from(top.max(next_top)) - i32::from(bottom.min(next_bottom))
+                            > shape.step
+                        {
+                            return false;
+                        }
                     }
                 }
-                low = low.min(bottom);
-                high = high.max(top);
             }
+            true
+        } else {
+            let mut low = u16::MAX;
+            let mut high = 0;
+            for z in lo[1] / 8..=hi[1] / 8 {
+                for x in lo[0] / 8..=hi[0] / 8 {
+                    let [bottom, mut top] =
+                        world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
+                    if !debris_dense.is_empty() {
+                        top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
+                    } else if !debris_pages.is_empty() {
+                        let (x, z) = (x as usize, z as usize);
+                        if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
+                            top = top.max(page[z % PAGE * PAGE + x % PAGE]);
+                        }
+                    }
+                    low = low.min(bottom);
+                    high = high.max(top);
+                }
+            }
+            i32::from(high - low) <= shape.step
         }
-        // Global corridors use gently varying terrain; climbing complex
-        // ramps remains the oriented local planner's job. A cliff between
-        // two individually flat tiles is refused by the combined range.
-        i32::from(high - low) <= shape.step
     };
     // Test long straight corridors in short swept sections. Comparing the
     // heights of the entire line would mistake a gradual hill for a cliff.
     let straight = |a: [i32; 2], b: [i32; 2]| {
         let delta = [b[0] - a[0], b[1] - a[1]];
-        let steps = (delta[0].unsigned_abs().max(delta[1].unsigned_abs()) as i32 / 8 + 1).max(1);
+        // Each check covers the whole swept box between its endpoints;
+        // eight-unit overlap repeats most tile queries for wide hulls.
+        let steps = delta[0]
+            .unsigned_abs()
+            .max(delta[1].unsigned_abs())
+            .div_ceil(cfg.cell as u32)
+            .max(1) as i32;
         let mut last = a;
         for step in 1..=steps {
             let next = [0, 1].map(|axis| {
@@ -264,6 +306,7 @@ mod tests {
             cell: 16,
             nodes: 8192,
             yielding: [4, 5],
+            local_grade: false,
         }
     }
     #[test]
@@ -330,11 +373,71 @@ mod tests {
             world.flush();
         }
         assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_none());
+        assert!(plan(
+            &world,
+            &Rubble::new(),
+            shape(),
+            from,
+            to,
+            Config {
+                local_grade: true,
+                ..config()
+            }
+        )
+        .is_none());
         world.restore_pristine();
         assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_some());
         let rubble = Rubble::from_sorted((0..256).map(|z| ([256, z], 26)).collect());
         assert!(plan(&world, &rubble, shape(), from, to, config()).is_none());
         assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_some());
+    }
+    #[test]
+    fn articulated_hull_can_route_up_a_gradual_hill() {
+        struct Hill;
+        impl voxel::Generator for Hill {
+            fn material(&self, x: u32, y: u32, _z: u32) -> Mat {
+                if y < 6 + x / 8 {
+                    2
+                } else {
+                    AIR
+                }
+            }
+        }
+        let world = World::new(512, 96, 256, 100000, Box::new(Hill));
+        let broad = Shape {
+            half: [50, 50],
+            support: [25, 25],
+            step: 4,
+            ..shape()
+        };
+        let from = [80, 128].map(Fx::from_int);
+        let to = [432, 128];
+        assert!(plan(
+            &world,
+            &Rubble::new(),
+            broad,
+            from,
+            to,
+            Config {
+                nodes: 1,
+                ..config()
+            }
+        )
+        .is_none());
+        let route = plan(
+            &world,
+            &Rubble::new(),
+            broad,
+            from,
+            to,
+            Config {
+                nodes: 1,
+                local_grade: true,
+                ..config()
+            },
+        )
+        .expect("a gradual grade is not one giant step for articulated legs");
+        assert_eq!(route.path, vec![to]);
     }
     #[test]
     fn sparse_pages_refuse_fresh_debris_on_a_large_map() {
