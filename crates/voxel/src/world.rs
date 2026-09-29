@@ -186,7 +186,7 @@ pub struct World {
     /// четыре пустые ячейки на колонку полигона.
     ceiling: Vec<u16>,
     /// Derived 8x8-column terrain tiles; a write invalidates its tile immediately.
-    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2], Option<u16>)>>,
+    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2], Option<u16>, bool)>>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
@@ -523,11 +523,11 @@ impl World {
                 }
             }
             let clear = (bare && bounds[0] == bounds[1]).then_some(bounds[0]);
-            (bounds, clear)
+            (bounds, clear, bare)
         };
-        let &(key, bounds, _) = self.floor_tiles[i].get_or_init(|| {
-            let (bounds, clear) = scan();
-            (yielding, bounds, clear)
+        let &(key, bounds, _, _) = self.floor_tiles[i].get_or_init(|| {
+            let (bounds, clear, bare) = scan();
+            (yielding, bounds, clear, bare)
         });
         Some(if key == yielding { bounds } else { scan().0 })
     }
@@ -540,7 +540,7 @@ impl World {
         let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
         self.floor_tiles[i]
             .get()
-            .and_then(|(key, bounds, _)| (*key == yielding).then_some(*bounds))
+            .and_then(|(key, bounds, _, _)| (*key == yielding).then_some(*bounds))
     }
     /// Uniform bare floor across an inclusive column box of prepared tiles.
     /// `None` means the caller must check the exact columns instead.
@@ -563,7 +563,7 @@ impl World {
         let mut level = None;
         for z in (lo[1] as usize / 8)..=(hi[1] as usize / 8) {
             for x in (lo[0] as usize / 8)..=(hi[0] as usize / 8) {
-                let (key, _, clear) = self.floor_tiles[x + stride * z].get()?;
+                let (key, _, clear, _) = self.floor_tiles[x + stride * z].get()?;
                 if *key != yielding {
                     return None;
                 }
@@ -575,6 +575,37 @@ impl World {
             }
         }
         level
+    }
+    /// Highest floor in a prepared box whose columns contain no yielding
+    /// material above that floor. A coarse pose may use this bound to prove
+    /// its belly clear while retaining exact contacts on uneven terrain.
+    pub fn prepared_bare_upper(
+        &self,
+        lo: [i32; 2],
+        hi: [i32; 2],
+        yielding: [Mat; 2],
+    ) -> Option<u16> {
+        if lo[0] < 0
+            || lo[1] < 0
+            || hi[0] < lo[0]
+            || hi[1] < lo[1]
+            || hi[0] >= self.nx as i32
+            || hi[1] >= self.nz as i32
+        {
+            return None;
+        }
+        let stride = self.nx.div_ceil(8) as usize;
+        let mut high = 0;
+        for z in (lo[1] as usize / 8)..=(hi[1] as usize / 8) {
+            for x in (lo[0] as usize / 8)..=(hi[0] as usize / 8) {
+                let (key, bounds, _, bare) = self.floor_tiles[x + stride * z].get()?;
+                if *key != yielding || !bare {
+                    return None;
+                }
+                high = high.max(bounds[1]);
+            }
+        }
+        Some(high)
     }
     fn forget_floor_tile(&mut self, x: u32, z: u32) {
         let i = (x / 8) as usize + self.nx.div_ceil(8) as usize * (z / 8) as usize;

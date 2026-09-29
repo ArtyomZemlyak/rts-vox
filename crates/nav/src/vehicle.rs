@@ -106,19 +106,29 @@ impl Rubble {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    /// Whether resting debris can affect a box of terrain columns.
-    /// Dense x-strips fall back to exact probing instead of scanning a
-    /// large pile on every candidate pose.
+    /// Whether resting debris can affect a box of terrain columns. The
+    /// columns are sorted by X then Z; a dense X strip elsewhere along Z
+    /// must not force a wide hull into an exact footprint scan.
     pub fn touches(&self, lo: [i32; 2], hi: [i32; 2]) -> bool {
         let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
         let rest = &self.0[first..];
         let count = rest.partition_point(|(at, _)| at[0] <= hi[0]);
-        if count > 512 {
-            return true;
+        if count <= 512 {
+            return rest[..count]
+                .iter()
+                .any(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1]);
         }
-        rest[..count]
-            .iter()
-            .any(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
+        let mut remaining = &rest[..count];
+        while let Some((at, _)) = remaining.first() {
+            let x = at[0];
+            let n = remaining.partition_point(|(p, _)| p[0] == x);
+            let z = remaining[..n].partition_point(|(p, _)| p[1] < lo[1]);
+            if z < n && remaining[z].0[1] <= hi[1] {
+                return true;
+            }
+            remaining = &remaining[n..];
+        }
+        false
     }
     /// Columns and tops in ascending column order.
     pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
@@ -939,13 +949,73 @@ impl<'a> Probe<'a> {
             return result;
         }
         let (lo, hi) = self.extent(pos, head, s);
+        let clearance = s.clearance.max(Fx::from_int(s.step));
+        // Every local coordinate of the rotated footprint lies inside these
+        // bounds. Its minimum belly is at the corner opposing each tilt.
+        let u = Fx::from_int(s.half[0]).add(Fx::from_ratio(1, 2));
+        let v = Fx::from_int(s.half[1]).add(Fx::from_ratio(1, 2));
+        let u = if pitch < Fx::ZERO { u } else { Fx::ZERO.sub(u) };
+        let v = if roll < Fx::ZERO { v } else { Fx::ZERO.sub(v) };
+        let min_belly = height.add(pitch.mul(u)).add(roll.mul(v)).add(clearance);
+        let no_rubble = !self.rubble.is_some_and(|rubble| rubble.touches(lo, hi));
+        let profile = match self.yielding.as_slice() {
+            [a, b] => Some([*a, *b]),
+            _ => None,
+        };
+        if no_rubble {
+            if let Some(profile) = profile {
+                if let Some(top) = self.world.prepared_bare_upper(lo, hi, profile) {
+                    if Fx::from_int(i32::from(top)) <= min_belly {
+                        return result;
+                    }
+                }
+            }
+        }
+        // One tree or damaged tile must not force a wide articulated hull
+        // to read every otherwise bare column. Tile proofs may omit only
+        // columns with neither yielding matter nor rubble, whose highest
+        // floor is below even the lowest point of the hull's belly.
+        let clear_tiles = if let Some(profile) = profile.filter(|_| {
+            no_rubble
+                && lo[0] >= 0
+                && lo[1] >= 0
+                && hi[0] < self.world.nx as i32
+                && hi[1] < self.world.nz as i32
+                && i64::from(hi[0] - lo[0] + 1) * i64::from(hi[1] - lo[1] + 1) >= 4096
+        }) {
+            let first = [lo[0] / 8, lo[1] / 8];
+            let last = [hi[0] / 8, hi[1] / 8];
+            let width = (last[0] - first[0] + 1) as usize;
+            let mut clear = Vec::with_capacity(width * (last[1] - first[1] + 1) as usize);
+            for z in first[1]..=last[1] {
+                for x in first[0]..=last[0] {
+                    let top = self.world.prepared_bare_upper(
+                        [x * 8, z * 8],
+                        [
+                            (x * 8 + 7).min(self.world.nx as i32 - 1),
+                            (z * 8 + 7).min(self.world.nz as i32 - 1),
+                        ],
+                        profile,
+                    );
+                    clear.push(top.is_some_and(|h| Fx::from_int(i32::from(h)) <= min_belly));
+                }
+            }
+            Some((first, width, clear))
+        } else {
+            None
+        };
         // A level hull has one belly plane. Flat ground dominates range
         // searches; avoid two fixed-point products per footprint column.
         let level = pitch == Fx::ZERO && roll == Fx::ZERO;
-        let clearance = s.clearance.max(Fx::from_int(s.step));
         let hull_height = Fx::from_int(s.height);
         for z in lo[1]..=hi[1] {
             for (x, u, v) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
+                if let Some((first, width, clear)) = &clear_tiles {
+                    let i = (z / 8 - first[1]) as usize * width + (x / 8 - first[0]) as usize;
+                    if clear[i] {
+                        continue;
+                    }
+                }
                 // Floor and yielding matter come from the same column answer.
                 // A second lookup used to repeat the page/cache query for
                 // every cell of every route pose, even without any trees.
@@ -2685,6 +2755,81 @@ mod tests {
         let mut rubble = Rubble::new();
         rubble.insert([128, 128], 32);
         compare(&w, &rubble);
+    }
+    #[test]
+    fn prepared_bare_grade_skips_a_wide_hulls_exact_footprint() {
+        struct Grade;
+        impl voxel::Generator for Grade {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                if y < 10 + x / 16 {
+                    1
+                } else {
+                    0
+                }
+            }
+        }
+        let mut w = World::new(384, 96, 384, 100, Box::new(Grade));
+        w.prepare_navigation([4, 5]);
+        let s = Shape {
+            half: [88, 80],
+            support: [50, 60],
+            clearance: Fx::from_int(38),
+            step: 14,
+            min_up: Fx::from_ratio(84, 100),
+            span: 12,
+            ramp: Fx::from_ratio(1, 2),
+            ..tank()
+        };
+        let pos = [Fx::from_int(192); 2];
+        assert_eq!(w.prepared_flat_area([100; 2], [284; 2], [4, 5]), None);
+        assert!(w.prepared_bare_upper([100; 2], [284; 2], [4, 5]).is_some());
+        let distant: Vec<_> = (100..140)
+            .flat_map(|x| (0..30).map(move |z| ([x, z], 50)))
+            .collect();
+        let mut rubble = Rubble::from_sorted(distant);
+        assert!(!rubble.touches([100, 100], [284, 284]));
+        for head in [0, angle::FULL / 8] {
+            let mut fast = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+            let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+            let a = fast.route_pose(pos, head, s);
+            let b = exact.route_pose(pos, head, s);
+            assert_eq!(
+                (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+                (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)
+            );
+            assert!(
+                fast.columns < 2000,
+                "wide grade still scanned its footprint: head={head}, fast={}, exact={}",
+                fast.columns,
+                exact.columns
+            );
+            assert!(exact.columns > 10_000);
+        }
+        w.queue_edit(voxel::Edit::put(192, 40, 192, 4));
+        w.flush();
+        w.prepare_navigation([4, 5]);
+        assert_eq!(w.prepared_bare_upper([100; 2], [284; 2], [4, 5]), None);
+        let mut fast = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+        let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+        let a = fast.route_pose(pos, 0, s);
+        let b = exact.route_pose(pos, 0, s);
+        assert_eq!(
+            (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+            (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)
+        );
+        assert!(fast.columns < 4000, "one tree scanned the whole hull");
+        assert!(exact.columns > 10_000);
+        rubble.insert([192, 192], 50);
+        assert!(rubble.touches([100, 100], [284, 284]));
+        let mut near = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+        near.route_pose(pos, 0, s);
+        assert!(
+            near.columns > 10_000,
+            "nearby rubble bypassed the exact probe"
+        );
+        w.queue_edit(voxel::Edit::put(192, 60, 192, 2));
+        w.flush();
+        assert_eq!(w.prepared_bare_upper([192, 192], [199, 199], [4, 5]), None);
     }
     fn tank() -> Shape {
         Shape {
