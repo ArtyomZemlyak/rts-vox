@@ -106,6 +106,20 @@ impl Rubble {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+    /// Whether resting debris can affect a box of terrain columns.
+    /// Dense x-strips fall back to exact probing instead of scanning a
+    /// large pile on every candidate pose.
+    pub fn touches(&self, lo: [i32; 2], hi: [i32; 2]) -> bool {
+        let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
+        let rest = &self.0[first..];
+        let count = rest.partition_point(|(at, _)| at[0] <= hi[0]);
+        if count > 512 {
+            return true;
+        }
+        rest[..count]
+            .iter()
+            .any(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
+    }
     /// Columns and tops in ascending column order.
     pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
         self.0.iter().map(|(c, t)| (c, t))
@@ -846,6 +860,31 @@ impl<'a> Probe<'a> {
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
     fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        // A prepared tile box can prove that every contact sample and every
+        // footprint column sees the same bare floor. Do not repeat hundreds
+        // of contact and belly probes for a turn on level, empty ground.
+        if s.ramp >= Fx::ZERO && s.step >= 0 && s.clearance >= Fx::ZERO && s.min_up.abs() <= Fx::ONE
+        {
+            if let [a, b] = self.yielding.as_slice() {
+                let c = pos.map(Fx::to_int_trunc);
+                let r = reach(s);
+                let lo = [c[0] - r, c[1] - r];
+                let hi = [c[0] + r, c[1] + r];
+                if !self.rubble.is_some_and(|rubble| rubble.touches(lo, hi)) {
+                    if let Some(h) = self.world.prepared_flat_area(lo, hi, [*a, *b]) {
+                        let h = Fx::from_int(i32::from(h));
+                        return Pose {
+                            height: h,
+                            floors: [h; 4],
+                            blocked: 0,
+                            steep: false,
+                            tilt: false,
+                            crush: 0,
+                        };
+                    }
+                }
+            }
+        }
         self.probe_pose(pos, head, s, true)
     }
     fn probe_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape, stop_on_refusal: bool) -> Pose {
@@ -2562,6 +2601,54 @@ mod tests {
                 hill,
             }),
         )
+    }
+    #[test]
+    fn prepared_flat_pose_matches_full_contacts_and_invalidates_on_edit() {
+        let mut w = world(false, false, false);
+        w.prepare_navigation([4, 5]);
+        let s = tank();
+        let at = [Fx::from_int(128), Fx::from_int(128)];
+        assert_eq!(
+            w.prepared_flat_area([128 - reach(s); 2], [128 + reach(s); 2], [4, 5]),
+            Some(16)
+        );
+        let mut shortcut = Probe::with_yield(&w, &[4, 5]);
+        shortcut.route_pose(at, 0, s);
+        assert_eq!(shortcut.samples, 0, "flat pose still scanned contacts");
+        let compare = |w: &World, rubble: &Rubble| {
+            for pos in [at, [Fx::from_int(126), Fx::from_int(130)]] {
+                for head in [0, angle::FULL / 8, angle::FULL / 4, angle::FULL * 3 / 8] {
+                    let mut fast = Probe::with_yield(w, &[4, 5]).with_rubble(rubble);
+                    let mut full = Probe::with_yield(w, &[4, 5]).with_rubble(rubble);
+                    let a = fast.route_pose(pos, head, s);
+                    let b = full.probe_pose(pos, head, s, true);
+                    assert_eq!(
+                        (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+                        (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)
+                    );
+                }
+            }
+        };
+        compare(&w, &Rubble::new());
+        let mut distant_rubble = Rubble::new();
+        distant_rubble.insert([20, 20], 32);
+        let mut shortcut = Probe::with_yield(&w, &[4, 5]).with_rubble(&distant_rubble);
+        shortcut.route_pose(at, 0, s);
+        assert_eq!(shortcut.samples, 0, "distant rubble disabled the shortcut");
+        compare(&w, &distant_rubble);
+        let mut nearby_rubble = Rubble::new();
+        nearby_rubble.insert([128, 128], 32);
+        compare(&w, &nearby_rubble);
+        w.queue_edit(voxel::Edit::put(128, 30, 128, 3));
+        w.flush();
+        assert_eq!(
+            w.prepared_flat_area([128 - reach(s); 2], [128 + reach(s); 2], [4, 5]),
+            None
+        );
+        compare(&w, &Rubble::new());
+        let mut rubble = Rubble::new();
+        rubble.insert([128, 128], 32);
+        compare(&w, &rubble);
     }
     fn tank() -> Shape {
         Shape {

@@ -186,7 +186,7 @@ pub struct World {
     /// четыре пустые ячейки на колонку полигона.
     ceiling: Vec<u16>,
     /// Derived 8x8-column terrain tiles; a write invalidates its tile immediately.
-    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2])>>,
+    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2], Option<u16>)>>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
@@ -501,11 +501,13 @@ impl World {
         let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
         let scan = || {
             let mut bounds = [u16::MAX, 0];
+            let mut bare = true;
             let mut cursor = Self::mat_cursor();
             for z in z * 8..((z + 1) * 8).min(self.nz) {
                 for x in x * 8..((x + 1) * 8).min(self.nx) {
                     let mut top = 0;
-                    for y in (0..self.column_ceiling(x, z)).rev() {
+                    let ceiling = self.column_ceiling(x, z);
+                    for y in (0..ceiling).rev() {
                         if !self.solid(x, y, z) {
                             continue;
                         }
@@ -517,12 +519,17 @@ impl World {
                     }
                     bounds[0] = bounds[0].min(top);
                     bounds[1] = bounds[1].max(top);
+                    bare &= u32::from(top) == ceiling;
                 }
             }
-            bounds
+            let clear = (bare && bounds[0] == bounds[1]).then_some(bounds[0]);
+            (bounds, clear)
         };
-        let &(key, bounds) = self.floor_tiles[i].get_or_init(|| (yielding, scan()));
-        Some(if key == yielding { bounds } else { scan() })
+        let &(key, bounds, _) = self.floor_tiles[i].get_or_init(|| {
+            let (bounds, clear) = scan();
+            (yielding, bounds, clear)
+        });
+        Some(if key == yielding { bounds } else { scan().0 })
     }
     /// Use only an already prepared tile with the requested material profile.
     /// A fine terrain probe must not pay for a fresh 8x8 scan on a live tick.
@@ -533,7 +540,41 @@ impl World {
         let i = x as usize + self.nx.div_ceil(8) as usize * z as usize;
         self.floor_tiles[i]
             .get()
-            .and_then(|(key, bounds)| (*key == yielding).then_some(*bounds))
+            .and_then(|(key, bounds, _)| (*key == yielding).then_some(*bounds))
+    }
+    /// Uniform bare floor across an inclusive column box of prepared tiles.
+    /// `None` means the caller must check the exact columns instead.
+    pub fn prepared_flat_area(
+        &self,
+        lo: [i32; 2],
+        hi: [i32; 2],
+        yielding: [Mat; 2],
+    ) -> Option<u16> {
+        if lo[0] < 0
+            || lo[1] < 0
+            || hi[0] < lo[0]
+            || hi[1] < lo[1]
+            || hi[0] >= self.nx as i32
+            || hi[1] >= self.nz as i32
+        {
+            return None;
+        }
+        let stride = self.nx.div_ceil(8) as usize;
+        let mut level = None;
+        for z in (lo[1] as usize / 8)..=(hi[1] as usize / 8) {
+            for x in (lo[0] as usize / 8)..=(hi[0] as usize / 8) {
+                let (key, _, clear) = self.floor_tiles[x + stride * z].get()?;
+                if *key != yielding {
+                    return None;
+                }
+                let h = (*clear)?;
+                if level.is_some_and(|was| was != h) {
+                    return None;
+                }
+                level = Some(h);
+            }
+        }
+        level
     }
     fn forget_floor_tile(&mut self, x: u32, z: u32) {
         let i = (x / 8) as usize + self.nx.div_ceil(8) as usize * (z / 8) as usize;
