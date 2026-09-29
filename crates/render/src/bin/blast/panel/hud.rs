@@ -1,5 +1,6 @@
 //! RTS command deck. The simulation owns orders and loadouts; this is presentation.
 use super::*;
+use bevy::ui::FocusPolicy;
 #[derive(Component)]
 pub struct Drawer;
 #[derive(Component)]
@@ -22,6 +23,8 @@ pub struct RosterStrip;
 pub struct CommandDeck;
 #[derive(Component)]
 pub struct HeaderBrand;
+#[derive(Component)]
+pub struct SelectionBox;
 pub const ROSTER_PAGE_SIZE: usize = 8;
 /// The compact layout handles the supported 960×540 window without shrinking
 /// labels and click targets along with the rest of the interface.
@@ -38,6 +41,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::BattleWorld
         | Action::BattlePreset
         | Action::BattleStart
+        | Action::SelectAllOwn
         | Action::RangeMode => 1,
         Action::Overview
         | Action::WholeMap
@@ -310,12 +314,26 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             button(p, font, "◀", Action::RosterPage(-1));
             let label = label(p, font, "", 13.0, Color::srgb(0.86, 0.93, 0.94));
             p.commands().entity(label).insert(HudText(5));
+            button(p, font, "Все", Action::SelectAllOwn);
             for id in 0..modding::range::MAX_RANGE_UNITS {
                 let e = button(p, font, &format!("Юнит {}", id + 1), Action::SelectUnit(id));
                 p.commands().entity(e).insert(Roster(id));
             }
             button(p, font, "▶", Action::RosterPage(1));
         });
+    commands.spawn((
+        SelectionBox,
+        Node {
+            position_type: PositionType::Absolute,
+            display: Display::None,
+            border: UiRect::all(px(1)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.24, 0.68, 0.9, 0.13)),
+        BorderColor::all(Color::srgba(0.55, 0.9, 1.0, 0.9)),
+        FocusPolicy::Pass,
+        UiTargetCamera(camera),
+    ));
     commands
         .spawn((
             BriefingCard,
@@ -385,6 +403,20 @@ pub fn refresh(
     } else {
         Some((usize::MAX, &scene.sim.gun))
     };
+    let selected_ids = if battle {
+        edit.battle_selected_ids(&scene.sim)
+    } else {
+        Vec::new()
+    };
+    let loadout_count =
+        selected_ids
+            .iter()
+            .filter(|&&i| {
+                scene.sim.units.get(i).is_some_and(|u| {
+                    matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                })
+            })
+            .count();
     let roster: Vec<_> = scene
         .sim
         .units
@@ -437,13 +469,7 @@ pub fn refresh(
         } else if matches!(action, Some(Action::RosterPage(_))) {
             Some(battle && pages > 1)
         } else if loadout.is_some() {
-            Some(
-                battle
-                    && selected.is_some_and(|(_, u)| {
-                        matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
-                            && u.status.alive
-                    }),
-            )
+            Some(battle && loadout_count > 0)
         } else if solo.is_some() {
             Some(!battle)
         } else if battle_button.is_some() {
@@ -579,24 +605,33 @@ pub fn refresh(
             ),
             2 => {
                 if battle {
-                    selected.map_or_else(
-                        || "Выберите танк или артиллерию для смены боеприпаса".into(),
-                        |(i, u)| {
-                            format!(
-                                "{} · дальность {} м\n{}",
-                                weapon_name(
-                                    scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
-                                ),
-                                scene.sim.battle_attack_range(i).unwrap_or(0) / 10,
-                                if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
-                                {
-                                    "Смена заряда сохраняет перезарядку"
-                                } else {
-                                    "Ведёт огонь во время движения"
-                                }
-                            )
-                        },
-                    )
+                    if selected_ids.len() > 1 {
+                        format!(
+                            "В отряде {} танков/артиллерий\nСмена заряда — для всей группы",
+                            loadout_count
+                        )
+                    } else {
+                        selected.map_or_else(
+                            || "Выберите танк или артиллерию для смены боеприпаса".into(),
+                            |(i, u)| {
+                                format!(
+                                    "{} · дальность {} м\n{}",
+                                    weapon_name(
+                                        scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
+                                    ),
+                                    scene.sim.battle_attack_range(i).unwrap_or(0) / 10,
+                                    if matches!(
+                                        u.kind,
+                                        RangeUnitKind::Tank | RangeUnitKind::Artillery
+                                    ) {
+                                        "Смена заряда сохраняет перезарядку"
+                                    } else {
+                                        "Ведёт огонь во время движения"
+                                    }
+                                )
+                            },
+                        )
+                    }
                 } else {
                     format!(
                         "Мощность {:.1}×  ·  {}",
@@ -634,8 +669,34 @@ pub fn refresh(
                 )
             }
         };
+        let value = if id.0 == 1 {
+            let count = selected_ids.len();
+            if count > 1 {
+                format!("ОТРЯД: {count}\n{value}")
+            } else {
+                value
+            }
+        } else {
+            value
+        };
         if **t != value {
             **t = value;
+        }
+    }
+}
+
+pub fn refresh_selection_box(edit: Res<Workshop>, mut boxes: Query<&mut Node, With<SelectionBox>>) {
+    for mut node in &mut boxes {
+        if let (Some(start), Some(end)) = (edit.drag_start, edit.drag_current) {
+            let lo = start.min(end);
+            let hi = start.max(end);
+            node.left = px(lo.x);
+            node.top = px(lo.y);
+            node.width = px(hi.x - lo.x);
+            node.height = px(hi.y - lo.y);
+            node.display = Display::Flex;
+        } else {
+            node.display = Display::None;
         }
     }
 }
@@ -737,6 +798,55 @@ mod tests {
         assert_eq!(app.world().resource::<Panel>().drawer, 3);
         click(&mut app, Action::Ranges);
         assert!(!app.world().resource::<Panel>().ranges);
+    }
+    #[test]
+    fn group_selection_and_commands_apply_to_every_selected_ally() {
+        use sim_core::blast::battle::Order;
+        let mut app = app();
+        click(&mut app, Action::BattleStart);
+        click(&mut app, Action::SelectAllOwn);
+        assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        click(&mut app, Action::Stop);
+        assert!(app.world().resource::<Scene>().sim.battle.actors[..2]
+            .iter()
+            .all(|actor| actor.order == Order::Hold));
+        click(&mut app, Action::AutoAttack);
+        assert!(app.world().resource::<Scene>().sim.battle.actors[..2]
+            .iter()
+            .all(|actor| actor.order == Order::Auto));
+        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Energy)));
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle_weapon(0),
+            Some(BattleWeapon::Energy)
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        click(&mut app, Action::SelectUnit(0));
+        assert_eq!(app.world().resource::<Workshop>().selected_units, [1]);
+        *app.world_mut().resource_mut::<ButtonInput<KeyCode>>() = default();
+        click(&mut app, Action::SelectAllOwn);
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        assert_eq!(
+            workbench::issue_battle_group_order(&mut scene.sim, &[0, 1], Order::Attack(2), None),
+            2
+        );
+        assert!(scene.sim.battle.actors[..2]
+            .iter()
+            .all(|actor| actor.order == Order::Attack(2)));
+        assert_eq!(
+            workbench::issue_battle_group_order(
+                &mut scene.sim,
+                &[0, 1],
+                Order::Move,
+                Some([3530, 2400])
+            ),
+            2
+        );
+        assert_ne!(
+            scene.sim.units[0].motion.destination,
+            scene.sim.units[1].motion.destination
+        );
     }
     #[test]
     fn authored_battles_load_through_hud_and_enemy_ai_acquires_targets() {

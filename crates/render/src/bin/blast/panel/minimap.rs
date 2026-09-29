@@ -316,16 +316,20 @@ pub fn update(
             Display::None
         };
         if let Some(u) = unit {
+            let selected = edit.selected_units.contains(i)
+                || (edit.selected_units.is_empty() && edit.controlled == Some(*i));
             let width = if u.kind == RangeUnitKind::Base {
                 10.0
             } else {
                 5.0
-            };
+            } + if selected { 3.0 } else { 0.0 };
             node.width = px(width);
             node.height = px(width);
             node.left = percent(100.0 * u.motion.pos[0].to_f64_lossy() as f32 / size[0] as f32);
             node.top = percent(100.0 * u.motion.pos[2].to_f64_lossy() as f32 / size[2] as f32);
-            color.0 = if *i == modding::range::MAX_RANGE_UNITS || scene.sim.allied(*i) {
+            color.0 = if selected {
+                Color::srgb(0.99, 0.94, 0.56)
+            } else if *i == modding::range::MAX_RANGE_UNITS || scene.sim.allied(*i) {
                 Color::srgb(0.2, 0.85, 1.0)
             } else {
                 Color::srgb(1.0, 0.32, 0.2)

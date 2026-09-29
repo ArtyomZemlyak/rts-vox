@@ -180,6 +180,7 @@ pub enum Action {
     Drawer(u8),
     Ranges,
     SelectUnit(usize),
+    SelectAllOwn,
     RosterPage(i32),
     BattleWeapon(Option<BattleWeapon>),
     Skirmish(u8),
@@ -354,6 +355,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Начать бой", Action::BattleStart),
                     ("Следующий свой", Action::NextOwn),
+                    ("Все свои", Action::SelectAllOwn),
                 ],
             ),
             (
@@ -392,7 +394,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![
                     ("Огонь по точке", Action::Fire),
-                    ("Стоп юнит", Action::Stop),
+                    ("Стоп выбранных", Action::Stop),
                 ],
             ),
             (false, vec![("Автоатака", Action::AutoAttack)]),
@@ -630,6 +632,7 @@ pub fn actions(
             edit.selected = Some(Selection::Unit(id));
         }
     }
+    let additive_selection = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let mut key = |k: KeyCode, p: &mut Panel| {
         keys.press(k);
         p.keys.push(k);
@@ -645,6 +648,7 @@ pub fn actions(
                 | Action::Ranges
                 | Action::Settings
                 | Action::SelectUnit(_)
+                | Action::SelectAllOwn
                 | Action::RosterPage(_)
                 | Action::NextOwn
                 | Action::Scenario(_)
@@ -681,8 +685,20 @@ pub fn actions(
                     && scene.sim.allied(id)
                     && scene.sim.units.get(id).is_some_and(|u| u.status.alive)
                 {
-                    edit.controlled = Some(id);
-                    edit.selected = Some(Selection::Unit(id));
+                    edit.select_battle_unit(&scene.sim, id, additive_selection);
+                }
+            }
+            Action::SelectAllOwn => {
+                if scene.sim.battle_mode() {
+                    let ids: Vec<_> = scene
+                        .sim
+                        .units
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+                        .map(|(i, _)| i)
+                        .collect();
+                    edit.select_battle_group(&scene.sim, &ids, false);
                 }
             }
             Action::RosterPage(delta) => {
@@ -698,10 +714,13 @@ pub fn actions(
                     (panel.roster_page as i32 + delta).rem_euclid(pages as i32) as usize;
             }
             Action::BattleWeapon(weapon) => {
-                if let Some(id) = edit.controlled {
-                    if !scene.sim.set_battle_weapon(id, weapon) {
-                        scene.notice = "Выберите свой действующий танк".into();
-                    }
+                let ids = edit.battle_selected_ids(&scene.sim);
+                let mut changed = false;
+                for id in ids {
+                    changed |= scene.sim.set_battle_weapon(id, weapon);
+                }
+                if !changed {
+                    scene.notice = "Выберите свой действующий танк".into();
                 }
             }
             Action::Skirmish(id) => match edit.skirmish(id, scene.sim.config.clone()) {
@@ -777,6 +796,8 @@ pub fn actions(
                                 && u.status.weapon
                         })
                         .map(|(i, _)| i);
+                    edit.selected_units = edit.controlled.into_iter().collect();
+                    edit.selected = edit.controlled.map(Selection::Unit);
                 }
                 Err(e) => scene.notice = e.into(),
             },
@@ -795,6 +816,7 @@ pub fn actions(
                         .map(|i| (start + i) % n)
                         .find(|&i| scene.sim.allied(i) && scene.sim.units[i].status.alive);
                     edit.selected = edit.controlled.map(Selection::Unit);
+                    edit.selected_units = edit.controlled.into_iter().collect();
                     if let Some(id) = edit.controlled {
                         panel.roster_page = scene
                             .sim
@@ -842,7 +864,7 @@ pub fn actions(
             }
             Action::AutoAttack => {
                 if scene.sim.battle_mode() {
-                    if let Some(id) = edit.controlled {
+                    for id in edit.battle_selected_ids(&scene.sim) {
                         scene
                             .sim
                             .battle_order(id, sim_core::blast::battle::Order::Auto, None);
@@ -859,7 +881,7 @@ pub fn actions(
             }
             Action::Stop => {
                 if scene.sim.battle_mode() {
-                    if let Some(id) = edit.controlled {
+                    for id in edit.battle_selected_ids(&scene.sim) {
                         scene
                             .sim
                             .battle_order(id, sim_core::blast::battle::Order::Hold, None);
@@ -1272,15 +1294,37 @@ pub fn refresh(
             Display::None
         };
     }
+    let selected_ids = edit.battle_selected_ids(&scene.sim);
+    let weapons: Vec<_> =
+        selected_ids
+            .iter()
+            .filter(|&&id| {
+                scene.sim.units.get(id).is_some_and(|u| {
+                    matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+                })
+            })
+            .filter_map(|&id| scene.sim.battle.actors.get(id).map(|a| a.weapon))
+            .collect();
+    let group_weapon = weapons
+        .first()
+        .copied()
+        .filter(|weapon| weapons.iter().all(|other| other == weapon));
     for (a, interaction, mut color) in &mut buttons {
         let active = match *a {
             Action::Drawer(id) => panel.drawer == id,
             Action::Ranges => panel.ranges,
-            Action::SelectUnit(id) => edit.controlled == Some(id),
-            Action::BattleWeapon(w) => edit
-                .controlled
-                .and_then(|id| scene.sim.battle.actors.get(id))
-                .is_some_and(|a| a.weapon == w),
+            Action::SelectUnit(id) => {
+                if edit.selected_units.is_empty() {
+                    edit.controlled == Some(id)
+                } else {
+                    edit.selected_units.contains(&id)
+                }
+            }
+            Action::SelectAllOwn => {
+                let selected = selected_ids.len();
+                selected > 0 && selected == scene.sim.battle_counts()[0]
+            }
+            Action::BattleWeapon(w) => group_weapon == Some(w),
             Action::Side(own) => edit.allied == own,
             Action::BattleStart => {
                 scene.sim.battle.phase == sim_core::blast::battle::Phase::Fighting
@@ -1319,9 +1363,9 @@ pub fn refresh(
     let instructions = if edit.editing {
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
     } else if scene.sim.battle_mode() {
-        "ЛКМ — выбрать своего
-ПКМ — движение / атака врага
-На ходу стреляет по целям в радиусе"
+        "ЛКМ — выбрать своего · рамка — отряд
+Shift+ЛКМ — добавить / убрать
+ПКМ — движение / атака всей группы"
     } else if panel.ground_fire {
         "Укажите точку выстрела на карте"
     } else if scene.sim.auto_attack {
@@ -1409,10 +1453,11 @@ pub fn refresh(
         target = format!(
             "{phase}
 Свои: {own} · Враги: {enemy}
-Управление: {controlled}
+Выделено: {} · ведущий: {controlled}
 Танки — выбор боеприпаса · Шагоходы — два пулемёта
 Дальность выбранного: {reach}
-{target}"
+{target}",
+            edit.battle_selected_ids(&scene.sim).len()
         );
     }
     let capacity = scene.sim.shield_tuning().capacity.max(1);

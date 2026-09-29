@@ -838,6 +838,7 @@ fn main() {
                     workbench::overlay,
                     panel::refresh,
                     panel::hud::refresh,
+                    panel::hud::refresh_selection_box,
                     knobs::refresh,
                     panel::release_keys,
                     record,

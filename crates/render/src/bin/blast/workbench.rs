@@ -118,6 +118,7 @@ pub struct Workshop {
     pub editing: bool,
     pub allied: bool,
     pub controlled: Option<usize>,
+    pub selected_units: Vec<usize>,
     pub tool: Tool,
     pub selected: Option<Selection>,
     pub pan: Vec2,
@@ -132,6 +133,8 @@ pub struct Workshop {
     preview: Option<Preview>,
     pub(super) validator: sim_core::blast::placement::Validator,
     previous_cursor: Option<Vec2>,
+    pub drag_start: Option<Vec2>,
+    pub drag_current: Option<Vec2>,
     pub pending: Option<(ExplosionConfig, RangeLayout)>,
 }
 impl Workshop {
@@ -154,6 +157,7 @@ impl Workshop {
             editing,
             allied: true,
             controlled: None,
+            selected_units: Vec::new(),
             zone,
             orbit: 0.0,
             pitch: 0.0,
@@ -168,7 +172,57 @@ impl Workshop {
             preview: None,
             validator: default(),
             previous_cursor: None,
+            drag_start: None,
+            drag_current: None,
             pending: None,
+        }
+    }
+    pub fn battle_selected_ids(&self, sim: &BlastRange) -> Vec<usize> {
+        let ids: Vec<_> = if self.selected_units.is_empty() {
+            self.controlled.into_iter().collect()
+        } else {
+            self.selected_units.clone()
+        };
+        ids.into_iter()
+            .filter(|&id| sim.units.get(id).is_some_and(|u| u.status.alive) && sim.allied(id))
+            .collect()
+    }
+    pub fn select_battle_group(&mut self, sim: &BlastRange, ids: &[usize], additive: bool) {
+        if additive && self.selected_units.is_empty() {
+            if let Some(id) = self
+                .controlled
+                .filter(|&i| sim.units.get(i).is_some_and(|u| u.status.alive) && sim.allied(i))
+            {
+                self.selected_units.push(id);
+            }
+        }
+        if !additive {
+            self.selected_units.clear();
+        }
+        for &id in ids {
+            if sim.units.get(id).is_some_and(|u| u.status.alive)
+                && sim.allied(id)
+                && !self.selected_units.contains(&id)
+            {
+                self.selected_units.push(id);
+            }
+        }
+        self.selected_units.sort_unstable();
+        self.controlled = self
+            .controlled
+            .filter(|id| self.selected_units.contains(id))
+            .or_else(|| self.selected_units.first().copied());
+        self.selected = self.controlled.map(Selection::Unit);
+    }
+    pub fn select_battle_unit(&mut self, sim: &BlastRange, id: usize, additive: bool) {
+        if additive && self.selected_units.contains(&id) {
+            self.selected_units.retain(|&i| i != id);
+            self.controlled = self.selected_units.first().copied();
+            self.selected = self.controlled.map(Selection::Unit);
+        } else {
+            self.select_battle_group(sim, &[id], additive);
+            self.controlled = Some(id).filter(|&i| self.selected_units.contains(&i));
+            self.selected = self.controlled.map(Selection::Unit);
         }
     }
     pub fn battle_preset(&mut self, config: ExplosionConfig) -> Result<(), String> {
@@ -195,6 +249,7 @@ impl Workshop {
         self.editing = true;
         self.selected = None;
         self.controlled = Some(0);
+        self.selected_units = vec![0];
         self.pan = Vec2::ZERO;
         self.zoom = 0.85;
         self.orbit = 0.0;
@@ -233,6 +288,7 @@ impl Workshop {
         self.editing = true;
         self.selected = Some(Selection::Unit(0));
         self.controlled = Some(0);
+        self.selected_units = vec![0];
         self.pan = Vec2::ZERO;
         self.zoom = if id == 3 { 1.35 } else { 0.85 };
         self.orbit = 0.0;
@@ -268,6 +324,7 @@ impl Workshop {
         self.allied = true;
         self.controlled = controlled;
         self.selected = self.controlled.map(Selection::Unit);
+        self.selected_units = self.controlled.into_iter().collect();
         if let Some(zone) = focus_zone {
             self.zone = zone;
         }
@@ -283,6 +340,7 @@ impl Workshop {
         layout.battle = false;
         self.commit(layout, config)?;
         self.controlled = None;
+        self.selected_units.clear();
         self.selected = None;
         self.editing = false;
         Ok(())
@@ -719,6 +777,72 @@ fn pick(sim: &BlastRange, ray: Ray3d) -> Option<([i32; 3], Option<Selection>)> {
     None
 }
 
+pub fn issue_battle_group_order(
+    sim: &mut BlastRange,
+    ids: &[usize],
+    order: sim_core::blast::battle::Order,
+    destination: Option<[i32; 2]>,
+) -> usize {
+    use sim_core::blast::battle::Order;
+    if order != Order::Move {
+        return ids
+            .iter()
+            .filter(|&&id| sim.battle_order(id, order, destination))
+            .count();
+    }
+    let Some(centre) = destination else { return 0 };
+    let movers: Vec<_> = ids
+        .iter()
+        .copied()
+        .filter(|&id| sim.units.get(id).is_some_and(|u| !u.kind.emplacement()))
+        .collect();
+    let columns = (1..=movers.len())
+        .find(|n| n * n >= movers.len())
+        .unwrap_or(1) as i32;
+    let rows = (movers.len() as i32 + columns - 1) / columns;
+    let size = sim.size();
+    let mut accepted = 0;
+    for (slot, id) in movers.into_iter().enumerate() {
+        let (col, row) = (slot as i32 % columns, slot as i32 / columns);
+        let target = [
+            (centre[0] + (2 * col - columns + 1) * 45).clamp(0, size[0] as i32 - 1),
+            (centre[1] + (2 * row - rows + 1) * 45).clamp(0, size[2] as i32 - 1),
+        ];
+        if sim.battle_order(id, Order::Move, Some(target))
+            || (target != centre && sim.battle_order(id, Order::Move, Some(centre)))
+        {
+            accepted += 1;
+        }
+    }
+    accepted
+}
+
+fn battle_units_in_screen_rect(
+    sim: &BlastRange,
+    camera: &Camera,
+    transform: &GlobalTransform,
+    start: Vec2,
+    end: Vec2,
+) -> Vec<usize> {
+    let lo = start.min(end);
+    let hi = start.max(end);
+    sim.units
+        .iter()
+        .enumerate()
+        .filter(|(i, u)| sim.allied(*i) && u.status.alive)
+        .filter_map(|(i, u)| {
+            let at = Vec3::from(u.motion.pos.map(|v| v.to_f64_lossy() as f32));
+            camera
+                .world_to_viewport(transform, at)
+                .ok()
+                .and_then(|point| {
+                    (point.x >= lo.x && point.x <= hi.x && point.y >= lo.y && point.y <= hi.y)
+                        .then_some(i)
+                })
+        })
+        .collect()
+}
+
 // Bevy injects each resource independently into this system.
 #[allow(clippy::too_many_arguments)]
 pub fn input(
@@ -796,15 +920,68 @@ pub fn input(
     if streaming.as_ref().is_some_and(|s| s.loading()) {
         edit.hover = None;
         edit.preview = None;
+        edit.drag_start = None;
+        edit.drag_current = None;
         return;
+    }
+    if scene.sim.battle_mode() {
+        edit.selected_units.retain(|&id| {
+            scene.sim.units.get(id).is_some_and(|u| u.status.alive) && scene.sim.allied(id)
+        });
+        if edit.controlled.is_some_and(|id| {
+            !scene.sim.units.get(id).is_some_and(|u| u.status.alive) || !scene.sim.allied(id)
+        }) {
+            edit.controlled = edit.selected_units.first().copied();
+            edit.selected = edit.controlled.map(Selection::Unit);
+        }
     }
     if !edit.editing {
         edit.hover = None;
+        let battle = scene.sim.battle_mode();
+        let fire = panel.as_ref().is_some_and(|p| p.ground_fire);
+        let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        if battle && !fire {
+            if mouse.just_pressed(MouseButton::Left) && !blocked {
+                edit.drag_start = cursor;
+                edit.drag_current = cursor;
+            }
+            if edit.drag_start.is_some() && mouse.pressed(MouseButton::Left) {
+                edit.drag_current = cursor.or(edit.drag_current);
+            }
+            if mouse.just_released(MouseButton::Left) {
+                let start = edit.drag_start.take();
+                let end = cursor.or(edit.drag_current.take());
+                if let (Some(start), Some(end)) = (start, end) {
+                    if start.distance_squared(end) >= 64.0 {
+                        let ids = battle_units_in_screen_rect(&scene.sim, camera, gt, start, end);
+                        edit.select_battle_group(&scene.sim, &ids, additive);
+                        return;
+                    }
+                    if !blocked {
+                        if let Ok(ray) = camera.viewport_to_world(gt, end) {
+                            match pick(&scene.sim, ray).and_then(|(_, s)| s) {
+                                Some(Selection::Unit(i))
+                                    if scene.sim.allied(i) && scene.sim.units[i].status.alive =>
+                                {
+                                    edit.select_battle_unit(&scene.sim, i, additive);
+                                }
+                                Some(enemy @ Selection::Unit(_)) => edit.selected = Some(enemy),
+                                _ if !additive => edit.select_battle_group(&scene.sim, &[], false),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            edit.drag_start = None;
+            edit.drag_current = None;
+        }
         if !blocked {
             if let Some(c) = cursor {
                 if let Ok(ray) = camera.viewport_to_world(gt, c) {
                     if let Some((hit, selection)) = pick(&scene.sim, ray) {
-                        if mouse.just_pressed(MouseButton::Left) {
+                        if !battle && mouse.just_pressed(MouseButton::Left) {
                             edit.selected = selection;
                             if let Some(Selection::Unit(i)) = selection {
                                 if scene.sim.allied(i) && scene.sim.units[i].status.alive {
@@ -812,12 +989,12 @@ pub fn input(
                                 }
                             }
                         }
-                        let fire = panel.as_ref().is_some_and(|p| p.ground_fire);
                         if mouse.just_pressed(MouseButton::Right)
                             || (fire && mouse.just_pressed(MouseButton::Left))
                         {
-                            if scene.sim.battle_mode() {
-                                if let Some(id) = edit.controlled {
+                            if battle {
+                                let ids = edit.battle_selected_ids(&scene.sim);
+                                if !ids.is_empty() {
                                     use sim_core::blast::battle::Order;
                                     let order = if fire {
                                         Order::Ground(hit)
@@ -826,22 +1003,46 @@ pub fn input(
                                             if !scene.sim.units[enemy].status.alive {
                                                 return;
                                             }
-                                            edit.controlled = Some(enemy);
-                                            edit.selected = selection;
-                                            return;
+                                            Order::Move
+                                        } else {
+                                            Order::Attack(enemy)
                                         }
-                                        Order::Attack(enemy)
                                     } else {
                                         Order::Move
                                     };
-                                    if scene.sim.battle_order(id, order, Some([hit[0], hit[2]])) {
-                                        scene.notice.clear();
+                                    let eligible = if order == Order::Move {
+                                        ids.iter()
+                                            .filter(|&&id| {
+                                                scene
+                                                    .sim
+                                                    .units
+                                                    .get(id)
+                                                    .is_some_and(|u| !u.kind.emplacement())
+                                            })
+                                            .count()
                                     } else {
-                                        scene.notice="Приказ недоступен: проверьте фазу боя и состояние юнита".into();
+                                        ids.len()
+                                    };
+                                    let accepted = issue_battle_group_order(
+                                        &mut scene.sim,
+                                        &ids,
+                                        order,
+                                        Some([hit[0], hit[2]]),
+                                    );
+                                    if eligible == 0 && order == Order::Move {
+                                        scene.notice = "В выделении нет подвижных юнитов".into();
+                                    } else if accepted == eligible && accepted > 0 {
+                                        scene.notice.clear();
+                                    } else if accepted > 0 {
+                                        scene.notice = format!(
+                                            "Приказ получили {accepted} из {eligible} юнитов"
+                                        );
+                                    } else {
+                                        scene.notice = "Приказ недоступен: проверьте фазу боя и состояние отряда".into();
                                     }
                                 } else {
                                     scene.notice =
-                                        "Сначала выберите свой юнит левой кнопкой".into();
+                                        "Сначала выделите своих юнитов левой кнопкой".into();
                                 }
                                 return;
                             }
@@ -864,6 +1065,8 @@ pub fn input(
         }
         return;
     }
+    edit.drag_start = None;
+    edit.drag_current = None;
     for (key, tool) in [
         (KeyCode::Digit1, Tool::Select),
         (KeyCode::Digit2, Tool::Tank),
@@ -1118,12 +1321,16 @@ pub fn overlay(
                     },
                 );
             }
-            if edit.controlled == Some(i) {
+            if edit.selected_units.contains(&i)
+                || (edit.selected_units.is_empty() && edit.controlled == Some(i))
+            {
                 giz.circle(
                     Isometry3d::new(p + Vec3::Y, flat),
                     radius + 3.0,
                     Color::WHITE,
                 );
+            }
+            if edit.controlled == Some(i) {
                 let mut from = [u.at[0], u.at[2]];
                 for &to in u.motion.path.iter().skip(u.motion.cursor) {
                     ground_dash(&mut giz, &scene.sim, from, to, 0.8, color);
@@ -1827,6 +2034,50 @@ mod tests {
         )
     }
     #[test]
+    fn battle_drag_rectangle_selects_only_visible_allies_inside_it() {
+        use bevy::camera::{CameraProjection, RenderTargetInfo};
+        let (workshop, config) = fixture();
+        let mut layout = workshop.layout.unwrap();
+        layout.battle = true;
+        for (id, unit) in layout.units.iter_mut().enumerate() {
+            unit.allied = id < 2;
+        }
+        let sim = BlastRange::with_layout(config, layout).unwrap();
+        let projection = OrthographicProjection {
+            area: Rect::from_corners(Vec2::new(-320.0, -240.0), Vec2::new(320.0, 240.0)),
+            near: 1.0,
+            far: 1200.0,
+            ..OrthographicProjection::default_3d()
+        };
+        let mut camera = Camera::default();
+        camera.computed.clip_from_view = projection.get_clip_from_view();
+        camera.computed.target_info = Some(RenderTargetInfo {
+            physical_size: UVec2::new(1600, 900),
+            scale_factor: 1.0,
+        });
+        let transform = GlobalTransform::from(
+            Transform::from_xyz(400.0, 300.0, 400.0)
+                .looking_at(Vec3::new(400.0, 0.0, 400.0), Vec3::NEG_Z),
+        );
+        let points: Vec<_> = sim.units[..2]
+            .iter()
+            .map(|u| {
+                camera
+                    .world_to_viewport(
+                        &transform,
+                        Vec3::from(u.motion.pos.map(|v| v.to_f64_lossy() as f32)),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let start = points[0].min(points[1]) - Vec2::splat(8.0);
+        let end = points[0].max(points[1]) + Vec2::splat(8.0);
+        assert_eq!(
+            battle_units_in_screen_rect(&sim, &camera, &transform, start, end),
+            [0, 1]
+        );
+    }
+    #[test]
     fn rejected_overlap_preserves_layout_history_and_pending() {
         let (mut w, c) = fixture();
         let before = w.layout.clone().unwrap();
@@ -2123,5 +2374,87 @@ mod tests {
         let patrols = &layout.course.as_ref().unwrap().patrols;
         assert_eq!(patrols.len(), 1);
         assert_eq!(patrols[0].unit, 7);
+
+        // A real pointer drag in battle selects two allies, never enemies.
+        let mut battle_layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        battle_layout.battle = true;
+        for (id, unit) in battle_layout.units.iter_mut().enumerate() {
+            unit.allied = id < 2;
+        }
+        let cfg = app.world().resource::<Scene>().sim.config.clone();
+        let mut battle = BlastRange::with_layout(cfg, battle_layout.clone()).unwrap();
+        battle.start_battle().unwrap();
+        app.world_mut().resource_mut::<Scene>().sim = battle;
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.layout = Some(battle_layout);
+            edit.editing = false;
+            edit.controlled = None;
+            edit.selected = None;
+            edit.selected_units.clear();
+        }
+        let (start, end) = {
+            let world = app.world_mut();
+            let mut q = world.query_filtered::<(&Camera, &GlobalTransform), With<GasCamera>>();
+            let (camera, transform) = q.single(world).unwrap();
+            let a = camera
+                .world_to_viewport(transform, Vec3::new(359.0, 16.0, 312.0))
+                .unwrap();
+            let b = camera
+                .world_to_viewport(transform, Vec3::new(439.0, 16.0, 336.0))
+                .unwrap();
+            (a.min(b) - Vec2::splat(8.0), a.max(b) + Vec2::splat(8.0))
+        };
+        *app.world_mut().resource_mut::<ButtonInput<MouseButton>>() = default();
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world)
+                .unwrap()
+                .set_cursor_position(Some(start));
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        assert!(app.world().resource::<Workshop>().drag_start.is_some());
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world).unwrap().set_cursor_position(Some(end));
+        }
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+        assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        let enemy = {
+            let world = app.world_mut();
+            let mut q = world.query_filtered::<(&Camera, &GlobalTransform), With<GasCamera>>();
+            let (camera, transform) = q.single(world).unwrap();
+            camera
+                .world_to_viewport(transform, Vec3::new(300.0, 20.0, 445.0))
+                .unwrap()
+        };
+        *app.world_mut().resource_mut::<ButtonInput<MouseButton>>() = default();
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world)
+                .unwrap()
+                .set_cursor_position(Some(enemy));
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        app.update();
+        assert!(app.world().resource::<Scene>().sim.battle.actors[..2]
+            .iter()
+            .all(|actor| actor.order == sim_core::blast::battle::Order::Attack(2)));
     }
 }
