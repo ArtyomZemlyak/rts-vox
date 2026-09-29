@@ -879,7 +879,15 @@ pub fn input(
     overrides: Option<Res<knobs::Overrides>>,
     streaming: Option<Res<streaming::Streaming>>,
 ) {
+    // A release outside the window can miss `just_released`. Do not keep an
+    // old drag alive when the mouse button is no longer held.
+    if !mouse.pressed(MouseButton::Left) && !mouse.just_released(MouseButton::Left) {
+        edit.drag_start = None;
+        edit.drag_current = None;
+    }
     if edit.layout.is_none() {
+        edit.drag_start = None;
+        edit.drag_current = None;
         wheel.clear();
         return;
     }
@@ -917,9 +925,19 @@ pub fn input(
             };
         edit.zoom = (edit.zoom * (-y * 0.08).exp()).clamp(0.3, 32.0);
     }
-    let Ok(window) = windows.single() else { return };
+    let Ok(window) = windows.single() else {
+        edit.drag_start = None;
+        edit.drag_current = None;
+        return;
+    };
     let cursor = window.cursor_position();
+    if cursor.is_none() {
+        edit.drag_start = None;
+        edit.drag_current = None;
+    }
     let Ok((camera, gt)) = cameras.single() else {
+        edit.drag_start = None;
+        edit.drag_current = None;
         return;
     };
     if let (Some(a), Some(b)) = (edit.previous_cursor, cursor) {
@@ -963,6 +981,10 @@ pub fn input(
         let fire = panel.as_ref().is_some_and(|p| p.ground_fire);
         let additive = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
         if battle && !fire {
+            if blocked {
+                edit.drag_start = None;
+                edit.drag_current = None;
+            }
             if mouse.just_pressed(MouseButton::Left) && !blocked {
                 edit.drag_start = cursor;
                 edit.drag_current = cursor;
@@ -2455,6 +2477,32 @@ mod tests {
             .release(MouseButton::Left);
         app.update();
         assert_eq!(app.world().resource::<Workshop>().selected_units, [0, 1]);
+        assert!(app.world().resource::<Workshop>().drag_start.is_none());
+        // Losing focus may suppress just_released; stale rectangle state must
+        // still disappear on the next update without the button held.
+        *app.world_mut().resource_mut::<ButtonInput<MouseButton>>() = default();
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.drag_start = Some(start);
+            edit.drag_current = Some(end);
+        }
+        app.update();
+        assert!(app.world().resource::<Workshop>().drag_start.is_none());
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.drag_start = Some(start);
+            edit.drag_current = Some(end);
+        }
+        {
+            let world = app.world_mut();
+            let mut q = world.query::<&mut Window>();
+            q.single_mut(world).unwrap().set_cursor_position(None);
+        }
+        app.update();
+        assert!(app.world().resource::<Workshop>().drag_start.is_none());
         let enemy = {
             let world = app.world_mut();
             let mut q = world.query_filtered::<(&Camera, &GlobalTransform), With<GasCamera>>();

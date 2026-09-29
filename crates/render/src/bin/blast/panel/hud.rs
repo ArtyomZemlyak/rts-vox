@@ -345,7 +345,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             border: UiRect::all(px(1)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.24, 0.68, 0.9, 0.13)),
+        BackgroundColor(Color::srgba(0.24, 0.68, 0.9, 0.0)),
         BorderColor::all(Color::srgba(0.55, 0.9, 1.0, 0.9)),
         FocusPolicy::Pass,
         UiTargetCamera(camera),
@@ -747,9 +747,36 @@ pub fn refresh(
     }
 }
 
-pub fn refresh_selection_box(edit: Res<Workshop>, mut boxes: Query<&mut Node, With<SelectionBox>>) {
+pub fn refresh_selection_box(
+    edit: Res<Workshop>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    mut boxes: Query<&mut Node, With<SelectionBox>>,
+) {
+    let pointer_inside = windows
+        .single()
+        .map_or(true, |w| w.cursor_position().is_some());
     for mut node in &mut boxes {
-        if let (Some(start), Some(end)) = (edit.drag_start, edit.drag_current) {
+        let drag = match (edit.drag_start, edit.drag_current) {
+            (Some(start), Some(end))
+                if mouse.pressed(MouseButton::Left)
+                    && pointer_inside
+                    && !edit.editing
+                    && start.is_finite()
+                    && end.is_finite()
+                    && start.distance_squared(end) >= 64.0 =>
+            {
+                Some((start, end))
+            }
+            _ => None,
+        };
+        if let Some((start, end)) = drag {
+            let (start, end) = if let Ok(window) = windows.single() {
+                let size = Vec2::new(window.width(), window.height());
+                (start.clamp(Vec2::ZERO, size), end.clamp(Vec2::ZERO, size))
+            } else {
+                (start, end)
+            };
             let lo = start.min(end);
             let hi = start.max(end);
             node.left = px(lo.x);
@@ -766,6 +793,47 @@ pub fn refresh_selection_box(edit: Res<Workshop>, mut boxes: Query<&mut Node, Wi
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_outline_only_appears_during_a_real_drag() {
+        let mut app = App::new();
+        app.insert_resource(Workshop::new(None, false))
+            .init_resource::<ButtonInput<MouseButton>>()
+            .add_systems(Update, refresh_selection_box);
+        let box_id = app.world_mut().spawn((SelectionBox, Node::default())).id();
+        {
+            let mut edit = app.world_mut().resource_mut::<Workshop>();
+            edit.drag_start = Some(Vec2::new(20.0, 30.0));
+            edit.drag_current = Some(Vec2::new(800.0, 600.0));
+        }
+        app.update();
+        assert_eq!(
+            app.world().entity(box_id).get::<Node>().unwrap().display,
+            Display::None
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.world_mut().resource_mut::<Workshop>().drag_current = Some(Vec2::new(24.0, 34.0));
+        app.update();
+        assert_eq!(
+            app.world().entity(box_id).get::<Node>().unwrap().display,
+            Display::None
+        );
+        app.world_mut().resource_mut::<Workshop>().drag_current = Some(Vec2::new(800.0, 600.0));
+        app.update();
+        assert_eq!(
+            app.world().entity(box_id).get::<Node>().unwrap().display,
+            Display::Flex
+        );
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+        assert_eq!(
+            app.world().entity(box_id).get::<Node>().unwrap().display,
+            Display::None
+        );
+    }
     fn app() -> App {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
