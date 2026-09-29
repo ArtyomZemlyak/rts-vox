@@ -821,6 +821,28 @@ impl Motion {
         self.cursor = 0;
         self.plan_to(w, to, b, others, rubble)
     }
+    /// Only nearby hulls matter to a contact detour. A distant actor is
+    /// handled if and when the moving hull reaches it, not by this search.
+    fn local_blockers(
+        &self,
+        from: [Fx; 2],
+        shape: nav::vehicle::Shape,
+        others: &[Obstacle],
+    ) -> Vec<Obstacle> {
+        if self.blocked_ticks == 0 && self.escape == 0 {
+            return Vec::new();
+        }
+        let radius =
+            Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
+        others
+            .iter()
+            .copied()
+            .filter(|o| {
+                let reach = radius.add(o.half[0].max(o.half[1]));
+                o.pos[0].sub(from[0]).abs() <= reach && o.pos[2].sub(from[1]).abs() <= reach
+            })
+            .collect()
+    }
     /// Replanning retains the current route while a replacement is pending.
     /// A temporary blocker can leave before the search finishes; execution
     /// may then resume under the same live collision checks as any move.
@@ -834,16 +856,6 @@ impl Motion {
     ) -> bool {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
-        let half = shape.half.map(Fx::from_int);
-        let clear = |p: [Fx; 2], head: i32| {
-            !others.iter().any(|o| {
-                o.overlaps(&Obstacle {
-                    pos: [p[0], Fx::ZERO, p[1]],
-                    head,
-                    half,
-                })
-            })
-        };
         let far = [w.nx as i32 - EDGE, w.nz as i32 - EDGE];
         // A fresh destination supersedes the recovery cycle of the old
         // order. Replanning the same destination preserves its attempt count.
@@ -857,12 +869,26 @@ impl Motion {
             .then_some(to);
         self.enabled = true;
         self.hunt = None;
+        // Global routing is terrain-only. A hull enters dynamic avoidance
+        // only after physical contact or an escape attempt on this order.
+        let avoid = self.blocked_ticks > 0 || self.escape > 0;
+        let half = shape.half.map(Fx::from_int);
+        let blockers = self.local_blockers(from, shape, others);
+        let clear = |p: [Fx; 2], head: i32| {
+            !blockers.iter().any(|o| {
+                o.overlaps(&Obstacle {
+                    pos: [p[0], Fx::ZERO, p[1]],
+                    head,
+                    half,
+                })
+            })
+        };
         if !self.blocked
             && !self.needs_recovery
+            && !avoid
             && self.route.is_empty()
             // Finish a checked local bypass before returning to the global map.
             && (!self.partial_path || self.cursor >= self.path.len())
-            && clear(to.map(Fx::from_int), self.drive.head)
             && self.destination.is_some()
             && (0..2).any(|a| {
                 from[a].sub(Fx::from_int(to[a])).abs()
@@ -1050,8 +1076,9 @@ impl Motion {
         }
         hunt.forget(changed);
         let half = self.shape(b).half.map(Fx::from_int);
+        let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
         let clear = |p: [Fx; 2], head: i32| {
-            !others.iter().any(|o| {
+            !blockers.iter().any(|o| {
                 o.overlaps(&Obstacle {
                     pos: [p[0], Fx::ZERO, p[1]],
                     head,
@@ -1882,6 +1909,23 @@ mod tests {
 
     fn ground(depth: i32) -> World {
         World::new(640, 64, 640, 100, Box::new(Ground { depth }))
+    }
+
+    #[test]
+    fn distant_route_ignores_units_until_a_live_contact() {
+        let w = ground(0);
+        w.prepare_navigation([4, 5]);
+        let body = voxel::unit::tank();
+        let goal = [500, 300];
+        let blocker = Motion::new([280, 16, 300], RangeUnitKind::Tank, &body);
+        let mut empty = Motion::new([90, 16, 300], RangeUnitKind::Tank, &body);
+        let mut occupied = empty.clone();
+        let rubble = nav::vehicle::Rubble::new();
+        assert!(empty.move_to(&w, goal, &body, &[], &rubble));
+        assert!(occupied.move_to(&w, goal, &body, &[Obstacle::of(&blocker, &body)], &rubble));
+        assert!(!occupied.searching());
+        assert_eq!(occupied.path, empty.path);
+        assert_eq!(occupied.path.last(), Some(&goal));
     }
 
     #[test]
