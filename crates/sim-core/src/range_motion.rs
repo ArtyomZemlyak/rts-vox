@@ -648,6 +648,9 @@ impl Motion {
                 .count()
                 >= 2
     }
+    pub(super) fn can_drive(&self, response: crate::mobility::Mobility) -> bool {
+        response.engine > Fx::ZERO && response.traction > Fx::ZERO && self.carried()
+    }
     /// The ride of this hull now: the chassis' ride at the range's gravity
     /// and the body's own mobility (ADR-305), low on its legs when none
     /// carries them (ADR-304).
@@ -1166,7 +1169,7 @@ impl Motion {
             self.passive(w, rubble, b, gravity, response, others);
             return;
         }
-        let engine = engine && response.traction > Fx::ZERO && self.carried();
+        let engine = engine && self.can_drive(response);
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
         self.hunt_step(w, b, others, rubble, tick, changed);

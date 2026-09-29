@@ -127,6 +127,48 @@ fn distant_stationary_garrisons_draw_after_the_mobile_attackers_are_gone() {
 }
 
 #[test]
+fn stranded_gun_does_not_keep_a_remote_base_assault_fighting() {
+    let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::Artillery])
+        .layout
+        .unwrap();
+    layout.size = [4096, 192, 640];
+    layout.clear_max = [4000, 600];
+    layout.units = vec![
+        RangeUnitDef {
+            kind: RangeUnitKind::Base,
+            at: [150, 16, 336],
+            allied: true,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [2800, 16, 336],
+            allied: true,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Artillery,
+            at: [3000, 16, 336],
+            allied: false,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Base,
+            at: [3800, 16, 336],
+            allied: false,
+        },
+    ];
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut battle = BlastRange::with_layout(config, layout).unwrap();
+    battle.start_battle().unwrap();
+    battle.battle.ai.next_tick = u32::MAX;
+    battle.units[1].status.weapon = false;
+    battle.units[2].mobility.traction = Fx::ZERO;
+    battle.battle.actors[2].order = Order::Attack(0);
+    battle.battle.actors[2].target = Some(0);
+    battle.battle_tick();
+    assert_eq!(battle.battle.phase, Phase::Draw);
+}
+
+#[test]
 fn annihilation_hit_on_base_ends_a_real_battle() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units[1].at = [500, 16, 500];
@@ -464,6 +506,76 @@ fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
     assert_eq!(red[1].order, AiOrder::Attack(1));
     assert_eq!(blue[0].order, AiOrder::Attack(2));
     assert_eq!(blue[1].order, AiOrder::Attack(3));
+}
+
+#[test]
+fn mobile_guns_switch_to_the_base_after_field_weapons_are_disabled() {
+    let tuning =
+        modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+    let observation = Observation {
+        version: OBSERVATION_VERSION,
+        observed_tick: 0,
+        decision_tick: 0,
+        size: [10000, 192, 10000],
+        units: vec![
+            UnitObservation {
+                id: 0,
+                allied: true,
+                alive: true,
+                armed: true,
+                mobile: true,
+                kind: RangeUnitKind::Tank,
+                position: [8000, 4000],
+                ordered_target: Some(1),
+            },
+            UnitObservation {
+                id: 1,
+                allied: false,
+                alive: true,
+                armed: false,
+                mobile: true,
+                kind: RangeUnitKind::Strider,
+                position: [8100, 4000],
+                ordered_target: None,
+            },
+            UnitObservation {
+                id: 2,
+                allied: false,
+                alive: true,
+                armed: false,
+                mobile: false,
+                kind: RangeUnitKind::Base,
+                position: [1500, 600],
+                ordered_target: None,
+            },
+        ],
+    };
+    let rules = Rules {
+        tuning: &tuning,
+        controlled_allied: true,
+    };
+    assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(2));
+}
+
+#[test]
+fn observation_does_not_call_a_tank_mobile_without_traction() {
+    let mut r = arena(RangeUnitKind::Tank);
+    r.start_battle().unwrap();
+    r.units[0].mobility.traction = Fx::ZERO;
+    assert!(r.units[0].status.engine);
+    assert!(!r.enemy_ai_observation().unwrap().units[0].mobile);
+}
+
+#[test]
+fn observation_does_not_call_an_unsupported_walker_mobile() {
+    let mut r = arena(RangeUnitKind::Strider);
+    r.start_battle().unwrap();
+    assert!(r.units[0].motion.legs_lost.len() >= 2);
+    for leg in r.units[0].motion.legs_lost.iter_mut().skip(1) {
+        *leg = true;
+    }
+    assert!(r.units[0].status.engine);
+    assert!(!r.enemy_ai_observation().unwrap().units[0].mobile);
 }
 
 #[test]

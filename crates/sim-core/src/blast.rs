@@ -6404,6 +6404,11 @@ mod tests {
         bytes.extend_from_slice(&print.v);
         bytes[..4].copy_from_slice(&39u32.to_le_bytes());
         let b = BlastRange::restore(a.config.clone(), &bytes).unwrap();
+        // Version 39 did not store explicit ammunition selections; restoring
+        // one intentionally returns every actor to target-based automatic ammo.
+        for actor in &mut a.battle.actors {
+            actor.weapon = None;
+        }
         assert_eq!(a.state_hash(), b.state_hash());
     }
     /// **A parked hull has no speed** (ADR-434). Stopping the patrols

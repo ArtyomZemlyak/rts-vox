@@ -258,10 +258,11 @@ fn main() {
                     continue;
                 }
                 let a = &sim.battle.actors[id];
-                println!("  side={} unit={id} at=({}, {}) order={:?} target={:?} dest={:?} vel={} path={}/{} searching={} blocked={} recovery={:?} fired={} damage={}",
+                println!("  side={} unit={id} at=({}, {}) order={:?} target={:?} dest={:?} vel={} path={}/{} searching={} blocked={} recovery={:?} motor={} traction={} fired={} damage={}",
                     if sim.allied(id) { "blue" } else { "red" }, u.at[0], u.at[2], a.order, a.target,
                     u.motion.destination, u.motion.drive.vel.to_int_trunc(), u.motion.cursor,
-                    u.motion.path.len(), u.motion.searching(), u.motion.blocked, u.motion.recovery_state(), a.fired, u.revision);
+                    u.motion.path.len(), u.motion.searching(), u.motion.blocked, u.motion.recovery_state(),
+                    u.mobility.engine.to_f64_lossy(), u.mobility.traction.to_f64_lossy(), a.fired, u.revision);
             }
         }
         if until_end && sim.battle.phase != sim_core::blast::battle::Phase::Fighting {

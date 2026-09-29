@@ -152,6 +152,7 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
         | RangeUnitKind::TurretT1
         | RangeUnitKind::TurretT2 => 45,
         RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
+        RangeUnitKind::Base => 0,
     };
     match t {
         Terrain::Trench { depth, .. } => depth <= 4 || eighth == 2,
@@ -198,6 +199,7 @@ fn run(t: Terrain, kind: RangeUnitKind, heading: i32, back: bool) -> Run {
         RangeUnitKind::Artillery => voxel::unit::artillery(),
         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+        RangeUnitKind::Base => voxel::unit::command_base(),
     };
     let yaw = angle::norm(heading + if back { angle::FULL / 2 } else { 0 });
     let dir = [angle::cos(yaw), angle::sin(yaw)];
@@ -313,6 +315,7 @@ fn probe_poses_along_the_run() {
             RangeUnitKind::Artillery => voxel::unit::artillery(),
             RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
             RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
+            RangeUnitKind::Base => voxel::unit::command_base(),
         };
         let m = Motion::new([210, settle(t, [210, 320]), 320], kind, &body);
         let shape = m.probe_shape(&body);

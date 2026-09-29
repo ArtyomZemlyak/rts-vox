@@ -530,7 +530,7 @@ impl BlastRange {
                     allied: self.allied(id),
                     alive: unit.status.alive,
                     armed: unit.status.weapon,
-                    mobile: unit.status.engine,
+                    mobile: unit.status.engine && unit.motion.can_drive(unit.mobility),
                     kind: unit.kind,
                     position: [
                         unit.motion.pos[0].to_int_trunc(),
@@ -1016,7 +1016,11 @@ impl BlastRange {
                 // reach either base. Keep nearby stationary gunfights alive,
                 // but do not leave a whole-map AI battle in Fighting forever.
                 let mobile_gun = self.units.iter().any(|u| {
-                    u.status.alive && u.status.engine && u.status.weapon && !u.kind.emplacement()
+                    u.status.alive
+                        && u.status.engine
+                        && u.status.weapon
+                        && u.motion.can_drive(u.mobility)
+                        && !u.kind.emplacement()
                 });
                 let stationary_target_in_range = !mobile_gun && {
                     self.units.iter().enumerate().any(|(id, u)| {
@@ -1063,12 +1067,16 @@ impl BlastRange {
                         ) + 128;
                         u.status.alive
                             && u.status.weapon
-                            && self.units.iter().enumerate().any(|(other_id, other)| {
-                                other.status.alive && self.allied(id) != self.allied(other_id) && {
-                                    let dx = i64::from(u.at[0] - other.at[0]);
-                                    let dz = i64::from(u.at[2] - other.at[2]);
-                                    dx * dx + dz * dz <= i64::from(range) * i64::from(range)
-                                }
+                            && battle.actors[id].target.is_some_and(|other_id| {
+                                self.units.get(other_id).is_some_and(|other| {
+                                    other.status.alive
+                                        && self.allied(id) != self.allied(other_id)
+                                        && {
+                                            let dx = i64::from(u.at[0] - other.at[0]);
+                                            let dz = i64::from(u.at[2] - other.at[2]);
+                                            dx * dx + dz * dz <= i64::from(range) * i64::from(range)
+                                        }
+                                })
                             })
                     })
                 };
@@ -1259,7 +1267,6 @@ impl BlastRange {
                     let needs_detour = self.units[id].motion.blocked;
                     let length = dx.mul(dx).add(dz.mul(dz)).sqrt().max(Fx::ONE);
                     let road_goal = if b.autonomous
-                        && kind == RangeUnitKind::Artillery
                         && target.is_some_and(|other| self.units[other].kind == RangeUnitKind::Base)
                         && length > Fx::from_int(range * 2)
                     {

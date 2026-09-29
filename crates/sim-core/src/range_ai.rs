@@ -319,10 +319,13 @@ impl Policy for Rules<'_> {
                     }
                 } else {
                     AiOrder::Attack({
-                        // Mobile artillery is the siege arm. It advances on the
-                        // command objective instead of chasing a distant scout,
-                        // but engages armed defenders in its immediate sector.
-                        let siege = (u.kind == RangeUnitKind::Artillery && u.armed)
+                        // Artillery assaults the base from the outset. Once
+                        // the enemy has no armed field units left, every
+                        // surviving mobile gun joins that assault instead of
+                        // pursuing harmless disabled hulls across rough ground.
+                        let siege = (u.armed
+                            && (u.kind == RangeUnitKind::Artillery
+                                || (u.mobile && enemy_field == 0)))
                             .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
                             .flatten();
                         if let Some(base) = siege {
