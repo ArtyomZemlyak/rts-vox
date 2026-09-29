@@ -15,7 +15,7 @@ use phys::{
     blast::{Hit, Wave},
     V3,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use voxel::{
     store::{Mat, AIR},
     world::{snapshot::Snapshot, Edit},
@@ -58,6 +58,58 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distant_hull_rejection_preserves_rotated_contacts() {
+        for head in (0..angle::FULL).step_by((angle::FULL / 16) as usize) {
+            let hull = Hull {
+                pos: [Fx::from_int(20), Fx::from_int(12), Fx::from_int(30)],
+                head,
+                half: [Fx::from_int(7), Fx::from_int(13)],
+                height: Fx::from_int(8),
+                vel: [Fx::ZERO; 3],
+                step: Fx::ONE,
+                solid: None,
+            };
+            let low = [Fx::from_int(-2); 3];
+            let high = [Fx::from_int(2); 3];
+            let reach = Fx::from_int(2);
+            let (c, s) = (angle::cos(head), angle::sin(head));
+            for x in (-20..=60).step_by(4) {
+                for z in (-10..=70).step_by(4) {
+                    let p = [Fx::from_int(x), Fx::from_int(16), Fx::from_int(z)];
+                    let dx = p[0].sub(hull.pos[0]);
+                    let dz = p[2].sub(hull.pos[2]);
+                    let u = dx.mul(c).add(dz.mul(s));
+                    let v = dz.mul(c).sub(dx.mul(s));
+                    let expected =
+                        u.abs() <= hull.half[0].add(reach) && v.abs() <= hull.half[1].add(reach);
+                    assert_eq!(
+                        hull_box_hit(p, low, high, &[hull], 0, true).is_some(),
+                        expected,
+                        "head={head} x={x} z={z}"
+                    );
+                    let to = [p[0].add(Fx::from_int(3)), p[1], p[2].sub(Fx::ONE)];
+                    let extent = [hull.half[0].add(reach), hull.half[1].add(reach)];
+                    let rotated = [
+                        extent[0]
+                            .mul(c.abs())
+                            .add(extent[1].mul(s.abs()))
+                            .add(Fx::ONE),
+                        extent[0]
+                            .mul(s.abs())
+                            .add(extent[1].mul(c.abs()))
+                            .add(Fx::ONE),
+                    ];
+                    let old_near = [(0, 0), (2, 1)].iter().all(|&(axis, i)| {
+                        p[axis].min(to[axis]) <= hull.pos[axis].add(rotated[i])
+                            && p[axis].max(to[axis]) >= hull.pos[axis].sub(rotated[i])
+                    });
+                    assert_eq!(hull_near(p, to, low, high, &[hull], 0).0, old_near);
+                }
+            }
+        }
+    }
     // ADR-479 implementation retained as the differential oracle.
     impl Bursts {
         fn reference_rubble(
@@ -431,7 +483,7 @@ mod tests {
                     }
                 }
             }
-            let mut expected = BTreeMap::<_, Vec<u32>>::new();
+            let mut expected = HashMap::<_, Vec<u32>>::new();
             for (i, f) in fragments.iter().enumerate() {
                 if !f.resting || hull.carries(world_boxes[i].0[1], f.position) {
                     continue;
@@ -3115,7 +3167,9 @@ impl Bursts {
         // (ADR-308), gathered once for the whole tick.
         let settled = Settled::of(&self.fragments, hulls, tick, t);
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
-        let mut piles: BTreeMap<RestingPile, usize> = BTreeMap::new();
+        // Only key lookups are used; fragment order (not map iteration) decides
+        // which resting piece owns a pile.
+        let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(self.fragments.len());
         let mut merged = BTreeSet::new();
         let mut stale_wrecks = BTreeSet::new();
         let mut landed = Vec::new();
@@ -3875,7 +3929,7 @@ fn sort_columns(columns: &mut Vec<([i32; 2], u16)>) {
 pub(crate) struct Settled {
     /// Cell of `CELL` units to the indices of the pieces whose box covers
     /// it, in index order.
-    cells: BTreeMap<[i32; 3], Vec<u32>>,
+    cells: HashMap<[i32; 3], Vec<u32>>,
     /// Frozen world boxes in original fragment order, including unindexed
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
@@ -3980,7 +4034,7 @@ impl Settled {
             return Settled::default();
         }
         let mut out = Settled {
-            cells: BTreeMap::new(),
+            cells: HashMap::new(),
             boxes,
         };
         for (i, f) in fragments.iter().enumerate() {
@@ -4083,9 +4137,16 @@ fn hull_box_hit<'h, 's>(
         if (i < 64 && skip & (1 << i) != 0) || top < h.pos[1] || bottom > h.pos[1].add(h.height) {
             return None;
         }
-        let (c, s) = (angle::cos(h.head), angle::sin(h.head));
         let dx = p[0].sub(h.pos[0]);
         let dz = p[2].sub(h.pos[2]);
+        // A rotated rectangle cannot extend further than the sum of its
+        // half-axes on either world axis. Most debris is far from a hull;
+        // reject it before the local-frame products and voxel probe.
+        let extent = h.half[0].add(h.half[1]).add(reach);
+        if dx.abs() > extent || dz.abs() > extent {
+            return None;
+        }
+        let (c, s) = (angle::cos(h.head), angle::sin(h.head));
         let u = dx.mul(c).add(dz.mul(s));
         let v = dz.mul(c).sub(dx.mul(s));
         (u.abs() <= h.half[0].add(reach)
@@ -4224,9 +4285,26 @@ fn hull_near(
     let exact = by_voxels(low, high);
     let swept_lo: [Fx; 3] = std::array::from_fn(|a| from[a].min(to[a]).add(low[a]));
     let swept_hi: [Fx; 3] = std::array::from_fn(|a| from[a].max(to[a]).add(high[a]));
+    let horizontal_lo = [from[0].min(to[0]), from[2].min(to[2])];
+    let horizontal_hi = [from[0].max(to[0]), from[2].max(to[2])];
     let (mut near, mut apart) = (false, skip);
     for (i, h) in hulls.iter().enumerate() {
         if i < 64 && skip & (1 << i) != 0 {
+            continue;
+        }
+        // Superset of the rotated footprint on both world axes. The exact
+        // rotated and voxel checks below still decide contact.
+        let extent = h.half[0].add(h.half[1]).add(reach).add(reach).add(Fx::ONE);
+        if top < h.pos[1]
+            || bottom > h.pos[1].add(h.height)
+            || horizontal_lo[0] > h.pos[0].add(extent)
+            || horizontal_hi[0] < h.pos[0].sub(extent)
+            || horizontal_lo[1] > h.pos[2].add(extent)
+            || horizontal_hi[1] < h.pos[2].sub(extent)
+        {
+            if i < 64 {
+                apart |= 1 << i;
+            }
             continue;
         }
         let reaches = top >= h.pos[1] && bottom <= h.pos[1].add(h.height) && {
