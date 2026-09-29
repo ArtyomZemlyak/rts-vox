@@ -41,13 +41,41 @@ pub fn plan(
     // A broad travel corridor, not an oriented turning/clearance proof.
     // Short maneuvers and actual movement keep the detailed footprint probe.
     let radius = shape.half[0].min(shape.half[1]) + 1;
-    let mut debris = BTreeMap::<[i32; 2], u16>::new();
+    const PAGE: usize = 32;
+    let tiles = [
+        (world.nx as usize).div_ceil(8),
+        (world.nz as usize).div_ceil(8),
+    ];
+    // A kilometre map needs only about 3 MiB for direct tile lookups. Keep
+    // that fast path, but cap its size: a 10 km map would otherwise allocate
+    // hundreds of MiB for every route even with only a few debris columns.
+    let dense = !rubble.0.is_empty() && tiles[0] * tiles[1] <= 2_000_000;
+    let mut debris_dense = if dense {
+        vec![0u16; tiles[0] * tiles[1]]
+    } else {
+        Vec::new()
+    };
+    let page_width = tiles[0].div_ceil(PAGE);
+    let mut debris_pages: Vec<Option<Box<[u16; PAGE * PAGE]>>> = if rubble.0.is_empty() || dense {
+        Vec::new()
+    } else {
+        vec![None; page_width * tiles[1].div_ceil(PAGE)]
+    };
     for &(p, top) in &rubble.0 {
-        let key = p.map(|v| v.div_euclid(8));
-        debris
-            .entry(key)
-            .and_modify(|h| *h = (*h).max(top))
-            .or_insert(top);
+        let x = p[0].div_euclid(8);
+        let z = p[1].div_euclid(8);
+        if x < 0 || z < 0 || x as usize >= tiles[0] || z as usize >= tiles[1] {
+            continue;
+        }
+        let (x, z) = (x as usize, z as usize);
+        let pile = if dense {
+            &mut debris_dense[z * tiles[0] + x]
+        } else {
+            let page = &mut debris_pages[z / PAGE * page_width + x / PAGE];
+            let page = page.get_or_insert_with(|| Box::new([0; PAGE * PAGE]));
+            &mut page[z % PAGE * PAGE + x % PAGE]
+        };
+        *pile = (*pile).max(top);
     }
     let clear = |a: [i32; 2], b: [i32; 2]| -> bool {
         let lo = [0, 1].map(|k| a[k].min(b[k]) - radius);
@@ -60,8 +88,13 @@ pub fn plan(
         for z in lo[1] / 8..=hi[1] / 8 {
             for x in lo[0] / 8..=hi[0] / 8 {
                 let [bottom, mut top] = world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
-                if let Some(&pile) = debris.get(&[x, z]) {
-                    top = top.max(pile);
+                if !debris_dense.is_empty() {
+                    top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
+                } else if !debris_pages.is_empty() {
+                    let (x, z) = (x as usize, z as usize);
+                    if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
+                        top = top.max(page[z % PAGE * PAGE + x % PAGE]);
+                    }
                 }
                 low = low.min(bottom);
                 high = high.max(top);
@@ -148,9 +181,7 @@ pub fn plan(
             }
             // Join the first grid leg directly where possible, without a
             // needless backwards move to the snapped start node.
-            if path.len() > 1 && clear(origin, path[1]) {
-                path.remove(0);
-            } else if path.first() == Some(&origin) {
+            if (path.len() > 1 && clear(origin, path[1])) || path.first() == Some(&origin) {
                 path.remove(0);
             }
             let mut compact: Vec<[i32; 2]> = Vec::new();
@@ -304,6 +335,27 @@ mod tests {
         let rubble = Rubble::from_sorted((0..256).map(|z| ([256, z], 26)).collect());
         assert!(plan(&world, &rubble, shape(), from, to, config()).is_none());
         assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_some());
+    }
+    #[test]
+    fn sparse_pages_refuse_fresh_debris_on_a_large_map() {
+        let world = World::new(20000, 32, 10000, 100000, Box::new(Floor));
+        let from = [64, 128].map(Fx::from_int);
+        let to = [448, 128];
+        let cfg = Config {
+            nodes: 1,
+            ..config()
+        };
+        assert_eq!(
+            plan(&world, &Rubble::new(), shape(), from, to, cfg)
+                .unwrap()
+                .path,
+            vec![to]
+        );
+        let rubble = Rubble::from_sorted((0..256).map(|z| ([256, z], 26)).collect());
+        assert!(
+            plan(&world, &rubble, shape(), from, to, cfg).is_none(),
+            "large-map sparse debris was ignored"
+        );
     }
     #[test]
     fn sealed_wall_forest_and_opened_gap_have_distinct_answers() {

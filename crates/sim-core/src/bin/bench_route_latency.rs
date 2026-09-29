@@ -30,7 +30,26 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--cell")
         .map(|w| w[1].parse::<i32>().unwrap());
-    let rubble = nav::vehicle::Rubble::new();
+    let rubble_columns = args
+        .windows(2)
+        .find(|w| w[0] == "--rubble-columns")
+        .map_or(0, |w| w[1].parse::<usize>().unwrap());
+    // Zero-height entries stress debris indexing without changing whether
+    // terrain is passable, so the same 312 routes remain comparable.
+    let mut columns = Vec::with_capacity(rubble_columns);
+    for x in (32..r.world.nx as i32 - 32).step_by(80) {
+        for z in (32..r.world.nz as i32 - 32).step_by(80) {
+            if columns.len() == rubble_columns {
+                break;
+            }
+            columns.push(([x, z], 0));
+        }
+        if columns.len() == rubble_columns {
+            break;
+        }
+    }
+    assert_eq!(columns.len(), rubble_columns);
+    let rubble = nav::vehicle::Rubble::from_sorted(columns);
     let mut cases = Vec::new();
     let mut incomplete = 0;
     for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
