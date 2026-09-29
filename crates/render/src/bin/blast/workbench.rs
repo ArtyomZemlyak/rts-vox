@@ -334,6 +334,27 @@ impl Workshop {
         self.pitch = 0.0;
         Ok(preset.briefing)
     }
+    /// Rebuild the current authored battle without changing its placements or
+    /// adding a no-op entry to the editor undo stack.
+    pub fn replay_battle(&mut self, config: ExplosionConfig) -> Result<(), String> {
+        let layout = self.layout.clone().ok_or("Нет расстановки боя")?;
+        if !layout.battle {
+            return Err("Сначала выберите бой".into());
+        }
+        self.validator
+            .validate(&layout)
+            .map_err(|e| e.to_string())?;
+        self.preview = None;
+        self.pending = Some((config, layout.clone()));
+        self.editing = false;
+        self.controlled = layout
+            .units
+            .iter()
+            .position(|u| u.allied && !u.kind.emplacement());
+        self.selected_units = self.controlled.into_iter().collect();
+        self.selected = self.controlled.map(Selection::Unit);
+        Ok(())
+    }
     pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
         let mut layout = self.layout.clone().ok_or("No range layout")?;
         remove_world_battle_blocks(&mut layout, &world_battle_blocks()?);

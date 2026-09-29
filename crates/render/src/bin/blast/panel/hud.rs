@@ -26,6 +26,13 @@ pub struct HeaderBrand;
 #[derive(Component)]
 pub struct SelectionBox;
 pub const ROSTER_PAGE_SIZE: usize = 8;
+pub fn roster_page_size(window_width: f32) -> usize {
+    if window_width < 1280.0 {
+        5
+    } else {
+        ROSTER_PAGE_SIZE
+    }
+}
 /// The compact layout handles the supported 960×540 window without shrinking
 /// labels and click targets along with the rest of the interface.
 pub fn scale(_size: Vec2) -> f32 {
@@ -39,8 +46,11 @@ pub fn section(editor: bool, a: Action) -> u8 {
     match a {
         Action::Skirmish(_)
         | Action::BattleWorld
+        | Action::BattleWorldAuto
         | Action::BattlePreset
         | Action::BattleStart
+        | Action::BattleReplay
+        | Action::BattleChoose
         | Action::SelectAllOwn
         | Action::RangeMode => 1,
         Action::Overview
@@ -86,7 +96,7 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
         action,
         Node {
             min_height: px(38),
-            padding: UiRect::axes(px(12), px(7)),
+            padding: UiRect::axes(px(8), px(7)),
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             border: UiRect::all(px(1)),
@@ -100,11 +110,13 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
         b.insert(BattleButton);
     }
     b.with_children(|p| {
-        let e = label(p, font, text, 13.0, Color::srgb(0.86, 0.93, 0.94));
+        let e = label(p, font, text, 12.0, Color::srgb(0.86, 0.93, 0.94));
         if let Action::SelectUnit(id) = action {
             p.commands().entity(e).insert(HudText(100 + id as u8));
         } else if action == Action::Pause {
             p.commands().entity(e).insert(HudText(4));
+        } else if action == Action::Reset {
+            p.commands().entity(e).insert(HudText(6));
         }
     })
     .id()
@@ -162,7 +174,9 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 TextColor(Color::srgb(0.52, 0.77, 0.80)),
                 HudText(0),
             ));
-            p.spawn(row()).with_children(|p| {
+            let mut header_row = row();
+            header_row.flex_wrap = FlexWrap::NoWrap;
+            p.spawn(header_row).with_children(|p| {
                 for (name, action) in [
                     ("Сражения", Action::Drawer(1)),
                     ("Испытания", Action::Drawer(2)),
@@ -194,7 +208,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         .insert(CommandDeck)
         .with_children(|p| {
             p.spawn(Node {
-                width: percent(30),
+                width: percent(28),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(9),
                 ..default()
@@ -222,7 +236,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 });
             });
             p.spawn(Node {
-                width: percent(29),
+                width: percent(35),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(9),
                 ..default()
@@ -248,11 +262,13 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 );
                 p.spawn(row()).with_children(|p| {
                     button(p, font, "Начать бой", Action::BattleStart);
+                    button(p, font, "Повторить бой", Action::BattleReplay);
+                    button(p, font, "Другой бой", Action::BattleChoose);
                     button(p, font, "Сводка", Action::Drawer(5));
                 });
             });
             p.spawn(Node {
-                width: percent(41),
+                width: percent(31),
                 flex_direction: FlexDirection::Column,
                 row_gap: px(9),
                 ..default()
@@ -311,7 +327,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         ))
         .insert(RosterStrip)
         .with_children(|p| {
-            button(p, font, "◀", Action::RosterPage(-1));
+            button(p, font, "Назад", Action::RosterPage(-1));
             let label = label(p, font, "", 13.0, Color::srgb(0.86, 0.93, 0.94));
             p.commands().entity(label).insert(HudText(5));
             button(p, font, "Все", Action::SelectAllOwn);
@@ -319,7 +335,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 let e = button(p, font, &format!("Юнит {}", id + 1), Action::SelectUnit(id));
                 p.commands().entity(e).insert(Roster(id));
             }
-            button(p, font, "▶", Action::RosterPage(1));
+            button(p, font, "Далее", Action::RosterPage(1));
         });
     commands.spawn((
         SelectionBox,
@@ -425,7 +441,10 @@ pub fn refresh(
         .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
         .map(|(i, _)| i)
         .collect();
-    let pages = roster.len().div_ceil(ROSTER_PAGE_SIZE).max(1);
+    let page_size = windows
+        .single()
+        .map_or(ROSTER_PAGE_SIZE, |window| roster_page_size(window.width()));
+    let pages = roster.len().div_ceil(page_size).max(1);
     let page = panel.roster_page % pages;
     for (
         mut node,
@@ -447,6 +466,18 @@ pub fn refresh(
                 node.height = height;
             }
         }
+        if drawer.is_some() {
+            let bottom = px(if compact { 16 } else { 236 });
+            if node.bottom != bottom {
+                node.bottom = bottom;
+            }
+        }
+        if briefing.is_some() {
+            let width = percent(if compact { 56 } else { 47 });
+            if node.width != width {
+                node.width = width;
+            }
+        }
         if strip.is_some() {
             let bottom = px(if compact { 234 } else { 184 });
             if node.bottom != bottom {
@@ -462,8 +493,8 @@ pub fn refresh(
                 battle
                     && roster
                         .iter()
-                        .skip(page * ROSTER_PAGE_SIZE)
-                        .take(ROSTER_PAGE_SIZE)
+                        .skip(page * page_size)
+                        .take(page_size)
                         .any(|id| id == i),
             )
         } else if matches!(action, Some(Action::RosterPage(_))) {
@@ -472,6 +503,12 @@ pub fn refresh(
             Some(battle && loadout_count > 0)
         } else if solo.is_some() {
             Some(!battle)
+        } else if matches!(action, Some(Action::BattleReplay)) {
+            Some(battle && scene.sim.battle.phase != sim_core::blast::battle::Phase::Setup)
+        } else if matches!(action, Some(Action::BattleChoose)) {
+            Some(battle)
+        } else if matches!(action, Some(Action::Pause)) {
+            Some(!edit.editing)
         } else if battle_button.is_some() {
             Some(
                 battle
@@ -531,6 +568,13 @@ pub fn refresh(
                     "Пауза".into()
                 }
             }
+            6 => {
+                if battle {
+                    "Расстановка".into()
+                } else {
+                    "Сброс".into()
+                }
+            }
             0 => {
                 if battle {
                     let [a, b] = scene.sim.battle_counts();
@@ -541,10 +585,17 @@ pub fn refresh(
                         sim_core::blast::battle::Phase::Defeat => "ПОРАЖЕНИЕ",
                         sim_core::blast::battle::Phase::Draw => "НИЧЬЯ",
                     };
-                    if let Some([own, enemy]) = scene.sim.battle_base_integrity() {
-                        format!("БАЗЫ: СВОЯ {own}% / ВРАГ {enemy}%  ·  {phase}")
+                    let name = if panel.battle_name.is_empty() {
+                        "БОЙ"
                     } else {
-                        format!("СВОИ {a}  /  ВРАГИ {b}  ·  {phase}")
+                        &panel.battle_name
+                    };
+                    if compact {
+                        format!("{name} · {phase}")
+                    } else if let Some([own, enemy]) = scene.sim.battle_base_integrity() {
+                        format!("{name} · БАЗЫ {own}% / {enemy}% · {phase}")
+                    } else {
+                        format!("{name} · СВОИ {a} / ВРАГИ {b} · {phase}")
                     }
                 } else {
                     format!(
@@ -658,9 +709,20 @@ pub fn refresh(
                 } else {
                     ""
                 };
+                let briefing = if compact && battle {
+                    let mut chars = panel.briefing.chars();
+                    let short: String = chars.by_ref().take(64).collect();
+                    if chars.next().is_some() {
+                        format!("{short}…")
+                    } else {
+                        short
+                    }
+                } else {
+                    panel.briefing.clone()
+                };
                 format!(
                     "{phase}\n{}{}",
-                    panel.briefing,
+                    briefing,
                     if scene.notice.is_empty() {
                         String::new()
                     } else {
@@ -759,6 +821,63 @@ mod tests {
         let e = app.world_mut().spawn((action, Interaction::Pressed)).id();
         app.update();
         app.world_mut().despawn(e);
+    }
+    fn rebuild_pending(app: &mut App) {
+        let (config, layout) = app
+            .world_mut()
+            .resource_mut::<Workshop>()
+            .pending
+            .take()
+            .expect("UI action queued a rebuild");
+        app.world_mut().resource_mut::<Scene>().sim =
+            BlastRange::with_layout(config, layout).unwrap();
+        app.update();
+    }
+    #[test]
+    fn a_started_battle_can_be_replayed_and_switched_from_the_hud() {
+        let mut app = app();
+        assert!(app
+            .world_mut()
+            .resource_mut::<Scene>()
+            .sim
+            .set_ai_vs_ai(true));
+        click(&mut app, Action::BattleStart);
+        app.world_mut().resource_mut::<Scene>().sim.units[0]
+            .status
+            .alive = false;
+        click(&mut app, Action::BattleChoose);
+        assert_eq!(app.world().resource::<Panel>().drawer, 1);
+        assert!(app.world().resource::<Workshop>().pending.is_none());
+        assert!(!app.world().resource::<Scene>().sim.units[0].status.alive);
+
+        click(&mut app, Action::BattleReplay);
+        assert_eq!(app.world().resource::<Panel>().drawer, 0);
+        assert!(app.world().resource::<Panel>().battle_launch);
+        assert!(app.world().resource::<Panel>().battle_auto);
+        assert!(app.world().resource::<Scene>().paused);
+        rebuild_pending(&mut app);
+        assert!(!app.world().resource::<Panel>().battle_launch);
+        assert!(!app.world().resource::<Scene>().paused);
+        assert!(app.world().resource::<Scene>().sim.battle.autonomous);
+        assert_eq!(app.world().resource::<Scene>().sim.battle_counts(), [2, 2]);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+
+        click(&mut app, Action::BattleChoose);
+        click(&mut app, Action::Skirmish(1));
+        assert_eq!(
+            app.world().resource::<Panel>().battle_name,
+            "Встреча в окружении"
+        );
+        rebuild_pending(&mut app);
+        assert_eq!(app.world().resource::<Scene>().sim.battle_counts(), [3, 4]);
+        assert!(!app.world().resource::<Scene>().sim.battle.autonomous);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
     }
     #[test]
     fn hud_selects_tank_ammunition_and_issues_orders() {

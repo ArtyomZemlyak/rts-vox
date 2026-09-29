@@ -619,6 +619,25 @@ fn main() {
     }
     let mut hud = panel::Panel::new(drive, demo);
     hud.briefing = battle_briefing;
+    hud.battle_name = if world_battle {
+        if ai_vs_ai {
+            "Война за базы · ИИ × ИИ".into()
+        } else {
+            "Война за базы".into()
+        }
+    } else if skirmish.is_some() {
+        workshop
+            .sector()
+            .map_or_else(String::new, |z| z.name.clone())
+    } else if battle_preset {
+        "Бой 2×2 / расстановка".into()
+    } else if workshop.layout.as_ref().is_some_and(|layout| layout.battle) {
+        workshop
+            .sector()
+            .map_or_else(|| "Свой бой".into(), |zone| zone.name.clone())
+    } else {
+        String::new()
+    };
     hud.drawer = hud_drawer;
     let mut sim = range_sim(
         weapon_config(energy, anni, power, delivery),

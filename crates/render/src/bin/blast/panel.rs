@@ -146,6 +146,7 @@ pub struct Panel {
     pub ranges: bool,
     pub battle_launch: bool,
     pub battle_auto: bool,
+    pub battle_name: String,
     pub roster_page: usize,
     pub briefing: String,
     pub scenario_run: Option<ScenarioRun>,
@@ -166,6 +167,7 @@ impl Panel {
             ranges: true,
             battle_launch: false,
             battle_auto: false,
+            battle_name: String::new(),
             roster_page: 0,
             briefing: String::new(),
             scenario_run: None,
@@ -190,6 +192,8 @@ pub enum Action {
     BattleWorldAuto,
     RangeMode,
     BattleStart,
+    BattleReplay,
+    BattleChoose,
     Side(bool),
     NextOwn,
     Edit,
@@ -305,8 +309,9 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             border_radius: BorderRadius::all(px(10)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.025, 0.045, 0.06, 0.96)),
+        BackgroundColor(Color::srgb(0.025, 0.045, 0.06)),
         BorderColor::all(Color::srgb(0.17, 0.29, 0.32)),
+        ZIndex(10),
         UiTargetCamera(camera),
     ));
     root.with_children(|p| {
@@ -338,14 +343,12 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 false,
                 vec![("Встреча в окружении · 3 против 4", Action::Skirmish(1))],
             ),
+            (false, vec![("Бой на всей карте", Action::BattleWorld)]),
             (
                 false,
-                vec![
-                    ("Бой на всей карте", Action::BattleWorld),
-                    ("ИИ против ИИ · вся карта", Action::BattleWorldAuto),
-                    ("Бой 2×2 / расстановка", Action::BattlePreset),
-                ],
+                vec![("ИИ против ИИ · вся карта", Action::BattleWorldAuto)],
             ),
+            (false, vec![("Бой 2×2 / расстановка", Action::BattlePreset)]),
             (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
@@ -353,7 +356,6 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 false,
                 vec![
-                    ("Начать бой", Action::BattleStart),
                     ("Следующий свой", Action::NextOwn),
                     ("Все свои", Action::SelectAllOwn),
                 ],
@@ -381,13 +383,6 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 vec![
                     ("Управлять юнитом", Action::Play),
                     ("Расстановка", Action::Edit),
-                ],
-            ),
-            (
-                false,
-                vec![
-                    ("Пауза / пуск", Action::Pause),
-                    ("Восстановить", Action::Reset),
                 ],
             ),
             (
@@ -531,7 +526,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 .as_ref()
                 .map(|s| (false, vec![(s.title.as_str(), Action::Scenario(id as u8))]))
         });
-        rows.splice(3..3, scenario_rows);
+        rows.splice(5..5, scenario_rows);
         for (editor, row) in rows {
             let section = hud::section(editor, row[0].1);
             let mut parent = p.spawn(Node {
@@ -611,6 +606,7 @@ pub fn actions(
     interactions: Query<(&Action, &Interaction), Changed<Interaction>>,
     windows: Query<&Window>,
     roots: Query<&bevy::ui::RelativeCursorPosition, With<PanelRoot>>,
+    mut scrolls: Query<&mut ScrollPosition, With<ScrollPanel>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut gas: ResMut<GasInput>,
     scale: Option<ResMut<UiScale>>,
@@ -678,7 +674,14 @@ pub fn actions(
             panel.battle_auto = false;
         }
         match action {
-            Action::Drawer(id) => panel.drawer = if panel.drawer == id { 0 } else { id },
+            Action::Drawer(id) => {
+                panel.drawer = if panel.drawer == id { 0 } else { id };
+                if panel.drawer != 0 {
+                    for mut scroll in &mut scrolls {
+                        scroll.y = 0.0;
+                    }
+                }
+            }
             Action::Ranges => panel.ranges = !panel.ranges,
             Action::SelectUnit(id) => {
                 if scene.sim.battle_mode()
@@ -702,6 +705,9 @@ pub fn actions(
                 }
             }
             Action::RosterPage(delta) => {
+                let page_size = windows.single().map_or(hud::ROSTER_PAGE_SIZE, |window| {
+                    hud::roster_page_size(window.width())
+                });
                 let count = scene
                     .sim
                     .units
@@ -709,7 +715,7 @@ pub fn actions(
                     .enumerate()
                     .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
                     .count();
-                let pages = count.div_ceil(hud::ROSTER_PAGE_SIZE).max(1);
+                let pages = count.div_ceil(page_size).max(1);
                 panel.roster_page =
                     (panel.roster_page as i32 + delta).rem_euclid(pages as i32) as usize;
             }
@@ -725,6 +731,7 @@ pub fn actions(
             }
             Action::Skirmish(id) => match edit.skirmish(id, scene.sim.config.clone()) {
                 Ok(briefing) => {
+                    panel.battle_name = edit.sector().map_or_else(String::new, |z| z.name.clone());
                     panel.briefing = briefing;
                     panel.battle_launch = true;
                     panel.drawer = 0;
@@ -740,6 +747,11 @@ pub fn actions(
             Action::BattleWorld | Action::BattleWorldAuto => {
                 match edit.battle_world(scene.sim.config.clone()) {
                     Ok(briefing) => {
+                        panel.battle_name = if action == Action::BattleWorldAuto {
+                            "Война за базы · ИИ × ИИ".into()
+                        } else {
+                            "Война за базы".into()
+                        };
                         panel.battle_auto = action == Action::BattleWorldAuto;
                         panel.briefing = briefing;
                         panel.battle_launch = true;
@@ -756,6 +768,9 @@ pub fn actions(
             }
             Action::BattlePreset => match edit.battle_preset(scene.sim.config.clone()) {
                 Ok(()) => {
+                    panel.battle_name = "Бой 2×2 / расстановка".into();
+                    panel.drawer = 0;
+                    panel.pending = None;
                     scene.view = 1;
                     scene.repeat = false;
                     panel.demo = false;
@@ -765,6 +780,9 @@ pub fn actions(
             },
             Action::RangeMode => match edit.range_mode(scene.sim.config.clone()) {
                 Ok(()) => {
+                    panel.battle_name.clear();
+                    panel.drawer = 0;
+                    panel.pending = None;
                     panel.drive = true;
                     panel.demo = false;
                     panel.ground_fire = false;
@@ -801,14 +819,41 @@ pub fn actions(
                 }
                 Err(e) => scene.notice = e.into(),
             },
+            Action::BattleReplay => match edit.replay_battle(scene.sim.config.clone()) {
+                Ok(()) => {
+                    panel.battle_launch = true;
+                    panel.battle_auto = scene.sim.battle.autonomous;
+                    panel.briefing.clear();
+                    panel.drawer = 0;
+                    panel.roster_page = 0;
+                    panel.ground_fire = false;
+                    panel.pending = None;
+                    scene.paused = true;
+                    scene.repeat = false;
+                }
+                Err(e) => scene.notice = e,
+            },
+            Action::BattleChoose => {
+                panel.drawer = 1;
+                for mut scroll in &mut scrolls {
+                    scroll.y = 0.0;
+                }
+            }
             Action::Side(allied) => {
                 if edit.editing {
-                    if let Err(e) = edit.side(allied, scene.sim.config.clone()) {
-                        scene.notice = e;
+                    match edit.side(allied, scene.sim.config.clone()) {
+                        Ok(()) if panel.battle_name.is_empty() => {
+                            panel.battle_name = "Свой бой".into();
+                        }
+                        Err(e) => scene.notice = e,
+                        _ => {}
                     }
                 }
             }
             Action::NextOwn => {
+                let page_size = windows.single().map_or(hud::ROSTER_PAGE_SIZE, |window| {
+                    hud::roster_page_size(window.width())
+                });
                 let n = scene.sim.units.len();
                 let start = edit.controlled.map_or(0, |i| i + 1);
                 if n > 0 {
@@ -826,7 +871,7 @@ pub fn actions(
                             .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
                             .position(|(i, _)| i == id)
                             .unwrap_or(0)
-                            / hud::ROSTER_PAGE_SIZE;
+                            / page_size;
                     }
                 }
             }
@@ -1018,6 +1063,7 @@ pub fn actions(
             }
             Action::Save => key(KeyCode::F6, &mut panel),
             Action::Load => {
+                panel.battle_name.clear();
                 if std::path::Path::new("out/range-layout.ron").is_file() {
                     scene.layout_file = Some("out/range-layout.ron".into());
                 }
@@ -1277,8 +1323,15 @@ pub fn refresh(
                 )
             },
         );
-        **t = if scene.sim.battle_mode() {
-            format!("Бой · {sector} · расстановка по всей карте")
+        **t = if scene.sim.battle_mode() && panel.drawer == 1 {
+            let name = if panel.battle_name.is_empty() {
+                "Текущий бой"
+            } else {
+                &panel.battle_name
+            };
+            format!("Сейчас: {name}\nНовый сценарий заменит текущий бой")
+        } else if panel.drawer == 1 {
+            "Выберите сценарий боя".into()
         } else {
             sector
         };
