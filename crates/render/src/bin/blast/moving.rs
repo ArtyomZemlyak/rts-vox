@@ -16,6 +16,9 @@ pub struct Visual {
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
     scratch: Vec<usize>,
+    /// Reused by the integer sort of toroidal voxel addresses.
+    sort_scratch: Vec<usize>,
+    sort_counts: Vec<usize>,
     #[cfg(test)]
     occupancy_rebuilds: usize,
     cached: Vec<Occupied>,
@@ -26,6 +29,9 @@ pub struct Visual {
 pub fn reset(v: &mut Visual) {
     *v = Visual {
         occupied: std::mem::take(&mut v.occupied),
+        scratch: std::mem::take(&mut v.scratch),
+        sort_scratch: std::mem::take(&mut v.sort_scratch),
+        sort_counts: std::mem::take(&mut v.sort_counts),
         window: v.window,
         ..default()
     };
@@ -278,6 +284,35 @@ pub(super) fn cells(sim: &BlastRange, window: &TerrainWindow) -> Vec<usize> {
     out.dedup();
     out
 }
+fn radix_pass(input: &[usize], output: &mut [usize], counts: &mut [usize], shift: usize) {
+    counts.fill(0);
+    for &v in input {
+        counts[(v >> shift) & (counts.len() - 1)] += 1;
+    }
+    let mut start = 0;
+    for count in counts.iter_mut() {
+        let n = *count;
+        *count = start;
+        start += n;
+    }
+    for &v in input {
+        let bucket = (v >> shift) & (counts.len() - 1);
+        output[counts[bucket]] = v;
+        counts[bucket] += 1;
+    }
+}
+fn sort_unique_cells(values: &mut Vec<usize>, scratch: &mut Vec<usize>, counts: &mut Vec<usize>) {
+    if values.len() < 4096 || values.iter().any(|&v| v > u32::MAX as usize) {
+        values.sort_unstable();
+        values.dedup();
+        return;
+    }
+    scratch.resize(values.len(), 0);
+    counts.resize(1 << 16, 0);
+    radix_pass(values, scratch, counts, 0);
+    radix_pass(scratch, values, counts, 16);
+    values.dedup();
+}
 fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -> Vec<usize> {
     let previous_window = visual.window;
     let shifted = previous_window != Some(*window);
@@ -381,8 +416,7 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
         visual.cached[id].revision = u.revision;
         next.extend_from_slice(&visual.cached[id].cells);
     }
-    next.sort_unstable();
-    next.dedup();
+    sort_unique_cells(&mut next, &mut visual.sort_scratch, &mut visual.sort_counts);
     next
 }
 pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
@@ -615,6 +649,36 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn integer_occupancy_sort_matches_comparison_sort_with_duplicates() {
+        let mut scratch = Vec::new();
+        let mut counts = Vec::new();
+        for len in [0, 1, 4095, 4096, 100_000] {
+            let mut seed = 0x9e37_79b9u32;
+            let mut values: Vec<usize> = (0..len)
+                .map(|i| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    if i % 3 == 0 {
+                        (seed % 2048) as usize
+                    } else {
+                        seed as usize
+                    }
+                })
+                .collect();
+            let mut expected = values.clone();
+            expected.sort_unstable();
+            expected.dedup();
+            sort_unique_cells(&mut values, &mut scratch, &mut counts);
+            assert_eq!(values, expected, "len={len}");
+        }
+        if usize::BITS > 32 {
+            let mut values = vec![u32::MAX as usize + 1; 4096];
+            values.push(0);
+            sort_unique_cells(&mut values, &mut scratch, &mut counts);
+            assert_eq!(values, [0, u32::MAX as usize + 1]);
+        }
+    }
 
     #[test]
     fn packed_shadow_cells_match_multiword_volume_after_damage() {
