@@ -15,6 +15,7 @@ nav = { path = "../nav" }
 voxel = { path = "../voxel" }
 worldgen = { path = "../worldgen" }
 rayon = "1"
+rustc-hash = "1"
 
 [lib]
 name = "sim_core"

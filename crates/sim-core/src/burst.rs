@@ -15,6 +15,7 @@ use phys::{
     blast::{Hit, Wave},
     V3,
 };
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use voxel::{
     store::{Mat, AIR},
@@ -501,7 +502,10 @@ mod tests {
             }
             let index = Settled::of(&fragments, &[hull], tick, &t);
             assert!(!expected.is_empty());
-            assert_eq!(index.cells, expected);
+            assert_eq!(index.cells.len(), expected.len());
+            for (cell, pieces) in &expected {
+                assert_eq!(index.cells.get(cell), Some(pieces));
+            }
             for (i, &(lo, hi)) in world_boxes.iter().enumerate() {
                 for skip in [i as u32, u32::MAX] {
                     for from_above in [None, Some(lo[1]), Some(hi[1])] {
@@ -3953,7 +3957,7 @@ fn sort_columns(columns: &mut Vec<([i32; 2], u16)>) {
 pub(crate) struct Settled {
     /// Cell of `CELL` units to the indices of the pieces whose box covers
     /// it, in index order.
-    cells: HashMap<[i32; 3], Vec<u32>>,
+    cells: FxHashMap<[i32; 3], Vec<u32>>,
     /// Frozen world boxes in original fragment order, including unindexed
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
@@ -3965,7 +3969,7 @@ const SETTLED_CELL: i32 = 4;
 /// insertion ORs a range instead of hashing every Y coordinate. No path
 /// iterates the hash table: contact order comes from the fragment slice.
 #[derive(Default)]
-struct SettledQueries(std::collections::HashMap<[i32; 3], u64>);
+struct SettledQueries(FxHashMap<[i32; 3], u64>);
 impl SettledQueries {
     fn include(&mut self, lo: [i32; 3], hi: [i32; 3]) {
         let first = lo[1].div_euclid(64);

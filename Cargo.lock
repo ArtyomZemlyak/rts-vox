@@ -4558,6 +4558,7 @@ dependencies = [
  "nav",
  "phys",
  "rayon",
+ "rustc-hash",
  "voxel",
  "worldgen",
 ]
