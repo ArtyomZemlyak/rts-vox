@@ -3678,20 +3678,21 @@ impl BlastRange {
             if let Some(pool) = &self.navigation_pool {
                 // Search only against immutable terrain and rubble. A hull
                 // recovering from contact keeps its local blocker search in
-                // the serial motion pass below. Indexed chunks keep each
-                // hull's state independent and leave commit order unchanged.
+                // the serial motion pass below. Search costs vary sharply by
+                // hull and terrain, so schedule individual hulls rather than
+                // pairing a slow search with another in the same chunk.
+                // Commit order remains unchanged.
                 let world = &self.world;
                 let rubble = &self.rubble;
                 let tick = self.tick;
                 pool.install(|| {
                     let _: Vec<()> = self
                         .units
-                        .par_chunks_mut(2)
+                        .par_chunks_mut(1)
                         .map(|chunk| {
-                            for u in chunk {
-                                u.motion
-                                    .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
-                            }
+                            let u = &mut chunk[0];
+                            u.motion
+                                .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
                         })
                         .collect();
                 });

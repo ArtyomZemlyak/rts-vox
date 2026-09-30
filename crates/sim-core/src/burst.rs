@@ -1773,6 +1773,66 @@ mod tests {
         assert_eq!(run(1), run(4));
     }
     #[test]
+    fn simultaneous_support_losses_wake_in_piece_order_across_workers() {
+        let w = world();
+        let mut t = tuning();
+        t.blast.max_flying = 7;
+        t.blast.rest_check_ticks = 1;
+        t.blast.push_pct = 0;
+        let run = |workers| {
+            let (mut pieces, mut economy) = (Bursts::default(), economy());
+            for i in 0..1200 {
+                let held = economy.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                pieces.fragments.push(Fragment {
+                    id: i + 1,
+                    position: V3::new(
+                        Fx::from_int(8 + (i % 40) as i32 * 2),
+                        Fx::from_int(36),
+                        Fx::from_int(8 + (i / 40) as i32 * 2),
+                    ),
+                    velocity: V3::ZERO,
+                    material: 1,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held,
+                    resting: true,
+                });
+            }
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                pieces.step_fragments(
+                    &w,
+                    &mut economy,
+                    &t.blast,
+                    crate::gravity_per_tick(&t),
+                    0,
+                    Surroundings::NONE,
+                );
+            });
+            let flying: Vec<_> = pieces
+                .fragments
+                .iter()
+                .filter(|f| !f.resting)
+                .map(|f| f.id)
+                .collect();
+            assert_eq!(flying, (1..=7).collect::<Vec<_>>());
+            assert!(economy.balanced());
+            let mut bytes = Blob::new();
+            pieces.save(&mut bytes);
+            bytes.v
+        };
+        assert_eq!(run(1), run(4));
+    }
+    #[test]
     fn settled_candidates_keep_cell_lists_in_fragment_order_across_workers() {
         let t = tuning();
         let fragments: Vec<_> = (0..1400)
@@ -3301,8 +3361,11 @@ impl Bursts {
         let mut room = (t.max_flying as usize).saturating_sub(
             self.fragments.iter().filter(|f| !f.resting).count() + self.claims.len(),
         );
-        for i in 0..self.fragments.len() {
-            let f = &mut self.fragments[i];
+        // These queries read the frozen surroundings and only this piece.
+        // Compute candidates independently; the ordered pass below still
+        // allocates flying slots and therefore resolves competing wakeups.
+        let query = |(i, f): (usize, &Fragment)| {
+            let mut push = None;
             if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || room > 0) {
                 let (low, high) = f.bounds();
                 if let Some(h) = hull_hit(arr(f.position), low, high, hulls, 0) {
@@ -3315,22 +3378,38 @@ impl Bursts {
                         // A moving hull bulldozes the piece it drove into
                         // (ADR-294): the piece leaves ahead of it at the
                         // hull's pace and a little up.
-                        if f.resting {
-                            f.resting = false;
-                            room -= 1;
-                            stale_wrecks.insert(f.held);
-                        }
                         let along = V3::new(h.vel[0], Fx::ZERO, h.vel[2]).scale(motion.push);
                         let lift = along.len_sq().sqrt().mul(motion.push_up);
-                        f.velocity = V3::new(along.x, h.vel[1].mul(motion.push).add(lift), along.z);
+                        push = Some(V3::new(
+                            along.x,
+                            h.vel[1].mul(motion.push).add(lift),
+                            along.z,
+                        ));
                     }
                 }
             }
-            if room > 0
+            let unsupported = room > 0
+                && push.is_none()
                 && f.resting
                 && due(f.id, tick, t)
-                && !supported(f, world, hulls, &settled, i as u32)
-            {
+                && !supported(f, world, hulls, &settled, i as u32);
+            (push, unsupported)
+        };
+        let wakeups: Vec<_> = if self.fragments.len() >= 1024 {
+            self.fragments.par_iter().enumerate().map(query).collect()
+        } else {
+            self.fragments.iter().enumerate().map(query).collect()
+        };
+        for (f, (push, unsupported)) in self.fragments.iter_mut().zip(wakeups) {
+            if let Some(velocity) = push.filter(|_| !f.resting || room > 0) {
+                if f.resting {
+                    f.resting = false;
+                    room -= 1;
+                    stale_wrecks.insert(f.held);
+                }
+                f.velocity = velocity;
+            }
+            if room > 0 && f.resting && unsupported {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
