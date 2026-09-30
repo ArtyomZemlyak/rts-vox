@@ -5,18 +5,21 @@ use super::*;
 fn outside_halo(q: [i64; 3], d: [i64; 3], length2: i64, radius: i32) -> bool {
     // The exact projection rounds each component by < 1 sixteenth. A margin
     // of 2 covers the resulting three-dimensional displacement.
-    let limit2 = i128::from(radius * 16 + 2).pow(2);
-    let length2 = i128::from(length2);
-    let q2 = q.iter().map(|&v| i128::from(v).pow(2)).sum::<i128>();
-    let dot = (0..3)
-        .map(|i| i128::from(q[i]) * i128::from(d[i]))
-        .sum::<i128>();
+    // The range's maximum map dimensions keep these squared sixteenth-cell
+    // coordinates within i64. Only the final products need i128; widening
+    // each input and squaring it there was costly for every halo candidate.
+    let limit = i64::from(radius) * 16 + 2;
+    let limit2 = limit * limit;
+    let q2 = q[0] * q[0] + q[1] * q[1] + q[2] * q[2];
+    let dot = q[0] * d[0] + q[1] * d[1] + q[2] * d[2];
     if dot <= 0 {
         q2 >= limit2
     } else if dot >= length2 {
-        (0..3).map(|i| i128::from(q[i] - d[i]).pow(2)).sum::<i128>() >= limit2
+        let end = [0, 1, 2].map(|i| q[i] - d[i]);
+        end[0] * end[0] + end[1] * end[1] + end[2] * end[2] >= limit2
     } else {
-        q2 * length2 - dot * dot >= limit2 * length2
+        i128::from(q2) * i128::from(length2) - i128::from(dot) * i128::from(dot)
+            >= i128::from(limit2) * i128::from(length2)
     }
 }
 
@@ -259,6 +262,35 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn coarse_halo_integer_width_matches_wide_projection_at_map_extents() {
+        for d in [[262_128, 0, 0], [-262_128, 262_128, 0], [131_072; 3]] {
+            let length2 = d.iter().map(|v| v * v).sum::<i64>();
+            for q in [
+                [0, 0, 0],
+                [262_128, 262_128, 262_128],
+                [-262_128, 262_128, -262_128],
+                [131_072, 16, 16],
+            ] {
+                let q2 = q.iter().map(|&v| i128::from(v).pow(2)).sum::<i128>();
+                let dot = (0..3)
+                    .map(|i| i128::from(q[i]) * i128::from(d[i]))
+                    .sum::<i128>();
+                for radius in 1..=8 {
+                    let limit2 = i128::from(radius * 16 + 2).pow(2);
+                    let expected = if dot <= 0 {
+                        q2 >= limit2
+                    } else if dot >= i128::from(length2) {
+                        (0..3).map(|i| i128::from(q[i] - d[i]).pow(2)).sum::<i128>() >= limit2
+                    } else {
+                        q2 * i128::from(length2) - dot * dot >= limit2 * i128::from(length2)
+                    };
+                    assert_eq!(outside_halo(q, d, length2, radius), expected);
                 }
             }
         }
