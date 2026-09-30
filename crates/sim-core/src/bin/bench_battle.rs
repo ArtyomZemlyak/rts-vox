@@ -299,6 +299,7 @@ fn main() {
     let mut restored = None;
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
+    let mut debris_phase_windows = vec![[0u128; 7]; ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
     let mut unit_last = unit_start.clone();
     for tick_index in 0..ticks {
@@ -306,6 +307,7 @@ fn main() {
         let mut last = start;
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
+        let mut debris_detail = [0u128; 7];
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
@@ -330,6 +332,14 @@ fn main() {
                         "motion_commit" => motion_detail[1] = elapsed,
                         "motion_contacts" => motion_detail[2] = elapsed,
                         "motion_felling" => motion_detail[3] = elapsed,
+                        "debris_begin" => {}
+                        "debris_bodies" => debris_detail[0] = elapsed,
+                        "debris_sections" => debris_detail[1] = elapsed,
+                        "debris_hulls" => debris_detail[2] = elapsed,
+                        "debris_confirm" => debris_detail[3] = elapsed,
+                        "debris_settled" => debris_detail[4] = elapsed,
+                        "debris_advance" => debris_detail[5] = elapsed,
+                        "debris_finish" => debris_detail[6] = elapsed,
                         _ => unreachable!(),
                     }
                 }
@@ -364,6 +374,12 @@ fn main() {
         let elapsed = start.elapsed().as_micros();
         samples.push(elapsed);
         if tick_csv.is_some() {
+            for (sum, value) in debris_phase_windows[tick_index / 300]
+                .iter_mut()
+                .zip(debris_detail)
+            {
+                *sum += value;
+            }
             profile.tick = sim.tick;
             profile.total_us = elapsed;
             [
@@ -616,6 +632,12 @@ fn main() {
                     .map(|(id, _)| (id, unit_phase_windows[index][id].map(|us| us / len)))
                     .collect::<Vec<_>>()
             );
+            println!(
+                "debris_phases_window={}..{} bodies_sections_hulls_confirm_settled_advance_finish_us={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                debris_phase_windows[index].map(|us| us / len)
+            );
         }
         println!("tick_csv={path}");
         let (mut single, mut full, mut identity) = (0, 0, 0);
@@ -635,6 +657,12 @@ fn main() {
     samples.sort_unstable();
     let count = samples.len();
     println!("ticks={} units={} phase={:?} alive={:?} bases={:?} shots={:?} damage={:?} peak_rounds={} p50_us={} p95_us={} p99_us={} max_us={} hash={:016x}",sim.tick,sim.units.len(),sim.battle.phase,sim.battle_counts(),sim.battle_base_integrity(),sim.battle.actors.iter().map(|a|a.fired).collect::<Vec<_>>(),sim.units.iter().map(|u|u.revision).collect::<Vec<_>>(),peak_rounds,samples[count/2],samples[count*95/100],samples[count*99/100],samples[count-1],sim.state_hash());
+    if args.iter().any(|arg| arg == "--felling-profile") {
+        println!(
+            "felling_profile={:?}",
+            sim.matter.felling_profile(&sim.world, &sim.navigation.fell)
+        );
+    }
     for (id, u) in sim.units.iter().enumerate() {
         println!(
             "unit={id} alive={} engine={} weapon={} core_pct={} at={:?} order={:?} target={:?} destination={:?} path={} cursor={} next={:?} vel={} searching={} blocked={} floors={:?} last_plan={:?}",

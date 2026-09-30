@@ -4219,11 +4219,14 @@ impl BlastRange {
             }
         }
         completed("collapse");
+        detail("debris_begin");
         // Whole bodies fall a voxel at a time and bake back where they
         // land, through the edit queue like everything else.
         self.bodies.step(&mut self.world);
+        detail("debris_bodies");
         let work = self.matter.step_sections(&mut self.units);
         self.matter.shed_segments_budget(&mut self.units, work);
+        detail("debris_sections");
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
         // they drive into (ADR-294); the dead lie as debris.
         let live: Vec<(UnitVoxels, &[Fx; 3])> = self
@@ -4236,13 +4239,15 @@ impl BlastRange {
             .collect();
         let hulls: Vec<crate::burst::Hull> =
             live.iter().map(|(v, was)| v.hull(Some(was))).collect();
-        self.matter.flush(
+        detail("debris_hulls");
+        self.matter.flush_observed(
             &self.world,
             battle_mode || self.config.material_energy_j > 0,
             self.config.gravity,
             u64::from(self.tick),
             &hulls,
             &self.navigation.fell.materials,
+            |stage| detail(stage),
         );
         completed("debris");
         for e in self.world.edits() {

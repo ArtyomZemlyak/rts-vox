@@ -37,6 +37,24 @@ fn claimable(w: &World, p: [i32; 3]) -> bool {
 #[path = "range_fracture.rs"]
 mod fracture;
 
+// A signed 21-bit coordinate per axis fits the game's current and planned
+// world sizes. Biasing each component preserves the old lexicographic order
+// of `(position, seed)` while making a queued pair 16 instead of 24 bytes.
+const FELL_BITS: u32 = 21;
+const FELL_MASK: u64 = (1 << FELL_BITS) - 1;
+const FELL_BIAS: i64 = 1 << (FELL_BITS - 1);
+fn fell_key(p: [i32; 3]) -> u64 {
+    debug_assert!(p.iter().all(
+        |&v| (i64::from(v) + FELL_BIAS) >= 0 && (i64::from(v) + FELL_BIAS) <= FELL_MASK as i64
+    ));
+    p.into_iter().fold(0, |key, v| {
+        (key << FELL_BITS) | (i64::from(v) + FELL_BIAS) as u64
+    })
+}
+fn fell_cell(key: u64) -> [i32; 3] {
+    [42, 21, 0].map(|shift| (((key >> shift) & FELL_MASK) as i64 - FELL_BIAS) as i32)
+}
+
 pub struct Matter {
     batch: Option<fracture::Batch>,
     pub debris: Bursts,
@@ -53,7 +71,16 @@ pub struct Matter {
     section_cursor: usize,
     /// Yielding cells still to be released after a cut, each with the cut
     /// cell it hangs from. Ordered, bounded per tick, saved whole.
-    felling: BTreeSet<([i32; 3], [i32; 3])>,
+    felling: BTreeSet<(u64, u64)>,
+}
+#[derive(Debug, Default)]
+pub struct FellingProfile {
+    pub pending: usize,
+    pub positions: usize,
+    pub seeds: usize,
+    pub yielding: usize,
+    pub claimed: usize,
+    pub outside: usize,
 }
 impl Matter {
     pub fn new(units: &[RangeUnit]) -> Self {
@@ -97,16 +124,50 @@ impl Matter {
     pub fn felling_pending(&self) -> usize {
         self.felling.len()
     }
+    /// Read-only, potentially expensive diagnostic for a completed bench.
+    /// It never influences the felling order or simulation state.
+    pub fn felling_profile(&self, w: &World, f: &Felling) -> FellingProfile {
+        let mut result = FellingProfile {
+            pending: self.felling.len(),
+            ..FellingProfile::default()
+        };
+        let mut last = None;
+        let mut seeds = std::collections::BTreeSet::new();
+        for &(p, seed) in &self.felling {
+            let (p, seed) = (fell_cell(p), fell_cell(seed));
+            if last != Some(p) {
+                result.positions += 1;
+                last = Some(p);
+            }
+            seeds.insert(seed);
+            if p[0] < 0
+                || p[1] < 0
+                || p[2] < 0
+                || p[0] >= w.nx as i32
+                || p[1] >= w.ny as i32
+                || p[2] >= w.nz as i32
+            {
+                result.outside += 1;
+                continue;
+            }
+            let q = p.map(|v| v as u32);
+            result.yielding += usize::from(f.materials.contains(&w.material(q[0], q[1], q[2])));
+            result.claimed += usize::from(self.debris.claimed(q));
+        }
+        result.seeds = seeds.len();
+        result
+    }
     /// What hangs from a cut falls: connected yielding matter no lower than
     /// the cut and within the radius. Below the cut a stump keeps standing.
     fn spread(&mut self, p: [i32; 3], seed: [i32; 3], radius: i32) {
+        let seed_key = fell_key(seed);
         for a in 0..3 {
             for d in [-1, 1] {
                 let mut q = p;
                 q[a] += d;
                 let far = (0..3).map(|k| (q[k] - seed[k]).pow(2)).sum::<i32>() > radius * radius;
                 if !far && q[1] >= seed[1] {
-                    self.felling.insert((q, seed));
+                    self.felling.insert((fell_key(q), seed_key));
                 }
             }
         }
@@ -149,6 +210,7 @@ impl Matter {
             let Some((p, seed)) = self.felling.pop_first() else {
                 break;
             };
+            let (p, seed) = (fell_cell(p), fell_cell(seed));
             left -= 1;
             if p[0] < 0
                 || p[1] < 0
@@ -170,7 +232,7 @@ impl Matter {
             }
             // Felled wood crumbles in two-cell pieces whatever the weapon.
             if !self.debris.claim_voxel(w, q, m, seed, 0, 2, &self.tuning) {
-                self.felling.insert((p, seed));
+                self.felling.insert((fell_key(p), fell_key(seed)));
                 break;
             }
             self.spread(p, seed, f.radius);
@@ -715,6 +777,19 @@ impl Matter {
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
     ) {
+        self.flush_observed(w, material, gravity, tick, hulls, yielding, |_| {});
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn flush_observed(
+        &mut self,
+        w: &World,
+        material: bool,
+        gravity: i32,
+        tick: u64,
+        hulls: &[crate::burst::Hull],
+        yielding: &[voxel::store::Mat],
+        mut completed: impl FnMut(&'static str),
+    ) {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
         for &(edit, old) in w.completed() {
@@ -745,13 +820,15 @@ impl Matter {
             self.economy.ledger.reveal(self.economy.ground, amount);
             self.economy.ledger.sink(self.economy.ground, amount, sink);
         }
-        self.debris.step_fragments(
+        completed("debris_confirm");
+        self.debris.step_fragments_observed(
             w,
             &mut self.economy,
             &self.tuning,
             Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)),
             tick,
             crate::burst::Surroundings { hulls, yielding },
+            completed,
         );
     }
     pub fn save(&self, b: &mut Blob) {
@@ -762,8 +839,9 @@ impl Matter {
         b.u64(self.spent_mj);
         b.usize(self.section_cursor);
         b.u32(self.felling.len() as u32);
-        for (p, seed) in &self.felling {
-            for v in p.iter().chain(seed) {
+        for &(p, seed) in &self.felling {
+            let (p, seed) = (fell_cell(p), fell_cell(seed));
+            for v in p.iter().chain(seed.iter()) {
                 b.i32(*v);
             }
         }
@@ -812,8 +890,15 @@ impl Matter {
             let seed: [i32; 3] = std::array::from_fn(|_| s.i32());
             let dims = [w.nx, w.ny, w.nz];
             if (0..3).any(|a| {
-                p[a] < -1 || p[a] > dims[a] as i32 || seed[a] < 0 || seed[a] >= dims[a] as i32
-            }) || !self.felling.insert((p, seed))
+                p[a] < -1
+                    || p[a] > dims[a] as i32
+                    || seed[a] < 0
+                    || seed[a] >= dims[a] as i32
+                    || [p[a], seed[a]].into_iter().any(|v| {
+                        let shifted = i64::from(v) + FELL_BIAS;
+                        shifted < 0 || shifted > FELL_MASK as i64
+                    })
+            }) || !self.felling.insert((fell_key(p), fell_key(seed)))
             {
                 return None;
             }
@@ -898,5 +983,41 @@ impl Matter {
             }
         }
         Some(())
+    }
+}
+
+#[cfg(test)]
+mod felling_key_tests {
+    use super::{fell_cell, fell_key};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn packed_felling_queue_preserves_signed_position_and_seed_order() {
+        let cells = [
+            [-1, 0, 0],
+            [0, -1, 0],
+            [0, 0, -1],
+            [0, 0, 0],
+            [10000, 191, 10000],
+            [10001, 192, 10001],
+        ];
+        for p in cells {
+            assert_eq!(fell_cell(fell_key(p)), p);
+        }
+        let old: BTreeSet<_> = cells
+            .into_iter()
+            .flat_map(|p| cells.into_iter().map(move |seed| (p, seed)))
+            .collect();
+        let packed: BTreeSet<_> = old
+            .iter()
+            .map(|&(p, seed)| (fell_key(p), fell_key(seed)))
+            .collect();
+        assert_eq!(
+            old.into_iter().collect::<Vec<_>>(),
+            packed
+                .into_iter()
+                .map(|(p, seed)| (fell_cell(p), fell_cell(seed)))
+                .collect::<Vec<_>>()
+        );
     }
 }

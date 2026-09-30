@@ -2394,6 +2394,9 @@ pub struct Fragment {
 pub struct Bursts {
     jobs: VecDeque<Job>,
     claims: BTreeMap<[u32; 3], Claim>,
+    /// Reused only within a tick; neither cache affects save or ordering.
+    settled_scratch: Settled,
+    query_scratch: SettledQueries,
     pub fragments: Vec<Fragment>,
     pub corpses: BTreeMap<u32, Fragment>,
     pub(crate) next_id: u64,
@@ -3162,11 +3165,28 @@ impl Bursts {
         tick: u64,
         around: Surroundings<'_>,
     ) {
+        self.step_fragments_observed(world, e, t, gravity, tick, around, |_| {});
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_fragments_observed(
+        &mut self,
+        world: &voxel::World,
+        e: &mut Economy,
+        t: &Blast,
+        gravity: Fx,
+        tick: u64,
+        around: Surroundings<'_>,
+        mut completed: impl FnMut(&'static str),
+    ) {
         let (hulls, yielding) = (around.hulls, around.yielding);
         let motion = FragmentMotion::new(t);
         // What has already landed is ground for what is still falling
         // (ADR-308), gathered once for the whole tick.
-        let settled = Settled::of(&self.fragments, hulls, tick, t);
+        let mut settled = std::mem::take(&mut self.settled_scratch);
+        let mut queries = std::mem::take(&mut self.query_scratch);
+        Settled::of_into(&self.fragments, hulls, tick, t, &mut settled, &mut queries);
+        completed("debris_settled");
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         // Only key lookups are used; fragment order (not map iteration) decides
         // which resting piece owns a pile.
@@ -3262,6 +3282,7 @@ impl Bursts {
                 piles.insert(key, i);
             }
         }
+        completed("debris_advance");
         if !merged.is_empty() {
             self.fragments.retain(|f| !merged.contains(&f.held));
             stale_wrecks.extend(merged.iter().copied());
@@ -3304,6 +3325,9 @@ impl Bursts {
                 w.z = p[2];
             }
         }
+        self.settled_scratch = settled;
+        self.query_scratch = queries;
+        completed("debris_finish");
     }
 
     /// The columns resting pieces stand in and the height of their tops,
@@ -3983,11 +4007,30 @@ impl Settled {
     /// the flying ones, and the resting ones whose turn it is to look for
     /// their support (ADR-291). Pieces on a hull's roof (ADR-293) are left
     /// out: they ride, they are not ground.
+    #[cfg(test)]
     fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
         Self::around(fragments, hulls, |_, f| !f.resting || due(f.id, tick, t))
     }
+    fn of_into(
+        fragments: &[Fragment],
+        hulls: &[Hull],
+        tick: u64,
+        t: &Blast,
+        out: &mut Settled,
+        want: &mut SettledQueries,
+    ) {
+        Self::around_bounds_into(
+            fragments,
+            hulls,
+            |_, f| !f.resting || due(f.id, tick, t),
+            |_, f| f.bounds(),
+            out,
+            want,
+        );
+    }
     /// The resting pieces around those `asks` picks, by index and piece;
     /// a hull's riders left out as in [`Settled::of`].
+    #[cfg(test)]
     fn around(
         fragments: &[Fragment],
         hulls: &[Hull],
@@ -4003,19 +4046,40 @@ impl Settled {
         asks: impl Fn(usize, &Fragment) -> bool,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]),
     ) -> Settled {
+        let mut out = Settled::default();
+        Self::around_bounds_into(
+            fragments,
+            hulls,
+            asks,
+            bounds,
+            &mut out,
+            &mut SettledQueries::default(),
+        );
+        out
+    }
+    fn around_bounds_into(
+        fragments: &[Fragment],
+        hulls: &[Hull],
+        asks: impl Fn(usize, &Fragment) -> bool,
+        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]),
+        out: &mut Settled,
+        want: &mut SettledQueries,
+    ) {
+        out.cells.clear();
+        out.boxes.clear();
+        want.0.clear();
         if !fragments.iter().any(|f| f.resting) {
-            return Settled::default();
+            return;
         }
         // Only membership is queried. Fragment insertion and contact order
         // still follow the ordered fragment slice, not the hash table.
-        let mut want = SettledQueries::default();
-        let mut boxes = Vec::with_capacity(fragments.len());
+        out.boxes.reserve(fragments.len());
         for (i, f) in fragments.iter().enumerate() {
             let (low, high) = bounds(i, f);
             let p = arr(f.position);
             let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
-            boxes.push((lo, hi));
+            out.boxes.push((lo, hi));
             if !asks(i, f) {
                 continue;
             }
@@ -4031,12 +4095,13 @@ impl Settled {
             want.include(c0.map(|v| v - 1), c1.map(|v| v + 1));
         }
         if want.0.is_empty() {
-            return Settled::default();
+            out.boxes.clear();
+            return;
         }
-        let mut out = Settled {
-            cells: HashMap::new(),
-            boxes,
-        };
+        // Most resting pieces are nowhere near a live hull. Reject them
+        // against a conservative box before doing the rotated voxel roof
+        // query, without changing which hull can carry a piece.
+        let hull_boxes: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
         for (i, f) in fragments.iter().enumerate() {
             if !f.resting {
                 continue;
@@ -4056,7 +4121,15 @@ impl Settled {
             // it: riders held what fell on them (ADR-458). Asked of the
             // pieces the queries reach alone: a hull's voxels answer it
             // (ADR-469).
-            if hulls.iter().any(|h| h.carries(lo[1], f.position)) {
+            if hulls.iter().zip(&hull_boxes).any(|(h, (min, max))| {
+                let x = f.position.x;
+                let z = f.position.z;
+                x >= min[0]
+                    && x <= max[0]
+                    && z >= min[1]
+                    && z <= max[1]
+                    && h.carries(lo[1], f.position)
+            }) {
                 continue;
             }
             for z in c0[2]..=c1[2] {
@@ -4069,7 +4142,6 @@ impl Settled {
                 }
             }
         }
-        out
     }
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.
