@@ -599,10 +599,23 @@ impl<'a> Probe<'a> {
     /// Every yielding cell inside the hull at this pose, in column order.
     /// This is the cut a tracked hull makes when it stands here.
     pub fn crushed(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Vec<[u32; 3]> {
+        self.crushed_limit(pos, head, s, usize::MAX)
+    }
+    /// Ordered cut prefix for a bounded fragment pool. Frame cells do not
+    /// count toward `limit`: the pool cannot claim them, but the caller still
+    /// receives them in their original positions before the prefix ends.
+    pub fn crushed_limit(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+        limit: usize,
+    ) -> Vec<[u32; 3]> {
         let mut out = Vec::new();
-        if self.yielding.is_empty() {
+        if self.yielding.is_empty() || limit == 0 {
             return out;
         }
+        let mut claimable = 0usize;
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let (lo, hi) = self.extent(pos, head, s);
         for z in lo[1]..=hi[1] {
@@ -617,7 +630,14 @@ impl<'a> Probe<'a> {
                 for y in low as i32..=(high as i32).min(top - 1) {
                     let m = self.world.material(x as u32, y as u32, z as u32);
                     if m != AIR && self.yields(m) {
-                        out.push([x as u32, y as u32, z as u32]);
+                        let p = [x as u32, y as u32, z as u32];
+                        if limit != usize::MAX && !self.world.on_frame(p[0], p[1], p[2]) {
+                            if claimable == limit {
+                                return out;
+                            }
+                            claimable += 1;
+                        }
+                        out.push(p);
                     }
                 }
             }
@@ -2765,6 +2785,22 @@ mod tests {
                 hill,
             }),
         )
+    }
+    #[test]
+    fn bounded_crush_preserves_column_order_and_full_query() {
+        let mut w = world(false, false, false);
+        for x in 110..145 {
+            w.queue_edit(voxel::Edit::put(x, 16, 128, 4));
+        }
+        w.flush();
+        let at = [Fx::from_int(128); 2];
+        let mut probe = Probe::with_yield(&w, &[4, 5]);
+        let full = probe.crushed(at, 0, tank());
+        assert!(full.len() > 10);
+        let prefix = probe.crushed_limit(at, 0, tank(), 10);
+        assert_eq!(prefix, full[..10]);
+        assert!(probe.crushed_limit(at, 0, tank(), 0).is_empty());
+        assert_eq!(probe.crushed_limit(at, 0, tank(), usize::MAX), full);
     }
     #[test]
     fn prepared_flat_pose_matches_full_contacts_and_invalidates_on_edit() {

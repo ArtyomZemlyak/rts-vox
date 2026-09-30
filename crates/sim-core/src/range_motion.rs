@@ -188,6 +188,9 @@ pub struct Motion {
     /// Pure terrain answers carried between ticks; changed pages are dropped
     /// before each use. Scratch only, never serialized.
     terrain_columns: nav::vehicle::Columns,
+    /// Transient cap supplied by the range's fragment room before each tick.
+    /// Standalone motion retains the complete cut list.
+    pub(crate) cut_limit: usize,
     started: bool,
 }
 /// Fair continuation shares in stable slot order. Rotate the remainder so
@@ -336,6 +339,7 @@ impl Motion {
             resume_budget: None,
             prepared_hunt: false,
             terrain_columns: nav::vehicle::Columns::default(),
+            cut_limit: usize::MAX,
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -652,7 +656,12 @@ impl Motion {
         // (ADR-452): slid into standing trunks, the hull stood in them
         // until it next drove.
         if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
-            self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
+            self.cut = ground.crushed_limit(
+                [self.pos[0], self.pos[2]],
+                self.drive.head,
+                shape,
+                self.cut_limit,
+            );
         }
         moved
     }
@@ -1548,7 +1557,12 @@ impl Motion {
         };
         self.brake_shove(&lim);
         if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
-            self.cut = ground.crushed([self.pos[0], self.pos[2]], self.drive.head, shape);
+            self.cut = ground.crushed_limit(
+                [self.pos[0], self.pos[2]],
+                self.drive.head,
+                shape,
+                self.cut_limit,
+            );
         }
         // A dry search is a block even if its tiny reachable pocket contains
         // several cells. Only recovery can change the next search start.
@@ -1707,6 +1721,7 @@ impl Motion {
         self.dry = false;
         self.prepared_hunt = false;
         self.terrain_columns = nav::vehicle::Columns::default();
+        self.cut_limit = usize::MAX;
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),

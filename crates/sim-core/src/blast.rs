@@ -3628,6 +3628,18 @@ impl BlastRange {
             .iter()
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
+        // At most this many new terrain cells can be claimed before the
+        // fragment pool is full. Earlier hulls can claim no more than `room`
+        // cells in total; pre-existing claims are skipped. Therefore every
+        // hull needs at most `room + claims + 1` claimable candidates from
+        // its ordered crush list to reproduce the full `Matter::fell` pass.
+        let room = self.matter.debris.fragment_room(&self.matter.tuning) as usize;
+        let cut_limit = if room == 0 {
+            0
+        } else {
+            room.saturating_add(self.matter.debris.claims())
+                .saturating_add(1)
+        };
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
         // again next tick, in the same stable spatial order as motion below.
@@ -3693,6 +3705,7 @@ impl BlastRange {
         for id in motion_order {
             unit_detail(id, "begin");
             let u = &mut self.units[id];
+            u.motion.cut_limit = cut_limit;
             u.motion.allow_start(starts > 0);
             {
                 let others: Vec<_> = positions
@@ -3747,6 +3760,7 @@ impl BlastRange {
             unit_detail(id, "unit_done");
         }
         if !self.battle_mode() {
+            self.gun.motion.cut_limit = cut_limit;
             self.gun.motion.allow_start(starts > 0);
             self.gun.motion.step(
                 &self.world,
