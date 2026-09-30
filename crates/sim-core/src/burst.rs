@@ -3417,6 +3417,7 @@ impl Bursts {
                 stale_wrecks.insert(f.held);
             }
         }
+        completed("debris_wake");
         // All support checks and flying-slot claims above retain fragment
         // order. Translation reads only the frozen world, hulls and settled
         // index; no fragment observes another fragment's new position until
@@ -3449,6 +3450,7 @@ impl Bursts {
                 .collect()
         };
         let landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
+        completed("debris_translate");
         for i in 0..self.fragments.len() {
             if !self.fragments[i].resting || self.fragments[i].chunk.is_some() {
                 continue;

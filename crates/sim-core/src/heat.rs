@@ -214,11 +214,14 @@ impl Heat {
             return;
         }
         let budget = t.cells_per_tick.max(1);
-        let mut batch: Vec<[u32; 3]> = match self.cursor {
+        // Capture each old value during the ordered range walk instead of
+        // looking it up in the tree again for both gain and cooling passes.
+        // Gains are still committed after reading all burning sources.
+        let mut batch: Vec<([u32; 3], HeatCell)> = match self.cursor {
             Some(c) => self
                 .cells
                 .range(c..)
-                .map(|(k, _)| *k)
+                .map(|(k, c)| (*k, *c))
                 .take(budget)
                 .collect(),
             None => Vec::new(),
@@ -228,15 +231,14 @@ impl Heat {
             batch.extend(
                 self.cells
                     .range(..bound)
-                    .map(|(k, _)| *k)
+                    .map(|(k, c)| (*k, *c))
                     .take(budget - batch.len()),
             );
         }
         // Burning cells feed their solid neighbours; gains are gathered
         // first so the order of the batch cannot favour a direction.
         let mut gain: BTreeMap<[u32; 3], u32> = BTreeMap::new();
-        for &p in &batch {
-            let c = self.cells[&p];
+        for &(p, c) in &batch {
             if c.burn == 0 {
                 continue;
             }
@@ -254,7 +256,7 @@ impl Heat {
             }
         }
         let mut last = None;
-        for p in batch {
+        for (p, mut c) in batch {
             last = Some(p);
             let m = w.material(p[0], p[1], p[2]);
             if m == AIR {
@@ -265,7 +267,6 @@ impl Heat {
             if claimed(p) {
                 continue;
             }
-            let mut c = self.cells[&p];
             c.heat = c
                 .heat
                 .saturating_add(gain.remove(&p).unwrap_or(0))

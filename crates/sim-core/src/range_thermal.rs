@@ -143,6 +143,15 @@ impl Thermals {
         self.rejected_heat = self.rejected_heat.saturating_add(u64::from(heat - used));
     }
     pub fn step(&mut self, units: &mut [RangeUnit], matter: &mut Matter, t: &Tuning) {
+        self.step_observed(units, matter, t, |_| {});
+    }
+    fn step_observed(
+        &mut self,
+        units: &mut [RangeUnit],
+        matter: &mut Matter,
+        t: &Tuning,
+        mut completed: impl FnMut(&'static str),
+    ) {
         let batch = self.batch_after(self.cursor, t.cells_per_tick);
         self.cursor = batch.last().copied();
         let mut delta = BTreeMap::<Cell, i64>::new();
@@ -181,6 +190,7 @@ impl Thermals {
                 available -= share;
             }
         }
+        completed("unit_heat_conduction");
         for (p, change) in delta {
             let heat = i64::from(self.heat(p)) + change;
             if heat <= 0 {
@@ -189,12 +199,24 @@ impl Thermals {
                 self.cells.insert(p, heat.min(i64::from(HEAT_CAP)) as u32);
             }
         }
+        completed("unit_heat_commit");
         let mut changed = BTreeSet::new();
+        // Nothing can free a fragment slot during this ordered melting pass.
+        // Each successful melt emits exactly one flying piece; once full,
+        // further attempts would only rescan every fragment to refuse it.
+        let mut room = if batch.is_empty() {
+            0
+        } else {
+            matter.debris.fragment_room(&matter.tuning)
+        };
         for p in batch {
             let Some(body) = p.body(units) else {
                 self.cells.remove(&p);
                 continue;
             };
+            if room == 0 {
+                continue;
+            }
             let cell = p.at.map(usize::from);
             let role = body.part_at(cell[0], cell[1], cell[2]) as usize;
             if temperature(self.heat(p), body.mm) < t.softening[role] {
@@ -209,6 +231,7 @@ impl Thermals {
             if !matter.melt_unit(id, u, usize::from(p.part), cell) {
                 continue;
             }
+            room -= 1;
             if p.part == 0 {
                 u.body.remove(cell[0], cell[1], cell[2]);
                 u.removed.push(p.at);
@@ -228,9 +251,11 @@ impl Thermals {
             self.melted += 1;
             changed.insert(id);
         }
+        completed("unit_heat_melt");
         for id in changed {
             units[id].refresh_damage(id);
         }
+        completed("unit_heat_damage");
     }
     pub fn save(&self, b: &mut Blob) {
         b.usize(self.cells.len());
@@ -285,9 +310,17 @@ impl Thermals {
     }
 }
 impl BlastRange {
+    #[cfg(test)]
     pub(super) fn step_unit_heat(&mut self) {
-        self.thermals
-            .step(&mut self.units, &mut self.matter, &self.thermal_tuning);
+        self.step_unit_heat_observed(|_| {});
+    }
+    pub(super) fn step_unit_heat_observed(&mut self, completed: impl FnMut(&'static str)) {
+        self.thermals.step_observed(
+            &mut self.units,
+            &mut self.matter,
+            &self.thermal_tuning,
+            completed,
+        );
     }
 }
 
@@ -398,6 +431,37 @@ mod tests {
         r.matter.tuning.max_fragments = cap;
         r.step_unit_heat();
         assert!(p.body(&r.units).is_none());
+    }
+    #[test]
+    fn melting_consumes_last_slot_and_retains_the_next_hot_cell() {
+        let mut r = range();
+        r.thermal_tuning.cooling_milli = 0;
+        r.thermal_tuning.conduction_milli = 0;
+        r.thermal_tuning.softening = [1; 5];
+        let a = cell(&r, Part::Armour);
+        let b = cell(&r, Part::Engine);
+        for p in [a, b] {
+            r.thermals.deposit(p, 1000, &r.thermal_tuning);
+        }
+        let before = r.units[0].body.solid_count();
+        r.matter.tuning.max_fragments = 1;
+        r.matter.tuning.max_flying = 1;
+        r.step_unit_heat();
+        assert_eq!(r.thermals.melted, 1);
+        assert_eq!(r.matter.debris.fragments.len(), 1);
+        assert_eq!(r.units[0].body.solid_count(), before - 1);
+        let (first, waiting) = if a < b { (a, b) } else { (b, a) };
+        assert!(first.body(&r.units).is_none());
+        assert!(waiting.body(&r.units).is_some());
+        assert_eq!(r.thermals.heat(waiting), 1000);
+        assert!(r.matter.economy.ledger.balanced());
+        r.matter.tuning.max_fragments = 2;
+        r.matter.tuning.max_flying = 2;
+        r.step_unit_heat();
+        assert_eq!(r.thermals.melted, 2);
+        assert!(waiting.body(&r.units).is_none());
+        assert_eq!(r.thermals.hot(), 0);
+        assert!(r.matter.economy.ledger.balanced());
     }
     #[test]
     fn thermal_budget_rotates_and_full_field_keeps_existing_heat() {

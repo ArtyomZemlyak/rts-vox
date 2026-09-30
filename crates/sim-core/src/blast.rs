@@ -4088,6 +4088,7 @@ impl BlastRange {
         completed("unit_fire");
         self.exchange_heat();
         completed("heat_exchange");
+        detail("heat_begin");
         {
             // Fire consumes voxels through the same edit queue as the wave;
             // cells the wave has claimed wait for it.
@@ -4101,6 +4102,7 @@ impl BlastRange {
             heat.step(world, &matter.economy.mats, heat_tuning, |p| {
                 matter.debris.claimed(p)
             });
+            detail("heat_world");
             // Melted voxels run off as debris (ADR-290); one the pool
             // cannot take keeps its heat for the next tick.
             for p in heat.melting.clone() {
@@ -4109,13 +4111,16 @@ impl BlastRange {
                     heat.melted_total += 1;
                 }
             }
+            detail("heat_melt");
         }
-        self.step_unit_heat();
+        self.step_unit_heat_observed(&mut detail);
+        detail("heat_units");
         self.world.flush();
         self.world_changed = nav::vehicle::Changed::default();
         for e in self.world.edits() {
             self.world_changed.column(e.x as i32, e.z as i32);
         }
+        detail("heat_edits");
         completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse
         // layer finds what the edits left hanging and digs it out as
