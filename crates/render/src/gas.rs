@@ -168,6 +168,9 @@ pub struct GasInput {
     pub distant_uploads: distant::Uploads,
     pub distant_edits: std::collections::BTreeSet<[u32; 2]>,
     pub terrain_dirty: Vec<std::ops::Range<usize>>,
+    /// Mask invalidation consumes each dirty span once, independently of the
+    /// GPU upload acknowledgement that controls `terrain_dirty` retention.
+    mask_dirty_cursor: usize,
     /// Where the volume of terrain sits in the world (ADR-318).
     pub window: TerrainWindow,
     /// The scene can wait for actual shader readiness before advancing capture.
@@ -201,6 +204,7 @@ impl Default for GasInput {
             distant_uploads: default(),
             distant_edits: default(),
             terrain_dirty: vec![],
+            mask_dirty_cursor: 0,
             window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
             timings: Arc::new(GasTimings::default()),
@@ -258,6 +262,7 @@ impl ExtractResource for GasInput {
             distant_uploads: source.distant_uploads.clone(),
             distant_edits: default(),
             terrain_dirty: Vec::new(),
+            mask_dirty_cursor: 0,
             window: source.window,
             ready: source.ready.clone(),
             timings: source.timings.clone(),
@@ -280,6 +285,7 @@ impl GasInput {
     pub fn begin_frame(&mut self) {
         if self.uploaded.load(Ordering::Acquire) == self.terrain_revision {
             self.terrain_dirty.clear();
+            self.mask_dirty_cursor = 0;
         }
     }
     fn patches(&self) -> impl Iterator<Item = (usize, &[u32])> {
@@ -309,8 +315,10 @@ impl GasInput {
         )
     }
     pub fn advance(&mut self, step: u32) {
+        let new_dirty = &self.terrain_dirty[self.mask_dirty_cursor..];
         self.atmosphere
-            .advance_gpu(step, &self.terrain_words, self.window, &self.terrain_dirty);
+            .advance_gpu(step, &self.terrain_words, self.window, new_dirty);
+        self.mask_dirty_cursor = self.terrain_dirty.len();
     }
 }
 
@@ -337,6 +345,38 @@ mod window_tests {
         source.uploaded.store(4, Ordering::Release);
         source.begin_frame();
         assert!(source.terrain_dirty.is_empty());
+    }
+    #[test]
+    fn mask_cursor_consumes_only_new_spans_without_losing_gpu_patches() {
+        let mut source = GasInput {
+            terrain_words: Arc::new(vec![0; 64]),
+            terrain_revision: 2,
+            terrain_dirty: vec![2..5],
+            ..default()
+        };
+        source.uploaded.store(1, Ordering::Release);
+        source.advance(1);
+        assert_eq!(source.mask_dirty_cursor, 1);
+        source.begin_frame(); // Render has not acknowledged revision 2.
+        assert_eq!(source.terrain_dirty.len(), 1);
+        source.advance(2);
+        assert_eq!(source.mask_dirty_cursor, 1);
+        source.terrain_dirty.push(8..11);
+        source.terrain_revision = 3;
+        source.advance(3);
+        assert_eq!(source.mask_dirty_cursor, 2);
+        assert_eq!(
+            GasInput::extract_resource(&source).patches,
+            vec![2..5, 8..11]
+        );
+        source.uploaded.store(3, Ordering::Release);
+        source.begin_frame();
+        assert_eq!(source.mask_dirty_cursor, 0);
+        source.terrain_dirty.push(20..21);
+        source.terrain_revision = 4;
+        source.advance(4);
+        assert_eq!(source.mask_dirty_cursor, 1);
+        assert_eq!(GasInput::extract_resource(&source).patches, vec![20..21]);
     }
     #[test]
     #[ignore = "manual CPU benchmark of one streamed x slab, includes resource drop"]

@@ -405,7 +405,52 @@ fn refresh_mask(r: &mut Region, words: &[u32], window: TerrainWindow, spans: &[R
 
 #[cfg(test)]
 mod tests {
+    use super::super::GasInput;
     use super::*;
+    #[test]
+    fn gpu_masks_only_consume_new_dirty_spans_across_catch_up_ticks() {
+        let window = TerrainWindow {
+            origin: [0, 0, 0],
+            dims: [256, 64, 256],
+        };
+        let mut gas = GasInput {
+            window,
+            terrain_words: Arc::new(vec![0; window.words()]),
+            ..default()
+        };
+        gas.atmosphere.emit(shot(100.0, false));
+        gas.advance(0);
+        gas.atmosphere.regions[0].as_mut().unwrap().params.origin = Vec4::new(80.0, 0.0, 80.0, 1.0);
+        let revision = gas.atmosphere.regions[0].as_ref().unwrap().mask_revision;
+
+        let outside = window.index([1, 0, 1]).unwrap() / 8;
+        gas.terrain_dirty.push(outside..outside + 1);
+        gas.advance(1);
+        assert_eq!(
+            gas.atmosphere.regions[0].as_ref().unwrap().mask_revision,
+            revision
+        );
+
+        let inside = window.index([100, 20, 100]).unwrap() / 8;
+        gas.terrain_dirty.push(inside..inside + 1);
+        gas.advance(2);
+        assert_eq!(
+            gas.atmosphere.regions[0].as_ref().unwrap().mask_revision,
+            revision + 1
+        );
+        gas.advance(3);
+        assert_eq!(
+            gas.atmosphere.regions[0].as_ref().unwrap().mask_revision,
+            revision + 1
+        );
+
+        gas.window.origin[0] += 8;
+        gas.advance(4);
+        assert_eq!(
+            gas.atmosphere.regions[0].as_ref().unwrap().mask_revision,
+            revision + 2
+        );
+    }
     #[test]
     fn gpu_mask_invalidation_covers_each_changed_voxel_across_wraps() {
         let window = TerrainWindow {
