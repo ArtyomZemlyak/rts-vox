@@ -800,7 +800,10 @@ impl Matter {
             return None;
         }
         let n = s.u32() as usize;
-        if n > 1 << 16 {
+        // A kilometre-scale battle can have over 65k crown cells awaiting
+        // support updates. Bound an untrusted count by the encoded bytes as
+        // well as an absolute ceiling instead of rejecting valid snapshots.
+        if n > 1 << 24 || n > s.left() / 24 {
             return None;
         }
         self.felling.clear();

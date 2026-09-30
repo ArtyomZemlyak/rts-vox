@@ -723,6 +723,9 @@ impl BlastRange {
         {
             return Err("Нужен хотя бы один свой и один вражеский юнит");
         }
+        if self.units.len() >= 16 && self.navigation_workers > 1 && self.navigation_pool.is_none() {
+            self.set_navigation_workers(self.navigation_workers);
+        }
         self.control();
         self.fire_tick = u32::MAX;
         self.patrols_running = true;

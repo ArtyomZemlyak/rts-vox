@@ -1807,6 +1807,7 @@ fn sixteen_machines_fight_the_training_battle_and_replay() {
         a.step();
     }
     let mut b = BlastRange::restore(config, &a.snapshot()).unwrap();
+    assert!(b.set_navigation_workers(1));
     for tick in 0..90 {
         a.step();
         b.step();

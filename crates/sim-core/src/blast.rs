@@ -17,6 +17,7 @@ use modding::explosion::{ExplosionConfig, ProjectileMotion};
 use modding::range::{RangeLayout, RangeShieldDef, RangeUnitKind};
 use motion::Motion;
 use phys::blast::Wave;
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use voxel::bodies::Bodies;
 use voxel::collapse::CollapseLayer;
@@ -2204,6 +2205,10 @@ pub struct BlastRange {
     pub turret: crate::turret::Traverse,
     turret_limits: crate::turret::Limits,
     pub navigation: modding::navigation::Navigation,
+    /// Fixed-size, local pool for terrain-only route continuations. Runtime
+    /// infrastructure, never part of the authoritative snapshot or hash.
+    navigation_pool: Option<rayon::ThreadPool>,
+    navigation_workers: usize,
     pub shields: Vec<RangeShield>,
     /// Transient renderer notification, like `surface_changed`.
     pub shield_hits: Vec<ShieldHit>,
@@ -2267,6 +2272,28 @@ fn relative_contact_velocity(
 }
 
 impl BlastRange {
+    /// Set a fixed route-worker count for this scene. One keeps the serial
+    /// path; all worker counts execute the same logical search allowances.
+    pub fn set_navigation_workers(&mut self, workers: usize) -> bool {
+        if !(1..=8).contains(&workers) {
+            return false;
+        }
+        let pool = if workers == 1 {
+            None
+        } else {
+            match rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .thread_name(|i| format!("range-nav-{i}"))
+                .build()
+            {
+                Ok(pool) => Some(pool),
+                Err(_) => return false,
+            }
+        };
+        self.navigation_pool = pool;
+        self.navigation_workers = workers;
+        true
+    }
     /// Known chunks, component nodes, chunks needing an anchor path and edges.
     pub fn support_graph_size(&self) -> [usize; 4] {
         self.collapse.graph_size()
@@ -2606,6 +2633,8 @@ impl BlastRange {
                 crate::TICKS_PER_SECOND,
             ),
             navigation,
+            navigation_pool: None,
+            navigation_workers: 4,
             shields,
             shield_hits: Vec::new(),
             shield_tuning,
@@ -3271,7 +3300,13 @@ impl BlastRange {
         if version >= 46 {
             r.battle.autonomous = s.bool();
         }
-        (s.ok() && s.left() == 0).then_some(r)
+        if !s.ok() || s.left() != 0 {
+            return None;
+        }
+        if r.battle_mode() && r.units.len() >= 16 {
+            r.set_navigation_workers(4);
+        }
+        Some(r)
     }
 
     pub fn state_hash(&self) -> u64 {
@@ -3554,11 +3589,22 @@ impl BlastRange {
     }
     /// Report completed phases to a read-only observer. The simulation never
     /// reads clocks or consumes a result from it; benches own their timers.
-    pub fn step_observed(&mut self, mut completed: impl FnMut(&'static str)) {
+    pub fn step_observed(&mut self, completed: impl FnMut(&'static str)) {
+        self.step_observed_detail(completed, |_| {}, |_, _| {});
+    }
+    /// Optional boundaries inside motion for external profilers. The
+    /// simulation never reads their timing or changes scheduling from them.
+    pub fn step_observed_detail(
+        &mut self,
+        mut completed: impl FnMut(&'static str),
+        mut detail: impl FnMut(&'static str),
+        mut unit_detail: impl FnMut(usize, bool),
+    ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
         let changed = self.refresh_rubble();
         completed("rubble");
+        detail("motion_begin");
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.
         for s in &mut self.shields {
@@ -3614,6 +3660,30 @@ impl BlastRange {
             };
             m.allow_resume(work);
         }
+        if count >= 2 {
+            if let Some(pool) = &self.navigation_pool {
+                // Search only against immutable terrain and rubble. A hull
+                // recovering from contact keeps its local blocker search in
+                // the serial motion pass below. Indexed chunks keep each
+                // hull's state independent and leave commit order unchanged.
+                let world = &self.world;
+                let rubble = &self.rubble;
+                let tick = self.tick;
+                pool.install(|| {
+                    let _: Vec<()> = self
+                        .units
+                        .par_chunks_mut(2)
+                        .map(|chunk| {
+                            for u in chunk {
+                                u.motion
+                                    .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
+                            }
+                        })
+                        .collect();
+                });
+            }
+        }
+        detail("motion_routes");
         let mut contacts = Vec::new();
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
@@ -3621,6 +3691,7 @@ impl BlastRange {
             (p[0], p[2], id)
         });
         for id in motion_order {
+            unit_detail(id, true);
             let u = &mut self.units[id];
             u.motion.allow_start(starts > 0);
             {
@@ -3672,6 +3743,7 @@ impl BlastRange {
                 }
             }
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
+            unit_detail(id, false);
         }
         if !self.battle_mode() {
             self.gun.motion.allow_start(starts > 0);
@@ -3692,6 +3764,7 @@ impl BlastRange {
                 contacts.push((self.units.len(), target, velocity));
             }
         }
+        detail("motion_commit");
         // Position acceptance above remains in stable spatial order. Sample all
         // contact velocities before transferring any shove: a hull touched
         // twice in one tick must not make the second contact order-dependent.
@@ -3755,6 +3828,7 @@ impl BlastRange {
         for ((a, b), closing) in impacts {
             self.contact_damage(a, b, closing);
         }
+        detail("motion_contacts");
         // Hulls cut yielding vegetation along their path; the crown that
         // hung from those cells follows over the next ticks.
         let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
@@ -3770,6 +3844,7 @@ impl BlastRange {
         }
         self.matter
             .step_felling(&mut self.world, &self.navigation.fell);
+        detail("motion_felling");
         if battle_mode {
             completed("motion");
         }
@@ -8180,11 +8255,10 @@ mod tests {
             .gun
             .motion
             .move_to(&a.world, goal, &a.gun.body, &[obstacle], &a.rubble));
-        // The obstructed target ring is checked in bounded slices too.
-        for tick in 0..20 {
-            if !a.gun.motion.searching() {
-                break;
-            }
+        // Global planning ignores moving bodies until contact. Drive into
+        // the occupied route before checking recovery from that contact.
+        let mut contact_tick = None;
+        for tick in 0..300 {
             a.gun.motion.step(
                 &a.world,
                 &a.gun.body,
@@ -8197,24 +8271,36 @@ mod tests {
                 &a.rubble,
                 &nav::vehicle::Changed::default(),
             );
+            if a.gun.motion.blocked && !a.gun.motion.searching() {
+                contact_tick = Some(tick);
+                break;
+            }
         }
+        let contact_tick = contact_tick.expect("the occupied route did not cause contact");
         assert!(!a.gun.motion.searching());
         assert!(a.gun.motion.blocked);
-        assert!(a.gun.motion.path.is_empty());
+        assert_eq!(a.gun.motion.destination, Some(goal));
         let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
-        b.gun.motion.step(
-            &b.world,
-            &b.gun.body,
-            true,
-            true,
-            b.gun.mobility,
-            &[],
-            b.gun.motion.replan + 20,
-            b.config.gravity,
-            &b.rubble,
-            &nav::vehicle::Changed::default(),
-        );
-        assert!(!b.gun.motion.path.is_empty());
+        let blocked_at = b.gun.motion.pos;
+        for tick in contact_tick + 1..contact_tick + 301 {
+            b.gun.motion.step(
+                &b.world,
+                &b.gun.body,
+                true,
+                true,
+                b.gun.mobility,
+                &[],
+                tick,
+                b.config.gravity,
+                &b.rubble,
+                &nav::vehicle::Changed::default(),
+            );
+            if b.gun.motion.destination.is_none() {
+                break;
+            }
+        }
+        assert!(b.gun.motion.pos[0] > blocked_at[0]);
+        assert_eq!(b.gun.motion.destination, None);
         a.gun.motion.stop();
         a.gun.motion.step(
             &a.world,

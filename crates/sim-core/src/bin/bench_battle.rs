@@ -1,7 +1,43 @@
 //! Bounded battle load, including real damage, concurrent waves and bookkeeping.
 use sim_core::blast::battle::{Order, Phase, Weapon};
 use sim_core::blast::BlastRange;
+use std::io::Write;
 use std::time::Instant;
+
+#[derive(Default)]
+struct TickProfile {
+    tick: u32,
+    total_us: u128,
+    motion_us: u128,
+    route_us: u128,
+    commit_us: u128,
+    contact_us: u128,
+    felling_us: u128,
+    debris_us: u128,
+    battle_orders_us: u128,
+    rubble_us: u128,
+    heat_flush_us: u128,
+    searching: usize,
+    moving: usize,
+    blocked: usize,
+    fragments: usize,
+    flying: usize,
+    chunks: usize,
+    felling: usize,
+}
+
+impl TickProfile {
+    fn record_phase(&mut self, name: &str, us: u128) {
+        match name {
+            "motion" => self.motion_us = us,
+            "debris" => self.debris_us = us,
+            "battle_orders" => self.battle_orders_us = us,
+            "rubble" => self.rubble_us = us,
+            "heat_flush" => self.heat_flush_us = us,
+            _ => {}
+        }
+    }
+}
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -14,6 +50,14 @@ fn main() {
     let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
+    let tick_csv = args
+        .windows(2)
+        .find(|w| w[0] == "--tick-csv")
+        .map(|w| w[1].as_str());
+    let workers = args
+        .windows(2)
+        .find(|w| w[0] == "--workers")
+        .map(|w| w[1].parse::<usize>().expect("workers"));
     let focus = args
         .windows(2)
         .find(|w| w[0] == "--focus-unit")
@@ -151,6 +195,9 @@ fn main() {
         assert!(sim.set_ai_vs_ai(true));
     }
     sim.start_battle().unwrap();
+    if let Some(workers) = workers {
+        assert!(sim.set_navigation_workers(workers), "workers: 1..=8");
+    }
     if args.iter().any(|a| a == "--group-order-bench") {
         assert!(world_battle, "--group-order-bench requires --world");
         let ids: Vec<_> = sim
@@ -226,6 +273,7 @@ fn main() {
         assert!(sim.battle_order(1, Order::Attack(2), None));
     }
     let mut samples = Vec::new();
+    let mut tick_profiles = Vec::new();
     let mut peak_rounds = 0;
     let mut assault_shots = 0;
     let mut assault_weapon = true;
@@ -249,17 +297,76 @@ fn main() {
         "replay requires 300 ticks after the snapshot"
     );
     let mut restored = None;
-    for _ in 0..ticks {
+    let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
+    let mut unit_start = vec![Instant::now(); sim.units.len()];
+    for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
-        sim.step_observed(|phase| {
-            let now = Instant::now();
-            let elapsed = now.duration_since(last).as_micros();
-            last = now;
-            phases.entry(phase).or_default().push(elapsed);
-        });
+        let mut detail_last = start;
+        let mut motion_detail = [0u128; 4];
+        let mut profile = TickProfile::default();
+        let unit_window = &mut unit_time_windows[tick_index / 300];
+        sim.step_observed_detail(
+            |phase| {
+                let now = Instant::now();
+                let elapsed = now.duration_since(last).as_micros();
+                last = now;
+                phases.entry(phase).or_default().push(elapsed);
+                if tick_csv.is_some() {
+                    profile.record_phase(phase, elapsed);
+                }
+            },
+            |name| {
+                if tick_csv.is_some() {
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(detail_last).as_micros();
+                    detail_last = now;
+                    match name {
+                        "motion_begin" => {}
+                        "motion_routes" => motion_detail[0] = elapsed,
+                        "motion_commit" => motion_detail[1] = elapsed,
+                        "motion_contacts" => motion_detail[2] = elapsed,
+                        "motion_felling" => motion_detail[3] = elapsed,
+                        _ => unreachable!(),
+                    }
+                }
+            },
+            |id, begin| {
+                if tick_csv.is_some() {
+                    let now = Instant::now();
+                    if begin {
+                        unit_start[id] = now;
+                    } else {
+                        unit_window[id] += now.duration_since(unit_start[id]).as_micros();
+                    }
+                }
+            },
+        );
         // Measure the authoritative tick, excluding optional replay and log I/O.
-        samples.push(start.elapsed().as_micros());
+        let elapsed = start.elapsed().as_micros();
+        samples.push(elapsed);
+        if tick_csv.is_some() {
+            profile.tick = sim.tick;
+            profile.total_us = elapsed;
+            [
+                profile.route_us,
+                profile.commit_us,
+                profile.contact_us,
+                profile.felling_us,
+            ] = motion_detail;
+            for unit in std::iter::once(&sim.gun).chain(sim.units.iter()) {
+                profile.searching += usize::from(unit.motion.searching());
+                profile.moving += usize::from(unit.motion.destination.is_some());
+                profile.blocked += usize::from(unit.motion.blocked);
+            }
+            profile.fragments = sim.matter.debris.fragments.len();
+            profile.felling = sim.matter.felling_pending();
+            for fragment in &sim.matter.debris.fragments {
+                profile.flying += usize::from(!fragment.resting);
+                profile.chunks += usize::from(fragment.chunk.is_some());
+            }
+            tick_profiles.push(profile);
+        }
         if replay && sim.tick == snapshot_tick {
             let bytes = sim.snapshot();
             println!(
@@ -410,6 +517,86 @@ fn main() {
                 .sunk(sim_core::matter::Sink::Annihilation),
             0
         );
+    }
+    if let Some(path) = tick_csv {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_orders_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling").unwrap();
+        for p in &tick_profiles {
+            writeln!(
+                out,
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                p.tick,
+                p.total_us,
+                p.motion_us,
+                p.route_us,
+                p.commit_us,
+                p.contact_us,
+                p.felling_us,
+                p.debris_us,
+                p.battle_orders_us,
+                p.rubble_us,
+                p.heat_flush_us,
+                p.searching,
+                p.moving,
+                p.blocked,
+                p.fragments,
+                p.flying,
+                p.chunks,
+                p.felling
+            )
+            .unwrap();
+        }
+        out.flush().unwrap();
+        for (index, window) in tick_profiles.chunks(300).enumerate() {
+            let len = window.len() as u128;
+            let mut times: Vec<_> = window.iter().map(|p| p.total_us).collect();
+            times.sort_unstable();
+            println!("tick_window={}..{} mean_us={} p99_us={} motion_us={} route_us={} commit_us={} contact_us={} felling_us={} debris_us={} battle_orders_us={} searches_max={} flying_max={} fragments_max={} felling_max={}",
+                window[0].tick, window[window.len()-1].tick,
+                window.iter().map(|p| p.total_us).sum::<u128>() / len,
+                times[times.len() * 99 / 100],
+                window.iter().map(|p| p.motion_us).sum::<u128>() / len,
+                window.iter().map(|p| p.route_us).sum::<u128>() / len,
+                window.iter().map(|p| p.commit_us).sum::<u128>() / len,
+                window.iter().map(|p| p.contact_us).sum::<u128>() / len,
+                window.iter().map(|p| p.felling_us).sum::<u128>() / len,
+                window.iter().map(|p| p.debris_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_orders_us).sum::<u128>() / len,
+                window.iter().map(|p| p.searching).max().unwrap(),
+                window.iter().map(|p| p.flying).max().unwrap(),
+                window.iter().map(|p| p.fragments).max().unwrap(),
+                window.iter().map(|p| p.felling).max().unwrap());
+            let mut units: Vec<_> = unit_time_windows[index]
+                .iter()
+                .copied()
+                .enumerate()
+                .collect();
+            units.sort_unstable_by_key(|&(id, us)| (std::cmp::Reverse(us), id));
+            println!(
+                "motion_units_window={}..{} top_us_per_tick={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                units
+                    .into_iter()
+                    .take(8)
+                    .map(|(id, us)| (id, us / len))
+                    .collect::<Vec<_>>()
+            );
+        }
+        println!("tick_csv={path}");
+        let (mut single, mut full, mut identity) = (0, 0, 0);
+        for fragment in &sim.matter.debris.fragments {
+            single += usize::from(fragment.shape.count_ones() == 1);
+            let cells = u32::from(fragment.side.clamp(1, 4)).pow(3);
+            let mask = if cells == 64 {
+                u64::MAX
+            } else {
+                (1u64 << cells) - 1
+            };
+            full += usize::from(fragment.shape == mask);
+            identity += usize::from(fragment.basis == sim_core::burst::IDENTITY);
+        }
+        println!("fragment_shapes single={single} full={full} identity={identity}");
     }
     samples.sort_unstable();
     let count = samples.len();

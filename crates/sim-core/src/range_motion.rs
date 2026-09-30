@@ -182,6 +182,9 @@ pub struct Motion {
     /// Per-tick continuation allowance assigned by the range. Scratch,
     /// recomputed before motion after loading; standalone callers use tuning.
     resume_budget: Option<usize>,
+    /// This tick's terrain-only continuation was run before spatially ordered
+    /// motion. Never serialized; the enclosing tick is atomic.
+    prepared_hunt: bool,
     started: bool,
 }
 /// Fair continuation shares in stable slot order. Rotate the remainder so
@@ -328,6 +331,7 @@ impl Motion {
             next_plan: 0,
             may_start: true,
             resume_budget: None,
+            prepared_hunt: false,
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -1138,6 +1142,21 @@ impl Motion {
             None => self.hunt = Some(hunt),
         }
     }
+    /// Continue a search that cannot read live blockers independently of the
+    /// spatial motion commit. The caller may run these on a fixed worker pool.
+    pub(super) fn prepare_terrain_hunt(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        rubble: &nav::vehicle::Rubble,
+        tick: u32,
+        changed: &nav::vehicle::Changed,
+    ) {
+        if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
+            self.hunt_step(w, b, &[], rubble, tick, changed);
+            self.prepared_hunt = true;
+        }
+    }
     /// Ticks until the next search after the last one: four replan periods
     /// when it ran the open set dry, one otherwise (P-17).
     fn replan_after_search(&self) -> u32 {
@@ -1240,7 +1259,9 @@ impl Motion {
         let engine = engine && self.can_drive(response);
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
-        self.hunt_step(w, b, others, rubble, tick, changed);
+        if !std::mem::take(&mut self.prepared_hunt) {
+            self.hunt_step(w, b, others, rubble, tick, changed);
+        }
         // A partial route is a prefix the budget ran out on, planned
         // around whatever stood there then: the hull searches again on its
         // cadence while it drives it and takes the new route up (ADR-467).
@@ -1638,6 +1659,7 @@ impl Motion {
     pub(crate) fn load_version(&mut self, s: &mut Scan, continuation: bool) -> bool {
         self.contact = None;
         self.dry = false;
+        self.prepared_hunt = false;
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),
