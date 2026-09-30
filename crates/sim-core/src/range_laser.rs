@@ -133,6 +133,14 @@ impl BlastRange {
                     .then_some((id, box_at))
             })
             .collect();
+        // Above both the terrain column and every nearby unit box there is
+        // no heatable matter. Clip vertical loops before evaluating the
+        // exact distance to the beam for each empty-air candidate.
+        let unit_top = bounds
+            .iter()
+            .map(|(_, (_, hi))| hi[1] + 1)
+            .max()
+            .unwrap_or(0);
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));
         let mut doses = BTreeMap::<thermal::Cell, u32>::new();
         let r2 = i64::from(radius * 16).pow(2);
@@ -150,14 +158,30 @@ impl BlastRange {
             let centre: [i32; 3] = std::array::from_fn(|i| {
                 ((a[i] + d[i] * (axial - a[axis]) / axial_length) / 16) as i32
             });
+            let x_lo = (centre[u] - 2 * radius).max(0);
+            let mut x_hi = (centre[u] + 2 * radius).min(self.size[u] as i32 - 1);
+            let y_lo = (centre[v] - 2 * radius).max(0);
+            let y_hi = (centre[v] + 2 * radius).min(self.size[v] as i32 - 1);
+            // For an X-dominant beam, the outer transverse coordinate is
+            // height. A single maximum over this slice rejects only air.
+            if axis == 0 {
+                let top = (y_lo..=y_hi)
+                    .map(|z| self.world.column_ceiling(along as u32, z as u32) as i32)
+                    .max()
+                    .unwrap_or(0)
+                    .max(unit_top);
+                x_hi = x_hi.min(top - 1);
+            }
             // At most sqrt(3) times the radius on an axial slice, including
             // endpoint caps. Every world cell is visited exactly once.
-            for x in (centre[u] - 2 * radius).max(0)
-                ..=(centre[u] + 2 * radius).min(self.size[u] as i32 - 1)
-            {
-                for y in (centre[v] - 2 * radius).max(0)
-                    ..=(centre[v] + 2 * radius).min(self.size[v] as i32 - 1)
-                {
+            for x in x_lo..=x_hi {
+                let mut column_y_hi = y_hi;
+                if axis == 2 {
+                    let top =
+                        (self.world.column_ceiling(x as u32, along as u32) as i32).max(unit_top);
+                    column_y_hi = column_y_hi.min(top - 1);
+                }
+                for y in y_lo..=column_y_hi {
                     let mut p = [0; 3];
                     p[axis] = along;
                     p[u] = x;
