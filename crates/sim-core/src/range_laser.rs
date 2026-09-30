@@ -169,18 +169,9 @@ impl BlastRange {
                     if outside_halo(q, d, length2, radius) {
                         continue;
                     }
-                    let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
-                    let source: [i64; 3] = std::array::from_fn(|i| a[i] + d[i] * dot / length2);
-                    let distance2 = (0..3)
-                        .map(|i| (i64::from(p[i]) * 16 + 8 - source[i]).pow(2))
-                        .sum::<i64>();
-                    if distance2 >= r2 {
-                        continue;
-                    }
-                    let heat = (i64::from(tuning.heat) * (r2 - distance2) / r2) as u32;
-                    if heat == 0 {
-                        continue;
-                    }
+                    // A dose can only reach actual unit or terrain matter.
+                    // Test that before the three exact projection divisions;
+                    // the vast majority of halo candidates are empty air.
                     let cell = self.laser_cell(p, &bounds);
                     if cell.is_some() && cell == core_cell {
                         continue;
@@ -206,6 +197,18 @@ impl BlastRange {
                         {
                             continue;
                         }
+                    }
+                    let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
+                    let source: [i64; 3] = std::array::from_fn(|i| a[i] + d[i] * dot / length2);
+                    let distance2 = (0..3)
+                        .map(|i| (i64::from(p[i]) * 16 + 8 - source[i]).pow(2))
+                        .sum::<i64>();
+                    if distance2 >= r2 {
+                        continue;
+                    }
+                    let heat = (i64::from(tuning.heat) * (r2 - distance2) / r2) as u32;
+                    if heat == 0 {
+                        continue;
                     }
                     if !self.laser_visible(source, p, cell, &bounds) {
                         continue;
