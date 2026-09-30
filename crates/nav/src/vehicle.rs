@@ -1040,13 +1040,22 @@ impl<'a> Probe<'a> {
         let level = pitch == Fx::ZERO && roll == Fx::ZERO;
         let hull_height = Fx::from_int(s.height);
         for z in lo[1]..=hi[1] {
-            for (x, u, v) in Self::row(pos, c, sin, s, lo[0], hi[0], z) {
+            // A proved clear tile needs no footprint transforms either.
+            // Start each remaining run at its exact local coordinate; moving
+            // by whole columns adds an integral multiple of c / -sin, with
+            // the same fixed-point rounding as the unsplit row.
+            let (first, last) = clear_tiles
+                .as_ref()
+                .map_or((0, 0), |(first, _, _)| (first[0], hi[0] / 8));
+            let runs = (first..=last).filter_map(|tile| {
                 if let Some((first, width, clear)) = &clear_tiles {
-                    let i = (z / 8 - first[1]) as usize * width + (x / 8 - first[0]) as usize;
-                    if clear[i] {
-                        continue;
-                    }
+                    let i = (z / 8 - first[1]) as usize * width + (tile - first[0]) as usize;
+                    (!clear[i]).then_some((lo[0].max(tile * 8), hi[0].min(tile * 8 + 7)))
+                } else {
+                    Some((lo[0], hi[0]))
                 }
+            });
+            for (x, u, v) in runs.flat_map(|(a, b)| Self::row(pos, c, sin, s, a, b, z)) {
                 // Floor and yielding matter come from the same column answer.
                 // A second lookup used to repeat the page/cache query for
                 // every cell of every route pose, even without any trees.
@@ -2487,6 +2496,20 @@ mod tests {
                             expected,
                             "base={base} half={half:?} head={head} row={z}"
                         );
+                        let split: Vec<_> = (lo[0].div_euclid(8)..=hi[0].div_euclid(8))
+                            .flat_map(|tile| {
+                                Probe::row(
+                                    pos,
+                                    c,
+                                    sin,
+                                    s,
+                                    lo[0].max(tile * 8),
+                                    hi[0].min(tile * 8 + 7),
+                                    z,
+                                )
+                            })
+                            .collect();
+                        assert_eq!(split, expected, "split row changed fixed-point coordinates");
                     }
                 }
             }

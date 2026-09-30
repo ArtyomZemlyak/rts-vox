@@ -1,0 +1,125 @@
+param(
+    [Parameter(Mandatory = $true)][int]$TargetProcessId,
+    [ValidateRange(1, 3600)][int]$Seconds = 40,
+    [ValidateRange(100, 5000)][int]$IntervalMilliseconds = 1000,
+    [Parameter(Mandatory = $true)][string]$Output
+)
+$ErrorActionPreference = 'Stop'
+# OS counters only: no instrumentation or clocks enter the simulation.
+if (-not ('RangeThreadNames' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class RangeThreadNames {
+    [DllImport("kernel32.dll")] static extern IntPtr OpenThread(uint access, bool inherit, uint id);
+    [DllImport("kernel32.dll")] static extern int GetThreadDescription(IntPtr thread, out IntPtr text);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+    public static string Read(uint id) {
+        IntPtr thread = OpenThread(0x0800, false, id);
+        if (thread == IntPtr.Zero) return "";
+        IntPtr text = IntPtr.Zero;
+        try {
+            return GetThreadDescription(thread, out text) == 0 ? Marshal.PtrToStringUni(text) : "";
+        } finally {
+            if (text != IntPtr.Zero) LocalFree(text);
+            CloseHandle(thread);
+        }
+    }
+}
+'@
+}
+$directory = [System.IO.Path]::GetFullPath($Output)
+New-Item -ItemType Directory -Force -Path $directory | Out-Null
+$target = Get-Process -Id $TargetProcessId
+$logical = [Environment]::ProcessorCount
+$previous = @{}
+$names = @{}
+$created = @{}
+$samples = [System.Collections.Generic.List[object]]::new()
+$baselineTime = Get-Date
+$baselineCpuMs = $target.TotalProcessorTime.TotalMilliseconds
+$processCpuMs = 0.0
+$timer = [System.Diagnostics.Stopwatch]::StartNew()
+$lastMs = 0.0
+try {
+    # Capture a baseline so the first interval excludes process startup CPU.
+    foreach ($thread in $target.Threads) {
+        try {
+            $previous[$thread.Id] = $thread.TotalProcessorTime.TotalMilliseconds
+            $created[$thread.Id] = $thread.StartTime.ToString('o')
+        } catch { }
+    }
+    while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
+        Start-Sleep -Milliseconds $IntervalMilliseconds
+        $target.Refresh()
+        if ($target.HasExited) { break }
+        $nowMs = $timer.Elapsed.TotalMilliseconds
+        # The process counter also includes threads that exited between samples.
+        $processCpuMs = [Math]::Max(0.0, $target.TotalProcessorTime.TotalMilliseconds - $baselineCpuMs)
+        $elapsedMs = $nowMs - $lastMs
+        foreach ($thread in $target.Threads) {
+            try {
+                $id = $thread.Id
+                $cpu = $thread.TotalProcessorTime.TotalMilliseconds
+                if (-not $created.ContainsKey($id)) { $created[$id] = $thread.StartTime.ToString('o') }
+                if (-not $names.ContainsKey($id)) {
+                    # Some hosts expose no OS descriptions, including for
+                    # named Rust threads. Empty names do not identify a pool.
+                    try { $names[$id] = [RangeThreadNames]::Read($id) } catch { $names[$id] = '' }
+                }
+                $delta = if ($previous.ContainsKey($id)) {
+                    [Math]::Max(0.0, $cpu - $previous[$id])
+                } elseif ($thread.StartTime -ge $baselineTime) {
+                    $cpu
+                } else {
+                    # A pre-existing thread inaccessible at baseline has no
+                    # reliable delta on its first successful observation.
+                    0.0
+                }
+                $previous[$id] = $cpu
+                $state = ''
+                $wait = ''
+                try {
+                    $state = $thread.ThreadState.ToString()
+                    if ($state -eq 'Wait') { $wait = $thread.WaitReason.ToString() }
+                } catch { }
+                $samples.Add([pscustomobject]@{
+                    Seconds = [Math]::Round($nowMs / 1000.0, 3)
+                    IntervalMs = [Math]::Round($elapsedMs, 3)
+                    ThreadId = $id
+                    Name = $names[$id]
+                    CreatedAt = $created[$id]
+                    CpuMs = $delta
+                    CorePercent = [Math]::Round(100.0 * $delta / $elapsedMs, 2)
+                    State = $state
+                    WaitReason = $wait
+                })
+            } catch { }
+        }
+        $lastMs = $nowMs
+    }
+} finally { $target.Dispose() }
+$samples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
+$totalCpu = ($samples | Measure-Object CpuMs -Sum).Sum
+$summary = @($samples | Group-Object ThreadId | ForEach-Object {
+    $cpu = ($_.Group | Measure-Object CpuMs -Sum).Sum
+    [pscustomobject]@{
+        ThreadId = $_.Name
+        Name = $_.Group[0].Name
+        CreatedAt = $_.Group[0].CreatedAt
+        CpuMs = [Math]::Round($cpu, 3)
+        MeanCorePercent = if ($lastMs -gt 0) { [Math]::Round(100.0 * $cpu / $lastMs, 2) } else { 0 }
+        CpuSharePercent = if ($totalCpu -gt 0) { [Math]::Round(100.0 * $cpu / $totalCpu, 2) } else { 0 }
+    }
+} | Sort-Object CpuMs -Descending)
+$summary | Export-Csv -LiteralPath (Join-Path $directory 'cpu-thread-summary.csv') -NoTypeInformation -Encoding UTF8
+[pscustomobject]@{
+    ProcessId = $TargetProcessId
+    LogicalProcessors = $logical
+    ObservedSeconds = [Math]::Round($lastMs / 1000.0, 3)
+    CpuSeconds = [Math]::Round($processCpuMs / 1000.0, 3)
+    SampledThreadCpuSeconds = [Math]::Round($totalCpu / 1000.0, 3)
+    MeanProcessPercent = if ($lastMs -gt 0) { [Math]::Round(100.0 * $processCpuMs / $lastMs / $logical, 2) } else { 0 }
+} | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-summary.csv') -NoTypeInformation -Encoding UTF8
+$summary | Select-Object -First 12 | Format-Table -AutoSize
