@@ -185,6 +185,9 @@ pub struct Motion {
     /// This tick's terrain-only continuation was run before spatially ordered
     /// motion. Never serialized; the enclosing tick is atomic.
     prepared_hunt: bool,
+    /// Pure terrain answers carried between ticks; changed pages are dropped
+    /// before each use. Scratch only, never serialized.
+    terrain_columns: nav::vehicle::Columns,
     started: bool,
 }
 /// Fair continuation shares in stable slot order. Rotate the remainder so
@@ -332,6 +335,7 @@ impl Motion {
             may_start: true,
             resume_budget: None,
             prepared_hunt: false,
+            terrain_columns: nav::vehicle::Columns::default(),
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -749,6 +753,9 @@ impl Motion {
     ) {
         self.cut.clear();
         self.contact = None;
+        // Passive motion does not receive the per-tick changed-page set.
+        // Its last driven answers must not survive edits made while parked.
+        self.terrain_columns = nav::vehicle::Columns::default();
         // Nothing drives a parked hull (ADR-434): its position already
         // stops advancing, and a speed kept from the last driven tick
         // led the aim at a standing target, went into contacts and
@@ -1248,6 +1255,35 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
     ) {
+        self.step_observed(
+            w,
+            b,
+            alive,
+            engine,
+            response,
+            others,
+            tick,
+            gravity,
+            rubble,
+            changed,
+            |_| {},
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_observed(
+        &mut self,
+        w: &World,
+        b: &UnitBody,
+        alive: bool,
+        engine: bool,
+        response: crate::mobility::Mobility,
+        others: &[Obstacle],
+        tick: u32,
+        gravity: i32,
+        rubble: &nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+        mut completed: impl FnMut(&'static str),
+    ) {
         self.cut.clear();
         self.contact = None;
         if !self.enabled {
@@ -1262,6 +1298,7 @@ impl Motion {
         if !std::mem::take(&mut self.prepared_hunt) {
             self.hunt_step(w, b, others, rubble, tick, changed);
         }
+        completed("hunt");
         // A partial route is a prefix the budget ran out on, planned
         // around whatever stood there then: the hull searches again on its
         // cadence while it drives it and takes the new route up (ADR-467).
@@ -1296,6 +1333,7 @@ impl Motion {
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
         }
+        completed("plan");
         let mut want = drive::NO_WAY;
         let mut speed = Fx::ZERO;
         let base_limits = Limits::of(&self.chassis, TICKS);
@@ -1411,11 +1449,15 @@ impl Motion {
         let lim = response.limits(&base_limits, want == drive::NO_WAY);
         let old = self.drive;
         let old_pos = self.pos;
-        // Two poses and the cut lie within a hull length of the vehicle; a
-        // whole-map cache would cost more to clear than the poses to compute.
-        let mut ground =
-            nav::vehicle::Probe::around(w, &self.yielding, [self.pos[0], self.pos[2]], 96)
-                .with_rubble(rubble);
+        // Retain bounded column pages across nearby ticks. The world's edits
+        // and rubble changes invalidate precisely the pages they touched.
+        let mut ground = nav::vehicle::Probe::for_local(
+            w,
+            &self.yielding,
+            std::mem::take(&mut self.terrain_columns),
+            changed,
+        )
+        .with_rubble(rubble);
         let shape = self.shape(b);
         let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
         // Pushing through a tree is slower than open ground.
@@ -1535,6 +1577,7 @@ impl Motion {
         } else {
             self.blocked_ticks = 0;
         }
+        completed("terrain");
         let mut advanced = 0;
         if let Some(c) = drive::StepCycle::of(&self.chassis) {
             advanced = c.advance(path, angle::diff(self.drive.head, old.head));
@@ -1543,6 +1586,7 @@ impl Motion {
         let nominal = crate::ride::supports_of(&self.chassis);
         let (hc, hs) = crate::ride::heading_of(self.drive.head);
         let f = ground.support_floors([self.pos[0], self.pos[2]], self.drive.head, shape);
+        self.terrain_columns = ground.take_columns();
         let floors = [f[3], f[1], f[2], f[0]];
         self.floors = floors;
         // A walker stands on the legs it still has (ADR-280); a tracked
@@ -1570,6 +1614,7 @@ impl Motion {
             .hull
             .y
             .sub(crate::ride::ride_of(&self.chassis).clearance);
+        completed("ride");
         let linear = V3::new(
             self.pos[0].sub(old_pos[0]),
             Fx::ZERO,
@@ -1583,6 +1628,7 @@ impl Motion {
             angle::diff(self.drive.head, old.head),
             Fx::from_ratio(advanced, angle::FULL),
         );
+        completed("feet");
     }
     pub fn save(&self, b: &mut Blob) {
         for v in self.pos {
@@ -1660,6 +1706,7 @@ impl Motion {
         self.contact = None;
         self.dry = false;
         self.prepared_hunt = false;
+        self.terrain_columns = nav::vehicle::Columns::default();
         self.pos = std::array::from_fn(|_| s.fx());
         self.drive = Drive {
             head: s.i32(),
@@ -2190,7 +2237,20 @@ mod tests {
             while w.queued() > 0 {
                 w.flush();
             }
-            step(&mut m, &w, &body, &[], 20);
+            // The standalone helper has no world-change tracker; pass the
+            // dug region explicitly, as BlastRange does on a live tick.
+            m.step(
+                &w,
+                &body,
+                true,
+                true,
+                crate::mobility::Mobility::intact(true),
+                &[],
+                20,
+                98,
+                &nav::vehicle::Rubble::new(),
+                &nav::vehicle::Changed::everywhere(),
+            );
             assert!(m.floors.iter().all(|h| *h == Fx::from_int(8)));
             assert!(
                 m.hull.vy < Fx::ZERO,

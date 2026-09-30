@@ -3598,7 +3598,7 @@ impl BlastRange {
         &mut self,
         mut completed: impl FnMut(&'static str),
         mut detail: impl FnMut(&'static str),
-        mut unit_detail: impl FnMut(usize, bool),
+        mut unit_detail: impl FnMut(usize, &'static str),
     ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
@@ -3691,7 +3691,7 @@ impl BlastRange {
             (p[0], p[2], id)
         });
         for id in motion_order {
-            unit_detail(id, true);
+            unit_detail(id, "begin");
             let u = &mut self.units[id];
             u.motion.allow_start(starts > 0);
             {
@@ -3708,7 +3708,7 @@ impl BlastRange {
                 if self.patrols_running
                     && (!battle_mode || self.battle.phase == battle::Phase::Fighting)
                 {
-                    u.motion.step(
+                    u.motion.step_observed(
                         &self.world,
                         &u.body,
                         u.status.alive,
@@ -3719,6 +3719,7 @@ impl BlastRange {
                         self.config.gravity,
                         &self.rubble,
                         &changed,
+                        |stage| unit_detail(id, stage),
                     );
                 } else {
                     u.motion.passive(
@@ -3743,7 +3744,7 @@ impl BlastRange {
                 }
             }
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
-            unit_detail(id, false);
+            unit_detail(id, "unit_done");
         }
         if !self.battle_mode() {
             self.gun.motion.allow_start(starts > 0);

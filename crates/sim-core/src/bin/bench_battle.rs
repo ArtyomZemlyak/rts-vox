@@ -298,7 +298,9 @@ fn main() {
     );
     let mut restored = None;
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
+    let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
+    let mut unit_last = unit_start.clone();
     for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -306,6 +308,7 @@ fn main() {
         let mut motion_detail = [0u128; 4];
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
+        let unit_phases = &mut unit_phase_windows[tick_index / 300];
         sim.step_observed_detail(
             |phase| {
                 let now = Instant::now();
@@ -331,13 +334,28 @@ fn main() {
                     }
                 }
             },
-            |id, begin| {
+            |id, stage| {
                 if tick_csv.is_some() {
                     let now = Instant::now();
-                    if begin {
+                    if stage == "begin" {
                         unit_start[id] = now;
+                        unit_last[id] = now;
                     } else {
-                        unit_window[id] += now.duration_since(unit_start[id]).as_micros();
+                        let elapsed = now.duration_since(unit_last[id]).as_micros();
+                        unit_last[id] = now;
+                        let phase = match stage {
+                            "hunt" => 0,
+                            "plan" => 1,
+                            "terrain" => 2,
+                            "ride" => 3,
+                            "feet" => 4,
+                            "unit_done" => 5,
+                            _ => unreachable!(),
+                        };
+                        unit_phases[id][phase] += elapsed;
+                        if stage == "unit_done" {
+                            unit_window[id] += now.duration_since(unit_start[id]).as_micros();
+                        }
                     }
                 }
             },
@@ -580,6 +598,22 @@ fn main() {
                     .into_iter()
                     .take(8)
                     .map(|(id, us)| (id, us / len))
+                    .collect::<Vec<_>>()
+            );
+            let mut ranked: Vec<_> = unit_time_windows[index]
+                .iter()
+                .copied()
+                .enumerate()
+                .collect();
+            ranked.sort_unstable_by_key(|&(id, us)| (std::cmp::Reverse(us), id));
+            println!(
+                "motion_unit_phases_window={}..{} hunt_plan_terrain_ride_feet_other_us={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                ranked
+                    .into_iter()
+                    .take(3)
+                    .map(|(id, _)| (id, unit_phase_windows[index][id].map(|us| us / len)))
                     .collect::<Vec<_>>()
             );
         }

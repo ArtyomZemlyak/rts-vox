@@ -341,7 +341,7 @@ fn reach(s: Shape) -> i32 {
 }
 /// Cached column answers for a suspended search. Pages are bounded and moved
 /// into the next probe; none survives a change on it or enters a save.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Columns {
     pages: Vec<Option<ColumnPage>>,
     replacement: Vec<u8>,
@@ -361,7 +361,7 @@ impl Columns {
 // Eviction only repeats a pure query, never changes the search's work allowance.
 const PAGE_SIDE: usize = 32;
 const PAGE_SLOTS: usize = 128;
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ColumnPage {
     key: [i32; 2],
     values: Vec<(u16, [u16; 2])>,
@@ -457,6 +457,17 @@ impl<'a> Probe<'a> {
         probe.pages = columns.pages;
         probe.replacement = columns.replacement;
         probe
+    }
+    /// Reuse exact local column answers across motion ticks. Both world
+    /// edits and rubble changes invalidate their affected pages first.
+    pub fn for_local(
+        world: &'a World,
+        yielding: &[Mat],
+        mut columns: Columns,
+        changed: &Changed,
+    ) -> Self {
+        columns.forget(changed);
+        Self::for_search(world, yielding, columns)
     }
     /// Transfer search pages without allocating or clearing a replacement.
     pub fn take_columns(&mut self) -> Columns {
@@ -2668,6 +2679,27 @@ mod tests {
         w.flush();
         let mut fresh = Probe::for_search(&w, &[], Columns::default());
         assert_eq!(fresh.floor(90, 72), Probe::new(&w).floor(90, 72));
+    }
+    #[test]
+    fn local_column_cache_forgets_world_and_rubble_changes() {
+        let mut w = world(false, false, false);
+        let mut probe = Probe::for_local(&w, &[], Columns::default(), &Changed::default());
+        assert_eq!(probe.floor(100, 100), 16);
+        let columns = probe.take_columns();
+        drop(probe);
+
+        w.queue_dig(100, 15, 100);
+        w.flush();
+        let mut changed = Changed::default();
+        changed.column(100, 100);
+        let mut probe = Probe::for_local(&w, &[], columns, &changed);
+        assert_eq!(probe.floor(100, 100), 15);
+        let columns = probe.take_columns();
+        drop(probe);
+
+        let rubble = Rubble::from([([100, 100], 40)]);
+        let mut probe = Probe::for_local(&w, &[], columns, &changed).with_rubble(&rubble);
+        assert_eq!(probe.floor(100, 100), 40);
     }
     #[test]
     fn old_frontiers_and_kilometre_search_dimensions_load() {
