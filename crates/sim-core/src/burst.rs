@@ -1772,6 +1772,45 @@ mod tests {
         };
         assert_eq!(run(1), run(4));
     }
+    #[test]
+    fn settled_candidates_keep_cell_lists_in_fragment_order_across_workers() {
+        let t = tuning();
+        let fragments: Vec<_> = (0..1400)
+            .map(|i| Fragment {
+                id: i + 1,
+                position: V3::new(
+                    Fx::from_int(12 + (i % 40) as i32),
+                    Fx::from_int(18),
+                    Fx::from_int(12 + ((i % 1200) / 40) as i32),
+                ),
+                velocity: V3::ZERO,
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 1,
+                count: 1,
+                shape: 1,
+                side: 1,
+                chunk: None,
+                held: i as u32,
+                resting: i < 1200,
+            })
+            .collect();
+        let run = |workers| {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut index = Settled::default();
+                let mut queries = SettledQueries::default();
+                Settled::of_into(&fragments, &[], 0, &t.blast, &mut index, &mut queries);
+                (index.boxes, index.cells, queries.0)
+            })
+        };
+        assert_eq!(run(1), run(4));
+    }
     fn tick(b: &mut Bursts, w: &mut voxel::World, e: &mut Economy, t: &Blast) {
         b.advance(w, &e.mats, t);
         w.begin_tick();
@@ -4130,7 +4169,7 @@ impl Settled {
         fragments: &[Fragment],
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool,
-        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]),
+        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
     ) -> Settled {
         let mut out = Settled::default();
         Self::around_bounds_into(
@@ -4147,7 +4186,7 @@ impl Settled {
         fragments: &[Fragment],
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool,
-        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]),
+        bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
         out: &mut Settled,
         want: &mut SettledQueries,
     ) {
@@ -4162,16 +4201,30 @@ impl Settled {
         }
         // Only membership is queried. Fragment insertion and contact order
         // still follow the ordered fragment slice, not the hash table.
-        out.boxes.reserve(fragments.len());
-        for (i, f) in fragments.iter().enumerate() {
+        out.boxes
+            .resize(fragments.len(), ([Fx::ZERO; 3], [Fx::ZERO; 3]));
+        let world_box = |(i, f): (usize, &Fragment)| {
             let (low, high) = bounds(i, f);
             let p = arr(f.position);
             let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
-            out.boxes.push((lo, hi));
+            (lo, hi)
+        };
+        if fragments.len() >= 1024 {
+            out.boxes
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, box_at)| *box_at = world_box((i, &fragments[i])));
+        } else {
+            for (i, box_at) in out.boxes.iter_mut().enumerate() {
+                *box_at = world_box((i, &fragments[i]));
+            }
+        }
+        for (i, f) in fragments.iter().enumerate() {
             if !asks(i, f) {
                 continue;
             }
+            let (lo, hi) = out.boxes[i];
             // Where the piece may get to this tick: its box swept by its
             // velocity, and a cell beyond for what gravity adds (ADR-438).
             // A cell beside the one it is in was all it asked about, and a
@@ -4191,9 +4244,9 @@ impl Settled {
         // against a conservative box before doing the rotated voxel roof
         // query, without changing which hull can carry a piece.
         let hull_boxes: Vec<_> = hulls.iter().map(Hull::footprint_box).collect();
-        for (i, f) in fragments.iter().enumerate() {
+        let candidate = |(i, f): (usize, &Fragment)| {
             if !f.resting {
-                continue;
+                return None;
             }
             let (lo, hi) = out.boxes[i];
             let (c0, c1) = settled_cells(lo, hi);
@@ -4203,7 +4256,7 @@ impl Settled {
                 })
             };
             if !cells().any(|c| want.contains(c)) {
-                continue;
+                return None;
             }
             // The test asked whether the piece's centre lay inside a
             // hull's box, and the centre of a piece on a roof lies above
@@ -4219,8 +4272,19 @@ impl Settled {
                     && z <= max[1]
                     && h.carries(lo[1], f.position)
             }) {
-                continue;
+                return None;
             }
+            Some((c0, c1))
+        };
+        let selected: Vec<_> = if fragments.len() >= 1024 {
+            fragments.par_iter().enumerate().map(candidate).collect()
+        } else {
+            fragments.iter().enumerate().map(candidate).collect()
+        };
+        for (i, cells) in selected.into_iter().enumerate() {
+            let Some((c0, c1)) = cells else {
+                continue;
+            };
             for z in c0[2]..=c1[2] {
                 for y in c0[1]..=c1[1] {
                     for x in c0[0]..=c1[0] {
