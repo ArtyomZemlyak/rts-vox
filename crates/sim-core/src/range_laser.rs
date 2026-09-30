@@ -1,6 +1,25 @@
 //! Surface heating around the unobstructed laser segment (ADR-473).
 use super::*;
 
+#[inline]
+fn outside_halo(q: [i64; 3], d: [i64; 3], length2: i64, radius: i32) -> bool {
+    // The exact projection rounds each component by < 1 sixteenth. A margin
+    // of 2 covers the resulting three-dimensional displacement.
+    let limit2 = i128::from(radius * 16 + 2).pow(2);
+    let length2 = i128::from(length2);
+    let q2 = q.iter().map(|&v| i128::from(v).pow(2)).sum::<i128>();
+    let dot = (0..3)
+        .map(|i| i128::from(q[i]) * i128::from(d[i]))
+        .sum::<i128>();
+    if dot <= 0 {
+        q2 >= limit2
+    } else if dot >= length2 {
+        (0..3).map(|i| i128::from(q[i] - d[i]).pow(2)).sum::<i128>() >= limit2
+    } else {
+        q2 * length2 - dot * dot >= limit2 * length2
+    }
+}
+
 impl BlastRange {
     fn laser_cell(
         &self,
@@ -35,6 +54,11 @@ impl BlastRange {
             let p = std::array::from_fn(|a| {
                 (source[a] + delta[a] * i / steps.max(1)).div_euclid(16) as i32
             });
+            // Quarter-cell steps often land in the same voxel. Its shield,
+            // body and terrain cannot change during this visibility query.
+            if i > 0 && p == previous {
+                continue;
+            }
             if self.dome_crossed(previous, p).is_some() {
                 return false;
             }
@@ -42,7 +66,7 @@ impl BlastRange {
             if other.is_some() {
                 return other == cell;
             }
-            if material(&self.world, p) != 0 {
+            if self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32) {
                 return cell.is_none() && p == target;
             }
             previous = p;
@@ -109,6 +133,11 @@ impl BlastRange {
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));
         let mut doses = BTreeMap::<thermal::Cell, u32>::new();
         let r2 = i64::from(radius * 16).pow(2);
+        // Reject the many cells in the enclosing square that cannot lie in
+        // the round halo before the three integer divisions below. The exact
+        // dose still uses the original sixteenth-cell projection. Two extra
+        // sixteenths cover its < sqrt(3) quantization error, so this test can
+        // only reject cells whose exact dose is zero.
         let lo = (a[axis].min(b[axis]) / 16 - i64::from(radius)).max(0) as i32;
         let hi = (a[axis].max(b[axis]) / 16 + i64::from(radius)).min(i64::from(self.size[axis]) - 1)
             as i32;
@@ -134,6 +163,9 @@ impl BlastRange {
                         continue;
                     }
                     let q: [i64; 3] = std::array::from_fn(|i| i64::from(p[i]) * 16 + 8 - a[i]);
+                    if outside_halo(q, d, length2, radius) {
+                        continue;
+                    }
                     let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
                     let source: [i64; 3] = std::array::from_fn(|i| a[i] + d[i] * dot / length2);
                     let distance2 = (0..3)
@@ -156,6 +188,9 @@ impl BlastRange {
                         }
                     } else {
                         if p[1] as u32 >= self.world.column_ceiling(p[0] as u32, p[2] as u32) {
+                            continue;
+                        }
+                        if !self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32) {
                             continue;
                         }
                         let mat = material(&self.world, p);
@@ -188,6 +223,44 @@ impl BlastRange {
         // the same victim, but duplicate samples of one barrel never stack.
         for (cell, heat) in doses {
             self.thermals.deposit(cell, heat, &self.thermal_tuning);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::outside_halo;
+
+    #[test]
+    fn coarse_halo_rejection_never_drops_an_exactly_heated_cell() {
+        for d in [
+            [0, 0, 0],
+            [160, 0, 0],
+            [64, 192, 48],
+            [-96, 160, -80],
+            [240, -64, 96],
+        ] {
+            let length2 = d.iter().map(|v| v * v).sum::<i64>().max(1);
+            for radius in 1..=5 {
+                for x in (-120..=120).step_by(16) {
+                    for y in (-120..=120).step_by(16) {
+                        for z in (-120..=120).step_by(16) {
+                            let q = [x, y, z];
+                            if !outside_halo(q, d, length2, radius) {
+                                continue;
+                            }
+                            let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
+                            let exact2 = (0..3)
+                                .map(|i| (q[i] - d[i] * dot / length2).pow(2))
+                                .sum::<i64>();
+                            assert!(
+                                exact2 >= i64::from(radius * 16).pow(2),
+                                "q={q:?} d={d:?} radius={radius}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

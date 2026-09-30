@@ -1031,7 +1031,8 @@ impl BlastRange {
         battle.lasers.clear();
         if battle.phase == Phase::Fighting {
             self.battle_ai_tick(&mut battle);
-            self.battle_orders(&mut battle);
+            completed("battle_ai");
+            self.battle_orders(&mut battle, &mut completed);
         }
         completed("battle_orders");
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
@@ -1147,7 +1148,7 @@ impl BlastRange {
         }
         self.battle = battle;
     }
-    fn battle_orders(&mut self, b: &mut Battle) {
+    fn battle_orders(&mut self, b: &mut Battle, mut completed: impl FnMut(&'static str)) {
         let stream = self.streams.tuning.machine_gun.clone();
         for id in 0..self.units.len() {
             if !self.units[id].status.alive || !self.units[id].status.weapon {
@@ -1256,12 +1257,15 @@ impl BlastRange {
             // so a moving unit does not wait to begin slewing its turret.
             let angle = fx::angle::atan2(dz.raw(), dx.raw());
             a.turret.step(angle, self.turret_limits);
+            completed("orders_misc");
             self.units[id].update_pose(a.turret.angle);
+            completed("orders_pose");
             let in_range =
                 dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
             // Bullets and penetrators cannot help by firing into a hill.
             // Check the actual muzzle ray only after entering range; the
             // normal projectile sweep remains authoritative for a hit.
+            completed("orders_misc");
             let blocked_direct = in_range
                 && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic)
                 && !kind.emplacement()
@@ -1280,6 +1284,7 @@ impl BlastRange {
                         )
                         .clear
                     });
+            completed("orders_los");
             if !in_range || blocked_direct {
                 a.charge = None;
                 if kind.emplacement() {
@@ -1406,8 +1411,11 @@ impl BlastRange {
                 }
                 let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
                 if let Some(from) = muzzles.first().copied() {
-                    b.lasers
-                        .push(self.laser_ray(from, p, Some(id), &tuning.laser, config));
+                    completed("orders_misc");
+                    let trace =
+                        self.laser_ray(from, p, Some(id), &tuning.laser, config, &mut completed);
+                    completed("orders_laser");
+                    b.lasers.push(trace);
                     a.fired = a.fired.wrapping_add(1);
                     a.burst += 1;
                     if a.burst >= tuning.laser.burst_ticks {

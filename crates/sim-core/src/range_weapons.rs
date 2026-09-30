@@ -517,7 +517,14 @@ impl BlastRange {
     }
     fn emit_laser(&mut self, tuning: &Stream) {
         for from in self.stream_muzzles() {
-            let trace = self.laser_ray(from, self.target(), None, tuning, &self.config.clone());
+            let trace = self.laser_ray(
+                from,
+                self.target(),
+                None,
+                tuning,
+                &self.config.clone(),
+                |_| {},
+            );
             self.streams.traces.push(trace);
         }
     }
@@ -530,6 +537,7 @@ impl BlastRange {
         owner: Option<usize>,
         tuning: &Stream,
         config: &ExplosionConfig,
+        mut completed: impl FnMut(&'static str),
     ) -> Trace {
         let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
         let length = delta
@@ -578,7 +586,7 @@ impl BlastRange {
                 hit = true;
                 break;
             }
-            if material(&self.world, p) != 0
+            if self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32)
                 || near.iter().any(|&id| {
                     let (lo, hi) = boxes[id];
                     (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
@@ -599,7 +607,9 @@ impl BlastRange {
             previous = p;
             free_end = point;
         }
+        completed("orders_laser_beam");
         self.laser_halo_owned(from, free_end, contact, tuning, owner);
+        completed("orders_laser_halo");
         Trace {
             from,
             to: end,

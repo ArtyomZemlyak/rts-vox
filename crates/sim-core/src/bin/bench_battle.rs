@@ -14,7 +14,13 @@ struct TickProfile {
     contact_us: u128,
     felling_us: u128,
     debris_us: u128,
+    battle_ai_us: u128,
     battle_orders_us: u128,
+    battle_pose_us: u128,
+    battle_los_us: u128,
+    battle_laser_us: u128,
+    battle_beam_us: u128,
+    battle_halo_us: u128,
     rubble_us: u128,
     heat_flush_us: u128,
     searching: usize,
@@ -31,7 +37,30 @@ impl TickProfile {
         match name {
             "motion" => self.motion_us = us,
             "debris" => self.debris_us = us,
-            "battle_orders" => self.battle_orders_us = us,
+            "battle_ai" => self.battle_ai_us = us,
+            "orders_pose" => {
+                self.battle_pose_us += us;
+                self.battle_orders_us += us;
+            }
+            "orders_los" => {
+                self.battle_los_us += us;
+                self.battle_orders_us += us;
+            }
+            "orders_laser" => {
+                self.battle_laser_us += us;
+                self.battle_orders_us += us;
+            }
+            "orders_laser_beam" => {
+                self.battle_beam_us += us;
+                self.battle_laser_us += us;
+                self.battle_orders_us += us;
+            }
+            "orders_laser_halo" => {
+                self.battle_halo_us += us;
+                self.battle_laser_us += us;
+                self.battle_orders_us += us;
+            }
+            "orders_misc" | "battle_orders" => self.battle_orders_us += us,
             "rubble" => self.rubble_us = us,
             "heat_flush" => self.heat_flush_us = us,
             _ => {}
@@ -554,11 +583,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_orders_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -567,7 +596,13 @@ fn main() {
                 p.contact_us,
                 p.felling_us,
                 p.debris_us,
+                p.battle_ai_us,
                 p.battle_orders_us,
+                p.battle_pose_us,
+                p.battle_los_us,
+                p.battle_laser_us,
+                p.battle_beam_us,
+                p.battle_halo_us,
                 p.rubble_us,
                 p.heat_flush_us,
                 p.searching,
@@ -585,7 +620,7 @@ fn main() {
             let len = window.len() as u128;
             let mut times: Vec<_> = window.iter().map(|p| p.total_us).collect();
             times.sort_unstable();
-            println!("tick_window={}..{} mean_us={} p99_us={} motion_us={} route_us={} commit_us={} contact_us={} felling_us={} debris_us={} battle_orders_us={} searches_max={} flying_max={} fragments_max={} felling_max={}",
+            println!("tick_window={}..{} mean_us={} p99_us={} motion_us={} route_us={} commit_us={} contact_us={} felling_us={} debris_us={} battle_ai_us={} battle_orders_us={} battle_pose_us={} battle_los_us={} battle_laser_us={} battle_beam_us={} battle_halo_us={} searches_max={} flying_max={} fragments_max={} felling_max={}",
                 window[0].tick, window[window.len()-1].tick,
                 window.iter().map(|p| p.total_us).sum::<u128>() / len,
                 times[times.len() * 99 / 100],
@@ -595,7 +630,13 @@ fn main() {
                 window.iter().map(|p| p.contact_us).sum::<u128>() / len,
                 window.iter().map(|p| p.felling_us).sum::<u128>() / len,
                 window.iter().map(|p| p.debris_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_ai_us).sum::<u128>() / len,
                 window.iter().map(|p| p.battle_orders_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_pose_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_los_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_laser_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_beam_us).sum::<u128>() / len,
+                window.iter().map(|p| p.battle_halo_us).sum::<u128>() / len,
                 window.iter().map(|p| p.searching).max().unwrap(),
                 window.iter().map(|p| p.flying).max().unwrap(),
                 window.iter().map(|p| p.fragments).max().unwrap(),
