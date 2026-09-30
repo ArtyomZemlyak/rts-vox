@@ -1153,7 +1153,7 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
     let unit_boxes: Vec<_> = sim.units.iter().map(|u| u.bounds()).collect();
     let window = gas.window;
     let words = Arc::make_mut(&mut gas.terrain_words);
-    let mut dirty = BTreeSet::new();
+    let mut dirty = Vec::new();
     let edits = sim
         .world
         .edits()
@@ -1190,8 +1190,12 @@ fn apply_terrain(sim: &BlastRange, gas: &mut GasInput, unit_start: &[usize]) {
             gas.terrain_column_top[slot] = gas.terrain_column_top[slot].max((p[1] + 1) as u16);
         }
         words[i / 8] = (words[i / 8] & !(15 << shift)) | (m << shift);
-        dirty.insert(i / 8);
+        dirty.push(i / 8);
     }
+    // Craters touch the same packed word repeatedly; batch ordering avoids
+    // maintaining a tree for every edit while preserving sorted dirty spans.
+    dirty.sort_unstable();
+    dirty.dedup();
     let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
     for i in dirty {
         if let Some(r) = spans.last_mut() {
