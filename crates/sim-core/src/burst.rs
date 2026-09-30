@@ -458,6 +458,8 @@ mod tests {
         // Far sleepers and interleaved flying pieces leave gaps in the
         // indices held by the grid. Its box table must not compact them.
         fragments[1].position.x = Fx::from_int(1000);
+        let mut index = Settled::default();
+        let mut queries = SettledQueries::default();
         for tick in [0, 1, u64::from(t.rest_check_ticks)] {
             let world_boxes: Vec<_> = fragments
                 .iter()
@@ -500,7 +502,7 @@ mod tests {
                     }
                 }
             }
-            let index = Settled::of(&fragments, &[hull], tick, &t);
+            Settled::of_into(&fragments, &[hull], tick, &t, &mut index, &mut queries);
             assert!(!expected.is_empty());
             assert_eq!(index.cells.len(), expected.len());
             for (cell, pieces) in &expected {
@@ -527,8 +529,8 @@ mod tests {
         for f in &mut fragments {
             f.resting = false;
         }
-        let empty = Settled::of(&fragments, &[], 0, &t);
-        assert!(empty.cells.is_empty() && empty.boxes.is_empty());
+        Settled::of_into(&fragments, &[], 0, &t, &mut index, &mut queries);
+        assert!(index.cells.is_empty() && index.boxes.is_empty());
         fragments[0].resting = true;
         let sleeping = Settled::of(&fragments[..1], &[], 0, &t);
         assert!(!due(fragments[0].id, 0, &t));
@@ -3958,6 +3960,8 @@ pub(crate) struct Settled {
     /// Cell of `CELL` units to the indices of the pieces whose box covers
     /// it, in index order.
     cells: FxHashMap<[i32; 3], Vec<u32>>,
+    /// Reuse the per-cell lists when this scratch index is rebuilt next tick.
+    free_lists: Vec<Vec<u32>>,
     /// Frozen world boxes in original fragment order, including unindexed
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
@@ -4069,7 +4073,10 @@ impl Settled {
         out: &mut Settled,
         want: &mut SettledQueries,
     ) {
-        out.cells.clear();
+        for (_, mut list) in out.cells.drain() {
+            list.clear();
+            out.free_lists.push(list);
+        }
         out.boxes.clear();
         want.0.clear();
         if !fragments.iter().any(|f| f.resting) {
@@ -4140,7 +4147,11 @@ impl Settled {
                 for y in c0[1]..=c1[1] {
                     for x in c0[0]..=c1[0] {
                         if want.contains([x, y, z]) {
-                            out.cells.entry([x, y, z]).or_default().push(i as u32);
+                            let (cells, free_lists) = (&mut out.cells, &mut out.free_lists);
+                            cells
+                                .entry([x, y, z])
+                                .or_insert_with(|| free_lists.pop().unwrap_or_default())
+                                .push(i as u32);
                         }
                     }
                 }
