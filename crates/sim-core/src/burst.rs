@@ -15,6 +15,7 @@ use phys::{
     blast::{Hit, Wave},
     V3,
 };
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use voxel::{
@@ -1716,6 +1717,61 @@ mod tests {
     fn world() -> voxel::World {
         voxel::World::new(96, 64, 96, 4096, Box::new(Ground))
     }
+    #[test]
+    fn many_flying_pieces_match_with_one_and_four_workers() {
+        let w = world();
+        let t = tuning();
+        let run = |workers| {
+            let (mut pieces, mut economy) = (Bursts::default(), economy());
+            for i in 0..1200 {
+                let held = economy.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                pieces.fragments.push(Fragment {
+                    id: i + 1,
+                    position: V3::new(
+                        Fx::from_int(12 + (i % 60) as i32),
+                        Fx::from_int(36),
+                        Fx::from_int(12 + (i / 60) as i32),
+                    ),
+                    velocity: V3::new(
+                        Fx::from_ratio((i % 5) as i32 - 2, 4),
+                        Fx::ZERO,
+                        Fx::from_ratio((i % 7) as i32 - 3, 4),
+                    ),
+                    material: 1,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held,
+                    resting: false,
+                });
+            }
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                for tick in 0..8 {
+                    pieces.step_fragments(
+                        &w,
+                        &mut economy,
+                        &t.blast,
+                        crate::gravity_per_tick(&t),
+                        tick,
+                        Surroundings::NONE,
+                    );
+                }
+            });
+            let mut bytes = Blob::new();
+            pieces.save(&mut bytes);
+            bytes.v
+        };
+        assert_eq!(run(1), run(4));
+    }
     fn tick(b: &mut Bursts, w: &mut voxel::World, e: &mut Economy, t: &Blast) {
         b.advance(w, &e.mats, t);
         w.begin_tick();
@@ -2225,11 +2281,11 @@ pub struct Hull<'a> {
     pub solid: Option<Solid<'a>>,
 }
 /// A hull's voxels as world cells (ADR-469).
-pub trait Voxels {
+pub trait Voxels: Sync {
     /// Whether the world cell `p` lies in the hull's voxels.
     fn solid(&self, p: [i32; 3]) -> bool;
 }
-impl<F: Fn([i32; 3]) -> bool> Voxels for F {
+impl<F: Fn([i32; 3]) -> bool + Sync> Voxels for F {
     fn solid(&self, p: [i32; 3]) -> bool {
         self(p)
     }
@@ -3199,7 +3255,6 @@ impl Bursts {
         let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(self.fragments.len());
         let mut merged = BTreeSet::new();
         let mut stale_wrecks = BTreeSet::new();
-        let mut landed = Vec::new();
         // Waking pieces count against the flying budget like new ones; a
         // piece without room waits for its next turn. A claim holds its
         // flying slot until its dig lands and it becomes a piece: a
@@ -3243,17 +3298,40 @@ impl Bursts {
                 room -= 1;
                 stale_wrecks.insert(f.held);
             }
-            if advance_fragment(
+        }
+        // All support checks and flying-slot claims above retain fragment
+        // order. Translation reads only the frozen world, hulls and settled
+        // index; no fragment observes another fragment's new position until
+        // the ordered pile/ledger pass below.
+        let translate = |(i, f): (usize, &mut Fragment)| {
+            advance_fragment(
                 f, world, t, &motion, gravity, hulls, &settled, i as u32, true,
-            ) {
+            )
+            .then(|| {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
-                landed.push(Wreck {
+                Wreck {
                     held: f.held,
                     x: p[0],
                     y: p[1],
                     z: p[2],
-                });
-            }
+                }
+            })
+        };
+        let landed_slots: Vec<Option<Wreck>> = if self.fragments.len() >= 1024 {
+            self.fragments
+                .par_iter_mut()
+                .enumerate()
+                .map(translate)
+                .collect()
+        } else {
+            self.fragments
+                .iter_mut()
+                .enumerate()
+                .map(translate)
+                .collect()
+        };
+        let landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
+        for i in 0..self.fragments.len() {
             if !self.fragments[i].resting || self.fragments[i].chunk.is_some() {
                 continue;
             }

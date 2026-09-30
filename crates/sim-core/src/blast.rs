@@ -19,6 +19,10 @@ use motion::Motion;
 use phys::blast::Wave;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    OnceLock,
+};
 use voxel::bodies::Bodies;
 use voxel::collapse::CollapseLayer;
 use voxel::topo::unit::CoreBufs;
@@ -310,9 +314,9 @@ impl HitFrames {
 /// the unit's.
 struct UnitVoxels<'a> {
     unit: &'a RangeUnit,
-    frames: std::cell::OnceCell<HitFrames>,
-    asked: std::cell::Cell<u32>,
-    known: std::cell::OnceCell<KnownCells>,
+    frames: OnceLock<HitFrames>,
+    asked: AtomicU32,
+    known: OnceLock<KnownCells>,
 }
 /// Questions a unit's voxels answer directly in a step before its cells
 /// are remembered (ADR-469): remembering costs the box's bits.
@@ -322,15 +326,15 @@ const ASKED_BEFORE_KNOWN: u32 = 256;
 struct KnownCells {
     lo: [i32; 3],
     size: [i64; 3],
-    bits: std::cell::RefCell<Vec<u64>>,
+    bits: Vec<AtomicU64>,
 }
 impl<'a> UnitVoxels<'a> {
     fn of(unit: &'a RangeUnit) -> Self {
         Self {
             unit,
-            frames: std::cell::OnceCell::new(),
-            asked: std::cell::Cell::new(0),
-            known: std::cell::OnceCell::new(),
+            frames: OnceLock::new(),
+            asked: AtomicU32::new(0),
+            known: OnceLock::new(),
         }
     }
     /// The unit's hull for the pieces (ADR-293): its motion box, how far
@@ -358,9 +362,8 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
         let frames = self
             .frames
             .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta));
-        let asked = self.asked.get();
+        let asked = self.asked.fetch_add(1, Ordering::Relaxed);
         if asked < ASKED_BEFORE_KNOWN {
-            self.asked.set(asked + 1);
             return frames.hit(u, p).is_some();
         }
         let known = self.known.get_or_init(|| {
@@ -370,7 +373,7 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
             KnownCells {
                 lo,
                 size,
-                bits: std::cell::RefCell::new(vec![0; cells.div_ceil(32)]),
+                bits: (0..cells.div_ceil(32)).map(|_| AtomicU64::new(0)).collect(),
             }
         });
         let q: [i64; 3] = std::array::from_fn(|a| i64::from(p[a]) - i64::from(known.lo[a]));
@@ -379,13 +382,12 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
         }
         let i = ((q[1] * known.size[2] + q[2]) * known.size[0] + q[0]) as usize;
         let (word, shift) = (i / 32, 2 * (i % 32));
-        let mut bits = known.bits.borrow_mut();
-        let cell = bits[word] >> shift & 3;
+        let cell = known.bits[word].load(Ordering::Relaxed) >> shift & 3;
         if cell & 1 != 0 {
             return cell & 2 != 0;
         }
         let solid = frames.hit(u, p).is_some();
-        bits[word] |= (1 | u64::from(solid) << 1) << shift;
+        known.bits[word].fetch_or((1 | u64::from(solid) << 1) << shift, Ordering::Relaxed);
         solid
     }
 }
@@ -6907,6 +6909,37 @@ mod tests {
                 assert!(pruned && segment_hits > 0);
             }
         }
+    }
+
+    #[test]
+    fn concurrent_hull_voxel_cache_matches_direct_hits() {
+        let unit = RangeUnit::of_kind(RangeUnitKind::Strider, [200, 24, 200]);
+        let voxels = UnitVoxels::of(&unit);
+        let (lo, hi) = unit.bounds();
+        let points: Vec<_> = (lo[2]..=hi[2])
+            .step_by(2)
+            .flat_map(|z| {
+                (lo[1]..=hi[1])
+                    .step_by(2)
+                    .flat_map(move |y| (lo[0]..=hi[0]).step_by(2).map(move |x| [x, y, z]))
+            })
+            .collect();
+        assert!(points.len() > ASKED_BEFORE_KNOWN as usize);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let points = &points;
+                let unit = &unit;
+                let voxels = &voxels;
+                scope.spawn(move || {
+                    for &p in points {
+                        assert_eq!(
+                            crate::burst::Voxels::solid(voxels, p),
+                            unit.hit(p).is_some()
+                        );
+                    }
+                });
+            }
+        });
     }
     /// A block of four by four by four placed in the air, with a layer of
     /// `cap` on top when that is not air, applied by the range's own
