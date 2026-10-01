@@ -2062,6 +2062,84 @@ mod tests {
         }
     }
     #[test]
+    fn indexed_pruning_preserves_wreck_payloads_and_ordered_destruction() {
+        use std::sync::{Arc, Mutex};
+        struct Mark {
+            wreck: Wreck,
+            slot: u32,
+            drops: Arc<Mutex<Vec<u32>>>,
+        }
+        impl Drop for Mark {
+            fn drop(&mut self) {
+                self.drops.lock().unwrap().push(self.slot);
+            }
+        }
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for len in [0, 1023, 1024, 25_000] {
+                for mode in 0..5 {
+                    let removed = (0..1027)
+                        .flat_map(|id| match mode {
+                            0 => vec![],
+                            1 if id % 7 == 0 => vec![id],
+                            2 => vec![id],
+                            3 if id % 7 == 0 => vec![u32::MAX - id],
+                            4 if id % 7 == 0 => vec![id, u32::MAX - id],
+                            _ => vec![],
+                        })
+                        .collect();
+                    let build = |drops: &Arc<Mutex<Vec<u32>>>| {
+                        (0..len)
+                            .map(|i| Mark {
+                                wreck: Wreck {
+                                    // Unsorted, repeated identities; every original
+                                    // slot and its signed coordinates must survive.
+                                    held: if mode == 3 || (mode == 4 && i % 2 == 0) {
+                                        u32::MAX - i * 37 % 1027
+                                    } else {
+                                        i * 37 % 1027
+                                    },
+                                    x: i as i32 - 12_000,
+                                    y: -(i as i32),
+                                    z: (i as i32 * 17) % 1000,
+                                },
+                                slot: i,
+                                drops: Arc::clone(drops),
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let serial_drops = Arc::new(Mutex::new(Vec::new()));
+                    let actual_drops = Arc::new(Mutex::new(Vec::new()));
+                    let mut serial = build(&serial_drops);
+                    let mut actual = build(&actual_drops);
+                    retain_live(&mut serial, &removed, |m| m.wreck.held, false);
+                    pool.install(|| retain_live(&mut actual, &removed, |m| m.wreck.held, true));
+                    let surviving = |values: &[Mark]| {
+                        values
+                            .iter()
+                            .map(|m| {
+                                let w = m.wreck;
+                                (m.slot, w.held, w.x, w.y, w.z)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        surviving(&actual),
+                        surviving(&serial),
+                        "workers={workers} len={len} mode={mode}"
+                    );
+                    assert_eq!(*actual_drops.lock().unwrap(), *serial_drops.lock().unwrap());
+                    drop(actual);
+                    drop(serial);
+                    assert_eq!(*actual_drops.lock().unwrap(), *serial_drops.lock().unwrap());
+                }
+            }
+        }
+    }
+    #[test]
     fn settled_candidates_keep_cell_lists_in_fragment_order_across_workers() {
         let t = tuning();
         let fragments: Vec<_> = (0..1400)
@@ -3881,19 +3959,23 @@ impl Bursts {
         }
         completed("debris_advance");
         if !merged.is_empty() {
-            self.fragments.retain(|f| !merged.contains(&f.held));
+            retain_live(&mut self.fragments, &merged, |f| f.held, true);
             stale_wrecks.extend(merged.iter().copied());
         }
+        completed("debris_compact");
         // A waking piece can land again in this same tick. Remove its old
         // wreck once, then append the newly landed one in fragment order.
         if !stale_wrecks.is_empty() {
-            e.wrecks.retain(|w| !stale_wrecks.contains(&w.held));
+            retain_live(&mut e.wrecks, &stale_wrecks, |w| w.held, true);
         }
+        completed("debris_wreck_prune");
         e.wrecks
             .extend(landed.into_iter().filter(|w| !merged.contains(&w.held)));
+        completed("debris_wreck_append");
         for held in merged {
             e.ledger.retire_empty_debris(held);
         }
+        completed("debris_retire");
         for f in self.corpses.values_mut() {
             if f.resting
                 && due(f.id, tick, t)
@@ -3914,6 +3996,7 @@ impl Bursts {
                 false,
             );
         }
+        completed("debris_corpses");
         for w in &mut e.wrecks {
             if let Some(f) = self.corpses.get(&w.held) {
                 let p = arr(f.position).map(|v| v.to_int_trunc());
@@ -4555,6 +4638,36 @@ pub(crate) struct Settled {
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
     boxes: Vec<([Fx; 3], [Fx; 3])>,
+}
+/// A bounded bit mask replaces repeated tree lookups for dense container IDs.
+/// Compaction and destruction keep their original slot order.
+fn retain_live<T>(
+    values: &mut Vec<T>,
+    removed: &BTreeSet<u32>,
+    held: impl Fn(&T) -> u32,
+    indexed: bool,
+) {
+    if indexed && values.len() >= 1024 && removed.len() >= 8 {
+        let first = *removed.first().expect("nonempty");
+        let last = *removed.last().expect("nonempty");
+        let span = u64::from(last) - u64::from(first) + 1;
+        // Sparse or restored extreme IDs never cause an unbounded allocation.
+        if span <= 262_144 && span.div_ceil(4) <= values.len() as u64 {
+            let mut mask = vec![0u64; span.div_ceil(64) as usize];
+            for &id in removed {
+                let offset = id - first;
+                mask[(offset / 64) as usize] |= 1u64 << (offset % 64);
+            }
+            values.retain(|v| {
+                !held(v).checked_sub(first).is_some_and(|offset| {
+                    mask.get((offset / 64) as usize)
+                        .is_some_and(|word| word & (1u64 << (offset % 64)) != 0)
+                })
+            });
+            return;
+        }
+    }
+    values.retain(|v| !removed.contains(&held(v)));
 }
 /// Side of a cell of the settled index, world units.
 const SETTLED_CELL: i32 = 4;
