@@ -19,7 +19,7 @@ use voxel::{
     World,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
     pub half: [i32; 2],
     pub support: [i32; 2],
@@ -478,6 +478,10 @@ impl<'a> Probe<'a> {
     }
     pub fn yields(&self, m: Mat) -> bool {
         self.yielding.contains(&m)
+    }
+    /// Whether cached column answers use this exact yielding-material set.
+    pub fn matches_yielding(&self, materials: &[Mat]) -> bool {
+        self.yielding == materials
     }
     fn scan(&self, x: i32, z: i32) -> (u16, [u16; 2]) {
         let mut floor = 0;

@@ -24,6 +24,17 @@ pub(super) struct PreparedLocalHunt {
     blockers: Vec<Obstacle>,
     result: HuntAdvance,
 }
+/// Exact current-pose query plus its warm probe. The source borrows prevent
+/// edits to terrain/rubble until the enclosing motion phase consumes it.
+pub(super) struct PreparedGround<'a> {
+    world: &'a World,
+    rubble: &'a nav::vehicle::Rubble,
+    position: [Fx; 2],
+    head: i32,
+    shape: nav::vehicle::Shape,
+    current: nav::vehicle::Pose,
+    probe: nav::vehicle::Probe<'a>,
+}
 enum HuntAdvance {
     Pending(Box<nav::vehicle::Hunt>),
     Restart,
@@ -1394,6 +1405,56 @@ impl Motion {
         gravity: i32,
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
+        completed: impl FnMut(&'static str),
+    ) {
+        self.step_observed_ground(
+            w, b, alive, engine, response, others, tick, gravity, rubble, changed, None, completed,
+        );
+    }
+    pub(super) fn prepare_ground<'a>(
+        &mut self,
+        w: &'a World,
+        b: &UnitBody,
+        rubble: &'a nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+    ) -> Option<PreparedGround<'a>> {
+        if !self.enabled {
+            return None;
+        }
+        let mut probe = nav::vehicle::Probe::for_local(
+            w,
+            &self.yielding,
+            std::mem::take(&mut self.terrain_columns),
+            changed,
+        )
+        .with_rubble(rubble);
+        let position = [self.pos[0], self.pos[2]];
+        let shape = self.shape(b);
+        let current = probe.pose(position, self.drive.head, shape);
+        Some(PreparedGround {
+            world: w,
+            rubble,
+            position,
+            head: self.drive.head,
+            shape,
+            current,
+            probe,
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn step_observed_ground<'a>(
+        &mut self,
+        w: &'a World,
+        b: &UnitBody,
+        alive: bool,
+        engine: bool,
+        response: crate::mobility::Mobility,
+        others: &[Obstacle],
+        tick: u32,
+        gravity: i32,
+        rubble: &'a nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+        prepared: Option<PreparedGround<'a>>,
         mut completed: impl FnMut(&'static str),
     ) {
         self.cut.clear();
@@ -1563,15 +1624,43 @@ impl Motion {
         let old_pos = self.pos;
         // Retain bounded column pages across nearby ticks. The world's edits
         // and rubble changes invalidate precisely the pages they touched.
-        let mut ground = nav::vehicle::Probe::for_local(
-            w,
-            &self.yielding,
-            std::mem::take(&mut self.terrain_columns),
-            changed,
-        )
-        .with_rubble(rubble);
         let shape = self.shape(b);
-        let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
+        let (mut ground, current) = match prepared {
+            Some(p)
+                if std::ptr::eq(p.world, w)
+                    && std::ptr::eq(p.rubble, rubble)
+                    && p.position == [self.pos[0], self.pos[2]]
+                    && p.head == old.head
+                    && p.shape == shape
+                    && p.probe.matches_yielding(&self.yielding) =>
+            {
+                completed("ground_accepted");
+                (p.probe, p.current)
+            }
+            other => {
+                let columns = match other {
+                    Some(mut p) => {
+                        completed("ground_rejected");
+                        // Pages are still exact source-world answers. Only a
+                        // matching source can seed the ordinary current query.
+                        if std::ptr::eq(p.world, w)
+                            && std::ptr::eq(p.rubble, rubble)
+                            && p.probe.matches_yielding(&self.yielding)
+                        {
+                            p.probe.take_columns()
+                        } else {
+                            Default::default()
+                        }
+                    }
+                    None => std::mem::take(&mut self.terrain_columns),
+                };
+                let mut ground =
+                    nav::vehicle::Probe::for_local(w, &self.yielding, columns, changed)
+                        .with_rubble(rubble);
+                let current = ground.pose([self.pos[0], self.pos[2]], old.head, shape);
+                (ground, current)
+            }
+        };
         // Pushing through a tree is slower than open ground.
         if current.crush > 0 {
             speed = speed.mul(Fx::from_ratio(self.navigation.fell.speed_pct, 100));
@@ -2302,6 +2391,167 @@ mod tests {
         let mut blob = Blob::new();
         m.save(&mut blob);
         blob.v
+    }
+    #[test]
+    fn prepared_ground_matches_serial_drive_feet_and_live_contacts_across_workers() {
+        use rayon::prelude::*;
+        let w = ground(0);
+        let bodies = [
+            voxel::unit::tank(),
+            voxel::unit::strider(),
+            voxel::unit::spider(),
+            voxel::unit::artillery(),
+        ];
+        let kinds = [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+        ];
+        let changed = nav::vehicle::Changed::default();
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut rubble = nav::vehicle::Rubble::new();
+            let mut serial: Vec<_> = bodies
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    let mut m = Motion::new([160, 16, 180 + i as i32 * 100], kinds[i], b);
+                    m.enabled = true;
+                    m.path = vec![[500, 180 + i as i32 * 100]];
+                    m.destination = m.path.last().copied();
+                    m.next_plan = u32::MAX;
+                    m
+                })
+                .collect();
+            let mut prepared = serial.clone();
+            let mut contacts = 0;
+            for tick in 0..60 {
+                let mut changed = changed.clone();
+                if tick >= 30 {
+                    rubble = nav::vehicle::Rubble::from_sorted(vec![([170, 280], 18)]);
+                    changed.column(170, 280);
+                }
+                let mut answers: Vec<_> = pool.install(|| {
+                    prepared
+                        .par_iter_mut()
+                        .enumerate()
+                        .map(|(i, m)| m.prepare_ground(&w, &bodies[i], &rubble, &changed))
+                        .collect()
+                });
+                // Live blockers are supplied after preparation, just as spatial
+                // acceptance sees earlier actors' moves in the enclosing tick.
+                let others = [Obstacle {
+                    pos: [
+                        Fx::from_int(190 + (tick / 20) as i32),
+                        Fx::from_int(16),
+                        Fx::from_int(180),
+                    ],
+                    head: 0,
+                    half: [Fx::from_int(12), Fx::from_int(18)],
+                }];
+                for i in 0..bodies.len() {
+                    serial[i].allow_start(false);
+                    prepared[i].allow_start(false);
+                    serial[i].step(
+                        &w,
+                        &bodies[i],
+                        true,
+                        true,
+                        crate::mobility::Mobility::intact(true),
+                        &others,
+                        tick,
+                        98,
+                        &rubble,
+                        &changed,
+                    );
+                    let mut accepted = false;
+                    prepared[i].step_observed_ground(
+                        &w,
+                        &bodies[i],
+                        true,
+                        true,
+                        crate::mobility::Mobility::intact(true),
+                        &others,
+                        tick,
+                        98,
+                        &rubble,
+                        &changed,
+                        answers[i].take(),
+                        |stage| accepted |= stage == "ground_accepted",
+                    );
+                    assert!(accepted);
+                    assert_eq!(
+                        motion_bytes(&prepared[i]),
+                        motion_bytes(&serial[i]),
+                        "workers={workers} tick={tick} unit={i}"
+                    );
+                    assert_eq!(prepared[i].floors, serial[i].floors);
+                    assert_eq!(prepared[i].cut, serial[i].cut);
+                    assert_eq!(prepared[i].contact, serial[i].contact);
+                    contacts += usize::from(prepared[i].contact.is_some());
+                }
+                drop(answers);
+            }
+            assert!(contacts > 0, "fixture must exercise live contacts");
+        }
+    }
+    #[test]
+    fn changed_ground_key_or_source_falls_back_to_exact_probe() {
+        let w = ground(0);
+        let other_world = ground(5);
+        let b = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let other_rubble = nav::vehicle::Rubble::from_sorted(vec![([200, 300], 18)]);
+        let changed = nav::vehicle::Changed::default();
+        for case in 0..6 {
+            let mut m = Motion::new([200, 16, 300], RangeUnitKind::Tank, &b);
+            m.enabled = true;
+            let answer = m.prepare_ground(&w, &b, &rubble, &changed);
+            match case {
+                0 => m.pos[0] = m.pos[0].add(Fx::ONE),
+                1 => m.drive.head = angle::FULL / 8,
+                2 => m.step += 1,
+                5 => m.yielding = vec![1, 2],
+                _ => {}
+            }
+            let mut serial = m.clone();
+            let world = if case == 3 { &other_world } else { &w };
+            let rubble = if case == 4 { &other_rubble } else { &rubble };
+            let mut rejected = false;
+            m.step_observed_ground(
+                world,
+                &b,
+                true,
+                true,
+                crate::mobility::Mobility::intact(true),
+                &[],
+                0,
+                98,
+                rubble,
+                &changed,
+                answer,
+                |stage| rejected |= stage == "ground_rejected",
+            );
+            serial.step(
+                world,
+                &b,
+                true,
+                true,
+                crate::mobility::Mobility::intact(true),
+                &[],
+                0,
+                98,
+                rubble,
+                &changed,
+            );
+            assert!(rejected, "case={case}");
+            assert_eq!(motion_bytes(&m), motion_bytes(&serial), "case={case}");
+            assert_eq!(m.cut, serial.cut);
+        }
     }
     #[test]
     fn prepared_local_hunt_matches_serial_continuation() {

@@ -333,6 +333,7 @@ fn main() {
     let mut settled_phase_windows = vec![[0u128; 4]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
     let mut local_hunt_windows = vec![[0usize; 2]; ticks.div_ceil(300)];
+    let mut ground_windows = vec![(0u128, [0usize; 2]); ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
     let mut unit_last = unit_start.clone();
     for tick_index in 0..ticks {
@@ -340,6 +341,7 @@ fn main() {
         let mut last = start;
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
+        let mut ground_us = 0;
         let mut debris_detail = [0u128; 11];
         let mut settled_detail = [0u128; 4];
         let mut settled_last = None;
@@ -348,6 +350,7 @@ fn main() {
         let unit_window = &mut unit_time_windows[tick_index / 300];
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
         let local_hunts = &mut local_hunt_windows[tick_index / 300];
+        let ground_counts = &mut ground_windows[tick_index / 300].1;
         sim.step_observed_detail(
             |phase| {
                 let now = Instant::now();
@@ -380,6 +383,7 @@ fn main() {
                     match name {
                         "motion_begin" => {}
                         "motion_routes" => motion_detail[0] = elapsed,
+                        "motion_ground" => ground_us = elapsed,
                         "motion_commit" => motion_detail[1] = elapsed,
                         "motion_contacts" => motion_detail[2] = elapsed,
                         "motion_felling" => motion_detail[3] = elapsed,
@@ -412,6 +416,10 @@ fn main() {
             },
             |id, stage| {
                 if tick_csv.is_some() {
+                    if stage == "ground_accepted" || stage == "ground_rejected" {
+                        ground_counts[usize::from(stage == "ground_rejected")] += 1;
+                        return;
+                    }
                     if stage == "local_hunt_accepted" || stage == "local_hunt_rejected" {
                         local_hunts[usize::from(stage == "local_hunt_rejected")] += 1;
                         return;
@@ -444,6 +452,7 @@ fn main() {
         let elapsed = start.elapsed().as_micros();
         samples.push(elapsed);
         if tick_csv.is_some() {
+            ground_windows[tick_index / 300].0 += ground_us;
             for (sum, value) in settled_phase_windows[tick_index / 300]
                 .iter_mut()
                 .zip(settled_detail)
@@ -750,6 +759,14 @@ fn main() {
                 window[0].tick,
                 window[window.len() - 1].tick,
                 settled_phase_windows[index].map(|us| us / len)
+            );
+            println!(
+                "motion_ground_window={}..{} mean_us={} accepted={} rejected={}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                ground_windows[index].0 / len,
+                ground_windows[index].1[0],
+                ground_windows[index].1[1]
             );
         }
         println!("tick_csv={path}");

@@ -3734,6 +3734,25 @@ impl BlastRange {
             }
         }
         detail("motion_routes");
+        let driven =
+            self.patrols_running && (!battle_mode || self.battle.phase == battle::Phase::Fighting);
+        let mut prepared_ground: Vec<_> = (0..self.units.len()).map(|_| None).collect();
+        if driven && self.units.len() >= 4 {
+            if let Some(pool) = &self.navigation_pool {
+                let world = &self.world;
+                let rubble = &self.rubble;
+                prepared_ground = pool.install(|| {
+                    self.units
+                        .par_chunks_mut(1)
+                        .map(|chunk| {
+                            let u = &mut chunk[0];
+                            u.motion.prepare_ground(world, &u.body, rubble, &changed)
+                        })
+                        .collect()
+                });
+            }
+        }
+        detail("motion_ground");
         let mut contacts = Vec::new();
         for id in motion_order {
             unit_detail(id, "begin");
@@ -3767,7 +3786,7 @@ impl BlastRange {
                             },
                         );
                     }
-                    u.motion.step_observed(
+                    u.motion.step_observed_ground(
                         &self.world,
                         &u.body,
                         u.status.alive,
@@ -3778,6 +3797,7 @@ impl BlastRange {
                         self.config.gravity,
                         &self.rubble,
                         &changed,
+                        prepared_ground[id].take(),
                         |stage| unit_detail(id, stage),
                     );
                 } else {
@@ -3805,6 +3825,7 @@ impl BlastRange {
             starts = starts.saturating_sub(usize::from(u.motion.started_search()));
             unit_detail(id, "unit_done");
         }
+        drop(prepared_ground);
         if !self.battle_mode() {
             self.gun.motion.cut_limit = cut_limit;
             self.gun.motion.allow_start(starts > 0);
