@@ -9,6 +9,7 @@ use fx::{
     blob::{Blob, Scan},
     Fx,
 };
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use voxel::{
     impact::ray_cells,
@@ -276,6 +277,28 @@ impl BlastRange {
         accepted
     }
     pub(super) fn exchange_heat(&mut self) {
+        self.exchange_heat_in(true);
+    }
+    fn exchange_contacts(&self, source: Site, bounds: &[Bounds]) -> [Option<Site>; 6] {
+        let heat = source.heat(self);
+        if u64::from(heat) * u64::from(self.thermal_tuning.exchange_milli) < 1000 {
+            return [None; 6];
+        }
+        let Some(from) = source.centre(self) else {
+            return [None; 6];
+        };
+        std::array::from_fn(|i| {
+            let mut to = from;
+            let sign = if i.is_multiple_of(2) { -1 } else { 1 };
+            to[i / 2] = to[i / 2].add(Fx::from_int(
+                sign * i32::from(self.thermal_tuning.exchange_reach),
+            ));
+            self.first_contact(Some(source), from, to, bounds)
+                .and_then(|(_, p)| p)
+                .filter(|dest| source.separate(*dest) && dest.accepts(self))
+        })
+    }
+    fn exchange_heat_in(&mut self, parallel: bool) {
         self.heat_exchange.visited = 0;
         let t = &self.thermal_tuning;
         if t.exchange_milli == 0 || (self.heat.hot() == 0 && self.thermals.hot() == 0) {
@@ -300,63 +323,51 @@ impl BlastRange {
         let mut incoming = BTreeMap::<Site, u32>::new();
         let mut new = BTreeSet::new();
         let mut pairs = BTreeSet::new();
-        for source in world
+        let sources: Vec<_> = world
             .into_iter()
             .map(Site::World)
             .chain(body.into_iter().map(Site::Body))
-        {
+            .collect();
+        // Rays read the phase's unchanged fields and geometry. Source and
+        // axis order survive indexed collection; admission remains serial.
+        let trace = |source: &Site| self.exchange_contacts(*source, &bounds);
+        let contacts: Vec<_> = if parallel && sources.len() >= 128 {
+            sources.par_iter().map(trace).collect()
+        } else {
+            sources.iter().map(trace).collect()
+        };
+        for (source, contacts) in sources.into_iter().zip(contacts) {
             let heat = source.heat(self);
-            if u64::from(heat) * u64::from(t.exchange_milli) < 1000 {
-                continue;
-            }
-            let Some(from) = source.centre(self) else {
-                continue;
-            };
-            for axis in 0..3 {
-                for sign in [-1, 1] {
-                    let mut to = from;
-                    to[axis] = to[axis].add(Fx::from_int(sign * i32::from(t.exchange_reach)));
-                    let Some(dest) = self
-                        .first_contact(Some(source), from, to, &bounds)
-                        .and_then(|(_, p)| p)
-                    else {
-                        continue;
-                    };
-                    if !source.separate(dest)
-                        || !dest.accepts(self)
-                        || !pairs.insert((source, dest))
-                    {
-                        continue;
-                    }
-                    let hot = temperature(heat, source.mm(self));
-                    let cold = temperature(dest.heat(self), dest.mm(self));
-                    // Smaller physical volume bounds equilibration for unequal grids.
-                    let volume = u128::from(source.mm(self).min(dest.mm(self))).pow(3);
-                    let share = (u128::from(hot.saturating_sub(cold))
-                        * u128::from(t.exchange_milli)
-                        * volume
+            for dest in contacts.into_iter().flatten() {
+                if !pairs.insert((source, dest)) {
+                    continue;
+                }
+                let hot = temperature(heat, source.mm(self));
+                let cold = temperature(dest.heat(self), dest.mm(self));
+                // Smaller physical volume bounds equilibration for unequal grids.
+                let volume = u128::from(source.mm(self).min(dest.mm(self))).pow(3);
+                let share =
+                    (u128::from(hot.saturating_sub(cold)) * u128::from(t.exchange_milli) * volume
                         / (1000 * u128::from(WORLD_MM).pow(3)))
                     .min(u128::from(CAP)) as u32;
-                    let available =
-                        heat.saturating_sub(outgoing.get(&source).copied().unwrap_or(0));
-                    let room = CAP
-                        .saturating_sub(dest.heat(self))
-                        .saturating_sub(incoming.get(&dest).copied().unwrap_or(0));
-                    let share = share.min(available).min(room);
-                    if share == 0 {
-                        continue;
-                    }
-                    if let Site::Body(p) = dest {
-                        if self.thermals.heat(p) == 0 && !new.contains(&p) {
-                            if self.thermals.hot() + new.len() >= t.max_cells {
-                                continue;
-                            }
-                            new.insert(p);
-                        }
-                    }
-                    *outgoing.entry(source).or_default() += share;
-                    *incoming.entry(dest).or_default() += share;
+                let available = heat.saturating_sub(outgoing.get(&source).copied().unwrap_or(0));
+                let room = CAP
+                    .saturating_sub(dest.heat(self))
+                    .saturating_sub(incoming.get(&dest).copied().unwrap_or(0));
+                let share = share.min(available).min(room);
+                if share == 0 {
+                    continue;
                 }
+                if let Site::Body(p) = dest {
+                    if self.thermals.heat(p) == 0 && !new.contains(&p) {
+                        if self.thermals.hot() + new.len() >= t.max_cells {
+                            continue;
+                        }
+                        new.insert(p);
+                    }
+                }
+                *outgoing.entry(source).or_default() += share;
+                *incoming.entry(dest).or_default() += share;
             }
         }
         // Commit only after every probe has read the beginning of this phase.
@@ -440,6 +451,82 @@ mod tests {
                 .into_iter()
                 .map(|p| u64::from(r.heat.cell(p).heat))
                 .sum::<u64>()
+    }
+    #[test]
+    fn pooled_exchange_preserves_cursors_caps_and_old_field_reads() {
+        let cubes: Vec<_> = (0..192)
+            .map(|i| [100 + (i % 32) * 4, 32, 100 + (i / 32) * 8])
+            .collect();
+        let blocks: Vec<_> = cubes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                (
+                    [p[0] + 2, p[1], p[2]],
+                    if i.is_multiple_of(5) { 6 } else { 5 },
+                )
+            })
+            .collect();
+        let state = |r: &BlastRange| {
+            let mut b = Blob::new();
+            r.heat.save(&mut b);
+            r.thermals.save(&mut b);
+            r.heat_exchange.save(&mut b);
+            b.v
+        };
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for (budget, max_cells, rate) in [(1, 130, 40), (64, 130, 40), (128, 128, 900)] {
+                let make = || {
+                    let mut r = fixture(&cubes, &blocks);
+                    r.thermal_tuning.exchange_cells_per_tick = budget;
+                    r.thermal_tuning.exchange_milli = rate;
+                    for (id, &(p, _)) in blocks.iter().enumerate() {
+                        if !id.is_multiple_of(3) {
+                            r.thermals.deposit(cell(id as u16), 6400, &r.thermal_tuning);
+                        }
+                        r.heat.add(
+                            &r.world,
+                            p.map(|v| v as u32),
+                            if id.is_multiple_of(2) { CAP - 1 } else { 120 },
+                        );
+                    }
+                    r.thermal_tuning.max_cells = max_cells;
+                    // Geometry can disappear while its heat entry remains.
+                    r.units[7].body.remove(0, 0, 0);
+                    r
+                };
+                let (mut actual, mut reference) = (make(), make());
+                let initial = total(&actual);
+                for tick in 0..5 {
+                    reference.exchange_heat_in(false);
+                    pool.install(|| actual.exchange_heat_in(true));
+                    assert_eq!(
+                        state(&actual),
+                        state(&reference),
+                        "workers={workers}, budget={budget}, tick={tick}"
+                    );
+                    assert_eq!(
+                        actual.heat_exchange.visited,
+                        reference.heat_exchange.visited
+                    );
+                    assert_eq!(total(&actual), initial);
+                    if budget >= 64 {
+                        assert!(actual.heat_exchange.visited >= 128);
+                        assert!(actual.heat_exchange.transferred > 0);
+                    }
+                    if tick == 2 {
+                        // Capacity opens again; previously refused transfers
+                        // must resume under the same source cursor order.
+                        actual.thermal_tuning.max_cells = 16384;
+                        reference.thermal_tuning.max_cells = 16384;
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn hot_armour_lights_timber_and_hot_world_heats_body_without_creating_energy() {
