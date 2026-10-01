@@ -118,6 +118,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
 /// in its pose and every segment in the frame the simulation posed it in
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Occupied {
     /// The body left the terrain window; its world cells must be rebuilt on
     /// re-entry because its pose or damage may have changed offscreen.
@@ -314,107 +315,147 @@ fn sort_unique_cells(values: &mut Vec<usize>, scratch: &mut Vec<usize>, counts: 
     values.dedup();
 }
 fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -> Vec<usize> {
-    let previous_window = visual.window;
-    let shifted = previous_window != Some(*window);
-    if visual.cached.len() != sim.units.len() + usize::from(!sim.battle_mode()) {
-        visual.cached.clear();
+    cached_cells_in(
+        sim,
+        window,
+        visual,
+        bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
+    )
+}
+fn new_occupied(u: &RangeUnit, window: &TerrainWindow) -> Occupied {
+    let mut world_cells = Vec::new();
+    unit_world_cells(u, |p| world_cells.push(p.to_array()));
+    let cells = world_cells
+        .iter()
+        .filter_map(|&p| window.index(p))
+        .collect();
+    Occupied {
+        hidden: false,
+        turret_delta: u.turret_delta,
+        pose: u.pose,
+        segments: u.seg_frames.clone(),
+        revision: u.revision,
+        root_bits: u.body.vol.cols.clone(),
+        segment_bits: u
+            .body
+            .segments
+            .iter()
+            .map(|s| s.body.vol.cols.clone())
+            .collect(),
+        gone: u.seg_gone.clone(),
+        world_cells,
+        bounds: None,
+        cells,
     }
+}
+/// One actor owns its cache. Preparing it reads no other actor and does not
+/// write terrain, GPU patches or the authoritative simulation.
+fn update_occupied(
+    u: &RangeUnit,
+    old: &mut Occupied,
+    window: &TerrainWindow,
+    previous_window: Option<TerrainWindow>,
+) -> bool {
+    let (lo, hi) = u.bounds();
+    if (0..3).any(|a| hi[a] < window.origin[a] || lo[a] >= window.origin[a] + window.dims[a] as i32)
+    {
+        old.hidden = true;
+        old.cells.clear();
+        return false;
+    }
+    let changed = old.hidden
+        || old.turret_delta != u.turret_delta
+        || old.pose != u.pose
+        || old.segments != u.seg_frames
+        // Dents/heat update appearance but keep occupancy. Compare the small
+        // packed geometry only when its revision changed.
+        || (old.revision != u.revision && !old.same_geometry(u));
+    if changed {
+        old.world_cells.clear();
+        unit_world_cells(u, |p| old.world_cells.push(p.to_array()));
+        old.hidden = false;
+        old.turret_delta = u.turret_delta;
+        old.pose = u.pose;
+        old.segments.clone_from(&u.seg_frames);
+        // Pose changes do not require copying intact packed geometry.
+        if old.revision != u.revision {
+            old.root_bits.clone_from(&u.body.vol.cols);
+            if old.segment_bits.len() != u.body.segments.len() {
+                old.segment_bits
+                    .resize_with(u.body.segments.len(), Vec::new);
+            }
+            for (bits, segment) in old.segment_bits.iter_mut().zip(&u.body.segments) {
+                bits.clone_from(&segment.body.vol.cols);
+            }
+            old.gone.clone_from(&u.seg_gone);
+        }
+        old.bounds = None;
+    }
+    if changed
+        || (previous_window != Some(*window)
+            && previous_window.is_none_or(|was| !old.same_clip(was, *window)))
+    {
+        old.cells.clear();
+        old.cells
+            .extend(old.world_cells.iter().filter_map(|&p| window.index(p)));
+    }
+    old.revision = u.revision;
+    changed
+}
+fn cached_cells_in(
+    sim: &BlastRange,
+    window: &TerrainWindow,
+    visual: &mut Visual,
+    pool: Option<&bevy::tasks::TaskPool>,
+) -> Vec<usize> {
+    let previous_window = visual.window;
+    let actor_count = sim.units.len() + usize::from(!sim.battle_mode());
+    let actors = sim
+        .units
+        .iter()
+        .chain((!sim.battle_mode()).then_some(&sim.gun));
+    // Reuse Bevy's persistent pool; small rosters and standalone callers keep
+    // the serial path. Scope results follow direct spawn order, not completion.
+    let pool = pool.filter(|_| actor_count >= 4);
+    let rebuilds = if visual.cached.len() != actor_count {
+        visual.cached = if let Some(pool) = pool {
+            pool.scope(|scope| {
+                for u in actors.clone() {
+                    scope.spawn(async move { new_occupied(u, window) });
+                }
+            })
+        } else {
+            actors.clone().map(|u| new_occupied(u, window)).collect()
+        };
+        actor_count
+    } else if let Some(pool) = pool {
+        pool.scope(|scope| {
+            for (u, old) in actors.clone().zip(&mut visual.cached) {
+                scope.spawn(async move { update_occupied(u, old, window, previous_window) });
+            }
+        })
+        .into_iter()
+        .filter(|rebuilt| *rebuilt)
+        .count()
+    } else {
+        actors
+            .zip(&mut visual.cached)
+            .map(|(u, old)| update_occupied(u, old, window, previous_window))
+            .filter(|rebuilt| *rebuilt)
+            .count()
+    };
+    #[cfg(test)]
+    {
+        visual.occupancy_rebuilds += rebuilds;
+    }
+    #[cfg(not(test))]
+    let _ = rebuilds;
     visual.window = Some(*window);
     let mut next = std::mem::take(&mut visual.scratch);
     next.clear();
     next.reserve(visual.occupied.len());
-    for (id, u) in sim
-        .units
-        .iter()
-        .chain((!sim.battle_mode()).then_some(&sim.gun))
-        .enumerate()
-    {
-        if let Some(old) = visual.cached.get_mut(id) {
-            let (lo, hi) = u.bounds();
-            if (0..3).any(|a| {
-                hi[a] < window.origin[a] || lo[a] >= window.origin[a] + window.dims[a] as i32
-            }) {
-                old.hidden = true;
-                old.cells.clear();
-                continue;
-            }
-        }
-        let changed = visual.cached.get(id).is_none_or(|old| {
-            old.hidden
-                || old.turret_delta != u.turret_delta
-                || old.pose != u.pose
-                || old.segments != u.seg_frames
-                // Dents/heat update appearance but keep occupancy. Compare
-                // the small packed geometry only when its revision changed.
-                || (old.revision != u.revision && !old.same_geometry(u))
-        });
-        if changed {
-            #[cfg(test)]
-            {
-                visual.occupancy_rebuilds += 1;
-            }
-            let mut world_cells = visual
-                .cached
-                .get_mut(id)
-                .map_or_else(Vec::new, |old| std::mem::take(&mut old.world_cells));
-            world_cells.clear();
-            unit_world_cells(u, |p| world_cells.push(p.to_array()));
-            if id == visual.cached.len() {
-                visual.cached.push(Occupied {
-                    hidden: false,
-                    turret_delta: u.turret_delta,
-                    pose: u.pose,
-                    segments: u.seg_frames.clone(),
-                    revision: u.revision,
-                    root_bits: u.body.vol.cols.clone(),
-                    segment_bits: u
-                        .body
-                        .segments
-                        .iter()
-                        .map(|s| s.body.vol.cols.clone())
-                        .collect(),
-                    gone: u.seg_gone.clone(),
-                    world_cells,
-                    bounds: None,
-                    cells: Vec::new(),
-                });
-            } else {
-                let old = &mut visual.cached[id];
-                old.hidden = false;
-                old.turret_delta = u.turret_delta;
-                old.pose = u.pose;
-                old.segments.clone_from(&u.seg_frames);
-                // Turning or driving changes the shadow cells, but leaves
-                // packed body geometry intact. Preserve its cached vectors
-                // until a damage revision actually changes.
-                if old.revision != u.revision {
-                    old.root_bits.clone_from(&u.body.vol.cols);
-                    if old.segment_bits.len() != u.body.segments.len() {
-                        old.segment_bits
-                            .resize_with(u.body.segments.len(), Vec::new);
-                    }
-                    for (bits, segment) in old.segment_bits.iter_mut().zip(&u.body.segments) {
-                        bits.clone_from(&segment.body.vol.cols);
-                    }
-                    old.gone.clone_from(&u.seg_gone);
-                }
-                old.revision = u.revision;
-                old.world_cells = world_cells;
-                old.bounds = None;
-            }
-        }
-        if changed
-            || (shifted
-                && previous_window.is_none_or(|old| !visual.cached[id].same_clip(old, *window)))
-        {
-            let cached = &mut visual.cached[id];
-            cached.cells.clear();
-            cached
-                .cells
-                .extend(cached.world_cells.iter().filter_map(|&p| window.index(p)));
-        }
-        visual.cached[id].revision = u.revision;
-        next.extend_from_slice(&visual.cached[id].cells);
+    for cached in &visual.cached {
+        next.extend_from_slice(&cached.cells);
     }
     sort_unique_cells(&mut next, &mut visual.sort_scratch, &mut visual.sort_counts);
     next
@@ -649,6 +690,156 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn occupancy_roster(count: usize) -> BlastRange {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+        let kinds = [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+            RangeUnitKind::TurretT1,
+            RangeUnitKind::TurretT2,
+            RangeUnitKind::Base,
+        ];
+        sim.units = (0..count)
+            .map(|i| {
+                RangeUnit::of_kind(
+                    kinds[i % kinds.len()],
+                    [160 + (i % 10) as i32 * 35, 16, 290 + (i / 10) as i32 * 35],
+                )
+            })
+            .collect();
+        sim
+    }
+
+    #[test]
+    fn pooled_occupancy_matches_exact_cells_and_serial_caches_across_workers() {
+        for workers in [1, 2, 4, 8] {
+            let pool = bevy::tasks::TaskPoolBuilder::new()
+                .num_threads(workers)
+                .build();
+            let mut sim = occupancy_roster(8);
+            let mut serial = Visual::default();
+            let mut parallel = Visual::default();
+            for stage in 0..11 {
+                let mut window = TerrainWindow {
+                    origin: [96, 0, 256],
+                    dims: [512, 192, 512],
+                };
+                match stage {
+                    2 => {
+                        for (i, u) in sim.units.iter_mut().enumerate() {
+                            u.motion.drive.head = fx::angle::FULL / (9 + i as i32);
+                            u.update_pose(fx::angle::FULL / (7 + i as i32));
+                        }
+                    }
+                    3 => {
+                        sim.units[0].body.vol.cols.fill(0);
+                        sim.units[0].revision += 1;
+                        sim.units[1].seg_gone[0] = true;
+                        sim.units[1].revision += 1;
+                        sim.units[2].revision += 1; // appearance without geometry
+                    }
+                    4 => window.origin = [104, 0, 264],
+                    5 | 6 => {
+                        window.origin = [0, 0, 0];
+                        window.dims = [64, 64, 64];
+                        if stage == 6 {
+                            sim.units[2].body.vol.cols.fill(0);
+                            sim.units[2].seg_gone.fill(true);
+                            sim.units[2].revision += 1;
+                        }
+                    }
+                    8 => {
+                        reset(&mut serial);
+                        reset(&mut parallel);
+                    }
+                    9 => {
+                        sim.units.pop();
+                    }
+                    10 => sim
+                        .units
+                        .push(RangeUnit::of_kind(RangeUnitKind::Spider, [210, 16, 340])),
+                    _ => {}
+                }
+                let reference = cached_cells_in(&sim, &window, &mut serial, None);
+                let result = cached_cells_in(&sim, &window, &mut parallel, Some(&pool));
+                assert_eq!(result, reference, "workers={workers} stage={stage}");
+                assert_eq!(result, cells(&sim, &window));
+                assert_eq!(parallel.cached, serial.cached);
+                assert_eq!(parallel.occupancy_rebuilds, serial.occupancy_rebuilds);
+                serial.scratch = std::mem::replace(&mut serial.occupied, reference);
+                parallel.scratch = std::mem::replace(&mut parallel.occupied, result);
+            }
+        }
+    }
+
+    #[test]
+    fn pooled_occupancy_completes_inside_an_existing_compute_task() {
+        // A real ECS system may already run on this pool. One worker must
+        // make progress too, without waiting for another OS thread to exist.
+        for workers in [1, 4] {
+            let pool = bevy::tasks::TaskPoolBuilder::new()
+                .num_threads(workers)
+                .build();
+            let sim = occupancy_roster(8);
+            let window = TerrainWindow {
+                origin: [96, 0, 256],
+                dims: [512, 192, 512],
+            };
+            let expected = cells(&sim, &window);
+            let result = pool.scope(|scope| {
+                scope.spawn(async {
+                    let mut visual = Visual::default();
+                    cached_cells_in(&sim, &window, &mut visual, Some(&pool));
+                    cached_cells_in(&sim, &window, &mut visual, Some(&pool))
+                });
+            });
+            assert_eq!(result, [expected]);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual sixty-actor occupancy timing without competing workloads"]
+    fn bench_occupancy_pool() {
+        let window = TerrainWindow {
+            origin: [96, 0, 256],
+            dims: [640, 192, 640],
+        };
+        for workers in [0, 1, 2, 4, 8] {
+            let pool = (workers > 0).then(|| {
+                bevy::tasks::TaskPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+            });
+            let mut sim = occupancy_roster(60);
+            let mut visual = Visual::default();
+            cached_cells_in(&sim, &window, &mut visual, pool.as_ref());
+            let mut times = Vec::new();
+            for tick in 0..120 {
+                for (i, u) in sim.units.iter_mut().enumerate() {
+                    u.motion.drive.head = (tick * 113 + i as i32 * 79) % fx::angle::FULL;
+                    u.update_pose((tick * 173) % fx::angle::FULL);
+                }
+                let start = std::time::Instant::now();
+                let next = cached_cells_in(&sim, &window, &mut visual, pool.as_ref());
+                times.push(start.elapsed().as_micros());
+                visual.scratch = std::mem::replace(&mut visual.occupied, next);
+            }
+            let mean = times.iter().sum::<u128>() / times.len() as u128;
+            times.sort_unstable();
+            println!(
+                "OCCUPANCY workers={workers} mean_us={mean} p50_us={} p99_us={} cells={}",
+                times[60],
+                times[118],
+                visual.occupied.len()
+            );
+        }
+    }
 
     #[test]
     fn integer_occupancy_sort_matches_comparison_sort_with_duplicates() {

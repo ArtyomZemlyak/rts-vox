@@ -150,6 +150,10 @@ pub fn begin(
         return;
     }
     if p.start.is_none() {
+        println!(
+            "PROFILE compute_workers={}",
+            bevy::tasks::ComputeTaskPool::try_get().map_or(0, |pool| pool.thread_num())
+        );
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
