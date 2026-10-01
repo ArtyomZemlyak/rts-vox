@@ -3674,37 +3674,67 @@ impl BlastRange {
             };
             m.allow_resume(work);
         }
-        if count >= 2 {
-            if let Some(pool) = &self.navigation_pool {
-                // Search only against immutable terrain and rubble. A hull
-                // recovering from contact keeps its local blocker search in
-                // the serial motion pass below. Search costs vary sharply by
-                // hull and terrain, so schedule individual hulls rather than
-                // pairing a slow search with another in the same chunk.
-                // Commit order remains unchanged.
-                let world = &self.world;
-                let rubble = &self.rubble;
-                let tick = self.tick;
-                pool.install(|| {
-                    let _: Vec<()> = self
-                        .units
-                        .par_chunks_mut(1)
-                        .map(|chunk| {
-                            let u = &mut chunk[0];
-                            u.motion
-                                .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
-                        })
-                        .collect();
-                });
-            }
-        }
-        detail("motion_routes");
-        let mut contacts = Vec::new();
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
             let p = self.units[id].motion.pos;
             (p[0], p[2], id)
         });
+        let mut local_hunts: Vec<Option<motion::PreparedLocalHunt>> =
+            (0..self.units.len()).map(|_| None).collect();
+        if count >= 2 {
+            if let Some(pool) = &self.navigation_pool {
+                // Terrain-only searches commit directly. Local searches run
+                // speculatively against snapshot blockers and commit only if
+                // those blockers still match the spatially ordered live state.
+                let world = &self.world;
+                let rubble = &self.rubble;
+                let tick = self.tick;
+                let gun_obstacle =
+                    (!battle_mode).then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
+                let mut ranks = vec![0; self.units.len()];
+                for (rank, &id) in motion_order.iter().enumerate() {
+                    ranks[id] = rank;
+                }
+                let changing: Vec<_> = self
+                    .units
+                    .iter()
+                    .map(|u| u.motion.obstacle_changing())
+                    .collect();
+                let driven = self.patrols_running
+                    && (!battle_mode || self.battle.phase == battle::Phase::Fighting);
+                local_hunts = pool.install(|| {
+                    self.units
+                        .par_chunks_mut(1)
+                        .enumerate()
+                        .map(|(id, chunk)| {
+                            let u = &mut chunk[0];
+                            u.motion
+                                .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
+                            if !driven
+                                || positions.iter().enumerate().any(|(other, obstacle)| {
+                                    ranks[other] < ranks[id]
+                                        && changing[other]
+                                        && u.motion.local_hunt_reads(&u.body, obstacle)
+                                })
+                            {
+                                return None;
+                            }
+                            let others: Vec<_> = positions
+                                .iter()
+                                .enumerate()
+                                .filter(|(i, _)| *i != id)
+                                .map(|(_, p)| *p)
+                                .chain(gun_obstacle)
+                                .collect();
+                            u.motion
+                                .prepare_local_hunt(world, &u.body, &others, rubble, &changed)
+                        })
+                        .collect()
+                });
+            }
+        }
+        detail("motion_routes");
+        let mut contacts = Vec::new();
         for id in motion_order {
             unit_detail(id, "begin");
             let u = &mut self.units[id];
@@ -3724,6 +3754,19 @@ impl BlastRange {
                 if self.patrols_running
                     && (!battle_mode || self.battle.phase == battle::Phase::Fighting)
                 {
+                    if let Some(prepared) = local_hunts[id].take() {
+                        let accepted = u
+                            .motion
+                            .accept_local_hunt(prepared, &u.body, &others, self.tick);
+                        unit_detail(
+                            id,
+                            if accepted {
+                                "local_hunt_accepted"
+                            } else {
+                                "local_hunt_rejected"
+                            },
+                        );
+                    }
                     u.motion.step_observed(
                         &self.world,
                         &u.body,

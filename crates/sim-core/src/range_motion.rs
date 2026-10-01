@@ -16,6 +16,19 @@ pub struct Obstacle {
     pub head: i32,
     pub half: [Fx; 2],
 }
+
+/// A local continuation computed against the pre-commit obstacle snapshot.
+/// The original motion/search stays untouched until its blockers are validated.
+pub(super) struct PreparedLocalHunt {
+    origin: [Fx; 2],
+    blockers: Vec<Obstacle>,
+    result: HuntAdvance,
+}
+enum HuntAdvance {
+    Pending(Box<nav::vehicle::Hunt>),
+    Restart,
+    Planned(nav::vehicle::Route, [Fx; 2]),
+}
 impl Obstacle {
     pub fn of(m: &Motion, b: &UnitBody) -> Self {
         Self {
@@ -65,6 +78,10 @@ impl Obstacle {
     }
     fn overlaps(&self, other: &Self) -> bool {
         self.penetration(other) > Fx::ZERO
+    }
+    fn within(&self, from: [Fx; 2], radius: Fx) -> bool {
+        let reach = radius.add(self.half[0].max(self.half[1]));
+        self.pos[0].sub(from[0]).abs() <= reach && self.pos[2].sub(from[1]).abs() <= reach
     }
 }
 /// Manoeuvres in one escape cycle: astern, ahead, then each turning both ways.
@@ -182,7 +199,7 @@ pub struct Motion {
     /// Per-tick continuation allowance assigned by the range. Scratch,
     /// recomputed before motion after loading; standalone callers use tuning.
     resume_budget: Option<usize>,
-    /// This tick's terrain-only continuation was run before spatially ordered
+    /// This tick's validated continuation was run before spatially ordered
     /// motion. Never serialized; the enclosing tick is atomic.
     prepared_hunt: bool,
     /// Pure terrain answers carried between ticks; changed pages are dropped
@@ -894,11 +911,28 @@ impl Motion {
         others
             .iter()
             .copied()
-            .filter(|o| {
-                let reach = radius.add(o.half[0].max(o.half[1]));
-                o.pos[0].sub(from[0]).abs() <= reach && o.pos[2].sub(from[1]).abs() <= reach
-            })
+            .filter(|o| o.within(from, radius))
             .collect()
+    }
+    /// Scheduling hint only: an already moving earlier hull is likely to
+    /// invalidate speculative work. Skipping that work leaves the serial path.
+    pub(super) fn local_hunt_reads(&self, b: &UnitBody, other: &Obstacle) -> bool {
+        if self.blocked_ticks == 0 && self.escape == 0 {
+            return false;
+        }
+        let Some(hunt) = &self.hunt else {
+            return false;
+        };
+        let shape = self.shape(b);
+        let radius =
+            Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
+        other.within(hunt.origin(), radius)
+    }
+    pub(super) fn obstacle_changing(&self) -> bool {
+        self.drive.vel != Fx::ZERO
+            || self.drive.yaw_rate != 0
+            || self.shove.x != Fx::ZERO
+            || self.shove.z != Fx::ZERO
     }
     /// Replanning retains the current route while a replacement is pending.
     /// A temporary blocker can leave before the search finishes; execution
@@ -1103,19 +1137,33 @@ impl Motion {
         tick: u32,
         changed: &nav::vehicle::Changed,
     ) {
+        let Some(hunt) = self.hunt.take() else {
+            return;
+        };
+        let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
+        let result = self.advance_hunt(hunt, w, b, &blockers, rubble, changed);
+        self.apply_hunt(result, tick);
+    }
+    /// Pure continuation over owned search scratch and immutable surroundings.
+    /// Both speculative and serial paths use the same calculation and commit.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_hunt(
+        &self,
+        mut hunt: Box<nav::vehicle::Hunt>,
+        w: &World,
+        b: &UnitBody,
+        blockers: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+    ) -> HuntAdvance {
         let slice = self
             .resume_budget
             .unwrap_or(self.navigation.search_nodes_per_tick);
         if slice == 0 {
             // Changes must still invalidate cached terrain during a skipped slice.
-            if let Some(hunt) = &mut self.hunt {
-                hunt.forget(changed);
-            }
-            return;
+            hunt.forget(changed);
+            return HuntAdvance::Pending(hunt);
         }
-        let Some(mut hunt) = self.hunt.take() else {
-            return;
-        };
         if !hunt.starts_at([self.pos[0], self.pos[2]], self.drive.head) {
             // A hull driving on its route or braking while the new search
             // runs moves by design: the search holds while the hull is
@@ -1131,13 +1179,11 @@ impl Motion {
             let (dx, dz) = (self.pos[0].sub(from[0]), self.pos[2].sub(from[1]));
             let reach = Fx::from_int(self.navigation.retarget_units);
             if self.escape_left > 0 || dx.mul(dx).add(dz.mul(dz)) > reach.mul(reach) {
-                self.next_plan = tick;
-                return;
+                return HuntAdvance::Restart;
             }
         }
         hunt.forget(changed);
         let half = self.shape(b).half.map(Fx::from_int);
-        let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
         let clear = |p: [Fx; 2], head: i32| {
             !blockers.iter().any(|o| {
                 o.overlaps(&Obstacle {
@@ -1148,14 +1194,25 @@ impl Motion {
             })
         };
         match hunt.advance_in(w, rubble, &clear, slice) {
-            Some(plan) => {
+            Some(plan) => HuntAdvance::Planned(plan, hunt.origin()),
+            None => HuntAdvance::Pending(hunt),
+        }
+    }
+    fn apply_hunt(&mut self, result: HuntAdvance, tick: u32) {
+        match result {
+            HuntAdvance::Planned(plan, from) => {
+                self.hunt = None;
                 // The cadence of the next try counts from the answer, not
                 // from the question (ADR-306).
                 self.take_plan(plan);
-                self.take_up(hunt.origin());
+                self.take_up(from);
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
-            None => self.hunt = Some(hunt),
+            HuntAdvance::Pending(hunt) => self.hunt = Some(hunt),
+            HuntAdvance::Restart => {
+                self.hunt = None;
+                self.next_plan = tick;
+            }
         }
     }
     /// Continue a search that cannot read live blockers independently of the
@@ -1172,6 +1229,52 @@ impl Motion {
             self.hunt_step(w, b, &[], rubble, tick, changed);
             self.prepared_hunt = true;
         }
+    }
+    pub(super) fn prepare_local_hunt(
+        &self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+    ) -> Option<PreparedLocalHunt> {
+        if !self.enabled
+            || self.prepared_hunt
+            || self.resume_budget == Some(0)
+            || (self.blocked_ticks == 0 && self.escape == 0)
+        {
+            return None;
+        }
+        let hunt = self.hunt.as_ref()?;
+        let origin = hunt.origin();
+        let blockers = self.local_blockers(origin, self.shape(b), others);
+        let result = self.advance_hunt(hunt.clone(), w, b, &blockers, rubble, changed);
+        Some(PreparedLocalHunt {
+            origin,
+            blockers,
+            result,
+        })
+    }
+    /// Later actors observe earlier accepted positions. A changed nearby hull
+    /// invalidates speculative work; the original search then runs normally.
+    pub(super) fn accept_local_hunt(
+        &mut self,
+        prepared: PreparedLocalHunt,
+        b: &UnitBody,
+        others: &[Obstacle],
+        tick: u32,
+    ) -> bool {
+        let blockers = self.local_blockers(prepared.origin, self.shape(b), others);
+        if blockers.len() != prepared.blockers.len()
+            || !blockers.iter().zip(&prepared.blockers).all(|(a, b)| {
+                a.pos[0] == b.pos[0] && a.pos[2] == b.pos[2] && a.head == b.head && a.half == b.half
+            })
+        {
+            return false;
+        }
+        self.apply_hunt(prepared.result, tick);
+        self.prepared_hunt = true;
+        true
     }
     /// Ticks until the next search after the last one: four replan periods
     /// when it ran the open set dry, one otherwise (P-17).
@@ -2184,6 +2287,121 @@ mod tests {
             &nav::vehicle::Rubble::new(),
             &nav::vehicle::Changed::default(),
         );
+    }
+    fn local_hunter(w: &World, b: &UnitBody, others: &[Obstacle]) -> Motion {
+        let mut m = Motion::new([200, 16, 300], RangeUnitKind::Tank, b);
+        m.navigation.global_nodes = 0;
+        m.navigation.search_nodes_per_tick = 1;
+        m.blocked_ticks = 1;
+        assert!(m.move_to(w, [430, 300], b, others, &nav::vehicle::Rubble::new()));
+        m.blocked_ticks = 1;
+        assert!(m.searching());
+        m
+    }
+    fn motion_bytes(m: &Motion) -> Vec<u8> {
+        let mut blob = Blob::new();
+        m.save(&mut blob);
+        blob.v
+    }
+    #[test]
+    fn prepared_local_hunt_matches_serial_continuation() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = nav::vehicle::Changed::default();
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(10)],
+        };
+        let mut serial = local_hunter(&w, &body, &[obstacle]);
+        let mut prepared = serial.clone();
+        let mut accepted = 0;
+        for tick in 0..200 {
+            if let Some(result) =
+                prepared.prepare_local_hunt(&w, &body, &[obstacle], &rubble, &changed)
+            {
+                prepared.allow_start(false);
+                prepared.cut_limit = 7;
+                assert!(prepared.accept_local_hunt(result, &body, &[obstacle], tick));
+                assert!(!prepared.may_start);
+                assert_eq!(prepared.cut_limit, 7);
+                accepted += 1;
+            }
+            serial.allow_start(false);
+            prepared.allow_start(false);
+            step(&mut serial, &w, &body, &[obstacle], tick);
+            step(&mut prepared, &w, &body, &[obstacle], tick);
+            assert_eq!(
+                motion_bytes(&serial),
+                motion_bytes(&prepared),
+                "tick={tick}"
+            );
+        }
+        assert!(accepted > 0);
+    }
+    #[test]
+    fn moved_rotated_and_new_local_blockers_reject_prepared_hunt() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = nav::vehicle::Changed::default();
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(10)],
+        };
+        let mut moved = obstacle;
+        moved.pos[0] = moved.pos[0].add(Fx::ONE);
+        let mut rotated = obstacle;
+        rotated.head = angle::FULL / 8;
+        let mut larger = obstacle;
+        larger.half[0] = larger.half[0].add(Fx::ONE);
+        for (before, after) in [
+            (vec![obstacle], vec![moved]),
+            (vec![obstacle], vec![rotated]),
+            (vec![obstacle], vec![larger]),
+            (vec![obstacle], vec![]),
+            (vec![], vec![obstacle]),
+        ] {
+            let mut m = local_hunter(&w, &body, &before);
+            let mut serial = m.clone();
+            let original = motion_bytes(&m);
+            let prepared = m
+                .prepare_local_hunt(&w, &body, &before, &rubble, &changed)
+                .unwrap();
+            assert!(!m.accept_local_hunt(prepared, &body, &after, 0));
+            assert_eq!(motion_bytes(&m), original);
+            step(&mut m, &w, &body, &after, 0);
+            step(&mut serial, &w, &body, &after, 0);
+            assert_eq!(motion_bytes(&m), motion_bytes(&serial));
+        }
+    }
+    #[test]
+    fn blocker_height_and_distant_motion_do_not_invalidate_local_hunt() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(10)],
+        };
+        let mut distant = obstacle;
+        distant.pos[0] = Fx::from_int(490);
+        let mut m = local_hunter(&w, &body, &[obstacle, distant]);
+        let prepared = m
+            .prepare_local_hunt(
+                &w,
+                &body,
+                &[obstacle, distant],
+                &nav::vehicle::Rubble::new(),
+                &nav::vehicle::Changed::default(),
+            )
+            .unwrap();
+        let mut raised = obstacle;
+        raised.pos[1] = raised.pos[1].add(Fx::ONE);
+        distant.pos[0] = distant.pos[0].sub(Fx::ONE);
+        assert!(m.accept_local_hunt(prepared, &body, &[raised, distant], 0));
     }
     #[test]
     fn a_whole_map_order_is_immediate_drives_to_the_end_and_replays() {

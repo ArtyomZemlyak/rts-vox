@@ -330,6 +330,7 @@ fn main() {
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
     let mut debris_phase_windows = vec![[0u128; 9]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
+    let mut local_hunt_windows = vec![[0usize; 2]; ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
     let mut unit_last = unit_start.clone();
     for tick_index in 0..ticks {
@@ -342,6 +343,7 @@ fn main() {
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
+        let local_hunts = &mut local_hunt_windows[tick_index / 300];
         sim.step_observed_detail(
             |phase| {
                 let now = Instant::now();
@@ -390,6 +392,10 @@ fn main() {
             },
             |id, stage| {
                 if tick_csv.is_some() {
+                    if stage == "local_hunt_accepted" || stage == "local_hunt_rejected" {
+                        local_hunts[usize::from(stage == "local_hunt_rejected")] += 1;
+                        return;
+                    }
                     let now = Instant::now();
                     if stage == "begin" {
                         unit_start[id] = now;
@@ -667,6 +673,13 @@ fn main() {
                 .copied()
                 .enumerate()
                 .collect();
+            println!(
+                "local_hunts_window={}..{} accepted={} rejected={}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                local_hunt_windows[index][0],
+                local_hunt_windows[index][1],
+            );
             units.sort_unstable_by_key(|&(id, us)| (std::cmp::Reverse(us), id));
             println!(
                 "motion_units_window={}..{} top_us_per_tick={:?}",
