@@ -359,23 +359,31 @@ impl<'a> UnitVoxels<'a> {
 impl crate::burst::Voxels for UnitVoxels<'_> {
     fn solid(&self, p: [i32; 3]) -> bool {
         let u = self.unit;
-        let frames = self
-            .frames
-            .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta));
-        let asked = self.asked.fetch_add(1, Ordering::Relaxed);
-        if asked < ASKED_BEFORE_KNOWN {
-            return frames.hit(u, p).is_some();
-        }
-        let known = self.known.get_or_init(|| {
-            let (lo, hi) = u.bounds();
-            let size: [i64; 3] = std::array::from_fn(|a| i64::from(hi[a]) - i64::from(lo[a]) + 1);
-            let cells = size.iter().product::<i64>() as usize;
-            KnownCells {
-                lo,
-                size,
-                bits: (0..cells.div_ceil(32)).map(|_| AtomicU64::new(0)).collect(),
+        let known = if let Some(known) = self.known.get() {
+            known
+        } else {
+            // Only cold queries count toward allocating the cache. Once
+            // published, readers need no shared read-modify-write counter.
+            let asked = self.asked.fetch_add(1, Ordering::Relaxed);
+            if asked < ASKED_BEFORE_KNOWN {
+                return self
+                    .frames
+                    .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+                    .hit(u, p)
+                    .is_some();
             }
-        });
+            self.known.get_or_init(|| {
+                let (lo, hi) = u.bounds();
+                let size: [i64; 3] =
+                    std::array::from_fn(|a| i64::from(hi[a]) - i64::from(lo[a]) + 1);
+                let cells = size.iter().product::<i64>() as usize;
+                KnownCells {
+                    lo,
+                    size,
+                    bits: (0..cells.div_ceil(32)).map(|_| AtomicU64::new(0)).collect(),
+                }
+            })
+        };
         let q: [i64; 3] = std::array::from_fn(|a| i64::from(p[a]) - i64::from(known.lo[a]));
         if (0..3).any(|a| q[a] < 0 || q[a] >= known.size[a]) {
             return false;
@@ -386,7 +394,11 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
         if cell & 1 != 0 {
             return cell & 2 != 0;
         }
-        let solid = frames.hit(u, p).is_some();
+        let solid = self
+            .frames
+            .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+            .hit(u, p)
+            .is_some();
         known.bits[word].fetch_or((1 | u64::from(solid) << 1) << shift, Ordering::Relaxed);
         solid
     }
@@ -6995,6 +7007,82 @@ mod tests {
                 });
             }
         });
+    }
+    #[test]
+    fn warm_hull_voxel_queries_keep_cold_counter_idle_across_workers() {
+        let pools: Vec<_> = [1, 2, 4, 8]
+            .into_iter()
+            .map(|workers| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        for kind in [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+            RangeUnitKind::TurretT1,
+            RangeUnitKind::TurretT2,
+            RangeUnitKind::Base,
+        ] {
+            let mut unit = RangeUnit::of_kind(kind, [-20, 24, -20]);
+            unit.motion.drive.head = fx::angle::FULL / 7;
+            unit.motion.hull.up =
+                phys::V3::new(Fx::from_ratio(1, 7), Fx::ONE, Fx::from_ratio(-1, 5));
+            unit.update_pose(-fx::angle::FULL / 9);
+            for damaged in [false, true] {
+                if damaged {
+                    for (i, col) in unit.body.vol.cols.iter_mut().enumerate() {
+                        if i % 3 == 0 {
+                            *col = 0;
+                        }
+                    }
+                    if let Some(gone) = unit.seg_gone.first_mut() {
+                        *gone = true;
+                    }
+                }
+                let (lo, hi) = unit.bounds();
+                let points: Vec<_> = (0..512)
+                    .map(|i| {
+                        let sample = [i % 8, i / 8 % 8, i / 64];
+                        [0, 1, 2].map(|a| lo[a] - 1 + (hi[a] - lo[a] + 2) * sample[a] / 7)
+                    })
+                    .collect();
+                let expected: Vec<_> = points.iter().map(|&p| unit.hit(p).is_some()).collect();
+                assert!(
+                    expected.iter().any(|&solid| solid),
+                    "empty fixture: {kind:?}"
+                );
+                for pool in &pools {
+                    let voxels = UnitVoxels::of(&unit);
+                    for _ in 0..ASKED_BEFORE_KNOWN {
+                        assert!(!crate::burst::Voxels::solid(&voxels, lo.map(|v| v - 1)));
+                    }
+                    assert!(voxels.known.get().is_none());
+                    assert!(!crate::burst::Voxels::solid(&voxels, lo.map(|v| v - 1)));
+                    assert!(voxels.known.get().is_some());
+                    let cold_count = voxels.asked.load(Ordering::Relaxed);
+                    for _ in 0..2 {
+                        let actual: Vec<_> = pool.install(|| {
+                            points
+                                .par_iter()
+                                .map(|&p| crate::burst::Voxels::solid(&voxels, p))
+                                .collect()
+                        });
+                        assert_eq!(
+                            actual,
+                            expected,
+                            "{kind:?} damaged={damaged} workers={}",
+                            pool.current_num_threads()
+                        );
+                        assert_eq!(voxels.asked.load(Ordering::Relaxed), cold_count);
+                    }
+                }
+            }
+        }
     }
     /// A block of four by four by four placed in the air, with a layer of
     /// `cap` on top when that is not air, applied by the range's own
