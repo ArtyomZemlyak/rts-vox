@@ -401,7 +401,7 @@ mod tests {
                 ];
                 // Repeated and overlapping requests must retain every bit.
                 for &(lo, hi) in boxes.iter().chain(boxes.iter().rev()) {
-                    words.include(lo, hi);
+                    words.build(&[(lo, hi)], false);
                     for z in lo[2]..=hi[2] {
                         for y in lo[1]..=hi[1] {
                             for x in lo[0]..=hi[0] {
@@ -503,7 +503,15 @@ mod tests {
                     }
                 }
             }
-            Settled::of_into(&fragments, &[hull], tick, &t, &mut index, &mut queries);
+            Settled::of_into(
+                &fragments,
+                &[hull],
+                tick,
+                &t,
+                &mut index,
+                &mut queries,
+                &mut |_| {},
+            );
             assert!(!expected.is_empty());
             assert_eq!(index.cells.len(), expected.len());
             for (cell, pieces) in &expected {
@@ -530,7 +538,15 @@ mod tests {
         for f in &mut fragments {
             f.resting = false;
         }
-        Settled::of_into(&fragments, &[], 0, &t, &mut index, &mut queries);
+        Settled::of_into(
+            &fragments,
+            &[],
+            0,
+            &t,
+            &mut index,
+            &mut queries,
+            &mut |_| {},
+        );
         assert!(index.cells.is_empty() && index.boxes.is_empty());
         fragments[0].resting = true;
         let sleeping = Settled::of(&fragments[..1], &[], 0, &t);
@@ -1985,11 +2001,66 @@ mod tests {
             pool.install(|| {
                 let mut index = Settled::default();
                 let mut queries = SettledQueries::default();
-                Settled::of_into(&fragments, &[], 0, &t.blast, &mut index, &mut queries);
+                Settled::of_into(
+                    &fragments,
+                    &[],
+                    0,
+                    &t.blast,
+                    &mut index,
+                    &mut queries,
+                    &mut |_| {},
+                );
                 (index.boxes, index.cells, queries.0)
             })
         };
         assert_eq!(run(1), run(4));
+    }
+    #[test]
+    fn parallel_query_stripes_match_cells_across_negative_word_boundaries_and_rebuilds() {
+        let ranges: Vec<_> = (0..160)
+            .map(|i| {
+                let x = i % 17 - 8;
+                let y = (i % 5 - 2) * 64 - 2;
+                let z = i % 7 - 3;
+                ([x, y, z], [x + i % 9, y + 4, z + 1])
+            })
+            .collect();
+        let mut expected = BTreeSet::new();
+        for &(lo, hi) in &ranges {
+            for z in lo[2]..=hi[2] {
+                for y in lo[1]..=hi[1] {
+                    for x in lo[0]..=hi[0] {
+                        expected.insert([x, y, z]);
+                    }
+                }
+            }
+        }
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut queries = SettledQueries::default();
+            for parallel in [false, true] {
+                queries.clear();
+                pool.install(|| queries.build(&ranges, parallel));
+                for z in -4..=5 {
+                    for y in -132..=132 {
+                        for x in -9..=17 {
+                            let cell = [x, y, z];
+                            assert_eq!(queries.contains(cell), expected.contains(&cell));
+                        }
+                    }
+                }
+                queries.clear();
+                pool.install(|| queries.build(&[], parallel));
+                assert!(queries.is_empty());
+                pool.install(|| queries.build(&[([-1, -65, 2], [-1, -65, 2])], parallel));
+                assert!(queries.contains([-1, -65, 2]));
+                assert!(!queries.contains([-1, -64, 2]));
+                assert!(!queries.contains([0, -65, 2]));
+            }
+        }
     }
     fn tick(b: &mut Bursts, w: &mut voxel::World, e: &mut Economy, t: &Blast) {
         b.advance(w, &e.mats, t);
@@ -3466,7 +3537,15 @@ impl Bursts {
         // (ADR-308), gathered once for the whole tick.
         let mut settled = std::mem::take(&mut self.settled_scratch);
         let mut queries = std::mem::take(&mut self.query_scratch);
-        Settled::of_into(&self.fragments, hulls, tick, t, &mut settled, &mut queries);
+        Settled::of_into(
+            &self.fragments,
+            hulls,
+            tick,
+            t,
+            &mut settled,
+            &mut queries,
+            &mut completed,
+        );
         completed("debris_settled");
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
         let mut merged = BTreeSet::new();
@@ -4314,9 +4393,35 @@ const SETTLED_CELL: i32 = 4;
 /// insertion ORs a range instead of hashing every Y coordinate. No path
 /// iterates the hash table: contact order comes from the fragment slice.
 #[derive(Default)]
-struct SettledQueries(FxHashMap<[i32; 3], u64>);
+struct SettledQueries([FxHashMap<[i32; 3], u64>; 8]);
 impl SettledQueries {
-    fn include(&mut self, lo: [i32; 3], hi: [i32; 3]) {
+    fn clear(&mut self) {
+        for stripe in &mut self.0 {
+            stripe.clear();
+        }
+    }
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(FxHashMap::is_empty)
+    }
+    fn build(&mut self, ranges: &[([i32; 3], [i32; 3])], parallel: bool) {
+        // X modulo eight owns the word, so workers never share a table and
+        // need no unordered merge. Ranges are captured in fragment order.
+        let fill = |(stripe, table): (usize, &mut FxHashMap<[i32; 3], u64>)| {
+            for &(lo, hi) in ranges {
+                Self::include(table, stripe as i32, lo, hi);
+            }
+        };
+        if parallel {
+            self.0.par_iter_mut().enumerate().for_each(fill);
+        } else {
+            self.0.iter_mut().enumerate().for_each(fill);
+        }
+    }
+    fn include(table: &mut FxHashMap<[i32; 3], u64>, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
+        let x0 = lo[0] + (stripe - lo[0]).rem_euclid(8);
+        if x0 > hi[0] {
+            return;
+        }
         let first = lo[1].div_euclid(64);
         let last = hi[1].div_euclid(64);
         for z in lo[2]..=hi[2] {
@@ -4332,14 +4437,14 @@ impl SettledQueries {
                     63
                 };
                 let mask = (u64::MAX << low) & (u64::MAX >> (63 - high));
-                for x in lo[0]..=hi[0] {
-                    *self.0.entry([x, word, z]).or_default() |= mask;
+                for x in (x0..=hi[0]).step_by(8) {
+                    *table.entry([x, word, z]).or_default() |= mask;
                 }
             }
         }
     }
     fn contains(&self, [x, y, z]: [i32; 3]) -> bool {
-        self.0
+        self.0[x.rem_euclid(8) as usize]
             .get(&[x, y.div_euclid(64), z])
             .is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
     }
@@ -4367,6 +4472,7 @@ impl Settled {
         t: &Blast,
         out: &mut Settled,
         want: &mut SettledQueries,
+        completed: &mut impl FnMut(&'static str),
     ) {
         Self::around_bounds_into(
             fragments,
@@ -4375,6 +4481,7 @@ impl Settled {
             |_, f| f.bounds(),
             out,
             want,
+            completed,
         );
     }
     /// The resting pieces around those `asks` picks, by index and piece;
@@ -4403,6 +4510,7 @@ impl Settled {
             bounds,
             &mut out,
             &mut SettledQueries::default(),
+            &mut |_| {},
         );
         out
     }
@@ -4413,13 +4521,14 @@ impl Settled {
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
         out: &mut Settled,
         want: &mut SettledQueries,
+        completed: &mut impl FnMut(&'static str),
     ) {
         for (_, mut list) in out.cells.drain() {
             list.clear();
             out.free_lists.push(list);
         }
         out.boxes.clear();
-        want.0.clear();
+        want.clear();
         if !fragments.iter().any(|f| f.resting) {
             return;
         }
@@ -4444,6 +4553,8 @@ impl Settled {
                 *box_at = world_box((i, &fragments[i]));
             }
         }
+        completed("settled_boxes");
+        let mut ranges = Vec::new();
         for (i, f) in fragments.iter().enumerate() {
             if !asks(i, f) {
                 continue;
@@ -4458,9 +4569,11 @@ impl Settled {
             let reach_lo = [0, 1, 2].map(|a| lo[a].add(v[a].min(Fx::ZERO)));
             let reach_hi = [0, 1, 2].map(|a| hi[a].add(v[a].max(Fx::ZERO)));
             let (c0, c1) = settled_cells(reach_lo, reach_hi);
-            want.include(c0.map(|v| v - 1), c1.map(|v| v + 1));
+            ranges.push((c0.map(|v| v - 1), c1.map(|v| v + 1)));
         }
-        if want.0.is_empty() {
+        want.build(&ranges, fragments.len() >= 1024 && ranges.len() >= 128);
+        completed("settled_queries");
+        if want.is_empty() {
             out.boxes.clear();
             return;
         }
@@ -4505,6 +4618,7 @@ impl Settled {
         } else {
             fragments.iter().enumerate().map(candidate).collect()
         };
+        completed("settled_candidates");
         for (i, cells) in selected.into_iter().enumerate() {
             let Some((c0, c1)) = cells else {
                 continue;
@@ -4523,6 +4637,7 @@ impl Settled {
                 }
             }
         }
+        completed("settled_cells");
     }
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.

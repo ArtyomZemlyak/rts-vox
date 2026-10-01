@@ -70,6 +70,7 @@ impl TickProfile {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    println!("physics_workers={}", rayon::current_num_threads());
     let assault = args.iter().any(|a| a == "--assault");
     let siege = args
         .windows(2)
@@ -329,6 +330,7 @@ fn main() {
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
     let mut debris_phase_windows = vec![[0u128; 11]; ticks.div_ceil(300)];
+    let mut settled_phase_windows = vec![[0u128; 4]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
     let mut local_hunt_windows = vec![[0usize; 2]; ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
@@ -339,6 +341,8 @@ fn main() {
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
         let mut debris_detail = [0u128; 11];
+        let mut settled_detail = [0u128; 4];
+        let mut settled_last = None;
         let mut heat_detail = [0u128; 8];
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
@@ -357,6 +361,20 @@ fn main() {
             |name| {
                 if tick_csv.is_some() {
                     let now = Instant::now();
+                    let settled_phase = match name {
+                        "settled_boxes" => Some(0),
+                        "settled_queries" => Some(1),
+                        "settled_candidates" => Some(2),
+                        "settled_cells" => Some(3),
+                        _ => None,
+                    };
+                    if let Some(phase) = settled_phase {
+                        settled_detail[phase] = now
+                            .duration_since(settled_last.unwrap_or(detail_last))
+                            .as_micros();
+                        settled_last = Some(now);
+                        return;
+                    }
                     let elapsed = now.duration_since(detail_last).as_micros();
                     detail_last = now;
                     match name {
@@ -426,6 +444,12 @@ fn main() {
         let elapsed = start.elapsed().as_micros();
         samples.push(elapsed);
         if tick_csv.is_some() {
+            for (sum, value) in settled_phase_windows[tick_index / 300]
+                .iter_mut()
+                .zip(settled_detail)
+            {
+                *sum += value;
+            }
             for (sum, value) in heat_phase_windows[tick_index / 300]
                 .iter_mut()
                 .zip(heat_detail)
@@ -720,6 +744,12 @@ fn main() {
                 window[0].tick,
                 window[window.len() - 1].tick,
                 heat_phase_windows[index].map(|us| us / len)
+            );
+            println!(
+                "settled_phases_window={}..{} boxes_queries_candidates_cells_us={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                settled_phase_windows[index].map(|us| us / len)
             );
         }
         println!("tick_csv={path}");
