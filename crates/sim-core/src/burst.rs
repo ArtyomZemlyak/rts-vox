@@ -2010,10 +2010,69 @@ mod tests {
                     &mut queries,
                     &mut |_| {},
                 );
-                (index.boxes, index.cells, queries.0)
+                (index.boxes, index.cells.ordered(), queries.0)
             })
         };
         assert_eq!(run(1), run(4));
+    }
+    #[test]
+    fn parallel_contact_stripes_match_ordered_reference_and_clear_reused_lists() {
+        let selected: Vec<_> = (0..1400)
+            .map(|i| {
+                (i % 5 != 0).then(|| {
+                    let x = i % 23 - 15;
+                    let y = i % 9 - 4;
+                    let z = i % 11 - 7;
+                    ([x, y, z], [x + i % 12, y + 1, z + 1])
+                })
+            })
+            .collect();
+        let mut want = SettledQueries::default();
+        let mut index = SettledCells::default();
+        for ranges in [
+            vec![([-19, -6, -8], [18, 8, 7])],
+            vec![([-9, -2, -4], [0, 2, 0]), ([5, 1, 2], [15, 8, 5])],
+            Vec::new(),
+        ] {
+            want.clear();
+            want.build(&ranges, false);
+            let mut expected = BTreeMap::<_, Vec<u32>>::new();
+            for (i, bounds) in selected.iter().enumerate() {
+                let Some((lo, hi)) = *bounds else {
+                    continue;
+                };
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in lo[0]..=hi[0] {
+                            if ranges.iter().any(|(a, b)| {
+                                (0..3).all(|axis| {
+                                    [x, y, z][axis] >= a[axis] && [x, y, z][axis] <= b[axis]
+                                })
+                            }) {
+                                expected.entry([x, y, z]).or_default().push(i as u32);
+                            }
+                        }
+                    }
+                }
+            }
+            for workers in [1, 2, 4, 8] {
+                index.clear();
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap();
+                pool.install(|| index.build(&selected, &want, true));
+                assert_eq!(index.len(), expected.len());
+                assert_eq!(index.is_empty(), expected.is_empty());
+                assert_eq!(index.ordered(), expected, "workers={workers}");
+                for (cell, list) in &expected {
+                    assert_eq!(index.get(cell), Some(list));
+                }
+            }
+            index.clear();
+            index.build(&selected, &want, false);
+            assert_eq!(index.ordered(), expected);
+        }
     }
     #[test]
     fn parallel_query_stripes_match_cells_across_negative_word_boundaries_and_rebuilds() {
@@ -4377,11 +4436,9 @@ fn sort_columns(columns: &mut Vec<([i32; 2], u16)>) {
 /// next one, and without this they fall through one another.
 #[derive(Default)]
 pub(crate) struct Settled {
-    /// Cell of `CELL` units to the indices of the pieces whose box covers
+    /// Cell of `SETTLED_CELL` units to the indices of the pieces whose box covers
     /// it, in index order.
-    cells: FxHashMap<[i32; 3], Vec<u32>>,
-    /// Reuse the per-cell lists when this scratch index is rebuilt next tick.
-    free_lists: Vec<Vec<u32>>,
+    cells: SettledCells,
     /// Frozen world boxes in original fragment order, including unindexed
     /// pieces. The cell lists use those indices throughout the tick, even
     /// when pieces wake or merge. Reuses the construction scratch buffer.
@@ -4389,6 +4446,88 @@ pub(crate) struct Settled {
 }
 /// Side of a cell of the settled index, world units.
 const SETTLED_CELL: i32 = 4;
+/// X modulo eight owns each contact list. Each worker appends indices in
+/// fragment order to its own tables; no merge or shared insertion is needed.
+#[derive(Default)]
+struct SettledCells {
+    stripes: [SettledCellStripe; 8],
+    len: usize,
+}
+#[derive(Default)]
+struct SettledCellStripe {
+    cells: FxHashMap<[i32; 3], Vec<u32>>,
+    free_lists: Vec<Vec<u32>>,
+}
+impl SettledCells {
+    fn clear(&mut self) {
+        for stripe in &mut self.stripes {
+            for (_, mut list) in stripe.cells.drain() {
+                list.clear();
+                stripe.free_lists.push(list);
+            }
+        }
+        self.len = 0;
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn get(&self, cell: &[i32; 3]) -> Option<&Vec<u32>> {
+        self.stripes[cell[0].rem_euclid(8) as usize].cells.get(cell)
+    }
+    #[cfg(test)]
+    fn ordered(&self) -> BTreeMap<[i32; 3], Vec<u32>> {
+        self.stripes
+            .iter()
+            .flat_map(|stripe| {
+                stripe
+                    .cells
+                    .iter()
+                    .map(|(&cell, list)| (cell, list.clone()))
+            })
+            .collect()
+    }
+    fn build(
+        &mut self,
+        selected: &[Option<([i32; 3], [i32; 3])>],
+        want: &SettledQueries,
+        parallel: bool,
+    ) {
+        let fill = |(owner, stripe): (usize, &mut SettledCellStripe)| {
+            for (i, bounds) in selected.iter().enumerate() {
+                let Some((lo, hi)) = *bounds else {
+                    continue;
+                };
+                let x0 = lo[0] + (owner as i32 - lo[0]).rem_euclid(8);
+                if x0 > hi[0] {
+                    continue;
+                }
+                for z in lo[2]..=hi[2] {
+                    for y in lo[1]..=hi[1] {
+                        for x in (x0..=hi[0]).step_by(8) {
+                            if want.contains([x, y, z]) {
+                                stripe
+                                    .cells
+                                    .entry([x, y, z])
+                                    .or_insert_with(|| stripe.free_lists.pop().unwrap_or_default())
+                                    .push(i as u32);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        if parallel {
+            self.stripes.par_iter_mut().enumerate().for_each(fill);
+        } else {
+            self.stripes.iter_mut().enumerate().for_each(fill);
+        }
+        self.len = self.stripes.iter().map(|stripe| stripe.cells.len()).sum();
+    }
+}
 /// Membership-only query mask. A word covers 64 vertical index cells;
 /// insertion ORs a range instead of hashing every Y coordinate. No path
 /// iterates the hash table: contact order comes from the fragment slice.
@@ -4523,10 +4662,7 @@ impl Settled {
         want: &mut SettledQueries,
         completed: &mut impl FnMut(&'static str),
     ) {
-        for (_, mut list) in out.cells.drain() {
-            list.clear();
-            out.free_lists.push(list);
-        }
+        out.cells.clear();
         out.boxes.clear();
         want.clear();
         if !fragments.iter().any(|f| f.resting) {
@@ -4619,24 +4755,7 @@ impl Settled {
             fragments.iter().enumerate().map(candidate).collect()
         };
         completed("settled_candidates");
-        for (i, cells) in selected.into_iter().enumerate() {
-            let Some((c0, c1)) = cells else {
-                continue;
-            };
-            for z in c0[2]..=c1[2] {
-                for y in c0[1]..=c1[1] {
-                    for x in c0[0]..=c1[0] {
-                        if want.contains([x, y, z]) {
-                            let (cells, free_lists) = (&mut out.cells, &mut out.free_lists);
-                            cells
-                                .entry([x, y, z])
-                                .or_insert_with(|| free_lists.pop().unwrap_or_default())
-                                .push(i as u32);
-                        }
-                    }
-                }
-            }
-        }
+        out.cells.build(&selected, want, fragments.len() >= 1024);
         completed("settled_cells");
     }
     /// Whether the box `lo..hi` shares space with a resting piece other
