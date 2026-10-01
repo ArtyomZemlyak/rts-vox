@@ -12,6 +12,7 @@
 use fx::blob::{Blob, Scan};
 use modding::heat::HeatTuning;
 use modding::Registry;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use voxel::{store::AIR, World};
 
@@ -206,6 +207,16 @@ impl Heat {
         t: &HeatTuning,
         claimed: impl Fn([u32; 3]) -> bool,
     ) {
+        self.step_in(w, mats, t, claimed, true);
+    }
+    fn step_in(
+        &mut self,
+        w: &mut World,
+        mats: &Registry,
+        t: &HeatTuning,
+        claimed: impl Fn([u32; 3]) -> bool,
+        parallel: bool,
+    ) {
         self.ignited.clear();
         self.burned.clear();
         self.melting.clear();
@@ -235,30 +246,55 @@ impl Heat {
                     .take(budget - batch.len()),
             );
         }
+        // The world is frozen throughout this phase: burning only queues
+        // edits. Read each material and a burning cell's solid neighbours
+        // independently; gains and bounded heat admission remain ordered.
+        let read = |&(p, c): &([u32; 3], HeatCell)| {
+            let material = w.material(p[0], p[1], p[2]);
+            let share = if c.burn == 0 {
+                0
+            } else {
+                mats.get(material)
+                    .map_or(0, |d| d.fuel / u32::from(t.burn_ticks.max(1)))
+            };
+            let mut solid = 0u8;
+            if share > 0 {
+                for (bit, q) in neighbours(w, p) {
+                    if w.solid(q[0], q[1], q[2]) {
+                        solid |= 1 << bit;
+                    }
+                }
+            }
+            (material, share, solid)
+        };
+        let reads: Vec<_> = if parallel && batch.len() >= 1024 {
+            batch.par_iter().map(read).collect()
+        } else {
+            batch.iter().map(read).collect()
+        };
         // Burning cells feed their solid neighbours; gains are gathered
         // first so the order of the batch cannot favour a direction.
         let mut gain: BTreeMap<[u32; 3], u32> = BTreeMap::new();
-        for &(p, c) in &batch {
-            if c.burn == 0 {
+        for (&(p, _), &(_, share, solid)) in batch.iter().zip(&reads) {
+            if solid == 0 {
                 continue;
             }
-            let m = w.material(p[0], p[1], p[2]);
-            let share = mats
-                .get(m)
-                .map_or(0, |d| d.fuel / u32::from(t.burn_ticks.max(1)));
-            if share == 0 {
-                continue;
-            }
-            for q in neighbours(w, p) {
-                if w.solid(q[0], q[1], q[2]) {
-                    *gain.entry(q).or_insert(0) += share;
+            for bit in 0..6 {
+                if solid & (1 << bit) == 0 {
+                    continue;
                 }
+                let mut q = p;
+                if bit % 2 == 0 {
+                    q[bit / 2] -= 1;
+                } else {
+                    q[bit / 2] += 1;
+                }
+                *gain.entry(q).or_insert(0) += share;
             }
         }
         let mut last = None;
-        for (p, mut c) in batch {
+        for ((p, mut c), (m, _, _)) in batch.into_iter().zip(reads) {
             last = Some(p);
-            let m = w.material(p[0], p[1], p[2]);
             if m == AIR {
                 // Taken by something else: its heat went with it.
                 self.cells.remove(&p);
@@ -393,21 +429,23 @@ fn cell_count(nx: u32, ny: u32, nz: u32) -> u64 {
 fn inside(w: &World, p: [u32; 3]) -> bool {
     p[0] < w.nx && p[1] < w.ny && p[2] < w.nz
 }
-fn neighbours(w: &World, p: [u32; 3]) -> Vec<[u32; 3]> {
-    let mut out = Vec::with_capacity(6);
-    for a in 0..3 {
-        if p[a] > 0 {
-            let mut q = p;
-            q[a] -= 1;
-            out.push(q);
-        }
+fn neighbours(w: &World, p: [u32; 3]) -> impl Iterator<Item = (usize, [u32; 3])> + '_ {
+    (0..6).filter_map(move |bit| {
+        let a = bit / 2;
         let mut q = p;
-        q[a] += 1;
-        if inside(w, q) {
-            out.push(q);
+        if bit % 2 == 0 {
+            if p[a] == 0 {
+                return None;
+            }
+            q[a] -= 1;
+        } else {
+            q[a] += 1;
+            if !inside(w, q) {
+                return None;
+            }
         }
-    }
-    out
+        Some((bit, q))
+    })
 }
 
 #[cfg(test)]
@@ -484,6 +522,91 @@ mod tests {
     fn mats() -> Registry {
         modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron"))
             .unwrap()
+    }
+    #[test]
+    fn parallel_world_reads_preserve_heat_edits_cursor_and_events_across_workers() {
+        struct Grid;
+        impl voxel::Generator for Grid {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 15 {
+                    1
+                } else {
+                    [0, 3, 4, 5, 4, 5][((x + y + z) % 6) as usize]
+                }
+            }
+        }
+        let registry = mats();
+        let mut initial = Heat::default();
+        for x in 0..19 {
+            for y in 15..30 {
+                for z in 0..19 {
+                    initial.cells.insert(
+                        [x, y, z],
+                        HeatCell {
+                            heat: if (x + z) % 3 == 0 { HEAT_CAP } else { 120 },
+                            burn: match (x + y + z) % 4 {
+                                0 => 1,
+                                1 => 2,
+                                _ => 0,
+                            },
+                        },
+                    );
+                }
+            }
+        }
+        initial.cursor = Some([8, 20, 3]);
+        let snapshot = |h: &Heat, w: &World| {
+            let mut b = Blob::new();
+            h.save(&mut b);
+            w.save(&mut b);
+            (b.v, h.ignited.clone(), h.burned.clone(), h.melting.clone())
+        };
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for budget in [1, 31, 1023, 4096] {
+                let mut t = tuning();
+                t.cells_per_tick = budget;
+                let mut serial = initial.clone();
+                let mut parallel = initial.clone();
+                let mut reference_world = World::new(64, 48, 64, 4096, Box::new(Grid));
+                let mut world = World::new(64, 48, 64, 4096, Box::new(Grid));
+                for tick in 0..8 {
+                    let claimed = |p: [u32; 3]| p[0] % 7 == tick % 7;
+                    serial.step_in(&mut reference_world, &registry, &t, claimed, false);
+                    pool.install(|| parallel.step_in(&mut world, &registry, &t, claimed, true));
+                    assert_eq!(
+                        snapshot(&parallel, &world),
+                        snapshot(&serial, &reference_world),
+                        "workers={workers}, budget={budget}, tick={tick}"
+                    );
+                    if budget == 4096 && tick == 0 {
+                        assert!(!parallel.ignited.is_empty());
+                        assert!(!parallel.burned.is_empty());
+                        assert!(!parallel.melting.is_empty());
+                        assert!(world.queued() > 0);
+                        assert!(parallel.burned_total > 0);
+                    }
+                    world.flush();
+                    reference_world.flush();
+                    assert_eq!(
+                        snapshot(&parallel, &world),
+                        snapshot(&serial, &reference_world)
+                    );
+                }
+            }
+        }
+        let mut empty = Heat::default();
+        empty.step_in(
+            &mut World::new(64, 48, 64, 4096, Box::new(Grid)),
+            &registry,
+            &tuning(),
+            |_| false,
+            true,
+        );
+        assert!(empty.cells.is_empty() && empty.cursor.is_none());
     }
     #[test]
     fn bare_soil_cools_to_nothing_and_fuel_lights_spreads_and_burns_out() {
