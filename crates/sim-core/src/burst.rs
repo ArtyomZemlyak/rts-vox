@@ -62,6 +62,99 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claim_batch_reserves_capacity_without_spending_it_on_rejected_cells() {
+        for n in [0, 16, 25000] {
+            for resting_every in [1, 3, usize::MAX] {
+                for (flying_extra, total_extra, claim_limit) in [
+                    (0, 10, 64),
+                    (10, 0, 64),
+                    (2, 10, 64),
+                    (10, 2, 64),
+                    (10, 10, 1),
+                    (10, 10, 64),
+                ] {
+                    let make = || {
+                        let mut b = Bursts::default();
+                        b.fragments = (0..n)
+                            .map(|i| Fragment {
+                                id: i as u64 + 1,
+                                position: V3::ZERO,
+                                velocity: V3::ZERO,
+                                material: 1,
+                                paint: None,
+                                mm: 100,
+                                basis: IDENTITY,
+                                mass_g: 1200,
+                                count: 1,
+                                shape: 1,
+                                side: 1,
+                                chunk: None,
+                                held: 0,
+                                resting: i % resting_every == 0,
+                            })
+                            .collect();
+                        b
+                    };
+                    let (mut actual, mut reference) = (make(), make());
+                    let (mut w, mut old_world) = (world(), world());
+                    let mut t = tuning().blast;
+                    let moving = actual.fragments.iter().filter(|f| !f.resting).count();
+                    t.max_flying = moving as u32 + flying_extra;
+                    t.max_fragments = n as u32 + total_extra;
+                    t.max_claims = claim_limit;
+                    for batch in 0..2 {
+                        // A subsequent batch must see fragments waking up and
+                        // outstanding claims; capacity is never carried over.
+                        if batch == 1 && n > 0 {
+                            actual.fragments[0].resting = false;
+                            reference.fragments[0].resting = false;
+                        }
+                        let mut room = actual.fragment_room(&t);
+                        let cells = [[0, 11, 48], [96, 11, 48]]
+                            .into_iter()
+                            .chain((40..60).flat_map(|x| [[x, 11, 48]; 2]));
+                        for p in cells {
+                            let before = room;
+                            let accepted = actual.claim_voxel_with_room(
+                                &mut w,
+                                p,
+                                1,
+                                [48, 13, 48],
+                                999,
+                                2,
+                                &t,
+                                &mut room,
+                            );
+                            assert_eq!(
+                                accepted,
+                                reference.claim_voxel(
+                                    &mut old_world,
+                                    p,
+                                    1,
+                                    [48, 13, 48],
+                                    999,
+                                    2,
+                                    &t,
+                                ),
+                                "n={n}, resting_every={resting_every}, batch={batch}, p={p:?}"
+                            );
+                            assert_eq!(before - room, u32::from(accepted));
+                            assert_eq!(room, actual.fragment_room(&t));
+                        }
+                        let snapshot = |b: &Bursts, w: &voxel::World| {
+                            let mut saved = Blob::new();
+                            b.save(&mut saved);
+                            w.save(&mut saved);
+                            saved.v
+                        };
+                        assert_eq!(snapshot(&actual, &w), snapshot(&reference, &old_world));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn distant_hull_rejection_preserves_rotated_contacts() {
         for head in (0..angle::FULL).step_by((angle::FULL / 16) as usize) {
             let hull = Hull {
@@ -3062,11 +3155,29 @@ impl Bursts {
         side: u8,
         t: &Blast,
     ) -> bool {
+        let mut room = self.fragment_room(t);
+        self.claim_voxel_with_room(world, p, mat, at, motion_mj, side, t, &mut room)
+    }
+
+    /// Ordered claim-only batch: fragments must remain unchanged while room
+    /// is consumed. Each successful claim reserves exactly one flying slot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn claim_voxel_with_room(
+        &mut self,
+        world: &mut voxel::World,
+        p: [u32; 3],
+        mat: Mat,
+        at: [i32; 3],
+        motion_mj: u64,
+        side: u8,
+        t: &Blast,
+        room: &mut u32,
+    ) -> bool {
         // The edit queue drops digs on the world's frame (ADR-034); a claim
         // there would never be confirmed and never released, and every
         // wait on claims would wait forever (ADR-420). Callers check it
         // first; this is the last line.
-        if self.fragment_room(t) == 0
+        if *room == 0
             || self.claims.len() >= t.max_claims as usize
             || self.claims.contains_key(&p)
             || !world.inside(p[0], p[1], p[2])
@@ -3083,6 +3194,7 @@ impl Bursts {
             },
         );
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
+        *room -= 1;
         true
     }
     pub fn pending(&self) -> usize {

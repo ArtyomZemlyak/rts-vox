@@ -177,7 +177,18 @@ impl Matter {
     /// share throws the pieces away from the hull. A full pool stops the cut
     /// where it is, and the hull keeps standing in the rest.
     pub fn fell(&mut self, w: &mut World, cells: &[[u32; 3]], at: [i32; 3], f: &Felling) -> usize {
+        self.fell_in(w, cells, at, f, true)
+    }
+    fn fell_in(
+        &mut self,
+        w: &mut World,
+        cells: &[[u32; 3]],
+        at: [i32; 3],
+        f: &Felling,
+        optimized: bool,
+    ) -> usize {
         let mut cut = 0;
+        let mut room = None;
         for &p in cells {
             let m = w.material(p[0], p[1], p[2]);
             if m == AIR
@@ -188,10 +199,23 @@ impl Matter {
                 continue;
             }
             let (cost, motion) = self.cost(m);
-            if !self
-                .debris
-                .claim_voxel(w, p, m, at, motion, self.fragment_box, &self.tuning)
-            {
+            let claimed = if optimized {
+                let capacity = room.get_or_insert_with(|| self.debris.fragment_room(&self.tuning));
+                self.debris.claim_voxel_with_room(
+                    w,
+                    p,
+                    m,
+                    at,
+                    motion,
+                    self.fragment_box,
+                    &self.tuning,
+                    capacity,
+                )
+            } else {
+                self.debris
+                    .claim_voxel(w, p, m, at, motion, self.fragment_box, &self.tuning)
+            };
+            if !claimed {
                 break;
             }
             self.supplied_mj += cost;
@@ -205,6 +229,10 @@ impl Matter {
     /// within the radius leave as unpowered debris and fall. Nothing is paid
     /// twice, and a full pool only postpones the rest.
     pub fn step_felling(&mut self, w: &mut World, f: &Felling) {
+        self.step_felling_in(w, f, true);
+    }
+    fn step_felling_in(&mut self, w: &mut World, f: &Felling, optimized: bool) {
+        let mut room = None;
         let mut left = f.cells_per_tick;
         while left > 0 {
             let Some((p, seed)) = self.felling.pop_first() else {
@@ -231,7 +259,14 @@ impl Matter {
                 continue;
             }
             // Felled wood crumbles in two-cell pieces whatever the weapon.
-            if !self.debris.claim_voxel(w, q, m, seed, 0, 2, &self.tuning) {
+            let claimed = if optimized {
+                let capacity = room.get_or_insert_with(|| self.debris.fragment_room(&self.tuning));
+                self.debris
+                    .claim_voxel_with_room(w, q, m, seed, 0, 2, &self.tuning, capacity)
+            } else {
+                self.debris.claim_voxel(w, q, m, seed, 0, 2, &self.tuning)
+            };
+            if !claimed {
                 self.felling.insert((fell_key(p), fell_key(seed)));
                 break;
             }
@@ -988,8 +1023,122 @@ impl Matter {
 
 #[cfg(test)]
 mod felling_key_tests {
-    use super::{fell_cell, fell_key};
+    use super::{fell_cell, fell_key, Matter};
+    use fx::blob::Blob;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn batched_felling_claims_preserve_frontier_edits_and_pool_deferral() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else {
+                    [4, 5, 3, 0][((x + y + z) % 4) as usize]
+                }
+            }
+        }
+        let initial: BTreeSet<_> = (2..24)
+            .flat_map(|x| {
+                (4..12).flat_map(move |y| {
+                    (2..24).flat_map(move |z| {
+                        [[x, 2, z], [x, 3, z]].map(|seed| (fell_key([x, y, z]), fell_key(seed)))
+                    })
+                })
+            })
+            .chain(
+                [
+                    ([-1, 4, 2], [2, 2, 2]),
+                    ([0, 4, 2], [2, 2, 2]),
+                    ([64, 4, 2], [63, 2, 2]),
+                ]
+                .map(|(p, seed)| (fell_key(p), fell_key(seed))),
+            )
+            .collect();
+        let snapshot = |m: &Matter, w: &voxel::World| {
+            let mut b = Blob::new();
+            m.save(&mut b);
+            w.save(&mut b);
+            b.v
+        };
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for budget in [1, 31, 1023, 4096] {
+                for (capacity, flying, fragments) in [
+                    (0, 4096, 32768),
+                    (7, 4096, 32768),
+                    (4096, 3, 32768),
+                    (4096, 4096, 5),
+                    (4096, 4096, 32768),
+                ] {
+                    let mut reference = Matter::new(&[]);
+                    let mut actual = Matter::new(&[]);
+                    reference.felling = initial.clone();
+                    actual.felling = initial.clone();
+                    reference.tuning.max_claims = capacity;
+                    actual.tuning.max_claims = capacity;
+                    reference.tuning.max_flying = flying;
+                    actual.tuning.max_flying = flying;
+                    reference.tuning.max_fragments = fragments;
+                    actual.tuning.max_fragments = fragments;
+                    let mut old_world = voxel::World::new(64, 32, 64, 4096, Box::new(Grove));
+                    let mut world = voxel::World::new(64, 32, 64, 4096, Box::new(Grove));
+                    let mut f = modding::navigation::Navigation::from_ron(include_str!(
+                        "../../../data/range-navigation.ron"
+                    ))
+                    .unwrap()
+                    .fell;
+                    f.cells_per_tick = budget;
+                    let cuts: Vec<_> = (2..10)
+                        .flat_map(|x| (4..8).flat_map(move |y| (2..10).map(move |z| [x, y, z])))
+                        .chain([[0, 5, 1], [3, 4, 3], [3, 4, 3]])
+                        .collect();
+                    assert_eq!(
+                        actual.fell_in(&mut world, &cuts, [3, 4, 3], &f, true),
+                        reference.fell_in(&mut old_world, &cuts, [3, 4, 3], &f, false)
+                    );
+                    assert_eq!(snapshot(&actual, &world), snapshot(&reference, &old_world));
+                    for tick in 0..4 {
+                        if tick == 2 {
+                            reference.tuning.max_claims = 4096;
+                            actual.tuning.max_claims = 4096;
+                            reference.tuning.max_flying = 4096;
+                            actual.tuning.max_flying = 4096;
+                            reference.tuning.max_fragments = 32768;
+                            actual.tuning.max_fragments = 32768;
+                        }
+                        reference.step_felling_in(&mut old_world, &f, false);
+                        pool.install(|| actual.step_felling_in(&mut world, &f, true));
+                        assert_eq!(
+                            snapshot(&actual, &world),
+                            snapshot(&reference, &old_world),
+                            "workers={workers}, budget={budget}, capacity={capacity}, tick={tick}"
+                        );
+                        if tick == 0
+                            && budget == 4096
+                            && capacity == 4096
+                            && flying == 4096
+                            && fragments == 32768
+                        {
+                            assert!(world.queued() > 0);
+                            assert!(actual.debris.claims() > 0);
+                            assert!(
+                                actual.felling.iter().any(|key| !initial.contains(key)),
+                                "new frontier must be admitted during this phase"
+                            );
+                        }
+                        world.flush();
+                        old_world.flush();
+                        assert_eq!(snapshot(&actual, &world), snapshot(&reference, &old_world));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn packed_felling_queue_preserves_signed_position_and_seed_order() {
