@@ -60,7 +60,9 @@ try {
             # Retain the handle before the counter script observes exit;
             # Windows PowerShell 5.1 otherwise loses the child's ExitCode.
             $null = $process.Handle
-            & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ([Math]::Min(3600, $Seconds + 120)) -Output (Join-Path $directory "$scenario-cpu")
+            # Formatting records from the sampler must not become scenario
+            # results in the enclosing foreach or corrupt summary.csv.
+            & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ([Math]::Min(3600, $Seconds + 120)) -Output (Join-Path $directory "$scenario-cpu") | Out-Host
             $process.WaitForExit()
         } else {
             $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait

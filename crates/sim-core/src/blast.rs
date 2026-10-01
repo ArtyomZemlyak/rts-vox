@@ -3685,21 +3685,12 @@ impl BlastRange {
             if let Some(pool) = &self.navigation_pool {
                 // Terrain-only searches commit directly. Local searches run
                 // speculatively against snapshot blockers and commit only if
-                // those blockers still match the spatially ordered live state.
+                // their queried clearances match the spatially ordered live state.
                 let world = &self.world;
                 let rubble = &self.rubble;
                 let tick = self.tick;
                 let gun_obstacle =
                     (!battle_mode).then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
-                let mut ranks = vec![0; self.units.len()];
-                for (rank, &id) in motion_order.iter().enumerate() {
-                    ranks[id] = rank;
-                }
-                let changing: Vec<_> = self
-                    .units
-                    .iter()
-                    .map(|u| u.motion.obstacle_changing())
-                    .collect();
                 let driven = self.patrols_running
                     && (!battle_mode || self.battle.phase == battle::Phase::Fighting);
                 local_hunts = pool.install(|| {
@@ -3710,13 +3701,7 @@ impl BlastRange {
                             let u = &mut chunk[0];
                             u.motion
                                 .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
-                            if !driven
-                                || positions.iter().enumerate().any(|(other, obstacle)| {
-                                    ranks[other] < ranks[id]
-                                        && changing[other]
-                                        && u.motion.local_hunt_reads(&u.body, obstacle)
-                                })
-                            {
+                            if !driven {
                                 return None;
                             }
                             let others: Vec<_> = positions

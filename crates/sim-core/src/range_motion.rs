@@ -21,8 +21,15 @@ pub struct Obstacle {
 /// The original motion/search stays untouched until its blockers are validated.
 pub(super) struct PreparedLocalHunt {
     origin: [Fx; 2],
+    shape: nav::vehicle::Shape,
     blockers: Vec<Obstacle>,
+    checked: Vec<HuntClearance>,
     result: HuntAdvance,
+}
+struct HuntClearance {
+    position: [Fx; 2],
+    head: i32,
+    clear: bool,
 }
 /// Exact current-pose query plus its warm probe. The source borrows prevent
 /// edits to terrain/rubble until the enclosing motion phase consumes it.
@@ -925,26 +932,6 @@ impl Motion {
             .filter(|o| o.within(from, radius))
             .collect()
     }
-    /// Scheduling hint only: an already moving earlier hull is likely to
-    /// invalidate speculative work. Skipping that work leaves the serial path.
-    pub(super) fn local_hunt_reads(&self, b: &UnitBody, other: &Obstacle) -> bool {
-        if self.blocked_ticks == 0 && self.escape == 0 {
-            return false;
-        }
-        let Some(hunt) = &self.hunt else {
-            return false;
-        };
-        let shape = self.shape(b);
-        let radius =
-            Fx::from_int(4 * (shape.half[0].max(shape.half[1]) + self.navigation.cell_units));
-        other.within(hunt.origin(), radius)
-    }
-    pub(super) fn obstacle_changing(&self) -> bool {
-        self.drive.vel != Fx::ZERO
-            || self.drive.yaw_rate != 0
-            || self.shove.x != Fx::ZERO
-            || self.shove.z != Fx::ZERO
-    }
     /// Replanning retains the current route while a replacement is pending.
     /// A temporary blocker can leave before the search finishes; execution
     /// may then resume under the same live collision checks as any move.
@@ -1152,7 +1139,7 @@ impl Motion {
             return;
         };
         let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
-        let result = self.advance_hunt(hunt, w, b, &blockers, rubble, changed);
+        let result = self.advance_hunt(hunt, w, b, &blockers, rubble, changed, None);
         self.apply_hunt(result, tick);
     }
     /// Pure continuation over owned search scratch and immutable surroundings.
@@ -1166,6 +1153,7 @@ impl Motion {
         blockers: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
+        checked: Option<&std::cell::RefCell<Vec<HuntClearance>>>,
     ) -> HuntAdvance {
         let slice = self
             .resume_budget
@@ -1196,13 +1184,21 @@ impl Motion {
         hunt.forget(changed);
         let half = self.shape(b).half.map(Fx::from_int);
         let clear = |p: [Fx; 2], head: i32| {
-            !blockers.iter().any(|o| {
+            let answer = !blockers.iter().any(|o| {
                 o.overlaps(&Obstacle {
                     pos: [p[0], Fx::ZERO, p[1]],
                     head,
                     half,
                 })
-            })
+            });
+            if let Some(checked) = checked {
+                checked.borrow_mut().push(HuntClearance {
+                    position: p,
+                    head,
+                    clear: answer,
+                });
+            }
+            answer
         };
         match hunt.advance_in(w, rubble, &clear, slice) {
             Some(plan) => HuntAdvance::Planned(plan, hunt.origin()),
@@ -1258,16 +1254,30 @@ impl Motion {
         }
         let hunt = self.hunt.as_ref()?;
         let origin = hunt.origin();
-        let blockers = self.local_blockers(origin, self.shape(b), others);
-        let result = self.advance_hunt(hunt.clone(), w, b, &blockers, rubble, changed);
+        let shape = self.shape(b);
+        let blockers = self.local_blockers(origin, shape, others);
+        let checked = std::cell::RefCell::new(Vec::new());
+        // Only the budgeted continuation's callback reads are retained. The
+        // recorder is local to this worker; serial searches do not allocate it.
+        let result = self.advance_hunt(
+            hunt.clone(),
+            w,
+            b,
+            &blockers,
+            rubble,
+            changed,
+            Some(&checked),
+        );
         Some(PreparedLocalHunt {
             origin,
+            shape,
             blockers,
+            checked: checked.into_inner(),
             result,
         })
     }
-    /// Later actors observe earlier accepted positions. A changed nearby hull
-    /// invalidates speculative work; the original search then runs normally.
+    /// Later actors observe earlier accepted positions. A moved blocker is
+    /// harmless if every queried pose still has the same clearance answer.
     pub(super) fn accept_local_hunt(
         &mut self,
         prepared: PreparedLocalHunt,
@@ -1275,14 +1285,32 @@ impl Motion {
         others: &[Obstacle],
         tick: u32,
     ) -> bool {
-        let blockers = self.local_blockers(prepared.origin, self.shape(b), others);
-        if blockers.len() != prepared.blockers.len()
-            || !blockers.iter().zip(&prepared.blockers).all(|(a, b)| {
+        let shape = self.shape(b);
+        if shape != prepared.shape {
+            return false;
+        }
+        let blockers = self.local_blockers(prepared.origin, shape, others);
+        let unchanged = blockers.len() == prepared.blockers.len()
+            && blockers.iter().zip(&prepared.blockers).all(|(a, b)| {
                 a.pos[0] == b.pos[0] && a.pos[2] == b.pos[2] && a.head == b.head && a.half == b.half
+            });
+        if !unchanged
+            && !prepared.checked.iter().all(|q| {
+                let clear = !blockers.iter().any(|o| {
+                    o.overlaps(&Obstacle {
+                        pos: [q.position[0], Fx::ZERO, q.position[1]],
+                        head: q.head,
+                        half: shape.half.map(Fx::from_int),
+                    })
+                });
+                clear == q.clear
             })
         {
             return false;
         }
+        // Identical callback answers reproduce every branch of the original
+        // continuation. Terrain/rubble and this actor remain fixed in the phase;
+        // neighbors can change without invalidating unread or harmless poses.
         self.apply_hunt(prepared.result, tick);
         self.prepared_hunt = true;
         true
@@ -2591,7 +2619,7 @@ mod tests {
         assert!(accepted > 0);
     }
     #[test]
-    fn moved_rotated_and_new_local_blockers_reject_prepared_hunt() {
+    fn changed_local_blockers_preserve_exact_serial_continuation() {
         let w = ground(0);
         let body = voxel::unit::tank();
         let rubble = nav::vehicle::Rubble::new();
@@ -2620,11 +2648,202 @@ mod tests {
             let prepared = m
                 .prepare_local_hunt(&w, &body, &before, &rubble, &changed)
                 .unwrap();
-            assert!(!m.accept_local_hunt(prepared, &body, &after, 0));
-            assert_eq!(motion_bytes(&m), original);
+            if !m.accept_local_hunt(prepared, &body, &after, 0) {
+                assert_eq!(motion_bytes(&m), original);
+            }
             step(&mut m, &w, &body, &after, 0);
             step(&mut serial, &w, &body, &after, 0);
             assert_eq!(motion_bytes(&m), motion_bytes(&serial));
+        }
+    }
+    #[test]
+    fn local_hunt_rejects_both_clearance_changes_without_mutating_search() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = nav::vehicle::Changed::default();
+        let mut source = local_hunter(&w, &body, &[]);
+        source.resume_budget = Some(64);
+        let free = source
+            .prepare_local_hunt(&w, &body, &[], &rubble, &changed)
+            .unwrap();
+        let query = free.checked.iter().find(|q| q.clear).unwrap();
+        let obstacle = Obstacle {
+            pos: [query.position[0], Fx::from_int(16), query.position[1]],
+            head: query.head,
+            half: source.shape(&body).half.map(Fx::from_int),
+        };
+        assert_eq!(
+            source
+                .local_blockers(free.origin, free.shape, &[obstacle])
+                .len(),
+            1
+        );
+        let blocked = source
+            .prepare_local_hunt(&w, &body, &[obstacle], &rubble, &changed)
+            .unwrap();
+        assert!(blocked.checked.iter().any(|q| !q.clear));
+        for (prepared, after) in [(free, vec![obstacle]), (blocked, vec![])] {
+            let mut m = source.clone();
+            let mut serial = source.clone();
+            let original = motion_bytes(&m);
+            assert!(!m.accept_local_hunt(prepared, &body, &after, 0));
+            assert_eq!(motion_bytes(&m), original);
+            m.allow_start(false);
+            serial.allow_start(false);
+            step(&mut m, &w, &body, &after, 0);
+            step(&mut serial, &w, &body, &after, 0);
+            assert_eq!(motion_bytes(&m), motion_bytes(&serial));
+        }
+    }
+    #[test]
+    fn local_hunt_accepts_changed_neighbors_that_do_not_change_queries() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = nav::vehicle::Changed::default();
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(160), Fx::from_int(16), Fx::from_int(350)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(10)],
+        };
+        let mut moved = obstacle;
+        moved.pos[0] = moved.pos[0].sub(Fx::ONE);
+        let mut rotated = obstacle;
+        rotated.head = angle::FULL / 8;
+        let mut larger = obstacle;
+        larger.half[0] = larger.half[0].add(Fx::ONE);
+        for (before, after) in [
+            (vec![obstacle], vec![moved]),
+            (vec![obstacle], vec![rotated]),
+            (vec![obstacle], vec![larger]),
+            (vec![obstacle], vec![]),
+            (vec![], vec![obstacle]),
+            (vec![obstacle, moved], vec![moved, obstacle]),
+        ] {
+            let mut m = local_hunter(&w, &body, &before);
+            m.resume_budget = Some(64);
+            let mut serial = m.clone();
+            let prepared = m
+                .prepare_local_hunt(&w, &body, &before, &rubble, &changed)
+                .unwrap();
+            assert!(!prepared.checked.is_empty());
+            assert!(prepared.checked.iter().all(|q| q.clear));
+            assert_eq!(
+                m.local_blockers(prepared.origin, prepared.shape, &before)
+                    .len(),
+                before.len()
+            );
+            assert_eq!(
+                m.local_blockers(prepared.origin, prepared.shape, &after)
+                    .len(),
+                after.len()
+            );
+            assert!(m.accept_local_hunt(prepared, &body, &after, 0));
+            m.allow_start(false);
+            serial.allow_start(false);
+            step(&mut m, &w, &body, &after, 0);
+            step(&mut serial, &w, &body, &after, 0);
+            assert_eq!(motion_bytes(&m), motion_bytes(&serial));
+            assert_eq!(m.cut, serial.cut);
+            assert_eq!(m.contact, serial.contact);
+        }
+    }
+    #[test]
+    fn local_hunt_rejects_changed_own_shape() {
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let mut m = local_hunter(&w, &body, &[]);
+        let prepared = m
+            .prepare_local_hunt(
+                &w,
+                &body,
+                &[],
+                &nav::vehicle::Rubble::new(),
+                &nav::vehicle::Changed::default(),
+            )
+            .unwrap();
+        m.step += 1;
+        let original = motion_bytes(&m);
+        assert!(!m.accept_local_hunt(prepared, &body, &[], 0));
+        assert_eq!(motion_bytes(&m), original);
+    }
+    #[test]
+    fn pooled_local_hunts_validate_live_queries_across_worker_counts() {
+        use rayon::prelude::*;
+        let w = ground(0);
+        let body = voxel::unit::tank();
+        let rubble = nav::vehicle::Rubble::new();
+        let changed = nav::vehicle::Changed::default();
+        let obstacle = Obstacle {
+            pos: [Fx::from_int(160), Fx::from_int(16), Fx::from_int(350)],
+            head: 0,
+            half: [Fx::from_int(6), Fx::from_int(10)],
+        };
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut prepared: Vec<_> = (0..12)
+                .map(|_| {
+                    let mut m = local_hunter(&w, &body, &[obstacle]);
+                    m.resume_budget = Some(64);
+                    m
+                })
+                .collect();
+            let mut serial = prepared.clone();
+            let answers: Vec<_> = pool.install(|| {
+                prepared
+                    .par_iter()
+                    .map(|m| {
+                        m.prepare_local_hunt(&w, &body, &[obstacle], &rubble, &changed)
+                            .unwrap()
+                    })
+                    .collect()
+            });
+            let mut accepted = 0;
+            let mut rejected = 0;
+            for (i, answer) in answers.into_iter().enumerate() {
+                let mut moved = obstacle;
+                moved.pos[0] = moved.pos[0].sub(Fx::from_int(i as i32 + 1));
+                moved.head = angle::FULL / 8;
+                let others = match i % 3 {
+                    0 => vec![moved],
+                    1 => {
+                        let q = answer.checked.iter().find(|q| q.clear).unwrap();
+                        vec![
+                            moved,
+                            Obstacle {
+                                pos: [q.position[0], Fx::from_int(16), q.position[1]],
+                                head: q.head,
+                                half: answer.shape.half.map(Fx::from_int),
+                            },
+                        ]
+                    }
+                    _ => vec![],
+                };
+                if prepared[i].accept_local_hunt(answer, &body, &others, 0) {
+                    assert_ne!(i % 3, 1);
+                    accepted += 1;
+                } else {
+                    assert_eq!(i % 3, 1);
+                    assert_eq!(motion_bytes(&prepared[i]), motion_bytes(&serial[i]));
+                    rejected += 1;
+                }
+                prepared[i].allow_start(false);
+                serial[i].allow_start(false);
+                step(&mut prepared[i], &w, &body, &others, 0);
+                step(&mut serial[i], &w, &body, &others, 0);
+                assert_eq!(
+                    motion_bytes(&prepared[i]),
+                    motion_bytes(&serial[i]),
+                    "workers={workers} unit={i}"
+                );
+                assert_eq!(prepared[i].cut, serial[i].cut);
+                assert_eq!(prepared[i].contact, serial[i].contact);
+            }
+            assert_eq!((accepted, rejected), (8, 4));
         }
     }
     #[test]
