@@ -2,6 +2,50 @@ use super::*;
 use std::time::Instant;
 
 #[test]
+fn native_worker_override_preserves_battle_across_rebuild() {
+    let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+    let mut workshop = Workshop::new(Some(layout), false);
+    workshop.battle_preset(config(false, false)).unwrap();
+    let layout = workshop.layout.unwrap();
+    let mut serial = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+    let mut parallel = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
+    let mut serial_profile = profile::Profile::new(None, 20.0);
+    serial_profile.navigation_workers = Some(1);
+    let mut parallel_profile = profile::Profile::new(None, 20.0);
+    parallel_profile.navigation_workers = Some(8);
+    for round in 0..2 {
+        if round > 0 {
+            serial = serial
+                .rebuilt_with_layout(config(false, false), layout.clone(), &workshop.validator)
+                .unwrap();
+            parallel = parallel
+                .rebuilt_with_layout(config(false, false), layout.clone(), &workshop.validator)
+                .unwrap();
+        }
+        serial_profile.configure_navigation(&mut serial);
+        parallel_profile.configure_navigation(&mut parallel);
+        serial.start_battle().unwrap();
+        parallel.start_battle().unwrap();
+        assert_eq!(serial.snapshot(), parallel.snapshot());
+        let initial = serial
+            .units
+            .iter()
+            .map(|u| u.motion.pos)
+            .collect::<Vec<_>>();
+        for _ in 0..120 {
+            serial.step();
+            parallel.step();
+        }
+        assert!(serial
+            .units
+            .iter()
+            .zip(initial)
+            .any(|(u, p)| u.motion.pos != p));
+        assert_eq!(serial.snapshot(), parallel.snapshot());
+    }
+}
+
+#[test]
 fn stock_battle_arena_is_already_authored_and_preset_preserves_terrain() {
     let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
     let tuning = modding::range_battle::Tuning::from_ron(include_str!(

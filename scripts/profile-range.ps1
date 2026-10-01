@@ -7,6 +7,9 @@ param(
     [switch]$Gpu,
     [switch]$CheckBudget,
     [ValidateRange(30, 1000)][int]$TargetFps = 120,
+    # Zero preserves the scene default; 1 selects the serial route path.
+    [ValidateRange(0, 8)][int]$NavigationWorkers = 0,
+    [switch]$CpuThreads,
     [switch]$CheckEveryFrame
 )
 $ErrorActionPreference = 'Stop'
@@ -47,8 +50,21 @@ try {
         $err = Join-Path $directory "$scenario.err"
         $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
         if ($Gpu) { $arguments += '--profile-gpu' }
+        if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
         # -Wait keeps the exit status available in Windows PowerShell 5.1 too.
-        $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait
+        if ($CpuThreads) {
+            # Read this process's public counters; no kernel trace or system
+            # profiling policy is needed. Sample once per second, outside the
+            # renderer. Compare only runs using the same sampling option.
+            $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
+            # Retain the handle before the counter script observes exit;
+            # Windows PowerShell 5.1 otherwise loses the child's ExitCode.
+            $null = $process.Handle
+            & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ([Math]::Min(3600, $Seconds + 120)) -Output (Join-Path $directory "$scenario-cpu")
+            $process.WaitForExit()
+        } else {
+            $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait
+        }
         if ($process.ExitCode -ne 0) { throw "$scenario failed; see $err" }
         if ($scenario -eq 'flame') {
             $contacts = Select-String -LiteralPath $log -Pattern 'PROFILE stream_packets=(\d+) unit_damage=(\d+)'

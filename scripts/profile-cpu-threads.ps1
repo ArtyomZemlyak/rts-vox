@@ -37,6 +37,7 @@ $previous = @{}
 $names = @{}
 $created = @{}
 $samples = [System.Collections.Generic.List[object]]::new()
+$processSamples = [System.Collections.Generic.List[object]]::new()
 $baselineTime = Get-Date
 $baselineCpuMs = $target.TotalProcessorTime.TotalMilliseconds
 $processCpuMs = 0.0
@@ -57,6 +58,14 @@ try {
         $nowMs = $timer.Elapsed.TotalMilliseconds
         # The process counter also includes threads that exited between samples.
         $processCpuMs = [Math]::Max(0.0, $target.TotalProcessorTime.TotalMilliseconds - $baselineCpuMs)
+        $processSamples.Add([pscustomobject]@{
+            Seconds = [Math]::Round($nowMs / 1000.0, 3)
+            CpuMs = $processCpuMs
+            PrivateBytes = $target.PrivateMemorySize64
+            WorkingSetBytes = $target.WorkingSet64
+            ThreadCount = $target.Threads.Count
+            HandleCount = $target.HandleCount
+        })
         $elapsedMs = $nowMs - $lastMs
         foreach ($thread in $target.Threads) {
             try {
@@ -101,6 +110,7 @@ try {
     }
 } finally { $target.Dispose() }
 $samples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
+$processSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-samples.csv') -NoTypeInformation -Encoding UTF8
 $totalCpu = ($samples | Measure-Object CpuMs -Sum).Sum
 $summary = @($samples | Group-Object ThreadId | ForEach-Object {
     $cpu = ($_.Group | Measure-Object CpuMs -Sum).Sum

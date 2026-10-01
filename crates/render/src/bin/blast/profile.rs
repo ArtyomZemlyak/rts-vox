@@ -10,6 +10,9 @@ pub struct Profile {
     pub clouds: usize,
     pub gpu: bool,
     pub actions: bool,
+    /// Optional fixed route pool for paired native performance experiments.
+    /// Reapply when the workshop replaces the simulation, not every frame.
+    pub navigation_workers: Option<usize>,
     action_step: u8,
     action_time: f64,
     gpu_samples: std::collections::BTreeMap<String, GpuSamples>,
@@ -18,8 +21,9 @@ pub struct Profile {
     start: Option<f64>,
     mark: Option<Instant>,
     phases: Vec<f64>,
-    detail: [f64; 4],
-    rows: Vec<(f64, u32, [f64; 13])>,
+    detail: [f64; 5],
+    simulation_ticks: u32,
+    rows: Vec<(f64, u32, [f64; 15])>,
     finished: bool,
 }
 /// Repeat the actual workshop requests in a native renderer, without video
@@ -110,6 +114,14 @@ struct GpuSamples {
     values: Vec<f64>,
 }
 impl Profile {
+    pub fn configure_navigation(&self, sim: &mut BlastRange) {
+        if let Some(workers) = self.navigation_workers {
+            assert!(
+                sim.set_navigation_workers(workers),
+                "--nav-workers 1..=8: pool creation failed"
+            );
+        }
+    }
     pub fn new(output: Option<String>, seconds: f64) -> Self {
         assert!(seconds.is_finite() && (1.0..=3600.0).contains(&seconds));
         Self {
@@ -124,6 +136,13 @@ impl Profile {
     pub fn measure(&mut self, phase: usize, duration: std::time::Duration) {
         if self.start.is_some() {
             self.detail[phase] += duration.as_secs_f64() * 1000.0;
+        }
+    }
+    /// Count completed authoritative steps and their cost before visual events.
+    pub fn record_tick(&mut self, duration: std::time::Duration) {
+        if self.start.is_some() {
+            self.simulation_ticks += 1;
+            self.detail[4] += duration.as_secs_f64() * 1000.0;
         }
     }
     fn stamp(&mut self) {
@@ -154,6 +173,7 @@ pub fn begin(
             "PROFILE compute_workers={}",
             bevy::tasks::ComputeTaskPool::try_get().map_or(0, |pool| pool.thread_num())
         );
+        println!("PROFILE navigation_override={:?}", p.navigation_workers);
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
@@ -175,6 +195,7 @@ pub fn begin(
     }
     p.phases.clear();
     p.detail.fill(0.0);
+    p.simulation_ticks = 0;
     p.mark = Some(Instant::now());
 }
 pub fn stamp(mut p: ResMut<Profile>) {
@@ -230,6 +251,8 @@ pub fn end(
         gas.timings.active_regions.load(Ordering::Relaxed) as f64,
         gas.timings.extract_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
         p.detail[3],
+        f64::from(p.simulation_ticks),
+        p.detail[4],
     ];
     if elapsed > 0.0 {
         p.rows.push((elapsed, scene.sim.tick, phases));
@@ -250,13 +273,13 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms"
         )?;
         for (t, tick, ms) in &p.rows {
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6}",
-                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11], ms[12]
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6}",
+                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11], ms[12], ms[13], ms[14]
             )?;
         }
         out.flush()
@@ -275,8 +298,11 @@ pub fn end(
     ]
     .into_iter()
     .enumerate()
-    .chain([(11, "render_extract"), (12, "occupancy")])
-    {
+    .chain([
+        (11, "render_extract"),
+        (12, "occupancy"),
+        (14, "simulation_core"),
+    ]) {
         let mut values: Vec<_> = p.rows.iter().map(|r| r.2[column]).collect();
         values.sort_by(f64::total_cmp);
         if !values.is_empty() {
@@ -290,6 +316,17 @@ pub fn end(
             );
         }
     }
+    let tick_count: u64 = p.rows.iter().map(|r| r.2[13] as u64).sum();
+    let core_ms: f64 = p.rows.iter().map(|r| r.2[14]).sum();
+    println!(
+        "PROFILE simulation_ticks={} mean_core_tick_ms={:.3}",
+        tick_count,
+        if tick_count > 0 {
+            core_ms / tick_count as f64
+        } else {
+            0.0
+        }
+    );
     println!(
         "PROFILE max_gas_regions={}",
         p.rows.iter().map(|r| r.2[10] as usize).max().unwrap_or(0)

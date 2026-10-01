@@ -341,6 +341,7 @@ fn main() {
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
     let mut profile_actions = false;
+    let mut navigation_workers = None;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -352,6 +353,16 @@ fn main() {
             }
             "--profile-gpu" => profile_gpu = true,
             "--profile-actions" => profile_actions = true,
+            "--nav-workers" => {
+                i += 1;
+                let workers = args
+                    .get(i)
+                    .expect("--nav-workers 1..=8")
+                    .parse::<usize>()
+                    .expect("--nav-workers 1..=8");
+                assert!((1..=8).contains(&workers), "--nav-workers 1..=8");
+                navigation_workers = Some(workers);
+            }
             "--camera-sweep" => camera_sweep = true,
             "--stock-tuning" => stock_tuning = true,
             "--gas-cell-mm" => {
@@ -731,6 +742,8 @@ fn main() {
         "--profile-gpu requires --profile"
     );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
+    profiler.navigation_workers = navigation_workers;
+    profiler.configure_navigation(&mut sim);
     profiler.clouds = profile_clouds;
     profiler.gpu = profile_gpu;
     assert!(
@@ -1534,11 +1547,12 @@ fn advance(
                 kind,
             )
         };
-        let Ok(sim) = next else {
+        let Ok(mut sim) = next else {
             scene.notice = format!("Layout rejected: {}", next.err().unwrap());
             eprintln!("{}", scene.notice);
             return;
         };
+        profile.configure_navigation(&mut sim);
         scene.notice.clear();
         if keys.just_pressed(KeyCode::F5) {
             *workshop = Workshop::new(reloaded, workshop.editing);
@@ -1649,6 +1663,7 @@ fn advance(
         }
         let started = std::time::Instant::now();
         scene.sim.step();
+        profile.record_tick(started.elapsed());
         for impact in scene
             .sim
             .battle
