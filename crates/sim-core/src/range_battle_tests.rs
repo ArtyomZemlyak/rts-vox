@@ -2383,3 +2383,66 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
         "own laser damaged spider"
     );
 }
+
+/// Worker pools are transient: restoring chooses the roster's default,
+/// whereas an explicit serial override survives starting/restarting a fight.
+#[test]
+fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
+    let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        "../../../data/battle-world.ron"
+    ))
+    .unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.course.as_mut().unwrap().patrols.clear();
+    layout.units = preset.units;
+    layout.blocks.extend(preset.blocks);
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    for (count, workers) in [(24, 4), (60, 8)] {
+        let mut layout = layout.clone();
+        layout.units.truncate(count);
+        let mut parallel = BlastRange::with_layout(config.clone(), layout).unwrap();
+        assert!(parallel.navigation_pool.is_none());
+        assert!(parallel.set_ai_vs_ai(true));
+        let setup = parallel.snapshot();
+        parallel.start_battle().unwrap();
+        assert_eq!(
+            parallel
+                .navigation_pool
+                .as_ref()
+                .unwrap()
+                .current_num_threads(),
+            workers
+        );
+        for _ in 0..20 {
+            parallel.step();
+        }
+        assert!(parallel.units.iter().any(|u| u.motion.searching()));
+        let mut serial = BlastRange::restore(config.clone(), &parallel.snapshot()).unwrap();
+        assert_eq!(
+            serial
+                .navigation_pool
+                .as_ref()
+                .unwrap()
+                .current_num_threads(),
+            workers
+        );
+        assert_eq!(serial.state_hash(), parallel.state_hash());
+        assert!(serial.set_navigation_workers(1));
+        assert!(serial.navigation_pool.is_none());
+        let mut restarted = BlastRange::restore(config.clone(), &setup).unwrap();
+        assert!(restarted.set_navigation_workers(1));
+        restarted.start_battle().unwrap();
+        assert!(restarted.navigation_pool.is_none());
+        drop(restarted);
+        for tick in 0..20 {
+            serial.step();
+            parallel.step();
+            assert_eq!(
+                serial.state_hash(),
+                parallel.state_hash(),
+                "count={count} tick={tick}"
+            );
+        }
+    }
+}

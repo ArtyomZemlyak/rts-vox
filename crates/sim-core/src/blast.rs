@@ -2285,6 +2285,16 @@ fn relative_contact_velocity(
     }
 }
 
+// The crowded full-map battle uses a larger persistent pool; smaller
+// rosters retain the training battle's pool. This affects scheduling only.
+fn default_navigation_workers(units: usize) -> usize {
+    if units >= 48 {
+        8
+    } else {
+        4
+    }
+}
+
 impl BlastRange {
     /// Set a fixed route-worker count for this scene. One keeps the serial
     /// path; all worker counts execute the same logical search allowances.
@@ -2604,6 +2614,7 @@ impl BlastRange {
         if gun.kind == RangeUnitKind::Spider {
             streams.tuning.laser = motion::spider_tuning().laser.clone();
         }
+        let navigation_workers = default_navigation_workers(units.len());
         let mut result = Self {
             battle,
             combustion,
@@ -2648,7 +2659,7 @@ impl BlastRange {
             ),
             navigation,
             navigation_pool: None,
-            navigation_workers: 4,
+            navigation_workers,
             shields,
             shield_hits: Vec::new(),
             shield_tuning,
@@ -3318,7 +3329,7 @@ impl BlastRange {
             return None;
         }
         if r.battle_mode() && r.units.len() >= 16 {
-            r.set_navigation_workers(4);
+            r.set_navigation_workers(default_navigation_workers(r.units.len()));
         }
         Some(r)
     }
