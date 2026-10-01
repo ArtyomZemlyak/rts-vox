@@ -50,7 +50,7 @@ impl TickProfile {
                 self.battle_laser_us += us;
                 self.battle_orders_us += us;
             }
-            "orders_laser_beam" => {
+            "orders_laser_setup" | "orders_laser_query" | "orders_laser_beam" => {
                 self.battle_beam_us += us;
                 self.battle_laser_us += us;
                 self.battle_orders_us += us;

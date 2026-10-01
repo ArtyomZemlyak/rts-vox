@@ -12,6 +12,14 @@ mod spall;
 
 const MAX_ROUNDS: usize = 128;
 
+fn laser_boxes(units: &[RangeUnit]) -> Vec<([i32; 3], [i32; 3])> {
+    if units.len() >= 16 {
+        units.par_iter().map(|u| u.bounds()).collect()
+    } else {
+        units.iter().map(|u| u.bounds()).collect()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Round {
     pub pos: [Fx; 3],
@@ -555,7 +563,7 @@ impl BlastRange {
                 .add(direction[a].mul(Fx::from_int(tuning.range)))
                 .to_int_trunc()
         });
-        let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
+        let boxes = laser_boxes(&self.units);
         let near: Vec<_> = boxes
             .iter()
             .enumerate()
@@ -568,6 +576,7 @@ impl BlastRange {
             .collect();
         let serial = self.streams.serial;
         self.streams.serial = serial.wrapping_add(1);
+        completed("orders_laser_setup");
         let mut previous = from.map(Fx::to_int_trunc);
         let (mut end, mut free_end, mut contact, mut hit) = (from, from, None, false);
         for i in 1..=tuning.range * 2 {
@@ -582,6 +591,7 @@ impl BlastRange {
                 continue;
             }
             if let Some(shield) = self.dome_crossed(previous, p) {
+                completed("orders_laser_query");
                 self.absorb_work(shield, p, tuning.work);
                 hit = true;
                 break;
@@ -592,6 +602,7 @@ impl BlastRange {
                     (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
                 })
             {
+                completed("orders_laser_query");
                 self.stream_contact_owned(
                     p,
                     tuning,
@@ -607,8 +618,13 @@ impl BlastRange {
             previous = p;
             free_end = point;
         }
+        if !hit {
+            completed("orders_laser_query");
+        }
         completed("orders_laser_beam");
-        self.laser_halo_owned(from, free_end, contact, tuning, owner);
+        // Laser contact only deposits heat (or drains a shield); it never
+        // edits body geometry. The halo therefore reads these same boxes.
+        self.laser_halo_with_boxes(from, free_end, contact, tuning, owner, &boxes);
         completed("orders_laser_halo");
         Trace {
             from,
@@ -931,6 +947,54 @@ mod tests {
         l.units.truncate(1);
         l.units[0].at = [285, 16, 336];
         BlastRange::with_layout(c, l).unwrap()
+    }
+    #[test]
+    fn laser_boxes_preserve_slots_and_fresh_articulated_poses_across_workers() {
+        let kinds = [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+            RangeUnitKind::TurretT1,
+            RangeUnitKind::TurretT2,
+            RangeUnitKind::Base,
+        ];
+        let mut units: Vec<_> = (0..17)
+            .map(|id| RangeUnit::of_kind(kinds[id % kinds.len()], [100 + id as i32 * 250, 16, 336]))
+            .collect();
+        let pools: Vec<_> = [1, 2, 4, 8]
+            .into_iter()
+            .map(|workers| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        let pristine: Vec<_> = units.iter().map(|unit| unit.bounds()).collect();
+        for phase in 0..2 {
+            if phase > 0 {
+                for (id, unit) in units.iter_mut().enumerate() {
+                    unit.motion.drive.head = (id as i32 + 1) * 13;
+                    unit.motion.pos[1] = unit.motion.pos[1].add(Fx::from_int(id as i32 + 1));
+                    unit.update_pose((id as i32 + 1) * 31);
+                }
+            }
+            let expected: Vec<_> = units.iter().map(|unit| unit.bounds()).collect();
+            if phase > 0 {
+                assert_ne!(expected, pristine);
+            }
+            for count in [0, 1, 15, 16, 17] {
+                for pool in &pools {
+                    assert_eq!(
+                        pool.install(|| laser_boxes(&units[..count])),
+                        expected[..count],
+                        "phase={phase} count={count} workers={}",
+                        pool.current_num_threads()
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn laser_halo_heats_exposed_surfaces_with_falloff_and_not_through_them() {

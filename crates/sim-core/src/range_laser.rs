@@ -93,6 +93,7 @@ impl BlastRange {
     ) {
         self.laser_halo_owned(from, to, contact, tuning, None);
     }
+    #[cfg(test)]
     pub(super) fn laser_halo_owned(
         &mut self,
         from: [Fx; 3],
@@ -101,17 +102,29 @@ impl BlastRange {
         tuning: &Stream,
         owner: Option<usize>,
     ) {
-        self.laser_halo_in(from, to, contact, tuning, owner, true);
+        self.laser_halo_in([from, to], contact, tuning, owner, None, true);
     }
-    fn laser_halo_in(
+    pub(super) fn laser_halo_with_boxes(
         &mut self,
         from: [Fx; 3],
         to: [Fx; 3],
         contact: Option<[i32; 3]>,
         tuning: &Stream,
         owner: Option<usize>,
+        boxes: &[([i32; 3], [i32; 3])],
+    ) {
+        self.laser_halo_in([from, to], contact, tuning, owner, Some(boxes), true);
+    }
+    fn laser_halo_in(
+        &mut self,
+        beam: [[Fx; 3]; 2],
+        contact: Option<[i32; 3]>,
+        tuning: &Stream,
+        owner: Option<usize>,
+        boxes: Option<&[([i32; 3], [i32; 3])]>,
         parallel: bool,
     ) {
+        let [from, to] = beam;
         let radius = tuning.heat_radius;
         if radius == 0 || tuning.heat == 0 {
             return;
@@ -144,7 +157,7 @@ impl BlastRange {
                 if Some(id) == owner {
                     return None;
                 }
-                let box_at = u.bounds();
+                let box_at = boxes.map_or_else(|| u.bounds(), |boxes| boxes[id]);
                 (0..3)
                     .all(|i| box_at.0[i] <= region_hi[i] && box_at.1[i] >= region_lo[i])
                     .then_some((id, box_at))
@@ -378,11 +391,11 @@ mod tests {
                     tuning.heat = 900_000; // repeated deposits exercise heat saturation
                     for _ in 0..2 {
                         serial.laser_halo_in(
-                            centre(from),
-                            centre(to),
+                            [centre(from), centre(to)],
                             contact,
                             &tuning,
                             owner,
+                            None,
                             false,
                         );
                     }
@@ -401,13 +414,22 @@ mod tests {
                             BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
                         parallel.thermal_tuning.max_cells = 7;
                         pool.install(|| {
+                            let boxes = laser_boxes(&parallel.units);
+                            assert_eq!(
+                                boxes,
+                                parallel
+                                    .units
+                                    .iter()
+                                    .map(|u| u.bounds())
+                                    .collect::<Vec<_>>()
+                            );
                             for _ in 0..2 {
                                 parallel.laser_halo_in(
-                                    centre(from),
-                                    centre(to),
+                                    [centre(from), centre(to)],
                                     contact,
                                     &tuning,
                                     owner,
+                                    Some(&boxes),
                                     true,
                                 );
                             }
