@@ -1,6 +1,12 @@
 //! Surface heating around the unobstructed laser segment (ADR-473).
 use super::*;
 
+#[derive(Default)]
+struct HaloDeposits {
+    ground: Vec<([u32; 3], u32)>,
+    units: BTreeMap<thermal::Cell, u32>,
+}
+
 #[inline]
 fn outside_halo(q: [i64; 3], d: [i64; 3], length2: i64, radius: i32) -> bool {
     // The exact projection rounds each component by < 1 sixteenth. A margin
@@ -95,6 +101,17 @@ impl BlastRange {
         tuning: &Stream,
         owner: Option<usize>,
     ) {
+        self.laser_halo_in(from, to, contact, tuning, owner, true);
+    }
+    fn laser_halo_in(
+        &mut self,
+        from: [Fx; 3],
+        to: [Fx; 3],
+        contact: Option<[i32; 3]>,
+        tuning: &Stream,
+        owner: Option<usize>,
+        parallel: bool,
+    ) {
         let radius = tuning.heat_radius;
         if radius == 0 || tuning.heat == 0 {
             return;
@@ -142,7 +159,6 @@ impl BlastRange {
             .max()
             .unwrap_or(0);
         let core_cell = contact.and_then(|p| self.laser_cell(p, &bounds));
-        let mut doses = BTreeMap::<thermal::Cell, u32>::new();
         let r2 = i64::from(radius * 16).pow(2);
         // Reject the many cells in the enclosing square that cannot lie in
         // the round halo before the three integer divisions below. The exact
@@ -152,100 +168,133 @@ impl BlastRange {
         let lo = (a[axis].min(b[axis]) / 16 - i64::from(radius)).max(0) as i32;
         let hi = (a[axis].max(b[axis]) / 16 + i64::from(radius)).min(i64::from(self.size[axis]) - 1)
             as i32;
-        for along in lo..=hi {
-            let axial =
-                (i64::from(along) * 16 + 8).clamp(a[axis].min(b[axis]), a[axis].max(b[axis]));
-            let centre: [i32; 3] = std::array::from_fn(|i| {
-                ((a[i] + d[i] * (axial - a[axis]) / axial_length) / 16) as i32
-            });
-            let x_lo = (centre[u] - 2 * radius).max(0);
-            let mut x_hi = (centre[u] + 2 * radius).min(self.size[u] as i32 - 1);
-            let y_lo = (centre[v] - 2 * radius).max(0);
-            let y_hi = (centre[v] + 2 * radius).min(self.size[v] as i32 - 1);
-            // For an X-dominant beam, the outer transverse coordinate is
-            // height. A single maximum over this slice rejects only air.
-            if axis == 0 {
-                let top = (y_lo..=y_hi)
-                    .map(|z| self.world.column_ceiling(along as u32, z as u32) as i32)
-                    .max()
-                    .unwrap_or(0)
-                    .max(unit_top);
-                x_hi = x_hi.min(top - 1);
+        // Each slice reads the same immutable geometry, shields and material
+        // registry. Heat does not alter them until the later thermal phase.
+        let collect = |start: i32, end: i32| {
+            let mut deposits = HaloDeposits::default();
+            for along in start..=end {
+                let axial =
+                    (i64::from(along) * 16 + 8).clamp(a[axis].min(b[axis]), a[axis].max(b[axis]));
+                let centre: [i32; 3] = std::array::from_fn(|i| {
+                    ((a[i] + d[i] * (axial - a[axis]) / axial_length) / 16) as i32
+                });
+                let x_lo = (centre[u] - 2 * radius).max(0);
+                let mut x_hi = (centre[u] + 2 * radius).min(self.size[u] as i32 - 1);
+                let y_lo = (centre[v] - 2 * radius).max(0);
+                let y_hi = (centre[v] + 2 * radius).min(self.size[v] as i32 - 1);
+                // For an X-dominant beam, the outer transverse coordinate is
+                // height. A single maximum over this slice rejects only air.
+                if axis == 0 {
+                    let top = (y_lo..=y_hi)
+                        .map(|z| self.world.column_ceiling(along as u32, z as u32) as i32)
+                        .max()
+                        .unwrap_or(0)
+                        .max(unit_top);
+                    x_hi = x_hi.min(top - 1);
+                }
+                // At most sqrt(3) times the radius on an axial slice, including
+                // endpoint caps. Every world cell is visited exactly once.
+                for x in x_lo..=x_hi {
+                    let mut column_y_hi = y_hi;
+                    if axis == 2 {
+                        let top = (self.world.column_ceiling(x as u32, along as u32) as i32)
+                            .max(unit_top);
+                        column_y_hi = column_y_hi.min(top - 1);
+                    }
+                    for y in y_lo..=column_y_hi {
+                        let mut p = [0; 3];
+                        p[axis] = along;
+                        p[u] = x;
+                        p[v] = y;
+                        if contact == Some(p) {
+                            continue;
+                        }
+                        let q: [i64; 3] = std::array::from_fn(|i| i64::from(p[i]) * 16 + 8 - a[i]);
+                        if outside_halo(q, d, length2, radius) {
+                            continue;
+                        }
+                        // A dose can only reach actual unit or terrain matter.
+                        // Test that before the three exact projection divisions;
+                        // the vast majority of halo candidates are empty air.
+                        let cell = self.laser_cell(p, &bounds);
+                        if cell.is_some() && cell == core_cell {
+                            continue;
+                        }
+                        if let Some(c) = cell {
+                            if self.units[c.unit as usize].section_holds(c.part as usize, c.at) {
+                                continue;
+                            }
+                        } else {
+                            if p[1] as u32 >= self.world.column_ceiling(p[0] as u32, p[2] as u32) {
+                                continue;
+                            }
+                            if !self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32) {
+                                continue;
+                            }
+                            let mat = material(&self.world, p);
+                            if !self
+                                .matter
+                                .economy
+                                .mats
+                                .get(mat)
+                                .is_some_and(|m| m.melt > 0 || m.kindling > 0)
+                            {
+                                continue;
+                            }
+                        }
+                        let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
+                        let source: [i64; 3] = std::array::from_fn(|i| a[i] + d[i] * dot / length2);
+                        let distance2 = (0..3)
+                            .map(|i| (i64::from(p[i]) * 16 + 8 - source[i]).pow(2))
+                            .sum::<i64>();
+                        if distance2 >= r2 {
+                            continue;
+                        }
+                        let heat = (i64::from(tuning.heat) * (r2 - distance2) / r2) as u32;
+                        if heat == 0 {
+                            continue;
+                        }
+                        if !self.laser_visible(source, p, cell, &bounds) {
+                            continue;
+                        }
+                        if let Some(c) = cell {
+                            deposits
+                                .units
+                                .entry(c)
+                                .and_modify(|h| *h = (*h).max(heat))
+                                .or_insert(heat);
+                        } else {
+                            deposits.ground.push((p.map(|n| n as u32), heat));
+                        }
+                    }
+                }
             }
-            // At most sqrt(3) times the radius on an axial slice, including
-            // endpoint caps. Every world cell is visited exactly once.
-            for x in x_lo..=x_hi {
-                let mut column_y_hi = y_hi;
-                if axis == 2 {
-                    let top =
-                        (self.world.column_ceiling(x as u32, along as u32) as i32).max(unit_top);
-                    column_y_hi = column_y_hi.min(top - 1);
-                }
-                for y in y_lo..=column_y_hi {
-                    let mut p = [0; 3];
-                    p[axis] = along;
-                    p[u] = x;
-                    p[v] = y;
-                    if contact == Some(p) {
-                        continue;
-                    }
-                    let q: [i64; 3] = std::array::from_fn(|i| i64::from(p[i]) * 16 + 8 - a[i]);
-                    if outside_halo(q, d, length2, radius) {
-                        continue;
-                    }
-                    // A dose can only reach actual unit or terrain matter.
-                    // Test that before the three exact projection divisions;
-                    // the vast majority of halo candidates are empty air.
-                    let cell = self.laser_cell(p, &bounds);
-                    if cell.is_some() && cell == core_cell {
-                        continue;
-                    }
-                    if let Some(c) = cell {
-                        if self.units[c.unit as usize].section_holds(c.part as usize, c.at) {
-                            continue;
-                        }
-                    } else {
-                        if p[1] as u32 >= self.world.column_ceiling(p[0] as u32, p[2] as u32) {
-                            continue;
-                        }
-                        if !self.world.solid(p[0] as u32, p[1] as u32, p[2] as u32) {
-                            continue;
-                        }
-                        let mat = material(&self.world, p);
-                        if !self
-                            .matter
-                            .economy
-                            .mats
-                            .get(mat)
-                            .is_some_and(|m| m.melt > 0 || m.kindling > 0)
-                        {
-                            continue;
-                        }
-                    }
-                    let dot = (0..3).map(|i| q[i] * d[i]).sum::<i64>().clamp(0, length2);
-                    let source: [i64; 3] = std::array::from_fn(|i| a[i] + d[i] * dot / length2);
-                    let distance2 = (0..3)
-                        .map(|i| (i64::from(p[i]) * 16 + 8 - source[i]).pow(2))
-                        .sum::<i64>();
-                    if distance2 >= r2 {
-                        continue;
-                    }
-                    let heat = (i64::from(tuning.heat) * (r2 - distance2) / r2) as u32;
-                    if heat == 0 {
-                        continue;
-                    }
-                    if !self.laser_visible(source, p, cell, &bounds) {
-                        continue;
-                    }
-                    if let Some(c) = cell {
-                        doses
-                            .entry(c)
-                            .and_modify(|h| *h = (*h).max(heat))
-                            .or_insert(heat);
-                    } else {
-                        self.heat.add(&self.world, p.map(|n| n as u32), heat);
-                    }
-                }
+            deposits
+        };
+        let batches = if parallel && hi - lo >= 127 {
+            let count = (hi - lo + 1) as usize;
+            // Indexed collection preserves axial traversal order; no thermal
+            // cap, admission or saturation decision is made on a worker.
+            (0..count.div_ceil(32))
+                .into_par_iter()
+                .map(|chunk| {
+                    let start = lo + (chunk * 32) as i32;
+                    collect(start, (start + 31).min(hi))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![collect(lo, hi)]
+        };
+        let mut doses = BTreeMap::<thermal::Cell, u32>::new();
+        for batch in batches {
+            for (p, heat) in batch.ground {
+                self.heat.add(&self.world, p, heat);
+            }
+            for (cell, heat) in batch.units {
+                doses
+                    .entry(cell)
+                    .and_modify(|h| *h = (*h).max(heat))
+                    .or_insert(heat);
             }
         }
         // The firing gun is separate from `units`: neither its hull nor its
@@ -259,7 +308,122 @@ impl BlastRange {
 
 #[cfg(test)]
 mod tests {
-    use super::outside_halo;
+    use super::*;
+
+    #[test]
+    fn pooled_halo_keeps_heat_and_admission_order_across_workers() {
+        let config = ExplosionConfig::from_ron(include_str!("../../../data/laser.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.course = None;
+        layout.shields.clear();
+        layout.units.truncate(1);
+        layout.units[0].at = [285, 16, 336];
+        layout.blocks = [
+            ([200, 100, 338], [201, 101, 340]),
+            ([210, 100, 339], [211, 101, 340]),
+            ([340, 100, 338], [341, 101, 340]),
+            ([338, 100, 200], [340, 101, 201]),
+            ([339, 100, 210], [340, 101, 211]),
+        ]
+        .map(|(min, max)| modding::range::RangeBlock {
+            min,
+            max,
+            material: 3,
+        })
+        .to_vec();
+        let initial = BlastRange::with_layout(config, layout).unwrap();
+        let armour = initial.units[0].world_pos([30, 11, 0]);
+        let centre = |p: [i32; 3]| p.map(|v| Fx::from_int(v).add(Fx::from_ratio(1, 2)));
+        let cases = [
+            ([180, 100, 336], [500, 100, 336], None),
+            ([500, 100, 336], [180, 100, 336], Some([200, 100, 338])),
+            ([336, 100, 180], [336, 100, 500], None),
+            ([200, 20, 336], [200, 220, 336], None),
+            ([180, 100, 180], [500, 100, 500], None),
+            ([500, 100, 500], [180, 100, 180], None),
+            ([200, 100, 336], [200, 100, 336], None),
+            (
+                [armour[0] - 150, armour[1], armour[2] - 2],
+                [armour[0] + 150, armour[1], armour[2] - 2],
+                None,
+            ),
+        ];
+        let pools: Vec<_> = [1, 2, 4, 8]
+            .into_iter()
+            .map(|workers| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        for shielded in [false, true] {
+            let mut layout = initial.layout.as_ref().unwrap().clone();
+            if shielded {
+                layout.shields.push(modding::range::RangeShieldDef {
+                    at: [285, 100, 336],
+                    radius: 40,
+                });
+            }
+            let seed = BlastRange::with_layout(initial.config.clone(), layout).unwrap();
+            let snapshot = seed.snapshot();
+            for (case, (from, to, contact)) in cases.into_iter().enumerate() {
+                for owner in [None, Some(0)] {
+                    let mut serial = BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
+                    // Tuning is authored rather than stored in the snapshot.
+                    // Exercise the cap that makes unit deposit order significant.
+                    serial.thermal_tuning.max_cells = 7;
+                    let mut tuning = serial.streams.tuning.laser.clone();
+                    tuning.heat = 900_000; // repeated deposits exercise heat saturation
+                    for _ in 0..2 {
+                        serial.laser_halo_in(
+                            centre(from),
+                            centre(to),
+                            contact,
+                            &tuning,
+                            owner,
+                            false,
+                        );
+                    }
+                    if !shielded && case == 0 {
+                        assert!(serial.heat.hot() > 0, "fixture did not heat terrain");
+                    }
+                    if case == 7 && owner.is_none() {
+                        assert!(serial.thermals.hot() > 0, "fixture did not heat armour");
+                        assert!(
+                            serial.thermals.rejected_heat > 0,
+                            "fixture did not reach the admission cap"
+                        );
+                    }
+                    for pool in &pools {
+                        let mut parallel =
+                            BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
+                        parallel.thermal_tuning.max_cells = 7;
+                        pool.install(|| {
+                            for _ in 0..2 {
+                                parallel.laser_halo_in(
+                                    centre(from),
+                                    centre(to),
+                                    contact,
+                                    &tuning,
+                                    owner,
+                                    true,
+                                );
+                            }
+                        });
+                        assert_eq!(
+                            parallel.state_hash(),
+                            serial.state_hash(),
+                            "case={case} shield={shielded} owner={owner:?} workers={}",
+                            pool.current_num_threads()
+                        );
+                        assert_eq!(parallel.snapshot(), serial.snapshot());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn coarse_halo_rejection_never_drops_an_exactly_heated_cell() {
