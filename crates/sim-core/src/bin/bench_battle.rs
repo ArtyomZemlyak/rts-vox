@@ -328,7 +328,7 @@ fn main() {
     let mut restored = None;
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
-    let mut debris_phase_windows = vec![[0u128; 9]; ticks.div_ceil(300)];
+    let mut debris_phase_windows = vec![[0u128; 11]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
     let mut local_hunt_windows = vec![[0usize; 2]; ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
@@ -338,7 +338,7 @@ fn main() {
         let mut last = start;
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
-        let mut debris_detail = [0u128; 9];
+        let mut debris_detail = [0u128; 11];
         let mut heat_detail = [0u128; 8];
         let mut profile = TickProfile::default();
         let unit_window = &mut unit_time_windows[tick_index / 300];
@@ -373,8 +373,10 @@ fn main() {
                         "debris_settled" => debris_detail[4] = elapsed,
                         "debris_wake" => debris_detail[5] = elapsed,
                         "debris_translate" => debris_detail[6] = elapsed,
-                        "debris_advance" => debris_detail[7] = elapsed,
-                        "debris_finish" => debris_detail[8] = elapsed,
+                        "debris_merge_keys" => debris_detail[7] = elapsed,
+                        "debris_merge_groups" => debris_detail[8] = elapsed,
+                        "debris_advance" => debris_detail[9] = elapsed,
+                        "debris_finish" => debris_detail[10] = elapsed,
                         "heat_begin" => {}
                         "heat_world" => heat_detail[0] = elapsed,
                         "heat_melt" => heat_detail[1] = elapsed,
@@ -708,7 +710,7 @@ fn main() {
                     .collect::<Vec<_>>()
             );
             println!(
-                "debris_phases_window={}..{} bodies_sections_hulls_confirm_settled_wake_translate_merge_finish_us={:?}",
+                "debris_phases_window={}..{} bodies_sections_hulls_confirm_settled_wake_translate_keys_groups_merge_finish_us={:?}",
                 window[0].tick,
                 window[window.len() - 1].tick,
                 debris_phase_windows[index].map(|us| us / len)

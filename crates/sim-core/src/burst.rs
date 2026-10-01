@@ -1833,6 +1833,126 @@ mod tests {
         assert_eq!(run(1), run(4));
     }
     #[test]
+    fn parallel_pile_grouping_matches_ordered_merging_and_ledger() {
+        const GROUPS: usize = 256;
+        fn reference(pieces: &mut Bursts, world: &voxel::World, economy: &mut Economy, t: &Blast) {
+            let mut piles: HashMap<([i32; 3], Mat, Option<[u8; 3]>, u16), usize> = HashMap::new();
+            let mut merged = BTreeSet::new();
+            for i in 0..pieces.fragments.len() {
+                let f = &pieces.fragments[i];
+                let key = (
+                    arr(f.position).map(|v| v.to_int_trunc().div_euclid(t.pile_cell as i32)),
+                    f.material,
+                    f.paint,
+                    f.mm,
+                );
+                if let Some(&j) = piles.get(&key) {
+                    let (a, b) = pieces.fragments.split_at_mut(i);
+                    let to = &mut a[j];
+                    let from = &b[0];
+                    economy.ledger.transfer(from.held, to.held, u64::MAX);
+                    to.mass_g += from.mass_g;
+                    to.count += from.count;
+                    let bottom = to.position.y.add(to.bounds().0[1]);
+                    restack(to);
+                    match world_floor(to, world) {
+                        Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
+                        _ => to.position.y = bottom.sub(to.bounds().0[1]),
+                    }
+                    merged.insert(from.held);
+                } else {
+                    piles.insert(key, i);
+                }
+            }
+            pieces.fragments.retain(|f| !merged.contains(&f.held));
+            economy.wrecks.retain(|w| !merged.contains(&w.held));
+            for held in merged {
+                assert!(economy.ledger.retire_empty_debris(held));
+            }
+        }
+        let w = world();
+        let mut t = tuning();
+        t.blast.max_flying = 0;
+        t.blast.push_pct = 0;
+        let build = || {
+            let (mut pieces, mut economy) = (Bursts::default(), economy());
+            // Interleave donors so grouping cannot use adjacency; different
+            // materials, paint and scale at one position must stay separate.
+            for donor in 0..4 {
+                for group in 0..GROUPS {
+                    let count = [1, 2, 7, 70][donor];
+                    let material = 1 + (group % 2) as u16;
+                    let held = economy.ledger.create(matter::Kind::Debris, 0, u64::MAX);
+                    let amount = economy.per_voxel(material) * u64::from(count);
+                    economy.ledger.reveal(economy.ground, amount);
+                    economy.ledger.transfer(economy.ground, held, amount);
+                    let position = V3::new(
+                        Fx::from_int(4 + (group / 8 % 8) as i32 * 8),
+                        Fx::from_ratio(if group < 64 { 25 } else { 65 }, 2),
+                        Fx::from_int(4 + (group / 64) as i32 * 8),
+                    );
+                    pieces.fragments.push(Fragment {
+                        id: (donor * GROUPS + group + 1) as u64,
+                        position,
+                        velocity: V3::ZERO,
+                        material,
+                        paint: Some([0, (group % 4) as u8, 0]),
+                        mm: if group % 8 < 4 { 50 } else { 100 },
+                        basis: IDENTITY,
+                        mass_g: 1200 * u64::from(count),
+                        count,
+                        shape: 1,
+                        side: 1,
+                        chunk: None,
+                        held,
+                        resting: true,
+                    });
+                    economy.wrecks.push(Wreck {
+                        held,
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                    });
+                }
+            }
+            pieces.next_id = (4 * GROUPS + 1) as u64;
+            (pieces, economy)
+        };
+        let (mut expected, mut expected_economy) = build();
+        reference(&mut expected, &w, &mut expected_economy, &t.blast);
+        assert_eq!(expected.fragments.len(), GROUPS);
+        let mut expected_bytes = Blob::new();
+        expected.save(&mut expected_bytes);
+        for workers in [1, 2, 4, 8] {
+            let (mut pieces, mut economy) = build();
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                pieces.step_fragments(
+                    &w,
+                    &mut economy,
+                    &t.blast,
+                    crate::gravity_per_tick(&t),
+                    0,
+                    Surroundings::NONE,
+                )
+            });
+            let mut bytes = Blob::new();
+            pieces.save(&mut bytes);
+            assert_eq!(bytes.v, expected_bytes.v, "workers={workers}");
+            assert_eq!(economy.hash(), expected_economy.hash());
+            assert_eq!(economy.wrecks.len(), expected_economy.wrecks.len());
+            assert!(economy
+                .wrecks
+                .iter()
+                .zip(&expected_economy.wrecks)
+                .all(|(a, b)| (a.held, a.x, a.y, a.z) == (b.held, b.x, b.y, b.z)));
+            assert!(economy.balanced());
+        }
+    }
+    #[test]
     fn settled_candidates_keep_cell_lists_in_fragment_order_across_workers() {
         let t = tuning();
         let fragments: Vec<_> = (0..1400)
@@ -3349,9 +3469,6 @@ impl Bursts {
         Settled::of_into(&self.fragments, hulls, tick, t, &mut settled, &mut queries);
         completed("debris_settled");
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
-        // Only key lookups are used; fragment order (not map iteration) decides
-        // which resting piece owns a pile.
-        let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(self.fragments.len());
         let mut merged = BTreeSet::new();
         let mut stale_wrecks = BTreeSet::new();
         // Waking pieces count against the flying budget like new ones; a
@@ -3451,6 +3568,11 @@ impl Bursts {
         };
         let landed: Vec<Wreck> = landed_slots.into_iter().flatten().collect();
         completed("debris_translate");
+        // Equal keys always enter the same shard; source slots stay ordered
+        // inside it. Each independent table therefore chooses the same first
+        // pile owner as the original single table, without shared mutation.
+        let mut shards: [Vec<(RestingPile, usize)>; 8] = std::array::from_fn(|_| Vec::new());
+        let parallel = self.fragments.len() >= 1024;
         for i in 0..self.fragments.len() {
             if !self.fragments[i].resting || self.fragments[i].chunk.is_some() {
                 continue;
@@ -3462,29 +3584,50 @@ impl Bursts {
                 f.paint,
                 f.mm,
             );
-            if let Some(&j) = piles.get(&key) {
-                let (a, b) = self.fragments.split_at_mut(i);
-                let to = &mut a[j];
-                let from = &mut b[0];
-                e.ledger.transfer(from.held, to.held, u64::MAX);
-                to.mass_g += from.mass_g;
-                to.count += from.count;
-                // The pile grows where the piece it grows on rests: on
-                // the world, whose top the support probe reaches half a
-                // unit under the piece, it sits on that top; on a settled
-                // piece or a roof, its bottom stays where the piece's was.
-                // Dropped onto the world under its centre whatever held
-                // it, it sank into the piece or the hull (ADR-457).
-                let bottom = to.position.y.add(to.bounds().0[1]);
-                restack(to);
-                match world_floor(to, world) {
-                    Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
-                    _ => to.position.y = bottom.sub(to.bounds().0[1]),
+            let hash = (key.0[0] as u32).wrapping_mul(0x9e3779b9).rotate_left(13)
+                ^ (key.0[1] as u32).wrapping_mul(0xc2b2ae35)
+                ^ (key.0[2] as u32).wrapping_mul(0x85ebca6b);
+            let shard = if parallel { (hash >> 29) as usize } else { 0 };
+            shards[shard].push((key, i));
+        }
+        completed("debris_merge_keys");
+        let group = |entries: &Vec<(RestingPile, usize)>| {
+            let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(entries.len());
+            let mut pairs = Vec::new();
+            for &(key, donor) in entries {
+                if let Some(&head) = piles.get(&key) {
+                    pairs.push((head, donor));
+                } else {
+                    piles.insert(key, donor);
                 }
-                merged.insert(from.held);
-            } else {
-                piles.insert(key, i);
             }
+            pairs
+        };
+        let groups: Vec<_> = if parallel {
+            shards.par_iter().map(group).collect()
+        } else {
+            shards[..1].iter().map(group).collect()
+        };
+        completed("debris_merge_groups");
+        let mut transfers: Vec<_> = groups.into_iter().flatten().collect();
+        transfers.sort_unstable_by_key(|&(_, donor)| donor);
+        for (head, donor) in transfers {
+            let (a, b) = self.fragments.split_at_mut(donor);
+            let to = &mut a[head];
+            let from = &b[0];
+            e.ledger.transfer(from.held, to.held, u64::MAX);
+            to.mass_g += from.mass_g;
+            to.count += from.count;
+            // Grow after every donor in original order. Seat on terrain, but
+            // retain the bottom on a piece or roof so the pile does not sink
+            // into its support (ADR-457).
+            let bottom = to.position.y.add(to.bounds().0[1]);
+            restack(to);
+            match world_floor(to, world) {
+                Some(floor) if bottom.sub(floor) <= Fx::from_ratio(1, 2) => seat(to, floor),
+                _ => to.position.y = bottom.sub(to.bounds().0[1]),
+            }
+            merged.insert(from.held);
         }
         completed("debris_advance");
         if !merged.is_empty() {
