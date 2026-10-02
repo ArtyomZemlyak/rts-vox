@@ -322,13 +322,47 @@ fn cached_cells(sim: &BlastRange, window: &TerrainWindow, visual: &mut Visual) -
         bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
     )
 }
-fn new_occupied(u: &RangeUnit, window: &TerrainWindow) -> Occupied {
+/// A batch maps many voxels through one immutable window. The floor reciprocal
+/// underestimates u32 division by at most one, so one remainder correction
+/// exactly reproduces `%`, including non-power-of-two dimensions.
+struct WindowIndex {
+    window: TerrainWindow,
+    reciprocal: [u64; 3],
+}
+impl WindowIndex {
+    fn new(window: TerrainWindow) -> Self {
+        Self {
+            reciprocal: window.dims.map(|d| {
+                if d == 0 {
+                    0
+                } else {
+                    (1u64 << 32) / u64::from(d)
+                }
+            }),
+            window,
+        }
+    }
+    fn wrap(n: u32, d: u32, reciprocal: u64) -> u32 {
+        let quotient = (u64::from(n) * reciprocal) >> 32;
+        let remainder = u64::from(n) - quotient * u64::from(d);
+        (if remainder >= u64::from(d) {
+            remainder - u64::from(d)
+        } else {
+            remainder
+        }) as u32
+    }
+    fn index(&self, p: [i32; 3]) -> Option<usize> {
+        self.window.holds(p).then(|| {
+            let m =
+                [0, 1, 2].map(|a| Self::wrap(p[a] as u32, self.window.dims[a], self.reciprocal[a]));
+            (m[0] + self.window.dims[0] * (m[1] + self.window.dims[1] * m[2])) as usize
+        })
+    }
+}
+fn new_occupied(u: &RangeUnit, index: &WindowIndex) -> Occupied {
     let mut world_cells = Vec::new();
     unit_world_cells(u, |p| world_cells.push(p.to_array()));
-    let cells = world_cells
-        .iter()
-        .filter_map(|&p| window.index(p))
-        .collect();
+    let cells = world_cells.iter().filter_map(|&p| index.index(p)).collect();
     Occupied {
         hidden: false,
         turret_delta: u.turret_delta,
@@ -353,9 +387,10 @@ fn new_occupied(u: &RangeUnit, window: &TerrainWindow) -> Occupied {
 fn update_occupied(
     u: &RangeUnit,
     old: &mut Occupied,
-    window: &TerrainWindow,
+    index: &WindowIndex,
     previous_window: Option<TerrainWindow>,
 ) -> bool {
+    let window = &index.window;
     let (lo, hi) = u.bounds();
     if (0..3).any(|a| hi[a] < window.origin[a] || lo[a] >= window.origin[a] + window.dims[a] as i32)
     {
@@ -397,7 +432,7 @@ fn update_occupied(
     {
         old.cells.clear();
         old.cells
-            .extend(old.world_cells.iter().filter_map(|&p| window.index(p)));
+            .extend(old.world_cells.iter().filter_map(|&p| index.index(p)));
     }
     old.revision = u.revision;
     changed
@@ -408,6 +443,7 @@ fn cached_cells_in(
     visual: &mut Visual,
     pool: Option<&bevy::tasks::TaskPool>,
 ) -> Vec<usize> {
+    let index = WindowIndex::new(*window);
     let previous_window = visual.window;
     let actor_count = sim.units.len() + usize::from(!sim.battle_mode());
     let actors = sim
@@ -421,17 +457,19 @@ fn cached_cells_in(
         visual.cached = if let Some(pool) = pool {
             pool.scope(|scope| {
                 for u in actors.clone() {
-                    scope.spawn(async move { new_occupied(u, window) });
+                    let index = &index;
+                    scope.spawn(async move { new_occupied(u, index) });
                 }
             })
         } else {
-            actors.clone().map(|u| new_occupied(u, window)).collect()
+            actors.clone().map(|u| new_occupied(u, &index)).collect()
         };
         actor_count
     } else if let Some(pool) = pool {
         pool.scope(|scope| {
             for (u, old) in actors.clone().zip(&mut visual.cached) {
-                scope.spawn(async move { update_occupied(u, old, window, previous_window) });
+                let index = &index;
+                scope.spawn(async move { update_occupied(u, old, index, previous_window) });
             }
         })
         .into_iter()
@@ -440,7 +478,7 @@ fn cached_cells_in(
     } else {
         actors
             .zip(&mut visual.cached)
-            .map(|(u, old)| update_occupied(u, old, window, previous_window))
+            .map(|(u, old)| update_occupied(u, old, &index, previous_window))
             .filter(|rebuilt| *rebuilt)
             .count()
     };
@@ -481,7 +519,7 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
         v.scratch = next;
         return;
     }
-    let mut dirty = Vec::new();
+    let mut spans = Vec::new();
     let words = Arc::make_mut(&mut gas.terrain_words);
     let tops = &mut gas.terrain_column_top;
     let mut set = |i: usize, m: u32| {
@@ -498,7 +536,9 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
             return;
         }
         *word = new;
-        dirty.push(i / 8);
+        // The merge below visits the sorted union of old/new cells. Changed
+        // word indices are therefore already ordered, including duplicates.
+        append_dirty_word(&mut spans, i / 8);
     };
     // Both lists are sorted sets. Interior cells shared by the old and new
     // pose need neither a material lookup nor a GPU upload.
@@ -524,21 +564,24 @@ pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
             new += 1;
         }
     }
-    dirty.sort_unstable();
-    dirty.dedup();
-    let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
-    for i in dirty {
-        if let Some(r) = spans.last_mut() {
-            if i <= r.end + 16 {
-                r.end = i + 1;
-                continue;
-            }
-        }
-        spans.push(i..i + 1);
-    }
     gas.terrain_dirty.extend(spans);
     gas.terrain_revision += 1;
     v.scratch = std::mem::replace(&mut v.occupied, next);
+}
+/// Coalesce the ordered dirty words as they are emitted by the cell merge.
+/// Matches sorting/deduplicating first, including the existing 16-word gap.
+fn append_dirty_word(spans: &mut Vec<std::ops::Range<usize>>, word: usize) {
+    if let Some(last) = spans.last_mut() {
+        debug_assert!(word >= last.end - 1, "dirty words must be ordered");
+        if word < last.end {
+            return;
+        }
+        if word <= last.end + 16 {
+            last.end = word + 1;
+            return;
+        }
+    }
+    spans.push(word..word + 1);
 }
 pub fn animate(
     scene: Res<Scene>,
@@ -691,6 +734,112 @@ pub fn gun_segments(scene: &Scene, v: &Visual, p: Pose) -> Vec<Transform> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn prepared_window_index_matches_modulo_at_edges_and_full_u32_range() {
+        for divisor in [1, 2, 3, 7, 64, 127, 192, 1001, 1280, 1 << 31, u32::MAX] {
+            let reciprocal = (1u64 << 32) / u64::from(divisor);
+            for value in [
+                0,
+                1,
+                divisor - 1,
+                divisor,
+                divisor.saturating_add(1),
+                u32::MAX,
+            ] {
+                assert_eq!(
+                    WindowIndex::wrap(value, divisor, reciprocal),
+                    value % divisor
+                );
+            }
+            let mut value = 0u32;
+            for _ in 0..10_000 {
+                value = value.wrapping_mul(1664525).wrapping_add(1013904223);
+                assert_eq!(
+                    WindowIndex::wrap(value, divisor, reciprocal),
+                    value % divisor
+                );
+            }
+        }
+        for dims in [
+            [1280, 192, 1280],
+            [512, 128, 512],
+            [1001, 127, 913],
+            [1, 2, 4],
+            [0, 0, 0],
+        ] {
+            for origin in [[0, 0, 0], [64, 8, 128], [8768, 0, 8640], [-64, -1, -160]] {
+                let window = TerrainWindow { origin, dims };
+                let index = WindowIndex::new(window);
+                for x in [
+                    -1,
+                    0,
+                    1,
+                    dims[0] as i32 - 1,
+                    dims[0] as i32,
+                    dims[0] as i32 + 1,
+                ] {
+                    for y in [
+                        -1,
+                        0,
+                        1,
+                        dims[1] as i32 - 1,
+                        dims[1] as i32,
+                        dims[1] as i32 + 1,
+                    ] {
+                        for z in [
+                            -1,
+                            0,
+                            1,
+                            dims[2] as i32 - 1,
+                            dims[2] as i32,
+                            dims[2] as i32 + 1,
+                        ] {
+                            let p = [origin[0] + x, origin[1] + y, origin[2] + z];
+                            assert_eq!(
+                                index.index(p),
+                                window.index(p),
+                                "dims={dims:?} origin={origin:?} p={p:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn ordered_dirty_spans_match_sorted_deduplicated_reference() {
+        for stride in [0, 1, 2, 16, 17, 18, 64, 1024] {
+            for duplicates in [1, 2, 8] {
+                for count in [0, 1, 2, 10_000] {
+                    let words: Vec<_> = (0..count)
+                        .flat_map(|i| std::iter::repeat_n(i * stride + i / 11, duplicates))
+                        .collect();
+                    let mut actual = Vec::new();
+                    for &word in &words {
+                        append_dirty_word(&mut actual, word);
+                    }
+                    let mut sorted = words;
+                    sorted.reverse();
+                    sorted.sort_unstable();
+                    sorted.dedup();
+                    let mut expected: Vec<std::ops::Range<usize>> = Vec::new();
+                    for word in sorted {
+                        if let Some(last) = expected.last_mut() {
+                            if word <= last.end + 16 {
+                                last.end = word + 1;
+                                continue;
+                            }
+                        }
+                        expected.push(word..word + 1);
+                    }
+                    assert_eq!(
+                        actual, expected,
+                        "stride={stride} duplicates={duplicates} count={count}"
+                    );
+                }
+            }
+        }
+    }
     fn occupancy_roster(count: usize) -> BlastRange {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
