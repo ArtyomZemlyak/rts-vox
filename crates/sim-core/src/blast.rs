@@ -3621,9 +3621,20 @@ impl BlastRange {
     /// simulation never reads their timing or changes scheduling from them.
     pub fn step_observed_detail(
         &mut self,
+        completed: impl FnMut(&'static str),
+        detail: impl FnMut(&'static str),
+        unit_detail: impl FnMut(usize, &'static str),
+    ) {
+        self.step_observed_tasks(completed, detail, unit_detail, |_, _| {});
+    }
+    /// Read-only task boundaries on the navigation pool's worker thread.
+    /// Observers own any clocks or collection; their output never enters the tick.
+    pub fn step_observed_tasks(
+        &mut self,
         mut completed: impl FnMut(&'static str),
         mut detail: impl FnMut(&'static str),
         mut unit_detail: impl FnMut(usize, &'static str),
+        task_detail: impl Fn(usize, &'static str) + Sync,
     ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
@@ -3722,9 +3733,11 @@ impl BlastRange {
                         .enumerate()
                         .map(|(id, chunk)| {
                             let u = &mut chunk[0];
+                            task_detail(id, "route_begin");
                             u.motion
                                 .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
                             if !driven {
+                                task_detail(id, "route_end");
                                 return None;
                             }
                             let others: Vec<_> = positions
@@ -3734,8 +3747,11 @@ impl BlastRange {
                                 .map(|(_, p)| *p)
                                 .chain(gun_obstacle)
                                 .collect();
-                            u.motion
-                                .prepare_local_hunt(world, &u.body, &others, rubble, &changed)
+                            let prepared = u
+                                .motion
+                                .prepare_local_hunt(world, &u.body, &others, rubble, &changed);
+                            task_detail(id, "route_end");
+                            prepared
                         })
                         .collect()
                 });
@@ -3752,9 +3768,14 @@ impl BlastRange {
                 prepared_ground = pool.install(|| {
                     self.units
                         .par_chunks_mut(1)
-                        .map(|chunk| {
+                        .enumerate()
+                        .map(|(id, chunk)| {
                             let u = &mut chunk[0];
-                            u.motion.prepare_ground(world, &u.body, rubble, &changed)
+                            task_detail(id, "ground_begin");
+                            let prepared =
+                                u.motion.prepare_ground(world, &u.body, rubble, &changed);
+                            task_detail(id, "ground_end");
+                            prepared
                         })
                         .collect()
                 });

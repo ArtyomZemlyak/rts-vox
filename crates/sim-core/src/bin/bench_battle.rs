@@ -4,6 +4,9 @@ use sim_core::blast::BlastRange;
 use std::io::Write;
 use std::time::Instant;
 
+#[path = "bench_battle/workers.rs"]
+mod workers;
+
 #[derive(Default)]
 struct TickProfile {
     tick: u32,
@@ -80,6 +83,7 @@ fn main() {
     let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
+    let profile_workers = args.iter().any(|a| a == "--profile-workers");
     let tick_csv = args
         .windows(2)
         .find(|w| w[0] == "--tick-csv")
@@ -336,6 +340,14 @@ fn main() {
     let mut ground_windows = vec![(0u128, [0usize; 2]); ticks.div_ceil(300)];
     let mut unit_start = vec![Instant::now(); sim.units.len()];
     let mut unit_last = unit_start.clone();
+    let worker_profile = profile_workers.then(|| workers::Profile::new(sim.units.len()));
+    let mut worker_windows: Vec<workers::Window> = if profile_workers {
+        (0..ticks.div_ceil(300))
+            .map(|_| workers::Window::default())
+            .collect()
+    } else {
+        Vec::new()
+    };
     for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -351,7 +363,7 @@ fn main() {
         let unit_phases = &mut unit_phase_windows[tick_index / 300];
         let local_hunts = &mut local_hunt_windows[tick_index / 300];
         let ground_counts = &mut ground_windows[tick_index / 300].1;
-        sim.step_observed_detail(
+        sim.step_observed_tasks(
             |phase| {
                 let now = Instant::now();
                 let elapsed = now.duration_since(last).as_micros();
@@ -452,9 +464,17 @@ fn main() {
                     }
                 }
             },
+            |id, event| {
+                if let Some(profile) = &worker_profile {
+                    profile.observe(id, event);
+                }
+            },
         );
         // Measure the authoritative tick, excluding optional replay and log I/O.
         let elapsed = start.elapsed().as_micros();
+        if let Some(profile) = &worker_profile {
+            profile.collect(&mut worker_windows[tick_index / 300]);
+        }
         samples.push(elapsed);
         if tick_csv.is_some() {
             ground_windows[tick_index / 300].0 += ground_us;
@@ -788,6 +808,12 @@ fn main() {
             identity += usize::from(fragment.basis == sim_core::burst::IDENTITY);
         }
         println!("fragment_shapes single={single} full={full} identity={identity}");
+    }
+    if profile_workers {
+        println!("navigation_task_profile=wall_time_not_cpu opt_in=true");
+        for (index, window) in worker_windows.iter().enumerate() {
+            window.report(index * 300 + 1, ((index + 1) * 300).min(ticks));
+        }
     }
     samples.sort_unstable();
     let count = samples.len();

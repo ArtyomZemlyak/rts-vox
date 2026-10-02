@@ -2435,14 +2435,41 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         restarted.start_battle().unwrap();
         assert!(restarted.navigation_pool.is_none());
         drop(restarted);
+        let tasks: Vec<[std::sync::atomic::AtomicUsize; 4]> = (0..count)
+            .map(|_| std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)))
+            .collect();
         for tick in 0..20 {
             serial.step();
-            parallel.step();
+            parallel.step_observed_tasks(
+                |_| {},
+                |_| {},
+                |_, _| {},
+                |id, event| {
+                    assert!(rayon::current_thread_index().unwrap() < workers);
+                    let stage = match event {
+                        "route_begin" => 0,
+                        "route_end" => 1,
+                        "ground_begin" => 2,
+                        "ground_end" => 3,
+                        _ => unreachable!(),
+                    };
+                    tasks[id][stage].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                },
+            );
             assert_eq!(
                 serial.state_hash(),
                 parallel.state_hash(),
                 "count={count} tick={tick}"
             );
         }
+        let mut route_tasks = 0;
+        for task in tasks {
+            let count = task.map(|v| v.into_inner());
+            assert_eq!(count[0], count[1]);
+            assert_eq!(count[2], count[3]);
+            assert_eq!(count[2], 20);
+            route_tasks += count[0];
+        }
+        assert!(route_tasks > 0, "observer never saw a continuation task");
     }
 }
