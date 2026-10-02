@@ -22,6 +22,9 @@ use std::sync::Arc;
 #[path = "columns.rs"]
 pub mod columns;
 #[cfg(test)]
+#[path = "world_material_tests.rs"]
+mod material_tests;
+#[cfg(test)]
 #[path = "world_reset_tests.rs"]
 mod reset_tests;
 #[path = "snapshot.rs"]
@@ -109,6 +112,8 @@ pub trait Generator: Send + Sync {
     /// простой генератор оставался в одну строку; настоящий генератор
     /// обязан её переопределить и вынести всё, что зависит только от
     /// `(x, z)`, наружу цикла (ADR-114).
+    /// Переопределение обязано совпадать с `material`, включая AIR:
+    /// из этих колонок строится точная карта занятости мира.
     fn column(&self, x: u32, z: u32, y0: u32, out: &mut [Mat]) {
         for (i, o) in out.iter_mut().enumerate() {
             *o = self.material(x, y0 + i as u32, z);
@@ -721,7 +726,7 @@ impl World {
     /// Материал с курсором. Ответ **тот же до бита**, что у
     /// [`World::material`]: это ускорение, а не приближение.
     pub fn material_cached(&self, c: &mut MatCursor, x: u32, y: u32, z: u32) -> Mat {
-        if !self.inside(x, y, z) {
+        if !self.solid(x, y, z) {
             return AIR;
         }
         let cs = CS as u32;
@@ -751,7 +756,10 @@ impl World {
     }
 
     pub fn material(&self, x: u32, y: u32, z: u32) -> Mat {
-        if !self.inside(x, y, z) {
+        // Occupancy is exact for the committed generator/chunk overlay. Air
+        // needs neither palette decoding nor a procedural terrain evaluation.
+        // Pending edits become visible only when apply updates both layers.
+        if !self.solid(x, y, z) {
             return AIR;
         }
         match &self.chunks[self.chunk_index(x, y, z)] {
