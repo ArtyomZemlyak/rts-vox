@@ -10,6 +10,8 @@ param(
     # Zero preserves the scene default; 1 selects the serial route path.
     [ValidateRange(0, 8)][int]$NavigationWorkers = 0,
     [switch]$CpuThreads,
+    # Optional boundaries and calling-thread cycle counters, saved after the run.
+    [switch]$CorePhases,
     [switch]$CheckEveryFrame
 )
 $ErrorActionPreference = 'Stop'
@@ -50,6 +52,7 @@ try {
         $err = Join-Path $directory "$scenario.err"
         $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
         if ($Gpu) { $arguments += '--profile-gpu' }
+        if ($CorePhases) { $arguments += '--profile-core' }
         if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
         # -Wait keeps the exit status available in Windows PowerShell 5.1 too.
         if ($CpuThreads) {

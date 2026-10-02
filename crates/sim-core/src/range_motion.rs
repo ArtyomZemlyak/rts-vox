@@ -884,11 +884,22 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
     ) -> bool {
+        self.move_to_observed(w, to, b, others, rubble, |_| {})
+    }
+    fn move_to_observed(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        completed: impl FnMut(&'static str),
+    ) -> bool {
         // An explicit order supersedes the old route, even to the same point.
         self.path.clear();
         self.partial_path = false;
         self.cursor = 0;
-        self.plan_to(w, to, b, others, rubble)
+        self.plan_to_observed(w, to, b, others, rubble, completed)
     }
     /// Accept a group order without starting every hull's route search in the
     /// input frame. The normal motion scheduler starts these searches under
@@ -942,6 +953,17 @@ impl Motion {
         b: &UnitBody,
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
+    ) -> bool {
+        self.plan_to_observed(w, to, b, others, rubble, |_| {})
+    }
+    fn plan_to_observed(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        mut completed: impl FnMut(&'static str),
     ) -> bool {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
@@ -997,13 +1019,65 @@ impl Motion {
                     local_grade: self.coarse_local_grade,
                 },
             ) {
+                completed("plan_coarse");
                 self.take_plan(plan);
                 return true;
             }
+            completed("plan_coarse");
         }
         let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
             .with_rubble(rubble);
-        match nav::vehicle::Hunt::start_bounded(
+        let budget = self
+            .navigation
+            .search_nodes_per_tick
+            .min(self.search_slice_limit)
+            .max(1);
+        let mut prepare = |request: nav::vehicle::StartSweep,
+                           ground: &mut nav::vehicle::Probe<'_>| {
+            use rayon::prelude::*;
+            let shape = request.shape;
+            let samples = &request.samples;
+            let prefix = ground.route_samples(shape, &samples[..4]);
+            if !request.prefix_open(&prefix) {
+                return nav::vehicle::PreparedSweep {
+                    poses: samples[..4].iter().copied().zip(prefix).collect(),
+                    ..Default::default()
+                };
+            }
+            let batches: Vec<_> = samples[4..]
+                .par_chunks(4)
+                .with_max_len(1)
+                .map(|batch| {
+                    let mut probe = ground.fork_route();
+                    let answers = probe.route_samples(shape, batch);
+                    let reads = [probe.scans, probe.samples];
+                    (
+                        batch.iter().copied().zip(answers).collect::<Vec<_>>(),
+                        probe.take_columns(),
+                        reads,
+                    )
+                })
+                .collect();
+            let mut poses: Vec<_> = samples[..4].iter().copied().zip(prefix).collect();
+            let mut columns = None;
+            let mut reads = [0u64; 2];
+            for (answers, cache, work) in batches {
+                poses.extend(answers);
+                columns = Some(cache);
+                for a in 0..2 {
+                    reads[a] = reads[a].wrapping_add(work[a]);
+                }
+            }
+            nav::vehicle::PreparedSweep {
+                poses,
+                columns,
+                reads,
+            }
+        };
+        let prepare: Option<&mut nav::vehicle::PrepareStart<'_>> =
+            (shape.half.iter().all(|&n| n >= 40) && rayon::current_num_threads() >= 4)
+                .then_some(&mut prepare);
+        match nav::vehicle::Hunt::start_bounded_sweep(
             &mut ground,
             shape,
             from,
@@ -1011,10 +1085,8 @@ impl Motion {
             to,
             self.search(w),
             &clear,
-            self.navigation
-                .search_nodes_per_tick
-                .min(self.search_slice_limit)
-                .max(1),
+            budget,
+            prepare,
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
             nav::vehicle::Hunting::Open(hunt) => {
@@ -1026,6 +1098,7 @@ impl Motion {
                 self.dry = false;
             }
         }
+        completed("plan_fine");
         !self.blocked
     }
     /// The planner's budget and rules for this hull. Its bounds are the
@@ -1619,7 +1692,7 @@ impl Motion {
         {
             if let Some(goal) = self.destination {
                 self.started = true;
-                self.plan_to(w, goal, b, others, rubble);
+                self.plan_to_observed(w, goal, b, others, rubble, &mut completed);
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
         }
@@ -1635,7 +1708,7 @@ impl Motion {
         {
             let goal = self.route[self.waypoint];
             self.started = true;
-            self.move_to(w, goal, b, others, rubble);
+            self.move_to_observed(w, goal, b, others, rubble, &mut completed);
             if self.dry {
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
@@ -2525,6 +2598,48 @@ mod tests {
         let mut blob = Blob::new();
         m.save(&mut blob);
         blob.v
+    }
+    #[test]
+    fn fresh_spider_search_matches_serial_across_workers_and_live_blockers() {
+        let body = voxel::unit::spider();
+        let serial_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+        for workers in [2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for depth in [0, 9] {
+                let w = ground(depth);
+                let rubble = nav::vehicle::Rubble::from_sorted(vec![([215, 300], 24)]);
+                for goal in [[500, 300], [200, 530], [80, 80]] {
+                    for blocked in [false, true] {
+                        let mut serial = Motion::new([180, 16, 300], RangeUnitKind::Spider, &body);
+                        serial.navigation.global_nodes = 0;
+                        serial.navigation.search_nodes_per_tick = 32;
+                        serial.blocked_ticks = u32::from(blocked);
+                        let mut prepared = serial.clone();
+                        let others = [Obstacle {
+                            pos: [Fx::from_int(240), Fx::from_int(16), Fx::from_int(300)],
+                            head: angle::FULL / 7,
+                            half: [Fx::from_int(30); 2],
+                        }];
+                        let a = serial_pool
+                            .install(|| serial.move_to(&w, goal, &body, &others, &rubble));
+                        let b =
+                            pool.install(|| prepared.move_to(&w, goal, &body, &others, &rubble));
+                        assert_eq!(a, b);
+                        assert_eq!(
+                            motion_bytes(&serial),
+                            motion_bytes(&prepared),
+                            "workers={workers} depth={depth} goal={goal:?} blocked={blocked}"
+                        );
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn prepared_ground_matches_serial_drive_feet_and_live_contacts_across_workers() {

@@ -341,6 +341,7 @@ fn main() {
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
     let mut profile_actions = false;
+    let mut profile_core = false;
     let mut navigation_workers = None;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
@@ -353,6 +354,7 @@ fn main() {
             }
             "--profile-gpu" => profile_gpu = true,
             "--profile-actions" => profile_actions = true,
+            "--profile-core" => profile_core = true,
             "--nav-workers" => {
                 i += 1;
                 let workers = args
@@ -746,6 +748,11 @@ fn main() {
     profiler.configure_navigation(&mut sim);
     profiler.clouds = profile_clouds;
     profiler.gpu = profile_gpu;
+    assert!(
+        !profile_core || profile_output.is_some(),
+        "--profile-core requires --profile"
+    );
+    profiler.core = profile_core;
     assert!(
         !profile_actions || profile_output.is_some(),
         "--profile-actions requires --profile"
@@ -1671,7 +1678,8 @@ fn advance(
             }
         }
         let started = std::time::Instant::now();
-        scene.sim.step();
+        let generation = scene.generation;
+        profile.step(&mut scene.sim, generation);
         profile.record_tick(started.elapsed());
         for impact in scene
             .sim

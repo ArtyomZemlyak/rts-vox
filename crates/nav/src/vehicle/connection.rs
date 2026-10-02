@@ -70,6 +70,21 @@ impl Connection {
         if self.cursor < 16 {
             return Vec::new();
         }
+        self.sample_range(shape, budget)
+    }
+    pub(super) fn start_batch(&self, shape: Shape, budget: usize) -> Option<StartSweep> {
+        if budget < 16 {
+            return None;
+        }
+        let samples = self.sample_range(shape, budget);
+        (samples.len() >= 16).then_some(StartSweep {
+            shape,
+            samples,
+            height: self.height,
+            initial: self.cursor == 0,
+        })
+    }
+    fn sample_range(&self, shape: Shape, budget: usize) -> Vec<([Fx; 2], i32)> {
         let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
         let turns = turn_samples(angle::diff(self.yaw, self.head), shape);
         let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);

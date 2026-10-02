@@ -452,7 +452,7 @@ fn main() {
                         unit_last[id] = now;
                         let phase = match stage {
                             "hunt" => 0,
-                            "plan" => 1,
+                            "plan" | "plan_coarse" | "plan_fine" => 1,
                             "terrain" => 2,
                             "ride" => 3,
                             "feet" => 4,

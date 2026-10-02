@@ -355,6 +355,29 @@ pub struct PreparedSweep {
     pub columns: Option<Columns>,
     pub reads: [u64; 2],
 }
+/// Exact terrain samples of a freshly started direct connection. Its initial
+/// query establishes height; later poses must also satisfy clearance and step.
+pub struct StartSweep {
+    pub shape: Shape,
+    pub samples: Vec<([Fx; 2], i32)>,
+    height: Fx,
+    initial: bool,
+}
+pub type PrepareStart<'a> = dyn FnMut(StartSweep, &mut Probe<'_>) -> PreparedSweep + 'a;
+impl StartSweep {
+    pub fn prefix_open(&self, poses: &[Pose]) -> bool {
+        let mut height = self.height;
+        for (i, pose) in poses.iter().enumerate() {
+            if !(i == 0 && self.initial)
+                && (pose.refused() || pose.height.sub(height).abs() > Fx::from_int(self.shape.step))
+            {
+                return false;
+            }
+            height = pose.height;
+        }
+        true
+    }
+}
 impl Columns {
     /// Drop the pages a change touched; the rest still answer for the
     /// world as it is (ADR-427).
@@ -1386,6 +1409,22 @@ impl Hunt {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         budget: usize,
     ) -> Hunting {
+        Self::start_bounded_sweep(ground, shape, from, head, to, cfg, clear, budget, None)
+    }
+    /// Optional pure geometry preparation. Logical goal, direct-connection and
+    /// frontier work still runs in the original order under the same budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_bounded_sweep(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
+        prepare: Option<&mut PrepareStart<'_>>,
+    ) -> Hunting {
         let none = |stranded, exhausted, nodes, poses| {
             Hunting::Done(Route {
                 path: vec![],
@@ -1468,7 +1507,7 @@ impl Hunt {
             connection: None,
             expansion: None,
         };
-        let result = hunt.prepare(ground, clear, &mut budget.max(1));
+        let result = hunt.prepare_sweep(ground, clear, &mut budget.max(1), prepare);
         hunt.scans = ground.scans;
         hunt.samples = ground.samples;
         if let Some(mut route) = result {
@@ -1486,6 +1525,15 @@ impl Hunt {
         ground: &mut Probe<'_>,
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
+    ) -> Option<Route> {
+        self.prepare_sweep(ground, clear, allowance, None)
+    }
+    fn prepare_sweep(
+        &mut self,
+        ground: &mut Probe<'_>,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        allowance: &mut usize,
+        prepare: Option<&mut PrepareStart<'_>>,
     ) -> Option<Route> {
         let mut pending = self.prelude.take()?;
         if pending.straight.is_none() {
@@ -1530,6 +1578,25 @@ impl Hunt {
             }
         }
         if let Some(run) = &mut pending.straight {
+            if let Some((prepare, batch)) = prepare.and_then(|prepare| {
+                run.start_batch(self.shape, *allowance)
+                    .map(|batch| (prepare, batch))
+            }) {
+                let prepared = prepare(batch, ground);
+                if let Some(columns) = prepared.columns {
+                    ground.pages = columns.pages;
+                    ground.replacement = columns.replacement;
+                    ground.last_page = 0;
+                }
+                ground.prepared_routes.extend(
+                    prepared
+                        .poses
+                        .into_iter()
+                        .map(|((p, h), pose)| ((p[0], p[1], h), pose)),
+                );
+                ground.scans = ground.scans.wrapping_add(prepared.reads[0]);
+                ground.samples = ground.samples.wrapping_add(prepared.reads[1]);
+            }
             let before = *allowance;
             let answer = run.advance(ground, self.shape, clear, allowance);
             self.probed += (before - *allowance) as u32;
@@ -2778,6 +2845,129 @@ mod tests {
             }
             assert!(slices > 1);
         }
+    }
+    #[test]
+    fn initial_sweep_prefix_uses_origin_only_to_establish_height() {
+        let pose = |height, blocked| Pose {
+            height: Fx::from_int(height),
+            floors: [Fx::from_int(height); 4],
+            blocked,
+            steep: false,
+            tilt: false,
+            crush: 0,
+        };
+        let mut batch = StartSweep {
+            shape: tank(),
+            samples: Vec::new(),
+            height: Fx::ZERO,
+            initial: true,
+        };
+        assert!(batch.prefix_open(&[pose(20, 1), pose(24, 0)]));
+        assert!(!batch.prefix_open(&[pose(20, 1), pose(25, 0)]));
+        assert!(!batch.prefix_open(&[pose(20, 0), pose(20, 1)]));
+        batch.initial = false;
+        batch.height = Fx::from_int(20);
+        assert!(!batch.prefix_open(&[pose(20, 1)]));
+        assert!(!batch.prefix_open(&[pose(25, 0)]));
+        assert!(batch.prefix_open(&[pose(24, 0)]));
+    }
+    #[test]
+    fn prepared_initial_sweeps_preserve_frontiers_budgets_and_callbacks() {
+        let w = world(false, false, true);
+        let mut batches = 0;
+        for budget in [0, 1, 7, 17, 32, 96] {
+            for to in [[220, 72], [128, 128], [8, 8]] {
+                for blocked in [false, true] {
+                    let from = [50, 72].map(Fx::from_int);
+                    let mut a = Probe::for_search(&w, &[], Columns::default());
+                    let mut b = Probe::for_search(&w, &[], Columns::default());
+                    let calls_a = std::cell::RefCell::new(Vec::new());
+                    let calls_b = std::cell::RefCell::new(Vec::new());
+                    let clear_a = |p, h| {
+                        calls_a.borrow_mut().push((p, h));
+                        !blocked
+                    };
+                    let clear_b = |p, h| {
+                        calls_b.borrow_mut().push((p, h));
+                        !blocked
+                    };
+                    let mut prepare = |batch: StartSweep, probe: &mut Probe<'_>| {
+                        batches += 1;
+                        let answers = probe.route_samples(batch.shape, &batch.samples);
+                        PreparedSweep {
+                            poses: batch.samples.into_iter().zip(answers).collect(),
+                            ..Default::default()
+                        }
+                    };
+                    let x = Hunt::start_bounded(
+                        &mut a,
+                        tank(),
+                        from,
+                        1234,
+                        to,
+                        search(),
+                        &clear_a,
+                        budget,
+                    );
+                    let y = Hunt::start_bounded_sweep(
+                        &mut b,
+                        tank(),
+                        from,
+                        1234,
+                        to,
+                        search(),
+                        &clear_b,
+                        budget,
+                        Some(&mut prepare),
+                    );
+                    assert_eq!(calls_a.into_inner(), calls_b.into_inner());
+                    match (x, y) {
+                        (Hunting::Done(a), Hunting::Done(b)) => {
+                            assert_eq!(
+                                (a.path, a.nodes, a.poses, a.partial, a.stranded, a.exhausted),
+                                (b.path, b.nodes, b.poses, b.partial, b.stranded, b.exhausted)
+                            );
+                        }
+                        (Hunting::Open(mut a), Hunting::Open(mut b)) => {
+                            for _ in 0..12 {
+                                let mut sa = fx::blob::Blob::new();
+                                let mut sb = fx::blob::Blob::new();
+                                a.save(&mut sa);
+                                b.save(&mut sb);
+                                assert_eq!(sa.v, sb.v);
+                                let ra = a.advance_in(&w, &Rubble::new(), &|_, _| !blocked, 7);
+                                let rb = b.advance_in(&w, &Rubble::new(), &|_, _| !blocked, 7);
+                                assert_eq!(ra.is_some(), rb.is_some());
+                                if let Some(a) = ra {
+                                    let b = rb.unwrap();
+                                    assert_eq!(
+                                        (
+                                            a.path,
+                                            a.nodes,
+                                            a.poses,
+                                            a.partial,
+                                            a.stranded,
+                                            a.exhausted
+                                        ),
+                                        (
+                                            b.path,
+                                            b.nodes,
+                                            b.poses,
+                                            b.partial,
+                                            b.stranded,
+                                            b.exhausted
+                                        )
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        _ => panic!("preparation changed initial search progress"),
+                    }
+                }
+            }
+        }
+        assert!(batches > 0);
     }
     #[test]
     fn prepared_sweeps_preserve_search_slices_edits_and_blocker_callbacks() {

@@ -2,6 +2,8 @@
 //! read back timing queries only, never terrain, pixels or simulation fields.
 use super::*;
 use std::{io::Write, time::Instant};
+#[path = "profile/core.rs"]
+mod core;
 
 #[derive(Resource, Default)]
 pub struct Profile {
@@ -10,6 +12,7 @@ pub struct Profile {
     pub clouds: usize,
     pub gpu: bool,
     pub actions: bool,
+    pub core: bool,
     /// Optional fixed route pool for paired native performance experiments.
     /// Reapply when the workshop replaces the simulation, not every frame.
     pub navigation_workers: Option<usize>,
@@ -23,8 +26,9 @@ pub struct Profile {
     phases: Vec<f64>,
     detail: [f64; 5],
     simulation_ticks: u32,
-    rows: Vec<(f64, u32, [f64; 15])>,
+    rows: Vec<(f64, u32, [f64; 15], u64)>,
     finished: bool,
+    core_rows: Vec<core::Tick>,
 }
 /// Repeat the actual workshop requests in a native renderer, without video
 /// readback. Loading must finish before the next action can be measured.
@@ -114,6 +118,13 @@ struct GpuSamples {
     values: Vec<f64>,
 }
 impl Profile {
+    pub fn step(&mut self, sim: &mut BlastRange, generation: u64) {
+        if self.core && self.start.is_some() && !self.finished {
+            self.core_rows.push(core::Tick::record(sim, generation));
+        } else {
+            sim.step();
+        }
+    }
     pub fn configure_navigation(&self, sim: &mut BlastRange) {
         if let Some(workers) = self.navigation_workers {
             assert!(
@@ -255,7 +266,8 @@ pub fn end(
         p.detail[4],
     ];
     if elapsed > 0.0 {
-        p.rows.push((elapsed, scene.sim.tick, phases));
+        p.rows
+            .push((elapsed, scene.sim.tick, phases, scene.generation));
     }
     if elapsed < p.seconds {
         return;
@@ -273,16 +285,17 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation"
         )?;
-        for (t, tick, ms) in &p.rows {
+        for (t, tick, ms, generation) in &p.rows {
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6}",
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation}",
                 ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11], ms[12], ms[13], ms[14]
             )?;
         }
         out.flush()
+            .and_then(|()| core::save(p.output.as_ref().unwrap(), &p.core_rows))
     })();
     for (column, name) in [
         "frame",
