@@ -72,7 +72,8 @@ def os_window(directory, scenario, log, frames, roles):
     """Keep only entire 1Hz intervals inside the native measurement window."""
     path = directory / f"{scenario}-cpu"
     epoch = re.search(r"epoch_unix_ns=(\d+)", log)
-    if not epoch or not path.joinpath("cpu-process-samples.csv").exists():
+    if (not epoch or not frames or optional_int(frames[-1], "frame_end_ns") is None
+            or not path.joinpath("cpu-process-samples.csv").exists()):
         return {"status": "unavailable_or_legacy"}
     begin = int(epoch[1])
     end = begin + int(frames[-1]["frame_end_ns"])
@@ -112,15 +113,22 @@ def summarize_tick(rows):
         raise ValueError("Tick needs exactly one begin and end")
     begin, end = begins[0], ends[0]
     total = interval(begin, end)
+    origin = optional_int(begin, "profile_offset_ns")
+    if origin is not None:
+        origin -= int(begin["offset_ns"])
     phases, units, jobs = [], [], []
     last = begin
     unit_last = {}
     pending = {}
     unidentified_tasks = 0
     for row in sorted(rows, key=lambda r: int(r["offset_ns"])):
-        if int(row["offset_ns"]) > int(end["offset_ns"]):
+        if not int(begin["offset_ns"]) <= int(row["offset_ns"]) <= int(end["offset_ns"]):
             raise ValueError("Event lies outside its tick")
+        if origin is not None and optional_int(row, "profile_offset_ns") != origin + int(row["offset_ns"]):
+            raise ValueError("Trace clocks disagree")
         if row["lane"] == "phase":
+            if begin.get("os_thread") and row.get("os_thread") and row["os_thread"] != begin["os_thread"]:
+                raise ValueError("Phase boundary is not on the tick caller")
             phases.append(dict(name=row["event"], **interval(last, row)))
             last = row
         elif row["lane"] == "unit":
@@ -168,14 +176,43 @@ def analyze(directory, scenario="world-battle", top=12):
         raise ValueError("Invalid frame duration")
     starts = [optional_int(r, "frame_start_ns") for r in frames]
     aligned = all(s is not None for s in starts)
+    clock_fields = ("frame_start_ns", "frame_end_ns", "frame_gap_ns")
+    if any(optional_int(r, key) is not None for r in frames for key in clock_fields):
+        if not all(optional_int(r, key) is not None for r in frames for key in clock_fields):
+            raise ValueError("Incomplete frame clock")
     if aligned and starts != sorted(starts):
         raise ValueError("Frame clock regressed")
+    if aligned:
+        for idx, row in enumerate(frames):
+            start, end, gap = [int(row[key]) for key in clock_fields]
+            if min(start, end, gap) < 0 or end < start:
+                raise ValueError("Invalid frame clock interval")
+            expected_gap = start - int(frames[idx - 1]["frame_end_ns"]) if idx else 0
+            if expected_gap < 0 or gap != expected_gap:
+                raise ValueError("Frame slices overlap or gap disagrees")
+    frame_times = []
+    for idx, row in enumerate(frames):
+        observed = row.get("observed_frame_ms")
+        supplied = float(observed) if observed not in (None, "") else None
+        derived = (starts[idx] - starts[idx - 1]) / 1e6 if aligned and idx else None
+        if derived is not None and derived <= 0:
+            raise ValueError("Frame clock did not advance")
+        if "observed_frame_ms" in row and idx and supplied is None:
+            raise ValueError("Missing observed frame duration")
+        if supplied is not None and (not math.isfinite(supplied) or supplied <= 0):
+            raise ValueError("Invalid observed frame duration")
+        if supplied is not None and derived is not None and not math.isclose(supplied, derived, rel_tol=0, abs_tol=0.000002):
+            raise ValueError("Observed frame duration disagrees with clock")
+        frame_times.append(derived if derived is not None else supplied if aligned else float(row["frame_ms"]))
     ticks_per_frame = [int(r["simulation_ticks"]) for r in frames]
     frame_ticks = sum(ticks_per_frame)
     if min(ticks_per_frame) < 0:
         raise ValueError("Negative step count")
     core_totals, phase_totals, slow, seen = [], {}, [], set()
     unmapped = 0
+    identity_mismatches = 0
+    missing_clock = 0
+    mapped_steps = [0] * len(frames)
     roles = {}
     core_path = directory / f"{scenario}.core.csv"
     if core_path.exists():
@@ -192,10 +229,20 @@ def analyze(directory, scenario="world-battle", top=12):
             core_totals.append(tick["wall_ms"])
             for phase in tick["phases"]:
                 phase_totals.setdefault(phase["name"], []).append(phase)
-            if aligned and tick["profile_begin_ns"] is not None:
-                idx = bisect.bisect_right(starts, tick["profile_begin_ns"]) - 1
+            if aligned:
+                if tick["profile_begin_ns"] is None or tick["profile_end_ns"] is None:
+                    missing_clock += 1
+                    idx = -1
+                else:
+                    idx = bisect.bisect_right(starts, tick["profile_begin_ns"]) - 1
                 if idx >= 0 and tick["profile_end_ns"] <= int(frames[idx]["frame_end_ns"]):
                     tick["frame_row"] = idx
+                    # A matching total is insufficient: resets and multiple
+                    # steps in one frame must preserve each frame's identity.
+                    expected_tick = (int(frames[idx]["tick"]) - ticks_per_frame[idx] + mapped_steps[idx] + 1) % (1 << 32)
+                    if tick["generation"] != int(frames[idx]["generation"]) or tick["tick"] != expected_tick:
+                        identity_mismatches += 1
+                    mapped_steps[idx] += 1
                 else:
                     unmapped += 1
             # Bound retained raw detail to the slowest top ticks.
@@ -220,30 +267,42 @@ def analyze(directory, scenario="world-battle", top=12):
         reasons.append("incomplete_provenance")
     if not frame_ticks:
         reasons.append("simulation_did_not_advance")
+    if not aligned:
+        reasons.append("monotonic_frame_clock_missing")
     if core_path.exists() and len(seen) != frame_ticks:
         reasons.append("frame_core_tick_count_mismatch")
     if manifest and manifest.get("CorePhases") and not core_path.exists():
         reasons.append("core_trace_missing")
     if unmapped:
         reasons.append("core_ticks_outside_frame_slice")
+    if missing_clock:
+        reasons.append("core_tick_clock_missing")
+    if identity_mismatches:
+        reasons.append("frame_core_tick_identity_mismatch")
+    if aligned and core_path.exists() and mapped_steps != ticks_per_frame:
+        reasons.append("frame_core_step_distribution_mismatch")
     hash_match = re.search(r"^PROFILE state_hash=([0-9a-f]+)$", log, re.M)
     adapter = re.search(r"^PROFILE adapter_name=.*$", log, re.M)
     rate = re.search(r"^PROFILE tick_rate=(\d+)", log, re.M)
     pools = re.search(r"^PROFILE physics_workers=(\d+) navigation_workers=(\d+)", log, re.M)
     if not pools:
         reasons.append("actual_worker_counts_missing")
-    seconds = float(frames[-1]["seconds"])
+    seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
     expensive_frames = []
-    for idx in sorted(range(len(frames)), key=lambda i: -float(frames[i]["frame_ms"]))[:top]:
+    for idx in sorted((i for i, value in enumerate(frame_times) if value is not None), key=lambda i: -frame_times[i])[:top]:
         row = frames[idx]
         prev = frames[idx - 1] if idx else None
         expensive_frames.append(dict(row=idx, tick=int(row["tick"]), generation=int(row["generation"]),
-            frame_delta_ms=float(row["frame_ms"]), current_core_ms=float(row["simulation_core_ms"]),
+            frame_delta_ms=frame_times[idx], bevy_delta_ms=float(row["frame_ms"]), current_core_ms=float(row["simulation_core_ms"]),
             previous_core_ms=float(prev["simulation_core_ms"]) if prev else None,
+            previous_measured_slice_ms=(int(prev["frame_end_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
+            begin_to_begin_ms=(int(row["frame_start_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             outside_observed_slice_ms=int(row["frame_gap_ns"]) / 1e6 if aligned else None))
-    return dict(schema=2, directory=str(directory), scenario=scenario, manifest=manifest,
+    return dict(schema=3, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
-        reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([float(r["frame_ms"]) for r in frames]),
+        reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
+        frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
+        bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
         measured_steps=frame_ticks, trace_steps=len(seen), core_tick_ms=stats(core_totals),
         core_ms_per_step=sum(float(r["simulation_core_ms"]) for r in frames) / frame_ticks if frame_ticks else None,
         realtime_ratio=frame_ticks / (seconds * (int(rate[1]) if rate else 30)) if seconds > 0 else None,
@@ -251,6 +310,8 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
         frame_alignment="shared_monotonic_epoch" if aligned else "legacy_frame_delta_lags_phase_columns",
+        trace_alignment=dict(unmapped_ticks=unmapped, missing_clock_ticks=missing_clock,
+                             identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
                     "worker_covered_wall is a union per OS thread, not CPU utilization; do not add it to parent wall",
@@ -272,7 +333,7 @@ def compare(a, b):
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
-    for key in ["measured_steps", "actual_adapter", "actual_workers", "frame_alignment", "state_hash"]:
+    for key in ["measured_steps", "actual_adapter", "actual_workers", "frame_alignment", "frame_timing_metric", "state_hash"]:
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
     return {"eligible": not problems, "reasons": problems,
@@ -283,7 +344,7 @@ def markdown(report):
     lines = ["# Range performance evidence", "",
              f"Comparison eligible: {report['valid_for_comparison']}. Reasons: {', '.join(report['reasons']) or 'none observed'}.",
              f"Frames: {report['frames']}; real steps: {report['measured_steps']}; traced steps: {report['trace_steps']}.",
-             f"Frame alignment: {report['frame_alignment']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
+             f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
              "| Phase | Mean per actual traced tick, ms | p99 occurrence, ms | CPU counter samples |",
              "|---|---:|---:|---:|"]
     for p in report["phases"]:
@@ -294,6 +355,17 @@ def markdown(report):
         leaders = sorted(tick["phases"], key=lambda p: -p["wall_ms"])[:3]
         names = ", ".join(f"{p['name']}={p['wall_ms']:.3f}ms" for p in leaders)
         lines.append(f"- generation {tick['generation']}, tick {tick['tick']}: wall {tick['wall_ms']:.3f}ms, CPU {tick['thread_cpu_ms']}ms; {names}.")
+        for job in tick["longest_tasks"][:3]:
+            lines.append(f"  - task {job['name']}, unit {job['unit']}, OS thread {job['thread']}: wall {job['wall_ms']:.3f}ms, CPU {job['thread_cpu_ms']}ms (inclusive; not added to phase totals).")
+    lines += ["", "Slow frames (monotonic begin-to-begin; previous measured slice plus current gap):", "",
+              "| Row | Generation/tick | Observed interval, ms | Bevy delta, ms | Previous core, ms | Current core, ms | Previous measured slice, ms | Outside slices, ms |",
+              "|---|---|---:|---:|---:|---:|---:|---:|"]
+    def number(value):
+        return "unavailable" if value is None else f"{value:.3f}"
+    for frame in report["slow_frames"]:
+        values = [number(frame[key]) for key in ("frame_delta_ms", "bevy_delta_ms", "previous_core_ms", "current_core_ms", "previous_measured_slice_ms", "outside_observed_slice_ms")]
+        lines.append(f"| {frame['row']} | {frame['generation']}/{frame['tick']} | {' | '.join(values)} |")
+    lines += ["", "Bevy delta may lag by multiple rows through the render pipeline; it is not used to select slow frames or attribute their phases. Outside slices is the monotonic gap from the previous measured end to the current measured start. It is not an identified GPU/lock wait. First-frame previous values and legacy clock fields remain unavailable."]
     lines += ["", *[f"- {s}." for s in report["limitations"]]]
     cpu = report["os_cpu_window"]
     if cpu["status"] == "aligned_intervals":

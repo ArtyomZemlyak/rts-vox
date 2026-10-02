@@ -134,8 +134,9 @@ try {
             Save-RangeManifest $manifest $manifestPath
             $process.Dispose()
             if ($rows.Count -eq 0) { throw "$scenario produced no frame samples; failure evidence retained in $manifestPath" }
-            $culture = [System.Globalization.CultureInfo]::InvariantCulture
-            $times = @($rows | ForEach-Object { [double]::Parse($_.frame_ms, $culture) } | Sort-Object)
+            $frameTiming = Get-RangeFrameTimes -Rows $rows
+            $times = @($frameTiming.Values | Sort-Object)
+            if ($times.Count -eq 0) { throw 'No monotonic frame intervals; FPS cannot be evaluated.' }
             $p99 = $times[[int][Math]::Floor($times.Count * 0.99)]
             $mean = ($times | Measure-Object -Average).Average
             $result = [pscustomobject]@{
@@ -147,6 +148,7 @@ try {
                 SimulationRealtimeRatio = [Math]::Round($validity.SimulationRealtimeRatio, 4)
                 MeetsSimulationRate = $validity.MeetsSimulationRate
                 TargetFps = $TargetFps
+                FrameTimingMetric = $frameTiming.Metric
                 Frames = $times.Count
                 MeanFps = [Math]::Round(1000.0 / $mean, 1)
                 P95ms = [Math]::Round($times[[int][Math]::Floor($times.Count * 0.95)], 3)

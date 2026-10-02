@@ -29,6 +29,8 @@ pub struct Profile {
     rows: Vec<Frame>,
     epoch: Option<Instant>,
     frame_start_ns: u128,
+    previous_begin_ns: Option<u128>,
+    observed_frame_ms: Option<f64>,
     last_end_ns: Option<u128>,
     finished: bool,
     core_rows: Vec<core::Tick>,
@@ -41,6 +43,7 @@ struct Frame {
     start_ns: u128,
     end_ns: u128,
     gap_ns: u128,
+    observed_frame_ms: Option<f64>,
 }
 /// Repeat the actual workshop requests in a native renderer, without video
 /// readback. Loading must finish before the next action can be measured.
@@ -195,7 +198,9 @@ pub fn begin(
     }
     if p.start.is_none() {
         p.epoch = Some(Instant::now());
-        println!("PROFILE schema=2 frame_ms_scope=previous_start_to_current_start cpu_time_scope=thread_kernel_plus_user");
+        println!(
+            "PROFILE schema=3 frame_ms_scope=bevy_time_delta_render_pipeline_lag observed_frame_ms_scope=previous_profile_begin_to_current_profile_begin cpu_time_scope=thread_kernel_plus_user"
+        );
         println!(
             "PROFILE tick_rate={} epoch_unix_ns={}",
             sim_core::TICKS_PER_SECOND,
@@ -205,8 +210,10 @@ pub fn begin(
                 .as_nanos()
         );
         if let Some(adapter) = adapter {
-            println!("PROFILE adapter_name={:?} adapter_backend={:?} adapter_device_type={:?} adapter_driver={:?}",
-                adapter.name, adapter.backend, adapter.device_type, adapter.driver);
+            println!(
+                "PROFILE adapter_name={:?} adapter_backend={:?} adapter_device_type={:?} adapter_driver={:?}",
+                adapter.name, adapter.backend, adapter.device_type, adapter.driver
+            );
         } else {
             println!("PROFILE adapter=unavailable");
         }
@@ -223,6 +230,10 @@ pub fn begin(
     }
     let start = *p.start.get_or_insert(now);
     p.frame_start_ns = p.epoch.unwrap().elapsed().as_nanos();
+    p.observed_frame_ms = p
+        .previous_begin_ns
+        .map(|previous| (p.frame_start_ns - previous) as f64 / 1_000_000.0);
+    p.previous_begin_ns = Some(p.frame_start_ns);
     if p.clouds > 0 && !p.emitted && now - start >= 0.5 {
         p.emitted = true;
         for i in 0..p.clouds {
@@ -301,6 +312,7 @@ pub fn end(
     if elapsed > 0.0 {
         let end_ns = p.epoch.unwrap().elapsed().as_nanos();
         let start_ns = p.frame_start_ns;
+        let observed_frame_ms = p.observed_frame_ms;
         let gap_ns = p
             .last_end_ns
             .map_or(0, |last| start_ns.saturating_sub(last));
@@ -312,6 +324,7 @@ pub fn end(
             start_ns,
             end_ns,
             gap_ns,
+            observed_frame_ms,
         });
         p.last_end_ns = Some(end_ns);
     }
@@ -331,7 +344,7 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns,observed_frame_ms"
         )?;
         for row in &p.rows {
             let Frame {
@@ -342,11 +355,27 @@ pub fn end(
                 start_ns,
                 end_ns,
                 gap_ns,
+                observed_frame_ms,
             } = row;
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns}",
-                ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11], ms[12], ms[13], ms[14]
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns},{}",
+                ms[0],
+                ms[1],
+                ms[2],
+                ms[3],
+                ms[4],
+                ms[5],
+                ms[6],
+                ms[7],
+                ms[8],
+                ms[9],
+                ms[10],
+                ms[11],
+                ms[12],
+                ms[13],
+                ms[14],
+                observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}"))
             )?;
         }
         out.flush()
@@ -371,7 +400,17 @@ pub fn end(
         (12, "occupancy"),
         (14, "simulation_core"),
     ]) {
-        let mut values: Vec<_> = p.rows.iter().map(|r| r.ms[column]).collect();
+        let mut values: Vec<_> = p
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if column == 0 {
+                    r.observed_frame_ms
+                } else {
+                    Some(r.ms[column])
+                }
+            })
+            .collect();
         values.sort_by(f64::total_cmp);
         if !values.is_empty() {
             println!(

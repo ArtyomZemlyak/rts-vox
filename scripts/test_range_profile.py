@@ -62,6 +62,19 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(result["unidentified_task_events"], 4)
         self.assertEqual(result["worker_covered_wall_ms"], {})
 
+    def test_trace_boundaries_and_both_clocks_must_agree(self):
+        before = trace() + [mark("task", "bad_begin", -1, "2", "0")]
+        with self.assertRaisesRegex(ValueError, "outside"):
+            profile.summarize_tick(before)
+        clocks = trace()
+        clocks[-1]["profile_offset_ns"] = "9999"
+        with self.assertRaisesRegex(ValueError, "clocks disagree"):
+            profile.summarize_tick(clocks)
+        worker_phase = trace()
+        worker_phase[-2]["os_thread"] = "2"
+        with self.assertRaisesRegex(ValueError, "tick caller"):
+            profile.summarize_tick(worker_phase)
+
 
 class ReportTests(unittest.TestCase):
     def setUp(self):
@@ -100,7 +113,7 @@ class ReportTests(unittest.TestCase):
 
     def test_reset_uses_generation_and_invalid_pairs_preserve_numbers(self):
         rows = trace() + [dict(r, generation="1", profile_offset_ns=str(int(r["profile_offset_ns"]) + 10000)) for r in trace()]
-        frames = [self.frames[0], dict(self.frames[0], seconds="2", generation="1", frame_start_ns="10900", frame_end_ns="11200")]
+        frames = [self.frames[0], dict(self.frames[0], seconds="2", generation="1", frame_start_ns="10900", frame_end_ns="11200", frame_gap_ns="9700")]
         self.write(frames, rows)
         r = profile.analyze(self.path)
         self.assertEqual(r["trace_steps"], 2)
@@ -109,6 +122,69 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(comparison["eligible"])
         self.assertIn("different_or_missing:state_hash", comparison["reasons"])
         self.assertIsNotNone(comparison["after_core_ms_per_step"])
+
+    def test_total_step_count_does_not_hide_wrong_generation_or_tick(self):
+        for key, wrong in [("generation", "99"), ("tick", "99")]:
+            with self.subTest(key=key):
+                self.write(rows=[dict(r, **{key: wrong}) for r in trace()])
+                report = profile.analyze(self.path)
+                self.assertEqual(report["measured_steps"], report["trace_steps"])
+                self.assertFalse(report["valid_for_comparison"])
+                self.assertIn("frame_core_tick_identity_mismatch", report["reasons"])
+
+    def test_multiple_steps_need_correct_order_and_frame_distribution(self):
+        rows = trace() + [dict(r, tick="2", profile_offset_ns=str(int(r["profile_offset_ns"]) + 100)) for r in trace()]
+        self.write(frames=[dict(self.frames[0], tick="2", simulation_ticks="2")], rows=rows)
+        self.assertTrue(profile.analyze(self.path)["valid_for_comparison"])
+        wrong = [dict(self.frames[0], tick="2"), dict(self.frames[1], tick="2", simulation_ticks="1")]
+        self.write(frames=wrong, rows=rows)
+        report = profile.analyze(self.path)
+        self.assertEqual(report["measured_steps"], report["trace_steps"])
+        self.assertIn("frame_core_step_distribution_mismatch", report["reasons"])
+
+    def test_frame_clocks_and_missing_trace_clock_cannot_silently_join(self):
+        for change in [dict(frame_end_ns="800"), dict(frame_gap_ns="1"), dict(frame_end_ns="")]:
+            with self.subTest(change=change):
+                self.write(frames=[dict(self.frames[0], **change)])
+                with self.assertRaisesRegex(ValueError, "frame|Frame"):
+                    profile.analyze(self.path)
+        self.write(rows=[dict(r, profile_offset_ns="") for r in trace()])
+        report = profile.analyze(self.path)
+        self.assertFalse(report["valid_for_comparison"])
+        self.assertIn("core_tick_clock_missing", report["reasons"])
+
+    def test_plain_report_exposes_frame_stall_and_worker_details(self):
+        self.write()
+        report = profile.analyze(self.path)
+        frame = report["slow_frames"][0]
+        self.assertAlmostEqual(frame["previous_measured_slice_ms"] + frame["outside_observed_slice_ms"], frame["begin_to_begin_ms"])
+        rendered = profile.markdown(report)
+        self.assertIn("| 1 | 0/1 | 1.999 | 250.000 | 2.000 | 0.000 |", rendered)
+        self.assertIn("task parent, unit 0, OS thread 2", rendered)
+        self.assertIn("not an identified GPU/lock wait", rendered)
+
+    def test_pipeline_lag_cannot_shift_stall_or_fps(self):
+        frames = [dict(self.frames[0], frame_start_ns="0", frame_end_ns="30000000", observed_frame_ms="", frame_ms="4"),
+                  dict(self.frames[1], frame_start_ns="32000000", frame_end_ns="33000000", frame_gap_ns="2000000", observed_frame_ms="32", frame_ms="4"),
+                  dict(self.frames[1], frame_start_ns="34000000", frame_end_ns="35000000", frame_gap_ns="1000000", observed_frame_ms="2", frame_ms="32")]
+        self.write(frames=frames)
+        report = profile.analyze(self.path)
+        self.assertTrue(report["valid_for_comparison"])
+        self.assertEqual(report["slow_frames"][0]["row"], 1)
+        self.assertEqual(report["slow_frames"][0]["previous_core_ms"], 2)
+        self.assertEqual(report["slow_frames"][0]["frame_delta_ms"], 32)
+        self.assertEqual(report["frame_ms"]["mean"], 17)
+        frames[1]["observed_frame_ms"] = "4"
+        self.write(frames=frames)
+        with self.assertRaisesRegex(ValueError, "disagrees"):
+            profile.analyze(self.path)
+
+    def test_legacy_os_samples_without_frame_epoch_remain_unavailable(self):
+        folder = self.path / 'world-battle-cpu'; folder.mkdir()
+        (folder / 'cpu-process-samples.csv').write_text('Utc,Seconds,CpuMs\n')
+        result = profile.os_window(self.path, 'world-battle', 'epoch_unix_ns=2000000000',
+                                   [dict(frame_ms='10')], {})
+        self.assertEqual(result['status'], 'unavailable_or_legacy')
 
     def test_duplicate_tick_is_rejected_instead_of_silently_merged(self):
         rows = trace() + [dict(r, generation="1") for r in trace()] + trace()
