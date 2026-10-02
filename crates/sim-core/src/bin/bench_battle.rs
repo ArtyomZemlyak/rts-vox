@@ -334,7 +334,7 @@ fn main() {
     let mut unit_time_windows = vec![vec![0u128; sim.units.len()]; ticks.div_ceil(300)];
     let mut unit_phase_windows = vec![vec![[0u128; 6]; sim.units.len()]; ticks.div_ceil(300)];
     let mut debris_phase_windows = vec![[0u128; 16]; ticks.div_ceil(300)];
-    let mut settled_phase_windows = vec![[0u128; 4]; ticks.div_ceil(300)];
+    let mut settled_phase_windows = vec![[0u128; 6]; ticks.div_ceil(300)];
     let mut heat_phase_windows = vec![[0u128; 8]; ticks.div_ceil(300)];
     let mut local_hunt_windows = vec![[0usize; 2]; ticks.div_ceil(300)];
     let mut ground_windows = vec![(0u128, [0usize; 2]); ticks.div_ceil(300)];
@@ -355,7 +355,7 @@ fn main() {
         let mut motion_detail = [0u128; 4];
         let mut ground_us = 0;
         let mut debris_detail = [0u128; 16];
-        let mut settled_detail = [0u128; 4];
+        let mut settled_detail = [0u128; 6];
         let mut settled_last = None;
         let mut heat_detail = [0u128; 8];
         let mut profile = TickProfile::default();
@@ -377,10 +377,12 @@ fn main() {
                 if tick_csv.is_some() {
                     let now = Instant::now();
                     let settled_phase = match name {
-                        "settled_boxes" => Some(0),
-                        "settled_queries" => Some(1),
-                        "settled_candidates" => Some(2),
-                        "settled_cells" => Some(3),
+                        "settled_clear" => Some(0),
+                        "settled_boxes" => Some(1),
+                        "settled_ranges" => Some(2),
+                        "settled_queries" => Some(3),
+                        "settled_candidates" => Some(4),
+                        "settled_cells" => Some(5),
                         _ => None,
                     };
                     if let Some(phase) = settled_phase {
@@ -780,7 +782,7 @@ fn main() {
                 heat_phase_windows[index].map(|us| us / len)
             );
             println!(
-                "settled_phases_window={}..{} boxes_queries_candidates_cells_us={:?}",
+                "settled_phases_window={}..{} clear_boxes_ranges_queries_candidates_cells_us={:?}",
                 window[0].tick,
                 window[window.len() - 1].tick,
                 settled_phase_windows[index].map(|us| us / len)

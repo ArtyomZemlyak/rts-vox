@@ -2187,6 +2187,140 @@ mod tests {
         assert_eq!(run(1), run(4));
     }
     #[test]
+    fn settled_rebuilds_preserve_sweeps_and_clear_empty_generations() {
+        let t = tuning().blast;
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut fragments: Vec<_> = (0..1200u32)
+                .map(|i| Fragment {
+                    id: u64::from(i) + 1,
+                    position: V3::new(
+                        Fx::from_ratio((i % 29) as i32 - 18, 2),
+                        Fx::from_ratio((i % 13) as i32 - 8, 2),
+                        Fx::from_int((i % 17) as i32 - 10),
+                    ),
+                    velocity: V3::new(Fx::from_int(-3), Fx::ZERO, Fx::from_ratio(7, 2)),
+                    material: 1,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1,
+                    count: 3,
+                    shape: 7,
+                    side: 2,
+                    chunk: None,
+                    held: i,
+                    resting: i % 3 != 0,
+                })
+                .collect();
+            let mut index = Settled::default();
+            let mut queries = SettledQueries::default();
+            for (generation, len) in [1200, 1100, 17, 1200, 1200, 1200, 0]
+                .into_iter()
+                .enumerate()
+            {
+                for f in &mut fragments {
+                    f.position.x = f.position.x.add(Fx::from_ratio(3, 2));
+                    f.velocity.z = f.velocity.z.neg();
+                    if generation >= 4 {
+                        f.resting = generation == 4;
+                    }
+                }
+                let fragments = &fragments[..len];
+                let tick = generation as u64;
+                let boxes: Vec<_> = fragments
+                    .iter()
+                    .map(|f| {
+                        let (lo, hi) = f.bounds();
+                        let p = arr(f.position);
+                        (
+                            [0, 1, 2].map(|a| p[a].add(lo[a])),
+                            [0, 1, 2].map(|a| p[a].add(hi[a])),
+                        )
+                    })
+                    .collect();
+                let mut wanted = BTreeSet::new();
+                for (f, &(lo, hi)) in fragments.iter().zip(&boxes) {
+                    if generation == 4 || (f.resting && !due(f.id, tick, &t)) {
+                        continue;
+                    }
+                    let velocity = arr(f.velocity);
+                    let first = [0, 1, 2].map(|a| {
+                        lo[a]
+                            .add(velocity[a].min(Fx::ZERO))
+                            .to_int_trunc()
+                            .div_euclid(SETTLED_CELL)
+                            - 1
+                    });
+                    let last = [0, 1, 2].map(|a| {
+                        hi[a]
+                            .add(velocity[a].max(Fx::ZERO))
+                            .to_int_trunc()
+                            .div_euclid(SETTLED_CELL)
+                            + 1
+                    });
+                    for z in first[2]..=last[2] {
+                        for y in first[1]..=last[1] {
+                            for x in first[0]..=last[0] {
+                                wanted.insert([x, y, z]);
+                            }
+                        }
+                    }
+                }
+                let mut expected = BTreeMap::<_, Vec<u32>>::new();
+                for (i, (f, &(lo, hi))) in fragments.iter().zip(&boxes).enumerate() {
+                    if !f.resting {
+                        continue;
+                    }
+                    let first = lo.map(|v| v.to_int_trunc().div_euclid(SETTLED_CELL));
+                    let last = hi.map(|v| v.to_int_trunc().div_euclid(SETTLED_CELL));
+                    for z in first[2]..=last[2] {
+                        for y in first[1]..=last[1] {
+                            for x in first[0]..=last[0] {
+                                let cell = [x, y, z];
+                                if wanted.contains(&cell) {
+                                    expected.entry(cell).or_default().push(i as u32);
+                                }
+                            }
+                        }
+                    }
+                }
+                pool.install(|| {
+                    Settled::around_bounds_into(
+                        fragments,
+                        &[],
+                        |_, f| generation != 4 && (!f.resting || due(f.id, tick, &t)),
+                        |_, f| f.bounds(),
+                        &mut index,
+                        &mut queries,
+                        &mut |_| {},
+                    )
+                });
+                assert_eq!(
+                    index.cells.ordered(),
+                    expected,
+                    "workers={workers}, generation={generation}"
+                );
+                if wanted.is_empty() || !fragments.iter().any(|f| f.resting) {
+                    assert!(index.boxes.is_empty() && queries.is_empty());
+                } else {
+                    assert_eq!(index.boxes, boxes);
+                    for z in -14..=14 {
+                        for y in -10..=10 {
+                            for x in -14..=14 {
+                                let cell = [x, y, z];
+                                assert_eq!(queries.contains(cell), wanted.contains(&cell));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn parallel_contact_stripes_match_ordered_reference_and_clear_reused_lists() {
         let selected: Vec<_> = (0..1400)
             .map(|i| {
@@ -4854,7 +4988,7 @@ impl Settled {
     fn around(
         fragments: &[Fragment],
         hulls: &[Hull],
-        asks: impl Fn(usize, &Fragment) -> bool,
+        asks: impl Fn(usize, &Fragment) -> bool + Sync,
     ) -> Settled {
         Self::around_bounds(fragments, hulls, asks, |_, f| f.bounds())
     }
@@ -4863,7 +4997,7 @@ impl Settled {
     fn around_bounds(
         fragments: &[Fragment],
         hulls: &[Hull],
-        asks: impl Fn(usize, &Fragment) -> bool,
+        asks: impl Fn(usize, &Fragment) -> bool + Sync,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
     ) -> Settled {
         let mut out = Settled::default();
@@ -4881,16 +5015,17 @@ impl Settled {
     fn around_bounds_into(
         fragments: &[Fragment],
         hulls: &[Hull],
-        asks: impl Fn(usize, &Fragment) -> bool,
+        asks: impl Fn(usize, &Fragment) -> bool + Sync,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
         out: &mut Settled,
         want: &mut SettledQueries,
         completed: &mut impl FnMut(&'static str),
     ) {
         out.cells.clear();
-        out.boxes.clear();
         want.clear();
+        completed("settled_clear");
         if !fragments.iter().any(|f| f.resting) {
+            out.boxes.clear();
             return;
         }
         // Only membership is queried. Fragment insertion and contact order
@@ -4904,23 +5039,7 @@ impl Settled {
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
             (lo, hi)
         };
-        if fragments.len() >= 1024 {
-            out.boxes
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, box_at)| *box_at = world_box((i, &fragments[i])));
-        } else {
-            for (i, box_at) in out.boxes.iter_mut().enumerate() {
-                *box_at = world_box((i, &fragments[i]));
-            }
-        }
-        completed("settled_boxes");
-        let mut ranges = Vec::new();
-        for (i, f) in fragments.iter().enumerate() {
-            if !asks(i, f) {
-                continue;
-            }
-            let (lo, hi) = out.boxes[i];
+        let swept = |f: &Fragment, (lo, hi): ([Fx; 3], [Fx; 3])| {
             // Where the piece may get to this tick: its box swept by its
             // velocity, and a cell beyond for what gravity adds (ADR-438).
             // A cell beside the one it is in was all it asked about, and a
@@ -4930,8 +5049,48 @@ impl Settled {
             let reach_lo = [0, 1, 2].map(|a| lo[a].add(v[a].min(Fx::ZERO)));
             let reach_hi = [0, 1, 2].map(|a| hi[a].add(v[a].max(Fx::ZERO)));
             let (c0, c1) = settled_cells(reach_lo, reach_hi);
-            ranges.push((c0.map(|v| v - 1), c1.map(|v| v + 1)));
-        }
+            (c0.map(|v| v - 1), c1.map(|v| v + 1))
+        };
+        let ranges = if fragments.len() >= 1024 {
+            // Both reads belong to the same immutable fragment. A worker
+            // writes only its boxes and owns its compact list of requests.
+            // Collect by chunk index, then preserve fragment order on join.
+            let groups: Vec<Vec<_>> = out
+                .boxes
+                .par_chunks_mut(256)
+                .enumerate()
+                .map(|(chunk, boxes)| {
+                    let mut ranges = Vec::new();
+                    for (offset, box_at) in boxes.iter_mut().enumerate() {
+                        let i = chunk * 256 + offset;
+                        let f = &fragments[i];
+                        *box_at = world_box((i, f));
+                        if asks(i, f) {
+                            ranges.push(swept(f, *box_at));
+                        }
+                    }
+                    ranges
+                })
+                .collect();
+            completed("settled_boxes");
+            let mut ranges = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+            for group in groups {
+                ranges.extend(group);
+            }
+            ranges
+        } else {
+            for (i, box_at) in out.boxes.iter_mut().enumerate() {
+                *box_at = world_box((i, &fragments[i]));
+            }
+            completed("settled_boxes");
+            fragments
+                .iter()
+                .enumerate()
+                .filter(|&(i, f)| asks(i, f))
+                .map(|(i, f)| swept(f, out.boxes[i]))
+                .collect()
+        };
+        completed("settled_ranges");
         want.build(&ranges, fragments.len() >= 1024 && ranges.len() >= 128);
         completed("settled_queries");
         if want.is_empty() {
