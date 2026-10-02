@@ -40,12 +40,18 @@ def render_context(log):
              re.findall(r"^PROFILE render_context_step=(\d+) value=(RenderContext \{[^\r\n]+\})$", log, re.M)]
     changed = re.search(r"^PROFILE render_context_changed=(true|false)$", log, re.M)
     reasons = []
-    if not initial or not steps or not changed or not re.search(r"^PROFILE render_context_schema=1$", log, re.M):
+    if not initial or not steps or not changed or not re.search(r"^PROFILE render_context_schema=2$", log, re.M):
         reasons.append("render_context_missing")
     elif initial[1] != steps[0]["value"]:
         reasons.append("render_context_initial_mismatch")
     if changed and changed[1] == "true":
         reasons.append("render_context_changed_during_run")
+    contexts = ([initial[1]] if initial else []) + [step["value"] for step in steps]
+    focus = [re.search(r"\bfocused: (true|false)(?:,| \})", value) for value in contexts]
+    if not focus or any(value is None for value in focus):
+        reasons.append("render_focus_missing")
+    elif len({value[1] for value in focus}) > 1:
+        reasons.append("render_focus_changed_during_run")
     return dict(initial=initial[1] if initial else None, steps=steps,
                 invalid_change=changed[1] == "true" if changed else None, reasons=reasons)
 

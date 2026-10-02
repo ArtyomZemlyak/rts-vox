@@ -41,6 +41,7 @@ pub struct Profile {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RenderContext {
     physical_size: [u32; 2],
+    focused: bool,
     scale_factor: f32,
     present_mode: bevy::window::PresentMode,
     window_mode: bevy::window::WindowMode,
@@ -54,6 +55,7 @@ struct RenderContext {
 impl RenderContext {
     fn same_window(&self, other: &Self) -> bool {
         self.physical_size == other.physical_size
+            && self.focused == other.focused
             && self.scale_factor == other.scale_factor
             && self.present_mode == other.present_mode
             && self.window_mode == other.window_mode
@@ -87,6 +89,7 @@ pub fn render_context(
     };
     let context = RenderContext {
         physical_size: [window.physical_width(), window.physical_height()],
+        focused: window.focused,
         scale_factor: window.scale_factor(),
         present_mode: window.present_mode,
         window_mode: window.mode,
@@ -562,7 +565,7 @@ pub fn end(
                 .collect::<Vec<_>>()
         );
     }
-    println!("PROFILE render_context_schema=1");
+    println!("PROFILE render_context_schema=2");
     if let Some((_, context)) = p.render_contexts.first() {
         println!("PROFILE render_context={context:?}");
     } else {

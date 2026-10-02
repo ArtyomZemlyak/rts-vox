@@ -9,7 +9,7 @@ import unittest
 spec = importlib.util.spec_from_file_location("range_profile", Path(__file__).with_name("analyze-range-profile.py"))
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
-CONTEXT = 'RenderContext { physical_size: [1600, 900], scale_factor: 1.0, present_mode: AutoNoVsync, window_mode: Windowed, view: 1, camera_sweep: false, camera_controls: [0.0, 0.0, 1.0, 0.0, 0.0], zone: 0, overlays: [true, false], drawer: 0 }'
+CONTEXT = 'RenderContext { physical_size: [1600, 900], focused: true, scale_factor: 1.0, present_mode: AutoNoVsync, window_mode: Windowed, view: 1, camera_sweep: false, camera_controls: [0.0, 0.0, 1.0, 0.0, 0.0], zone: 0, overlays: [true, false], drawer: 0 }'
 
 
 def mark(lane, event, ns, thread="1", unit="", cpu=None, tick=1, generation=0):
@@ -93,7 +93,7 @@ class ReportTests(unittest.TestCase):
                 out = csv.DictWriter(dst, list(data[0])); out.writeheader(); out.writerows(data)
         (self.path / "world-battle.log").write_text('PROFILE tick_rate=30\nPROFILE physics_workers=8 navigation_workers=8\nPROFILE state_hash=0123456789abcdef\nPROFILE adapter_name="GPU" adapter_backend=Vulkan adapter_device_type=DiscreteGpu\n')
         with (self.path / 'world-battle.log').open('a') as out:
-            out.write(f'PROFILE render_context_schema=1\nPROFILE render_context={CONTEXT}\nPROFILE render_context_step=0 value={CONTEXT}\nPROFILE render_context_changed=false\n')
+            out.write(f'PROFILE render_context_schema=2\nPROFILE render_context={CONTEXT}\nPROFILE render_context_step=0 value={CONTEXT}\nPROFILE render_context_changed=false\n')
         if manifest:
             (self.path / "world-battle.manifest.json").write_text(json.dumps({"BinarySha256": "a" * 64, "InputHashes": [{"Path": "data/fixture.ron", "Sha256": "b" * 64}], "Validity": {"ValidForComparison": True, "Reasons": []}}))
 
@@ -213,6 +213,37 @@ class ReportTests(unittest.TestCase):
         self.write()
         log.write_text('\n'.join(line for line in log.read_text().splitlines() if 'render_context' not in line))
         self.assertIn('render_context_missing', profile.analyze(self.path)['reasons'])
+
+    def test_stable_focus_is_an_explicit_pair_condition(self):
+        self.write()
+        before = profile.analyze(self.path)
+        log = self.path / 'world-battle.log'
+        log.write_text(log.read_text().replace('focused: true', 'focused: false'))
+        after = profile.analyze(self.path)
+        self.assertTrue(after['valid_for_comparison'])
+        self.assertIn('different_or_missing:actual_render_context', profile.compare(before, after)['reasons'])
+
+    def test_losing_and_restoring_focus_is_invalid_even_with_a_false_change_flag(self):
+        self.write()
+        log = self.path / 'world-battle.log'
+        with log.open('a') as out:
+            out.write(f'PROFILE render_context_step=3 value={CONTEXT.replace("focused: true", "focused: false")}\n')
+            out.write(f'PROFILE render_context_step=4 value={CONTEXT}\n')
+        result = profile.analyze(self.path)
+        self.assertFalse(result['valid_for_comparison'])
+        self.assertIn('render_focus_changed_during_run', result['reasons'])
+
+    def test_legacy_context_and_missing_focus_still_show_timings_but_never_qualify(self):
+        for old, new, reason in [('render_context_schema=2', 'render_context_schema=1', 'render_context_missing'),
+                                 ('focused: true, ', '', 'render_focus_missing')]:
+            with self.subTest(reason=reason):
+                self.write()
+                log = self.path / 'world-battle.log'
+                log.write_text(log.read_text().replace(old, new))
+                result = profile.analyze(self.path)
+                self.assertFalse(result['valid_for_comparison'])
+                self.assertIn(reason, result['reasons'])
+                self.assertIsNotNone(result['frame_ms'])
 
     def test_scripted_context_sequence_is_compared_without_frame_timestamps(self):
         self.write()

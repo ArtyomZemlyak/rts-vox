@@ -87,11 +87,18 @@ function Get-RangeValidity {
         if ($row.frame_end_ns -ne $null -and $row.frame_end_ns -ne '') { $seconds = [long]::Parse($row.frame_end_ns, $culture) / 1000000000.0 }
     }
     if ($ticks -eq 0) { $issues.Add('simulation_did_not_advance') }
-    if ($Log -notmatch '(?m)^PROFILE render_context_schema=1\r?$' -or
+    if ($Log -notmatch '(?m)^PROFILE render_context_schema=2\r?$' -or
         $Log -notmatch '(?m)^PROFILE render_context=RenderContext \{' -or
         $Log -notmatch '(?m)^PROFILE render_context_step=\d+ value=RenderContext \{' -or
         $Log -notmatch '(?m)^PROFILE render_context_changed=(true|false)\r?$') { $issues.Add('render_context_missing') }
     if ($Log -match '(?m)^PROFILE render_context_changed=true\r?$') { $issues.Add('render_context_changed_during_run') }
+    $contexts = @([regex]::Matches($Log, '(?m)^PROFILE render_context(?:_step=\d+ value)?=(RenderContext \{[^\r\n]+\})\r?$'))
+    $focusValues = @($contexts | ForEach-Object {
+        if ($_.Groups[1].Value -match '\bfocused: (true|false)(?:,| \})') { $Matches[1] }
+        else { $issues.Add('render_focus_missing') }
+    })
+    if ($contexts.Count -eq 0) { $issues.Add('render_focus_missing') }
+    if (@($focusValues | Select-Object -Unique).Count -gt 1) { $issues.Add('render_focus_changed_during_run') }
     if ($Log -notmatch 'PROFILE state_hash=[0-9a-f]{16}\b') { $issues.Add('state_hash_missing') }
     if ($Log -notmatch 'PROFILE physics_workers=\d+ navigation_workers=\d+') { $issues.Add('actual_worker_counts_missing') }
     if ($Log -notmatch 'PROFILE adapter_name=.+adapter_backend=.+adapter_device_type=') {
