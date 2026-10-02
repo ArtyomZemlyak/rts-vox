@@ -16,6 +16,8 @@ param(
     # Existing frozen build: no overwriting target/release for A/B runs.
     [string]$BinaryPath = '',
     [ValidateRange(0, 128)][int]$PhysicsWorkers = 0,
+    [ValidateRange(960, 8192)][int]$WindowWidth = 1600,
+    [ValidateRange(540, 8192)][int]$WindowHeight = 900,
     [switch]$AllowContaminated
 )
 $ErrorActionPreference = 'Stop'
@@ -60,6 +62,7 @@ try {
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
+                RequestedWindow = @($WindowWidth, $WindowHeight)
                 Status = 'preflight'; Validity = $null
             }
             Save-RangeManifest $manifest $manifestPath
@@ -85,7 +88,7 @@ try {
             if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
             $log = Join-Path $directory "$scenario.log"
             $err = Join-Path $directory "$scenario.err"
-            $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
             if ($CorePhases) { $arguments += '--profile-core' }
             if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
@@ -128,7 +131,7 @@ try {
             }
             $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

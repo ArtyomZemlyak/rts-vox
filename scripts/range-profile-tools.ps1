@@ -87,6 +87,11 @@ function Get-RangeValidity {
         if ($row.frame_end_ns -ne $null -and $row.frame_end_ns -ne '') { $seconds = [long]::Parse($row.frame_end_ns, $culture) / 1000000000.0 }
     }
     if ($ticks -eq 0) { $issues.Add('simulation_did_not_advance') }
+    if ($Log -notmatch '(?m)^PROFILE render_context_schema=1\r?$' -or
+        $Log -notmatch '(?m)^PROFILE render_context=RenderContext \{' -or
+        $Log -notmatch '(?m)^PROFILE render_context_step=\d+ value=RenderContext \{' -or
+        $Log -notmatch '(?m)^PROFILE render_context_changed=(true|false)\r?$') { $issues.Add('render_context_missing') }
+    if ($Log -match '(?m)^PROFILE render_context_changed=true\r?$') { $issues.Add('render_context_changed_during_run') }
     if ($Log -notmatch 'PROFILE state_hash=[0-9a-f]{16}\b') { $issues.Add('state_hash_missing') }
     if ($Log -notmatch 'PROFILE physics_workers=\d+ navigation_workers=\d+') { $issues.Add('actual_worker_counts_missing') }
     if ($Log -notmatch 'PROFILE adapter_name=.+adapter_backend=.+adapter_device_type=') {

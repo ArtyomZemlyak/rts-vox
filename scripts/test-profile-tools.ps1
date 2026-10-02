@@ -4,7 +4,11 @@ function Assert-Profile($Condition, $Message) { if (-not $Condition) { throw $Me
 $log = 'PROFILE tick_rate=30 state=Fighting
 PROFILE adapter_name="GPU" adapter_backend=Vulkan adapter_device_type=DiscreteGpu
 PROFILE state_hash=0123456789abcdef
-PROFILE physics_workers=8 navigation_workers=8'
+PROFILE physics_workers=8 navigation_workers=8
+PROFILE render_context_schema=1
+PROFILE render_context=RenderContext { physical_size: [1600, 900], view: 1 }
+PROFILE render_context_step=0 value=RenderContext { physical_size: [1600, 900], view: 1 }
+PROFILE render_context_changed=false'
 $rows = @([pscustomobject]@{frame_ms='4.5';simulation_ticks='30';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'})
 $valid = Get-RangeValidity $rows -Scenario world-battle -Log $log
 Assert-Profile ($valid.ValidForComparison -and $valid.AcceptanceEligible -and $valid.MeetsSimulationRate) 'Good run rejected'
@@ -33,9 +37,13 @@ $mismatch = Get-RangeValidity $pipeline -Scenario world-battle -Log $log
 Assert-Profile ($mismatch.Reasons -contains 'observed_frame_clock_mismatch' -and -not $mismatch.AcceptanceEligible) 'Contradictory timing passed FPS acceptance'
 $legacy = Get-RangeValidity @([pscustomobject]@{frame_ms='4.5';simulation_ticks='30';seconds='1.0'}) -Scenario world-battle -Log $log
 Assert-Profile ($legacy.Reasons -contains 'monotonic_frame_clock_missing' -and -not $legacy.AcceptanceEligible) 'Legacy Bevy-only timing passed FPS acceptance'
+$changed = Get-RangeValidity $rows -Scenario world-battle -Log ($log.Replace('render_context_changed=false','render_context_changed=true'))
+Assert-Profile ($changed.Reasons -contains 'render_context_changed_during_run' -and -not $changed.AcceptanceEligible) 'Resized/panned run passed FPS acceptance'
+$noContext = Get-RangeValidity $rows -Scenario world-battle -Log ($log.Replace('render_context_schema=1','render_context_schema=0'))
+Assert-Profile ($noContext.Reasons -contains 'render_context_missing' -and -not $noContext.ValidForComparison) 'Unknown render conditions accepted'
 foreach ($file in 'profile-range.ps1','profile-cpu-threads.ps1','range-profile-tools.ps1') {
     $errors = $null; $tokens = $null
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file), [ref]$tokens, [ref]$errors)
     Assert-Profile ($errors.Count -eq 0) "Invalid PowerShell syntax: $file $errors"
 }
-'PASS: 11 validity/timing cases and parser checks.'
+'PASS: 13 validity/timing/context cases and parser checks.'

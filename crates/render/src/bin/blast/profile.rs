@@ -34,6 +34,30 @@ pub struct Profile {
     last_end_ns: Option<u128>,
     finished: bool,
     core_rows: Vec<core::Tick>,
+    render_contexts: Vec<(u8, RenderContext)>,
+    context_action_step: u8,
+    render_context_invalid: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RenderContext {
+    physical_size: [u32; 2],
+    scale_factor: f32,
+    present_mode: bevy::window::PresentMode,
+    window_mode: bevy::window::WindowMode,
+    view: u8,
+    camera_sweep: bool,
+    camera_controls: [f32; 5],
+    zone: usize,
+    overlays: [bool; 2],
+    drawer: u8,
+}
+impl RenderContext {
+    fn same_window(&self, other: &Self) -> bool {
+        self.physical_size == other.physical_size
+            && self.scale_factor == other.scale_factor
+            && self.present_mode == other.present_mode
+            && self.window_mode == other.window_mode
+    }
 }
 struct Frame {
     seconds: f64,
@@ -44,6 +68,49 @@ struct Frame {
     end_ns: u128,
     gap_ns: u128,
     observed_frame_ms: Option<f64>,
+}
+/// Capture requested camera controls, not animated/following camera poses.
+/// Keep changes in memory and print after measurement, not in a slow frame.
+pub fn render_context(
+    scene: Res<Scene>,
+    edit: Res<Workshop>,
+    panel: Option<Res<panel::Panel>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut p: ResMut<Profile>,
+) {
+    if p.start.is_none() || p.finished {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        p.render_context_invalid = true;
+        return;
+    };
+    let context = RenderContext {
+        physical_size: [window.physical_width(), window.physical_height()],
+        scale_factor: window.scale_factor(),
+        present_mode: window.present_mode,
+        window_mode: window.mode,
+        view: scene.view,
+        camera_sweep: scene.camera_sweep,
+        camera_controls: [edit.pan.x, edit.pan.y, edit.zoom, edit.orbit, edit.pitch],
+        zone: edit.zone,
+        overlays: panel.as_ref().map_or([false; 2], |p| [p.ranges, p.routes]),
+        drawer: panel.as_ref().map_or(0, |p| p.drawer),
+    };
+    if let Some((_, previous)) = p.render_contexts.last() {
+        if *previous != context {
+            let scripted = p.actions && p.context_action_step != p.action_step;
+            if !previous.same_window(&context) || !scripted {
+                p.render_context_invalid = true;
+            }
+        } else {
+            p.context_action_step = p.action_step;
+            return;
+        }
+    }
+    let step = p.action_step;
+    p.render_contexts.push((step, context));
+    p.context_action_step = step;
 }
 /// Repeat the actual workshop requests in a native renderer, without video
 /// readback. Loading must finish before the next action can be measured.
@@ -495,6 +562,19 @@ pub fn end(
                 .collect::<Vec<_>>()
         );
     }
+    println!("PROFILE render_context_schema=1");
+    if let Some((_, context)) = p.render_contexts.first() {
+        println!("PROFILE render_context={context:?}");
+    } else {
+        println!("PROFILE render_context=unavailable");
+    }
+    for (step, context) in &p.render_contexts {
+        println!("PROFILE render_context_step={step} value={context:?}");
+    }
+    println!(
+        "PROFILE render_context_changed={}",
+        p.render_context_invalid
+    );
     println!("PROFILE state_hash={:016x}", scene.sim.state_hash());
     if p.gpu {
         for (name, samples) in &mut p.gpu_samples {

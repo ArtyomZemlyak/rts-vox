@@ -9,6 +9,7 @@ import unittest
 spec = importlib.util.spec_from_file_location("range_profile", Path(__file__).with_name("analyze-range-profile.py"))
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
+CONTEXT = 'RenderContext { physical_size: [1600, 900], scale_factor: 1.0, present_mode: AutoNoVsync, window_mode: Windowed, view: 1, camera_sweep: false, camera_controls: [0.0, 0.0, 1.0, 0.0, 0.0], zone: 0, overlays: [true, false], drawer: 0 }'
 
 
 def mark(lane, event, ns, thread="1", unit="", cpu=None, tick=1, generation=0):
@@ -91,6 +92,8 @@ class ReportTests(unittest.TestCase):
             with (self.path / f"world-battle.{name}").open("w", newline="") as dst:
                 out = csv.DictWriter(dst, list(data[0])); out.writeheader(); out.writerows(data)
         (self.path / "world-battle.log").write_text('PROFILE tick_rate=30\nPROFILE physics_workers=8 navigation_workers=8\nPROFILE state_hash=0123456789abcdef\nPROFILE adapter_name="GPU" adapter_backend=Vulkan adapter_device_type=DiscreteGpu\n')
+        with (self.path / 'world-battle.log').open('a') as out:
+            out.write(f'PROFILE render_context_schema=1\nPROFILE render_context={CONTEXT}\nPROFILE render_context_step=0 value={CONTEXT}\nPROFILE render_context_changed=false\n')
         if manifest:
             (self.path / "world-battle.manifest.json").write_text(json.dumps({"BinarySha256": "a" * 64, "InputHashes": [{"Path": "data/fixture.ron", "Sha256": "b" * 64}], "Validity": {"ValidForComparison": True, "Reasons": []}}))
 
@@ -185,6 +188,42 @@ class ReportTests(unittest.TestCase):
         result = profile.os_window(self.path, 'world-battle', 'epoch_unix_ns=2000000000',
                                    [dict(frame_ms='10')], {})
         self.assertEqual(result['status'], 'unavailable_or_legacy')
+
+    def test_render_conditions_cannot_hide_behind_same_gpu_and_final_hash(self):
+        self.write()
+        before = profile.analyze(self.path)
+        log = self.path / 'world-battle.log'
+        for old, new in [('[1600, 900]', '[960, 540]'), ('AutoNoVsync', 'AutoVsync'),
+                         ('1.0, 0.0, 0.0]', '2.0, 0.0, 0.0]')]:
+            with self.subTest(change=new):
+                self.write()
+                log.write_text(log.read_text().replace(old, new))
+                after = profile.analyze(self.path)
+                self.assertTrue(after['valid_for_comparison'])
+                self.assertEqual(before['state_hash'], after['state_hash'])
+                self.assertIn('different_or_missing:actual_render_context', profile.compare(before, after)['reasons'])
+
+    def test_transient_render_change_and_missing_metadata_are_invalid(self):
+        self.write()
+        log = self.path / 'world-battle.log'
+        log.write_text(log.read_text().replace('render_context_changed=false', 'render_context_changed=true'))
+        result = profile.analyze(self.path)
+        self.assertFalse(result['valid_for_comparison'])
+        self.assertIn('render_context_changed_during_run', result['reasons'])
+        self.write()
+        log.write_text('\n'.join(line for line in log.read_text().splitlines() if 'render_context' not in line))
+        self.assertIn('render_context_missing', profile.analyze(self.path)['reasons'])
+
+    def test_scripted_context_sequence_is_compared_without_frame_timestamps(self):
+        self.write()
+        log = self.path / 'world-battle.log'
+        with log.open('a') as out:
+            out.write(f'PROFILE render_context_step=3 value={CONTEXT.replace("zone: 0", "zone: 7")}\n')
+        before = profile.analyze(self.path)
+        self.assertTrue(before['valid_for_comparison'])
+        self.assertTrue(profile.compare(before, profile.analyze(self.path))['eligible'])
+        log.write_text(log.read_text().replace('render_context_step=3', 'render_context_step=4'))
+        self.assertFalse(profile.compare(before, profile.analyze(self.path))['eligible'])
 
     def test_duplicate_tick_is_rejected_instead_of_silently_merged(self):
         rows = trace() + [dict(r, generation="1") for r in trace()] + trace()

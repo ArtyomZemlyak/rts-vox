@@ -34,6 +34,22 @@ def stats(values):
             "max": values[-1]}
 
 
+def render_context(log):
+    initial = re.search(r"^PROFILE render_context=(RenderContext \{[^\r\n]+\})$", log, re.M)
+    steps = [dict(step=int(step), value=value) for step, value in
+             re.findall(r"^PROFILE render_context_step=(\d+) value=(RenderContext \{[^\r\n]+\})$", log, re.M)]
+    changed = re.search(r"^PROFILE render_context_changed=(true|false)$", log, re.M)
+    reasons = []
+    if not initial or not steps or not changed or not re.search(r"^PROFILE render_context_schema=1$", log, re.M):
+        reasons.append("render_context_missing")
+    elif initial[1] != steps[0]["value"]:
+        reasons.append("render_context_initial_mismatch")
+    if changed and changed[1] == "true":
+        reasons.append("render_context_changed_during_run")
+    return dict(initial=initial[1] if initial else None, steps=steps,
+                invalid_change=changed[1] == "true" if changed else None, reasons=reasons)
+
+
 def interval(a, b):
     wall = int(b["offset_ns"]) - int(a["offset_ns"])
     if wall < 0:
@@ -285,6 +301,8 @@ def analyze(directory, scenario="world-battle", top=12):
     adapter = re.search(r"^PROFILE adapter_name=.*$", log, re.M)
     rate = re.search(r"^PROFILE tick_rate=(\d+)", log, re.M)
     pools = re.search(r"^PROFILE physics_workers=(\d+) navigation_workers=(\d+)", log, re.M)
+    context = render_context(log)
+    reasons.extend(context["reasons"])
     if not pools:
         reasons.append("actual_worker_counts_missing")
     seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
@@ -308,6 +326,7 @@ def analyze(directory, scenario="world-battle", top=12):
         realtime_ratio=frame_ticks / (seconds * (int(rate[1]) if rate else 30)) if seconds > 0 else None,
         state_hash=hash_match[1] if hash_match else None, actual_adapter=adapter[0] if adapter else None,
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
+        actual_render_context=context,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
         frame_alignment="shared_monotonic_epoch" if aligned else "legacy_frame_delta_lags_phase_columns",
         trace_alignment=dict(unmapped_ticks=unmapped, missing_clock_ticks=missing_clock,
@@ -329,11 +348,11 @@ def compare(a, b):
         if not run["valid_for_comparison"]:
             problems.append(f"{label}:not_valid")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
-            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes"]
+            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow"]
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
-    for key in ["measured_steps", "actual_adapter", "actual_workers", "frame_alignment", "frame_timing_metric", "state_hash"]:
+    for key in ["measured_steps", "actual_adapter", "actual_workers", "actual_render_context", "frame_alignment", "frame_timing_metric", "state_hash"]:
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
     return {"eligible": not problems, "reasons": problems,
@@ -345,6 +364,8 @@ def markdown(report):
              f"Comparison eligible: {report['valid_for_comparison']}. Reasons: {', '.join(report['reasons']) or 'none observed'}.",
              f"Frames: {report['frames']}; real steps: {report['measured_steps']}; traced steps: {report['trace_steps']}.",
              f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
+             f"Observed render context: {report['actual_render_context']['initial'] or 'unavailable'}.",
+             f"Render context records: {len(report['actual_render_context']['steps'])}; invalid change: {report['actual_render_context']['invalid_change']}.", "",
              "| Phase | Mean per actual traced tick, ms | p99 occurrence, ms | CPU counter samples |",
              "|---|---:|---:|---:|"]
     for p in report["phases"]:

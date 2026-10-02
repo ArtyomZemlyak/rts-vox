@@ -882,6 +882,7 @@ fn main() {
                     panel::release_keys,
                     record,
                     capture,
+                    profile::render_context,
                     profile::end,
                 )
                     .chain(),
