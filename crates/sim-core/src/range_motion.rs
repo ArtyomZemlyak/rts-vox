@@ -884,8 +884,9 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
     ) -> bool {
-        self.move_to_observed(w, to, b, others, rubble, |_| {})
+        self.move_to_observed(w, to, b, others, rubble, None, |_| {})
     }
+    #[allow(clippy::too_many_arguments)]
     fn move_to_observed(
         &mut self,
         w: &World,
@@ -893,13 +894,14 @@ impl Motion {
         b: &UnitBody,
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
+        prepared: Option<&PreparedGround<'_>>,
         completed: impl FnMut(&'static str),
     ) -> bool {
         // An explicit order supersedes the old route, even to the same point.
         self.path.clear();
         self.partial_path = false;
         self.cursor = 0;
-        self.plan_to_observed(w, to, b, others, rubble, completed)
+        self.plan_to_observed(w, to, b, others, rubble, prepared, completed)
     }
     /// Accept a group order without starting every hull's route search in the
     /// input frame. The normal motion scheduler starts these searches under
@@ -954,8 +956,9 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
     ) -> bool {
-        self.plan_to_observed(w, to, b, others, rubble, |_| {})
+        self.plan_to_observed(w, to, b, others, rubble, None, |_| {})
     }
+    #[allow(clippy::too_many_arguments)]
     fn plan_to_observed(
         &mut self,
         w: &World,
@@ -963,6 +966,7 @@ impl Motion {
         b: &UnitBody,
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
+        prepared: Option<&PreparedGround<'_>>,
         mut completed: impl FnMut(&'static str),
     ) -> bool {
         let from = [self.pos[0], self.pos[2]];
@@ -1025,8 +1029,19 @@ impl Motion {
             }
             completed("plan_coarse");
         }
-        let mut ground = nav::vehicle::Probe::for_search(w, &self.yielding, Default::default())
-            .with_rubble(rubble);
+        // Prepared motion geometry already invalidated changed pages against
+        // this tick's immutable sources. Share its exact column answers, not
+        // its pose: route contacts can use a different approach margin.
+        let columns = prepared
+            .filter(|p| {
+                std::ptr::eq(p.world, w)
+                    && std::ptr::eq(p.rubble, rubble)
+                    && p.probe.matches_yielding(&self.yielding)
+            })
+            .map(|p| p.probe.fork_route().take_columns())
+            .unwrap_or_default();
+        let mut ground =
+            nav::vehicle::Probe::for_search(w, &self.yielding, columns).with_rubble(rubble);
         let budget = self
             .navigation
             .search_nodes_per_tick
@@ -1077,7 +1092,7 @@ impl Motion {
         let prepare: Option<&mut nav::vehicle::PrepareStart<'_>> =
             (shape.half.iter().all(|&n| n >= 40) && rayon::current_num_threads() >= 4)
                 .then_some(&mut prepare);
-        match nav::vehicle::Hunt::start_bounded_sweep(
+        match nav::vehicle::Hunt::start_bounded_sweep_observed(
             &mut ground,
             shape,
             from,
@@ -1087,6 +1102,7 @@ impl Motion {
             &clear,
             budget,
             prepare,
+            &mut completed,
         ) {
             nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
             nav::vehicle::Hunting::Open(hunt) => {
@@ -1692,7 +1708,15 @@ impl Motion {
         {
             if let Some(goal) = self.destination {
                 self.started = true;
-                self.plan_to_observed(w, goal, b, others, rubble, &mut completed);
+                self.plan_to_observed(
+                    w,
+                    goal,
+                    b,
+                    others,
+                    rubble,
+                    prepared.as_ref(),
+                    &mut completed,
+                );
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
         }
@@ -1708,7 +1732,15 @@ impl Motion {
         {
             let goal = self.route[self.waypoint];
             self.started = true;
-            self.move_to_observed(w, goal, b, others, rubble, &mut completed);
+            self.move_to_observed(
+                w,
+                goal,
+                b,
+                others,
+                rubble,
+                prepared.as_ref(),
+                &mut completed,
+            );
             if self.dry {
                 self.next_plan = tick.saturating_add(self.replan_after_search());
             }
@@ -2640,6 +2672,69 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn fresh_search_reuses_only_matching_prepared_sources_across_workers() {
+        let w = ground(9);
+        let other_world = ground(0);
+        let rubble = nav::vehicle::Rubble::new();
+        let other_rubble = nav::vehicle::Rubble::from([([330, 300], 80)]);
+        let changed = nav::vehicle::Changed::default();
+        let body = voxel::unit::spider();
+        let mut reused = false;
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for source in 0..4 {
+                for goal in [[323, 300], [450, 300], [320, 480], [90, 80]] {
+                    let mut seeded = Motion::new([320, 16, 300], RangeUnitKind::Spider, &body);
+                    seeded.enabled = true;
+                    seeded.navigation.global_nodes = 0;
+                    seeded.navigation.search_nodes_per_tick = 32;
+                    let prepared = seeded
+                        .prepare_ground(
+                            if source == 1 { &other_world } else { &w },
+                            &body,
+                            if source == 2 { &other_rubble } else { &rubble },
+                            &changed,
+                        )
+                        .unwrap();
+                    if source == 3 {
+                        seeded.yielding.clear();
+                    }
+                    let mut cold = seeded.clone();
+                    let a = pool.install(|| cold.move_to(&w, goal, &body, &[], &rubble));
+                    let b = pool.install(|| {
+                        seeded.move_to_observed(
+                            &w,
+                            goal,
+                            &body,
+                            &[],
+                            &rubble,
+                            Some(&prepared),
+                            |_| {},
+                        )
+                    });
+                    assert_eq!(a, b);
+                    assert_eq!(
+                        motion_bytes(&cold),
+                        motion_bytes(&seeded),
+                        "workers={workers} source={source} goal={goal:?}"
+                    );
+                    if source == 0 {
+                        reused |= seeded.last_probe[0] < cold.last_probe[0];
+                    } else {
+                        assert_eq!(
+                            cold.last_probe, seeded.last_probe,
+                            "wrong source seeded search"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(reused, "matching source did not reduce terrain reads");
     }
     #[test]
     fn prepared_ground_matches_serial_drive_feet_and_live_contacts_across_workers() {

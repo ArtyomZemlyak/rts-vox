@@ -1425,6 +1425,33 @@ impl Hunt {
         budget: usize,
         prepare: Option<&mut PrepareStart<'_>>,
     ) -> Hunting {
+        Self::start_bounded_sweep_observed(
+            ground,
+            shape,
+            from,
+            head,
+            to,
+            cfg,
+            clear,
+            budget,
+            prepare,
+            |_| {},
+        )
+    }
+    /// Pure boundaries of a fresh search; clocks belong to the observer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_bounded_sweep_observed(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
+        prepare: Option<&mut PrepareStart<'_>>,
+        completed: impl FnMut(&'static str),
+    ) -> Hunting {
         let none = |stranded, exhausted, nodes, poses| {
             Hunting::Done(Route {
                 path: vec![],
@@ -1507,7 +1534,7 @@ impl Hunt {
             connection: None,
             expansion: None,
         };
-        let result = hunt.prepare_sweep(ground, clear, &mut budget.max(1), prepare);
+        let result = hunt.prepare_sweep(ground, clear, &mut budget.max(1), prepare, completed);
         hunt.scans = ground.scans;
         hunt.samples = ground.samples;
         if let Some(mut route) = result {
@@ -1526,7 +1553,7 @@ impl Hunt {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
     ) -> Option<Route> {
-        self.prepare_sweep(ground, clear, allowance, None)
+        self.prepare_sweep(ground, clear, allowance, None, |_| {})
     }
     fn prepare_sweep(
         &mut self,
@@ -1534,6 +1561,7 @@ impl Hunt {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         allowance: &mut usize,
         prepare: Option<&mut PrepareStart<'_>>,
+        mut completed: impl FnMut(&'static str),
     ) -> Option<Route> {
         let mut pending = self.prelude.take()?;
         if pending.straight.is_none() {
@@ -1573,6 +1601,7 @@ impl Hunt {
                     break;
                 }
             }
+            completed("plan_target");
             if pending.straight.is_none() && pending.goal_cursor == candidates.len() * 8 {
                 return Some(self.empty(false, true));
             }
@@ -1597,8 +1626,10 @@ impl Hunt {
                 ground.scans = ground.scans.wrapping_add(prepared.reads[0]);
                 ground.samples = ground.samples.wrapping_add(prepared.reads[1]);
             }
+            completed("plan_prepare");
             let before = *allowance;
             let answer = run.advance(ground, self.shape, clear, allowance);
+            completed("plan_direct");
             self.probed += (before - *allowance) as u32;
             match answer {
                 Some(Some(_)) => {
@@ -2909,7 +2940,8 @@ mod tests {
                         &clear_a,
                         budget,
                     );
-                    let y = Hunt::start_bounded_sweep(
+                    let mut stages = Vec::new();
+                    let y = Hunt::start_bounded_sweep_observed(
                         &mut b,
                         tank(),
                         from,
@@ -2919,7 +2951,16 @@ mod tests {
                         &clear_b,
                         budget,
                         Some(&mut prepare),
+                        |stage| stages.push(stage),
                     );
+                    if (0..2).any(|i| to[i] < search().min[i] || to[i] >= search().max[i]) {
+                        assert!(stages.is_empty());
+                    } else {
+                        assert!(
+                            stages == ["plan_target"]
+                                || stages == ["plan_target", "plan_prepare", "plan_direct"]
+                        );
+                    }
                     assert_eq!(calls_a.into_inner(), calls_b.into_inner());
                     match (x, y) {
                         (Hunting::Done(a), Hunting::Done(b)) => {
