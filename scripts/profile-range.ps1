@@ -12,99 +12,166 @@ param(
     [switch]$CpuThreads,
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
-    [switch]$CheckEveryFrame
+    [switch]$CheckEveryFrame,
+    # Existing frozen build: no overwriting target/release for A/B runs.
+    [string]$BinaryPath = '',
+    [ValidateRange(0, 128)][int]$PhysicsWorkers = 0,
+    [switch]$AllowContaminated
 )
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/range-profile-tools.ps1"
 $repo = Split-Path $PSScriptRoot -Parent
+$originalRayonEnvironment = $env:RAYON_NUM_THREADS
 Push-Location $repo
 try {
+    if ($PhysicsWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$PhysicsWorkers" }
+    if ($BinaryPath -and -not $SkipBuild) { throw '-BinaryPath requires -SkipBuild.' }
     if (-not $SkipBuild) {
         & "$PSScriptRoot/cargo-local.ps1" build --release -p render --bin blast
         if ($LASTEXITCODE -ne 0) { throw 'Range build failed.' }
     }
-    if (-not $Output) { $Output = "out/performance/$(Get-Date -Format yyyyMMdd-HHmmss)" }
+    if (-not $Output) { $Output = "out/performance/$(Get-Date -Format yyyyMMdd-HHmmss-fff)" }
     $directory = if ([System.IO.Path]::IsPathRooted($Output)) {
         [System.IO.Path]::GetFullPath($Output)
     } else {
         [System.IO.Path]::GetFullPath((Join-Path $repo $Output))
     }
     New-Item -ItemType Directory -Force $directory | Out-Null
-    $binary = Join-Path $repo 'target/release/blast.exe'
+    $binary = if ($BinaryPath) { (Resolve-Path -LiteralPath $BinaryPath).Path } else { Join-Path $repo 'target/release/blast.exe' }
     if (-not (Test-Path -LiteralPath $binary)) { throw 'Build the release range first.' }
     $budgetMs = 1000.0 / $TargetFps
     # Run sequentially: competing windows or video readback invalidate timings.
     $report = foreach ($scenario in $Scenarios) {
-        $extra = switch ($scenario) {
-            'actions'     { @('--drive', '--view', 'overview', '--realtime', '--profile-actions') }
-            'battle'       { @('--battle') }
-            'battle-eight' { @('--battle-eight') }
-            'world-battle' { @('--world-battle', '--ai-vs-ai') }
-            'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
-            'shell'        { @('--weapon', 'shell', '--power', '4000', '--view', 'overview') }
-            'clouds'       { @('--drive', '--profile-clouds', '8') }
-            'drive'        { @('--move', '2200,336') }
-            'stream'       { @('--move', '2200,336', '--view', 'gun') }
-            'flame'        { @('--weapon', 'flame', '--open', '--view', 'exposed', '--attack-unit', '1') }
-        }
-        $csv = Join-Path $directory "$scenario.csv"
-        if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
-        $log = Join-Path $directory "$scenario.log"
-        $err = Join-Path $directory "$scenario.err"
-        $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
-        if ($Gpu) { $arguments += '--profile-gpu' }
-        if ($CorePhases) { $arguments += '--profile-core' }
-        if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
-        # -Wait keeps the exit status available in Windows PowerShell 5.1 too.
-        if ($CpuThreads) {
-            # Read this process's public counters; no kernel trace or system
-            # profiling policy is needed. Sample once per second, outside the
-            # renderer. Compare only runs using the same sampling option.
+        $manifest = $null
+        try {
+            $manifestPath = Join-Path $directory "$scenario.manifest.json"
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario-cpu") {
+                if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
+            }
+            $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
+            $preflight = @(Get-RangeCompetingProcesses -Exclude @($PID) -AdditionalNames @($binaryName))
+            $manifest = [ordered]@{
+                Schema = 2; Scenario = $scenario; RequestedSeconds = $Seconds; TargetFps = $TargetFps
+                StartedUtc = (Get-Date).ToUniversalTime().ToString('o')
+                GitHead = (& git rev-parse HEAD); SourceAtLaunch = @(& git status --short)
+                SourceProvenance = 'SourceAtLaunch is not proof of the source used to build this binary; BinarySha256 identifies the measured executable.'
+                BinaryPath = $binary; BinarySha256 = (Get-FileHash -LiteralPath $binary).Hash
+                InputHashes = @(Get-RangeInputHashes -Repo $repo)
+                RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
+                GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases
+                EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
+                Status = 'preflight'; Validity = $null
+            }
+            Save-RangeManifest $manifest $manifestPath
+            if ($preflight.Count -gt 0 -and -not $AllowContaminated) {
+                $manifest.Status = 'refused'
+                $manifest.Validity = @{ ValidForComparison = $false; AcceptanceEligible = $false; Reasons = @('competing_process_before_start') }
+                Save-RangeManifest $manifest $manifestPath
+                throw 'Build/test/capture/profile process is already running. Evidence is in the manifest. -AllowContaminated collects diagnostics but cannot qualify a speed comparison.'
+            }
+            $extra = switch ($scenario) {
+                'actions'     { @('--drive', '--view', 'overview', '--realtime', '--profile-actions') }
+                'battle'       { @('--battle') }
+                'battle-eight' { @('--battle-eight') }
+                'world-battle' { @('--world-battle', '--ai-vs-ai') }
+                'energy'       { @('--weapon', 'energy', '--power', '4000', '--open', '--view', 'exposed') }
+                'shell'        { @('--weapon', 'shell', '--power', '4000', '--view', 'overview') }
+                'clouds'       { @('--drive', '--profile-clouds', '8') }
+                'drive'        { @('--move', '2200,336') }
+                'stream'       { @('--move', '2200,336', '--view', 'gun') }
+                'flame'        { @('--weapon', 'flame', '--open', '--view', 'exposed', '--attack-unit', '1') }
+            }
+            $csv = Join-Path $directory "$scenario.csv"
+            if ($scenario -eq 'actions' -and $Seconds -lt 15) { throw 'The actions scenario needs at least 15 seconds.' }
+            $log = Join-Path $directory "$scenario.log"
+            $err = Join-Path $directory "$scenario.err"
+            $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
+            if ($Gpu) { $arguments += '--profile-gpu' }
+            if ($CorePhases) { $arguments += '--profile-core' }
+            if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
+            $manifest.Arguments = $arguments
+            $manifest.Status = 'running'
+            Save-RangeManifest $manifest $manifestPath
             $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru
-            # Retain the handle before the counter script observes exit;
-            # Windows PowerShell 5.1 otherwise loses the child's ExitCode.
             $null = $process.Handle
-            # Formatting records from the sampler must not become scenario
-            # results in the enclosing foreach or corrupt summary.csv.
-            & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ([Math]::Min(3600, $Seconds + 120)) -Output (Join-Path $directory "$scenario-cpu") | Out-Host
-            $process.WaitForExit()
-        } else {
-            $process = Start-Process -FilePath $binary -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -Wait
-        }
-        if ($process.ExitCode -ne 0) { throw "$scenario failed; see $err" }
-        if ($scenario -eq 'flame') {
-            $contacts = Select-String -LiteralPath $log -Pattern 'PROFILE stream_packets=(\d+) unit_damage=(\d+)'
-            if (-not $contacts -or [long]$contacts.Matches[0].Groups[1].Value -eq 0 -or [long]$contacts.Matches[0].Groups[2].Value -eq 0) {
-                throw 'Flamethrower benchmark did not produce packets and real unit damage.'
+            $manifest.ProcessId = $process.Id
+            Save-RangeManifest $manifest $manifestPath
+            $reasons = [System.Collections.Generic.List[string]]::new()
+            if ($preflight.Count -gt 0) { $reasons.Add('competing_process_before_start') }
+            try {
+                # Environment/process sampling is always active. Optional thread
+                # enumeration remains a separate comparison flag, outside core.
+                & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ($Seconds + 120) -ProcessOnly:(-not $CpuThreads) -AdditionalProcessNames @($binaryName) -Output (Join-Path $directory "$scenario-cpu") | Out-Host
+            } catch { $reasons.Add('os_sampler_failed'); $manifest.SamplerError = $_.Exception.Message }
+            if (-not $process.WaitForExit(1000)) {
+                $reasons.Add('profile_timeout')
+                # This is the process we launched, never a competing process.
+                $process.Kill(); $process.WaitForExit()
             }
-        }
-        if ($scenario -eq 'stream') {
-            # This preset starts in the origin window. Following the gun must
-            # actually move that window; a stationary overview is no proof.
-            $origin = Select-String -LiteralPath $log -Pattern 'terrain_origin=\[(\d+), (\d+), (\d+)\]'
-            if (-not $origin -or ([long]$origin.Matches[0].Groups[1].Value -eq 0 -and [long]$origin.Matches[0].Groups[3].Value -eq 0)) {
-                throw 'Streaming benchmark never moved the terrain window; increase -Seconds (try 90).'
+            $manifest.ExitCode = $process.ExitCode
+            if ($process.ExitCode -ne 0) { $reasons.Add('process_failed') }
+            $environmentPath = Join-Path $directory "$scenario-cpu/cpu-environment.csv"
+            if (Test-Path -LiteralPath $environmentPath) {
+                if (@(Import-Csv -LiteralPath $environmentPath).Count -gt 0) { $reasons.Add('competing_process_during_run') }
+            } else { $reasons.Add('environment_observations_missing') }
+            if ((Get-FileHash -LiteralPath $binary).Hash -ne $manifest.BinarySha256) { $reasons.Add('binary_changed_during_run') }
+            if ((@(Get-RangeInputHashes -Repo $repo) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
+            $rows = if (Test-Path -LiteralPath $csv) { @(Import-Csv -LiteralPath $csv) } else { @() }
+            $content = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
+            if ($scenario -eq 'flame') {
+                if ($content -notmatch 'PROFILE stream_packets=(\d+) unit_damage=(\d+)' -or
+                    [long]$Matches[1] -eq 0 -or [long]$Matches[2] -eq 0) { $reasons.Add('flame_workload_missing') }
             }
+            if ($scenario -eq 'stream') {
+                if ($content -notmatch 'terrain_origin=\[(\d+), (\d+), (\d+)\]' -or
+                    ([long]$Matches[1] -eq 0 -and [long]$Matches[3] -eq 0)) { $reasons.Add('streaming_workload_missing') }
+            }
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases
+            $manifest.Validity = $validity
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=)' })
+            $manifest.Status = 'completed'
+            $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            Save-RangeManifest $manifest $manifestPath
+            $process.Dispose()
+            if ($rows.Count -eq 0) { throw "$scenario produced no frame samples; failure evidence retained in $manifestPath" }
+            $culture = [System.Globalization.CultureInfo]::InvariantCulture
+            $times = @($rows | ForEach-Object { [double]::Parse($_.frame_ms, $culture) } | Sort-Object)
+            $p99 = $times[[int][Math]::Floor($times.Count * 0.99)]
+            $mean = ($times | Measure-Object -Average).Average
+            $result = [pscustomobject]@{
+                Scenario = $scenario
+                ValidForComparison = $validity.ValidForComparison
+                AcceptanceEligible = $validity.AcceptanceEligible
+                InvalidReasons = $validity.Reasons -join '|'
+                SimulationTicks = $validity.SimulationTicks
+                SimulationRealtimeRatio = [Math]::Round($validity.SimulationRealtimeRatio, 4)
+                MeetsSimulationRate = $validity.MeetsSimulationRate
+                TargetFps = $TargetFps
+                Frames = $times.Count
+                MeanFps = [Math]::Round(1000.0 / $mean, 1)
+                P95ms = [Math]::Round($times[[int][Math]::Floor($times.Count * 0.95)], 3)
+                P99ms = [Math]::Round($p99, 3)
+                MaxMs = [Math]::Round($times[-1], 3)
+                FramesOverBudget = @($times | Where-Object { $_ -gt $budgetMs }).Count
+                MeetsP99 = $validity.AcceptanceEligible -and $validity.MeetsSimulationRate -and $p99 -le $budgetMs
+                MeetsEveryFrame = $validity.AcceptanceEligible -and $validity.MeetsSimulationRate -and $times[-1] -le $budgetMs
+            }
+            Write-Host "$scenario`: p99=$($result.P99ms) ms, max=$($result.MaxMs) ms, frames over ${TargetFps} FPS budget=$($result.FramesOverBudget)"
+            if (-not $validity.ValidForComparison) { Write-Warning "$scenario comparison invalid: $($result.InvalidReasons)" }
+            $result
+            # Retain completed scenarios even if a later launch fails.
+            $result | Export-Csv -LiteralPath (Join-Path $directory "$scenario.summary.csv") -NoTypeInformation -Encoding UTF8
+        } catch {
+            if ($null -ne $manifest) {
+                $manifest.Error = $_.Exception.Message
+                if ($manifest.Status -ne 'refused') {
+                    $manifest.Status = 'failed'
+                    $manifest.Validity = @{ValidForComparison=$false; AcceptanceEligible=$false; Reasons=@('runner_failed')}
+                }
+                Save-RangeManifest $manifest $manifestPath
+            }
+            throw
         }
-        $rows = @(Import-Csv -LiteralPath $csv)
-        if ($rows.Count -eq 0) { throw "$scenario produced no frame samples." }
-        $culture = [System.Globalization.CultureInfo]::InvariantCulture
-        $times = @($rows | ForEach-Object { [double]::Parse($_.frame_ms, $culture) } | Sort-Object)
-        $p99 = $times[[int][Math]::Floor($times.Count * 0.99)]
-        $mean = ($times | Measure-Object -Average).Average
-        $result = [pscustomobject]@{
-            Scenario = $scenario
-            TargetFps = $TargetFps
-            Frames = $times.Count
-            MeanFps = [Math]::Round(1000.0 / $mean, 1)
-            P95ms = [Math]::Round($times[[int][Math]::Floor($times.Count * 0.95)], 3)
-            P99ms = [Math]::Round($p99, 3)
-            MaxMs = [Math]::Round($times[-1], 3)
-            FramesOverBudget = @($times | Where-Object { $_ -gt $budgetMs }).Count
-            MeetsP99 = $p99 -le $budgetMs
-            MeetsEveryFrame = $times[-1] -le $budgetMs
-        }
-        Write-Host "$scenario`: p99=$($result.P99ms) ms, max=$($result.MaxMs) ms, frames over ${TargetFps} FPS budget=$($result.FramesOverBudget)"
-        $result
     }
     $report | Export-Csv -LiteralPath (Join-Path $directory 'summary.csv') -NoTypeInformation -Encoding UTF8
     $report | Format-Table -AutoSize
@@ -113,5 +180,6 @@ try {
         throw "The $TargetFps FPS budget was exceeded; maxima and slow frames are retained in summary.csv."
     }
 } finally {
+    $env:RAYON_NUM_THREADS = $originalRayonEnvironment
     Pop-Location
 }

@@ -26,9 +26,21 @@ pub struct Profile {
     phases: Vec<f64>,
     detail: [f64; 5],
     simulation_ticks: u32,
-    rows: Vec<(f64, u32, [f64; 15], u64)>,
+    rows: Vec<Frame>,
+    epoch: Option<Instant>,
+    frame_start_ns: u128,
+    last_end_ns: Option<u128>,
     finished: bool,
     core_rows: Vec<core::Tick>,
+}
+struct Frame {
+    seconds: f64,
+    tick: u32,
+    ms: [f64; 15],
+    generation: u64,
+    start_ns: u128,
+    end_ns: u128,
+    gap_ns: u128,
 }
 /// Repeat the actual workshop requests in a native renderer, without video
 /// readback. Loading must finish before the next action can be measured.
@@ -120,7 +132,8 @@ struct GpuSamples {
 impl Profile {
     pub fn step(&mut self, sim: &mut BlastRange, generation: u64) {
         if self.core && self.start.is_some() && !self.finished {
-            self.core_rows.push(core::Tick::record(sim, generation));
+            self.core_rows
+                .push(core::Tick::record(sim, generation, self.epoch.unwrap()));
         } else {
             sim.step();
         }
@@ -167,6 +180,7 @@ pub fn begin(
     scene: Res<Scene>,
     mut gas: ResMut<GasInput>,
     mut p: ResMut<Profile>,
+    adapter: Option<Res<bevy::render::renderer::RenderAdapterInfo>>,
 ) {
     if p.output.is_none()
         || !gas.ready.load(Ordering::Relaxed)
@@ -180,16 +194,35 @@ pub fn begin(
         return;
     }
     if p.start.is_none() {
+        p.epoch = Some(Instant::now());
+        println!("PROFILE schema=2 frame_ms_scope=previous_start_to_current_start cpu_time_scope=thread_kernel_plus_user");
+        println!(
+            "PROFILE tick_rate={} epoch_unix_ns={}",
+            sim_core::TICKS_PER_SECOND,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        if let Some(adapter) = adapter {
+            println!("PROFILE adapter_name={:?} adapter_backend={:?} adapter_device_type={:?} adapter_driver={:?}",
+                adapter.name, adapter.backend, adapter.device_type, adapter.driver);
+        } else {
+            println!("PROFILE adapter=unavailable");
+        }
         println!(
             "PROFILE compute_workers={}",
             bevy::tasks::ComputeTaskPool::try_get().map_or(0, |pool| pool.thread_num())
         );
         println!("PROFILE navigation_override={:?}", p.navigation_workers);
+        let [physics, navigation] = scene.sim.worker_counts();
+        println!("PROFILE physics_workers={physics} navigation_workers={navigation}");
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
     }
     let start = *p.start.get_or_insert(now);
+    p.frame_start_ns = p.epoch.unwrap().elapsed().as_nanos();
     if p.clouds > 0 && !p.emitted && now - start >= 0.5 {
         p.emitted = true;
         for i in 0..p.clouds {
@@ -266,8 +299,21 @@ pub fn end(
         p.detail[4],
     ];
     if elapsed > 0.0 {
-        p.rows
-            .push((elapsed, scene.sim.tick, phases, scene.generation));
+        let end_ns = p.epoch.unwrap().elapsed().as_nanos();
+        let start_ns = p.frame_start_ns;
+        let gap_ns = p
+            .last_end_ns
+            .map_or(0, |last| start_ns.saturating_sub(last));
+        p.rows.push(Frame {
+            seconds: elapsed,
+            tick: scene.sim.tick,
+            ms: phases,
+            generation: scene.generation,
+            start_ns,
+            end_ns,
+            gap_ns,
+        });
+        p.last_end_ns = Some(end_ns);
     }
     if elapsed < p.seconds {
         return;
@@ -285,12 +331,21 @@ pub fn end(
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,
-            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation"
+            "seconds,tick,frame_ms,simulation_input_ms,unit_mesh_ms,fragments_ms,presentation_ms,physics_ms,terrain_ms,atmosphere_ms,render_prepare_ms,gas_allocation_ms,gas_regions,render_extract_ms,occupancy_ms,simulation_ticks,simulation_core_ms,generation,frame_start_ns,frame_end_ns,frame_gap_ns"
         )?;
-        for (t, tick, ms, generation) in &p.rows {
+        for row in &p.rows {
+            let Frame {
+                seconds: t,
+                tick,
+                ms,
+                generation,
+                start_ns,
+                end_ns,
+                gap_ns,
+            } = row;
             writeln!(
                 out,
-                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation}",
+                "{t:.6},{tick},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.0},{:.6},{:.6},{:.0},{:.6},{generation},{start_ns},{end_ns},{gap_ns}",
                 ms[0], ms[1], ms[2], ms[3], ms[4], ms[5], ms[6], ms[7], ms[8], ms[9], ms[10], ms[11], ms[12], ms[13], ms[14]
             )?;
         }
@@ -316,7 +371,7 @@ pub fn end(
         (12, "occupancy"),
         (14, "simulation_core"),
     ]) {
-        let mut values: Vec<_> = p.rows.iter().map(|r| r.2[column]).collect();
+        let mut values: Vec<_> = p.rows.iter().map(|r| r.ms[column]).collect();
         values.sort_by(f64::total_cmp);
         if !values.is_empty() {
             println!(
@@ -329,8 +384,8 @@ pub fn end(
             );
         }
     }
-    let tick_count: u64 = p.rows.iter().map(|r| r.2[13] as u64).sum();
-    let core_ms: f64 = p.rows.iter().map(|r| r.2[14]).sum();
+    let tick_count: u64 = p.rows.iter().map(|r| r.ms[13] as u64).sum();
+    let core_ms: f64 = p.rows.iter().map(|r| r.ms[14]).sum();
     println!(
         "PROFILE simulation_ticks={} mean_core_tick_ms={:.3}",
         tick_count,
@@ -342,7 +397,7 @@ pub fn end(
     );
     println!(
         "PROFILE max_gas_regions={}",
-        p.rows.iter().map(|r| r.2[10] as usize).max().unwrap_or(0)
+        p.rows.iter().map(|r| r.ms[10] as usize).max().unwrap_or(0)
     );
     println!(
         "PROFILE render_extract_peak_ms={:.3}",
@@ -401,6 +456,7 @@ pub fn end(
                 .collect::<Vec<_>>()
         );
     }
+    println!("PROFILE state_hash={:016x}", scene.sim.state_hash());
     if p.gpu {
         for (name, samples) in &mut p.gpu_samples {
             let v = &mut samples.values;

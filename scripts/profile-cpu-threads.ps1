@@ -1,12 +1,15 @@
 param(
     [Parameter(Mandatory = $true)][int]$TargetProcessId,
-    [ValidateRange(1, 3600)][int]$Seconds = 40,
+    [ValidateRange(1, 7200)][int]$Seconds = 40,
     [ValidateRange(100, 5000)][int]$IntervalMilliseconds = 1000,
-    [Parameter(Mandatory = $true)][string]$Output
+    [Parameter(Mandatory = $true)][string]$Output,
+    [switch]$ProcessOnly,
+    [string[]]$AdditionalProcessNames = @()
 )
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/range-profile-tools.ps1"
 # OS counters only: no instrumentation or clocks enter the simulation.
-if (-not ('RangeThreadNames' -as [type])) {
+if (-not $ProcessOnly -and -not ('RangeThreadNames' -as [type])) {
     Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -38,17 +41,20 @@ $names = @{}
 $created = @{}
 $samples = [System.Collections.Generic.List[object]]::new()
 $processSamples = [System.Collections.Generic.List[object]]::new()
+$environmentSamples = [System.Collections.Generic.List[object]]::new()
 $baselineTime = Get-Date
 $baselineCpuMs = $target.TotalProcessorTime.TotalMilliseconds
 $processCpuMs = 0.0
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 $lastMs = 0.0
+$samplerFailure = $null
+$timedOut = $false
 try {
     # Capture a baseline so the first interval excludes process startup CPU.
-    foreach ($thread in $target.Threads) {
+    foreach ($thread in $(if (-not $ProcessOnly) { $target.Threads } else { @() })) {
         try {
             $previous[$thread.Id] = $thread.TotalProcessorTime.TotalMilliseconds
-            $created[$thread.Id] = $thread.StartTime.ToString('o')
+            $created[$thread.Id] = $thread.StartTime.ToUniversalTime().ToString('o')
         } catch { }
     }
     while ($timer.Elapsed.TotalSeconds -lt $Seconds) {
@@ -56,10 +62,22 @@ try {
         $target.Refresh()
         if ($target.HasExited) { break }
         $nowMs = $timer.Elapsed.TotalMilliseconds
+        $utc = (Get-Date).ToUniversalTime().ToString('o')
+        foreach ($other in (Get-RangeCompetingProcesses -Exclude @($TargetProcessId, $PID) -AdditionalNames $AdditionalProcessNames)) {
+            $environmentSamples.Add([pscustomobject]@{
+                Seconds = [Math]::Round($nowMs / 1000.0, 3)
+                Utc = $utc
+                ProcessId = $other.ProcessId
+                Name = $other.Name
+                StartedUtc = $other.StartedUtc
+                CpuMs = $other.CpuMs
+            })
+        }
         # The process counter also includes threads that exited between samples.
         $processCpuMs = [Math]::Max(0.0, $target.TotalProcessorTime.TotalMilliseconds - $baselineCpuMs)
         $processSamples.Add([pscustomobject]@{
             Seconds = [Math]::Round($nowMs / 1000.0, 3)
+            Utc = $utc
             CpuMs = $processCpuMs
             PrivateBytes = $target.PrivateMemorySize64
             WorkingSetBytes = $target.WorkingSet64
@@ -67,11 +85,16 @@ try {
             HandleCount = $target.HandleCount
         })
         $elapsedMs = $nowMs - $lastMs
-        foreach ($thread in $target.Threads) {
+        foreach ($thread in $(if (-not $ProcessOnly) { $target.Threads } else { @() })) {
             try {
                 $id = $thread.Id
                 $cpu = $thread.TotalProcessorTime.TotalMilliseconds
-                if (-not $created.ContainsKey($id)) { $created[$id] = $thread.StartTime.ToString('o') }
+                $threadStarted = $thread.StartTime
+                $currentCreation = $threadStarted.ToUniversalTime().ToString('o')
+                if ($created.ContainsKey($id) -and $created[$id] -ne $currentCreation) {
+                    $previous.Remove($id); $names.Remove($id)
+                }
+                $created[$id] = $currentCreation
                 if (-not $names.ContainsKey($id)) {
                     # Some hosts expose no OS descriptions, including for
                     # named Rust threads. Empty names do not identify a pool.
@@ -79,7 +102,7 @@ try {
                 }
                 $delta = if ($previous.ContainsKey($id)) {
                     [Math]::Max(0.0, $cpu - $previous[$id])
-                } elseif ($thread.StartTime -ge $baselineTime) {
+                } elseif ($threadStarted -ge $baselineTime) {
                     $cpu
                 } else {
                     # A pre-existing thread inaccessible at baseline has no
@@ -108,14 +131,26 @@ try {
         }
         $lastMs = $nowMs
     }
+    $timedOut = -not $target.HasExited
+} catch {
+    # A process can exit between Refresh and a counter read. Preserve all
+    # samples even for a real sampler failure, rather than losing the trace.
+    $exited = $false
+    try { $exited = $target.HasExited } catch { }
+    if (-not $exited) { $samplerFailure = $_.Exception.Message }
 } finally { $target.Dispose() }
 $samples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
 $processSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-samples.csv') -NoTypeInformation -Encoding UTF8
+if ($environmentSamples.Count -gt 0) {
+    $environmentSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-environment.csv') -NoTypeInformation -Encoding UTF8
+} else {
+    '"Seconds","Utc","ProcessId","Name","StartedUtc","CpuMs"' | Set-Content -LiteralPath (Join-Path $directory 'cpu-environment.csv') -Encoding UTF8
+}
 $totalCpu = ($samples | Measure-Object CpuMs -Sum).Sum
-$summary = @($samples | Group-Object ThreadId | ForEach-Object {
+$summary = @($samples | Group-Object ThreadId,CreatedAt | ForEach-Object {
     $cpu = ($_.Group | Measure-Object CpuMs -Sum).Sum
     [pscustomobject]@{
-        ThreadId = $_.Name
+        ThreadId = $_.Group[0].ThreadId
         Name = $_.Group[0].Name
         CreatedAt = $_.Group[0].CreatedAt
         CpuMs = [Math]::Round($cpu, 3)
@@ -133,3 +168,15 @@ $summary | Export-Csv -LiteralPath (Join-Path $directory 'cpu-thread-summary.csv
     MeanProcessPercent = if ($lastMs -gt 0) { [Math]::Round(100.0 * $processCpuMs / $lastMs / $logical, 2) } else { 0 }
 } | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-summary.csv') -NoTypeInformation -Encoding UTF8
 $summary | Select-Object -First 12 | Format-Table -AutoSize
+[pscustomobject]@{
+    ProcessId = $TargetProcessId
+    ProcessOnly = [bool]$ProcessOnly
+    IntervalMilliseconds = $IntervalMilliseconds
+    StartedUtc = $baselineTime.ToUniversalTime().ToString('o')
+    TimedOut = $timedOut
+    Error = $samplerFailure
+    ProcessSamples = $processSamples.Count
+    ThreadSamples = $samples.Count
+    CompetingProcessSamples = $environmentSamples.Count
+} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'sampler-status.json') -Encoding UTF8
+if ($samplerFailure) { throw $samplerFailure }

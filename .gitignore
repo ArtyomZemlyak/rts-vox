@@ -28,3 +28,6 @@ Desktop.ini
 
 # Кэш карт окна показа (ADR-228): нетронутая земля, строится заново из сида
 /cache/
+
+# Python performance diagnostics
+__pycache__/

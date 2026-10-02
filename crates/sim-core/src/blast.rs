@@ -2139,6 +2139,11 @@ fn default_navigation_workers(units: usize) -> usize {
 }
 
 impl BlastRange {
+    /// Observed from the caller: physics uses its Rayon pool (global on the
+    /// renderer main thread), while routes have this scene's fixed pool.
+    pub fn worker_counts(&self) -> [usize; 2] {
+        [rayon::current_num_threads(), self.navigation_workers]
+    }
     /// Set a fixed route-worker count for this scene. One keeps the serial
     /// path; all worker counts execute the same logical search allowances.
     pub fn set_navigation_workers(&mut self, workers: usize) -> bool {
