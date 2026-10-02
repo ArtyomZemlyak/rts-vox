@@ -1231,12 +1231,16 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
+        detail: impl Fn(&'static str),
     ) {
         if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
+            detail("terrain_advance_begin");
             self.hunt_step(w, b, &[], rubble, tick, changed);
             self.prepared_hunt = true;
+            detail("terrain_advance_end");
         }
     }
+    #[cfg(test)]
     pub(super) fn prepare_local_hunt(
         &self,
         w: &World,
@@ -1244,6 +1248,17 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
+    ) -> Option<PreparedLocalHunt> {
+        self.prepare_local_hunt_observed(w, b, others, rubble, changed, |_| {})
+    }
+    pub(super) fn prepare_local_hunt_observed(
+        &self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+        detail: impl Fn(&'static str),
     ) -> Option<PreparedLocalHunt> {
         if !self.enabled
             || self.prepared_hunt
@@ -1259,15 +1274,12 @@ impl Motion {
         let checked = std::cell::RefCell::new(Vec::new());
         // Only the budgeted continuation's callback reads are retained. The
         // recorder is local to this worker; serial searches do not allocate it.
-        let result = self.advance_hunt(
-            hunt.clone(),
-            w,
-            b,
-            &blockers,
-            rubble,
-            changed,
-            Some(&checked),
-        );
+        detail("local_clone_begin");
+        let candidate = hunt.clone();
+        detail("local_clone_end");
+        detail("local_advance_begin");
+        let result = self.advance_hunt(candidate, w, b, &blockers, rubble, changed, Some(&checked));
+        detail("local_advance_end");
         Some(PreparedLocalHunt {
             origin,
             shape,
@@ -2596,15 +2608,32 @@ mod tests {
         let mut prepared = serial.clone();
         let mut accepted = 0;
         for tick in 0..200 {
-            if let Some(result) =
-                prepared.prepare_local_hunt(&w, &body, &[obstacle], &rubble, &changed)
-            {
+            let events = std::cell::RefCell::new(Vec::new());
+            if let Some(result) = prepared.prepare_local_hunt_observed(
+                &w,
+                &body,
+                &[obstacle],
+                &rubble,
+                &changed,
+                |event| events.borrow_mut().push(event),
+            ) {
+                assert_eq!(
+                    *events.borrow(),
+                    [
+                        "local_clone_begin",
+                        "local_clone_end",
+                        "local_advance_begin",
+                        "local_advance_end"
+                    ]
+                );
                 prepared.allow_start(false);
                 prepared.cut_limit = 7;
                 assert!(prepared.accept_local_hunt(result, &body, &[obstacle], tick));
                 assert!(!prepared.may_start);
                 assert_eq!(prepared.cut_limit, 7);
                 accepted += 1;
+            } else {
+                assert!(events.borrow().is_empty());
             }
             serial.allow_start(false);
             prepared.allow_start(false);

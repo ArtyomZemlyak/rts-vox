@@ -2435,7 +2435,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         restarted.start_battle().unwrap();
         assert!(restarted.navigation_pool.is_none());
         drop(restarted);
-        let tasks: Vec<[std::sync::atomic::AtomicUsize; 4]> = (0..count)
+        let tasks: Vec<[std::sync::atomic::AtomicUsize; 10]> = (0..count)
             .map(|_| std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)))
             .collect();
         for tick in 0..20 {
@@ -2451,6 +2451,12 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
                         "route_end" => 1,
                         "ground_begin" => 2,
                         "ground_end" => 3,
+                        "local_clone_begin" => 4,
+                        "local_clone_end" => 5,
+                        "local_advance_begin" => 6,
+                        "local_advance_end" => 7,
+                        "terrain_advance_begin" => 8,
+                        "terrain_advance_end" => 9,
                         _ => unreachable!(),
                     };
                     tasks[id][stage].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2463,13 +2469,21 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
             );
         }
         let mut route_tasks = 0;
+        let mut continuations = 0;
         for task in tasks {
             let count = task.map(|v| v.into_inner());
             assert_eq!(count[0], count[1]);
             assert_eq!(count[2], count[3]);
             assert_eq!(count[2], 20);
+            assert_eq!(count[4], count[5]);
+            assert_eq!(count[6], count[7]);
+            assert_eq!(count[4], count[6]);
+            assert_eq!(count[8], count[9]);
+            assert!(count[4] + count[8] <= count[0]);
+            continuations += count[4] + count[8];
             route_tasks += count[0];
         }
         assert!(route_tasks > 0, "observer never saw a continuation task");
+        assert!(continuations > 0, "observer never saw an active search");
     }
 }

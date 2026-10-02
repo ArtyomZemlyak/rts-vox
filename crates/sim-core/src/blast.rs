@@ -3734,8 +3734,14 @@ impl BlastRange {
                         .map(|(id, chunk)| {
                             let u = &mut chunk[0];
                             task_detail(id, "route_begin");
-                            u.motion
-                                .prepare_terrain_hunt(world, &u.body, rubble, tick, &changed);
+                            u.motion.prepare_terrain_hunt(
+                                world,
+                                &u.body,
+                                rubble,
+                                tick,
+                                &changed,
+                                |stage| task_detail(id, stage),
+                            );
                             if !driven {
                                 task_detail(id, "route_end");
                                 return None;
@@ -3747,9 +3753,14 @@ impl BlastRange {
                                 .map(|(_, p)| *p)
                                 .chain(gun_obstacle)
                                 .collect();
-                            let prepared = u
-                                .motion
-                                .prepare_local_hunt(world, &u.body, &others, rubble, &changed);
+                            let prepared = u.motion.prepare_local_hunt_observed(
+                                world,
+                                &u.body,
+                                &others,
+                                rubble,
+                                &changed,
+                                |stage| task_detail(id, stage),
+                            );
                             task_detail(id, "route_end");
                             prepared
                         })
