@@ -100,17 +100,17 @@ fn button(p: &mut ChildSpawnerCommands, font: &TextFont, text: &str, action: Act
             align_items: AlignItems::Center,
             justify_content: JustifyContent::Center,
             border: UiRect::all(px(1)),
-            border_radius: BorderRadius::all(px(3)),
+            border_radius: BorderRadius::all(px(1)),
             ..default()
         },
-        BackgroundColor(Color::srgb(0.075, 0.13, 0.15)),
-        BorderColor::all(Color::srgb(0.19, 0.29, 0.33)),
+        BackgroundColor(theme::BUTTON),
+        BorderColor::all(theme::FRAME),
     ));
     if matches!(action, Action::BattleStart | Action::NextOwn) {
         b.insert(BattleButton);
     }
     b.with_children(|p| {
-        let e = label(p, font, text, 12.0, Color::srgb(0.86, 0.93, 0.94));
+        let e = label(p, font, text, 12.0, theme::TEXT);
         if let Action::SelectUnit(id) = action {
             p.commands().entity(e).insert(HudText(100 + id as u8));
         } else if action == Action::Pause {
@@ -134,8 +134,8 @@ fn chrome(node: Node, camera: Entity) -> impl Bundle {
         PanelRoot,
         bevy::ui::RelativeCursorPosition::default(),
         node,
-        BackgroundColor(Color::srgba(0.025, 0.044, 0.055, 0.96)),
-        BorderColor::all(Color::srgb(0.19, 0.31, 0.35)),
+        BackgroundColor(theme::PANEL),
+        BorderColor::all(theme::FRAME),
         UiTargetCamera(camera),
     )
 }
@@ -158,20 +158,14 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             camera,
         ))
         .with_children(|p| {
-            let brand = label(
-                p,
-                font,
-                "RTS / ПОЛИГОН",
-                19.0,
-                Color::srgb(0.83, 0.94, 0.94),
-            );
+            let brand = label(p, font, "RTS / ПОЛИГОН", 19.0, theme::TEXT);
             p.commands()
                 .entity(brand)
                 .insert((HeaderBrand, Visibility::Visible));
             p.spawn((
                 Text::new(""),
                 font.clone(),
-                TextColor(Color::srgb(0.52, 0.77, 0.80)),
+                TextColor(theme::MUTED),
                 HudText(0),
             ));
             let mut header_row = row();
@@ -214,20 +208,14 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 ..default()
             })
             .with_children(|p| {
-                label(
-                    p,
-                    font,
-                    "ВЫБРАННЫЙ ЮНИТ",
-                    11.0,
-                    Color::srgb(0.43, 0.68, 0.72),
-                );
+                label(p, font, "ВЫБРАННЫЙ ЮНИТ", 11.0, theme::MUTED);
                 p.spawn((
                     Text::new(""),
                     TextFont {
                         font_size: FontSize::Px(16.0),
                         ..font.clone()
                     },
-                    TextColor(Color::srgb(0.88, 0.94, 0.94)),
+                    TextColor(theme::TEXT),
                     HudText(1),
                 ));
                 p.spawn(row()).with_children(|p| {
@@ -242,13 +230,13 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 ..default()
             })
             .with_children(|p| {
-                label(p, font, "ПРИКАЗЫ", 11.0, Color::srgb(0.43, 0.68, 0.72));
+                label(p, font, "ПРИКАЗЫ", 11.0, theme::MUTED);
                 p.spawn(row()).with_children(|p| {
                     for (name, a) in [
                         ("Атаковать точку", Action::Fire),
                         ("Стоп", Action::Stop),
                         ("Автоатака", Action::AutoAttack),
-                        ("Дальности", Action::Ranges),
+                        ("Радиусы выбранных", Action::Ranges),
                     ] {
                         button(p, font, name, a);
                     }
@@ -258,7 +246,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     font,
                     "ЛКМ: выбрать  /  ПКМ: идти или атаковать",
                     12.0,
-                    Color::srgb(0.56, 0.70, 0.73),
+                    theme::MUTED,
                 );
                 p.spawn(row()).with_children(|p| {
                     button(p, font, "Начать бой", Action::BattleStart);
@@ -274,7 +262,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 ..default()
             })
             .with_children(|p| {
-                label(p, font, "ВООРУЖЕНИЕ", 11.0, Color::srgb(0.43, 0.68, 0.72));
+                label(p, font, "ВООРУЖЕНИЕ", 11.0, theme::MUTED);
                 p.spawn((row(), BattleLoadout)).with_children(|p| {
                     for (name, w) in [
                         ("По цели", None),
@@ -305,7 +293,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                         font_size: FontSize::Px(13.0),
                         ..font.clone()
                     },
-                    TextColor(Color::srgb(0.78, 0.75, 0.57)),
+                    TextColor(theme::ACCENT),
                     HudText(2),
                 ));
             });
@@ -328,7 +316,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         .insert(RosterStrip)
         .with_children(|p| {
             button(p, font, "Назад", Action::RosterPage(-1));
-            let label = label(p, font, "", 13.0, Color::srgb(0.86, 0.93, 0.94));
+            let label = label(p, font, "", 13.0, theme::TEXT);
             p.commands().entity(label).insert(HudText(5));
             button(p, font, "Все", Action::SelectAllOwn);
             for id in 0..modding::range::MAX_RANGE_UNITS {
@@ -362,8 +350,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 border: UiRect::left(px(2)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.044, 0.055, 0.85)),
-            BorderColor::all(Color::srgb(0.46, 0.64, 0.61)),
+            BackgroundColor(theme::PANEL),
+            BorderColor::all(theme::ACCENT),
             UiTargetCamera(camera),
         ))
         .with_children(|p| {
@@ -373,7 +361,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     font_size: FontSize::Px(14.0),
                     ..font.clone()
                 },
-                TextColor(Color::srgb(0.94, 0.91, 0.73)),
+                TextColor(theme::TEXT),
                 HudText(3),
             ));
         });
@@ -1135,6 +1123,24 @@ mod tests {
         assert_eq!(scene.sim.battle.actors[1].target, None);
     }
 
+    #[test]
+    fn range_mode_cancels_a_pending_world_battle_launch() {
+        let mut app = app();
+        let original =
+            RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
+        click(&mut app, Action::BattleWorld);
+        assert!(app.world().resource::<Panel>().battle_launch);
+        click(&mut app, Action::RangeMode);
+        assert!(!app.world().resource::<Panel>().battle_launch);
+        assert!(!app.world().resource::<Panel>().battle_auto);
+        assert_eq!(app.world().resource::<Panel>().drawer, 0);
+        assert!(app.world().resource::<Workshop>().controlled.is_none());
+        rebuild_pending(&mut app);
+        let scene = app.world().resource::<Scene>();
+        assert_eq!(scene.sim.layout.as_ref(), Some(&original));
+        assert!(scene.notice.is_empty(), "{}", scene.notice);
+        assert!(app.world().resource::<Workshop>().pending.is_none());
+    }
     #[test]
     fn editor_buttons_explain_missing_selection_and_reach_spider_tool() {
         let mut app = app();

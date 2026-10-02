@@ -1240,10 +1240,24 @@ fn every_battle_chassis_can_fire_during_a_move_order() {
         r.start_battle().unwrap();
         r.battle.ai.next_tick = u32::MAX;
         r.battle.actors[1].order = Order::Hold;
+        // Isolate firing on an established route: a siege beam can end this
+        // tiny duel before the first route search has finished.
+        r.units[0].status.weapon = false;
+        r.units[1].status.weapon = false;
         assert!(r.battle_order(0, Order::Move, Some([260, 430])), "{kind:?}");
         let start = r.units[0].motion.pos;
+        for _ in 0..180 {
+            r.step();
+            if r.units[0].motion.pos != start {
+                break;
+            }
+        }
+        assert_ne!(r.units[0].motion.pos, start, "{kind:?} never moved");
+        assert!(r.units[0].motion.destination.is_some());
+        r.units[0].status.weapon = true;
         let mut fired_while_moving = false;
         for _ in 0..180 {
+            assert_eq!(r.battle.actors[0].order, Order::Move);
             let before = r.battle.actors[0].fired;
             r.step();
             if r.battle.actors[0].fired > before
@@ -1255,7 +1269,6 @@ fn every_battle_chassis_can_fire_during_a_move_order() {
             }
         }
         assert!(fired_while_moving, "{kind:?} did not shoot on its route");
-        assert_eq!(r.battle.actors[0].order, Order::Move);
     }
 }
 
@@ -1269,6 +1282,8 @@ fn enemy_ai_move_orders_keep_firing_for_every_chassis() {
         let mut r = arena_of([RangeUnitKind::Tank, kind]);
         r.start_battle().unwrap();
         r.battle.actors[0].order = Order::Hold;
+        r.units[0].status.weapon = false;
+        r.units[1].status.weapon = false;
         let tick = r.enemy_ai_observation().unwrap().decision_tick;
         r.submit_enemy_ai_plan(
             tick,
@@ -1282,6 +1297,15 @@ fn enemy_ai_move_orders_keep_firing_for_every_chassis() {
         assert_eq!(r.battle.actors[1].order, Order::Move);
         r.battle.ai.next_tick = u32::MAX;
         let start = r.units[1].motion.pos;
+        for _ in 0..180 {
+            r.step();
+            if r.units[1].motion.pos != start {
+                break;
+            }
+        }
+        assert_ne!(r.units[1].motion.pos, start, "enemy {kind:?} never moved");
+        assert!(r.units[1].motion.destination.is_some());
+        r.units[1].status.weapon = true;
         let mut fired_while_moving = false;
         for _ in 0..180 {
             let before = r.battle.actors[1].fired;
@@ -2361,7 +2385,8 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
     for tick in 0..360 {
         step(&mut r);
         beams += r.battle.lasers.len();
-        if tick == 50 {
+        // Snapshot a live beam, rather than the already-ended siege duel.
+        if replay.is_none() && !r.battle.lasers.is_empty() {
             replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
         } else if let Some(other) = replay.as_mut() {
             step(other);
@@ -2372,7 +2397,11 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
             );
         }
     }
-    assert!(beams > 20, "laser never sustained: {beams}");
+    assert!(beams >= 2, "laser never sustained: {beams}");
+    assert!(
+        !r.units[1].status.alive,
+        "siege beam did not destroy the tank"
+    );
     assert!(
         r.units[1].body.volume_mm3() < victim,
         "laser did not melt armour"

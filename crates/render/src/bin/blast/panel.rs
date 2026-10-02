@@ -9,6 +9,8 @@ use workbench::{Selection, Tool};
 pub mod hud;
 #[path = "panel/minimap.rs"]
 pub mod minimap;
+#[path = "panel/theme.rs"]
+pub mod theme;
 
 const SCENARIO_GAP_TICKS: u32 = 30;
 
@@ -309,8 +311,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             border_radius: BorderRadius::all(px(10)),
             ..default()
         },
-        BackgroundColor(Color::srgb(0.025, 0.045, 0.06)),
-        BorderColor::all(Color::srgb(0.17, 0.29, 0.32)),
+        BackgroundColor(theme::PANEL),
+        BorderColor::all(theme::FRAME),
         ZIndex(10),
         UiTargetCamera(camera),
     ));
@@ -321,17 +323,17 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 font_size: FontSize::Px(23.0),
                 ..text_font.clone()
             },
-            TextColor(Color::srgb(0.83, 0.94, 0.93)),
+            TextColor(theme::TEXT),
         ));
         p.spawn((
             Text::new("Операции на километровой карте"),
             text_font.clone(),
-            TextColor(Color::srgb(0.48, 0.65, 0.68)),
+            TextColor(theme::MUTED),
         ));
         p.spawn((
             Text::new(""),
             text_font.clone(),
-            TextColor(Color::srgb(0.85, 0.76, 0.48)),
+            TextColor(theme::ACCENT),
             SectorLabel,
         ));
         let mut rows: Vec<(bool, Vec<(&str, Action)>)> = vec![
@@ -570,14 +572,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                             border_radius: BorderRadius::all(px(5)),
                             ..default()
                         },
-                        BackgroundColor(Color::srgb(0.075, 0.13, 0.15)),
+                        BackgroundColor(theme::BUTTON),
                     ))
                     .with_children(|b| {
-                        b.spawn((
-                            Text::new(label),
-                            text_font.clone(),
-                            TextColor(Color::srgb(0.82, 0.9, 0.91)),
-                        ));
+                        b.spawn((Text::new(label), text_font.clone(), TextColor(theme::TEXT)));
                     });
                 }
             });
@@ -585,7 +583,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
         p.spawn((
             Text::new(""),
             text_font,
-            TextColor(Color::srgb(0.61, 0.77, 0.78)),
+            TextColor(theme::MUTED),
             Readout,
             hud::DrawerSection(5),
         ));
@@ -781,6 +779,9 @@ pub fn actions(
             Action::RangeMode => match edit.range_mode(scene.sim.config.clone()) {
                 Ok(()) => {
                     panel.battle_name.clear();
+                    panel.battle_launch = false;
+                    panel.battle_auto = false;
+                    panel.roster_page = 0;
                     panel.drawer = 0;
                     panel.pending = None;
                     panel.drive = true;
@@ -1307,7 +1308,12 @@ pub fn refresh(
             With<hud::DrawerSection>,
         )>,
     >,
-    mut buttons: Query<(&Action, &Interaction, &mut BackgroundColor)>,
+    mut buttons: Query<(
+        &Action,
+        &Interaction,
+        &mut BackgroundColor,
+        Option<&mut BorderColor>,
+    )>,
     mut text: Query<&mut Text, (With<Readout>, Without<SectorLabel>)>,
     mut sectors: Query<&mut Text, (With<SectorLabel>, Without<Readout>)>,
 ) {
@@ -1362,7 +1368,7 @@ pub fn refresh(
         .first()
         .copied()
         .filter(|weapon| weapons.iter().all(|other| other == weapon));
-    for (a, interaction, mut color) in &mut buttons {
+    for (a, interaction, mut color, border) in &mut buttons {
         let active = match *a {
             Action::Drawer(id) => panel.drawer == id,
             Action::Ranges => panel.ranges,
@@ -1405,13 +1411,10 @@ pub fn refresh(
             Action::ScenarioMenu => panel.scenarios_open,
             _ => false,
         };
-        color.0 = if *interaction == Interaction::Hovered {
-            Color::srgb(0.16, 0.28, 0.3)
-        } else if active {
-            Color::srgb(0.09, 0.31, 0.32)
-        } else {
-            Color::srgb(0.075, 0.13, 0.15)
-        };
+        color.0 = theme::button_background(*interaction, active);
+        if let Some(mut border) = border {
+            *border = BorderColor::all(if active { theme::ACCENT } else { theme::FRAME });
+        }
     }
     let instructions = if edit.editing {
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"

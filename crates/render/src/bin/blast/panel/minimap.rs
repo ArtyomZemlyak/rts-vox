@@ -34,8 +34,8 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 border: UiRect::all(px(1)),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.025, 0.044, 0.055, 0.96)),
-            BorderColor::all(Color::srgb(0.19, 0.31, 0.35)),
+            BackgroundColor(theme::PANEL),
+            BorderColor::all(theme::FRAME),
             UiTargetCamera(camera),
         ))
         .with_children(|p| {
@@ -45,7 +45,7 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                     font_size: FontSize::Px(10.0),
                     ..font.clone()
                 },
-                TextColor(Color::srgb(0.55, 0.78, 0.80)),
+                TextColor(theme::MUTED),
             ));
             p.spawn((
                 Button,

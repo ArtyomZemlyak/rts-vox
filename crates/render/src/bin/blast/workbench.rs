@@ -129,6 +129,7 @@ pub struct Workshop {
     rotate: bool,
     history: Vec<RangeLayout>,
     redo: Vec<RangeLayout>,
+    range_before_battle: Option<RangeLayout>,
     hover: Option<[i32; 3]>,
     preview: Option<Preview>,
     pub(super) validator: sim_core::blast::placement::Validator,
@@ -168,6 +169,7 @@ impl Workshop {
             rotate: false,
             history: Vec::new(),
             redo: Vec::new(),
+            range_before_battle: None,
             hover: None,
             preview: None,
             validator: default(),
@@ -356,14 +358,34 @@ impl Workshop {
         Ok(())
     }
     pub fn range_mode(&mut self, config: ExplosionConfig) -> Result<(), String> {
-        let mut layout = self.layout.clone().ok_or("No range layout")?;
-        remove_world_battle_blocks(&mut layout, &world_battle_blocks()?);
+        let current = self.layout.as_ref().ok_or("No range layout")?;
+        // A battle roster is placed with reversed enemy mounts and its own
+        // fortifications. It cannot simply become a non-battle range roster.
+        let mut layout = if current.battle {
+            match &self.range_before_battle {
+                Some(before) => before.clone(),
+                None => RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?,
+            }
+        } else {
+            current.clone()
+        };
         layout.battle = false;
+        let zone = layout
+            .zones
+            .iter()
+            .position(|z| z.spawn == layout.gun)
+            .unwrap_or(0);
         self.commit(layout, config)?;
+        self.range_before_battle = None;
         self.controlled = None;
         self.selected_units.clear();
         self.selected = None;
         self.editing = false;
+        self.zone = zone;
+        self.pan = Vec2::ZERO;
+        self.zoom = 1.0;
+        self.orbit = 0.0;
+        self.pitch = 0.0;
         Ok(())
     }
     pub fn side(&mut self, allied: bool, config: ExplosionConfig) -> Result<(), String> {
@@ -461,6 +483,9 @@ impl Workshop {
         config: ExplosionConfig,
     ) -> Result<(), String> {
         self.validator.validate(&next).map_err(|e| e.to_string())?;
+        if next.battle && self.layout.as_ref().is_some_and(|old| !old.battle) {
+            self.range_before_battle = self.layout.clone();
+        }
         self.preview = None;
         if let Some(old) = self.layout.replace(next) {
             if self.history.len() == 32 {
@@ -1351,7 +1376,9 @@ pub fn overlay(
                 * 0.6)
                 .max(24.0);
             giz.circle(Isometry3d::new(p + Vec3::Y * 0.8, flat), radius, color);
-            if panel.ranges {
+            let selected = edit.selected_units.contains(&i)
+                || (edit.selected_units.is_empty() && edit.controlled == Some(i));
+            if panel.ranges && selected {
                 let reach = scene.sim.battle_attack_range(i).unwrap_or(0);
                 ground_range(
                     &mut giz,
@@ -1365,9 +1392,7 @@ pub fn overlay(
                     },
                 );
             }
-            if edit.selected_units.contains(&i)
-                || (edit.selected_units.is_empty() && edit.controlled == Some(i))
-            {
+            if selected {
                 giz.circle(
                     Isometry3d::new(p + Vec3::Y, flat),
                     radius + 3.0,
@@ -1671,6 +1696,7 @@ mod tests {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
         let blocks = layout.blocks.clone();
+        let before_battle = layout.clone();
         let mut edit = Workshop::new(Some(layout), false);
         edit.battle_preset(config(false, false)).unwrap();
         let layout = edit.layout.as_ref().unwrap();
@@ -1693,13 +1719,20 @@ mod tests {
         edit.range_mode(config(false, false)).unwrap();
         assert!(!edit.layout.as_ref().unwrap().battle);
         assert!(!edit.pending.as_ref().unwrap().1.battle);
-        assert_eq!(edit.layout.as_ref().unwrap().units.len(), 4);
+        assert_eq!(
+            edit.layout.as_ref().unwrap().units.len(),
+            before_battle.units.len()
+        );
+        assert_eq!(edit.layout.as_ref(), Some(&before_battle));
+        let (c, restored) = edit.pending.take().unwrap();
+        BlastRange::with_layout(c, restored).unwrap();
         assert!(edit.controlled.is_none());
     }
     #[test]
     fn world_battle_places_both_sides_beyond_prepared_sectors() {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
+        let range_unit_count = layout.units.len();
         let config = config(false, false);
         let far = [7800, 16, 4000];
         assert!(!layout.zones.iter().any(|z| z.contains([far[0], far[2]], 0)));
@@ -1832,6 +1865,11 @@ mod tests {
         );
         edit.range_mode(sim.config.clone()).unwrap();
         assert_eq!(edit.layout.as_ref().unwrap().blocks, blocks);
+        let (c, restored) = edit.pending.take().unwrap();
+        assert!(!restored.battle);
+        assert_eq!(restored.units.len(), range_unit_count);
+        assert_eq!(restored.gun, modding::range::stock_gun());
+        BlastRange::with_layout(c, restored).unwrap();
     }
     #[test]
     fn preview_and_commit_agree_on_terrain_and_unit_collisions() {

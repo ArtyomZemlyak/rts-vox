@@ -14,5 +14,7 @@
     ),
     laser: (burst_ticks: 120, interval_ticks: 1, range: 2800,
         standoff_milli: 800, spread_milli: 0, work: 600,
-        heat: 350, heat_radius: 4, fracture_j: 1, reload_ticks: 75),
+        // Siege beam: thick armour must melt even while the contact moves.
+        // Heat is energy per hit; cell volume and conduction still apply.
+        heat: 6400, heat_radius: 4, fracture_j: 1, reload_ticks: 75),
 )

@@ -1148,6 +1148,68 @@ mod tests {
         assert!(r.shell.is_none());
     }
     #[test]
+    fn spider_laser_burns_through_steel_in_half_a_second() {
+        let mut r = laser_range(vec![modding::range::RangeBlock {
+            min: [230, 0, 330],
+            max: [238, 60, 342],
+            material: 3,
+        }]);
+        r.streams.tuning.laser = super::super::motion::spider_tuning().laser.clone();
+        r.control();
+        r.aim = Some([392, 40, 336]);
+        assert!(r.refire());
+        let mut contacts = Vec::new();
+        for _ in 0..15 {
+            r.step();
+            if let Some(trace) = r.streams.traces.first() {
+                contacts.push(trace.to.map(Fx::to_int_trunc));
+            }
+        }
+        let first = *contacts.first().expect("siege laser never fired");
+        assert_eq!(first[0], 230);
+        assert_eq!(
+            material(&r.world, [237, first[1], first[2]]),
+            0,
+            "80 cm steel still blocks the siege beam: {contacts:?}"
+        );
+        assert!(
+            r.heat.melted_total >= 8,
+            "steel did not melt layer by layer"
+        );
+        assert!(r.explosion.is_none());
+        assert!(r.shell.is_none());
+        eprintln!(
+            "siege steel: ticks=15 melted={} contacts={contacts:?}",
+            r.heat.melted_total
+        );
+    }
+    #[test]
+    fn spider_laser_melts_armour_while_the_contact_sweeps() {
+        let mut r = laser_range(vec![]);
+        r.streams.tuning.laser = super::super::motion::spider_tuning().laser.clone();
+        r.control();
+        r.aim = Some([285, 39, 336]);
+        assert!(r.refire());
+        let own = r.gun.body.volume_mm3();
+        for tick in 0..15 {
+            // A moving contact must not need repeated hits on one voxel.
+            r.aim = Some([285, 39, 332 + tick % 9]);
+            r.step();
+        }
+        assert!(
+            r.thermals.melted > 0,
+            "sweeping siege beam left intact armour"
+        );
+        assert!(!r.units[0].removed.is_empty());
+        assert_eq!(r.gun.body.volume_mm3(), own, "beam heated its emitter");
+        assert!(r.explosion.is_none());
+        eprintln!(
+            "siege armour: ticks=15 melted={} removed={}",
+            r.thermals.melted,
+            r.units[0].removed.len()
+        );
+    }
+    #[test]
     fn laser_softens_and_removes_armour_without_a_blast() {
         let mut r = laser_range(vec![]);
         r.control();

@@ -1638,7 +1638,16 @@ fn advance(
     } else {
         1
     };
-    for _ in 0..steps {
+    // A long tick must not be multiplied by an eight-tick catch-up burst.
+    // Debt is subtracted only for completed work and stays for later frames.
+    let batch_started = std::time::Instant::now();
+    for batch_step in 0..steps {
+        if scene.realtime
+            && batch_step > 0
+            && batch_started.elapsed() >= std::time::Duration::from_millis(4)
+        {
+            break;
+        }
         if scene.realtime {
             scene.acc -= 1.0 / 30.0;
         }
