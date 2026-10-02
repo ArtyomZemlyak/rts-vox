@@ -237,6 +237,7 @@ impl Heat {
                 .collect(),
             None => Vec::new(),
         };
+        let first_len = batch.len();
         if batch.len() < budget {
             let bound = self.cursor.unwrap_or([u32::MAX; 3]);
             batch.extend(
@@ -249,8 +250,7 @@ impl Heat {
         // The world is frozen throughout this phase: burning only queues
         // edits. Read each material and a burning cell's solid neighbours
         // independently; gains and bounded heat admission remain ordered.
-        let read = |&(p, c): &([u32; 3], HeatCell)| {
-            let material = w.material(p[0], p[1], p[2]);
+        let read = |&(p, c): &([u32; 3], HeatCell), material| {
             let share = if c.burn == 0 {
                 0
             } else {
@@ -268,9 +268,29 @@ impl Heat {
             (material, share, solid)
         };
         let reads: Vec<_> = if parallel && batch.len() >= 1024 {
-            batch.par_iter().map(read).collect()
+            let mut reads = vec![(AIR, 0, 0); batch.len()];
+            // Each disjoint source/output block owns its chunk cursor.
+            // Reuse never crosses a phase or observes edits queued below.
+            batch
+                .par_chunks(64)
+                .zip(reads.par_chunks_mut(64))
+                .for_each(|(sources, outputs)| {
+                    let mut cursor = World::mat_cursor();
+                    for (source, output) in sources.iter().zip(outputs) {
+                        let p = source.0;
+                        let material = w.material_cached(&mut cursor, p[0], p[1], p[2]);
+                        *output = read(source, material);
+                    }
+                });
+            reads
         } else {
-            batch.iter().map(read).collect()
+            batch
+                .iter()
+                .map(|source| {
+                    let p = source.0;
+                    read(source, w.material(p[0], p[1], p[2]))
+                })
+                .collect()
         };
         // Burning cells feed their solid neighbours; gains are gathered
         // first so the order of the batch cannot favour a direction.
@@ -292,17 +312,100 @@ impl Heat {
                 *gain.entry(q).or_insert(0) += share;
             }
         }
+        // Preserve the former tree mutation order as an independent oracle.
+        #[cfg(test)]
+        if !parallel {
+            let mut last = None;
+            for ((p, mut c), (m, _, _)) in batch.into_iter().zip(reads) {
+                last = Some(p);
+                if m == AIR {
+                    // Taken by something else: its heat went with it.
+                    self.cells.remove(&p);
+                    continue;
+                }
+                if claimed(p) {
+                    continue;
+                }
+                c.heat = c
+                    .heat
+                    .saturating_add(gain.remove(&p).unwrap_or(0))
+                    .min(HEAT_CAP);
+                let def = mats.get(m).copied();
+                if c.burn > 0 {
+                    c.burn -= 1;
+                    if c.burn == 0 {
+                        w.queue_dig_by(p[0], p[1], p[2], FIRE);
+                        self.burned.insert(p);
+                        self.burned_total += 1;
+                        self.burned_by_material[usize::from(m) & 15] += 1;
+                        self.cells.remove(&p);
+                        continue;
+                    }
+                } else if let Some(d) = def {
+                    // Judged on the heat reached, before this tick's cooling: a
+                    // deposit equal to the kindling lights the voxel.
+                    if d.kindling > 0 && d.fuel > 0 && c.heat >= d.kindling {
+                        c.burn = t.burn_ticks;
+                        self.ignited.push(p);
+                    }
+                    // A meltable voxel at its point gives way (ADR-290); the
+                    // range takes it as debris and forgets its heat.
+                    if d.melt > 0 && c.heat >= d.melt {
+                        self.melting.push(p);
+                    }
+                }
+                if c.heat > 0 {
+                    let lost = (c.heat * t.cooling_milli / 1000).max(1);
+                    c.heat = c.heat.saturating_sub(lost);
+                }
+                if c.heat == 0 && c.burn == 0 {
+                    self.cells.remove(&p);
+                } else {
+                    self.cells.insert(p, c);
+                }
+            }
+            for (q, g) in gain {
+                let c = self.cells.entry(q).or_default();
+                c.heat = c.heat.saturating_add(g).min(HEAT_CAP);
+            }
+            self.cursor = last.and_then(|l| {
+                self.cells
+                    .range((std::ops::Bound::Excluded(l), std::ops::Bound::Unbounded))
+                    .next()
+                    .map(|(k, _)| *k)
+            });
+            return;
+        }
+        // The batch follows two disjoint key ranges. Mutate their existing
+        // entries by one ordered walk, rather than searching the tree again
+        // for every update. Deletions wait until both ranges have been visited;
+        // neighbour gains are still admitted after the entire batch.
+        let batch_len = batch.len();
+        let Heat {
+            cells,
+            cursor,
+            ignited,
+            burned,
+            burned_total,
+            burned_by_material,
+            melting,
+            ..
+        } = self;
+        let mut inputs = reads.into_iter();
+        let mut removed = Vec::new();
         let mut last = None;
-        for ((p, mut c), (m, _, _)) in batch.into_iter().zip(reads) {
+        let mut commit = |p: &[u32; 3], entry: &mut HeatCell| {
+            let (m, _, _) = inputs.next().expect("one read per batch entry");
+            let p = *p;
             last = Some(p);
             if m == AIR {
-                // Taken by something else: its heat went with it.
-                self.cells.remove(&p);
-                continue;
+                removed.push(p);
+                return;
             }
             if claimed(p) {
-                continue;
+                return;
             }
+            let mut c = *entry;
             c.heat = c
                 .heat
                 .saturating_add(gain.remove(&p).unwrap_or(0))
@@ -312,23 +415,19 @@ impl Heat {
                 c.burn -= 1;
                 if c.burn == 0 {
                     w.queue_dig_by(p[0], p[1], p[2], FIRE);
-                    self.burned.insert(p);
-                    self.burned_total += 1;
-                    self.burned_by_material[usize::from(m) & 15] += 1;
-                    self.cells.remove(&p);
-                    continue;
+                    burned.insert(p);
+                    *burned_total += 1;
+                    burned_by_material[usize::from(m) & 15] += 1;
+                    removed.push(p);
+                    return;
                 }
             } else if let Some(d) = def {
-                // Judged on the heat reached, before this tick's cooling: a
-                // deposit equal to the kindling lights the voxel.
                 if d.kindling > 0 && d.fuel > 0 && c.heat >= d.kindling {
                     c.burn = t.burn_ticks;
-                    self.ignited.push(p);
+                    ignited.push(p);
                 }
-                // A meltable voxel at its point gives way (ADR-290); the
-                // range takes it as debris and forgets its heat.
                 if d.melt > 0 && c.heat >= d.melt {
-                    self.melting.push(p);
+                    melting.push(p);
                 }
             }
             if c.heat > 0 {
@@ -336,17 +435,30 @@ impl Heat {
                 c.heat = c.heat.saturating_sub(lost);
             }
             if c.heat == 0 && c.burn == 0 {
-                self.cells.remove(&p);
+                removed.push(p);
             } else {
-                self.cells.insert(p, c);
+                *entry = c;
+            }
+        };
+        if let Some(start) = *cursor {
+            for (p, entry) in cells.range_mut(start..).take(first_len) {
+                commit(p, entry);
             }
         }
+        let bound = cursor.unwrap_or([u32::MAX; 3]);
+        for (p, entry) in cells.range_mut(..bound).take(batch_len - first_len) {
+            commit(p, entry);
+        }
+        debug_assert!(inputs.next().is_none());
+        for p in removed {
+            cells.remove(&p);
+        }
         for (q, g) in gain {
-            let c = self.cells.entry(q).or_default();
+            let c = cells.entry(q).or_default();
             c.heat = c.heat.saturating_add(g).min(HEAT_CAP);
         }
-        self.cursor = last.and_then(|l| {
-            self.cells
+        *cursor = last.and_then(|l| {
+            cells
                 .range((std::ops::Bound::Excluded(l), std::ops::Bound::Unbounded))
                 .next()
                 .map(|(k, _)| *k)
@@ -524,14 +636,14 @@ mod tests {
             .unwrap()
     }
     #[test]
-    fn parallel_world_reads_preserve_heat_edits_cursor_and_events_across_workers() {
+    fn parallel_world_reads_and_ordered_commit_match_reference_across_workers() {
         struct Grid;
         impl voxel::Generator for Grid {
             fn material(&self, x: u32, y: u32, z: u32) -> u16 {
                 if y < 15 {
                     1
                 } else {
-                    [0, 3, 4, 5, 4, 5][((x + y + z) % 6) as usize]
+                    [0, 3, 4, 5, 4, 5, 17][((x + y + z) % 7) as usize]
                 }
             }
         }
@@ -561,12 +673,12 @@ mod tests {
             w.save(&mut b);
             (b.v, h.ignited.clone(), h.burned.clone(), h.melting.clone())
         };
-        for workers in [1, 2, 4, 8] {
+        for workers in [1, 2, 4, 6, 8] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            for budget in [1, 31, 1023, 4096] {
+            for budget in [0, 1, 31, 1023, 1024, 4096] {
                 let mut t = tuning();
                 t.cells_per_tick = budget;
                 let mut serial = initial.clone();
@@ -574,9 +686,36 @@ mod tests {
                 let mut reference_world = World::new(64, 48, 64, 4096, Box::new(Grid));
                 let mut world = World::new(64, 48, 64, 4096, Box::new(Grid));
                 for tick in 0..8 {
-                    let claimed = |p: [u32; 3]| p[0] % 7 == tick % 7;
+                    if tick == 4 {
+                        serial.cursor = None;
+                        parallel.cursor = None;
+                    }
+                    let reference_calls = std::cell::RefCell::new(Vec::new());
+                    let claimed = |p: [u32; 3]| {
+                        let mut calls = reference_calls.borrow_mut();
+                        let rank = calls.len() as u32;
+                        calls.push(p);
+                        (p[0] + rank) % 7 == tick % 7
+                    };
                     serial.step_in(&mut reference_world, &registry, &t, claimed, false);
-                    pool.install(|| parallel.step_in(&mut world, &registry, &t, claimed, true));
+                    let calls = pool.install(|| {
+                        // A non-Sync callback stays on the ordered commit path.
+                        let calls = std::cell::RefCell::new(Vec::new());
+                        parallel.step_in(
+                            &mut world,
+                            &registry,
+                            &t,
+                            |p| {
+                                let mut calls = calls.borrow_mut();
+                                let rank = calls.len() as u32;
+                                calls.push(p);
+                                (p[0] + rank) % 7 == tick % 7
+                            },
+                            true,
+                        );
+                        calls.into_inner()
+                    });
+                    assert_eq!(calls, reference_calls.into_inner());
                     assert_eq!(
                         snapshot(&parallel, &world),
                         snapshot(&serial, &reference_world),
