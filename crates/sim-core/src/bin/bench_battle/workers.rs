@@ -2,12 +2,18 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-const PHASES: [&str; 5] = [
+const PHASES: [&str; 11] = [
     "routes",
     "ground",
     "local_clone",
     "local_advance",
     "terrain_advance",
+    "route_forget",
+    "route_query",
+    "sweep_0",
+    "sweep_1",
+    "sweep_2",
+    "sweep_3",
 ];
 
 #[derive(Clone, Copy)]
@@ -94,6 +100,18 @@ impl Profile {
             "local_advance_end" => (3, false),
             "terrain_advance_begin" => (4, true),
             "terrain_advance_end" => (4, false),
+            "route_forget_begin" => (5, true),
+            "route_forget_end" => (5, false),
+            "route_query_begin" => (6, true),
+            "route_query_end" => (6, false),
+            "sweep_0_begin" => (7, true),
+            "sweep_0_end" => (7, false),
+            "sweep_1_begin" => (8, true),
+            "sweep_1_end" => (8, false),
+            "sweep_2_begin" => (9, true),
+            "sweep_2_end" => (9, false),
+            "sweep_3_begin" => (10, true),
+            "sweep_3_end" => (10, false),
             _ => unreachable!("unknown navigation task event"),
         };
         let now = Instant::now();

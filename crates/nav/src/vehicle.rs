@@ -13,6 +13,7 @@ use fx::{angle, Fx};
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    sync::Arc,
 };
 use voxel::{
     store::{Mat, AIR},
@@ -343,8 +344,16 @@ fn reach(s: Shape) -> i32 {
 /// into the next probe; none survives a change on it or enters a save.
 #[derive(Clone, Debug, Default)]
 pub struct Columns {
-    pages: Vec<Option<ColumnPage>>,
+    pages: Vec<Option<Arc<ColumnPage>>>,
     replacement: Vec<u8>,
+}
+/// Transient exact geometry, with worker reads accounted separately from
+/// logical search work. No answers or cache pages enter a saved search.
+#[derive(Default)]
+pub struct PreparedSweep {
+    pub poses: Vec<(([Fx; 2], i32), Pose)>,
+    pub columns: Option<Columns>,
+    pub reads: [u64; 2],
 }
 impl Columns {
     /// Drop the pages a change touched; the rest still answer for the
@@ -368,7 +377,7 @@ struct ColumnPage {
 }
 pub struct Probe<'a> {
     world: &'a World,
-    pages: Vec<Option<ColumnPage>>,
+    pages: Vec<Option<Arc<ColumnPage>>>,
     replacement: Vec<u8>,
     last_page: usize,
     x0: i32,
@@ -385,6 +394,7 @@ pub struct Probe<'a> {
     hump_key: (i32, i32),
     /// Grade depends on the hull's tilt limit, not its pose or the terrain.
     grade_cache: Option<(Fx, Fx)>,
+    prepared_routes: BTreeMap<(Fx, Fx, i32), Pose>,
     yielding: Vec<Mat>,
     rubble: Option<&'a Rubble>,
     /// Columns scanned, columns answered and surface samples taken since
@@ -434,6 +444,7 @@ impl<'a> Probe<'a> {
             hump_weights: Vec::new(),
             hump_key: (0, 0),
             grade_cache: None,
+            prepared_routes: BTreeMap::new(),
             yielding: yielding.to_vec(),
             rubble: None,
             scans: 0,
@@ -475,6 +486,16 @@ impl<'a> Probe<'a> {
             pages: std::mem::take(&mut self.pages),
             replacement: std::mem::take(&mut self.replacement),
         }
+    }
+    /// Independent scratch sharing only immutable, copy-on-write page answers.
+    pub fn fork_route(&self) -> Probe<'a> {
+        let columns = Columns {
+            pages: self.pages.clone(),
+            replacement: self.replacement.clone(),
+        };
+        let mut fork = Self::for_search(self.world, &self.yielding, columns);
+        fork.rubble = self.rubble;
+        fork
     }
     pub fn yields(&self, m: Mat) -> bool {
         self.yielding.contains(&m)
@@ -547,12 +568,15 @@ impl<'a> Probe<'a> {
                     .unwrap_or_else(|| {
                         let i = base + usize::from(self.replacement[bucket]);
                         self.replacement[bucket] = (self.replacement[bucket] + 1) % 4;
-                        let page = self.pages[i].get_or_insert_with(|| ColumnPage {
-                            key,
-                            values: vec![(u16::MAX, [u16::MAX, 0]); PAGE_SIDE * PAGE_SIDE],
-                        });
-                        page.key = key;
-                        page.values.fill((u16::MAX, [u16::MAX, 0]));
+                        if let Some(page) = self.pages[i].as_mut().and_then(Arc::get_mut) {
+                            page.key = key;
+                            page.values.fill((u16::MAX, [u16::MAX, 0]));
+                        } else {
+                            self.pages[i] = Some(Arc::new(ColumnPage {
+                                key,
+                                values: vec![(u16::MAX, [u16::MAX, 0]); PAGE_SIDE * PAGE_SIDE],
+                            }));
+                        }
                         i
                     });
                 self.last_page = slot;
@@ -565,7 +589,7 @@ impl<'a> Probe<'a> {
             }
             self.scans += 1;
             let value = self.scan(x, z);
-            self.pages[slot].as_mut().unwrap().values[index] = value;
+            Arc::make_mut(self.pages[slot].as_mut().unwrap()).values[index] = value;
             return Some(value);
         }
         let (dx, dz) = (x - self.x0, z - self.z0);
@@ -915,10 +939,21 @@ impl<'a> Probe<'a> {
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
     fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        if let Some(pose) = self.prepared_routes.get(&(pos[0], pos[1], head)) {
+            return *pose;
+        }
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose;
         }
         self.probe_pose(pos, head, s, true)
+    }
+    /// Immutable-world geometry for one speculative sweep batch. Logical
+    /// progress and blocker callbacks remain with the owning search.
+    pub fn route_samples(&mut self, s: Shape, samples: &[([Fx; 2], i32)]) -> Vec<Pose> {
+        samples
+            .iter()
+            .map(|&(at, head)| self.route_pose(at, head, s))
+            .collect()
     }
     /// The prepared tiles prove the complete support and belly footprint is
     /// one bare height. The proof is the same for driving and route search.
@@ -1558,8 +1593,60 @@ impl Hunt {
         clear: &impl Fn([Fx; 2], i32) -> bool,
         budget: usize,
     ) -> Option<Route> {
+        self.advance_in_prepared(world, rubble, clear, budget, PreparedSweep::default())
+    }
+    /// Exact poses ahead of the currently suspended swept connection. A caller
+    /// may prepare them independently; branch decisions still consume them in
+    /// original order and pay the original logical allowance.
+    pub fn sweep_samples(&self, budget: usize) -> Option<(Shape, Vec<([Fx; 2], i32)>)> {
+        let run = self.pending_connection()?;
+        let samples = run.samples(self.shape, budget);
+        (samples.len() >= 16).then_some((self.shape, samples))
+    }
+    fn pending_connection(&self) -> Option<&Connection> {
+        self.prelude
+            .as_ref()
+            .and_then(|p| p.straight.as_ref())
+            .or_else(|| self.connection.as_ref().map(|(_, _, run)| run))
+            .or_else(|| {
+                self.expansion
+                    .as_ref()
+                    .and_then(|e| e.pending.as_ref().map(|(_, _, run)| run))
+            })
+    }
+    /// A short exact prefix avoids launching workers for an immediate refusal.
+    /// This only decides whether to speculate; the search still commits it.
+    pub fn sweep_prefix_open(&self, poses: &[Pose]) -> bool {
+        self.pending_connection()
+            .is_some_and(|run| run.prefix_open(self.shape, poses))
+    }
+    /// Worker-local scratch over the search's already validated columns.
+    /// A worker can extend/evict its copy without mutating another worker.
+    pub fn sweep_probe<'a>(&self, world: &'a World, rubble: &'a Rubble) -> Probe<'a> {
+        Probe::for_search(world, &self.yielding, self.columns.clone()).with_rubble(rubble)
+    }
+    /// Prepared answers must use this search's shape/yielding profile and the
+    /// exact world/rubble being advanced. They are discarded after this slice.
+    pub fn advance_in_prepared(
+        &mut self,
+        world: &World,
+        rubble: &Rubble,
+        clear: &impl Fn([Fx; 2], i32) -> bool,
+        budget: usize,
+        prepared: PreparedSweep,
+    ) -> Option<Route> {
         let carried = std::mem::take(&mut self.columns);
-        let mut ground = Probe::for_search(world, &self.yielding, carried).with_rubble(rubble);
+        let mut ground =
+            Probe::for_search(world, &self.yielding, prepared.columns.unwrap_or(carried))
+                .with_rubble(rubble);
+        ground.prepared_routes.extend(
+            prepared
+                .poses
+                .iter()
+                .map(|&((p, h), pose)| ((p[0], p[1], h), pose)),
+        );
+        self.scans = self.scans.wrapping_add(prepared.reads[0]);
+        self.samples = self.samples.wrapping_add(prepared.reads[1]);
         let result = self.advance(&mut ground, clear, budget);
         self.columns = ground.take_columns();
         result
@@ -2693,6 +2780,102 @@ mod tests {
         }
     }
     #[test]
+    fn prepared_sweeps_preserve_search_slices_edits_and_blocker_callbacks() {
+        let mut batches = 0;
+        for budget in [16, 31, 64] {
+            let mut w = world(false, false, true);
+            let rubble = Rubble::from([([149, 72], 30)]);
+            let mut probe = Probe::for_search(&w, &[], Columns::default()).with_rubble(&rubble);
+            let Hunting::Open(mut serial) = Hunt::start_bounded(
+                &mut probe,
+                tank(),
+                [50, 72].map(Fx::from_int),
+                1234,
+                [220, 72],
+                search(),
+                &|_, _| true,
+                1,
+            ) else {
+                panic!("bounded prelude must stay open");
+            };
+            let mut prepared = serial.clone();
+            drop(probe);
+            for tick in 0..3000 {
+                if tick == 1 {
+                    w.queue_edit(voxel::Edit::put(70, 20, 72, 4));
+                    w.flush();
+                    let mut changed = Changed::default();
+                    changed.column(70, 72);
+                    serial.forget(&changed);
+                    prepared.forget(&changed);
+                }
+                let a = std::cell::RefCell::new(Vec::new());
+                let b = std::cell::RefCell::new(Vec::new());
+                let (answers, columns) = prepared
+                    .sweep_samples(budget)
+                    .map(|(shape, samples)| {
+                        batches += 1;
+                        let mut probe = prepared.sweep_probe(&w, &rubble);
+                        let mut poses = probe.route_samples(shape, &samples[..4]);
+                        if prepared.sweep_prefix_open(&poses) {
+                            let mut fork = probe.fork_route();
+                            poses.extend(fork.route_samples(shape, &samples[4..]));
+                            (
+                                samples.into_iter().zip(poses).collect::<Vec<_>>(),
+                                Some(fork.take_columns()),
+                            )
+                        } else {
+                            (
+                                samples[..4].iter().copied().zip(poses).collect::<Vec<_>>(),
+                                Some(probe.take_columns()),
+                            )
+                        }
+                    })
+                    .unwrap_or_default();
+                let x = serial.advance_in(
+                    &w,
+                    &rubble,
+                    &|p, h| {
+                        a.borrow_mut().push((p, h));
+                        p[0] < Fx::from_int(210)
+                    },
+                    budget,
+                );
+                let y = prepared.advance_in_prepared(
+                    &w,
+                    &rubble,
+                    &|p, h| {
+                        b.borrow_mut().push((p, h));
+                        p[0] < Fx::from_int(210)
+                    },
+                    budget,
+                    PreparedSweep {
+                        poses: answers,
+                        columns,
+                        reads: [0; 2],
+                    },
+                );
+                assert_eq!(*a.borrow(), *b.borrow(), "budget={budget} tick={tick}");
+                let mut left = fx::blob::Blob::new();
+                let mut right = fx::blob::Blob::new();
+                serial.save(&mut left);
+                prepared.save(&mut right);
+                assert_eq!(left.v, right.v, "budget={budget} tick={tick}");
+                assert_eq!(x.is_some(), y.is_some());
+                if let Some(x) = x {
+                    let y = y.unwrap();
+                    assert_eq!(
+                        (x.path, x.partial, x.stranded, x.nodes, x.poses, x.exhausted),
+                        (y.path, y.partial, y.stranded, y.nodes, y.poses, y.exhausted)
+                    );
+                    break;
+                }
+                assert!(tick < 2999, "search did not finish");
+            }
+        }
+        assert!(batches > 0);
+    }
+    #[test]
     fn bounded_column_cache_survives_eviction_transfer_and_world_edits() {
         let mut w = World::new(
             1024,
@@ -2726,6 +2909,58 @@ mod tests {
         w.flush();
         let mut fresh = Probe::for_search(&w, &[], Columns::default());
         assert_eq!(fresh.floor(90, 72), Probe::new(&w).floor(90, 72));
+    }
+    #[test]
+    fn forked_column_pages_preserve_answers_across_evictions_and_edits() {
+        let mut w = World::new(
+            1024,
+            64,
+            1024,
+            100,
+            Box::new(TestGround {
+                rock: true,
+                corridor: false,
+                hill: true,
+            }),
+        );
+        let mut root = Probe::for_search(&w, &[], Columns::default());
+        for x in (0..1024).step_by(17) {
+            assert_eq!(root.floor(x, 100), Probe::new(&w).floor(x, 100));
+        }
+        root.floor(100, 100);
+        let columns = root.take_columns();
+        drop(root);
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..4)
+                .map(|offset| {
+                    let columns = columns.clone();
+                    let world = &w;
+                    scope.spawn(move || {
+                        let mut fork = Probe::for_search(world, &[], columns);
+                        let mut plain = Probe::new(world);
+                        for x in (offset..1024).step_by(7) {
+                            for z in (0..1024).step_by(23) {
+                                assert_eq!(fork.column(x, z), plain.column(x, z));
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for job in jobs {
+                job.join().unwrap();
+            }
+        });
+        let mut resumed = Probe::for_search(&w, &[], columns);
+        assert_eq!(resumed.floor(100, 100), Probe::new(&w).floor(100, 100));
+        let columns = resumed.take_columns();
+        drop(resumed);
+        w.queue_edit(voxel::Edit::put(100, 40, 100, 4));
+        w.flush();
+        let mut changed = Changed::default();
+        changed.column(100, 100);
+        let mut resumed = Probe::for_local(&w, &[], columns, &changed);
+        assert_eq!(resumed.floor(100, 100), 41);
+        assert_eq!(resumed.column(100, 100), Probe::new(&w).column(100, 100));
     }
     #[test]
     fn local_column_cache_forgets_world_and_rubble_changes() {

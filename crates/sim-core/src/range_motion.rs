@@ -1126,6 +1126,7 @@ impl Motion {
     }
     /// One tick's worth of the search in flight, if there is one. A world
     /// that changed under it drops what it scanned, not the search.
+    #[allow(clippy::too_many_arguments)]
     fn hunt_step(
         &mut self,
         w: &World,
@@ -1134,12 +1135,24 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
+        detail: impl Fn(&'static str),
+        sweep_detail: impl Fn(usize, bool) + Sync,
     ) {
         let Some(hunt) = self.hunt.take() else {
             return;
         };
         let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
-        let result = self.advance_hunt(hunt, w, b, &blockers, rubble, changed, None);
+        let result = self.advance_hunt(
+            hunt,
+            w,
+            b,
+            &blockers,
+            rubble,
+            changed,
+            None,
+            detail,
+            sweep_detail,
+        );
         self.apply_hunt(result, tick);
     }
     /// Pure continuation over owned search scratch and immutable surroundings.
@@ -1154,13 +1167,17 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
         checked: Option<&std::cell::RefCell<Vec<HuntClearance>>>,
+        detail: impl Fn(&'static str),
+        sweep_detail: impl Fn(usize, bool) + Sync,
     ) -> HuntAdvance {
         let slice = self
             .resume_budget
             .unwrap_or(self.navigation.search_nodes_per_tick);
         if slice == 0 {
             // Changes must still invalidate cached terrain during a skipped slice.
+            detail("route_forget_begin");
             hunt.forget(changed);
+            detail("route_forget_end");
             return HuntAdvance::Pending(hunt);
         }
         if !hunt.starts_at([self.pos[0], self.pos[2]], self.drive.head) {
@@ -1181,7 +1198,9 @@ impl Motion {
                 return HuntAdvance::Restart;
             }
         }
+        detail("route_forget_begin");
         hunt.forget(changed);
+        detail("route_forget_end");
         let half = self.shape(b).half.map(Fx::from_int);
         let clear = |p: [Fx; 2], head: i32| {
             let answer = !blockers.iter().any(|o| {
@@ -1200,7 +1219,63 @@ impl Motion {
             }
             answer
         };
-        match hunt.advance_in(w, rubble, &clear, slice) {
+        detail("route_query_begin");
+        let prepared = if checked.is_none()
+            && blockers.is_empty()
+            && self.shape(b).half.iter().all(|&n| n >= 40)
+            && rayon::current_thread_index().is_some()
+            && rayon::current_num_threads() >= 4
+        {
+            hunt.sweep_samples(slice)
+                .map(|(shape, samples)| {
+                    use rayon::prelude::*;
+                    let mut seed = hunt.sweep_probe(w, rubble);
+                    let prefix = seed.route_samples(shape, &samples[..4]);
+                    if !hunt.sweep_prefix_open(&prefix) {
+                        return nav::vehicle::PreparedSweep {
+                            poses: samples[..4].iter().copied().zip(prefix).collect(),
+                            reads: [seed.scans, seed.samples],
+                            columns: Some(seed.take_columns()),
+                        };
+                    }
+                    let poses: Vec<_> = samples[4..]
+                        .par_chunks(8)
+                        .enumerate()
+                        .with_max_len(1)
+                        .map(|(id, batch)| {
+                            sweep_detail(id, true);
+                            let mut ground = seed.fork_route();
+                            let poses = ground.route_samples(shape, batch);
+                            let reads = [ground.scans, ground.samples];
+                            let columns = ground.take_columns();
+                            sweep_detail(id, false);
+                            (poses, columns, reads)
+                        })
+                        .collect();
+                    let mut answers = Vec::with_capacity(samples.len());
+                    answers.extend(prefix);
+                    let mut reads = [seed.scans, seed.samples];
+                    let mut columns = None;
+                    for (poses, cache, work) in poses {
+                        answers.extend(poses);
+                        columns = Some(cache);
+                        for a in 0..2 {
+                            reads[a] = reads[a].wrapping_add(work[a]);
+                        }
+                    }
+                    nav::vehicle::PreparedSweep {
+                        poses: samples.into_iter().zip(answers).collect(),
+                        columns,
+                        reads,
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            nav::vehicle::PreparedSweep::default()
+        };
+        let plan = hunt.advance_in_prepared(w, rubble, &clear, slice, prepared);
+        detail("route_query_end");
+        match plan {
             Some(plan) => HuntAdvance::Planned(plan, hunt.origin()),
             None => HuntAdvance::Pending(hunt),
         }
@@ -1231,11 +1306,20 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
-        detail: impl Fn(&'static str),
+        detail: impl Fn(&'static str) + Sync,
     ) {
         if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
             detail("terrain_advance_begin");
-            self.hunt_step(w, b, &[], rubble, tick, changed);
+            self.hunt_step(w, b, &[], rubble, tick, changed, &detail, |batch, begin| {
+                const BEGIN: [&str; 4] = [
+                    "sweep_0_begin",
+                    "sweep_1_begin",
+                    "sweep_2_begin",
+                    "sweep_3_begin",
+                ];
+                const END: [&str; 4] = ["sweep_0_end", "sweep_1_end", "sweep_2_end", "sweep_3_end"];
+                detail(if begin { BEGIN[batch] } else { END[batch] });
+            });
             self.prepared_hunt = true;
             detail("terrain_advance_end");
         }
@@ -1278,7 +1362,17 @@ impl Motion {
         let candidate = hunt.clone();
         detail("local_clone_end");
         detail("local_advance_begin");
-        let result = self.advance_hunt(candidate, w, b, &blockers, rubble, changed, Some(&checked));
+        let result = self.advance_hunt(
+            candidate,
+            w,
+            b,
+            &blockers,
+            rubble,
+            changed,
+            Some(&checked),
+            &detail,
+            |_, _| {},
+        );
         detail("local_advance_end");
         Some(PreparedLocalHunt {
             origin,
@@ -1509,7 +1603,7 @@ impl Motion {
         // A search begun on an earlier tick walks on before anything asks
         // for another (ADR-306).
         if !std::mem::take(&mut self.prepared_hunt) {
-            self.hunt_step(w, b, others, rubble, tick, changed);
+            self.hunt_step(w, b, others, rubble, tick, changed, |_| {}, |_, _| {});
         }
         completed("hunt");
         // A partial route is a prefix the budget ran out on, planned
@@ -2623,6 +2717,10 @@ mod tests {
                         "local_clone_begin",
                         "local_clone_end",
                         "local_advance_begin",
+                        "route_forget_begin",
+                        "route_forget_end",
+                        "route_query_begin",
+                        "route_query_end",
                         "local_advance_end"
                     ]
                 );

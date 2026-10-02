@@ -64,6 +64,50 @@ impl Connection {
         self.height = Fx::ZERO;
         self.crush = 0;
     }
+    pub(super) fn samples(&self, shape: Shape, budget: usize) -> Vec<([Fx; 2], i32)> {
+        // Let the owning search establish that the connection has a useful
+        // legal prefix before speculating across later samples.
+        if self.cursor < 16 {
+            return Vec::new();
+        }
+        let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
+        let turns = turn_samples(angle::diff(self.yaw, self.head), shape);
+        let steps = (delta[0].abs().max(delta[1].abs()).to_int_trunc() + 1).max(1);
+        let last = (turns + steps).min(self.cursor.saturating_add(budget.min(32) as i32 - 1));
+        (self.cursor..=last)
+            .map(|cursor| self.sample(cursor, turns, steps))
+            .collect()
+    }
+    fn sample(&self, cursor: i32, turns: i32, steps: i32) -> ([Fx; 2], i32) {
+        if cursor == 0 {
+            (self.from, self.head)
+        } else if cursor <= turns {
+            (
+                self.from,
+                angle::norm(self.head + angle::diff(self.yaw, self.head) * cursor / turns),
+            )
+        } else {
+            let delta = [self.to[0].sub(self.from[0]), self.to[1].sub(self.from[1])];
+            let f = Fx::from_ratio(cursor - turns, steps);
+            (
+                [
+                    self.from[0].add(delta[0].mul(f)),
+                    self.from[1].add(delta[1].mul(f)),
+                ],
+                self.yaw,
+            )
+        }
+    }
+    pub(super) fn prefix_open(&self, shape: Shape, poses: &[Pose]) -> bool {
+        let mut height = self.height;
+        for pose in poses {
+            if pose.refused() || pose.height.sub(height).abs() > Fx::from_int(shape.step) {
+                return false;
+            }
+            height = pose.height;
+        }
+        true
+    }
     /// Outer None: allowance spent. Inner None: blocked. Some count: open.
     pub fn advance(
         &mut self,
@@ -100,21 +144,7 @@ impl Connection {
                     |pose| pose.height,
                 );
             } else {
-                let (p, h) = if self.cursor <= turns {
-                    (
-                        self.from,
-                        angle::norm(self.head + turn * self.cursor / turns),
-                    )
-                } else {
-                    let f = Fx::from_ratio(self.cursor - turns, steps);
-                    (
-                        [
-                            self.from[0].add(delta[0].mul(f)),
-                            self.from[1].add(delta[1].mul(f)),
-                        ],
-                        yaw,
-                    )
-                };
+                let (p, h) = self.sample(self.cursor, turns, steps);
                 if !clear(p, h) {
                     return Some(None);
                 }

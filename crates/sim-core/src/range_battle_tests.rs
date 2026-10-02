@@ -2464,7 +2464,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         restarted.start_battle().unwrap();
         assert!(restarted.navigation_pool.is_none());
         drop(restarted);
-        let tasks: Vec<[std::sync::atomic::AtomicUsize; 10]> = (0..count)
+        let tasks: Vec<[std::sync::atomic::AtomicUsize; 22]> = (0..count)
             .map(|_| std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)))
             .collect();
         for tick in 0..20 {
@@ -2486,6 +2486,18 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
                         "local_advance_end" => 7,
                         "terrain_advance_begin" => 8,
                         "terrain_advance_end" => 9,
+                        "route_forget_begin" => 10,
+                        "route_forget_end" => 11,
+                        "route_query_begin" => 12,
+                        "route_query_end" => 13,
+                        "sweep_0_begin" => 14,
+                        "sweep_0_end" => 15,
+                        "sweep_1_begin" => 16,
+                        "sweep_1_end" => 17,
+                        "sweep_2_begin" => 18,
+                        "sweep_2_end" => 19,
+                        "sweep_3_begin" => 20,
+                        "sweep_3_end" => 21,
                         _ => unreachable!(),
                     };
                     tasks[id][stage].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2508,6 +2520,14 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
             assert_eq!(count[6], count[7]);
             assert_eq!(count[4], count[6]);
             assert_eq!(count[8], count[9]);
+            assert_eq!(count[10], count[11]);
+            assert_eq!(count[12], count[13]);
+            assert!(count[12] <= count[10]);
+            assert!(count[10] <= count[4] + count[8]);
+            for batch in 0..4 {
+                assert_eq!(count[14 + 2 * batch], count[15 + 2 * batch]);
+                assert!(count[14 + 2 * batch] <= count[12]);
+            }
             assert!(count[4] + count[8] <= count[0]);
             continuations += count[4] + count[8];
             route_tasks += count[0];
