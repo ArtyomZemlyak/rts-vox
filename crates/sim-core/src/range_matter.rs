@@ -812,7 +812,16 @@ impl Matter {
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
     ) {
-        self.flush_observed(w, material, gravity, tick, hulls, yielding, |_| {});
+        self.flush_observed(
+            w,
+            material,
+            gravity,
+            tick,
+            hulls,
+            yielding,
+            |_| {},
+            &|_, _| {},
+        );
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn flush_observed(
@@ -824,6 +833,7 @@ impl Matter {
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
         mut completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
@@ -864,6 +874,7 @@ impl Matter {
             tick,
             crate::burst::Surroundings { hulls, yielding },
             completed,
+            task,
         );
     }
     pub fn save(&self, b: &mut Blob) {

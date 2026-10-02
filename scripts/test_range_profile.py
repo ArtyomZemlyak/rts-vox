@@ -28,6 +28,32 @@ def trace():
 
 
 class TraceTests(unittest.TestCase):
+    def test_physics_batches_are_not_actor_zero(self):
+        rows = trace() + [
+            mark("task", "physics_translate_begin", 15, "3", "0", 200),
+            mark("task", "physics_translate_end", 60, "3", "0", 210),
+            mark("task", "physics_translate_begin", 16, "4", "0", 300),
+            mark("task", "physics_translate_end", 65, "4", "0", 320),
+        ]
+        result = profile.summarize_tick(rows)
+        jobs = [j for j in result["longest_tasks"] if j["domain"] == "physics"]
+        self.assertEqual(len(jobs), 2)
+        self.assertTrue(all(j["unit"] is None and j["job_slot"] == "0" for j in jobs))
+        self.assertEqual(result["worker_families"]["3"], ["physics_translate"])
+        self.assertAlmostEqual(result["worker_covered_wall_ms"]["4"], 49 / 1e6)
+        family = result["task_families"]["physics_translate"]
+        self.assertEqual(family["jobs"], 2)
+        self.assertEqual(family["cpu_samples"], 2)
+        self.assertAlmostEqual(family["inclusive_wall_ms"], 94 / 1e6)
+        self.assertAlmostEqual(family["sampled_cpu_ms"], 30 / 1e6)
+        self.assertAlmostEqual(family["max_wall_ms"], 49 / 1e6)
+
+    def test_physics_batch_missing_end_is_not_hidden_by_another_thread(self):
+        rows = trace() + [mark("task", "physics_wake_begin", 15, "3", "0"),
+                          mark("task", "physics_wake_end", 60, "4", "0")]
+        with self.assertRaisesRegex(ValueError, "Unmatched"):
+            profile.summarize_tick(rows)
+
     def test_inclusive_tasks_not_double_counted(self):
         tick = profile.summarize_tick(trace())
         self.assertEqual(tick["task_count"], 2)
@@ -105,6 +131,83 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(r["slow_frames"][0]["previous_core_ms"], 2)
         self.assertEqual(r["slow_ticks"][0]["frame_row"], 0)
         self.assertTrue(r["valid_for_comparison"])
+
+    def test_new_schema_requires_physics_scopes_and_cannot_pair_with_legacy(self):
+        self.write()
+        legacy = profile.analyze(self.path)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE core_trace_schema=2\n")
+        missing = profile.analyze(self.path)
+        self.assertIn("physics_task_coverage_missing", missing["reasons"])
+        self.assertFalse(missing["valid_for_comparison"])
+        self.assertEqual(missing["physics_task_coverage"]["missing_ticks"], 1)
+        rows = trace()
+        for family in ("physics_rubble_floor", "physics_rubble_columns"):
+            rows += [mark("task", family + "_begin", 15, "3", "0"),
+                     mark("task", family + "_end", 60, "3", "0")]
+        self.write(rows=rows)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE core_trace_schema=2\n")
+        complete = profile.analyze(self.path)
+        self.assertTrue(complete["valid_for_comparison"])
+        self.assertEqual(complete["physics_task_coverage"]["traced_ticks"], 1)
+        self.assertEqual(complete["task_families"]["physics_rubble_floor"]["cpu_samples"], 0)
+        self.assertIn("unavailable", profile.markdown(complete))
+        self.assertIn("different_or_missing:core_trace_schema", profile.compare(legacy, complete)["reasons"])
+
+    def bounded_physics_fixture(self):
+        rows, summary = trace(), []
+        for family in ("physics_rubble_floor", "physics_rubble_columns"):
+            rows += [mark("task", family + "_begin", 15, "3", "0"),
+                     mark("task", family + "_end", 60, "3", "0")]
+            summary.append(dict(generation="0", tick="1", os_thread="3", stage="0", family=family,
+                jobs="3", inclusive_wall_ns="60", max_wall_ns="45", cpu_ns="0", cpu_samples="0",
+                cycles="0", cycle_samples="0"))
+        self.write(rows=rows)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE core_trace_schema=2\nPROFILE physics_task_sampling=longest_per_thread_family_stage\n")
+        return summary
+
+    def write_physics(self, rows):
+        with (self.path / "world-battle.physics.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(rows[0]))
+            writer.writeheader(); writer.writerows(rows)
+
+    def test_bounded_physics_uses_complete_totals_and_keeps_null_counters(self):
+        self.write_physics(self.bounded_physics_fixture())
+        report = profile.analyze(self.path)
+        self.assertTrue(report["valid_for_comparison"])
+        self.assertEqual(report["task_families"]["physics_rubble_floor"]["jobs"], 3)
+        self.assertEqual(report["task_families"]["physics_rubble_floor"]["cpu_samples"], 0)
+        self.assertAlmostEqual(report["task_families"]["physics_rubble_floor"]["inclusive_wall_ms"], 60 / 1e6)
+        self.assertIn("physics stage 0", profile.markdown(report))
+
+    def test_missing_physics_totals_do_not_pass(self):
+        self.bounded_physics_fixture()
+        report = profile.analyze(self.path)
+        self.assertFalse(report["valid_for_comparison"])
+        self.assertIn("physics_task_summary_missing", report["reasons"])
+
+    def test_corrupt_physics_totals_are_rejected(self):
+        for field, value in (("jobs", "0"), ("tick", "2"), ("stage", "1"), ("max_wall_ns", "44"),
+                             ("inclusive_wall_ns", "44"), ("cpu_samples", "4"), ("cpu_ns", "1")):
+            with self.subTest(field=field):
+                rows = self.bounded_physics_fixture()
+                rows[0][field] = value
+                self.write_physics(rows)
+                with self.assertRaisesRegex(ValueError, "[Pp]hysics summary"):
+                    profile.analyze(self.path)
+
+    def test_duplicate_missing_and_extra_summary_rows_are_rejected(self):
+        for variant in ("duplicate", "missing", "extra"):
+            with self.subTest(variant=variant):
+                rows = self.bounded_physics_fixture()
+                if variant == "duplicate": rows.append(rows[0])
+                elif variant == "missing": rows = rows[:1]
+                else: rows += [dict(row, tick="2") for row in rows]
+                self.write_physics(rows)
+                with self.assertRaisesRegex(ValueError, "[Pp]hysics summary"):
+                    profile.analyze(self.path)
 
     def test_missing_ticks_and_legacy_manifest_never_qualify_a_comparison(self):
         frames = [dict(self.frames[0], simulation_ticks="2")]

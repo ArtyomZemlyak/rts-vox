@@ -2,7 +2,15 @@
 //! Boundaries share one tick epoch. Phase/detail lanes overlap; their durations
 //! must not be added together. Worker parents may include nested child jobs.
 use super::{BlastRange, Instant, Write};
-use std::{cell::RefCell, sync::Mutex};
+use std::{
+    cell::RefCell,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Mutex,
+    },
+};
+#[path = "physics.rs"]
+mod physics;
 
 #[derive(Clone, Copy)]
 struct Cpu {
@@ -66,12 +74,63 @@ fn cpu() -> Option<Cpu> {
     None
 }
 
+#[derive(Clone, Copy)]
 struct Mark {
     lane: &'static str,
     event: &'static str,
     unit: Option<usize>,
     ns: u128,
     cpu: Option<Cpu>,
+}
+
+/// Diagnostic buffers owned by OS thread, including physics jobs without an
+/// actor ID. Registration uses atomics; unrelated workers never share the
+/// append lock. Unknown thread IDs retain events in the fallback buffer and
+/// remain explicitly unattributable in the analyzer.
+struct WorkerMarks {
+    slots: Vec<(AtomicU32, Mutex<Vec<Mark>>)>,
+    unknown: Mutex<Vec<Mark>>,
+}
+impl WorkerMarks {
+    fn new() -> Self {
+        Self {
+            // Profile runner allows 128 physics + 8 navigation workers.
+            slots: (0..256)
+                .map(|_| (AtomicU32::new(0), Mutex::new(Vec::new())))
+                .collect(),
+            unknown: Mutex::new(Vec::new()),
+        }
+    }
+    fn push(&self, mark: Mark) {
+        if let Some(id) = mark.cpu.map(|c| c.thread).filter(|&id| id != 0) {
+            for (owner, marks) in &self.slots {
+                let current = owner.load(Ordering::Relaxed);
+                if current == id
+                    || (current == 0
+                        && owner
+                            .compare_exchange(0, id, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok())
+                {
+                    marks.lock().unwrap().push(mark);
+                    return;
+                }
+            }
+            // Never silently drop a trace at an unexpected thread ceiling.
+        }
+        self.unknown.lock().unwrap().push(mark);
+    }
+    fn append_to(self, marks: &mut Vec<Mark>) -> Vec<physics::Total> {
+        let mut totals = Vec::new();
+        for (_, events) in self.slots {
+            let (events, summary) = physics::compact(events.into_inner().unwrap());
+            marks.extend(events);
+            totals.extend(summary);
+        }
+        let (events, summary) = physics::compact(self.unknown.into_inner().unwrap());
+        marks.extend(events);
+        totals.extend(summary);
+        totals
+    }
 }
 impl Mark {
     fn new(epoch: Instant, lane: &'static str, event: &'static str, unit: Option<usize>) -> Self {
@@ -91,21 +150,20 @@ pub(super) struct Tick {
     tick: u32,
     start_ns: u128,
     marks: Vec<Mark>,
+    physics: Vec<physics::Total>,
 }
 impl Tick {
     pub(super) fn record(sim: &mut BlastRange, generation: u64, profile_epoch: Instant) -> Self {
         // Allocate only in the diagnostic mode, before starting the tick clock.
-        // No common worker lock: each actor owns its event buffer.
-        let workers: Vec<_> = (0..sim.units.len())
-            .map(|_| Mutex::new(Vec::with_capacity(24)))
-            .collect();
+        // No common worker lock: each known OS thread owns its event buffer.
+        let workers = WorkerMarks::new();
         let marks = RefCell::new(Vec::with_capacity(128 + sim.units.len() * 14));
         let epoch = Instant::now();
         let start_ns = epoch.duration_since(profile_epoch).as_nanos();
         marks
             .borrow_mut()
             .push(Mark::new(epoch, "tick", "begin", None));
-        sim.step_observed_tasks(
+        sim.step_observed_all_tasks(
             |event| {
                 marks
                     .borrow_mut()
@@ -123,19 +181,21 @@ impl Tick {
             },
             |unit, event| {
                 let mark = Mark::new(epoch, "task", event, Some(unit));
-                workers[unit].lock().unwrap().push(mark);
+                workers.push(mark);
+            },
+            |slot, event| {
+                workers.push(Mark::new(epoch, "task", event, Some(slot)));
             },
         );
         let mut marks = marks.into_inner();
         marks.push(Mark::new(epoch, "tick", "end", None));
-        for events in workers {
-            marks.extend(events.into_inner().unwrap());
-        }
+        let physics = workers.append_to(&mut marks);
         Self {
             generation,
             tick: sim.tick,
             start_ns,
             marks,
+            physics,
         }
     }
 }
@@ -176,12 +236,95 @@ pub(super) fn save(output: &str, rows: &[Tick]) -> std::io::Result<()> {
             writeln!(out, ",{}", row.start_ns + mark.ns)?;
         }
     }
+    out.flush()?;
+    let path = std::path::Path::new(output).with_extension("physics.csv");
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(out, "generation,tick,os_thread,stage,family,jobs,inclusive_wall_ns,max_wall_ns,cpu_ns,cpu_samples,cycles,cycle_samples")?;
+    for row in rows {
+        for total in &row.physics {
+            writeln!(
+                out,
+                "{},{},{},{},{},{},{},{},{},{},{},{}",
+                row.generation,
+                row.tick,
+                total.thread.map_or(String::new(), |id| id.to_string()),
+                total.stage.map_or(String::new(), |id| id.to_string()),
+                total.family,
+                total.jobs,
+                total.wall_ns,
+                total.max_ns,
+                total.cpu_ns,
+                total.cpu_samples,
+                total.cycles,
+                total.cycle_samples
+            )?;
+        }
+    }
     out.flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_buffers_keep_concurrent_physics_batches_and_overflow() {
+        let buffers = WorkerMarks::new();
+        std::thread::scope(|scope| {
+            for id in 1..=32 {
+                let buffers = &buffers;
+                scope.spawn(move || {
+                    for event in ["physics_translate_begin", "physics_translate_end"] {
+                        buffers.push(Mark {
+                            lane: "task",
+                            event,
+                            unit: Some(0),
+                            ns: id as u128,
+                            cpu: Some(Cpu {
+                                thread: id,
+                                cycles: None,
+                                time_ns: None,
+                            }),
+                        });
+                    }
+                });
+            }
+        });
+        // Exhaust registration and retain both overflow and unknown-ID marks.
+        for id in 33..=257 {
+            buffers.push(Mark {
+                lane: "task",
+                event: "physics_cells_begin",
+                unit: Some(0),
+                ns: 0,
+                cpu: Some(Cpu {
+                    thread: id,
+                    cycles: None,
+                    time_ns: None,
+                }),
+            });
+        }
+        buffers.push(Mark {
+            lane: "task",
+            event: "unknown",
+            unit: Some(0),
+            ns: 0,
+            cpu: None,
+        });
+        let mut marks = Vec::new();
+        let _ = buffers.append_to(&mut marks);
+        assert_eq!(marks.len(), 290);
+        for id in 1..=32 {
+            let events: Vec<_> = marks
+                .iter()
+                .filter(|m| m.cpu.is_some_and(|c| c.thread == id))
+                .map(|m| m.event)
+                .collect();
+            assert_eq!(events, ["physics_translate_begin", "physics_translate_end"]);
+        }
+        assert!(marks.iter().any(|m| m.cpu.is_some_and(|c| c.thread == 257)));
+        assert_eq!(marks.iter().filter(|m| m.cpu.is_none()).count(), 1);
+    }
 
     #[test]
     fn observation_does_not_change_tick_or_snapshot() {

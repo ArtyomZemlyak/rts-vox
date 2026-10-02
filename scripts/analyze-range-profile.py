@@ -171,19 +171,37 @@ def summarize_tick(rows):
                 if not pending.get(key):
                     raise ValueError(f"Unmatched task end: {key}")
                 a = pending[key].pop()
-                jobs.append(dict(name=key[1], unit=key[0], thread=key[2],
+                physics = key[1].startswith("physics_")
+                jobs.append(dict(name=key[1], unit=None if physics else key[0],
+                                 domain="physics" if physics else "actor",
+                                 job_slot=key[0] if physics else None, thread=key[2],
                                  start=int(a["offset_ns"]), end=int(row["offset_ns"]),
                                  **interval(a, row)))
     if any(pending.values()):
         raise ValueError("Unfinished worker task")
     # The tail is explicit; phase totals partition the caller's tick only.
     phases.append(dict(name="unmarked_tail", **interval(last, end)))
+    families = {}
+    for job in jobs:
+        family = families.setdefault(job["name"], dict(jobs=0, inclusive_wall_ms=0.0,
+            max_wall_ms=0.0, sampled_cpu_ms=0.0, cpu_samples=0, cycles=0, cycle_samples=0))
+        family["jobs"] += 1
+        family["inclusive_wall_ms"] += job["wall_ms"]
+        family["max_wall_ms"] = max(family["max_wall_ms"], job["wall_ms"])
+        if job["thread_cpu_ms"] is not None:
+            family["sampled_cpu_ms"] += job["thread_cpu_ms"]
+            family["cpu_samples"] += 1
+        if job["cycles"] is not None:
+            family["cycles"] += job["cycles"]
+            family["cycle_samples"] += 1
     return dict(generation=int(begin["generation"]), tick=int(begin["tick"]), **total,
                 profile_begin_ns=optional_int(begin, "profile_offset_ns"),
                 profile_end_ns=optional_int(end, "profile_offset_ns"), phases=phases,
                 unit_intervals=sorted(units, key=lambda r: -r["wall_ms"])[:8],
                 longest_tasks=sorted(jobs, key=lambda r: -r["wall_ms"])[:8],
                 task_count=len(jobs), unidentified_task_events=unidentified_tasks,
+                task_families=families,
+                physics_samples=[job for job in jobs if job["domain"] == "physics"],
                 worker_families={thread: sorted({j["name"] for j in jobs if j["thread"] == thread})
                                  for thread in {j["thread"] for j in jobs}},
                 worker_covered_wall_ms=union_by_thread(jobs))
@@ -191,6 +209,12 @@ def summarize_tick(rows):
 
 def analyze(directory, scenario="world-battle", top=12):
     directory = Path(directory)
+    log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
+    sampling_match = re.search(r"^PROFILE physics_task_sampling=(\w+)$", log, re.M)
+    sampling = sampling_match[1] if sampling_match else "all"
+    summary_path = directory / f"{scenario}.physics.csv"
+    summarized = sampling == "longest_per_thread_family_stage"
+    summary_groups = iter(itertools.groupby(read_csv(summary_path), key=lambda r: (r["generation"], r["tick"]))) if summarized and summary_path.exists() else None
     frames = list(read_csv(directory / f"{scenario}.csv"))
     if not frames:
         raise ValueError("No frame samples")
@@ -236,6 +260,8 @@ def analyze(directory, scenario="world-battle", top=12):
     missing_clock = 0
     mapped_steps = [0] * len(frames)
     roles = {}
+    task_families = {}
+    missing_physics_ticks = 0
     core_path = directory / f"{scenario}.core.csv"
     if core_path.exists():
         groups = itertools.groupby(read_csv(core_path), key=lambda r: (r["generation"], r["tick"]))
@@ -244,10 +270,51 @@ def analyze(directory, scenario="world-battle", top=12):
                 raise ValueError("Non-contiguous or duplicated tick in trace")
             seen.add(key)
             tick = summarize_tick(list(raw_rows))
+            samples = tick.pop("physics_samples")
+            if summarized and summary_groups is not None:
+                group = next(summary_groups, None)
+                if group is None or group[0] != key:
+                    raise ValueError("Physics summary tick identity mismatch")
+                sample_keys = {(j["thread"], j["job_slot"], j["name"]): j for j in samples}
+                if len(sample_keys) != len(samples):
+                    raise ValueError("Duplicate retained physics scope")
+                complete = {}
+                for row in group[1]:
+                    sample_key = (row["os_thread"], row["stage"], row["family"])
+                    sample = sample_keys.pop(sample_key, None)
+                    if sample is None:
+                        raise ValueError("Physics summary scope mismatch")
+                    values = {field: int(row[field]) for field in ("jobs", "inclusive_wall_ns", "max_wall_ns", "cpu_ns", "cpu_samples", "cycles", "cycle_samples")}
+                    if (min(values.values()) < 0 or values["jobs"] < 1 or
+                            max(values["cpu_samples"], values["cycle_samples"]) > values["jobs"] or
+                            values["max_wall_ns"] > values["inclusive_wall_ns"] or
+                            values["max_wall_ns"] != round(sample["wall_ms"] * 1e6) or
+                            (sample["thread_cpu_ms"] is not None and (values["cpu_samples"] == 0 or values["cpu_ns"] < round(sample["thread_cpu_ms"] * 1e6))) or
+                            (sample["cycles"] is not None and (values["cycle_samples"] == 0 or values["cycles"] < sample["cycles"])) or
+                            (values["cpu_samples"] == 0 and values["cpu_ns"] != 0) or
+                            (values["cycle_samples"] == 0 and values["cycles"] != 0)):
+                        raise ValueError("Invalid physics summary counters")
+                    family = complete.setdefault(row["family"], dict(jobs=0, inclusive_wall_ms=0.0,
+                        max_wall_ms=0.0, sampled_cpu_ms=0.0, cpu_samples=0, cycles=0, cycle_samples=0))
+                    family["jobs"] += values["jobs"]
+                    family["inclusive_wall_ms"] += values["inclusive_wall_ns"] / 1e6
+                    family["max_wall_ms"] = max(family["max_wall_ms"], values["max_wall_ns"] / 1e6)
+                    family["sampled_cpu_ms"] += values["cpu_ns"] / 1e6
+                    for field in ("cpu_samples", "cycles", "cycle_samples"):
+                        family[field] += values[field]
+                if sample_keys:
+                    raise ValueError("Physics summary scopes missing")
+                tick["task_families"].update(complete)
+            if not all(name in tick["task_families"] for name in ("physics_rubble_floor", "physics_rubble_columns")):
+                missing_physics_ticks += 1
             if tick["os_thread"]:
                 roles.setdefault(tick["os_thread"], set()).add("tick_caller")
             for thread, families in tick["worker_families"].items():
                 roles.setdefault(thread, set()).update(families)
+            for name, values in tick["task_families"].items():
+                family = task_families.setdefault(name, dict.fromkeys(values, 0))
+                for field, value in values.items():
+                    family[field] = max(family[field], value) if field == "max_wall_ms" else family[field] + value
             core_totals.append(tick["wall_ms"])
             for phase in tick["phases"]:
                 phase_totals.setdefault(phase["name"], []).append(phase)
@@ -271,6 +338,8 @@ def analyze(directory, scenario="world-battle", top=12):
             slow.append(tick)
             slow.sort(key=lambda r: -r["wall_ms"])
             del slow[top:]
+    if summary_groups is not None and next(summary_groups, None) is not None:
+        raise ValueError("Unexpected extra physics summary tick")
     phase_summary = []
     for name, values in phase_totals.items():
         cpu = [v["thread_cpu_ms"] for v in values if v["thread_cpu_ms"] is not None]
@@ -278,7 +347,8 @@ def analyze(directory, scenario="world-battle", top=12):
         phase_summary.append(dict(name=name, mean_per_tick_ms=sum(wall) / len(seen),
                                   wall_occurrences=stats(wall), thread_cpu_occurrences=stats(cpu)))
     phase_summary.sort(key=lambda r: -r["mean_per_tick_ms"])
-    log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
+    schema_match = re.search(r"^PROFILE core_trace_schema=(\d+)$", log, re.M)
+    core_schema = int(schema_match[1]) if schema_match else (1 if core_path.exists() else None)
     manifest_path = directory / f"{scenario}.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
     validity = manifest.get("Validity") or {} if manifest else {}
@@ -301,6 +371,16 @@ def analyze(directory, scenario="world-battle", top=12):
         reasons.append("core_tick_clock_missing")
     if identity_mismatches:
         reasons.append("frame_core_tick_identity_mismatch")
+    if core_schema == 2 and missing_physics_ticks:
+        reasons.append("physics_task_coverage_missing")
+    if core_schema == 2 and not core_path.exists():
+        reasons.append("core_trace_missing")
+    if core_schema is not None and core_schema not in (1, 2):
+        reasons.append("core_trace_schema_unsupported")
+    if summarized and not summary_path.exists():
+        reasons.append("physics_task_summary_missing")
+    if sampling not in ("all", "longest_per_thread_family_stage"):
+        reasons.append("physics_task_sampling_unsupported")
     if aligned and core_path.exists() and mapped_steps != ticks_per_frame:
         reasons.append("frame_core_step_distribution_mismatch")
     hash_match = re.search(r"^PROFILE state_hash=([0-9a-f]+)$", log, re.M)
@@ -334,11 +414,19 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         actual_render_context=context,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
+        task_families=task_families,
+        core_trace_schema=core_schema,
+        physics_task_sampling=sampling,
+        physics_task_coverage=dict(traced_ticks=len(seen) - missing_physics_ticks, missing_ticks=missing_physics_ticks),
         frame_alignment="shared_monotonic_epoch" if aligned else "legacy_frame_delta_lags_phase_columns",
         trace_alignment=dict(unmapped_ticks=unmapped, missing_clock_ticks=missing_clock,
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
+                    "physics slots identify caller stages (0 rubble, 1 debris), not actors; OS thread and family pair scopes",
+                    "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
+                    "task family wall totals are inclusive across concurrent jobs, not elapsed phase time or CPU utilization",
+                    "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",
                     "worker_covered_wall is a union per OS thread, not CPU utilization; do not add it to parent wall",
                     "unit intervals are between consecutive callbacks and can enclose other work",
                     "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame",
@@ -358,7 +446,7 @@ def compare(a, b):
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
-    for key in ["measured_steps", "actual_adapter", "actual_workers", "actual_render_context", "frame_alignment", "frame_timing_metric", "state_hash"]:
+    for key in ["measured_steps", "actual_adapter", "actual_workers", "actual_render_context", "core_trace_schema", "physics_task_sampling", "frame_alignment", "frame_timing_metric", "state_hash"]:
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
     return {"eligible": not problems, "reasons": problems,
@@ -377,13 +465,21 @@ def markdown(report):
     for p in report["phases"]:
         cpu = p["thread_cpu_occurrences"]
         lines.append(f"| {p['name']} | {p['mean_per_tick_ms']:.3f} | {p['wall_occurrences']['p99']:.3f} | {cpu['samples'] if cpu else 'unavailable'} |")
+    lines += ["", f"Core trace schema: {report['core_trace_schema']}; sampling: {report['physics_task_sampling']}; physics coverage: {report['physics_task_coverage']}.", "",
+              "Job totals are inclusive across threads; do not add them to phase time.", "",
+              "| Task family | Jobs | Inclusive wall total, ms | Longest job, ms | Sampled CPU total, ms | CPU samples |",
+              "|---|---:|---:|---:|---:|---:|"]
+    for name, family in sorted(report["task_families"].items()):
+        cpu = f"{family['sampled_cpu_ms']:.3f}" if family['cpu_samples'] else "unavailable"
+        lines.append(f"| {name} | {family['jobs']} | {family['inclusive_wall_ms']:.3f} | {family['max_wall_ms']:.3f} | {cpu} | {family['cpu_samples']} |")
     lines += ["", "Slow ticks (CPU counter time is not lock wait time):", ""]
     for tick in report["slow_ticks"]:
         leaders = sorted(tick["phases"], key=lambda p: -p["wall_ms"])[:3]
         names = ", ".join(f"{p['name']}={p['wall_ms']:.3f}ms" for p in leaders)
         lines.append(f"- generation {tick['generation']}, tick {tick['tick']}: wall {tick['wall_ms']:.3f}ms, CPU {tick['thread_cpu_ms']}ms; {names}.")
         for job in tick["longest_tasks"][:3]:
-            lines.append(f"  - task {job['name']}, unit {job['unit']}, OS thread {job['thread']}: wall {job['wall_ms']:.3f}ms, CPU {job['thread_cpu_ms']}ms (inclusive; not added to phase totals).")
+            owner = f"physics stage {job['job_slot']}" if job['domain'] == 'physics' else f"unit {job['unit']}"
+            lines.append(f"  - task {job['name']}, {owner}, OS thread {job['thread']}: wall {job['wall_ms']:.3f}ms, CPU {job['thread_cpu_ms']}ms (inclusive; not added to phase totals).")
     lines += ["", "Slow frames (monotonic begin-to-begin; previous measured slice plus current gap):", "",
               "| Row | Generation/tick | Observed interval, ms | Bevy delta, ms | Previous core, ms | Current core, ms | Previous measured slice, ms | Outside slices, ms |",
               "|---|---|---:|---:|---:|---:|---:|---:|"]

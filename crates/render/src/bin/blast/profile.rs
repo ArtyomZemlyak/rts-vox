@@ -294,6 +294,10 @@ pub fn begin(
         println!("PROFILE navigation_override={:?}", p.navigation_workers);
         let [physics, navigation] = scene.sim.worker_counts();
         println!("PROFILE physics_workers={physics} navigation_workers={navigation}");
+        if p.core {
+            println!("PROFILE core_trace_schema=2");
+            println!("PROFILE physics_task_sampling=longest_per_thread_family_stage");
+        }
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);

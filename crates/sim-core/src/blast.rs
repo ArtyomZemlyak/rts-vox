@@ -3427,8 +3427,11 @@ impl BlastRange {
     /// one. A search restored from a snapshot has no such memo and asks
     /// afresh, so a memo left from older rubble found a different route
     /// than the restored run (ADR-426).
-    fn refresh_rubble(&mut self) -> nav::vehicle::Changed {
-        let rubble = self.current_rubble();
+    fn refresh_rubble(
+        &mut self,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Changed {
+        let rubble = self.current_rubble_observed(task);
         let mut changed = self.world_changed.clone();
         // The print is a function of the map: an unchanged map has the
         // print it had and changes no page (ADR-465). Most steps leave
@@ -3448,6 +3451,12 @@ impl BlastRange {
     /// right after a restore planned over bare ground while the continuing
     /// run planned over the heap (ADR-426).
     fn current_rubble(&self) -> nav::vehicle::Rubble {
+        self.current_rubble_observed(&|_, _| {})
+    }
+    fn current_rubble_observed(
+        &self,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Rubble {
         let live: Vec<UnitVoxels> = self
             .units
             .iter()
@@ -3456,9 +3465,12 @@ impl BlastRange {
             .map(UnitVoxels::of)
             .collect();
         let hulls: Vec<crate::burst::Hull> = live.iter().map(|v| v.hull(None)).collect();
-        self.matter
-            .debris
-            .rubble(&self.world, &self.navigation.fell.materials, &hulls)
+        self.matter.debris.rubble_observed(
+            &self.world,
+            &self.navigation.fell.materials,
+            &hulls,
+            task,
+        )
     }
     /// Report completed phases to a read-only observer. The simulation never
     /// reads clocks or consumes a result from it; benches own their timers.
@@ -3479,14 +3491,28 @@ impl BlastRange {
     /// Observers own any clocks or collection; their output never enters the tick.
     pub fn step_observed_tasks(
         &mut self,
+        completed: impl FnMut(&'static str),
+        detail: impl FnMut(&'static str),
+        unit_detail: impl FnMut(usize, &'static str),
+        task_detail: impl Fn(usize, &'static str) + Sync,
+    ) {
+        self.step_observed_all_tasks(completed, detail, unit_detail, task_detail, |_, _| {});
+    }
+    /// Also observe independent physics jobs on their executing threads.
+    /// Physics IDs name caller stages (0: rubble, 1: debris), not actor IDs;
+    /// observers pair them by OS thread and event family. Navigation-only
+    /// observers keep the existing API and receive no physics events.
+    pub fn step_observed_all_tasks(
+        &mut self,
         mut completed: impl FnMut(&'static str),
         mut detail: impl FnMut(&'static str),
         mut unit_detail: impl FnMut(usize, &'static str),
         task_detail: impl Fn(usize, &'static str) + Sync,
+        physics_detail: impl Fn(usize, &'static str) + Sync,
     ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
-        let changed = self.refresh_rubble();
+        let changed = self.refresh_rubble(&physics_detail);
         completed("rubble");
         detail("motion_begin");
         // Domes recover before this tick's round flies: a collapsed one
@@ -4250,6 +4276,7 @@ impl BlastRange {
             &hulls,
             &self.navigation.fell.materials,
             |stage| detail(stage),
+            &|_, event| physics_detail(1, event),
         );
         completed("debris");
         for e in self.world.edits() {

@@ -23,6 +23,25 @@ use voxel::{
     world::{snapshot::Snapshot, Edit},
 };
 
+/// One independent physics job (or Rayon leaf batch), not an actor ID.
+/// Timers and collection belong to the observer. The no-op observer carries
+/// no clocks, allocation, thread lookup or synchronization into ordinary play.
+struct PhysicsTask<'a, F: Fn(usize, &'static str)> {
+    observe: &'a F,
+    end: &'static str,
+}
+impl<'a, F: Fn(usize, &'static str)> PhysicsTask<'a, F> {
+    fn new(observe: &'a F, begin: &'static str, end: &'static str) -> Self {
+        observe(0, begin);
+        Self { observe, end }
+    }
+}
+impl<F: Fn(usize, &'static str)> Drop for PhysicsTask<'_, F> {
+    fn drop(&mut self) {
+        (self.observe)(0, self.end);
+    }
+}
+
 #[path = "chunk.rs"]
 pub mod chunk;
 #[path = "corpse.rs"]
@@ -494,7 +513,7 @@ mod tests {
                 ];
                 // Repeated and overlapping requests must retain every bit.
                 for &(lo, hi) in boxes.iter().chain(boxes.iter().rev()) {
-                    words.build(&[(lo, hi)], false);
+                    words.build(&[(lo, hi)], false, &|_, _| {});
                     for z in lo[2]..=hi[2] {
                         for y in lo[1]..=hi[1] {
                             for x in lo[0]..=hi[0] {
@@ -604,6 +623,7 @@ mod tests {
                 &mut index,
                 &mut queries,
                 &mut |_| {},
+                &|_, _| {},
             );
             assert!(!expected.is_empty());
             assert_eq!(index.cells.len(), expected.len());
@@ -639,6 +659,7 @@ mod tests {
             &mut index,
             &mut queries,
             &mut |_| {},
+            &|_, _| {},
         );
         assert!(index.cells.is_empty() && index.boxes.is_empty());
         fragments[0].resting = true;
@@ -1888,7 +1909,7 @@ mod tests {
         t.blast.max_flying = 7;
         t.blast.rest_check_ticks = 1;
         t.blast.push_pct = 0;
-        let run = |workers| {
+        let run = |workers, observed| {
             let (mut pieces, mut economy) = (Bursts::default(), economy());
             for i in 0..1200 {
                 let held = economy.ledger.create(matter::Kind::Debris, 0, u64::MAX);
@@ -1917,16 +1938,56 @@ mod tests {
                 .num_threads(workers)
                 .build()
                 .unwrap();
+            let events = std::sync::Mutex::new(Vec::new());
             pool.install(|| {
-                pieces.step_fragments(
+                pieces.step_fragments_observed(
                     &w,
                     &mut economy,
                     &t.blast,
                     crate::gravity_per_tick(&t),
                     0,
                     Surroundings::NONE,
+                    |_| {},
+                    &|slot, event| {
+                        if observed {
+                            events
+                                .lock()
+                                .unwrap()
+                                .push((std::thread::current().id(), slot, event));
+                        }
+                    },
                 );
             });
+            if observed {
+                let mut pending = HashMap::new();
+                let mut families = BTreeSet::new();
+                for (thread, slot, event) in events.into_inner().unwrap() {
+                    assert_eq!(slot, 0);
+                    if let Some(name) = event.strip_suffix("_begin") {
+                        *pending.entry((thread, name)).or_insert(0usize) += 1;
+                        families.insert(name);
+                    } else {
+                        let name = event.strip_suffix("_end").unwrap();
+                        let count = pending
+                            .get_mut(&(thread, name))
+                            .expect("begin before end on same thread");
+                        assert!(*count > 0);
+                        *count -= 1;
+                    }
+                }
+                assert!(pending.values().all(|&count| count == 0));
+                for family in [
+                    "physics_boxes",
+                    "physics_queries",
+                    "physics_candidates",
+                    "physics_cells",
+                    "physics_wake",
+                    "physics_translate",
+                    "physics_merge",
+                ] {
+                    assert!(families.contains(family), "missing {family}");
+                }
+            }
             let flying: Vec<_> = pieces
                 .fragments
                 .iter()
@@ -1939,7 +2000,11 @@ mod tests {
             pieces.save(&mut bytes);
             bytes.v
         };
-        assert_eq!(run(1), run(4));
+        let expected = run(1, false);
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(expected, run(workers, true));
+            assert_eq!(expected, run(workers, false));
+        }
     }
     #[test]
     fn parallel_pile_grouping_matches_ordered_merging_and_ledger() {
@@ -2180,6 +2245,7 @@ mod tests {
                     &mut index,
                     &mut queries,
                     &mut |_| {},
+                    &|_, _| {},
                 );
                 (index.boxes, index.cells.ordered(), queries.0)
             })
@@ -2297,6 +2363,7 @@ mod tests {
                         &mut index,
                         &mut queries,
                         &mut |_| {},
+                        &|_, _| {},
                     )
                 });
                 assert_eq!(
@@ -2340,7 +2407,7 @@ mod tests {
             Vec::new(),
         ] {
             want.clear();
-            want.build(&ranges, false);
+            want.build(&ranges, false, &|_, _| {});
             let mut expected = BTreeMap::<_, Vec<u32>>::new();
             for (i, bounds) in selected.iter().enumerate() {
                 let Some((lo, hi)) = *bounds else {
@@ -2366,7 +2433,7 @@ mod tests {
                     .num_threads(workers)
                     .build()
                     .unwrap();
-                pool.install(|| index.build(&selected, &want, true));
+                pool.install(|| index.build(&selected, &want, true, &|_, _| {}));
                 assert_eq!(index.len(), expected.len());
                 assert_eq!(index.is_empty(), expected.is_empty());
                 assert_eq!(index.ordered(), expected, "workers={workers}");
@@ -2375,7 +2442,7 @@ mod tests {
                 }
             }
             index.clear();
-            index.build(&selected, &want, false);
+            index.build(&selected, &want, false, &|_, _| {});
             assert_eq!(index.ordered(), expected);
         }
     }
@@ -2407,7 +2474,7 @@ mod tests {
             let mut queries = SettledQueries::default();
             for parallel in [false, true] {
                 queries.clear();
-                pool.install(|| queries.build(&ranges, parallel));
+                pool.install(|| queries.build(&ranges, parallel, &|_, _| {}));
                 for z in -4..=5 {
                     for y in -132..=132 {
                         for x in -9..=17 {
@@ -2417,9 +2484,11 @@ mod tests {
                     }
                 }
                 queries.clear();
-                pool.install(|| queries.build(&[], parallel));
+                pool.install(|| queries.build(&[], parallel, &|_, _| {}));
                 assert!(queries.is_empty());
-                pool.install(|| queries.build(&[([-1, -65, 2], [-1, -65, 2])], parallel));
+                pool.install(|| {
+                    queries.build(&[([-1, -65, 2], [-1, -65, 2])], parallel, &|_, _| {})
+                });
                 assert!(queries.contains([-1, -65, 2]));
                 assert!(!queries.contains([-1, -64, 2]));
                 assert!(!queries.contains([0, -65, 2]));
@@ -3900,7 +3969,7 @@ impl Bursts {
         tick: u64,
         around: Surroundings<'_>,
     ) {
-        self.step_fragments_observed(world, e, t, gravity, tick, around, |_| {});
+        self.step_fragments_observed(world, e, t, gravity, tick, around, |_| {}, &|_, _| {});
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3913,6 +3982,7 @@ impl Bursts {
         tick: u64,
         around: Surroundings<'_>,
         mut completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         let (hulls, yielding) = (around.hulls, around.yielding);
         let motion = FragmentMotion::new(t);
@@ -3928,6 +3998,7 @@ impl Bursts {
             &mut settled,
             &mut queries,
             &mut completed,
+            task,
         );
         completed("debris_settled");
         type RestingPile = ([i32; 3], Mat, Option<[u8; 3]>, u16);
@@ -3975,7 +4046,14 @@ impl Bursts {
             (push, unsupported)
         };
         let wakeups: Vec<_> = if self.fragments.len() >= 1024 {
-            self.fragments.par_iter().enumerate().map(query).collect()
+            self.fragments
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || PhysicsTask::new(task, "physics_wake_begin", "physics_wake_end"),
+                    |_, item| query(item),
+                )
+                .collect()
         } else {
             self.fragments.iter().enumerate().map(query).collect()
         };
@@ -4019,7 +4097,10 @@ impl Bursts {
             self.fragments
                 .par_iter_mut()
                 .enumerate()
-                .map(translate)
+                .map_init(
+                    || PhysicsTask::new(task, "physics_translate_begin", "physics_translate_end"),
+                    |_, item| translate(item),
+                )
                 .collect()
         } else {
             self.fragments
@@ -4054,6 +4135,7 @@ impl Bursts {
         }
         completed("debris_merge_keys");
         let group = |entries: &Vec<(RestingPile, usize)>| {
+            let _task = PhysicsTask::new(task, "physics_merge_begin", "physics_merge_end");
             let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(entries.len());
             let mut pairs = Vec::new();
             for &(key, donor) in entries {
@@ -4160,6 +4242,15 @@ impl Bursts {
         yielding: &[Mat],
         hulls: &[Hull],
     ) -> nav::vehicle::Rubble {
+        self.rubble_observed(world, yielding, hulls, &|_, _| {})
+    }
+    pub(crate) fn rubble_observed(
+        &self,
+        world: &voxel::World,
+        yielding: &[Mat],
+        hulls: &[Hull],
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) -> nav::vehicle::Rubble {
         // Floor is what something holds: the world, or a resting piece
         // under it — a pile on a rock piece is floor at the pile's top.
         // Only the world was asked, and a stacked piece was missing from
@@ -4171,6 +4262,11 @@ impl Bursts {
         let mut bounds = vec![None; self.fragments.len()];
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
+        let floor_task = PhysicsTask::new(
+            task,
+            "physics_rubble_floor_begin",
+            "physics_rubble_floor_end",
+        );
         for (i, f) in self.fragments.iter().enumerate() {
             if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
                 continue;
@@ -4188,12 +4284,14 @@ impl Bursts {
                 stacked.push(i);
             }
         }
+        drop(floor_task);
         if !stacked.is_empty() {
             let settled = Settled::around_bounds(
                 &self.fragments,
                 hulls,
                 |i, _| stacked.binary_search(&i).is_ok(),
                 |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
+                task,
             );
             // These pieces already failed the world support test above.
             // No world or hull changes occur while this query is running.
@@ -4212,6 +4310,11 @@ impl Bursts {
         }
         // A hull covers no column outside the box around its footprint:
         // a piece far from every hull asks none of them (ADR-465).
+        let _columns_task = PhysicsTask::new(
+            task,
+            "physics_rubble_columns_begin",
+            "physics_rubble_columns_end",
+        );
         let reach: Vec<([Fx; 2], [Fx; 2])> = hulls.iter().map(Hull::footprint_box).collect();
         let mut against: Vec<&Hull> = Vec::with_capacity(hulls.len());
         // The columns with their tops, gathered and sorted, and the map
@@ -4854,8 +4957,10 @@ impl SettledCells {
         selected: &[Option<([i32; 3], [i32; 3])>],
         want: &SettledQueries,
         parallel: bool,
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         let fill = |(owner, stripe): (usize, &mut SettledCellStripe)| {
+            let _task = PhysicsTask::new(task, "physics_cells_begin", "physics_cells_end");
             for (i, bounds) in selected.iter().enumerate() {
                 let Some((lo, hi)) = *bounds else {
                     continue;
@@ -4901,10 +5006,16 @@ impl SettledQueries {
     fn is_empty(&self) -> bool {
         self.0.iter().all(FxHashMap::is_empty)
     }
-    fn build(&mut self, ranges: &[([i32; 3], [i32; 3])], parallel: bool) {
+    fn build(
+        &mut self,
+        ranges: &[([i32; 3], [i32; 3])],
+        parallel: bool,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         // X modulo eight owns the word, so workers never share a table and
         // need no unordered merge. Ranges are captured in fragment order.
         let fill = |(stripe, table): (usize, &mut FxHashMap<[i32; 3], u64>)| {
+            let _task = PhysicsTask::new(task, "physics_queries_begin", "physics_queries_end");
             for &(lo, hi) in ranges {
                 Self::include(table, stripe as i32, lo, hi);
             }
@@ -4963,6 +5074,7 @@ impl Settled {
     fn of(fragments: &[Fragment], hulls: &[Hull], tick: u64, t: &Blast) -> Settled {
         Self::around(fragments, hulls, |_, f| !f.resting || due(f.id, tick, t))
     }
+    #[allow(clippy::too_many_arguments)] // Independent phase and worker observers.
     fn of_into(
         fragments: &[Fragment],
         hulls: &[Hull],
@@ -4971,6 +5083,7 @@ impl Settled {
         out: &mut Settled,
         want: &mut SettledQueries,
         completed: &mut impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         Self::around_bounds_into(
             fragments,
@@ -4980,6 +5093,7 @@ impl Settled {
             out,
             want,
             completed,
+            task,
         );
     }
     /// The resting pieces around those `asks` picks, by index and piece;
@@ -4990,7 +5104,7 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool + Sync,
     ) -> Settled {
-        Self::around_bounds(fragments, hulls, asks, |_, f| f.bounds())
+        Self::around_bounds(fragments, hulls, asks, |_, f| f.bounds(), &|_, _| {})
     }
     /// A caller that already measured pieces can supply the same local
     /// boxes. They must describe this exact immutable fragment slice.
@@ -4999,6 +5113,7 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool + Sync,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) -> Settled {
         let mut out = Settled::default();
         Self::around_bounds_into(
@@ -5009,9 +5124,11 @@ impl Settled {
             &mut out,
             &mut SettledQueries::default(),
             &mut |_| {},
+            task,
         );
         out
     }
+    #[allow(clippy::too_many_arguments)] // Independent phase and worker observers.
     fn around_bounds_into(
         fragments: &[Fragment],
         hulls: &[Hull],
@@ -5020,6 +5137,7 @@ impl Settled {
         out: &mut Settled,
         want: &mut SettledQueries,
         completed: &mut impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         out.cells.clear();
         want.clear();
@@ -5060,6 +5178,7 @@ impl Settled {
                 .par_chunks_mut(256)
                 .enumerate()
                 .map(|(chunk, boxes)| {
+                    let _task = PhysicsTask::new(task, "physics_boxes_begin", "physics_boxes_end");
                     let mut ranges = Vec::new();
                     for (offset, box_at) in boxes.iter_mut().enumerate() {
                         let i = chunk * 256 + offset;
@@ -5091,7 +5210,11 @@ impl Settled {
                 .collect()
         };
         completed("settled_ranges");
-        want.build(&ranges, fragments.len() >= 1024 && ranges.len() >= 128);
+        want.build(
+            &ranges,
+            fragments.len() >= 1024 && ranges.len() >= 128,
+            task,
+        );
         completed("settled_queries");
         if want.is_empty() {
             out.boxes.clear();
@@ -5134,12 +5257,20 @@ impl Settled {
             Some((c0, c1))
         };
         let selected: Vec<_> = if fragments.len() >= 1024 {
-            fragments.par_iter().enumerate().map(candidate).collect()
+            fragments
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || PhysicsTask::new(task, "physics_candidates_begin", "physics_candidates_end"),
+                    |_, item| candidate(item),
+                )
+                .collect()
         } else {
             fragments.iter().enumerate().map(candidate).collect()
         };
         completed("settled_candidates");
-        out.cells.build(&selected, want, fragments.len() >= 1024);
+        out.cells
+            .build(&selected, want, fragments.len() >= 1024, task);
         completed("settled_cells");
     }
     /// Whether the box `lo..hi` shares space with a resting piece other

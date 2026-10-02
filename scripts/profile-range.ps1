@@ -47,7 +47,7 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
@@ -131,7 +131,7 @@ try {
             }
             $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath
