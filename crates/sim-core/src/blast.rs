@@ -3641,10 +3641,17 @@ impl BlastRange {
             }
         }
         detail("motion_ground");
+        // Accepted hull positions remain ordered. Feet and articulated poses
+        // read only each actor and frozen terrain; later hulls use Obstacle,
+        // which does not depend on foot state or segment frames.
+        let parallel_feet = self.units.len() >= 4 && self.navigation_pool.is_some();
         let mut contacts = Vec::new();
         for id in motion_order {
             unit_detail(id, "begin");
             let u = &mut self.units[id];
+            if parallel_feet {
+                u.motion.defer_feet();
+            }
             u.motion.cut_limit = cut_limit;
             u.motion.allow_start(starts > 0);
             {
@@ -3703,7 +3710,9 @@ impl BlastRange {
                 } else {
                     u.motion.drive.head
                 };
-                u.update_pose(head);
+                if !parallel_feet {
+                    u.update_pose(head);
+                }
                 positions[id] = motion::Obstacle::of(&u.motion, &u.body);
                 if let Some((other, velocity)) = u.motion.take_contact() {
                     let target = if other < id { other } else { other + 1 };
@@ -3735,6 +3744,25 @@ impl BlastRange {
             }
         }
         detail("motion_commit");
+        if parallel_feet {
+            let world = &self.world;
+            let rubble = &self.rubble;
+            let actors = &self.battle.actors;
+            self.navigation_pool.as_ref().unwrap().install(|| {
+                self.units.par_iter_mut().enumerate().for_each(|(id, u)| {
+                    task_detail(id, "feet_begin");
+                    u.motion.finish_feet(world, rubble, &u.body);
+                    let head = if battle_mode {
+                        actors[id].turret.angle
+                    } else {
+                        u.motion.drive.head
+                    };
+                    u.update_pose(head);
+                    task_detail(id, "feet_end");
+                });
+            });
+        }
+        detail("motion_feet");
         // Position acceptance above remains in stable spatial order. Sample all
         // contact velocities before transferring any shove: a hull touched
         // twice in one tick must not make the second contact order-dependent.

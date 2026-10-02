@@ -47,6 +47,14 @@ enum HuntAdvance {
     Restart,
     Planned(nav::vehicle::Route, [Fx; 2]),
 }
+/// Inputs from accepted hull motion. Feet use the previous tick for suspension,
+/// then advance against the tick's immutable terrain before contacts or felling.
+#[derive(Clone, Copy, Debug)]
+struct FeetStep {
+    linear: V3,
+    angular: i32,
+    cycles: Fx,
+}
 impl Obstacle {
     pub fn of(m: &Motion, b: &UnitBody) -> Self {
         Self {
@@ -226,6 +234,9 @@ pub struct Motion {
     /// Transient cap supplied by the range's fragment room before each tick.
     /// Standalone motion retains the complete cut list.
     pub(crate) cut_limit: usize,
+    /// Scratch inside one atomic range tick; never saved or hashed.
+    defer_feet: bool,
+    pending_feet: Option<FeetStep>,
     started: bool,
 }
 /// Fair continuation shares in stable slot order. Rotate the remainder so
@@ -375,6 +386,8 @@ impl Motion {
             prepared_hunt: false,
             terrain_columns: nav::vehicle::Columns::default(),
             cut_limit: usize::MAX,
+            defer_feet: false,
+            pending_feet: None,
             started: false,
             last_plan: [0; 2],
             last_probe: [0; 2],
@@ -810,6 +823,18 @@ impl Motion {
         self.settle(w, rubble, b, gravity, response);
         self.step_feet(w, rubble, b, moved, 0, Fx::ZERO);
     }
+    /// Only the enclosing range can defer feet: it joins every job before
+    /// changing terrain, applying contacts, observing poses or saving state.
+    pub(super) fn defer_feet(&mut self) {
+        debug_assert!(!self.defer_feet && self.pending_feet.is_none());
+        self.defer_feet = true;
+    }
+    pub(super) fn finish_feet(&mut self, w: &World, rubble: &nav::vehicle::Rubble, b: &UnitBody) {
+        self.defer_feet = false;
+        if let Some(step) = self.pending_feet.take() {
+            self.step_feet(w, rubble, b, step.linear, step.angular, step.cycles);
+        }
+    }
     /// Advance a walker's feet one tick from the motion just accepted
     /// (ADR-279): the displacement, yaw step and phase advance of this
     /// tick, the terrain under each sole, and whether the hull carries
@@ -827,6 +852,15 @@ impl Motion {
             return;
         };
         if self.rigs.is_empty() {
+            return;
+        }
+        if self.defer_feet {
+            debug_assert!(self.pending_feet.is_none());
+            self.pending_feet = Some(FeetStep {
+                linear,
+                angular,
+                cycles,
+            });
             return;
         }
         let gait = crate::gait::Gait::of(g);
@@ -2737,7 +2771,7 @@ mod tests {
         assert!(reused, "matching source did not reduce terrain reads");
     }
     #[test]
-    fn prepared_ground_matches_serial_drive_feet_and_live_contacts_across_workers() {
+    fn prepared_ground_and_deferred_feet_match_serial_motion_across_workers() {
         use rayon::prelude::*;
         let w = ground(0);
         let bodies = [
@@ -2775,6 +2809,22 @@ mod tests {
             let mut contacts = 0;
             for tick in 0..60 {
                 let mut changed = changed.clone();
+                for group in [&mut serial, &mut prepared] {
+                    if tick == 15 {
+                        group[1].legs_buckled[1] = true;
+                        group[2].legs_buckled[1] = true;
+                    }
+                    if tick == 25 {
+                        group[1].legs_lost[0] = true;
+                        group[2].legs_lost[0] = true;
+                    }
+                    if tick == 45 {
+                        for m in group.iter_mut() {
+                            m.enabled = false;
+                            m.shove = V3::new(Fx::from_int(12), Fx::ZERO, Fx::ZERO);
+                        }
+                    }
+                }
                 if tick >= 30 {
                     rubble = nav::vehicle::Rubble::from_sorted(vec![([170, 280], 18)]);
                     changed.column(170, 280);
@@ -2800,6 +2850,7 @@ mod tests {
                 for i in 0..bodies.len() {
                     serial[i].allow_start(false);
                     prepared[i].allow_start(false);
+                    prepared[i].defer_feet();
                     serial[i].step(
                         &w,
                         &bodies[i],
@@ -2827,7 +2878,22 @@ mod tests {
                         answers[i].take(),
                         |stage| accepted |= stage == "ground_accepted",
                     );
-                    assert!(accepted);
+                    assert!(accepted || !prepared[i].enabled);
+                    // Articulation does not change the blocker later hulls see.
+                    let before = Obstacle::of(&prepared[i], &bodies[i]);
+                    let expected = Obstacle::of(&serial[i], &bodies[i]);
+                    assert_eq!(before.pos, expected.pos);
+                    assert_eq!(before.head, expected.head);
+                    assert_eq!(before.half, expected.half);
+                }
+                drop(answers);
+                pool.install(|| {
+                    prepared.par_iter_mut().enumerate().for_each(|(i, m)| {
+                        m.finish_feet(&w, &rubble, &bodies[i]);
+                    });
+                });
+                for i in 0..bodies.len() {
+                    assert!(!prepared[i].defer_feet && prepared[i].pending_feet.is_none());
                     assert_eq!(
                         motion_bytes(&prepared[i]),
                         motion_bytes(&serial[i]),
@@ -2838,7 +2904,6 @@ mod tests {
                     assert_eq!(prepared[i].contact, serial[i].contact);
                     contacts += usize::from(prepared[i].contact.is_some());
                 }
-                drop(answers);
             }
             assert!(contacts > 0, "fixture must exercise live contacts");
         }

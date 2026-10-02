@@ -2,7 +2,7 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
-const PHASES: [&str; 11] = [
+const PHASES: [&str; 12] = [
     "routes",
     "ground",
     "local_clone",
@@ -14,6 +14,7 @@ const PHASES: [&str; 11] = [
     "sweep_1",
     "sweep_2",
     "sweep_3",
+    "feet",
 ];
 
 #[derive(Clone, Copy)]
@@ -112,6 +113,8 @@ impl Profile {
             "sweep_2_end" => (9, false),
             "sweep_3_begin" => (10, true),
             "sweep_3_end" => (10, false),
+            "feet_begin" => (11, true),
+            "feet_end" => (11, false),
             _ => unreachable!("unknown navigation task event"),
         };
         let now = Instant::now();

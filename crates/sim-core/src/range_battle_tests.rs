@@ -2464,7 +2464,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         restarted.start_battle().unwrap();
         assert!(restarted.navigation_pool.is_none());
         drop(restarted);
-        let tasks: Vec<[std::sync::atomic::AtomicUsize; 22]> = (0..count)
+        let tasks: Vec<[std::sync::atomic::AtomicUsize; 24]> = (0..count)
             .map(|_| std::array::from_fn(|_| std::sync::atomic::AtomicUsize::new(0)))
             .collect();
         for tick in 0..20 {
@@ -2498,6 +2498,8 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
                         "sweep_2_end" => 19,
                         "sweep_3_begin" => 20,
                         "sweep_3_end" => 21,
+                        "feet_begin" => 22,
+                        "feet_end" => 23,
                         _ => unreachable!(),
                     };
                     tasks[id][stage].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2516,6 +2518,8 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
             assert_eq!(count[0], count[1]);
             assert_eq!(count[2], count[3]);
             assert_eq!(count[2], 20);
+            assert_eq!(count[22], 20);
+            assert_eq!(count[22], count[23]);
             assert_eq!(count[4], count[5]);
             assert_eq!(count[6], count[7]);
             assert_eq!(count[4], count[6]);

@@ -14,6 +14,7 @@ struct TickProfile {
     motion_us: u128,
     route_us: u128,
     commit_us: u128,
+    feet_us: u128,
     contact_us: u128,
     felling_us: u128,
     debris_us: u128,
@@ -354,6 +355,7 @@ fn main() {
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
         let mut ground_us = 0;
+        let mut feet_us = 0;
         let mut debris_detail = [0u128; 16];
         let mut settled_detail = [0u128; 6];
         let mut settled_last = None;
@@ -399,6 +401,7 @@ fn main() {
                         "motion_routes" => motion_detail[0] = elapsed,
                         "motion_ground" => ground_us = elapsed,
                         "motion_commit" => motion_detail[1] = elapsed,
+                        "motion_feet" => feet_us = elapsed,
                         "motion_contacts" => motion_detail[2] = elapsed,
                         "motion_felling" => motion_detail[3] = elapsed,
                         "debris_begin" => {}
@@ -501,6 +504,7 @@ fn main() {
             }
             profile.tick = sim.tick;
             profile.total_us = elapsed;
+            profile.feet_us = feet_us;
             [
                 profile.route_us,
                 profile.commit_us,
@@ -673,11 +677,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -701,7 +705,8 @@ fn main() {
                 p.fragments,
                 p.flying,
                 p.chunks,
-                p.felling
+                p.felling,
+                p.feet_us
             )
             .unwrap();
         }
@@ -795,6 +800,12 @@ fn main() {
                 ground_windows[index].0 / len,
                 ground_windows[index].1[0],
                 ground_windows[index].1[1]
+            );
+            println!(
+                "motion_feet_window={}..{} mean_us={}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                window.iter().map(|p| p.feet_us).sum::<u128>() / len,
             );
         }
         println!("tick_csv={path}");
