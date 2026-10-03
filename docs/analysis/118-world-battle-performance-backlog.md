@@ -4322,3 +4322,36 @@ Parent prepare 32,127 мс при actual gas 0,046 мс: residual 32,081 мс
 source IDs, WBPERF-002/независимый tick и 165 FPS открыты. Следующий
 instrumentation шаг — actual Bevy jobs без изменения их параллельности.
 Данные, память, SHA, ограничения — [138](138-render-trace-duration-budget.md).
+
+## ADR-545 — фактические Bevy system calls на render workers
+
+WBPERF-001/027: optional feature наблюдает cached SystemMeta entries,
+сохраняет реальные имена, immutable source row/generation/tick и
+calling-thread CPU/cycles; commands отдельны. Расписание/пулы не меняются.
+Имена main/render с неоднозначным происхождением и собственные probes
+исключены явно. Union wall не складывает вложенные/параллельные calls.
+Feature build исключён из FPS-приёмки даже без флага наблюдения.
+
+Native обнаружил унаследованный RUST_LOG=warn: inventory был заполнен,
+actual calls отсутствовали. Пустой dataset сохранён и отклонён; runner
+теперь включает SystemMeta target и сохраняет effective filter. Буфер
+bounded 2 млн records; длинные runs снимают каждый восьмой source frame
+целиком, unsampled rows видны и не получают attribution. Это не полный
+профиль редких stalls во всех кадрах.
+
+120 с: 394182 calls / 1077 selected source frames, task drops/open=0;
+7537 prepare frames намеренно не сняты. Coarse: 8613 complete / 3 terminal
+open / одна unhanded main row. Actual collect_meshes_for_gpu_building:
+20,740 мс внутри prepare 23,741 мс (row 7008, tick 2432); union 23,199,
+other/unobserved 0,542 мс. Это system parent с nested taskpool producers
+и collection, не установленная CPU/lock/GPU wait причина. Нужны
+changed/new/removed queue counts, child worker calls и OS scheduling;
+проверить лишнюю инвалидизацию instances до смены pools/preprocessing.
+
+Actions 30 с: 466284 calls / 1274 selected frames, generations 1…4,
+task drops/open=0; отдельный reload allocator 3,995 мс. 374 проверки
+и обычные tests/build/clippy проходят без новых предупреждений. Бой
+делает 3600 шагов / 0,9996×; diagnostic ~71,77 FPS не A/B/165-приёмка.
+WBPERF-001/027, неснятые редкие фризы, независимый sim/render, GPU IDs
+и 165 FPS открыты. Данные, SHA, память и границы —
+[139](139-render-prepare-system-calls.md).

@@ -57,6 +57,23 @@ $noBytes = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Rep
 Assert-Profile ($noBytes.Reasons -contains 'render_timeline_budget_count_mismatch') 'New schema accepted without memory accounting'
 $duplicateRender = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log + "`n" + $renderV4Log) -RenderTimeline
 Assert-Profile ($duplicateRender.Reasons -contains 'render_timeline_metadata_missing') 'Duplicate render metadata accepted'
+$taskLog = $renderV4Log + "`nPROFILE render_tasks_build=true`nPROFILE render_tasks_schema=1 render_task_limit=2000000 render_tasks_started=3 render_tasks_retained=3 render_tasks_dropped=0 render_tasks_incomplete=0 render_task_cutoff_ns=1000000001 render_task_names=2 render_task_excluded_names=1 render_task_bytes=224"
+$tasks = Get-RangeValidity $rows -Scenario world-battle -Log $taskLog -RenderTimeline -RenderTasks
+Assert-Profile ($tasks.ValidForComparison -and -not $tasks.AcceptanceEligible -and $tasks.Mode -eq 'render_task_diagnostic') 'Actual-task capture rejected or used for FPS acceptance'
+$taskBuild = Get-RangeValidity $rows -Scenario world-battle -Log ($log + "`nPROFILE render_tasks_build=true")
+Assert-Profile ($taskBuild.ValidForComparison -and -not $taskBuild.AcceptanceEligible) 'Feature-only build used for FPS acceptance'
+$missingTasks = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log + "`nPROFILE render_tasks_build=true") -RenderTimeline -RenderTasks
+Assert-Profile ($missingTasks.Reasons -contains 'render_tasks_metadata_missing') 'Missing tasks capture accepted'
+$missingBuild = Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.Replace('render_tasks_build=true','render_tasks_build=false')) -RenderTimeline -RenderTasks
+Assert-Profile ($missingBuild.Reasons -contains 'render_tasks_build_or_mode_missing') 'Non-instrumented build claimed task coverage'
+$taskCounts = Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.Replace('render_tasks_started=3 ', 'render_tasks_started=4 ')) -RenderTimeline -RenderTasks
+Assert-Profile ($taskCounts.Reasons -contains 'render_tasks_budget_count_mismatch') 'Task counts mismatch accepted'
+$taskEmpty = Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.Replace('render_tasks_started=3 ', 'render_tasks_started=0 ').Replace('render_tasks_retained=3 ', 'render_tasks_retained=0 ')) -RenderTimeline -RenderTasks
+Assert-Profile ($taskEmpty.Reasons -contains 'render_tasks_empty_capture') 'Empty task capture called evidence'
+$taskOverflow = Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.Replace('render_tasks_started=3 ', 'render_tasks_started=2000001 ').Replace('render_tasks_retained=3 ', 'render_tasks_retained=2000000 ').Replace('render_tasks_dropped=0 ', 'render_tasks_dropped=1 ')) -RenderTimeline -RenderTasks
+Assert-Profile ($taskOverflow.Reasons -contains 'render_tasks_truncated' -and -not $taskOverflow.ValidForComparison) 'Task overflow accepted for comparison'
+$taskBytes = Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.Replace('render_task_bytes=224', 'render_task_bytes=1025')) -RenderTimeline -RenderTasks
+Assert-Profile ($taskBytes.Reasons -contains 'render_tasks_budget_count_mismatch') 'Invalid task memory accounting accepted'
 $missing = Get-RangeValidity $rows -Scenario world-battle -Log ''
 Assert-Profile ($missing.Reasons -contains 'state_hash_missing' -and $missing.Reasons -contains 'actual_adapter_missing') 'Unknown provenance accepted'
 $nan = Get-RangeValidity @([pscustomobject]@{frame_ms='NaN';simulation_ticks='30';seconds='1.0'}) -Scenario world-battle -Log $log
@@ -88,4 +105,9 @@ foreach ($file in 'profile-range.ps1','profile-cpu-threads.ps1','range-profile-t
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file), [ref]$tokens, [ref]$errors)
     Assert-Profile ($errors.Count -eq 0) "Invalid PowerShell syntax: $file $errors"
 }
-'PASS: 32 validity/timing/context/budget cases and parser checks.'
+Assert-Profile ((Get-RangeTaskLogFilter '') -eq 'bevy_ecs::system::function_system=info') 'Empty task log filter not enabled'
+Assert-Profile ((Get-RangeTaskLogFilter 'warn') -eq 'warn,bevy_ecs::system::function_system=info') 'Inherited warn silenced tasks'
+Assert-Profile ((Get-RangeTaskLogFilter 'error,bevy_ecs::system::function_system=off') -eq 'error,bevy_ecs::system::function_system=off,bevy_ecs::system::function_system=info') 'Existing target filter not overridden'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.TrimEnd() + ' render_task_stride=8') -RenderTimeline -RenderTasks).ValidForComparison) 'Declared whole-frame sampling rejected'
+Assert-Profile (-not (Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.TrimEnd() + ' render_task_stride=2') -RenderTimeline -RenderTasks).ValidForComparison) 'Unknown task stride accepted'
+'PASS: 45 validity/timing/context/budget/task/log-filter cases and parser checks.'

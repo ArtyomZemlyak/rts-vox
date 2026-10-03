@@ -1053,6 +1053,100 @@ class ReportTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,"Render timeline"):
                     profile.analyze(self.path)
 
+    def task_fixture(self, rows=None, **metadata):
+        self.gas_fixture(schema=3)
+        if rows is None:
+            rows = [dict(frame_row="0", generation="0", tick="1", name=name, kind=kind,
+                         begin_ns=str(a), end_ns=str(b), begin_thread=f"ThreadId({thread})", end_thread=f"ThreadId({thread})",
+                         begin_os_thread=str(thread), end_os_thread=str(thread), begin_cpu_ns="100", end_cpu_ns="100",
+                         begin_cycles="1000", end_cycles="1100")
+                    for name,kind,a,b,thread in [("task<A,B>","system",1820,1860,3),("other","system",1830,1880,4),("task<A,B>","commands",1840,1850,3)]]
+        with (self.path / 'world-battle.tasks.csv').open('w',newline='') as out:
+            writer=csv.DictWriter(out,list(rows[0]));writer.writeheader();writer.writerows(rows)
+        with (self.path / 'world-battle.task-names.csv').open('w',newline='') as out:
+            writer=csv.DictWriter(out,['name','allowed']);writer.writeheader()
+            writer.writerows([dict(name=n,allowed=a) for n,a in [('task<A,B>',1),('other',1),('ambiguous',0)]])
+        fields=dict(render_tasks_schema=1,render_task_limit=2000000,render_tasks_started=len(rows),render_tasks_retained=len(rows),render_tasks_dropped=0,render_tasks_incomplete=sum(not row['end_ns'] for row in rows),render_task_cutoff_ns=2000101,render_task_names=2,render_task_excluded_names=1,render_task_bytes=192)
+        fields.update(metadata)
+        with (self.path / 'world-battle.log').open('a') as out:
+            out.write('PROFILE render_tasks_build=true\nPROFILE '+ ' '.join(f'{k}={v}' for k,v in fields.items())+'\n')
+        path=self.path/'world-battle.manifest.json';manifest=json.loads(path.read_text());manifest['RenderTasks']=True;path.write_text(json.dumps(manifest))
+        return rows
+
+    def test_render_tasks_parallel_nested_wall_is_a_union_not_a_sum(self):
+        self.task_fixture();report=profile.analyze(self.path)
+        tasks=report['render_tasks'];frame=tasks['slow_prepare_frames'][0]
+        self.assertAlmostEqual(frame['task_union_ms'],.00006)
+        self.assertAlmostEqual(frame['other_or_unobserved_ms'],.00004)
+        self.assertEqual(tasks['sampled_names'],2)
+        self.assertEqual(tasks['excluded_names'],['ambiguous'])
+        self.assertEqual(frame['longest_calls'][0]['os_thread'],4)
+        self.assertEqual(frame['longest_calls'][0]['cpu_ms'],0)
+        self.assertTrue(report['valid_for_comparison']);self.assertFalse(report['acceptance_eligible'])
+        self.assertIn('Actual Bevy prepare tasks',profile.markdown(report))
+
+    def test_render_tasks_whole_frame_stride_is_explicit_and_compared(self):
+        self.task_fixture();full=profile.analyze(self.path)
+        self.task_fixture(render_task_stride=8);sampled=profile.analyze(self.path)
+        self.assertTrue(sampled['valid_for_comparison'])
+        self.assertEqual(sampled['render_tasks']['stride'],8)
+        self.assertIn('different:render_tasks:stride',profile.compare(full,sampled)['reasons'])
+        self.assertIn('unsampled source rows',profile.markdown(sampled))
+        self.task_fixture(render_task_stride=2)
+        with self.assertRaisesRegex(ValueError,'whole-frame stride'):profile.analyze(self.path)
+        rows=self.task_fixture();rows[0]['frame_row']='1';self.task_fixture(rows,render_task_stride=8)
+        with self.assertRaisesRegex(ValueError,'Render tasks source'):profile.analyze(self.path)
+
+    def test_render_tasks_conflicting_build_markers_are_invalid(self):
+        self.task_fixture()
+        with (self.path/'world-battle.log').open('a') as out:out.write('PROFILE render_tasks_build=false\n')
+        self.assertIn('render_tasks_build_or_mode_missing',profile.analyze(self.path)['reasons'])
+
+    def test_render_tasks_reject_identity_clock_threads_and_inventory(self):
+        for field,value in [('frame_row','1'),('generation','1'),('tick','2'),('name','ambiguous'),('kind','launch'),('begin_ns','1799'),('end_ns','1901'),('begin_os_thread','0'),('end_os_thread','9'),('end_cycles','999'),('end_thread','ThreadId(9)')]:
+            with self.subTest(field=field,value=value):
+                rows=self.task_fixture();rows[0][field]=value;self.task_fixture(rows)
+                with self.assertRaisesRegex(ValueError,'Render tasks'):profile.analyze(self.path)
+
+    def test_render_tasks_bad_counts_missing_and_undeclared_cannot_pass(self):
+        for key,value in [('render_task_limit',2000001),('render_tasks_retained',4),('render_tasks_started',4),('render_tasks_incomplete',1),('render_task_names',3),('render_task_bytes',1025),('render_task_cutoff_ns',2000100)]:
+            with self.subTest(key=key,value=value):
+                self.task_fixture(**{key:value})
+                with self.assertRaisesRegex(ValueError,'Render tasks'):profile.analyze(self.path)
+        self.task_fixture();(self.path/'world-battle.task-names.csv').unlink()
+        self.assertIn('render_tasks_artifact_or_metadata_missing',profile.analyze(self.path)['reasons'])
+        self.task_fixture();path=self.path/'world-battle.manifest.json';manifest=json.loads(path.read_text());manifest['RenderTasks']=False;path.write_text(json.dumps(manifest))
+        self.assertIn('render_tasks_mode_mismatch',profile.analyze(self.path)['reasons'])
+
+    def test_render_task_feature_build_and_modes_are_a_separate_contract(self):
+        self.task_fixture();after=profile.analyze(self.path)
+        # Retain a report snapshot then compare with a legacy no-task build.
+        for suffix in ['tasks.csv','task-names.csv']:(self.path/f'world-battle.{suffix}').unlink()
+        self.gas_fixture(schema=3);before=profile.analyze(self.path)
+        self.assertIn('different:RenderTasks_build_or_mode',profile.compare(before,after)['reasons'])
+        self.write()
+        with (self.path/'world-battle.log').open('a') as out:out.write('PROFILE render_tasks_build=true\n')
+        ordinary=profile.analyze(self.path)
+        self.assertFalse(ordinary['acceptance_eligible'])
+
+    def test_render_tasks_open_terminal_call_is_not_complete_coverage(self):
+        rows=self.task_fixture();rows=rows[:1];rows[0]['end_ns']='';rows[0]['end_thread']=''
+        for key in ['end_os_thread','end_cpu_ns','end_cycles']:rows[0][key]=''
+        self.task_fixture(rows)
+        # Open prepare/schedule in the terminal source row, with no post-prepare stages.
+        path=self.path/'world-battle.render.csv';spans=list(profile.read_csv(path));kept=[]
+        for row in spans:
+            if row['stage'] in ('render_system','render_graph','submit_present_tail'):continue
+            if row['stage'] in ('render_prepare','render_schedule'):
+                row['end_ns']='';row['end_thread']=''
+            kept.append(row)
+        with path.open('w',newline='') as out:
+            writer=csv.DictWriter(out,list(kept[0]));writer.writeheader();writer.writerows(kept)
+        logpath=self.path/'world-battle.log';log=logpath.read_text();log=log.replace('render_spans_started=13','render_spans_started=10').replace('render_spans_retained=13','render_spans_retained=10').replace('render_spans_incomplete=0','render_spans_incomplete=2');logpath.write_text(log)
+        result=profile.analyze(self.path)['render_tasks']
+        self.assertEqual(result['incomplete'],1)
+        self.assertIsNone(result['slow_prepare_frames'][0]['other_or_unobserved_ms'])
+
     def test_extract_phase_schema_is_a_separate_diagnostic_contract(self):
         self.gas_fixture(schema=2);before=profile.analyze(self.path)
         self.gas_fixture(schema=3);after=profile.analyze(self.path)

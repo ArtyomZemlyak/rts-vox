@@ -33,6 +33,8 @@ fx = { path = "../fx" }
 # Включается явно: `cargo run -p render --bin battle --features rt -- --rt 1`.
 [features]
 rt = ["bevy/bevy_solari"]
+# Opt-in ECS tracing and real system names; only existing Bevy dependencies.
+render-tasks = ["bevy/detailed_trace", "bevy/debug"]
 
 [lib]
 path = "src/lib.rs"

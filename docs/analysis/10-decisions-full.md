@@ -24239,3 +24239,41 @@ driver CPU 0 при ненулевых cycles не устанавливает п
 CPU здесь не измерены. WBPERF-001/027, GPU IDs, независимый sim/render и
 165 FPS открыты. SHA, данные и границы —
 [138](138-render-trace-duration-budget.md).
+
+## ADR-545 — actual Bevy SystemMeta calls и выбранные source frames
+
+ADR-544 сохранял prepare residual без attribution других workers.
+Optional existing Bevy detailed_trace/debug включает cached SystemMeta
+spans до создания систем; observer записывает actual entry/end на
+calling thread с immutable source row/generation/tick, wall, OS CPU/cycles.
+Commands отдельны; main/render ambiguous names и probes исключаются.
+Нет unsafe замены систем, новых scheduling fences или смены pools.
+Новых crates/versions нет; lock добавляет только existing tracing edge.
+
+Feature build исключён из FPS-приёмки даже без сбора; ordinary build
+без feature и recorder. Native выявил inherited RUST_LOG=warn: inventory
+заполнен, actual calls=0. Invalid evidence сохранено; runner включает
+INFO SystemMeta target, сохраняет effective filter и восстанавливает env.
+Буфер bounded 2 млн records (208 bytes, 396,73 MiB элементов, не RSS).
+До 20 секунд whole-frame stride 1; длиннее stride 8. Неснятые кадры
+не имеют task attribution. Пустая/обрезанная трасса не проходит gate,
+режим/filter/stride различия не проходят A/B. Union вложенных и
+параллельных wall intervals не считается CPU utilization или wait.
+
+136 library/101 blast/92 Python/45 PowerShell = 374 проверки; дополнительно
+обычные tests/build/clippy без feature, новых предупреждений нет.
+Native 120 с: 394182 calls/1077 sampled source frames, 7537 намеренно
+неснятых prepare rows; task drops/open=0. Coarse 8613 complete source
+rows, 3 terminal open spans, одна unhanded main row. Actions 30 с:
+466284 calls/1274 sampled frames, reset generations 1…4, task drops/open=0.
+3600 steps/0,9996×, diagnostic ~71,77 FPS не A/B/165 acceptance.
+
+Row 7008/tick 2432: prepare 23,7412 мс, task union 23,1990,
+other/unobserved 0,5422. Actual collect_meshes_for_gpu_building 20,7398 мс
+на OS worker 533864, rounded CPU 0 при 48704380 cycles. Pinned source
+использует nested ComputeTaskPool producers и mpsc collection: их
+отдельные CPU/wait причины пока не измерены. Следующий приоритет — queue
+workload/invalidation, child worker spans и source-aligned OS scheduling.
+Reload allocator отдельно; неснятые редкие фризы, independent sim/render,
+GPU IDs и 165 FPS открыты. SHA/raw evidence/ограничения —
+[139](139-render-prepare-system-calls.md).

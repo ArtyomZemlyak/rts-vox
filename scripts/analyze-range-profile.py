@@ -755,6 +755,118 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
     return summary, issues
 
 
+RENDER_TASK_LIMIT = 2_000_000
+
+
+def analyze_render_tasks(directory, scenario, log, manifest, frames, timeline, top, roles):
+    """Actual cached SystemMeta entries, not scheduler launch/enqueue times."""
+    path = directory / f"{scenario}.tasks.csv"
+    inventory = directory / f"{scenario}.task-names.csv"
+    declared = bool((manifest or {}).get("RenderTasks"))
+    metadata = re.findall(r"^PROFILE render_tasks_schema=(\d+) render_task_limit=(\d+) render_tasks_started=(\d+) render_tasks_retained=(\d+) render_tasks_dropped=(\d+) render_tasks_incomplete=(\d+) render_task_cutoff_ns=(\d+) render_task_names=(\d+) render_task_excluded_names=(\d+) render_task_bytes=(\d+)(?: render_task_stride=(\d+))?$", log, re.M)
+    if not declared and not metadata and not path.exists() and not inventory.exists():
+        return None, []
+    if not declared:
+        return None, ["render_tasks_mode_mismatch"]
+    if not timeline or not path.exists() or not inventory.exists() or len(metadata) != 1:
+        return None, ["render_tasks_artifact_or_metadata_missing"]
+    schema, limit, started, retained, dropped, incomplete, cutoff, names, excluded, size = map(int, metadata[0][:10])
+    stride = int(metadata[0][10] or 1)
+    if stride not in (1, 8):
+        raise ValueError("Render tasks invalid whole-frame stride")
+    if schema != 1 or limit != RENDER_TASK_LIMIT or retained != min(started, limit) or started != retained + dropped or incomplete > retained or names == 0 or not 1 <= size <= 1024 or cutoff < timeline["cutoff_ns"]:
+        raise ValueError("Render tasks metadata budget/count/clock mismatch")
+    issues = ["render_tasks_truncated"] if dropped else []
+    if retained == 0:
+        issues.append("render_tasks_empty_capture")
+    if re.findall(r"^PROFILE render_tasks_build=(true|false)$", log, re.M) != ["true"]:
+        issues.append("render_tasks_build_or_mode_missing")
+    allowed, ignored = set(), set()
+    for row in read_csv(inventory):
+        if row["allowed"] not in ("0", "1") or not row["name"] or row["name"] in allowed | ignored:
+            raise ValueError("Render tasks inventory invalid")
+        (allowed if row["allowed"] == "1" else ignored).add(row["name"])
+    if len(allowed) != names or len(ignored) != excluded:
+        raise ValueError("Render tasks inventory count mismatch")
+    parents = {int(r["frame_row"]): (int(r["begin_ns"]), optional_int(r, "end_ns"))
+               for r in read_csv(directory / f"{scenario}.render.csv") if r["stage"] == "render_prepare"}
+    count, opened, last_begin, last_row, parent_missing = 0, 0, -1, -1, 0
+    jobs, leaders, sampled, source_count = {}, [], set(), 0
+    for idx_text, rows in itertools.groupby(read_csv(path), key=lambda row: row["frame_row"]):
+        idx = int(idx_text)
+        if idx <= last_row or idx % stride or (idx not in parents and not timeline["dropped"]) or idx < 0 or idx >= len(frames):
+            raise ValueError("Render tasks source order/parent missing")
+        last_row = idx; source_count += 1
+        if idx not in parents: parent_missing += 1
+        parent_a, parent_b = parents.get(idx, (int(frames[idx]["frame_end_ns"]), None))
+        intervals, longest, source_open = [], [], 0
+        for row in rows:
+            count += 1
+            if count > retained:
+                raise ValueError("Render tasks count mismatch")
+            if int(row["generation"]) != int(frames[idx]["generation"]) or int(row["tick"]) != int(frames[idx]["tick"]) or row["name"] not in allowed or row["kind"] not in ("system", "commands"):
+                raise ValueError("Render tasks identity/name/kind mismatch")
+            a, b = int(row["begin_ns"]), optional_int(row, "end_ns")
+            if a < max(parent_a, int(frames[idx]["frame_end_ns"])) or a < last_begin or a > cutoff or (b is not None and (b < a or b > cutoff)) or (parent_b is not None and (b is None or b > parent_b or a > parent_b)):
+                raise ValueError("Render tasks clock/nesting mismatch")
+            last_begin = a
+            if not re.fullmatch(r"ThreadId\(\d+\)", row["begin_thread"]) or (row["end_thread"] != row["begin_thread"] if b is not None else bool(row["end_thread"])):
+                raise ValueError("Render tasks thread mismatch")
+            counters = {field: optional_int(row, field) for field in ("begin_os_thread", "end_os_thread", "begin_cpu_ns", "end_cpu_ns", "begin_cycles", "end_cycles")}
+            if any(v is not None and v < 0 for v in counters.values()) or any(counters[f] == 0 for f in ("begin_os_thread", "end_os_thread")) or any(counters[side + "_os_thread"] is None and (counters[side + "_cpu_ns"] is not None or counters[side + "_cycles"] is not None) for side in ("begin", "end")):
+                raise ValueError("Render tasks counter identity invalid")
+            same = counters["begin_os_thread"] is not None and counters["begin_os_thread"] == counters["end_os_thread"]
+            if counters["begin_os_thread"] is not None and counters["end_os_thread"] is not None and not same:
+                raise ValueError("Render tasks OS thread changed")
+            def delta(field):
+                x, y = counters["begin_" + field], counters["end_" + field]
+                if not same or x is None or y is None:
+                    return None
+                if y < x:
+                    raise ValueError("Render tasks counter regressed")
+                return y - x
+            if b is None:
+                if any(counters[k] is not None for k in ("end_os_thread", "end_cpu_ns", "end_cycles")):
+                    raise ValueError("Render tasks open call has end counters")
+                opened += 1; source_open += 1
+                continue
+            cpu, cycles, wall = delta("cpu_ns"), delta("cycles"), (b - a)/1e6
+            key = (row["name"], row["kind"])
+            values = jobs.setdefault(key, dict(wall=[], cpu=[], cycles=[]))
+            values["wall"].append(wall)
+            if cpu is not None: values["cpu"].append(cpu/1e6)
+            if cycles is not None: values["cycles"].append(cycles)
+            sampled.add(row["name"])
+            if counters["begin_os_thread"] is not None:
+                roles.setdefault(str(counters["begin_os_thread"]), set()).add("render_prepare_task")
+            intervals.append((a, b))
+            longest.append(dict(name=row["name"], kind=row["kind"], wall_ms=wall, cpu_ms=cpu/1e6 if cpu is not None else None, cycles=cycles, os_thread=counters["begin_os_thread"], thread=row["begin_thread"]))
+        union = sum(b-a for a,b in merged_intervals(intervals))/1e6
+        parent_wall = (parent_b-parent_a)/1e6 if parent_b is not None else None
+        leaders.append(dict(source_row=idx, generation=int(frames[idx]["generation"]), tick=int(frames[idx]["tick"]), prepare_ms=parent_wall,
+            task_union_ms=union, other_or_unobserved_ms=parent_wall-union if parent_wall is not None and not dropped and not source_open else None,
+            longest_calls=sorted(longest, key=lambda c:-c["wall_ms"])[:3], incomplete=source_open))
+    if count != retained or opened != incomplete:
+        raise ValueError("Render tasks count/open mismatch")
+    summary = dict(schema=schema, limit=limit, stride=stride, span_bytes=size, reserved_bytes=limit*size,
+        retained=retained, started=started, dropped=dropped, incomplete=incomplete,
+        allowed_names=names, excluded_names=sorted(ignored), sampled_names=len(sampled),
+        source_rows=source_count, source_rows_without_parent=parent_missing,
+        intentionally_unsampled_prepare_rows=sum(idx % stride != 0 for idx in parents),
+        prepare_rows_without_calls=sum(idx % stride == 0 for idx in parents)-source_count+parent_missing,
+        capture_not_truncated=dropped == 0, cutoff_ns=cutoff,
+        jobs=sorted((dict(name=name, kind=kind, wall_ms=stats(v["wall"]), cpu_ms=stats(v["cpu"]), cycles=stats(v["cycles"]), inclusive_wall_ms=sum(v["wall"])) for (name,kind),v in jobs.items()), key=lambda job:-job["inclusive_wall_ms"]),
+        slow_prepare_frames=sorted(leaders,key=lambda frame:-(frame["prepare_ms"] or 0))[:top],
+        limitations=["Actual SystemMeta entry includes parameter access/function body; commands are separately labeled",
+            "Prepare-phase only; skipped systems, conditions, non-SystemMeta work and ambiguous main/render names are not invented jobs",
+            "Union covers observed task wall, not CPU utilization; concurrent/nested job wall totals must not be added to parent time",
+            "Other/unobserved includes scheduling and unobserved work; no lock-wait or OS cause is inferred",
+            "Feature build and per-task counters add overhead and cannot qualify FPS; coarse zero CPU counters are not idle"])
+    summary["limitations"].append(f"Whole-frame stride {stride}: unsampled source rows have no task attribution, including rare stalls there")
+    if parent_missing: issues.append("render_tasks_parent_coverage_missing")
+    return summary, issues
+
+
 def analyze(directory, scenario="world-battle", top=12):
     directory = Path(directory)
     log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
@@ -958,6 +1070,10 @@ def analyze(directory, scenario="world-battle", top=12):
     stall_trace, stall_issues = analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top)
     reasons.extend(stall_issues)
     render_trace, render_issues = analyze_render_timeline(directory, scenario, log, manifest, frames, top, roles)
+    render_tasks, task_issues = analyze_render_tasks(directory, scenario, log, manifest, frames, render_trace, top, roles)
+    task_build_match = re.search(r"^PROFILE render_tasks_build=(true|false)$", log, re.M)
+    task_build = task_build_match[1] == "true" if task_build_match else None
+    reasons.extend(task_issues)
     reasons.extend(render_issues)
     if not pools:
         reasons.append("actual_worker_counts_missing")
@@ -978,7 +1094,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=5, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -1000,6 +1116,7 @@ def analyze(directory, scenario="world-battle", top=12):
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         slice_summary=slice_summary, slow_slices=slow_slices,
         stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
+        render_tasks=render_tasks, render_tasks_build=task_build,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
                     "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
@@ -1025,9 +1142,13 @@ def compare(a, b):
         if not run["meets_simulation_rate"]:
             problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
-            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow"]
+            "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
         problems.append("different:RenderTimeline")
+    if bool((a["manifest"] or {}).get("RenderTasks")) != bool((b["manifest"] or {}).get("RenderTasks")) or a.get("render_tasks_build") != b.get("render_tasks_build"):
+        problems.append("different:RenderTasks_build_or_mode")
+    if (a.get("render_tasks") or {}).get("stride") != (b.get("render_tasks") or {}).get("stride"):
+        problems.append("different:render_tasks:stride")
     for key in ("schema", "gas_details", "span_limit", "span_bytes"):
         if (a.get("render_timeline") or {}).get(key) != (b.get("render_timeline") or {}).get(key):
             problems.append("different:render_timeline:" + key)
@@ -1118,6 +1239,14 @@ def markdown(report):
         for thread in cpu["sampled_threads"][:12]:
             lines.append(f"- OS thread {thread['os_thread']}: {thread['cpu_ms']:.3f}ms; observed callbacks: {', '.join(thread['observed_roles']) or 'unattributed'}.")
     timeline = report.get("render_timeline")
+    tasks = report.get("render_tasks")
+    if tasks:
+        lines += ["", f"Actual Bevy prepare tasks: {tasks['retained']} records, drops {tasks['dropped']}, open {tasks['incomplete']}, source rows {tasks['source_rows']}; {tasks['sampled_names']}/{tasks['allowed_names']} names executed. Excluded names: {tasks['excluded_names']}.", "",
+                  "| Source row | Parent prepare, ms | Task wall union, ms | Other/unobserved, ms | Longest actual calls |", "|---:|---:|---:|---:|---|"]
+        for frame in tasks["slow_prepare_frames"]:
+            calls = "; ".join(f"{c['kind']} {c['name']}: {c['wall_ms']:.3f}ms, OS {c['os_thread']}, CPU {c['cpu_ms']}, cycles {c['cycles']}" for c in frame['longest_calls'])
+            lines.append(f"| {frame['source_row']} | {frame['prepare_ms']} | {frame['task_union_ms']:.3f} | {frame['other_or_unobserved_ms']} | {calls.replace('|', '/')} |")
+        lines += ["", *tasks["limitations"]]
     if report.get("terrain_journal_maintenance") is not None:
         lines += ["", f"Terrain journal maintenance: {report['terrain_journal_maintenance']}.", ""]
     if timeline:

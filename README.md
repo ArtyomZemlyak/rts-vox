@@ -152,6 +152,22 @@ Schema 4 планирует bounded span budget по длительности: �
 ранжируется независимо от общего render schedule. Подробности —
 [ADR-544](docs/analysis/138-render-trace-duration-budget.md).
 
+Для actual Bevy system calls нужна отдельная диагностическая сборка:
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cargo-local.ps1 build --locked --release -p render --bin blast --features render-tasks`.
+Запуск: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -RenderTimeline -RenderTasks -CpuThreads`.
+Sidecars `.tasks.csv`/`.task-names.csv` содержат реальные вызовы систем и
+commands с именами, исходным кадром, фактическим потоком и CPU/cycles.
+Стенд включает INFO только для SystemMeta target и восстанавливает RUST_LOG
+после запуска; effective filter записан в manifest. При прямом CLI нужно
+разрешить `bevy_ecs::system::function_system=info` в RUST_LOG.
+До 20 секунд записываются все source frames; длиннее — каждый восьмой
+целиком, шаг явен в metadata/report. Неснятые кадры не имеют task attribution.
+Пересекающиеся вызовы объединяются по wall intervals, не суммируются.
+Feature build исключён из FPS-приёмки даже без флага сбора. Пустая/обрезанная
+трасса не проходит evidence gate. Обычная игровая сборка — без
+`--features render-tasks`. Ограничения и результаты —
+[ADR-545](docs/analysis/139-render-prepare-system-calls.md).
+
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между
 срезами и полного интервала кадра. Лимит — четыре окна, 16 тиков до/после

@@ -374,6 +374,8 @@ pub struct Output<'w> {
     exit: MessageWriter<'w, AppExit>,
     source: Option<ResMut<'w, render::timeline::FrameSource>>,
     timeline: Option<Res<'w, render::timeline::Timeline>>,
+    #[cfg(feature = "render-tasks")]
+    tasks: Option<Res<'w, render::timeline::tasks::Tasks>>,
 }
 pub fn end(
     time: Res<Time<Real>>,
@@ -388,6 +390,8 @@ pub fn end(
         mut exit,
         source,
         timeline,
+        #[cfg(feature = "render-tasks")]
+        tasks,
     } = output;
     let Some(start) = p.start else {
         return;
@@ -468,6 +472,8 @@ pub fn end(
     }
     p.finished = true;
     let render_capture = timeline.as_ref().map(|t| t.close(p.epoch.unwrap()));
+    #[cfg(feature = "render-tasks")]
+    let task_capture = tasks.as_ref().map(|t| t.close(p.epoch.unwrap()));
     if p.actions && p.action_step < 8 {
         eprintln!(
             "Interaction profile ended before all actions completed: {}/8",
@@ -533,14 +539,22 @@ pub fn end(
                 observed_frame_ms.map_or(String::new(), |value| format!("{value:.6}"))
             )?;
         }
-        out.flush()
+        let saved = out
+            .flush()
             .and_then(|()| core::save(p.output.as_ref().unwrap(), &p.core_rows))
             .and_then(|()| core::save_stalls(p.output.as_ref().unwrap(), &stall_rows))
             .and_then(|()| {
                 render_capture
                     .as_ref()
                     .map_or(Ok(()), |t| t.save(p.output.as_ref().unwrap()))
-            })
+            });
+        #[cfg(feature = "render-tasks")]
+        let saved = saved.and_then(|()| {
+            task_capture
+                .as_ref()
+                .map_or(Ok(()), |t| t.save(p.output.as_ref().unwrap()))
+        });
+        saved
     })();
     for (column, name) in [
         "frame",

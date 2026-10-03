@@ -71,9 +71,15 @@ function Get-RangeFrameTimes {
     [pscustomobject]@{ Metric='profile_begin_interval'; Values=$values.ToArray(); Reasons=@($issues | Select-Object -Unique) }
 }
 
+function Get-RangeTaskLogFilter {
+    param([string]$RustLog)
+    $target = 'bevy_ecs::system::function_system=info'
+    if ($RustLog) { "$RustLog,$target" } else { $target }
+}
+
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -134,17 +140,32 @@ function Get-RangeValidity {
         $issues.Add('render_timeline_detail_mode_missing')
     }
     # A separate comparison key must still match scenario, inputs and flags.
+    $taskBuild = $Log -match '(?m)^PROFILE render_tasks_build=true\r?$'
+    if ($RenderTasks) {
+        if (-not $taskBuild -or -not $RenderTimeline) { $issues.Add('render_tasks_build_or_mode_missing') }
+        $taskMeta = [regex]::Matches($Log, '(?m)^PROFILE render_tasks_schema=1 render_task_limit=2000000 render_tasks_started=(\d+) render_tasks_retained=(\d+) render_tasks_dropped=(\d+) render_tasks_incomplete=(\d+) render_task_cutoff_ns=\d+ render_task_names=(\d+) render_task_excluded_names=\d+ render_task_bytes=(\d+)(?: render_task_stride=(1|8))?\r?$')
+        if ($taskMeta.Count -ne 1) { $issues.Add('render_tasks_metadata_missing') }
+        else {
+            $g = $taskMeta[0].Groups
+            if ([long]$g[2].Value -ne [Math]::Min(2000000, [long]$g[1].Value) -or
+                [long]$g[1].Value -ne ([long]$g[2].Value + [long]$g[3].Value) -or
+                [long]$g[4].Value -gt [long]$g[2].Value -or
+                [long]$g[5].Value -eq 0 -or [long]$g[6].Value -lt 1 -or [long]$g[6].Value -gt 1024) { $issues.Add('render_tasks_budget_count_mismatch') }
+            if ([long]$g[3].Value -gt 0) { $issues.Add('render_tasks_truncated') }
+            if ([long]$g[2].Value -eq 0) { $issues.Add('render_tasks_empty_capture') }
+        }
+    }
     $valid = $issues.Count -eq 0
     $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and $meetsRate
+        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
+        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }

@@ -13,6 +13,7 @@ param(
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
     [switch]$RenderTimeline,
+    [switch]$RenderTasks,
     # Zero plans a bounded budget for the duration; explicit overflow is invalid.
     [ValidateRange(0, 1000000)][int]$RenderSpanLimit = 0,
     [ValidateRange(0, 10000)][int]$TriggerMilliseconds = 0,
@@ -28,15 +29,21 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/range-profile-tools.ps1"
 $repo = Split-Path $PSScriptRoot -Parent
 $originalRayonEnvironment = $env:RAYON_NUM_THREADS
+$originalRustLog = $env:RUST_LOG
 Push-Location $repo
 try {
     if ($PhysicsWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$PhysicsWorkers" }
     if ($CorePhases -and $TriggerMilliseconds -gt 0) { throw '-CorePhases and -TriggerMilliseconds are separate diagnostic modes.' }
     if ($BinaryPath -and -not $SkipBuild) { throw '-BinaryPath requires -SkipBuild.' }
     if ($RenderSpanLimit -gt 0 -and -not $RenderTimeline) { throw '-RenderSpanLimit requires -RenderTimeline.' }
+    if ($RenderTasks -and -not $RenderTimeline) { throw '-RenderTasks requires -RenderTimeline.' }
+    # Cached SystemMeta spans are INFO; retain other inherited log settings.
+    if ($RenderTasks) { $env:RUST_LOG = Get-RangeTaskLogFilter -RustLog $originalRustLog }
     $renderBudget = if ($RenderTimeline) { Get-RangeRenderSpanLimit -Seconds $Seconds -Requested $RenderSpanLimit } else { 0 }
     if (-not $SkipBuild) {
-        & "$PSScriptRoot/cargo-local.ps1" build --release -p render --bin blast
+        $buildArgs = @('build', '--release', '-p', 'render', '--bin', 'blast')
+        if ($RenderTasks) { $buildArgs += @('--features', 'render-tasks') }
+        & "$PSScriptRoot/cargo-local.ps1" @buildArgs
         if ($LASTEXITCODE -ne 0) { throw 'Range build failed.' }
     }
     if (-not $Output) { $Output = "out/performance/$(Get-Date -Format yyyyMMdd-HHmmss-fff)" }
@@ -54,7 +61,7 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.task-names.csv", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
@@ -69,6 +76,8 @@ try {
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
                 RenderSpanLimit = $renderBudget
+                RenderTasks = [bool]$RenderTasks
+                RustLog = $env:RUST_LOG
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
                 RequestedWindow = @($WindowWidth, $WindowHeight)
                 Status = 'preflight'; Validity = $null
@@ -99,6 +108,7 @@ try {
             $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
             if ($RenderTimeline) { $arguments += '--profile-render' }
+            if ($RenderTasks) { $arguments += '--profile-render-tasks' }
             # Preserve automatic runs of frozen schema-1/2/3 binaries. New
             # executables plan the same duration budget internally; only an
             # explicit override requires the new CLI flag.
@@ -146,9 +156,10 @@ try {
             if ($RenderTimeline -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.render.csv"))) {
                 $reasons.Add('render_timeline_artifact_missing')
             }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget
+            if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath
@@ -202,6 +213,7 @@ try {
         throw "The $TargetFps FPS budget was exceeded; maxima and slow frames are retained in summary.csv."
     }
 } finally {
+    $env:RUST_LOG = $originalRustLog
     $env:RAYON_NUM_THREADS = $originalRayonEnvironment
     Pop-Location
 }

@@ -341,6 +341,7 @@ fn main() {
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
     let mut profile_render = false;
+    let mut profile_render_tasks = false;
     let mut profile_render_spans = None;
     let mut profile_actions = false;
     let mut profile_core = false;
@@ -357,6 +358,7 @@ fn main() {
             }
             "--profile-gpu" => profile_gpu = true,
             "--profile-render" => profile_render = true,
+            "--profile-render-tasks" => profile_render_tasks = true,
             "--profile-render-spans" => {
                 i += 1;
                 let spans = args
@@ -775,7 +777,17 @@ fn main() {
         profile_render_spans.is_none() || profile_render,
         "--profile-render-spans requires --profile-render"
     );
+    assert!(
+        !profile_render_tasks || (profile_render && cfg!(feature = "render-tasks")),
+        "--profile-render-tasks requires --profile-render and a build with --features render-tasks"
+    );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
+    if profile_output.is_some() {
+        println!(
+            "PROFILE render_tasks_build={}",
+            cfg!(feature = "render-tasks")
+        );
+    }
     profiler.navigation_workers = navigation_workers;
     profiler.configure_navigation(&mut sim);
     profiler.clouds = profile_clouds;
@@ -802,8 +814,21 @@ fn main() {
     gas.params.sky = Vec4::new(0.075, 0.105, 0.145, 0.00065);
     configure_gas(&sim, energy, anni, &mut gas);
     let mut app = App::new();
+    #[cfg(feature = "render-tasks")]
+    if profile_render_tasks {
+        app.insert_resource(render::timeline::tasks::Tasks::new(
+            profile::render_sample,
+            profile_seconds,
+        ));
+    }
+    let log_plugin = bevy::log::LogPlugin::default();
+    #[cfg(feature = "render-tasks")]
+    let log_plugin = bevy::log::LogPlugin {
+        custom_layer: render::timeline::tasks::layer,
+        ..log_plugin
+    };
     app.add_plugins(
-        DefaultPlugins.set(WindowPlugin {
+        DefaultPlugins.set(log_plugin).set(WindowPlugin {
             primary_window: Some(Window {
                 title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
                 resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])

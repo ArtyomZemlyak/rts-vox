@@ -2,6 +2,8 @@
 //! pipelined rendering never reads the next main world's frame ID.
 //! These spans are not GPU execution, CPU utilization, or lock-wait samples.
 use bevy::prelude::*;
+#[cfg(feature = "render-tasks")]
+pub mod tasks;
 use bevy::render::{
     pipelined_rendering::RenderExtractApp,
     renderer::{render_system, RenderGraph, RenderGraphSystems},
@@ -337,9 +339,18 @@ impl Plugin for TimelinePlugin {
             .insert_resource(recorder.clone())
             .init_resource::<RenderFrame>()
             .init_resource::<RenderTrace>();
+        #[cfg(feature = "render-tasks")]
+        if let Some(tasks) = app.world().get_resource::<tasks::Tasks>().cloned() {
+            app.sub_app_mut(RenderApp).insert_resource(tasks);
+        }
+        let render = app.sub_app_mut(RenderApp);
         let extract_recorder = recorder.clone();
         let mut original = render.take_extract().expect("Bevy extraction callback");
         render.set_extract(move |main, render| {
+            #[cfg(feature = "render-tasks")]
+            if let Some(tasks) = render.get_resource::<tasks::Tasks>() {
+                tasks.configure_once(main, render);
+            }
             let tag = main.resource::<FrameSource>().0;
             render.resource_mut::<RenderFrame>().tag = tag;
             let trace = tag
@@ -406,8 +417,19 @@ fn schedule_begin(world: &mut World) {
     let mut frame = world.resource_mut::<RenderFrame>();
     frame.schedule = frame.tag.and_then(|t| recorder.begin(t, "render_schedule"));
     frame.prepare = frame.tag.and_then(|t| recorder.begin(t, "render_prepare"));
+    #[cfg(feature = "render-tasks")]
+    {
+        let tag = frame.tag;
+        if let Some(tasks) = world.get_resource::<tasks::Tasks>() {
+            tasks.set_active(tag);
+        }
+    }
 }
 fn prepare_end(world: &mut World) {
+    #[cfg(feature = "render-tasks")]
+    if let Some(tasks) = world.get_resource::<tasks::Tasks>() {
+        tasks.set_active(None);
+    }
     world
         .resource::<Timeline>()
         .end(world.resource::<RenderFrame>().prepare);
