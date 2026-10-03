@@ -5,12 +5,16 @@ use render::footing::Contact;
 use render::gait::{self, LegRig, Pose};
 use sim_core::blast::RangeUnit;
 
+#[cfg(test)]
+#[path = "moving/history_tests.rs"]
+mod history_tests;
+
 #[derive(Resource, Default)]
 pub struct Visual {
     pub previous: Vec<Pose>,
     /// Foot contacts of the previous tick, per unit and leg (ADR-279).
     previous_feet: Vec<Vec<Option<Contact>>>,
-    pub fragments: std::collections::BTreeMap<u64, Vec3>,
+    pub fragments: std::collections::HashMap<u64, Vec3>,
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,
@@ -86,18 +90,17 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
 pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWindow) {
     v.turret = Some(sim.turret.angle);
     v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
-    v.fragments = sim
-        .matter
-        .debris
-        .fragments
-        .iter()
-        .map(|f| {
+    // Only ID lookups consume this history; ordering comes from the physical
+    // fragment slice. Reuse buckets instead of allocating a tree every tick.
+    // Capture resting pieces too: one may wake during the upcoming step.
+    v.fragments.clear();
+    v.fragments
+        .extend(sim.matter.debris.fragments.iter().map(|f| {
             (
                 f.id,
                 super::fragments::pos([f.position.x, f.position.y, f.position.z]),
             )
-        })
-        .collect();
+        }));
     v.previous = sim
         .units
         .iter()
