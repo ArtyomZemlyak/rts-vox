@@ -24309,3 +24309,32 @@ Sim-cli seed42/1000ticks hash 66041a9f60189841 сохранён.
 sim/render остаются открытыми. Низкий общий CPU% не доказывает нехватку
 потоков. SHA, WIP provenance, сырые данные, порядок запусков и пределы
 выводов — [140](140-parallel-unit-poses-and-compute-pool.md).
+
+## ADR-547 — общий снимок геометрии и параллельные контакты горения
+
+Фаза unit_fire повторно строила bounds всех корпусов/range gun для каждого
+spill и emission. Теперь ленивый снимок общий внутри фазы, не хранится
+между тиками. Шесть receiver probes используют отсортированный массив
+вместо BTreeSet, сохраняя Site order и устранение повторов. От четырёх
+emissions контакты рассчитываются indexed Rayon batch в существующем
+physics pool; малые/однопоточные пакеты серийны. Приём тепла, caps,
+округления, ignition, fuel ledger остаются в прежнем порядке. Новых
+зависимостей, сохранённых полей или изменений баланса нет.
+
+558 release sim-core tests passed, 4 ignored; differential oracle проверяет
+1/2/4/8 workers, caps, world/body receivers и меняющуюся геометрию.
+Clippy/build проходят без новых warnings. Пять прежних architecture gate
+failures воспроизведены без двух изменённых файлов; исправление старых
+нарушений и cfg/test scanner остаётся долгом, общий CI не объявлен зелёным.
+
+Две CPU-пары по 3600 тиков: unit_fire mean 641…643→215…217 мкс,
+полный тик быстрее на 3,68…4,13%. Counters совпадают каждый тик,
+hash bcc1f58c226d1721. Две ordinary native пары 120 с: FPS
+75,50→76,73 и 76,65→78,92, tempo ~1×, тот же hash, gates проходят.
+Отдельный actions smoke проверяет reset generations 1…4.
+Результат включает кеш/array/parallel batch; их отдельный вклад не измерен.
+
+165 FPS и редкие stalls остаются открытыми. Fire child worker spans
+ещё не добавлены: parent wall не доказывает CPU utilization или wait.
+Frozen SHA, одинаковый ADR-523 WIP в бинарниках, сырые замеры и границы
+выводов — [141](141-parallel-combustion-contacts.md).

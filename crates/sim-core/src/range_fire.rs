@@ -232,6 +232,9 @@ impl BlastRange {
         let speed = Fx::from_ratio(tuning.max_speed, crate::TICKS_PER_SECOND);
         let gravity = Fx::from_ratio(tuning.gravity, crate::TICKS_PER_SECOND.pow(2));
         let mut emissions = Vec::new();
+        // Fuel movement and receiver probes cannot change body geometry.
+        // Build its bounds lazily once for this phase, including the range gun.
+        let mut contact_bounds = None;
         for id in 0..self.combustion.stocks.len() {
             let mut stock = self.combustion.stocks[id].clone();
             let Some(held) = stock.held else {
@@ -309,7 +312,8 @@ impl BlastRange {
                         Fx::from_int(self.size[a] as i32).sub(Fx::from_ratio(1, 64)),
                     )
                 });
-                if let Some(t) = self.fuel_collision(spill.at, to) {
+                let bounds = contact_bounds.get_or_insert_with(|| self.heat_contact_bounds());
+                if let Some(t) = self.fuel_collision(spill.at, to, bounds) {
                     // Stop just before contact; test support again next tick so
                     // a removed floor never leaves a floating, permanently resting fire.
                     let t = t.sub(Fx::from_ratio(1, 64)).max(Fx::ZERO);
@@ -341,10 +345,12 @@ impl BlastRange {
         }
         // All ignitions read the old thermal field; simultaneous fires cannot
         // ignite one another in iteration order within this phase.
-        for (at, heat) in emissions {
-            let accepted = self.deposit_fire_heat(at, tuning.reach, heat);
-            self.combustion.dissipated_heat += u64::from(heat - accepted);
+        if emissions.is_empty() {
+            return;
         }
+        let bounds = contact_bounds.get_or_insert_with(|| self.heat_contact_bounds());
+        let dissipated = self.deposit_fire_batch(&emissions, tuning.reach, bounds, true);
+        self.combustion.dissipated_heat += dissipated;
     }
 }
 

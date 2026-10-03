@@ -25,6 +25,23 @@ enum Site {
     Body(Cell),
 }
 
+/// Six probes have at most six distinct receivers. Sorted array traversal
+/// preserves the former BTreeSet order without a tree allocation per fire.
+struct FireContacts {
+    sites: [Option<Site>; 6],
+}
+impl FireContacts {
+    fn iter(&self) -> impl Iterator<Item = Site> + '_ {
+        self.sites.iter().enumerate().filter_map(|(i, &site)| {
+            if i == 0 || self.sites[i - 1] != site {
+                site
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct Exchange {
     world_cursor: Option<[u32; 3]>,
@@ -232,18 +249,74 @@ impl BlastRange {
         }
         best
     }
-    /// Collision for a small physical spill. Caller bounds travel per tick.
-    pub(super) fn fuel_collision(&self, from: [Fx; 3], to: [Fx; 3]) -> Option<Fx> {
-        let bounds: Vec<_> = self
-            .units
+    /// One immutable geometry snapshot for the fuel phase, including the gun.
+    pub(super) fn heat_contact_bounds(&self) -> Vec<Bounds> {
+        self.units
             .iter()
             .chain(std::iter::once(&self.gun))
             .map(|u| u.bounds())
-            .collect();
-        self.first_contact(None, from, to, &bounds).map(|(t, _)| t)
+            .collect()
+    }
+    pub(super) fn fuel_collision(
+        &self,
+        from: [Fx; 3],
+        to: [Fx; 3],
+        bounds: &[Bounds],
+    ) -> Option<Fx> {
+        self.first_contact(None, from, to, bounds).map(|(t, _)| t)
+    }
+    fn fire_contacts(&self, from: [Fx; 3], reach: u8, bounds: &[Bounds]) -> FireContacts {
+        let mut sites = std::array::from_fn(|i| {
+            let mut to = from;
+            let sign = if i.is_multiple_of(2) { -1 } else { 1 };
+            to[i / 2] = to[i / 2].add(Fx::from_int(sign * i32::from(reach)));
+            self.first_contact(None, from, to, bounds)
+                .and_then(|(_, site)| site)
+                .filter(|site| site.accepts(self))
+        });
+        sites.sort_unstable();
+        FireContacts { sites }
+    }
+    fn deposit_fire_contacts(&mut self, contacts: &FireContacts, heat: u32) -> u32 {
+        let mut accepted = 0;
+        let count = contacts.iter().count() as u32;
+        for (i, site) in contacts.iter().enumerate() {
+            let share = heat / count + u32::from((i as u32) < heat % count);
+            let before = site.heat(self);
+            match site {
+                Site::World(p) => self.heat.add(&self.world, p, share),
+                Site::Body(p) => self.thermals.deposit(p, share, &self.thermal_tuning),
+            }
+            accepted += site.heat(self) - before;
+        }
+        accepted
+    }
+    pub(super) fn deposit_fire_batch(
+        &mut self,
+        emissions: &[([Fx; 3], u32)],
+        reach: u8,
+        bounds: &[Bounds],
+        parallel: bool,
+    ) -> u64 {
+        // Receiver selection depends only on this phase's fixed geometry and
+        // material, not previous deposits. Admission/caps remain source ordered.
+        let probe = |&(at, _): &([Fx; 3], u32)| self.fire_contacts(at, reach, bounds);
+        let contacts: Vec<_> =
+            if parallel && emissions.len() >= 4 && rayon::current_num_threads() > 1 {
+                emissions.par_iter().map(probe).collect()
+            } else {
+                emissions.iter().map(probe).collect()
+            };
+        let mut dissipated = 0;
+        for ((_, heat), contacts) in emissions.iter().zip(contacts) {
+            let accepted = self.deposit_fire_contacts(&contacts, *heat);
+            dissipated += u64::from(*heat - accepted);
+        }
+        dissipated
     }
     /// Chemical heat touches the first surface, including its own compartment.
     /// Heat with no receiver (or no field capacity) dissipates into the air.
+    #[cfg(test)] // Former serial implementation remains the differential oracle.
     pub(super) fn deposit_fire_heat(&mut self, from: [Fx; 3], reach: u8, heat: u32) -> u32 {
         let bounds: Vec<_> = self
             .units
@@ -482,6 +555,119 @@ mod tests {
                 .into_iter()
                 .map(|p| u64::from(r.heat.cell(p).heat))
                 .sum::<u64>()
+    }
+    #[test]
+    fn pooled_fire_batch_matches_sequential_deposits_with_caps_and_changing_geometry() {
+        let cubes: Vec<_> = (0..96)
+            .map(|i| [100 + (i % 16) * 4, 32, 100 + (i / 16) * 8])
+            .collect();
+        let blocks: Vec<_> = cubes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ([p[0] + 2, p[1], p[2]], if i % 3 == 0 { 3 } else { 5 }))
+            .collect();
+        let state = |r: &BlastRange| {
+            let mut b = Blob::new();
+            r.heat.save(&mut b);
+            r.thermals.save(&mut b);
+            b.v
+        };
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for limit in [1, 128] {
+                let make = || {
+                    let mut r = fixture(&cubes, &blocks);
+                    for id in [0, 1, 7] {
+                        r.thermals.deposit(cell(id), CAP - 1, &r.thermal_tuning);
+                    }
+                    r.thermal_tuning.max_cells = limit;
+                    r.units[7].body.remove(0, 0, 0);
+                    r.gun = cube([102, 32, 108]);
+                    r
+                };
+                let (mut actual, mut reference) = (make(), make());
+                for count in [0, 1, 3, 4, 96] {
+                    let emissions: Vec<_> = cubes
+                        .iter()
+                        .take(count)
+                        .enumerate()
+                        .map(|(i, p)| {
+                            let offset = if i % 2 == 0 { 1 } else { 3 };
+                            (
+                                [
+                                    Fx::from_ratio(p[0] * 2 + offset, 2),
+                                    Fx::from_ratio(p[1] * 2 + 1, 2),
+                                    Fx::from_ratio(p[2] * 2 + 1, 2),
+                                ],
+                                if i % 13 == 0 { 0 } else { 1999 + i as u32 },
+                            )
+                        })
+                        .collect();
+                    let bounds = actual.heat_contact_bounds();
+                    // Both duplicate rays into the emitter and distinct world/body
+                    // receivers occur, so the comparison is not a cold no-op.
+                    assert_eq!(
+                        actual
+                            .fire_contacts(
+                                emissions.get(1).map_or(
+                                    [
+                                        Fx::from_ratio(201, 2),
+                                        Fx::from_ratio(65, 2),
+                                        Fx::from_ratio(201, 2)
+                                    ],
+                                    |e| e.0
+                                ),
+                                3,
+                                &bounds
+                            )
+                            .iter()
+                            .count(),
+                        if count > 1 { 2 } else { 1 }
+                    );
+                    let mut expected_loss = 0;
+                    for &(at, heat) in &emissions {
+                        expected_loss += u64::from(heat - reference.deposit_fire_heat(at, 3, heat));
+                    }
+                    let initial = total(&actual);
+                    let loss =
+                        pool.install(|| actual.deposit_fire_batch(&emissions, 3, &bounds, true));
+                    assert_eq!(
+                        loss, expected_loss,
+                        "workers={workers}, limit={limit}, count={count}"
+                    );
+                    assert_eq!(state(&actual), state(&reference));
+                    let supplied: u64 = emissions.iter().map(|e| u64::from(e.1)).sum();
+                    assert_eq!(total(&actual) - initial + loss, supplied);
+                }
+                // A subsequent phase must rebuild bounds and use the new geometry.
+                for r in [&mut actual, &mut reference] {
+                    r.units[1].body.remove(0, 0, 0);
+                    r.gun = cube([106, 32, 108]);
+                    r.thermal_tuning.max_cells = 16384;
+                }
+                let emissions = [(
+                    [
+                        Fx::from_ratio(211, 2),
+                        Fx::from_ratio(65, 2),
+                        Fx::from_ratio(201, 2),
+                    ],
+                    9999,
+                ); 8];
+                let expected_loss: u64 = emissions
+                    .iter()
+                    .map(|&(at, h)| u64::from(h - reference.deposit_fire_heat(at, 3, h)))
+                    .sum();
+                let bounds = actual.heat_contact_bounds();
+                assert_eq!(
+                    pool.install(|| actual.deposit_fire_batch(&emissions, 3, &bounds, true)),
+                    expected_loss
+                );
+                assert_eq!(state(&actual), state(&reference));
+            }
+        }
     }
     #[test]
     fn pooled_exchange_preserves_cursors_caps_and_old_field_reads() {
