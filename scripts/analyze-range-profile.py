@@ -1065,6 +1065,12 @@ def analyze(directory, scenario="world-battle", top=12):
     adapter = re.search(r"^PROFILE adapter_name=.*$", log, re.M)
     rate = re.search(r"^PROFILE tick_rate=(\d+)", log, re.M)
     pools = re.search(r"^PROFILE physics_workers=(\d+) navigation_workers=(\d+)", log, re.M)
+    compute_counts = re.findall(r"^PROFILE compute_workers=(\d+)$", log, re.M)
+    compute = int(compute_counts[0]) if len(compute_counts) == 1 else None
+    requested_compute = int((manifest or {}).get("ComputeWorkers") or 0)
+    if requested_compute and (not 1 <= requested_compute <= 16 or compute != requested_compute or
+            re.findall(r"^PROFILE compute_override=Some\((\d+)\)$", log, re.M) != [str(requested_compute)]):
+        reasons.append("compute_workers_override_mismatch")
     context = render_context(log)
     reasons.extend(context["reasons"])
     stall_trace, stall_issues = analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top)
@@ -1103,6 +1109,7 @@ def analyze(directory, scenario="world-battle", top=12):
         realtime_ratio=frame_ticks / (seconds * (int(rate[1]) if rate else 30)) if seconds > 0 else None,
         state_hash=hash_match[1] if hash_match else None, actual_adapter=adapter[0] if adapter else None,
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
+        actual_compute_workers=compute,
         actual_render_context=context,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
         terrain_journal_maintenance=journal_maintenance(log),
@@ -1145,6 +1152,10 @@ def compare(a, b):
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
         problems.append("different:RenderTimeline")
+    if int((a["manifest"] or {}).get("ComputeWorkers") or 0) != int((b["manifest"] or {}).get("ComputeWorkers") or 0):
+        problems.append("different:ComputeWorkers")
+    if a.get("actual_compute_workers") != b.get("actual_compute_workers"):
+        problems.append("different_or_missing:actual_compute_workers")
     if bool((a["manifest"] or {}).get("RenderTasks")) != bool((b["manifest"] or {}).get("RenderTasks")) or a.get("render_tasks_build") != b.get("render_tasks_build"):
         problems.append("different:RenderTasks_build_or_mode")
     if (a.get("render_tasks") or {}).get("stride") != (b.get("render_tasks") or {}).get("stride"):
@@ -1173,6 +1184,7 @@ def markdown(report):
              f"FPS acceptance eligible: {report['acceptance_eligible']}; simulation at real time: {report['meets_simulation_rate']}; ratio: {report['realtime_ratio']}.", "",
              f"Frames: {report['frames']}; real steps: {report['measured_steps']}; traced steps: {report['trace_steps']}.",
              f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
+             f"Requested compute workers: {int((report['manifest'] or {}).get('ComputeWorkers') or 0)} (0 = default); actual compute workers: {report.get('actual_compute_workers')}. Actual physics/navigation workers: {report['actual_workers']}.", "",
              f"Observed render context: {report['actual_render_context']['initial'] or 'unavailable'}.",
              f"Render context records: {len(report['actual_render_context']['steps'])}; invalid change: {report['actual_render_context']['invalid_change']}.", "",
              "| Phase | Mean per actual traced tick, ms | p99 occurrence, ms | CPU counter samples |",

@@ -133,6 +133,45 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(r["slow_ticks"][0]["frame_row"], 0)
         self.assertTrue(r["valid_for_comparison"])
 
+    def test_compute_override_checks_actual_pool_and_cannot_be_silently_ignored(self):
+        for observed, marker, valid in [
+                (8, 'Some(8)', True), (4, 'Some(8)', False),
+                (8, 'None', False), (None, 'Some(8)', False)]:
+            with self.subTest(observed=observed, marker=marker):
+                self.write()
+                path = self.path / 'world-battle.manifest.json'
+                manifest = json.loads(path.read_text())
+                manifest['ComputeWorkers'] = 8
+                path.write_text(json.dumps(manifest))
+                with (self.path / 'world-battle.log').open('a') as out:
+                    if observed is not None:
+                        out.write(f'PROFILE compute_workers={observed}\n')
+                    out.write(f'PROFILE compute_override={marker}\n')
+                result = profile.analyze(self.path)
+                self.assertEqual(result['valid_for_comparison'], valid)
+                self.assertEqual(result['actual_compute_workers'], observed)
+                self.assertIn(f'actual compute workers: {observed}', profile.markdown(result))
+                if not valid:
+                    self.assertIn('compute_workers_override_mismatch', result['reasons'])
+
+    def test_compute_experiment_parameters_are_comparison_keys_and_legacy_zero_is_default(self):
+        self.write()
+        before = profile.analyze(self.path)
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['ComputeWorkers'] = 0
+        path.write_text(json.dumps(manifest))
+        after = profile.analyze(self.path)
+        self.assertNotIn('different:ComputeWorkers', profile.compare(before, after)['reasons'])
+        after['actual_compute_workers'] = 8
+        before['actual_compute_workers'] = 4
+        self.assertIn('different_or_missing:actual_compute_workers', profile.compare(before, after)['reasons'])
+        manifest['ComputeWorkers'] = 8
+        path.write_text(json.dumps(manifest))
+        with (self.path / 'world-battle.log').open('a') as out:
+            out.write('PROFILE compute_workers=8\nPROFILE compute_override=Some(8)\n')
+        self.assertIn('different:ComputeWorkers', profile.compare(before, profile.analyze(self.path))['reasons'])
+
     def ordinary_stall_frames(self):
         frames = []
         for start, end, gap, tick, steps, core, input_ms in [

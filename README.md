@@ -168,6 +168,17 @@ Feature build исключён из FPS-приёмки даже без флаг�
 `--features render-tasks`. Ограничения и результаты —
 [ADR-545](docs/analysis/139-render-prepare-system-calls.md).
 
+Размер render compute pool можно проверить отдельно:
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 60 -TargetFps 165 -SkipBuild -ComputeWorkers 8`.
+`-ComputeWorkers 0` сохраняет настройку Bevy по умолчанию; 1…16 задаёт
+фиксированное число потоков через CLI `--compute-workers`. Physics,
+navigation, IO и async pools сохраняют свои настройки. Manifest и отчёт
+содержат запрошенное и фактическое число потоков; игнорирование параметра
+старой сборкой отклоняется. Разные размеры пула считаются отдельными
+экспериментами и не проходят строгий gate пары с одинаковыми условиями.
+Результаты и параллельное обновление поз —
+[ADR-546](docs/analysis/140-parallel-unit-poses-and-compute-pool.md).
+
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между
 срезами и полного интервала кадра. Лимит — четыре окна, 16 тиков до/после

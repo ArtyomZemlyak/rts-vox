@@ -22,6 +22,8 @@ use render::{look, presentation};
 use sim_core::blast::{BlastRange, GUN};
 #[path = "blast/bodies.rs"]
 mod bodies;
+#[path = "blast/compute.rs"]
+mod compute;
 #[path = "blast/damage_art.rs"]
 mod damage_art;
 #[path = "blast/fire.rs"]
@@ -347,6 +349,7 @@ fn main() {
     let mut profile_core = false;
     let mut profile_trigger_ms = None;
     let mut navigation_workers = None;
+    let mut compute_workers = None;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -380,6 +383,16 @@ fn main() {
                     .expect("--profile-trigger-ms 1..=10000");
                 assert!((1..=10000).contains(&ms), "--profile-trigger-ms 1..=10000");
                 profile_trigger_ms = Some(ms);
+            }
+            "--compute-workers" => {
+                i += 1;
+                let workers = args
+                    .get(i)
+                    .expect("--compute-workers 1..=16")
+                    .parse::<usize>()
+                    .expect("--compute-workers 1..=16");
+                assert!((1..=16).contains(&workers), "--compute-workers 1..=16");
+                compute_workers = Some(workers);
             }
             "--nav-workers" => {
                 i += 1;
@@ -783,6 +796,7 @@ fn main() {
     );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
     if profile_output.is_some() {
+        println!("PROFILE compute_override={compute_workers:?}");
         println!(
             "PROFILE render_tasks_build={}",
             cfg!(feature = "render-tasks")
@@ -828,20 +842,23 @@ fn main() {
         ..log_plugin
     };
     app.add_plugins(
-        DefaultPlugins.set(log_plugin).set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
-                resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
-                    .with_scale_factor_override(1.0),
-                present_mode: if realtime && profile_output.is_none() {
-                    PresentMode::AutoVsync
-                } else {
-                    PresentMode::AutoNoVsync
-                },
+        DefaultPlugins
+            .set(compute::plugin(compute_workers))
+            .set(log_plugin)
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "RTS VOX / BLAST RANGE — Space: pause · R: replay".into(),
+                    resolution: bevy::window::WindowResolution::new(window_size[0], window_size[1])
+                        .with_scale_factor_override(1.0),
+                    present_mode: if realtime && profile_output.is_none() {
+                        PresentMode::AutoVsync
+                    } else {
+                        PresentMode::AutoNoVsync
+                    },
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }),
     );
     if profile_render {
         app.add_plugins(render::timeline::TimelinePlugin {

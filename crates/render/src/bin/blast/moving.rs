@@ -8,6 +8,9 @@ use sim_core::blast::RangeUnit;
 #[cfg(test)]
 #[path = "moving/history_tests.rs"]
 mod history_tests;
+#[cfg(test)]
+#[path = "moving/pose_tests.rs"]
+mod pose_tests;
 
 #[derive(Resource, Default)]
 pub struct Visual {
@@ -28,6 +31,35 @@ pub struct Visual {
     cached: Vec<Occupied>,
     window: Option<TerrainWindow>,
     rigs: Vec<Vec<LegRig>>,
+    frame_poses: Vec<ActorFrame>,
+}
+
+#[derive(Default)]
+struct ActorFrame {
+    pos: Vec3,
+    hull: Quat,
+    turret: Quat,
+    kind: usize,
+    legs: Vec<gait::LegPose>,
+}
+impl ActorFrame {
+    fn transform(&self, witness: &Witness, rigs: &[Vec<LegRig>]) -> Transform {
+        let rotation = if witness.3 { self.turret } else { self.hull };
+        let mut local = witness.1;
+        if let Some(segment) = witness.2 {
+            for (rig, leg) in rigs[self.kind].iter().zip(&self.legs) {
+                if let Some(role) = rig.role(segment) {
+                    let part = leg.part(role);
+                    local.translation = part.pos;
+                    local.rotation = part.rot;
+                    break;
+                }
+            }
+        }
+        local.translation = self.pos + rotation * local.translation;
+        local.rotation = rotation * local.rotation;
+        local
+    }
 }
 /// Keep the previous shadow cells so replacement actors remove old silhouettes.
 pub fn reset(v: &mut Visual) {
@@ -606,12 +638,37 @@ pub fn animate(
         .collect();
     }
     let t = fraction(&scene);
-    let mut poses = Vec::new();
-    let mut legs = Vec::new();
+    let Visual {
+        previous,
+        previous_feet,
+        battle_turrets,
+        rigs,
+        frame_poses,
+        ..
+    } = &mut *v;
+    frame_poses.resize_with(scene.sim.units.len(), ActorFrame::default);
     for (i, u) in scene.sim.units.iter().enumerate() {
-        let p = visible(u, v.previous.get(i), &scene);
-        poses.push(p);
-        let mut lp = Vec::new();
+        let p = visible(u, previous.get(i), &scene);
+        let frame = &mut frame_poses[i];
+        frame.pos = p.pos;
+        frame.hull = render::realtime::hull_rotation(p.up, p.yaw);
+        let yaw = if scene.sim.battle_mode() {
+            scene.sim.battle.actors.get(i).map_or(p.yaw, |actor| {
+                let angle = actor.turret.angle;
+                let was = battle_turrets.get(i).copied().unwrap_or(angle);
+                -(was as f32 + fx::angle::diff(angle, was) as f32 * t) * std::f32::consts::TAU
+                    / fx::angle::FULL as f32
+            })
+        } else {
+            p.yaw
+        };
+        frame.turret = if yaw == p.yaw {
+            frame.hull
+        } else {
+            render::realtime::hull_rotation(p.up, yaw)
+        };
+        frame.kind = u.kind.index();
+        frame.legs.clear();
         // The range plants the feet (ADR-279); the picture interpolates
         // their contacts between ticks and poses the links with the same
         // two-link solve the simulation uses.
@@ -623,8 +680,8 @@ pub fn animate(
                 | RangeUnitKind::TurretT2
                 | RangeUnitKind::Base
         ) {
-            let rigs = &v.rigs[u.kind.index()];
-            let rot = render::realtime::hull_rotation(p.up, p.yaw);
+            let rigs = &rigs[u.kind.index()];
+            let rot = frame.hull;
             for (j, rig) in rigs.iter().enumerate() {
                 let Some(now) = u
                     .motion
@@ -635,8 +692,7 @@ pub fn animate(
                 else {
                     break;
                 };
-                let was = v
-                    .previous_feet
+                let was = previous_feet
                     .get(i)
                     .and_then(|f| f.get(j))
                     .copied()
@@ -647,40 +703,22 @@ pub fn animate(
                 };
                 let mut pose = rig.solve(rot.inverse() * (c.pos - p.pos), rot);
                 pose.foot.rot = rot.inverse() * c.rot;
-                lp.push(pose);
+                frame.legs.push(pose);
             }
         }
-        legs.push(lp);
     }
-    for (w, mut tr) in &mut query {
-        let Some(p) = poses.get(w.0) else {
-            continue;
-        };
-        let yaw = if w.3 && scene.sim.battle_mode() {
-            {
-                let angle = scene.sim.battle.actors[w.0].turret.angle;
-                let was = v.battle_turrets.get(w.0).copied().unwrap_or(angle);
-                -(was as f32 + fx::angle::diff(angle, was) as f32 * t) * std::f32::consts::TAU
-                    / fx::angle::FULL as f32
-            }
-        } else {
-            p.yaw
-        };
-        let rotation = render::realtime::hull_rotation(p.up, yaw);
-        let mut local = w.1;
-        if let Some(seg) = w.2 {
-            for (i, r) in v.rigs[scene.sim.units[w.0].kind.index()].iter().enumerate() {
-                if let (Some(role), Some(lp)) = (r.role(seg), legs[w.0].get(i)) {
-                    let f = lp.part(role);
-                    local.translation = f.pos;
-                    local.rotation = f.rot;
-                    break;
-                }
-            }
+    let frames = &*frame_poses;
+    let rigs = &*rigs;
+    let apply = |(w, mut transform): (&Witness, Mut<Transform>)| {
+        if let Some(frame) = frames.get(w.0) {
+            let next = frame.transform(w, rigs);
+            transform.set_if_neq(next);
         }
-        *tr = local;
-        tr.translation = p.pos + rotation * local.translation;
-        tr.rotation = rotation * local.rotation;
+    };
+    if bevy::tasks::ComputeTaskPool::try_get().is_some() {
+        query.par_iter_mut().for_each(apply);
+    } else {
+        query.iter_mut().for_each(apply);
     }
 }
 
@@ -843,7 +881,7 @@ mod tests {
             }
         }
     }
-    fn occupancy_roster(count: usize) -> BlastRange {
+    pub(super) fn occupancy_roster(count: usize) -> BlastRange {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
         layout.battle = true;

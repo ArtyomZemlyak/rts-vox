@@ -24277,3 +24277,35 @@ workload/invalidation, child worker spans и source-aligned OS scheduling.
 Reload allocator отдельно; неснятые редкие фризы, independent sim/render,
 GPU IDs и 165 FPS открыты. SHA/raw evidence/ограничения —
 [139](139-render-prepare-system-calls.md).
+
+## ADR-546 — параллельные позы и проверка compute pool
+
+Продолжает ADR-545: animate безусловно записывал Transform всех Witness,
+что через GlobalTransform запускало mesh extraction даже у неподвижных
+юнитов. Per-unit frame buffer сохраняет hull/turret rotations и leg poses,
+переиспользуется; независимые Witness получают позу через par_iter_mut
+постоянного ComputeTaskPool. set_if_neq сохраняет change tick неподвижного
+меша. Формулы/масштаб/интерполяция/смерть/reset совпадают с serial reference,
+снимок симуляции неизменен. PostUpdate observer подтверждает ноль ложных
+Changed local/global; изменение одного юнита помечает только его меши.
+
+--compute-workers / -ComputeWorkers фиксируют только compute min/max;
+IO/async, physics/navigation прежние. Default Bevy policy сохранена.
+Requested/actual count и CLI identity сверяются, игнорирующий флаг старый
+exe invalid. Разные requested/actual pools не проходят strict comparison.
+Unknown legacy actual count не превращается в выдуманное значение.
+
+379 проверок, release build/clippy без новых warnings. Две обычные
+минутные пары и длинная пара native/offline gates проходят, hash одинаков:
+1800 ticks bdfb97cef98d13e2 / 3600 bcc1f58c226d1721, tempo ~0,9995×.
+Observed FPS 100,73→104,58; повтор 105,88→106,31; 120 с 74,47→75,10.
+Разброс before больше малого выигрыша; крупное устойчивое ускорение
+не доказано. Tail ~66 мс остаётся, длинный p99 чуть выше. Compute=8
+даёт менее 1% поверх первого after default=4, default не изменён.
+Actions reset generations 1…4 проходят; это отдельный сценарный smoke.
+Sim-cli seed42/1000ticks hash 66041a9f60189841 сохранён.
+
+165 FPS, child attribution mesh queues, редкие stalls и независимый
+sim/render остаются открытыми. Низкий общий CPU% не доказывает нехватку
+потоков. SHA, WIP provenance, сырые данные, порядок запусков и пределы
+выводов — [140](140-parallel-unit-poses-and-compute-pool.md).

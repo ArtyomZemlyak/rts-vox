@@ -110,4 +110,9 @@ Assert-Profile ((Get-RangeTaskLogFilter 'warn') -eq 'warn,bevy_ecs::system::func
 Assert-Profile ((Get-RangeTaskLogFilter 'error,bevy_ecs::system::function_system=off') -eq 'error,bevy_ecs::system::function_system=off,bevy_ecs::system::function_system=info') 'Existing target filter not overridden'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.TrimEnd() + ' render_task_stride=8') -RenderTimeline -RenderTasks).ValidForComparison) 'Declared whole-frame sampling rejected'
 Assert-Profile (-not (Get-RangeValidity $rows -Scenario world-battle -Log ($taskLog.TrimEnd() + ' render_task_stride=2') -RenderTimeline -RenderTasks).ValidForComparison) 'Unknown task stride accepted'
-'PASS: 45 validity/timing/context/budget/task/log-filter cases and parser checks.'
+$computeLog = $log + "`nPROFILE compute_workers=8`nPROFILE compute_override=Some(8)"
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $computeLog -ComputeWorkers 8).ValidForComparison) 'Actual compute override rejected'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('compute_workers=8','compute_workers=4')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Ignored worker override accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('Some(8)','None')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Missing compute CLI identity accepted'
+Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Old frozen binary silently accepted override'
+'PASS: 49 validity/timing/context/budget/task/log-filter/compute cases and parser checks.'

@@ -79,7 +79,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -141,6 +141,13 @@ function Get-RangeValidity {
     }
     # A separate comparison key must still match scenario, inputs and flags.
     $taskBuild = $Log -match '(?m)^PROFILE render_tasks_build=true\r?$'
+    if ($ComputeWorkers -gt 0) {
+        $compute = [regex]::Matches($Log, '(?m)^PROFILE compute_workers=(\d+)\r?$')
+        $override = [regex]::Matches($Log, '(?m)^PROFILE compute_override=Some\((\d+)\)\r?$')
+        if ($compute.Count -ne 1 -or $override.Count -ne 1 -or
+            [int]$compute[0].Groups[1].Value -ne $ComputeWorkers -or
+            [int]$override[0].Groups[1].Value -ne $ComputeWorkers) { $issues.Add('compute_workers_override_mismatch') }
+    }
     if ($RenderTasks) {
         if (-not $taskBuild -or -not $RenderTimeline) { $issues.Add('render_tasks_build_or_mode_missing') }
         $taskMeta = [regex]::Matches($Log, '(?m)^PROFILE render_tasks_schema=1 render_task_limit=2000000 render_tasks_started=(\d+) render_tasks_retained=(\d+) render_tasks_dropped=(\d+) render_tasks_incomplete=(\d+) render_task_cutoff_ns=\d+ render_task_names=(\d+) render_task_excluded_names=\d+ render_task_bytes=(\d+)(?: render_task_stride=(1|8))?\r?$')
