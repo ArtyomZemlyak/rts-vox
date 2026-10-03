@@ -1,6 +1,11 @@
 //! Read-only view of actual matter; no lifetime, random velocity or gravity here.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+#[path = "fragments/lifecycle_tests.rs"]
+mod lifecycle_tests;
+#[path = "fragments/slots.rs"]
+mod slots;
 #[derive(Component)]
 pub struct Piece(u64, u64, bool);
 #[derive(Default)]
@@ -8,6 +13,8 @@ pub struct Cache {
     meshes: BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
     chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
+    slots: HashMap<u64, slots::Slot>,
+    epoch: u64,
 }
 /// The cube colour of a range material, shared with falling bodies.
 pub fn material_colour(material: u16) -> [f32; 4] {
@@ -36,26 +43,8 @@ pub fn draw(
     mut old: Query<(Entity, &Piece, &mut Transform)>,
 ) {
     let fragments = &scene.sim.matter.debris.fragments;
-    let ids: BTreeMap<_, _> = fragments
-        .iter()
-        .map(|f| {
-            (
-                f.id,
-                f.chunk.as_ref().map_or((0, false), |c| {
-                    (c.hash(), !scene.sim.units[c.template as usize].status.alive)
-                }),
-            )
-        })
-        .collect();
-    let mut entities = BTreeMap::new();
-    for (e, p, _) in &mut old {
-        if ids.get(&p.0) != Some(&(p.1, p.2)) {
-            commands.entity(e).despawn();
-            cache.chunks.remove(&p.0);
-        } else {
-            entities.insert(p.0, e);
-        }
-    }
+    cache.epoch = cache.epoch.wrapping_add(1);
+    let epoch = cache.epoch;
     let alpha = if scene.realtime && !scene.paused {
         (scene.acc * 30.0).clamp(0.0, 1.0)
     } else {
@@ -63,30 +52,51 @@ pub fn draw(
     };
     let mut chunk_builds = 0;
     for f in fragments {
-        let current = pos([f.position.x, f.position.y, f.position.z]);
-        let position = visual
-            .fragments
-            .get(&f.id)
-            .copied()
-            .unwrap_or(current)
-            .lerp(current, alpha);
-        let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
-        let rotation = Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
-        let scale = if f.chunk.is_some() {
-            1.0
-        } else {
-            (f.count as f32 / f.shape.count_ones() as f32).cbrt() * f.mm as f32
-                / voxel::unit::WORLD_MM as f32
+        let piece_key = f.chunk.as_ref().map_or((0, false), |c| {
+            (c.hash(), !scene.sim.units[c.template as usize].status.alive)
+        });
+        let make_transform = || {
+            let current = pos([f.position.x, f.position.y, f.position.z]);
+            let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
+            let rotation =
+                Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
+            let scale = if f.chunk.is_some() {
+                1.0
+            } else {
+                (f.count as f32 / f.shape.count_ones() as f32).cbrt() * f.mm as f32
+                    / voxel::unit::WORLD_MM as f32
+            };
+            Transform::from_translation(current)
+                .with_rotation(rotation)
+                .with_scale(Vec3::splat(scale))
         };
-        let transform = Transform::from_translation(position)
-            .with_rotation(rotation)
-            .with_scale(Vec3::splat(scale));
-        if let Some(&entity) = entities.get(&f.id) {
-            if let Ok((_, _, mut tr)) = old.get_mut(entity) {
-                *tr = transform;
+        if let Some(slot) = cache.slots.get_mut(&f.id) {
+            if slot.matches(piece_key, f) && old.contains(slot.entity) {
+                slot.seen = epoch;
+                if let Some(transform) = slot.sample(
+                    f,
+                    visual.fragments.get(&f.id).copied(),
+                    alpha,
+                    make_transform,
+                ) {
+                    if let Ok((_, p, mut tr)) = old.get_mut(slot.entity) {
+                        debug_assert_eq!((p.0, p.1, p.2), (f.id, piece_key.0, piece_key.1));
+                        if *tr != transform {
+                            *tr = transform;
+                        }
+                    }
+                }
+                continue;
             }
-            continue;
+            let entity = slot.entity;
+            if old.contains(entity) {
+                commands.entity(entity).despawn();
+            }
+            cache.slots.remove(&f.id);
+            cache.chunks.remove(&f.id);
         }
+        let current = make_transform();
+        let transform = slots::interpolate(current, visual.fragments.get(&f.id).copied(), alpha);
         if let Some(chunk) = &f.chunk {
             if chunk_builds >= 2 {
                 continue;
@@ -97,7 +107,7 @@ pub fn draw(
             let kind = unit.kind;
             let template = &art.pristine[kind.index()];
             let mut handles = Vec::new();
-            commands
+            let entity = commands
                 .spawn((
                     Piece(f.id, chunk.hash(), dead),
                     transform,
@@ -120,7 +130,12 @@ pub fn draw(
                             Transform::default(),
                         ));
                     }
-                });
+                })
+                .id();
+            cache.slots.insert(
+                f.id,
+                slots::Slot::new(entity, piece_key, f, current, transform, epoch),
+            );
             cache.chunks.insert(f.id, handles);
             continue;
         }
@@ -182,11 +197,29 @@ pub fn draw(
                 })
             })
             .clone();
-        commands.spawn((
-            Piece(f.id, 0, false),
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            transform,
-        ));
+        let entity = commands
+            .spawn((
+                Piece(f.id, 0, false),
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                transform,
+            ))
+            .id();
+        cache.slots.insert(
+            f.id,
+            slots::Slot::new(entity, piece_key, f, current, transform, epoch),
+        );
     }
+    let Cache { slots, chunks, .. } = &mut *cache;
+    slots.retain(|id, slot| {
+        if slot.seen == epoch {
+            true
+        } else {
+            if old.contains(slot.entity) {
+                commands.entity(slot.entity).despawn();
+            }
+            chunks.remove(id);
+            false
+        }
+    });
 }
