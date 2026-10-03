@@ -1,4 +1,10 @@
 # Shared by the runner and OS sampler; no simulation code or dependencies.
+function Get-RangeRenderSpanLimit {
+    param([ValidateRange(1, 3600)][int]$Seconds, [ValidateRange(0, 1000000)][int]$Requested = 0)
+    if ($Requested -gt 0) { return $Requested }
+    # Same bounded planning rule as render::timeline::span_limit_for_seconds.
+    [int][Math]::Min(1000000, [Math]::Max(100000, ($Seconds + 1) * 400 * 13))
+}
 function Get-RangeCompetingProcesses {
     param([int[]]$Exclude = @(), [string[]]$AdditionalNames = @())
     $names = @('cargo','rustc','sim_core*','nav-*','phys-*','bench_*','blast*','ffmpeg') + $AdditionalNames
@@ -67,7 +73,7 @@ function Get-RangeFrameTimes {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -106,11 +112,25 @@ function Get-RangeValidity {
     } elseif ($Log -match 'adapter_device_type=Cpu\b') {
         $issues.Add('software_adapter')
     }
-    if ($RenderTimeline -and $Log -notmatch '(?m)^PROFILE render_timeline_schema=[123] render_span_limit=100000 render_spans_started=\d+ render_spans_retained=\d+ render_spans_dropped=\d+ render_spans_incomplete=\d+ render_cutoff_ns=\d+ render_pipelined=(true|false)( render_gas_details=(true|false))?\r?$') {
-        $issues.Add('render_timeline_metadata_missing')
+    if ($RenderTimeline) {
+        $renderMeta = [regex]::Matches($Log, '(?m)^PROFILE render_timeline_schema=([1234]) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=\d+ render_pipelined=(true|false)(?: render_gas_details=(true|false))?(?: render_span_bytes=(\d+))?\r?$')
+        if ($renderMeta.Count -ne 1) { $issues.Add('render_timeline_metadata_missing') }
+        else {
+            $g = $renderMeta[0].Groups
+            $schema = [int]$g[1].Value; $limit = [long]$g[2].Value
+            $started = [long]$g[3].Value; $retained = [long]$g[4].Value
+            $dropped = [long]$g[5].Value; $incomplete = [long]$g[6].Value
+            if (($schema -lt 4 -and ($limit -ne 100000 -or $g[9].Success)) -or
+                ($schema -eq 4 -and ($limit -lt 1 -or $limit -gt 1000000 -or -not $g[9].Success -or [long]$g[9].Value -lt 1 -or [long]$g[9].Value -gt 1024)) -or
+                $retained -ne [Math]::Min($started, $limit) -or $started -ne ($retained + $dropped) -or $incomplete -gt $retained -or $retained -eq 0) {
+                $issues.Add('render_timeline_budget_count_mismatch')
+            }
+            if ($schema -eq 4 -and $RenderSpanLimit -gt 0 -and $limit -ne $RenderSpanLimit) { $issues.Add('render_timeline_budget_manifest_mismatch') }
+            if ($schema -eq 4 -and $dropped -gt 0) { $issues.Add('render_timeline_truncated') }
+        }
     }
-    if ($RenderTimeline -and $Log -match '(?m)^PROFILE render_timeline_schema=[23] ' -and
-        $Log -notmatch '(?m)^PROFILE render_timeline_schema=[23] [^\r\n]+ render_gas_details=(true|false)\r?$') {
+    if ($RenderTimeline -and $Log -match '(?m)^PROFILE render_timeline_schema=[234] ' -and
+        $Log -notmatch '(?m)^PROFILE render_timeline_schema=[234] [^\r\n]+ render_gas_details=(true|false)( render_span_bytes=\d+)?\r?$') {
         $issues.Add('render_timeline_detail_mode_missing')
     }
     # A separate comparison key must still match scenario, inputs and flags.

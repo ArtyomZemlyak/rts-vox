@@ -38,6 +38,25 @@ $renderV3 = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV2Log.Re
 Assert-Profile ($renderV3.ValidForComparison -and -not $renderV3.AcceptanceEligible) 'Extract phase schema used for FPS acceptance or rejected'
 $noPhaseMode = Get-RangeValidity $rows -Scenario world-battle -Log ($renderLog.Replace('render_timeline_schema=1 ', 'render_timeline_schema=3 ')) -RenderTimeline
 Assert-Profile ($noPhaseMode.Reasons -contains 'render_timeline_detail_mode_missing') 'Extract phase schema accepted without mode'
+Assert-Profile ((Get-RangeRenderSpanLimit -Seconds 5) -eq 100000 -and (Get-RangeRenderSpanLimit -Seconds 20) -eq 109200 -and (Get-RangeRenderSpanLimit -Seconds 120) -eq 629200 -and (Get-RangeRenderSpanLimit -Seconds 3600) -eq 1000000 -and (Get-RangeRenderSpanLimit -Seconds 120 -Requested 3) -eq 3) 'Duration budget diverged from native contract'
+$renderV4Log = $renderV2Log.Replace('render_timeline_schema=2 ', 'render_timeline_schema=4 ').Replace('render_span_limit=100000 ', 'render_span_limit=629200 ') + ' render_span_bytes=256'
+$renderV4 = Get-RangeValidity $rows -Scenario world-battle -Log $renderV4Log -RenderTimeline -RenderSpanLimit 629200
+Assert-Profile ($renderV4.ValidForComparison -and -not $renderV4.AcceptanceEligible) 'Duration budget rejected or used for FPS acceptance'
+$wrongBudget = Get-RangeValidity $rows -Scenario world-battle -Log $renderV4Log -RenderTimeline -RenderSpanLimit 100000
+Assert-Profile ($wrongBudget.Reasons -contains 'render_timeline_budget_manifest_mismatch') 'Requested/actual trace budget mismatch hidden'
+$truncatedLog = $renderV4Log.Replace('render_span_limit=629200 ', 'render_span_limit=7 ').Replace('render_spans_started=7 ', 'render_spans_started=8 ').Replace('render_spans_dropped=0 ', 'render_spans_dropped=1 ')
+$truncated = Get-RangeValidity $rows -Scenario world-battle -Log $truncatedLog -RenderTimeline -RenderSpanLimit 7
+Assert-Profile (-not $truncated.ValidForComparison -and $truncated.Reasons -contains 'render_timeline_truncated') 'Dropped late trace accepted for comparison'
+$badCount = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Replace('render_spans_started=7 ', 'render_spans_started=8 ')) -RenderTimeline
+Assert-Profile ($badCount.Reasons -contains 'render_timeline_budget_count_mismatch') 'Inconsistent trace counts accepted'
+$badLimit = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Replace('render_span_limit=629200 ', 'render_span_limit=1000001 ')) -RenderTimeline
+Assert-Profile ($badLimit.Reasons -contains 'render_timeline_budget_count_mismatch') 'Unbounded memory limit accepted'
+$badBytes = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Replace('render_span_bytes=256', 'render_span_bytes=1025')) -RenderTimeline
+Assert-Profile ($badBytes.Reasons -contains 'render_timeline_budget_count_mismatch') 'Unbounded record size accepted'
+$noBytes = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log.Replace(' render_span_bytes=256', '')) -RenderTimeline
+Assert-Profile ($noBytes.Reasons -contains 'render_timeline_budget_count_mismatch') 'New schema accepted without memory accounting'
+$duplicateRender = Get-RangeValidity $rows -Scenario world-battle -Log ($renderV4Log + "`n" + $renderV4Log) -RenderTimeline
+Assert-Profile ($duplicateRender.Reasons -contains 'render_timeline_metadata_missing') 'Duplicate render metadata accepted'
 $missing = Get-RangeValidity $rows -Scenario world-battle -Log ''
 Assert-Profile ($missing.Reasons -contains 'state_hash_missing' -and $missing.Reasons -contains 'actual_adapter_missing') 'Unknown provenance accepted'
 $nan = Get-RangeValidity @([pscustomobject]@{frame_ms='NaN';simulation_ticks='30';seconds='1.0'}) -Scenario world-battle -Log $log
@@ -69,4 +88,4 @@ foreach ($file in 'profile-range.ps1','profile-cpu-threads.ps1','range-profile-t
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file), [ref]$tokens, [ref]$errors)
     Assert-Profile ($errors.Count -eq 0) "Invalid PowerShell syntax: $file $errors"
 }
-'PASS: 23 validity/timing/context cases and parser checks.'
+'PASS: 32 validity/timing/context/budget cases and parser checks.'

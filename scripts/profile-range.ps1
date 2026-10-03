@@ -13,6 +13,8 @@ param(
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
     [switch]$RenderTimeline,
+    # Zero plans a bounded budget for the duration; explicit overflow is invalid.
+    [ValidateRange(0, 1000000)][int]$RenderSpanLimit = 0,
     [ValidateRange(0, 10000)][int]$TriggerMilliseconds = 0,
     [switch]$CheckEveryFrame,
     # Existing frozen build: no overwriting target/release for A/B runs.
@@ -31,6 +33,8 @@ try {
     if ($PhysicsWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$PhysicsWorkers" }
     if ($CorePhases -and $TriggerMilliseconds -gt 0) { throw '-CorePhases and -TriggerMilliseconds are separate diagnostic modes.' }
     if ($BinaryPath -and -not $SkipBuild) { throw '-BinaryPath requires -SkipBuild.' }
+    if ($RenderSpanLimit -gt 0 -and -not $RenderTimeline) { throw '-RenderSpanLimit requires -RenderTimeline.' }
+    $renderBudget = if ($RenderTimeline) { Get-RangeRenderSpanLimit -Seconds $Seconds -Requested $RenderSpanLimit } else { 0 }
     if (-not $SkipBuild) {
         & "$PSScriptRoot/cargo-local.ps1" build --release -p render --bin blast
         if ($LASTEXITCODE -ne 0) { throw 'Range build failed.' }
@@ -64,6 +68,7 @@ try {
                 InputHashes = @(Get-RangeInputHashes -Repo $repo)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
+                RenderSpanLimit = $renderBudget
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
                 RequestedWindow = @($WindowWidth, $WindowHeight)
                 Status = 'preflight'; Validity = $null
@@ -94,6 +99,10 @@ try {
             $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
             if ($RenderTimeline) { $arguments += '--profile-render' }
+            # Preserve automatic runs of frozen schema-1/2/3 binaries. New
+            # executables plan the same duration budget internally; only an
+            # explicit override requires the new CLI flag.
+            if ($RenderSpanLimit -gt 0) { $arguments += @('--profile-render-spans', $RenderSpanLimit) }
             if ($CorePhases) { $arguments += '--profile-core' }
             if ($TriggerMilliseconds -gt 0) { $arguments += @('--profile-trigger-ms', $TriggerMilliseconds) }
             if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
@@ -137,7 +146,7 @@ try {
             if ($RenderTimeline -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.render.csv"))) {
                 $reasons.Add('render_timeline_artifact_missing')
             }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget
             $manifest.Validity = $validity
             $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'

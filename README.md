@@ -144,6 +144,13 @@ Schema 3 добавляет исходное число dirty ranges и подф
 сохраняя unacknowledged edits и необработанный хвост; стоимость обслуживания
 main thread выводится отдельно. Подробности —
 [ADR-543](docs/analysis/137-lagging-terrain-journal.md).
+Schema 4 планирует bounded span budget по длительности: для 120 секунд
+629200 записей вместо 100000, максимум — миллион. `-RenderSpanLimit N`
+переопределяет план; метаданные сохраняют реальный лимит и размер записи.
+Переполнение новой трассы сохраняет данные, но отклоняет сравнение;
+открытый последний кадр остаётся отдельно указанным. Prepare вне gas call
+ранжируется независимо от общего render schedule. Подробности —
+[ADR-544](docs/analysis/138-render-trace-duration-budget.md).
 
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между

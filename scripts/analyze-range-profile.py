@@ -460,6 +460,7 @@ def incident_coverage(episodes, frames, mapped_steps, mapped_wall, mapped_jobs, 
 
 
 RENDER_SPAN_LIMIT = 100_000
+RENDER_MAX_SPANS = 1_000_000
 RENDER_STAGES = {"pipeline_handoff", "extract_callback", "render_schedule", "render_prepare",
                  "render_system", "render_graph", "submit_present_tail"}
 
@@ -510,7 +511,7 @@ def overlap_ns(index, a, b):
 def analyze_render_timeline(directory, scenario, log, manifest, frames, top, roles=None):
     """Source rows are frozen at extraction; time overlap is not a causal wait."""
     path = directory / f"{scenario}.render.csv"
-    metadata = re.findall(r"^PROFILE render_timeline_schema=(\d+) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=(\d+) render_pipelined=(true|false)(?: render_gas_details=(true|false))?$", log, re.M)
+    metadata = re.findall(r"^PROFILE render_timeline_schema=(\d+) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=(\d+) render_pipelined=(true|false)(?: render_gas_details=(true|false))?(?: render_span_bytes=(\d+))?$", log, re.M)
     declared = bool((manifest or {}).get("RenderTimeline"))
     if not path.exists() and not metadata and not declared:
         return None, []
@@ -519,8 +520,16 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
     if not declared:
         return None, ["render_timeline_mode_mismatch"]
     schema, limit, started, retained, dropped, incomplete, cutoff = map(int, metadata[0][:7])
-    if schema not in (1, 2, 3) or (schema == 1 and metadata[0][8]) or (schema >= 2 and not metadata[0][8]) or limit != RENDER_SPAN_LIMIT or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
+    span_bytes = int(metadata[0][9]) if metadata[0][9] else None
+    budget_valid = (limit == RENDER_SPAN_LIMIT and span_bytes is None) if schema < 4 else (
+        1 <= limit <= RENDER_MAX_SPANS and span_bytes is not None and 1 <= span_bytes <= 1024)
+    if schema not in (1, 2, 3, 4) or (schema == 1 and metadata[0][8]) or (schema >= 2 and not metadata[0][8]) or not budget_valid or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
         raise ValueError("Render timeline metadata budget/count mismatch")
+    issues = []
+    if schema == 4 and (manifest or {}).get("RenderSpanLimit") != limit:
+        issues.append("render_timeline_budget_manifest_mismatch")
+    if schema == 4 and dropped:
+        issues.append("render_timeline_truncated")
     if not all(r.get("frame_end_ns") for r in frames) or cutoff < int(frames[-1]["frame_end_ns"]):
         raise ValueError("Render timeline cutoff/frame clock mismatch")
     gas_details = metadata[0][8] == "true"
@@ -717,6 +726,9 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
             transfer_totals={field: sum(g.get("gas_terrain_upload", {}).get("work", {}).get(field, 0) for g in groups.values())
                              for field in ("terrain_writes", "terrain_bytes", "terrain_submits")})
     summary = dict(schema=schema, gas_details=gas_details, gas_summary=gas_summary, pipelined=pipelined, cutoff_ns=cutoff, retained=retained, dropped=dropped,
+        span_limit=limit, span_bytes=span_bytes, reserved_span_bytes=limit * span_bytes if span_bytes else None,
+        capture_not_truncated=dropped == 0, last_source_row=max(groups) if groups else None,
+        last_span_begin_ns=last_begin,
         incomplete=incomplete, source_rows=len(groups), complete_source_rows=len(complete),
         missing_source_rows=len(frames) - len(groups),
         stage_ms={stage: stats([(b - a) / 1e6 for a, b in values]) for stage, values in intervals.items()},
@@ -726,6 +738,8 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
         stage_driver_cycles={stage: stats([g[stage]["cycles"] for g in groups.values()
             if stage in g and g[stage]["cycles"] is not None]) for stage in allowed_stages},
         slow_render_frames=leaders[:top], slow_gas_calls=gas_leaders, slow_gaps=gaps[:top],
+        slow_other_prepare=sorted((f for f in leaders if f["other_or_unobserved_ms"].get("render_prepare") is not None),
+                                  key=lambda f: -f["other_or_unobserved_ms"]["render_prepare"])[:top],
         limitations=["CPU wall only: includes preemption, waits and diagnostic boundary overhead",
             "Rust ThreadId and optional OS thread/counters are distinct; missing counters remain null",
             "gas leaf CPU belongs to the actual task thread, coarse parent CPU excludes other workers",
@@ -738,7 +752,7 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
             "submit_present_tail includes final submission/readbacks/presentation/collection and scheduled boundary overhead, not pure present",
             "cutoff may retain an open terminal render frame; final main frame is not handed off yet",
             "GPU execution timestamps are not attached to source rows"])
-    return summary, []
+    return summary, issues
 
 
 def analyze(directory, scenario="world-battle", top=12):
@@ -1014,7 +1028,7 @@ def compare(a, b):
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow"]
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
         problems.append("different:RenderTimeline")
-    for key in ("schema", "gas_details"):
+    for key in ("schema", "gas_details", "span_limit", "span_bytes"):
         if (a.get("render_timeline") or {}).get(key) != (b.get("render_timeline") or {}).get(key):
             problems.append("different:render_timeline:" + key)
     for key in keys:
@@ -1109,6 +1123,7 @@ def markdown(report):
     if timeline:
         lines += ["", "Render CPU timeline (shared epoch, immutable source frame; overlaps are not causes):", "",
                   f"Source rows complete {timeline['complete_source_rows']}/{report['frames']}, missing {timeline['missing_source_rows']}, open spans {timeline['incomplete']}, dropped {timeline['dropped']}.", "",
+                  f"Capture not truncated: {timeline['capture_not_truncated']}; span budget {timeline['span_limit']}, reserved span bytes {timeline['reserved_span_bytes']}; last recorded source row {timeline['last_source_row']}. Terminal open/unhanded frames remain explicit.", "",
                   "| Stage | Samples | Mean wall, ms | p99, ms | Max, ms | Mean calling-thread CPU, ms |",
                   "|---|---:|---:|---:|---:|---:|"]
         for stage, values in sorted(timeline["stage_ms"].items()):
@@ -1128,12 +1143,12 @@ def markdown(report):
                     cpu_text = "unavailable" if cpu is None else f"{cpu:.3f}"
                     payload = leaf["input_frame_row"]
                     lines.append(f"| {frame['source_row']} | {stage} | {'complete' if leaf['completed'] else 'aborted'} | {payload if payload is not None else 'unknown'} | {frame['spans_ms'][stage]:.3f} | {cpu_text} | {work['patches']} | {work['words']} | {work['terrain_bytes']} |")
-            lines += ["", "Heavy render frames: parent wall outside the gas call includes other jobs/scheduling, not identified idle or wait time.", "",
+            lines += ["", "Prepare outside gas ranked separately: parent wall outside the gas call includes other jobs/scheduling, not identified idle or wait time.", "",
                       "| Source row | Prepare parent, ms | Actual gas prepare, ms | Other/unobserved prepare, ms | Extract parent, ms | Actual gas extract, ms |",
                       "|---:|---:|---:|---:|---:|---:|"]
             def shown(value):
                 return "unavailable" if value is None else f"{value:.3f}"
-            for frame in timeline["slow_render_frames"][:3]:
+            for frame in timeline["slow_other_prepare"][:3]:
                 spans = frame["spans_ms"]
                 lines.append(f"| {frame['source_row']} | {shown(spans.get('render_prepare'))} | {shown(spans.get('gas_prepare'))} | {shown(frame['other_or_unobserved_ms'].get('render_prepare'))} | {shown(spans.get('extract_callback'))} | {shown(spans.get('gas_extract'))} |")
             if timeline["schema"] >= 3:

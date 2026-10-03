@@ -4298,3 +4298,27 @@ datasets прошли; reset поколений 1…4 и прежний headless
 увеличения/семплирования bounded trace; 002/027, unobserved prepare, GPU IDs
 и 165 FPS открыты. Все плохие/несопоставимые результаты сохранены.
 Доказательства, SHA, ограничения — [137](137-lagging-terrain-journal.md).
+
+## ADR-544 — сохранение позднего render profile и отдельный prepare-рейтинг
+
+WBPERF-001: schema 4 заранее планирует bounded buffer по длительности,
+для 120 с — 629200 spans, max 1000000. Actual budget/размер записи видны
+в metadata; override имеет CLI/script key. Новые dropped captures сохраняют
+raw evidence, но отклоняются PowerShell/offline comparison gate. Форматы
+1/2/3 и автоматические запуски frozen старых binaries сохранены.
+Prepare вне gas call ранжируется отдельно от общего schedule, без сложения
+вложенных scopes и назначения неизвестной причины.
+
+348 проверок прошли; восемь raw datasets ADR-543 читаются новым parser.
+Native 120 с: 101491 spans, 7807 полных source rows, drops/open=0,
+missing=1 — только последний ещё не handed-off main frame. Старый cap
+потерял бы 115 полных source rows в этом же потоке. Actions: generations
+1…4, drops=0, два terminal open. Forced limit 10: 11838 drops, оба gate
+корректно отклоняют comparison, offline --require-valid exit 2.
+
+Parent prepare 32,127 мс при actual gas 0,046 мс: residual 32,081 мс
+остаётся без per-system/OS attribution. Core mean 15,535 мс/step;
+диагностический FPS 65,034, не FPS A/B/165-приёмка. WBPERF-001/027, GPU
+source IDs, WBPERF-002/независимый tick и 165 FPS открыты. Следующий
+instrumentation шаг — actual Bevy jobs без изменения их параллельности.
+Данные, память, SHA, ограничения — [138](138-render-trace-duration-budget.md).

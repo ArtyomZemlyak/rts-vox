@@ -341,6 +341,7 @@ fn main() {
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
     let mut profile_render = false;
+    let mut profile_render_spans = None;
     let mut profile_actions = false;
     let mut profile_core = false;
     let mut profile_trigger_ms = None;
@@ -356,6 +357,16 @@ fn main() {
             }
             "--profile-gpu" => profile_gpu = true,
             "--profile-render" => profile_render = true,
+            "--profile-render-spans" => {
+                i += 1;
+                let spans = args
+                    .get(i)
+                    .expect("--profile-render-spans 1..=1000000")
+                    .parse::<usize>()
+                    .expect("--profile-render-spans 1..=1000000");
+                assert!((1..=render::timeline::MAX_SPANS).contains(&spans));
+                profile_render_spans = Some(spans);
+            }
             "--profile-actions" => profile_actions = true,
             "--profile-core" => profile_core = true,
             "--profile-trigger-ms" => {
@@ -760,6 +771,10 @@ fn main() {
         !profile_render || profile_output.is_some(),
         "--profile-render requires --profile"
     );
+    assert!(
+        profile_render_spans.is_none() || profile_render,
+        "--profile-render-spans requires --profile-render"
+    );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
     profiler.navigation_workers = navigation_workers;
     profiler.configure_navigation(&mut sim);
@@ -807,6 +822,8 @@ fn main() {
         app.add_plugins(render::timeline::TimelinePlugin {
             sample: profile::render_sample,
             gas_details: true,
+            span_limit: profile_render_spans
+                .unwrap_or_else(|| render::timeline::span_limit_for_seconds(profile_seconds)),
         });
     }
     if profile_gpu {

@@ -820,6 +820,8 @@ class ReportTests(unittest.TestCase):
             out.write("PROFILE " + " ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
         path = self.path / "world-battle.manifest.json"
         manifest = json.loads(path.read_text()); manifest["RenderTimeline"] = True
+        if fields["render_timeline_schema"] == 4:
+            manifest["RenderSpanLimit"] = fields["render_span_limit"]
         path.write_text(json.dumps(manifest))
         return spans
 
@@ -899,6 +901,68 @@ class ReportTests(unittest.TestCase):
         result = profile.analyze(self.path)["render_timeline"]
         self.assertFalse(result["pipelined"])
         self.assertEqual(result["complete_source_rows"], 1)
+
+    def test_duration_budget_is_recorded_and_a_separate_contract(self):
+        rows = self.gas_fixture(schema=3)
+        before = profile.analyze(self.path)
+        self.render_fixture(rows, render_timeline_schema=4, render_gas_details="true",
+                            render_span_limit=629200, render_span_bytes=256)
+        result = profile.analyze(self.path)
+        timeline = result["render_timeline"]
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertTrue(timeline["capture_not_truncated"])
+        self.assertEqual(timeline["reserved_span_bytes"], 629200 * 256)
+        self.assertEqual(timeline["last_source_row"], 0)
+        self.assertIn("Capture not truncated: True", profile.markdown(result))
+        self.assertIn("different:render_timeline:span_limit", profile.compare(before, result)["reasons"])
+
+    def test_new_budget_overflow_retains_evidence_but_cannot_pass_comparison(self):
+        rows = self.gas_fixture(schema=3)[:3]
+        self.render_fixture(rows, render_timeline_schema=4, render_gas_details="true",
+                            render_span_limit=3, render_span_bytes=256,
+                            render_spans_started=20, render_spans_dropped=17)
+        result = profile.analyze(self.path)
+        self.assertFalse(result["valid_for_comparison"])
+        self.assertIn("render_timeline_truncated", result["reasons"])
+        self.assertFalse(result["render_timeline"]["capture_not_truncated"])
+        self.assertEqual(result["render_timeline"]["dropped"], 17)
+        self.assertFalse(result["render_timeline"]["slow_other_prepare"])
+
+    def test_duration_budget_rejects_bad_sizes_and_manifest_mismatch(self):
+        rows = self.gas_fixture(schema=3)
+        good = dict(render_timeline_schema=4, render_gas_details="true",
+                    render_span_limit=629200, render_span_bytes=256)
+        for key, value in (("render_span_limit", 0), ("render_span_limit", 1000001),
+                           ("render_span_bytes", 0), ("render_span_bytes", 1025)):
+            with self.subTest(key=key, value=value):
+                self.render_fixture(rows, **dict(good, **{key: value}))
+                with self.assertRaisesRegex(ValueError, "Render timeline"):
+                    profile.analyze(self.path)
+        self.render_fixture(rows, **dict(good, render_span_bytes=""))
+        self.assertIn("render_timeline_artifact_or_metadata_missing", profile.analyze(self.path)["reasons"])
+        self.render_fixture(rows, **good)
+        path = self.path / "world-battle.manifest.json"
+        manifest = json.loads(path.read_text()); manifest["RenderSpanLimit"] = 100000
+        path.write_text(json.dumps(manifest))
+        result = profile.analyze(self.path)
+        self.assertIn("render_timeline_budget_manifest_mismatch", result["reasons"])
+        self.assertFalse(result["valid_for_comparison"])
+
+    def test_prepare_residual_ranking_survives_schedule_only_top_limit(self):
+        first = self.gas_fixture(schema=3)
+        second = [dict(row, frame_row="1", begin_ns=str(int(row["begin_ns"]) + 2000000),
+                       end_ns=str(int(row["end_ns"]) + 2000000),
+                       input_frame_row="1" if row["input_frame_row"] else "") for row in first]
+        # Frame 0 has the slower graph/schedule; frame 1 has larger non-gas prepare.
+        next(row for row in second if row["stage"] == "render_schedule")["end_ns"] = "2002990"
+        next(row for row in second if row["stage"] == "render_prepare")["begin_ns"] = "2001710"
+        self.render_fixture(sorted(first + second, key=lambda row: int(row["begin_ns"])),
+                            render_timeline_schema=4, render_gas_details="true", render_span_limit=629200,
+                            render_span_bytes=256, render_cutoff_ns=2005000)
+        result = profile.analyze(self.path, top=1)
+        self.assertEqual(result["render_timeline"]["slow_render_frames"][0]["source_row"], 0)
+        self.assertEqual(result["render_timeline"]["slow_other_prepare"][0]["source_row"], 1)
+        self.assertIn("Prepare outside gas ranked separately", profile.markdown(result))
 
     def test_render_overlap_index_matches_exhaustive_intersections(self):
         spans = profile.merged_intervals([(5, 10), (8, 20), (25, 30), (40, 50), (45, 48)])

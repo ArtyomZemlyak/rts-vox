@@ -204,6 +204,16 @@ impl Timeline {
     }
 }
 
+/// Budget for the requested capture, not the achieved frame rate. Reserve space
+/// for 400 frames/s and all 13 current scopes/frame, plus the terminal frame.
+/// Allocation remains bounded even for hour-long diagnostics; overflow is
+/// reported explicitly and disqualifies a schema-4 capture from comparison.
+pub const MAX_SPANS: usize = 1_000_000;
+pub fn span_limit_for_seconds(seconds: f64) -> usize {
+    assert!(seconds.is_finite() && (1.0..=3600.0).contains(&seconds));
+    ((seconds.ceil() as usize + 1) * 400 * 13).clamp(100_000, MAX_SPANS)
+}
+
 pub struct Capture {
     spans: Vec<Span>,
     started: u64,
@@ -223,8 +233,8 @@ impl Capture {
             gas_details,
         } = self;
         let incomplete = spans.iter().filter(|s| s.end_ns.is_none()).count();
-        println!("PROFILE render_timeline_schema=3 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details}",
-            spans.len(), started - spans.len() as u64);
+        println!("PROFILE render_timeline_schema=4 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details} render_span_bytes={}",
+            spans.len(), started - spans.len() as u64, std::mem::size_of::<Span>());
         let path = std::path::Path::new(output).with_extension("render.csv");
         let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
@@ -298,22 +308,25 @@ fn counter(value: Option<u64>) -> String {
 pub struct TimelinePlugin {
     pub sample: fn() -> Option<CpuSample>,
     pub gas_details: bool,
+    pub span_limit: usize,
 }
 impl Default for TimelinePlugin {
     fn default() -> Self {
         Self {
             sample: unavailable,
             gas_details: false,
+            span_limit: 100_000,
         }
     }
 }
 impl Plugin for TimelinePlugin {
     fn build(&self, app: &mut App) {
+        assert!((1..=MAX_SPANS).contains(&self.span_limit));
         let recorder = Timeline {
             pipelined: app.get_sub_app(RenderExtractApp).is_some(),
             sample: self.sample,
             gas_details: self.gas_details,
-            ..default()
+            ..Timeline::with_limit(self.span_limit)
         };
         app.init_resource::<FrameSource>()
             .insert_resource(recorder.clone());
@@ -434,6 +447,35 @@ fn graph_end(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn duration_budget_is_bounded_and_keeps_late_records() {
+        assert_eq!(span_limit_for_seconds(5.0), 100_000);
+        assert_eq!(span_limit_for_seconds(20.0), 109_200);
+        assert_eq!(span_limit_for_seconds(120.0), 629_200);
+        assert_eq!(span_limit_for_seconds(120.1), 634_400);
+        assert_eq!(span_limit_for_seconds(3600.0), MAX_SPANS);
+        let recorder = Timeline::with_limit(span_limit_for_seconds(120.0));
+        let tag = tag(0);
+        // Reproduce the old 100k cutoff, including a completed late call.
+        for _ in 0..100_001 {
+            let token = recorder.begin(tag, "gas_prepare");
+            assert!(token.is_some());
+            recorder.end(token);
+        }
+        let capture = recorder.close(tag.epoch);
+        assert_eq!(capture.started as usize, capture.spans.len());
+        assert!(capture.spans.last().unwrap().end_ns.is_some());
+        assert!(
+            capture.spans.len() * std::mem::size_of::<Span>()
+                <= MAX_SPANS * std::mem::size_of::<Span>()
+        );
+    }
+    #[test]
+    fn duration_budget_rejects_invalid_capture_duration() {
+        for seconds in [0.0, 3601.0, f64::NAN, f64::INFINITY] {
+            assert!(std::panic::catch_unwind(|| span_limit_for_seconds(seconds)).is_err());
+        }
+    }
     fn tag(row: usize) -> FrameTag {
         FrameTag {
             row,

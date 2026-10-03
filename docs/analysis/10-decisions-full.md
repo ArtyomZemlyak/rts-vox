@@ -24206,3 +24206,36 @@ Detail after исчерпал 100000 spans: 5806 dropped, позднее фаз�
 прочие prepare jobs, OS/GPU IDs, независимый tick и 165 FPS открыты.
 SHA, полные данные, ограничения и дальнейшие задачи —
 [137](137-lagging-terrain-journal.md).
+
+## ADR-544 — bounded render capture по длительности и независимый prepare-рейтинг
+
+ADR-543 ускорил extraction, после чего detail run исчерпал прежние 100000
+spans: 5806 dropped/447 отсутствующих source rows. Schema 4 планирует
+буфер заранее по duration (120 с: 629200, max миллион), сохраняет actual
+limit/sizeof record и сверяет его с manifest. Явный CLI/script override
+bounded; автоматические frozen schema-1/2/3 runs продолжают работать.
+Новый overflow сохраняет raw evidence, но оба инструмента отклоняют
+comparison; --require-valid exit 2. Старое historical evidence читается
+с явными drops, не переименовывается в полное покрытие.
+
+Prepare residual ранжируется независимо от общего schedule. Source IDs,
+OS CPU/cycles/nesting/терминальное open coverage сохранены; residual не
+считается idle/ожиданием. Ordinary mode не устанавливает plugin. Per-system
+Bevy instrumentation остаётся отдельным шагом: никаких unsafe замен систем
+или новых exclusive fences между параллельными jobs.
+
+130 lib/101 blast/85 Python/32 PowerShell = 348 проверок; build/clippy без
+новых предупреждений, восемь прежних raw datasets читаются. Native 120 с:
+101491 spans, 7807 complete source rows, drops/open=0, missing=1 — лишь
+последний main frame ещё не handed off. Actions reset generations 1…4:
+drops=0, два terminal open. Forced limit 10 даёт 11838 drops и expected
+gate rejection, evidence сохранено. Резерв 120 с: 201,62 MiB элементов,
+не RSS; max миллион и переполнение длинных/более быстрых runs явны.
+
+3601 steps/0,999605×, diagnostic 65,034 FPS, p99 36,046/max 71,034 мс,
+не A/B/165-приёмка. Core mean 15,535 мс/step. Row 5017 / tick 1451:
+prepare 32,127 мс, gas 0,046, residual 32,081, graph 3,334 мс. Квантованный
+driver CPU 0 при ненулевых cycles не устанавливает причину; другие worker
+CPU здесь не измерены. WBPERF-001/027, GPU IDs, независимый sim/render и
+165 FPS открыты. SHA, данные и границы —
+[138](138-render-trace-duration-budget.md).
