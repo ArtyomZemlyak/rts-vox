@@ -24144,3 +24144,33 @@ native reset поколений 1…4 и проверка terminal incomplete. 1
 продвинута, 002/026/027 и 165 FPS открыты; source scopes extract/prepare
 workers, OS stacks/waits и GPU IDs идут далее. Полный обзор, SHA,
 результаты и ограничения — [135](135-render-source-frame-timeline.md).
+
+## ADR-542 — реальные CPU-render worker calls и workload
+
+Source-frame schema 2 измеряет GasInput extraction и gas prepare прямо
+внутри функций на фактическом worker thread; prepare имеет четыре
+синхронных участка. Workload содержит patches/words/regions/deposits и
+явные terrain queue writes/bytes/submits. Scope guards отличают normal,
+aborted и terminal open. Payload source frame отделён от consuming frame;
+диагностическая метка не форсирует Bevy change detection. Горячий stderr
+PROFILE_RENDER_PREPARE удалён; export и summary остаются после замера.
+Parser проверяет clocks/thread/nesting/status/references/facts; transfers
+считает только по upload leaf. Markdown явно подписывает calling-thread
+CPU и отдельно ранжирует actual extract/prepare без огромных словарей.
+
+Native 120 с покрывает все 7243 переданных source frames без drops. Общий
+prepare до 39,0085 мс, actual gas_prepare max 4,1965 мс: residual 37,7934 мс
+у тяжёлого кадра не объяснён. Actual gas_extract достигает 22,7336 мс
+с собственным CPU 15,625 мс и 34305 выходными patches; сортировка/упаковка/
+clone пока не разделены. Actions/reset 1…4 сохраняет terminal open и
+показывает 88 MB distant upload / 21 write / 6,5654 мс. Native reuse = 0,
+соответствующий случай проверен fixtures. Ordinary того же exe теряет
+темп 0,91701×; разные состояния не образуют строгий overhead A/B.
+
+326 проверок прошли (126 library, 101 blast, 78 Python, 21 PowerShell;
+13 profile core входят в blast),
+прежний headless hash сохранён. WBPERF-001 продвинута частично; extraction
+007/008, unobserved Bevy/OS 027, независимый tick 002, GPU IDs и 165 FPS
+остаются открытыми. История работающих/отклонённых подходов, методы,
+приоритеты, SHA/артефакты и ограничения —
+[136](136-render-worker-calls-and-workload.md).

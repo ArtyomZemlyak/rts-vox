@@ -106,8 +106,12 @@ function Get-RangeValidity {
     } elseif ($Log -match 'adapter_device_type=Cpu\b') {
         $issues.Add('software_adapter')
     }
-    if ($RenderTimeline -and $Log -notmatch '(?m)^PROFILE render_timeline_schema=1 render_span_limit=100000 render_spans_started=\d+ render_spans_retained=\d+ render_spans_dropped=\d+ render_spans_incomplete=\d+ render_cutoff_ns=\d+ render_pipelined=(true|false)\r?$') {
+    if ($RenderTimeline -and $Log -notmatch '(?m)^PROFILE render_timeline_schema=[12] render_span_limit=100000 render_spans_started=\d+ render_spans_retained=\d+ render_spans_dropped=\d+ render_spans_incomplete=\d+ render_cutoff_ns=\d+ render_pipelined=(true|false)( render_gas_details=(true|false))?\r?$') {
         $issues.Add('render_timeline_metadata_missing')
+    }
+    if ($RenderTimeline -and $Log -match '(?m)^PROFILE render_timeline_schema=2 ' -and
+        $Log -notmatch '(?m)^PROFILE render_timeline_schema=2 [^\r\n]+ render_gas_details=(true|false)\r?$') {
+        $issues.Add('render_timeline_detail_mode_missing')
     }
     # A separate comparison key must still match scenario, inputs and flags.
     $valid = $issues.Count -eq 0

@@ -179,6 +179,9 @@ pub struct GasInput {
     uploaded: Arc<AtomicU64>,
     patches: Vec<std::ops::Range<usize>>,
     patch_words: Vec<u32>,
+    pub(crate) trace: Option<crate::timeline::FrameTrace>,
+    /// Identity of the actual extraction, distinct from the consuming render frame.
+    data_frame: Option<usize>,
 }
 /// Optional extraction and render preparation CPU counters for the native profiler.
 /// These are not GPU timestamps and never enter the simulation.
@@ -211,12 +214,15 @@ impl Default for GasInput {
             uploaded: Arc::new(AtomicU64::new(0)),
             patches: Vec::new(),
             patch_words: Vec::new(),
+            trace: None,
+            data_frame: None,
         }
     }
 }
 impl ExtractResource for GasInput {
     type Source = Self;
     fn extract_resource(source: &Self) -> Self {
+        let scope = source.trace.as_ref().map(|t| t.scope("gas_extract"));
         let started = source
             .timings
             .enabled
@@ -267,6 +273,8 @@ impl ExtractResource for GasInput {
             ready: source.ready.clone(),
             timings: source.timings.clone(),
             uploaded: source.uploaded.clone(),
+            trace: None,
+            data_frame: source.trace.as_ref().map(|t| t.tag.row),
         };
         if let Some(started) = started {
             let ns = started.elapsed().as_nanos() as u64;
@@ -276,10 +284,35 @@ impl ExtractResource for GasInput {
                 .extract_peak_ns
                 .fetch_max(ns, Ordering::Relaxed);
         }
+        if let Some(scope) = scope {
+            scope.complete(result.profile_work());
+        }
         result
     }
 }
 impl GasInput {
+    fn profile_work(&self) -> crate::timeline::Workload {
+        crate::timeline::Workload {
+            input_frame_row: self.data_frame,
+            patches: self.patches.len() as u64,
+            words: self.patch_words.len() as u64,
+            distant_words: self
+                .distant_uploads
+                .patches
+                .iter()
+                .map(|(_, v)| v.len() as u64)
+                .sum(),
+            regions: self.atmosphere.regions.iter().flatten().count() as u64,
+            deposits: self
+                .atmosphere
+                .regions
+                .iter()
+                .flatten()
+                .map(|r| r.deposits.len() as u64)
+                .sum(),
+            ..default()
+        }
+    }
     /// Preserve patches until the renderer acknowledges them, including frames
     /// that only pan a paused camera and never execute a simulation tick.
     pub fn begin_frame(&mut self) {
@@ -892,11 +925,16 @@ fn prepare(
     mut commands: Commands,
     mut pipeline: ResMut<Pipeline>,
     input: Res<GasInput>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
+    gpu: (Res<RenderDevice>, Res<RenderQueue>),
     cache: Res<PipelineCache>,
     views: Query<(Entity, &ExtractedView), With<GasCamera>>,
+    trace: Option<Res<crate::timeline::RenderTrace>>,
 ) -> Result<(), BevyError> {
+    let (device, queue) = gpu;
+    let trace = trace.as_ref().and_then(|t| t.0.as_ref());
+    let scope = trace.map(|t| t.scope("gas_prepare"));
+    let mut work = trace.map(|_| input.profile_work());
+    let views_scope = trace.map(|t| t.scope("gas_views_uniform"));
     let started = input
         .timings
         .enabled
@@ -919,6 +957,10 @@ fn prepare(
     params.control.w = -1.0; // base pass, without raymarching a plume
     pipeline.uniform.set(params);
     pipeline.uniform.write_buffer(&device, &queue);
+    if let Some(scope) = views_scope {
+        scope.complete(work.unwrap());
+    }
+    let upload_scope = trace.map(|t| t.scope("gas_terrain_upload"));
     if pipeline.terrain_revision != input.terrain_revision {
         assert!(input.window.words() <= TERRAIN_WORDS);
         let count = input.patch_words.len();
@@ -966,6 +1008,10 @@ fn prepare(
             });
             queue.write_buffer(&spans, 0, descriptor_bytes.as_ref());
             queue.write_buffer(&values, 0, value_bytes.as_ref());
+            if let Some(work) = &mut work {
+                work.terrain_writes += 2;
+                work.terrain_bytes += (descriptor_bytes.len() + value_bytes.len()) as u64;
+            }
             let group = device.create_bind_group(
                 "terrain sparse upload",
                 &cache.get_bind_group_layout(&pipeline.upload_layout),
@@ -991,10 +1037,17 @@ fn prepare(
             // Submit before the frame's passes, making the new terrain visible
             // to depth, shadows and gas in this same frame.
             queue.submit([encoder.finish()]);
+            if let Some(work) = &mut work {
+                work.terrain_submits += 1;
+            }
         } else {
             for (start, words) in input.patches() {
                 let bytes = le_bytes(words);
                 queue.write_buffer(&pipeline.terrain, start as u64 * 4, bytes.as_ref());
+                if let Some(work) = &mut work {
+                    work.terrain_writes += 1;
+                    work.terrain_bytes += bytes.len() as u64;
+                }
             }
         }
         pipeline.terrain_revision = input.terrain_revision;
@@ -1011,13 +1064,20 @@ fn prepare(
                 le_bytes(words).as_ref(),
             );
         }
+        if let Some(work) = &mut work {
+            work.terrain_writes += input.distant_uploads.patches.len() as u64;
+            work.terrain_bytes += work.distant_words * 4;
+        }
         pipeline.distant_revision = input.distant_uploads.revision;
         input
             .distant_uploads
             .acknowledged
             .store(input.distant_uploads.revision, Ordering::Release);
     }
-    let after_upload = started.map_or(0, |t| t.elapsed().as_nanos() as u64);
+    if let Some(scope) = upload_scope {
+        scope.complete(work.unwrap());
+    }
+    let bricks_scope = trace.map(|t| t.scope("gas_bricks"));
     let terrain_buffer = pipeline.terrain.clone();
     pipeline.bricks.prepare(
         input.window,
@@ -1027,7 +1087,18 @@ fn prepare(
         &queue,
         &cache,
     );
-    let after_bricks = started.map_or(0, |t| t.elapsed().as_nanos() as u64);
+    if let Some(scope) = bricks_scope {
+        scope.complete(crate::timeline::Workload {
+            terrain_writes: 0,
+            terrain_bytes: 0,
+            terrain_submits: 0,
+            ..work.unwrap()
+        });
+    }
+    let regions_scope = trace.map(|t| t.scope("gas_regions"));
+    if let Some(work) = &mut work {
+        work.deposits = 0;
+    }
     let layout = cache.get_bind_group_layout(&pipeline.compute_layout);
     let mask_layout = cache.get_bind_group_layout(&pipeline.mask_layout);
     let Pipeline {
@@ -1055,6 +1126,9 @@ fn prepare(
         p.control.z = source.opacity(input.atmosphere.clock);
         p.control.w = 1.0; // overlay: the terrain and beam have already been drawn
         if slot.as_ref().is_none_or(|r| r.id != source.id) {
+            if let Some(work) = &mut work {
+                work.new_regions += 1;
+            }
             let allocation = started.map(|_| std::time::Instant::now());
             let buffers = std::array::from_fn(|_| state_buffer(&device));
             let mask = device.create_buffer(&BufferDescriptor {
@@ -1140,6 +1214,9 @@ fn prepare(
             let mut uniform = UniformBuffer::from(p);
             uniform.write_buffer(&device, &queue);
             let groups = compute_groups(&device, &layout, &uniform, &r.buffers, &r.mask);
+            if let Some(work) = &mut work {
+                work.deposits += 1;
+            }
             r.deposits.push(GpuDeposit {
                 serial: deposit.serial,
                 step: deposit.step,
@@ -1148,20 +1225,16 @@ fn prepare(
             });
         }
     }
+    if let Some(scope) = regions_scope {
+        scope.complete(crate::timeline::Workload {
+            terrain_writes: 0,
+            terrain_bytes: 0,
+            terrain_submits: 0,
+            ..work.unwrap()
+        });
+    }
     if let Some(started) = started {
         let elapsed = started.elapsed().as_nanos() as u64;
-        if elapsed >= 4_000_000 {
-            eprintln!(
-                "PROFILE_RENDER_PREPARE total_ms={:.3} upload_ms={:.3} bricks_ms={:.3} regions_ms={:.3} patches={} words={} regions={}",
-                elapsed as f64 / 1_000_000.0,
-                after_upload as f64 / 1_000_000.0,
-                after_bricks.saturating_sub(after_upload) as f64 / 1_000_000.0,
-                elapsed.saturating_sub(after_bricks) as f64 / 1_000_000.0,
-                input.patches.len(),
-                input.patch_words.len(),
-                input.atmosphere.regions.iter().flatten().count()
-            );
-        }
         input
             .timings
             .prepare_peak_ns
@@ -1179,6 +1252,9 @@ fn prepare(
             input.atmosphere.regions.iter().flatten().count() as u64,
             Ordering::Relaxed,
         );
+    }
+    if let Some(scope) = scope {
+        scope.complete(work.unwrap());
     }
     Ok(())
 }

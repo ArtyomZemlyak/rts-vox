@@ -944,5 +944,127 @@ class ReportTests(unittest.TestCase):
             profile.analyze(self.path)
 
 
+    def gas_fixture(self, prepare_complete=True):
+        spans = self.render_fixture()
+        for row in spans:
+            row.update(completed="", input_frame_row="", **{key: "" for key in profile.GAS_WORK_FIELDS})
+        leafs = [("gas_extract", 1450, 1500, "3", "extract_callback"),
+                 ("gas_prepare", 1810, 1890, "4", "render_prepare")]
+        if prepare_complete:
+            leafs += [("gas_views_uniform", 1820, 1830, "4", "gas_prepare"),
+                      ("gas_terrain_upload", 1830, 1850, "4", "gas_prepare"),
+                      ("gas_bricks", 1850, 1860, "4", "gas_prepare"),
+                      ("gas_regions", 1860, 1880, "4", "gas_prepare")]
+        for stage, a, b, thread, parent in leafs:
+            row = dict(spans[0], stage=stage, begin_ns=str(a), end_ns=str(b),
+                       begin_thread=f"ThreadId({thread})", end_thread=f"ThreadId({thread})",
+                       completed="1" if stage != "gas_prepare" or prepare_complete else "0", input_frame_row="0",
+                       **{key: "0" for key in profile.GAS_WORK_FIELDS})
+            if stage in ("gas_prepare", "gas_terrain_upload"):
+                row.update(terrain_writes="2", terrain_bytes="128", terrain_submits="1")
+            spans.append(row)
+        spans.sort(key=lambda r: int(r["begin_ns"]))
+        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        return spans
+
+    def test_actual_gas_calls_are_on_worker_threads_and_transfers_not_doubled(self):
+        self.gas_fixture()
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertTrue(result["gas_details"])
+        self.assertEqual(result["complete_source_rows"], 1)
+        self.assertEqual(result["gas_summary"]["actual_extract_calls"], 1)
+        self.assertEqual(result["gas_summary"]["transfer_totals"]["terrain_bytes"], 128)
+        self.assertIn("gas_extract", result["slow_render_frames"][0]["leaf_work"])
+
+    def test_gas_payload_reuse_keeps_original_extraction_identity(self):
+        first = self.gas_fixture()
+        second = [dict(row, frame_row="1", begin_ns=str(int(row["begin_ns"]) + 2000000),
+                       end_ns=str(int(row["end_ns"]) + 2000000))
+                  for row in first if row["stage"] != "gas_extract"]
+        self.render_fixture(sorted(first + second, key=lambda r: int(r["begin_ns"])),
+                            render_timeline_schema=2, render_gas_details="true", render_cutoff_ns=2005000)
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertEqual(result["complete_source_rows"], 2)
+        self.assertEqual(result["gas_summary"]["actual_extract_calls"], 1)
+        self.assertEqual(result["gas_summary"]["reused_payload_calls"], 1)
+        # Work happened again, even though the extracted payload was reused.
+        self.assertEqual(result["gas_summary"]["transfer_totals"]["terrain_bytes"], 256)
+        reused = next(r for r in result["slow_gas_calls"]["gas_prepare"] if r["source_row"] == 1)
+        self.assertEqual(reused["leaf_work"]["gas_prepare"]["input_frame_row"], 0)
+
+    def test_render_markdown_labels_cpu_and_actual_call_work(self):
+        self.gas_fixture()
+        report = profile.analyze(self.path)
+        rendered = profile.markdown(report)
+        self.assertIn("Mean calling-thread CPU, ms", rendered)
+        self.assertIn("Actual extract and prepare calls ranked separately", rendered)
+        self.assertIn("other jobs/scheduling", rendered)
+        self.assertIn("unavailable", rendered)
+        self.assertNotIn("actual leaf calls {", rendered)
+
+    def test_slow_extract_survives_schedule_only_top_limit(self):
+        first = self.gas_fixture()
+        second = [dict(row, frame_row="1", begin_ns=str(int(row["begin_ns"]) + 2000000),
+                       end_ns=str(int(row["end_ns"]) + 2000000),
+                       input_frame_row="1" if row["input_frame_row"] else "") for row in first]
+        next(r for r in second if r["stage"] == "gas_extract")["end_ns"] = "2001590"
+        self.render_fixture(sorted(first + second, key=lambda r: int(r["begin_ns"])),
+                            render_timeline_schema=2, render_gas_details="true", render_cutoff_ns=2005000)
+        result = profile.analyze(self.path, top=1)["render_timeline"]
+        self.assertEqual(result["slow_render_frames"][0]["source_row"], 0)
+        self.assertEqual(result["slow_gas_calls"]["gas_extract"][0]["source_row"], 1)
+
+    def test_missing_gas_extract_is_not_an_invented_call(self):
+        spans = [r for r in self.gas_fixture() if r["stage"] != "gas_extract"]
+        for row in spans:
+            if row["stage"] in profile.GAS_STAGES: row["input_frame_row"] = ""
+        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertEqual(result["complete_source_rows"], 1)
+        self.assertEqual(result["gas_summary"]["actual_extract_calls"], 0)
+        self.assertEqual(result["gas_summary"]["source_rows_without_extract_call"], 1)
+
+    def test_aborted_prepare_is_explicit_and_does_not_invent_remaining_stages(self):
+        self.gas_fixture(False)
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertEqual(result["gas_summary"]["aborted_prepare_calls"], 1)
+        self.assertNotIn("gas_regions", result["stage_ms"])
+
+    def test_gas_detail_integrity_rejects_missing_stages_clock_payload_or_threads(self):
+        for stage, changes in (("gas_regions", dict(begin_thread="ThreadId(5)", end_thread="ThreadId(5)")),
+                               ("gas_extract", dict(input_frame_row="1")),
+                               ("gas_bricks", dict(terrain_bytes="128")),
+                               ("gas_prepare", dict(words="-1")),
+                               ("gas_prepare", dict(completed="")),
+                               ("gas_regions", dict(end_ns="1950"))):
+            with self.subTest(stage=stage, changes=changes):
+                spans=self.gas_fixture()
+                next(r for r in spans if r["stage"] == stage).update(changes)
+                self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+                with self.assertRaisesRegex(ValueError, "Render timeline"):
+                    profile.analyze(self.path)
+        spans=[r for r in self.gas_fixture() if r["stage"] != "gas_bricks"]
+        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        with self.assertRaisesRegex(ValueError, "coverage missing"):
+            profile.analyze(self.path)
+
+    def test_gas_contract_and_legacy_render_contract_do_not_form_equal_pair(self):
+        self.render_fixture(); before=profile.analyze(self.path)
+        self.gas_fixture(); after=profile.analyze(self.path)
+        self.assertIn("different:render_timeline:schema", profile.compare(before, after)["reasons"])
+
+
+    def test_payload_reference_requires_actual_extract_with_same_facts(self):
+        spans = [r for r in self.gas_fixture() if r["stage"] != "gas_extract"]
+        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        with self.assertRaisesRegex(ValueError, "source extraction missing"):
+            profile.analyze(self.path)
+        spans=self.gas_fixture()
+        next(r for r in spans if r["stage"] == "gas_prepare")["words"]="32"
+        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        with self.assertRaisesRegex(ValueError, "payload facts mismatch"):
+            profile.analyze(self.path)
+
+
 if __name__ == "__main__":
     unittest.main()

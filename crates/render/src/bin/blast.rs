@@ -806,6 +806,7 @@ fn main() {
     if profile_render {
         app.add_plugins(render::timeline::TimelinePlugin {
             sample: profile::render_sample,
+            gas_details: true,
         });
     }
     if profile_gpu {

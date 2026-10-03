@@ -396,7 +396,7 @@ P1 — следующий существенный расход/масштаби
 |---|---|---|---|---|
 | WBPERF-001 | P0 | Репрезентативный стенд и детальные метрики | Замер + код | M |
 | WBPERF-002 | P0 | Отделить кадр от авторитетного тика | Замер + код | XL |
-| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540: frame-trigger и покрытие эпизодов; причина пауз, OS/render trace и исчерпание окон открыты | M/L |
+| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540/542: frame-trigger, source-frame и реальные gas worker scopes; причина пауз, прочие Bevy jobs/OS waits и исчерпание окон открыты | M/L |
 | WBPERF-003 | P0 | Постоянный пул поиска маршрутов | Замер + код | XL |
 | WBPERF-004 | P0 | Удешевить точную проходимость и повторные поиски | Замер + код | L |
 | WBPERF-005 | P0 | Активные обломки, спящие кучи и независимая физика | Замер + код | XL |
@@ -4234,3 +4234,33 @@ scheduling/stack/wait, source IDs GPU/fences, сокращение синхро�
 затем повторные fixed-workload пары. Reset поколений 1…4 проверен нативно;
 124 library/13 core/69 Python/19 PowerShell проверок прошли.
 Методы, SHA, цифры и ограничения — [135](135-render-source-frame-timeline.md).
+
+## ADR-542 — actual render worker calls и workload
+
+WBPERF-001: schema 2 записывает gas extraction/prepare прямо внутри функций
+на фактическом потоке, четыре синхронных prepare-участка, завершение/ранний
+выход, объём payload и явные terrain write/submit bytes. Потребляющий source
+frame отделён от actual extracted payload frame. Диагностическая метка не
+меняет Bevy change detection; reuse/неизвестный источник не выдаются за
+новое копирование. Удалена stderr-печать на горячем пути медленного prepare.
+Parser проверяет payload reference/facts и не складывает transfer counters
+родителя с детьми; Markdown отдельно ранжирует extract и prepare.
+
+Бой 120 с: actual gas_prepare max 4,1965 мс; у source row 7201 общий prepare
+39,0085 мс, gas_prepare 1,2151 мс, вне него 37,7934 мс. Причина residual
+пока неизвестна. Actual gas_extract max 22,7336 мс, собственный CPU 15,625 мс,
+34305 выходных patches. Это сортировка/упаковка/clone, не установленная
+чистая цена копии; исходные unmerged ranges и подфазы требуют детализации.
+Actions/reset выявляет 88 MB distant upload в 21 записи / 6,5654 мс.
+
+Все 7243 переданных source frames длинного боя покрыты, drops=0; actions
+сохраняет поколения 1…4 и 2 terminal open spans. Native reuse отсутствовал;
+он проверен fixtures. Ordinary на том же exe: 3304 шага / 0,91701×,
+p99 52,128 мс. Это не FPS-приёмка и не строгая пара overhead.
+
+Дальше: WBPERF-007/008 — фазы и исходные dirty ranges extraction; 001/027 —
+остальные Bevy Prepare/Extract jobs и OS stacks/waits; 002 — независимый тик
+и serial critical path. 026/027, GPU source IDs и 165 FPS открыты. 126 library,
+101 blast (включая 13 profile core), 78 Python, 21 PowerShell проверки прошли;
+hash прежний.
+Полный обзор, приоритеты и доказательства — [136](136-render-worker-calls-and-workload.md).

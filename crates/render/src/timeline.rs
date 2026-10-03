@@ -38,6 +38,59 @@ fn unavailable() -> Option<CpuSample> {
     None
 }
 
+/// Per-call facts. Queue counters cover explicit terrain/distant transfers,
+/// not uniform buffers, GPU execution or all allocations in the renderer.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Workload {
+    pub input_frame_row: Option<usize>,
+    pub patches: u64,
+    pub words: u64,
+    pub distant_words: u64,
+    pub regions: u64,
+    pub new_regions: u64,
+    pub deposits: u64,
+    pub terrain_writes: u64,
+    pub terrain_bytes: u64,
+    pub terrain_submits: u64,
+}
+#[derive(Clone)]
+pub(crate) struct FrameTrace {
+    pub tag: FrameTag,
+    recorder: Timeline,
+}
+#[derive(Resource, Default)]
+pub(crate) struct RenderTrace(pub Option<FrameTrace>);
+impl FrameTrace {
+    pub fn scope(&self, stage: &'static str) -> Scope {
+        Scope {
+            recorder: self.recorder.clone(),
+            token: self.recorder.begin(self.tag, stage),
+            work: Workload::default(),
+            completed: false,
+        }
+    }
+}
+/// Owned guard: no ECS borrow, global tag reads or added scheduling edges.
+/// Early returns finish as aborted; cutoff leaves the record explicitly open.
+pub(crate) struct Scope {
+    recorder: Timeline,
+    token: Option<usize>,
+    work: Workload,
+    completed: bool,
+}
+impl Scope {
+    pub fn complete(mut self, work: Workload) {
+        self.work = work;
+        self.completed = true;
+    }
+}
+impl Drop for Scope {
+    fn drop(&mut self) {
+        self.recorder
+            .end_detail(self.token, Some((self.completed, self.work)));
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Span {
     tag: FrameTag,
@@ -48,6 +101,7 @@ struct Span {
     end_thread: Option<ThreadId>,
     begin_cpu: Option<CpuSample>,
     end_cpu: Option<CpuSample>,
+    detail: Option<(bool, Workload)>,
 }
 
 #[derive(Default)]
@@ -65,6 +119,7 @@ pub struct Timeline {
     limit: usize,
     pipelined: bool,
     sample: fn() -> Option<CpuSample>,
+    gas_details: bool,
 }
 
 impl Default for Timeline {
@@ -83,6 +138,7 @@ impl Timeline {
             limit,
             pipelined: false,
             sample: unavailable,
+            gas_details: false,
         }
     }
 
@@ -105,11 +161,15 @@ impl Timeline {
             end_thread: None,
             begin_cpu: (self.sample)(),
             end_cpu: None,
+            detail: None,
         });
         Some(slot)
     }
 
     fn end(&self, slot: Option<usize>) {
+        self.end_detail(slot, None);
+    }
+    fn end_detail(&self, slot: Option<usize>, detail: Option<(bool, Workload)>) {
         let Some(slot) = slot else { return };
         let mut store = self.store.lock().unwrap();
         if store.closed {
@@ -120,6 +180,7 @@ impl Timeline {
         span.end_ns = Some(span.tag.epoch.elapsed().as_nanos());
         span.end_thread = Some(std::thread::current().id());
         span.end_cpu = (self.sample)();
+        span.detail = detail;
     }
 
     /// Close under the lock: export cannot race the render thread's final span.
@@ -133,6 +194,7 @@ impl Timeline {
             cutoff_ns: epoch.elapsed().as_nanos(),
             limit: self.limit,
             pipelined: self.pipelined,
+            gas_details: self.gas_details,
         }
     }
 }
@@ -143,6 +205,7 @@ pub struct Capture {
     cutoff_ns: u128,
     limit: usize,
     pipelined: bool,
+    gas_details: bool,
 }
 impl Capture {
     pub fn save(&self, output: &str) -> std::io::Result<()> {
@@ -152,20 +215,21 @@ impl Capture {
             cutoff_ns,
             limit,
             pipelined,
+            gas_details,
         } = self;
         let incomplete = spans.iter().filter(|s| s.end_ns.is_none()).count();
-        println!("PROFILE render_timeline_schema=1 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined}",
+        println!("PROFILE render_timeline_schema=2 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details}",
             spans.len(), started - spans.len() as u64);
         let path = std::path::Path::new(output).with_extension("render.csv");
         let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             out,
-            "frame_row,generation,tick,stage,begin_ns,end_ns,begin_thread,end_thread,begin_os_thread,end_os_thread,begin_cpu_ns,end_cpu_ns,begin_cycles,end_cycles"
+            "frame_row,generation,tick,stage,begin_ns,end_ns,begin_thread,end_thread,begin_os_thread,end_os_thread,begin_cpu_ns,end_cpu_ns,begin_cycles,end_cycles,completed,input_frame_row,patches,words,distant_words,regions,new_regions,deposits,terrain_writes,terrain_bytes,terrain_submits"
         )?;
         for span in spans {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{:?},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{:?},{},{},{},{},{},{},{},{}",
                 span.tag.row,
                 span.tag.generation,
                 span.tag.tick,
@@ -180,11 +244,32 @@ impl Capture {
                 counter(span.begin_cpu.and_then(|v| v.time_ns)),
                 counter(span.end_cpu.and_then(|v| v.time_ns)),
                 counter(span.begin_cpu.and_then(|v| v.cycles)),
-                counter(span.end_cpu.and_then(|v| v.cycles))
+                counter(span.end_cpu.and_then(|v| v.cycles)),
+                detail_csv(span.detail)
             )?;
         }
         out.flush()
     }
+}
+
+fn detail_csv(detail: Option<(bool, Workload)>) -> String {
+    let Some((completed, w)) = detail else {
+        return ",,,,,,,,,,".into();
+    };
+    format!(
+        "{},{},{},{},{},{},{},{},{},{},{}",
+        u8::from(completed),
+        w.input_frame_row.map_or(String::new(), |r| r.to_string()),
+        w.patches,
+        w.words,
+        w.distant_words,
+        w.regions,
+        w.new_regions,
+        w.deposits,
+        w.terrain_writes,
+        w.terrain_bytes,
+        w.terrain_submits
+    )
 }
 
 #[derive(Resource, Default)]
@@ -203,11 +288,13 @@ fn counter(value: Option<u64>) -> String {
 
 pub struct TimelinePlugin {
     pub sample: fn() -> Option<CpuSample>,
+    pub gas_details: bool,
 }
 impl Default for TimelinePlugin {
     fn default() -> Self {
         Self {
             sample: unavailable,
+            gas_details: false,
         }
     }
 }
@@ -216,6 +303,7 @@ impl Plugin for TimelinePlugin {
         let recorder = Timeline {
             pipelined: app.get_sub_app(RenderExtractApp).is_some(),
             sample: self.sample,
+            gas_details: self.gas_details,
             ..default()
         };
         app.init_resource::<FrameSource>()
@@ -225,12 +313,27 @@ impl Plugin for TimelinePlugin {
             .expect("timeline requires RenderApp");
         render
             .insert_resource(recorder.clone())
-            .init_resource::<RenderFrame>();
+            .init_resource::<RenderFrame>()
+            .init_resource::<RenderTrace>();
         let extract_recorder = recorder.clone();
         let mut original = render.take_extract().expect("Bevy extraction callback");
         render.set_extract(move |main, render| {
             let tag = main.resource::<FrameSource>().0;
             render.resource_mut::<RenderFrame>().tag = tag;
+            let trace = tag
+                .filter(|_| extract_recorder.gas_details)
+                .map(|tag| FrameTrace {
+                    tag,
+                    recorder: extract_recorder.clone(),
+                });
+            render.resource_mut::<RenderTrace>().0 = trace.clone();
+            if extract_recorder.gas_details {
+                if let Some(mut gas) = main.get_resource_mut::<crate::gas::GasInput>() {
+                    // Diagnostic identity must not force an unchanged resource
+                    // through Bevy's change-gated extraction again.
+                    gas.bypass_change_detection().trace = trace;
+                }
+            }
             let token = tag.and_then(|t| extract_recorder.begin(t, "extract_callback"));
             original(main, render);
             extract_recorder.end(token);
@@ -418,5 +521,88 @@ mod tests {
         assert_eq!(store.spans.len(), 1);
         assert_eq!(store.spans[0].tag.row, 0);
         assert!(store.spans[0].end_ns.is_some());
+    }
+    #[test]
+    fn actual_call_guards_keep_completion_work_and_cutoff() {
+        let recorder = Timeline::with_limit(4);
+        let tag = tag(0);
+        let trace = FrameTrace {
+            tag,
+            recorder: recorder.clone(),
+        };
+        trace.scope("gas_extract").complete(Workload {
+            input_frame_row: Some(0),
+            words: 512,
+            ..default()
+        });
+        drop(trace.scope("gas_prepare"));
+        let open = trace.scope("gas_regions");
+        let capture = recorder.close(tag.epoch);
+        drop(open);
+        assert_eq!(capture.spans[0].detail.unwrap().0, true);
+        assert_eq!(capture.spans[0].detail.unwrap().1.words, 512);
+        assert_eq!(capture.spans[1].detail.unwrap().0, false);
+        assert!(capture.spans[2].end_ns.is_none());
+        assert!(capture.spans[2].detail.is_none());
+        assert_eq!(detail_csv(None).split(',').count(), 11);
+    }
+    #[test]
+    fn diagnostic_tag_does_not_mark_gas_changed_or_copy_payload() {
+        use bevy::render::extract_resource::ExtractResource;
+        let mut app = App::new();
+        let mut sub = bevy::app::SubApp::new();
+        sub.add_schedule(Render::base_schedule());
+        sub.add_schedule(RenderGraph::base_schedule());
+        sub.set_extract(|_, _| {});
+        app.insert_sub_app(RenderApp, sub);
+        app.insert_resource(crate::gas::GasInput::default());
+        app.add_plugins(TimelinePlugin {
+            gas_details: true,
+            ..default()
+        });
+        app.world_mut().clear_trackers();
+        app.world_mut().increment_change_tick();
+        let changed = app
+            .world_mut()
+            .resource_mut::<crate::gas::GasInput>()
+            .last_changed();
+        let mut sub = app.remove_sub_app(RenderApp).unwrap();
+        app.world_mut().resource_mut::<FrameSource>().0 = Some(tag(0));
+        sub.extract(app.world_mut());
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<crate::gas::GasInput>()
+                .last_changed(),
+            changed
+        );
+        let payload =
+            crate::gas::GasInput::extract_resource(app.world().resource::<crate::gas::GasInput>());
+        app.world_mut().resource_mut::<FrameSource>().0 = Some(tag(1));
+        sub.extract(app.world_mut());
+        assert_eq!(
+            app.world_mut()
+                .resource_mut::<crate::gas::GasInput>()
+                .last_changed(),
+            changed
+        );
+        assert_eq!(
+            sub.world()
+                .resource::<RenderTrace>()
+                .0
+                .as_ref()
+                .unwrap()
+                .tag
+                .row,
+            1
+        );
+        assert!(payload.trace.is_none());
+        let store = app.world().resource::<Timeline>().store.lock().unwrap();
+        let call = store
+            .spans
+            .iter()
+            .find(|s| s.stage == "gas_extract")
+            .unwrap();
+        assert_eq!(call.tag.row, 0);
+        assert_eq!(call.detail.unwrap().1.input_frame_row, Some(0));
     }
 }

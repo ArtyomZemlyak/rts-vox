@@ -132,7 +132,13 @@ Sidecar `world-battle.render.csv` сохраняет исходный frame row/
 render span и пропуски при лимите записи остаются явными. Анализатор проверяет
 привязку/вложенность и показывает пересечения с паузами, без сложения вложенных
 интервалов. Это диагностический режим, не FPS-приёмка; GPU timestamps пока
-не привязаны к этим ID. Подробности — [ADR-541](docs/analysis/135-render-source-frame-timeline.md).
+не привязаны к этим ID. Schema 2 отдельно сохраняет реальные gas extract/prepare
+вызовы на воркерах, объём данных и явные terrain transfers. Payload source ID
+отделён от потребляющего кадра; диагностическая метка не форсирует extraction
+неизменного ресурса. Отчёт ранжирует extract и prepare отдельно и показывает
+работу вне gas call, не называя её ожиданием или idle. Подробности —
+[ADR-541](docs/analysis/135-render-source-frame-timeline.md),
+[ADR-542](docs/analysis/136-render-worker-calls-and-workload.md).
 
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между
