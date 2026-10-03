@@ -22,6 +22,8 @@ $software = Get-RangeValidity $rows -Scenario world-battle -Log ($log.Replace('D
 Assert-Profile ($software.Reasons -contains 'software_adapter') 'Software adapter accepted'
 $diagnostic = Get-RangeValidity $rows -Scenario world-battle -Log $log -CorePhases
 Assert-Profile ($diagnostic.ValidForComparison -and -not $diagnostic.AcceptanceEligible) 'Detailed trace used for FPS acceptance'
+$trigger = Get-RangeValidity $rows -Scenario world-battle -Log $log -TriggerPhases
+Assert-Profile ($trigger.ValidForComparison -and -not $trigger.AcceptanceEligible -and $trigger.Mode -eq 'trigger_diagnostic') 'Trigger trace used for FPS acceptance'
 $missing = Get-RangeValidity $rows -Scenario world-battle -Log ''
 Assert-Profile ($missing.Reasons -contains 'state_hash_missing' -and $missing.Reasons -contains 'actual_adapter_missing') 'Unknown provenance accepted'
 $nan = Get-RangeValidity @([pscustomobject]@{frame_ms='NaN';simulation_ticks='30';seconds='1.0'}) -Scenario world-battle -Log $log
@@ -53,4 +55,4 @@ foreach ($file in 'profile-range.ps1','profile-cpu-threads.ps1','range-profile-t
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file), [ref]$tokens, [ref]$errors)
     Assert-Profile ($errors.Count -eq 0) "Invalid PowerShell syntax: $file $errors"
 }
-'PASS: 16 validity/timing/context cases and parser checks.'
+'PASS: 17 validity/timing/context cases and parser checks.'

@@ -342,6 +342,7 @@ fn main() {
     let mut profile_gpu = false;
     let mut profile_actions = false;
     let mut profile_core = false;
+    let mut profile_trigger_ms = None;
     let mut navigation_workers = None;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
@@ -355,6 +356,16 @@ fn main() {
             "--profile-gpu" => profile_gpu = true,
             "--profile-actions" => profile_actions = true,
             "--profile-core" => profile_core = true,
+            "--profile-trigger-ms" => {
+                i += 1;
+                let ms = args
+                    .get(i)
+                    .expect("--profile-trigger-ms 1..=10000")
+                    .parse::<u32>()
+                    .expect("--profile-trigger-ms 1..=10000");
+                assert!((1..=10000).contains(&ms), "--profile-trigger-ms 1..=10000");
+                profile_trigger_ms = Some(ms);
+            }
             "--nav-workers" => {
                 i += 1;
                 let workers = args
@@ -753,6 +764,9 @@ fn main() {
         "--profile-core requires --profile"
     );
     profiler.core = profile_core;
+    if let Some(ms) = profile_trigger_ms {
+        profiler.configure_trigger(ms);
+    }
     assert!(
         !profile_actions || profile_output.is_some(),
         "--profile-actions requires --profile"

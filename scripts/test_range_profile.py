@@ -241,6 +241,109 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(result["slice_summary"]["measured_wall_ms"])
         self.assertTrue(all(value is None for value in result["slice_summary"]["phase_totals_ms"].values()))
 
+    def write_stall_capture(self, rows=None, retained=1, threshold=50):
+        self.write()
+        (self.path / "world-battle.core.csv").unlink()
+        marks = rows if rows is not None else [r for r in trace() if r["lane"] != "task"]
+        with (self.path / "world-battle.stall.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(marks[0])); writer.writeheader(); writer.writerows(marks)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write(f"PROFILE stall_capture_schema=1 stall_capture_mode=phase_ring threshold_ms={threshold} pre_ticks=16 post_ticks=16 max_windows=4\n")
+            out.write(f"PROFILE stall_windows=0 stall_slow_ticks=0 stall_unarmed_slow_ticks=0 stall_retained_ticks={retained}\n")
+        path = self.path / "world-battle.manifest.json"
+        manifest = json.loads(path.read_text()); manifest["CoreTriggerMilliseconds"] = threshold
+        path.write_text(json.dumps(manifest))
+
+    def test_phase_ring_is_partial_diagnostic_with_correct_tick_identity(self):
+        self.write_stall_capture()
+        # Another actual step is intentionally outside the retained context.
+        frames = [dict(r) for r in self.frames]; frames[1].update(tick="2", simulation_ticks="1")
+        with (self.path / "world-battle.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(frames[0])); writer.writeheader(); writer.writerows(frames)
+        result = profile.analyze(self.path)
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertFalse(result["acceptance_eligible"])
+        self.assertEqual(result["trace_steps"], 0)
+        self.assertEqual(result["measured_steps"], 2)
+        capture = result["stall_trace"]
+        self.assertTrue(capture["partial"])
+        self.assertEqual(capture["retained_ticks"], 1)
+        self.assertEqual(capture["ticks"][0]["frame_row"], 0)
+        self.assertEqual(capture["ticks"][0]["task_count"], 0)
+        self.assertIn("Phase-ring capture", profile.markdown(result))
+
+    def test_phase_ring_rejects_declared_mode_mismatch_and_missing_metadata(self):
+        self.write_stall_capture()
+        path = self.path / "world-battle.manifest.json"
+        manifest = json.loads(path.read_text()); manifest["CoreTriggerMilliseconds"] = 0
+        path.write_text(json.dumps(manifest))
+        result = profile.analyze(self.path)
+        self.assertIn("stall_capture_mode_mismatch", result["reasons"])
+        self.assertFalse(result["acceptance_eligible"])
+        self.write_stall_capture()
+        log = self.path / "world-battle.log"
+        log.write_text("\n".join(line for line in log.read_text().splitlines() if "stall_capture_schema" not in line))
+        self.assertIn("stall_capture_metadata_missing", profile.analyze(self.path)["reasons"])
+
+    def test_phase_ring_rejects_worker_marks_or_wrong_frame_identity(self):
+        self.write_stall_capture(rows=trace())
+        with self.assertRaisesRegex(ValueError, "Worker/unit"):
+            profile.analyze(self.path)
+        self.write_stall_capture(rows=[dict(r, tick="2") for r in trace() if r["lane"] != "task"])
+        with self.assertRaisesRegex(ValueError, "identity mismatch"):
+            profile.analyze(self.path)
+
+    def test_phase_ring_checks_retained_count_missing_file_and_budget(self):
+        self.write_stall_capture(retained=2)
+        with self.assertRaisesRegex(ValueError, "count mismatch"):
+            profile.analyze(self.path)
+        self.write_stall_capture()
+        (self.path / "world-battle.stall.csv").unlink()
+        with self.assertRaisesRegex(ValueError, "file missing"):
+            profile.analyze(self.path)
+        self.write_stall_capture(retained=1000)
+        with self.assertRaisesRegex(ValueError, "budget/count"):
+            profile.analyze(self.path)
+
+    def test_phase_ring_duplicate_and_clock_overrun_are_not_silently_accepted(self):
+        rows = [r for r in trace() if r["lane"] != "task"]
+        self.write_stall_capture(rows=rows + rows)
+        with self.assertRaisesRegex(ValueError, "exactly one begin"):
+            profile.analyze(self.path)
+        rows = [dict(r) for r in rows]
+        rows[-1].update(offset_ns="1000", profile_offset_ns="2000")
+        self.write_stall_capture(rows=rows)
+        with self.assertRaisesRegex(ValueError, "outside frame"):
+            profile.analyze(self.path)
+
+    def test_boundary_only_capture_leaves_phase_cpu_unavailable_and_rejects_inconsistent_rows(self):
+        self.write_stall_capture()
+        legacy = profile.analyze(self.path)
+        log = self.path / "world-battle.log"
+        log.write_text(log.read_text().replace("max_windows=4", "max_windows=4 cpu_sampling=tick_boundaries"))
+        # Existing fixture has phase CPU counters; the declaration must agree.
+        with self.assertRaisesRegex(ValueError, "Unexpected phase CPU"):
+            profile.analyze(self.path)
+        path = self.path / "world-battle.stall.csv"
+        rows = list(profile.read_csv(path))
+        for row in rows:
+            if row["lane"] != "tick":
+                row["thread_cpu_ns"] = row["cpu_cycles"] = ""
+        with path.open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(rows[0])); writer.writeheader(); writer.writerows(rows)
+        after = profile.analyze(self.path)
+        tick = after["stall_trace"]["ticks"][0]
+        self.assertIsNotNone(tick["thread_cpu_ms"])
+        self.assertTrue(all(p["thread_cpu_ms"] is None for p in tick["phases"]))
+        self.assertIn("different:stall_trace:cpu_sampling", profile.compare(legacy, after)["reasons"])
+
+    def test_trigger_thresholds_are_explicit_pair_condition(self):
+        self.write_stall_capture(threshold=50)
+        before = profile.analyze(self.path)
+        self.write_stall_capture(threshold=100)
+        after = profile.analyze(self.path)
+        self.assertIn("different:CoreTriggerMilliseconds", profile.compare(before, after)["reasons"])
+
     def test_new_schema_requires_physics_scopes_and_cannot_pair_with_legacy(self):
         self.write()
         legacy = profile.analyze(self.path)

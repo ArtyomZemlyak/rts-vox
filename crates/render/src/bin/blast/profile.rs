@@ -13,6 +13,7 @@ pub struct Profile {
     pub gpu: bool,
     pub actions: bool,
     pub core: bool,
+    trigger: Option<core::Trigger>,
     /// Optional fixed route pool for paired native performance experiments.
     /// Reapply when the workshop replaces the simulation, not every frame.
     pub navigation_workers: Option<usize>,
@@ -207,9 +208,19 @@ impl Profile {
         if self.core && self.start.is_some() && !self.finished {
             self.core_rows
                 .push(core::Tick::record(sim, generation, self.epoch.unwrap()));
+        } else if self.start.is_some() && !self.finished && self.trigger.is_some() {
+            let tick = core::Tick::record_phases(sim, generation, self.epoch.unwrap());
+            self.trigger.as_mut().unwrap().push(tick);
         } else {
             sim.step();
         }
+    }
+    pub fn configure_trigger(&mut self, threshold_ms: u32) {
+        assert!(
+            self.output.is_some() && !self.core,
+            "--profile-trigger-ms requires --profile and excludes --profile-core"
+        );
+        self.trigger = Some(core::Trigger::new(threshold_ms));
     }
     pub fn configure_navigation(&self, sim: &mut BlastRange) {
         if let Some(workers) = self.navigation_workers {
@@ -297,6 +308,10 @@ pub fn begin(
         if p.core {
             println!("PROFILE core_trace_schema=3");
             println!("PROFILE physics_task_sampling=longest_per_thread_family_stage");
+        }
+        if let Some(trigger) = &p.trigger {
+            println!("PROFILE stall_capture_schema=1 stall_capture_mode=phase_ring threshold_ms={} pre_ticks={} post_ticks={} max_windows={} cpu_sampling=tick_boundaries",
+                trigger.threshold_ms, core::Trigger::PRE, core::Trigger::POST, core::Trigger::MAX_WINDOWS);
         }
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
@@ -414,6 +429,14 @@ pub fn end(
         exit.write(AppExit::error());
         return;
     }
+    let stall_rows = if let Some(trigger) = &mut p.trigger {
+        let rows = trigger.finish();
+        println!("PROFILE stall_windows={} stall_slow_ticks={} stall_unarmed_slow_ticks={} stall_retained_ticks={}",
+            trigger.windows, trigger.slow_ticks, trigger.unarmed_slow_ticks, rows.len());
+        rows
+    } else {
+        Vec::new()
+    };
     let result = (|| -> std::io::Result<()> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
@@ -454,6 +477,7 @@ pub fn end(
         }
         out.flush()
             .and_then(|()| core::save(p.output.as_ref().unwrap(), &p.core_rows))
+            .and_then(|()| core::save_stalls(p.output.as_ref().unwrap(), &stall_rows))
     })();
     for (column, name) in [
         "frame",

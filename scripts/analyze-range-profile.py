@@ -304,6 +304,71 @@ def summarize_slices(frames, aligned, top):
     return summary, slow, episodes if aligned else None
 
 
+def analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top):
+    header = re.search(r"^PROFILE stall_capture_schema=(\d+) stall_capture_mode=(\w+) threshold_ms=(\d+) pre_ticks=(\d+) post_ticks=(\d+) max_windows=(\d+)(?: cpu_sampling=(\w+))?$", log, re.M)
+    declared = int((manifest or {}).get("CoreTriggerMilliseconds") or 0)
+    path = directory / f"{scenario}.stall.csv"
+    if not header:
+        return None, ["stall_capture_metadata_missing"] if declared or path.exists() else []
+    version, mode, threshold, pre, post, maximum, cpu_sampling = header.groups()
+    cpu_sampling = cpu_sampling or "unspecified"
+    threshold, pre, post, maximum = map(int, (threshold, pre, post, maximum))
+    if version != "1" or mode != "phase_ring" or min(threshold, maximum) <= 0 or cpu_sampling not in ("unspecified", "tick_boundaries"):
+        raise ValueError("Unsupported stall capture contract")
+    summary = re.search(r"^PROFILE stall_windows=(\d+) stall_slow_ticks=(\d+) stall_unarmed_slow_ticks=(\d+) stall_retained_ticks=(\d+)$", log, re.M)
+    if not summary:
+        raise ValueError("Stall capture summary missing")
+    windows, slow_count, unarmed, retained = map(int, summary.groups())
+    if windows > maximum or slow_count < windows or unarmed > slow_count or retained > maximum * (pre + 1 + post) + pre:
+        raise ValueError("Stall capture budget/count mismatch")
+    if not all(start is not None for start in starts):
+        raise ValueError("Stall capture requires aligned frame clocks")
+    issues = []
+    if declared != threshold or (manifest or {}).get("CorePhases"):
+        issues.append("stall_capture_mode_mismatch")
+    if retained and not path.exists():
+        raise ValueError("Stall capture file missing")
+    ticks, identities, mapped, last_begin = [], set(), {}, -1
+    for key, group in itertools.groupby(read_csv(path) if path.exists() else [], key=lambda r: (r["generation"], r["tick"])):
+        if key in identities:
+            raise ValueError("Duplicated stall capture tick")
+        identities.add(key)
+        rows = list(group)
+        if any(row["lane"] not in ("tick", "phase", "detail") for row in rows):
+            raise ValueError("Worker/unit marks in phase-only stall capture")
+        if cpu_sampling == "tick_boundaries" and any(
+            row["lane"] != "tick" and any(row.get(k) not in (None, "") for k in ("thread_cpu_ns", "cpu_cycles")) for row in rows
+        ):
+            raise ValueError("Unexpected phase CPU counters in boundary-only capture")
+        tick = summarize_tick(rows)
+        tick.pop("physics_samples")
+        begin, end = tick["profile_begin_ns"], tick["profile_end_ns"]
+        if begin is None or end is None or begin < last_begin:
+            raise ValueError("Stall capture clock missing or regressed")
+        last_begin = begin
+        idx = bisect.bisect_right(starts, begin) - 1
+        if idx < 0 or end > int(frames[idx]["frame_end_ns"]):
+            raise ValueError("Stall capture outside frame slice")
+        frame = frames[idx]
+        steps = int(frame["simulation_ticks"])
+        distance = (tick["tick"] - int(frame["tick"]) + steps - 1) % (1 << 32)
+        if tick["generation"] != int(frame["generation"]) or distance >= steps:
+            raise ValueError("Stall capture frame/tick identity mismatch")
+        mapped[idx] = mapped.get(idx, 0) + 1
+        if mapped[idx] > steps:
+            raise ValueError("Excess stall capture ticks in frame")
+        tick["frame_row"] = idx
+        if tick["os_thread"]:
+            roles.setdefault(tick["os_thread"], set()).add("tick_caller")
+        ticks.append(tick)
+    if len(ticks) != retained or slow_count > sum(int(f["simulation_ticks"]) for f in frames):
+        raise ValueError("Stall capture retained/observed count mismatch")
+    return dict(schema=1, mode=mode, cpu_sampling=cpu_sampling, threshold_ms=threshold, pre_ticks=pre, post_ticks=post,
+                max_windows=maximum, windows=windows, observed_slow_ticks=slow_count,
+                unarmed_slow_ticks=unarmed, retained_ticks=retained, partial=True,
+                ticks=ticks, slow_ticks=sorted(ticks, key=lambda t: -t["wall_ms"])[:top]), issues
+
+
 def analyze(directory, scenario="world-battle", top=12):
     directory = Path(directory)
     log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
@@ -500,6 +565,8 @@ def analyze(directory, scenario="world-battle", top=12):
     pools = re.search(r"^PROFILE physics_workers=(\d+) navigation_workers=(\d+)", log, re.M)
     context = render_context(log)
     reasons.extend(context["reasons"])
+    stall_trace, stall_issues = analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top)
+    reasons.extend(stall_issues)
     if not pools:
         reasons.append("actual_worker_counts_missing")
     seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
@@ -518,7 +585,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=4, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -538,7 +605,7 @@ def analyze(directory, scenario="world-battle", top=12):
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         slice_summary=slice_summary, slow_slices=slow_slices,
-        stall_episodes=episodes,
+        stall_episodes=episodes, stall_trace=stall_trace,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
                     "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
@@ -548,6 +615,7 @@ def analyze(directory, scenario="world-battle", top=12):
                     "unit intervals are between consecutive callbacks and can enclose other work",
                     "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame; repeated observations are not new jobs and their per-row sum/mean is not render CPU work",
                     "single_tick_ms is exact core wall only for one-step slices; multi-step slices expose an average, never invented individual tick durations",
+                    "phase-ring capture retains selected phase/detail ticks and quiet tail, not all ticks or worker jobs; caller CPU is not process CPU and the instrumented run cannot qualify FPS",
                     "stall episodes group adjacent measured slices or following gaps >=50ms; core wall includes worker execution/preemption/waits and is not OS CPU time",
                     "OS counters use coarse sampling; UTC alignment is approximate, and only full in-window intervals are included",
                     "callback roles are accumulated per OS ID; thread CPU accounting keeps creation-time lifetimes separate",
@@ -567,6 +635,11 @@ def compare(a, b):
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
+    if int((a["manifest"] or {}).get("CoreTriggerMilliseconds") or 0) != int((b["manifest"] or {}).get("CoreTriggerMilliseconds") or 0):
+        problems.append("different:CoreTriggerMilliseconds")
+    for key in ("schema", "mode", "cpu_sampling", "threshold_ms", "pre_ticks", "post_ticks", "max_windows"):
+        if (a["stall_trace"] or {}).get(key) != (b["stall_trace"] or {}).get(key):
+            problems.append(f"different:stall_trace:{key}")
     for key in ["measured_steps", "actual_adapter", "actual_workers", "actual_render_context", "core_trace_schema", "physics_task_sampling", "frame_alignment", "frame_timing_metric", "state_hash"]:
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
@@ -623,6 +696,12 @@ def markdown(report):
         lines += ["", f"Stall episodes: {episodes['count']} (adjacent measured slices or following gaps >= {episodes['threshold_ms']}ms; wall evidence, not an identified cause).", ""]
         for episode in episodes["retained"]:
             lines.append(f"- generation {episode['generation']}, rows {episode['first_row']}..{episode['last_row']}, {episode['simulation_ticks']} steps: measured wall {episode['measured_wall_ms']:.3f}ms, following gaps {episode['following_gap_ms']:.3f}ms, core wall {episode['core_ms']:.3f}ms; longest exact single tick {number(episode['longest_single_tick_ms'])}ms.")
+    capture = report["stall_trace"]
+    if capture is not None:
+        lines += ["", f"Phase-ring capture: {capture['windows']} windows, {capture['observed_slow_ticks']} slow ticks, {capture['unarmed_slow_ticks']} unarmed crossings; {capture['retained_ticks']} selected ticks retained. CPU sampling: {capture['cpu_sampling']}. Diagnostic only; no worker/stack/wait evidence. Quiet tail remains even if no trigger fired.", ""]
+        for tick in capture["slow_ticks"]:
+            phases = ", ".join(f"{p['name']}={p['wall_ms']:.3f}ms (caller CPU {number(p['thread_cpu_ms'])}ms)" for p in sorted(tick["phases"], key=lambda p: -p["wall_ms"])[:3])
+            lines.append(f"- row {tick['frame_row']}, generation {tick['generation']}, tick {tick['tick']}: wall {tick['wall_ms']:.3f}ms, caller CPU {number(tick['thread_cpu_ms'])}ms; {phases}.")
     lines += ["", "Bevy delta may lag by multiple rows through the render pipeline; it is not used to select slow frames or attribute their phases. Outside slices is the monotonic gap from the previous measured end to the current measured start. It is not an identified GPU/lock wait. First-frame previous values and legacy clock fields remain unavailable."]
     lines += ["", *[f"- {s}." for s in report["limitations"]]]
     cpu = report["os_cpu_window"]

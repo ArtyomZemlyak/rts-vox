@@ -74,6 +74,24 @@ fn cpu() -> Option<Cpu> {
     None
 }
 
+#[cfg(windows)]
+fn cpu_identity() -> Option<Cpu> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    // SAFETY: this call returns the executing thread ID without an output buffer.
+    Some(Cpu {
+        thread: unsafe { GetCurrentThreadId() },
+        cycles: None,
+        time_ns: None,
+    })
+}
+#[cfg(not(windows))]
+fn cpu_identity() -> Option<Cpu> {
+    None
+}
+
 #[derive(Clone, Copy)]
 struct Mark {
     lane: &'static str,
@@ -133,6 +151,15 @@ impl WorkerMarks {
     }
 }
 impl Mark {
+    fn phase(epoch: Instant, lane: &'static str, event: &'static str) -> Self {
+        Self {
+            lane,
+            event,
+            unit: None,
+            ns: epoch.elapsed().as_nanos(),
+            cpu: cpu_identity(),
+        }
+    }
     fn new(epoch: Instant, lane: &'static str, event: &'static str, unit: Option<usize>) -> Self {
         let ns = epoch.elapsed().as_nanos();
         Self {
@@ -153,6 +180,47 @@ pub(super) struct Tick {
     physics: Vec<physics::Total>,
 }
 impl Tick {
+    pub(super) fn record_phases(
+        sim: &mut BlastRange,
+        generation: u64,
+        profile_epoch: Instant,
+    ) -> Self {
+        let marks = RefCell::new(Vec::with_capacity(64));
+        let epoch = Instant::now();
+        let start_ns = epoch.duration_since(profile_epoch).as_nanos();
+        marks
+            .borrow_mut()
+            .push(Mark::new(epoch, "tick", "begin", None));
+        sim.step_observed_detail(
+            |event| marks.borrow_mut().push(Mark::phase(epoch, "phase", event)),
+            |event| marks.borrow_mut().push(Mark::phase(epoch, "detail", event)),
+            |_, _| {},
+        );
+        let mut marks = marks.into_inner();
+        marks.push(Mark::new(epoch, "tick", "end", None));
+        Self {
+            generation,
+            tick: sim.tick,
+            start_ns,
+            marks,
+            physics: Vec::new(),
+        }
+    }
+    fn wall_ns(&self) -> u128 {
+        let begin = self
+            .marks
+            .iter()
+            .find(|m| m.lane == "tick" && m.event == "begin")
+            .unwrap()
+            .ns;
+        let end = self
+            .marks
+            .iter()
+            .find(|m| m.lane == "tick" && m.event == "end")
+            .unwrap()
+            .ns;
+        end - begin
+    }
     pub(super) fn record(sim: &mut BlastRange, generation: u64, profile_epoch: Instant) -> Self {
         // Allocate only in the diagnostic mode, before starting the tick clock.
         // No common worker lock: each known OS thread owns its event buffer.
@@ -200,11 +268,11 @@ impl Tick {
     }
 }
 
-pub(super) fn save(output: &str, rows: &[Tick]) -> std::io::Result<()> {
+fn save_marks(output: &str, rows: &[Tick], extension: &str) -> std::io::Result<()> {
     if rows.is_empty() {
         return Ok(());
     }
-    let path = std::path::Path::new(output).with_extension("core.csv");
+    let path = std::path::Path::new(output).with_extension(extension);
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(
         out,
@@ -236,7 +304,18 @@ pub(super) fn save(output: &str, rows: &[Tick]) -> std::io::Result<()> {
             writeln!(out, ",{}", row.start_ns + mark.ns)?;
         }
     }
-    out.flush()?;
+    out.flush()
+}
+
+pub(super) fn save_stalls(output: &str, rows: &[Tick]) -> std::io::Result<()> {
+    save_marks(output, rows, "stall.csv")
+}
+
+pub(super) fn save(output: &str, rows: &[Tick]) -> std::io::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    save_marks(output, rows, "core.csv")?;
     let path = std::path::Path::new(output).with_extension("physics.csv");
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
     writeln!(out, "generation,tick,os_thread,stage,family,jobs,inclusive_wall_ns,max_wall_ns,cpu_ns,cpu_samples,cycles,cycle_samples")?;
@@ -261,6 +340,64 @@ pub(super) fn save(output: &str, rows: &[Tick]) -> std::io::Result<()> {
         }
     }
     out.flush()
+}
+
+/// A diagnostic flight recorder. No file IO, worker marks or locks during a
+/// tick. Retain bounded windows, plus the last quiet history at shutdown.
+pub(super) struct Trigger {
+    pub(super) threshold_ms: u32,
+    history: std::collections::VecDeque<Tick>,
+    retained: Vec<Tick>,
+    post_left: usize,
+    pub(super) windows: usize,
+    pub(super) slow_ticks: u64,
+    pub(super) unarmed_slow_ticks: u64,
+}
+impl Trigger {
+    pub(super) const PRE: usize = 16;
+    pub(super) const POST: usize = 16;
+    pub(super) const MAX_WINDOWS: usize = 4;
+    pub(super) fn new(threshold_ms: u32) -> Self {
+        assert!((1..=10000).contains(&threshold_ms));
+        Self {
+            threshold_ms,
+            history: std::collections::VecDeque::with_capacity(Self::PRE),
+            retained: Vec::new(),
+            post_left: 0,
+            windows: 0,
+            slow_ticks: 0,
+            unarmed_slow_ticks: 0,
+        }
+    }
+    pub(super) fn push(&mut self, tick: Tick) {
+        // A reset must not attach old-generation context to a new incident.
+        let previous = self.history.back().or_else(|| self.retained.last());
+        if previous.is_some_and(|was| was.generation != tick.generation) {
+            self.history.clear();
+            self.post_left = 0;
+        }
+        let slow = tick.wall_ns() >= u128::from(self.threshold_ms) * 1_000_000;
+        self.slow_ticks += u64::from(slow);
+        if self.post_left > 0 {
+            self.retained.push(tick);
+            self.post_left -= 1;
+        } else if slow && self.windows < Self::MAX_WINDOWS {
+            self.retained.extend(self.history.drain(..));
+            self.retained.push(tick);
+            self.windows += 1;
+            self.post_left = Self::POST;
+        } else {
+            self.unarmed_slow_ticks += u64::from(slow);
+            if self.history.len() == Self::PRE {
+                self.history.pop_front();
+            }
+            self.history.push_back(tick);
+        }
+    }
+    pub(super) fn finish(&mut self) -> Vec<Tick> {
+        self.retained.extend(self.history.drain(..));
+        std::mem::take(&mut self.retained)
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +472,7 @@ mod tests {
             modding::explosion::Delivery::Blast,
         ));
         let mut observed = BlastRange::new(sim.config.clone());
+        let mut phases = BlastRange::new(sim.config.clone());
         for _ in 0..12 {
             sim.step();
             let trace = Tick::record(&mut observed, 7, Instant::now());
@@ -348,6 +486,95 @@ mod tests {
                 .unwrap();
             assert!(trace.marks.iter().all(|m| m.ns <= end.ns));
             assert_eq!(sim.snapshot(), observed.snapshot());
+            let light = Tick::record_phases(&mut phases, 7, Instant::now());
+            assert_eq!(sim.snapshot(), phases.snapshot());
+            assert!(light.physics.is_empty());
+            assert!(light.marks.iter().filter(|m| m.lane != "tick").all(|m| m
+                .cpu
+                .is_none_or(|cpu| cpu.time_ns.is_none() && cpu.cycles.is_none())));
+            assert!(light
+                .marks
+                .iter()
+                .all(|m| m.lane != "task" && m.lane != "unit"));
         }
+    }
+    fn sample(tick: u32, generation: u64, ms: u128) -> Tick {
+        Tick {
+            generation,
+            tick,
+            start_ns: u128::from(tick) * 100_000_000,
+            marks: vec![
+                Mark {
+                    lane: "tick",
+                    event: "begin",
+                    unit: None,
+                    ns: 0,
+                    cpu: None,
+                },
+                Mark {
+                    lane: "tick",
+                    event: "end",
+                    unit: None,
+                    ns: ms * 1_000_000,
+                    cpu: None,
+                },
+            ],
+            physics: Vec::new(),
+        }
+    }
+    #[test]
+    fn trigger_keeps_context_and_post_window_without_duplicates() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=100 {
+            ring.push(sample(tick, 0, if tick == 30 { 50 } else { 1 }));
+        }
+        let rows = ring.finish();
+        let expected: Vec<_> = (14..=46).chain(85..=100).collect();
+        assert_eq!(rows.iter().map(|r| r.tick).collect::<Vec<_>>(), expected);
+        assert_eq!(ring.windows, 1);
+        assert_eq!(ring.slow_ticks, 1);
+    }
+    #[test]
+    fn trigger_bounds_repeated_stalls_and_counts_unarmed_crossings() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=1000 {
+            ring.push(sample(tick, 0, 51));
+        }
+        let rows = ring.finish();
+        assert_eq!(ring.windows, Trigger::MAX_WINDOWS);
+        assert_eq!(ring.slow_ticks, 1000);
+        assert!(ring.unarmed_slow_ticks > 0);
+        assert!(
+            rows.len() <= Trigger::MAX_WINDOWS * (Trigger::PRE + 1 + Trigger::POST) + Trigger::PRE
+        );
+        assert!(rows.windows(2).all(|w| w[0].tick < w[1].tick));
+    }
+    #[test]
+    fn trigger_reset_cuts_history_and_unfinished_post_capture() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=20 {
+            ring.push(sample(tick, 0, if tick == 20 { 51 } else { 1 }));
+        }
+        ring.push(sample(1, 1, 1));
+        ring.push(sample(2, 1, 51));
+        let rows = ring.finish();
+        assert_eq!(ring.windows, 2);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.generation == 1)
+                .map(|r| r.tick)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+    #[test]
+    fn trigger_without_incident_retains_only_quiet_tail() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=100 {
+            ring.push(sample(tick, 0, 1));
+        }
+        assert_eq!(ring.windows, 0);
+        assert_eq!(ring.finish().len(), Trigger::PRE);
+        assert!(ring.finish().is_empty());
     }
 }

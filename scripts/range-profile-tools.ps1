@@ -67,7 +67,7 @@ function Get-RangeFrameTimes {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases)
+        [switch]$CorePhases, [switch]$TriggerPhases)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -111,13 +111,13 @@ function Get-RangeValidity {
     $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases -and $meetsRate
+        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($CorePhases) { 'diagnostic' } else { 'timing' }
+        Mode = if ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }
