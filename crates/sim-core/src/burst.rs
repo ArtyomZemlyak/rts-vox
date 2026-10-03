@@ -390,6 +390,62 @@ mod tests {
         }
     }
     #[test]
+    fn hull_support_rejects_below_first_roof_without_voxel_queries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let queries = AtomicUsize::new(0);
+        for base in [-129, -65, -64, -1, 0, 1, 63, 64, 129] {
+            let voxels = |p: [i32; 3]| {
+                queries.fetch_add(1, Ordering::Relaxed);
+                p[1] >= base + 3 && (p[0] + p[2]).rem_euclid(3) != 0
+            };
+            for fraction in [0, 1, 3] {
+                for head in [0, 2731, angle::FULL / 8, angle::FULL / 4] {
+                    let hull = Hull {
+                        pos: [
+                            Fx::ZERO,
+                            Fx::from_int(base).add(Fx::from_ratio(fraction, 4)),
+                            Fx::ZERO,
+                        ],
+                        head,
+                        half: [Fx::from_int(4), Fx::from_int(2)],
+                        height: Fx::from_int(8),
+                        vel: [Fx::ZERO; 3],
+                        step: Fx::ONE,
+                        solid: Some(Solid(&voxels)),
+                    };
+                    for solid in [hull.solid, None] {
+                        let hull = Hull { solid, ..hull };
+                        for x in [-6, -1, 0, 1, 6] {
+                            let centre = V3::new(
+                                Fx::from_ratio(x * 2 + 1, 2),
+                                Fx::ZERO,
+                                Fx::from_ratio(1, 2),
+                            );
+                            for offset in -8..=40 {
+                                let bottom = Fx::from_int(base).add(Fx::from_ratio(offset, 4));
+                                let reach = bottom.add(Fx::from_ratio(1, 2));
+                                let reference =
+                                    hull.lowest(centre).is_some_and(|roof| roof <= reach);
+                                queries.store(0, Ordering::Relaxed);
+                                assert_eq!(hull.carries(bottom, centre), reference);
+                                if solid.is_some() && reach < Fx::from_int(base + 1) {
+                                    assert_eq!(queries.load(Ordering::Relaxed), 0);
+                                }
+                            }
+                        }
+                    }
+                    let centre = V3::new(Fx::from_ratio(3, 2), Fx::ZERO, Fx::from_ratio(1, 2));
+                    queries.store(0, Ordering::Relaxed);
+                    assert!(hull.carries(Fx::from_int(base + 6), centre));
+                    assert!(
+                        queries.load(Ordering::Relaxed) > 0,
+                        "valid roofs still use exact voxels"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
     fn scattered_impulses_are_varied_replayable_and_never_add_energy() {
         let t = tuning().blast;
         let direction = V3::new(Fx::from_int(3), Fx::from_int(2), Fx::ONE);
@@ -3118,6 +3174,15 @@ impl Hull<'_> {
     /// rear deck rides there, and one under the belly does not.
     pub fn carries(&self, bottom: Fx, centre: V3) -> bool {
         let reach = bottom.add(Fx::from_ratio(1, 2));
+        // `lowest` starts at floor(pos.y); the first possible voxel roof is
+        // that integer + 1. A lower support probe cannot ride this hull,
+        // regardless of heading, holes or its column's actual roof. Reject
+        // before footprint/trigonometry/voxel queries in parallel debris jobs.
+        if self.solid.is_some()
+            && (reach.raw() >> 32) < i64::from((self.pos[1].raw() >> 32) as i32) + 1
+        {
+            return false;
+        }
         self.lowest(centre).is_some_and(|roof| roof <= reach)
     }
     /// Whether a piece whose box bottom is `bottom` and centre `centre`

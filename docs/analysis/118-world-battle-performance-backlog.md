@@ -2,7 +2,19 @@
 
 Обновлено: 03.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-547: lazy общий bounds snapshot и параллельные receiver
+Последний шаг ADR-548: точный ранний отсев Hull::carries, когда проба
+обломка ниже первой возможной voxel roof. Не меняет опоры или pool;
+убирает footprint/voxel calls из существующих parallel candidate jobs.
+Две CPU-пары 3600 тиков: candidates быстрее на 20,5…22,0%, полный тик
+на 0,7…1,2%; state/counters/hash совпадают. Одна ordinary native пара
+120 с: FPS 77,71→79,55, core/step 14,291→14,104 мс, tempo 1×.
+Max кадр 66,1→77,2 мс; stalls/165 FPS остаются открытыми. 559 sim tests
+passed, 4 ignored; reset 1…4 проверен. Word-enumeration contact lists
+и stripe source scatter отменены по замерам: устойчивого общего выигрыша
+не показали. Подробности/данные/ограничения —
+[142](142-debris-support-lower-bound.md).
+
+Предыдущий шаг ADR-547: lazy общий bounds snapshot и параллельные receiver
 queries химического огня, компактные шесть контактов вместо BTreeSet.
 Коммит тепла/топлива сохраняет порядок/caps. Две CPU-пары по 3600 тиков:
 unit_fire mean 641…643→215…217 мкс, тик быстрее на 3,68…4,13%; counters/hash

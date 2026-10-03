@@ -24338,3 +24338,31 @@ hash bcc1f58c226d1721. Две ordinary native пары 120 с: FPS
 ещё не добавлены: parent wall не доказывает CPU utilization или wait.
 Frozen SHA, одинаковый ADR-523 WIP в бинарниках, сырые замеры и границы
 выводов — [141](141-parallel-combustion-contacts.md).
+
+## ADR-548 — ранний отсев ниже возможной крыши корпуса
+
+Hull::lowest начинает колонку с floor(pos.y), поэтому первая возможная
+voxel roof имеет высоту floor(pos.y)+1. Проба bottom+1/2 ниже неё теперь
+отклоняется в Hull::carries до footprint/trigonometry/voxel calls.
+Действует с Solid, с прежним base cast и округлением; остальные запросы
+сохраняют старый путь. Опоры/порядок/баланс/картинка прежние, новых pools,
+saved state, кешей или зависимостей нет. Ускоряются существующие
+parallel candidate jobs, равномерность CPU% этим не доказывается.
+
+559 release sim-core tests passed, 4 ignored. Differential test проверяет
+низкие/высокие пробы, отрицательные/дробные bases, повороты, отверстия,
+точки вне footprint, Solid/box fallback и реальное число voxel calls.
+Build/clippy проходят без новых warnings; seed42 hash прежний.
+Старый architecture debt ADR-547 не закрыт.
+
+Две CPU-пары 3600 тиков: candidates −20,5…22,0%, полный тик −0,7…1,2%;
+каждый tick counter/state совпадает, hash bcc1f58c226d1721. Одна ordinary
+native пара 120 с: FPS 77,71→79,55, core/step14,291→14,104 мс, tempo1×,
+тот же hash и gates. Actions reset generations1…4 проходят (456 шагов).
+165 FPS не достигнуты; max кадр66,1→77,2 мс, stalls не исправлены.
+
+Word-range contact-list enumeration и source scatter по X stripes
+проверены и отменены: дополнительная работа не дала подтверждённого
+ускорения полного боя. Их raw evidence сохранено. Пределы одной native
+пары, frozen SHA/WIP provenance и данные —
+[142](142-debris-support-lower-bound.md).
