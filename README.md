@@ -124,6 +124,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\capture-range.ps1 
 флаг `blast --battle-eight` запускает тот же бой 4×4 отдельно.
 `--attack-unit 1` приказывает стрелять по первой мишени полигона;
 стенд огнемёта проверяет ненулевой урон, а не только наличие пламени.
+Для привязанной к кадрам CPU-трассы рендера добавьте `-RenderTimeline`:
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -RenderTimeline -TriggerMilliseconds 50 -CpuThreads`.
+Sidecar `world-battle.render.csv` сохраняет исходный frame row/generation/tick,
+общий epoch, extract/handoff/prepare/render graph и общий submit/present tail,
+идентификаторы потоков и доступные OS CPU/cycle counters. Последний открытый
+render span и пропуски при лимите записи остаются явными. Анализатор проверяет
+привязку/вложенность и показывает пересечения с паузами, без сложения вложенных
+интервалов. Это диагностический режим, не FPS-приёмка; GPU timestamps пока
+не привязаны к этим ID. Подробности — [ADR-541](docs/analysis/135-render-source-frame-timeline.md).
+
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между
 срезами и полного интервала кадра. Лимит — четыре окна, 16 тиков до/после

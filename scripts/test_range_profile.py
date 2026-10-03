@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("range_profile", Path(__file__).with_name("analyze-range-profile.py"))
 profile = importlib.util.module_from_spec(spec)
@@ -794,6 +795,153 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['process_cpu_ms'], 50)
         self.assertEqual(result['sampled_threads'][0]['observed_roles'], ['local_advance'])
         self.assertEqual(result['process_minus_sampled_threads_ms'], 20)
+
+
+    def render_fixture(self, spans=None, **metadata):
+        self.write()
+        values = [("pipeline_handoff", 1300, 2000, "1"), ("extract_callback", 1400, 1600, "1"),
+                  ("render_schedule", 1700, 3000, "2"), ("render_prepare", 1800, 1900, "2"),
+                  ("render_system", 2000, 2900, "2"), ("render_graph", 2100, 2600, "2"),
+                  ("submit_present_tail", 2600, 2800, "2")]
+        if spans is None:
+            spans = [dict(frame_row="0", generation="0", tick="1", stage=stage,
+                          begin_ns=str(a), end_ns=str(b), begin_thread=f"ThreadId({thread})",
+                          end_thread=f"ThreadId({thread})", begin_os_thread="", end_os_thread="",
+                          begin_cpu_ns="", end_cpu_ns="", begin_cycles="", end_cycles="")
+                     for stage, a, b, thread in values]
+        with (self.path / "world-battle.render.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(spans[0])); writer.writeheader(); writer.writerows(spans)
+        fields = dict(render_timeline_schema=1, render_span_limit=100000, render_spans_started=len(spans),
+                      render_spans_retained=len(spans), render_spans_dropped=0,
+                      render_spans_incomplete=sum(not r["end_ns"] for r in spans), render_cutoff_ns=2000101,
+                      render_pipelined="true")
+        fields.update(metadata)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE " + " ".join(f"{k}={v}" for k, v in fields.items()) + "\n")
+        path = self.path / "world-battle.manifest.json"
+        manifest = json.loads(path.read_text()); manifest["RenderTimeline"] = True
+        path.write_text(json.dumps(manifest))
+        return spans
+
+    def test_render_source_identity_and_async_overlap_are_not_double_counted(self):
+        self.render_fixture()
+        result = profile.analyze(self.path)
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertFalse(result["acceptance_eligible"])
+        timeline = result["render_timeline"]
+        self.assertEqual(timeline["complete_source_rows"], 1)
+        self.assertEqual(timeline["missing_source_rows"], 1)
+        gap = timeline["slow_gaps"][0]
+        self.assertAlmostEqual(gap["gap_ms"] - gap["unobserved_or_other_ms"], .0017)
+        self.assertEqual(timeline["slow_render_frames"][0]["source_row"], 0)
+        self.assertIn("Render CPU timeline", profile.markdown(result))
+        ordinary = dict(result, manifest=dict(result["manifest"], RenderTimeline=False))
+        self.assertIn("different:RenderTimeline", profile.compare(result, ordinary)["reasons"])
+
+    def test_render_timeline_rejects_reset_identity_and_invalid_clocks(self):
+        for field, value in (("frame_row", "1"), ("generation", "1"), ("tick", "2"),
+                             ("begin_ns", "1000"), ("end_ns", "2000102"), ("end_thread", "ThreadId(4)")):
+            with self.subTest(field=field):
+                spans = self.render_fixture(); spans[1][field] = value
+                self.render_fixture(spans)
+                with self.assertRaisesRegex(ValueError, "Render timeline"):
+                    profile.analyze(self.path)
+
+    def test_render_timeline_partial_terminal_spans_stay_explicit(self):
+        spans = self.render_fixture()
+        for row in spans:
+            if row["stage"] in ("render_system", "render_schedule"):
+                row["end_ns"] = ""; row["end_thread"] = ""
+        self.render_fixture(spans)
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertEqual(result["incomplete"], 2)
+        self.assertEqual(result["complete_source_rows"], 0)
+        self.assertNotIn("render_system", result["stage_ms"])
+
+    def test_render_timeline_missing_or_undeclared_artifacts_cannot_pass(self):
+        self.render_fixture(); (self.path / "world-battle.render.csv").unlink()
+        result = profile.analyze(self.path)
+        self.assertIn("render_timeline_artifact_or_metadata_missing", result["reasons"])
+        self.assertFalse(result["acceptance_eligible"])
+        self.render_fixture()
+        path = self.path / "world-battle.manifest.json"
+        manifest = json.loads(path.read_text()); del manifest["RenderTimeline"]
+        path.write_text(json.dumps(manifest))
+        self.assertIn("render_timeline_mode_mismatch", profile.analyze(self.path)["reasons"])
+
+    def test_render_timeline_budget_counts_duplicates_and_nesting_rejected(self):
+        for field, value in (("render_spans_retained", 8), ("render_spans_started", 9),
+                             ("render_spans_incomplete", 1), ("render_span_limit", 99999),
+                             ("render_timeline_schema", 2), ("render_cutoff_ns", 2000099)):
+            with self.subTest(field=field):
+                self.render_fixture(**{field: value})
+                with self.assertRaisesRegex(ValueError, "Render timeline"):
+                    profile.analyze(self.path)
+        spans = self.render_fixture(); self.render_fixture(spans + [spans[-1]])
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            profile.analyze(self.path)
+        spans = self.render_fixture(); spans[-1]["end_ns"] = "2999"
+        self.render_fixture(spans)
+        with self.assertRaisesRegex(ValueError, "nested"):
+            profile.analyze(self.path)
+
+    def test_render_timeline_explicit_drops_do_not_invent_coverage(self):
+        spans = self.render_fixture()[:3]
+        self.render_fixture(spans, render_span_limit=3, render_spans_started=20, render_spans_dropped=17)
+        with patch.object(profile, "RENDER_SPAN_LIMIT", 3):
+            result = profile.analyze(self.path)["render_timeline"]
+        self.assertEqual(result["dropped"], 17)
+        self.assertEqual(result["complete_source_rows"], 0)
+
+    def test_render_timeline_nonpipelined_mode_has_no_handoff(self):
+        spans = self.render_fixture()[1:]
+        self.render_fixture(spans, render_pipelined="false")
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertFalse(result["pipelined"])
+        self.assertEqual(result["complete_source_rows"], 1)
+
+    def test_render_overlap_index_matches_exhaustive_intersections(self):
+        spans = profile.merged_intervals([(5, 10), (8, 20), (25, 30), (40, 50), (45, 48)])
+        index = profile.interval_index(spans)
+        for a in range(0, 55):
+            for b in range(a, 56):
+                expected = sum(max(0, min(y, b) - max(x, a)) for x, y in spans)
+                self.assertEqual(profile.overlap_ns(index, a, b), expected)
+
+
+    def test_render_completed_schedule_cannot_hide_missing_stages(self):
+        spans = [r for r in self.render_fixture() if r["stage"] != "render_graph"]
+        self.render_fixture(spans)
+        with self.assertRaisesRegex(ValueError, "coverage missing"):
+            profile.analyze(self.path)
+
+
+    def test_render_driver_cpu_preserves_null_zero_and_rounding(self):
+        spans = self.render_fixture()
+        spans[0].update(begin_os_thread="7", end_os_thread="7", begin_cpu_ns="0", end_cpu_ns="1000",
+                        begin_cycles="500", end_cycles="900")
+        spans[1].update(begin_os_thread="7", end_os_thread="7", begin_cpu_ns="1000", end_cpu_ns="1000")
+        self.render_fixture(spans)
+        result = profile.analyze(self.path)["render_timeline"]
+        self.assertAlmostEqual(result["stage_driver_cpu_ms"]["pipeline_handoff"]["mean"], .001)
+        self.assertEqual(result["stage_driver_cpu_ms"]["extract_callback"]["mean"], 0)
+        self.assertIsNone(result["stage_driver_cpu_ms"]["render_system"])
+        self.assertEqual(result["stage_driver_cycles"]["pipeline_handoff"]["mean"], 400)
+
+    def test_render_counter_corruption_cannot_pass(self):
+        for changes in (dict(begin_cpu_ns="1"), dict(begin_os_thread="7", end_os_thread="8"),
+                        dict(begin_os_thread="7", end_os_thread="7", begin_cpu_ns="2", end_cpu_ns="1"),
+                        dict(begin_os_thread="7", end_os_thread="7", begin_cycles="-1")):
+            with self.subTest(changes=changes):
+                spans = self.render_fixture(); spans[0].update(changes); self.render_fixture(spans)
+                with self.assertRaisesRegex(ValueError, "Render timeline"):
+                    profile.analyze(self.path)
+
+
+    def test_render_drops_cannot_hide_missing_records_before_capacity(self):
+        self.render_fixture(render_spans_started=20, render_spans_dropped=13)
+        with self.assertRaisesRegex(ValueError, "budget/count"):
+            profile.analyze(self.path)
 
 
 if __name__ == "__main__":

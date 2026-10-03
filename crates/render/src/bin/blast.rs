@@ -340,6 +340,7 @@ fn main() {
     let mut profile_seconds = 20.0;
     let mut profile_clouds = 0;
     let mut profile_gpu = false;
+    let mut profile_render = false;
     let mut profile_actions = false;
     let mut profile_core = false;
     let mut profile_trigger_ms = None;
@@ -354,6 +355,7 @@ fn main() {
                 profile_output = Some(args[i].clone());
             }
             "--profile-gpu" => profile_gpu = true,
+            "--profile-render" => profile_render = true,
             "--profile-actions" => profile_actions = true,
             "--profile-core" => profile_core = true,
             "--profile-trigger-ms" => {
@@ -754,6 +756,10 @@ fn main() {
         !profile_gpu || profile_output.is_some(),
         "--profile-gpu requires --profile"
     );
+    assert!(
+        !profile_render || profile_output.is_some(),
+        "--profile-render requires --profile"
+    );
     let mut profiler = profile::Profile::new(profile_output.clone(), profile_seconds);
     profiler.navigation_workers = navigation_workers;
     profiler.configure_navigation(&mut sim);
@@ -797,6 +803,11 @@ fn main() {
             ..default()
         }),
     );
+    if profile_render {
+        app.add_plugins(render::timeline::TimelinePlugin {
+            sample: profile::render_sample,
+        });
+    }
     if profile_gpu {
         app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
     }

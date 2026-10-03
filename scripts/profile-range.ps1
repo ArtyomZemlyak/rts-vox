@@ -12,6 +12,7 @@ param(
     [switch]$CpuThreads,
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
+    [switch]$RenderTimeline,
     [ValidateRange(0, 10000)][int]$TriggerMilliseconds = 0,
     [switch]$CheckEveryFrame,
     # Existing frozen build: no overwriting target/release for A/B runs.
@@ -49,7 +50,7 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
@@ -62,7 +63,7 @@ try {
                 BinaryPath = $binary; BinarySha256 = (Get-FileHash -LiteralPath $binary).Hash
                 InputHashes = @(Get-RangeInputHashes -Repo $repo)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
-                GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds
+                GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
                 EnvironmentSampleIntervalMs = 1000; PreflightProcesses = $preflight
                 RequestedWindow = @($WindowWidth, $WindowHeight)
                 Status = 'preflight'; Validity = $null
@@ -92,6 +93,7 @@ try {
             $err = Join-Path $directory "$scenario.err"
             $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
+            if ($RenderTimeline) { $arguments += '--profile-render' }
             if ($CorePhases) { $arguments += '--profile-core' }
             if ($TriggerMilliseconds -gt 0) { $arguments += @('--profile-trigger-ms', $TriggerMilliseconds) }
             if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
@@ -132,9 +134,12 @@ try {
                 if ($content -notmatch 'terrain_origin=\[(\d+), (\d+), (\d+)\]' -or
                     ([long]$Matches[1] -eq 0 -and [long]$Matches[3] -eq 0)) { $reasons.Add('streaming_workload_missing') }
             }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0)
+            if ($RenderTimeline -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.render.csv"))) {
+                $reasons.Add('render_timeline_artifact_missing')
+            }
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

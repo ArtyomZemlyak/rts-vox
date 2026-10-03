@@ -4212,3 +4212,25 @@ OS scheduling/stack/wait и привязанные к кадру render/GPU span
 покрытие остальных поздних эпизодов остаётся частичным. Подтверждённые,
 отклонённые оптимизации, порядок дальнейшей работы, SHA/артефакты и
 ограничения — [134](134-performance-review-and-frame-triggers.md).
+
+
+## ADR-541 — исходный кадр и временная трасса CPU-рендера
+
+WBPERF-001: `-RenderTimeline` сохраняет неизменный frame row/generation/tick,
+общий epoch, исходные pipeline/extract callbacks и prepare/graph/tail spans,
+доступные OS CPU/cycles. Recorder bounded, export до выгрузки логов фиксирует
+open/cutoff; parser проверяет identity/threads/nesting/counts, не складывает
+пересекающиеся времена и исключает этот режим из FPS-приёмки.
+
+В 120-секундном бою сохранены все 6420 переданных source frames. Долгий
+prepare 82,783 мс совпадает с тяжёлым соседним main slice; root graph того
+source frame 3,280 мс. Это локализация до графа, не доказательство GPU/lock
+причины. Ordinary того же exe теряет темп 0,91764×, p99 51,627 мс;
+165 FPS, крупный редкий фриз и WBPERF-002/026/027 не закрыты. Диагностический
+запуск 0,84348× тяжелее, но не образует строгий overhead A/B по workload.
+
+Следующий порядок: source scopes дорогих extract/prepare и workers, OS
+scheduling/stack/wait, source IDs GPU/fences, сокращение синхронного пути,
+затем повторные fixed-workload пары. Reset поколений 1…4 проверен нативно;
+124 library/13 core/69 Python/19 PowerShell проверок прошли.
+Методы, SHA, цифры и ограничения — [135](135-render-source-frame-timeline.md).

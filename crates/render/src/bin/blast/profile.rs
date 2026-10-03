@@ -4,6 +4,7 @@ use super::*;
 use std::{io::Write, time::Instant};
 #[path = "profile/core.rs"]
 mod core;
+pub use self::core::render_sample;
 
 #[derive(Resource, Default)]
 pub struct Profile {
@@ -365,6 +366,12 @@ pub fn stamp(mut p: ResMut<Profile>) {
         p.stamp();
     }
 }
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct Output<'w> {
+    exit: MessageWriter<'w, AppExit>,
+    source: Option<ResMut<'w, render::timeline::FrameSource>>,
+    timeline: Option<Res<'w, render::timeline::Timeline>>,
+}
 pub fn end(
     time: Res<Time<Real>>,
     scene: Res<Scene>,
@@ -372,8 +379,13 @@ pub fn end(
     art: Res<WitnessArt>,
     diagnostics: Option<Res<bevy::diagnostic::DiagnosticsStore>>,
     mut p: ResMut<Profile>,
-    mut exit: MessageWriter<AppExit>,
+    output: Output,
 ) {
+    let Output {
+        mut exit,
+        source,
+        timeline,
+    } = output;
     let Some(start) = p.start else {
         return;
     };
@@ -435,6 +447,14 @@ pub fn end(
             gap_ns,
             observed_frame_ms,
         });
+        if let Some(mut source) = source {
+            source.0 = Some(render::timeline::FrameTag {
+                row: p.rows.len() - 1,
+                generation: scene.generation,
+                tick: scene.sim.tick,
+                epoch: p.epoch.unwrap(),
+            });
+        }
         p.last_end_ns = Some(end_ns);
         if let Some(trigger) = &mut p.trigger {
             trigger.frame("update", scene.generation, scene.sim.tick, start_ns, end_ns);
@@ -444,6 +464,7 @@ pub fn end(
         return;
     }
     p.finished = true;
+    let render_capture = timeline.as_ref().map(|t| t.close(p.epoch.unwrap()));
     if p.actions && p.action_step < 8 {
         eprintln!(
             "Interaction profile ended before all actions completed: {}/8",
@@ -512,6 +533,11 @@ pub fn end(
         out.flush()
             .and_then(|()| core::save(p.output.as_ref().unwrap(), &p.core_rows))
             .and_then(|()| core::save_stalls(p.output.as_ref().unwrap(), &stall_rows))
+            .and_then(|()| {
+                render_capture
+                    .as_ref()
+                    .map_or(Ok(()), |t| t.save(p.output.as_ref().unwrap()))
+            })
     })();
     for (column, name) in [
         "frame",

@@ -24,6 +24,11 @@ $diagnostic = Get-RangeValidity $rows -Scenario world-battle -Log $log -CorePhas
 Assert-Profile ($diagnostic.ValidForComparison -and -not $diagnostic.AcceptanceEligible) 'Detailed trace used for FPS acceptance'
 $trigger = Get-RangeValidity $rows -Scenario world-battle -Log $log -TriggerPhases
 Assert-Profile ($trigger.ValidForComparison -and -not $trigger.AcceptanceEligible -and $trigger.Mode -eq 'trigger_diagnostic') 'Trigger trace used for FPS acceptance'
+$renderLog = $log + "`nPROFILE render_timeline_schema=1 render_span_limit=100000 render_spans_started=7 render_spans_retained=7 render_spans_dropped=0 render_spans_incomplete=0 render_cutoff_ns=1000000001 render_pipelined=true"
+$render = Get-RangeValidity $rows -Scenario world-battle -Log $renderLog -RenderTimeline
+Assert-Profile ($render.ValidForComparison -and -not $render.AcceptanceEligible -and $render.Mode -eq 'render_diagnostic') 'Render timeline used for FPS acceptance'
+$noRender = Get-RangeValidity $rows -Scenario world-battle -Log $log -RenderTimeline
+Assert-Profile (-not $noRender.ValidForComparison -and $noRender.Reasons -contains 'render_timeline_metadata_missing') 'Missing render timeline metadata accepted'
 $missing = Get-RangeValidity $rows -Scenario world-battle -Log ''
 Assert-Profile ($missing.Reasons -contains 'state_hash_missing' -and $missing.Reasons -contains 'actual_adapter_missing') 'Unknown provenance accepted'
 $nan = Get-RangeValidity @([pscustomobject]@{frame_ms='NaN';simulation_ticks='30';seconds='1.0'}) -Scenario world-battle -Log $log
@@ -55,4 +60,4 @@ foreach ($file in 'profile-range.ps1','profile-cpu-threads.ps1','range-profile-t
     $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $file), [ref]$tokens, [ref]$errors)
     Assert-Profile ($errors.Count -eq 0) "Invalid PowerShell syntax: $file $errors"
 }
-'PASS: 17 validity/timing/context cases and parser checks.'
+'PASS: 19 validity/timing/context cases and parser checks.'

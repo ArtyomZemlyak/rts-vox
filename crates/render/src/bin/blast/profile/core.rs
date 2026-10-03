@@ -92,6 +92,14 @@ fn cpu_identity() -> Option<Cpu> {
     None
 }
 
+pub fn render_sample() -> Option<render::timeline::CpuSample> {
+    cpu().map(|v| render::timeline::CpuSample {
+        os_thread: v.thread,
+        time_ns: v.time_ns,
+        cycles: v.cycles,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct Mark {
     lane: &'static str,

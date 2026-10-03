@@ -67,7 +67,7 @@ function Get-RangeFrameTimes {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -106,18 +106,21 @@ function Get-RangeValidity {
     } elseif ($Log -match 'adapter_device_type=Cpu\b') {
         $issues.Add('software_adapter')
     }
+    if ($RenderTimeline -and $Log -notmatch '(?m)^PROFILE render_timeline_schema=1 render_span_limit=100000 render_spans_started=\d+ render_spans_retained=\d+ render_spans_dropped=\d+ render_spans_incomplete=\d+ render_cutoff_ns=\d+ render_pipelined=(true|false)\r?$') {
+        $issues.Add('render_timeline_metadata_missing')
+    }
     # A separate comparison key must still match scenario, inputs and flags.
     $valid = $issues.Count -eq 0
     $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and $meetsRate
+        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
+        Mode = if ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }

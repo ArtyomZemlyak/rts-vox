@@ -24123,3 +24123,24 @@ none/partial/complete/no_core_ticks для каждого сохранённог
 OS stacks, render-frame spans, причина больших пауз и независимая
 симуляция остаются открытыми. Обзор и нативные проверки —
 [134-performance-review-and-frame-triggers.md](134-performance-review-and-frame-triggers.md).
+
+## ADR-541 — временная трасса CPU-рендера с исходным кадром
+
+Профильный `-RenderTimeline` замораживает source frame row/generation/tick
+перед исходным Bevy extraction callback. CPU wall handoff/extract/prepare/
+render_system/root graph/submit-present tail и доступные OS CPU/cycles
+имеют общий epoch с main slices. Исходные callbacks сохраняются;
+обычный режим не устанавливает recorder или дополнительные границы.
+Bounded 100000 spans, closed snapshot до выгрузки CSV, open/dropped/cutoff
+явны. Analyzer проверяет источники/threads/nesting/counts и вычисляет union
+пересечений с main gaps; диагностические режимы исключены из FPS-приёмки.
+
+Native 120 секунд: все 6420 переданных source frames, prepare 82,783 мс
+при graph 3,280 мс у тяжёлого кадра. Это локализация CPU участка до графа,
+не доказательство GPU/lock wait. Diagnostic 0,84348×, ordinary того же exe
+0,91764×; разные шаги/состояния не образуют строгий overhead A/B. Сохранены
+native reset поколений 1…4 и проверка terminal incomplete. 124 library,
+13 core, 69 Python и 19 PowerShell проверок прошли. WBPERF-001 частично
+продвинута, 002/026/027 и 165 FPS открыты; source scopes extract/prepare
+workers, OS stacks/waits и GPU IDs идут далее. Полный обзор, SHA,
+результаты и ограничения — [135](135-render-source-frame-timeline.md).

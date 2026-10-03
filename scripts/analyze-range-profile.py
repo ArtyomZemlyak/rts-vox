@@ -459,6 +459,186 @@ def incident_coverage(episodes, frames, mapped_steps, mapped_wall, mapped_jobs, 
             cause_identified=False)
 
 
+RENDER_SPAN_LIMIT = 100_000
+RENDER_STAGES = {"pipeline_handoff", "extract_callback", "render_schedule", "render_prepare",
+                 "render_system", "render_graph", "submit_present_tail"}
+
+
+def merged_intervals(intervals):
+    result = []
+    for a, b in sorted(intervals):
+        if result and a <= result[-1][1]:
+            result[-1][1] = max(result[-1][1], b)
+        else:
+            result.append([a, b])
+    return result
+
+
+def interval_index(intervals):
+    starts, ends, prefix = [], [], [0]
+    for a, b in intervals:
+        starts.append(a); ends.append(b); prefix.append(prefix[-1] + b - a)
+    return starts, ends, prefix
+
+
+def overlap_ns(index, a, b):
+    starts, ends, prefix = index
+    first, last = bisect.bisect_right(ends, a), bisect.bisect_left(starts, b)
+    if first >= last:
+        return 0
+    return prefix[last] - prefix[first] - max(0, a - starts[first]) - max(0, ends[last - 1] - b)
+
+
+def analyze_render_timeline(directory, scenario, log, manifest, frames, top, roles=None):
+    """Source rows are frozen at extraction; time overlap is not a causal wait."""
+    path = directory / f"{scenario}.render.csv"
+    metadata = re.findall(r"^PROFILE render_timeline_schema=(\d+) render_span_limit=(\d+) render_spans_started=(\d+) render_spans_retained=(\d+) render_spans_dropped=(\d+) render_spans_incomplete=(\d+) render_cutoff_ns=(\d+) render_pipelined=(true|false)$", log, re.M)
+    declared = bool((manifest or {}).get("RenderTimeline"))
+    if not path.exists() and not metadata and not declared:
+        return None, []
+    if not path.exists() or len(metadata) != 1:
+        return None, ["render_timeline_artifact_or_metadata_missing"]
+    if not declared:
+        return None, ["render_timeline_mode_mismatch"]
+    schema, limit, started, retained, dropped, incomplete, cutoff = map(int, metadata[0][:7])
+    if schema != 1 or limit != RENDER_SPAN_LIMIT or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
+        raise ValueError("Render timeline metadata budget/count mismatch")
+    if not all(r.get("frame_end_ns") for r in frames) or cutoff < int(frames[-1]["frame_end_ns"]):
+        raise ValueError("Render timeline cutoff/frame clock mismatch")
+    groups, intervals, pending = {}, {}, 0
+    count, last_begin = 0, -1
+    for row in read_csv(path):
+        count += 1
+        if count > retained:
+            raise ValueError("Render timeline count mismatch")
+        idx = int(row["frame_row"])
+        stage = row["stage"]
+        a, b = int(row["begin_ns"]), optional_int(row, "end_ns")
+        if idx < 0 or idx >= len(frames) or stage not in RENDER_STAGES:
+            raise ValueError("Render timeline source/stage invalid")
+        frame = frames[idx]
+        if int(row["generation"]) != int(frame["generation"]) or int(row["tick"]) != int(frame["tick"]):
+            raise ValueError("Render timeline identity mismatch")
+        if a < int(frame["frame_end_ns"]) or a < last_begin or a > cutoff or (b is not None and (b < a or b > cutoff)):
+            raise ValueError("Render timeline clock mismatch")
+        last_begin = a
+        if not re.fullmatch(r"ThreadId\(\d+\)", row["begin_thread"]) or (
+            b is None and row["end_thread"] or b is not None and row["end_thread"] != row["begin_thread"]):
+            raise ValueError("Render timeline driving thread mismatch")
+        if b is None:
+            pending += 1
+        group = groups.setdefault(idx, {})
+        if stage in group:
+            raise ValueError("Render timeline duplicate stage/source")
+        fields = ("begin_os_thread", "end_os_thread", "begin_cpu_ns", "end_cpu_ns", "begin_cycles", "end_cycles")
+        if not all(field in row for field in fields):
+            raise ValueError("Render timeline counter columns missing")
+        counters = {key: optional_int(row, key) for key in fields}
+        if any(v is not None and v < 0 for v in counters.values()) or any(
+            counters[key] == 0 for key in ("begin_os_thread", "end_os_thread")) or any(
+            counters[side + "_os_thread"] is None and (counters[side + "_cpu_ns"] is not None or counters[side + "_cycles"] is not None)
+            for side in ("begin", "end")):
+            raise ValueError("Render timeline counter identity invalid")
+        if b is None and any(counters[key] is not None for key in ("end_os_thread", "end_cpu_ns", "end_cycles")):
+            raise ValueError("Render timeline open span has end counters")
+        same = counters["begin_os_thread"] is not None and counters["begin_os_thread"] == counters["end_os_thread"]
+        if counters["begin_os_thread"] is not None and counters["end_os_thread"] is not None and not same:
+            raise ValueError("Render timeline OS thread changed")
+        def delta(name):
+            x, y = counters["begin_" + name], counters["end_" + name]
+            if not same or x is None or y is None:
+                return None
+            if y < x:
+                raise ValueError("Render timeline CPU counter regressed")
+            return y - x
+        cpu, cycles = delta("cpu_ns"), delta("cycles")
+        group[stage] = dict(begin_ns=a, end_ns=b, thread=row["begin_thread"],
+                           driver_cpu_ms=cpu / 1e6 if cpu is not None else None, cycles=cycles)
+        if roles is not None and counters["begin_os_thread"] is not None:
+            roles.setdefault(str(counters["begin_os_thread"]), set()).add(stage if stage.startswith("render_") else "render_" + stage)
+        if b is not None:
+            intervals.setdefault(stage, []).append((a, b))
+    if count != retained or pending != incomplete:
+        raise ValueError("Render timeline count mismatch")
+    # Containment only for nested same-thread scopes. A renderer may start
+    # before the main-thread handoff returns; those two are intentionally async.
+    parents = {"extract_callback": "pipeline_handoff", "render_prepare": "render_schedule",
+               "render_system": "render_schedule", "render_graph": "render_system",
+               "submit_present_tail": "render_system"}
+    for idx, group in groups.items():
+        for child_name, parent_name in parents.items():
+            child, parent = group.get(child_name), group.get(parent_name)
+            if child is None or parent is None:
+                continue
+            if child["thread"] != parent["thread"] or child["begin_ns"] < parent["begin_ns"] or (
+                parent["end_ns"] is not None and (child["end_ns"] is None or child["end_ns"] > parent["end_ns"])):
+                raise ValueError("Render timeline nested scope mismatch")
+        for before, after in (("extract_callback", "render_schedule"), ("render_prepare", "render_system"),
+                              ("render_graph", "submit_present_tail")):
+            x, y = group.get(before), group.get(after)
+            if x and y and (x["end_ns"] is None or x["end_ns"] > y["begin_ns"]):
+                raise ValueError("Render timeline stage order mismatch")
+    # Validate completeness before the cutoff, except the trailing active frame
+    # and explicitly dropped records. Missing interior stages are corrupt data.
+    pipelined = metadata[0][7] == "true"
+    expected = RENDER_STAGES if pipelined else RENDER_STAGES - {"pipeline_handoff"}
+    if not pipelined and any("pipeline_handoff" in g for g in groups.values()):
+        raise ValueError("Render timeline pipeline mode mismatch")
+    complete = [idx for idx, group in groups.items()
+                if set(group) == expected and all(s["end_ns"] is not None for s in group.values())]
+    if not dropped and groups:
+        for idx, group in groups.items():
+            schedule = group.get("render_schedule")
+            if schedule and schedule["end_ns"] is not None and idx not in complete:
+                raise ValueError("Render timeline completed schedule coverage missing")
+        for idx in range(max(groups)):
+            if idx not in complete:
+                raise ValueError("Render timeline interior coverage missing")
+    merged = {stage: merged_intervals(values) for stage, values in intervals.items()}
+    total = lambda values: sum(b - a for a, b in values) / 1e6
+    leaders = []
+    for idx, group in groups.items():
+        values = {stage: (span["end_ns"] - span["begin_ns"]) / 1e6
+                  for stage, span in group.items() if span["end_ns"] is not None}
+        leaders.append(dict(source_row=idx, generation=int(frames[idx]["generation"]),
+                            tick=int(frames[idx]["tick"]), spans_ms=values,
+                            driver_counters={stage: dict(cpu_ms=v["driver_cpu_ms"], cycles=v["cycles"])
+                                             for stage, v in group.items() if v["end_ns"] is not None}))
+    leaders.sort(key=lambda r: -r["spans_ms"].get("render_schedule", 0))
+    gaps = []
+    indexed = {stage: interval_index(values) for stage, values in merged.items()}
+    covered_index = interval_index(merged_intervals(merged.get("pipeline_handoff", []) +
+        merged.get("extract_callback", []) + merged.get("render_schedule", [])))
+    gap_rows = sorted(range(1, len(frames)), key=lambda i:
+        -(int(frames[i]["frame_start_ns"]) - int(frames[i - 1]["frame_end_ns"])))[:top]
+    for idx in gap_rows:
+        a, b = int(frames[idx - 1]["frame_end_ns"]), int(frames[idx]["frame_start_ns"])
+        spans = {stage: overlap_ns(values, a, b) / 1e6 for stage, values in indexed.items()}
+        gaps.append(dict(row=idx, gap_ms=(b - a) / 1e6, overlap_ms=spans,
+                         unobserved_or_other_ms=max(0, b - a - overlap_ns(covered_index, a, b)) / 1e6))
+    gaps.sort(key=lambda r: -r["gap_ms"])
+    summary = dict(schema=schema, pipelined=pipelined, cutoff_ns=cutoff, retained=retained, dropped=dropped,
+        incomplete=incomplete, source_rows=len(groups), complete_source_rows=len(complete),
+        missing_source_rows=len(frames) - len(groups),
+        stage_ms={stage: stats([(b - a) / 1e6 for a, b in values]) for stage, values in intervals.items()},
+        stage_union_ms={stage: total(values) for stage, values in merged.items()},
+        stage_driver_cpu_ms={stage: stats([g[stage]["driver_cpu_ms"] for g in groups.values()
+            if stage in g and g[stage]["driver_cpu_ms"] is not None]) for stage in expected},
+        stage_driver_cycles={stage: stats([g[stage]["cycles"] for g in groups.values()
+            if stage in g and g[stage]["cycles"] is not None]) for stage in expected},
+        slow_render_frames=leaders[:top], slow_gaps=gaps[:top],
+        limitations=["CPU wall only: includes preemption, waits and diagnostic boundary overhead",
+            "Rust ThreadId and optional OS thread/counters are distinct; missing counters remain null",
+            "driver CPU excludes workers, is coarse (zero may be rounded), and wall-minus-CPU is not lock-wait time",
+            "nested driver CPU/cycle deltas must not be added together; cycles are not milliseconds",
+            "nested/concurrent stage totals overlap; do not add them or call overlap a cause",
+            "render_system is a boundary scope around the Bevy function; pipeline cache/other scheduled Render jobs may run between hooks",
+            "submit_present_tail includes final submission/readbacks/presentation/collection and scheduled boundary overhead, not pure present",
+            "cutoff may retain an open terminal render frame; final main frame is not handed off yet",
+            "GPU execution timestamps are not attached to source rows"])
+    return summary, []
+
+
 def analyze(directory, scenario="world-battle", top=12):
     directory = Path(directory)
     log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
@@ -661,6 +841,8 @@ def analyze(directory, scenario="world-battle", top=12):
     reasons.extend(context["reasons"])
     stall_trace, stall_issues = analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top)
     reasons.extend(stall_issues)
+    render_trace, render_issues = analyze_render_timeline(directory, scenario, log, manifest, frames, top, roles)
+    reasons.extend(render_issues)
     if not pools:
         reasons.append("actual_worker_counts_missing")
     seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
@@ -680,7 +862,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=5, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -700,7 +882,7 @@ def analyze(directory, scenario="world-battle", top=12):
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         slice_summary=slice_summary, slow_slices=slow_slices,
-        stall_episodes=episodes, stall_trace=stall_trace,
+        stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
                     "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
@@ -727,6 +909,8 @@ def compare(a, b):
             problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow"]
+    if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
+        problems.append("different:RenderTimeline")
     for key in keys:
         if (a["manifest"] or {}).get(key) != (b["manifest"] or {}).get(key):
             problems.append(f"different:{key}")
@@ -813,6 +997,20 @@ def markdown(report):
         lines += ["", f"OS CPU inside measurement window: {cpu['process_cpu_ms']:.3f}ms / {cpu['observed_ms']:.3f}ms; core equivalents={cpu['core_equivalents']}.", ""]
         for thread in cpu["sampled_threads"][:12]:
             lines.append(f"- OS thread {thread['os_thread']}: {thread['cpu_ms']:.3f}ms; observed callbacks: {', '.join(thread['observed_roles']) or 'unattributed'}.")
+    timeline = report.get("render_timeline")
+    if timeline:
+        lines += ["", "Render CPU timeline (shared epoch, immutable source frame; overlaps are not causes):", "",
+                  f"Source rows complete {timeline['complete_source_rows']}/{report['frames']}, missing {timeline['missing_source_rows']}, open spans {timeline['incomplete']}, dropped {timeline['dropped']}.", "",
+                  "| Stage | Samples | Mean wall, ms | p99, ms | Max, ms |",
+                  "|---|---:|---:|---:|---:|"]
+        for stage, values in sorted(timeline["stage_ms"].items()):
+            cpu = timeline["stage_driver_cpu_ms"].get(stage)
+            cpu_text = f"{cpu['mean']:.3f}" if cpu else "unavailable"
+            lines.append(f"| {stage} | {values['samples']} | {values['mean']:.3f} | {values['p99']:.3f} | {values['max']:.3f} | {cpu_text} |")
+        lines += ["", "Slow gaps and timeline intersections (nested spans are never added):", ""]
+        for gap in timeline["slow_gaps"]:
+            lines.append(f"- row {gap['row']}: gap {gap['gap_ms']:.3f}ms, stage overlaps {gap['overlap_ms']}, unobserved/other {gap['unobserved_or_other_ms']:.3f}ms.")
+        lines += ["", *timeline["limitations"]]
     if "comparison" in report:
         lines += ["", f"Pair comparison: {json.dumps(report['comparison'])}"]
     return "\n".join(lines) + "\n"
