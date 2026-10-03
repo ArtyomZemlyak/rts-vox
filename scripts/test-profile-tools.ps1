@@ -17,7 +17,7 @@ Assert-Profile (-not $busy.ValidForComparison -and -not $busy.AcceptanceEligible
 $stopped = Get-RangeValidity @([pscustomobject]@{frame_ms='4.5';simulation_ticks='0';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'}) -Scenario world-battle -Log $log
 Assert-Profile ($stopped.Reasons -contains 'simulation_did_not_advance') 'Zero-tick fast frame accepted'
 $slow = Get-RangeValidity @([pscustomobject]@{frame_ms='4.5';simulation_ticks='10';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'}) -Scenario world-battle -Log $log
-Assert-Profile (-not $slow.MeetsSimulationRate) 'Slow simulation accepted as real-time'
+Assert-Profile ($slow.ValidForComparison -and -not $slow.MeetsSimulationRate -and -not $slow.AcceptanceEligible) 'Slow simulation accepted as real-time or its diagnostic evidence discarded'
 $software = Get-RangeValidity $rows -Scenario world-battle -Log ($log.Replace('DiscreteGpu','Cpu'))
 Assert-Profile ($software.Reasons -contains 'software_adapter') 'Software adapter accepted'
 $diagnostic = Get-RangeValidity $rows -Scenario world-battle -Log $log -CorePhases

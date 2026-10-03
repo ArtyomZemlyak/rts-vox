@@ -132,6 +132,115 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(r["slow_ticks"][0]["frame_row"], 0)
         self.assertTrue(r["valid_for_comparison"])
 
+    def ordinary_stall_frames(self):
+        frames = []
+        for start, end, gap, tick, steps, core, input_ms in [
+            (0, 750, 0, 1, 1, 700, 720),
+            (800, 810, 50, 1, 0, 0, 1),
+            (820, 900, 10, 3, 2, 60, 65),
+            (910, 915, 10, 3, 0, 0, 1),
+        ]:
+            frames.append(dict(seconds=str(end / 1000), generation="0", tick=str(tick),
+                               frame_ms="10", simulation_ticks=str(steps), simulation_core_ms=str(core),
+                               frame_start_ns=str(start * 1000000), frame_end_ns=str(end * 1000000),
+                               frame_gap_ns=str(gap * 1000000), simulation_input_ms=str(input_ms),
+                               unit_mesh_ms="1", fragments_ms="1", presentation_ms="1",
+                               occupancy_ms="2", physics_ms=str(core), terrain_ms="3", atmosphere_ms="1",
+                               # A stale render observation on every row must
+                               # never be attributed to these Update slices.
+                               render_extract_ms="999", render_prepare_ms="888"))
+        return frames
+
+    def ordinary_report(self, frames):
+        self.write(frames=frames)
+        (self.path / "world-battle.core.csv").unlink()
+        return profile.analyze(self.path)
+
+    def test_ordinary_profile_exposes_correct_slice_without_core_trace_or_render_attribution(self):
+        result = self.ordinary_report(self.ordinary_stall_frames())
+        self.assertEqual(result["slow_ticks"], [])
+        sample = result["slow_slices"][0]
+        self.assertEqual(sample["row"], 0)
+        self.assertEqual(sample["measured_wall_ms"], 750)
+        self.assertEqual(sample["core_ms"], 700)
+        self.assertEqual(sample["following_interval_row"], 1)
+        self.assertEqual(sample["following_interval_ms"], 800)
+        self.assertEqual(sample["following_gap_ms"], 50)
+        self.assertEqual(sample["phases"]["simulation_input_ms"], 720)
+        self.assertNotIn("render_extract_ms", sample["phases"])
+        self.assertNotIn("physics_ms", sample["phases"])
+        self.assertEqual(sample["nested_details"]["physics_ms"], 700)
+        self.assertEqual(result["slice_summary"]["single_tick_ms"]["max"], 700)
+        self.assertEqual(result["slice_summary"]["multi_step_slices"], 1)
+        multi = next(s for s in result["slow_slices"] if s["simulation_ticks"] == 2)
+        self.assertIsNone(multi["single_tick_ms"])
+        self.assertEqual(multi["mean_core_ms_per_step"], 30)
+        self.assertIn("Main slices", profile.markdown(result))
+
+    def test_equal_slow_runs_keep_diagnostic_evidence_but_cannot_qualify_a_speed_pair(self):
+        result = self.ordinary_report(self.ordinary_stall_frames())
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertFalse(result["meets_simulation_rate"])
+        self.assertFalse(result["acceptance_eligible"])
+        pair = profile.compare(result, result)
+        self.assertFalse(pair["eligible"])
+        self.assertIn("before:simulation_not_realtime", pair["reasons"])
+        self.assertIn("after:simulation_not_realtime", pair["reasons"])
+
+    def test_stall_episodes_do_not_double_count_following_gaps_or_invent_multi_step_ticks(self):
+        result = self.ordinary_report(self.ordinary_stall_frames())
+        episodes = result["stall_episodes"]
+        self.assertEqual(episodes["count"], 2)
+        first, second = episodes["retained"]
+        self.assertEqual((first["first_row"], first["last_row"]), (0, 0))
+        self.assertEqual(first["covered_wall_ms"], 800)
+        self.assertEqual(first["longest_single_tick_ms"], 700)
+        self.assertEqual(second["covered_wall_ms"], 90)
+        self.assertEqual(second["simulation_ticks"], 2)
+        self.assertIsNone(second["longest_single_tick_ms"])
+
+    def test_gap_only_stall_keeps_small_measured_slice_and_does_not_blame_core(self):
+        frames = self.ordinary_stall_frames()
+        frames[0].update(frame_end_ns="10000000", simulation_core_ms="2", simulation_input_ms="3")
+        frames[1]["frame_gap_ns"] = "790000000"
+        result = self.ordinary_report(frames)
+        episode = result["stall_episodes"]["retained"][0]
+        self.assertEqual(episode["measured_wall_ms"], 10)
+        self.assertEqual(episode["following_gap_ms"], 790)
+        self.assertEqual(episode["core_ms"], 2)
+        self.assertEqual(episode["covered_wall_ms"], 800)
+
+    def test_stall_episodes_split_generations_and_include_final_slice_without_next_interval(self):
+        frames = self.ordinary_stall_frames()[:2]
+        frames[1].update(generation="1", tick="0", simulation_ticks="2", simulation_core_ms="80", frame_end_ns="900000000")
+        result = self.ordinary_report(frames)
+        self.assertEqual(result["stall_episodes"]["count"], 2)
+        final = next(s for s in result["slow_slices"] if s["generation"] == 1)
+        self.assertEqual(final["first_tick"], (1 << 32) - 1)
+        self.assertIsNone(final["following_interval_ms"])
+        self.assertIsNone(final["following_gap_ms"])
+        self.assertEqual(final["measured_wall_ms"], 100)
+
+    def test_slice_and_episode_detail_is_bounded_without_losing_total_episode_count(self):
+        frames = self.ordinary_stall_frames()
+        summary, slow, episodes = profile.summarize_slices(frames, True, 1)
+        self.assertEqual(len(slow), 1)
+        self.assertEqual(len(episodes["retained"]), 1)
+        self.assertEqual(episodes["count"], 2)
+        self.assertEqual(summary["measured_wall_ms"]["samples"], 4)
+        self.assertEqual(summary["phase_totals_ms"]["simulation_input_ms"], 787)
+
+    def test_legacy_slices_keep_missing_clocks_and_phases_unavailable(self):
+        frames = self.ordinary_stall_frames()
+        for row in frames:
+            for key in ("frame_start_ns", "frame_end_ns", "frame_gap_ns", *profile.SLICE_PHASES):
+                del row[key]
+        result = self.ordinary_report(frames)
+        self.assertEqual(result["slow_slices"], [])
+        self.assertIsNone(result["stall_episodes"])
+        self.assertIsNone(result["slice_summary"]["measured_wall_ms"])
+        self.assertTrue(all(value is None for value in result["slice_summary"]["phase_totals_ms"].values()))
+
     def test_new_schema_requires_physics_scopes_and_cannot_pair_with_legacy(self):
         self.write()
         legacy = profile.analyze(self.path)

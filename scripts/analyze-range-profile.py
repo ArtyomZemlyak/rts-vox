@@ -207,6 +207,103 @@ def summarize_tick(rows):
                 worker_covered_wall_ms=union_by_thread(jobs))
 
 
+# Exclusive Update-system boundaries; the other columns are nested details or
+# asynchronous render-thread observations, so they must not be added here.
+SLICE_PHASES = ("simulation_input_ms", "unit_mesh_ms", "fragments_ms", "presentation_ms")
+SLICE_DETAILS = ("simulation_core_ms", "occupancy_ms", "physics_ms", "terrain_ms", "atmosphere_ms")
+
+
+def measured_slice(frames, idx, aligned):
+    row = frames[idx]
+    steps = int(row["simulation_ticks"])
+    tick = int(row["tick"])
+    def optional_ms(key):
+        value = row.get(key)
+        return float(value) if value not in (None, "") else None
+    wall = (int(row["frame_end_ns"]) - int(row["frame_start_ns"])) / 1e6 if aligned else None
+    following = frames[idx + 1] if idx + 1 < len(frames) and aligned else None
+    core = float(row["simulation_core_ms"])
+    return dict(row=idx, generation=int(row["generation"]), end_tick=tick,
+                first_tick=(tick - steps + 1) % (1 << 32) if steps else None,
+                simulation_ticks=steps, measured_wall_ms=wall, core_ms=core,
+                single_tick_ms=core if steps == 1 else None,
+                mean_core_ms_per_step=core / steps if steps else None,
+                # The observed interval on the following row contains this
+                # slice, not that following row's core or presentation work.
+                following_interval_row=idx + 1 if following else None,
+                following_interval_ms=(int(following["frame_start_ns"]) - int(row["frame_start_ns"])) / 1e6 if following else None,
+                following_gap_ms=int(following["frame_gap_ns"]) / 1e6 if following else None,
+                phases={key: optional_ms(key) for key in SLICE_PHASES},
+                nested_details={key: optional_ms(key) for key in SLICE_DETAILS})
+
+
+def stall_episodes(slices, top, threshold_ms=50.0):
+    """Adjacent expensive main slices/gaps; wall evidence, never a wait cause."""
+    episodes = []
+    count = 0
+    active = None
+    def retain(episode):
+        nonlocal count
+        count += 1
+        # Measured slices and following gaps are disjoint on the shared clock.
+        episode["covered_wall_ms"] = episode["measured_wall_ms"] + episode["following_gap_ms"]
+        episodes.append(episode)
+        episodes.sort(key=lambda r: -r["covered_wall_ms"])
+        del episodes[top:]
+    for sample in slices:
+        wall, gap = sample["measured_wall_ms"], sample["following_gap_ms"]
+        slow = (wall is not None and wall >= threshold_ms) or (gap is not None and gap >= threshold_ms)
+        if active and (not slow or sample["generation"] != active["generation"]):
+            retain(active)
+            active = None
+        if not slow:
+            continue
+        if active is None:
+            active = dict(generation=sample["generation"], first_row=sample["row"],
+                          last_row=sample["row"], first_tick=sample["first_tick"],
+                          end_tick=sample["end_tick"], slices=0, simulation_ticks=0,
+                          measured_wall_ms=0.0, following_gap_ms=0.0, core_ms=0.0,
+                          longest_single_tick_ms=None)
+        if active["first_tick"] is None:
+            active["first_tick"] = sample["first_tick"]
+        active["last_row"], active["end_tick"] = sample["row"], sample["end_tick"]
+        active["slices"] += 1
+        active["simulation_ticks"] += sample["simulation_ticks"]
+        active["measured_wall_ms"] += wall or 0.0
+        active["following_gap_ms"] += gap or 0.0
+        active["core_ms"] += sample["core_ms"]
+        if sample["single_tick_ms"] is not None:
+            active["longest_single_tick_ms"] = max(active["longest_single_tick_ms"] or 0.0, sample["single_tick_ms"])
+    if active:
+        retain(active)
+    return dict(threshold_ms=threshold_ms, count=count, retained=episodes)
+
+
+def summarize_slices(frames, aligned, top):
+    walls, singles, slow = [], [], []
+    multi = 0
+    totals = dict.fromkeys(SLICE_PHASES, 0.0)
+    def samples():
+        nonlocal multi
+        for idx in range(len(frames)):
+            sample = measured_slice(frames, idx, aligned)
+            if sample["measured_wall_ms"] is not None:
+                walls.append(sample["measured_wall_ms"])
+                slow.append(sample)
+                slow.sort(key=lambda r: -r["measured_wall_ms"])
+                del slow[top:]
+            if sample["single_tick_ms"] is not None:
+                singles.append(sample["single_tick_ms"])
+            multi += sample["simulation_ticks"] > 1
+            for key, value in sample["phases"].items():
+                totals[key] = totals[key] + value if totals[key] is not None and value is not None else None
+            yield sample
+    episodes = stall_episodes(samples(), top)
+    summary = dict(measured_wall_ms=stats(walls), single_tick_ms=stats(singles),
+                   multi_step_slices=multi, phase_totals_ms=totals)
+    return summary, slow, episodes if aligned else None
+
+
 def analyze(directory, scenario="world-battle", top=12):
     directory = Path(directory)
     log = (directory / f"{scenario}.log").read_text(encoding="utf-8-sig", errors="replace")
@@ -406,6 +503,8 @@ def analyze(directory, scenario="world-battle", top=12):
     if not pools:
         reasons.append("actual_worker_counts_missing")
     seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
+    meets_rate = scenario != "world-battle" or frame_ticks >= math.floor(seconds * (int(rate[1]) if rate else 30)) - 1
+    slice_summary, slow_slices, episodes = summarize_slices(frames, aligned, top)
     expensive_frames = []
     for idx in sorted((i for i, value in enumerate(frame_times) if value is not None), key=lambda i: -frame_times[i])[:top]:
         row = frames[idx]
@@ -416,8 +515,10 @@ def analyze(directory, scenario="world-battle", top=12):
             previous_measured_slice_ms=(int(prev["frame_end_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             begin_to_begin_ms=(int(row["frame_start_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             outside_observed_slice_ms=int(row["frame_gap_ns"]) / 1e6 if aligned else None))
-    return dict(schema=3, directory=str(directory), scenario=scenario, manifest=manifest,
+    return dict(schema=4, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
+        meets_simulation_rate=meets_rate,
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -436,6 +537,8 @@ def analyze(directory, scenario="world-battle", top=12):
         trace_alignment=dict(unmapped_ticks=unmapped, missing_clock_ticks=missing_clock,
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
+        slice_summary=slice_summary, slow_slices=slow_slices,
+        stall_episodes=episodes,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
                     "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
@@ -443,7 +546,9 @@ def analyze(directory, scenario="world-battle", top=12):
                     "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",
                     "worker_covered_wall is a union per OS thread, not CPU utilization; do not add it to parent wall",
                     "unit intervals are between consecutive callbacks and can enclose other work",
-                    "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame",
+                    "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame; repeated observations are not new jobs and their per-row sum/mean is not render CPU work",
+                    "single_tick_ms is exact core wall only for one-step slices; multi-step slices expose an average, never invented individual tick durations",
+                    "stall episodes group adjacent measured slices or following gaps >=50ms; core wall includes worker execution/preemption/waits and is not OS CPU time",
                     "OS counters use coarse sampling; UTC alignment is approximate, and only full in-window intervals are included",
                     "callback roles are accumulated per OS ID; thread CPU accounting keeps creation-time lifetimes separate",
                     "OS thread CPU includes unmarked work too; a callback role does not attribute all of that thread's CPU to one subsystem",
@@ -455,6 +560,8 @@ def compare(a, b):
     for label, run in [("before", a), ("after", b)]:
         if not run["valid_for_comparison"]:
             problems.append(f"{label}:not_valid")
+        if not run["meets_simulation_rate"]:
+            problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow"]
     for key in keys:
@@ -469,7 +576,8 @@ def compare(a, b):
 
 def markdown(report):
     lines = ["# Range performance evidence", "",
-             f"Comparison eligible: {report['valid_for_comparison']}. Reasons: {', '.join(report['reasons']) or 'none observed'}.",
+             f"Diagnostic evidence valid: {report['valid_for_comparison']}. Reasons: {', '.join(report['reasons']) or 'none observed'}.",
+             f"FPS acceptance eligible: {report['acceptance_eligible']}; simulation at real time: {report['meets_simulation_rate']}; ratio: {report['realtime_ratio']}.", "",
              f"Frames: {report['frames']}; real steps: {report['measured_steps']}; traced steps: {report['trace_steps']}.",
              f"Frame alignment: {report['frame_alignment']}; duration metric: {report['frame_timing_metric']}. Core ms per actual step: {report['core_ms_per_step']}.", "",
              f"Observed render context: {report['actual_render_context']['initial'] or 'unavailable'}.",
@@ -502,6 +610,19 @@ def markdown(report):
     for frame in report["slow_frames"]:
         values = [number(frame[key]) for key in ("frame_delta_ms", "bevy_delta_ms", "previous_core_ms", "current_core_ms", "previous_measured_slice_ms", "outside_observed_slice_ms")]
         lines.append(f"| {frame['row']} | {frame['generation']}/{frame['tick']} | {' | '.join(values)} |")
+    lines += ["", "Main slices (also available without detailed core trace):", "",
+              "| Row | Generation / tick range | Steps | Measured wall, ms | Core wall, ms | Following interval row / ms | Following gap, ms | Exclusive Update phases, ms |",
+              "|---|---|---:|---:|---:|---|---:|---|"]
+    for sample in report["slow_slices"]:
+        phases = ", ".join(f"{key.removesuffix('_ms')}={number(value)}" for key, value in sample["phases"].items())
+        ticks = f"{sample['first_tick']}..{sample['end_tick']}" if sample["simulation_ticks"] else "no step"
+        lines.append(f"| {sample['row']} | {sample['generation']} / {ticks} | {sample['simulation_ticks']} | {number(sample['measured_wall_ms'])} | {number(sample['core_ms'])} | {sample['following_interval_row']} / {number(sample['following_interval_ms'])} | {number(sample['following_gap_ms'])} | {phases} |")
+    lines += ["", "Core/occupancy/physics/terrain/atmosphere are nested details, not additive Update phases. Render atomic observations are excluded from the slice breakdown. Multi-step core totals do not identify individual tick costs."]
+    episodes = report["stall_episodes"]
+    if episodes is not None:
+        lines += ["", f"Stall episodes: {episodes['count']} (adjacent measured slices or following gaps >= {episodes['threshold_ms']}ms; wall evidence, not an identified cause).", ""]
+        for episode in episodes["retained"]:
+            lines.append(f"- generation {episode['generation']}, rows {episode['first_row']}..{episode['last_row']}, {episode['simulation_ticks']} steps: measured wall {episode['measured_wall_ms']:.3f}ms, following gaps {episode['following_gap_ms']:.3f}ms, core wall {episode['core_ms']:.3f}ms; longest exact single tick {number(episode['longest_single_tick_ms'])}ms.")
     lines += ["", "Bevy delta may lag by multiple rows through the render pipeline; it is not used to select slow frames or attribute their phases. Outside slices is the monotonic gap from the previous measured end to the current measured start. It is not an identified GPU/lock wait. First-frame previous values and legacy clock fields remain unavailable."]
     lines += ["", *[f"- {s}." for s in report["limitations"]]]
     cpu = report["os_cpu_window"]
@@ -530,7 +651,7 @@ def main():
     prefix = args.directory / f"{args.scenario}.analysis"
     prefix.with_suffix(".analysis.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     prefix.with_suffix(".analysis.md").write_text(markdown(result), encoding="utf-8")
-    print(f"Steps={result['measured_steps']} trace={result['trace_steps']} eligible={result['valid_for_comparison']} reasons={result['reasons']}")
+    print(f"Steps={result['measured_steps']} trace={result['trace_steps']} evidence_valid={result['valid_for_comparison']} fps_eligible={result['acceptance_eligible']} realtime={result['meets_simulation_rate']} reasons={result['reasons']}")
     if args.require_valid and (not result["valid_for_comparison"] or not result.get("comparison", {"eligible": True})["eligible"]):
         raise SystemExit(2)
 

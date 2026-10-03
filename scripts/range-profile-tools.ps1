@@ -108,14 +108,15 @@ function Get-RangeValidity {
     }
     # A separate comparison key must still match scenario, inputs and flags.
     $valid = $issues.Count -eq 0
+    $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases
+        AcceptanceEligible = $valid -and -not $CorePhases -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
-        MeetsSimulationRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
+        MeetsSimulationRate = $meetsRate
         Mode = if ($CorePhases) { 'diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
