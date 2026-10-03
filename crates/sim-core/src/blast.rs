@@ -4193,7 +4193,7 @@ impl BlastRange {
             }
             detail("heat_melt");
         }
-        self.step_unit_heat_observed(&mut detail);
+        self.step_unit_heat_observed(&mut detail, &|_, event| physics_detail(5, event));
         detail("heat_units");
         self.world.flush();
         self.world_changed = nav::vehicle::Changed::default();

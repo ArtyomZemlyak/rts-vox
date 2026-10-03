@@ -7,10 +7,18 @@ use fx::{
     Fx,
 };
 use modding::unit_heat::Tuning;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
 use voxel::unit::{UnitBody, WORLD_MM};
 const HEAT_CAP: u32 = 1_000_000;
+
+/// Geometry and neighbour energy are immutable until the melting pass.
+/// Capacity admission and total outflow still follow the source cursor order.
+struct ConductionRead {
+    heat: u32,
+    neighbours: [Option<(Cell, u32)>; 6],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Cell {
@@ -143,39 +151,78 @@ impl Thermals {
         self.rejected_heat = self.rejected_heat.saturating_add(u64::from(heat - used));
     }
     pub fn step(&mut self, units: &mut [RangeUnit], matter: &mut Matter, t: &Tuning) {
-        self.step_observed(units, matter, t, |_| {});
+        self.step_observed(units, matter, t, |_| {}, &|_, _| {});
     }
-    fn step_observed(
+    fn conduction_read(&self, p: Cell, units: &[RangeUnit], t: &Tuning) -> Option<ConductionRead> {
+        p.body(units)?;
+        let heat = self.heat(p);
+        let mut neighbours = [None; 6];
+        for (slot, q) in neighbours.iter_mut().zip(p.neighbours()) {
+            if q.body(units).is_some() {
+                let other = self.heat(q);
+                if heat > other {
+                    *slot = Some((q, (heat - other) * t.conduction_milli / 1000));
+                }
+            }
+        }
+        Some(ConductionRead { heat, neighbours })
+    }
+    fn conduction_delta(
         &mut self,
-        units: &mut [RangeUnit],
-        matter: &mut Matter,
+        batch: &[Cell],
+        units: &[RangeUnit],
         t: &Tuning,
-        mut completed: impl FnMut(&'static str),
-    ) {
-        let batch = self.batch_after(self.cursor, t.cells_per_tick);
-        self.cursor = batch.last().copied();
+        parallel: bool,
+        task: &(impl Fn(usize, &'static str) + Send + Sync),
+    ) -> BTreeMap<Cell, i64> {
+        let read = |&p: &Cell| self.conduction_read(p, units, t);
+        let reads: Vec<_> = if parallel && batch.len() >= 256 && rayon::current_num_threads() > 1 {
+            batch
+                .par_iter()
+                .with_min_len(128)
+                .map_init(
+                    || {
+                        crate::burst::PhysicsTask::new(
+                            task,
+                            "physics_unit_heat_read_begin",
+                            "physics_unit_heat_read_end",
+                        )
+                    },
+                    |_, p| read(p),
+                )
+                .collect()
+        } else {
+            let _read = crate::burst::PhysicsTask::new(
+                task,
+                "physics_unit_heat_read_begin",
+                "physics_unit_heat_read_end",
+            );
+            batch.iter().map(read).collect()
+        };
+        let _commit = crate::burst::PhysicsTask::new(
+            task,
+            "physics_unit_heat_admit_begin",
+            "physics_unit_heat_admit_end",
+        );
         let mut delta = BTreeMap::<Cell, i64>::new();
         let mut new = BTreeSet::new();
-        for &p in &batch {
-            let heat = self.heat(p);
-            if p.body(units).is_none() {
+        for (&p, read) in batch.iter().zip(reads) {
+            let Some(read) = read else {
+                // Keep removal here: it frees capacity at precisely the old
+                // source position, including when the cursor wraps.
                 self.cells.remove(&p);
                 continue;
-            }
+            };
+            let heat = read.heat;
             let cooling = if t.cooling_milli == 0 {
                 0
             } else {
                 (heat * t.cooling_milli / 1000).max(1)
             };
-            *delta.entry(p).or_default() -= i64::from(cooling);
-            // Cap total outflow at the available heat, including cooling.
+            let mut spent = i64::from(cooling);
             let mut available = heat.saturating_sub(cooling);
-            for q in p.neighbours() {
-                if q.body(units).is_none() {
-                    continue;
-                }
-                let share =
-                    (heat.saturating_sub(self.heat(q)) * t.conduction_milli / 1000).min(available);
+            for (q, requested) in read.neighbours.into_iter().flatten() {
+                let share = requested.min(available);
                 if share == 0 {
                     continue;
                 }
@@ -185,11 +232,30 @@ impl Thermals {
                     }
                     new.insert(q);
                 }
-                *delta.entry(p).or_default() -= i64::from(share);
+                spent += i64::from(share);
                 *delta.entry(q).or_default() += i64::from(share);
                 available -= share;
             }
+            *delta.entry(p).or_default() -= spent;
         }
+        delta
+    }
+    fn step_observed(
+        &mut self,
+        units: &mut [RangeUnit],
+        matter: &mut Matter,
+        t: &Tuning,
+        mut completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Send + Sync),
+    ) {
+        let _total = crate::burst::PhysicsTask::new(
+            task,
+            "physics_unit_heat_begin",
+            "physics_unit_heat_end",
+        );
+        let batch = self.batch_after(self.cursor, t.cells_per_tick);
+        self.cursor = batch.last().copied();
+        let delta = self.conduction_delta(&batch, units, t, true, task);
         completed("unit_heat_conduction");
         for (p, change) in delta {
             let heat = i64::from(self.heat(p)) + change;
@@ -312,14 +378,19 @@ impl Thermals {
 impl BlastRange {
     #[cfg(test)]
     pub(super) fn step_unit_heat(&mut self) {
-        self.step_unit_heat_observed(|_| {});
+        self.step_unit_heat_observed(|_| {}, &|_, _| {});
     }
-    pub(super) fn step_unit_heat_observed(&mut self, completed: impl FnMut(&'static str)) {
+    pub(super) fn step_unit_heat_observed(
+        &mut self,
+        completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Send + Sync),
+    ) {
         self.thermals.step_observed(
             &mut self.units,
             &mut self.matter,
             &self.thermal_tuning,
             completed,
+            task,
         );
     }
 }
@@ -328,6 +399,168 @@ impl BlastRange {
 mod tests {
     use super::*;
     use voxel::unit::Part;
+    // Original cursor-ordered conduction, including admission and stale removal.
+    fn old_delta(
+        field: &mut Thermals,
+        batch: &[Cell],
+        units: &[RangeUnit],
+        t: &Tuning,
+    ) -> BTreeMap<Cell, i64> {
+        let mut delta = BTreeMap::<Cell, i64>::new();
+        let mut new = BTreeSet::new();
+        for &p in batch {
+            let heat = field.heat(p);
+            if p.body(units).is_none() {
+                field.cells.remove(&p);
+                continue;
+            }
+            let cooling = if t.cooling_milli == 0 {
+                0
+            } else {
+                (heat * t.cooling_milli / 1000).max(1)
+            };
+            *delta.entry(p).or_default() -= i64::from(cooling);
+            let mut available = heat.saturating_sub(cooling);
+            for q in p.neighbours() {
+                if q.body(units).is_none() {
+                    continue;
+                }
+                let share =
+                    (heat.saturating_sub(field.heat(q)) * t.conduction_milli / 1000).min(available);
+                if share == 0 {
+                    continue;
+                }
+                if !field.cells.contains_key(&q) && !new.contains(&q) {
+                    if field.cells.len() + new.len() >= t.max_cells {
+                        continue;
+                    }
+                    new.insert(q);
+                }
+                *delta.entry(p).or_default() -= i64::from(share);
+                *delta.entry(q).or_default() += i64::from(share);
+                available -= share;
+            }
+        }
+        delta
+    }
+    #[test]
+    fn parallel_conduction_matches_old_admission_with_cursor_wrap_and_removed_cells() {
+        let mut r = range();
+        r.units.push(RangeUnit::new([200, 16, 200]));
+        let b = &r.units[0].body;
+        let mut cells = Vec::new();
+        for x in 0..b.vol.nx {
+            for y in 0..b.vol.ny {
+                for z in 0..b.vol.nz {
+                    let p = Cell {
+                        unit: 0,
+                        part: 0,
+                        at: [x, y, z],
+                    };
+                    if p.body(&r.units).is_some() {
+                        cells.push(p);
+                    }
+                }
+            }
+        }
+        assert!(cells.len() >= 600);
+        let mut initial: BTreeMap<_, _> = cells
+            .iter()
+            .step_by(2)
+            .take(480)
+            .enumerate()
+            .map(|(i, &p)| {
+                (
+                    p,
+                    if i % 5 == 0 {
+                        HEAT_CAP
+                    } else {
+                        (i as u32 * 7919) % 50000 + 1
+                    },
+                )
+            })
+            .collect();
+        for unit in 0..2 {
+            let b = &r.units[unit].body.segments[0].body;
+            let mut count = 0;
+            'segment: for x in 0..b.vol.nx {
+                for y in 0..b.vol.ny {
+                    for z in 0..b.vol.nz {
+                        let p = Cell {
+                            unit: unit as u16,
+                            part: 1,
+                            at: [x, y, z],
+                        };
+                        if p.body(&r.units).is_some() {
+                            initial.insert(p, HEAT_CAP / (count + 1));
+                            count += 1;
+                            if count == 60 {
+                                break 'segment;
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(count, 60);
+        }
+        assert_eq!(initial.len(), 600);
+        for &p in initial.keys().step_by(11) {
+            let [x, y, z] = p.at.map(usize::from);
+            let u = &mut r.units[usize::from(p.unit)];
+            if p.part == 0 {
+                u.body.remove(x, y, z);
+            } else {
+                u.body.segments[usize::from(p.part - 1)]
+                    .body
+                    .remove(x, y, z);
+            }
+        }
+        r.units[1].seg_gone[0] = true;
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for limit in [7, 256, 512, 600] {
+                for capacity in [600, 601, 610, 16384] {
+                    for (cooling, conduction) in [(0, 0), (0, 150), (8, 8), (1000, 150)] {
+                        for cursor in [None, initial.keys().nth(311).copied()] {
+                            let mut tuning = r.thermal_tuning.clone();
+                            tuning.cooling_milli = cooling;
+                            tuning.conduction_milli = conduction;
+                            tuning.max_cells = capacity;
+                            let mut expected = Thermals {
+                                cells: initial.clone(),
+                                ..Default::default()
+                            };
+                            let batch = expected.batch_after(cursor, limit);
+                            let wanted = old_delta(&mut expected, &batch, &r.units, &tuning);
+                            for parallel in [false, true] {
+                                let mut actual = Thermals {
+                                    cells: initial.clone(),
+                                    ..Default::default()
+                                };
+                                let got = pool.install(|| {
+                                    actual.conduction_delta(
+                                        &batch,
+                                        &r.units,
+                                        &tuning,
+                                        parallel,
+                                        &|_, _| {},
+                                    )
+                                });
+                                assert_eq!(
+                                    got, wanted,
+                                    "workers={workers} limit={limit} capacity={capacity}"
+                                );
+                                assert_eq!(actual.cells, expected.cells);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     fn range() -> BlastRange {
         let c = modding::explosion::ExplosionConfig::from_ron(include_str!(
             "../../../data/flamethrower.ron"

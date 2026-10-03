@@ -2,7 +2,21 @@
 
 Обновлено: 03.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-548: точный ранний отсев Hull::carries, когда проба
+Последний шаг ADR-549: immutable соседские чтения unit conduction
+в existing physics pool, cursor-ordered admission/outflow/stale removal.
+Leaf minimum 128: полный штатный пакет 512 даёт четыре задания.
+CPU-пара 3600 тиков: conduction 258,8→198,8 мкс (−23,2%), tick 13,119→12,634 мс;
+те же counters/hash. Две ordinary native пары 120 с: FPS 78,02→78,59 и
+77,99→79,37, core/step −1,49…1,60%, tempo 1×. 165 FPS/rare stalls открыты.
+Leaf 64 отклонён: CPU-фаза быстрее, но native FPS −1,6…2,6% в двух парах.
+Stage 5 parent/read/admission scopes наблюдают реальные leaves и OS threads;
+900 ticks полной final trace/95 analyzer tests/560 full sim tests плюс
+повтор differential matrix после grain tuning проходят. Следующий основной
+этап — WBPERF-002; micro parallelism не снимает serial sim/render critical path.
+Данные, rejected evidence, frozen SHA/WIP provenance —
+[143](143-parallel-unit-conduction.md).
+
+Предыдущий шаг ADR-548: точный ранний отсев Hull::carries, когда проба
 обломка ниже первой возможной voxel roof. Не меняет опоры или pool;
 убирает footprint/voxel calls из существующих parallel candidate jobs.
 Две CPU-пары 3600 тиков: candidates быстрее на 20,5…22,0%, полный тик

@@ -608,6 +608,25 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(report["valid_for_comparison"])
         self.assertIn("physics_task_coverage_missing", report["reasons"])
 
+    def test_unit_heat_readers_and_ordered_admission_are_separate_task_families(self):
+        rows = trace()
+        for family, stage in (("physics_rubble_floor", "0"), ("physics_rubble_columns", "0"),
+                              ("physics_heat_exchange", "3"), ("physics_ground_heat", "4"),
+                              ("physics_unit_heat", "5"), ("physics_unit_heat_admit", "5")):
+            rows += [mark("task", family + "_begin", 15, "3", stage),
+                     mark("task", family + "_end", 60, "3", stage)]
+        for thread in ("7", "8"):
+            rows += [mark("task", "physics_unit_heat_read_begin", 20, thread, "5"),
+                     mark("task", "physics_unit_heat_read_end", 50, thread, "5")]
+        self.write(rows=rows)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE core_trace_schema=3\n")
+        report = profile.analyze(self.path)
+        self.assertTrue(report["valid_for_comparison"])
+        self.assertEqual(report["task_families"]["physics_unit_heat_read"]["jobs"], 2)
+        self.assertEqual(report["task_families"]["physics_unit_heat_admit"]["jobs"], 1)
+        self.assertIn("5 unit heat", profile.markdown(report))
+
     def bounded_physics_fixture(self):
         rows, summary = trace(), []
         for family in ("physics_rubble_floor", "physics_rubble_columns"):

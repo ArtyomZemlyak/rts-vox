@@ -1125,7 +1125,7 @@ def analyze(directory, scenario="world-battle", top=12):
         stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
         render_tasks=render_tasks, render_tasks_build=task_build,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
-                    "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
+                    "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat, 5 unit heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
                     "task family wall totals are inclusive across concurrent jobs, not elapsed phase time or CPU utilization",
                     "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",

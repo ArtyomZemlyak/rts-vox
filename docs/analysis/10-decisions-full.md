@@ -24366,3 +24366,25 @@ Word-range contact-list enumeration и source scatter по X stripes
 ускорения полного боя. Их raw evidence сохранено. Пределы одной native
 пары, frozen SHA/WIP provenance и данные —
 [142](142-debris-support-lower-bound.md).
+
+## ADR-549 — параллельные чтения теплопроводности юнитов
+
+Неизменные geometry/old-heat neighbour probes от 256 источников выполняются
+indexed-пакетом в существующем physics pool, leaf минимум 128. Малые/однопоточные
+пакеты серийны. Исходный cursor order сохраняется; capacity/admission,
+освобождение stale slots, outflow, cooling, rounding и melting последовательны.
+Debit источника накапливается локально и один раз добавляется в delta.
+Новых caches/pools/dependencies/snapshot fields, смены баланса/лимитов/картинки нет.
+
+Physics observer получает stage 5 unit_heat parent, реальные leaf read jobs и
+serial admission; clocks/OS CPU/cycles принадлежат прежнему profiler.
+Bounded totals и старые schema 3 datasets совместимы. Inclusive parent/child
+wall не является CPU utilization или суммой elapsed phase time.
+
+560 sim-core tests passed, 4 ignored; differential oracle покрывает 768
+serial/parallel cases с 1/4/8 workers, cursor wrap, полным field, отверстиями
+и gone sections. 95 analyzer tests passed; clippy без новых warnings,
+seed 42 CLI hash прежний. Старый architecture debt не закрыт.
+
+Свежие CPU/native/control данные, frozen SHA/WIP provenance и ограничения —
+[143](143-parallel-unit-conduction.md). 165 FPS и rare stalls остаются открытыми.
