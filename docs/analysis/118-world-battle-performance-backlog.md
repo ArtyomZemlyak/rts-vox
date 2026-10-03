@@ -3645,6 +3645,30 @@ entity проверены. Ниже сохранён исходный переч
 пересоздании деревьев и записи спящих Transform устранены. Инстанс-буферы,
 активные пространственные списки и общий p99 ≤0,7 мс ещё не выполнены.
 
+03.10.2026, ADR-550: ID→Slot lookup/retain на каждом кадре заменены плотным
+массивом с линейным ordered merge при compaction и compatibility map только
+для unordered import. Preparation поз от 2048 кусков идёт пакетами по 2048
+в существующем ComputeTaskPool; Assets/entities/Transform commit сохраняют
+физический порядок. Интерполяция, wake/reset/ID reuse, отделка, внешнее
+удаление entity и неизменные Transform проверены. Физика/материя прежние.
+
+Две ordinary native пары, полный бой 30×30, по 120 с, порядок второй пары
+обратный, 8/8 physics/navigation и прежние compute 4: FPS
+78,334→80,960 и 78,775→80,377. Группа fragments_ms (также позы юнитов и
+падающие тела) 1,336→0,830 и 1,329→0,837 мс, позднее среднее
+2,083→1,212 и 2,053→1,222 мс. p99 кадра 33,396→31,572 и
+32,727→31,808 мс. Core/шаг немного дороже: 13,969→14,076 и
+13,963→14,105 мс; ускорение симуляции не заявляется. 3600 шагов и hash
+bcc1f58c226d1721 одинаковы, tempo 0,9996…0,9997, validity gates прошли.
+
+108 полных render tests passed/2 ignored; после добавления large ECS fixture
+12 целевых fragment tests прошли (не складывать с полным набором).
+Группа p99 2,46…2,51 мс всё ещё выше ≤0,7; worker OS IDs/cycles новых
+Compute jobs не сняты, равномерная загрузка CPU не доказана. WBPERF-013
+частична, независимый sim/render, 165 FPS и rare stalls открыты. Данные,
+SHA/WIP provenance, memory и ограничения —
+[144](144-dense-parallel-fragment-poses.md).
+
 Места: [fragments.rs](../../crates/render/src/bin/blast/fragments.rs), `draw` (33),
 [moving.rs](../../crates/render/src/bin/blast/moving.rs), `before/animate`,
 [bodies.rs](../../crates/render/src/bin/blast/bodies.rs), `draw`.

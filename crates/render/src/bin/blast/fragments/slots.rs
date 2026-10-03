@@ -25,7 +25,6 @@ impl Stamp {
 pub(super) struct Slot {
     pub entity: Entity,
     pub key: (u64, bool),
-    pub seen: u64,
     mesh: Option<render::model::FragmentMeshKey>,
     stamp: Stamp,
     current: Transform,
@@ -38,12 +37,10 @@ impl Slot {
         f: &Fragment,
         current: Transform,
         shown: Transform,
-        seen: u64,
     ) -> Self {
         Self {
             entity,
             key,
-            seen,
             mesh: mesh_key(f),
             stamp: Stamp::of(f),
             current,
@@ -117,7 +114,7 @@ mod tests {
         }
     }
     fn slot(f: &Fragment, current: Transform) -> Slot {
-        Slot::new(Entity::from_bits(7), (0, false), f, current, current, 1)
+        Slot::new(Entity::from_bits(7), (0, false), f, current, current)
     }
     #[test]
     fn sleeping_piece_skips_pose_rebuild_and_transform_updates() {

@@ -24388,3 +24388,31 @@ seed 42 CLI hash прежний. Старый architecture debt не закры�
 
 Свежие CPU/native/control данные, frozen SHA/WIP provenance и ограничения —
 [143](143-parallel-unit-conduction.md). 165 FPS и rare stalls остаются открытыми.
+
+## ADR-550 — плотные слоты и параллельная подготовка поз обломков
+
+Заменяет ID→Slot lookup/retain из ADR-531 плотным массивом в порядке
+физических fragments. Normal ordered compaction сохраняет render identities
+линейным merge с reusable scratch; unordered import использует compatibility
+map только при изменении порядка. Retired entities удаляются отдельным списком.
+
+От 2048 кусков независимая preparation выполняется пакетами по 2048 в
+существующем ComputeTaskPool; малые/standalone вызовы последовательны.
+Воркеры меняют только свои render slots, физика и ECS query неизменны.
+Assets/structural ECS и готовые Transform применяются после join в физическом
+порядке. Stamp/interpolation, неизменные Transform, mm/shape, wake/reset,
+смена отделки и external entity removal сохраняются. Физика/материя/баланс
+и квота секционных мешей прежние; новых pools/dependencies нет.
+
+Две ordinary native 120-секундные пары полного боя подтвердили прирост
+FPS 2,03…3,35%, снижение группы поз/обломков 37,0…37,9%. Чистый core/шаг
+немного дороже, ускорение симуляции не заявляется. Все четыре сохранили
+3600 шагов, игровой evidence и hash bcc1f58c226d1721.
+108 full render tests passed/2 ignored и последующие 12 целевых fragment
+tests passed; эти наборы пересекаются. Clippy без новых предупреждений.
+
+Профиль fragments_ms включает unit poses и falling bodies. Новые worker
+OS IDs/cycles не сняты; равномерная загрузка CPU не доказана. Общий p99
+WBPERF-013, независимый sim/render, 165 FPS и rare stalls остаются открытыми.
+Замеры, проверки, SHA/WIP provenance и ограничения —
+[144](144-dense-parallel-fragment-poses.md).

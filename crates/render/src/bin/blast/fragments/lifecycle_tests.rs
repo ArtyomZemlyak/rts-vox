@@ -274,3 +274,51 @@ fn native_piece_lifecycle_reuses_sleeps_rebuilds_and_retires_entities() {
     app.update();
     assert!(pieces(&mut app).is_empty());
 }
+
+#[test]
+fn dense_parallel_draw_preserves_reordered_and_compacted_pieces() {
+    bevy::tasks::ComputeTaskPool::get_or_init(|| {
+        bevy::tasks::TaskPoolBuilder::new().num_threads(4).build()
+    });
+    let mut app = app();
+    app.world_mut()
+        .resource_mut::<Scene>()
+        .sim
+        .matter
+        .debris
+        .fragments = (1..=4097).map(piece).collect();
+    app.update();
+    let first = pieces(&mut app);
+    app.world_mut().clear_trackers();
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        let fragments = &mut scene.sim.matter.debris.fragments;
+        fragments.rotate_left(100);
+        fragments.retain(|f| f.id % 7 != 0);
+        for f in fragments.iter_mut().filter(|f| f.id % 13 == 0) {
+            f.position.y = fx::Fx::from_int(9);
+        }
+    }
+    app.update();
+    let next = pieces(&mut app);
+    for (&id, &entity) in &first {
+        if id % 7 == 0 {
+            assert!(!next.contains_key(&id));
+            assert!(app.world().get_entity(entity).is_err());
+        } else {
+            assert_eq!(next[&id], entity);
+            let tr = app.world().entity(entity).get::<Transform>().unwrap();
+            assert_eq!(tr.translation.y, if id % 13 == 0 { 9.0 } else { 0.0 });
+        }
+    }
+    app.world_mut().clear_trackers();
+    app.update();
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, (With<Piece>, Changed<Transform>)>()
+            .iter(world)
+            .count(),
+        0
+    );
+}

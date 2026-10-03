@@ -2,6 +2,8 @@
 use super::*;
 use bevy::platform::collections::HashMap;
 use std::collections::BTreeMap;
+#[path = "fragments/dense.rs"]
+mod dense;
 #[cfg(test)]
 #[path = "fragments/lifecycle_tests.rs"]
 mod lifecycle_tests;
@@ -14,8 +16,7 @@ pub struct Cache {
     meshes: BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
     materials: BTreeMap<u16, Handle<StandardMaterial>>,
     chunks: BTreeMap<u64, Vec<Handle<Mesh>>>,
-    slots: HashMap<u64, slots::Slot>,
-    epoch: u64,
+    slots: dense::Slots,
 }
 /// The cube colour of a range material, shared with falling bodies.
 pub fn material_colour(material: u16) -> [f32; 4] {
@@ -67,55 +68,60 @@ pub fn draw(
     mut old: Query<(Entity, &Piece, &mut Transform)>,
 ) {
     let fragments = &scene.sim.matter.debris.fragments;
-    cache.epoch = cache.epoch.wrapping_add(1);
-    let epoch = cache.epoch;
     let alpha = if scene.realtime && !scene.paused {
         (scene.acc * 30.0).clamp(0.0, 1.0)
     } else {
         1.0
     };
     let mut chunk_builds = 0;
-    for f in fragments {
-        let piece_key = f.chunk.as_ref().map_or((0, false), |c| {
-            (c.hash(), !scene.sim.units[c.template as usize].status.alive)
-        });
-        let make_transform = || {
-            let current = pos([f.position.x, f.position.y, f.position.z]);
-            let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
-            let rotation =
-                Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
-            // Excess inventory in a saturated pile is not additional geometry.
-            let scale = render::model::fragment_scale(f);
-            Transform::from_translation(current)
-                .with_rotation(rotation)
-                .with_scale(Vec3::splat(scale))
-        };
-        if let Some(slot) = cache.slots.get_mut(&f.id) {
-            if slot.matches(piece_key, f) && old.contains(slot.entity) {
-                slot.seen = epoch;
-                if let Some(transform) = slot.sample(
-                    f,
-                    visual.fragments.get(&f.id).copied(),
-                    alpha,
-                    make_transform,
-                ) {
+    cache.slots.align(fragments);
+    {
+        let Cache { slots, chunks, .. } = &mut *cache;
+        for slot in slots.retired.drain(..) {
+            if old.contains(slot.entity) {
+                commands.entity(slot.entity).despawn();
+            }
+            chunks.remove(&slot.id);
+        }
+    }
+    cache.slots.prepare(
+        fragments,
+        &scene.sim.units,
+        &visual.fragments,
+        alpha,
+        |entity| old.as_readonly().contains(entity),
+        bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
+    );
+    // Workers touch only their render slots and read-only physics/queries.
+    // Asset and entity changes keep the original physical fragment order.
+    let Cache {
+        slots,
+        chunks,
+        meshes: cached_meshes,
+        materials: cached_materials,
+        ..
+    } = &mut *cache;
+    for (entry, f) in slots.entries.iter_mut().zip(fragments) {
+        let (piece_key, current) = match entry.prepared {
+            dense::Prepared::Existing(next) => {
+                let slot = entry.slot.as_ref().unwrap();
+                if let Some(transform) = next {
                     if let Ok((_, p, mut tr)) = old.get_mut(slot.entity) {
-                        debug_assert_eq!((p.0, p.1, p.2), (f.id, piece_key.0, piece_key.1));
-                        if *tr != transform {
-                            *tr = transform;
-                        }
+                        debug_assert_eq!((p.0, p.1, p.2), (f.id, slot.key.0, slot.key.1));
+                        tr.set_if_neq(transform);
                     }
                 }
                 continue;
             }
+            dense::Prepared::Replace(key, current) => (key, current),
+        };
+        if let Some(slot) = entry.slot.take() {
             let entity = slot.entity;
             if old.contains(entity) {
                 commands.entity(entity).despawn();
             }
-            cache.slots.remove(&f.id);
-            cache.chunks.remove(&f.id);
+            chunks.remove(&f.id);
         }
-        let current = make_transform();
         let transform = slots::interpolate(current, visual.fragments.get(&f.id).copied(), alpha);
         if let Some(chunk) = &f.chunk {
             if chunk_builds >= 2 {
@@ -152,11 +158,8 @@ pub fn draw(
                     }
                 })
                 .id();
-            cache.slots.insert(
-                f.id,
-                slots::Slot::new(entity, piece_key, f, current, transform, epoch),
-            );
-            cache.chunks.insert(f.id, handles);
+            entry.slot = Some(slots::Slot::new(entity, piece_key, f, current, transform));
+            chunks.insert(f.id, handles);
             continue;
         }
         let colour = if let Some(p) = f.paint {
@@ -175,13 +178,11 @@ pub fn draw(
             material_colour(f.material)
         };
         let key = (f.material, f.shape, f.side, f.paint);
-        let mesh = cache
-            .meshes
+        let mesh = cached_meshes
             .entry(key)
             .or_insert_with(|| meshes.add(piece_mesh(f.shape, f.side, colour)))
             .clone();
-        let material = cache
-            .materials
+        let material = cached_materials
             .entry(f.material)
             .or_insert_with(|| {
                 materials.add(StandardMaterial {
@@ -199,23 +200,8 @@ pub fn draw(
                 transform,
             ))
             .id();
-        cache.slots.insert(
-            f.id,
-            slots::Slot::new(entity, piece_key, f, current, transform, epoch),
-        );
+        entry.slot = Some(slots::Slot::new(entity, piece_key, f, current, transform));
     }
-    let Cache { slots, chunks, .. } = &mut *cache;
-    slots.retain(|id, slot| {
-        if slot.seen == epoch {
-            true
-        } else {
-            if old.contains(slot.entity) {
-                commands.entity(slot.entity).despawn();
-            }
-            chunks.remove(id);
-            false
-        }
-    });
 }
 
 #[cfg(test)]
