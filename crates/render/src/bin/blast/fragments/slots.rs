@@ -7,7 +7,6 @@ struct Stamp {
     position: V3,
     basis: [V3; 3],
     mm: u16,
-    count: u32,
     shape: u64,
     section: bool,
 }
@@ -17,7 +16,6 @@ impl Stamp {
             position: f.position,
             basis: f.basis,
             mm: f.mm,
-            count: f.count,
             shape: f.shape,
             section: f.chunk.is_some(),
         }
@@ -128,10 +126,9 @@ mod tests {
         let mut s = slot(&f, current);
         for alpha in [0.0, 0.25, 0.75, 1.0] {
             for previous in [None, Some(current.translation)] {
-                assert!(
-                    s.sample(&f, previous, alpha, || panic!("unchanged pose rebuilt"))
-                        .is_none()
-                );
+                assert!(s
+                    .sample(&f, previous, alpha, || panic!("unchanged pose rebuilt"))
+                    .is_none());
             }
         }
     }
@@ -154,27 +151,39 @@ mod tests {
                 assert_eq!(next.unwrap_or(s.shown), expected);
             }
         }
-        assert!(
-            s.sample(&f, None, 1.0, || panic!("resting rebuild"))
-                .is_none()
-        );
+        assert!(s
+            .sample(&f, None, 1.0, || panic!("resting rebuild"))
+            .is_none());
     }
     #[test]
     fn same_tick_pose_rotation_and_scale_changes_are_not_lost() {
         let mut f = piece();
         let current = Transform::from_xyz(8.0, 0.0, 0.0);
         let mut s = slot(&f, current);
-        for change in 0..5 {
+        for change in 0..4 {
             match change {
                 0 => f.position.y = Fx::ONE,
                 1 => f.basis.swap(0, 2),
                 2 => f.mm = 200,
-                3 => f.count = 4,
                 _ => f.shape = 3,
             }
             let expected = Transform::from_xyz(8.0, change as f32 + 1.0, 0.0);
             assert_eq!(s.sample(&f, None, 1.0, || expected), Some(expected));
         }
+    }
+    #[test]
+    fn extra_inventory_does_not_rebuild_a_saturated_pile_pose() {
+        let mut f = piece();
+        f.shape = u64::MAX;
+        f.side = 4;
+        f.count = 64;
+        let mut s = slot(&f, Transform::default());
+        f.count = 4096;
+        f.mass_g *= 64;
+        assert!(s.matches((0, false), &f));
+        assert!(s
+            .sample(&f, None, 1.0, || panic!("inventory is not geometry"))
+            .is_none());
     }
     #[test]
     fn pause_and_previous_tick_changes_update_picture_without_rebuilding_pose() {

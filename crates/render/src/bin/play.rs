@@ -1465,8 +1465,7 @@ fn debris(
             }
             entry.insert(meshes.add(combined.expect("nonempty authoritative fragment")));
         }
-        let scale = (f.count as f32 / f.shape.count_ones().max(1) as f32).cbrt() * f.mm as f32
-            / voxel::unit::WORLD_MM as f32;
+        let scale = render::model::fragment_scale(f);
         let pose = if let Some(pose) = shown.poses.get_mut(&f.id) {
             if advanced {
                 pose.previous = pose.current;

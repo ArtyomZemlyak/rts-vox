@@ -41,6 +41,17 @@
 /// Material, occupied mini-volume shape and optional owner/finish/part paint.
 pub type FragmentMeshKey = (u16, u64, u8, Option<[u8; 3]>);
 
+/// Match the physics shape's cell size. A saturated pile may hold more matter
+/// than its bounded shape; that inventory does not enlarge its collision box.
+/// Preserved sections already contain world-scale geometry.
+pub fn fragment_scale(f: &sim_core::burst::Fragment) -> f32 {
+    if f.chunk.is_some() {
+        1.0
+    } else {
+        f.mm as f32 / voxel::unit::WORLD_MM as f32
+    }
+}
+
 use bevy::prelude::{Component, Quat, Transform, Vec3};
 use voxel::unit::{Attach, UnitBody, TURN};
 

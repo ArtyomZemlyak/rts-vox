@@ -86,6 +86,120 @@ fn pieces(app: &mut App) -> BTreeMap<u64, Entity> {
         .map(|(e, p)| (p.0, e))
         .collect()
 }
+/// Read the actual draw-system mesh and transform, not a second scale formula.
+fn assert_drawn_bounds(app: &App, entity: Entity, f: &sim_core::burst::Fragment) {
+    let e = app.world().entity(entity);
+    let tr = e.get::<Transform>().unwrap();
+    let mesh = app
+        .world()
+        .resource::<Assets<Mesh>>()
+        .get(&e.get::<Mesh3d>().unwrap().0)
+        .unwrap();
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    for p in mesh
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .unwrap()
+        .as_float3()
+        .unwrap()
+    {
+        let p = tr.rotation * (Vec3::from(*p) * tr.scale);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let (low, high) = f.bounds();
+    assert!(
+        (lo - pos(low)).abs().max_element() < 0.0001,
+        "count={}",
+        f.count
+    );
+    assert!(
+        (hi - pos(high)).abs().max_element() < 0.0001,
+        "count={}",
+        f.count
+    );
+    assert_eq!(
+        tr.translation,
+        pos([f.position.x, f.position.y, f.position.z])
+    );
+}
+#[test]
+fn saturated_pile_draw_stays_inside_physics_after_inventory_growth_and_wake() {
+    let mut app = app();
+    let mut f = piece(7);
+    f.shape = u64::MAX;
+    f.side = 4;
+    f.count = 64;
+    app.world_mut()
+        .resource_mut::<Scene>()
+        .sim
+        .matter
+        .debris
+        .fragments = vec![f];
+    app.update();
+    let first = pieces(&mut app);
+    app.world_mut().clear_trackers();
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        let f = &mut scene.sim.matter.debris.fragments[0];
+        f.count = 4096;
+        f.mass_g = 4096;
+    }
+    app.update();
+    assert_eq!(pieces(&mut app), first);
+    let world = app.world_mut();
+    assert_eq!(
+        world
+            .query_filtered::<Entity, (With<Piece>, Changed<Transform>)>()
+            .iter(world)
+            .count(),
+        0
+    );
+    assert_drawn_bounds(
+        &app,
+        first[&7],
+        &app.world().resource::<Scene>().sim.matter.debris.fragments[0],
+    );
+
+    // The same saturated container can become airborne and rotate again.
+    {
+        use fx::Fx;
+        use sim_core::damage::V3;
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        let f = &mut scene.sim.matter.debris.fragments[0];
+        f.resting = false;
+        f.position.y = Fx::from_int(8);
+        f.mm = 200;
+        let c = Fx::from_ratio(707107, 1000000);
+        f.basis = [
+            V3::new(c, Fx::ZERO, c),
+            V3::UP,
+            V3::new(c.neg(), Fx::ZERO, c),
+        ];
+    }
+    app.update();
+    assert_eq!(pieces(&mut app), first);
+    let f = &app.world().resource::<Scene>().sim.matter.debris.fragments[0];
+    assert_eq!((f.count, f.mass_g), (4096, 4096));
+    assert_drawn_bounds(&app, first[&7], f);
+
+    // Physical shape changes still replace the mesh, including sparse pieces.
+    app.world_mut()
+        .resource_mut::<Scene>()
+        .sim
+        .matter
+        .debris
+        .fragments[0]
+        .shape = 1 | (1 << 1) | (1 << 4);
+    app.update();
+    let next = pieces(&mut app);
+    assert_ne!(next[&7], first[&7]);
+    assert_drawn_bounds(
+        &app,
+        next[&7],
+        &app.world().resource::<Scene>().sim.matter.debris.fragments[0],
+    );
+}
 #[test]
 fn native_piece_lifecycle_reuses_sleeps_rebuilds_and_retires_entities() {
     let mut app = app();

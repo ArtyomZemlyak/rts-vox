@@ -32,6 +32,29 @@ pub fn material_colour(material: u16) -> [f32; 4] {
 pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(v.map(|a| a.to_f64_lossy() as f32))
 }
+fn piece_mesh(shape: u64, side: u8, colour: [f32; 4]) -> Mesh {
+    let c = sim_core::burst::shape_centre(shape, side);
+    let centre = pos([c.x, c.y, c.z]);
+    let mut combined: Option<Mesh> = None;
+    let side = u32::from(side.clamp(1, 4));
+    for i in 0..side * side * side {
+        if shape & (1 << i) != 0 {
+            let offset = Vec3::new(
+                (i % side) as f32,
+                ((i / side) % side) as f32,
+                (i / (side * side)) as f32,
+            ) - centre;
+            let mut cube = Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
+            cube.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![colour; cube.count_vertices()]);
+            if let Some(m) = combined.as_mut() {
+                m.merge(&cube).expect("same fragment attributes");
+            } else {
+                combined = Some(cube);
+            }
+        }
+    }
+    combined.expect("nonempty physical shape")
+}
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     mut commands: Commands,
@@ -61,12 +84,8 @@ pub fn draw(
             let basis = f.basis.map(|v| pos([v.x, v.y, v.z]));
             let rotation =
                 Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
-            let scale = if f.chunk.is_some() {
-                1.0
-            } else {
-                (f.count as f32 / f.shape.count_ones() as f32).cbrt() * f.mm as f32
-                    / voxel::unit::WORLD_MM as f32
-            };
+            // Excess inventory in a saturated pile is not additional geometry.
+            let scale = render::model::fragment_scale(f);
             Transform::from_translation(current)
                 .with_rotation(rotation)
                 .with_scale(Vec3::splat(scale))
@@ -159,33 +178,7 @@ pub fn draw(
         let mesh = cache
             .meshes
             .entry(key)
-            .or_insert_with(|| {
-                let c = sim_core::burst::shape_centre(f.shape, f.side);
-                let centre = pos([c.x, c.y, c.z]);
-                let mut combined: Option<Mesh> = None;
-                let side = u32::from(f.side.clamp(1, 4));
-                for i in 0..side * side * side {
-                    if f.shape & (1 << i) != 0 {
-                        let offset = Vec3::new(
-                            (i % side) as f32,
-                            ((i / side) % side) as f32,
-                            (i / (side * side)) as f32,
-                        ) - centre;
-                        let mut cube =
-                            Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
-                        cube.insert_attribute(
-                            Mesh::ATTRIBUTE_COLOR,
-                            vec![colour; cube.count_vertices()],
-                        );
-                        if let Some(m) = combined.as_mut() {
-                            m.merge(&cube).expect("same fragment attributes");
-                        } else {
-                            combined = Some(cube);
-                        }
-                    }
-                }
-                meshes.add(combined.expect("nonempty physical shape"))
-            })
+            .or_insert_with(|| meshes.add(piece_mesh(f.shape, f.side, colour)))
             .clone();
         let material = cache
             .materials
@@ -223,4 +216,59 @@ pub fn draw(
             false
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn saturated_pile_mesh_matches_physical_bounds() {
+        for (shape, side, count) in [(1, 2, 1), (u64::MAX, 4, 64), (u64::MAX, 4, 4096)] {
+            for mm in [100, 200] {
+                let f = sim_core::burst::Fragment {
+                    id: 1,
+                    position: phys_v3_zero(),
+                    velocity: phys_v3_zero(),
+                    material: 3,
+                    paint: None,
+                    mm,
+                    basis: [phys_v3(1, 0, 0), phys_v3(0, 1, 0), phys_v3(0, 0, 1)],
+                    mass_g: 1,
+                    count,
+                    shape,
+                    side,
+                    chunk: None,
+                    held: 0,
+                    resting: true,
+                };
+                let mesh = piece_mesh(shape, side, [1.0; 4]);
+                let points = mesh
+                    .attribute(Mesh::ATTRIBUTE_POSITION)
+                    .unwrap()
+                    .as_float3()
+                    .unwrap();
+                let mut lo = Vec3::splat(f32::INFINITY);
+                let mut hi = Vec3::splat(f32::NEG_INFINITY);
+                for p in points {
+                    let p = Vec3::from(*p) * render::model::fragment_scale(&f);
+                    lo = lo.min(p);
+                    hi = hi.max(p);
+                }
+                let (low, high) = f.bounds();
+                let v = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
+                assert!((lo - v(low)).abs().max_element() < 0.0001, "count={count}");
+                assert!((hi - v(high)).abs().max_element() < 0.0001, "count={count}");
+            }
+        }
+    }
+    fn phys_v3(x: i32, y: i32, z: i32) -> sim_core::damage::V3 {
+        sim_core::damage::V3::new(
+            fx::Fx::from_int(x),
+            fx::Fx::from_int(y),
+            fx::Fx::from_int(z),
+        )
+    }
+    fn phys_v3_zero() -> sim_core::damage::V3 {
+        phys_v3(0, 0, 0)
+    }
 }
