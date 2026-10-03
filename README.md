@@ -139,6 +139,11 @@ render span и пропуски при лимите записи остаютс�
 работу вне gas call, не называя её ожиданием или idle. Подробности —
 [ADR-541](docs/analysis/135-render-source-frame-timeline.md),
 [ADR-542](docs/analysis/136-render-worker-calls-and-workload.md).
+Schema 3 добавляет исходное число dirty ranges и подфазы extraction.
+Журнал уже обработанных масками правок уплотняется при отставании GPU,
+сохраняя unacknowledged edits и необработанный хвост; стоимость обслуживания
+main thread выводится отдельно. Подробности —
+[ADR-543](docs/analysis/137-lagging-terrain-journal.md).
 
 Для зависаний боя на всей карте: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/profile-range.ps1 -Scenarios world-battle -Seconds 120 -TargetFps 165 -SkipBuild -TriggerMilliseconds 50 -CpuThreads`.
 Захват сохраняет фазы вокруг долгого тика, Update-среза, паузы между

@@ -403,7 +403,7 @@ P1 — следующий существенный расход/масштаби
 | WBPERF-026 | P0 | Ограничить рост очереди падающей растительности | Замер + код | L/XL |
 | WBPERF-006 | P0 | Занятость юнитов без полной пересборки на каждый тик | Замер + код | L |
 | WBPERF-007 | P0 | Единый ограниченный журнал dirty-страниц | Замер + код | M |
-| WBPERF-008 | P0 | Дешёвый extract с переиспользуемыми буферами | Замер + код | M |
+| WBPERF-008 | P0 | Дешёвый extract с переиспользуемыми буферами | ADR-543: рост повторов consumed journal устранён; payload reuse/большие reload открыты | M |
 | WBPERF-009 | P0 | Камера/стриминг не останавливают бой | Прогон + код | L |
 | WBPERF-010 | P1 | Луч и нагрев лазера обходят поверхности, не пустоту | Замер семейства + код | L |
 | WBPERF-011 | P1 | Инкрементальные rubble и индексы контактов | Замер + код | L |
@@ -2921,6 +2921,17 @@ terrain-vec,terrain-skip-unchanged,unit-x-bins}` и каталоги `-repeat`.
 нет повторной полной копии карты, корректный ack при паузе/смене окна.
 Зависит от 007; эффект 007 и 008 считать совместно.
 
+03.10.2026, ADR-543: actual extraction range phase достигала 22,466 мс
+при 1529715 входных ranges / 37335 выходных patches. Уплотнение consumed
+prefix сохраняет exact union, pending mask tail и revision acknowledgement.
+Полный after 120 с: extract peak 0,395 мс в ordinary / 0,478 мс в detail,
+main maintenance mean 0,0304 / 0,0282 мс; 3600 шагов/реальный темп.
+Одна строгая ordinary-пара даёт 95,144→97,213 FPS; другая несопоставима,
+не считать её повтором. Detail after исчерпал 100000 spans (5806 drops),
+позднее фазовое покрытие неполное. Immutable payload reuse, pending хвост,
+крупные reload и весь 007/008 остаются открытыми. Данные/проверки —
+[137](137-lagging-terrain-journal.md).
+
 ### WBPERF-009 — камера не управляет временем боя
 
 Места: [streaming.rs](../../crates/render/src/bin/blast/streaming.rs),
@@ -4264,3 +4275,26 @@ p99 52,128 мс. Это не FPS-приёмка и не строгая пара 
 101 blast (включая 13 profile core), 78 Python, 21 PowerShell проверки прошли;
 hash прежний.
 Полный обзор, приоритеты и доказательства — [136](136-render-worker-calls-and-workload.md).
+
+## ADR-543 — накопление повторов terrain journal
+
+WBPERF-007/008: schema 3 показала 1,53 млн исходных dirty ranges против
+37335 выходных patches; range copy/sort/merge занимала 22,466 мс из
+22,963 мс actual extraction. Теперь обработанный масками prefix уплотняется
+без удаления unacknowledged edits; pending tail и mask cursor сохраняют
+обработку новых изменений. Прежний ack очищает оба cursor. Собственная
+стоимость compaction записывается как часть main Update после измерения.
+
+Ordinary after 120 с: 3600 шагов / 0,99952×, extract peak 0,395 мс,
+compaction mean 0,0304 / peak 0,263 мс. Одна строгая 60-секундная пара:
+1800 шагов/равный hash/реальный темп, 95,144→97,213 FPS; другая несопоставима
+и не считается подтверждающим повтором. Manual полный journal+extract
+benchmark: ~900→~48 мс за 240 кадров. 333 проверки и восемь raw native
+datasets прошли; reset поколений 1…4 и прежний headless hash сохранены.
+
+008 частично продвинута: payload reuse/большие reload/непотреблённый хвост
+открыты. Более быстрый detail after упёрся в 100000 spans, 5806 dropped;
+позднее фазовое покрытие частично и явно неизвестно. WBPERF-001 требует
+увеличения/семплирования bounded trace; 002/027, unobserved prepare, GPU IDs
+и 165 FPS открыты. Все плохие/несопоставимые результаты сохранены.
+Доказательства, SHA, ограничения — [137](137-lagging-terrain-journal.md).

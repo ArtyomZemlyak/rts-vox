@@ -466,6 +466,20 @@ RENDER_STAGES = {"pipeline_handoff", "extract_callback", "render_schedule", "ren
 
 GAS_STAGES = {"gas_extract", "gas_prepare", "gas_views_uniform", "gas_terrain_upload", "gas_bricks", "gas_regions"}
 GAS_WORK_FIELDS = ("patches", "words", "distant_words", "regions", "new_regions", "deposits", "terrain_writes", "terrain_bytes", "terrain_submits")
+GAS_EXTRACT_FIELDS = ("dirty_ranges", "range_ns", "pack_ns", "clone_ns")
+
+
+def journal_maintenance(log):
+    rows = re.findall(r"^PROFILE terrain_journal_compact_calls=(\d+) total_ms=([\d.]+) peak_ms=([\d.]+)$", log, re.M)
+    if not rows and "PROFILE terrain_journal_compact_calls=" not in log:
+        return None  # Legacy run did not measure maintenance, not zero cost.
+    if len(rows) != 1:
+        raise ValueError("Terrain journal metadata missing or duplicated")
+    calls, total, peak = int(rows[0][0]), float(rows[0][1]), float(rows[0][2])
+    if not math.isfinite(total) or not math.isfinite(peak) or total < peak or (calls == 0 and total != 0):
+        raise ValueError("Terrain journal counters invalid")
+    return dict(calls=calls, total_ms=total, peak_ms=peak, mean_ms=total/calls if calls else None,
+                scope="main Update wall, already included in slice; never add to frame time")
 
 
 def merged_intervals(intervals):
@@ -505,7 +519,7 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
     if not declared:
         return None, ["render_timeline_mode_mismatch"]
     schema, limit, started, retained, dropped, incomplete, cutoff = map(int, metadata[0][:7])
-    if schema not in (1, 2) or (schema == 1 and metadata[0][8]) or (schema == 2 and not metadata[0][8]) or limit != RENDER_SPAN_LIMIT or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
+    if schema not in (1, 2, 3) or (schema == 1 and metadata[0][8]) or (schema >= 2 and not metadata[0][8]) or limit != RENDER_SPAN_LIMIT or retained != min(started, limit) or started != retained + dropped or incomplete > retained or retained == 0:
         raise ValueError("Render timeline metadata budget/count mismatch")
     if not all(r.get("frame_end_ns") for r in frames) or cutoff < int(frames[-1]["frame_end_ns"]):
         raise ValueError("Render timeline cutoff/frame clock mismatch")
@@ -560,8 +574,9 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
         cpu, cycles = delta("cpu_ns"), delta("cycles")
         group[stage] = dict(begin_ns=a, end_ns=b, thread=row["begin_thread"],
                            driver_cpu_ms=cpu / 1e6 if cpu is not None else None, cycles=cycles)
-        if schema == 2:
-            detail_fields = ("completed", "input_frame_row", *GAS_WORK_FIELDS)
+        if schema >= 2:
+            work_fields = GAS_WORK_FIELDS + (GAS_EXTRACT_FIELDS if schema >= 3 else ())
+            detail_fields = ("completed", "input_frame_row", *work_fields)
             if not all(key in row for key in detail_fields):
                 raise ValueError("Render timeline detail columns missing")
             is_leaf = stage in GAS_STAGES
@@ -569,9 +584,9 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
                 if any(row[key] for key in detail_fields):
                     raise ValueError("Render timeline unexpected detail payload")
             else:
-                if row["completed"] not in ("0", "1") or any(row[key] == "" for key in GAS_WORK_FIELDS):
+                if row["completed"] not in ("0", "1") or any(row[key] == "" for key in work_fields):
                     raise ValueError("Render timeline incomplete detail payload")
-                work = {key: int(row[key]) for key in GAS_WORK_FIELDS}
+                work = {key: int(row[key]) for key in work_fields}
                 payload_row = optional_int(row, "input_frame_row")
                 if any(v < 0 for v in work.values()) or (payload_row is not None and not 0 <= payload_row <= idx):
                     raise ValueError("Render timeline detail payload invalid")
@@ -579,6 +594,9 @@ def analyze_render_timeline(directory, scenario, log, manifest, frames, top, rol
                     raise ValueError("Render timeline extraction source identity mismatch")
                 if stage not in ("gas_prepare", "gas_terrain_upload") and any(work[key] for key in ("terrain_writes", "terrain_bytes", "terrain_submits")):
                     raise ValueError("Render timeline transfer scope mismatch")
+                if schema >= 3 and (stage != "gas_extract" and any(work[key] for key in GAS_EXTRACT_FIELDS) or
+                        sum(work[key] for key in GAS_EXTRACT_FIELDS[1:]) > b - a):
+                    raise ValueError("Render timeline extraction phase scope mismatch")
                 group[stage].update(completed=row["completed"] == "1", work=work, input_frame_row=payload_row)
         if roles is not None and counters["begin_os_thread"] is not None:
             roles.setdefault(str(counters["begin_os_thread"]), set()).add(stage if stage.startswith("render_") else "render_" + stage)
@@ -957,6 +975,7 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         actual_render_context=context,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
+        terrain_journal_maintenance=journal_maintenance(log),
         task_families=task_families,
         core_trace_schema=core_schema,
         physics_task_sampling=sampling,
@@ -1085,6 +1104,8 @@ def markdown(report):
         for thread in cpu["sampled_threads"][:12]:
             lines.append(f"- OS thread {thread['os_thread']}: {thread['cpu_ms']:.3f}ms; observed callbacks: {', '.join(thread['observed_roles']) or 'unattributed'}.")
     timeline = report.get("render_timeline")
+    if report.get("terrain_journal_maintenance") is not None:
+        lines += ["", f"Terrain journal maintenance: {report['terrain_journal_maintenance']}.", ""]
     if timeline:
         lines += ["", "Render CPU timeline (shared epoch, immutable source frame; overlaps are not causes):", "",
                   f"Source rows complete {timeline['complete_source_rows']}/{report['frames']}, missing {timeline['missing_source_rows']}, open spans {timeline['incomplete']}, dropped {timeline['dropped']}.", "",
@@ -1115,6 +1136,13 @@ def markdown(report):
             for frame in timeline["slow_render_frames"][:3]:
                 spans = frame["spans_ms"]
                 lines.append(f"| {frame['source_row']} | {shown(spans.get('render_prepare'))} | {shown(spans.get('gas_prepare'))} | {shown(frame['other_or_unobserved_ms'].get('render_prepare'))} | {shown(spans.get('extract_callback'))} | {shown(spans.get('gas_extract'))} |")
+            if timeline["schema"] >= 3:
+                lines += ["", "Extraction phases (same calling thread, wall including preemption; phases are nested in extract):", "",
+                          "| Source row | Input dirty ranges | Output patches | Range copy/sort/merge, ms | Pack words, ms | Clone inputs, ms |",
+                          "|---:|---:|---:|---:|---:|---:|"]
+                for frame in timeline["slow_gas_calls"]["gas_extract"][:3]:
+                    w = frame["leaf_work"]["gas_extract"]["work"]
+                    lines.append(f"| {frame['source_row']} | {w['dirty_ranges']} | {w['patches']} | {w['range_ns']/1e6:.3f} | {w['pack_ns']/1e6:.3f} | {w['clone_ns']/1e6:.3f} |")
         lines += ["", "Slow gaps and timeline intersections (nested spans are never added):", ""]
         for gap in timeline["slow_gaps"]:
             lines.append(f"- row {gap['row']}: gap {gap['gap_ms']:.3f}ms, stage overlaps {gap['overlap_ms']}, unobserved/other {gap['unobserved_or_other_ms']:.3f}ms.")

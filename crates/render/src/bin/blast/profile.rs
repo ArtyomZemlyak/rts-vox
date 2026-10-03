@@ -317,6 +317,9 @@ pub fn begin(
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.prepare_peak_ns.store(0, Ordering::Relaxed);
         gas.timings.allocation_peak_ns.store(0, Ordering::Relaxed);
+        gas.timings.compact_calls.store(0, Ordering::Relaxed);
+        gas.timings.compact_total_ns.store(0, Ordering::Relaxed);
+        gas.timings.compact_peak_ns.store(0, Ordering::Relaxed);
     }
     let start = *p.start.get_or_insert(now);
     p.frame_start_ns = p.epoch.unwrap().elapsed().as_nanos();
@@ -599,6 +602,12 @@ pub fn end(
     println!(
         "PROFILE render_extract_peak_ms={:.3}",
         gas.timings.extract_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    );
+    println!(
+        "PROFILE terrain_journal_compact_calls={} total_ms={:.3} peak_ms={:.3}",
+        gas.timings.compact_calls.load(Ordering::Relaxed),
+        gas.timings.compact_total_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        gas.timings.compact_peak_ns.load(Ordering::Relaxed) as f64 / 1_000_000.0
     );
     println!(
         "PROFILE render_thread_prepare_peak_ms={:.3} allocation_peak_ms={:.3}",

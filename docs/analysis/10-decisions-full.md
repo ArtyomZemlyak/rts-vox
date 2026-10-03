@@ -24174,3 +24174,35 @@ clone пока не разделены. Actions/reset 1…4 сохраняет t
 остаются открытыми. История работающих/отклонённых подходов, методы,
 приоритеты, SHA/артефакты и ограничения —
 [136](136-render-worker-calls-and-workload.md).
+
+## ADR-543 — consumed terrain journal при отстающем GPU
+
+Render schema 3 добавляет число исходных dirty ranges и реальные wall
+подфазы range copy/sort/merge, pack words, clone inputs. Native control
+показал 1529715 ranges → 37335 patches, range 22,4658 мс / actual extract
+22,9627 мс. При отстающем acknowledgement журнал сохранял повторную
+историю и сортировал её целиком каждый frame.
+
+Теперь begin_frame объединяет mask-consumed prefix, сохраняя точный union
+unacknowledged edits и pending tail. Cursor переносится к новой границе,
+уже уплотнённый prefix без новых consumed entries не сортируется повторно.
+Ack очищает журнал и оба cursor; полный mutable terrain по-прежнему не
+разделяется с render world. Main-thread compaction counters печатаются
+после замера и показываются как inclusive Update wall, без сложения с
+кадром. Parser читает schema 1/2/3, проверяет фазовые scopes/суммы и не
+считает разные контракты равной парой. Физика/частота/качество прежние.
+
+Ordinary after 120 с: 3600 шагов / 0,99952×, extract peak 0,395 мс,
+maintenance mean 0,0304 / peak 0,263 мс; p99 кадра 35,807 мс, не 165 FPS.
+Одна строгая пара 1800 шагов/равный hash/реальный темп: 95,144→97,213 FPS;
+другая несопоставима и сохранена как плохой результат. CPU journal+extract
+benchmark ~900→~48 мс за 240 кадров, не FPS-приёмка. 128 lib/101 blast/
+81 Python/23 PowerShell = 333 проверки; новый manual benchmark выполнен
+отдельно. Все 8 raw native datasets валидны; reset 1…4/hash сохранены.
+
+Detail after исчерпал 100000 spans: 5806 dropped, позднее фазовое покрытие
+неизвестно. Полный actual extract peak остаётся отдельным counter, без
+выдуманного source ID. Payload reuse, большой reload/непотреблённый tail,
+прочие prepare jobs, OS/GPU IDs, независимый tick и 165 FPS открыты.
+SHA, полные данные, ограничения и дальнейшие задачи —
+[137](137-lagging-terrain-journal.md).

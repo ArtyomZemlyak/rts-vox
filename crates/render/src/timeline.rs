@@ -52,6 +52,11 @@ pub(crate) struct Workload {
     pub terrain_writes: u64,
     pub terrain_bytes: u64,
     pub terrain_submits: u64,
+    /// Extraction only: input before merging and actual same-thread wall phases.
+    pub dirty_ranges: u64,
+    pub range_ns: u64,
+    pub pack_ns: u64,
+    pub clone_ns: u64,
 }
 #[derive(Clone)]
 pub(crate) struct FrameTrace {
@@ -218,13 +223,13 @@ impl Capture {
             gas_details,
         } = self;
         let incomplete = spans.iter().filter(|s| s.end_ns.is_none()).count();
-        println!("PROFILE render_timeline_schema=2 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details}",
+        println!("PROFILE render_timeline_schema=3 render_span_limit={limit} render_spans_started={started} render_spans_retained={} render_spans_dropped={} render_spans_incomplete={incomplete} render_cutoff_ns={cutoff_ns} render_pipelined={pipelined} render_gas_details={gas_details}",
             spans.len(), started - spans.len() as u64);
         let path = std::path::Path::new(output).with_extension("render.csv");
         let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
         writeln!(
             out,
-            "frame_row,generation,tick,stage,begin_ns,end_ns,begin_thread,end_thread,begin_os_thread,end_os_thread,begin_cpu_ns,end_cpu_ns,begin_cycles,end_cycles,completed,input_frame_row,patches,words,distant_words,regions,new_regions,deposits,terrain_writes,terrain_bytes,terrain_submits"
+            "frame_row,generation,tick,stage,begin_ns,end_ns,begin_thread,end_thread,begin_os_thread,end_os_thread,begin_cpu_ns,end_cpu_ns,begin_cycles,end_cycles,completed,input_frame_row,patches,words,distant_words,regions,new_regions,deposits,terrain_writes,terrain_bytes,terrain_submits,dirty_ranges,range_ns,pack_ns,clone_ns"
         )?;
         for span in spans {
             writeln!(
@@ -254,10 +259,10 @@ impl Capture {
 
 fn detail_csv(detail: Option<(bool, Workload)>) -> String {
     let Some((completed, w)) = detail else {
-        return ",,,,,,,,,,".into();
+        return ",,,,,,,,,,,,,,".into();
     };
     format!(
-        "{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         u8::from(completed),
         w.input_frame_row.map_or(String::new(), |r| r.to_string()),
         w.patches,
@@ -268,7 +273,11 @@ fn detail_csv(detail: Option<(bool, Workload)>) -> String {
         w.deposits,
         w.terrain_writes,
         w.terrain_bytes,
-        w.terrain_submits
+        w.terrain_submits,
+        w.dirty_ranges,
+        w.range_ns,
+        w.pack_ns,
+        w.clone_ns
     )
 }
 
@@ -544,7 +553,7 @@ mod tests {
         assert_eq!(capture.spans[1].detail.unwrap().0, false);
         assert!(capture.spans[2].end_ns.is_none());
         assert!(capture.spans[2].detail.is_none());
-        assert_eq!(detail_csv(None).split(',').count(), 11);
+        assert_eq!(detail_csv(None).split(',').count(), 15);
     }
     #[test]
     fn diagnostic_tag_does_not_mark_gas_changed_or_copy_payload() {

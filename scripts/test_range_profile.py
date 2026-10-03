@@ -944,10 +944,12 @@ class ReportTests(unittest.TestCase):
             profile.analyze(self.path)
 
 
-    def gas_fixture(self, prepare_complete=True):
+    def gas_fixture(self, prepare_complete=True, schema=2):
         spans = self.render_fixture()
         for row in spans:
             row.update(completed="", input_frame_row="", **{key: "" for key in profile.GAS_WORK_FIELDS})
+            if schema >= 3:
+                row.update({key: "" for key in profile.GAS_EXTRACT_FIELDS})
         leafs = [("gas_extract", 1450, 1500, "3", "extract_callback"),
                  ("gas_prepare", 1810, 1890, "4", "render_prepare")]
         if prepare_complete:
@@ -962,10 +964,45 @@ class ReportTests(unittest.TestCase):
                        **{key: "0" for key in profile.GAS_WORK_FIELDS})
             if stage in ("gas_prepare", "gas_terrain_upload"):
                 row.update(terrain_writes="2", terrain_bytes="128", terrain_submits="1")
+            if schema >= 3:
+                row.update({key: "0" for key in profile.GAS_EXTRACT_FIELDS})
+                if stage == "gas_extract":
+                    row.update(dirty_ranges="100", range_ns="20", pack_ns="10", clone_ns="5")
             spans.append(row)
         spans.sort(key=lambda r: int(r["begin_ns"]))
-        self.render_fixture(spans, render_timeline_schema=2, render_gas_details="true")
+        self.render_fixture(spans, render_timeline_schema=schema, render_gas_details="true")
         return spans
+
+    def test_actual_extract_phases_and_raw_ranges_are_preserved(self):
+        self.gas_fixture(schema=3)
+        report = profile.analyze(self.path)
+        work = report["render_timeline"]["slow_gas_calls"]["gas_extract"][0]["leaf_work"]["gas_extract"]["work"]
+        self.assertEqual(work["dirty_ranges"], 100)
+        self.assertEqual(work["range_ns"], 20)
+        self.assertIn("Extraction phases", profile.markdown(report))
+        for stage,field,value in [("gas_extract","range_ns","100"),("gas_extract","dirty_ranges","-1"),
+                                  ("gas_regions","range_ns","1"),("gas_extract","clone_ns","")]:
+            with self.subTest(stage=stage,field=field):
+                rows=self.gas_fixture(schema=3)
+                next(r for r in rows if r["stage"]==stage)[field]=value
+                self.render_fixture(rows,render_timeline_schema=3,render_gas_details="true")
+                with self.assertRaisesRegex(ValueError,"Render timeline"):
+                    profile.analyze(self.path)
+
+    def test_extract_phase_schema_is_a_separate_diagnostic_contract(self):
+        self.gas_fixture(schema=2);before=profile.analyze(self.path)
+        self.gas_fixture(schema=3);after=profile.analyze(self.path)
+        self.assertIn("different:render_timeline:schema",profile.compare(before,after)["reasons"])
+
+    def test_journal_maintenance_is_inclusive_wall_and_legacy_is_unknown(self):
+        self.assertIsNone(profile.journal_maintenance(''))
+        result=profile.journal_maintenance('PROFILE terrain_journal_compact_calls=10 total_ms=2.000 peak_ms=0.900')
+        self.assertEqual(result['mean_ms'],0.2)
+        self.assertIn('already included',result['scope'])
+        for line in ['PROFILE terrain_journal_compact_calls=0 total_ms=1 peak_ms=0',
+                     'PROFILE terrain_journal_compact_calls=1 total_ms=1 peak_ms=2',
+                     'PROFILE terrain_journal_compact_calls=1 total_ms=NaN peak_ms=0']:
+            with self.assertRaisesRegex(ValueError,'Terrain journal'):profile.journal_maintenance(line)
 
     def test_actual_gas_calls_are_on_worker_threads_and_transfers_not_doubled(self):
         self.gas_fixture()

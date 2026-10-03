@@ -171,6 +171,8 @@ pub struct GasInput {
     /// Mask invalidation consumes each dirty span once, independently of the
     /// GPU upload acknowledgement that controls `terrain_dirty` retention.
     mask_dirty_cursor: usize,
+    /// Sorted/merged consumed prefix; new mask work remains an untouched tail.
+    compacted_dirty_cursor: usize,
     /// Where the volume of terrain sits in the world (ADR-318).
     pub window: TerrainWindow,
     /// The scene can wait for actual shader readiness before advancing capture.
@@ -195,6 +197,9 @@ pub struct GasTimings {
     pub prepare_peak_ns: AtomicU64,
     pub allocation_peak_ns: AtomicU64,
     pub active_regions: AtomicU64,
+    pub compact_calls: AtomicU64,
+    pub compact_total_ns: AtomicU64,
+    pub compact_peak_ns: AtomicU64,
 }
 impl Default for GasInput {
     fn default() -> Self {
@@ -208,6 +213,7 @@ impl Default for GasInput {
             distant_edits: default(),
             terrain_dirty: vec![],
             mask_dirty_cursor: 0,
+            compacted_dirty_cursor: 0,
             window: TerrainWindow::default(),
             ready: Arc::new(AtomicBool::new(false)),
             timings: Arc::new(GasTimings::default()),
@@ -229,6 +235,14 @@ impl ExtractResource for GasInput {
             .load(Ordering::Relaxed)
             .then(std::time::Instant::now);
         let uploaded = source.uploaded.load(Ordering::Acquire);
+        let phase = scope.as_ref().map(|_| std::time::Instant::now());
+        let dirty_ranges = if uploaded == source.terrain_revision {
+            0
+        } else if uploaded == 0 {
+            1
+        } else {
+            source.terrain_dirty.len() as u64
+        };
         let mut spans = if uploaded == source.terrain_revision {
             Vec::new()
         } else if uploaded == 0 {
@@ -236,23 +250,17 @@ impl ExtractResource for GasInput {
         } else {
             source.terrain_dirty.clone()
         };
-        spans.sort_unstable_by_key(|r| r.start);
-        let mut used = 0;
-        for i in 0..spans.len() {
-            let r = spans[i].clone();
-            if used > 0 && r.start <= spans[used - 1].end {
-                spans[used - 1].end = spans[used - 1].end.max(r.end);
-            } else {
-                spans[used] = r;
-                used += 1;
-            }
-        }
+        let used = merge_ranges(&mut spans);
         spans.truncate(used);
         let merged = spans;
+        let range_ns = phase.map_or(0, |p| p.elapsed().as_nanos() as u64);
+        let phase = phase.map(|_| std::time::Instant::now());
         let mut patch_words = Vec::with_capacity(merged.iter().map(|r| r.len()).sum());
         for r in &merged {
             patch_words.extend_from_slice(&source.terrain_words[r.clone()]);
         }
+        let pack_ns = phase.map_or(0, |p| p.elapsed().as_nanos() as u64);
+        let phase = phase.map(|_| std::time::Instant::now());
         let result = Self {
             params: source.params,
             atmosphere: source.atmosphere.clone(),
@@ -269,6 +277,7 @@ impl ExtractResource for GasInput {
             distant_edits: default(),
             terrain_dirty: Vec::new(),
             mask_dirty_cursor: 0,
+            compacted_dirty_cursor: 0,
             window: source.window,
             ready: source.ready.clone(),
             timings: source.timings.clone(),
@@ -276,6 +285,7 @@ impl ExtractResource for GasInput {
             trace: None,
             data_frame: source.trace.as_ref().map(|t| t.tag.row),
         };
+        let clone_ns = phase.map_or(0, |p| p.elapsed().as_nanos() as u64);
         if let Some(started) = started {
             let ns = started.elapsed().as_nanos() as u64;
             source.timings.extract_ns.store(ns, Ordering::Relaxed);
@@ -285,7 +295,13 @@ impl ExtractResource for GasInput {
                 .fetch_max(ns, Ordering::Relaxed);
         }
         if let Some(scope) = scope {
-            scope.complete(result.profile_work());
+            scope.complete(crate::timeline::Workload {
+                dirty_ranges,
+                range_ns,
+                pack_ns,
+                clone_ns,
+                ..result.profile_work()
+            });
         }
         result
     }
@@ -319,6 +335,34 @@ impl GasInput {
         if self.uploaded.load(Ordering::Acquire) == self.terrain_revision {
             self.terrain_dirty.clear();
             self.mask_dirty_cursor = 0;
+            self.compacted_dirty_cursor = 0;
+        } else if self.mask_dirty_cursor >= 1024
+            && self.mask_dirty_cursor > self.compacted_dirty_cursor
+        {
+            // A lagging upload must retain the union of edits, not every repeat
+            // of every edit since the last exact revision acknowledgement.
+            // Only compact mask-consumed entries: the pending tail must still
+            // reach advance_gpu exactly once, even during multi-tick frames.
+            let start = self
+                .timings
+                .enabled
+                .load(Ordering::Relaxed)
+                .then(std::time::Instant::now);
+            let consumed = self.mask_dirty_cursor;
+            let used = merge_ranges(&mut self.terrain_dirty[..consumed]);
+            self.terrain_dirty.drain(used..consumed);
+            self.mask_dirty_cursor = used;
+            self.compacted_dirty_cursor = used;
+            if let Some(start) = start {
+                let ns = start.elapsed().as_nanos() as u64;
+                self.timings.compact_calls.fetch_add(1, Ordering::Relaxed);
+                self.timings
+                    .compact_total_ns
+                    .fetch_add(ns, Ordering::Relaxed);
+                self.timings
+                    .compact_peak_ns
+                    .fetch_max(ns, Ordering::Relaxed);
+            }
         }
     }
     fn patches(&self) -> impl Iterator<Item = (usize, &[u32])> {
@@ -355,6 +399,22 @@ impl GasInput {
     }
 }
 
+/// Preserve exactly the covered words, including touching and nested spans.
+fn merge_ranges(spans: &mut [std::ops::Range<usize>]) -> usize {
+    spans.sort_unstable_by_key(|r| r.start);
+    let mut used = 0;
+    for i in 0..spans.len() {
+        let r = spans[i].clone();
+        if used > 0 && r.start <= spans[used - 1].end {
+            spans[used - 1].end = spans[used - 1].end.max(r.end);
+        } else {
+            spans[used] = r;
+            used += 1;
+        }
+    }
+    used
+}
+
 #[derive(Component, Clone, Copy, ExtractComponent)]
 #[require(DepthPrepass, NormalPrepass)]
 pub struct GasCamera;
@@ -364,6 +424,107 @@ pub struct GasPlugin;
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn lagging_journal_preserves_every_edit_without_growing_with_repeats() {
+        let mut source = GasInput {
+            terrain_words: Arc::new(vec![0; 2048]),
+            terrain_revision: 2,
+            ..default()
+        };
+        source.uploaded.store(1, Ordering::Release);
+        let mut covered = vec![false; 2048];
+        for frame in 0..64 {
+            source.begin_frame();
+            assert!(source.terrain_dirty.len() <= 256 + 1024);
+            for n in 0..512 {
+                let at = ((frame * 17 + n * 37) % 256) * 8;
+                let span = at..at + 1 + n % 3;
+                for word in span.clone() {
+                    covered[word] = true;
+                    Arc::make_mut(&mut source.terrain_words)[word] = (frame + n + 1) as u32;
+                }
+                source.terrain_dirty.push(span);
+            }
+            source.terrain_revision += 1;
+            source.advance(frame as u32);
+            let extracted = GasInput::extract_resource(&source);
+            let mut found = vec![false; 2048];
+            for (at, words) in extracted.patches() {
+                for (offset, word) in words.iter().enumerate() {
+                    found[at + offset] = true;
+                    assert_eq!(*word, source.terrain_words[at + offset]);
+                }
+            }
+            assert_eq!(found, covered);
+            assert_eq!(Arc::strong_count(&source.terrain_words), 1);
+        }
+        source
+            .uploaded
+            .store(source.terrain_revision, Ordering::Release);
+        source.begin_frame();
+        assert!(source.terrain_dirty.is_empty());
+        assert_eq!(source.mask_dirty_cursor, 0);
+        assert_eq!(source.compacted_dirty_cursor, 0);
+    }
+    #[test]
+    fn compaction_preserves_unconsumed_tail_and_does_not_replay_masks() {
+        let mut source = GasInput {
+            terrain_words: Arc::new(vec![0; 128]),
+            terrain_revision: 3,
+            terrain_dirty: vec![2..6; 2048],
+            mask_dirty_cursor: 2048,
+            ..default()
+        };
+        source.uploaded.store(1, Ordering::Release);
+        source.terrain_dirty.extend([40..44, 10..11]);
+        source.begin_frame();
+        assert_eq!(source.terrain_dirty, vec![2..6, 40..44, 10..11]);
+        assert_eq!(source.mask_dirty_cursor, 1);
+        assert_eq!(
+            &source.terrain_dirty[source.mask_dirty_cursor..],
+            &[40..44, 10..11]
+        );
+        source.advance(4);
+        assert_eq!(source.mask_dirty_cursor, 3);
+        source.advance(5);
+        assert_eq!(source.mask_dirty_cursor, 3);
+        assert_eq!(
+            GasInput::extract_resource(&source).patches,
+            vec![2..6, 10..11, 40..44]
+        );
+    }
+    #[test]
+    #[ignore = "manual delayed-upload benchmark, includes journal maintenance and extraction"]
+    fn bench_lagging_journal_and_extraction() {
+        for compact in [false, true] {
+            for trial in 0..3 {
+                let mut source = GasInput {
+                    terrain_words: Arc::new(vec![7; 32768]),
+                    terrain_revision: 2,
+                    ..default()
+                };
+                source.uploaded.store(1, Ordering::Release);
+                let start = std::time::Instant::now();
+                for frame in 0..240 {
+                    if compact {
+                        source.begin_frame();
+                    }
+                    for n in 0..4096 {
+                        let at = ((frame * 17 + n * 37) % 4096) * 8;
+                        source.terrain_dirty.push(at..at + 1);
+                    }
+                    source.terrain_revision += 1;
+                    source.advance(frame as u32);
+                    std::hint::black_box(GasInput::extract_resource(&source));
+                }
+                println!(
+                    "JOURNAL compact={compact} trial={trial} total_ms={:.3} retained={}",
+                    start.elapsed().as_secs_f64() * 1000.0,
+                    source.terrain_dirty.len()
+                );
+            }
+        }
+    }
     #[test]
     fn paused_frames_retain_unacknowledged_terrain_edits() {
         let mut source = GasInput {
