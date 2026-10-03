@@ -27,6 +27,7 @@ pub struct Visual {
     scratch: Vec<usize>,
     sort_scratch: Vec<usize>,
     sort_counts: Vec<usize>,
+    union_scratch: packed::Scratch,
     #[cfg(test)]
     occupancy_rebuilds: usize,
     cached: Vec<Occupied>,
@@ -69,6 +70,7 @@ pub fn reset(v: &mut Visual) {
         scratch: std::mem::take(&mut v.scratch),
         sort_scratch: std::mem::take(&mut v.sort_scratch),
         sort_counts: std::mem::take(&mut v.sort_counts),
+        union_scratch: std::mem::take(&mut v.union_scratch),
         window: v.window,
         ..default()
     };
@@ -551,9 +553,11 @@ fn cached_cells_in(
     next.clear();
     next.reserve(visual.occupied.len());
     if packed {
-        packed::union(
+        packed::union_in(
             visual.cached.iter().map(|cached| cached.words.as_slice()),
             &mut next,
+            pool,
+            &mut visual.union_scratch,
         );
     } else {
         for cached in &visual.cached {

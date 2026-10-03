@@ -24440,3 +24440,30 @@ Merge/commit serial, worker OS IDs/cycles не сняты; равномерно�
 не доказана. WBPERF-007/002/027, 165 FPS и rare stalls открыты.
 Все варианты, замеры, SHA/WIP provenance и ограничения —
 [145](145-packed-parallel-shadow-union.md).
+
+## ADR-552 — параллельное слияние масок теней
+
+После actor preparation крупный packed union разбивается на до четырёх
+непересекающихся word ranges в существующем ComputeTaskPool. Границы
+выбираются по prefix lengths input mask lists, одинаковый word не
+разделяется между jobs. Worker OR/min-heap/bit enumeration сохраняет
+точный sorted union. Caller соединяет reusable part buffers по range
+order; GPU words/dirty spans, actor geometry и физика прежние.
+Gate: минимум четыре threads и 32768 masks; меньшие нагрузки serial.
+
+60-actor CPU test: 4 threads 15,259→11,892 мс, 8 threads
+12,760→9,672 мс. Две ordinary native 120-секундные пары полного боя:
+occupancy/step −2,1/2,7%, 3600 steps, hash bcc1f58c226d1721 и
+полный gameplay evidence прежние. FPS 85,753→86,453 / 86,141→86,213;
+устойчивый overall FPS gain не установлен. p99/max кадра не лучше
+в обеих парах, устранение stalls не заявляется.
+
+114 full render tests passed, 2 ignored; ignored bench выполнен
+отдельно. Range jobs проверены на 1/4/8, skew/overlap/empty/usize,
+reuse/append/gate и nested pool. Clippy/build/own fmt проходят,
+новых warnings нет. Дополнительные reusable buffers удерживают
+union-sized capacity; memory residency и worker OS IDs/cycles не сняты.
+Final copy/commit и тик симуляции serial; 165 FPS, WBPERF-002/007/027
+и наблюдаемость leaf costs остаются открытыми.
+Данные, SHA/WIP provenance и ограничения —
+[146](146-parallel-shadow-union.md).

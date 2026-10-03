@@ -2980,6 +2980,26 @@ prepare/sort/pack/merge spans и actor sizes; independent sim/render,
 165 FPS и rare stalls открыты. SHA/WIP provenance, данные и ограничения —
 [145](145-packed-parallel-shadow-union.md).
 
+03.10.2026, ADR-552: крупный packed union разделён на до четырёх
+непересекающихся word ranges по prefix counts actor lists в существующем
+ComputeTaskPool. OR/enumeration параллельны; caller копирует результаты
+в прежнем порядке, GPU commit прежний. Gate: 4 threads и 32768 masks;
+меньшие нагрузки serial. Буферы переиспользуются, silhouette/physics
+не меняются. 60-actor CPU test: 4 threads 15,259→11,892 мс,
+8 threads 12,760→9,672 мс (−22,1/24,2%).
+
+Две ordinary native 120-секундные пары 30×30 сохранили 3600 steps,
+hash bcc1f58c226d1721 и полный gameplay evidence. Occupancy / step
+2,038→1,995 и 2,052→1,997 мс (−2,1/2,7%). Общий FPS
+85,753→86,453 / 86,141→86,213: устойчивый overall gain не установлен;
+whole-frame p99/max не лучше в обеих парах. 114 render tests passed,
+2 ignored; ignored bench отдельно, Clippy/build/own fmt проходят.
+Проверены range boundaries, skew/overlap/empty/reuse/nested и production
+gate. 007 частична: copy/commit serial, leaf duration/OS IDs/cycles,
+число включённых parallel merges и память не измерены. WBPERF-002/027,
+165 FPS и stalls открыты. Полные результаты и provenance —
+[146](146-parallel-shadow-union.md).
+
 ### WBPERF-008 — упаковка изменений без дорогой сортировки в extract
 
 Место: [gas.rs](../../crates/render/src/gas.rs), `extract_resource` (215).
