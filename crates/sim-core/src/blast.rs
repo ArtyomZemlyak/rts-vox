@@ -13,6 +13,8 @@ pub mod motion;
 pub mod placement;
 #[path = "range_plate.rs"]
 mod plate;
+#[path = "range_wave_cells.rs"]
+mod wave_cells;
 use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
@@ -869,6 +871,9 @@ pub fn unit_work(body: &UnitBody, p: [usize; 3], c: &ExplosionConfig) -> u32 {
 }
 
 pub type SurfaceWork = BTreeMap<[i32; 3], u32>;
+#[cfg(test)]
+#[path = "range_wave_damage_tests.rs"]
+mod wave_damage_tests;
 pub fn material_work(m: u16, c: &ExplosionConfig) -> u32 {
     match m {
         0 => 0,
@@ -1587,6 +1592,10 @@ pub struct Explosion {
     pub queued: usize,
     // Next subcell/actor in the first pending contact; committed work is never replayed.
     contact_cursor: usize,
+    // Stable local-cell cursor within the current coarse contact/actor.
+    body_cursor: usize,
+    // Old saved bursts finish with their original point-sampling semantics.
+    point_contacts: bool,
     poses: Vec<crate::damage::Frame>,
     turret_deltas: Vec<i32>,
     /// Segment frames of each unit when the burst began (ADR-278).
@@ -1644,6 +1653,8 @@ impl Explosion {
             at,
             pending: Default::default(),
             contact_cursor: 0,
+            body_cursor: 0,
+            point_contacts: false,
             poses: units.iter().map(|u| u.pose).collect(),
             turret_deltas: units.iter().map(|u| u.turret_delta).collect(),
             seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
@@ -1740,6 +1751,7 @@ impl Explosion {
         // cannot intersect it. Keep the canonical contact cursor and actor
         // order: a deferred material claim resumes at exactly the same hit.
         let mut next_actor = vec![units.len(); actors];
+        let mut contacts = Vec::new();
         while let Some(hit) = self.pending.front().copied() {
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
             let mut next = units.len();
@@ -1752,7 +1764,13 @@ impl Explosion {
             }
             while self.contact_cursor < edge.pow(3) * actors {
                 let subcell = self.contact_cursor / actors;
-                let actor = next_actor[self.contact_cursor % actors];
+                let actor = if self.body_cursor > 0 {
+                    // A segment may have detached during pool pressure. Finish
+                    // its stable cursor before using the live broad phase.
+                    self.contact_cursor % actors
+                } else {
+                    next_actor[self.contact_cursor % actors]
+                };
                 self.contact_cursor = subcell * actors + actor;
                 let q = [
                     p[0] + (subcell % edge) as i32,
@@ -1762,37 +1780,109 @@ impl Explosion {
                 // Advance only after successful application or an unaffordable
                 // hit. Pool pressure retries this exact actor on the next tick.
                 if let Some(u) = units.get_mut(actor) {
-                    let (lo, hi) = boxes[actor];
-                    if (0..3).any(|a| q[a] < lo[a] || q[a] > hi[a]) {
+                    // New bursts visit local voxel centres once per coarse
+                    // contact, not world-grid samples once per subcell.
+                    if !self.point_contacts && subcell != 0 {
                         self.contact_cursor += 1;
                         continue;
                     }
-                    match queries[actor].hit(u, q) {
-                        Some((0, cell)) => {
-                            // A cell already cut loose leaves with its whole
-                            // section; the wave neither ablates it nor waits
-                            // for it. Every other cell takes the impulse as
-                            // it arrives.
-                            let leaving = u
-                                .section
-                                .as_ref()
-                                .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
-                            if !leaving {
-                                let need = unit_work(&u.body, cell, c).saturating_sub(
-                                    u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
-                                );
+                    let (lo, hi) = boxes[actor];
+                    if self.point_contacts && (0..3).any(|a| q[a] < lo[a] || q[a] > hi[a]) {
+                        self.contact_cursor += 1;
+                        continue;
+                    }
+                    contacts.clear();
+                    if self.point_contacts {
+                        contacts.extend(queries[actor].hit(u, q));
+                    } else {
+                        queries[actor].wave_cells(
+                            u,
+                            &self.poses[actor],
+                            &self.seg_poses[actor],
+                            p,
+                            self.cell,
+                            &mut contacts,
+                        );
+                    }
+                    while self.body_cursor < contacts.len() {
+                        let (part, cell) = contacts[self.body_cursor];
+                        let solid = if part == 0 {
+                            u.body.vol.get(cell[0], cell[1], cell[2])
+                        } else {
+                            !u.seg_gone[part - 1]
+                                && u.body.segments[part - 1]
+                                    .body
+                                    .vol
+                                    .get(cell[0], cell[1], cell[2])
+                        };
+                        if !solid {
+                            self.body_cursor += 1;
+                            continue;
+                        }
+                        match part {
+                            0 => {
+                                // A cell already cut loose leaves with its whole
+                                // section; the wave neither ablates it nor waits
+                                // for it. Every other cell takes the impulse as
+                                // it arrives.
+                                let leaving = u
+                                    .section
+                                    .as_ref()
+                                    .is_some_and(|j| j.holds(cell.map(|v| v as u8)));
+                                if !leaving {
+                                    let need = unit_work(&u.body, cell, c).saturating_sub(
+                                        u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0),
+                                    );
+                                    let mut apply = true;
+                                    if hit.pressure >= need && hit.pressure > 0 {
+                                        if let Some(m) = matter
+                                            .as_deref_mut()
+                                            .filter(|_| c.material_energy_j > 0)
+                                        {
+                                            let frame = if cell[1] >= usize::from(u.body.turret_y) {
+                                                queries[actor].turret
+                                            } else {
+                                                self.poses[actor]
+                                            };
+                                            match m.body(actor, u, cell, &frame, self.at) {
+                                                matter::ClaimResult::Applied => u.detached += 1,
+                                                matter::ClaimResult::Unaffordable
+                                                | matter::ClaimResult::Indestructible => {
+                                                    apply = false
+                                                }
+                                                matter::ClaimResult::Deferred => return,
+                                            }
+                                        }
+                                    }
+                                    if apply {
+                                        u.receive_cell(cell, hit.pressure, c);
+                                        u.absorbed = u.absorbed.saturating_add(hit.pressure);
+                                    }
+                                }
+                            }
+                            part => {
+                                if u.section_holds(part, cell.map(|v| v as u8)) {
+                                    self.body_cursor += 1;
+                                    continue;
+                                }
+                                // A segment takes the impulse in its own frame.
+                                let seg = part - 1;
+                                let need = unit_work(&u.body.segments[seg].body, cell, c)
+                                    .saturating_sub(u.seg_dent(seg, cell));
                                 let mut apply = true;
                                 if hit.pressure >= need && hit.pressure > 0 {
                                     if let Some(m) =
                                         matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
                                     {
-                                        let frame = if cell[1] >= usize::from(u.body.turret_y) {
-                                            queries[actor].turret
-                                        } else {
-                                            self.poses[actor]
-                                        };
-                                        match m.body(actor, u, cell, &frame, self.at) {
-                                            matter::ClaimResult::Applied => u.detached += 1,
+                                        match m.body_segment(
+                                            actor,
+                                            u,
+                                            seg,
+                                            cell,
+                                            &self.seg_poses[actor][seg],
+                                            self.at,
+                                        ) {
+                                            matter::ClaimResult::Applied => u.seg_detached += 1,
                                             matter::ClaimResult::Unaffordable
                                             | matter::ClaimResult::Indestructible => apply = false,
                                             matter::ClaimResult::Deferred => return,
@@ -1800,47 +1890,14 @@ impl Explosion {
                                     }
                                 }
                                 if apply {
-                                    u.receive_cell(cell, hit.pressure, c);
+                                    u.receive_seg_cell(seg, cell, hit.pressure, c);
                                     u.absorbed = u.absorbed.saturating_add(hit.pressure);
                                 }
                             }
                         }
-                        Some((part, cell)) => {
-                            if u.section_holds(part, cell.map(|v| v as u8)) {
-                                self.contact_cursor += 1;
-                                continue;
-                            }
-                            // A segment takes the impulse in its own frame.
-                            let seg = part - 1;
-                            let need = unit_work(&u.body.segments[seg].body, cell, c)
-                                .saturating_sub(u.seg_dent(seg, cell));
-                            let mut apply = true;
-                            if hit.pressure >= need && hit.pressure > 0 {
-                                if let Some(m) =
-                                    matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
-                                {
-                                    match m.body_segment(
-                                        actor,
-                                        u,
-                                        seg,
-                                        cell,
-                                        &self.seg_poses[actor][seg],
-                                        self.at,
-                                    ) {
-                                        matter::ClaimResult::Applied => u.seg_detached += 1,
-                                        matter::ClaimResult::Unaffordable
-                                        | matter::ClaimResult::Indestructible => apply = false,
-                                        matter::ClaimResult::Deferred => return,
-                                    }
-                                }
-                            }
-                            if apply {
-                                u.receive_seg_cell(seg, cell, hit.pressure, c);
-                                u.absorbed = u.absorbed.saturating_add(hit.pressure);
-                            }
-                        }
-                        None => {}
+                        self.body_cursor += 1;
                     }
+                    self.body_cursor = 0;
                 } else {
                     let m = material(w, q);
                     if m != 0 && hit.pressure > 0 {
@@ -2575,7 +2632,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(46);
+        b.u32(47);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2741,6 +2798,12 @@ impl BlastRange {
         if version < 46 {
             b.bool(self.battle.autonomous);
         }
+        if version < 47 {
+            if let Some(e) = &self.explosion {
+                e.save_contacts(b);
+            }
+            self.battle.save_wave_contacts(b);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2756,7 +2819,7 @@ impl BlastRange {
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=46).contains(&version) {
+        if !(27..=47).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3172,6 +3235,12 @@ impl BlastRange {
         }
         if version >= 46 {
             r.battle.autonomous = s.bool();
+        }
+        if version >= 47 {
+            if let Some(e) = &mut r.explosion {
+                e.load_contacts(&mut s, &r.units)?;
+            }
+            r.battle.load_wave_contacts(&mut s, &r.units)?;
         }
         if !s.ok() || s.left() != 0 {
             return None;
@@ -4320,6 +4389,40 @@ impl BlastRange {
 }
 
 impl Explosion {
+    fn save_contacts(&self, b: &mut fx::blob::Blob) {
+        b.bool(self.point_contacts);
+        b.usize(self.body_cursor);
+    }
+    fn load_contacts(&mut self, s: &mut fx::blob::Scan, units: &[RangeUnit]) -> Option<()> {
+        self.point_contacts = s.bool();
+        self.body_cursor = s.usize();
+        if self.body_cursor == 0 {
+            return s.ok().then_some(());
+        }
+        let actor = self.contact_cursor % (units.len() + 1);
+        if self.point_contacts || self.contact_cursor >= units.len() {
+            return None;
+        }
+        let unit = units.get(actor)?;
+        let hit = self.pending.front()?;
+        let low = [0, 1, 2].map(|a| self.origin[a] + hit.cell[a] * self.cell);
+        let query = HitFrames::new(
+            unit,
+            self.poses[actor],
+            &self.seg_poses[actor],
+            self.turret_deltas[actor],
+        );
+        let mut cells = Vec::new();
+        query.wave_cells(
+            unit,
+            &self.poses[actor],
+            &self.seg_poses[actor],
+            low,
+            self.cell,
+            &mut cells,
+        );
+        (s.ok() && self.body_cursor < cells.len()).then_some(())
+    }
     fn save(&self, b: &mut fx::blob::Blob) {
         for v in self.at {
             b.i32(v);
@@ -4503,6 +4606,8 @@ impl Explosion {
             seg_poses,
             pending,
             contact_cursor,
+            body_cursor: 0,
+            point_contacts: true,
             at,
             origin,
             cell,
@@ -7931,7 +8036,9 @@ mod tests {
             "a glancing hit: {} cells",
             u.removed.len()
         );
-        assert!(u.detached > 0 && u.annihilated_mm3() > 0);
+        // Correct centre coverage can ablate the whole struck volume: do
+        // not require the old sampling holes to survive as detached sections.
+        assert!(u.annihilated_mm3() > 0);
         // Pieces cut loose leave in the tick that frees them; nothing lingers.
         assert!(carried <= 2, "sections waited {carried} ticks");
     }
@@ -8351,11 +8458,17 @@ mod tests {
         a.matter.tuning.max_flying = 1;
         for _ in 0..400 {
             a.step();
-            if a.explosion.as_ref().is_some_and(|e| e.contact_cursor > 0) {
+            if a.explosion
+                .as_ref()
+                .is_some_and(|e| e.contact_cursor > 0 || e.body_cursor > 0)
+            {
                 break;
             }
         }
-        assert!(a.explosion.as_ref().is_some_and(|e| e.contact_cursor > 0));
+        assert!(a
+            .explosion
+            .as_ref()
+            .is_some_and(|e| e.contact_cursor > 0 || e.body_cursor > 0));
         assert_eq!(a.matter.debris.fragments.len(), 1);
         let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         b.matter.tuning.max_flying = 1;
@@ -8930,7 +9043,11 @@ mod tests {
         assert!(!r.units.is_empty(), "the cover range brings machines");
         let c = r.config.clone();
         let walk = |at: [i32; 3]| {
-            let e = Explosion::with_damage(&r.world, at, &c, &r.units, &r.surface_work);
+            let mut e = Explosion::begin(at, &c, &r.units);
+            // Preserve the exact point sampler for pre-47 saved bursts.
+            // Voxel-centre capture has its own exhaustive reference test.
+            e.point_contacts = true;
+            e.capture(&r.world, &c, &r.units, &r.surface_work, usize::MAX);
             let n = e.wave.size();
             let half = n / 2;
             let radius2 = (half * half) as i32;

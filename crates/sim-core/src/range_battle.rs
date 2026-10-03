@@ -213,6 +213,17 @@ impl Battle {
     pub(super) fn working(&self) -> bool {
         !self.waves.is_empty()
     }
+    pub(super) fn save_wave_contacts(&self, b: &mut Blob) {
+        for burst in &self.waves {
+            burst.wave.save_contacts(b);
+        }
+    }
+    pub(super) fn load_wave_contacts(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
+        for burst in &mut self.waves {
+            burst.wave.load_contacts(s, units)?;
+        }
+        Some(())
+    }
     pub(super) fn save(&self, b: &mut Blob) {
         b.u8(match self.phase {
             Phase::Setup => 0,

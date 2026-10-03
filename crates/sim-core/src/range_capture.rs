@@ -35,7 +35,7 @@ pub(super) fn capture(
             let (lo, hi) = u.bounds_aimed(Some(&pose), segs, delta);
             (0..3)
                 .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
-                .then(|| (u, lo, hi, HitFrames::new(u, pose, segs, delta)))
+                .then(|| (u, lo, hi, pose, segs, HitFrames::new(u, pose, segs, delta)))
         })
         .collect();
     // Bodies are asked only where they can be (ADR-296): one box test
@@ -153,11 +153,34 @@ pub(super) fn capture(
             }
             // Body resistance is independent of the terrain reduction. Ask
             // only the intersecting part of each box, including suspended parts.
-            'bodies: for (u, lo, hi, query) in &queries {
+            'bodies: for (u, lo, hi, pose, segments, query) in &queries {
                 if r >= unit_maximum {
                     break;
                 }
                 if (0..3).any(|a| end[a] < lo[a] || p[a] > hi[a]) {
+                    continue;
+                }
+                if !e.point_contacts {
+                    // Same voxel-centre ownership as damage, including thin
+                    // rotated plates missed by the old world-point samples.
+                    query.visit_wave_cells(u, pose, segments, p, c.cell_units, |(part, cell)| {
+                        let occupied = if part == 0 {
+                            u.body.vol.get(cell[0], cell[1], cell[2])
+                        } else {
+                            !u.seg_gone[part - 1]
+                                && u.body.segments[part - 1]
+                                    .body
+                                    .vol
+                                    .get(cell[0], cell[1], cell[2])
+                        };
+                        if occupied {
+                            r = r.max(u.hit_resistance(Some((part, cell)), c));
+                        }
+                        r < unit_maximum
+                    });
+                    if r >= unit_maximum {
+                        break 'bodies;
+                    }
                     continue;
                 }
                 query.parts_in(u, p, end, &mut parts);
