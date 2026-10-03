@@ -276,8 +276,12 @@ impl BlastRange {
         }
         accepted
     }
+    #[cfg(test)]
     pub(super) fn exchange_heat(&mut self) {
-        self.exchange_heat_in(true);
+        self.exchange_heat_in(true, &|_, _| {});
+    }
+    pub(super) fn exchange_heat_observed(&mut self, task: &(impl Fn(usize, &'static str) + Sync)) {
+        self.exchange_heat_in(true, task);
     }
     fn exchange_contacts(&self, source: Site, bounds: &[Bounds]) -> [Option<Site>; 6] {
         let heat = source.heat(self);
@@ -298,7 +302,12 @@ impl BlastRange {
                 .filter(|dest| source.separate(*dest) && dest.accepts(self))
         })
     }
-    fn exchange_heat_in(&mut self, parallel: bool) {
+    fn exchange_heat_in(&mut self, parallel: bool, task: &(impl Fn(usize, &'static str) + Sync)) {
+        let _total = crate::burst::PhysicsTask::new(
+            task,
+            "physics_heat_exchange_begin",
+            "physics_heat_exchange_end",
+        );
         self.heat_exchange.visited = 0;
         let t = &self.thermal_tuning;
         if t.exchange_milli == 0 || (self.heat.hot() == 0 && self.thermals.hot() == 0) {
@@ -332,10 +341,32 @@ impl BlastRange {
         // axis order survive indexed collection; admission remains serial.
         let trace = |source: &Site| self.exchange_contacts(*source, &bounds);
         let contacts: Vec<_> = if parallel && sources.len() >= 128 {
-            sources.par_iter().map(trace).collect()
+            sources
+                .par_iter()
+                .map_init(
+                    || {
+                        crate::burst::PhysicsTask::new(
+                            task,
+                            "physics_heat_contacts_begin",
+                            "physics_heat_contacts_end",
+                        )
+                    },
+                    |_, source| trace(source),
+                )
+                .collect()
         } else {
+            let _task = crate::burst::PhysicsTask::new(
+                task,
+                "physics_heat_contacts_begin",
+                "physics_heat_contacts_end",
+            );
             sources.iter().map(trace).collect()
         };
+        let _commit = crate::burst::PhysicsTask::new(
+            task,
+            "physics_heat_commit_begin",
+            "physics_heat_commit_end",
+        );
         for (source, contacts) in sources.into_iter().zip(contacts) {
             let heat = source.heat(self);
             for dest in contacts.into_iter().flatten() {
@@ -502,8 +533,16 @@ mod tests {
                 let (mut actual, mut reference) = (make(), make());
                 let initial = total(&actual);
                 for tick in 0..5 {
-                    reference.exchange_heat_in(false);
-                    pool.install(|| actual.exchange_heat_in(true));
+                    reference.exchange_heat_in(false, &|_, _| {});
+                    let trace = crate::task_trace::Trace::default();
+                    pool.install(|| {
+                        actual.exchange_heat_in(true, &|slot, event| trace.record(slot, event))
+                    });
+                    trace.balanced(&[
+                        "physics_heat_exchange",
+                        "physics_heat_contacts",
+                        "physics_heat_commit",
+                    ]);
                     assert_eq!(
                         state(&actual),
                         state(&reference),

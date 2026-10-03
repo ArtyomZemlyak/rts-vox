@@ -28,6 +28,8 @@ pub mod save;
 pub mod shield;
 pub mod shot;
 mod shot_probe;
+#[cfg(test)]
+mod task_trace;
 pub mod turret;
 
 use drive::{Drive, Limits, NO_WAY};

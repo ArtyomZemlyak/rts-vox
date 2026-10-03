@@ -1,5 +1,6 @@
 //! Finite flight packets and spatial contacts, independent of explosion waves.
 use super::*;
+use crate::burst::PhysicsTask;
 use fx::blob::{Blob, Scan};
 use modding::{
     explosion::Delivery,
@@ -12,10 +13,24 @@ mod spall;
 
 const MAX_ROUNDS: usize = 128;
 
+#[cfg(test)]
 fn laser_boxes(units: &[RangeUnit]) -> Vec<([i32; 3], [i32; 3])> {
+    laser_boxes_observed(units, &|_, _| {})
+}
+fn laser_boxes_observed(
+    units: &[RangeUnit],
+    task: &(impl Fn(usize, &'static str) + Sync),
+) -> Vec<([i32; 3], [i32; 3])> {
     if units.len() >= 16 {
-        units.par_iter().map(|u| u.bounds()).collect()
+        units
+            .par_iter()
+            .map_init(
+                || PhysicsTask::new(task, "physics_laser_boxes_begin", "physics_laser_boxes_end"),
+                |_, u| u.bounds(),
+            )
+            .collect()
     } else {
+        let _task = PhysicsTask::new(task, "physics_laser_boxes_begin", "physics_laser_boxes_end");
         units.iter().map(|u| u.bounds()).collect()
     }
 }
@@ -523,7 +538,7 @@ impl BlastRange {
     pub fn stream_muzzles(&self) -> Vec<[Fx; 3]> {
         muzzles(&self.gun, self.turret.angle)
     }
-    fn emit_laser(&mut self, tuning: &Stream) {
+    fn emit_laser(&mut self, tuning: &Stream, physics: &(impl Fn(usize, &'static str) + Sync)) {
         for from in self.stream_muzzles() {
             let trace = self.laser_ray(
                 from,
@@ -531,7 +546,7 @@ impl BlastRange {
                 None,
                 tuning,
                 &self.config.clone(),
-                |_| {},
+                (&mut |_| {}, physics),
             );
             self.streams.traces.push(trace);
         }
@@ -545,8 +560,15 @@ impl BlastRange {
         owner: Option<usize>,
         tuning: &Stream,
         config: &ExplosionConfig,
-        mut completed: impl FnMut(&'static str),
+        observers: (
+            &mut impl FnMut(&'static str),
+            &(impl Fn(usize, &'static str) + Sync),
+        ),
     ) -> Trace {
+        let (completed, physics) = observers;
+        let task = |_, event| physics(2, event);
+        let beam_task =
+            PhysicsTask::new(&task, "physics_laser_beam_begin", "physics_laser_beam_end");
         let delta = std::array::from_fn::<_, 3, _>(|a| Fx::from_int(target[a]).sub(from[a]));
         let length = delta
             .iter()
@@ -563,7 +585,7 @@ impl BlastRange {
                 .add(direction[a].mul(Fx::from_int(tuning.range)))
                 .to_int_trunc()
         });
-        let boxes = laser_boxes(&self.units);
+        let boxes = laser_boxes_observed(&self.units, &task);
         let near: Vec<_> = boxes
             .iter()
             .enumerate()
@@ -621,10 +643,11 @@ impl BlastRange {
         if !hit {
             completed("orders_laser_query");
         }
+        drop(beam_task);
         completed("orders_laser_beam");
         // Laser contact only deposits heat (or drains a shield); it never
         // edits body geometry. The halo therefore reads these same boxes.
-        self.laser_halo_with_boxes(from, free_end, contact, tuning, owner, &boxes);
+        self.laser_halo_with_boxes(from, free_end, contact, tuning, owner, (&boxes, &task));
         completed("orders_laser_halo");
         Trace {
             from,
@@ -772,7 +795,10 @@ impl BlastRange {
             }
         }
     }
-    pub(super) fn step_streams(&mut self) {
+    pub(super) fn step_streams_observed(
+        &mut self,
+        physics: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         self.streams.traces.clear();
         if matches!(self.config.delivery, Delivery::Blast | Delivery::Kinetic) {
             return;
@@ -803,7 +829,7 @@ impl BlastRange {
                 && self.turret.aligned(self.aim_angle(), self.turret_limits)
             {
                 if self.config.delivery == Delivery::Laser {
-                    self.emit_laser(&tuning);
+                    self.emit_laser(&tuning, physics);
                 } else {
                     self.emit_stream(&tuning);
                 }
@@ -947,6 +973,56 @@ mod tests {
         l.units.truncate(1);
         l.units[0].at = [285, 16, 336];
         BlastRange::with_layout(c, l).unwrap()
+    }
+    #[test]
+    fn observed_laser_beam_preserves_state_and_pairs_all_scopes() {
+        let seed = laser_range(vec![]);
+        for workers in [1, 2, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let (mut reference, mut actual) = (
+                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap(),
+                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap(),
+            );
+            let from = [100, 100, 336].map(Fx::from_int);
+            let tuning = seed.streams.tuning.laser.clone();
+            reference.laser_ray(
+                from,
+                [500, 100, 336],
+                None,
+                &tuning,
+                &seed.config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            let trace = crate::task_trace::Trace::default();
+            pool.install(|| {
+                actual.laser_ray(
+                    from,
+                    [500, 100, 336],
+                    None,
+                    &tuning,
+                    &seed.config,
+                    (&mut |_| {}, &|stage, event| {
+                        assert_eq!(stage, 2);
+                        trace.record(stage, event);
+                    }),
+                );
+            });
+            trace.balanced(&[
+                "physics_laser_boxes",
+                "physics_laser_beam",
+                "physics_laser_halo",
+                "physics_laser_halo_read",
+                "physics_laser_halo_commit",
+            ]);
+            assert_eq!(
+                actual.state_hash(),
+                reference.state_hash(),
+                "workers={workers}"
+            );
+        }
     }
     #[test]
     fn laser_boxes_preserve_slots_and_fresh_articulated_poses_across_workers() {

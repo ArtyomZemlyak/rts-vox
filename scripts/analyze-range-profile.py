@@ -262,7 +262,9 @@ def analyze(directory, scenario="world-battle", top=12):
     roles = {}
     task_families = {}
     missing_physics_ticks = 0
+    schema_match = re.search(r"^PROFILE core_trace_schema=(\d+)$", log, re.M)
     core_path = directory / f"{scenario}.core.csv"
+    core_schema = int(schema_match[1]) if schema_match else (1 if core_path.exists() else None)
     if core_path.exists():
         groups = itertools.groupby(read_csv(core_path), key=lambda r: (r["generation"], r["tick"]))
         for key, raw_rows in groups:
@@ -305,7 +307,21 @@ def analyze(directory, scenario="world-battle", top=12):
                 if sample_keys:
                     raise ValueError("Physics summary scopes missing")
                 tick["task_families"].update(complete)
-            if not all(name in tick["task_families"] for name in ("physics_rubble_floor", "physics_rubble_columns")):
+            required = {"physics_rubble_floor", "physics_rubble_columns"}
+            if core_schema == 3:
+                required.update(("physics_heat_exchange", "physics_ground_heat"))
+                if any(p["name"] == "orders_laser" for p in tick["phases"]):
+                    required.update(("physics_laser_beam", "physics_laser_boxes", "physics_laser_halo"))
+            covered = required.issubset(tick["task_families"])
+            if core_schema == 3:
+                stages = {
+                    "physics_rubble_floor": "0", "physics_rubble_columns": "0",
+                    "physics_laser_beam": "2", "physics_laser_boxes": "2", "physics_laser_halo": "2",
+                    "physics_heat_exchange": "3", "physics_ground_heat": "4",
+                }
+                scopes = {(job["name"], job["job_slot"]) for job in samples}
+                covered = covered and all((name, stages[name]) in scopes for name in required)
+            if not covered:
                 missing_physics_ticks += 1
             if tick["os_thread"]:
                 roles.setdefault(tick["os_thread"], set()).add("tick_caller")
@@ -347,8 +363,6 @@ def analyze(directory, scenario="world-battle", top=12):
         phase_summary.append(dict(name=name, mean_per_tick_ms=sum(wall) / len(seen),
                                   wall_occurrences=stats(wall), thread_cpu_occurrences=stats(cpu)))
     phase_summary.sort(key=lambda r: -r["mean_per_tick_ms"])
-    schema_match = re.search(r"^PROFILE core_trace_schema=(\d+)$", log, re.M)
-    core_schema = int(schema_match[1]) if schema_match else (1 if core_path.exists() else None)
     manifest_path = directory / f"{scenario}.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
     validity = manifest.get("Validity") or {} if manifest else {}
@@ -371,11 +385,11 @@ def analyze(directory, scenario="world-battle", top=12):
         reasons.append("core_tick_clock_missing")
     if identity_mismatches:
         reasons.append("frame_core_tick_identity_mismatch")
-    if core_schema == 2 and missing_physics_ticks:
+    if core_schema in (2, 3) and missing_physics_ticks:
         reasons.append("physics_task_coverage_missing")
-    if core_schema == 2 and not core_path.exists():
+    if core_schema in (2, 3) and not core_path.exists():
         reasons.append("core_trace_missing")
-    if core_schema is not None and core_schema not in (1, 2):
+    if core_schema is not None and core_schema not in (1, 2, 3):
         reasons.append("core_trace_schema_unsupported")
     if summarized and not summary_path.exists():
         reasons.append("physics_task_summary_missing")
@@ -423,7 +437,7 @@ def analyze(directory, scenario="world-battle", top=12):
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
-                    "physics slots identify caller stages (0 rubble, 1 debris), not actors; OS thread and family pair scopes",
+                    "physics slots identify caller stages (0 rubble, 1 debris, 2 laser, 3 heat exchange, 4 terrain heat), not actors; OS thread and family pair scopes",
                     "sampled traces retain the longest physics scope per OS thread, family and stage; complete job totals are validated separately",
                     "task family wall totals are inclusive across concurrent jobs, not elapsed phase time or CPU utilization",
                     "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",

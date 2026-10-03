@@ -1000,9 +1000,13 @@ impl BlastRange {
     }
     #[cfg(test)]
     pub(super) fn battle_tick(&mut self) {
-        self.battle_tick_observed(|_| {});
+        self.battle_tick_observed(|_| {}, &|_, _| {});
     }
-    pub(super) fn battle_tick_observed(&mut self, mut completed: impl FnMut(&'static str)) {
+    pub(super) fn battle_tick_observed(
+        &mut self,
+        mut completed: impl FnMut(&'static str),
+        physics: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         if !self.battle_mode() {
             return;
         }
@@ -1032,7 +1036,7 @@ impl BlastRange {
         if battle.phase == Phase::Fighting {
             self.battle_ai_tick(&mut battle);
             completed("battle_ai");
-            self.battle_orders(&mut battle, &mut completed);
+            self.battle_orders(&mut battle, &mut completed, physics);
         }
         completed("battle_orders");
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
@@ -1148,7 +1152,12 @@ impl BlastRange {
         }
         self.battle = battle;
     }
-    fn battle_orders(&mut self, b: &mut Battle, mut completed: impl FnMut(&'static str)) {
+    fn battle_orders(
+        &mut self,
+        b: &mut Battle,
+        mut completed: impl FnMut(&'static str),
+        physics: &(impl Fn(usize, &'static str) + Sync),
+    ) {
         let stream = self.streams.tuning.machine_gun.clone();
         for id in 0..self.units.len() {
             if !self.units[id].status.alive || !self.units[id].status.weapon {
@@ -1412,8 +1421,14 @@ impl BlastRange {
                 let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
                 if let Some(from) = muzzles.first().copied() {
                     completed("orders_misc");
-                    let trace =
-                        self.laser_ray(from, p, Some(id), &tuning.laser, config, &mut completed);
+                    let trace = self.laser_ray(
+                        from,
+                        p,
+                        Some(id),
+                        &tuning.laser,
+                        config,
+                        (&mut completed, physics),
+                    );
                     completed("orders_laser");
                     b.lasers.push(trace);
                     a.fired = a.fired.wrapping_add(1);

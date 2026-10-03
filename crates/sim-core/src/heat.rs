@@ -207,8 +207,19 @@ impl Heat {
         t: &HeatTuning,
         claimed: impl Fn([u32; 3]) -> bool,
     ) {
-        self.step_in(w, mats, t, claimed, true);
+        self.step_observed(w, mats, t, claimed, &|_, _| {});
     }
+    pub(crate) fn step_observed(
+        &mut self,
+        w: &mut World,
+        mats: &Registry,
+        t: &HeatTuning,
+        claimed: impl Fn([u32; 3]) -> bool,
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
+        self.step_in_observed(w, mats, t, claimed, (true, task));
+    }
+    #[cfg(test)]
     fn step_in(
         &mut self,
         w: &mut World,
@@ -217,6 +228,22 @@ impl Heat {
         claimed: impl Fn([u32; 3]) -> bool,
         parallel: bool,
     ) {
+        self.step_in_observed(w, mats, t, claimed, (parallel, &|_, _| {}));
+    }
+    fn step_in_observed(
+        &mut self,
+        w: &mut World,
+        mats: &Registry,
+        t: &HeatTuning,
+        claimed: impl Fn([u32; 3]) -> bool,
+        observations: (bool, &(impl Fn(usize, &'static str) + Sync)),
+    ) {
+        let (parallel, task) = observations;
+        let _total = crate::burst::PhysicsTask::new(
+            task,
+            "physics_ground_heat_begin",
+            "physics_ground_heat_end",
+        );
         self.ignited.clear();
         self.burned.clear();
         self.melting.clear();
@@ -275,6 +302,11 @@ impl Heat {
                 .par_chunks(64)
                 .zip(reads.par_chunks_mut(64))
                 .for_each(|(sources, outputs)| {
+                    let _task = crate::burst::PhysicsTask::new(
+                        task,
+                        "physics_ground_heat_read_begin",
+                        "physics_ground_heat_read_end",
+                    );
                     let mut cursor = World::mat_cursor();
                     for (source, output) in sources.iter().zip(outputs) {
                         let p = source.0;
@@ -284,6 +316,11 @@ impl Heat {
                 });
             reads
         } else {
+            let _task = crate::burst::PhysicsTask::new(
+                task,
+                "physics_ground_heat_read_begin",
+                "physics_ground_heat_read_end",
+            );
             batch
                 .iter()
                 .map(|source| {
@@ -294,6 +331,11 @@ impl Heat {
         };
         // Burning cells feed their solid neighbours; gains are gathered
         // first so the order of the batch cannot favour a direction.
+        let _commit = crate::burst::PhysicsTask::new(
+            task,
+            "physics_ground_heat_commit_begin",
+            "physics_ground_heat_commit_end",
+        );
         let mut gain: BTreeMap<[u32; 3], u32> = BTreeMap::new();
         for (&(p, _), &(_, share, solid)) in batch.iter().zip(&reads) {
             if solid == 0 {
@@ -698,10 +740,11 @@ mod tests {
                         (p[0] + rank) % 7 == tick % 7
                     };
                     serial.step_in(&mut reference_world, &registry, &t, claimed, false);
+                    let trace = crate::task_trace::Trace::default();
                     let calls = pool.install(|| {
                         // A non-Sync callback stays on the ordered commit path.
                         let calls = std::cell::RefCell::new(Vec::new());
-                        parallel.step_in(
+                        parallel.step_in_observed(
                             &mut world,
                             &registry,
                             &t,
@@ -711,10 +754,15 @@ mod tests {
                                 calls.push(p);
                                 (p[0] + rank) % 7 == tick % 7
                             },
-                            true,
+                            (true, &|slot, event| trace.record(slot, event)),
                         );
                         calls.into_inner()
                     });
+                    trace.balanced(&[
+                        "physics_ground_heat",
+                        "physics_ground_heat_read",
+                        "physics_ground_heat_commit",
+                    ]);
                     assert_eq!(calls, reference_calls.into_inner());
                     assert_eq!(
                         snapshot(&parallel, &world),

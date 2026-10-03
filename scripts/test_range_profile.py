@@ -155,6 +155,40 @@ class ReportTests(unittest.TestCase):
         self.assertIn("unavailable", profile.markdown(complete))
         self.assertIn("different_or_missing:core_trace_schema", profile.compare(legacy, complete)["reasons"])
 
+    def test_schema_three_checks_thermal_and_laser_coverage(self):
+        for laser in (False, True):
+            base = {"physics_rubble_floor", "physics_rubble_columns", "physics_heat_exchange", "physics_ground_heat"}
+            if laser:
+                base.update(("physics_laser_beam", "physics_laser_boxes", "physics_laser_halo"))
+            for missing in (None, *sorted(base)):
+                with self.subTest(laser=laser, missing=missing):
+                    rows = trace()
+                    if laser:
+                        rows.append(mark("phase", "orders_laser", 90, cpu=125))
+                    for family in sorted(base - {missing}):
+                        stage = "0" if "rubble" in family else "4" if "ground_heat" in family else "3" if "heat_exchange" in family else "2"
+                        rows += [mark("task", family + "_begin", 15, "3", stage),
+                                 mark("task", family + "_end", 60, "3", stage)]
+                    self.write(rows=rows)
+                    with (self.path / "world-battle.log").open("a") as out:
+                        out.write("PROFILE core_trace_schema=3\n")
+                    report = profile.analyze(self.path)
+                    self.assertEqual(report["valid_for_comparison"], missing is None)
+                    if missing:
+                        self.assertIn("physics_task_coverage_missing", report["reasons"])
+
+    def test_schema_three_rejects_thermal_scopes_in_wrong_stage(self):
+        rows = trace()
+        for family in ("physics_rubble_floor", "physics_rubble_columns", "physics_heat_exchange", "physics_ground_heat"):
+            rows += [mark("task", family + "_begin", 15, "3", "0"),
+                     mark("task", family + "_end", 60, "3", "0")]
+        self.write(rows=rows)
+        with (self.path / "world-battle.log").open("a") as out:
+            out.write("PROFILE core_trace_schema=3\n")
+        report = profile.analyze(self.path)
+        self.assertFalse(report["valid_for_comparison"])
+        self.assertIn("physics_task_coverage_missing", report["reasons"])
+
     def bounded_physics_fixture(self):
         rows, summary = trace(), []
         for family in ("physics_rubble_floor", "physics_rubble_columns"):

@@ -26,12 +26,12 @@ use voxel::{
 /// One independent physics job (or Rayon leaf batch), not an actor ID.
 /// Timers and collection belong to the observer. The no-op observer carries
 /// no clocks, allocation, thread lookup or synchronization into ordinary play.
-struct PhysicsTask<'a, F: Fn(usize, &'static str)> {
+pub(crate) struct PhysicsTask<'a, F: Fn(usize, &'static str)> {
     observe: &'a F,
     end: &'static str,
 }
 impl<'a, F: Fn(usize, &'static str)> PhysicsTask<'a, F> {
-    fn new(observe: &'a F, begin: &'static str, end: &'static str) -> Self {
+    pub(crate) fn new(observe: &'a F, begin: &'static str, end: &'static str) -> Self {
         observe(0, begin);
         Self { observe, end }
     }

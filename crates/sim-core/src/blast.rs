@@ -3499,7 +3499,8 @@ impl BlastRange {
         self.step_observed_all_tasks(completed, detail, unit_detail, task_detail, |_, _| {});
     }
     /// Also observe independent physics jobs on their executing threads.
-    /// Physics IDs name caller stages (0: rubble, 1: debris), not actor IDs;
+    /// Physics IDs name caller stages (0: rubble, 1: debris, 2: laser,
+    /// 3: heat exchange, 4: terrain heat), not actor IDs;
     /// observers pair them by OS thread and event family. Navigation-only
     /// observers keep the existing API and receive no physics events.
     pub fn step_observed_all_tasks(
@@ -3945,7 +3946,7 @@ impl BlastRange {
                     self.streams.serial = self.streams.serial.wrapping_add(1);
                 }
             }
-            self.step_streams();
+            self.step_streams_observed(&physics_detail);
             if let Some(p) = self.shell {
                 self.velocity[1] = self.velocity[1].sub(Fx::from_int(gravity).mul(dt));
                 let q = std::array::from_fn(|a| p[a].add(self.velocity[a].mul(dt)));
@@ -4088,11 +4089,11 @@ impl BlastRange {
                 }
             }
         }
-        self.battle_tick_observed(&mut completed);
+        self.battle_tick_observed(&mut completed, &physics_detail);
         completed("wave");
         self.step_unit_fire();
         completed("unit_fire");
-        self.exchange_heat();
+        self.exchange_heat_observed(&|_, event| physics_detail(3, event));
         completed("heat_exchange");
         detail("heat_begin");
         {
@@ -4105,9 +4106,13 @@ impl BlastRange {
                 heat_tuning,
                 ..
             } = self;
-            heat.step(world, &matter.economy.mats, heat_tuning, |p| {
-                matter.debris.claimed(p)
-            });
+            heat.step_observed(
+                world,
+                &matter.economy.mats,
+                heat_tuning,
+                |p| matter.debris.claimed(p),
+                &|_, event| physics_detail(4, event),
+            );
             detail("heat_world");
             // Melted voxels run off as debris (ADR-290); one the pool
             // cannot take keeps its heat for the next tick.

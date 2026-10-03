@@ -1,6 +1,9 @@
 //! Surface heating around the unobstructed laser segment (ADR-473).
 use super::*;
 
+type Bounds = ([i32; 3], [i32; 3]);
+type HaloObservations<'a, F> = (&'a [Bounds], &'a F);
+
 #[derive(Default)]
 struct HaloDeposits {
     ground: Vec<([u32; 3], u32)>,
@@ -30,11 +33,7 @@ fn outside_halo(q: [i64; 3], d: [i64; 3], length2: i64, radius: i32) -> bool {
 }
 
 impl BlastRange {
-    fn laser_cell(
-        &self,
-        p: [i32; 3],
-        bounds: &[(usize, ([i32; 3], [i32; 3]))],
-    ) -> Option<thermal::Cell> {
+    fn laser_cell(&self, p: [i32; 3], bounds: &[(usize, Bounds)]) -> Option<thermal::Cell> {
         bounds.iter().find_map(|(id, (lo, hi))| {
             if (0..3).any(|a| p[a] < lo[a] || p[a] > hi[a]) {
                 return None;
@@ -54,7 +53,7 @@ impl BlastRange {
         source: [i64; 3],
         target: [i32; 3],
         cell: Option<thermal::Cell>,
-        bounds: &[(usize, ([i32; 3], [i32; 3]))],
+        bounds: &[(usize, Bounds)],
     ) -> bool {
         let delta: [i64; 3] = std::array::from_fn(|a| i64::from(target[a]) * 16 + 8 - source[a]);
         let steps = (delta.iter().map(|v| v.abs()).max().unwrap() + 3) / 4;
@@ -102,7 +101,7 @@ impl BlastRange {
         tuning: &Stream,
         owner: Option<usize>,
     ) {
-        self.laser_halo_in([from, to], contact, tuning, owner, None, true);
+        self.laser_halo_in([from, to], contact, tuning, owner, None, (true, &|_, _| {}));
     }
     pub(super) fn laser_halo_with_boxes(
         &mut self,
@@ -111,9 +110,17 @@ impl BlastRange {
         contact: Option<[i32; 3]>,
         tuning: &Stream,
         owner: Option<usize>,
-        boxes: &[([i32; 3], [i32; 3])],
+        observations: HaloObservations<'_, impl Fn(usize, &'static str) + Sync>,
     ) {
-        self.laser_halo_in([from, to], contact, tuning, owner, Some(boxes), true);
+        let (boxes, task) = observations;
+        self.laser_halo_in(
+            [from, to],
+            contact,
+            tuning,
+            owner,
+            Some(boxes),
+            (true, task),
+        );
     }
     fn laser_halo_in(
         &mut self,
@@ -121,9 +128,11 @@ impl BlastRange {
         contact: Option<[i32; 3]>,
         tuning: &Stream,
         owner: Option<usize>,
-        boxes: Option<&[([i32; 3], [i32; 3])]>,
-        parallel: bool,
+        boxes: Option<&[Bounds]>,
+        observations: (bool, &(impl Fn(usize, &'static str) + Sync)),
     ) {
+        let (parallel, task) = observations;
+        let _total = PhysicsTask::new(task, "physics_laser_halo_begin", "physics_laser_halo_end");
         let [from, to] = beam;
         let radius = tuning.heat_radius;
         if radius == 0 || tuning.heat == 0 {
@@ -184,6 +193,11 @@ impl BlastRange {
         // Each slice reads the same immutable geometry, shields and material
         // registry. Heat does not alter them until the later thermal phase.
         let collect = |start: i32, end: i32| {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_laser_halo_read_begin",
+                "physics_laser_halo_read_end",
+            );
             let mut deposits = HaloDeposits::default();
             for along in start..=end {
                 let axial =
@@ -298,6 +312,11 @@ impl BlastRange {
         } else {
             vec![collect(lo, hi)]
         };
+        let _merge = PhysicsTask::new(
+            task,
+            "physics_laser_halo_commit_begin",
+            "physics_laser_halo_commit_end",
+        );
         let mut doses = BTreeMap::<thermal::Cell, u32>::new();
         for batch in batches {
             for (p, heat) in batch.ground {
@@ -396,7 +415,7 @@ mod tests {
                             &tuning,
                             owner,
                             None,
-                            false,
+                            (false, &|_, _| {}),
                         );
                     }
                     if !shielded && case == 0 {
@@ -413,8 +432,11 @@ mod tests {
                         let mut parallel =
                             BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
                         parallel.thermal_tuning.max_cells = 7;
+                        let trace = crate::task_trace::Trace::default();
                         pool.install(|| {
-                            let boxes = laser_boxes(&parallel.units);
+                            let boxes = laser_boxes_observed(&parallel.units, &|slot, event| {
+                                trace.record(slot, event)
+                            });
                             assert_eq!(
                                 boxes,
                                 parallel
@@ -430,10 +452,16 @@ mod tests {
                                     &tuning,
                                     owner,
                                     Some(&boxes),
-                                    true,
+                                    (true, &|slot, event| trace.record(slot, event)),
                                 );
                             }
                         });
+                        trace.balanced(&[
+                            "physics_laser_boxes",
+                            "physics_laser_halo",
+                            "physics_laser_halo_read",
+                            "physics_laser_halo_commit",
+                        ]);
                         assert_eq!(
                             parallel.state_hash(),
                             serial.state_hash(),
