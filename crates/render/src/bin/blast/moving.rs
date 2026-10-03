@@ -14,7 +14,7 @@ pub struct Visual {
     pub previous: Vec<Pose>,
     /// Foot contacts of the previous tick, per unit and leg (ADR-279).
     previous_feet: Vec<Vec<Option<Contact>>>,
-    pub fragments: std::collections::HashMap<u64, Vec3>,
+    pub fragments: bevy::platform::collections::HashMap<u64, Vec3>,
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,

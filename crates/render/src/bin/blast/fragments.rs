@@ -1,6 +1,7 @@
 //! Read-only view of actual matter; no lifetime, random velocity or gravity here.
 use super::*;
-use std::collections::{BTreeMap, HashMap};
+use bevy::platform::collections::HashMap;
+use std::collections::BTreeMap;
 #[cfg(test)]
 #[path = "fragments/lifecycle_tests.rs"]
 mod lifecycle_tests;
