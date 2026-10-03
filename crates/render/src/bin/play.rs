@@ -208,8 +208,22 @@ struct ShotMark;
 #[derive(Component)]
 struct BlastMark(u32);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DebrisKey {
+    Piece(render::model::FragmentMeshKey),
+    Section(u64, bool),
+}
+impl DebrisKey {
+    fn of(f: &sim_core::burst::Fragment) -> Self {
+        match &f.chunk {
+            Some(c) => Self::Section(c.hash(), c.body.is_some()),
+            None => Self::Piece((f.material, f.shape, f.side, f.paint)),
+        }
+    }
+}
 struct DebrisPose {
     entity: Entity,
+    key: DebrisKey,
     previous: Vec3,
     current: Vec3,
 }
@@ -220,6 +234,10 @@ struct DebrisShown {
     poses: std::collections::BTreeMap<u64, DebrisPose>,
     mesh: std::collections::BTreeMap<render::model::FragmentMeshKey, Handle<Mesh>>,
 }
+
+#[cfg(test)]
+#[path = "play/debris_tests.rs"]
+mod debris_tests;
 
 /// Сегмент тела: меш по отделкам и место в теле (ADR-231).
 struct SegArt {
@@ -1348,7 +1366,7 @@ fn debris(
         if visible.contains(id) {
             true
         } else {
-            commands.entity(p.entity).despawn();
+            commands.entity(p.entity).try_despawn();
             false
         }
     });
@@ -1367,131 +1385,138 @@ fn debris(
     shown.tick = sim.r.world.tick;
     let fraction = sim.clock.fraction(DT);
     for (f, p, _) in candidates {
-        if let Some(chunk) = &f.chunk {
-            if !shown.poses.contains_key(&f.id) {
-                if chunk_builds >= 2 {
-                    continue;
-                }
-                chunk_builds += 1;
-                let template = &sim.r.world.material_bodies.as_ref().unwrap().templates
-                    [chunk.template as usize];
-                let mut handles = Vec::new();
-                let entity = commands
-                    .spawn((Transform::from_translation(p), Visibility::default()))
-                    .with_children(|parent| {
-                        for (finish, buf) in render::model::section_to_mesh(template, chunk) {
-                            let mesh = meshes.add(buf_to_mesh(&buf));
-                            handles.push(mesh.clone());
-                            parent.spawn((
-                                Mesh3d(mesh),
-                                MeshMaterial3d(if chunk.body.is_some() {
-                                    art.wreck_finish[finish].clone()
-                                } else {
-                                    art.finish[finish].clone()
-                                }),
-                                Transform::default(),
-                            ));
-                        }
-                    })
-                    .id();
-                shown.chunks.insert(f.id, handles);
-                shown.poses.insert(
-                    f.id,
-                    DebrisPose {
-                        entity,
-                        previous: p,
-                        current: p,
-                    },
-                );
-            }
-            let pose = shown.poses.get_mut(&f.id).unwrap();
+        let key = DebrisKey::of(f);
+        let previous = shown.poses.get(&f.id).map_or(p, |pose| {
             if advanced {
-                pose.previous = pose.current;
-                pose.current = p;
+                pose.current
+            } else {
+                pose.previous
             }
-            if let Ok(mut tr) = transforms.get_mut(pose.entity) {
-                tr.translation = pose.previous.lerp(pose.current, fraction);
-            }
-            continue;
-        }
-        let key = (f.material, f.shape, f.side, f.paint);
-        let finish = f.paint.map(|p| {
-            let part = match p[2] {
-                1 => voxel::Part::Core,
-                2 => voxel::Part::Engine,
-                3 => voxel::Part::Weapon,
-                4 => voxel::Part::Sensor,
-                _ => voxel::Part::Armour,
-            };
-            look::finish_of(p[1], part)
         });
-        let colour = if let (Some(p), Some(finish)) = (f.paint, finish) {
-            look::to_linear(look::finish_srgb(
-                finish,
-                look::side_tint()[p[0] as usize % 2],
-            ))
-        } else {
-            look::colour(f.material)
-        };
-        let material = finish.map_or_else(
-            || art.ground[look::class(f.material) as usize].clone(),
-            |f| art.finish[f as usize].clone(),
-        );
         let basis = f.basis.map(|v| position(v.x, v.y, v.z));
         let rotation = Quat::from_mat3(&Mat3::from_cols(basis[0], basis[1], basis[2])).normalize();
-        if let std::collections::btree_map::Entry::Vacant(entry) = shown.mesh.entry(key) {
-            let c = sim_core::burst::shape_centre(f.shape, f.side);
-            let centre = position(c.x, c.y, c.z);
-            let mut combined: Option<Mesh> = None;
-            let side = u32::from(f.side.clamp(1, 4));
-            for i in 0..side * side * side {
-                if f.shape & (1 << i) != 0 {
-                    let offset = Vec3::new(
-                        (i % side) as f32,
-                        ((i / side) % side) as f32,
-                        (i / (side * side)) as f32,
-                    ) - centre;
-                    let mut cube = Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
-                    cube.insert_attribute(
-                        Mesh::ATTRIBUTE_COLOR,
-                        vec![colour; cube.count_vertices()],
-                    );
-                    if let Some(mesh) = combined.as_mut() {
-                        mesh.merge(&cube).expect("same cube vertex attributes");
-                    } else {
-                        combined = Some(cube);
+        let transform = Transform::from_translation(previous.lerp(p, fraction))
+            .with_rotation(rotation)
+            .with_scale(Vec3::splat(render::model::fragment_scale(f)));
+        let rebuild = shown
+            .poses
+            .get(&f.id)
+            .is_none_or(|pose| pose.key != key || !transforms.contains(pose.entity));
+        // Defer expensive section geometry, but keep the existing picture moving
+        // with physics until its replacement can be built. New pieces stay queued.
+        if !rebuild || (f.chunk.is_some() && chunk_builds >= 2) {
+            if let Some(pose) = shown.poses.get_mut(&f.id) {
+                pose.previous = previous;
+                pose.current = p;
+                if let Ok(mut tr) = transforms.get_mut(pose.entity) {
+                    if *tr != transform {
+                        *tr = transform;
                     }
                 }
             }
-            entry.insert(meshes.add(combined.expect("nonempty authoritative fragment")));
+            continue;
         }
-        let scale = render::model::fragment_scale(f);
-        let pose = if let Some(pose) = shown.poses.get_mut(&f.id) {
-            if advanced {
-                pose.previous = pose.current;
-                pose.current = p;
+        if let Some(old) = shown.poses.remove(&f.id) {
+            commands.entity(old.entity).try_despawn();
+        }
+        if let Some(handles) = shown.chunks.remove(&f.id) {
+            for h in handles {
+                meshes.remove(h.id());
             }
-            pose
-        } else {
-            let mesh = shown.mesh[&key].clone();
-            let entity = commands
-                .spawn((
-                    Mesh3d(mesh),
-                    MeshMaterial3d(material),
-                    Transform::from_translation(p).with_scale(Vec3::splat(scale)),
-                ))
-                .id();
-            shown.poses.entry(f.id).or_insert(DebrisPose {
-                entity,
-                previous: p,
-                current: p,
-            })
-        };
-        if let Ok(mut tr) = transforms.get_mut(pose.entity) {
-            tr.translation = pose.previous.lerp(pose.current, fraction);
-            tr.scale = Vec3::splat(scale);
-            tr.rotation = rotation;
         }
+        let entity = if let Some(chunk) = &f.chunk {
+            chunk_builds += 1;
+            let template =
+                &sim.r.world.material_bodies.as_ref().unwrap().templates[chunk.template as usize];
+            let mut handles = Vec::new();
+            let entity = commands
+                .spawn((transform, Visibility::default()))
+                .with_children(|parent| {
+                    for (finish, buf) in render::model::section_to_mesh(template, chunk) {
+                        let mesh = meshes.add(buf_to_mesh(&buf));
+                        handles.push(mesh.clone());
+                        parent.spawn((
+                            Mesh3d(mesh),
+                            MeshMaterial3d(if chunk.body.is_some() {
+                                art.wreck_finish[finish].clone()
+                            } else {
+                                art.finish[finish].clone()
+                            }),
+                            Transform::default(),
+                        ));
+                    }
+                })
+                .id();
+            shown.chunks.insert(f.id, handles);
+            entity
+        } else {
+            let key = (f.material, f.shape, f.side, f.paint);
+            let finish = f.paint.map(|p| {
+                let part = match p[2] {
+                    1 => voxel::Part::Core,
+                    2 => voxel::Part::Engine,
+                    3 => voxel::Part::Weapon,
+                    4 => voxel::Part::Sensor,
+                    _ => voxel::Part::Armour,
+                };
+                look::finish_of(p[1], part)
+            });
+            let colour = if let (Some(p), Some(finish)) = (f.paint, finish) {
+                look::to_linear(look::finish_srgb(
+                    finish,
+                    look::side_tint()[p[0] as usize % 2],
+                ))
+            } else {
+                look::colour(f.material)
+            };
+            let material = finish.map_or_else(
+                || art.ground[look::class(f.material) as usize].clone(),
+                |f| art.finish[f as usize].clone(),
+            );
+            if let std::collections::btree_map::Entry::Vacant(entry) = shown.mesh.entry(key) {
+                let c = sim_core::burst::shape_centre(f.shape, f.side);
+                let centre = position(c.x, c.y, c.z);
+                let mut combined: Option<Mesh> = None;
+                let side = u32::from(f.side.clamp(1, 4));
+                for i in 0..side * side * side {
+                    if f.shape & (1 << i) != 0 {
+                        let offset = Vec3::new(
+                            (i % side) as f32,
+                            ((i / side) % side) as f32,
+                            (i / (side * side)) as f32,
+                        ) - centre;
+                        let mut cube =
+                            Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
+                        cube.insert_attribute(
+                            Mesh::ATTRIBUTE_COLOR,
+                            vec![colour; cube.count_vertices()],
+                        );
+                        if let Some(mesh) = combined.as_mut() {
+                            mesh.merge(&cube).expect("same cube vertex attributes");
+                        } else {
+                            combined = Some(cube);
+                        }
+                    }
+                }
+                entry.insert(meshes.add(combined.expect("nonempty authoritative fragment")));
+            }
+            commands
+                .spawn((
+                    Mesh3d(shown.mesh[&key].clone()),
+                    MeshMaterial3d(material),
+                    transform,
+                ))
+                .id()
+        };
+        shown.poses.insert(
+            f.id,
+            DebrisPose {
+                entity,
+                key,
+                previous,
+                current: p,
+            },
+        );
     }
 }
 
