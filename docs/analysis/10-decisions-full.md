@@ -24416,3 +24416,27 @@ OS IDs/cycles не сняты; равномерная загрузка CPU не 
 WBPERF-013, независимый sim/render, 165 FPS и rare stalls остаются открытыми.
 Замеры, проверки, SHA/WIP provenance и ограничения —
 [144](144-dense-parallel-fragment-poses.md).
+
+## ADR-551 — параллельная упаковка и точное слияние теней
+
+Подготовка occupancy каждого actor сортирует/упаковывает cells в 64-bit
+word masks в прежнем worker job. Caller сливает sorted mask lists через
+min-heap/OR и перечисляет прежний exact sorted union. Packed path включён
+от 4 actors и 4 ComputeTaskPool threads; меньшие составы/пулы сохраняют
+прежний concatenation/radix путь. Смена режима и clipping восстанавливают
+маски из immutable world-cell cache, уход за окно очищает их. Геометрия,
+силуэты, GPU words/dirty spans, физика/баланс/snapshots и пулы прежние.
+
+Always-packed prototype ухудшал serial/1/2 и ограничен новым выбором пути.
+Две ordinary native 120-секундные пары полного боя подтвердили FPS
+80,262→85,434 и 81,264→86,718, occupancy/step −28,8/29,2%.
+Max frames немного хуже; все четыре сохранили 3600 шагов, игровой evidence
+и hash bcc1f58c226d1721. 112 полных render tests passed, 2 ignored;
+isolated ignored occupancy benchmark выполнен отдельно. Проверены
+serial/1/2/4/8, cache switches, damage/legs/camera/reset, nested scope,
+overlap и full usize/64-bit boundaries. Новых Clippy warnings нет.
+
+Merge/commit serial, worker OS IDs/cycles не сняты; равномерность CPU
+не доказана. WBPERF-007/002/027, 165 FPS и rare stalls открыты.
+Все варианты, замеры, SHA/WIP provenance и ограничения —
+[145](145-packed-parallel-shadow-union.md).

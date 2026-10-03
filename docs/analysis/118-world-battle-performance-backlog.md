@@ -2955,6 +2955,31 @@ p99 `terrain` 32,60–32,92 и 35,37–38,46 мс соответственно. 
 Артефакты: `out/performance/audit-world-20260930-{after-halo-int64,
 terrain-vec,terrain-skip-unchanged,unit-x-bins}` и каталоги `-repeat`.
 
+03.10.2026, ADR-551: occupancy actor jobs сортируют/упаковывают клетки в
+64-bit word masks; caller выполняет точный sorted union вместо сортировки
+полного concatenated voxel array. Результат/силуэты/GPU words прежние.
+Packed path включён от 4 actors и 4 Compute threads. Always-packed prototype
+замедлял serial/1/2, поэтому там сохранён прежний radix path; смена режима
+и camera clipping инвалидируют masks корректно.
+
+Плотный 60-actor CPU test: 4 threads 17,906→15,261 мс, 8 threads
+16,356→12,676 мс; 206904 masks вместо 2828454 исходных клеток. Это не FPS.
+Две ordinary native пары полного боя 30×30, по 120 с, вторая в обратном
+порядке, прежние 8/8 physics/navigation и compute 4: FPS
+80,262→85,434 и 81,264→86,718. Occupancy / step
+2,881→2,051 и 2,891→2,047 мс (−28,8/29,2%). p99 frame
+31,852→30,770 и 31,373→30,642 мс; max немного дороже в обеих парах.
+Все четыре сохранили 3600 шагов, hash bcc1f58c226d1721 и игровой evidence;
+tempo 0,9996…0,9997, gates прошли.
+
+112 render tests passed, 2 ignored; отдельный ignored bench выполнен.
+Serial/1/2/4/8, cache-mode switches, damage/legs/camera/reset, nested scope
+и usize/64-bit boundaries проверены. 007 частична: merge/commit serial,
+worker OS IDs/cycles этой фазы не сняты. Далее — отдельные
+prepare/sort/pack/merge spans и actor sizes; independent sim/render,
+165 FPS и rare stalls открыты. SHA/WIP provenance, данные и ограничения —
+[145](145-packed-parallel-shadow-union.md).
+
 ### WBPERF-008 — упаковка изменений без дорогой сортировки в extract
 
 Место: [gas.rs](../../crates/render/src/gas.rs), `extract_resource` (215).

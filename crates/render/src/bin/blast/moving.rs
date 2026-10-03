@@ -8,6 +8,8 @@ use sim_core::blast::RangeUnit;
 #[cfg(test)]
 #[path = "moving/history_tests.rs"]
 mod history_tests;
+#[path = "moving/packed.rs"]
+mod packed;
 #[cfg(test)]
 #[path = "moving/pose_tests.rs"]
 mod pose_tests;
@@ -23,7 +25,6 @@ pub struct Visual {
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
     scratch: Vec<usize>,
-    /// Reused by the integer sort of toroidal voxel addresses.
     sort_scratch: Vec<usize>,
     sort_counts: Vec<usize>,
     #[cfg(test)]
@@ -153,7 +154,7 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
 /// in its pose and every segment in the frame the simulation posed it in
 /// (ADR-282), so a walker's legs and a tank's plates shade the ground
 /// under them rather than only the high root far downsun.
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 struct Occupied {
     /// The body left the terrain window; its world cells must be rebuilt on
     /// re-entry because its pose or damage may have changed offscreen.
@@ -170,6 +171,8 @@ struct Occupied {
     world_cells: Vec<[i32; 3]>,
     bounds: Option<([i32; 3], [i32; 3])>,
     cells: Vec<usize>,
+    words: Vec<(usize, u64)>,
+    packed: bool,
 }
 impl Occupied {
     fn same_clip(&mut self, old: TerrainWindow, new: TerrainWindow) -> bool {
@@ -394,10 +397,14 @@ impl WindowIndex {
         })
     }
 }
-fn new_occupied(u: &RangeUnit, index: &WindowIndex) -> Occupied {
+fn new_occupied(u: &RangeUnit, index: &WindowIndex, packed: bool) -> Occupied {
     let mut world_cells = Vec::new();
     unit_world_cells(u, |p| world_cells.push(p.to_array()));
-    let cells = world_cells.iter().filter_map(|&p| index.index(p)).collect();
+    let mut cells = world_cells.iter().filter_map(|&p| index.index(p)).collect();
+    let mut words = Vec::new();
+    if packed {
+        packed::pack(&mut cells, &mut words);
+    }
     Occupied {
         hidden: false,
         turret_delta: u.turret_delta,
@@ -415,6 +422,8 @@ fn new_occupied(u: &RangeUnit, index: &WindowIndex) -> Occupied {
         world_cells,
         bounds: None,
         cells,
+        words,
+        packed,
     }
 }
 /// One actor owns its cache. Preparing it reads no other actor and does not
@@ -424,6 +433,7 @@ fn update_occupied(
     old: &mut Occupied,
     index: &WindowIndex,
     previous_window: Option<TerrainWindow>,
+    packed: bool,
 ) -> bool {
     let window = &index.window;
     let (lo, hi) = u.bounds();
@@ -431,6 +441,7 @@ fn update_occupied(
     {
         old.hidden = true;
         old.cells.clear();
+        old.words.clear();
         return false;
     }
     let changed = old.hidden
@@ -462,12 +473,18 @@ fn update_occupied(
         old.bounds = None;
     }
     if changed
+        || old.packed != packed
         || (previous_window != Some(*window)
             && previous_window.is_none_or(|was| !old.same_clip(was, *window)))
     {
         old.cells.clear();
         old.cells
             .extend(old.world_cells.iter().filter_map(|&p| index.index(p)));
+        old.words.clear();
+        if packed {
+            packed::pack(&mut old.cells, &mut old.words);
+        }
+        old.packed = packed;
     }
     old.revision = u.revision;
     changed
@@ -488,23 +505,29 @@ fn cached_cells_in(
     // Reuse Bevy's persistent pool; small rosters and standalone callers keep
     // the serial path. Scope results follow direct spawn order, not completion.
     let pool = pool.filter(|_| actor_count >= 4);
+    // Local comparison sort pays off only when spread over enough workers.
+    // Preserve the former radix path for serial and small pools.
+    let packed = pool.is_some_and(|pool| pool.thread_num() >= 4);
     let rebuilds = if visual.cached.len() != actor_count {
         visual.cached = if let Some(pool) = pool {
             pool.scope(|scope| {
                 for u in actors.clone() {
                     let index = &index;
-                    scope.spawn(async move { new_occupied(u, index) });
+                    scope.spawn(async move { new_occupied(u, index, packed) });
                 }
             })
         } else {
-            actors.clone().map(|u| new_occupied(u, &index)).collect()
+            actors
+                .clone()
+                .map(|u| new_occupied(u, &index, packed))
+                .collect()
         };
         actor_count
     } else if let Some(pool) = pool {
         pool.scope(|scope| {
             for (u, old) in actors.clone().zip(&mut visual.cached) {
                 let index = &index;
-                scope.spawn(async move { update_occupied(u, old, index, previous_window) });
+                scope.spawn(async move { update_occupied(u, old, index, previous_window, packed) });
             }
         })
         .into_iter()
@@ -513,7 +536,7 @@ fn cached_cells_in(
     } else {
         actors
             .zip(&mut visual.cached)
-            .map(|(u, old)| update_occupied(u, old, &index, previous_window))
+            .map(|(u, old)| update_occupied(u, old, &index, previous_window, packed))
             .filter(|rebuilt| *rebuilt)
             .count()
     };
@@ -527,10 +550,17 @@ fn cached_cells_in(
     let mut next = std::mem::take(&mut visual.scratch);
     next.clear();
     next.reserve(visual.occupied.len());
-    for cached in &visual.cached {
-        next.extend_from_slice(&cached.cells);
+    if packed {
+        packed::union(
+            visual.cached.iter().map(|cached| cached.words.as_slice()),
+            &mut next,
+        );
+    } else {
+        for cached in &visual.cached {
+            next.extend_from_slice(&cached.cells);
+        }
+        sort_unique_cells(&mut next, &mut visual.sort_scratch, &mut visual.sort_counts);
     }
-    sort_unique_cells(&mut next, &mut visual.sort_scratch, &mut visual.sort_counts);
     next
 }
 pub fn occupancy(sim: &BlastRange, gas: &mut GasInput, v: &mut Visual) {
@@ -960,7 +990,16 @@ mod tests {
                 let result = cached_cells_in(&sim, &window, &mut parallel, Some(&pool));
                 assert_eq!(result, reference, "workers={workers} stage={stage}");
                 assert_eq!(result, cells(&sim, &window));
-                assert_eq!(parallel.cached, serial.cached);
+                let canonical = |cache: &Occupied| {
+                    let mut cache = cache.clone();
+                    packed::pack(&mut cache.cells, &mut cache.words);
+                    cache.packed = true;
+                    cache
+                };
+                assert_eq!(
+                    parallel.cached.iter().map(canonical).collect::<Vec<_>>(),
+                    serial.cached.iter().map(canonical).collect::<Vec<_>>()
+                );
                 assert_eq!(parallel.occupancy_rebuilds, serial.occupancy_rebuilds);
                 serial.scratch = std::mem::replace(&mut serial.occupied, reference);
                 parallel.scratch = std::mem::replace(&mut parallel.occupied, result);
@@ -994,6 +1033,37 @@ mod tests {
     }
 
     #[test]
+    fn occupancy_cache_switches_between_radix_and_packed_pools_without_stale_cells() {
+        let pools: Vec<_> = [1, 4, 8]
+            .into_iter()
+            .map(|workers| {
+                bevy::tasks::TaskPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+            })
+            .collect();
+        let mut sim = occupancy_roster(8);
+        let mut visual = Visual::default();
+        let mut window = TerrainWindow {
+            origin: [96, 0, 256],
+            dims: [512, 192, 512],
+        };
+        for (step, pool) in [None, Some(1), Some(0), Some(2), None, Some(1)]
+            .into_iter()
+            .enumerate()
+        {
+            if step == 3 {
+                window.origin[0] += 8;
+                sim.units[1].body.vol.cols.fill(0);
+                sim.units[1].revision += 1;
+            }
+            let result = cached_cells_in(&sim, &window, &mut visual, pool.map(|i| &pools[i]));
+            assert_eq!(result, cells(&sim, &window), "mode change {step}");
+            visual.scratch = std::mem::replace(&mut visual.occupied, result);
+        }
+    }
+
+    #[test]
     #[ignore = "manual sixty-actor occupancy timing without competing workloads"]
     fn bench_occupancy_pool() {
         let window = TerrainWindow {
@@ -1023,10 +1093,12 @@ mod tests {
             let mean = times.iter().sum::<u128>() / times.len() as u128;
             times.sort_unstable();
             println!(
-                "OCCUPANCY workers={workers} mean_us={mean} p50_us={} p99_us={} cells={}",
+                "OCCUPANCY workers={workers} mean_us={mean} p50_us={} p99_us={} cells={} cached_cells={} packed_words={}",
                 times[60],
                 times[118],
-                visual.occupied.len()
+                visual.occupied.len(),
+                visual.cached.iter().map(|c| c.cells.len()).sum::<usize>(),
+                visual.cached.iter().map(|c| c.words.len()).sum::<usize>(),
             );
         }
     }
