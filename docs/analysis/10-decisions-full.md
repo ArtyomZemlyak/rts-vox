@@ -24467,3 +24467,35 @@ Final copy/commit и тик симуляции serial; 165 FPS, WBPERF-002/007/0
 и наблюдаемость leaf costs остаются открытыми.
 Данные, SHA/WIP provenance и ограничения —
 [146](146-parallel-shadow-union.md).
+
+## ADR-553 — параллельная геометрия огня и дыма
+
+Hot/smoke geometry отделена от Assets и читает один immutable render
+frame: уже отсортированные particles, прежние Witness transforms и
+read-only sim/Effects. От 2 threads, 32 primitives в каждом слое и 256
+суммарно caller строит оценённо больший слой параллельно одному scope
+job меньшего. Vecs передаются в Mesh по владению; small/serial путь
+сохраняет compact cloned conversion. GPU settings, примитивы, цвета,
+сроки/число эффектов, layer order/visibility и физика прежние.
+Assets меняются на caller после join; новые pools/snapshots отсутствуют.
+
+Два немедленно ожидаемых jobs не приняты: native presentation tails
+ухудшались. Scope stealing оставлен для nested use; источник ожиданий
+не доказан. Fixed-order microbench исправлен warm-up/rotation/black_box;
+ранний вывод об ownership-only regression отозван. Controlled geometry
+fixture: serial 0,521 мс, 4 threads 0,282 мс; не whole draw и не FPS.
+
+Две ordinary native 120-секундные пары полного боя: presentation group
+mean −11,6/12,0%, p99 −8,2/10,9%, 3600 steps, hash
+bcc1f58c226d1721 и полный gameplay evidence прежние. FPS
+86,510→86,824 / 85,851→85,985: устойчивый overall gain не установлен.
+Whole-frame p99 немного хуже, max ниже; stalls не закрыты.
+117 full render tests passed, 3 ignored; ignored bench выполнен отдельно.
+Serial/parallel conversion attrs/indices/usage, nested scopes и пустые
+слои проверены, owned positions не копируются. Build/Clippy/fmt проходят.
+
+Отдельные fire/worker/join spans, native gate hit counts, worker OS
+IDs/cycles и память не сняты. WBPERF-020/025 частичны, 001/027,
+independent sim/render (002), balanced CPU и 165 FPS открыты.
+Evidence/prototypes/SHA/WIP provenance —
+[147](147-parallel-fire-geometry.md).

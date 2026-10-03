@@ -1,7 +1,7 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
 Обновлено: 03.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
-WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017 и 026 частично выполняются, остальные задачи открыты.
+WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
 Последний шаг ADR-549: immutable соседские чтения unit conduction
 в existing physics pool, cursor-ordered admission/outflow/stale removal.
 Leaf minimum 128: полный штатный пакет 512 даёт четыре задания.
@@ -3918,6 +3918,33 @@ GPU residency. Кэш вариантов фрагментов не имеет я
 через постоянные буферы. HUD уже сравнивает часть строк перед присваиванием.
 **Приёмка:** p99 оставшегося presentation ≤1 мс после 009, 30 выбранных
 юнитов, все круги дистанции, drag selection, прокрутка и смена меню работают.
+
+03.10.2026, ADR-553: подготовка hot/smoke geometry отделена от Assets.
+Для крупной нагрузки caller строит оценённо больший слой параллельно
+одному job меньшего в существующем ComputeTaskPool; Mesh Vecs передаются
+по владению. Small/serial path сохраняет compact cloned publication.
+Camera sort, interpolated Witness poses, примитивы/цвета/сроки эффектов,
+GPU settings и скрытый nonempty Mesh при пустом слое прежние.
+
+Два jobs с немедленным ожиданием не приняты: первые native runs снижали
+mean presentation, но увеличивали p99/max группы. Fixed-order microbench
+не отделял warm-up/специализацию; исправлен rotating warm opaque-input
+стенд. Его ранний вывод об ownership-only regression отозван.
+Controlled final CPU fixture: serial 0,521 / compute 4 0,282 мс;
+это только geometry, не FPS и не frozen old whole draw.
+
+Две ordinary native 120-секундные пары 30×30: presentation group mean
+0,775→0,685 / 0,774→0,681 мс (−11,6/12,0%), p99
+1,300→1,193 / 1,309→1,166 мс. Overall FPS
+86,510→86,824 / 85,851→85,985: устойчивый общий выигрыш не установлен.
+Whole-frame p99 немного хуже, max ниже; stalls не закрыты. Все четыре
+3600 steps, прежние hash bcc1f58c226d1721 / полный gameplay evidence.
+117 full render tests passed, 3 ignored; ignored bench выполнен отдельно.
+Conversion/parallel attrs, пустые слои, nested 1/2/4 и ownership pointer
+проверены; build/Clippy/fmt проходят. 020/025 частичны: отдельные
+fire/worker/join spans, gate hits, OS cycles и память не сняты;
+подтверждение причины tails, 165 FPS и WBPERF-002/027 открыты.
+Подробности и prototype provenance — [147](147-parallel-fire-geometry.md).
 
 ### WBPERF-021 — исходный сбой восстановления движения
 

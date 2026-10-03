@@ -1,6 +1,8 @@
 //! Bounded cubic combustion: hot torn tongues, cooling embers and coarse smoke.
 //! Pure presentation; body integrity and stream contacts come from sim-core.
 use super::*;
+#[path = "fire/geometry.rs"]
+mod geometry;
 use sim_core::blast::battle::Weapon as BattleWeapon;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
@@ -875,7 +877,7 @@ pub fn draw(
             ));
         }
         for smoke in [false, true] {
-            let handle = meshes.add(fire_mesh(&MeshBuf::default()));
+            let handle = meshes.add(fire_mesh(MeshBuf::default()));
             let material = materials.add(StandardMaterial {
                 base_color: Color::WHITE,
                 unlit: !smoke,
@@ -940,151 +942,6 @@ pub fn draw(
         eye.distance_squared(b.1)
             .total_cmp(&eye.distance_squared(a.1))
     });
-    let mut hot = MeshBuf::default();
-    for trace in &scene.sim.battle.lasers {
-        let from = point(trace.from);
-        let to = point(trace.to);
-        beam(&mut hot, from, to, 10.0, [1.8, 0.025, 0.018, 0.09]);
-        beam(&mut hot, from, to, 4.8, [5.0, 0.12, 0.04, 0.30]);
-        beam(&mut hot, from, to, 1.9, [12.0, 2.8, 0.8, 0.95]);
-        if trace.hit {
-            cube(&mut hot, to, 6.0, [9.0, 1.8, 0.3, 0.9]);
-        }
-    }
-    if scene.sim.config.delivery == Delivery::Laser && !scene.sim.battle_mode() {
-        for trace in &scene.sim.streams.traces {
-            let from = point(trace.from);
-            let to = point(trace.to);
-            let size = if scene.sim.gun.kind == RangeUnitKind::Spider {
-                3.0
-            } else {
-                1.0
-            };
-            let heat_width = scene.sim.streams.tuning.laser.heat_radius as f32 * 2.0;
-            if heat_width > 0.0 {
-                beam(&mut hot, from, to, heat_width, [1.6, 0.035, 0.012, 0.055]);
-            }
-            beam(&mut hot, from, to, 2.4 * size, [2.8, 0.06, 0.025, 0.18]);
-            beam(&mut hot, from, to, 0.65 * size, [7.0, 0.36, 0.25, 0.92]);
-            if trace.hit {
-                cube(&mut hot, to, 2.5 * size, [5.0, 0.65, 0.18, 0.75]);
-            }
-        }
-    }
-    if scene.sim.config.delivery == Delivery::MachineGun || scene.sim.battle_mode() {
-        for tracer in &fx.tracers {
-            let fade = (1.0 - (now - tracer.born) / TRACER_LIFE).clamp(0.0, 1.0);
-            // The short streak remains visible across render frames. Its head
-            // never passes the last physical bullet position.
-            beam(
-                &mut hot,
-                tracer.tail,
-                tracer.head,
-                1.1,
-                [3.8, 2.0, 0.28, 0.58 * fade],
-            );
-            beam(
-                &mut hot,
-                tracer.tail.lerp(tracer.head, 0.18),
-                tracer.head,
-                0.48,
-                [7.0, 4.3, 0.85, 0.95 * fade],
-            );
-        }
-    }
-    if scene.sim.battle_mode() {
-        let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
-        for r in scene
-            .sim
-            .battle
-            .rounds
-            .iter()
-            .filter(|r| matches!(r.weapon, BattleWeapon::Blast | BattleWeapon::Kinetic))
-        {
-            let t = if scene.realtime {
-                (scene.acc * 30.0).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            let at = point(r.previous).lerp(point(r.pos), t);
-            cube(&mut hot, at, 2.0, [6.0, 3.2, 0.55, 1.0]);
-        }
-    }
-    let mut smoke = MeshBuf::default();
-    for (p, at, t) in particles {
-        if p.smoke {
-            if p.dust_material != 0 {
-                let rgb = match p.dust_material {
-                    1 => [0.38, 0.31, 0.23],
-                    7 => [0.36, 0.34, 0.25],
-                    8 => [0.39, 0.36, 0.31],
-                    6 => [0.34, 0.34, 0.32],
-                    _ => [0.38, 0.36, 0.33],
-                };
-                let fade = (t * 9.0).min(1.0) * (1.0 - t).powi(2);
-                cube(
-                    &mut smoke,
-                    at,
-                    p.edge * (0.75 + t * 0.9),
-                    [rgb[0], rgb[1], rgb[2], fade * 0.34],
-                );
-            } else if p.burst_dust {
-                let fade = (t * 10.0).min(1.0) * (1.0 - t).powi(2);
-                let shade = 0.26 + noise(p.seed) * 0.09;
-                cube(
-                    &mut smoke,
-                    at,
-                    p.edge * (0.7 + t * 0.8),
-                    [shade, shade * 0.88, shade * 0.72, fade * 0.18],
-                );
-            } else {
-                let fade = (t * 8.0).min(1.0) * (1.0 - t).powi(2);
-                let shade = 0.14 + t * 0.11 + noise(p.seed) * 0.05;
-                cube(
-                    &mut smoke,
-                    at,
-                    p.edge * (0.65 + t * 1.35),
-                    [
-                        shade * 0.98,
-                        shade * 0.96,
-                        shade,
-                        fade * (0.14 + 0.07 * (1.0 - t)),
-                    ],
-                );
-            }
-        } else {
-            let col = flame_colour(p, t, now);
-            let edge = p.edge * (0.9 + (t * 3.0).sin() * 0.1) * (1.0 - t * 0.55);
-            if p.stream {
-                // A flame packet travels as a ragged tongue. Extend its
-                // cuboid behind the current position so the ribbon joins up
-                // without painting beyond the latest contact point.
-                let axis = p.velocity.normalize_or_zero();
-                beam(
-                    &mut hot,
-                    at - axis * edge * (2.1 - t * 0.7),
-                    at,
-                    edge * 0.72,
-                    col,
-                );
-            } else if p.burst_flame {
-                // Impact fragments have a direction. A short, uneven cuboid
-                // makes each hot tongue read as an outward jet rather than a
-                // ring of equally shaped fire blocks.
-                let axis = p.velocity.normalize_or_zero();
-                let stretch = 0.85 + noise(p.seed.wrapping_add(43)) * 1.45;
-                beam(
-                    &mut hot,
-                    at - axis * edge * stretch,
-                    at + axis * edge * 0.2,
-                    edge * (0.38 + noise(p.seed.wrapping_add(51)) * 0.27),
-                    col,
-                );
-            } else {
-                cube(&mut hot, at, edge, col);
-            }
-        }
-    }
     // Use exactly the interpolated transforms already applied to visible meshes,
     // including solved legs. Current simulation poses can lead the picture by a tick.
     let mut poses = std::collections::BTreeMap::new();
@@ -1093,81 +950,64 @@ pub fn draw(
             poses.entry((w.0, w.2, w.3)).or_insert(*tr);
         }
     }
-    for &(cell, heat) in &fx.heat_spots {
-        let id = usize::from(cell.unit);
-        let seg = cell.part.checked_sub(1).map(usize::from);
-        let turret = seg.map_or(cell.at[1] >= scene.sim.units[id].body.turret_y, |i| {
-            scene.sim.units[id].body.segments[i].attach.turret
-        });
-        let Some(tr) = poses.get(&(id, seg, turret)) else {
-            continue;
-        };
-        let Some(body) = cell.body(&scene.sim.units) else {
-            continue;
-        };
-        let level = (heat as f32 / scene.sim.thermal_tuning.glow as f32 - 1.0).clamp(0.0, 3.0);
-        let start = hot.pos.len();
-        let unit = &scene.sim.units[id];
-        let pivot = if let Some(seg) = seg {
-            render::model::pivot_centre(&unit.body.segments[seg].attach)
-        } else {
-            render::model::root_centre(body)
-        };
-        let local = (Vec3::from(cell.at.map(|v| v as f32)) + Vec3::splat(0.5) - Vec3::from(pivot))
-            * (body.mm as f32 / voxel::unit::WORLD_MM as f32);
-        let centre = tr.translation + tr.rotation * local;
-        cube(
-            &mut hot,
-            centre,
-            body.mm as f32 / voxel::unit::WORLD_MM as f32 * 1.06,
-            [0.8 + level * 1.4, 0.025 + level * 0.12, 0.006, 0.65],
-        );
-        let rotation = tr.rotation;
-        for p in &mut hot.pos[start..] {
-            *p = (centre + rotation * (Vec3::from(*p) - centre)).to_array();
-        }
-        for n in &mut hot.nrm[start..] {
-            *n = (rotation * Vec3::from(*n)).to_array();
-        }
-    }
+    let prepared = geometry::prepare(
+        geometry::Input {
+            sim: &scene.sim,
+            effects: &fx,
+            particles: &particles,
+            now,
+            fraction: if scene.realtime {
+                (scene.acc * 30.0).clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            poses: &poses,
+        },
+        bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
+    );
     for (layer, mut visible) in &mut layers {
         *visible = if if layer.0 {
-            smoke.is_empty()
+            prepared.smoke.is_none()
         } else {
-            hot.is_empty()
+            prepared.hot.is_none()
         } {
             Visibility::Hidden
         } else {
             Visibility::Inherited
         };
     }
-    if !hot.is_empty() {
-        if let Some(mut m) = fx.fire.as_ref().and_then(|h| meshes.get_mut(h)) {
-            *m = fire_mesh(&hot);
+    if let Some(mesh) = prepared.hot {
+        if let Some(mut asset) = fx.fire.as_ref().and_then(|h| meshes.get_mut(h)) {
+            *asset = mesh;
         }
     }
-    if !smoke.is_empty() {
-        if let Some(mut m) = fx.smoke.as_ref().and_then(|h| meshes.get_mut(h)) {
-            *m = fire_mesh(&smoke);
+    if let Some(mesh) = prepared.smoke {
+        if let Some(mut asset) = fx.smoke.as_ref().and_then(|h| meshes.get_mut(h)) {
+            *asset = mesh;
         }
     }
 }
 
-fn fire_mesh(buf: &MeshBuf) -> Mesh {
+fn fire_mesh(mut buf: MeshBuf) -> Mesh {
     // An empty Bevy 0.19 mesh has no allocator key. Keep the last nonempty
     // mesh hidden between bursts; the initial hidden mesh is a tiny cube.
-    let mut placeholder = MeshBuf::default();
     if buf.is_empty() {
-        cube(
-            &mut placeholder,
-            Vec3::new(0.0, -1000.0, 0.0),
-            0.01,
-            [0.0; 4],
-        );
+        cube(&mut buf, Vec3::new(0.0, -1000.0, 0.0), 0.01, [0.0; 4]);
     }
-    let mut m = mesh(if buf.is_empty() { &placeholder } else { buf });
-    m.asset_usage = RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD;
-    m
+    let textured = !buf.uv.is_empty() && buf.uv.len() == buf.pos.len();
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, buf.pos)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, buf.nrm)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, buf.col)
+    .with_inserted_indices(Indices::U32(buf.idx));
+    if textured {
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, buf.uv);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_TANGENT, buf.tan);
+    }
+    mesh
 }
 
 #[cfg(test)]
@@ -1635,7 +1475,7 @@ mod tests {
             let [a, c, d] = [t[0], t[1], t[2]].map(|i| Vec3::from(b.pos[i as usize]));
             assert!((c - a).cross(d - a).dot(Vec3::from(b.nrm[t[0] as usize])) > 0.0);
         }
-        assert!(fire_mesh(&b)
+        assert!(fire_mesh(b)
             .asset_usage
             .contains(RenderAssetUsages::MAIN_WORLD));
     }
