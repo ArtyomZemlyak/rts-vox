@@ -344,6 +344,173 @@ class ReportTests(unittest.TestCase):
         after = profile.analyze(self.path)
         self.assertIn("different:CoreTriggerMilliseconds", profile.compare(before, after)["reasons"])
 
+    def frame_capture(self, source="gap"):
+        self.write_stall_capture()
+        frames = [dict(r) for r in self.frames]
+        if source == "gap":
+            frames[1].update(frame_start_ns="200000000", frame_end_ns="200000100", frame_gap_ns="199998800")
+            begin, end, tick = 1200, 200000000, 1
+        else:
+            frames[1].update(frame_start_ns="2000000", frame_end_ns="202000000")
+            begin, end, tick = 2000000, 202000000, 1
+        with (self.path / "world-battle.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(frames[0])); writer.writeheader(); writer.writerows(frames)
+        log = self.path / "world-battle.log"
+        interval_signal = ("PROFILE stall_frame_signal source=interval generation=0 tick=1 begin_ns=900 end_ns=200000000 window=1\n" if source == "gap" else "")
+        count = 2 if source == "gap" else 1
+        log.write_text(log.read_text().replace("stall_capture_schema=1", "stall_capture_schema=2").replace("stall_windows=0", "stall_windows=1") +
+            f"PROFILE stall_frame_signals={count} stall_retained_frame_signals={count} stall_dropped_frame_signals=0 stall_unarmed_frame_signals=0\n" + interval_signal +
+            f"PROFILE stall_frame_signal source={source} generation=0 tick={tick} begin_ns={begin} end_ns={end} window=1\n")
+
+    def test_frame_trigger_catches_gap_with_fast_core_and_never_blames_the_gap_on_core(self):
+        self.frame_capture()
+        result = profile.analyze(self.path)
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertFalse(result["acceptance_eligible"])
+        capture = result["stall_trace"]
+        self.assertEqual(capture["windows"], 1)
+        self.assertEqual(capture["observed_slow_ticks"], 0)
+        self.assertEqual(capture["frame_signals"][0]["frame_row"], 1)
+        coverage = result["stall_episodes"]["retained"][0]["diagnostic_coverage"]
+        self.assertEqual(coverage["tick_phases"], "complete")
+        self.assertGreater(coverage["outside_update_ms"], 199)
+        self.assertFalse(coverage["worker_scopes_available"])
+        self.assertFalse(coverage["cause_identified"])
+        self.assertIn("Frame triggers: 2 signals", profile.markdown(result))
+
+    def test_frame_trigger_without_any_simulation_step_is_still_valid(self):
+        self.frame_capture("update")
+        result = profile.analyze(self.path)
+        coverage = result["stall_episodes"]["retained"][0]["diagnostic_coverage"]
+        self.assertEqual(coverage["tick_phases"], "no_core_ticks")
+        self.assertEqual(coverage["non_core_slice_ms"], 200)
+        self.assertFalse(result["acceptance_eligible"])
+
+    def test_frame_signal_metadata_clock_identity_and_counts_are_validated(self):
+        for old, new, message in [
+            ("begin_ns=1200", "begin_ns=1201", "clock/identity"),
+            ("source=gap generation=0", "source=gap generation=1", "clock/identity"),
+            ("window=1", "window=2", "clock/identity"),
+            ("stall_frame_signals=2", "stall_frame_signals=3", "budget/count"),
+            ("stall_retained_frame_signals=2", "stall_retained_frame_signals=0", "budget/count"),
+        ]:
+            with self.subTest(new=new):
+                self.frame_capture()
+                log = self.path / "world-battle.log"
+                log.write_text(log.read_text().replace(old, new))
+                with self.assertRaisesRegex(ValueError, message):
+                    profile.analyze(self.path)
+        self.frame_capture()
+        log = self.path / "world-battle.log"
+        log.write_text("\n".join(l for l in log.read_text().splitlines() if not l.startswith("PROFILE stall_frame_signals=")))
+        with self.assertRaisesRegex(ValueError, "summary missing"):
+            profile.analyze(self.path)
+
+    def test_combined_interval_triggers_when_slice_and_gap_are_both_below_threshold(self):
+        self.write_stall_capture()
+        frames = [dict(r) for r in self.frames]
+        frames[0]["frame_end_ns"] = "30000900"
+        frames[1].update(frame_start_ns="60000900", frame_end_ns="60001000", frame_gap_ns="30000000")
+        with (self.path / "world-battle.csv").open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(frames[0])); writer.writeheader(); writer.writerows(frames)
+        log = self.path / "world-battle.log"
+        log.write_text(log.read_text().replace("stall_capture_schema=1", "stall_capture_schema=2").replace("stall_windows=0", "stall_windows=1") +
+            "PROFILE stall_frame_signals=1 stall_retained_frame_signals=1 stall_dropped_frame_signals=0 stall_unarmed_frame_signals=0\n" +
+            "PROFILE stall_frame_signal source=interval generation=0 tick=1 begin_ns=900 end_ns=60000900 window=1\n")
+        result = profile.analyze(self.path)
+        episode = result["stall_episodes"]["retained"][0]
+        self.assertEqual(episode["covered_wall_ms"], 60)
+        self.assertEqual(episode["measured_wall_ms"], 30)
+        self.assertEqual(episode["following_gap_ms"], 30)
+        self.assertEqual(result["stall_trace"]["frame_signals"][0]["source"], "interval")
+
+    def test_incident_coverage_does_not_use_quiet_tail_as_evidence_for_earlier_stall(self):
+        frames = self.ordinary_stall_frames()
+        _, _, episodes = profile.summarize_slices(frames, True, 12)
+        quiet_tail = dict(ticks=[dict(frame_row=3, wall_ms=0.1)])
+        profile.incident_coverage(episodes, frames, [0] * 4, [0.0] * 4, [0] * 4, quiet_tail)
+        self.assertTrue(all(e["diagnostic_coverage"]["tick_phases"] == "none" for e in episodes["retained"]))
+        self.assertEqual(episodes["retained"][0]["diagnostic_coverage"]["untraced_steps"], 1)
+
+    def test_partial_multi_step_coverage_and_ordinary_missing_trace_are_explicit(self):
+        frames = self.ordinary_stall_frames()
+        ordinary = self.ordinary_report(frames)
+        self.assertTrue(all(e["diagnostic_coverage"]["tick_phases"] == "none" for e in ordinary["stall_episodes"]["retained"]))
+        _, _, episodes = profile.summarize_slices(frames, True, 12)
+        profile.incident_coverage(episodes, frames, [0, 0, 1, 0], [0, 0, 25, 0], [0, 0, 2, 0], None)
+        coverage = episodes["retained"][1]["diagnostic_coverage"]
+        self.assertEqual(coverage["tick_phases"], "partial")
+        self.assertEqual(coverage["untraced_steps"], 1)
+        self.assertEqual(coverage["captured_tick_wall_ms"], 25)
+        self.assertTrue(coverage["worker_scopes_available"])
+
+    def test_old_and_frame_trigger_contracts_cannot_be_speed_pairs(self):
+        self.write_stall_capture()
+        before = profile.analyze(self.path)
+        self.frame_capture()
+        after = profile.analyze(self.path)
+        self.assertIn("different:stall_trace:schema", profile.compare(before, after)["reasons"])
+
+    def test_zero_elapsed_first_slice_still_owns_its_trace_and_frame_signal(self):
+        self.frame_capture()
+        path = self.path / "world-battle.csv"
+        frames = list(profile.read_csv(path)); frames[0]["seconds"] = "0.0"
+        with path.open("w", newline="") as out:
+            writer = csv.DictWriter(out, list(frames[0])); writer.writeheader(); writer.writerows(frames)
+        result = profile.analyze(self.path)
+        self.assertTrue(result["valid_for_comparison"])
+        self.assertEqual(result["stall_trace"]["ticks"][0]["frame_row"], 0)
+
+    def late_peak_capture(self):
+        self.write_stall_capture(rows=[dict(r, generation="4", profile_offset_ns=str(880000000 + int(r['profile_offset_ns']))) for r in trace() if r['lane'] != 'task'])
+        frames = [dict(self.frames[0], generation=str(i), tick="1", frame_start_ns=str(i * 220000000),
+                       frame_end_ns=str(i * 220000000 + 200000000), frame_gap_ns="20000000" if i else "0") for i in range(5)]
+        with (self.path / 'world-battle.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, list(frames[0])); writer.writeheader(); writer.writerows(frames)
+        log = self.path / 'world-battle.log'
+        lines = [l for l in log.read_text().splitlines() if not l.startswith('PROFILE stall_')]
+        lines += ['PROFILE stall_capture_schema=3 stall_capture_mode=phase_ring threshold_ms=50 pre_ticks=16 post_ticks=16 max_windows=4',
+                  'PROFILE stall_windows=4 stall_slow_ticks=0 stall_unarmed_slow_ticks=0 stall_retained_ticks=1',
+                  'PROFILE stall_frame_signals=9 stall_retained_frame_signals=9 stall_dropped_frame_signals=0 stall_unarmed_frame_signals=1']
+        for i in range(5):
+            if i:
+                lines.append(f'PROFILE stall_frame_signal source=interval generation={i-1} tick=1 begin_ns={(i-1)*220000000} end_ns={i*220000000} window={i}')
+            lines.append(f'PROFILE stall_frame_signal source=update generation={i} tick=1 begin_ns={i*220000000} end_ns={i*220000000+200000000} window={i+1 if i<4 else 0}')
+        lines.append('PROFILE stall_peak_signal source=update generation=4 tick=1 begin_ns=880000000 end_ns=1080000000 window=0 context_ticks=16')
+        log.write_text('\n'.join(lines) + '\n')
+
+    def test_late_peak_is_separate_from_event_record_limit_and_keeps_phase_evidence(self):
+        self.late_peak_capture()
+        result = profile.analyze(self.path)
+        peak = result['stall_trace']['late_peak']
+        self.assertEqual(peak['frame_row'], 4)
+        self.assertEqual(peak['wall_ms'], 200)
+        self.assertEqual(result['stall_trace']['ticks'][0]['frame_row'], 4)
+        self.assertFalse(result['acceptance_eligible'])
+        self.assertIn('Late peak reserve', profile.markdown(result))
+
+    def test_late_peak_missing_duplicate_invalid_clocks_and_wrong_budget_are_rejected(self):
+        for old, new, error in [('PROFILE stall_peak_signal', 'IGNORED stall_peak_signal', 'metadata'),
+                                ('window=0 context_ticks=16', 'window=1 context_ticks=16', 'contract'),
+                                ('context_ticks=16', 'context_ticks=17', 'contract'),
+                                ('end_ns=1080000000 window=0 context', 'end_ns=1080000001 window=0 context', 'clock/identity')]:
+            with self.subTest(new=new):
+                self.late_peak_capture()
+                log = self.path / 'world-battle.log'; log.write_text(log.read_text().replace(old, new))
+                with self.assertRaisesRegex(ValueError, error): profile.analyze(self.path)
+        self.late_peak_capture()
+        log = self.path / 'world-battle.log'
+        log.write_text(log.read_text() + log.read_text().splitlines()[-1] + '\n')
+        with self.assertRaisesRegex(ValueError, 'metadata'): profile.analyze(self.path)
+
+    def test_late_peak_metadata_without_its_actual_tick_context_is_not_evidence(self):
+        self.late_peak_capture()
+        rows = [r for r in trace() if r['lane'] != 'task']
+        with (self.path / 'world-battle.stall.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, list(rows[0])); writer.writeheader(); writer.writerows(rows)
+        with self.assertRaisesRegex(ValueError, 'phase context missing'):
+            profile.analyze(self.path)
+
     def test_new_schema_requires_physics_scopes_and_cannot_pair_with_legacy(self):
         self.write()
         legacy = profile.analyze(self.path)

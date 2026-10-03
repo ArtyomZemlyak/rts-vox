@@ -172,6 +172,7 @@ impl Mark {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Tick {
     generation: u64,
     tick: u32,
@@ -352,11 +353,28 @@ pub(super) struct Trigger {
     pub(super) windows: usize,
     pub(super) slow_ticks: u64,
     pub(super) unarmed_slow_ticks: u64,
+    generation: Option<u64>,
+    pub(super) frame_signals: Vec<FrameSignal>,
+    pub(super) observed_frame_signals: u64,
+    pub(super) unarmed_frame_signals: u64,
+    pub(super) peak_signal: Option<FrameSignal>,
+    peak_context: Vec<Tick>,
+}
+#[derive(Clone, Copy)]
+pub(super) struct FrameSignal {
+    pub(super) source: &'static str,
+    pub(super) generation: u64,
+    pub(super) tick: u32,
+    pub(super) begin_ns: u128,
+    pub(super) end_ns: u128,
+    /// Zero means the bounded recorder was no longer armed.
+    pub(super) window: usize,
 }
 impl Trigger {
     pub(super) const PRE: usize = 16;
     pub(super) const POST: usize = 16;
     pub(super) const MAX_WINDOWS: usize = 4;
+    pub(super) const MAX_FRAME_SIGNALS: usize = 64;
     pub(super) fn new(threshold_ms: u32) -> Self {
         assert!((1..=10000).contains(&threshold_ms));
         Self {
@@ -367,15 +385,83 @@ impl Trigger {
             windows: 0,
             slow_ticks: 0,
             unarmed_slow_ticks: 0,
+            generation: None,
+            frame_signals: Vec::new(),
+            observed_frame_signals: 0,
+            unarmed_frame_signals: 0,
+            peak_signal: None,
+            peak_context: Vec::new(),
         }
     }
-    pub(super) fn push(&mut self, tick: Tick) {
+    fn generation(&mut self, generation: u64) {
         // A reset must not attach old-generation context to a new incident.
-        let previous = self.history.back().or_else(|| self.retained.last());
-        if previous.is_some_and(|was| was.generation != tick.generation) {
+        if self.generation.is_some_and(|was| was != generation) {
             self.history.clear();
             self.post_left = 0;
         }
+        self.generation = Some(generation);
+    }
+    /// Existing frame clocks also catch pauses with no expensive core tick.
+    /// Call gap signals before stepping, Update signals after the frame slice.
+    /// No extra clock, OS call, IO or worker collector is needed here.
+    pub(super) fn frame(
+        &mut self,
+        source: &'static str,
+        generation: u64,
+        tick: u32,
+        begin_ns: u128,
+        end_ns: u128,
+    ) {
+        if end_ns.saturating_sub(begin_ns) < u128::from(self.threshold_ms) * 1_000_000 {
+            return;
+        }
+        self.generation(generation);
+        self.observed_frame_signals += 1;
+        let window = if self.post_left > 0 {
+            self.windows
+        } else if self.windows < Self::MAX_WINDOWS {
+            self.retained.extend(self.history.drain(..));
+            self.windows += 1;
+            self.post_left = Self::POST;
+            self.windows
+        } else {
+            0
+        };
+        self.unarmed_frame_signals += u64::from(window == 0);
+        let signal = FrameSignal {
+            source,
+            generation,
+            tick,
+            begin_ns,
+            end_ns,
+            window,
+        };
+        if window == 0
+            && self
+                .peak_signal
+                .is_none_or(|old| end_ns - begin_ns > old.end_ns - old.begin_ns)
+        {
+            // Preserve the worst late interval even after ordinary windows and
+            // event records are exhausted. Only completed phase ticks, no new
+            // worker observations or IO. Replacing the peak keeps memory bounded.
+            self.peak_signal = Some(signal);
+            self.peak_context = self
+                .retained
+                .iter()
+                .chain(self.history.iter())
+                .rev()
+                .filter(|t| t.generation == generation)
+                .take(Self::PRE)
+                .cloned()
+                .collect();
+            self.peak_context.reverse();
+        }
+        if self.frame_signals.len() < Self::MAX_FRAME_SIGNALS {
+            self.frame_signals.push(signal);
+        }
+    }
+    pub(super) fn push(&mut self, tick: Tick) {
+        self.generation(tick.generation);
         let slow = tick.wall_ns() >= u128::from(self.threshold_ms) * 1_000_000;
         self.slow_ticks += u64::from(slow);
         if self.post_left > 0 {
@@ -396,6 +482,10 @@ impl Trigger {
     }
     pub(super) fn finish(&mut self) -> Vec<Tick> {
         self.retained.extend(self.history.drain(..));
+        self.retained.append(&mut self.peak_context);
+        self.retained
+            .sort_by_key(|t| (t.start_ns, t.generation, t.tick));
+        self.retained.dedup_by_key(|t| (t.generation, t.tick));
         std::mem::take(&mut self.retained)
     }
 }
@@ -576,5 +666,93 @@ mod tests {
         assert_eq!(ring.windows, 0);
         assert_eq!(ring.finish().len(), Trigger::PRE);
         assert!(ring.finish().is_empty());
+    }
+    #[test]
+    fn gap_trigger_keeps_context_before_next_tick_without_slow_core() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=30 {
+            ring.push(sample(tick, 0, 1));
+        }
+        ring.frame("gap", 0, 30, 1_000_000_000, 1_080_000_000);
+        for tick in 31..=80 {
+            ring.push(sample(tick, 0, 1));
+        }
+        let rows = ring.finish();
+        assert_eq!(ring.windows, 1);
+        assert_eq!(ring.slow_ticks, 0);
+        assert_eq!(ring.frame_signals[0].window, 1);
+        assert_eq!(
+            rows.iter().map(|r| r.tick).collect::<Vec<_>>(),
+            (15..=46).chain(65..=80).collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn frame_signals_are_bounded_and_do_not_extend_post_window_forever() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=1000 {
+            ring.push(sample(tick, 0, 1));
+            ring.frame("update", 0, tick, 0, 50_000_000);
+        }
+        assert_eq!(ring.windows, Trigger::MAX_WINDOWS);
+        assert_eq!(ring.observed_frame_signals, 1000);
+        assert_eq!(ring.frame_signals.len(), Trigger::MAX_FRAME_SIGNALS);
+        assert!(ring.unarmed_frame_signals > 0);
+        assert!(
+            ring.finish().len()
+                <= Trigger::MAX_WINDOWS * (Trigger::PRE + 1 + Trigger::POST) + 2 * Trigger::PRE
+        );
+    }
+    #[test]
+    fn no_tick_frame_and_reset_do_not_attach_old_generation() {
+        let mut ring = Trigger::new(50);
+        ring.push(sample(8, 0, 1));
+        ring.frame("update", 1, 0, 0, 49_000_000);
+        assert_eq!(ring.windows, 0);
+        ring.frame("update", 1, 0, 0, 50_000_000);
+        assert_eq!(ring.windows, 1);
+        assert!(ring.retained.is_empty());
+        ring.push(sample(1, 1, 1));
+        let rows = ring.finish();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].generation, 1);
+    }
+    #[test]
+    fn exhausted_recorder_preserves_stronger_late_peak_and_replaces_weaker_context() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=100 {
+            ring.push(sample(tick, 0, 1));
+            ring.frame("update", 0, tick, 0, 50_000_000);
+        }
+        ring.frame("interval", 0, 100, 0, 700_000_000);
+        for tick in 101..=200 {
+            ring.push(sample(tick, 0, 1));
+        }
+        ring.frame("interval", 0, 200, 0, 600_000_000);
+        for tick in 201..=300 {
+            ring.push(sample(tick, 0, 1));
+        }
+        let rows = ring.finish();
+        assert_eq!(ring.peak_signal.unwrap().tick, 100);
+        assert!(rows.iter().any(|t| t.tick == 100));
+        assert!(!rows.iter().any(|t| t.tick == 200));
+        assert!(
+            rows.len()
+                <= Trigger::MAX_WINDOWS * (Trigger::PRE + 1 + Trigger::POST) + 2 * Trigger::PRE
+        );
+        assert!(rows.windows(2).all(|w| w[0].tick < w[1].tick));
+    }
+    #[test]
+    fn stronger_peak_after_reset_has_only_its_own_generation_context() {
+        let mut ring = Trigger::new(50);
+        for tick in 1..=100 {
+            ring.push(sample(tick, 0, 1));
+            ring.frame("update", 0, tick, 0, 50_000_000);
+        }
+        ring.frame("gap", 1, 0, 0, 900_000_000);
+        assert!(ring.peak_context.is_empty());
+        ring.push(sample(1, 1, 1));
+        ring.frame("update", 1, 1, 0, 1_000_000_000);
+        assert_eq!(ring.peak_context.len(), 1);
+        assert_eq!(ring.peak_context[0].generation, 1);
     }
 }

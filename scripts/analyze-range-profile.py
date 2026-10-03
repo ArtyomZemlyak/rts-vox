@@ -252,7 +252,9 @@ def stall_episodes(slices, top, threshold_ms=50.0):
         del episodes[top:]
     for sample in slices:
         wall, gap = sample["measured_wall_ms"], sample["following_gap_ms"]
-        slow = (wall is not None and wall >= threshold_ms) or (gap is not None and gap >= threshold_ms)
+        interval = sample["following_interval_ms"]
+        slow = ((wall is not None and wall >= threshold_ms) or (gap is not None and gap >= threshold_ms) or
+                (interval is not None and interval >= threshold_ms))
         if active and (not slow or sample["generation"] != active["generation"]):
             retain(active)
             active = None
@@ -313,16 +315,72 @@ def analyze_stall_trace(directory, scenario, log, manifest, frames, starts, role
     version, mode, threshold, pre, post, maximum, cpu_sampling = header.groups()
     cpu_sampling = cpu_sampling or "unspecified"
     threshold, pre, post, maximum = map(int, (threshold, pre, post, maximum))
-    if version != "1" or mode != "phase_ring" or min(threshold, maximum) <= 0 or cpu_sampling not in ("unspecified", "tick_boundaries"):
+    if version not in ("1", "2", "3") or mode != "phase_ring" or min(threshold, maximum) <= 0 or cpu_sampling not in ("unspecified", "tick_boundaries"):
         raise ValueError("Unsupported stall capture contract")
     summary = re.search(r"^PROFILE stall_windows=(\d+) stall_slow_ticks=(\d+) stall_unarmed_slow_ticks=(\d+) stall_retained_ticks=(\d+)$", log, re.M)
     if not summary:
         raise ValueError("Stall capture summary missing")
     windows, slow_count, unarmed, retained = map(int, summary.groups())
-    if windows > maximum or slow_count < windows or unarmed > slow_count or retained > maximum * (pre + 1 + post) + pre:
+    extra = pre if version == "3" else 0
+    if windows > maximum or (version == "1" and slow_count < windows) or unarmed > slow_count or retained > maximum * (pre + 1 + post) + pre + extra:
         raise ValueError("Stall capture budget/count mismatch")
     if not all(start is not None for start in starts):
         raise ValueError("Stall capture requires aligned frame clocks")
+    frame_signals, signal_count, dropped_signals, unarmed_signals = [], None, None, None
+    peak = None
+    if version in ("2", "3"):
+        counts = re.search(r"^PROFILE stall_frame_signals=(\d+) stall_retained_frame_signals=(\d+) stall_dropped_frame_signals=(\d+) stall_unarmed_frame_signals=(\d+)$", log, re.M)
+        if not counts:
+            raise ValueError("Frame signal summary missing")
+        signal_count, saved_signals, dropped_signals, unarmed_signals = map(int, counts.groups())
+        matches = list(re.finditer(r"^PROFILE stall_frame_signal source=(gap|update|interval) generation=(\d+) tick=(\d+) begin_ns=(\d+) end_ns=(\d+) window=(\d+)$", log, re.M))
+        expected = sum(int(f["frame_end_ns"]) - int(f["frame_start_ns"]) >= threshold * 1000000 for f in frames)
+        expected += sum(int(f["frame_gap_ns"]) >= threshold * 1000000 for f in frames[1:])
+        expected += sum(starts[i] - starts[i - 1] >= threshold * 1000000 for i in range(1, len(starts)))
+        if (signal_count != expected or len(matches) != saved_signals or saved_signals != min(signal_count, 64) or
+                saved_signals + dropped_signals != signal_count or unarmed_signals > signal_count or windows > slow_count + signal_count):
+            raise ValueError("Frame signal budget/count mismatch")
+        def signal(source, values):
+            generation, tick, begin, end, window = map(int, values)
+            idx = bisect.bisect_left(starts, begin if source == "update" else end)
+            if idx >= len(frames) or (source != "update" and idx == 0):
+                raise ValueError("Frame signal outside frame clocks")
+            frame = frames[idx]
+            identity_frame = frame if source == "update" else frames[idx - 1]
+            expected_begin = int(identity_frame["frame_end_ns" if source == "gap" else "frame_start_ns"])
+            expected_end = int(frame["frame_end_ns"] if source == "update" else frame["frame_start_ns"])
+            if (begin != expected_begin or end != expected_end or end - begin < threshold * 1000000 or
+                    generation != int(identity_frame["generation"]) or tick != int(identity_frame["tick"]) or
+                    window > windows):
+                raise ValueError("Frame signal clock/identity mismatch")
+            return dict(source=source, generation=generation, tick=tick, frame_row=idx,
+                        begin_ns=begin, end_ns=end, wall_ms=(end - begin) / 1e6, window=window)
+        identities = set()
+        last_end = -1
+        for match in matches:
+            row = signal(match[1], match.groups()[1:])
+            identity = (row["source"], row["begin_ns"], row["end_ns"])
+            if row["end_ns"] < last_end or identity in identities:
+                raise ValueError("Frame signal clock/identity mismatch")
+            identities.add(identity)
+            last_end = row["end_ns"]
+            frame_signals.append(row)
+        saved_unarmed = sum(s["window"] == 0 for s in frame_signals)
+        if not saved_unarmed <= unarmed_signals <= saved_unarmed + dropped_signals:
+            raise ValueError("Frame signal unarmed count mismatch")
+        if version == "3":
+            peaks = list(re.finditer(r"^PROFILE stall_peak_signal source=(gap|update|interval) generation=(\d+) tick=(\d+) begin_ns=(\d+) end_ns=(\d+) window=(\d+) context_ticks=(\d+)$", log, re.M))
+            if len(peaks) != int(unarmed_signals > 0):
+                raise ValueError("Late peak metadata missing or duplicated")
+            if peaks:
+                match = peaks[0]
+                peak = signal(match[1], match.groups()[1:6])
+                peak["context_tick_budget"] = int(match[7])
+                if peak["window"] != 0 or peak["context_tick_budget"] != pre or any(
+                        (s["window"] == 0 and s["wall_ms"] > peak["wall_ms"]) or
+                        (s["source"] == peak["source"] and s["begin_ns"] == peak["begin_ns"] and s["end_ns"] == peak["end_ns"] and s["window"] != 0)
+                        for s in frame_signals):
+                    raise ValueError("Late peak contract mismatch")
     issues = []
     if declared != threshold or (manifest or {}).get("CorePhases"):
         issues.append("stall_capture_mode_mismatch")
@@ -363,10 +421,42 @@ def analyze_stall_trace(directory, scenario, log, manifest, frames, starts, role
         ticks.append(tick)
     if len(ticks) != retained or slow_count > sum(int(f["simulation_ticks"]) for f in frames):
         raise ValueError("Stall capture retained/observed count mismatch")
-    return dict(schema=1, mode=mode, cpu_sampling=cpu_sampling, threshold_ms=threshold, pre_ticks=pre, post_ticks=post,
+    if peak is not None:
+        idx = peak["frame_row"] - int(peak["source"] != "update")
+        expected = min(int(frames[idx]["simulation_ticks"]), peak["context_tick_budget"])
+        if mapped.get(idx, 0) < expected:
+            raise ValueError("Late peak phase context missing")
+    return dict(schema=int(version), mode=mode, cpu_sampling=cpu_sampling, threshold_ms=threshold, pre_ticks=pre, post_ticks=post,
                 max_windows=maximum, windows=windows, observed_slow_ticks=slow_count,
                 unarmed_slow_ticks=unarmed, retained_ticks=retained, partial=True,
+                observed_frame_signals=signal_count, dropped_frame_signals=dropped_signals, unarmed_frame_signals=unarmed_signals, frame_signals=frame_signals,
+                late_peak=peak,
                 ticks=ticks, slow_ticks=sorted(ticks, key=lambda t: -t["wall_ms"])[:top]), issues
+
+
+def incident_coverage(episodes, frames, mapped_steps, mapped_wall, mapped_jobs, capture):
+    """Context/quiet-tail ticks do not explain an incident unless clocks overlap."""
+    if episodes is None:
+        return
+    if capture is not None:
+        mapped_steps, mapped_wall = [0] * len(frames), [0.0] * len(frames)
+        for tick in capture["ticks"]:
+            idx = tick["frame_row"]
+            mapped_steps[idx] += 1
+            mapped_wall[idx] += tick["wall_ms"]
+    for episode in episodes["retained"]:
+        indices = range(episode["first_row"], episode["last_row"] + 1)
+        traced = sum(mapped_steps[i] for i in indices)
+        total = episode["simulation_ticks"]
+        status = "no_core_ticks" if total == 0 else "complete" if traced == total else "partial" if traced else "none"
+        episode["diagnostic_coverage"] = dict(
+            tick_phases=status, traced_steps=traced, untraced_steps=total - traced,
+            captured_tick_wall_ms=sum(mapped_wall[i] for i in indices),
+            non_core_slice_ms=max(0.0, episode["measured_wall_ms"] - episode["core_ms"]),
+            outside_update_ms=episode["following_gap_ms"],
+            worker_scopes_available=capture is None and any(mapped_jobs[i] for i in indices),
+            os_stacks_available=False,
+            cause_identified=False)
 
 
 def analyze(directory, scenario="world-battle", top=12):
@@ -421,6 +511,8 @@ def analyze(directory, scenario="world-battle", top=12):
     identity_mismatches = 0
     missing_clock = 0
     mapped_steps = [0] * len(frames)
+    mapped_wall = [0.0] * len(frames)
+    mapped_jobs = [0] * len(frames)
     roles = {}
     task_families = {}
     missing_physics_ticks = 0
@@ -510,6 +602,8 @@ def analyze(directory, scenario="world-battle", top=12):
                     if tick["generation"] != int(frames[idx]["generation"]) or tick["tick"] != expected_tick:
                         identity_mismatches += 1
                     mapped_steps[idx] += 1
+                    mapped_wall[idx] += tick["wall_ms"]
+                    mapped_jobs[idx] += tick["task_count"]
                 else:
                     unmapped += 1
             # Bound retained raw detail to the slowest top ticks.
@@ -572,6 +666,7 @@ def analyze(directory, scenario="world-battle", top=12):
     seconds = int(frames[-1]["frame_end_ns"]) / 1e9 if aligned else float(frames[-1]["seconds"])
     meets_rate = scenario != "world-battle" or frame_ticks >= math.floor(seconds * (int(rate[1]) if rate else 30)) - 1
     slice_summary, slow_slices, episodes = summarize_slices(frames, aligned, top)
+    incident_coverage(episodes, frames, mapped_steps, mapped_wall, mapped_jobs, stall_trace)
     expensive_frames = []
     for idx in sorted((i for i, value in enumerate(frame_times) if value is not None), key=lambda i: -frame_times[i])[:top]:
         row = frames[idx]
@@ -582,7 +677,7 @@ def analyze(directory, scenario="world-battle", top=12):
             previous_measured_slice_ms=(int(prev["frame_end_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             begin_to_begin_ms=(int(row["frame_start_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             outside_observed_slice_ms=int(row["frame_gap_ns"]) / 1e6 if aligned else None))
-    return dict(schema=4, directory=str(directory), scenario=scenario, manifest=manifest,
+    return dict(schema=5, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
         acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")),
@@ -616,7 +711,7 @@ def analyze(directory, scenario="world-battle", top=12):
                     "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame; repeated observations are not new jobs and their per-row sum/mean is not render CPU work",
                     "single_tick_ms is exact core wall only for one-step slices; multi-step slices expose an average, never invented individual tick durations",
                     "phase-ring capture retains selected phase/detail ticks and quiet tail, not all ticks or worker jobs; caller CPU is not process CPU and the instrumented run cannot qualify FPS",
-                    "stall episodes group adjacent measured slices or following gaps >=50ms; core wall includes worker execution/preemption/waits and is not OS CPU time",
+                    "stall episodes group adjacent slices, following gaps or begin intervals >=50ms; these overlap, and only disjoint slice/gap wall is added; core wall is not OS CPU time",
                     "OS counters use coarse sampling; UTC alignment is approximate, and only full in-window intervals are included",
                     "callback roles are accumulated per OS ID; thread CPU accounting keeps creation-time lifetimes separate",
                     "OS thread CPU includes unmarked work too; a callback role does not attribute all of that thread's CPU to one subsystem",
@@ -693,12 +788,21 @@ def markdown(report):
     lines += ["", "Core/occupancy/physics/terrain/atmosphere are nested details, not additive Update phases. Render atomic observations are excluded from the slice breakdown. Multi-step core totals do not identify individual tick costs."]
     episodes = report["stall_episodes"]
     if episodes is not None:
-        lines += ["", f"Stall episodes: {episodes['count']} (adjacent measured slices or following gaps >= {episodes['threshold_ms']}ms; wall evidence, not an identified cause).", ""]
+        lines += ["", f"Stall episodes: {episodes['count']} (slices, following gaps or begin intervals >= {episodes['threshold_ms']}ms; disjoint slice/gap wall, not an identified cause).", ""]
         for episode in episodes["retained"]:
             lines.append(f"- generation {episode['generation']}, rows {episode['first_row']}..{episode['last_row']}, {episode['simulation_ticks']} steps: measured wall {episode['measured_wall_ms']:.3f}ms, following gaps {episode['following_gap_ms']:.3f}ms, core wall {episode['core_ms']:.3f}ms; longest exact single tick {number(episode['longest_single_tick_ms'])}ms.")
+            coverage = episode["diagnostic_coverage"]
+            lines.append(f"  Tick phase coverage: {coverage['tick_phases']} ({coverage['traced_steps']}/{episode['simulation_ticks']} steps); non-core slice {coverage['non_core_slice_ms']:.3f}ms; outside Update {coverage['outside_update_ms']:.3f}ms. Worker scopes: {coverage['worker_scopes_available']}; OS stacks: unavailable. Cause remains unproven.")
     capture = report["stall_trace"]
     if capture is not None:
         lines += ["", f"Phase-ring capture: {capture['windows']} windows, {capture['observed_slow_ticks']} slow ticks, {capture['unarmed_slow_ticks']} unarmed crossings; {capture['retained_ticks']} selected ticks retained. CPU sampling: {capture['cpu_sampling']}. Diagnostic only; no worker/stack/wait evidence. Quiet tail remains even if no trigger fired.", ""]
+        if capture["schema"] >= 2:
+            lines.append(f"Frame triggers: {capture['observed_frame_signals']} signals, {capture['unarmed_frame_signals']} unarmed, {capture['dropped_frame_signals']} records omitted by the 64-record bound. Window 0 means unarmed; a signal does not imply complete phase coverage.")
+            for signal in capture["frame_signals"]:
+                lines.append(f"- {signal['source']}: row {signal['frame_row']}, generation {signal['generation']}, tick {signal['tick']}, {signal['wall_ms']:.3f}ms, window {signal['window']}.")
+        if capture["late_peak"] is not None:
+            peak = capture["late_peak"]
+            lines.append(f"Late peak reserve: {peak['source']} row {peak['frame_row']}, tick {peak['tick']}, {peak['wall_ms']:.3f}ms; up to {peak['context_tick_budget']} preceding/completed ticks retained, no post window. Overlapping ticks appear only once. This reserve is partial evidence, not an OS stack or cause.")
         for tick in capture["slow_ticks"]:
             phases = ", ".join(f"{p['name']}={p['wall_ms']:.3f}ms (caller CPU {number(p['thread_cpu_ms'])}ms)" for p in sorted(tick["phases"], key=lambda p: -p["wall_ms"])[:3])
             lines.append(f"- row {tick['frame_row']}, generation {tick['generation']}, tick {tick['tick']}: wall {tick['wall_ms']:.3f}ms, caller CPU {number(tick['thread_cpu_ms'])}ms; {phases}.")

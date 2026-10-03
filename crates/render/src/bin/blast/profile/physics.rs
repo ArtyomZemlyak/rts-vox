@@ -3,6 +3,7 @@
 use super::Mark;
 use std::collections::BTreeMap;
 
+#[derive(Clone)]
 pub(super) struct Total {
     pub thread: Option<u32>,
     pub stage: Option<usize>,

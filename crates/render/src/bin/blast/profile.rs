@@ -310,7 +310,7 @@ pub fn begin(
             println!("PROFILE physics_task_sampling=longest_per_thread_family_stage");
         }
         if let Some(trigger) = &p.trigger {
-            println!("PROFILE stall_capture_schema=1 stall_capture_mode=phase_ring threshold_ms={} pre_ticks={} post_ticks={} max_windows={} cpu_sampling=tick_boundaries",
+            println!("PROFILE stall_capture_schema=3 stall_capture_mode=phase_ring threshold_ms={} pre_ticks={} post_ticks={} max_windows={} cpu_sampling=tick_boundaries",
                 trigger.threshold_ms, core::Trigger::PRE, core::Trigger::POST, core::Trigger::MAX_WINDOWS);
         }
         gas.timings.extract_peak_ns.store(0, Ordering::Relaxed);
@@ -322,7 +322,25 @@ pub fn begin(
     p.observed_frame_ms = p
         .previous_begin_ns
         .map(|previous| (p.frame_start_ns - previous) as f64 / 1_000_000.0);
+    if let Some(previous) = p.previous_begin_ns {
+        let begin = p.frame_start_ns;
+        if let Some(trigger) = &mut p.trigger {
+            trigger.frame(
+                "interval",
+                scene.generation,
+                scene.sim.tick,
+                previous,
+                begin,
+            );
+        }
+    }
     p.previous_begin_ns = Some(p.frame_start_ns);
+    if let Some(last) = p.last_end_ns {
+        let begin = p.frame_start_ns;
+        if let Some(trigger) = &mut p.trigger {
+            trigger.frame("gap", scene.generation, scene.sim.tick, last, begin);
+        }
+    }
     if p.clouds > 0 && !p.emitted && now - start >= 0.5 {
         p.emitted = true;
         for i in 0..p.clouds {
@@ -398,7 +416,9 @@ pub fn end(
         f64::from(p.simulation_ticks),
         p.detail[4],
     ];
-    if elapsed > 0.0 {
+    // Keep the first measured slice too: its Bevy elapsed time can be zero,
+    // while its monotonic slice and any recorded core tick are already real.
+    if elapsed >= 0.0 {
         let end_ns = p.epoch.unwrap().elapsed().as_nanos();
         let start_ns = p.frame_start_ns;
         let observed_frame_ms = p.observed_frame_ms;
@@ -416,6 +436,9 @@ pub fn end(
             observed_frame_ms,
         });
         p.last_end_ns = Some(end_ns);
+        if let Some(trigger) = &mut p.trigger {
+            trigger.frame("update", scene.generation, scene.sim.tick, start_ns, end_ns);
+        }
     }
     if elapsed < p.seconds {
         return;
@@ -433,6 +456,17 @@ pub fn end(
         let rows = trigger.finish();
         println!("PROFILE stall_windows={} stall_slow_ticks={} stall_unarmed_slow_ticks={} stall_retained_ticks={}",
             trigger.windows, trigger.slow_ticks, trigger.unarmed_slow_ticks, rows.len());
+        println!("PROFILE stall_frame_signals={} stall_retained_frame_signals={} stall_dropped_frame_signals={} stall_unarmed_frame_signals={}",
+            trigger.observed_frame_signals, trigger.frame_signals.len(),
+            trigger.observed_frame_signals - trigger.frame_signals.len() as u64, trigger.unarmed_frame_signals);
+        for signal in &trigger.frame_signals {
+            println!("PROFILE stall_frame_signal source={} generation={} tick={} begin_ns={} end_ns={} window={}",
+                signal.source, signal.generation, signal.tick, signal.begin_ns, signal.end_ns, signal.window);
+        }
+        if let Some(signal) = &trigger.peak_signal {
+            println!("PROFILE stall_peak_signal source={} generation={} tick={} begin_ns={} end_ns={} window={} context_ticks={}",
+                signal.source, signal.generation, signal.tick, signal.begin_ns, signal.end_ns, signal.window, core::Trigger::PRE);
+        }
         rows
     } else {
         Vec::new()

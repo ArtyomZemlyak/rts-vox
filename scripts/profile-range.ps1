@@ -134,7 +134,7 @@ try {
             }
             $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0)
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath
