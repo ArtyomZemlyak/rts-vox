@@ -4524,3 +4524,22 @@ Caller обязан перечислить все восстановленные
 Следующий фокус: WBPERF-002/027, native critical path, tile-proof/gate hit
 attribution и OS stacks/waits. Подробные результаты, ограничения, hashes
 и сохранённые исключённые данные — [148](148-local-rubble-proofs-and-build-provenance.md).
+
+
+## ADR-555 — независимые floor/gather jobs на physics workers
+
+WBPERF-004/014/001 частично: крупная подготовка навигационных обломков
+распределяет classify и gather пакетами по 256 в существующем physics pool.
+Indexed join, stacked membership, rounding, roof/yielding/material filtering
+и same-call world visibility сохранены. CPU rubble mean −18,0% / −19,4%,
+p99 −19,4% / −21,1%; 561 core tests проходят, полный hash/counters прежние.
+Ordinary native пары: FPS 79,48→81,94 и 86,59→84,81; **устойчивого FPS
+выигрыша нет**, core/step −1,69% / −0,51%. Пики и обратная просадка открыты.
+
+Отдельный diagnostic подтвердил classify/gather на восьми физических OS
+workers, без missing trace coverage. Это не balanced CPU: aggregate worker
+cycles max/min 13,19× / 5,20× за capture; нужны per-join tails/размеры работы,
+а не увеличение pools по общему CPU %. Малые CPUTime deltas квантованы.
+Новые gather leaf scopes отделены от columns parent, их нельзя складывать.
+Stacked filtering/sort/dedup остаются serial. WBPERF-002, 001/027 и 165 FPS
+открыты. Данные, provenance и границы — [149](149-parallel-rubble-preparation.md).

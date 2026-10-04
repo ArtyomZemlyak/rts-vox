@@ -24525,3 +24525,22 @@ Pre-verified данные серии исключены из приёмки, п�
 101 nav, 560 core/4 ignored, 54 PowerShell cases, 95 Python analyzer tests,
 Clippy/fmt проходят. Полные данные/SHA/границы доказательства —
 [148](148-local-rubble-proofs-and-build-provenance.md).
+
+
+## ADR-555 — параллельная подготовка rubble
+
+04.10.2026. Classify/floor columns от 1024 входов исполняются пакетами
+по 256 в существующем physics pool; buffers owned, reads immutable,
+ordered join и точная карта сохранены. Stacked filtering/sort остаются
+serial. Новый gather scope отделён от columns parent; nested wall не
+суммируется. Сравнение с прежним oracle на 1/2/4/8 workers и gate boundaries,
+561 core/4 ignored, Clippy/fmt, 95 Python и 54 PowerShell checks проходят.
+
+CPU полный бой: rubble mean −18,0% / −19,4%, p99 −19,4% / −21,1%; общий
+tick −1,51% / −3,67%, не весь выигрыш атрибутирован. Ordinary native FPS
++3,10% / −2,06%, core/step −1,69% / −0,51%; устойчивого FPS выигрыша нет.
+Diagnostic подтвердил фактические classify/gather jobs на восьми physics
+OS workers, 1800 полных traced ticks. Aggregate cycles max/min 13,19× /
+5,20× не доказывают balanced CPU или причину stalls. CPUTime малых jobs
+квантован. WBPERF-002/001/027 и 165 FPS открыты. Полные доказательства,
+неудачный native результат и provenance — [149](149-parallel-rubble-preparation.md).

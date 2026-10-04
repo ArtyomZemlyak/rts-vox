@@ -309,9 +309,66 @@ mod tests {
         }
     }
     #[test]
+    fn rubble_batches_match_reference_at_thresholds_and_trace_worker_calls() {
+        let w = world();
+        let pools: Vec<_> = [1, 2, 4, 8]
+            .into_iter()
+            .map(|n| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+        for count in [0, 1023, 1024, 1537] {
+            let mut b = Bursts::default();
+            for i in 0..count {
+                b.fragments.push(Fragment {
+                    id: i + 1,
+                    position: V3::new(
+                        Fx::from_int(8 + (i % 40) as i32 * 2),
+                        Fx::from_ratio(25, 2),
+                        Fx::from_int(8 + (i / 40) as i32 * 2),
+                    ),
+                    velocity: V3::ZERO,
+                    material: 1,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1200,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held: i as u32,
+                    resting: true,
+                });
+            }
+            let expected = b.reference_rubble(&w, &[], &[]);
+            assert_eq!(expected.is_empty(), count == 0);
+            for pool in &pools {
+                let trace = crate::task_trace::Trace::default();
+                let actual = pool.install(|| {
+                    b.rubble_observed(&w, &[], &[], &|stage, event| trace.record(stage, event))
+                });
+                assert_eq!(
+                    actual,
+                    expected,
+                    "count={count} workers={}",
+                    pool.current_num_threads()
+                );
+                trace.balanced(&[
+                    "physics_rubble_floor",
+                    "physics_rubble_gather",
+                    "physics_rubble_columns",
+                ]);
+            }
+        }
+    }
+    #[test]
     fn rubble_reused_boxes_match_reference_after_support_and_hull_changes() {
         let (mut b, mut w) = (Bursts::default(), world());
-        for i in 0..192u32 {
+        for i in 0..1537u32 {
             let side = (i % 4 + 1) as u8;
             let full = u64::MAX >> (64 - u32::from(side).pow(3));
             let shape = if i % 3 == 0 {
@@ -346,6 +403,15 @@ mod tests {
                 resting: i % 5 != 0,
             });
         }
+        let pools: Vec<_> = [1, 2, 4, 8]
+            .into_iter()
+            .map(|n| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .build()
+                    .unwrap()
+            })
+            .collect();
         let solid = |[x, y, z]: [i32; 3]| {
             (42..54).contains(&x) && (42..54).contains(&z) && (14..16).contains(&y)
         };
@@ -365,10 +431,15 @@ mod tests {
             };
             for hulls in [&[][..], std::slice::from_ref(&hull)] {
                 for yielding in [&[][..], &[1][..], &[1, 2, 3][..]] {
-                    assert_eq!(
-                        b.rubble(&w, yielding, hulls),
-                        b.reference_rubble(&w, yielding, hulls)
-                    );
+                    let expected = b.reference_rubble(&w, yielding, hulls);
+                    for pool in &pools {
+                        assert_eq!(
+                            pool.install(|| b.rubble(&w, yielding, hulls)),
+                            expected,
+                            "pass={pass} workers={}",
+                            pool.current_num_threads()
+                        );
+                    }
                 }
             }
             // Queries after digging and fragment movement cannot reuse an
@@ -4327,29 +4398,51 @@ impl Bursts {
         let mut bounds = vec![None; self.fragments.len()];
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
-        let floor_task = PhysicsTask::new(
-            task,
-            "physics_rubble_floor_begin",
-            "physics_rubble_floor_end",
-        );
-        for (i, f) in self.fragments.iter().enumerate() {
-            if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
-                continue;
+        // Each batch owns its boxes and candidate lists. World/hulls/fragments
+        // stay immutable; indexed collection preserves the original ascending
+        // fragment order required by the stacked membership binary search.
+        let classify = |start: usize, boxes: &mut [Option<([Fx; 3], [Fx; 3])>]| {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_floor_begin",
+                "physics_rubble_floor_end",
+            );
+            let mut floor = Vec::new();
+            let mut stacked = Vec::new();
+            for (offset, slot) in boxes.iter_mut().enumerate() {
+                let i = start + offset;
+                let f = &self.fragments[i];
+                if !f.resting || f.chunk.is_some() || yielding.contains(&f.material) {
+                    continue;
+                }
+                let (low, high) = f.bounds();
+                *slot = Some((low, high));
+                let mut p = arr(f.position);
+                p[1] = p[1].sub(Fx::from_ratio(1, 2));
+                if fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz]) {
+                    floor.push(i);
+                } else if !hulls
+                    .iter()
+                    .any(|h| h.carries(f.position.y.add(low[1]), f.position))
+                {
+                    stacked.push(i);
+                }
             }
-            let (low, high) = f.bounds();
-            bounds[i] = Some((low, high));
-            let mut p = arr(f.position);
-            p[1] = p[1].sub(Fx::from_ratio(1, 2));
-            if fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz]) {
-                floor.push(i);
-            } else if !hulls
-                .iter()
-                .any(|h| h.carries(f.position.y.add(low[1]), f.position))
-            {
-                stacked.push(i);
+            (floor, stacked)
+        };
+        if self.fragments.len() >= 1024 {
+            let groups: Vec<_> = bounds
+                .par_chunks_mut(256)
+                .enumerate()
+                .map(|(batch, boxes)| classify(batch * 256, boxes))
+                .collect();
+            for (on_world, on_pieces) in groups {
+                floor.extend(on_world);
+                stacked.extend(on_pieces);
             }
+        } else {
+            (floor, stacked) = classify(0, &mut bounds);
         }
-        drop(floor_task);
         if !stacked.is_empty() {
             let settled = Settled::around_bounds(
                 &self.fragments,
@@ -4381,37 +4474,54 @@ impl Bursts {
             "physics_rubble_columns_end",
         );
         let reach: Vec<([Fx; 2], [Fx; 2])> = hulls.iter().map(Hull::footprint_box).collect();
-        let mut against: Vec<&Hull> = Vec::with_capacity(hulls.len());
-        // The columns with their tops, gathered and sorted, and the map
-        // built from them at once: thousands of single insertions into
-        // the tree cost a millisecond a step on a battlefield (ADR-465).
-        let mut columns: Vec<([i32; 2], u16)> = Vec::new();
-        for i in floor {
-            let f = &self.fragments[i];
-            let (low, high) = bounds[i].unwrap();
-            let p = arr(f.position);
-            // Floor of the bottom corners, ceiling of the top: the columns
-            // the box covers and the height it reaches.
-            let lo = [p[0].add(low[0]), p[2].add(low[2])].map(|v| (v.raw() >> 32) as i32);
-            let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
-            let top = -(p[1].add(high[1]).neg().raw() >> 32);
-            let top = top.clamp(0, i64::from(u16::MAX)) as u16;
-            against.clear();
-            against.extend(hulls.iter().zip(&reach).filter_map(|(h, (b0, b1))| {
-                let near = (0..2).all(|a| {
-                    Fx::from_int(lo[a]) <= b1[a] && Fx::from_int(hi[a]).add(Fx::ONE) >= b0[a]
-                });
-                (near && !h.covers_point([p[0], p[2]])).then_some(h)
-            }));
-            for z in lo[1].max(0)..=hi[1] {
-                for x in lo[0].max(0)..=hi[0] {
-                    if against.iter().any(|h| h.covers(x, z)) {
-                        continue;
+        // A batch reuses its hull filter and owns its output. Joining batches
+        // in floor order keeps both rounding and equal-column input order.
+        let gather = |floor: &[usize]| {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_gather_begin",
+                "physics_rubble_gather_end",
+            );
+            let mut against: Vec<&Hull> = Vec::with_capacity(hulls.len());
+            let mut columns: Vec<([i32; 2], u16)> = Vec::new();
+            for &i in floor {
+                let f = &self.fragments[i];
+                let (low, high) = bounds[i].unwrap();
+                let p = arr(f.position);
+                // Floor of the bottom corners, ceiling of the top: the columns
+                // the box covers and the height it reaches.
+                let lo = [p[0].add(low[0]), p[2].add(low[2])].map(|v| (v.raw() >> 32) as i32);
+                let hi = [p[0].add(high[0]), p[2].add(high[2])].map(|v| (v.raw() >> 32) as i32);
+                let top = -(p[1].add(high[1]).neg().raw() >> 32);
+                let top = top.clamp(0, i64::from(u16::MAX)) as u16;
+                against.clear();
+                against.extend(hulls.iter().zip(&reach).filter_map(|(h, (b0, b1))| {
+                    let near = (0..2).all(|a| {
+                        Fx::from_int(lo[a]) <= b1[a] && Fx::from_int(hi[a]).add(Fx::ONE) >= b0[a]
+                    });
+                    (near && !h.covers_point([p[0], p[2]])).then_some(h)
+                }));
+                for z in lo[1].max(0)..=hi[1] {
+                    for x in lo[0].max(0)..=hi[0] {
+                        if against.iter().any(|h| h.covers(x, z)) {
+                            continue;
+                        }
+                        columns.push(([x, z], top));
                     }
-                    columns.push(([x, z], top));
                 }
             }
-        }
+            columns
+        };
+        let mut columns = if floor.len() >= 1024 {
+            let groups: Vec<_> = floor.par_chunks(256).map(gather).collect();
+            let mut columns = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+            for group in groups {
+                columns.extend(group);
+            }
+            columns
+        } else {
+            gather(&floor)
+        };
         // A column under several pieces holds the highest top.
         sort_columns(&mut columns);
         columns.dedup_by(|later, kept| {
