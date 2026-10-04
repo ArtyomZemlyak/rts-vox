@@ -67,12 +67,14 @@ try {
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
             $preflight = @(Get-RangeCompetingProcesses -Exclude @($PID) -AdditionalNames @($binaryName))
+            $binaryHash = (Get-FileHash -LiteralPath $binary).Hash
+            $buildEvidence = Get-RangeBuildEvidence -BinaryPath $binary -BinarySha256 $binaryHash
             $manifest = [ordered]@{
                 Schema = 2; Scenario = $scenario; RequestedSeconds = $Seconds; TargetFps = $TargetFps
                 StartedUtc = (Get-Date).ToUniversalTime().ToString('o')
                 GitHead = (& git rev-parse HEAD); SourceAtLaunch = @(& git status --short)
                 SourceProvenance = 'SourceAtLaunch is not proof of the source used to build this binary; BinarySha256 identifies the measured executable.'
-                BinaryPath = $binary; BinarySha256 = (Get-FileHash -LiteralPath $binary).Hash
+                BinaryPath = $binary; BinarySha256 = $binaryHash; BuildEvidence = $buildEvidence
                 InputHashes = @(Get-RangeInputHashes -Repo $repo)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 ComputeWorkers = $ComputeWorkers

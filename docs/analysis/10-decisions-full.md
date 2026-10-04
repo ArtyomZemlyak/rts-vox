@@ -24499,3 +24499,29 @@ IDs/cycles и память не сняты. WBPERF-020/025 частичны, 001
 independent sim/render (002), balanced CPU и 165 FPS открыты.
 Evidence/prototypes/SHA/WIP provenance —
 [147](147-parallel-fire-geometry.md).
+
+## ADR-554 — локальные rubble proofs и build provenance
+
+04.10.2026. Один heap не заставляет полностью сканировать belly широкого
+корпуса: отдельные tiles без rubble используют точную prepared upper bound.
+Full Pose/search/save/counters совпадают с контролем. Дополнительные пулы
+и изменение scheduling не приняты. Cold-pose heap CPU быстрее в 11–12 раз;
+verified CPU motion быстрее на 9,3% / 3,9%, routes на 9,8% / 4,6%.
+
+Обычный native FPS +5,35% в первой паре, −3,61% во второй, core −1,36% /
++0,67%. Устойчивого общего выигрыша нет; наблюдаемая вторая просадка,
+редкие stalls, WBPERF-002 и 165 FPS остаются открыты. Принят локальный
+CPU shortcut, не достижение whole-battle FPS цели.
+
+Исправлена процедура source restore: Copy-Item может сохранить старое
+LastWriteTime, из-за чего Cargo повторно использует иной объект. Первый
+micro before/after был одним SHA executable. build-range-variant refreshes
+все перечисленные inputs, проверяет content hash через build и сохраняет
+frozen binary/evidence; profiler отклоняет evidence mismatch. Перечень
+inputs задаёт caller, полного dependency attestation это не обещает.
+Pre-verified данные серии исключены из приёмки, прошлые ADR без их
+собственных build logs задним числом не объявляются ошибочными.
+
+101 nav, 560 core/4 ignored, 54 PowerShell cases, 95 Python analyzer tests,
+Clippy/fmt проходят. Полные данные/SHA/границы доказательства —
+[148](148-local-rubble-proofs-and-build-provenance.md).

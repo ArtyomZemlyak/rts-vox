@@ -1,4 +1,14 @@
 # Shared by the runner and OS sampler; no simulation code or dependencies.
+function Get-RangeBuildEvidence {
+    param([string]$BinaryPath, [string]$BinarySha256)
+    $path = "$BinaryPath.build.json"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $evidence = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    if ($evidence.Schema -ne 1 -or $evidence.BinarySha256 -ne $BinarySha256) {
+        throw "Build evidence does not identify this binary: $path"
+    }
+    [pscustomobject]@{ ManifestPath = $path; Evidence = $evidence }
+}
 function Get-RangeRenderSpanLimit {
     param([ValidateRange(1, 3600)][int]$Seconds, [ValidateRange(0, 1000000)][int]$Requested = 0)
     if ($Requested -gt 0) { return $Requested }

@@ -115,4 +115,29 @@ Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $computeLog
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('compute_workers=8','compute_workers=4')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Ignored worker override accepted'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('Some(8)','None')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Missing compute CLI identity accepted'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Old frozen binary silently accepted override'
-'PASS: 49 validity/timing/context/budget/task/log-filter/compute cases and parser checks.'
+$evidenceTestBinary = Join-Path ([IO.Path]::GetTempPath()) ("rts-build-evidence-" + [guid]::NewGuid().ToString('N') + '.exe')
+$evidenceTestPath = "$evidenceTestBinary.build.json"
+try {
+    Assert-Profile ($null -eq (Get-RangeBuildEvidence $evidenceTestBinary 'AA')) 'Legacy binary given invented build evidence'
+    @{Schema=1; BinarySha256='AA'; RefreshedSources=@(@{Path='source.rs'; Sha256='BB'})} |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $evidenceTestPath -Encoding utf8
+    $evidence = Get-RangeBuildEvidence $evidenceTestBinary 'AA'
+    Assert-Profile ($evidence.Evidence.RefreshedSources[0].Sha256 -eq 'BB') 'Build inputs lost in profile evidence'
+    $rejected = $false
+    try { $null = Get-RangeBuildEvidence $evidenceTestBinary 'CC' } catch { $rejected = $true }
+    Assert-Profile $rejected 'Build evidence accepted for a different binary'
+    @{Schema=2; BinarySha256='AA'} | ConvertTo-Json | Set-Content -LiteralPath $evidenceTestPath -Encoding utf8
+    $rejected = $false
+    try { $null = Get-RangeBuildEvidence $evidenceTestBinary 'AA' } catch { $rejected = $true }
+    Assert-Profile $rejected 'Unknown build evidence schema accepted'
+    'invalid JSON' | Set-Content -LiteralPath $evidenceTestPath -Encoding utf8
+    $rejected = $false
+    try { $null = Get-RangeBuildEvidence $evidenceTestBinary 'AA' } catch { $rejected = $true }
+    Assert-Profile $rejected 'Broken build evidence accepted'
+} finally {
+    if (Test-Path -LiteralPath $evidenceTestPath) { Remove-Item -LiteralPath $evidenceTestPath }
+}
+$parserErrors = $null; $parserTokens = $null
+$null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'build-range-variant.ps1'), [ref]$parserTokens, [ref]$parserErrors)
+Assert-Profile ($parserErrors.Count -eq 0) "Invalid variant builder syntax: $parserErrors"
+'PASS: 54 validity/timing/context/budget/task/log-filter/compute/build-evidence cases and parser checks.'

@@ -1069,8 +1069,7 @@ impl<'a> Probe<'a> {
         // columns with neither yielding matter nor rubble, whose highest
         // floor is below even the lowest point of the hull's belly.
         let clear_tiles = if let Some(profile) = profile.filter(|_| {
-            no_rubble
-                && lo[0] >= 0
+            lo[0] >= 0
                 && lo[1] >= 0
                 && hi[0] < self.world.nx as i32
                 && hi[1] < self.world.nz as i32
@@ -1082,14 +1081,18 @@ impl<'a> Probe<'a> {
             let mut clear = Vec::with_capacity(width * (last[1] - first[1] + 1) as usize);
             for z in first[1]..=last[1] {
                 for x in first[0]..=last[0] {
-                    let top = self.world.prepared_bare_upper(
-                        [x * 8, z * 8],
-                        [
-                            (x * 8 + 7).min(self.world.nx as i32 - 1),
-                            (z * 8 + 7).min(self.world.nz as i32 - 1),
-                        ],
-                        profile,
-                    );
+                    let a = [x * 8, z * 8];
+                    let b = [
+                        (x * 8 + 7).min(self.world.nx as i32 - 1),
+                        (z * 8 + 7).min(self.world.nz as i32 - 1),
+                    ];
+                    // A heap under one part of a broad hull only invalidates
+                    // that tile's proof, not every bare tile of the footprint.
+                    let top = if no_rubble || !self.rubble.is_some_and(|r| r.touches(a, b)) {
+                        self.world.prepared_bare_upper(a, b, profile)
+                    } else {
+                        None
+                    };
                     clear.push(top.is_some_and(|h| Fx::from_int(i32::from(h)) <= min_belly));
                 }
             }
@@ -3425,11 +3428,39 @@ mod tests {
         rubble.insert([192, 192], 50);
         assert!(rubble.touches([100, 100], [284, 284]));
         let mut near = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
-        near.route_pose(pos, 0, s);
-        assert!(
-            near.columns > 10_000,
-            "nearby rubble bypassed the exact probe"
+        let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+        let a = near.pose(pos, 0, s);
+        let b = exact.pose(pos, 0, s);
+        assert_eq!(
+            (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+            (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush)
         );
+        assert!(
+            near.columns < 4000,
+            "one rubble tile scanned the whole hull: {}",
+            near.columns
+        );
+        assert!(exact.columns > 10_000);
+        for top in [16, 50, 82] {
+            for at in [[108, 180], [192, 192], [250, 220]] {
+                let rubble = Rubble::from([(at, top)]);
+                for head in [0, 1234, angle::FULL / 8, angle::FULL / 3] {
+                    let mut fast = Probe::with_yield(&w, &[4, 5]).with_rubble(&rubble);
+                    let mut exact = Probe::with_yield(&w, &[5, 4]).with_rubble(&rubble);
+                    let p = [
+                        pos[0].add(Fx::from_ratio(1, 3)),
+                        pos[1].sub(Fx::from_ratio(1, 5)),
+                    ];
+                    let a = fast.pose(p, head, s);
+                    let b = exact.pose(p, head, s);
+                    assert_eq!(
+                        (a.height, a.floors, a.blocked, a.steep, a.tilt, a.crush),
+                        (b.height, b.floors, b.blocked, b.steep, b.tilt, b.crush),
+                        "top={top} at={at:?} head={head}"
+                    );
+                }
+            }
+        }
         w.queue_edit(voxel::Edit::put(192, 60, 192, 2));
         w.flush();
         assert_eq!(w.prepared_bare_upper([192, 192], [199, 199], [4, 5]), None);

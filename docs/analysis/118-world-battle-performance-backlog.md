@@ -4498,3 +4498,29 @@ task drops/open=0; отдельный reload allocator 3,995 мс. 374 пров�
 WBPERF-001/027, неснятые редкие фризы, независимый sim/render, GPU IDs
 и 165 FPS открыты. Данные, SHA, память и границы —
 [139](139-render-prepare-system-calls.md).
+
+## ADR-554 — rubble proofs и корректная сборка вариантов
+
+WBPERF-003/004/001 частично: rubble под одной частью широкого корпуса
+не отключает bare-tile proofs в остальных его плитках. Полные geometry
+ответы, logical allowance и ordered commit сохранены. Cold-pose heap
+случаи быстрее в 11–12 раз, 101 nav и 560 core tests проходят.
+Две verified CPU пары: routes −9,8% / −4,6%, motion −9,3% / −3,9%.
+В обычных 120-секундных native парах FPS 73,81→77,75 и 75,06→72,35;
+**общий native FPS выигрыш не подтверждён**, вторая просадка и tails открыты.
+Не закрывать критерий 165 FPS или balanced CPU по этому этапу.
+
+Найден и исправлен дефект процедуры A/B: Copy-Item сохраняет старое время
+восстановленного source, Cargo может взять объект другого прототипа.
+Новый build-range-variant.ps1 обновляет время всех указанных восстановленных
+входов, проверяет их hash до/после, сохраняет frozen executable/build evidence.
+Профайлер связывает matching build manifest с run и отклоняет mismatch.
+Caller обязан перечислить все восстановленные inputs; это ограниченное
+доказательство, не полная dependency/clean checkout аттестация. Ранние
+смешанные прототипы этой серии не входят в приёмку. Новых потоков нет,
+дополнительная local-hunt параллелизация и принудительная гранулярность
+в штатной версии не оставлены. Нужна свежая проверка этих кандидатов.
+
+Следующий фокус: WBPERF-002/027, native critical path, tile-proof/gate hit
+attribution и OS stacks/waits. Подробные результаты, ограничения, hashes
+и сохранённые исключённые данные — [148](148-local-rubble-proofs-and-build-provenance.md).
