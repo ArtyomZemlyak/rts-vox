@@ -104,6 +104,69 @@ class TraceTests(unittest.TestCase):
             profile.summarize_tick(worker_phase)
 
 
+class FrameCadenceTests(unittest.TestCase):
+    def frames(self):
+        # Deliberately different current/preceding step counts and a reset.
+        return [dict(generation=str(g), tick=str(t), simulation_ticks=str(n),
+                     simulation_core_ms=str(core), frame_start_ns=str(a * 1000000),
+                     frame_end_ns=str(b * 1000000), frame_gap_ns=str(gap * 1000000))
+                for g, t, n, core, a, b, gap in [
+                    (0, 1, 1, 2, 0, 3, 0), (0, 1, 0, 0, 10, 11, 7),
+                    (1, 3, 3, 9, 15, 27, 4), (1, 4, 1, 8, 30, 40, 3)]]
+
+    def test_group_uses_preceding_work_and_following_gap(self):
+        result = profile.frame_cadence(self.frames(), True)
+        idle, single, multi = result["groups"]
+        self.assertEqual((idle["generation"], idle["steps_per_slice"]), (0, 0))
+        # Sorted by source generation/steps: idle interval is 15 - 10.
+        self.assertEqual(idle["interval_ms"]["mean"], 5)
+        self.assertEqual(idle["following_gap_ms"]["mean"], 4)
+        self.assertEqual((single["steps_per_slice"], single["interval_ms"]["mean"]), (1, 10))
+        self.assertEqual(single["following_gap_ms"]["mean"], 7)
+        self.assertEqual(multi["steps_per_slice"], 3)
+
+    def test_partition_covers_each_begin_interval_once(self):
+        result = profile.frame_cadence(self.frames(), True)
+        self.assertEqual(result["intervals"], 3)
+        self.assertEqual(result["covered_wall_ms"], 30)
+        self.assertEqual(result["update_total_ms"], 16)
+        self.assertEqual(result["following_gap_total_ms"], 14)
+        self.assertEqual(result["core_total_ms"], 11)  # Nested, not added to 30.
+        self.assertAlmostEqual(sum(r["wall_fraction"] for r in result["groups"]), 1)
+        for group in result["groups"]:
+            self.assertEqual(group["interval_total_ms"], group["update_total_ms"] + group["gap_total_ms"])
+
+    def test_multistep_is_slice_total_without_inventing_tick_costs(self):
+        group = profile.frame_cadence(self.frames(), True)["groups"][-1]
+        self.assertEqual(group["completed_steps"], 3)
+        self.assertEqual(group["core_ms"]["samples"], 1)
+        self.assertEqual(group["core_ms"]["mean"], 9)
+        self.assertNotIn("single_tick_ms", group)
+
+    def test_terminal_work_is_explicit_without_fabricated_following_gap(self):
+        result = profile.frame_cadence(self.frames(), True)
+        self.assertEqual(result["completed_steps"], 4)
+        self.assertEqual(result["terminal_slice"], dict(row=3, generation=1,
+                         simulation_ticks=1, measured_wall_ms=10, core_ms=8))
+
+    def test_reset_crossing_belongs_to_source_generation(self):
+        result = profile.frame_cadence(self.frames(), True)
+        crossing = next(g for g in result["groups"] if g["generation_crossings"])
+        self.assertEqual((crossing["generation"], crossing["steps_per_slice"]), (0, 0))
+        self.assertEqual(sum(g["generation_crossings"] for g in result["groups"]), 1)
+
+    def test_single_slice_does_not_invent_an_interval_or_share(self):
+        result = profile.frame_cadence(self.frames()[:1], True)
+        self.assertEqual(result["groups"], [])
+        self.assertEqual(result["covered_wall_ms"], 0)
+        self.assertEqual(result["completed_steps"], 0)
+        self.assertEqual(result["terminal_slice"]["simulation_ticks"], 1)
+
+    def test_legacy_and_empty_inputs_are_unavailable(self):
+        self.assertIsNone(profile.frame_cadence(self.frames(), False))
+        self.assertIsNone(profile.frame_cadence([], True))
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -132,6 +195,11 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(r["slow_frames"][0]["previous_core_ms"], 2)
         self.assertEqual(r["slow_ticks"][0]["frame_row"], 0)
         self.assertTrue(r["valid_for_comparison"])
+        cadence = r["frame_cadence"]
+        self.assertEqual(cadence["completed_steps"], 1)
+        self.assertEqual(cadence["groups"][0]["steps_per_slice"], 1)
+        self.assertAlmostEqual(cadence["groups"][0]["following_gap_ms"]["mean"], 1.9988)
+        self.assertIn("preceding Update plus its following gap", profile.markdown(r))
 
     def test_compute_override_checks_actual_pool_and_cannot_be_silently_ignored(self):
         for observed, marker, valid in [

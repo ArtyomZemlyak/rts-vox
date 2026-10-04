@@ -306,6 +306,49 @@ def summarize_slices(frames, aligned, top):
     return summary, slow, episodes if aligned else None
 
 
+def frame_cadence(frames, aligned):
+    """Partition begin intervals by their preceding slice, never current work.
+
+    Only offline CSV clocks are read. Gaps include other schedules, render and
+    preemption; this partition identifies neither GPU time nor wait causes.
+    """
+    if not aligned or not frames:
+        return None
+    groups = {}
+    for idx in range(len(frames) - 1):
+        row, following = frames[idx], frames[idx + 1]
+        key = int(row["generation"]), int(row["simulation_ticks"])
+        values = groups.setdefault(key, dict(interval=[], update=[], gap=[], core=[], crossings=0))
+        start, end = int(row["frame_start_ns"]), int(row["frame_end_ns"])
+        next_start = int(following["frame_start_ns"])
+        values["interval"].append(next_start - start)
+        values["update"].append(end - start)
+        values["gap"].append(next_start - end)
+        values["core"].append(float(row["simulation_core_ms"]))
+        values["crossings"] += int(row["generation"]) != int(following["generation"])
+    covered_ns = sum(sum(v["interval"]) for v in groups.values())
+    rows = []
+    for (generation, steps), values in sorted(groups.items()):
+        count = len(values["interval"])
+        totals = {k + "_total_ms": sum(values[k]) / 1e6 for k in ("interval", "update", "gap")}
+        rows.append(dict(generation=generation, steps_per_slice=steps,
+            intervals=count, completed_steps=count * steps,
+            generation_crossings=values["crossings"],
+            interval_ms=stats([v / 1e6 for v in values["interval"]]),
+            update_ms=stats([v / 1e6 for v in values["update"]]),
+            following_gap_ms=stats([v / 1e6 for v in values["gap"]]),
+            core_ms=stats(values["core"]), core_total_ms=sum(values["core"]),
+            wall_fraction=sum(values["interval"]) / covered_ns if covered_ns else None,
+            **totals))
+    terminal = measured_slice(frames, len(frames) - 1, True)
+    return dict(intervals=len(frames) - 1, covered_wall_ms=covered_ns / 1e6,
+        update_total_ms=sum(r["update_total_ms"] for r in rows),
+        following_gap_total_ms=sum(r["gap_total_ms"] for r in rows),
+        core_total_ms=sum(r["core_total_ms"] for r in rows),
+        completed_steps=sum(r["completed_steps"] for r in rows), groups=rows,
+        terminal_slice={k: terminal[k] for k in ("row", "generation", "simulation_ticks", "measured_wall_ms", "core_ms")})
+
+
 def analyze_stall_trace(directory, scenario, log, manifest, frames, starts, roles, top):
     header = re.search(r"^PROFILE stall_capture_schema=(\d+) stall_capture_mode=(\w+) threshold_ms=(\d+) pre_ticks=(\d+) post_ticks=(\d+) max_windows=(\d+)(?: cpu_sampling=(\w+))?$", log, re.M)
     declared = int((manifest or {}).get("CoreTriggerMilliseconds") or 0)
@@ -1097,7 +1140,7 @@ def analyze(directory, scenario="world-battle", top=12):
             previous_measured_slice_ms=(int(prev["frame_end_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             begin_to_begin_ms=(int(row["frame_start_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             outside_observed_slice_ms=int(row["frame_gap_ns"]) / 1e6 if aligned else None))
-    return dict(schema=5, directory=str(directory), scenario=scenario, manifest=manifest,
+    return dict(schema=6, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
         acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")),
@@ -1122,6 +1165,7 @@ def analyze(directory, scenario="world-battle", top=12):
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
         phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
         slice_summary=slice_summary, slow_slices=slow_slices,
+        frame_cadence=frame_cadence(frames, aligned),
         stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
         render_tasks=render_tasks, render_tasks_build=task_build,
         limitations=["wall_minus_cpu includes preemption, waits and coarse OS accounting; it is not lock wait time",
@@ -1133,6 +1177,7 @@ def analyze(directory, scenario="world-battle", top=12):
                     "unit intervals are between consecutive callbacks and can enclose other work",
                     "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame; repeated observations are not new jobs and their per-row sum/mean is not render CPU work",
                     "single_tick_ms is exact core wall only for one-step slices; multi-step slices expose an average, never invented individual tick durations",
+                    "frame cadence groups preceding slices plus following gaps; terminal Update has no observed following interval; core is nested within Update and gaps have no CPU/GPU/wait attribution",
                     "phase-ring capture retains selected phase/detail ticks and quiet tail, not all ticks or worker jobs; caller CPU is not process CPU and the instrumented run cannot qualify FPS",
                     "stall episodes group adjacent slices, following gaps or begin intervals >=50ms; these overlap, and only disjoint slice/gap wall is added; core wall is not OS CPU time",
                     "OS counters use coarse sampling; UTC alignment is approximate, and only full in-window intervals are included",
@@ -1223,6 +1268,15 @@ def markdown(report):
         ticks = f"{sample['first_tick']}..{sample['end_tick']}" if sample["simulation_ticks"] else "no step"
         lines.append(f"| {sample['row']} | {sample['generation']} / {ticks} | {sample['simulation_ticks']} | {number(sample['measured_wall_ms'])} | {number(sample['core_ms'])} | {sample['following_interval_row']} / {number(sample['following_interval_ms'])} | {number(sample['following_gap_ms'])} | {phases} |")
     lines += ["", "Core/occupancy/physics/terrain/atmosphere are nested details, not additive Update phases. Render atomic observations are excluded from the slice breakdown. Multi-step core totals do not identify individual tick costs."]
+    cadence = report.get("frame_cadence")
+    if cadence is not None:
+        lines += ["", "Frame cadence: preceding Update plus its following gap (not current-row work).",
+                  f"Complete intervals: {cadence['intervals']}; covered wall {cadence['covered_wall_ms']:.3f}ms = Update {cadence['update_total_ms']:.3f}ms + following gaps {cadence['following_gap_total_ms']:.3f}ms.",
+                  f"Completed steps in those slices: {cadence['completed_steps']}; terminal slice row {cadence['terminal_slice']['row']} has {cadence['terminal_slice']['simulation_ticks']} steps and no following interval. Core is nested inside Update; gaps do not identify a GPU or wait cause.", "",
+                  "| Source generation | Steps in preceding slice | Intervals | Wall share | Mean interval, ms | Mean Update, ms | Mean following gap, ms | Mean nested core, ms | Generation crossings |",
+                  "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for group in cadence["groups"]:
+            lines.append(f"| {group['generation']} | {group['steps_per_slice']} | {group['intervals']} | {group['wall_fraction']:.1%} | {group['interval_ms']['mean']:.3f} | {group['update_ms']['mean']:.3f} | {group['following_gap_ms']['mean']:.3f} | {group['core_ms']['mean']:.3f} | {group['generation_crossings']} |")
     episodes = report["stall_episodes"]
     if episodes is not None:
         lines += ["", f"Stall episodes: {episodes['count']} (slices, following gaps or begin intervals >= {episodes['threshold_ms']}ms; disjoint slice/gap wall, not an identified cause).", ""]

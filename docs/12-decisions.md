@@ -679,3 +679,6 @@
 
 
 | 555 | Крупная подготовка навигационных обломков классифицирует fragments и собирает floor columns пакетами по 256 в существующем physics pool от 1024 входов каждой фазы. Каждый job владеет buffers, читает неизменные world/hulls/fragments; indexed join сохраняет source order. Stacked support и sort/dedup остаются последовательными. Малые входы serial. Observer различает classify/gather jobs и columns parent; same-call geometry, tick и snapshots прежние. Разбор — analysis/149-parallel-rubble-preparation.md. |
+
+
+| 556 | Offline analyzer распределяет полные монотонные begin-to-begin интервалы по generation и числу шагов предыдущей Update slice. Следующий gap относится к этой slice; Update/core вложены, wall partition не означает CPU/GPU/wait attribution. Последняя slice сохраняется отдельно без выдуманного интервала; legacy без clocks получает null. Native collectors, scheduling и физика прежние. Разбор — analysis/150-wake-query-experiments-and-frame-cadence.md. |

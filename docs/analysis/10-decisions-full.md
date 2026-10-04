@@ -24544,3 +24544,23 @@ OS workers, 1800 полных traced ticks. Aggregate cycles max/min 13,19× /
 5,20× не доказывают balanced CPU или причину stalls. CPUTime малых jobs
 квантован. WBPERF-002/001/027 и 165 FPS открыты. Полные доказательства,
 неудачный native результат и provenance — [149](149-parallel-rubble-preparation.md).
+
+
+## ADR-556 — native проверка кандидатов и frame cadence
+
+04.10.2026. Три кандидата физической оптимизации отклонены: принудительное
+дробление classify/gather и parallel stacked support не дали устойчивого
+CPU выигрыша; hull-grid ускорил wake на 17,7…18,4%, но ordinary native
+FPS упал с 81,4…81,5 до 69,1 в двух обратных парах. Fresh rebuild control
+дал 85,1 FPS, тот же gameplay/hash; причинная атрибуция просадки открыта.
+Production burst восстановлен побайтно, новые physics jobs не оставлены.
+
+Принят offline frame cadence: предыдущая slice + её следующий gap,
+generation/step counts, disjoint wall totals и отдельная terminal slice.
+Новых runtime probes нет. Правильная привязка локализовала разницу после
+zero-step slices: mean gap 4,4→6,0 мс; one-step following gap около 3,8 мс
+в обоих вариантах. Это wall evidence, не GPU/lock/OS cause. 102 analyzer
+tests и пять native datasets проходят; local correctness не означает FPS
+acceptance. WBPERF-002/001/027, balanced CPU и 165 FPS открыты. Прототипы,
+проверки, отрицательные результаты и SHA —
+[150](150-wake-query-experiments-and-frame-cadence.md).

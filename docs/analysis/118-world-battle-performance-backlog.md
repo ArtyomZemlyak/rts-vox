@@ -1,8 +1,15 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
-Обновлено: 03.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
+Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-549: immutable соседские чтения unit conduction
+Последний шаг ADR-556: offline frame cadence разделяет предыдущую Update
+и её следующий gap по числу шагов/generation. Три новых physics кандидата
+отклонены; native регрессия hull-grid 81,4→69,1 FPS повторилась, хотя
+CPU wake быстрее на 18%. Штатный алгоритм восстановлен и пересобран.
+102 analyzer tests проходят; причина zero-step gaps, WBPERF-002 и 165 FPS
+открыты. Данные — [150](150-wake-query-experiments-and-frame-cadence.md).
+
+Предыдущий шаг ADR-549: immutable соседские чтения unit conduction
 в existing physics pool, cursor-ordered admission/outflow/stale removal.
 Leaf minimum 128: полный штатный пакет 512 даёт четыре задания.
 CPU-пара 3600 тиков: conduction 258,8→198,8 мкс (−23,2%), tick 13,119→12,634 мс;
@@ -4543,3 +4550,25 @@ cycles max/min 13,19× / 5,20× за capture; нужны per-join tails/разм
 Новые gather leaf scopes отделены от columns parent, их нельзя складывать.
 Stacked filtering/sort/dedup остаются serial. WBPERF-002, 001/027 и 165 FPS
 открыты. Данные, provenance и границы — [149](149-parallel-rubble-preparation.md).
+
+
+## ADR-556 — native регрессия кандидата и распределение кадров
+
+WBPERF-001/027 частично: offline frame cadence считает все полные
+монотонные интервалы по предыдущей Update/generation/step count, отделяет
+следующий gap и terminal slice, не смешивает core с CPU/GPU/wait time.
+102 analyzer tests проходят. Native runtime collectors не изменены.
+
+Новые physics алгоритмы не приняты: forced leaf splitting и parallel
+stacked support без устойчивого gain; hull-grid wake −17,7…18,4% CPU,
+но FPS 81,42→69,06 / 81,52→69,14. Fresh rebuilt baseline 85,12 FPS.
+Все пять native runs: 3600 steps, 1×, прежний gameplay/hash, valid gates.
+Grid отклонён, baseline восстановлен и пересобран. Плохие пики сохранены.
+
+Правильная cadence привязка показала native difference после zero-step
+slices: mean following gap 4,4→6,0 мс, one-step gap около 3,8 мс прежний.
+Это локализация, причина не установлена; нужны render/source spans и OS
+scheduling/stacks/waits. Следующий приоритет WBPERF-002/001/027.
+WBPERF-004/005/014, balanced CPU и 165 FPS не закрыты. Прототипы, bounds,
+SHA, source provenance и полные данные —
+[150](150-wake-query-experiments-and-frame-cadence.md).
