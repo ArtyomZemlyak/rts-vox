@@ -28,6 +28,50 @@ def trace():
             mark("phase", "motion", 80, cpu=120), mark("tick", "end", 100, cpu=130)]
 
 
+class CameraTourTests(unittest.TestCase):
+    def test_wall_clock_tour_retains_stopped_simulation_and_all_tick_groups(self):
+        signature = 'PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1'
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name)/'world-battle.camera.csv'
+            with path.open('w', newline='') as out:
+                writer = csv.writer(out)
+                writer.writerow('seconds,tick,segment,focus_x,focus_z,height,origin_x,origin_z,progress,blocked'.split(','))
+                for seconds, tick, segment in [(0, 0, 0), (3, 0, 0), (4, 1, 0), (5, 1, 0), (6, 2, 1)]:
+                    writer.writerow([seconds,tick,segment,100,100,240,0,0,50,'true'])
+            reasons=[]
+            tour=profile.camera_tour_capture(name,'world-battle',signature,{'CameraTour':True},5,reasons)
+            self.assertEqual(reasons, [])
+            self.assertEqual(tour['max_no_tick_seconds'], 3)
+            self.assertEqual(tour['blocked_frames'], 5)
+            self.assertEqual(tour['segments'], [0,1])
+            profile.camera_tour_capture(name,'world-battle',signature,{'CameraTour':False},5,reasons)
+            self.assertIn('camera_tour_mode_mismatch',reasons)
+            reasons=[]
+            profile.camera_tour_capture(name,'world-battle',signature,{'CameraTour':True},6,reasons)
+            self.assertIn('camera_tour_frame_count_mismatch',reasons)
+
+    def test_declared_tour_requires_runtime_mode_and_camera_artifact(self):
+        with tempfile.TemporaryDirectory() as name:
+            reasons=[]
+            self.assertIsNone(profile.camera_tour_capture(name,'world-battle','',{'CameraTour':True},1,reasons))
+            self.assertEqual(reasons,['camera_tour_mode_mismatch','camera_tour_artifact_missing'])
+
+    def test_camera_work_is_per_frame_and_rejects_nonfinite_cost(self):
+        signature = 'PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1'
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / 'world-battle.camera.csv'
+            header = 'seconds,tick,segment,origin_x,origin_z,progress,blocked,observe_ms,stream_ms\n'
+            path.write_text(header + '0,0,0,0,0,,false,0.5,2\n1,30,0,0,0,,false,1.5,4\n')
+            reasons = []
+            tour = profile.camera_tour_capture(name, 'world-battle', signature, {'CameraTour': True}, 2, reasons)
+            self.assertEqual(reasons, [])
+            self.assertEqual(tour['work_per_frame']['observe_ms']['mean'], 1)
+            self.assertEqual(tour['work_per_frame']['stream_ms']['max'], 4)
+            path.write_text(header + '0,0,0,0,0,,false,nan,2\n')
+            profile.camera_tour_capture(name, 'world-battle', signature, {'CameraTour': True}, 1, reasons)
+            self.assertIn('camera_tour_work_invalid', reasons)
+
+
 class TraceTests(unittest.TestCase):
     def test_physics_batches_are_not_actor_zero(self):
         rows = trace() + [
@@ -168,6 +212,13 @@ class FrameCadenceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_camera_tour_has_separate_comparison_gate(self):
+        self.write()
+        before = profile.analyze(self.path)
+        after = json.loads(json.dumps(before))
+        after['manifest']['CameraTour'] = True
+        self.assertIn('different:CameraTour', profile.compare(before, after)['reasons'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

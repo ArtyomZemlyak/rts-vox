@@ -146,7 +146,9 @@ pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWin
         .chain((!sim.battle_mode()).then_some(&sim.gun))
         .map(feet_of)
         .collect();
-    if v.occupied.is_empty() {
+    // An initialized clip can legitimately contain no actors. Re-enumerating
+    // the whole army on every such tick makes empty camera sectors expensive.
+    if v.window.is_none() && v.occupied.is_empty() {
         v.occupied = cells(sim, window);
     }
 }
@@ -936,6 +938,38 @@ mod tests {
             })
             .collect();
         sim
+    }
+
+    #[test]
+    fn valid_empty_clip_keeps_old_shadows_until_reentry_is_applied() {
+        let mut sim = occupancy_roster(8);
+        let window = TerrainWindow {
+            origin: [0; 3],
+            dims: [128, 64, 128],
+        };
+        let mut gas = GasInput::default();
+        gas.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut gas, window, None);
+        let mut visual = Visual::default();
+        occupancy(&sim, &mut gas, &mut visual);
+        assert!(visual.occupied.is_empty());
+        assert!(visual.window == Some(window));
+        for _ in 0..3 {
+            before(&sim, &mut visual, &window);
+            assert!(visual.occupied.is_empty());
+        }
+        // A roster change can introduce a body before the next history capture.
+        // History must preserve the actually uploaded empty state, otherwise
+        // occupancy incorrectly decides that the new shadow is already there.
+        sim.units[0] = RangeUnit::of_kind(RangeUnitKind::Tank, [64, 16, 64]);
+        assert!(!cells(&sim, &window).is_empty());
+        before(&sim, &mut visual, &window);
+        assert!(visual.occupied.is_empty());
+        occupancy(&sim, &mut gas, &mut visual);
+        let mut fresh = GasInput::default();
+        fresh.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut fresh, window, None);
+        assert_eq!(gas.terrain_words, fresh.terrain_words);
     }
 
     #[test]

@@ -346,6 +346,7 @@ fn main() {
     let mut profile_render_tasks = false;
     let mut profile_render_spans = None;
     let mut profile_actions = false;
+    let mut profile_camera_tour = false;
     let mut profile_core = false;
     let mut profile_trigger_ms = None;
     let mut navigation_workers = None;
@@ -373,6 +374,7 @@ fn main() {
                 profile_render_spans = Some(spans);
             }
             "--profile-actions" => profile_actions = true,
+            "--profile-camera-tour" => profile_camera_tour = true,
             "--profile-core" => profile_core = true,
             "--profile-trigger-ms" => {
                 i += 1;
@@ -819,6 +821,11 @@ fn main() {
         "--profile-actions requires --profile"
     );
     profiler.actions = profile_actions;
+    assert!(
+        !profile_camera_tour || (profile_output.is_some() && !camera_sweep),
+        "--profile-camera-tour requires --profile and excludes --camera-sweep"
+    );
+    profiler.camera_tour = profile_camera_tour;
     let mut gas = GasInput::default();
     gas.timings
         .enabled
@@ -1816,10 +1823,16 @@ fn advance(
         };
         scene.frame += 1;
         let terrain_started = std::time::Instant::now();
+        let patch_start = gas.terrain_dirty.len();
         apply_terrain(&scene.sim, &mut gas, &unit_start);
         let occupancy_started = std::time::Instant::now();
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
         profile.measure(3, occupancy_started.elapsed());
+        let observe_started = profile.camera_tour.then(std::time::Instant::now);
+        streaming.observe(&scene.sim, &gas.terrain_dirty[patch_start..]);
+        if let Some(start) = observe_started {
+            profile.measure_camera(0, start.elapsed());
+        }
         profile.measure(1, terrain_started.elapsed());
         if before.is_none() {
             if let Some(at) = scene.sim.impact {
@@ -2339,6 +2352,8 @@ fn framing(
     workshop: Res<Workshop>,
     visual: Res<moving::Visual>,
     stream: Res<streaming::Streaming>,
+    profile: Res<profile::Profile>,
+    time: Res<Time<Real>>,
     mut camera: Query<(&mut Transform, &mut Projection, &Camera), With<GasCamera>>,
 ) {
     let age = if scene.sim.impact.is_some() {
@@ -2501,6 +2516,11 @@ fn framing(
                 let full_height =
                     whole_map_frame(scene.sim.size(), offset, aspect).1 / (1.0 - panel_fraction);
                 height = height.min(full_height * 1.1);
+                if let Some(tour) = profile.camera_sample(time.elapsed_secs_f64(), scene.sim.size())
+                {
+                    aim = Vec3::new(tour.focus.x, 34.0, tour.focus.y);
+                    height = tour.height.min(full_height * 1.1);
+                }
                 aim -= screen_up * height * (238.0 - 72.0) * ui_scale / viewport.y.max(1.0) * 0.5;
                 aim += Vec3::new(pan.x, 0.0, pan.y);
                 // Continuous at the local-window limit: the old branch jumped

@@ -10,6 +10,7 @@ param(
     # Zero preserves the scene default; 1 selects the serial route path.
     [ValidateRange(0, 8)][int]$NavigationWorkers = 0,
     [switch]$CpuThreads,
+    [switch]$CameraTour,
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
     [switch]$RenderTimeline,
@@ -62,7 +63,7 @@ try {
         $manifest = $null
         try {
             $manifestPath = Join-Path $directory "$scenario.manifest.json"
-            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.task-names.csv", "$scenario-cpu") {
+            foreach ($artifact in "$scenario.manifest.json", "$scenario.csv", "$scenario.log", "$scenario.err", "$scenario.camera.csv", "$scenario.core.csv", "$scenario.physics.csv", "$scenario.stall.csv", "$scenario.render.csv", "$scenario.tasks.csv", "$scenario.task-names.csv", "$scenario-cpu") {
                 if (Test-Path -LiteralPath (Join-Path $directory $artifact)) { throw "Existing run retained: $artifact. Use a fresh output directory." }
             }
             $binaryName = [System.IO.Path]::GetFileNameWithoutExtension($binary)
@@ -78,6 +79,7 @@ try {
                 InputHashes = @(Get-RangeInputHashes -Repo $repo)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 ComputeWorkers = $ComputeWorkers
+                CameraTour = [bool]$CameraTour
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
                 RenderSpanLimit = $renderBudget
                 RenderTasks = [bool]$RenderTasks
@@ -111,6 +113,7 @@ try {
             $err = Join-Path $directory "$scenario.err"
             $arguments = @('--range', 'data/range-km.ron', '--stock-tuning', '--window', "$WindowWidth,$WindowHeight", '--profile', ('"' + $csv + '"'), '--profile-seconds', $Seconds) + $extra
             if ($Gpu) { $arguments += '--profile-gpu' }
+            if ($CameraTour) { $arguments += '--profile-camera-tour' }
             if ($RenderTimeline) { $arguments += '--profile-render' }
             if ($RenderTasks) { $arguments += '--profile-render-tasks' }
             # Preserve automatic runs of frozen schema-1/2/3 binaries. New
@@ -150,6 +153,9 @@ try {
             if ((@(Get-RangeInputHashes -Repo $repo) | ConvertTo-Json -Compress) -ne ($manifest.InputHashes | ConvertTo-Json -Compress)) { $reasons.Add('inputs_changed_during_run') }
             $rows = if (Test-Path -LiteralPath $csv) { @(Import-Csv -LiteralPath $csv) } else { @() }
             $content = if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Raw } else { '' }
+            if ($CameraTour -and -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.camera.csv"))) {
+                $reasons.Add('camera_tour_artifact_missing')
+            }
             if ($scenario -eq 'flame') {
                 if ($content -notmatch 'PROFILE stream_packets=(\d+) unit_damage=(\d+)' -or
                     [long]$Matches[1] -eq 0 -or [long]$Matches[2] -eq 0) { $reasons.Add('flame_workload_missing') }
@@ -162,9 +168,9 @@ try {
                 $reasons.Add('render_timeline_artifact_missing')
             }
             if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -CameraTour:$CameraTour
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

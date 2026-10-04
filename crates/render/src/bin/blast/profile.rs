@@ -5,6 +5,8 @@ use std::{io::Write, time::Instant};
 #[path = "profile/core.rs"]
 mod core;
 pub use self::core::render_sample;
+#[path = "profile/camera.rs"]
+mod camera;
 
 #[derive(Resource, Default)]
 pub struct Profile {
@@ -13,6 +15,9 @@ pub struct Profile {
     pub clouds: usize,
     pub gpu: bool,
     pub actions: bool,
+    pub camera_tour: bool,
+    camera_frames: Vec<camera::Frame>,
+    camera_work: [f64; 2],
     pub core: bool,
     trigger: Option<core::Trigger>,
     /// Optional fixed route pool for paired native performance experiments.
@@ -80,10 +85,25 @@ pub fn render_context(
     edit: Res<Workshop>,
     panel: Option<Res<panel::Panel>>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    (time, gas, stream): (Res<Time<Real>>, Res<GasInput>, Res<streaming::Streaming>),
     mut p: ResMut<Profile>,
 ) {
     if p.start.is_none() || p.finished {
         return;
+    }
+    if let Some(sample) = p.camera_sample(time.elapsed_secs_f64(), scene.sim.size()) {
+        let seconds = time.elapsed_secs_f64() - p.start.unwrap();
+        let [observe_ms, stream_ms] = p.camera_work;
+        p.camera_frames.push(camera::Frame {
+            seconds,
+            tick: scene.sim.tick,
+            sample,
+            origin: gas.window.origin,
+            progress: stream.progress(),
+            blocked: stream.loading(),
+            observe_ms,
+            stream_ms,
+        });
     }
     let Ok(window) = windows.single() else {
         p.render_context_invalid = true;
@@ -96,7 +116,7 @@ pub fn render_context(
         present_mode: window.present_mode,
         window_mode: window.mode,
         view: scene.view,
-        camera_sweep: scene.camera_sweep,
+        camera_sweep: scene.camera_sweep || p.camera_tour,
         camera_controls: [edit.pan.x, edit.pan.y, edit.zoom, edit.orbit, edit.pitch],
         zone: edit.zone,
         overlays: panel.as_ref().map_or([false; 2], |p| [p.ranges, p.routes]),
@@ -131,7 +151,9 @@ pub fn actions(
         return;
     }
     let now = time.elapsed_secs_f64();
-    if stream.loading() {
+    // The scripted sector check needs a published window. Camera preparation
+    // itself no longer blocks authoritative simulation.
+    if stream.loading() || stream.progress().is_some() {
         p.action_time = now;
         return;
     }
@@ -205,6 +227,10 @@ struct GpuSamples {
     values: Vec<f64>,
 }
 impl Profile {
+    pub(super) fn camera_sample(&self, now: f64, size: [u32; 3]) -> Option<camera::Sample> {
+        (self.camera_tour && !self.finished)
+            .then(|| camera::sample(now - self.start.unwrap_or(now), size))
+    }
     pub fn step(&mut self, sim: &mut BlastRange, generation: u64) {
         if self.core && self.start.is_some() && !self.finished {
             self.core_rows
@@ -242,6 +268,11 @@ impl Profile {
     pub fn running(&self) -> bool {
         self.output.is_none() || self.start.is_some()
     }
+    pub fn measure_camera(&mut self, phase: usize, duration: std::time::Duration) {
+        if self.start.is_some() && self.camera_tour {
+            self.camera_work[phase] += duration.as_secs_f64() * 1000.0;
+        }
+    }
     pub fn measure(&mut self, phase: usize, duration: std::time::Duration) {
         if self.start.is_some() {
             self.detail[phase] += duration.as_secs_f64() * 1000.0;
@@ -273,6 +304,7 @@ pub fn begin(
     {
         return;
     }
+    p.camera_work = [0.0; 2];
     let now = time.elapsed_secs_f64();
     let warm = *p.warm.get_or_insert(now);
     if now - warm < 2.0 {
@@ -291,6 +323,9 @@ pub fn begin(
                 .unwrap_or_default()
                 .as_nanos()
         );
+        if p.camera_tour {
+            println!("PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1");
+        }
         if let Some(adapter) = adapter {
             println!(
                 "PROFILE adapter_name={:?} adapter_backend={:?} adapter_device_type={:?} adapter_driver={:?}",
@@ -502,6 +537,9 @@ pub fn end(
         Vec::new()
     };
     let result = (|| -> std::io::Result<()> {
+        if p.camera_tour {
+            camera::save(p.output.as_ref().unwrap(), &p.camera_frames)?;
+        }
         let mut out = std::io::BufWriter::new(std::fs::File::create(p.output.as_ref().unwrap())?);
         writeln!(
             out,

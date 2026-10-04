@@ -697,3 +697,6 @@
 
 
 | 561 | Входы восьми полос settled contact index подготавливаются одним проходом в source order и хранятся в reusable scratch lists. Прежние physics jobs заполняют только принадлежащие им X-residue cells; ordered contacts, wanted membership, indexed ownership и existing pools сохранены. Physics observer отделяет cell partition от fill jobs. Разбор — analysis/155-settled-contact-work-partition.md. |
+
+
+| 562 | Подготовка окна камеры не блокирует authoritative ticks. Сброс generation имеет отдельный loading barrier; camera Job завершает выбранное окно, читает до восьми строк в existing compute pool и replay правок перед ordered publication. Physical GPU patches объединяются bounded bit mask по новым tick spans. Инициализированный пустой occupancy clip сохраняется без повторной геометрии всей армии. CameraTour имеет wall-clock workload и отдельные per-frame расходы. Разбор — analysis/156-camera-streaming-without-battle-pauses.md. |

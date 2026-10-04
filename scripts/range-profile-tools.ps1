@@ -89,7 +89,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [switch]$CameraTour)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -109,6 +109,11 @@ function Get-RangeValidity {
         if ($row.frame_end_ns -ne $null -and $row.frame_end_ns -ne '') { $seconds = [long]::Parse($row.frame_end_ns, $culture) / 1000000000.0 }
     }
     if ($ticks -eq 0) { $issues.Add('simulation_did_not_advance') }
+    $tourDeclared = $Log -match '(?m)^PROFILE camera_tour_schema='
+    if ($tourDeclared -ne [bool]$CameraTour -or ($tourDeclared -and
+        $Log -notmatch '(?m)^PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1\r?$')) {
+        $issues.Add('camera_tour_mode_mismatch')
+    }
     if ($Log -notmatch '(?m)^PROFILE render_context_schema=2\r?$' -or
         $Log -notmatch '(?m)^PROFILE render_context=RenderContext \{' -or
         $Log -notmatch '(?m)^PROFILE render_context_step=\d+ value=RenderContext \{' -or

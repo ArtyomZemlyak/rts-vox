@@ -1,8 +1,22 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
-WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-561: contact stripe inputs готовятся одним ordered scan,
+WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
+Последний шаг ADR-562: camera staging больше не блокирует время боя,
+восемь строк читаются в existing compute pool с ordered replay/publication.
+Новые GPU spans отмечаются bounded bit union; valid empty clip не запускает
+повторную серийную геометрию всей армии. Wall-clock native tour подтвердил
+старую остановку 4,203 с / 6270 blocked frames; два финальных тура имеют
+ноль blocked frames, max frame 54,19 / 71,27 мс и 3599 ticks/120 с. Небольшой
+терминальный debt оставляет strict tempo gate failed; допуски не расширялись.
+Stationary pair eligible, 3600 ticks и exact gameplay/hash; FPS 85,42→84,86,
+существенного общего gain нет. Reset/sector actions завершены, max43,58 мс;
+123 render и 106 analyzer tests проходят. Профиль камеры отделяет observe
+и streaming costs. WBPERF-009 partial; 002, 027, balanced CPU и 165 FPS открыты.
+Неудачные промежуточные варианты также сохранены. Данные —
+[156](156-camera-streaming-without-battle-pauses.md).
+
+Предыдущий шаг ADR-561: contact stripe inputs готовятся одним ordered scan,
 прежние восемь jobs обходят только свои reusable lists. Поздняя cells phase
 CPU −15,38% / −18,18%, общий tick/FPS gain не доказан. 562 core tests проходят,
 два native comparisons eligible, gameplay/hash прежние. Финальный ordinary
@@ -507,7 +521,7 @@ P1 — следующий существенный расход/масштаби
 | WBPERF-006 | P0 | Занятость юнитов без полной пересборки на каждый тик | Замер + код | L |
 | WBPERF-007 | P0 | Единый ограниченный журнал dirty-страниц | Замер + код | M |
 | WBPERF-008 | P0 | Дешёвый extract с переиспользуемыми буферами | ADR-543: рост повторов consumed journal устранён; payload reuse/большие reload открыты | M |
-| WBPERF-009 | P0 | Камера/стриминг не останавливают бой | Прогон + код | L |
+| WBPERF-009 | P0 | Камера/стриминг не останавливают бой | ADR-562: blocking устранён, parallel rows/replay и empty-clip fix; strict no-debt, publication cost и pixel/mouse/orbit QA открыты | L |
 | WBPERF-010 | P1 | Луч и нагрев лазера обходят поверхности, не пустоту | Замер семейства + код | L |
 | WBPERF-011 | P1 | Инкрементальные rubble и индексы контактов | Замер + код | L |
 | WBPERF-012 | P1 | Компактные пакеты тепловых ячеек | Замер + код | M |
@@ -3081,6 +3095,25 @@ main maintenance mean 0,0304 / 0,0282 мс; 3600 шагов/реальный т�
 [137](137-lagging-terrain-journal.md).
 
 ### WBPERF-009 — камера не управляет временем боя
+
+ADR-562: камера больше не приостанавливает authoritative ticks. Job не
+перезапускается при каждом новом focus; eight-row jobs читают текущий
+immutable мир в существующем compute pool, processed rows repair перед
+publication. GPU upload union bounded по физическим words и видит только
+новые tick spans. Исправлен valid empty clip, прежде запускавший серийное
+перечисление всей армии. Native tour clock независим от симуляции;
+CSV/анализатор отделяют blocked/no-tick samples и observe/streaming costs.
+
+Before tour: 4,203 с sampled no-tick, 2275/120 с ticks. Два final tours:
+0 blocked frames, 3599 ticks, max54,19/71,27 мс; strict tempo gate остаётся
+failed на небольшом terminal debt. Stationary eligible pair: 3600 ticks,
+точный gameplay/hash, FPS85,42→84,86. Actions reset/far sector проходят.
+WBPERF-009 partial: publication/малые synchronous shifts до17,49 мс,
+плотный непрерывный repair input, pixel flicker/caves и реальные mouse/minimap/
+orbit paths ещё не сертифицированы. Полные данные/rejected variants —
+[156](156-camera-streaming-without-battle-pauses.md).
+
+Исходный аудит до ADR-562:
 
 Места: [streaming.rs](../../crates/render/src/bin/blast/streaming.rs),
 `Job::step` (52), `camera` (92); render `blast.rs` (1595).

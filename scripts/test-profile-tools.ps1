@@ -12,6 +12,13 @@ PROFILE render_context_changed=false'
 $rows = @([pscustomobject]@{frame_ms='4.5';simulation_ticks='30';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'})
 $valid = Get-RangeValidity $rows -Scenario world-battle -Log $log
 Assert-Profile ($valid.ValidForComparison -and $valid.AcceptanceEligible -and $valid.MeetsSimulationRate) 'Good run rejected'
+$tourLog = $log + "`nPROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
+$tour = Get-RangeValidity $rows -Scenario world-battle -Log $tourLog -CameraTour
+Assert-Profile $tour.ValidForComparison 'Declared camera tour rejected'
+$undeclaredTour = Get-RangeValidity $rows -Scenario world-battle -Log $tourLog
+Assert-Profile ($undeclaredTour.Reasons -contains 'camera_tour_mode_mismatch') 'Undeclared camera tour accepted'
+$missingTour = Get-RangeValidity $rows -Scenario world-battle -Log $log -CameraTour
+Assert-Profile ($missingTour.Reasons -contains 'camera_tour_mode_mismatch') 'Camera tour without runtime mode accepted'
 $busy = Get-RangeValidity $rows -Scenario world-battle -Log $log -Reasons @('competing_process_during_run')
 Assert-Profile (-not $busy.ValidForComparison -and -not $busy.AcceptanceEligible) 'Contaminated run accepted'
 $stopped = Get-RangeValidity @([pscustomobject]@{frame_ms='4.5';simulation_ticks='0';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'}) -Scenario world-battle -Log $log
@@ -140,4 +147,4 @@ try {
 $parserErrors = $null; $parserTokens = $null
 $null = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'build-range-variant.ps1'), [ref]$parserTokens, [ref]$parserErrors)
 Assert-Profile ($parserErrors.Count -eq 0) "Invalid variant builder syntax: $parserErrors"
-'PASS: 54 validity/timing/context/budget/task/log-filter/compute/build-evidence cases and parser checks.'
+'PASS: validity/timing/context/camera/budget/task/log-filter/compute/build-evidence cases and parser checks.'

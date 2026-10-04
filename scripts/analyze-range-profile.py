@@ -74,6 +74,47 @@ def interval(a, b):
             "cycles": delta("cpu_cycles"), "os_thread": b.get("os_thread") or None}
 
 
+def camera_tour_capture(directory, scenario, log, manifest, frame_count, reasons):
+    declared = bool((manifest or {}).get("CameraTour"))
+    signature = "PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
+    observed = bool(re.search(r"^PROFILE camera_tour_schema=", log, re.M))
+    if declared != observed or (observed and signature not in log.splitlines()):
+        reasons.append("camera_tour_mode_mismatch")
+    if not declared:
+        return None
+    path = Path(directory) / f"{scenario}.camera.csv"
+    if not path.exists():
+        reasons.append("camera_tour_artifact_missing")
+        return None
+    rows = list(read_csv(path))
+    if len(rows) != frame_count or not rows:
+        reasons.append("camera_tour_frame_count_mismatch")
+    times = [float(r["seconds"]) for r in rows]
+    ticks = [int(r["tick"]) for r in rows]
+    segments = [int(r["segment"]) for r in rows]
+    if (any(not math.isfinite(v) or v < 0 for v in times) or
+            times != sorted(times) or ticks != sorted(ticks) or segments != sorted(segments) or
+            any(r["blocked"] not in ("true", "false") for r in rows)):
+        reasons.append("camera_tour_clock_invalid")
+    no_tick_seconds = [values[-1][1] - values[0][1]
+                       for _, group in itertools.groupby(zip(ticks, times), key=lambda p: p[0])
+                       for values in [list(group)] if values]
+    work = {}
+    for name in ("observe_ms", "stream_ms"):
+        if rows and name in rows[0]:
+            values = [float(r[name]) for r in rows]
+            if any(not math.isfinite(v) or v < 0 for v in values):
+                reasons.append("camera_tour_work_invalid")
+            else:
+                work[name] = stats(values)
+    return dict(schema=1, clock="wall", route="bases_pan_zoom_v1", frames=len(rows),
+                segments=sorted(set(segments)), blocked_frames=sum(r["blocked"] == "true" for r in rows),
+                streaming_frames=sum(bool(r["progress"]) for r in rows),
+                max_no_tick_seconds=max(no_tick_seconds, default=0),
+                work_per_frame=work,
+                window_origins=sorted({(int(r["origin_x"]), int(r["origin_z"])) for r in rows}))
+
+
 def union_by_thread(jobs):
     """Inclusive parent/child intervals on one OS thread count only once."""
     result = {}
@@ -1074,6 +1115,7 @@ def analyze(directory, scenario="world-battle", top=12):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
     validity = manifest.get("Validity") or {} if manifest else {}
     reasons = list(validity.get("Reasons") or [])
+    camera_tour = camera_tour_capture(directory, scenario, log, manifest, len(frames), reasons)
     if not manifest:
         reasons.append("legacy_run_without_manifest")
     elif not manifest.get("BinarySha256") or not manifest.get("InputHashes"):
@@ -1154,6 +1196,7 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_workers=[int(pools[1]), int(pools[2])] if pools else None,
         actual_compute_workers=compute,
         actual_render_context=context,
+        camera_tour=camera_tour,
         os_cpu_window=os_window(directory, scenario, log, frames, roles),
         terrain_journal_maintenance=journal_maintenance(log),
         task_families=task_families,
@@ -1195,6 +1238,8 @@ def compare(a, b):
             problems.append(f"{label}:simulation_not_realtime")
     keys = ["Scenario", "RequestedSeconds", "TargetFps", "RayonEnvironment", "NavigationWorkers", "GpuTimestamps",
             "CpuThreads", "CorePhases", "EnvironmentSampleIntervalMs", "InputHashes", "RequestedWindow", "RustLog"]
+    if bool((a["manifest"] or {}).get("CameraTour")) != bool((b["manifest"] or {}).get("CameraTour")):
+        problems.append("different:CameraTour")
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
         problems.append("different:RenderTimeline")
     if int((a["manifest"] or {}).get("ComputeWorkers") or 0) != int((b["manifest"] or {}).get("ComputeWorkers") or 0):
@@ -1237,6 +1282,11 @@ def markdown(report):
     for p in report["phases"]:
         cpu = p["thread_cpu_occurrences"]
         lines.append(f"| {p['name']} | {p['mean_per_tick_ms']:.3f} | {p['wall_occurrences']['p99']:.3f} | {cpu['samples'] if cpu else 'unavailable'} |")
+    if report.get("camera_tour"):
+        tour = report["camera_tour"]
+        lines += ["", f"Wall-clock camera tour: {tour['route']}; {len(tour['segments'])} segments; "
+                  f"{len(tour['window_origins'])} published origins; {tour['blocked_frames']} blocked frames; "
+                  f"longest sampled no-tick interval {tour['max_no_tick_seconds']:.6f} s."]
     lines += ["", f"Core trace schema: {report['core_trace_schema']}; sampling: {report['physics_task_sampling']}; physics coverage: {report['physics_task_coverage']}.", "",
               "Job totals are inclusive across threads; do not add them to phase time.", "",
               "| Task family | Jobs | Inclusive wall total, ms | Longest job, ms | Sampled CPU total, ms | CPU samples |",

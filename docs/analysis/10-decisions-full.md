@@ -24657,3 +24657,27 @@ Ordinary peak не повторился; traced tick2518 rubble37,06 ms и tick2
 debris40,82 ms требуют serial/dispatch/join attribution плюс OS waits.
 WBPERF-002, 001/027, stalls и 165 FPS остаются открытыми. Полные данные,
 SHA/provenance и ограничения — [155](155-settled-contact-work-partition.md).
+
+
+## ADR-562 — streaming камеры без остановки authoritative ticks
+
+Camera Job отделён от generation-reset barrier. Незавершённое окно не
+отменяется каждым новым focus; до восьми строк читаются existing compute
+jobs, processed rows replay terrain/surface edits до ordered publication.
+Physical old-shadow patches входят в bounded bit union по новым spans,
+не retained history. Valid empty occupancy clip больше не инициирует
+серийный обход всей армии. Gameplay data/core/pools прежние.
+
+Wall-clock CameraTour и CSV/валидатор воспроизводят старую остановку
+4,203 с / 6270 blocked frames. Два final tours: 0 blocked frames,
+max54,19/71,27 мс, 3599 ticks за120 с; terminal debt оставляет строгий
+темп gate failed. Baseline paused simulation не подходит для eligible
+FPS A/B. Stationary pair eligible: 3600 ticks, exact gameplay/hash,
+85,42→84,86 FPS; существенного общего ускорения не доказано.
+Actions reset/far sector завершены, max43,58 ms. 123 render tests / 3
+прежних ignored, 106 analyzer tests, PowerShell/Clippy/fmt проходят.
+
+WBPERF-009 partial; no-debt/publication/плотный repair input и pixel/mouse/
+orbit QA открыты. WBPERF-002, rare physical peaks/OS waits, CPU balance
+и165 FPS не закрыты. Raw intermediate failures, frozen SHA/provenance,
+ограничения и результаты — [156](156-camera-streaming-without-battle-pauses.md).
