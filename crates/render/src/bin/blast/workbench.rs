@@ -1079,6 +1079,15 @@ pub fn input(
                                     } else {
                                         Order::Move
                                     };
+                                    if scene.sim.battle.phase
+                                        == sim_core::blast::battle::Phase::Setup
+                                        && !matches!(order, Order::Move | Order::Hold)
+                                    {
+                                        scene.notice =
+                                            "Стрельба выключена: сначала нажмите «Начать бой»."
+                                                .into();
+                                        return;
+                                    }
                                     let eligible = if order == Order::Move {
                                         ids.iter()
                                             .filter(|&&id| {

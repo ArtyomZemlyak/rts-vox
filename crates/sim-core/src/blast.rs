@@ -3669,8 +3669,8 @@ impl BlastRange {
                 let tick = self.tick;
                 let gun_obstacle =
                     (!battle_mode).then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
-                let driven = self.patrols_running
-                    && (!battle_mode || self.battle.phase == battle::Phase::Fighting);
+                let driven =
+                    self.patrols_running && (!battle_mode || self.battle_movement_active());
                 local_hunts = pool.install(|| {
                     self.units
                         .par_chunks_mut(1)
@@ -3713,8 +3713,7 @@ impl BlastRange {
             }
         }
         detail("motion_routes");
-        let driven =
-            self.patrols_running && (!battle_mode || self.battle.phase == battle::Phase::Fighting);
+        let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         let mut prepared_ground: Vec<_> = (0..self.units.len()).map(|_| None).collect();
         if driven && self.units.len() >= 4 {
             if let Some(pool) = &self.navigation_pool {
@@ -3761,9 +3760,7 @@ impl BlastRange {
                             .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
                     )
                     .collect();
-                if self.patrols_running
-                    && (!battle_mode || self.battle.phase == battle::Phase::Fighting)
-                {
+                if driven {
                     if let Some(prepared) = local_hunts[id].take() {
                         let accepted = u
                             .motion

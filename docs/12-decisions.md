@@ -712,3 +712,6 @@
 
 
 | 566 | Параллельная фаза маршрутов собирает snapshot neighbours только для активного local continuation после terrain pass; shared guard не меняет ordered live commit, callbacks, allowances, pools и saves. Frozen builder записывает Rust/Cargo/compiler flags и hash build wrapper; optional RefreshTrackedInputs обновляет и проверяет tracked Rust/WGSL/RON/Cargo/config/toolchain inputs вместе с explicit sources. Analyzer отклоняет разные recorded build contexts и наличие context только с одной стороны; legacy pairs явно помечены unrecorded. Совпадение записанного context не аттестует generated/untracked inputs, SDK/registry/linker или полную воспроизводимость. |
+
+
+| 567 | Подготовленная боевая расстановка допускает свободное управление движением в Setup без ИИ, стрельбы и проверки победы; Start включает обычный бой из текущих позиций. Формат снимка не расширен. Управление сценарием выделено в отдельный HUD-блок. Паук получает лобовую геометрию и рабочий куб ядра, согласованный с большей областью Core; T2 — расширенную оболочку, маску казённика и рабочий куб ядра. Общие критерии отказа сохранены. Damage trace различает фазу, стрельбу, ревизии и давление debris pool; три неэффективных merge-кандидата отвергнуты. P-76 и победа T2 над пятью танками остаются открыты. |

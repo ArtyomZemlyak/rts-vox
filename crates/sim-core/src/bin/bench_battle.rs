@@ -84,8 +84,17 @@ fn main() {
         .map(|w| w[1].as_str());
     let replay = args.iter().any(|a| a == "--replay");
     let world_battle = assault || siege.is_some() || args.iter().any(|a| a == "--world");
+    let scenario = args
+        .windows(2)
+        .find(|w| w[0] == "--scenario")
+        .map(|w| w[1].as_str());
+    assert!(
+        !world_battle || scenario.is_none(),
+        "--scenario and --world/assault/siege are exclusive"
+    );
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
+    let damage_trace = args.iter().any(|a| a == "--damage-trace");
     let profile_workers = args.iter().any(|a| a == "--profile-workers");
     let tick_csv = args
         .windows(2)
@@ -127,8 +136,8 @@ fn main() {
         .find(|w| w[0] == "--balance")
         .map_or("even", |w| w[1].as_str());
     assert!(
-        !ai_vs_ai || world_battle,
-        "--ai-vs-ai requires --world, --assault or --siege"
+        !ai_vs_ai || world_battle || scenario.is_some(),
+        "--ai-vs-ai requires --world, --assault, --siege or --scenario"
     );
     let until_end = assault
         || siege.is_some()
@@ -196,6 +205,25 @@ fn main() {
             };
             layout.units = ids.map(|id| layout.units[id].clone()).into();
         }
+    } else if let Some(name) = scenario {
+        assert_eq!(balance, "even", "--balance requires --world");
+        assert!(
+            !args.iter().any(|a| a == "--units" || a == "--eight"),
+            "--scenario uses its authored roster"
+        );
+        let ron = match name {
+            "spider" => include_str!("../../../../data/skirmish-spider.ron"),
+            "turrets" => include_str!("../../../../data/skirmish-turrets.ron"),
+            "pincer" => include_str!("../../../../data/skirmish-pincer.ron"),
+            "breakthrough" => include_str!("../../../../data/skirmish-breakthrough.ron"),
+            _ => panic!("--scenario: spider, turrets, pincer or breakthrough"),
+        };
+        let preset = modding::range_skirmish::Skirmish::from_ron(ron).unwrap();
+        layout.gun = preset.zone.spawn;
+        layout.target = preset.zone.target;
+        layout.zones.push(preset.zone);
+        layout.units = preset.units;
+        layout.blocks.extend(preset.blocks);
     } else {
         assert_eq!(balance, "even", "--balance requires --world");
         layout.gun = t.zone.spawn;
@@ -355,6 +383,10 @@ fn main() {
     } else {
         Vec::new()
     };
+    let mut damage_previous = [0u64; 2];
+    let mut shots_previous = [0u64; 2];
+    let mut impact_window = [0usize; 6];
+    let mut laser_contacts = 0usize;
     for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -601,6 +633,37 @@ fn main() {
                 sim.battle_counts(),
                 sim.battle_base_integrity()
             );
+        }
+        if damage_trace {
+            for impact in &sim.battle.impacts {
+                impact_window[impact.weapon as usize] += 1;
+            }
+            laser_contacts += sim.battle.lasers.iter().filter(|trace| trace.hit).count();
+            if sim.tick % 150 == 0 {
+                let mut damage = [0u64; 2];
+                let mut shots = [0u64; 2];
+                let mut armed = [0usize; 2];
+                for (id, u) in sim.units.iter().enumerate() {
+                    let side = usize::from(!sim.allied(id));
+                    damage[side] += u.revision;
+                    shots[side] += u64::from(sim.battle.actors[id].fired);
+                    armed[side] += usize::from(u.status.alive && u.status.weapon);
+                }
+                println!("damage_window tick={} phase={:?} revisions_delta={:?} fired_delta={:?} impact_weapons={:?} laser_contacts={laser_contacts} alive={:?} armed={armed:?} waves={:?} fragments={} chunks={} flying={} claims={} fragment_room={}",
+                    sim.tick, sim.battle.phase,
+                    [0, 1].map(|side| damage[side] - damage_previous[side]),
+                    [0, 1].map(|side| shots[side] - shots_previous[side]),
+                    impact_window, sim.battle_counts(), sim.battle.wave_counts(),
+                    sim.matter.debris.fragments.len(),
+                    sim.matter.debris.fragments.iter().filter(|f| f.chunk.is_some()).count(),
+                    sim.matter.debris.fragments.iter().filter(|f| !f.resting).count(),
+                    sim.matter.debris.claims(),
+                    sim.matter.debris.fragment_room(&sim.matter.tuning));
+                damage_previous = damage;
+                shots_previous = shots;
+                impact_window = [0; 6];
+                laser_contacts = 0;
+            }
         }
         if trace && sim.tick % 600 == 0 {
             println!(

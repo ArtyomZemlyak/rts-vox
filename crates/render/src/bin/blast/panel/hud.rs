@@ -24,6 +24,8 @@ pub struct CommandDeck;
 #[derive(Component)]
 pub struct HeaderBrand;
 #[derive(Component)]
+pub struct BattleControls;
+#[derive(Component)]
 pub struct SelectionBox;
 pub const ROSTER_PAGE_SIZE: usize = 8;
 pub fn roster_page_size(window_width: f32) -> usize {
@@ -49,6 +51,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::BattleWorldAuto
         | Action::BattlePreset
         | Action::BattleStart
+        | Action::FreeControl
         | Action::BattleReplay
         | Action::BattleChoose
         | Action::SelectAllOwn
@@ -244,16 +247,10 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
                 label(
                     p,
                     font,
-                    "ЛКМ: выбрать  /  ПКМ: идти или атаковать",
+                    "ЛКМ: выбрать  /  ПКМ: отдать приказ",
                     12.0,
                     theme::MUTED,
                 );
-                p.spawn(row()).with_children(|p| {
-                    button(p, font, "Начать бой", Action::BattleStart);
-                    button(p, font, "Повторить бой", Action::BattleReplay);
-                    button(p, font, "Другой бой", Action::BattleChoose);
-                    button(p, font, "Сводка", Action::Drawer(5));
-                });
             });
             p.spawn(Node {
                 width: percent(31),
@@ -325,6 +322,38 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
             }
             button(p, font, "Далее", Action::RosterPage(1));
         });
+    commands
+        .spawn(chrome(
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(16),
+                top: px(76),
+                width: percent(47),
+                padding: UiRect::all(px(10)),
+                border: UiRect::left(px(2)),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(6),
+                ..default()
+            },
+            camera,
+        ))
+        .insert(BattleControls)
+        .with_children(|p| {
+            label(
+                p,
+                font,
+                "СРАЖЕНИЕ · УПРАВЛЕНИЕ СЦЕНАРИЕМ",
+                11.0,
+                theme::MUTED,
+            );
+            p.spawn(row()).with_children(|p| {
+                button(p, font, "Управлять без боя", Action::FreeControl);
+                button(p, font, "Начать бой", Action::BattleStart);
+                button(p, font, "Повторить бой", Action::BattleReplay);
+                button(p, font, "Другой бой", Action::BattleChoose);
+                button(p, font, "Сводка", Action::Drawer(5));
+            });
+        });
     commands.spawn((
         SelectionBox,
         Node {
@@ -382,6 +411,7 @@ pub fn refresh(
     edit: Res<Workshop>,
     panel: Res<Panel>,
     windows: Query<&Window>,
+    battle_bar: Query<&ComputedNode, With<BattleControls>>,
     mut text: Query<(&HudText, &mut Text)>,
     mut nodes: Query<(
         &mut Node,
@@ -395,6 +425,7 @@ pub fn refresh(
         Option<&RosterStrip>,
         Option<&CommandDeck>,
         Option<&HeaderBrand>,
+        Option<&BattleControls>,
     )>,
 ) {
     let battle = scene.sim.battle_mode();
@@ -446,6 +477,7 @@ pub fn refresh(
         strip,
         deck,
         brand,
+        battle_controls,
     ) in &mut nodes
     {
         if deck.is_some() {
@@ -461,10 +493,30 @@ pub fn refresh(
             }
         }
         if briefing.is_some() {
-            let width = percent(if compact { 56 } else { 47 });
+            let width = if compact { Val::Auto } else { percent(47) };
             if node.width != width {
                 node.width = width;
             }
+            node.left = px(if compact { 182 } else { 16 });
+            node.right = if compact { px(16) } else { Val::Auto };
+            node.top = px(if battle {
+                84.0 + battle_bar
+                    .single()
+                    .map_or(108.0, |n| n.size().y * n.inverse_scale_factor())
+            } else {
+                76.0
+            });
+        }
+        if battle_controls.is_some() {
+            // Minimap ends at x=170 in the compact layout. The drawer
+            // occupies the rightmost 330px, so neither may cover a button.
+            node.left = px(if compact { 182 } else { 16 });
+            node.right = if compact {
+                px(if panel.drawer != 0 { 362 } else { 16 })
+            } else {
+                Val::Auto
+            };
+            node.width = if compact { Val::Auto } else { percent(47) };
         }
         if strip.is_some() {
             let bottom = px(if compact { 234 } else { 184 });
@@ -474,6 +526,8 @@ pub fn refresh(
         }
         let visible = if brand.is_some() {
             Some(!hide_brand)
+        } else if battle_controls.is_some() {
+            Some(battle)
         } else if drawer.is_some() {
             Some(panel.drawer != 0)
         } else if let Some(Roster(i)) = roster_button {
@@ -491,6 +545,14 @@ pub fn refresh(
             Some(battle && loadout_count > 0)
         } else if solo.is_some() {
             Some(!battle)
+        } else if matches!(action, Some(Action::FreeControl)) {
+            Some(
+                battle
+                    && edit.editing
+                    && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup,
+            )
+        } else if matches!(action, Some(Action::Fire | Action::AutoAttack)) {
+            Some(!battle || scene.sim.battle.phase == sim_core::blast::battle::Phase::Fighting)
         } else if matches!(action, Some(Action::BattleReplay)) {
             Some(battle && scene.sim.battle.phase != sim_core::blast::battle::Phase::Setup)
         } else if matches!(action, Some(Action::BattleChoose)) {
@@ -505,9 +567,11 @@ pub fn refresh(
             )
         } else if briefing.is_some() {
             Some(
-                !scene.notice.is_empty()
-                    || (battle && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup)
-                    || (!battle && !panel.briefing.is_empty()),
+                !(compact && panel.drawer != 0)
+                    && (!scene.notice.is_empty()
+                        || (battle
+                            && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup)
+                        || (!battle && !panel.briefing.is_empty())),
             )
         } else if strip.is_some() {
             Some(battle && scene.sim.battle_counts()[0] > 0)
@@ -567,6 +631,7 @@ pub fn refresh(
                 if battle {
                     let [a, b] = scene.sim.battle_counts();
                     let phase = match scene.sim.battle.phase {
+                        sim_core::blast::battle::Phase::Setup if !edit.editing => "БЕЗ БОЯ",
                         sim_core::blast::battle::Phase::Setup => "РАССТАНОВКА",
                         sim_core::blast::battle::Phase::Fighting => "ИИ АКТИВЕН",
                         sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
@@ -686,8 +751,11 @@ pub fn refresh(
             _ => {
                 let phase = if battle {
                     match scene.sim.battle.phase {
+                        sim_core::blast::battle::Phase::Setup if !edit.editing => {
+                            "СВОБОДНОЕ УПРАВЛЕНИЕ · стрельба и ИИ выключены"
+                        }
                         sim_core::blast::battle::Phase::Setup => {
-                            "РАССТАНОВКА · нажмите «Начать бой»"
+                            "РАССТАНОВКА · выберите бой или управление без боя"
                         }
                         sim_core::blast::battle::Phase::Fighting => "БОЙ · уничтожьте противника",
                         sim_core::blast::battle::Phase::Victory => "ПОБЕДА",
@@ -888,6 +956,36 @@ mod tests {
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
+    }
+    #[test]
+    fn free_control_then_start_and_switch_battle_from_buttons() {
+        let mut app = app();
+        click(&mut app, Action::FreeControl);
+        let scene = app.world().resource::<Scene>();
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Setup
+        );
+        assert!(!scene.paused);
+        assert!(!app.world().resource::<Workshop>().editing);
+        assert!(app.world().resource::<Workshop>().controlled.is_some());
+        click(&mut app, Action::Fire);
+        assert!(!app.world().resource::<Panel>().ground_fire);
+        click(&mut app, Action::BattleStart);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+        click(&mut app, Action::BattleChoose);
+        assert_eq!(app.world().resource::<Panel>().drawer, 1);
+        click(&mut app, Action::BattlePreset);
+        rebuild_pending(&mut app);
+        click(&mut app, Action::FreeControl);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.phase,
+            sim_core::blast::battle::Phase::Setup
+        );
+        assert!(!app.world().resource::<Workshop>().editing);
     }
     #[test]
     fn a_started_battle_can_be_replayed_and_switched_from_the_hud() {

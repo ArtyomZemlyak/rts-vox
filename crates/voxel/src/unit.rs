@@ -1439,15 +1439,15 @@ pub fn turret_t1() -> UnitBody {
     u
 }
 
-/// T2 emplacement: a heavier, wider socket and a single energy cannon.
+/// T2 emplacement: a reinforced socket and a single energy cannon.
 pub fn turret_t2() -> UnitBody {
-    let mut u = UnitBody::new_scaled(48, 42, 48, 5, BODY_MM);
+    let mut u = UnitBody::new_scaled(48, 42, 48, 10, BODY_MM);
     let a = Part::Armour;
     fill_f(&mut u, (2, 46), (1, 6), (2, 46), a, FINISH_STEEL);
     fill_f(&mut u, (6, 42), (6, 15), (6, 42), a, FINISH_PLATE);
     fill(&mut u, (18, 30), (6, 17), (18, 30), Part::Core);
     ring(&mut u, (24, 24), 16, 10, (15, 18), a);
-    fill_f(&mut u, (10, 38), (18, 31), (11, 37), a, FINISH_PLATE);
+    fill_f(&mut u, (8, 43), (18, 31), (9, 39), a, FINISH_PLATE);
     fill_f(&mut u, (13, 35), (31, 34), (14, 34), a, FINISH_STEEL);
     for z in [9, 36] {
         fill_f(&mut u, (13, 34), (20, 28), (z, z + 3), a, FINISH_STEEL);
@@ -1468,6 +1468,11 @@ pub fn turret_t2() -> UnitBody {
         Part::Weapon,
         FINISH_GUN,
     );
+    // A physical mantlet surrounds the breech. Its outer shell may carry
+    // a chipped cannon, but does not bridge a severed muzzle.
+    for z in [(16, 19), (29, 32)] {
+        fill_f(&mut u, (32, 43), (22, 33), z, a, FINISH_STEEL);
+    }
     fill_f(
         &mut u,
         (44, 48),
@@ -1965,7 +1970,7 @@ pub fn strider() -> UnitBody {
 /// independently damageable articulated legs. Coarser 200 mm armour keeps
 /// its large silhouette affordable without inflating the voxel count.
 pub fn spider() -> UnitBody {
-    let mut u = UnitBody::new_scaled(88, 52, 80, 4, 200);
+    let mut u = UnitBody::new_scaled(88, 52, 80, 8, 200);
     for y in 25..40 {
         let inset = (y as i32 - 32).abs() / 2;
         fill_f(
@@ -2005,6 +2010,23 @@ pub fn spider() -> UnitBody {
         Part::Armour,
         FINISH_PLATE,
     );
+    // Layered glacis in front of the reactor, below the independently
+    // traversing laser. These are sacrificial cells, not a health bonus.
+    for y in 27..40 {
+        let front = 81 - (y as i32 - 33).abs() / 2;
+        fill_f(
+            &mut u,
+            (68, front as usize),
+            (y, y + 1),
+            (27, 53),
+            Part::Armour,
+            if y % 4 == 0 {
+                FINISH_STEEL
+            } else {
+                FINISH_PLATE
+            },
+        );
+    }
     for x in [30, 42, 54] {
         fill_f(
             &mut u,

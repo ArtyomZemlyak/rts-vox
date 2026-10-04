@@ -131,6 +131,52 @@ fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
 }
 
 #[test]
+fn free_control_moves_groups_without_starting_damage_or_ai_and_replays() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Strider,
+        at: [170, 16, 440],
+        allied: true,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_free_control().unwrap();
+    assert!(!r.battle_order(0, Order::Attack(1), None));
+    assert!(!r.battle_order(0, Order::Ground([450, 20, 336]), None));
+    assert!(!r.battle_order(0, Order::Auto, None));
+    assert!(!r.battle_order(1, Order::Move, Some([300, 336])));
+    assert_eq!(
+        r.battle_group_move(&[(0, [280, 336]), (2, [280, 440])], [280, 388]),
+        2
+    );
+    let before: Vec<_> = r.units.iter().map(|u| u.motion.pos).collect();
+    for _ in 0..120 {
+        r.step();
+    }
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..280 {
+        r.step();
+        replay.step();
+        assert_eq!(r.state_hash(), replay.state_hash());
+    }
+    assert!(r.units[0].motion.pos[0] > before[0][0].add(Fx::from_int(60)));
+    assert!(r.units[2].motion.pos[0] > before[2][0].add(Fx::from_int(60)));
+    assert_eq!(r.units[1].motion.pos, before[1]);
+    assert_eq!(r.battle.phase, Phase::Setup);
+    assert!(r.battle.actors.iter().all(|a| a.fired == 0));
+    assert!(r.units.iter().all(|u| u.revision == 0));
+    assert!(r.battle_order(0, Order::Hold, None));
+    r.start_battle().unwrap();
+    assert!(r.start_free_control().is_err());
+    for _ in 0..180 {
+        r.step();
+    }
+    assert!(r.battle.actors.iter().any(|a| a.fired > 0));
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
 fn distant_stationary_garrisons_draw_after_the_mobile_attackers_are_gone() {
     let mut layout = arena_of([RangeUnitKind::TurretT1, RangeUnitKind::TurretT2])
         .layout
@@ -2247,6 +2293,94 @@ fn stock_battle_kinetic_kills_a_frontal_tank() {
         assert_eq!(hits, expected, "distance={distance}");
         assert!(r.matter.economy.ledger.balanced());
     }
+}
+
+#[test]
+fn heavy_defenders_under_controlled_frontal_fire() {
+    for kind in [RangeUnitKind::Spider, RangeUnitKind::TurretT2] {
+        let mut r = arena_of([RangeUnitKind::Tank, kind]);
+        r.start_battle().unwrap();
+        r.units[1].motion.drive.head = fx::angle::HALF;
+        r.units[1].update_pose(fx::angle::HALF);
+        r.battle.actors[1].turret.angle = fx::angle::HALF;
+        r.battle.actors[1].order = Order::Hold;
+        r.battle.actors[0].order = Order::Attack(1);
+        r.battle.actors[0].weapon = Some(Weapon::Kinetic);
+        let mut hits = 0;
+        for _ in 0..600 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            if r.battle.impacts.iter().any(|p| p.weapon == Weapon::Kinetic) {
+                hits += 1;
+                eprintln!("defender={kind:?} hits={hits} alive={} armed={} core={:?} removed={} segments={} pos={:?}", r.units[1].status.alive, r.units[1].status.weapon, r.units[1].integrity.core, r.units[1].removed.len(), r.units[1].seg_removed.len(), r.units[1].at);
+            }
+            if !r.units[1].status.alive {
+                break;
+            }
+        }
+        assert!(hits >= 6, "{kind:?}: only {hits} impacts");
+        assert!(
+            r.units[1].status.alive && r.units[1].status.weapon,
+            "{kind:?}: {:?}",
+            r.units[1].status
+        );
+        assert!(
+            r.units[1].integrity.core < Fx::ONE,
+            "{kind:?}: core never damaged"
+        );
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+#[ignore = "P-78 qualification: T2 still loses to five simultaneous close-range tanks"]
+fn t2_defends_against_five_stock_tanks() {
+    let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::TurretT2])
+        .layout
+        .unwrap();
+    layout.units = (0..5)
+        .map(|i| RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            at: [170, 16, 240 + i * 48],
+            allied: true,
+        })
+        .chain(std::iter::once(RangeUnitDef {
+            kind: RangeUnitKind::TurretT2,
+            at: [450, 16, 336],
+            allied: false,
+        }))
+        .collect();
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    for actor in &mut r.battle.actors[..5] {
+        actor.order = Order::Attack(5);
+        actor.weapon = Some(Weapon::Kinetic);
+    }
+    r.units[5].motion.drive.head = fx::angle::HALF;
+    r.units[5].update_pose(fx::angle::HALF);
+    r.battle.actors[5].turret.angle = fx::angle::HALF;
+    r.battle.actors[5].order = Order::Auto;
+    for _ in 0..3600 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.phase != Phase::Fighting {
+            break;
+        }
+    }
+    eprintln!(
+        "T2 vs five: tick={} phase={:?} alive={:?} armed={} core={:?} shots={:?}",
+        r.tick,
+        r.battle.phase,
+        r.battle_counts(),
+        r.units[5].status.weapon,
+        r.units[5].integrity.core,
+        r.battle.actors.iter().map(|a| a.fired).collect::<Vec<_>>()
+    );
+    assert_eq!(r.battle.phase, Phase::Defeat);
+    assert!(r.units[5].status.alive && r.units[5].status.weapon);
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 /// Exercise the default enemy policy, pursuit and live motion together. A

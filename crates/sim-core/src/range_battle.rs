@@ -210,6 +210,11 @@ impl Battle {
             Weapon::Laser => &self.laser_config,
         }
     }
+    /// Read-only diagnostic counts: capturing resistance, applying pressure.
+    pub fn wave_counts(&self) -> [usize; 2] {
+        let capturing = self.waves.iter().filter(|w| w.wave.capturing()).count();
+        [capturing, self.waves.len() - capturing]
+    }
     pub(super) fn working(&self) -> bool {
         !self.waves.is_empty()
     }
@@ -419,6 +424,10 @@ pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
 impl BlastRange {
     pub fn battle_mode(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.battle)
+    }
+    /// Setup accepts explicit movement without running combat or AI.
+    pub fn battle_movement_active(&self) -> bool {
+        matches!(self.battle.phase, Phase::Setup | Phase::Fighting)
     }
     /// Effective loadout, shared by aiming, HUD and range indicators.
     pub fn battle_weapon(&self, id: usize) -> Option<Weapon> {
@@ -749,9 +758,27 @@ impl BlastRange {
         self.battle.ai.pending = None;
         Ok(())
     }
+    /// Drive the prepared roster without starting AI, combat or victory checks.
+    pub fn start_free_control(&mut self) -> Result<(), &'static str> {
+        if !self.battle_mode() || self.battle.phase != Phase::Setup {
+            return Err("Свободное управление доступно до начала боя");
+        }
+        self.control();
+        self.fire_tick = u32::MAX;
+        self.patrols_running = true;
+        for u in &mut self.units {
+            u.motion.route.clear();
+            u.motion.stop();
+        }
+        if self.units.len() >= 16 && self.navigation_workers > 1 && self.navigation_pool.is_none() {
+            self.set_navigation_workers(self.navigation_workers);
+        }
+        Ok(())
+    }
     pub fn battle_order(&mut self, id: usize, order: Order, destination: Option<[i32; 2]>) -> bool {
         if !self.battle_mode()
-            || self.battle.phase != Phase::Fighting
+            || !(self.battle.phase == Phase::Fighting
+                || self.battle.phase == Phase::Setup && matches!(order, Order::Move | Order::Hold))
             || !self.allied(id)
             || !self.units.get(id).is_some_and(|u| u.status.alive)
         {
@@ -807,7 +834,7 @@ impl BlastRange {
         destinations: &[(usize, [i32; 2])],
         fallback: [i32; 2],
     ) -> usize {
-        if !self.battle_mode() || self.battle.phase != Phase::Fighting {
+        if !self.battle_mode() || !self.battle_movement_active() {
             return 0;
         }
         let mut accepted = 0;

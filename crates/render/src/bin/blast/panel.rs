@@ -194,6 +194,7 @@ pub enum Action {
     BattleWorldAuto,
     RangeMode,
     BattleStart,
+    FreeControl,
     BattleReplay,
     BattleChoose,
     Side(bool),
@@ -636,6 +637,13 @@ pub fn actions(
             continue;
         }
         scene.notice.clear();
+        if scene.sim.battle_mode()
+            && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup
+            && matches!(action, Action::Fire | Action::AutoAttack)
+        {
+            scene.notice = "В свободном управлении доступны движение и остановка. Для стрельбы нажмите «Начать бой».".into();
+            continue;
+        }
         if !matches!(
             action,
             Action::Drawer(_)
@@ -792,6 +800,31 @@ pub fn actions(
                     scene.paused = false;
                 }
                 Err(e) => scene.notice = e,
+            },
+            Action::FreeControl => match scene.sim.start_free_control() {
+                Ok(()) => {
+                    panel.drawer = 0;
+                    edit.editing = false;
+                    scene.paused = false;
+                    panel.drive = true;
+                    panel.demo = false;
+                    panel.ground_fire = false;
+                    panel.battle_launch = false;
+                    scene.repeat = false;
+                    scene.notice = "Свободное управление: ЛКМ — выбор, ПКМ — движение. ИИ и стрельба выключены до начала боя.".into();
+                    edit.controlled = scene
+                        .sim
+                        .units
+                        .iter()
+                        .enumerate()
+                        .find(|(i, u)| {
+                            scene.sim.allied(*i) && u.status.alive && !u.kind.emplacement()
+                        })
+                        .map(|(i, _)| i);
+                    edit.selected_units = edit.controlled.into_iter().collect();
+                    edit.selected = edit.controlled.map(Selection::Unit);
+                }
+                Err(e) => scene.notice = e.into(),
             },
             Action::BattleStart => match scene.sim.start_battle() {
                 Ok(()) => {
@@ -1418,6 +1451,10 @@ pub fn refresh(
     }
     let instructions = if edit.editing {
         "ЛКМ — поставить / выбрать\nПКМ — переместить выбранное"
+    } else if scene.sim.battle_mode()
+        && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup
+    {
+        "ЛКМ / рамка — выбрать своих\nПКМ — движение группы\nСтрельба и ИИ — после «Начать бой»"
     } else if scene.sim.battle_mode() {
         "ЛКМ — выбрать своего · рамка — отряд
 Shift+ЛКМ — добавить / убрать
@@ -1485,7 +1522,10 @@ Shift+ЛКМ — добавить / убрать
     if scene.sim.battle_mode() {
         let [own, enemy] = scene.sim.battle_counts();
         let phase = match scene.sim.battle.phase {
-            sim_core::blast::battle::Phase::Setup => "Расставьте отряды и нажмите «Начать бой»",
+            sim_core::blast::battle::Phase::Setup if !edit.editing => {
+                "СВОБОДНОЕ УПРАВЛЕНИЕ · бой не запущен"
+            }
+            sim_core::blast::battle::Phase::Setup => "Расстановка · можно управлять без боя",
             sim_core::blast::battle::Phase::Fighting if scene.sim.battle.autonomous => {
                 "БОЙ · ИИ × ИИ"
             }
