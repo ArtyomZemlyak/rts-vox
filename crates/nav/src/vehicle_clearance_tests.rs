@@ -168,3 +168,77 @@ fn goal_probe_omits_crush_work_but_full_route_keeps_vegetation_cost() {
         .with_rubble(&rubble)
         .goal_refused(pos, 0, shape()));
 }
+
+#[test]
+fn speculative_prefix_stops_at_refusal_with_exact_answers_and_less_geometry() {
+    let mut world = World::new(384, 64, 384, 100_000, Box::new(Flat));
+    for y in 6..41 {
+        world.queue_edit(voxel::Edit::put(174, y, 178, 3));
+    }
+    while world.queued() > 0 {
+        world.flush();
+    }
+    world.prepare_navigation([4, 5]);
+    for head in [0, angle::FULL / 8] {
+        for initial in [false, true] {
+            let request = StartSweep {
+                shape: shape(),
+                samples: (0..4)
+                    .map(|i| ([174 + i, 178].map(Fx::from_int), head))
+                    .collect(),
+                height: Fx::from_int(6),
+                initial,
+            };
+            let mut eager = Probe::for_search(&world, &[4, 5], Columns::default());
+            let all = eager.route_samples(request.shape, &request.samples);
+            let expected = (1..=all.len())
+                .find(|&n| !request.prefix_open(&all[..n]))
+                .unwrap();
+            assert_eq!(expected, if initial { 2 } else { 1 });
+            let mut short = Probe::for_search(&world, &[4, 5], Columns::default());
+            let prefix =
+                short.route_prefix(request.shape, &request.samples, |p| request.prefix_open(p));
+            assert_eq!(prefix.len(), expected);
+            assert_eq!(
+                prefix.into_iter().map(signature).collect::<Vec<_>>(),
+                all[..expected]
+                    .iter()
+                    .copied()
+                    .map(signature)
+                    .collect::<Vec<_>>()
+            );
+            assert!(short.samples < eager.samples);
+            assert!(short.columns < eager.columns);
+        }
+    }
+}
+
+#[test]
+fn speculative_prefix_keeps_legal_samples_and_handles_empty_requests() {
+    let world = World::new(384, 64, 384, 100_000, Box::new(Flat));
+    let samples: Vec<_> = (0..8)
+        .map(|i| ([174 + i, 178].map(Fx::from_int), i * 256))
+        .collect();
+    for len in [0, 1, 4, 8] {
+        let request = StartSweep {
+            shape: shape(),
+            samples: samples[..len].to_vec(),
+            height: Fx::from_int(6),
+            initial: false,
+        };
+        let mut eager = Probe::for_search(&world, &[4, 5], Columns::default());
+        let all = eager.route_samples(request.shape, &request.samples);
+        assert!(request.prefix_open(&all));
+        let mut short = Probe::for_search(&world, &[4, 5], Columns::default());
+        let prefix =
+            short.route_prefix(request.shape, &request.samples, |p| request.prefix_open(p));
+        assert_eq!(
+            prefix.into_iter().map(signature).collect::<Vec<_>>(),
+            all.into_iter().map(signature).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            [short.scans, short.columns, short.samples],
+            [eager.scans, eager.columns, eager.samples]
+        );
+    }
+}

@@ -688,3 +688,6 @@
 
 
 | 558 | Выбор допустимой цели маршрута проверяет точные опоры и проходимость без подсчёта стоимости yielding растительности. Prepared floor bounds и верх обломков доказывают clearance; полные route/motion probes сохраняют crush cost. Logical work/order и authoritative state прежние. Pursuit diagnostics разделяют approach, firing point, flank и coarse/target/prepare/direct/fine retarget; bench учитывает все orders_* intervals. Новые pools не создаются. Разбор — analysis/152-goal-clearance-and-pursuit-attribution.md. |
+
+
+| 559 | Спекулятивный последовательный префикс fresh/suspended route sweep проверяет connection predicate после каждого точного pose и прекращает геометрию при первом отказе. Initial-pose exception, logical work allowance и commit order принадлежат прежнему поиску; допустимый полный префикс запускает прежний indexed fan-out. Разбор — analysis/153-sweep-prefix-work-and-rejected-geometry-indices.md. |

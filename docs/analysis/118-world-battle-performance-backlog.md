@@ -2,7 +2,17 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-558: goal refusal не считает unused vegetation cost;
+Последний шаг ADR-559: fresh/suspended sweep prefix прекращает ненужную
+геометрию при первом connection refusal; exact poses, logical budget и
+indexed fan-out сохраняются. 668 tests passed / 4 прежних ignored.
+Две ordinary пары по 120 с: FPS +0,193% / +0,151%, существенного gain нет;
+core/step +0,217% / −0,382%, второй max хуже. Gameplay/hash и tempo 1×
+прежние. CPU peak tick1024 / rubble27мс сохранён открытым. Три более
+сложных geometry candidates отклонены по CPU замерам; pools прежние.
+WBPERF-002, direct sweep ~4мс, CPU balance и 165 FPS остаются открыты.
+Данные — [153](153-sweep-prefix-work-and-rejected-geometry-indices.md).
+
+Предыдущий шаг ADR-558: goal refusal не считает unused vegetation cost;
 точные контакты, collision, budgets и route cost сохраняются.
 Goal CPU p99 7,37→0,92 мс, native diagnostic tick1606 51,7→40,2 мс.
 Две ordinary пары: FPS −0,856% / −0,921%, max frame −13…15%, core/step
@@ -4631,3 +4641,23 @@ approach/firing point/flank/coarse/goal/sweep preparation/direct intervals.
 привязать оставшиеся ~4 мс direct sweep к конкретным actor/jobs/OS waits,
 затем frame gaps и render producers. Исходные редкие многосекундные stalls
 этими 120-с runs не объявляются исправленными. Разбор — [152](152-goal-clearance-and-pursuit-attribution.md).
+
+
+## Шаг ADR-559 — не считать discarded prefix geometry
+
+WBPERF-003/004 частично: последовательная подготовка первых четырёх pose
+останавливается на первом отказе. При допустимом prefix прежние workers
+получают те же samples, потребитель сохраняет budgets и commit order.
+В тесте раннего отказа одна/две pose вместо четырёх; full battle/hash
+не меняются. 106 nav и 562 sim tests проходят / 4 прежних ignored.
+
+Mean CPU tick −0,13…0,23%, ordinary FPS +0,15…0,19%: общий значимый gain
+не доказан. Второй native max frame хуже; CPU tick1024 с 27мс rubble
+не выброшен. Новых pools нет, сбалансированная загрузка не измерялась.
+Const specialization, early terrain/debris thresholds и dense tile index
+отклонены; индекс увеличил rebuild cost без route/motion gain.
+
+Главные приоритеты остаются WBPERF-002 и WBPERF-001/027. Для дальнейших
+proof/index кандидатов нужны hit/work counters, для пиков — actor/job/OS
+attribution. Не закрывать 165 FPS/rare stalls этим локальным cleanup.
+Данные и пределы — [153](153-sweep-prefix-work-and-rejected-geometry-indices.md).

@@ -24603,3 +24603,19 @@ FPS gain/равномерного CPU/165 FPS нет. Goal batches и parallel p
 не ускорили нужные queries и откатились. Physics/nav pools прежние.
 941 tests passed / 7 прежних ignored. Данные/ограничения —
 [152](152-goal-clearance-and-pursuit-attribution.md).
+
+
+## ADR-559 — короткий префикс перед параллельными sweep jobs
+
+Fresh и suspended sweep preparation прекращает speculative geometry после
+первого отказа connection prefix. Точные pose/initial exception, логические
+budgets и ordered commit сохраняются. Два новых differential tests;
+106 nav + 562 sim tests проходят, четыре прежних ignored.
+
+Ordinary native четыре runs по 120 с: FPS +0,193% / +0,151%, существенного
+общего gain нет; core/step +0,217% / −0,382%, второй max frame хуже.
+3600 steps, 1×, полный gameplay/hash одинаковы. CPU tick 1024 с rubble
+27 мс сохранён открытым. Const specialization, early threshold proofs
+и dense debris index не ускорили полный CPU battle и откатились.
+Новые pools не добавлены, balanced CPU и 165 FPS не закрыты.
+Данные/пределы — [153](153-sweep-prefix-work-and-rejected-geometry-indices.md).

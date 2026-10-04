@@ -1009,6 +1009,24 @@ impl<'a> Probe<'a> {
             .map(|&(at, head)| self.route_pose(at, head, s))
             .collect()
     }
+    /// Ordered speculative prefix, stopping at the first failed connection
+    /// proof. The caller still commits samples with its original work budget;
+    /// geometry beyond a known refusal would only be discarded.
+    pub fn route_prefix(
+        &mut self,
+        s: Shape,
+        samples: &[([Fx; 2], i32)],
+        open: impl Fn(&[Pose]) -> bool,
+    ) -> Vec<Pose> {
+        let mut poses = Vec::with_capacity(samples.len());
+        for &(at, head) in samples {
+            poses.push(self.route_pose(at, head, s));
+            if !open(&poses) {
+                break;
+            }
+        }
+        poses
+    }
     /// The prepared tiles prove the complete support and belly footprint is
     /// one bare height. The proof is the same for driving and route search.
     fn flat_pose(&self, pos: [Fx; 2], s: Shape) -> Option<Pose> {

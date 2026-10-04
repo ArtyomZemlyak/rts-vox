@@ -1087,7 +1087,7 @@ impl Motion {
             use rayon::prelude::*;
             let shape = request.shape;
             let samples = &request.samples;
-            let prefix = ground.route_samples(shape, &samples[..4]);
+            let prefix = ground.route_prefix(shape, &samples[..4], |p| request.prefix_open(p));
             if !request.prefix_open(&prefix) {
                 return nav::vehicle::PreparedSweep {
                     poses: samples[..4].iter().copied().zip(prefix).collect(),
@@ -1367,7 +1367,8 @@ impl Motion {
                 .map(|(shape, samples)| {
                     use rayon::prelude::*;
                     let mut seed = hunt.sweep_probe(w, rubble);
-                    let prefix = seed.route_samples(shape, &samples[..4]);
+                    let prefix =
+                        seed.route_prefix(shape, &samples[..4], |p| hunt.sweep_prefix_open(p));
                     if !hunt.sweep_prefix_open(&prefix) {
                         return nav::vehicle::PreparedSweep {
                             poses: samples[..4].iter().copied().zip(prefix).collect(),
