@@ -2,7 +2,15 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-556: offline frame cadence разделяет предыдущую Update
+Последний шаг ADR-557: coordinator advance вынесен из shared render compute
+executor на main thread, существующие physics/nav workers сохранены.
+Native подтвердил execution boundary; ordinary FPS +2,2% / +0,3%,
+крупного устойчивого gain нет. Diagnostic prepare p99 21,5→7,6 мс,
+без FPS acceptance. 118 render tests проходят; tick 1606/orders_misc,
+независимый sim/render и 165 FPS открыты. Данные —
+[151](151-main-thread-tick-coordinator.md).
+
+Предыдущий шаг ADR-556: offline frame cadence разделяет предыдущую Update
 и её следующий gap по числу шагов/generation. Три новых physics кандидата
 отклонены; native регрессия hull-grid 81,4→69,1 FPS повторилась, хотя
 CPU wake быстрее на 18%. Штатный алгоритм восстановлен и пересобран.
@@ -4572,3 +4580,25 @@ scheduling/stacks/waits. Следующий приоритет WBPERF-002/001/02
 WBPERF-004/005/014, balanced CPU и 165 FPS не закрыты. Прототипы, bounds,
 SHA, source provenance и полные данные —
 [150](150-wake-query-experiments-and-frame-cadence.md).
+
+
+## ADR-557 — coordinator не занимает render ComputeTaskPool
+
+WBPERF-002/001/027 частично: advance исполняется на main-world main
+thread через NonSendMarker, без exclusive World borrow. Физика и routes
+сохраняют существующие pools и indexed joins, tick/chain/баланс прежние.
+Native tracing: все 1800 тиков на main OS ID, physics/nav по восемь других
+OS workers. Это execution boundary, не независимая симуляция.
+
+Ordinary пары 120 с: FPS 81,10→82,88 / 83,60→83,85; 3600 steps / 1×
+и полный gameplay/hash совпали. Второй core/step +0,878%, p99/max хуже;
+крупный устойчивый FPS gain не подтверждён. Matching diagnostic:
+render_prepare mean 3,314→2,964 мс, p99 21,527→7,601 мс; parent wall
+с observer overhead, не GPU/CPU utilization/FPS acceptance.
+
+118 full render tests / 3 ignored, Clippy/fmt, native actions generations
+1…4 проходят. Главный следующий пункт WBPERF-002 остаётся. WBPERF-001/027:
+конкретные weapon/order calls в tick 1606, где traced total около 53 мс,
+два orders_misc intervals около 10 мс; после них render queues/OS waits.
+Stalls, balanced CPU и 165 FPS открыты. Полные данные и границы —
+[151](151-main-thread-tick-coordinator.md).

@@ -24564,3 +24564,25 @@ tests и пять native datasets проходят; local correctness не оз�
 acceptance. WBPERF-002/001/027, balanced CPU и 165 FPS открыты. Прототипы,
 проверки, отрицательные результаты и SHA —
 [150](150-wake-query-experiments-and-frame-cadence.md).
+
+
+## ADR-557 — координатор тика вне render compute pool
+
+04.10.2026. Advance получает штатный NonSendMarker: main-world schedule
+исполняет синхронный coordinator на main thread, physics/nav fan-out
+остаётся в прежних постоянных пулах. World borrow не exclusive, chain
+и fixed ticks прежние. Native подтвердил 1800 тиков на main OS ID,
+восемь physics и восемь nav workers; compute size прежний.
+
+Две ordinary full-battle пары: FPS +2,185% / +0,300%, core/step −0,955% /
++0,878%; второй p99/max хуже. Крупный устойчивый FPS gain не доказан.
+Matching diagnostic render_prepare p99 21,527→7,601 мс, mean −10,54%;
+это instrumented parent wall, не GPU/CPU/wait attribution и не FPS
+acceptance. Общий дорогой tick 1606 около 53 мс с двумя orders_misc
+интервалами около 10 мс остаётся. Нужны конкретные weapon/order calls.
+
+118 render tests / 3 прежних ignored, metadata NON_SEND/non-exclusive
+regression, Clippy/fmt и native actions generations 1…4 проходят. Полный
+gameplay/hash прежний. WBPERF-002, 001/027, balanced CPU и 165 FPS открыты.
+Данные, OS IDs, SHA и ограничения —
+[151](151-main-thread-tick-coordinator.md).

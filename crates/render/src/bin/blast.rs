@@ -1475,11 +1475,15 @@ fn advance(
     mut workshop: ResMut<Workshop>,
     mut visual: ResMut<moving::Visual>,
     panel: Res<panel::Panel>,
-    (recording, mut profile, mut fire_fx, mut streaming): (
+    (recording, mut profile, mut fire_fx, mut streaming, _main_thread): (
         Res<Recording>,
         ResMut<profile::Profile>,
         ResMut<fire::Effects>,
         ResMut<streaming::Streaming>,
+        // Keep the synchronous tick coordinator out of the shared compute
+        // executor used by pipelined render preparation. Physics/navigation
+        // still fan out into their own persistent pools before ordered join.
+        bevy::ecs::system::NonSendMarker,
     ),
     mut gas: ResMut<GasInput>,
     keys: Res<ButtonInput<KeyCode>>,

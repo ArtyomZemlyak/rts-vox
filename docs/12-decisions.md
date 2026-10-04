@@ -682,3 +682,6 @@
 
 
 | 556 | Offline analyzer распределяет полные монотонные begin-to-begin интервалы по generation и числу шагов предыдущей Update slice. Следующий gap относится к этой slice; Update/core вложены, wall partition не означает CPU/GPU/wait attribution. Последняя slice сохраняется отдельно без выдуманного интервала; legacy без clocks получает null. Native collectors, scheduling и физика прежние. Разбор — analysis/150-wake-query-experiments-and-frame-cadence.md. |
+
+
+| 557 | Синхронный координатор advance полигона исполняется на главном потоке main-world schedule через NonSendMarker. Он не занимает общий ComputeTaskPool рендера и не получает EXCLUSIVE World borrow. Существующие physics/navigation pools, их размеры, indexed joins, порядок систем и входы рендера прежние; симуляция остаётся синхронной с кадром. Разбор — analysis/151-main-thread-tick-coordinator.md. |

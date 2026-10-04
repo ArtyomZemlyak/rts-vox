@@ -2,6 +2,16 @@ use super::*;
 use std::time::Instant;
 
 #[test]
+fn tick_coordinator_does_not_enter_the_shared_render_compute_executor() {
+    use bevy::ecs::system::{IntoSystem, System, SystemStateFlags};
+    let mut system = IntoSystem::into_system(advance);
+    system.initialize(&mut World::new());
+    assert!(system.flags().contains(SystemStateFlags::NON_SEND));
+    // A main-thread coordinator does not take an exclusive World borrow.
+    assert!(!system.flags().contains(SystemStateFlags::EXCLUSIVE));
+}
+
+#[test]
 fn native_worker_override_preserves_battle_across_rebuild() {
     let layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron")).unwrap();
     let mut workshop = Workshop::new(Some(layout), false);
