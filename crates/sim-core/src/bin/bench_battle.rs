@@ -27,6 +27,8 @@ struct TickProfile {
     battle_halo_us: u128,
     rubble_us: u128,
     heat_flush_us: u128,
+    collapse_us: u128,
+    collapse_work: sim_core::blast::CollapseWork,
     searching: usize,
     moving: usize,
     blocked: usize,
@@ -69,6 +71,7 @@ impl TickProfile {
             }
             "rubble" => self.rubble_us = us,
             "heat_flush" => self.heat_flush_us = us,
+            name if name == "collapse" || name.starts_with("collapse_") => self.collapse_us += us,
             _ => {}
         }
     }
@@ -76,6 +79,10 @@ impl TickProfile {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    if let Some(mode) = args.windows(2).find(|w| w[0] == "--collapse-stress") {
+        collapse_stress(&mode[1]);
+        return;
+    }
     println!("physics_workers={}", rayon::current_num_threads());
     let assault = args.iter().any(|a| a == "--assault");
     let siege = args
@@ -562,6 +569,7 @@ fn main() {
                 *sum += value;
             }
             profile.tick = sim.tick;
+            profile.collapse_work = sim.collapse_work;
             profile.total_us = elapsed;
             profile.feet_us = feet_us;
             [
@@ -788,11 +796,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -817,13 +825,28 @@ fn main() {
                 p.flying,
                 p.chunks,
                 p.felling,
-                p.feet_us
+                p.feet_us,
+                p.collapse_us,
+                p.collapse_work.queued,
+                p.collapse_work.submitted,
+                p.collapse_work.blocked_by,
+                p.collapse_work.blocked_ticks,
+                p.collapse_work.gather_candidates,
+                p.collapse_work.gather_buffer_peak
             )
             .unwrap();
         }
         out.flush().unwrap();
         for (index, window) in tick_profiles.chunks(300).enumerate() {
             let len = window.len() as u128;
+            println!("collapse_window={}..{} mean_us={} queued_max={} submitted_max={} blocked_ticks_max={} candidates_max={} buffer_peak_max={}",
+                window[0].tick, window[window.len()-1].tick,
+                window.iter().map(|p| p.collapse_us).sum::<u128>() / len,
+                window.iter().map(|p| p.collapse_work.queued).max().unwrap(),
+                window.iter().map(|p| p.collapse_work.submitted).max().unwrap(),
+                window.iter().map(|p| p.collapse_work.blocked_ticks).max().unwrap(),
+                window.iter().map(|p| p.collapse_work.gather_candidates).max().unwrap(),
+                window.iter().map(|p| p.collapse_work.gather_buffer_peak).max().unwrap());
             let mut times: Vec<_> = window.iter().map(|p| p.total_us).collect();
             times.sort_unstable();
             println!("tick_window={}..{} mean_us={} p99_us={} motion_us={} route_us={} commit_us={} contact_us={} felling_us={} debris_us={} battle_ai_us={} battle_orders_us={} battle_pose_us={} battle_los_us={} battle_laser_us={} battle_beam_us={} battle_halo_us={} searches_max={} flying_max={} fragments_max={} felling_max={}",
@@ -1029,4 +1052,118 @@ fn restore_snapshot(config: modding::explosion::ExplosionConfig, bytes: &[u8]) -
             last.0, last.1, last.2
         )
     })
+}
+
+/// Isolated complete-batch qualification: setup, serialization and log I/O are
+/// outside the measured collapse calls. No weapon or timing semantics change.
+fn collapse_stress(mode: &str) {
+    use voxel::{bodies::Bodies, collapse::CollapseLayer, world::Edit, Generator, World};
+    struct Terrain(bool);
+    impl Generator for Terrain {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            if if self.0 {
+                (32..288).contains(&x) && (32..48).contains(&y) && (32..288).contains(&z)
+            } else {
+                y < 48
+            } {
+                2
+            } else {
+                0
+            }
+        }
+    }
+    assert!(matches!(mode, "backlog" | "oversized"));
+    let mut samples = Vec::new();
+    for repeat in 0..3 {
+        let mut world = World::new(
+            320,
+            96,
+            320,
+            4_000_000,
+            Box::new(Terrain(mode == "oversized")),
+        );
+        // Fixture setup must really apply the entire requested edit batch;
+        // the ordinary materialization cap otherwise leaves most digs pending.
+        world.max_materialize_per_tick = 4_000_000;
+        let mut queued = std::collections::BTreeMap::new();
+        if mode == "oversized" {
+            world.queue_dig(32, 32, 32);
+        } else {
+            'cells: for x in 32..288 {
+                for y in 8..43 {
+                    for z in 32..288 {
+                        world.queue_dig(x, y, z);
+                        if queued.len() == 2_286_933 {
+                            queued.insert([x, y, z], Edit::dig(x, y, z));
+                            break 'cells;
+                        }
+                        queued.insert([x, y, z], Edit::dig(x, y, z));
+                    }
+                }
+            }
+        }
+        world.flush();
+        queued.clear();
+        for e in world.edits() {
+            queued.insert([e.x, e.y, e.z], *e);
+        }
+        assert_eq!(world.queued(), 0, "fixture setup left source digs pending");
+        let expected = if mode == "backlog" { 2_286_934 } else { 1 };
+        assert_eq!(
+            queued.len(),
+            expected,
+            "fixture must exercise the requested batch"
+        );
+        println!(
+            "collapse_fixture mode={mode} queued={} edit_bytes={}",
+            queued.len(),
+            std::mem::size_of::<Edit>()
+        );
+        let mut collapse = CollapseLayer::new(&world);
+        let mut bodies = Bodies::new(16, fx::Fx::from_int(100));
+        collapse.set_max_body_cells(4096);
+        let mut ticks = Vec::new();
+        let mut peak = 0;
+        let mut candidates = 0;
+        for _ in 0..128 {
+            let start = Instant::now();
+            let st = collapse.apply_iter_observed(
+                &mut world,
+                queued.values().copied(),
+                &mut bodies,
+                |_| {},
+            );
+            ticks.push(start.elapsed().as_micros());
+            peak = peak.max(st.gather_buffer_peak);
+            candidates = candidates.max(st.gather_candidates);
+            queued.clear();
+            if !collapse.pending() {
+                break;
+            }
+        }
+        assert!(!collapse.pending(), "qualification did not drain");
+        assert!(
+            bodies.list.is_empty(),
+            "both fixtures must retain their terrain"
+        );
+        let mut snapshot = fx::blob::Blob::new();
+        world.save(&mut snapshot);
+        world.save_transfers(&mut snapshot);
+        collapse.save(&mut snapshot);
+        bodies.save(&mut snapshot);
+        let hash = snapshot.v.iter().fold(0xcbf29ce484222325u64, |h, v| {
+            (h ^ u64::from(*v)).wrapping_mul(0x100000001b3)
+        });
+        println!("collapse_stress mode={mode} repeat={repeat} sum_us={} max_us={} calls={} candidates={candidates} buffer_peak={peak} hash={hash:016x}",
+            ticks.iter().sum::<u128>(), ticks.iter().max().unwrap(), ticks.len());
+        samples.extend(ticks);
+    }
+    samples.sort_unstable();
+    println!(
+        "collapse_stress_summary mode={mode} calls={} p50_us={} p95_us={} max_us={}",
+        samples.len(),
+        samples[samples.len() / 2],
+        samples[samples.len() * 95 / 100],
+        samples.last().unwrap()
+    );
 }

@@ -2076,6 +2076,20 @@ pub mod ai;
 #[path = "range_battle.rs"]
 pub mod battle;
 
+/// Per-tick diagnostics only; never serialized or included in the state hash.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CollapseWork {
+    pub queued: usize,
+    pub submitted: usize,
+    /// Bits 0/1: active wave/debris claim. Only when both clear, bit 2
+    /// reports a pending body source dig, preserving the cheap early guards.
+    pub blocked_by: u8,
+    /// Consecutive blocked ticks in this runtime (starts anew after restore).
+    pub blocked_ticks: u32,
+    pub gather_candidates: usize,
+    pub gather_buffer_peak: usize,
+}
+
 pub struct BlastRange {
     pub battle: battle::Battle,
     pub combustion: fire::Combustion,
@@ -2160,6 +2174,7 @@ pub struct BlastRange {
     /// The data ceiling on one fallen body; the room in the pool caps it
     /// further tick by tick.
     collapse_cap: usize,
+    pub collapse_work: CollapseWork,
 }
 
 /// The refused source motion is already normal to the other hull. Subtract
@@ -2582,6 +2597,7 @@ impl BlastRange {
             world_changed: nav::vehicle::Changed::default(),
             collapse_backlog: BTreeMap::new(),
             collapse_cap: stock.max_body_cells as usize,
+            collapse_work: CollapseWork::default(),
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         completed("components");
@@ -4234,18 +4250,45 @@ impl BlastRange {
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
         let wave_working =
             self.explosion.as_ref().is_some_and(|e| e.working()) || self.battle.working();
-        if (!self.collapse_backlog.is_empty() || self.collapse.pending())
-            && !wave_working
-            && self.matter.debris.claims() == 0
-            // Plate fracture also owns cells whose source digs are still
-            // draining. Do not detach a second body from that same matter.
-            && !self.bodies.list.iter().any(|b| b.awaiting_removal(&self.world))
-        {
+        let has_collapse = !self.collapse_backlog.is_empty() || self.collapse.pending();
+        let blocked_by = if has_collapse {
+            let cheap = u8::from(wave_working) | (u8::from(self.matter.debris.claims() != 0) << 1);
+            if cheap != 0 {
+                cheap
+            } else {
+                u8::from(
+                    self.bodies
+                        .list
+                        .iter()
+                        .any(|b| b.awaiting_removal(&self.world)),
+                ) << 2
+            }
+        } else {
+            0
+        };
+        self.collapse_work = CollapseWork {
+            queued: self.collapse_backlog.len(),
+            blocked_by,
+            blocked_ticks: if blocked_by != 0 {
+                self.collapse_work.blocked_ticks.saturating_add(1)
+            } else {
+                0
+            },
+            ..CollapseWork::default()
+        };
+        // Plate fracture also owns cells whose source digs are still draining.
+        // Retain all ownership guards: diagnostics must not change admission.
+        if has_collapse && blocked_by == 0 {
             self.collapse.set_max_body_cells(self.collapse_cap);
-            let edits: Vec<voxel::world::Edit> = self.collapse_backlog.values().copied().collect();
-            self.collapse
-                .apply_observed(&mut self.world, &edits, &mut self.bodies, &mut completed);
-            self.collapse_backlog.clear();
+            self.collapse_work.submitted = self.collapse_backlog.len();
+            let collapse_stats = self.collapse.apply_iter_observed(
+                &mut self.world,
+                self.collapse_backlog.values().copied(),
+                &mut self.bodies,
+                &mut completed,
+            );
+            self.collapse_work.gather_candidates = collapse_stats.gather_candidates;
+            self.collapse_work.gather_buffer_peak = collapse_stats.gather_buffer_peak;
             // Each cell goes by its own matter, not by the body it came
             // off in — else the wave's slicing would decide what crumbles.
             // A body torn off this tick keeps its cohesive cells, rebuilt
@@ -4297,11 +4340,11 @@ impl BlastRange {
             self.bodies.spawned.clear();
             if let Some(layout) = &self.layout {
                 let before = self.bodies.list.len();
-                plate::fracture(
+                plate::fracture_iter(
                     layout,
                     &mut self.world,
                     &mut self.bodies,
-                    &edits,
+                    self.collapse_backlog.values().copied(),
                     &mut crumbs,
                     |mat| {
                         self.matter
@@ -4317,6 +4360,7 @@ impl BlastRange {
                     .sum::<u64>();
                 self.bodies.spawned.clear();
             }
+            self.collapse_backlog.clear();
         }
         if !crumbs.is_empty() {
             // Crumbled cells — the layer's loose ones and the supports a
@@ -6630,6 +6674,26 @@ mod tests {
     /// (ADR-459). A corrupt place or speed of the gun's shell or of a
     /// stream round, or a corrupt aim, overflowed the dome and body tests
     /// or swept a billion steps a tick; the restore now answers `None`.
+    #[test]
+    fn collapse_diagnostics_do_not_change_save_or_authoritative_hash() {
+        let mut r = BlastRange::new(config());
+        let saved = r.snapshot();
+        let hash = r.state_hash();
+        r.collapse_work = CollapseWork {
+            queued: usize::MAX,
+            submitted: usize::MAX,
+            blocked_by: 7,
+            blocked_ticks: u32::MAX,
+            gather_candidates: usize::MAX,
+            gather_buffer_peak: usize::MAX,
+        };
+        assert_eq!(r.snapshot(), saved);
+        assert_eq!(r.state_hash(), hash);
+        let restored = BlastRange::restore(r.config.clone(), &saved).unwrap();
+        assert_eq!(restored.collapse_work, CollapseWork::default());
+        assert_eq!(restored.state_hash(), hash);
+    }
+
     #[test]
     fn a_large_real_collapse_backlog_is_not_a_corrupt_snapshot() {
         let count = (1u32 << 20) + 1;

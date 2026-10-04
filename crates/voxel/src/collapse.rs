@@ -103,6 +103,10 @@ pub struct CollapseStats {
     pub detached: usize,
     /// Компонент отвалилось, но не влезло в потолок тела.
     pub too_big: usize,
+    /// Unsupported voxel candidates, counted from run masks before allocation.
+    pub gather_candidates: usize,
+    /// Peak retained candidate cells; oversized groups release their prefix.
+    pub gather_buffer_peak: usize,
     /// Вокселей ушло в тела.
     pub cells: usize,
     /// Узлов в графе компонент — размер ступени C.
@@ -442,6 +446,18 @@ impl CollapseLayer {
         &mut self,
         w: &mut World,
         edits: &[Edit],
+        bodies: &mut Bodies,
+        completed: impl FnMut(&'static str),
+    ) -> CollapseStats {
+        self.apply_iter_observed(w, edits.iter().copied(), bodies, completed)
+    }
+
+    /// Stream the same ordered edit batch without a second materialized copy.
+    /// This still resolves one complete batch, never a partial support graph.
+    pub fn apply_iter_observed(
+        &mut self,
+        w: &mut World,
+        edits: impl Iterator<Item = Edit>,
         bodies: &mut Bodies,
         mut completed: impl FnMut(&'static str),
     ) -> CollapseStats {
@@ -1297,8 +1313,11 @@ impl CollapseLayer {
         // Состав групп. Обход по чанкам в порядке возрастания индекса,
         // внутри чанка — по пробегам: порядок вокселей детерминирован.
         let cs = CS as u32;
-        let mut roots: Vec<u32> = Vec::new();
-        let mut group_cells: Vec<Vec<(u32, u32, u32)>> = Vec::new();
+        let mut groups = BTreeMap::<u32, usize>::new();
+        // None means the complete connected group exceeded the body cap.
+        // Do not enumerate or retain the rest of a body that cannot be taken.
+        let mut group_cells: Vec<Option<Vec<(u32, u32, u32)>>> = Vec::new();
+        let mut buffered = 0usize;
         for k in 0..self.unsupported_chunks.len() {
             let i = self.unsupported_chunks[k] as usize;
             let base = self.base[i] as usize;
@@ -1314,34 +1333,48 @@ impl CollapseLayer {
                     continue;
                 }
                 let root = self.component_roots[base + lab];
-                let gi = match roots.iter().position(|&x| x == root) {
-                    Some(gi) => gi,
-                    None => {
-                        roots.push(root);
-                        group_cells.push(Vec::new());
-                        roots.len() - 1
-                    }
-                };
+                let next = group_cells.len();
+                let gi = *groups.entry(root).or_insert_with(|| {
+                    group_cells.push(Some(Vec::new()));
+                    next
+                });
                 let r = self.comps.runs[ri];
+                let count = r.mask.count_ones() as usize;
+                st.gather_candidates += count;
+                let Some(cells) = group_cells[gi].as_mut() else {
+                    continue;
+                };
+                if count > self.max_body_cells.saturating_sub(cells.len()) {
+                    buffered -= cells.len();
+                    group_cells[gi] = None;
+                    continue;
+                }
+                let needed = cells.len() + count;
+                if needed > cells.capacity() {
+                    let capacity = needed.next_power_of_two().min(self.max_body_cells);
+                    cells.reserve_exact(capacity - cells.len());
+                }
+                buffered += count;
+                st.gather_buffer_peak = st.gather_buffer_peak.max(buffered);
                 let col = r.col as usize;
                 let (ly, lz) = (col % CS, col / CS);
                 let mut bits = r.mask;
                 while bits != 0 {
                     let x = bits.trailing_zeros();
                     bits &= bits - 1;
-                    group_cells[gi].push((ox + x, oy + ly as u32, oz + lz as u32));
+                    cells.push((ox + x, oy + ly as u32, oz + lz as u32));
                 }
             }
         }
 
         let mut torn = 0usize;
         let mut touched: Vec<u32> = Vec::new();
-        for cells in &group_cells {
-            if cells.is_empty() {
-                continue;
-            }
-            if cells.len() > self.max_body_cells {
+        for group in &group_cells {
+            let Some(cells) = group else {
                 st.too_big += 1;
+                continue;
+            };
+            if cells.is_empty() {
                 continue;
             }
             self.cells.clear();
@@ -2276,6 +2309,93 @@ mod tests {
             c.known.len()
         );
         assert!(b.list.is_empty());
+    }
+
+    #[test]
+    fn rejected_large_groups_do_not_buffer_their_whole_volume_or_block_small_bodies() {
+        struct Slab;
+        impl crate::Generator for Slab {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                if ((32..288).contains(&x) && (32..48).contains(&y) && (32..288).contains(&z))
+                    || ((8..10).contains(&x) && (10..12).contains(&y) && (8..10).contains(&z))
+                {
+                    2
+                } else {
+                    AIR
+                }
+            }
+        }
+        let mut w = World::new(320, 96, 320, 100_000, Box::new(Slab));
+        let mut c = CollapseLayer::new(&w);
+        c.set_max_body_cells(4096);
+        let mut b = Bodies::new(16, test_gravity());
+        w.queue_dig(32, 32, 32);
+        w.queue_dig(8, 10, 8);
+        w.flush();
+        let mut edits = w.edits().to_vec();
+        let mut rejected = 0;
+        let mut candidates = 0;
+        for _ in 0..64 {
+            let st = c.apply_iter_observed(&mut w, edits.iter().copied(), &mut b, |_| {});
+            rejected += st.too_big;
+            candidates = candidates.max(st.gather_candidates);
+            assert!(st.gather_buffer_peak <= 4096 + 7, "{st:?}");
+            edits.clear();
+            if !c.pending() {
+                break;
+            }
+        }
+        assert!(rejected > 0);
+        assert!(candidates >= 256 * 256 * 16 - 1);
+        assert!(!c.pending());
+        assert_eq!(b.list.len(), 1);
+        assert_eq!(b.list[0].voxels.len(), 7);
+        w.flush();
+        assert!(
+            w.solid(128, 40, 128),
+            "rejected matter must remain in the world"
+        );
+        assert!(
+            !w.solid(9, 11, 9),
+            "small disconnected body must still detach"
+        );
+    }
+
+    #[test]
+    fn streamed_edits_preserve_complete_cross_chunk_body_and_snapshot_order() {
+        let mut a = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut b = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut ca = CollapseLayer::new(&a);
+        let mut cb = CollapseLayer::new(&b);
+        let mut ba = Bodies::new(16, test_gravity());
+        let mut bb = Bodies::new(16, test_gravity());
+        cut(&mut a, 4);
+        cut(&mut b, 4);
+        a.flush();
+        b.flush();
+        let edits = a.edits().to_vec();
+        ca.apply(&mut a, &edits, &mut ba);
+        cb.apply_iter_observed(&mut b, edits.into_iter(), &mut bb, |_| {});
+        assert_eq!(ba.list.len(), 1);
+        for _ in 0..8 {
+            let mut sa = fx::blob::Blob::new();
+            let mut sb = fx::blob::Blob::new();
+            ca.save(&mut sa);
+            ba.save(&mut sa);
+            a.save(&mut sa);
+            a.save_transfers(&mut sa);
+            cb.save(&mut sb);
+            bb.save(&mut sb);
+            b.save(&mut sb);
+            b.save_transfers(&mut sb);
+            assert_eq!(sa.v, sb.v);
+            a.flush();
+            b.flush();
+            ca.apply(&mut a, &[], &mut ba);
+            cb.apply_iter_observed(&mut b, std::iter::empty(), &mut bb, |_| {});
+            ba.step(&mut a);
+            bb.step(&mut b);
+        }
     }
 
     /// **A piece too big to fall waits for a change** (ADR-440). Only an

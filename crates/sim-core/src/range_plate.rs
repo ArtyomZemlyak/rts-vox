@@ -97,11 +97,25 @@ fn crush<'a>(
 /// support cross-section sets the compressive capacity. Only plates near this
 /// tick's edits are visited, so the kilometre map has no per-frame plate pass.
 /// The supports a tearing plate crushes go to `crumbs` ([`crush`]).
+#[cfg(test)]
 pub(super) fn fracture(
     layout: &RangeLayout,
     w: &mut World,
     bodies: &mut Bodies,
     edits: &[Edit],
+    crumbs: &mut Vec<([u32; 3], Mat)>,
+    material: impl Fn(u16) -> Option<(u32, u32, u32)>,
+) -> usize {
+    fracture_iter(layout, w, bodies, edits.iter().copied(), crumbs, material)
+}
+
+/// Cloneable traversal keeps plate checks on the same complete batch without
+/// allocating a second copy of a possibly million-cell collapse backlog.
+pub(super) fn fracture_iter(
+    layout: &RangeLayout,
+    w: &mut World,
+    bodies: &mut Bodies,
+    edits: impl Iterator<Item = Edit> + Clone,
     crumbs: &mut Vec<([u32; 3], Mat)>,
     material: impl Fn(u16) -> Option<(u32, u32, u32)>,
 ) -> usize {
@@ -124,7 +138,7 @@ pub(super) fn fracture(
         };
         if strength == 0
             || density == 0
-            || !edits.iter().any(|e| {
+            || !edits.clone().any(|e| {
                 (e.x as i32) >= roof.min[0]
                     && (e.x as i32) < roof.max[0]
                     && (e.z as i32) >= roof.min[2]
