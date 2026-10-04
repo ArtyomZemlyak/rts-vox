@@ -267,6 +267,20 @@ fn main() {
     if let Some(workers) = workers {
         assert!(sim.set_navigation_workers(workers), "workers: 1..=8");
     }
+    if let Some(path) = args
+        .windows(2)
+        .find(|w| w[0] == "--restore-file")
+        .map(|w| &w[1])
+    {
+        let bytes = std::fs::read(path).expect("read snapshot");
+        let restored = restore_snapshot(sim.config.clone(), &bytes);
+        println!(
+            "restored tick={} hash={:016x}",
+            restored.tick,
+            restored.state_hash()
+        );
+        return;
+    }
     if args.iter().any(|a| a == "--group-order-bench") {
         assert!(world_battle, "--group-order-bench requires --world");
         let ids: Vec<_> = sim
@@ -577,8 +591,15 @@ fn main() {
                 bytes.len(),
                 sim.layout.as_ref().unwrap().to_ron().unwrap().len()
             );
-            let replica = BlastRange::restore(sim.config.clone(), &bytes)
-                .expect("world battle snapshot restores");
+            if let Some(path) = args
+                .windows(2)
+                .find(|w| w[0] == "--snapshot-out")
+                .map(|w| &w[1])
+            {
+                std::fs::write(path, &bytes).expect("write replay snapshot");
+                println!("snapshot_file={path}");
+            }
+            let replica = restore_snapshot(sim.config.clone(), &bytes);
             assert_eq!(sim.state_hash(), replica.state_hash());
             restored = Some(replica);
         } else if let Some(replica) = &mut restored {
@@ -661,6 +682,12 @@ fn main() {
                     sim.matter.debris.claims(),
                     sim.matter.debris.fragment_room(&sim.matter.tuning));
                 let admission = sim.matter.admission;
+                let pool = sim.matter.debris.fragment_pools(&sim.matter.tuning);
+                println!("damage_storage tick={} working={} parked={} flying={} working_cap={} parked_cap={} record_bytes={} section_bytes={}",
+                    sim.tick, pool.working, pool.parked, pool.flying,
+                    sim.matter.tuning.max_fragments, sim.matter.tuning.max_resting_fragments,
+                    std::mem::size_of::<sim_core::burst::Fragment>(),
+                    std::mem::size_of::<sim_core::burst::chunk::Chunk>());
                 println!("damage_admission tick={} body_applied_unaffordable_deferred={:?} melt_applied_deferred={:?} room_scans={} room_items={}",
                     sim.tick,
                     [0, 1, 2].map(|i| admission.body[i] - admission_previous.body[i]),
@@ -989,4 +1016,17 @@ mod tests {
         assert_eq!(profile.battle_laser_us, 23);
         assert_eq!(profile.battle_halo_us, 23);
     }
+}
+
+fn restore_snapshot(config: modding::explosion::ExplosionConfig, bytes: &[u8]) -> BlastRange {
+    let mut last = ("header", 0, None);
+    BlastRange::restore_observed(config, bytes, |section, offset, unit| {
+        last = (section, offset, unit);
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "world battle snapshot refused: section={} offset={} unit={:?}",
+            last.0, last.1, last.2
+        )
+    })
 }

@@ -1537,8 +1537,15 @@ impl CollapseLayer {
     }
 
     pub fn load(&mut self, s: &mut fx::blob::Scan) -> bool {
+        self.load_diagnostic(s).is_ok()
+    }
+    /// Rejection category for offline snapshot diagnostics.
+    pub fn load_diagnostic(&mut self, s: &mut fx::blob::Scan) -> Result<(), &'static str> {
+        if !s.ok() {
+            return Err("collapse_prior_bytes");
+        }
         if s.u32() != self.nx || s.u32() != self.ny || s.u32() != self.nz {
-            return false;
+            return Err("collapse_dimensions");
         }
         self.recheck = s.bool();
         self.pending = s.u32s();
@@ -1547,18 +1554,23 @@ impl CollapseLayer {
         self.base = s.u32s();
         self.stale = s.bools();
         if self.base.len() != self.chunks.len() || self.stale.len() != self.chunks.len() {
-            return false;
+            return Err("collapse_array_lengths");
         }
+        // Sparse snapshots omit absent chunks. A scene may already have an
+        // authored support graph when restore starts; omitted entries must
+        // replace that graph with absence, not preserve its old nodes/edges.
+        self.chunks.fill_with(|| None);
+        self.nodes.fill_with(|| None);
         let n = s.list(6);
         for _ in 0..n {
             let ci = s.u32() as usize;
             if ci >= self.chunks.len() {
-                return false;
+                return Err("collapse_chunk_index");
             }
             self.chunks[ci] = if s.bool() {
                 let cols = s.u32s();
                 if cols.len() != crate::topo::COLS {
-                    return false;
+                    return Err("collapse_topology_length");
                 }
                 Some(Box::new(TopoChunk { cols }))
             } else {
@@ -1569,7 +1581,7 @@ impl CollapseLayer {
                 nd.n = s.usize();
                 nd.bedrock = s.bools();
                 if nd.bedrock.len() != nd.n {
-                    return false;
+                    return Err("collapse_bedrock_length");
                 }
                 for f in 0..FACES {
                     let nf = s.list(6);
@@ -1584,7 +1596,7 @@ impl CollapseLayer {
             };
         }
         if !self.references_hold() {
-            return false;
+            return Err("collapse_graph_references");
         }
         self.anchor_bits.fill(0);
         self.anchor_count = 0;
@@ -1606,7 +1618,11 @@ impl CollapseLayer {
             .sum();
         self.reached.clear();
         self.reached.resize(total, false);
-        s.ok()
+        if s.ok() {
+            Ok(())
+        } else {
+            Err("collapse_bytes")
+        }
     }
 }
 
@@ -1841,6 +1857,32 @@ mod tests {
     /// размеченных, размеченные не по возрастанию, сдвинутая нумерация,
     /// метка отрезка грани, опоры или ребра за узлами чанка, второй
     /// конец ребра за узлами соседа, отрезок за гранью.
+    #[test]
+    fn a_sparse_snapshot_replaces_an_already_populated_support_graph() {
+        let mut w = World::new(96, 64, 64, 100_000, Box::new(Bridge));
+        let mut target = CollapseLayer::new(&w);
+        let mut bodies = Bodies::new(16, test_gravity());
+        w.queue_edit(Edit::put(50, DECK + 1, 8, 2));
+        for _ in 0..8 {
+            w.flush();
+            let edits = w.edits().to_vec();
+            target.apply(&mut w, &edits, &mut bodies);
+            bodies.step(&mut w);
+        }
+        assert!(target.nodes.iter().any(Option::is_some));
+        assert!(target.chunks.iter().any(Option::is_some));
+        let source = CollapseLayer::new(&w);
+        let mut saved = fx::blob::Blob::new();
+        source.save(&mut saved);
+        assert!(target.load(&mut fx::blob::Scan::new(&saved.v)));
+        let mut loaded = fx::blob::Blob::new();
+        target.save(&mut loaded);
+        assert_eq!(saved.v, loaded.v, "omitted chunks kept their scene graph");
+        assert!(target.nodes.iter().all(Option::is_none));
+        assert!(target.chunks.iter().all(Option::is_none));
+        assert!(target.references_hold());
+    }
+
     #[test]
     fn a_corrupt_graph_snapshot_is_refused() {
         let graph = || {

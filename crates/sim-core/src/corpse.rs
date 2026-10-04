@@ -62,7 +62,7 @@ impl crate::World {
             count,
             shape: 1,
             side: 2,
-            chunk: Some(chunk),
+            chunk: Some(Box::new(chunk)),
             held,
             resting: false,
         };

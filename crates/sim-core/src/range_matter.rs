@@ -735,7 +735,7 @@ impl Matter {
                         count,
                         shape: 1,
                         side: 2,
-                        chunk: Some(chunk),
+                        chunk: Some(Box::new(chunk)),
                         held,
                         resting: false,
                     });
@@ -865,7 +865,7 @@ impl Matter {
                     count,
                     shape: 1,
                     side: 2,
-                    chunk: Some(chunk),
+                    chunk: Some(Box::new(chunk)),
                     held,
                     resting: false,
                 });
@@ -1056,6 +1056,7 @@ impl Matter {
         // Also bound by encoded bytes before allocating an untrusted count.
         let ledger_limit = (self.tuning.max_fragments as usize)
             .saturating_mul(4usize.pow(3))
+            .saturating_add(self.tuning.max_resting_fragments as usize)
             .saturating_add(units.len().saturating_mul(2).saturating_add(2));
         if n > ledger_limit || n > s.left() / 18 {
             return None;

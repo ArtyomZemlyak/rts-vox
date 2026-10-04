@@ -184,6 +184,10 @@ pub struct Blast {
     pub max_claims: u32,
     pub max_fragments: u32,
     pub max_flying: u32,
+    /// Separate bounded storage for ordinary, motionless settled pieces.
+    /// Zero preserves the legacy single-pool policy for existing data/mods.
+    #[serde(default)]
+    pub max_resting_fragments: u32,
     pub pile_cell: u32,
     /// Cells per side of the box a burst's debris pieces are grouped in,
     /// `1..=4` (ADR-284): the batch's weapons. A range weapon names its own.
@@ -464,6 +468,9 @@ impl Tuning {
             || b.max_fragments == 0
             || b.max_flying == 0
             || b.max_flying > b.max_fragments
+            || b.max_fragments
+                .checked_add(b.max_resting_fragments)
+                .is_none()
             || b.pile_cell == 0
             || !(1..=4).contains(&b.fragment_box)
             || b.resistance_per_strength == 0
@@ -664,5 +671,36 @@ mod tests {
             t.tracked.gait.is_none() && t.walking.gait.is_some(),
             "походка не у той ходовой"
         );
+    }
+}
+
+#[cfg(test)]
+mod resting_pool_compatibility {
+    #[test]
+    fn omitted_resting_budget_preserves_legacy_data_policy() {
+        let data = include_str!("../../../data/sim.ron");
+        let stock = super::Tuning::from_ron(data).unwrap();
+        assert!(stock.blast.max_resting_fragments > 0);
+        let legacy = data.replace(", max_resting_fragments: 131072", "");
+        assert_eq!(
+            super::Tuning::from_ron(&legacy)
+                .unwrap()
+                .blast
+                .max_resting_fragments,
+            0
+        );
+    }
+}
+
+#[cfg(test)]
+mod resting_pool_bounds {
+    #[test]
+    fn combined_storage_budget_must_fit_the_fragment_index() {
+        let data = include_str!("../../../data/sim.ron");
+        let invalid = data.replace(
+            "max_resting_fragments: 131072",
+            "max_resting_fragments: 4294967295",
+        );
+        assert!(super::Tuning::from_ron(&invalid).is_err());
     }
 }

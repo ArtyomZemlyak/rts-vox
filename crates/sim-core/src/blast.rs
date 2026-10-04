@@ -2817,6 +2817,17 @@ impl BlastRange {
     }
 
     pub fn restore(config: ExplosionConfig, bytes: &[u8]) -> Option<Self> {
+        Self::restore_observed(config, bytes, |_, _, _| {})
+    }
+    /// Pure decoder progress for diagnostics. Offset and optional unit index
+    /// describe the last entered section if the snapshot is refused. Observing
+    /// does not change validation, saved bytes, reconstructed state or hashes.
+    pub fn restore_observed(
+        config: ExplosionConfig,
+        bytes: &[u8],
+        mut observe: impl FnMut(&'static str, usize, Option<usize>),
+    ) -> Option<Self> {
+        observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
         if !(27..=47).contains(&version) {
@@ -2875,6 +2886,7 @@ impl BlastRange {
         r.impact_tick = s.u32();
         r.removed = s.usize();
         r.removed_materials = std::array::from_fn(|_| s.usize());
+        observe("surface", bytes.len() - s.left(), None);
         let count = s.u32() as usize;
         if count > bytes.len() / 16 {
             return None;
@@ -2901,6 +2913,7 @@ impl BlastRange {
             .chain(std::iter::once(&mut r.gun))
             .enumerate()
         {
+            observe("unit_motion", bytes.len() - s.left(), Some(id));
             let at = std::array::from_fn(|_| s.i32());
             if !u.motion.load_version(&mut s, version >= 29) {
                 return None;
@@ -2910,6 +2923,7 @@ impl BlastRange {
             if u.at != at {
                 return None;
             }
+            observe("unit_damage", bytes.len() - s.left(), Some(id));
             let revision = s.u64();
             let count = s.u32() as usize;
             if count > u.body.solid_count() as usize {
@@ -3042,6 +3056,7 @@ impl BlastRange {
             // its record is "buckled" whatever the links' structure says;
             // requiring the structure here refused every snapshot taken
             // after a walker died of core damage.
+            observe("unit_legs", bytes.len() - s.left(), Some(id));
             let buckled = u.integrity_model.buckled(&u.body);
             for (li, leg) in u.body.legs.iter().enumerate() {
                 let lost = u.seg_gone[leg.thigh as usize];
@@ -3058,17 +3073,21 @@ impl BlastRange {
                 }
             }
         }
+        observe("world", bytes.len() - s.left(), None);
         if !r.world.load(&mut s) {
             return None;
         }
         r.world.prepare_navigation(r.navigation.fell.materials);
+        observe("matter", bytes.len() - s.left(), None);
         r.matter.load(&mut s, &r.world, &r.units)?;
+        observe("surface_validation", bytes.len() - s.left(), None);
         if r.surface_work.iter().any(|(p, work)| {
             let m = material(&r.world, *p);
             m == 0 || *work >= 1_000_000
         }) {
             return None;
         }
+        observe("explosion", bytes.len() - s.left(), None);
         if s.bool() {
             r.explosion = Some(Explosion::load(&mut s, &r.units, r.size, version >= 36)?);
         }
@@ -3083,33 +3102,23 @@ impl BlastRange {
                 return None;
             }
         }
+        observe("heat", bytes.len() - s.left(), None);
         r.heat = Heat::load(&mut s, &r.world, &r.heat_tuning)?;
-        if !r.collapse.load(&mut s) {
+        observe("collapse", bytes.len() - s.left(), None);
+        if let Err(reason) = r.collapse.load_diagnostic(&mut s) {
+            observe(reason, bytes.len() - s.left(), None);
             return None;
         }
+        observe("collapse_backlog", bytes.len() - s.left(), None);
         r.collapsed_cells = s.u64();
-        let backlog = s.u32();
-        if backlog > 1 << 20 {
-            return None;
-        }
-        for _ in 0..backlog {
-            let (x, y, z) = (s.u32(), s.u32(), s.u32());
-            let mat = s.u32();
-            if mat > u32::from(u16::MAX) {
-                return None;
-            }
-            let e = if mat == 0 {
-                voxel::world::Edit::dig(x, y, z)
-            } else {
-                voxel::world::Edit::put(x, y, z, mat as u16)
-            };
-            r.collapse_backlog.insert([x, y, z], e);
-        }
+        r.collapse_backlog = load_collapse_backlog(&mut s, r.size)?;
+        observe("body_jobs", bytes.len() - s.left(), None);
         if !r.bodies.load_version(&mut s, version >= 37) {
             return None;
         }
         let steady = s.bool();
         if version >= 31 {
+            observe("streams", bytes.len() - s.left(), None);
             r.streams.load(&mut s)?;
             if !r
                 .streams
@@ -3121,12 +3130,15 @@ impl BlastRange {
             }
         }
         if version >= 32 {
+            observe("thermals", bytes.len() - s.left(), None);
             r.thermals.load(&mut s, &r.units, &r.thermal_tuning)?;
         }
         if version >= 33 {
+            observe("heat_exchange", bytes.len() - s.left(), None);
             r.heat_exchange.load(&mut s, r.size, &r.units)?;
         }
         if version >= 34 {
+            observe("combustion", bytes.len() - s.left(), None);
             r.combustion.load(&mut s, &r.units, &r.matter, r.size)?;
         } else {
             if r.matter
@@ -3141,6 +3153,7 @@ impl BlastRange {
             }
             r.combustion = fire::Combustion::empty(r.units.len());
         }
+        observe("section_jobs", bytes.len() - s.left(), None);
         if version >= 35 {
             for (id, u) in r.units.iter_mut().enumerate() {
                 for i in 0..u.seg_sections.len() {
@@ -3163,6 +3176,7 @@ impl BlastRange {
                 u.refresh_damage(id);
             }
         }
+        observe("battle", bytes.len() - s.left(), None);
         if version >= 36 {
             let allied: Vec<_> = r
                 .layout
@@ -3189,6 +3203,7 @@ impl BlastRange {
                 }
             }
         }
+        observe("navigation", bytes.len() - s.left(), None);
         let columns = [r.size[0], r.size[2]];
         if version >= 40 {
             r.world_changed = nav::vehicle::Changed::load(&mut s, columns)?;
@@ -3210,9 +3225,11 @@ impl BlastRange {
         }
         // Transfers between world and bodies still to drain (ADR-431);
         // an older snapshot queued its detach digs with the orders.
+        observe("transfers", bytes.len() - s.left(), None);
         if version >= 41 && !r.world.load_transfers(&mut s) {
             return None;
         }
+        observe("loadouts", bytes.len() - s.left(), None);
         if version >= 42 {
             for (actor, unit) in r.battle.actors.iter_mut().zip(&r.units) {
                 actor.weapon = match s.u8() {
@@ -3236,12 +3253,14 @@ impl BlastRange {
         if version >= 46 {
             r.battle.autonomous = s.bool();
         }
+        observe("wave_contacts", bytes.len() - s.left(), None);
         if version >= 47 {
             if let Some(e) = &mut r.explosion {
                 e.load_contacts(&mut s, &r.units)?;
             }
             r.battle.load_wave_contacts(&mut s, &r.units)?;
         }
+        observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
         }
@@ -4613,6 +4632,38 @@ impl Explosion {
             captured,
         })
     }
+}
+
+/// One pending edit per world cell. Bound by the actual encoded records and
+/// map volume instead of rejecting a valid long battle at a fixed count.
+fn load_collapse_backlog(
+    s: &mut fx::blob::Scan,
+    size: [u32; 3],
+) -> Option<BTreeMap<[u32; 3], voxel::world::Edit>> {
+    let count = s.u32() as usize;
+    let cells = size
+        .into_iter()
+        .fold(1u64, |n, side| n.saturating_mul(u64::from(side)));
+    if count as u64 > cells || count > s.left() / 16 {
+        return None;
+    }
+    let mut edits = BTreeMap::new();
+    for _ in 0..count {
+        let p = std::array::from_fn(|_| s.u32());
+        let mat = s.u32();
+        if mat > u32::from(u16::MAX) || (0..3).any(|a| p[a] >= size[a]) {
+            return None;
+        }
+        let edit = if mat == 0 {
+            voxel::world::Edit::dig(p[0], p[1], p[2])
+        } else {
+            voxel::world::Edit::put(p[0], p[1], p[2], mat as u16)
+        };
+        if edits.insert(p, edit).is_some() {
+            return None;
+        }
+    }
+    s.ok().then_some(edits)
 }
 
 #[cfg(test)]
@@ -6579,6 +6630,72 @@ mod tests {
     /// (ADR-459). A corrupt place or speed of the gun's shell or of a
     /// stream round, or a corrupt aim, overflowed the dome and body tests
     /// or swept a billion steps a tick; the restore now answers `None`.
+    #[test]
+    fn a_large_real_collapse_backlog_is_not_a_corrupt_snapshot() {
+        let count = (1u32 << 20) + 1;
+        let mut bytes = fx::blob::Blob::new();
+        bytes.u32(count);
+        for i in 0..count {
+            for p in [i % 128, i / 128 % 128, i / (128 * 128)] {
+                bytes.u32(p);
+            }
+            bytes.u32(1);
+        }
+        let mut scan = fx::blob::Scan::new(&bytes.v);
+        let edits = load_collapse_backlog(&mut scan, [128, 128, 65]).unwrap();
+        assert_eq!(edits.len(), count as usize);
+        assert_eq!(scan.left(), 0);
+        assert!(edits.contains_key(&[0, 0, 64]));
+        assert!(edits.values().all(|e| e.mat == 1));
+        bytes.v.pop();
+        assert!(
+            load_collapse_backlog(&mut fx::blob::Scan::new(&bytes.v), [128, 128, 65]).is_none()
+        );
+    }
+
+    #[test]
+    fn collapse_backlog_refuses_impossible_counts_coordinates_materials_and_duplicates() {
+        let reads = |count, rows: &[[u32; 4]]| {
+            let mut b = fx::blob::Blob::new();
+            b.u32(count);
+            for row in rows {
+                for v in row {
+                    b.u32(*v);
+                }
+            }
+            load_collapse_backlog(&mut fx::blob::Scan::new(&b.v), [2, 2, 2])
+        };
+        assert!(reads(1, &[[0, 0, 0, 1]]).is_some());
+        assert!(reads(9, &[[0, 0, 0, 1]; 9]).is_none());
+        assert!(reads(8, &[[0, 0, 0, 1]]).is_none());
+        assert!(reads(1, &[[2, 0, 0, 1]]).is_none());
+        assert!(reads(1, &[[0, 0, 0, 65536]]).is_none());
+        assert!(reads(2, &[[0, 0, 0, 1]; 2]).is_none());
+    }
+
+    #[test]
+    fn snapshot_progress_observer_preserves_the_decoder_and_identifies_rejection() {
+        let r = BlastRange::new(config());
+        let bytes = r.snapshot();
+        let mut sections = Vec::new();
+        let copy = BlastRange::restore_observed(config(), &bytes, |name, offset, unit| {
+            assert!(offset <= bytes.len());
+            sections.push((name, offset, unit));
+        })
+        .unwrap();
+        assert_eq!(r.snapshot(), copy.snapshot());
+        assert_eq!(sections.first(), Some(&("header", 0, None)));
+        assert_eq!(sections.last().unwrap().0, "tail");
+        let mut last = None;
+        assert!(
+            BlastRange::restore_observed(config(), &[0; 4], |name, offset, unit| {
+                last = Some((name, offset, unit));
+            })
+            .is_none()
+        );
+        assert_eq!(last, Some(("header", 0, None)));
+    }
+
     #[test]
     fn a_snapshot_with_an_impossible_round_is_refused() {
         let restores = |r: &BlastRange| BlastRange::restore(config(), &r.snapshot()).is_some();

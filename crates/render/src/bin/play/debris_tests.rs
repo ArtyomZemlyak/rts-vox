@@ -128,7 +128,7 @@ fn section(app: &App, id: u64, count: usize) -> Fragment {
     let frame = Frame::new(body, PhysV3::ZERO, 0, PhysV3::UP);
     let mut f = piece(id);
     f.count = cells.len() as u32;
-    f.chunk = Some(Chunk::new(0, 0, cells, [frame; 2], shape));
+    f.chunk = Some(Box::new(Chunk::new(0, 0, cells, [frame; 2], shape)));
     f
 }
 
@@ -330,7 +330,7 @@ fn debris_reused_section_updates_corpse_finish_and_releases_old_meshes() {
     let shape = Shape::from_body(&body);
     let frame = Frame::new(&body, PhysV3::ZERO, 0, PhysV3::UP);
     let mut f = piece(7);
-    f.chunk = Some(Chunk::from_body(0, 0, body, [frame; 2], shape));
+    f.chunk = Some(Box::new(Chunk::from_body(0, 0, body, [frame; 2], shape)));
     put(&mut app, f);
     app.update();
     assert!(app.world().get_entity(old).is_err());

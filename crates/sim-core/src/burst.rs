@@ -81,6 +81,174 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sleeping_history_keeps_its_matter_and_does_not_block_new_claims() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let mut t = tuning().blast;
+        t.max_fragments = 1;
+        t.max_flying = 1;
+        t.max_resting_fragments = 32;
+        for i in 0..32 {
+            let p = [8 + (i % 8) * 8, 16, 8 + (i / 8) * 8];
+            assert!(b.spawn(p, 1, p.map(|n| n as i32), 2, 1, 0, &mut e, &t));
+            let f = b.fragments.last_mut().unwrap();
+            f.resting = true;
+            heap(f, &w);
+        }
+        let old = b.hash();
+        assert_eq!(
+            b.fragment_pools(&t),
+            FragmentPools {
+                working: 0,
+                parked: 32,
+                flying: 0
+            }
+        );
+        assert_eq!(b.fragment_room(&t), 1);
+        // Legacy data without the opt-in resting budget retains its old limit.
+        let legacy = Blast {
+            max_resting_fragments: 0,
+            ..t
+        };
+        assert_eq!(b.fragment_room(&legacy), 0);
+        assert_eq!(
+            old,
+            b.hash(),
+            "classification does not modify old matter/shape"
+        );
+        let p = [70, 10, 70];
+        assert!(b.claim_voxel(&mut w, p, 1, p.map(|n| n as i32), 0, 1, &t));
+        assert_eq!(b.fragment_room(&t), 0);
+        w.flush();
+        b.confirm(w.completed(), &mut e, &t);
+        assert_eq!(b.fragments.len(), 33);
+        assert_eq!(b.fragment_pools(&t).working, 1);
+        assert!(e.balanced());
+        // A full storage budget remains finite, even when the new piece rests.
+        let f = b.fragments.last_mut().unwrap();
+        f.resting = true;
+        heap(f, &w);
+        assert_eq!(b.fragment_room(&t), 0);
+        let held = b.fragments[0].held;
+        let hauler = e.ledger.create(matter::Kind::Hauler, 0, u64::MAX);
+        let amount = e.ledger.held(held);
+        assert_eq!(e.ledger.transfer(held, hauler, amount), amount);
+        b.sweep(&e);
+        assert_eq!(b.fragments.len(), 32);
+        assert_eq!(b.fragment_room(&t), 1);
+        assert!(e.balanced());
+        // Neither a nonzero velocity nor an active flag can masquerade as
+        // static storage. A forged moving history must be refused by load.
+        let mut bytes = Blob::new();
+        b.save(&mut bytes);
+        let copy = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t).unwrap();
+        assert_eq!(b.hash(), copy.hash());
+        for f in &mut b.fragments {
+            f.resting = false;
+        }
+        let mut invalid = Blob::new();
+        b.save(&mut invalid);
+        assert!(Bursts::load(&mut Scan::new(&invalid.v), Some(&w), &t).is_none());
+        b.fragments[0].resting = true;
+        b.fragments[0].velocity = V3::UP;
+        assert!(!b.fragments[0].parkable());
+    }
+
+    #[test]
+    fn sleeping_wakeups_respect_pending_claims_and_working_slots() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let tuning = tuning();
+        let mut t = tuning.blast;
+        t.max_fragments = 1;
+        t.max_flying = 2; // Flying room exists; the working reservation is decisive.
+        t.max_resting_fragments = 3;
+        t.rest_check_ticks = 1;
+        for x in [16, 32, 48] {
+            assert!(b.spawn([x, 16, 16], 1, [x as i32, 16, 16], 2, 1, 0, &mut e, &t));
+            let f = b.fragments.last_mut().unwrap();
+            f.resting = true;
+            heap(f, &w);
+            e.wrecks.push(Wreck {
+                held: f.held,
+                x: x as i32,
+                y: 12,
+                z: 16,
+            });
+            w.queue_dig(x, 11, 16);
+        }
+        assert!(b.claim_voxel(&mut w, [70, 10, 70], 1, [70, 10, 70], 0, 1, &t));
+        w.flush();
+        b.step_fragments(
+            &w,
+            &mut e,
+            &t,
+            crate::gravity_per_tick(&tuning),
+            0,
+            Surroundings::NONE,
+        );
+        assert!(
+            b.fragments.iter().all(|f| f.resting),
+            "a wakeup stole the claim's working slot"
+        );
+        b.claims.clear();
+        b.step_fragments(
+            &w,
+            &mut e,
+            &t,
+            crate::gravity_per_tick(&tuning),
+            1,
+            Surroundings::NONE,
+        );
+        assert!(
+            !b.fragments[0].resting,
+            "the first unsupported piece must resume falling"
+        );
+        assert!(b.fragments[1..].iter().all(|f| f.resting));
+        assert_eq!(b.fragment_pools(&t).working, 1);
+        assert_eq!(e.wrecks.len(), 2);
+        assert!(e.balanced());
+    }
+
+    #[test]
+    fn legacy_two_cell_fragments_fit_their_encoded_byte_bound() {
+        let (mut b, w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning().blast;
+        for x in [16, 32, 48, 64] {
+            assert!(b.spawn([x, 16, 16], 1, [x as i32, 16, 16], 2, 1, 0, &mut e, &t));
+            let f = b.fragments.last_mut().unwrap();
+            f.resting = true;
+            assert_eq!(f.side, 2);
+            assert_eq!(f.shape, 1);
+            assert!(f.paint.is_none() && f.chunk.is_none());
+        }
+        let mut current = Blob::new();
+        b.save(&mut current);
+        // Bare Bursts, with no jobs, claims or corpse records: the old
+        // representation stores one byte of shape and omits the box side.
+        let mut legacy = current.v[..80].to_vec();
+        assert_eq!(current.v.len(), 80 + 4 * 160);
+        for record in current.v[80..].chunks_exact(160) {
+            legacy.extend_from_slice(&record[..146]);
+            legacy.extend_from_slice(&record[154..]);
+        }
+        assert_eq!(legacy.len(), 80 + 4 * 152);
+        let copy =
+            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true).unwrap();
+        assert_eq!(b.hash(), copy.hash());
+        // Truncated data must still fail before allocating fragment records.
+        legacy.truncate(legacy.len() - 1);
+        assert!(
+            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true).is_none()
+        );
+        assert!(e.balanced());
+    }
+
+    #[test]
+    fn ordinary_fragment_record_does_not_store_an_inline_section_payload() {
+        assert!(std::mem::size_of::<Fragment>() <= 192);
+        assert!(std::mem::size_of::<Option<chunk::Chunk>>() > std::mem::size_of::<Fragment>());
+    }
+
+    #[test]
     fn claim_batch_reserves_capacity_without_spending_it_on_rejected_cells() {
         for n in [0, 16, 25000] {
             for resting_every in [1, 3, usize::MAX] {
@@ -3395,7 +3563,9 @@ pub struct Fragment {
     pub shape: u64,
     /// Cells per side of that box, `1..=4`.
     pub side: u8,
-    pub chunk: Option<chunk::Chunk>,
+    // Ordinary debris does not pay for the large section payload inline.
+    // The box changes storage only; chunk geometry/serialization are identical.
+    pub chunk: Option<Box<chunk::Chunk>>,
     pub held: u32,
     pub resting: bool,
 }
@@ -3422,7 +3592,16 @@ pub const IDENTITY: [V3; 3] = [
     V3::UP,
     V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
 ];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FragmentPools {
+    pub working: usize,
+    pub parked: usize,
+    pub flying: usize,
+}
 impl Fragment {
+    fn parkable(&self) -> bool {
+        self.resting && self.velocity == V3::ZERO && self.chunk.is_none()
+    }
     /// Keep the centre over the map (ADR-428). A save refuses a piece
     /// whose centre lies off it, and one would get there: a hull at the
     /// map edge hangs its cells over it. The box may still cross the edge;
@@ -3713,12 +3892,40 @@ impl Bursts {
         self.claims.contains_key(&p)
     }
     pub fn fragment_room(&self, t: &Blast) -> u32 {
-        let moving = self.fragments.iter().filter(|f| !f.resting).count();
+        let pool = self.fragment_pools(t);
         (t.max_flying as usize)
-            .saturating_sub(moving + self.claims.len())
-            .min(
-                (t.max_fragments as usize).saturating_sub(self.fragments.len() + self.claims.len()),
-            ) as u32
+            .saturating_sub(pool.flying + self.claims.len())
+            .min((t.max_fragments as usize).saturating_sub(pool.working + self.claims.len()))
+            as u32
+    }
+    /// Counts are derived from physical state, never a second copy of matter.
+    /// Ordinary sleeping pieces retain shape, pose, ID, Ledger and collisions.
+    /// Whole chunks and pieces still moving stay in the working pool.
+    pub fn fragment_pools(&self, t: &Blast) -> FragmentPools {
+        self.fragment_pool_snapshot(t).0
+    }
+    /// The admitted sleepers are exactly the parkable entries before this
+    /// source-order boundary. Carry it with the counts: no second full scan
+    /// or per-piece allocation is needed to freeze wakeup reservations.
+    fn fragment_pool_snapshot(&self, t: &Blast) -> (FragmentPools, usize) {
+        let mut flying = 0;
+        let mut parked = 0;
+        let mut end = 0;
+        for (i, f) in self.fragments.iter().enumerate() {
+            flying += usize::from(!f.resting);
+            if parked < t.max_resting_fragments as usize && f.parkable() {
+                parked += 1;
+                end = i + 1;
+            }
+        }
+        (
+            FragmentPools {
+                working: self.fragments.len() - parked,
+                parked,
+                flying,
+            },
+            end,
+        )
     }
     pub(crate) fn emit_body_fragment(
         &mut self,
@@ -3865,8 +4072,9 @@ impl Bursts {
         let mut samples = t.samples_per_tick;
         let mut pops = t.wave_pops_per_tick;
         let mut edits = t.edits_per_tick;
-        let moving = self.fragments.iter().filter(|f| !f.resting).count();
-        let room = (t.max_flying as usize).saturating_sub(moving);
+        let pool = self.fragment_pools(t);
+        let room = (t.max_flying as usize).saturating_sub(pool.flying);
+        let working = pool.working;
         for _ in 0..self.jobs.len() {
             let mut j = self.jobs.pop_front().unwrap();
             while j.cursor < j.samples() && samples > 0 {
@@ -3948,7 +4156,7 @@ impl Bursts {
                     }
                     if self.claims.len() >= t.max_claims as usize
                         || self.claims.len() >= room
-                        || self.claims.len() + self.fragments.len() >= t.max_fragments as usize
+                        || self.claims.len() + working >= t.max_fragments as usize
                     {
                         break;
                     }
@@ -4233,15 +4441,19 @@ impl Bursts {
         // piece without room waits for its next turn. A claim holds its
         // flying slot until its dig lands and it becomes a piece: a
         // waking piece does not take it (ADR-443).
-        let mut room = (t.max_flying as usize).saturating_sub(
-            self.fragments.iter().filter(|f| !f.resting).count() + self.claims.len(),
-        );
+        let (pool, parked_end) = self.fragment_pool_snapshot(t);
+        let mut room = (t.max_flying as usize).saturating_sub(pool.flying + self.claims.len());
+        let mut working_room =
+            (t.max_fragments as usize).saturating_sub(pool.working + self.claims.len());
+        // Wakeups claim working slots in the frozen source order. A parked
+        // piece never borrows a slot reserved by a pending terrain dig.
         // These queries read the frozen surroundings and only this piece.
         // Compute candidates independently; the ordered pass below still
         // allocates flying slots and therefore resolves competing wakeups.
         let query = |(i, f): (usize, &Fragment)| {
+            let can_wake = room > 0 && (!(i < parked_end && f.parkable()) || working_room > 0);
             let mut push = None;
-            if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || room > 0) {
+            if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || can_wake) {
                 let (low, high) = settled.fragment_bounds(i as u32, f);
                 if let Some(h) = hull_hit(arr(f.position), low, high, hulls, 0) {
                     // What the hull climbs as floor it does not push: a
@@ -4263,7 +4475,7 @@ impl Bursts {
                     }
                 }
             }
-            let unsupported = room > 0
+            let unsupported = can_wake
                 && push.is_none()
                 && f.resting
                 && due(f.id, tick, t)
@@ -4282,20 +4494,24 @@ impl Bursts {
         } else {
             self.fragments.iter().enumerate().map(query).collect()
         };
-        for (f, (push, unsupported)) in self.fragments.iter_mut().zip(wakeups) {
-            if let Some(velocity) = push.filter(|_| !f.resting || room > 0) {
+        for (i, (f, (push, unsupported))) in self.fragments.iter_mut().zip(wakeups).enumerate() {
+            let parked = i < parked_end && f.parkable();
+            let can_wake = room > 0 && (!parked || working_room > 0);
+            if let Some(velocity) = push.filter(|_| !f.resting || can_wake) {
                 if f.resting {
                     f.resting = false;
                     room -= 1;
+                    working_room -= usize::from(parked);
                     stale_wrecks.insert(f.held);
                 }
                 f.velocity = velocity;
             }
-            if room > 0 && f.resting && unsupported {
+            if can_wake && f.resting && unsupported {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
                 room -= 1;
+                working_room -= usize::from(parked);
                 stale_wrecks.insert(f.held);
             }
         }
@@ -4934,7 +5150,10 @@ impl Bursts {
         }
         let count = s.usize();
         let corpses = s.usize();
-        if count > t.max_fragments as usize || corpses > s.left() / 100 {
+        let stored_limit =
+            (t.max_fragments as usize).saturating_add(t.max_resting_fragments as usize);
+        let record_bytes = if two_cell_masks { 152 } else { 160 };
+        if count > stored_limit || count > s.left() / record_bytes || corpses > s.left() / 100 {
             return None;
         }
         let mut ids = BTreeSet::new();
@@ -4965,7 +5184,7 @@ impl Bursts {
                 resting: s.bool(),
             };
             if s.bool() {
-                f.chunk = Some(chunk::Chunk::load(s, bodies, f.mm, f.count)?);
+                f.chunk = Some(Box::new(chunk::Chunk::load(s, bodies, f.mm, f.count)?));
             }
             if f.id == 0
                 || f.id > out.next_id
@@ -5014,7 +5233,9 @@ impl Bursts {
                 out.fragments.push(f);
             }
         }
-        s.ok().then_some(out)
+        // Storage slots do not admit active work. Do not accept a forged save
+        // that disguises moving pieces/whole sections as sleeping history.
+        (s.ok() && out.fragment_pools(t).working <= t.max_fragments as usize).then_some(out)
     }
 }
 
