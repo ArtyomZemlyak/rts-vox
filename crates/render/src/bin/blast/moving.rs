@@ -19,7 +19,7 @@ pub struct Visual {
     pub previous: Vec<Pose>,
     /// Foot contacts of the previous tick, per unit and leg (ADR-279).
     previous_feet: Vec<Vec<Option<Contact>>>,
-    pub fragments: bevy::platform::collections::HashMap<u64, Vec3>,
+    pub fragments: super::fragments::history::History,
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
     occupied: Vec<usize>,
@@ -125,12 +125,10 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
 pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWindow) {
     v.turret = Some(sim.turret.angle);
     v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
-    // Only ID lookups consume this history; ordering comes from the physical
-    // fragment slice. Reuse buckets instead of allocating a tree every tick.
     // Capture resting pieces too: one may wake during the upcoming step.
-    v.fragments.clear();
+    // Reuse dense origins; each parallel picture leaf merges its sorted IDs.
     v.fragments
-        .extend(sim.matter.debris.fragments.iter().map(|f| {
+        .capture(sim.matter.debris.fragments.iter().map(|f| {
             (
                 f.id,
                 super::fragments::pos([f.position.x, f.position.y, f.position.z]),

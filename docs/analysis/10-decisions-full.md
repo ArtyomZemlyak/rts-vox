@@ -24619,3 +24619,18 @@ Ordinary native четыре runs по 120 с: FPS +0,193% / +0,151%, сущес
 и dense debris index не ускорили полный CPU battle и откатились.
 Новые pools не добавлены, balanced CPU и 165 FPS не закрыты.
 Данные/пределы — [153](153-sweep-prefix-work-and-rejected-geometry-indices.md).
+
+
+## ADR-560 — плотная история поз в параллельных fragment leaves
+
+Reusable ordered `(ID, position)` history заменяет построение hash table до
+тика и repeated lookup внутри picture jobs. Прежние leaves по 2048 сливают IDs
+от partition_point; reordered/imported/duplicate данные сохраняют lookup
+семантику, resting/wake/interpolation/reset и физический commit order прежние.
+Новые pools не оставлены: отдельный picture executor не дал устойчивого gain.
+
+119 render tests проходят / 3 прежних ignored. Два обычных native comparisons
+по 120 с: fragment mean −6,62% / −5,44%, p99 ~2,36→2,26 мс. FPS +0,604% /
++0,048%, существенного общего gain нет; оба max frame хуже. 3600 steps,
+1× и полные gameplay/hash lines совпадают. WBPERF-002/027, CPU balance и
+165 FPS открыты. Данные — [154](154-dense-fragment-history-and-rejected-picture-pool.md).

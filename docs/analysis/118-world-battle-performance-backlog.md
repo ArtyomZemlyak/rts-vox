@@ -2,7 +2,17 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-559: fresh/suspended sweep prefix прекращает ненужную
+Последний шаг ADR-560: dense previous fragment positions заменяют hash table
+в нормальном ordered пути. Прежние пакеты по 2048 сливают ID/position внутри
+shared compute jobs; imported/reordered input сохраняет lookup semantics.
+119 render tests passed / 3 прежних ignored; обычные две пары по 120 с eligible,
+3600 steps и gameplay/hash прежние. Mean fragment phase −6,62% / −5,44%,
+p99 ~2,36→2,26 мс; FPS +0,604% / +0,048%, существенного общего gain нет,
+max frames хуже. Отдельный picture pool не даёт устойчивого gain и откатился.
+WBPERF-002, межзапусковые различия/пики WBPERF-027, CPU balance и 165 FPS
+остаются открыты. Данные — [154](154-dense-fragment-history-and-rejected-picture-pool.md).
+
+Предыдущий шаг ADR-559: fresh/suspended sweep prefix прекращает ненужную
 геометрию при первом connection refusal; exact poses, logical budget и
 indexed fan-out сохраняются. 668 tests passed / 4 прежних ignored.
 Две ordinary пары по 120 с: FPS +0,193% / +0,151%, существенного gain нет;

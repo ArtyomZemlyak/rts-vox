@@ -66,14 +66,19 @@ impl Slots {
         &mut self,
         pieces: &[Fragment],
         units: &[RangeUnit],
-        previous: &HashMap<u64, Vec3>,
+        previous: &super::history::History,
         alpha: f32,
         exists: impl Fn(Entity) -> bool + Sync,
         pool: Option<&bevy::tasks::TaskPool>,
     ) {
         let prepare = |entries: &mut [Entry], pieces: &[Fragment]| {
+            let Some(first) = pieces.first() else {
+                return;
+            };
+            let mut origins =
+                previous.cursor(first.id, pieces.windows(2).all(|w| w[0].id < w[1].id));
             for (entry, f) in entries.iter_mut().zip(pieces) {
-                entry.prepare(f, units, previous.get(&f.id).copied(), alpha, &exists);
+                entry.prepare(f, units, origins.next(f.id), alpha, &exists);
             }
         };
         if let Some(pool) = pool.filter(|_| pieces.len() >= 2048) {
@@ -201,7 +206,8 @@ mod tests {
         parallel.align(&pieces);
         install(&mut serial, &pieces);
         install(&mut parallel, &pieces);
-        let previous: HashMap<_, _> = pieces.iter().map(|f| (f.id, Vec3::ZERO)).collect();
+        let mut previous = super::super::history::History::default();
+        previous.capture(pieces.iter().map(|f| (f.id, Vec3::ZERO)));
         for round in 0..4 {
             for f in &mut pieces {
                 if f.id % 3 == 0 {

@@ -4,6 +4,8 @@ use bevy::platform::collections::HashMap;
 use std::collections::BTreeMap;
 #[path = "fragments/dense.rs"]
 mod dense;
+#[path = "fragments/history.rs"]
+pub(super) mod history;
 #[cfg(test)]
 #[path = "fragments/lifecycle_tests.rs"]
 mod lifecycle_tests;

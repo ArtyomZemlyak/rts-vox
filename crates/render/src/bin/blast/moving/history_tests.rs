@@ -37,20 +37,20 @@ fn tick_history_keeps_resting_origins_and_replaces_removed_and_reused_ids() {
     sim.matter.debris.fragments = vec![piece(7, 70), piece(2, 20), piece(9, 90)];
     before(&sim, &mut v, &window);
     assert_eq!(v.fragments.len(), 3);
-    assert_eq!(v.fragments[&7], Vec3::new(70.0, 12.0, 20.0));
+    assert_eq!(*v.fragments.get(&7).unwrap(), Vec3::new(70.0, 12.0, 20.0));
     // Wake and move a resting piece. Its old origin is still available to
     // interpolate this tick, independent of the source slice's ID order.
     sim.matter.debris.fragments[0].resting = false;
     sim.matter.debris.fragments[0].position.x = Fx::from_int(74);
-    assert_eq!(v.fragments[&7].x, 70.0);
+    assert_eq!(v.fragments.get(&7).unwrap().x, 70.0);
     before(&sim, &mut v, &window);
-    assert_eq!(v.fragments[&7].x, 74.0);
+    assert_eq!(v.fragments.get(&7).unwrap().x, 74.0);
     sim.matter.debris.fragments = vec![piece(2, 200), piece(11, 110)];
     before(&sim, &mut v, &window);
     assert_eq!(v.fragments.len(), 2);
-    assert!(!v.fragments.contains_key(&7));
-    assert!(!v.fragments.contains_key(&9));
-    assert_eq!(v.fragments[&2].x, 200.0);
+    assert!(v.fragments.get(&7).is_none());
+    assert!(v.fragments.get(&9).is_none());
+    assert_eq!(v.fragments.get(&2).unwrap().x, 200.0);
     reset(&mut v);
     assert!(v.fragments.is_empty());
     assert_eq!(v.occupied, vec![0]);

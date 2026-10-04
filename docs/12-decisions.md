@@ -691,3 +691,6 @@
 
 
 | 559 | Спекулятивный последовательный префикс fresh/suspended route sweep проверяет connection predicate после каждого точного pose и прекращает геометрию при первом отказе. Initial-pose exception, logical work allowance и commit order принадлежат прежнему поиску; допустимый полный префикс запускает прежний indexed fan-out. Разбор — analysis/153-sweep-prefix-work-and-rejected-geometry-indices.md. |
+
+
+| 560 | Previous positions физических обломков хранятся в reusable плотном render массиве. Строго возрастающий capture не строит lookup map; прежние параллельные leaves по 2048 сливают ID/position от partition_point. Reordered current input использует lookup, unordered/duplicate history сохраняет compatibility map и last-write-wins. Resting/wake, interpolation, reset/ID reuse, ordered publication, физика и shared pools прежние. Разбор — analysis/154-dense-fragment-history-and-rejected-picture-pool.md. |
