@@ -703,3 +703,6 @@
 
 
 | 563 | Пять physics/parallel candidates отвергнуты по CPU/native замерам; production physics и existing pools сохранены. Opt-in OsPressure наблюдает system CPU group, page faults, memory и top8 readable process lifetimes вне симуляции. Analyzer соединяет только целые in-window интервалы со stall episodes без пропорциональной атрибуции; unavailable/coarse counters и partial process coverage явно сохраняются. Диагностика не квалифицирует FPS; diagnostic comparison имеет отдельный fps_acceptance_eligible. Внешние CPU bursts наблюдаются рядом с длинными stalls, причина без OS scheduler/worker traces не доказана. Разбор — analysis/157-parallel-physics-experiments-and-os-pressure.md. |
+
+
+| 564 | Wake, support и начало translation повторно используют world boxes неизменного phase input из existing indexed physics pool. Local bounds восстанавливаются через wrapping Fx subtraction прежнего центра; empty/unbuilt index и corpse queries используют прямую геометрию. Substeps получают те же bounds до изменения basis/shape; кеш нельзя переносить через смену позы или поколения. Порядок контактов/merge, quotas, pools и save format сохранены. Разбор и ограничения измерений — analysis/158-reuse-phase-fragment-bounds.md. |

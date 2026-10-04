@@ -24713,3 +24713,27 @@ windows исчерпаны до второго позднего эпизода. 
 sim/read model, strict camera debt, CPU balance/165FPS не закрыты.
 Raw A/B, hashes, rejected variants, observability limits и tests —
 [157](157-parallel-physics-experiments-and-os-pressure.md).
+
+
+## ADR-564 — повторное использование границ immutable physics phase
+
+Wake/support/translation используют world boxes, уже рассчитанные indexed
+physics jobs. Wrapping Fx subtraction восстанавливает прежние local bounds
+бит-в-бит; substeps используют их до tumble. Empty/unbuilt/corpse queries
+сохраняют direct fallback. Дополнительных jobs, pools, locks и allocations
+нет; контактный порядок, quotas, snapshots/save format не меняются.
+
+Wake spatial grid отвергнут: CPU wake/debris выросли. Две свежие CPU пары
+reuse по 3600 ticks дают wake −15,75/20,88%, debris −5,56/9,04%, полный
+tick −1,21/3,19%. Все tick counters/gameplay/hash совпадают, 1/2/4/8 replay,
+50 physics tests и release golden4/save19 проходят. Неполный debug golden
+run не считается passed; исходные 13 WIP сохранены отдельно.
+
+Native пары: 87,40→65,85 и 87,09→86,64 FPS. Первая просадка не повторилась,
+но не объяснена; во второй max frame хуже. FPS gain и исправление latency
+tails не доказаны. Сохраняется только локальный CPU geometry gain.
+Pressure camera tour: 151 origins, 0 blocked frames, 3600 ticks/120с,
+strict tempo true, max52,62мс. Diagnostic tour не квалифицирует FPS и не
+объясняет ordinary slowdown. WBPERF-002/027, CPU balance/165FPS открыты.
+Raw, hashes, rejected variant и все результаты —
+[158](158-reuse-phase-fragment-bounds.md).

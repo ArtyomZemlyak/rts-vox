@@ -856,7 +856,7 @@ mod tests {
                                 expected.1[a] = expected.1[a].max(value);
                             }
                         }
-                        let fragment = Fragment {
+                        let mut fragment = Fragment {
                             id: 1,
                             position: V3::ZERO,
                             velocity: V3::ZERO,
@@ -877,6 +877,23 @@ mod tests {
                             expected,
                             "side={side} shape={shape:x} mm={mm} turn={turn}"
                         );
+                        for position in [
+                            V3::new(Fx::from_ratio(-17, 3), Fx(1), Fx::ONE),
+                            V3::new(Fx::MIN, Fx::MAX, Fx(-1234567)),
+                        ] {
+                            fragment.position = position;
+                            let p = arr(position);
+                            let frozen = Settled {
+                                boxes: vec![(
+                                    [0, 1, 2].map(|a| p[a].add(expected.0[a])),
+                                    [0, 1, 2].map(|a| p[a].add(expected.1[a])),
+                                )],
+                                ..Settled::default()
+                            };
+                            assert_eq!(frozen.fragment_bounds(0, &fragment), expected);
+                            assert_eq!(frozen.fragment_bounds(u32::MAX, &fragment), expected);
+                            assert_eq!(Settled::default().fragment_bounds(0, &fragment), expected);
+                        }
                     }
                 }
             }
@@ -2027,7 +2044,72 @@ mod tests {
             pieces.save(&mut bytes);
             bytes.v
         };
-        assert_eq!(run(1), run(4));
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(expected, run(workers));
+        }
+    }
+
+    #[test]
+    fn cached_translation_bounds_match_direct_after_eviction_bounce_and_tumble() {
+        let mut w = world();
+        w.flush();
+        let t = tuning().blast;
+        let motion = FragmentMotion::new(&t);
+        let hull = Hull {
+            pos: [Fx::from_int(24), Fx::from_int(12), Fx::from_int(48)],
+            head: angle::FULL / 7,
+            half: [Fx::from_int(6); 2],
+            height: Fx::from_int(8),
+            vel: [Fx::ONE, Fx::ZERO, Fx::ZERO],
+            step: Fx::ZERO,
+            solid: None,
+        };
+        let run = |cached| {
+            let mut f = Fragment {
+                id: 173,
+                position: V3::new(Fx::from_int(24), Fx::from_int(16), Fx::from_int(48)),
+                velocity: V3::new(Fx::from_ratio(3, 2), Fx::from_ratio(-1, 3), Fx::ONE),
+                material: 1,
+                paint: None,
+                mm: 125,
+                basis: IDENTITY,
+                mass_g: 1200,
+                count: 8,
+                shape: 255,
+                side: 2,
+                chunk: None,
+                held: 0,
+                resting: false,
+            };
+            let mut index = Settled::default();
+            for _ in 0..90 {
+                if cached {
+                    let p = arr(f.position);
+                    let (lo, hi) = f.bounds();
+                    index.boxes = vec![(
+                        [0, 1, 2].map(|a| p[a].add(lo[a])),
+                        [0, 1, 2].map(|a| p[a].add(hi[a])),
+                    )];
+                }
+                advance_fragment(
+                    &mut f,
+                    &w,
+                    &t,
+                    &motion,
+                    Fx::from_ratio(1, 30),
+                    &[hull],
+                    &index,
+                    0,
+                    true,
+                );
+            }
+            assert!(f.resting);
+            assert_ne!(f.basis, IDENTITY);
+            assert_ne!(f.position.x, Fx::from_int(24));
+            (f.position, f.velocity, f.basis, f.resting)
+        };
+        assert_eq!(run(false), run(true));
     }
     #[test]
     fn simultaneous_support_losses_wake_in_piece_order_across_workers() {
@@ -2493,6 +2575,13 @@ mod tests {
                         &|_, _| {},
                     )
                 });
+                for (i, fragment) in fragments.iter().enumerate() {
+                    assert_eq!(
+                        index.fragment_bounds(i as u32, fragment),
+                        fragment.bounds(),
+                        "workers={workers}, generation={generation}, fragment={i}"
+                    );
+                }
                 assert_eq!(
                     index.cells.ordered(),
                     expected,
@@ -4153,7 +4242,7 @@ impl Bursts {
         let query = |(i, f): (usize, &Fragment)| {
             let mut push = None;
             if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || room > 0) {
-                let (low, high) = f.bounds();
+                let (low, high) = settled.fragment_bounds(i as u32, f);
                 if let Some(h) = hull_hit(arr(f.position), low, high, hulls, 0) {
                     // What the hull climbs as floor it does not push: a
                     // piece of a yielding material, or one rising above
@@ -4999,7 +5088,7 @@ fn supported(
     settled: &Settled,
     skip: u32,
 ) -> bool {
-    let (low, high) = f.bounds();
+    let (low, high) = settled.fragment_bounds(skip, f);
     let mut p = arr(f.position);
     p[1] = p[1].sub(Fx::from_ratio(1, 2));
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
@@ -5260,6 +5349,24 @@ fn settled_cells(lo: [Fx; 3], hi: [Fx; 3]) -> ([i32; 3], [i32; 3]) {
     )
 }
 impl Settled {
+    /// The world boxes were built from this immutable phase input. Subtract
+    /// that same centre using wrapping Fx arithmetic: (p + bound) - p is
+    /// exactly bound, including fractional and overflow edge cases. Wake
+    /// changes velocity/resting only; each translation reads its start pose.
+    /// An empty/unbuilt index and corpse queries retain direct geometry.
+    fn fragment_bounds(&self, index: u32, f: &Fragment) -> ([Fx; 3], [Fx; 3]) {
+        self.boxes.get(index as usize).map_or_else(
+            || f.bounds(),
+            |&(lo, hi)| {
+                let p = arr(f.position);
+                (
+                    [0, 1, 2].map(|a| lo[a].sub(p[a])),
+                    [0, 1, 2].map(|a| hi[a].sub(p[a])),
+                )
+            },
+        )
+    }
+
     /// The resting pieces around those that will ask about them this tick:
     /// the flying ones, and the resting ones whose turn it is to look for
     /// their support (ADR-291). Pieces on a hull's roof (ADR-293) are left
@@ -5622,7 +5729,7 @@ fn advance_fragment(
         .unwrap();
     let delta = arr(f.velocity.scale(Fx::from_ratio(1, steps as i32)));
     let mut supported = false;
-    let (low, high) = f.bounds();
+    let (low, high) = settled.fragment_bounds(skip, f);
     // A piece in a live hull's box and under its voxels — born there, from
     // a cell dug under the hull — leaves by the nearest side before it
     // flies (ADR-302, ADR-469): the blast throws it out from under the
@@ -5677,6 +5784,7 @@ fn advance_fragment(
             steps,
             delta,
             apart,
+            (low, high),
             &mut supported,
         );
     }
@@ -5770,10 +5878,12 @@ fn substeps(
     steps: usize,
     mut delta: [Fx; 3],
     inside: u64,
+    local_bounds: ([Fx; 3], [Fx; 3]),
     supported: &mut bool,
 ) {
     let bounds = [world.nx, world.ny, world.nz];
-    let (low, high) = f.bounds();
+    // Eviction changes position, not shape/basis; tumble happens afterward.
+    let (low, high) = local_bounds;
     for _ in 0..steps {
         for axis in 0..3 {
             if delta[axis] == Fx::ZERO {

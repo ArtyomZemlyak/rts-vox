@@ -2,7 +2,19 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-563: пять physics/parallel candidates отклонены;
+Последний шаг ADR-564: wake/support/translation повторно используют bounds
+из параллельной подготовки неизменного phase input; substeps получают те
+же local bounds до tumble. Existing indexed pools/order/quotas сохранены.
+Две CPU пары: wake −15,75/20,88%, debris −5,56/9,04%, total −1,21/3,19%;
+все3600 tick counters/full gameplay/hash совпали. Wake grid отвергнут.
+Native FPS gain не доказан:87,40→65,85 и87,09→86,64; первая просадка
+не повторилась и не объяснена, max второй пары хуже. Все results сохранены.
+Тур:151 origins/0 blocked,3600 ticks/120с/strict tempo true, max52,62мс;
+pressure capture diagnostic only. 50 physics tests, golden4/save19 проходят.
+WBPERF-004/012 partial; 002,027, CPU balance, rare stalls/165FPS открыты.
+Данные — [158](158-reuse-phase-fragment-bounds.md).
+
+Предыдущий шаг ADR-563: пять physics/parallel candidates отклонены;
 два native A/B не дали устойчивого gain, все алгоритмы физики восстановлены.
 Новый opt-in OsPressure показывает system CPU, page faults, memory и top8
 читаемых process lifetimes рядом с stalls; diagnostic не квалифицирует FPS.
