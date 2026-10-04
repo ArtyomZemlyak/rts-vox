@@ -1,8 +1,22 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
-WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-565: analyzer больше не игнорирует caller detail boundaries;
+WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020, 026 и 027 частично выполняются, остальные задачи открыты.
+Последний шаг ADR-566: parallel route phase не собирает neighbours для
+неактивных local hunts; shared guard проверяется после terrain continuation.
+Новые nested sweeps с 4/2 batches отвергнуты по native FPS регрессии.
+Builder фиксирует Rust/Cargo/flags и optional tracked-input refresh;
+analyzer отклоняет разные/односторонне отсутствующие recorded contexts.
+Свежие 340-input native пары: FPS +0,037/+0,161%, core −0,353/0,375%;
+значимый общий gain не доказан. 3600 ticks/1×/полный gameplay/hash совпадают.
+Camera tour:21 segments/145 origins/0 blocked,3600 traced ticks/strict tempo,
+max51,63мс, streaming max19,51мс; route/translate по8 OS workers.
+Это не balanced CPU или исправление rare freezes. 45 motion/golden4/save19,
+124 analyzer tests/PS suite; исходные WIP сохранены. WBPERF-002, streaming
+tails, dispatch/join attribution и165FPS открыты. Данные и ограничения —
+[160](160-local-route-inputs-and-build-context.md).
+
+Предыдущий шаг ADR-565: analyzer больше не игнорирует caller detail boundaries;
 показывает подготовку, промежутки без записанных scopes и полные physics/nav
 итоги по потокам. Compacted coverage — lower bound, не idle/utilization.
 122 analyzer tests/PS suite; все прежние поля реального отчёта неизменны.

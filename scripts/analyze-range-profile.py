@@ -1426,6 +1426,22 @@ def analyze(directory, scenario="world-battle", top=12):
                     "OS process polling can miss workloads shorter than its interval; stack/wait traces remain separate"])
 
 
+def recorded_build_context(report):
+    envelope = (report.get("manifest") or {}).get("BuildEvidence")
+    if not isinstance(envelope, dict) or not isinstance(envelope.get("Evidence"), dict):
+        return None
+    evidence = envelope["Evidence"]
+    toolchain = evidence.get("Toolchain")
+    if not isinstance(toolchain, dict):
+        return None
+    for key in ("Rustc", "Cargo"):
+        if not isinstance(toolchain.get(key), list) or not toolchain[key] or not all(isinstance(v, str) for v in toolchain[key]):
+            return None
+    if not isinstance(toolchain.get("BuildEnvironment"), dict) or not toolchain.get("CargoLocalSha256"):
+        return None
+    return dict(toolchain=toolchain, tracked_inputs_refreshed=evidence.get("TrackedInputsRefreshed"))
+
+
 def compare(a, b):
     problems = []
     for label, run in [("before", a), ("after", b)]:
@@ -1463,7 +1479,11 @@ def compare(a, b):
     for key in ["measured_steps", "actual_adapter", "actual_workers", "actual_render_context", "core_trace_schema", "physics_task_sampling", "frame_alignment", "frame_timing_metric", "state_hash"]:
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
+    context_a, context_b = recorded_build_context(a), recorded_build_context(b)
+    if context_a != context_b:
+        problems.append("different_or_missing:recorded_build_context")
     return {"eligible": not problems, "reasons": problems,
+            "build_context_status": "matched_recorded" if context_a is not None and context_a == context_b else "legacy_unrecorded" if context_a is None and context_b is None else "mismatched_or_missing",
             "fps_acceptance_eligible": not problems and a["acceptance_eligible"] and b["acceptance_eligible"],
             "before_core_ms_per_step": a["core_ms_per_step"], "after_core_ms_per_step": b["core_ms_per_step"]}
 

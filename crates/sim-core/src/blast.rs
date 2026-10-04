@@ -3686,7 +3686,7 @@ impl BlastRange {
                                 &changed,
                                 |stage| task_detail(id, stage),
                             );
-                            if !driven {
+                            if !driven || !u.motion.needs_local_hunt() {
                                 task_detail(id, "route_end");
                                 return None;
                             }

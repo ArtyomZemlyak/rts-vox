@@ -709,3 +709,6 @@
 
 
 | 565 | Offline analyzer сохраняет detail intervals caller внутри групп от begin до phase/tick, проверяет их clock и OS-thread identity и отделяет nested details от parent totals. Union записанных scopes клипуется к detail; parent/child на одном потоке не удваиваются. Compacted physics coverage является lower bound, незаписанный промежуток не считается idle/lock wait. Physics totals сохраняют validated thread/stage/family, actor totals — recorded thread/family, с исходной доступностью CPU counters. Diagnostic captures не квалифицируют FPS; simulation/pools/budgets неизменны. |
+
+
+| 566 | Параллельная фаза маршрутов собирает snapshot neighbours только для активного local continuation после terrain pass; shared guard не меняет ordered live commit, callbacks, allowances, pools и saves. Frozen builder записывает Rust/Cargo/compiler flags и hash build wrapper; optional RefreshTrackedInputs обновляет и проверяет tracked Rust/WGSL/RON/Cargo/config/toolchain inputs вместе с explicit sources. Analyzer отклоняет разные recorded build contexts и наличие context только с одной стороны; legacy pairs явно помечены unrecorded. Совпадение записанного context не аттестует generated/untracked inputs, SDK/registry/linker или полную воспроизводимость. |

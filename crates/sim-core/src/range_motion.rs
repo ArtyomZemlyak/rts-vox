@@ -1473,6 +1473,15 @@ impl Motion {
     ) -> Option<PreparedLocalHunt> {
         self.prepare_local_hunt_observed(w, b, others, rubble, changed, |_| {})
     }
+    /// Test after terrain continuation: it may already have completed the
+    /// search. Inactive actors need no neighbour snapshot allocation.
+    pub(super) fn needs_local_hunt(&self) -> bool {
+        self.enabled
+            && !self.prepared_hunt
+            && self.resume_budget != Some(0)
+            && (self.blocked_ticks != 0 || self.escape != 0)
+            && self.hunt.is_some()
+    }
     pub(super) fn prepare_local_hunt_observed(
         &self,
         w: &World,
@@ -1482,11 +1491,7 @@ impl Motion {
         changed: &nav::vehicle::Changed,
         detail: impl Fn(&'static str),
     ) -> Option<PreparedLocalHunt> {
-        if !self.enabled
-            || self.prepared_hunt
-            || self.resume_budget == Some(0)
-            || (self.blocked_ticks == 0 && self.escape == 0)
-        {
+        if !self.needs_local_hunt() {
             return None;
         }
         let hunt = self.hunt.as_ref()?;

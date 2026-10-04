@@ -329,6 +329,36 @@ class FrameCadenceTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_build_context_is_explicit_and_compares_toolchain_flags_and_refresh(self):
+        self.write()
+        before = profile.analyze(self.path)
+        self.assertEqual(profile.compare(before, before)["build_context_status"], "legacy_unrecorded")
+        after = json.loads(json.dumps(before))
+        evidence = dict(Toolchain=dict(Rustc=["rustc test"], Cargo=["cargo test"],
+            BuildEnvironment={"RUSTFLAGS": None}, CargoLocalSha256="AA"), TrackedInputsRefreshed=True)
+        after["manifest"]["BuildEvidence"] = dict(Evidence=evidence)
+        self.assertIn("different_or_missing:recorded_build_context", profile.compare(before, after)["reasons"])
+        self.assertEqual(profile.compare(after, after)["build_context_status"], "matched_recorded")
+        for field, value in [("Rustc", ["other"]), ("Cargo", ["other"]),
+                             ("BuildEnvironment", {"RUSTFLAGS": "-C opt-level=1"}), ("CargoLocalSha256", "BB")]:
+            changed = json.loads(json.dumps(after))
+            changed["manifest"]["BuildEvidence"]["Evidence"]["Toolchain"][field] = value
+            self.assertIn("different_or_missing:recorded_build_context", profile.compare(after, changed)["reasons"])
+        changed = json.loads(json.dumps(after))
+        changed["manifest"]["BuildEvidence"]["Evidence"]["TrackedInputsRefreshed"] = False
+        self.assertFalse(profile.compare(after, changed)["eligible"])
+
+    def test_incomplete_build_context_cannot_claim_recorded_match(self):
+        self.write()
+        report = profile.analyze(self.path)
+        for context in [None, [], {}, {"Rustc": [], "Cargo": ["cargo"]}]:
+            report["manifest"]["BuildEvidence"] = dict(Evidence=dict(Toolchain=context))
+            self.assertIsNone(profile.recorded_build_context(report))
+            self.assertEqual(profile.compare(report, report)["build_context_status"], "legacy_unrecorded")
+        for envelope in [None, [], "unknown", dict(Evidence=[]), dict(Evidence="unknown")]:
+            report["manifest"]["BuildEvidence"] = envelope
+            self.assertIsNone(profile.recorded_build_context(report))
+
     def test_camera_tour_has_separate_comparison_gate(self):
         self.write()
         before = profile.analyze(self.path)

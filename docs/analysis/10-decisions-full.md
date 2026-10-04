@@ -24762,3 +24762,28 @@ traces не установлена. WBPERF-001/027 partial, independent executor
 WBPERF-002, CPU balance/165FPS открыты. Native binary и13 исходных WIP
 сохранены; исходы с разным terminal tick не сравниваются как gameplay A/B.
 Raw и ограничения — [159](159-worker-distribution-and-caller-details.md).
+
+
+## ADR-566 — local route inputs и context измеряемых сборок
+
+Неактивные local hunts не создают neighbour Vec после terrain continuation.
+Guard общий с потребителем; inputs/ordered commit/quotas/pools/saves прежние.
+Два nested sweep кандидата отклонены: native FPS −1,35/1,85% и −0,62%,
+второй max четырёх-batch варианта87,33мс. Production paths восстановлены.
+
+Прежний frozen manifest не фиксировал toolchain/profile context и все
+restored dependency timestamps. Builder записывает versions/flags/wrapper
+hash; optional tracked refresh использован на340 inputs свежих вариантов.
+Отличаются только два файла фикса. Analyzer отвергает разные/односторонне
+отсутствующие contexts; legacy_unrecorded не означает verified context.
+Полная generated/SDK/registry/linker цепочка не аттестована.
+
+Свежие native пары: FPS +0,037/+0,161%, core −0,353/0,375%; значимый FPS
+gain не доказан, max не улучшился. Каждый capture3600 ticks/1×/тот же полный
+gameplay/hash. Camera diagnostic:21 segments/145 origins/0 blocked,
+3600 traced ticks/strict tempo, max51,63мс, streaming19,51мс; route/translate
+по8 OS workers, без доказательства balanced CPU или исправления rare stalls.
+45 motion/golden4/save19/fmt,124 analyzer tests/PS suite проходят; Clippy
+с прежними warnings. Исходные13 WIP сохранены, native пересобран.
+WBPERF-002 и165FPS остаются открыты. Разбор —
+[160](160-local-route-inputs-and-build-context.md).
