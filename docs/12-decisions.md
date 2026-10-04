@@ -694,3 +694,6 @@
 
 
 | 560 | Previous positions физических обломков хранятся в reusable плотном render массиве. Строго возрастающий capture не строит lookup map; прежние параллельные leaves по 2048 сливают ID/position от partition_point. Reordered current input использует lookup, unordered/duplicate history сохраняет compatibility map и last-write-wins. Resting/wake, interpolation, reset/ID reuse, ordered publication, физика и shared pools прежние. Разбор — analysis/154-dense-fragment-history-and-rejected-picture-pool.md. |
+
+
+| 561 | Входы восьми полос settled contact index подготавливаются одним проходом в source order и хранятся в reusable scratch lists. Прежние physics jobs заполняют только принадлежащие им X-residue cells; ordered contacts, wanted membership, indexed ownership и existing pools сохранены. Physics observer отделяет cell partition от fill jobs. Разбор — analysis/155-settled-contact-work-partition.md. |

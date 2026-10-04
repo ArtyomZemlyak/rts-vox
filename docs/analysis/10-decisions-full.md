@@ -24634,3 +24634,26 @@ Reusable ordered `(ID, position)` history заменяет построение 
 +0,048%, существенного общего gain нет; оба max frame хуже. 3600 steps,
 1× и полные gameplay/hash lines совпадают. WBPERF-002/027, CPU balance и
 165 FPS открыты. Данные — [154](154-dense-fragment-history-and-rejected-picture-pool.md).
+
+
+## ADR-561 — ordered partition перед parallel contact fill
+
+Каждая из восьми stripes получает reusable source/bounds list вместо полного
+повторного scan selected. Source order, exact cells/wanted mask и ordered
+contacts сохраняются. Новых pools/лимитов/физических входов нет; partition
+observer отделён от прежних fill jobs. Differential 1/2/4/8 workers и 562
+full core tests проходят / 4 прежних ignored. После type alias cleanup
+повторён differential, Clippy/fmt без новых замечаний.
+
+CPU поздняя cells parent phase −15,38% / −18,18%; общего tick gain нет.
+Четыре ordinary native runs ~85 FPS: +0,103% / −0,077%, p99/max хуже.
+Ещё final/late control 82,04/77,75 FPS; это открытый межзапусковый разброс,
+не алгоритмический gain. Все шесть имеют 3600 steps / 1× и прежний hash.
+Final peak 248,2 ms / tick3001 core236,65 ms не объяснён и не скрыт.
+
+Отдельный diagnostic подтвердил 7149 partition calls, 57192 fill jobs,
+восемь physics OS workers и полную coverage. Balanced CPU не установлена.
+Ordinary peak не повторился; traced tick2518 rubble37,06 ms и tick2245
+debris40,82 ms требуют serial/dispatch/join attribution плюс OS waits.
+WBPERF-002, 001/027, stalls и 165 FPS остаются открытыми. Полные данные,
+SHA/provenance и ограничения — [155](155-settled-contact-work-partition.md).

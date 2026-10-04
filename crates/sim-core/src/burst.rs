@@ -5083,11 +5083,13 @@ fn retain_live<T>(
 }
 /// Side of a cell of the settled index, world units.
 const SETTLED_CELL: i32 = 4;
+type SettledCellRequest = (u32, [i32; 3], [i32; 3]);
 /// X modulo eight owns each contact list. Each worker appends indices in
 /// fragment order to its own tables; no merge or shared insertion is needed.
 #[derive(Default)]
 struct SettledCells {
     stripes: [SettledCellStripe; 8],
+    requests: [Vec<SettledCellRequest>; 8],
     len: usize,
 }
 #[derive(Default)]
@@ -5134,25 +5136,39 @@ impl SettledCells {
         parallel: bool,
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
-        let fill = |(owner, stripe): (usize, &mut SettledCellStripe)| {
-            let _task = PhysicsTask::new(task, "physics_cells_begin", "physics_cells_end");
+        {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_cell_partition_begin",
+                "physics_cell_partition_end",
+            );
+            for requests in &mut self.requests {
+                requests.clear();
+            }
+            // Visit each source once. The first eight X cells name exactly
+            // the stripes intersecting this box, including negative cells.
+            // Appending in source order preserves every contact list's order.
             for (i, bounds) in selected.iter().enumerate() {
                 let Some((lo, hi)) = *bounds else {
                     continue;
                 };
-                let x0 = lo[0] + (owner as i32 - lo[0]).rem_euclid(8);
-                if x0 > hi[0] {
-                    continue;
+                for x in (lo[0]..=hi[0]).take(8) {
+                    self.requests[x.rem_euclid(8) as usize].push((i as u32, [x, lo[1], lo[2]], hi));
                 }
+            }
+        }
+        let fill = |(stripe, requests): (&mut SettledCellStripe, &Vec<SettledCellRequest>)| {
+            let _task = PhysicsTask::new(task, "physics_cells_begin", "physics_cells_end");
+            for &(i, lo, hi) in requests {
                 for z in lo[2]..=hi[2] {
                     for y in lo[1]..=hi[1] {
-                        for x in (x0..=hi[0]).step_by(8) {
+                        for x in (lo[0]..=hi[0]).step_by(8) {
                             if want.contains([x, y, z]) {
                                 stripe
                                     .cells
                                     .entry([x, y, z])
                                     .or_insert_with(|| stripe.free_lists.pop().unwrap_or_default())
-                                    .push(i as u32);
+                                    .push(i);
                             }
                         }
                     }
@@ -5160,9 +5176,12 @@ impl SettledCells {
             }
         };
         if parallel {
-            self.stripes.par_iter_mut().enumerate().for_each(fill);
+            self.stripes
+                .par_iter_mut()
+                .zip(&self.requests)
+                .for_each(fill);
         } else {
-            self.stripes.iter_mut().enumerate().for_each(fill);
+            self.stripes.iter_mut().zip(&self.requests).for_each(fill);
         }
         self.len = self.stripes.iter().map(|stripe| stripe.cells.len()).sum();
     }

@@ -2,7 +2,19 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-560: dense previous fragment positions заменяют hash table
+Последний шаг ADR-561: contact stripe inputs готовятся одним ordered scan,
+прежние восемь jobs обходят только свои reusable lists. Поздняя cells phase
+CPU −15,38% / −18,18%, общий tick/FPS gain не доказан. 562 core tests проходят,
+два native comparisons eligible, gameplay/hash прежние. Финальный ordinary
+run поймал кадр 248,2 мс / core 236,65 мс tick3001; diagnostic его не повторил,
+но нашёл rubble 37,06 мс tick2518 и debris 40,82 мс tick2245. Причина пиков
+не установлена. Partition span отделён, восемь physics OS workers подтверждены.
+WBPERF-002, 001/027, CPU balance и 165 FPS открыты. Следующий diagnostic
+приоритет: serial/dispatch/join boundaries этих parents и OS wait/stacks;
+job totals и квантованные CPU counters этого не объясняют. Данные —
+[155](155-settled-contact-work-partition.md).
+
+Предыдущий шаг ADR-560: dense previous fragment positions заменяют hash table
 в нормальном ordered пути. Прежние пакеты по 2048 сливают ID/position внутри
 shared compute jobs; imported/reordered input сохраняет lookup semantics.
 119 render tests passed / 3 прежних ignored; обычные две пары по 120 с eligible,
