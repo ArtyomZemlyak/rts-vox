@@ -294,10 +294,9 @@ impl Thermals {
             if u.section_holds(usize::from(p.part), p.at) {
                 continue;
             }
-            if !matter.melt_unit(id, u, usize::from(p.part), cell) {
+            if !matter.melt_unit_with_room(id, u, usize::from(p.part), cell, &mut room) {
                 continue;
             }
-            room -= 1;
             if p.part == 0 {
                 u.body.remove(cell[0], cell[1], cell[2]);
                 u.removed.push(p.at);

@@ -383,6 +383,7 @@ fn main() {
     } else {
         Vec::new()
     };
+    let mut admission_previous = sim.matter.admission;
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; 6];
@@ -659,6 +660,14 @@ fn main() {
                     sim.matter.debris.fragments.iter().filter(|f| !f.resting).count(),
                     sim.matter.debris.claims(),
                     sim.matter.debris.fragment_room(&sim.matter.tuning));
+                let admission = sim.matter.admission;
+                println!("damage_admission tick={} body_applied_unaffordable_deferred={:?} melt_applied_deferred={:?} room_scans={} room_items={}",
+                    sim.tick,
+                    [0, 1, 2].map(|i| admission.body[i] - admission_previous.body[i]),
+                    [0, 1].map(|i| admission.melt[i] - admission_previous.melt[i]),
+                    admission.room_scans - admission_previous.room_scans,
+                    admission.room_items - admission_previous.room_items);
+                admission_previous = admission;
                 damage_previous = damage;
                 shots_previous = shots;
                 impact_window = [0; 6];

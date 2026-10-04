@@ -7,8 +7,19 @@ use std::collections::BTreeMap;
 
 type Key = (usize, usize, [u32; 3], u8, [i64; 16]);
 #[derive(Default)]
-pub(super) struct Batch(BTreeMap<Key, (Frame, Vec<(u32, usize)>)>);
+pub(super) struct Batch {
+    groups: BTreeMap<Key, (Frame, Vec<(u32, usize)>)>,
+    // One conservative slot per ungrouped cell, exactly as the scalar path.
+    // Nothing removes or wakes fragments between ordered batch commits.
+    pub(super) room: Option<u32>,
+}
 impl Batch {
+    pub(super) fn with_room(room: Option<u32>) -> Self {
+        Self {
+            room,
+            ..Self::default()
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn record(
         &mut self,
@@ -37,7 +48,7 @@ impl Batch {
             n += 1;
         }
         pose[n] = frame.scale.raw();
-        self.0
+        self.groups
             .entry((unit, part, origin, side, pose))
             .or_insert_with(|| (frame, Vec::new()))
             .1
@@ -56,14 +67,15 @@ fn motion_mj(f: &Fragment) -> u64 {
 impl Matter {
     pub(crate) fn begin_body_batch(&mut self) {
         assert!(self.batch.is_none());
-        self.batch = Some(Batch::default());
+        let room = self.claim_room();
+        self.batch = Some(Batch::with_room(Some(room)));
     }
     pub(crate) fn finish_body_batch(&mut self) {
         let Some(batch) = self.batch.take() else {
             return;
         };
         let mut removed = BTreeSet::new();
-        for ((_, _, origin, side, _), (frame, cells)) in batch.0 {
+        for ((_, _, origin, side, _), (frame, cells)) in batch.groups {
             // Keep subsystem boundaries, but paint scratches do not sever steel.
             let mut roles = BTreeMap::<u8, (u64, Vec<(u32, usize)>)>::new();
             for (bit, index) in cells {
@@ -127,18 +139,291 @@ impl Matter {
         if removed.is_empty() {
             return;
         }
-        let mut i = 0;
-        self.debris.fragments.retain(|_| {
-            let keep = !removed.contains(&i);
-            i += 1;
-            keep
-        });
+        // Only this batch's appended suffix can contain donors. Leave the
+        // long-lived settled prefix untouched and preserve every survivor's
+        // order (this is stable compaction, never swap-and-pop deletion).
+        let first = *removed.first().unwrap();
+        let mut removed = removed.into_iter().peekable();
+        let fragments = &mut self.debris.fragments;
+        let mut write = first;
+        for read in first..fragments.len() {
+            if removed.peek() == Some(&read) {
+                removed.next();
+            } else {
+                if write != read {
+                    fragments.swap(write, read);
+                }
+                write += 1;
+            }
+        }
+        fragments.truncate(write);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_admission_matches_scalar_with_mixed_claims_and_pool_pressure() {
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/energy-cannon.ron"
+        ))
+        .unwrap();
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        for (total, flying, claims) in [(1, 1, 1), (31, 7, 3), (31, 31, 31), (4096, 4096, 4096)] {
+            let run = |cached: bool| {
+                let mut r =
+                    crate::blast::BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+                let u = &r.units[0];
+                let m = &mut r.matter;
+                m.tuning.max_fragments = total;
+                m.tuning.max_flying = flying;
+                m.tuning.max_claims = claims;
+                m.begin(u32::MAX, 4);
+                m.begin_body_batch();
+                if !cached {
+                    m.batch.as_mut().unwrap().room = None;
+                }
+                // Duplicate claims, full claim budget, mixed terrain/body
+                // reservations, insufficient energy and full flying/total caps.
+                for x in [40, 40, 41, 42, 43] {
+                    let _ = m.ground(&mut r.world, [x, 2, 40], [40, 2, 40]);
+                    if cached {
+                        assert_eq!(m.claim_room(), m.debris.fragment_room(&m.tuning));
+                    }
+                }
+                let mut attempted = 0;
+                for z in 0..usize::from(u.body.vol.nz) {
+                    for y in 0..usize::from(u.body.vol.ny) {
+                        for x in 0..usize::from(u.body.vol.nx) {
+                            if !u.body.vol.get(x, y, z) || attempted >= 128 {
+                                continue;
+                            }
+                            let cell = [x, y, z];
+                            if attempted % 5 == 0 {
+                                m.melt_unit(0, u, 0, cell);
+                            } else {
+                                m.body(0, u, cell, &u.root_frame(y), [200, 16, 330]);
+                            }
+                            attempted += 1;
+                            if cached {
+                                assert_eq!(m.claim_room(), m.debris.fragment_room(&m.tuning));
+                            }
+                        }
+                    }
+                }
+                m.remaining_mj = 0;
+                let _ = m.body(0, u, [1, 1, 1], &u.root_frame(1), [200, 16, 330]);
+                let profile = m.admission;
+                m.finish_body_batch();
+                assert!(m.economy.ledger.balanced());
+                let mut bytes = fx::blob::Blob::new();
+                m.save(&mut bytes);
+                r.world.save(&mut bytes);
+                (bytes.v, profile)
+            };
+            let (actual, fast) = run(true);
+            let (expected, slow) = run(false);
+            assert_eq!(actual, expected, "caps={total}/{flying}/{claims}");
+            assert_eq!(fast.body, slow.body);
+            assert_eq!(fast.melt, slow.melt);
+            assert!(fast.room_scans < slow.room_scans);
+            assert!(fast.room_items <= slow.room_items);
+            assert!(slow.room_scans > 100);
+            if total == 4096 {
+                assert_eq!(fast.room_scans, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn thermal_reservations_match_scalar_melts_with_caps_and_invalid_cells() {
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/energy-cannon.ron"
+        ))
+        .unwrap();
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        for cap in [1, 7, 128] {
+            let run = |reserved: bool| {
+                let mut r =
+                    crate::blast::BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+                let u = &r.units[0];
+                let m = &mut r.matter;
+                m.tuning.max_flying = cap;
+                let mut room = m.debris.fragment_room(&m.tuning);
+                let mut result = Vec::new();
+                // Air must not consume a reservation.
+                result.push(if reserved {
+                    m.melt_unit_with_room(0, u, 0, [0, 0, 0], &mut room)
+                } else {
+                    m.melt_unit(0, u, 0, [0, 0, 0])
+                });
+                let mut n = 0;
+                for z in 0..usize::from(u.body.vol.nz) {
+                    for y in 0..usize::from(u.body.vol.ny) {
+                        for x in 0..usize::from(u.body.vol.nx) {
+                            if !u.body.vol.get(x, y, z) || n >= 128 {
+                                continue;
+                            }
+                            result.push(if reserved {
+                                m.melt_unit_with_room(0, u, 0, [x, y, z], &mut room)
+                            } else {
+                                m.melt_unit(0, u, 0, [x, y, z])
+                            });
+                            n += 1;
+                            if reserved {
+                                assert_eq!(room, m.debris.fragment_room(&m.tuning));
+                            }
+                        }
+                    }
+                }
+                assert!(m.economy.ledger.balanced());
+                let mut bytes = fx::blob::Blob::new();
+                m.save(&mut bytes);
+                (result, bytes.v, m.admission)
+            };
+            let (actual, fast, a) = run(true);
+            let (expected, slow, b) = run(false);
+            assert_eq!(actual, expected);
+            assert_eq!(fast, slow);
+            assert_eq!(a.melt, b.melt);
+            assert_eq!(a.room_scans, 0);
+            assert!(b.room_scans > 100);
+        }
+    }
+
+    #[test]
+    fn grouped_body_tail_preserves_settled_prefix_and_exact_removed_cells() {
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/energy-cannon.ron"
+        ))
+        .unwrap();
+        let layout =
+            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
+                .unwrap();
+        let mut r = crate::blast::BlastRange::with_layout(config, layout).unwrap();
+        let u = &r.units[0];
+        let b = &u.body;
+        let mut cells = None;
+        'boxes: for z in (0..usize::from(b.vol.nz).saturating_sub(3)).step_by(4) {
+            for y in (0..usize::from(b.vol.ny).saturating_sub(3)).step_by(4) {
+                for x in (0..usize::from(b.vol.nx).saturating_sub(3)).step_by(4) {
+                    let group: Vec<_> = (z..z + 4)
+                        .flat_map(|z| {
+                            (y..y + 4).flat_map(move |y| (x..x + 4).map(move |x| [x, y, z]))
+                        })
+                        .collect();
+                    if group.iter().all(|&[x, y, z]| {
+                        b.vol.get(x, y, z) && b.part_at(x, y, z) == voxel::Part::Armour
+                    }) {
+                        cells = Some(group);
+                        break 'boxes;
+                    }
+                }
+            }
+        }
+        let cells = cells.expect("fixture has a full armour fracture box");
+        let m = &mut r.matter;
+        m.tuning.max_fragments = 128;
+        m.tuning.max_flying = 128;
+        m.begin(u32::MAX, 4);
+        // Existing settled pieces must keep their positions, shape, order
+        // and ledger owners when only the new suffix is compacted.
+        'prefix: for z in 0..usize::from(b.vol.nz) {
+            for y in 0..usize::from(b.vol.ny) {
+                for x in 0..usize::from(b.vol.nx) {
+                    if !b.vol.get(x, y, z) || cells.contains(&[x, y, z]) {
+                        continue;
+                    }
+                    assert!(matches!(
+                        m.body(0, u, [x, y, z], &u.root_frame(y), [200, 16, 330]),
+                        ClaimResult::Applied
+                    ));
+                    let f = m.debris.fragments.last_mut().unwrap();
+                    f.resting = true;
+                    f.velocity = V3::ZERO;
+                    if m.debris.fragments.len() == 4 {
+                        break 'prefix;
+                    }
+                }
+            }
+        }
+        let signature = |f: &Fragment| {
+            (
+                f.id, f.held, f.position, f.velocity, f.basis, f.shape, f.side, f.count, f.mass_g,
+                f.resting,
+            )
+        };
+        let prefix: Vec<_> = m.debris.fragments.iter().map(signature).collect();
+        let mut expected_mass = m.debris.fragments.iter().map(|f| f.mass_g).sum::<u64>();
+        m.begin_body_batch();
+        let body_before = m.economy.ledger.held(m.body_container(0));
+        for &cell in &cells {
+            assert!(matches!(
+                m.body(0, u, cell, &u.root_frame(cell[1]), [200, 16, 330]),
+                ClaimResult::Applied
+            ));
+            let f = m.debris.fragments.last().unwrap();
+            expected_mass += f.mass_g;
+            assert!(m.debris.fragments.len() <= 128);
+        }
+        m.finish_body_batch();
+        assert_eq!(
+            m.debris.fragments[..4]
+                .iter()
+                .map(signature)
+                .collect::<Vec<_>>(),
+            prefix
+        );
+        assert_eq!(m.admission.body, [68, 0, 0]);
+        assert_eq!(m.debris.fragments.len(), 5);
+        assert_eq!(m.debris.fragments.iter().map(|f| f.count).sum::<u32>(), 68);
+        let mut restored = BTreeSet::new();
+        for f in &m.debris.fragments[4..] {
+            let centre = shape_centre(f.shape, f.side);
+            let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+            for bit in 0..u32::from(f.side).pow(3) {
+                if f.shape & (1 << bit) == 0 {
+                    continue;
+                }
+                let side = u32::from(f.side);
+                let delta = [
+                    Fx::from_int((bit % side) as i32).sub(centre.x),
+                    Fx::from_int((bit / side % side) as i32).sub(centre.y),
+                    Fx::from_int((bit / (side * side)) as i32).sub(centre.z),
+                ];
+                let mut world = f.position;
+                for a in 0..3 {
+                    world = world.add(f.basis[a].scale(delta[a].mul(scale)));
+                }
+                let local = u
+                    .root_frame(cells[0][1])
+                    .local(world)
+                    .map(|v| v.to_int_trunc() as usize);
+                assert!(restored.insert(local));
+            }
+        }
+        assert_eq!(restored, cells.into_iter().collect());
+        assert_eq!(
+            m.debris.fragments.iter().map(|f| f.mass_g).sum::<u64>(),
+            expected_mass
+        );
+        assert_eq!(
+            body_before - m.economy.ledger.held(m.body_container(0)),
+            64 * m.economy.per_voxel(3)
+        );
+        assert!(m.economy.ledger.balanced());
+        assert!(m
+            .debris
+            .fragments
+            .iter()
+            .all(|f| shape_components(f.shape, f.side) == [f.shape]));
+    }
+
     #[test]
     fn armour_batches_keep_matter_and_exact_connected_geometry() {
         let config = modding::explosion::ExplosionConfig::from_ron(include_str!(

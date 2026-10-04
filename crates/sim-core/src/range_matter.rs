@@ -58,6 +58,9 @@ fn fell_cell(key: u64) -> [i32; 3] {
 pub struct Matter {
     batch: Option<fracture::Batch>,
     pub debris: Bursts,
+    /// Diagnostic attempts since construction/load; excluded from snapshots
+    /// and authoritative hashes. Never used to choose work or damage.
+    pub admission: AdmissionProfile,
     /// Cells per side of the current weapon's debris pieces (ADR-284).
     fragment_box: u8,
     pub economy: Economy,
@@ -72,6 +75,16 @@ pub struct Matter {
     /// Yielding cells still to be released after a cut, each with the cut
     /// cell it hangs from. Ordered, bounded per tick, saved whole.
     felling: BTreeSet<(u64, u64)>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdmissionProfile {
+    /// Body fracture: applied, unaffordable, pool deferred.
+    pub body: [u64; 3],
+    /// Body melt: applied, pool deferred.
+    pub melt: [u64; 2],
+    /// Full fragment array visits for admission (not physics queries).
+    pub room_scans: u64,
+    pub room_items: u64,
 }
 #[derive(Debug, Default)]
 pub struct FellingProfile {
@@ -108,6 +121,7 @@ impl Matter {
         Self {
             batch: None,
             debris: Bursts::default(),
+            admission: AdmissionProfile::default(),
             fragment_box: 2,
             economy,
             tuning: t.blast,
@@ -119,6 +133,25 @@ impl Matter {
             section_jobs: t.impact.detach_jobs_per_tick,
             section_cursor: 0,
             felling: BTreeSet::new(),
+        }
+    }
+    /// Read capacity once per atomic fracture batch. Body emissions and
+    /// successful terrain claims consume the same conservative reservations.
+    fn claim_room(&mut self) -> u32 {
+        self.batch
+            .as_ref()
+            .and_then(|batch| batch.room)
+            .unwrap_or_else(|| self.scan_claim_room())
+    }
+    fn scan_claim_room(&mut self) -> u32 {
+        self.admission.room_scans += 1;
+        self.admission.room_items += self.debris.fragments.len() as u64;
+        self.debris.fragment_room(&self.tuning)
+    }
+    fn consume_body_slot(&mut self) {
+        if let Some(room) = self.batch.as_mut().and_then(|batch| batch.room.as_mut()) {
+            assert!(*room > 0);
+            *room -= 1;
         }
     }
     pub fn felling_pending(&self) -> usize {
@@ -329,7 +362,25 @@ impl Matter {
     /// Heat has already softened this cell. Transfer it without explosive
     /// fracture work or a launch impulse, like melted terrain.
     pub fn melt_unit(&mut self, id: usize, u: &RangeUnit, part: usize, cell: [usize; 3]) -> bool {
-        if self.debris.fragment_room(&self.tuning) == 0 {
+        let mut room = self.claim_room();
+        let applied = self.melt_unit_with_room(id, u, part, cell, &mut room);
+        if applied {
+            self.consume_body_slot();
+        }
+        applied
+    }
+    /// Ordered thermal pass: only successful single-piece melts consume the
+    /// caller's reservations; fragments cannot settle or wake inside the pass.
+    pub(crate) fn melt_unit_with_room(
+        &mut self,
+        id: usize,
+        u: &RangeUnit,
+        part: usize,
+        cell: [usize; 3],
+        room: &mut u32,
+    ) -> bool {
+        if *room == 0 {
+            self.admission.melt[1] += 1;
             return false;
         }
         let root_frame = u.root_frame(cell[1]);
@@ -384,6 +435,8 @@ impl Matter {
             0,
             &self.tuning,
         );
+        *room -= 1;
+        self.admission.melt[0] += 1;
         true
     }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
@@ -395,7 +448,8 @@ impl Matter {
         if cost > self.remaining_mj {
             return ClaimResult::Unaffordable;
         }
-        if !self.debris.claim_voxel(
+        let mut room = self.claim_room();
+        let applied = self.debris.claim_voxel_with_room(
             w,
             p.map(|v| v as u32),
             m,
@@ -403,7 +457,12 @@ impl Matter {
             motion,
             self.fragment_box,
             &self.tuning,
-        ) {
+            &mut room,
+        );
+        if let Some(cached) = self.batch.as_mut().and_then(|batch| batch.room.as_mut()) {
+            *cached = room;
+        }
+        if !applied {
             return ClaimResult::Deferred;
         }
         self.pay(cost);
@@ -495,9 +554,11 @@ impl Matter {
             (cost, motion) = (cost - motion, 0);
         }
         if cost > self.remaining_mj {
+            self.admission.body[1] += 1;
             return ClaimResult::Unaffordable;
         }
-        if self.debris.fragment_room(&self.tuning) == 0 {
+        if self.claim_room() == 0 {
+            self.admission.body[2] += 1;
             return ClaimResult::Deferred;
         }
         let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
@@ -564,6 +625,8 @@ impl Matter {
                 &self.tuning,
             );
         }
+        self.consume_body_slot();
+        self.admission.body[0] += 1;
         self.pay(cost);
         ClaimResult::Applied
     }
@@ -908,6 +971,7 @@ impl Matter {
         b.u32s(&free);
     }
     pub fn load(&mut self, s: &mut Scan, w: &World, units: &[RangeUnit]) -> Option<()> {
+        self.admission = AdmissionProfile::default();
         self.fragment_box = s.u8();
         if !(1..=4).contains(&self.fragment_box) {
             return None;
