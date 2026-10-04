@@ -135,7 +135,7 @@ impl Matter {
             felling: BTreeSet::new(),
         }
     }
-    /// Read capacity once per atomic fracture batch. Body emissions and
+    /// Read capacity once per atomic fracture batch. Body components and
     /// successful terrain claims consume the same conservative reservations.
     fn claim_room(&mut self) -> u32 {
         self.batch
@@ -557,7 +557,24 @@ impl Matter {
             self.admission.body[1] += 1;
             return ClaimResult::Unaffordable;
         }
-        if self.claim_room() == 0 {
+        let reserved_component = self
+            .batch
+            .as_ref()
+            .is_some_and(|batch| batch.room.is_some());
+        let admitted = if reserved_component {
+            self.batch.as_mut().unwrap().reserve(
+                id,
+                part,
+                cell,
+                *frame,
+                self.fragment_box,
+                body.part_at(cell[0], cell[1], cell[2]) as u8,
+                &self.tuning,
+            )
+        } else {
+            self.claim_room() > 0
+        };
+        if !admitted {
             self.admission.body[2] += 1;
             return ClaimResult::Deferred;
         }
@@ -625,7 +642,11 @@ impl Matter {
                 &self.tuning,
             );
         }
-        self.consume_body_slot();
+        // Component admission already debited (or returned) the exact number
+        // of final pieces. The scalar path still reserves one emitted cell.
+        if !reserved_component {
+            self.consume_body_slot();
+        }
         self.admission.body[0] += 1;
         self.pay(cost);
         ClaimResult::Applied
@@ -1029,7 +1050,14 @@ impl Matter {
         );
         self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0, false)?;
         let n = s.usize();
-        if n > self.tuning.max_fragments as usize + units.len() * 2 + 2 {
+        // An atomic body batch can use up to 64 temporary cell containers for
+        // each final piece. Retired donor slots remain on the Ledger free list;
+        // they are not live fragments, but must round-trip with the snapshot.
+        // Also bound by encoded bytes before allocating an untrusted count.
+        let ledger_limit = (self.tuning.max_fragments as usize)
+            .saturating_mul(4usize.pow(3))
+            .saturating_add(units.len().saturating_mul(2).saturating_add(2));
+        if n > ledger_limit || n > s.left() / 18 {
             return None;
         }
         let mut containers = Vec::with_capacity(n);

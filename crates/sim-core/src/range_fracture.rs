@@ -9,8 +9,9 @@ type Key = (usize, usize, [u32; 3], u8, [i64; 16]);
 #[derive(Default)]
 pub(super) struct Batch {
     groups: BTreeMap<Key, (Frame, Vec<(u32, usize)>)>,
-    // One conservative slot per ungrouped cell, exactly as the scalar path.
-    // Nothing removes or wakes fragments between ordered batch commits.
+    // One reservation per connected component, with the same boundaries as
+    // finish_body_batch. Temporary cell donors are not independent pieces.
+    components: BTreeMap<(Key, u8), Vec<u64>>,
     pub(super) room: Option<u32>,
 }
 impl Batch {
@@ -21,16 +22,14 @@ impl Batch {
         }
     }
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn record(
-        &mut self,
-        index: usize,
+    fn location(
         unit: usize,
         part: usize,
         cell: [usize; 3],
         frame: Frame,
         side: u8,
         tuning: &modding::tuning::Blast,
-    ) {
+    ) -> (Key, u32) {
         let p = cell.map(|v| v as u32);
         let (origin, side) = fracture_box(p, side, tuning);
         let s = u32::from(side);
@@ -48,8 +47,82 @@ impl Batch {
             n += 1;
         }
         pose[n] = frame.scale.raw();
+        ((unit, part, origin, side, pose), bit)
+    }
+    /// Reserve before transferring matter. A face-connected addition needs no
+    /// new piece; a bridge returns the reservations of the components it joins.
+    /// No geometry is regrouped or published until the normal atomic commit.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reserve(
+        &mut self,
+        unit: usize,
+        part: usize,
+        cell: [usize; 3],
+        frame: Frame,
+        side: u8,
+        role: u8,
+        tuning: &modding::tuning::Blast,
+    ) -> bool {
+        let (key, bit) = Self::location(unit, part, cell, frame, side, tuning);
+        let side = u32::from(key.3);
+        let xyz = [bit % side, bit / side % side, bit / (side * side)];
+        let mut neighbours = 0;
+        for (axis, stride) in [1, side, side * side].into_iter().enumerate() {
+            if xyz[axis] > 0 {
+                neighbours |= 1u64 << (bit - stride);
+            }
+            if xyz[axis] + 1 < side {
+                neighbours |= 1u64 << (bit + stride);
+            }
+        }
+        let pieces = self.components.entry((key, role)).or_default();
+        // A caller must actually remove the previous cell before claiming it
+        // again. A duplicate cannot manufacture geometry or release a slot.
+        if pieces.iter().any(|shape| shape & (1u64 << bit) != 0) {
+            return false;
+        }
+        let joined = pieces
+            .iter()
+            .filter(|shape| **shape & neighbours != 0)
+            .count();
+        let room = self
+            .room
+            .as_mut()
+            .expect("component admission needs a cache");
+        if joined == 0 && *room == 0 {
+            return false;
+        }
+        if joined == 0 {
+            *room -= 1;
+        } else {
+            *room += (joined - 1) as u32;
+        }
+        let mut shape = 1u64 << bit;
+        pieces.retain(|piece| {
+            if *piece & neighbours == 0 {
+                true
+            } else {
+                shape |= *piece;
+                false
+            }
+        });
+        pieces.push(shape);
+        true
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record(
+        &mut self,
+        index: usize,
+        unit: usize,
+        part: usize,
+        cell: [usize; 3],
+        frame: Frame,
+        side: u8,
+        tuning: &modding::tuning::Blast,
+    ) {
+        let (key, bit) = Self::location(unit, part, cell, frame, side, tuning);
         self.groups
-            .entry((unit, part, origin, side, pose))
+            .entry(key)
             .or_insert_with(|| (frame, Vec::new()))
             .1
             .push((bit, index));
@@ -164,7 +237,97 @@ impl Matter {
 mod tests {
     use super::*;
     #[test]
-    fn cached_admission_matches_scalar_with_mixed_claims_and_pool_pressure() {
+    fn reservations_follow_face_components_without_crossing_fracture_boundaries() {
+        let tuning = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+        let frame = Frame {
+            base: V3::ZERO,
+            x: crate::burst::IDENTITY[0],
+            y: crate::burst::IDENTITY[1],
+            z: crate::burst::IDENTITY[2],
+            centre: [Fx::ZERO; 3],
+            scale: Fx::ONE,
+        };
+        let mut batch = Batch::with_room(Some(2));
+        let reserve = |batch: &mut Batch, unit, part, cell, frame, role| {
+            batch.reserve(unit, part, cell, frame, 4, role, &tuning.blast)
+        };
+        assert!(reserve(&mut batch, 0, 0, [0, 0, 0], frame, 0));
+        assert!(reserve(&mut batch, 0, 0, [2, 0, 0], frame, 0));
+        assert_eq!(batch.room, Some(0));
+        // Touching a corner/edge, crossing a box, owner, part, role or exact
+        // pose does not extend either reserved physical component.
+        for (unit, part, cell, pose, role) in [
+            (0, 0, [1, 1, 0], frame, 0),
+            (0, 0, [4, 0, 0], frame, 0),
+            (1, 0, [1, 0, 0], frame, 0),
+            (0, 1, [1, 0, 0], frame, 0),
+            (0, 0, [1, 0, 0], frame, 1),
+            (
+                0,
+                0,
+                [1, 0, 0],
+                Frame {
+                    base: V3::UP,
+                    ..frame
+                },
+                0,
+            ),
+        ] {
+            assert!(!reserve(&mut batch, unit, part, cell, pose, role));
+            assert_eq!(batch.room, Some(0));
+        }
+        // This cell joins the two pieces: one slot returns immediately.
+        assert!(reserve(&mut batch, 0, 0, [1, 0, 0], frame, 0));
+        assert_eq!(batch.room, Some(1));
+        assert!(!reserve(&mut batch, 0, 0, [1, 0, 0], frame, 0));
+        assert_eq!(batch.room, Some(1));
+        assert!(reserve(&mut batch, 0, 0, [1, 1, 0], frame, 1));
+        assert_eq!(batch.room, Some(0));
+    }
+
+    #[test]
+    fn reservations_match_final_components_for_varied_cell_orders() {
+        let tuning = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
+        let frame = Frame {
+            base: V3::ZERO,
+            x: crate::burst::IDENTITY[0],
+            y: crate::burst::IDENTITY[1],
+            z: crate::burst::IDENTITY[2],
+            centre: [Fx::ZERO; 3],
+            scale: Fx::ONE,
+        };
+        for side in 1..=4u8 {
+            let n = u32::from(side);
+            for stride in [1, 3, 5, 7, 11, 13, 17, 31, 63] {
+                let mut batch = Batch::with_room(Some(64));
+                let mut masks = BTreeMap::<Key, u64>::new();
+                // Odd strides permute the 64 cells, exposing gaps and bridges.
+                for k in 0..64 {
+                    let bit = (k * stride) % 64;
+                    let cell = [
+                        (bit % 4) as usize,
+                        (bit / 4 % 4) as usize,
+                        (bit / 16) as usize,
+                    ];
+                    assert!(batch.reserve(0, 0, cell, frame, side, 0, &tuning.blast));
+                    let (key, bit) = Batch::location(0, 0, cell, frame, side, &tuning.blast);
+                    *masks.entry(key).or_default() |= 1u64 << bit;
+                    let pieces = masks
+                        .iter()
+                        .map(|(key, &mask)| shape_components(mask, key.3).len())
+                        .sum::<usize>();
+                    assert_eq!(
+                        batch.room,
+                        Some(64 - pieces as u32),
+                        "side={n}, stride={stride}, k={k}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn component_admission_preserves_scalar_when_room_is_ample_and_respects_caps() {
         let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
             "../../../data/energy-cannon.ron"
         ))
@@ -208,9 +371,6 @@ mod tests {
                                 m.body(0, u, cell, &u.root_frame(y), [200, 16, 330]);
                             }
                             attempted += 1;
-                            if cached {
-                                assert_eq!(m.claim_room(), m.debris.fragment_room(&m.tuning));
-                            }
                         }
                     }
                 }
@@ -218,6 +378,11 @@ mod tests {
                 let _ = m.body(0, u, [1, 1, 1], &u.root_frame(1), [200, 16, 330]);
                 let profile = m.admission;
                 m.finish_body_batch();
+                assert!(m.debris.fragments.len() + m.debris.claims() <= total as usize);
+                assert!(
+                    m.debris.fragments.iter().filter(|f| !f.resting).count() + m.debris.claims()
+                        <= flying as usize
+                );
                 assert!(m.economy.ledger.balanced());
                 let mut bytes = fx::blob::Blob::new();
                 m.save(&mut bytes);
@@ -226,9 +391,11 @@ mod tests {
             };
             let (actual, fast) = run(true);
             let (expected, slow) = run(false);
-            assert_eq!(actual, expected, "caps={total}/{flying}/{claims}");
-            assert_eq!(fast.body, slow.body);
-            assert_eq!(fast.melt, slow.melt);
+            if total == 4096 {
+                assert_eq!(actual, expected, "ample capacity preserves exact output");
+                assert_eq!(fast.body, slow.body);
+                assert_eq!(fast.melt, slow.melt);
+            }
             assert!(fast.room_scans < slow.room_scans);
             assert!(fast.room_items <= slow.room_items);
             assert!(slow.room_scans > 100);
@@ -328,11 +495,14 @@ mod tests {
         }
         let cells = cells.expect("fixture has a full armour fracture box");
         let m = &mut r.matter;
-        m.tuning.max_fragments = 128;
-        m.tuning.max_flying = 128;
+        // Four old settled pieces plus ONE free slot must admit the whole
+        // connected 64-cell plate without changing its exact final geometry.
+        m.tuning.max_fragments = 5;
+        m.tuning.max_flying = 1;
         m.begin(u32::MAX, 4);
         // Existing settled pieces must keep their positions, shape, order
         // and ledger owners when only the new suffix is compacted.
+        let mut prefix_cells = Vec::new();
         'prefix: for z in 0..usize::from(b.vol.nz) {
             for y in 0..usize::from(b.vol.ny) {
                 for x in 0..usize::from(b.vol.nx) {
@@ -343,6 +513,7 @@ mod tests {
                         m.body(0, u, [x, y, z], &u.root_frame(y), [200, 16, 330]),
                         ClaimResult::Applied
                     ));
+                    prefix_cells.push([x, y, z]);
                     let f = m.debris.fragments.last_mut().unwrap();
                     f.resting = true;
                     f.velocity = V3::ZERO;
@@ -369,7 +540,7 @@ mod tests {
             ));
             let f = m.debris.fragments.last().unwrap();
             expected_mass += f.mass_g;
-            assert!(m.debris.fragments.len() <= 128);
+            assert_eq!(m.claim_room(), 0);
         }
         m.finish_body_batch();
         assert_eq!(
@@ -407,7 +578,7 @@ mod tests {
                 assert!(restored.insert(local));
             }
         }
-        assert_eq!(restored, cells.into_iter().collect());
+        assert_eq!(restored, cells.iter().copied().collect());
         assert_eq!(
             m.debris.fragments.iter().map(|f| f.mass_g).sum::<u64>(),
             expected_mass
@@ -422,6 +593,22 @@ mod tests {
             .fragments
             .iter()
             .all(|f| shape_components(f.shape, f.side) == [f.shape]));
+        // Commit the corresponding body removals, then round-trip even though
+        // retired temporary donors outnumber the five final physical pieces.
+        for [x, y, z] in prefix_cells.into_iter().chain(cells) {
+            assert!(r.units[0].body.remove(x, y, z));
+        }
+        let mut bytes = Blob::new();
+        m.save(&mut bytes);
+        assert!(m.economy.ledger.snapshot().0.len() > 5 + r.units.len() * 2 + 2);
+        let mut copy = Matter::new(&r.units);
+        copy.tuning = m.tuning.clone();
+        assert!(copy
+            .load(&mut Scan::new(&bytes.v), &r.world, &r.units)
+            .is_some());
+        let mut restored = Blob::new();
+        copy.save(&mut restored);
+        assert_eq!(bytes.v, restored.v);
     }
 
     #[test]
