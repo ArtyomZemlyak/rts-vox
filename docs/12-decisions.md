@@ -706,3 +706,6 @@
 
 
 | 564 | Wake, support и начало translation повторно используют world boxes неизменного phase input из existing indexed physics pool. Local bounds восстанавливаются через wrapping Fx subtraction прежнего центра; empty/unbuilt index и corpse queries используют прямую геометрию. Substeps получают те же bounds до изменения basis/shape; кеш нельзя переносить через смену позы или поколения. Порядок контактов/merge, quotas, pools и save format сохранены. Разбор и ограничения измерений — analysis/158-reuse-phase-fragment-bounds.md. |
+
+
+| 565 | Offline analyzer сохраняет detail intervals caller внутри групп от begin до phase/tick, проверяет их clock и OS-thread identity и отделяет nested details от parent totals. Union записанных scopes клипуется к detail; parent/child на одном потоке не удваиваются. Compacted physics coverage является lower bound, незаписанный промежуток не считается idle/lock wait. Physics totals сохраняют validated thread/stage/family, actor totals — recorded thread/family, с исходной доступностью CPU counters. Diagnostic captures не квалифицируют FPS; simulation/pools/budgets неизменны. |

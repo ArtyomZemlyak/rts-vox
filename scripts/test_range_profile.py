@@ -134,6 +134,62 @@ class CameraTourTests(unittest.TestCase):
 
 
 class TraceTests(unittest.TestCase):
+    def test_detail_groups_partition_only_their_parent_and_keep_scope_bounds(self):
+        rows = [mark('tick', 'begin', 0), mark('phase', 'rubble', 5),
+                mark('detail', 'motion_begin', 5),
+                mark('task', 'route_begin', 10, '2', '0'),
+                mark('task', 'nested_begin', 15, '2', '0'),
+                mark('task', 'nested_end', 25, '2', '0'),
+                mark('task', 'route_end', 30, '2', '0'),
+                mark('detail', 'motion_routes', 40),
+                mark('detail', 'motion_ground', 60), mark('phase', 'motion', 70),
+                mark('phase', 'battle', 80), mark('detail', 'debris_begin', 80),
+                mark('detail', 'settled_boxes', 90), mark('phase', 'debris', 100),
+                mark('tick', 'end', 110)]
+        tick = profile.summarize_tick(rows)
+        self.assertEqual([d['group'] for d in tick['details']], ['motion'] * 3 + ['debris'] * 2)
+        self.assertEqual([(d['start'], d['end']) for d in tick['details']], [(5,40),(40,60),(60,70),(80,90),(90,100)])
+        first = tick['details'][0]['scope_coverage']
+        self.assertAlmostEqual(first['observed_scope_ms'], 20 / 1e6)
+        self.assertAlmostEqual(first['unobserved_scope_ms'], 15 / 1e6)
+        self.assertAlmostEqual(first['longest_unobserved_scope_ms'], 10 / 1e6)
+        self.assertEqual(first['per_thread_scope_ms'], {'2': 20 / 1e6})
+        self.assertEqual(first['caller_scope_ms'], 0)
+        actor = {r['family']:r for r in tick['actor_thread_totals']}
+        self.assertEqual(set(actor), {'route','nested'})
+        self.assertEqual(actor['route']['os_thread'], '2')
+        self.assertAlmostEqual(actor['route']['inclusive_wall_ms'], 20 / 1e6)
+        self.assertAlmostEqual(actor['nested']['inclusive_wall_ms'], 10 / 1e6)
+        self.assertEqual(actor['route']['cpu_samples'], 0)
+        self.assertAlmostEqual(sum(d['wall_ms'] for d in tick['details']), 85 / 1e6)
+
+    def test_scope_clipping_concurrency_caller_and_compacted_lower_bound(self):
+        jobs = [dict(start=0, end=25, thread='1'), dict(start=10, end=40, thread='2'),
+                dict(start=20, end=30, thread='3'), dict(start=60, end=80, thread='3')]
+        result = profile.scope_coverage(jobs, 15, 70, '1', 'longest_per_thread_family_stage', 2)
+        self.assertEqual(result['kind'], 'retained_scopes_lower_bound')
+        self.assertAlmostEqual(result['observed_scope_ms'], 35 / 1e6)
+        self.assertAlmostEqual(result['unobserved_scope_ms'], 20 / 1e6)
+        self.assertAlmostEqual(result['longest_unobserved_scope_ms'], 20 / 1e6)
+        self.assertEqual(result['observed_threads'], 3)
+        self.assertEqual(result['unidentified_task_events'], 2)
+        self.assertAlmostEqual(result['caller_scope_ms'], 10 / 1e6)
+        self.assertEqual(profile.scope_coverage([],0,10,'1','all_scopes',0)['kind'], 'unavailable_no_identified_scopes')
+
+    def test_detail_unknown_begin_zero_interval_and_tick_tail_remain_explicit(self):
+        rows = [mark('tick', 'begin', 0), mark('detail', 'unexpected', 3),
+                mark('detail', 'next', 3), mark('detail', 'heat_begin', 5),
+                mark('detail', 'heat_units', 8), mark('tick', 'end', 10)]
+        details = profile.summarize_tick(rows)['details']
+        self.assertEqual([d['group'] for d in details], [None,None,'heat','heat'])
+        self.assertEqual([d['end']-d['start'] for d in details], [0,2,3,2])
+        self.assertEqual(details[-1]['name'], 'heat_unmarked_tail')
+        self.assertIsNone(details[0]['thread_cpu_ms'])
+
+    def test_detail_wrong_caller_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Detail boundary'):
+            profile.summarize_tick(trace() + [mark('detail','motion_begin',5,'2')])
+
     def test_physics_batches_are_not_actor_zero(self):
         rows = trace() + [
             mark("task", "physics_translate_begin", 15, "3", "0", 200),
@@ -833,6 +889,48 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["task_families"]["physics_rubble_floor"]["cpu_samples"], 0)
         self.assertAlmostEqual(report["task_families"]["physics_rubble_floor"]["inclusive_wall_ms"], 60 / 1e6)
         self.assertIn("physics stage 0", profile.markdown(report))
+        totals = report['physics_thread_totals']
+        self.assertEqual(len(totals), 2)
+        self.assertTrue(all(r['jobs'] == 3 and r['os_thread'] == '3' and r['stage'] == '0' for r in totals))
+        self.assertTrue(all(r['cpu_samples'] == 0 and r['cpu_ns'] == 0 for r in totals))
+        self.assertEqual(report['slow_ticks'][0]['physics_thread_totals'], totals)
+        self.assertIn('Physics per-thread complete summary totals', profile.markdown(report))
+
+    def test_native_details_are_aggregated_and_retained_in_plain_report(self):
+        rows = trace() + [mark('detail','motion_begin',5), mark('detail','motion_routes',75)]
+        self.write(rows=rows)
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text())
+        manifest['CorePhases'] = True
+        path.write_text(json.dumps(manifest))
+        report = profile.analyze(self.path)
+        self.assertEqual([d['name'] for d in report['details']], ['motion_routes', 'motion_unmarked_tail'])
+        self.assertAlmostEqual(report['details'][0]['mean_per_tick_ms'], 70 / 1e6)
+        self.assertEqual(report['slow_ticks'][0]['details'][0]['scope_coverage']['observed_threads'], 1)
+        markdown = profile.markdown(report)
+        self.assertIn('Nested caller details', markdown)
+        self.assertIn('detail motion/motion_routes', markdown)
+        self.assertEqual({r['family'] for r in report['actor_thread_totals']}, {'parent','child'})
+        self.assertIn('Actor/navigation per-thread recorded totals', markdown)
+        self.assertFalse(report['acceptance_eligible'])
+
+    def test_complete_thread_totals_preserve_threads_instead_of_longest_samples(self):
+        summary = self.bounded_physics_fixture()
+        path = self.path / 'world-battle.core.csv'
+        rows = list(profile.read_csv(path)) + [
+            mark('task','physics_rubble_floor_begin',20,'4','0'),
+            mark('task','physics_rubble_floor_end',55,'4','0')]
+        with path.open('w',newline='') as out:
+            writer = csv.DictWriter(out,list(rows[0])); writer.writeheader(); writer.writerows(rows)
+        summary.append(dict(generation='0',tick='1',os_thread='4',stage='0',family='physics_rubble_floor',
+                            jobs='2',inclusive_wall_ns='50',max_wall_ns='35',cpu_ns='10',cpu_samples='1',cycles='0',cycle_samples='0'))
+        self.write_physics(summary)
+        report = profile.analyze(self.path)
+        totals = [r for r in report['physics_thread_totals'] if r['family'] == 'physics_rubble_floor']
+        self.assertEqual({r['os_thread']:r['jobs'] for r in totals}, {'3':3,'4':2})
+        self.assertEqual(sum(r['inclusive_wall_ns'] for r in totals),110)
+        self.assertEqual(sum(r['cpu_ns'] for r in totals),10)
+        self.assertEqual(report['task_families']['physics_rubble_floor']['jobs'],5)
 
     def test_missing_physics_totals_do_not_pass(self):
         self.bounded_physics_fixture()

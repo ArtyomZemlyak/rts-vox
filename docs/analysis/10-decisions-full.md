@@ -24737,3 +24737,28 @@ strict tempo true, max52,62мс. Diagnostic tour не квалифицирует
 объясняет ordinary slowdown. WBPERF-002/027, CPU balance/165FPS открыты.
 Raw, hashes, rejected variant и все результаты —
 [158](158-reuse-phase-fragment-bounds.md).
+
+
+## ADR-565 — caller details и полные итоги по рабочим потокам
+
+Analyzer игнорировал существующие detail boundaries и сливал physics
+summary по family, теряя thread distribution. Теперь detail groups,
+clipped recorded-scope union/gaps и physics/actor thread totals видны в
+JSON и Markdown. Unknown/compacted evidence явно неполно; scope wall и
+coarse CPU counters не объявляются idle, utilization или lock waiting.
+
+Parallel stacked support отклонён: CPU rubble1001,35→999,13 и
+999,13→1016,21µs, последний max14,43мс. Counter/gameplay/hash совпадают,
+51 prototype physics test прошёл; production code/tests полностью откатились.
+122 analyzer tests/PS suite проходят. Все прежние поля реального3600-tick
+report совпадают со старым analyzer, totals согласованы с family counters.
+
+Full native diagnostic stationary/camera:3600/3584 traced ticks,
+8 route/8 translate OS threads, physics/nav8/8/compute4. Camera153 origins,
+0 blocked, max89,23мс, strict tempo false; не FPS A/B. Stationary tick2543
+локализует route actor23 на25,79мс; camera tick3553 — route interval16,46мс
+с13,42мс без recorded scopes. Причина без OS scheduler/dispatch/join
+traces не установлена. WBPERF-001/027 partial, independent executor
+WBPERF-002, CPU balance/165FPS открыты. Native binary и13 исходных WIP
+сохранены; исходы с разным terminal tick не сравниваются как gameplay A/B.
+Raw и ограничения — [159](159-worker-distribution-and-caller-details.md).

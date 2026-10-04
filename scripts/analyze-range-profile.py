@@ -131,6 +131,36 @@ def union_by_thread(jobs):
     return result
 
 
+def scope_coverage(jobs, start, end, caller, sampling, unidentified):
+    """Recorded scope wall coverage, never CPU utilization or lock waiting.
+
+    Compacted physics retains only longest scopes. Its unions are lower bounds;
+    their complement may contain omitted jobs, serial work, waits or preemption.
+    Nested parents may themselves wait for children, even with full scope input.
+    """
+    clipped = [dict(j, start=max(start, j['start']), end=min(end, j['end']))
+               for j in jobs if j['start'] < end and j['end'] > start]
+    covered = union_by_thread(clipped)
+    spans = sorted((j['start'], j['end']) for j in clipped)
+    cursor = start
+    gaps = []
+    for a, b in spans:
+        if a > cursor:
+            gaps.append(a - cursor)
+        cursor = max(cursor, b)
+    if cursor < end:
+        gaps.append(end - cursor)
+    missing_ns = sum(gaps)
+    return dict(kind='unavailable_no_identified_scopes' if not jobs else
+                'retained_scopes_lower_bound' if sampling == 'longest_per_thread_family_stage'
+                else 'recorded_scopes', unidentified_task_events=unidentified,
+                observed_scope_ms=(end - start - missing_ns) / 1e6,
+                unobserved_scope_ms=missing_ns / 1e6,
+                longest_unobserved_scope_ms=max(gaps, default=0) / 1e6,
+                caller_scope_ms=covered.get(caller, 0.0),
+                per_thread_scope_ms=covered, observed_threads=len(covered))
+
+
 def pressure_interval(a, b, begin_ns, end_ns, process_cpu_ms):
     """Whole OS sampling interval. Faults include soft faults; no cause inference."""
     if b.get("OsPressureReadUs") in (None, ""):
@@ -270,7 +300,7 @@ def attach_os_pressure(episodes, frames, cpu):
             samples=overlap[:12])
 
 
-def summarize_tick(rows):
+def summarize_tick(rows, sampling='all_scopes'):
     begins = [r for r in rows if r["lane"] == "tick" and r["event"] == "begin"]
     ends = [r for r in rows if r["lane"] == "tick" and r["event"] == "end"]
     if len(begins) != 1 or len(ends) != 1:
@@ -280,8 +310,14 @@ def summarize_tick(rows):
     origin = optional_int(begin, "profile_offset_ns")
     if origin is not None:
         origin -= int(begin["offset_ns"])
-    phases, units, jobs = [], [], []
+    phases, details, units, jobs = [], [], [], []
     last = begin
+    detail_last, detail_group = None, None
+    def detail_interval(row, name):
+        if detail_last is not None:
+            details.append(dict(name=name, group=detail_group, from_event=detail_last['event'],
+                                start=int(detail_last['offset_ns']), end=int(row['offset_ns']),
+                                **interval(detail_last, row)))
     unit_last = {}
     pending = {}
     unidentified_tasks = 0
@@ -294,7 +330,18 @@ def summarize_tick(rows):
             if begin.get("os_thread") and row.get("os_thread") and row["os_thread"] != begin["os_thread"]:
                 raise ValueError("Phase boundary is not on the tick caller")
             phases.append(dict(name=row["event"], **interval(last, row)))
+            detail_interval(row, f'{detail_group or "detail"}_unmarked_tail')
+            detail_last, detail_group = None, None
             last = row
+        elif row['lane'] == 'detail':
+            if begin.get('os_thread') and row.get('os_thread') and row['os_thread'] != begin['os_thread']:
+                raise ValueError('Detail boundary is not on the tick caller')
+            if row['event'].endswith('_begin'):
+                detail_interval(row, f'{detail_group or "detail"}_unmarked_tail')
+                detail_group = row['event'][:-6]
+            else:
+                detail_interval(row, row['event'])
+            detail_last = row
         elif row["lane"] == "unit":
             if row["unit"] in unit_last:
                 units.append(dict(unit=row["unit"], name=row["event"],
@@ -323,7 +370,12 @@ def summarize_tick(rows):
         raise ValueError("Unfinished worker task")
     # The tail is explicit; phase totals partition the caller's tick only.
     phases.append(dict(name="unmarked_tail", **interval(last, end)))
+    detail_interval(end, f'{detail_group or "detail"}_unmarked_tail')
+    for detail in details:
+        detail['scope_coverage'] = scope_coverage(jobs, detail['start'], detail['end'],
+                                                 begin.get('os_thread'), sampling, unidentified_tasks)
     families = {}
+    actor_threads = {}
     for job in jobs:
         family = families.setdefault(job["name"], dict(jobs=0, inclusive_wall_ms=0.0,
             max_wall_ms=0.0, sampled_cpu_ms=0.0, cpu_samples=0, cycles=0, cycle_samples=0))
@@ -336,13 +388,26 @@ def summarize_tick(rows):
         if job["cycles"] is not None:
             family["cycles"] += job["cycles"]
             family["cycle_samples"] += 1
+        if job['domain'] == 'actor':
+            key = job['thread'], job['name']
+            value = actor_threads.setdefault(key, dict(os_thread=key[0], family=key[1], jobs=0,
+                inclusive_wall_ms=0.0, max_wall_ms=0.0, sampled_cpu_ms=0.0, cpu_samples=0, cycles=0, cycle_samples=0))
+            value['jobs'] += 1
+            value['inclusive_wall_ms'] += job['wall_ms']
+            value['max_wall_ms'] = max(value['max_wall_ms'], job['wall_ms'])
+            if job['thread_cpu_ms'] is not None:
+                value['sampled_cpu_ms'] += job['thread_cpu_ms']
+                value['cpu_samples'] += 1
+            if job['cycles'] is not None:
+                value['cycles'] += job['cycles']
+                value['cycle_samples'] += 1
     return dict(generation=int(begin["generation"]), tick=int(begin["tick"]), **total,
                 profile_begin_ns=optional_int(begin, "profile_offset_ns"),
-                profile_end_ns=optional_int(end, "profile_offset_ns"), phases=phases,
+                profile_end_ns=optional_int(end, "profile_offset_ns"), phases=phases, details=details,
                 unit_intervals=sorted(units, key=lambda r: -r["wall_ms"])[:8],
                 longest_tasks=sorted(jobs, key=lambda r: -r["wall_ms"])[:8],
                 task_count=len(jobs), unidentified_task_events=unidentified_tasks,
-                task_families=families,
+                task_families=families, actor_thread_totals=list(actor_threads.values()),
                 physics_samples=[job for job in jobs if job["domain"] == "physics"],
                 worker_families={thread: sorted({j["name"] for j in jobs if j["thread"] == thread})
                                  for thread in {j["thread"] for j in jobs}},
@@ -1099,7 +1164,7 @@ def analyze(directory, scenario="world-battle", top=12):
     frame_ticks = sum(ticks_per_frame)
     if min(ticks_per_frame) < 0:
         raise ValueError("Negative step count")
-    core_totals, phase_totals, slow, seen = [], {}, [], set()
+    core_totals, phase_totals, detail_totals, slow, seen = [], {}, {}, [], set()
     unmapped = 0
     identity_mismatches = 0
     missing_clock = 0
@@ -1108,6 +1173,8 @@ def analyze(directory, scenario="world-battle", top=12):
     mapped_jobs = [0] * len(frames)
     roles = {}
     task_families = {}
+    physics_threads = {}
+    actor_threads = {}
     missing_physics_ticks = 0
     schema_match = re.search(r"^PROFILE core_trace_schema=(\d+)$", log, re.M)
     core_path = directory / f"{scenario}.core.csv"
@@ -1118,7 +1185,7 @@ def analyze(directory, scenario="world-battle", top=12):
             if key in seen:
                 raise ValueError("Non-contiguous or duplicated tick in trace")
             seen.add(key)
-            tick = summarize_tick(list(raw_rows))
+            tick = summarize_tick(list(raw_rows), sampling)
             samples = tick.pop("physics_samples")
             if summarized and summary_groups is not None:
                 group = next(summary_groups, None)
@@ -1128,6 +1195,7 @@ def analyze(directory, scenario="world-battle", top=12):
                 if len(sample_keys) != len(samples):
                     raise ValueError("Duplicate retained physics scope")
                 complete = {}
+                tick['physics_thread_totals'] = []
                 for row in group[1]:
                     sample_key = (row["os_thread"], row["stage"], row["family"])
                     sample = sample_keys.pop(sample_key, None)
@@ -1151,6 +1219,13 @@ def analyze(directory, scenario="world-battle", top=12):
                     family["sampled_cpu_ms"] += values["cpu_ns"] / 1e6
                     for field in ("cpu_samples", "cycles", "cycle_samples"):
                         family[field] += values[field]
+                    thread_total = dict(os_thread=row['os_thread'], stage=row['stage'], family=row['family'], **values)
+                    tick['physics_thread_totals'].append(thread_total)
+                    key = (row['os_thread'], row['stage'], row['family'])
+                    aggregate = physics_threads.setdefault(key, dict(os_thread=key[0], stage=key[1], family=key[2],
+                        **dict.fromkeys(values, 0)))
+                    for field, value in values.items():
+                        aggregate[field] = max(aggregate[field], value) if field == 'max_wall_ns' else aggregate[field] + value
                 if sample_keys:
                     raise ValueError("Physics summary scopes missing")
                 tick["task_families"].update(complete)
@@ -1178,9 +1253,18 @@ def analyze(directory, scenario="world-battle", top=12):
                 family = task_families.setdefault(name, dict.fromkeys(values, 0))
                 for field, value in values.items():
                     family[field] = max(family[field], value) if field == "max_wall_ms" else family[field] + value
+            for value in tick['actor_thread_totals']:
+                key = value['os_thread'], value['family']
+                aggregate = actor_threads.setdefault(key, dict(os_thread=key[0], family=key[1],
+                    **dict.fromkeys((k for k in value if k not in ('os_thread', 'family')), 0)))
+                for field, number in value.items():
+                    if field not in ('os_thread', 'family'):
+                        aggregate[field] = max(aggregate[field], number) if field == 'max_wall_ms' else aggregate[field] + number
             core_totals.append(tick["wall_ms"])
             for phase in tick["phases"]:
                 phase_totals.setdefault(phase["name"], []).append(phase)
+            for detail in tick['details']:
+                detail_totals.setdefault((detail['group'], detail['name']), []).append(detail['wall_ms'])
             if aligned:
                 if tick["profile_begin_ns"] is None or tick["profile_end_ns"] is None:
                     missing_clock += 1
@@ -1212,6 +1296,10 @@ def analyze(directory, scenario="world-battle", top=12):
         phase_summary.append(dict(name=name, mean_per_tick_ms=sum(wall) / len(seen),
                                   wall_occurrences=stats(wall), thread_cpu_occurrences=stats(cpu)))
     phase_summary.sort(key=lambda r: -r["mean_per_tick_ms"])
+    detail_summary = [dict(group=group, name=name, mean_per_tick_ms=sum(values) / len(seen),
+                           wall_occurrences=stats(values))
+                      for (group, name), values in detail_totals.items()]
+    detail_summary.sort(key=lambda r: -r['mean_per_tick_ms'])
     manifest_path = directory / f"{scenario}.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
     validity = manifest.get("Validity") or {} if manifest else {}
@@ -1305,14 +1393,14 @@ def analyze(directory, scenario="world-battle", top=12):
         camera_tour=camera_tour,
         os_cpu_window=cpu_window,
         terrain_journal_maintenance=journal_maintenance(log),
-        task_families=task_families,
+        task_families=task_families, physics_thread_totals=list(physics_threads.values()), actor_thread_totals=list(actor_threads.values()),
         core_trace_schema=core_schema,
         physics_task_sampling=sampling,
         physics_task_coverage=dict(traced_ticks=len(seen) - missing_physics_ticks, missing_ticks=missing_physics_ticks),
         frame_alignment="shared_monotonic_epoch" if aligned else "legacy_frame_delta_lags_phase_columns",
         trace_alignment=dict(unmapped_ticks=unmapped, missing_clock_ticks=missing_clock,
                              identity_mismatches=identity_mismatches, mapped_steps_per_frame=mapped_steps if core_path.exists() and aligned else None),
-        phases=phase_summary, slow_ticks=slow, slow_frames=expensive_frames,
+        phases=phase_summary, details=detail_summary, slow_ticks=slow, slow_frames=expensive_frames,
         slice_summary=slice_summary, slow_slices=slow_slices,
         frame_cadence=frame_cadence(frames, aligned),
         stall_episodes=episodes, stall_trace=stall_trace, render_timeline=render_trace,
@@ -1323,6 +1411,9 @@ def analyze(directory, scenario="world-battle", top=12):
                     "task family wall totals are inclusive across concurrent jobs, not elapsed phase time or CPU utilization",
                     "zero task CPU deltas can be coarse OS rounding; diagnostic callbacks add overhead",
                     "worker_covered_wall is a union per OS thread, not CPU utilization; do not add it to parent wall",
+                    "detail intervals partition recorded detail groups only; they overlap parent phases and must not be added to them",
+                    "scope coverage uses recorded inclusive wall intervals, not active CPU or lock-wait evidence; compacted physics unions are lower bounds and gaps may contain omitted jobs",
+                    "physics thread totals are complete only for validated summary captures; inclusive wall and coarse per-job CPU counters do not measure scheduler utilization",
                     "unit intervals are between consecutive callbacks and can enclose other work",
                     "render_prepare/render_extract are latest render-thread atomic observations and can belong to another frame; repeated observations are not new jobs and their per-row sum/mean is not render CPU work",
                     "single_tick_ms is exact core wall only for one-step slices; multi-step slices expose an average, never invented individual tick durations",
@@ -1391,6 +1482,13 @@ def markdown(report):
     for p in report["phases"]:
         cpu = p["thread_cpu_occurrences"]
         lines.append(f"| {p['name']} | {p['mean_per_tick_ms']:.3f} | {p['wall_occurrences']['p99']:.3f} | {cpu['samples'] if cpu else 'unavailable'} |")
+    if report.get('details'):
+        lines += ['', 'Nested caller details (already included in parent phases):', '',
+                  '| Group / completed boundary | Mean per traced tick, ms | p99 occurrence, ms | Occurrences |',
+                  '|---|---:|---:|---:|']
+        for detail in report['details']:
+            values = detail['wall_occurrences']
+            lines.append(f"| {detail['group'] or 'unidentified'} / {detail['name']} | {detail['mean_per_tick_ms']:.3f} | {values['p99']:.3f} | {values['samples']} |")
     if report.get("camera_tour"):
         tour = report["camera_tour"]
         lines += ["", f"Wall-clock camera tour: {tour['route']}; {len(tour['segments'])} segments; "
@@ -1403,11 +1501,30 @@ def markdown(report):
     for name, family in sorted(report["task_families"].items()):
         cpu = f"{family['sampled_cpu_ms']:.3f}" if family['cpu_samples'] else "unavailable"
         lines.append(f"| {name} | {family['jobs']} | {family['inclusive_wall_ms']:.3f} | {family['max_wall_ms']:.3f} | {cpu} | {family['cpu_samples']} |")
+    if report.get('physics_thread_totals'):
+        totals = sorted(report['physics_thread_totals'], key=lambda r: (-r['cpu_ns'], -r['inclusive_wall_ns'], r['os_thread'], r['family'], r['stage']))
+        lines += ['', f'Physics per-thread complete summary totals: {len(totals)} thread/stage/family groups; top 24 below, all groups in JSON. Inclusive scope wall is not CPU utilization; zero counters can be OS rounding.', '',
+                  '| OS thread | Stage / family | Jobs | Inclusive wall, ms | Sampled CPU, ms | CPU samples |',
+                  '|---|---|---:|---:|---:|---:|']
+        for total in totals[:24]:
+            cpu = f"{total['cpu_ns'] / 1e6:.3f}" if total['cpu_samples'] else 'unavailable'
+            lines.append(f"| {total['os_thread']} | {total['stage']} / {total['family']} | {total['jobs']} | {total['inclusive_wall_ns'] / 1e6:.3f} | {cpu} | {total['cpu_samples']} |")
+    if report.get('actor_thread_totals'):
+        totals = sorted(report['actor_thread_totals'], key=lambda r: (-r['sampled_cpu_ms'], -r['inclusive_wall_ms'], r['os_thread'], r['family']))
+        lines += ['', f'Actor/navigation per-thread recorded totals: {len(totals)} thread/family groups; top 24 below, all in JSON. Nested families overlap; do not sum them as utilization.', '',
+                  '| OS thread | Family | Jobs | Inclusive wall, ms | Sampled CPU, ms | CPU samples |',
+                  '|---|---|---:|---:|---:|---:|']
+        for total in totals[:24]:
+            cpu = f"{total['sampled_cpu_ms']:.3f}" if total['cpu_samples'] else 'unavailable'
+            lines.append(f"| {total['os_thread']} | {total['family']} | {total['jobs']} | {total['inclusive_wall_ms']:.3f} | {cpu} | {total['cpu_samples']} |")
     lines += ["", "Slow ticks (CPU counter time is not lock wait time):", ""]
     for tick in report["slow_ticks"]:
         leaders = sorted(tick["phases"], key=lambda p: -p["wall_ms"])[:3]
         names = ", ".join(f"{p['name']}={p['wall_ms']:.3f}ms" for p in leaders)
         lines.append(f"- generation {tick['generation']}, tick {tick['tick']}: wall {tick['wall_ms']:.3f}ms, CPU {tick['thread_cpu_ms']}ms; {names}.")
+        for detail in sorted(tick.get('details', []), key=lambda d: -d['wall_ms'])[:3]:
+            coverage = detail['scope_coverage']
+            lines.append(f"  - detail {detail['group']}/{detail['name']}: {detail['wall_ms']:.3f}ms; observed scope wall {coverage['observed_scope_ms']:.3f}ms, longest unobserved span {coverage['longest_unobserved_scope_ms']:.3f}ms, {coverage['observed_threads']} identified threads ({coverage['kind']}; not idle/lock-wait evidence).")
         for job in tick["longest_tasks"][:3]:
             owner = f"physics stage {job['job_slot']}" if job['domain'] == 'physics' else f"unit {job['unit']}"
             lines.append(f"  - task {job['name']}, {owner}, OS thread {job['thread']}: wall {job['wall_ms']:.3f}ms, CPU {job['thread_cpu_ms']}ms (inclusive; not added to phase totals).")

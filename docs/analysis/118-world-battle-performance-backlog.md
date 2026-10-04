@@ -2,7 +2,18 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-564: wake/support/translation повторно используют bounds
+Последний шаг ADR-565: analyzer больше не игнорирует caller detail boundaries;
+показывает подготовку, промежутки без записанных scopes и полные physics/nav
+итоги по потокам. Compacted coverage — lower bound, не idle/utilization.
+122 analyzer tests/PS suite; все прежние поля реального отчёта неизменны.
+Два full native diagnostic: 3600/3584 traced ticks, 8 route/8 translate
+потоков. Stationary routes tail26,39мс; camera routes имеют13,42мс без
+записанных scopes. Причина без scheduler traces не доказана. Camera153
+origins/0 blocked, max89,23мс; strict tempo false. Parallel stacked support
+отвергнут по двум CPU парам; engine/binary сохранены. FPS gain/165FPS открыты.
+Данные — [159](159-worker-distribution-and-caller-details.md).
+
+Предыдущий шаг ADR-564: wake/support/translation повторно используют bounds
 из параллельной подготовки неизменного phase input; substeps получают те
 же local bounds до tumble. Existing indexed pools/order/quotas сохранены.
 Две CPU пары: wake −15,75/20,88%, debris −5,56/9,04%, total −1,21/3,19%;
@@ -537,7 +548,7 @@ P1 — следующий существенный расход/масштаби
 |---|---|---|---|---|
 | WBPERF-001 | P0 | Репрезентативный стенд и детальные метрики | Замер + код | M |
 | WBPERF-002 | P0 | Отделить кадр от авторитетного тика | Замер + код | XL |
-| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540/542/563: frame-trigger, source-frame, gas worker scopes и opt-in OS pressure; внешние CPU bursts наблюдаются рядом с длинными stalls. Причина пауз, scheduler/worker waits, прочие Bevy jobs и исчерпание окон открыты | M/L |
+| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540/542/563/565: frame-trigger, caller details, полные thread/family totals, gas scopes и opt-in OS pressure. Camera routes имеют13,42мс без записанных scopes. Причина пауз, scheduler/worker waits, прочие Bevy jobs и исчерпание trigger windows открыты | M/L |
 | WBPERF-003 | P0 | Постоянный пул поиска маршрутов | Замер + код | XL |
 | WBPERF-004 | P0 | Удешевить точную проходимость и повторные поиски | Замер + код | L |
 | WBPERF-005 | P0 | Активные обломки, спящие кучи и независимая физика | Замер + код | XL |
