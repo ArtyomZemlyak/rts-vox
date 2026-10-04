@@ -1836,14 +1836,19 @@ fn advance(
         profile.measure(1, terrain_started.elapsed());
         if before.is_none() {
             if let Some(at) = scene.sim.impact {
-                gas.params.control.z = 1.0;
-                let point = Vec3::from(at.map(|v| v as f32));
-                let outward = scene.previous_shell.map_or(Vec3::Y, |p| p - point);
-                gas.params.source = gas
-                    .surface_source(point, outward)
-                    .extend(scene.sim.config.gas_source_radius as f32);
-                let params = gas.params;
-                gas.atmosphere.emit_at(params, scene.sim.impact_tick * 2);
+                // Solid shot contacts use their own bounded spark/spall layer.
+                // An empty cold gas field still adds explosion lighting/soot,
+                // so do not deposit one for a non-explosive projectile.
+                if scene.sim.config.delivery != Delivery::Kinetic {
+                    gas.params.control.z = 1.0;
+                    let point = Vec3::from(at.map(|v| v as f32));
+                    let outward = scene.previous_shell.map_or(Vec3::Y, |p| p - point);
+                    gas.params.source = gas
+                        .surface_source(point, outward)
+                        .extend(scene.sim.config.gas_source_radius as f32);
+                    let params = gas.params;
+                    gas.atmosphere.emit_at(params, scene.sim.impact_tick * 2);
+                }
                 println!("IMPACT tick={} at={at:?}", scene.sim.impact_tick);
             }
         }
@@ -1928,6 +1933,10 @@ fn advance(
                 Color::srgb(1.0, 0.4, 0.08)
             };
             l.intensity = 280_000_000.0 * (-age * 1.8).exp();
+            if scene.sim.config.delivery == Delivery::Kinetic {
+                l.color = Color::srgb(1.0, 0.82, 0.55);
+                l.intensity = 6_000_000.0 * (-age * 28.0).exp();
+            }
             if scene.energy {
                 l.intensity = if scene.sim.impact.is_some() {
                     150_000_000.0 * (-age * 5.0).exp()

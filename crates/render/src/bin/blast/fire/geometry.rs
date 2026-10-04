@@ -147,6 +147,35 @@ fn hot(input: Input<'_>) -> MeshBuf {
         }
     }
     for &(p, at, t) in particles.iter().filter(|(p, _, _)| !p.smoke) {
+        if let Some(kind) = p.contact {
+            let col = contact_colour(kind, t);
+            match kind {
+                ContactKind::Spark => {
+                    let age = (now - p.born).max(0.0);
+                    let velocity = p.velocity - Vec3::Y * contact_gravity(sim) * age;
+                    let tail = at
+                        - velocity.normalize_or_zero()
+                            * (velocity.length() * 0.065).clamp(2.0, 6.5);
+                    beam(&mut hot, tail, at, p.edge * (1.0 - t * 0.45), col);
+                }
+                ContactKind::Chip => {
+                    let start = hot.pos.len();
+                    cube(&mut hot, at, p.edge, col);
+                    let age = (now - p.born).max(0.0);
+                    let rotation = Quat::from_rotation_y(age * (6.0 + noise(p.seed) * 13.0))
+                        * Quat::from_rotation_x(age * (5.0 + noise(p.seed.wrapping_add(9)) * 11.0));
+                    for p in &mut hot.pos[start..] {
+                        *p = (at + rotation * (Vec3::from(*p) - at)).to_array();
+                    }
+                    for n in &mut hot.nrm[start..] {
+                        *n = (rotation * Vec3::from(*n)).to_array();
+                    }
+                }
+                ContactKind::Flash => cube(&mut hot, at, p.edge * (1.0 - t * 0.6), col),
+                ContactKind::Dust => {}
+            }
+            continue;
+        }
         let col = flame_colour(p, t, now);
         let edge = p.edge * (0.9 + (t * 3.0).sin() * 0.1) * (1.0 - t * 0.55);
         if p.stream {
@@ -220,7 +249,16 @@ fn hot(input: Input<'_>) -> MeshBuf {
 fn smoke(input: Input<'_>) -> MeshBuf {
     let mut smoke = MeshBuf::default();
     for &(p, at, t) in input.particles.iter().filter(|(p, _, _)| p.smoke) {
-        if p.dust_material != 0 {
+        if p.contact == Some(ContactKind::Dust) {
+            let fade = (t * 12.0).min(1.0) * (1.0 - t).powi(2);
+            let shade = 0.43 + noise(p.seed) * 0.08;
+            cube(
+                &mut smoke,
+                at,
+                p.edge * (0.75 + t * 0.65),
+                [shade, shade * 0.96, shade * 0.90, fade * 0.32],
+            );
+        } else if p.dust_material != 0 {
             let rgb = match p.dust_material {
                 1 => [0.38, 0.31, 0.23],
                 7 => [0.36, 0.34, 0.25],
@@ -306,6 +344,16 @@ mod tests {
             p.burst_flame = i % 7 == 0;
             p.stream = i % 11 == 0;
             p.dust_material = if i % 13 == 0 { 1 } else { 0 };
+            p.contact = match i % 17 {
+                0 => Some(ContactKind::Flash),
+                1 => Some(ContactKind::Spark),
+                2 => Some(ContactKind::Chip),
+                3 => Some(ContactKind::Dust),
+                _ => None,
+            };
+            if let Some(kind) = p.contact {
+                p.smoke = kind == ContactKind::Dust;
+            }
         }
         for i in 0..32 {
             effects.tracers.push(Tracer {

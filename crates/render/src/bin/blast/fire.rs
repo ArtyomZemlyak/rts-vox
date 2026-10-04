@@ -9,12 +9,20 @@ const CAP: usize = 1800;
 const BURST_PARTICLES: usize = 57;
 const DEATH_PARTICLES: usize = 41;
 const DEATH_LIGHTS: usize = 8;
+const KINETIC_PARTICLES: usize = 28;
 const TRACER_CAP: usize = 512;
 const TRACER_LIFE: f32 = 0.11;
 #[derive(Component)]
 pub(super) struct Layer(bool);
 #[derive(Component)]
 pub(super) struct DeathLight(usize);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContactKind {
+    Flash,
+    Spark,
+    Chip,
+    Dust,
+}
 #[derive(Clone, Copy)]
 struct Particle {
     at: Vec3,
@@ -28,6 +36,7 @@ struct Particle {
     burst_flame: bool,
     stream: bool,
     dust_material: u16,
+    contact: Option<ContactKind>,
 }
 #[derive(Clone, Copy)]
 struct Tracer {
@@ -42,6 +51,8 @@ pub struct Effects {
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
     energy_impacts: Vec<(sim_core::blast::battle::Impact, u32)>,
+    kinetic_paths: Vec<(Vec3, Vec3)>,
+    last_kinetic_shell: Option<Vec3>,
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
@@ -96,6 +107,29 @@ fn flame_colour(p: &Particle, t: f32, now: f32) -> [f32; 4] {
     let radiance = colour * Vec4::new(flicker, flicker, flicker, 1.0) * envelope;
     radiance.to_array()
 }
+fn contact_gravity(sim: &BlastRange) -> f32 {
+    if sim.battle_mode() {
+        sim.battle.kinetic_config.gravity as f32
+    } else {
+        sim.config.gravity as f32
+    }
+}
+fn contact_colour(kind: ContactKind, t: f32) -> [f32; 4] {
+    match kind {
+        ContactKind::Flash => [12.0, 9.0, 4.5, (1.0 - t).powi(2) * 0.96],
+        ContactKind::Spark => {
+            let hot = Vec3::new(8.0, 5.5, 2.3).lerp(Vec3::new(2.6, 0.75, 0.12), smooth01(t));
+            hot.extend((1.0 - smooth01((t - 0.55) / 0.45)) * 0.95)
+                .to_array()
+        }
+        ContactKind::Chip => {
+            let metal =
+                Vec3::new(1.3, 0.9, 0.45).lerp(Vec3::new(0.38, 0.43, 0.48), smooth01(t / 0.35));
+            metal.extend(1.0 - smooth01((t - 0.75) / 0.25)).to_array()
+        }
+        ContactKind::Dust => [0.45, 0.43, 0.40, 0.0],
+    }
+}
 fn point(p: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(p.map(|v| v.to_f64_lossy() as f32))
 }
@@ -117,6 +151,8 @@ impl Effects {
         self.particles.clear();
         self.tracers.clear();
         self.energy_impacts.clear();
+        self.kinetic_paths.clear();
+        self.last_kinetic_shell = None;
         self.sources.clear();
         self.heat_spots.clear();
         self.serial = 0;
@@ -207,6 +243,7 @@ impl Effects {
             burst_flame: false,
             stream: false,
             dust_material: 0,
+            contact: None,
         });
     }
     fn add_dust(&mut self, at: Vec3, velocity: Vec3, now: f32, life: f32, edge: f32, mat: u16) {
@@ -340,6 +377,75 @@ impl Effects {
             );
         }
     }
+    /// Presentation-only contact: a hot pinch, sparks and cold cubic spall.
+    /// Reserve the complete burst even when old smoke has filled the pool.
+    fn kinetic_contact(&mut self, at: Vec3, normal: Vec3, now: f32) {
+        let needed = self
+            .particles
+            .len()
+            .saturating_add(KINETIC_PARTICLES)
+            .saturating_sub(CAP);
+        self.particles.drain(..needed);
+        let normal = normal.normalize_or(Vec3::Y);
+        let tangent = normal.any_orthonormal_vector();
+        let side = normal.cross(tangent);
+        for i in 0..KINETIC_PARTICLES {
+            let seed = self.serial;
+            let kind = match i {
+                0 => ContactKind::Flash,
+                1..=16 => ContactKind::Spark,
+                17..=23 => ContactKind::Chip,
+                _ => ContactKind::Dust,
+            };
+            let angle = noise(seed.wrapping_add(7)) * std::f32::consts::TAU;
+            let radial = tangent * angle.cos() + side * angle.sin();
+            let direction = (normal * (0.35 + noise(seed.wrapping_add(11)) * 0.85)
+                + radial * (0.6 + noise(seed.wrapping_add(13)) * 1.1))
+                .normalize_or_zero();
+            let (speed, life, edge) = match kind {
+                ContactKind::Flash => (0.0, 0.10, 6.4),
+                ContactKind::Spark => (
+                    28.0 + noise(seed + 1) * 65.0,
+                    0.26 + noise(seed + 2) * 0.32,
+                    0.65 + noise(seed + 3) * 0.85,
+                ),
+                ContactKind::Chip => (
+                    12.0 + noise(seed + 1) * 30.0,
+                    0.40 + noise(seed + 2) * 0.30,
+                    1.0 + noise(seed + 3) * 1.4,
+                ),
+                ContactKind::Dust => (
+                    4.0 + noise(seed + 1) * 7.0,
+                    0.48 + noise(seed + 2) * 0.22,
+                    3.2 + noise(seed + 3) * 2.6,
+                ),
+            };
+            self.add(
+                at + normal * 1.0 + radial * if i == 0 { 0.0 } else { 0.8 },
+                direction * speed,
+                now,
+                life,
+                edge,
+                kind == ContactKind::Dust,
+            );
+            self.particles.last_mut().unwrap().contact = Some(kind);
+        }
+    }
+    /// Match the last visible flight segment; unknown/instant contacts use an
+    /// upward fan instead of guessing the owner among neighbouring shooters.
+    fn kinetic_normal(&self, at: Vec3) -> Vec3 {
+        self.kinetic_paths
+            .iter()
+            .filter_map(|&(a, b)| {
+                let path = b - a;
+                let along = ((at - a).dot(path) / path.length_squared().max(0.001)).clamp(0.0, 1.0);
+                let distance = at.distance_squared(a + path * along);
+                (distance <= 9.0 && path.length_squared() > 0.001)
+                    .then_some((distance, -path.normalize_or_zero()))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(Vec3::Y, |(_, normal)| normal)
+    }
     pub fn capture(&mut self, sim: &BlastRange) {
         let now = sim.tick as f32 / 30.0;
         self.particles.retain(|p| now - p.born < p.life);
@@ -358,7 +464,7 @@ impl Effects {
             if i.weapon == BattleWeapon::Blast {
                 self.shell_burst(at, now, sim.battle.shell_config.energy);
             } else if i.weapon == BattleWeapon::Kinetic {
-                self.add(at, Vec3::Y * 3.0, now, 0.16, 1.8, false);
+                self.kinetic_contact(at, self.kinetic_normal(at), now);
             }
         }
         if !sim.battle_mode()
@@ -376,21 +482,7 @@ impl Effects {
         {
             if let Some(at) = sim.impact {
                 let centre = Vec3::from(at.map(|v| v as f32));
-                for i in 0..10u32 {
-                    let seed = self.serial.wrapping_add(i * 17);
-                    self.add(
-                        centre,
-                        Vec3::new(
-                            noise(seed) * 26.0 - 13.0,
-                            noise(seed + 1) * 18.0 + 3.0,
-                            noise(seed + 2) * 26.0 - 13.0,
-                        ),
-                        now,
-                        0.18 + noise(seed + 3) * 0.12,
-                        0.55 + noise(seed + 4) * 0.8,
-                        false,
-                    );
-                }
+                self.kinetic_contact(centre, self.kinetic_normal(centre), now);
             }
         }
         let tuning = &sim.streams.tuning;
@@ -592,6 +684,26 @@ impl Effects {
             }
         }
         self.capture_dust(sim, now);
+        self.kinetic_paths.clear();
+        self.kinetic_paths.extend(
+            sim.battle
+                .rounds
+                .iter()
+                .filter(|r| r.weapon == BattleWeapon::Kinetic)
+                .take(TRACER_CAP)
+                .map(|r| {
+                    let at = point(r.pos);
+                    (at, at + at - point(r.previous))
+                }),
+        );
+        let shell = (!sim.battle_mode() && sim.config.delivery == Delivery::Kinetic)
+            .then_some(sim.shell)
+            .flatten()
+            .map(point);
+        if let (Some(at), Some(before)) = (shell, self.last_kinetic_shell) {
+            self.kinetic_paths.push((at, at + at - before));
+        }
+        self.last_kinetic_shell = shell;
     }
     /// One tracer and impact style for the selectable gun and every battle actor.
     fn capture_bullet(&mut self, trace: &sim_core::blast::weapons::Trace, now: f32) {
@@ -935,7 +1047,14 @@ pub fn draw(
         let wobble = Vec3::new(angle.sin(), 0.0, (angle * 0.83).cos())
             * age
             * if p.smoke { 2.5 } else { 1.6 };
-        let at = p.at + p.velocity * age + wobble;
+        let ballistic = matches!(p.contact, Some(ContactKind::Spark | ContactKind::Chip));
+        let at = p.at
+            + p.velocity * age
+            + if ballistic {
+                Vec3::Y * (-0.5 * contact_gravity(&scene.sim) * age * age)
+            } else {
+                wobble
+            };
         particles.push((p, at, t));
     }
     particles.sort_by(|a, b| {
@@ -1202,9 +1321,73 @@ mod tests {
             .iter()
             .filter(|p| p.born == now && !p.smoke)
             .count();
-        assert_eq!(sparks, 10);
+        assert!(
+            sparks >= 24,
+            "contact lacks a visible flash/spark/spall burst"
+        );
+        for kind in [
+            ContactKind::Flash,
+            ContactKind::Spark,
+            ContactKind::Chip,
+            ContactKind::Dust,
+        ] {
+            assert!(effects
+                .particles
+                .iter()
+                .any(|p| p.born == now && p.contact == Some(kind)));
+        }
+        assert!(!effects
+            .particles
+            .iter()
+            .any(|p| p.born == now && p.burst_flame));
         assert!(r.explosion.is_none());
     }
+    #[test]
+    fn battle_kinetic_contacts_survive_pool_pressure_overlap_and_expire_without_changing_simulation(
+    ) {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+        sim.tick = 30;
+        sim.battle.impacts = vec![
+            sim_core::blast::battle::Impact {
+                at: [160, 20, 300],
+                weapon: BattleWeapon::Kinetic,
+            },
+            sim_core::blast::battle::Impact {
+                at: [240, 20, 300],
+                weapon: BattleWeapon::Kinetic,
+            },
+        ];
+        let before = sim.state_hash();
+        let mut effects = Effects::default();
+        effects.before(&sim);
+        for _ in 0..CAP {
+            effects.add(Vec3::ZERO, Vec3::ZERO, 0.0, 10.0, 2.0, true);
+        }
+        effects.capture(&sim);
+        assert_eq!(sim.state_hash(), before);
+        assert_eq!(effects.particles.len(), CAP);
+        for at in [Vec3::new(160.0, 21.0, 300.0), Vec3::new(240.0, 21.0, 300.0)] {
+            assert!(effects
+                .particles
+                .iter()
+                .any(|p| p.contact == Some(ContactKind::Flash) && p.at == at));
+        }
+        assert!(!effects.particles.iter().any(|p| p.burst_flame));
+        sim.battle.impacts.clear();
+        sim.tick += 1;
+        effects.capture(&sim);
+        assert!(effects
+            .particles
+            .iter()
+            .any(|p| p.contact == Some(ContactKind::Spark)));
+        sim.tick += 30;
+        effects.capture(&sim);
+        assert!(!effects.particles.iter().any(|p| p.contact.is_some()));
+    }
+
     #[test]
     fn a_new_impact_replaces_old_remnants_when_the_pool_is_full() {
         let mut effects = Effects::default();
