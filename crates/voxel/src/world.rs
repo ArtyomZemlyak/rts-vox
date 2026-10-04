@@ -590,6 +590,25 @@ impl World {
         hi: [i32; 2],
         yielding: [Mat; 2],
     ) -> Option<u16> {
+        self.prepared_upper(lo, hi, yielding, true)
+    }
+    /// Highest non-yielding floor in a prepared box. This bound cannot prove
+    /// the absence of crushable vegetation; it only proves terrain clearance.
+    pub fn prepared_floor_upper(
+        &self,
+        lo: [i32; 2],
+        hi: [i32; 2],
+        yielding: [Mat; 2],
+    ) -> Option<u16> {
+        self.prepared_upper(lo, hi, yielding, false)
+    }
+    fn prepared_upper(
+        &self,
+        lo: [i32; 2],
+        hi: [i32; 2],
+        yielding: [Mat; 2],
+        require_bare: bool,
+    ) -> Option<u16> {
         if lo[0] < 0
             || lo[1] < 0
             || hi[0] < lo[0]
@@ -604,7 +623,7 @@ impl World {
         for z in (lo[1] as usize / 8)..=(hi[1] as usize / 8) {
             for x in (lo[0] as usize / 8)..=(hi[0] as usize / 8) {
                 let (key, bounds, _, bare) = self.floor_tiles[x + stride * z].get()?;
-                if *key != yielding || !bare {
+                if *key != yielding || (require_bare && !bare) {
                     return None;
                 }
                 high = high.max(bounds[1]);

@@ -982,6 +982,7 @@ impl Motion {
     /// Replanning retains the current route while a replacement is pending.
     /// A temporary blocker can leave before the search finishes; execution
     /// may then resume under the same live collision checks as any move.
+    #[cfg(test)]
     fn plan_to(
         &mut self,
         w: &World,
@@ -1222,10 +1223,23 @@ impl Motion {
         others: &[Obstacle],
         rubble: &nav::vehicle::Rubble,
     ) -> bool {
+        self.retarget_observed(w, to, b, others, rubble, |_| {})
+    }
+    /// The same immediate pursuit order, with observations of route startup.
+    /// Callbacks never enter the search inputs or determine its allowance.
+    pub(super) fn retarget_observed(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        completed: impl FnMut(&'static str),
+    ) -> bool {
         if self.cursor >= self.path.len() || self.blocked || self.escape_left > 0 {
-            return self.move_to(w, to, b, others, rubble);
+            return self.move_to_observed(w, to, b, others, rubble, None, completed);
         }
-        self.plan_to(w, to, b, others, rubble)
+        self.plan_to_observed(w, to, b, others, rubble, None, completed)
     }
     /// Whether a route search is still walking its frontier (ADR-306).
     pub fn searching(&self) -> bool {

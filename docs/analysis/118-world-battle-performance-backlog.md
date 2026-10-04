@@ -2,7 +2,16 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-557: coordinator advance вынесен из shared render compute
+Последний шаг ADR-558: goal refusal не считает unused vegetation cost;
+точные контакты, collision, budgets и route cost сохраняются.
+Goal CPU p99 7,37→0,92 мс, native diagnostic tick1606 51,7→40,2 мс.
+Две ordinary пары: FPS −0,856% / −0,921%, max frame −13…15%, core/step
+−0,2…0,55%. Это hitch fix с небольшим FPS tradeoff, не общий FPS gain.
+Дополнительные goal/prefix jobs отклонены, physics/nav pools прежние.
+941 tests passed / 7 ignored. Direct sweep ~4 мс, WBPERF-002, CPU balance
+и 165 FPS открыты. Данные — [152](152-goal-clearance-and-pursuit-attribution.md).
+
+Предыдущий шаг ADR-557: coordinator advance вынесен из shared render compute
 executor на main thread, существующие physics/nav workers сохранены.
 Native подтвердил execution boundary; ordinary FPS +2,2% / +0,3%,
 крупного устойчивого gain нет. Diagnostic prepare p99 21,5→7,6 мс,
@@ -4602,3 +4611,23 @@ render_prepare mean 3,314→2,964 мс, p99 21,527→7,601 мс; parent wall
 два orders_misc intervals около 10 мс; после них render queues/OS waits.
 Stalls, balanced CPU и 165 FPS открыты. Полные данные и границы —
 [151](151-main-thread-tick-coordinator.md).
+
+
+## Шаг ADR-558 — конкретная причина pursuit hitch
+
+orders_misc больших тиков атрибутирован к immediate retarget. Отделены
+approach/firing point/flank/coarse/goal/sweep preparation/direct intervals.
+Новый goal probe сохраняет отказ/точные опоры, но не вычисляет cost сноса
+деревьев, который потребитель не читает. Штатный путь/motion cost прежний.
+Тесты exact scan/terrain edits/dense rubble/battle/replay проходят.
+
+Тик1606 diagnostic 51,745→40,229 мс. Native full battle: max кадр ниже
+на 13,14…14,72%, но средний FPS ниже на 0,86…0,92%; p99 почти прежний.
+Не закрывать общий FPS пункт. Дополнительный parallel goal/prefix fan-out
+отклонён по результату, новые pools не добавлены. Наблюдаются прежние
+восемь physics и восемь nav workers; равномерность CPU не установлена.
+
+Следующие приоритеты: WBPERF-002 independent sim/read model; WBPERF-001/027
+привязать оставшиеся ~4 мс direct sweep к конкретным actor/jobs/OS waits,
+затем frame gaps и render producers. Исходные редкие многосекундные stalls
+этими 120-с runs не объявляются исправленными. Разбор — [152](152-goal-clearance-and-pursuit-attribution.md).

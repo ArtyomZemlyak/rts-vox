@@ -64,7 +64,9 @@ impl TickProfile {
                 self.battle_laser_us += us;
                 self.battle_orders_us += us;
             }
-            "orders_misc" | "battle_orders" => self.battle_orders_us += us,
+            name if name.starts_with("orders_") || name == "battle_orders" => {
+                self.battle_orders_us += us
+            }
             "rubble" => self.rubble_us = us,
             "heat_flush" => self.heat_flush_us = us,
             _ => {}
@@ -93,6 +95,10 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--workers")
         .map(|w| w[1].parse::<usize>().expect("workers"));
+    let order_trace_tick = args
+        .windows(2)
+        .find(|w| w[0] == "--order-trace-tick")
+        .map(|w| w[1].parse::<usize>().expect("order trace tick"));
     let focus = args
         .windows(2)
         .find(|w| w[0] == "--focus-unit")
@@ -371,6 +377,12 @@ fn main() {
                 let elapsed = now.duration_since(last).as_micros();
                 last = now;
                 phases.entry(phase).or_default().push(elapsed);
+                if order_trace_tick == Some(tick_index + 1) && phase.starts_with("orders_") {
+                    println!(
+                        "order_trace tick={} phase={phase} us={elapsed}",
+                        tick_index + 1
+                    );
+                }
                 if tick_csv.is_some() {
                     profile.record_phase(phase, elapsed);
                 }
@@ -875,5 +887,34 @@ fn main() {
             Phase::Victory,
             "cross-map assault did not finish"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pursuit_subphases_remain_in_the_total_order_time() {
+        let mut profile = TickProfile::default();
+        for name in [
+            "orders_retarget_coarse",
+            "orders_retarget_target",
+            "orders_retarget_prepare",
+            "orders_retarget_direct",
+            "orders_retarget_fine",
+            "orders_approach",
+            "orders_firing_point",
+            "orders_flank",
+            "orders_retarget_setup",
+            "orders_retarget",
+            "battle_orders",
+        ] {
+            profile.record_phase(name, 17);
+        }
+        assert_eq!(profile.battle_orders_us, 11 * 17);
+        profile.record_phase("orders_laser_halo", 23);
+        assert_eq!(profile.battle_orders_us, 11 * 17 + 23);
+        assert_eq!(profile.battle_laser_us, 23);
+        assert_eq!(profile.battle_halo_us, 23);
     }
 }

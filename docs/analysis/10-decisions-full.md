@@ -24586,3 +24586,20 @@ regression, Clippy/fmt и native actions generations 1…4 проходят. П�
 gameplay/hash прежний. WBPERF-002, 001/027, balanced CPU и 165 FPS открыты.
 Данные, OS IDs, SHA и ограничения —
 [151](151-main-thread-tick-coordinator.md).
+
+
+## ADR-558 — цель маршрута без лишней стоимости сноса деревьев
+
+Goal refusal сохраняет точные контакты/наклон и terrain/rubble clearance;
+prepared non-yielding upper bounds не требуют подсчёта yielding canopy.
+Полные route/motion probes сохраняют vegetation cost, логические budgets
+и state hash прежние. Profiling отделяет pursuit retarget subphases.
+
+CPU goal p99 7,372→0,916 мс; matching native diagnostic tick1606
+51,745→40,229 мс, after goal p99 0,900 мс. Ordinary два 120-с comparisons:
+FPS −0,856% / −0,921%, core/step −0,199% / −0,547%; max кадр −13…15%.
+Принят конкретный hitch fix с открытым небольшим FPS tradeoff; общего
+FPS gain/равномерного CPU/165 FPS нет. Goal batches и parallel prefix
+не ускорили нужные queries и откатились. Physics/nav pools прежние.
+941 tests passed / 7 прежних ignored. Данные/ограничения —
+[152](152-goal-clearance-and-pursuit-attribution.md).

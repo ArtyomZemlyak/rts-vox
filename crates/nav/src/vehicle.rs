@@ -131,6 +131,37 @@ impl Rubble {
         }
         false
     }
+    /// Exact upper bound of debris inside a terrain box. A pile below the
+    /// lowest belly cannot invalidate a bare-terrain clearance proof.
+    pub fn upper_in(&self, lo: [i32; 2], hi: [i32; 2]) -> u16 {
+        if (0..2).any(|a| lo[a] > hi[a]) {
+            return 0;
+        }
+        let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
+        let rest = &self.0[first..];
+        let count = rest.partition_point(|(at, _)| at[0] <= hi[0]);
+        if count <= 512 {
+            return rest[..count]
+                .iter()
+                .filter(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
+                .map(|(_, top)| *top)
+                .max()
+                .unwrap_or(0);
+        }
+        let mut remaining = &rest[..count];
+        let mut upper = 0;
+        while let Some((at, _)) = remaining.first() {
+            let x = at[0];
+            let n = remaining.partition_point(|(p, _)| p[0] == x);
+            let first = remaining[..n].partition_point(|(p, _)| p[1] < lo[1]);
+            let last = remaining[..n].partition_point(|(p, _)| p[1] <= hi[1]);
+            for (_, top) in &remaining[first..last] {
+                upper = upper.max(*top);
+            }
+            remaining = &remaining[n..];
+        }
+        upper
+    }
     /// Columns and tops in ascending column order.
     pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
         self.0.iter().map(|(c, t)| (c, t))
@@ -1008,7 +1039,25 @@ impl<'a> Probe<'a> {
         }
         None
     }
+    /// Goal-ring probes consume only refusal, never vegetation cost. Contact
+    /// floors remain exact; a prepared terrain bound can omit crush counting.
+    fn goal_refused(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> bool {
+        if let Some(pose) = self.flat_pose(pos, s) {
+            return pose.refused();
+        }
+        self.probe_pose_cost(pos, head, s, true, false).refused()
+    }
     fn probe_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape, stop_on_refusal: bool) -> Pose {
+        self.probe_pose_cost(pos, head, s, stop_on_refusal, true)
+    }
+    fn probe_pose_cost(
+        &mut self,
+        pos: [Fx; 2],
+        head: i32,
+        s: Shape,
+        stop_on_refusal: bool,
+        count_crush: bool,
+    ) -> Pose {
         let (floors, steep) = self.contacts(pos, head, s);
         let (c, sin) = (angle::cos(head), angle::sin(head));
         let height = floors
@@ -1055,12 +1104,22 @@ impl<'a> Probe<'a> {
             [a, b] => Some([*a, *b]),
             _ => None,
         };
-        if no_rubble {
-            if let Some(profile) = profile {
-                if let Some(top) = self.world.prepared_bare_upper(lo, hi, profile) {
-                    if Fx::from_int(i32::from(top)) <= min_belly {
-                        return result;
-                    }
+        let upper = |lo, hi, profile| {
+            if count_crush {
+                self.world.prepared_bare_upper(lo, hi, profile)
+            } else {
+                self.world.prepared_floor_upper(lo, hi, profile)
+            }
+        };
+        if let Some(profile) = profile {
+            if let Some(top) = upper(lo, hi, profile) {
+                if Fx::from_int(i32::from(top)) <= min_belly
+                    && (no_rubble
+                        || self.rubble.is_none_or(|r| {
+                            Fx::from_int(i32::from(r.upper_in(lo, hi))) <= min_belly
+                        }))
+                {
+                    return result;
                 }
             }
         }
@@ -1088,12 +1147,14 @@ impl<'a> Probe<'a> {
                     ];
                     // A heap under one part of a broad hull only invalidates
                     // that tile's proof, not every bare tile of the footprint.
-                    let top = if no_rubble || !self.rubble.is_some_and(|r| r.touches(a, b)) {
-                        self.world.prepared_bare_upper(a, b, profile)
-                    } else {
-                        None
-                    };
-                    clear.push(top.is_some_and(|h| Fx::from_int(i32::from(h)) <= min_belly));
+                    let top = upper(a, b, profile);
+                    clear.push(
+                        top.is_some_and(|h| Fx::from_int(i32::from(h)) <= min_belly)
+                            && (no_rubble
+                                || self.rubble.is_none_or(|r| {
+                                    Fx::from_int(i32::from(r.upper_in(a, b))) <= min_belly
+                                })),
+                    );
                 }
             }
             Some((first, width, clear))
@@ -1141,7 +1202,10 @@ impl<'a> Probe<'a> {
                         return result;
                     }
                 }
-                if low != u16::MAX && Fx::from_int(i32::from(low)) < local.add(hull_height) {
+                if count_crush
+                    && low != u16::MAX
+                    && Fx::from_int(i32::from(low)) < local.add(hull_height)
+                {
                     result.crush += 1;
                 }
             }
@@ -1591,7 +1655,7 @@ impl Hunt {
                 *allowance -= 1;
                 self.probed += 1;
                 let q = p.map(Fx::from_int);
-                if clear(q, yaw) && !ground.route_pose(q, yaw, self.shape).refused() {
+                if clear(q, yaw) && !ground.goal_refused(q, yaw, self.shape) {
                     self.to = p;
                     let cell = [self.n, self.rows].map(|n| n as i32 - 1);
                     let end = [0, 1].map(|a| {
@@ -4156,3 +4220,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "vehicle_clearance_tests.rs"]
+mod clearance_tests;

@@ -1367,7 +1367,9 @@ impl BlastRange {
                         from[0].add(dx.mul(approach)).to_int_trunc(),
                         from[2].add(dz.mul(approach)).to_int_trunc(),
                     ];
+                    completed("orders_approach");
                     let dest = self.firing_point(id, [p[0], p[2]], dest, b.tuning.firing_spacing);
+                    completed("orders_firing_point");
                     let dest = if blocked_direct || needs_detour && road_goal.is_none() {
                         let muzzle_y = weapons::muzzles(&self.units[id], a.turret.angle)
                             .first()
@@ -1383,6 +1385,7 @@ impl BlastRange {
                     } else {
                         dest
                     };
+                    completed("orders_flank");
                     // Keep a usable firing position when our own detour changes
                     // the approach angle. Comparing the new radial point with
                     // the old one replanned even against a stationary target.
@@ -1404,6 +1407,7 @@ impl BlastRange {
                             })
                     };
                     if changed {
+                        completed("orders_retarget_setup");
                         let others: Vec<_> = self
                             .units
                             .iter()
@@ -1414,8 +1418,24 @@ impl BlastRange {
                         let u = &mut self.units[id];
                         // Under way, the hull drives on while the new
                         // route is searched (ADR-462).
-                        u.motion
-                            .retarget(&self.world, dest, &u.body, &others, &self.rubble);
+                        u.motion.retarget_observed(
+                            &self.world,
+                            dest,
+                            &u.body,
+                            &others,
+                            &self.rubble,
+                            |phase| {
+                                completed(match phase {
+                                    "plan_coarse" => "orders_retarget_coarse",
+                                    "plan_target" => "orders_retarget_target",
+                                    "plan_prepare" => "orders_retarget_prepare",
+                                    "plan_direct" => "orders_retarget_direct",
+                                    "plan_fine" => "orders_retarget_fine",
+                                    _ => unreachable!("unknown pursuit route phase"),
+                                });
+                            },
+                        );
+                        completed("orders_retarget");
                     }
                 }
                 continue;
@@ -1769,3 +1789,7 @@ impl BlastRange {
 #[cfg(test)]
 #[path = "range_battle_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "range_order_profile_tests.rs"]
+mod order_profile_tests;

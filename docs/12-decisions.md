@@ -685,3 +685,6 @@
 
 
 | 557 | Синхронный координатор advance полигона исполняется на главном потоке main-world schedule через NonSendMarker. Он не занимает общий ComputeTaskPool рендера и не получает EXCLUSIVE World borrow. Существующие physics/navigation pools, их размеры, indexed joins, порядок систем и входы рендера прежние; симуляция остаётся синхронной с кадром. Разбор — analysis/151-main-thread-tick-coordinator.md. |
+
+
+| 558 | Выбор допустимой цели маршрута проверяет точные опоры и проходимость без подсчёта стоимости yielding растительности. Prepared floor bounds и верх обломков доказывают clearance; полные route/motion probes сохраняют crush cost. Logical work/order и authoritative state прежние. Pursuit diagnostics разделяют approach, firing point, flank и coarse/target/prepare/direct/fine retarget; bench учитывает все orders_* intervals. Новые pools не создаются. Разбор — analysis/152-goal-clearance-and-pursuit-attribution.md. |
