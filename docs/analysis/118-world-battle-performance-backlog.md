@@ -2,7 +2,19 @@
 
 Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020 и 026 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-562: camera staging больше не блокирует время боя,
+Последний шаг ADR-563: пять physics/parallel candidates отклонены;
+два native A/B не дали устойчивого gain, все алгоритмы физики восстановлены.
+Новый opt-in OsPressure показывает system CPU, page faults, memory и top8
+читаемых process lifetimes рядом с stalls; diagnostic не квалифицирует FPS.
+Baseline diagnostic воспроизвёл два эпизода1,968/1,853с с внешними node
+CPU bursts7,688/8,484 CPU-с примерно за1,17/1,19 wall-с; system busy100%.
+Причина не доказана без scheduler/worker waits. Прежний список известных
+build/test names эту нагрузку пропускал. Камера:134 origins,0 blocked,
+max81,39мс, tempo gate false. 116 analyzer tests/PS suite проходят.
+WBPERF-001/027 partial; 002, CPU balance, rare stalls и165FPS открыты.
+Данные и ограничения — [157](157-parallel-physics-experiments-and-os-pressure.md).
+
+Предыдущий шаг ADR-562: camera staging больше не блокирует время боя,
 восемь строк читаются в existing compute pool с ordered replay/publication.
 Новые GPU spans отмечаются bounded bit union; valid empty clip не запускает
 повторную серийную геометрию всей армии. Wall-clock native tour подтвердил
@@ -513,7 +525,7 @@ P1 — следующий существенный расход/масштаби
 |---|---|---|---|---|
 | WBPERF-001 | P0 | Репрезентативный стенд и детальные метрики | Замер + код | M |
 | WBPERF-002 | P0 | Отделить кадр от авторитетного тика | Замер + код | XL |
-| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540/542: frame-trigger, source-frame и реальные gas worker scopes; причина пауз, прочие Bevy jobs/OS waits и исчерпание окон открыты | M/L |
+| WBPERF-027 | P0 | Объяснить межзапусковые просадки нативного боя | ADR-540/542/563: frame-trigger, source-frame, gas worker scopes и opt-in OS pressure; внешние CPU bursts наблюдаются рядом с длинными stalls. Причина пауз, scheduler/worker waits, прочие Bevy jobs и исчерпание окон открыты | M/L |
 | WBPERF-003 | P0 | Постоянный пул поиска маршрутов | Замер + код | XL |
 | WBPERF-004 | P0 | Удешевить точную проходимость и повторные поиски | Замер + код | L |
 | WBPERF-005 | P0 | Активные обломки, спящие кучи и независимая физика | Замер + код | XL |

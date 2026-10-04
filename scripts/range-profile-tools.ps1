@@ -89,7 +89,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [switch]$CameraTour)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [switch]$CameraTour, [switch]$OsPressure)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -181,13 +181,13 @@ function Get-RangeValidity {
     $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
-        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and $meetsRate
+        AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and $meetsRate
         Reasons = @($issues | Select-Object -Unique)
         SimulationTicks = $ticks
         ObservedSeconds = $seconds
         SimulationRealtimeRatio = if ($seconds -gt 0) { $ticks / ($seconds * $rate) } else { 0.0 }
         MeetsSimulationRate = $meetsRate
-        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } else { 'timing' }
+        Mode = if ($RenderTasks) { 'render_task_diagnostic' } elseif ($RenderTimeline) { 'render_diagnostic' } elseif ($CorePhases) { 'diagnostic' } elseif ($TriggerPhases) { 'trigger_diagnostic' } elseif ($OsPressure) { 'os_pressure_diagnostic' } else { 'timing' }
         FrameTimingMetric = $timing.Metric
     }
 }

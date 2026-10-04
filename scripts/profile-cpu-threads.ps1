@@ -4,10 +4,15 @@ param(
     [ValidateRange(100, 5000)][int]$IntervalMilliseconds = 1000,
     [Parameter(Mandatory = $true)][string]$Output,
     [switch]$ProcessOnly,
+    [switch]$OsPressure,
     [string[]]$AdditionalProcessNames = @()
 )
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/range-profile-tools.ps1"
+if ($OsPressure) {
+    . "$PSScriptRoot/range-os-pressure.ps1"
+    Initialize-RangeOsPressure
+}
 # OS counters only: no instrumentation or clocks enter the simulation.
 if (-not $ProcessOnly -and -not ('RangeThreadNames' -as [type])) {
     Add-Type @'
@@ -35,6 +40,8 @@ public static class RangeThreadNames {
 $directory = [System.IO.Path]::GetFullPath($Output)
 New-Item -ItemType Directory -Force -Path $directory | Out-Null
 $target = Get-Process -Id $TargetProcessId
+$pressureWarmup = if ($OsPressure) { [RangeOsPressure]::Read($target.Handle) } else { $null }
+$previousOsProcesses = if ($OsPressure) { Get-RangeOsProcessSnapshot } else { $null }
 $logical = [Environment]::ProcessorCount
 $previous = @{}
 $names = @{}
@@ -42,6 +49,7 @@ $created = @{}
 $samples = [System.Collections.Generic.List[object]]::new()
 $processSamples = [System.Collections.Generic.List[object]]::new()
 $environmentSamples = [System.Collections.Generic.List[object]]::new()
+$osProcessSamples = [System.Collections.Generic.List[object]]::new()
 $baselineTime = Get-Date
 $baselineCpuMs = $target.TotalProcessorTime.TotalMilliseconds
 $processCpuMs = 0.0
@@ -75,7 +83,29 @@ try {
         }
         # The process counter also includes threads that exited between samples.
         $processCpuMs = [Math]::Max(0.0, $target.TotalProcessorTime.TotalMilliseconds - $baselineCpuMs)
-        $processSamples.Add([pscustomobject]@{
+        $pressure = if ($OsPressure) { [RangeOsPressure]::Read($target.Handle) } else { $null }
+        $osProcesses = if ($OsPressure) { Get-RangeOsProcessSnapshot } else { $null }
+        if ($OsPressure) {
+            $deltas = @(
+                foreach ($key in $osProcesses.Readable.Keys) {
+                    $current = $osProcesses.Readable[$key]
+                    $old = $previousOsProcesses.Readable[$key]
+                    if ($null -eq $old -or $current.CpuMs -lt $old.CpuMs) { continue }
+                    [pscustomobject]@{
+                        Seconds = [Math]::Round($nowMs / 1000.0, 3); Utc = $utc
+                        ProcessId = $current.ProcessId; Name = $current.Name
+                        StartedUtc = $current.StartedUtc; CpuMs = $current.CpuMs - $old.CpuMs
+                        IsTarget = $current.ProcessId -eq $TargetProcessId
+                        IsSampler = $current.ProcessId -eq $PID
+                    }
+                }
+            )
+            foreach ($delta in ($deltas | Sort-Object @{Expression='CpuMs';Descending=$true},ProcessId | Select-Object -First 8)) {
+                $osProcessSamples.Add($delta)
+            }
+            $previousOsProcesses = $osProcesses
+        }
+        $processSample = [pscustomobject]@{
             Seconds = [Math]::Round($nowMs / 1000.0, 3)
             Utc = $utc
             CpuMs = $processCpuMs
@@ -83,7 +113,22 @@ try {
             WorkingSetBytes = $target.WorkingSet64
             ThreadCount = $target.Threads.Count
             HandleCount = $target.HandleCount
-        })
+            SystemIdle100ns = if ($pressure) { $pressure.SystemIdle100ns } else { $null }
+            SystemKernel100ns = if ($pressure) { $pressure.SystemKernel100ns } else { $null }
+            SystemUser100ns = if ($pressure) { $pressure.SystemUser100ns } else { $null }
+            SystemCpuGroup = if ($pressure) { $pressure.SystemCpuGroup } else { $null }
+            SystemCpuProcessors = if ($pressure) { $pressure.SystemCpuProcessors } else { $null }
+            MachineProcessors = if ($pressure) { $pressure.MachineProcessors } else { $null }
+            PageFaults = if ($pressure) { $pressure.PageFaults } else { $null }
+            PhysicalAvailableBytes = if ($pressure) { $pressure.PhysicalAvailableBytes } else { $null }
+            SystemCommitBytes = if ($pressure) { $pressure.SystemCommitBytes } else { $null }
+            SystemCommitLimitBytes = if ($pressure) { $pressure.SystemCommitLimitBytes } else { $null }
+            OsPressureReadUs = if ($pressure) { $pressure.ReadUs } else { $null }
+            OsReadableProcesses = if ($osProcesses) { $osProcesses.Readable.Count } else { $null }
+            OsUnreadableProcesses = if ($osProcesses) { $osProcesses.Unreadable } else { $null }
+            OsSamplerWorkMs = $null
+        }
+        $processSamples.Add($processSample)
         $elapsedMs = $nowMs - $lastMs
         foreach ($thread in $(if (-not $ProcessOnly) { $target.Threads } else { @() })) {
             try {
@@ -129,6 +174,7 @@ try {
                 })
             } catch { }
         }
+        if ($OsPressure) { $processSample.OsSamplerWorkMs = $timer.Elapsed.TotalMilliseconds - $nowMs }
         $lastMs = $nowMs
     }
     $timedOut = -not $target.HasExited
@@ -141,6 +187,13 @@ try {
 } finally { $target.Dispose() }
 $samples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
 $processSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-samples.csv') -NoTypeInformation -Encoding UTF8
+if ($OsPressure) {
+    if ($osProcessSamples.Count -gt 0) {
+        $osProcessSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-os-processes.csv') -NoTypeInformation -Encoding UTF8
+    } else {
+        '"Seconds","Utc","ProcessId","Name","StartedUtc","CpuMs","IsTarget","IsSampler"' | Set-Content -LiteralPath (Join-Path $directory 'cpu-os-processes.csv') -Encoding utf8
+    }
+}
 if ($environmentSamples.Count -gt 0) {
     $environmentSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-environment.csv') -NoTypeInformation -Encoding UTF8
 } else {
@@ -171,6 +224,8 @@ $summary | Select-Object -First 12 | Format-Table -AutoSize
 [pscustomobject]@{
     ProcessId = $TargetProcessId
     ProcessOnly = [bool]$ProcessOnly
+    OsPressure = [bool]$OsPressure
+    OsPressureWarmupUs = if ($pressureWarmup) { $pressureWarmup.ReadUs } else { $null }
     IntervalMilliseconds = $IntervalMilliseconds
     StartedUtc = $baselineTime.ToUniversalTime().ToString('o')
     TimedOut = $timedOut

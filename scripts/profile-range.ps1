@@ -10,6 +10,7 @@ param(
     # Zero preserves the scene default; 1 selects the serial route path.
     [ValidateRange(0, 8)][int]$NavigationWorkers = 0,
     [switch]$CpuThreads,
+    [switch]$OsPressure,
     [switch]$CameraTour,
     # Optional boundaries and calling-thread cycle counters, saved after the run.
     [switch]$CorePhases,
@@ -80,7 +81,7 @@ try {
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
                 ComputeWorkers = $ComputeWorkers
                 CameraTour = [bool]$CameraTour
-                GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
+                GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; OsPressure = [bool]$OsPressure; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
                 RenderSpanLimit = $renderBudget
                 RenderTasks = [bool]$RenderTasks
                 RustLog = $env:RUST_LOG
@@ -136,7 +137,7 @@ try {
             try {
                 # Environment/process sampling is always active. Optional thread
                 # enumeration remains a separate comparison flag, outside core.
-                & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ($Seconds + 120) -ProcessOnly:(-not $CpuThreads) -AdditionalProcessNames @($binaryName) -Output (Join-Path $directory "$scenario-cpu") | Out-Host
+                & "$PSScriptRoot/profile-cpu-threads.ps1" -TargetProcessId $process.Id -Seconds ($Seconds + 120) -ProcessOnly:(-not $CpuThreads) -OsPressure:$OsPressure -AdditionalProcessNames @($binaryName) -Output (Join-Path $directory "$scenario-cpu") | Out-Host
             } catch { $reasons.Add('os_sampler_failed'); $manifest.SamplerError = $_.Exception.Message }
             if (-not $process.WaitForExit(1000)) {
                 $reasons.Add('profile_timeout')
@@ -168,7 +169,7 @@ try {
                 $reasons.Add('render_timeline_artifact_missing')
             }
             if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -CameraTour:$CameraTour
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure
             $manifest.Validity = $validity
             $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'

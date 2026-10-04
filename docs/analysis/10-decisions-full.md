@@ -24681,3 +24681,35 @@ WBPERF-009 partial; no-debt/publication/плотный repair input и pixel/mou
 orbit QA открыты. WBPERF-002, rare physical peaks/OS waits, CPU balance
 и165 FPS не закрыты. Raw intermediate failures, frozen SHA/provenance,
 ограничения и результаты — [156](156-camera-streaming-without-battle-pauses.md).
+
+
+## ADR-563 — параллельные эксперименты и OS pressure рядом с зависаниями
+
+Identity bounds, word intersections, packed contact fill, fixed chunks256
+и persistent flat outputs отвергнуты. Все3600 tick counters, gameplay/hash
+совпадают, но native pair A +0,626% FPS, pair B −5,596%; устойчивого gain
+нет. Physics source и baseline executable восстановлены. Pooled chunks
+не принимаются только за увеличение task count или меньше allocation.
+
+Новый external OsPressure фиксирует system CPU/processor group, nullable
+page-fault/physical/commit counters и до8 читаемых процессов по lifetime
+PID+StartedUtc с per-interval CPU delta. Sensor warmup/read cost, whole
+sampler wall и inaccessible process count сохраняются. Only full native
+in-window intervals присоединяются к stall episodes; coarse counters
+не делятся на длительность stall, faults не означают disk paging.
+OsPressure всегда diagnostic, сравнение имеет отдельный FPS acceptance.
+
+Sequential baseline captures: camera134 origins/0 blocked/max81,391мс,
+3577 steps; stationary3556 steps/max423,966мс, эпизоды1,968/1,853с.
+114 OS intervals в каждом; errors/timeout отсутствуют, tempo gate false.
+В пересечениях node набрал7,688/8,484 CPU-с за1,17/1,19 wall-с,
+native только0,547/0,328 CPU-с; system busy100%. Известный build/test
+process list давал0 competing samples и пропускал такую нагрузку.
+Причина stalls остаётся недоказанной без scheduler/worker wait traces.
+
+116 analyzer tests/PS parser-validity suite и native API samples проходят.
+WBPERF-001/027 partial: нужны dispatch/join и OS stacks, phase-ring
+windows исчерпаны до второго позднего эпизода. WBPERF-002 independent
+sim/read model, strict camera debt, CPU balance/165FPS не закрыты.
+Raw A/B, hashes, rejected variants, observability limits и tests —
+[157](157-parallel-physics-experiments-and-os-pressure.md).

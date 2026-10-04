@@ -28,6 +28,67 @@ def trace():
             mark("phase", "motion", 80, cpu=120), mark("tick", "end", 100, cpu=130)]
 
 
+class OsPressureTests(unittest.TestCase):
+    def rows(self):
+        before = dict(OsPressureReadUs='10', SystemIdle100ns='0', SystemKernel100ns='0',
+            SystemUser100ns='0', SystemCpuGroup='0', SystemCpuProcessors='8', MachineProcessors='8',
+            PageFaults='4294967290', PhysicalAvailableBytes='42', SystemCommitBytes='50', SystemCommitLimitBytes='100')
+        after = dict(before, SystemIdle100ns='60000000', SystemKernel100ns='70000000',
+            SystemUser100ns='10000000', PageFaults='5')
+        return before, after
+
+    def test_group_cpu_excludes_idle_and_faults_wrap_as_dword(self):
+        a, b = self.rows()
+        r = profile.pressure_interval(a, b, 0, 1_000_000_000, 250)
+        self.assertEqual(r['system_busy_percent'], 25)
+        self.assertEqual(r['system_minus_process_cpu_ms'], 1750)
+        self.assertEqual(r['page_fault_delta'], 11)
+        self.assertEqual(r['commit_percent'], 50)
+
+    def test_missing_fields_are_unavailable_and_coarse_difference_stays_signed(self):
+        a, b = self.rows()
+        self.assertIsNone(profile.pressure_interval({}, {}, 0, 1, 0))
+        self.assertEqual(profile.pressure_interval(a, b, 0, 1, 2500)['system_minus_process_cpu_ms'], -500)
+        b['PageFaults'] = ''; b['SystemUser100ns'] = ''
+        r = profile.pressure_interval(a, b, 0, 1, 0)
+        self.assertIsNone(r['page_fault_delta'])
+        self.assertIsNone(r['system_busy_percent'])
+
+    def test_group_change_or_counter_reset_cannot_look_like_low_cpu(self):
+        a, b = self.rows()
+        for changes in [dict(SystemCpuGroup='1'), dict(SystemIdle100ns='80000001')]:
+            r = profile.pressure_interval(a, dict(b, **changes), 0, 1, 0)
+            self.assertTrue(r['cpu_counter_discontinuity'])
+            self.assertIsNone(r['system_busy_percent'])
+        a['SystemKernel100ns'] = '80000000'
+        self.assertTrue(profile.pressure_interval(a, b, 0, 1, 0)['cpu_counter_discontinuity'])
+
+    def test_partial_machine_group_does_not_subtract_whole_process_cpu(self):
+        a, b = self.rows()
+        a['MachineProcessors'] = b['MachineProcessors'] = '128'
+        r = profile.pressure_interval(a, b, 0, 1, 250)
+        self.assertEqual(r['system_busy_percent'], 25)
+        self.assertIsNone(r['system_minus_process_cpu_ms'])
+
+    def test_invalid_faults_commit_and_read_cost_are_rejected(self):
+        a, b = self.rows()
+        for changes in [dict(OsPressureReadUs='nan'), dict(OsPressureReadUs='-1'),
+                        dict(PageFaults='4294967296'), dict(SystemCommitBytes='101'), dict(SystemCommitLimitBytes='0'),
+                        dict(SystemKernel100ns='-1'), dict(OsSamplerWorkMs='nan'), dict(OsSamplerWorkMs='-1')]:
+            with self.assertRaises(ValueError): profile.pressure_interval(a, dict(b, **changes), 0, 1, 0)
+
+    def test_episode_overlap_does_not_apportion_whole_interval_counters(self):
+        a, b = self.rows()
+        sample = profile.pressure_interval(a, b, 0, 1_000_000_000, 0)
+        episodes = dict(retained=[dict(first_row=0, last_row=0)])
+        frames = [dict(frame_start_ns='100000000', frame_end_ns='101000000')]
+        profile.attach_os_pressure(episodes, frames, dict(pressure=dict(intervals=[sample])))
+        overlap = episodes['retained'][0]['os_pressure']
+        self.assertEqual(overlap['maximum_page_fault_delta'], 11)
+        self.assertEqual(overlap['intervals'], 1)
+        self.assertNotIn('cause_identified', overlap)
+
+
 class CameraTourTests(unittest.TestCase):
     def test_wall_clock_tour_retains_stopped_simulation_and_all_tick_groups(self):
         signature = 'PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1'
@@ -972,6 +1033,73 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['process_cpu_ms'], 50)
         self.assertEqual(result['sampled_threads'][0]['observed_roles'], ['local_advance'])
         self.assertEqual(result['process_minus_sampled_threads_ms'], 20)
+
+    def test_os_pressure_capture_is_diagnostic_and_requires_actual_samples(self):
+        self.write()
+        manifest_path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(manifest_path.read_text()); manifest['OsPressure'] = True
+        manifest_path.write_text(json.dumps(manifest))
+        result = profile.analyze(self.path)
+        self.assertFalse(result['acceptance_eligible'])
+        self.assertIn('os_pressure_artifact_missing', result['reasons'])
+
+    def test_os_pressure_window_ignores_startup_and_dump_samples(self):
+        folder = self.path / 'world-battle-cpu'; folder.mkdir()
+        a, b = OsPressureTests().rows()
+        samples = [dict(a if i < 3 else b, Seconds=str(i), Utc=f'1970-01-01T00:00:0{i}Z', CpuMs=str(i * 10)) for i in range(1, 5)]
+        with (folder / 'cpu-process-samples.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, samples[0]); writer.writeheader(); writer.writerows(samples)
+        result = profile.os_window(self.path, 'world-battle', 'epoch_unix_ns=2000000000',
+                                   [dict(frame_end_ns='1000000000')], {})
+        self.assertEqual(len(result['pressure']['intervals']), 1)
+        self.assertEqual(result['pressure']['intervals'][0]['page_fault_delta'], 11)
+        self.assertEqual(result['pressure']['intervals'][0]['begin_ns'], 0)
+        self.assertEqual(result['pressure']['intervals'][0]['end_ns'], 1_000_000_000)
+
+    def test_observed_pressure_requires_declared_mode_and_never_accepts_fps(self):
+        frame = dict(seconds='1', tick='30', generation='0', frame_ms='1000', simulation_ticks='30',
+            simulation_core_ms='2', frame_start_ns='0', frame_end_ns='1000000000', frame_gap_ns='0')
+        self.ordinary_report([frame])
+        with (self.path / 'world-battle.log').open('a') as out:
+            out.write('PROFILE epoch_unix_ns=2000000000\n')
+        folder = self.path / 'world-battle-cpu'; folder.mkdir()
+        a, b = OsPressureTests().rows()
+        samples = [dict(r, Seconds=str(i), Utc=f'1970-01-01T00:00:0{i}Z', CpuMs=str(i * 10))
+                   for i, r in [(2, a), (3, b)]]
+        with (folder / 'cpu-process-samples.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, samples[0]); writer.writeheader(); writer.writerows(samples)
+        result = profile.analyze(self.path)
+        self.assertIn('os_pressure_mode_mismatch', result['reasons'])
+        path = self.path / 'world-battle.manifest.json'
+        manifest = json.loads(path.read_text()); manifest['OsPressure'] = True
+        path.write_text(json.dumps(manifest))
+        result = profile.analyze(self.path)
+        self.assertTrue(result['valid_for_comparison'])
+        self.assertTrue(result['meets_simulation_rate'])
+        self.assertFalse(result['acceptance_eligible'])
+        self.assertFalse(profile.compare(result, result)['fps_acceptance_eligible'])
+        self.assertIn('not stall attribution', profile.markdown(result))
+
+    def test_os_process_deltas_join_only_accepted_intervals_and_reject_bad_values(self):
+        folder = self.path / 'world-battle-cpu'; folder.mkdir()
+        a, b = OsPressureTests().rows()
+        samples = [dict(r, Seconds=str(i), Utc=f'1970-01-01T00:00:0{i}Z', CpuMs=str(i * 10))
+                   for i, r in [(2, a), (3, b)]]
+        with (folder / 'cpu-process-samples.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, samples[0]); writer.writeheader(); writer.writerows(samples)
+        process = dict(Seconds='3', ProcessId='12', Name='example', StartedUtc='lifetime-1',
+                       CpuMs='250', IsTarget='false', IsSampler='false')
+        def joined(rows):
+            with (folder / 'cpu-os-processes.csv').open('w', newline='') as out:
+                writer = csv.DictWriter(out, process); writer.writeheader(); writer.writerows(rows)
+            return profile.os_window(self.path, 'world-battle', 'epoch_unix_ns=2000000000',
+                                     [dict(frame_end_ns='1000000000')], {})
+        result = joined([dict(process, Seconds='4', CpuMs='nan'), process])
+        self.assertEqual(result['pressure']['intervals'][0]['top_processes'][0]['cpu_ms'], 250)
+        self.assertEqual(result['pressure']['intervals'][0]['top_processes'][0]['started_utc'], 'lifetime-1')
+        for changes in [dict(CpuMs='nan'), dict(CpuMs='-1'), dict(IsTarget='unknown')]:
+            with self.assertRaisesRegex(ValueError, 'OS process pressure'):
+                joined([dict(process, **changes)])
 
 
     def render_fixture(self, spans=None, **metadata):

@@ -700,3 +700,6 @@
 
 
 | 562 | Подготовка окна камеры не блокирует authoritative ticks. Сброс generation имеет отдельный loading barrier; camera Job завершает выбранное окно, читает до восьми строк в existing compute pool и replay правок перед ordered publication. Physical GPU patches объединяются bounded bit mask по новым tick spans. Инициализированный пустой occupancy clip сохраняется без повторной геометрии всей армии. CameraTour имеет wall-clock workload и отдельные per-frame расходы. Разбор — analysis/156-camera-streaming-without-battle-pauses.md. |
+
+
+| 563 | Пять physics/parallel candidates отвергнуты по CPU/native замерам; production physics и existing pools сохранены. Opt-in OsPressure наблюдает system CPU group, page faults, memory и top8 readable process lifetimes вне симуляции. Analyzer соединяет только целые in-window интервалы со stall episodes без пропорциональной атрибуции; unavailable/coarse counters и partial process coverage явно сохраняются. Диагностика не квалифицирует FPS; diagnostic comparison имеет отдельный fps_acceptance_eligible. Внешние CPU bursts наблюдаются рядом с длинными stalls, причина без OS scheduler/worker traces не доказана. Разбор — analysis/157-parallel-physics-experiments-and-os-pressure.md. |

@@ -11,6 +11,8 @@ PROFILE render_context_step=0 value=RenderContext { physical_size: [1600, 900], 
 PROFILE render_context_changed=false'
 $rows = @([pscustomobject]@{frame_ms='4.5';simulation_ticks='30';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'})
 $valid = Get-RangeValidity $rows -Scenario world-battle -Log $log
+$pressure = Get-RangeValidity $rows -Scenario world-battle -Log $log -OsPressure
+Assert-Profile ($pressure.ValidForComparison -and -not $pressure.AcceptanceEligible -and $pressure.Mode -eq 'os_pressure_diagnostic') 'OS pressure capture accepted as FPS benchmark'
 Assert-Profile ($valid.ValidForComparison -and $valid.AcceptanceEligible -and $valid.MeetsSimulationRate) 'Good run rejected'
 $tourLog = $log + "`nPROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
 $tour = Get-RangeValidity $rows -Scenario world-battle -Log $tourLog -CameraTour

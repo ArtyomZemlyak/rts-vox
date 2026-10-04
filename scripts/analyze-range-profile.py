@@ -131,6 +131,61 @@ def union_by_thread(jobs):
     return result
 
 
+def pressure_interval(a, b, begin_ns, end_ns, process_cpu_ms):
+    """Whole OS sampling interval. Faults include soft faults; no cause inference."""
+    if b.get("OsPressureReadUs") in (None, ""):
+        return None
+    read_us = float(b["OsPressureReadUs"])
+    if not math.isfinite(read_us) or read_us < 0:
+        raise ValueError("Invalid OS pressure read cost")
+    def value(row, key):
+        result = optional_int(row, key)
+        if result is not None and result < 0:
+            raise ValueError("Negative OS pressure counter")
+        return result
+    cpu_keys = ("SystemIdle100ns", "SystemKernel100ns", "SystemUser100ns")
+    old = [value(a, k) for k in cpu_keys]
+    new = [value(b, k) for k in cpu_keys]
+    groups = [value(r, "SystemCpuGroup") for r in (a, b)]
+    processors = [value(r, "SystemCpuProcessors") for r in (a, b)]
+    machines = [value(r, "MachineProcessors") for r in (a, b)]
+    busy_percent = residual_ms = None
+    discontinuity = False
+    if all(v is not None for v in old + new + groups + processors + machines):
+        if groups[0] != groups[1] or processors[0] != processors[1] or machines[0] != machines[1]:
+            discontinuity = True
+        else:
+            delta = [y - x for x, y in zip(old, new)]
+            total = delta[1] + delta[2]
+            if min(delta) < 0 or total <= 0 or delta[0] > total:
+                discontinuity = True
+            elif processors[1] > 0 and machines[1] >= processors[1]:
+                busy_percent = 100 * (total - delta[0]) / total
+                if processors[1] == machines[1]:
+                    # Keep signed coarse-counter differences, never clamp them.
+                    residual_ms = (total - delta[0]) / 10000 - process_cpu_ms
+    faults = [value(r, "PageFaults") for r in (a, b)]
+    if any(v is not None and v > 0xffffffff for v in faults):
+        raise ValueError("OS page fault counter exceeds DWORD")
+    fault_delta = ((faults[1] - faults[0]) & 0xffffffff) if None not in faults else None
+    available = value(b, "PhysicalAvailableBytes")
+    commit = value(b, "SystemCommitBytes")
+    limit = value(b, "SystemCommitLimitBytes")
+    if commit is not None and limit is not None and (limit == 0 or commit > limit):
+        raise ValueError("Invalid OS commit counters")
+    sampler_ms = float(b["OsSamplerWorkMs"]) if b.get("OsSamplerWorkMs") not in (None, "") else None
+    if sampler_ms is not None and (not math.isfinite(sampler_ms) or sampler_ms < 0):
+        raise ValueError("Invalid OS sampler work cost")
+    return dict(begin_ns=begin_ns, end_ns=end_ns, process_cpu_ms=process_cpu_ms,
+                system_busy_percent=busy_percent,
+                system_minus_process_cpu_ms=residual_ms, cpu_counter_discontinuity=discontinuity,
+                processor_group=groups[1], processors=processors[1], machine_processors=machines[1],
+                page_fault_delta=fault_delta, physical_available_bytes=available,
+                commit_percent=100 * commit / limit if commit is not None and limit else None,
+                read_us=read_us, sampler_work_ms=sampler_ms,
+                readable_processes=value(b, "OsReadableProcesses"), unreadable_processes=value(b, "OsUnreadableProcesses"))
+
+
 def os_window(directory, scenario, log, frames, roles):
     """Keep only entire 1Hz intervals inside the native measurement window."""
     path = directory / f"{scenario}-cpu"
@@ -142,6 +197,7 @@ def os_window(directory, scenario, log, frames, roles):
     end = begin + int(frames[-1]["frame_end_ns"])
     previous = None
     accepted, cpu_ms, wall_ms = set(), 0.0, 0.0
+    pressure = []
     for row in read_csv(path / "cpu-process-samples.csv"):
         if not row.get("Utc"):
             continue
@@ -151,7 +207,25 @@ def os_window(directory, scenario, log, frames, roles):
             delta = float(row["CpuMs"]) - float(previous[1]["CpuMs"])
             if elapsed > 0 and delta >= 0:
                 cpu_ms += delta; wall_ms += elapsed; accepted.add(row["Seconds"])
+                sample = pressure_interval(previous[1], row, previous[0] - begin, now - begin, delta)
+                if sample is not None:
+                    sample["sample_seconds"] = row["Seconds"]
+                    sample["top_processes"] = []
+                    pressure.append(sample)
         previous = now, row
+    process_path = path / "cpu-os-processes.csv"
+    if process_path.exists():
+        pressure_by_seconds = {r["sample_seconds"]: r for r in pressure}
+        for row in read_csv(process_path):
+            observation = pressure_by_seconds.get(row["Seconds"])
+            if observation is None:
+                continue
+            value = float(row["CpuMs"])
+            if not math.isfinite(value) or value < 0 or any(row[key].lower() not in ("true", "false") for key in ("IsTarget", "IsSampler")):
+                raise ValueError("Invalid OS process pressure counters")
+            observation["top_processes"].append(dict(process_id=int(row["ProcessId"]), name=row["Name"],
+                started_utc=row["StartedUtc"], cpu_ms=value,
+                is_target=row["IsTarget"].lower() == "true", is_sampler=row["IsSampler"].lower() == "true"))
     threads = {}
     thread_path = path / "cpu-threads.csv"
     if thread_path.exists() and thread_path.stat().st_size:
@@ -166,7 +240,34 @@ def os_window(directory, scenario, log, frames, roles):
     return dict(status="aligned_intervals", intervals=len(accepted), observed_ms=wall_ms,
                 process_cpu_ms=cpu_ms, core_equivalents=cpu_ms / wall_ms if wall_ms else None,
                 sampled_threads=ranked,
-                process_minus_sampled_threads_ms=cpu_ms - sum(threads.values()))
+                process_minus_sampled_threads_ms=cpu_ms - sum(threads.values()),
+                pressure=dict(status="observed" if pressure else "unavailable_or_legacy", intervals=pressure,
+                    system_busy_percent=stats([r["system_busy_percent"] for r in pressure if r["system_busy_percent"] is not None]),
+                    physical_available_bytes=stats([r["physical_available_bytes"] for r in pressure if r["physical_available_bytes"] is not None]),
+                    page_fault_delta=stats([r["page_fault_delta"] for r in pressure if r["page_fault_delta"] is not None]),
+                    read_us=stats([r["read_us"] for r in pressure]),
+                    sampler_work_ms=stats([r["sampler_work_ms"] for r in pressure if r["sampler_work_ms"] is not None]),
+                    discontinuities=sum(r["cpu_counter_discontinuity"] for r in pressure)))
+
+
+def attach_os_pressure(episodes, frames, cpu):
+    if not episodes:
+        return
+    samples = cpu.get("pressure", {}).get("intervals", [])
+    for episode in episodes["retained"]:
+        first, last = episode["first_row"], episode["last_row"]
+        begin = optional_int(frames[first], "frame_start_ns")
+        end = optional_int(frames[last], "frame_end_ns")
+        if end is not None and last + 1 < len(frames):
+            end += int(frames[last + 1].get("frame_gap_ns") or 0)
+        overlap = [r for r in samples if begin is not None and end is not None
+                   and r["begin_ns"] < end and r["end_ns"] > begin]
+        episode["os_pressure"] = dict(status="overlapping_coarse_intervals" if overlap else "unavailable_or_no_overlap",
+            intervals=len(overlap),
+            system_busy_percent=stats([r["system_busy_percent"] for r in overlap if r["system_busy_percent"] is not None]),
+            minimum_available_bytes=min((r["physical_available_bytes"] for r in overlap if r["physical_available_bytes"] is not None), default=None),
+            maximum_page_fault_delta=max((r["page_fault_delta"] for r in overlap if r["page_fault_delta"] is not None), default=None),
+            samples=overlap[:12])
 
 
 def summarize_tick(rows):
@@ -1172,6 +1273,11 @@ def analyze(directory, scenario="world-battle", top=12):
     meets_rate = scenario != "world-battle" or frame_ticks >= math.floor(seconds * (int(rate[1]) if rate else 30)) - 1
     slice_summary, slow_slices, episodes = summarize_slices(frames, aligned, top)
     incident_coverage(episodes, frames, mapped_steps, mapped_wall, mapped_jobs, stall_trace)
+    cpu_window = os_window(directory, scenario, log, frames, roles)
+    pressure_observed = cpu_window.get("pressure", {}).get("status") == "observed"
+    if bool((manifest or {}).get("OsPressure")) != pressure_observed:
+        reasons.append("os_pressure_artifact_missing" if (manifest or {}).get("OsPressure") else "os_pressure_mode_mismatch")
+    attach_os_pressure(episodes, frames, cpu_window)
     expensive_frames = []
     for idx in sorted((i for i, value in enumerate(frame_times) if value is not None), key=lambda i: -frame_times[i])[:top]:
         row = frames[idx]
@@ -1185,7 +1291,7 @@ def analyze(directory, scenario="world-battle", top=12):
     return dict(schema=6, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
-        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")),
+        acceptance_eligible=bool(validity.get("ValidForComparison")) and not reasons and meets_rate and not bool((manifest or {}).get("CorePhases")) and stall_trace is None and not bool((manifest or {}).get("CoreTriggerMilliseconds")) and render_trace is None and not bool((manifest or {}).get("RenderTimeline")) and not task_build and render_tasks is None and not bool((manifest or {}).get("RenderTasks")) and not bool((manifest or {}).get("OsPressure")),
         reasons=sorted(set(reasons)), frames=len(frames), frame_ms=stats([v for v in frame_times if v is not None]),
         frame_timing_metric="profile_begin_interval" if aligned else "bevy_time_delta_unaligned",
         bevy_frame_ms=stats([float(r["frame_ms"]) for r in frames]),
@@ -1197,7 +1303,7 @@ def analyze(directory, scenario="world-battle", top=12):
         actual_compute_workers=compute,
         actual_render_context=context,
         camera_tour=camera_tour,
-        os_cpu_window=os_window(directory, scenario, log, frames, roles),
+        os_cpu_window=cpu_window,
         terrain_journal_maintenance=journal_maintenance(log),
         task_families=task_families,
         core_trace_schema=core_schema,
@@ -1242,6 +1348,8 @@ def compare(a, b):
         problems.append("different:CameraTour")
     if bool((a["manifest"] or {}).get("RenderTimeline")) != bool((b["manifest"] or {}).get("RenderTimeline")):
         problems.append("different:RenderTimeline")
+    if bool((a["manifest"] or {}).get("OsPressure")) != bool((b["manifest"] or {}).get("OsPressure")):
+        problems.append("different:OsPressure")
     if int((a["manifest"] or {}).get("ComputeWorkers") or 0) != int((b["manifest"] or {}).get("ComputeWorkers") or 0):
         problems.append("different:ComputeWorkers")
     if a.get("actual_compute_workers") != b.get("actual_compute_workers"):
@@ -1265,6 +1373,7 @@ def compare(a, b):
         if a[key] != b[key] or (key in ("actual_adapter", "actual_workers", "state_hash") and a[key] is None):
             problems.append(f"different_or_missing:{key}")
     return {"eligible": not problems, "reasons": problems,
+            "fps_acceptance_eligible": not problems and a["acceptance_eligible"] and b["acceptance_eligible"],
             "before_core_ms_per_step": a["core_ms_per_step"], "after_core_ms_per_step": b["core_ms_per_step"]}
 
 
@@ -1354,6 +1463,20 @@ def markdown(report):
         lines += ["", f"OS CPU inside measurement window: {cpu['process_cpu_ms']:.3f}ms / {cpu['observed_ms']:.3f}ms; core equivalents={cpu['core_equivalents']}.", ""]
         for thread in cpu["sampled_threads"][:12]:
             lines.append(f"- OS thread {thread['os_thread']}: {thread['cpu_ms']:.3f}ms; observed callbacks: {', '.join(thread['observed_roles']) or 'unattributed'}.")
+        pressure = cpu.get("pressure", {})
+        if pressure.get("status") == "observed":
+            lines += ["", "Opt-in OS pressure (whole approximately 1 Hz intervals, not stall attribution):",
+                f"System busy percent: {pressure['system_busy_percent']}; available physical bytes: {pressure['physical_available_bytes']}.",
+                f"Page fault deltas: {pressure['page_fault_delta']}; read cost µs: {pressure['read_us']}; counter discontinuities: {pressure['discontinuities']}.",
+                f"Whole sampler work ms: {pressure.get('sampler_work_ms')}. Top process counters cover readable lifetimes only; protected and short-lived processes can be missing.",
+                "Faults include soft faults; commit/available memory do not identify paging or waits. CPU scope is the recorded processor group; system-minus-process is only available for a whole-machine group and preserves coarse negative differences."]
+            for episode in report["stall_episodes"]["retained"]:
+                observation = episode.get("os_pressure", {})
+                lines.append(f"- stall rows {episode['first_row']}..{episode['last_row']}: {observation.get('intervals', 0)} overlapping OS intervals; system busy={observation.get('system_busy_percent')}, minimum available bytes={observation.get('minimum_available_bytes')}, max whole-interval faults={observation.get('maximum_page_fault_delta')}. Cause remains unproven.")
+                foreign = sorted(((sample, p) for sample in observation.get('samples', []) for p in sample.get('top_processes', []) if not p['is_target'] and not p['is_sampler']), key=lambda pair: -pair[1]['cpu_ms'])[:3]
+                for sample, process in foreign:
+                    duration_ms = (sample['end_ns'] - sample['begin_ns']) / 1e6
+                    lines.append(f"  - readable process {process['name']} PID {process['process_id']}: {process['cpu_ms']:.3f}ms CPU in whole interval {sample['begin_ns']/1e9:.3f}..{sample['end_ns']/1e9:.3f}s ({duration_ms:.3f}ms wall); native process CPU {sample['process_cpu_ms']:.3f}ms. Not attributed to the stall.")
     timeline = report.get("render_timeline")
     tasks = report.get("render_tasks")
     if tasks:
