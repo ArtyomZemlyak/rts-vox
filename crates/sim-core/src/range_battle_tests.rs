@@ -3449,3 +3449,176 @@ fn spider_reactor_and_laser_remain_physically_severable() {
     let (status, _) = model.evaluate(&body, &mut CoreBufs::new());
     assert!(!status.alive && !status.weapon);
 }
+
+#[test]
+fn spider_laser_opening_uses_current_terrain_and_keeps_close_and_legacy_aim_safe() {
+    let mut r = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank]);
+    let mut tuning = motion::spider_tuning().clone();
+    let from = [200, 60, 336].map(Fx::from_int);
+    let target = [450, 35, 336];
+    let first = spider_laser_aim(&r.world, from, target, 0, &tuning);
+    assert_eq!(first, [330, 15, 336]);
+    r.world
+        .queue_dig(first[0] as u32, first[1] as u32, first[2] as u32);
+    r.world.flush();
+    assert_eq!(
+        spider_laser_aim(&r.world, from, target, 0, &tuning),
+        [330, 14, 336]
+    );
+    let mut previous = first[0];
+    for sample in 1..=18 {
+        let aim = spider_laser_aim(&r.world, from, target, sample, &tuning);
+        assert!((previous..=target[0]).contains(&aim[0]));
+        assert!((14..=target[1]).contains(&aim[1]));
+        previous = aim[0];
+    }
+    assert_eq!(
+        spider_laser_aim(&r.world, from, target, 18, &tuning),
+        target
+    );
+    assert_eq!(
+        spider_laser_aim(&r.world, from, [400, 35, 390], 19, &tuning),
+        [400, 35, 390]
+    );
+    let close = spider_laser_aim(&r.world, from, [210, 35, 336], 0, &tuning);
+    assert!(
+        (205..210).contains(&close[0]),
+        "opening point behind muzzle: {close:?}"
+    );
+    assert_eq!(
+        spider_laser_aim(&r.world, from, [200, 35, 336], 0, &tuning),
+        [200, 35, 336]
+    );
+    tuning.laser.interval_ticks = 2;
+    assert_eq!(spider_laser_aim(&r.world, from, target, 9, &tuning), target);
+    tuning.laser_sweep = None;
+    assert_eq!(spider_laser_aim(&r.world, from, target, 0, &tuning), target);
+}
+
+fn step_spider_opening_trial(r: &mut BlastRange) {
+    // Keep the independent target stationary without an invalid saved AI clock.
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    r.step();
+}
+
+#[test]
+fn spider_laser_opening_heats_the_visible_ground_then_armour_and_replays() {
+    let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    // Use meltable paving: ordinary soil has neither melt nor kindling and
+    // intentionally does not retain heat in the existing material contract.
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 14, 300],
+        max: [425, 16, 375],
+        material: 3,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let own_volume = r.units[0].body.volume_mm3();
+    for _ in 0..180 {
+        step_spider_opening_trial(&mut r);
+        if !r.battle.lasers.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(r.battle.lasers.len(), 1, "no opening beam");
+    let first = r.battle.lasers[0];
+    assert!(first.hit);
+    assert!(
+        first.to[0].to_int_trunc() < r.units[1].at[0] - 20,
+        "first beam skipped ground: {first:?}"
+    );
+    assert!(first.to[1].to_int_trunc() <= 16);
+    assert!(
+        r.heat.hot() > 0 || r.heat.melted_total > 0,
+        "visible ground contact neither heated nor melted the paving"
+    );
+    assert!(
+        !r.thermals.cells().any(|(cell, _)| cell.unit == 1),
+        "target heated before beam reached it"
+    );
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut target_heated = false;
+    for _ in 0..100 {
+        step_spider_opening_trial(&mut r);
+        step_spider_opening_trial(&mut replay);
+        assert_eq!(
+            r.state_hash(),
+            replay.state_hash(),
+            "mid-sweep restore diverged"
+        );
+        target_heated |= r.thermals.cells().any(|(cell, _)| cell.unit == 1);
+        assert!(
+            !r.thermals.cells().any(|(cell, _)| cell.unit == 0),
+            "emitter heated itself"
+        );
+        if !r.units[1].status.alive {
+            break;
+        }
+    }
+    assert!(target_heated, "opening pass never reached armour");
+    assert!(
+        !r.units[1].status.alive,
+        "sustained siege beam failed to finish target"
+    );
+    assert_eq!(r.units[0].body.volume_mm3(), own_volume);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn spider_laser_new_target_restarts_opening_but_explicit_ground_aim_is_direct() {
+    let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.units.push(RangeUnitDef {
+        kind: RangeUnitKind::Tank,
+        at: [450, 16, 500],
+        allied: false,
+        weapon: None,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    for a in &mut r.battle.actors[1..] {
+        a.order = Order::Hold;
+    }
+    // Policy replaces the target while an earlier burst is active. Commands
+    // already reset burst; this exercises the distinct acquisition path.
+    r.battle.actors[0].target = Some(1);
+    r.battle.actors[0].burst = 30;
+    r.battle.actors[0].order = Order::Attack(2);
+    for _ in 0..180 {
+        step_spider_opening_trial(&mut r);
+        if !r.battle.lasers.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(r.battle.actors[0].target, Some(2));
+    assert_eq!(
+        r.battle.actors[0].burst, 1,
+        "new target reused old sweep progress"
+    );
+    assert_eq!(r.battle.lasers.len(), 1);
+    assert!(r.battle.lasers[0].to[1].to_int_trunc() <= 16);
+    let target = aim_point(&r.units[2]);
+    assert!(r.battle_order(0, Order::Ground(target), None));
+    for _ in 0..180 {
+        step_spider_opening_trial(&mut r);
+        if !r.battle.lasers.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(r.battle.lasers.len(), 1);
+    assert!(
+        r.battle.lasers[0].to[1].to_int_trunc() > 16,
+        "explicit ground order acquired automatic sweep"
+    );
+    assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 2));
+    assert!(r.matter.economy.ledger.balanced());
+}

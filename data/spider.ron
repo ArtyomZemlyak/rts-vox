@@ -12,6 +12,8 @@
         gait: Some((stride_cm: 440, duty_pct: 75, lift_cm: 100,
             offset_pct: (0, 50, 25, 75))),
     ),
+    // 0.6 second opening pass, starting up to 12 m before the target.
+    laser_sweep: Some((ticks: 18, lead_units: 120)),
     laser: (burst_ticks: 120, interval_ticks: 1, range: 2800,
         standoff_milli: 800, spread_milli: 0, work: 600,
         // Siege beam: thick armour must melt even while the contact moves.

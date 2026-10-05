@@ -7,6 +7,14 @@ pub struct Tuning {
     pub step: i32,
     pub laser: crate::range_weapon::Stream,
     pub charge_ticks: u32,
+    #[serde(default)]
+    pub laser_sweep: Option<LaserSweep>,
+}
+/// Opening pass of the siege beam; omitted settings preserve direct aim.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct LaserSweep {
+    pub ticks: u32,
+    pub lead_units: i32,
 }
 impl Tuning {
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -27,6 +35,11 @@ impl Tuning {
             || !(1..=100000).contains(&t.laser.heat)
             || !(0..=4).contains(&t.laser.heat_radius)
             || !(1..=300).contains(&t.laser.reload_ticks)
+            || t.laser_sweep.is_some_and(|s| {
+                !(1..=300).contains(&s.ticks)
+                    || s.ticks > t.laser.burst_ticks.saturating_sub(1) * t.laser.interval_ticks
+                    || !(1..=t.laser.range).contains(&s.lead_units)
+            })
         {
             return Err("invalid heavy spider tuning".into());
         }
@@ -37,6 +50,28 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opening_laser_sweep_has_legacy_default_and_finite_reachable_limits() {
+        let source = include_str!("../../../data/spider.ron");
+        let direct = source
+            .lines()
+            .filter(|l| !l.contains("laser_sweep:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(Tuning::from_ron(&direct).unwrap().laser_sweep.is_none());
+        let sweep = Tuning::from_ron(source).unwrap().laser_sweep.unwrap();
+        assert_eq!((sweep.ticks, sweep.lead_units), (18, 120));
+        for (from, to) in [
+            ("ticks: 18", "ticks: 0"),
+            ("ticks: 18", "ticks: 120"),
+            ("ticks: 18", "ticks: 301"),
+            ("lead_units: 120", "lead_units: 0"),
+            ("lead_units: 120", "lead_units: 2801"),
+            ("burst_ticks: 120", "burst_ticks: 1"),
+        ] {
+            assert!(Tuning::from_ron(&source.replace(from, to)).is_err(), "{to}");
+        }
+    }
     #[test]
     fn spider_laser_and_gait_have_finite_budgets() {
         let source = include_str!("../../../data/spider.ron");

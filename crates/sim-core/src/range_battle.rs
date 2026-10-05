@@ -434,6 +434,46 @@ impl Battle {
         s.ok().then_some(())
     }
 }
+/// Smooth opening aim, derived from the already saved active beam sample count.
+/// The ray still owns contact/cover/heat; this only supplies its current aim.
+fn spider_laser_aim(
+    world: &World,
+    from: [Fx; 3],
+    target: [i32; 3],
+    samples: u32,
+    tuning: &modding::spider::Tuning,
+) -> [i32; 3] {
+    let Some(sweep) = tuning.laser_sweep else {
+        return target;
+    };
+    let elapsed = samples.saturating_mul(tuning.laser.interval_ticks);
+    if elapsed >= sweep.ticks {
+        return target;
+    }
+    let dx = Fx::from_int(target[0]).sub(from[0]);
+    let dz = Fx::from_int(target[2]).sub(from[2]);
+    let distance_sq = dx.mul(dx).add(dz.mul(dz));
+    if distance_sq <= Fx::ONE {
+        return target;
+    }
+    // Never place the opening point behind the muzzle when the enemy is close.
+    let pull = Fx::from_int(sweep.lead_units)
+        .div(distance_sq.sqrt())
+        .min(Fx::from_ratio(1, 2));
+    let x = Fx::from_int(target[0]).sub(dx.mul(pull)).to_int_trunc();
+    let z = Fx::from_int(target[2]).sub(dz.mul(pull)).to_int_trunc();
+    // This exact ceiling is refreshed by edits in the same simulation tick.
+    let y = world.column_ceiling(x as u32, z as u32).saturating_sub(1) as i32;
+    let start = [x, y, z];
+    let t = Fx::from_ratio(elapsed as i32, sweep.ticks as i32);
+    let blend = t.mul(t).mul(Fx::from_int(3).sub(t.mul(Fx::from_int(2))));
+    std::array::from_fn(|a| {
+        Fx::from_int(start[a])
+            .add(Fx::from_int(target[a] - start[a]).mul(blend))
+            .to_int_trunc()
+    })
+}
+
 pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
     let origin = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
     let size = usize::from(u.body.core_size);
@@ -1287,6 +1327,9 @@ impl BlastRange {
             if target_changed {
                 a.charge = None;
                 a.pursuit = 0;
+                if kind == RangeUnitKind::Spider && !matches!(a.order, Order::Ground(_)) {
+                    a.burst = 0;
+                }
             }
             a.target = target;
             // A tank loads for what it aims at (ADR-456).
@@ -1391,6 +1434,9 @@ impl BlastRange {
             completed("orders_los");
             if !in_range || blocked_direct {
                 a.charge = None;
+                if kind == RangeUnitKind::Spider {
+                    a.burst = 0;
+                }
                 if kind.emplacement() {
                     continue;
                 }
@@ -1536,6 +1582,13 @@ impl BlastRange {
                 let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
                 if let Some(from) = muzzles.first().copied() {
                     completed("orders_misc");
+                    let p = if kind == RangeUnitKind::Spider && !matches!(a.order, Order::Ground(_))
+                    {
+                        spider_laser_aim(&self.world, from, p, a.burst, tuning)
+                    } else {
+                        p
+                    };
+                    completed("orders_laser_sweep");
                     let trace = self.laser_ray(
                         from,
                         p,
