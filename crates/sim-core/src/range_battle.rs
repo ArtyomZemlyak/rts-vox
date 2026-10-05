@@ -1823,7 +1823,13 @@ impl BlastRange {
     }
     fn battle_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
         let n = b.waves.len().max(1);
-        for w in &mut b.waves {
+        // A growing old crater must not consume every newly freed fragment
+        // slot before a newer hit reaches its hull. Rotate service, not the
+        // canonical wave array: snapshots and stable wave identity keep their
+        // order, and the saved tick determines the next turn after loading.
+        let first = self.tick as usize % n;
+        for offset in 0..b.waves.len() {
+            let w = &mut b.waves[(first + offset) % n];
             let config = match w.weapon {
                 Weapon::Energy => &b.energy_config,
                 Weapon::Annihilation => &b.anni_config,
@@ -1883,6 +1889,10 @@ impl BlastRange {
         b.waves.retain(|w| w.wave.working());
     }
 }
+
+#[cfg(test)]
+#[path = "range_wave_admission_tests.rs"]
+mod wave_admission_tests;
 
 #[cfg(test)]
 #[path = "range_battle_tests.rs"]
