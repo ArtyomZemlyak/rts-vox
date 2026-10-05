@@ -1,6 +1,9 @@
 // 30 Hz, world units = 0.1 m. Same kilometre map, one additional clear sector.
 (
     tank_power_milli: 1000,
+    // Reinforced emplacement capacitor: twice the ordinary energy round.
+    turret_t2_power_milli: 2000,
+    turret_t2_reload_ticks: Some(60),
     tank_reload_ticks: 90,
     tank_range: 700,
     artillery_range: 1800,

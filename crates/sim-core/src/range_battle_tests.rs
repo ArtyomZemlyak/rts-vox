@@ -2573,9 +2573,7 @@ fn heavy_defenders_under_controlled_frontal_fire() {
     }
 }
 
-#[test]
-#[ignore = "P-78 qualification: T2 still loses to five simultaneous close-range tanks"]
-fn t2_defends_against_five_stock_tanks() {
+fn t2_defense_layout() -> RangeLayout {
     let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::TurretT2])
         .layout
         .unwrap();
@@ -2593,10 +2591,17 @@ fn t2_defends_against_five_stock_tanks() {
             allied: false,
         }))
         .collect();
+    layout
+}
+
+#[test]
+fn t2_defends_against_five_stock_tanks() {
+    let layout = t2_defense_layout();
     let config =
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     r.start_battle().unwrap();
+
     for actor in &mut r.battle.actors[..5] {
         actor.order = Order::Attack(5);
         actor.weapon = Some(Weapon::Kinetic);
@@ -2607,7 +2612,42 @@ fn t2_defends_against_five_stock_tanks() {
     r.battle.actors[5].order = Order::Auto;
     for _ in 0..3600 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        let old_status = r.units[5].status;
         r.step();
+        if r.battle.impacts.iter().any(|p| p.weapon == Weapon::Kinetic)
+            || (old_status.weapon && !r.units[5].status.weapon)
+        {
+            let u = &r.units[5];
+            let min = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
+            let width = usize::from(u.body.core_size);
+            let mut min_slice = width * width;
+            for axis in 0..3 {
+                for slice in 0..width {
+                    let mut n = 0;
+                    for a in 0..width {
+                        for b in 0..width {
+                            let mut p = min;
+                            p[axis] += slice;
+                            p[(axis + 1) % 3] += a;
+                            p[(axis + 2) % 3] += b;
+                            n += usize::from(u.body.vol.get(p[0], p[1], p[2]));
+                        }
+                    }
+                    min_slice = min_slice.min(n);
+                }
+            }
+            eprintln!(
+                "T2 tick={} alive={} armed={} core={} min_slice={}/{} removed={} shots={}",
+                r.tick,
+                u.status.alive,
+                u.status.weapon,
+                u.integrity.core.mul(Fx::from_int(100)).to_int_trunc(),
+                min_slice,
+                width * width,
+                u.removed.len(),
+                r.battle.actors[5].fired
+            );
+        }
         if r.battle.phase != Phase::Fighting {
             break;
         }
@@ -3063,4 +3103,168 @@ fn machine_gun_continuation_capacity_reserves_both_walker_barrels() {
     }
     assert_eq!(r.battle.actors[0].fired, 1);
     assert_eq!(r.battle.rounds.len(), 2);
+}
+
+#[test]
+fn t2_defends_against_five_tanks_from_each_cardinal_direction() {
+    for turn in 0..4 {
+        let mut layout = t2_defense_layout();
+        layout.size = [768, 192, 768];
+        layout.clear_max = [704, 704];
+        for (i, unit) in layout.units[..5].iter_mut().enumerate() {
+            unit.at[2] = 196 + i as i32 * 70;
+        }
+        for unit in &mut layout.units {
+            let mut p = [unit.at[0] - 450, unit.at[2] - 336];
+            for _ in 0..turn {
+                p = [-p[1], p[0]];
+            }
+            unit.at[0] = 384 + p[0];
+            unit.at[2] = 384 + p[1];
+        }
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r = BlastRange::with_layout(config, layout).unwrap();
+        r.start_battle().unwrap();
+        let attacker_head = fx::angle::diff(turn * fx::angle::QUARTER, 0);
+        let defender_head = fx::angle::diff(attacker_head + fx::angle::HALF, 0);
+        for id in 0..6 {
+            let head = if id == 5 {
+                defender_head
+            } else {
+                attacker_head
+            };
+            r.units[id].motion.drive.head = head;
+            r.units[id].update_pose(head);
+            r.battle.actors[id].turret.angle = head;
+            r.battle.actors[id].order = if id == 5 {
+                Order::Auto
+            } else {
+                Order::Attack(5)
+            };
+            if id < 5 {
+                r.battle.actors[id].weapon = Some(Weapon::Kinetic);
+            }
+        }
+        for _ in 0..3600 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            if r.battle.phase != Phase::Fighting {
+                break;
+            }
+        }
+        eprintln!(
+            "cardinal={turn} tick={} phase={:?} counts={:?} core={:?} armed={}",
+            r.tick,
+            r.battle.phase,
+            r.battle_counts(),
+            r.units[5].integrity.core,
+            r.units[5].status.weapon
+        );
+        assert_eq!(r.battle.phase, Phase::Defeat, "approach={turn}");
+        assert!(r.units[5].status.alive && r.units[5].status.weapon);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
+    let mut r = arena_of([RangeUnitKind::Tank, RangeUnitKind::TurretT2]);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    for actor in &mut r.battle.actors {
+        actor.order = Order::Hold;
+    }
+    let ordinary = r.battle.energy_config.energy;
+    assert_eq!(
+        r.battle
+            .shot_config(Weapon::Energy, RangeUnitKind::Tank)
+            .energy,
+        ordinary
+    );
+    let heavy = r
+        .battle
+        .shot_config(Weapon::Energy, RangeUnitKind::TurretT2)
+        .energy;
+    assert_eq!(heavy, ordinary * 2);
+    // An already emitted bolt will hit empty ground after its gun loses power.
+    let p = [300, 20, 100].map(Fx::from_int);
+    r.battle.rounds.push(Round {
+        owner: 1,
+        weapon: Weapon::Energy,
+        pos: p,
+        previous: p,
+        velocity: [Fx::ZERO, Fx::from_int(-120), Fx::ZERO],
+        distance: Fx::from_int(100),
+    });
+    r.matter.begin(r.battle.kinetic_config.material_energy_j, 1);
+    let config = r.battle.kinetic_config.clone();
+    let u = &mut r.units[1];
+    let path = u.body.weapon_paths()[0];
+    for y in path.min[1]..path.max[1] {
+        for z in path.min[2]..path.max[2] {
+            let cell = [45, usize::from(y), usize::from(z)];
+            if !u.body.vol.get(cell[0], cell[1], cell[2]) {
+                continue;
+            }
+            assert!(matches!(
+                r.matter.body(1, u, cell, &u.root_frame(cell[1]), u.at),
+                matter::ClaimResult::Applied
+            ));
+            u.detached += 1;
+            u.receive_cell(cell, 1_000_000, &config);
+        }
+    }
+    u.refresh_damage(1);
+    assert!(u.status.alive && !u.status.weapon);
+    let mut last = ("header", 0, None);
+    let mut copy = BlastRange::restore_observed(r.config.clone(), &r.snapshot(), |s, o, u| {
+        last = (s, o, u);
+    })
+    .unwrap_or_else(|| panic!("T2 contact restore refused at {last:?}"));
+    for _ in 0..30 {
+        r.step();
+        copy.step();
+        assert_eq!(r.state_hash(), copy.state_hash());
+        if !r.battle.waves.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(r.battle.waves.len(), 1);
+    let wave = &r.battle.waves[0].wave.wave;
+    assert_eq!(wave.pressure_at([wave.size() / 2; 3]), heavy);
+    let mut wave_copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..30 {
+        r.step();
+        wave_copy.step();
+    }
+    assert_eq!(r.state_hash(), wave_copy.state_hash());
+    assert!(r.matter.economy.ledger.balanced());
+    assert_eq!(r.battle.energy_config.energy, ordinary);
+}
+
+#[test]
+fn reinforced_t2_still_loses_a_severed_barrel_and_a_cut_core_section() {
+    let template = voxel::unit::turret_t2();
+    let model = crate::integrity::Model::new(&template);
+    let mut body = template.clone();
+    let path = body.weapon_paths()[0];
+    for y in path.min[1]..path.max[1] {
+        for z in path.min[2]..path.max[2] {
+            body.remove(45, usize::from(y), usize::from(z));
+        }
+    }
+    let (status, report) = model.evaluate(&body, &mut CoreBufs::new());
+    assert!(status.alive && !status.weapon);
+    assert_eq!(report.core, Fx::ONE);
+    let mut body = template;
+    let min = [body.core.0, body.core.1, body.core.2].map(usize::from);
+    let n = usize::from(body.core_size);
+    for x in min[0]..min[0] + n {
+        for z in min[2]..min[2] + n {
+            body.remove(x, min[1] + n / 2, z);
+        }
+    }
+    let (status, _) = model.evaluate(&body, &mut CoreBufs::new());
+    assert!(!status.alive && !status.weapon);
 }

@@ -234,6 +234,15 @@ impl Battle {
             Weapon::Laser => &self.laser_config,
         }
     }
+    pub(super) fn shot_config(&self, weapon: Weapon, kind: RangeUnitKind) -> ExplosionConfig {
+        let mut config = self.config(weapon).clone();
+        if kind == RangeUnitKind::TurretT2 && weapon == Weapon::Energy {
+            config.energy = (u64::from(config.energy)
+                * u64::from(self.tuning.turret_t2_power_milli)
+                / 1000) as u32;
+        }
+        config
+    }
     /// Read-only diagnostic counts: capturing resistance, applying pressure.
     pub fn wave_counts(&self) -> [usize; 2] {
         let capturing = self.waves.iter().filter(|w| w.wave.capturing()).count();
@@ -1649,6 +1658,10 @@ impl BlastRange {
                 a.next = self.tick
                     + if weapon == Weapon::Canister {
                         b.tuning.canister.reload_ticks
+                    } else if kind == RangeUnitKind::TurretT2 {
+                        b.tuning
+                            .turret_t2_reload_ticks
+                            .unwrap_or(b.tuning.tank_reload_ticks)
                     } else {
                         b.tuning.tank_reload_ticks
                     };
@@ -1671,7 +1684,9 @@ impl BlastRange {
         let boxes: Vec<_> = self.units.iter().map(|u| u.bounds()).collect();
         for mut r in std::mem::take(&mut b.rounds) {
             r.previous = r.pos;
-            let config = b.config(r.weapon).clone();
+            // Stable owner kind survives its destruction; already flying rounds
+            // retain their emplacement identity, including after restore.
+            let config = b.shot_config(r.weapon, self.units[r.owner].kind);
             let gravity = if r.weapon == Weapon::MachineGun || r.weapon.energetic() {
                 0
             } else {

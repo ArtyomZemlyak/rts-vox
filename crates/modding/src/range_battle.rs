@@ -35,6 +35,10 @@ pub struct TankAmmo {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Tuning {
     pub tank_power_milli: u32,
+    #[serde(default = "default_turret_t2_power")]
+    pub turret_t2_power_milli: u32,
+    #[serde(default)]
+    pub turret_t2_reload_ticks: Option<u32>,
     pub tank_reload_ticks: u32,
     pub tank_range: i32,
     #[serde(default = "default_artillery_range")]
@@ -56,6 +60,9 @@ pub struct Tuning {
     pub zone: RangeZone,
     pub units: Vec<RangeUnitDef>,
 }
+fn default_turret_t2_power() -> u32 {
+    1000
+}
 fn default_artillery_range() -> i32 {
     1800
 }
@@ -63,6 +70,9 @@ impl Tuning {
     pub fn from_ron(s: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(s).map_err(|e| e.to_string())?;
         if !(100..=4000).contains(&t.tank_power_milli)
+            || !(100..=4000).contains(&t.turret_t2_power_milli)
+            || t.turret_t2_reload_ticks
+                .is_some_and(|n| !(1..=1800).contains(&n))
             || !(1..=1800).contains(&t.tank_reload_ticks)
             || !(100..=3000).contains(&t.tank_range)
             || !(100..=3000).contains(&t.artillery_range)
@@ -123,5 +133,47 @@ mod tests {
         assert_eq!(Tuning::from_ron(&old).unwrap().artillery_range, 1800);
         let invalid = shipped.replace("artillery_range: 1800,", "artillery_range: 0,");
         assert!(Tuning::from_ron(&invalid).is_err());
+    }
+    #[test]
+    fn turret_t2_power_has_legacy_default_and_finite_limits() {
+        let shipped = include_str!("../../../data/range-battle.ron");
+        let old = shipped
+            .lines()
+            .filter(|l| !l.contains("turret_t2_power_milli:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Tuning::from_ron(&old).unwrap().turret_t2_power_milli, 1000);
+        assert_eq!(
+            Tuning::from_ron(shipped).unwrap().turret_t2_power_milli,
+            2000
+        );
+        for n in [0, 99, 4001, u32::MAX] {
+            let bad = shipped.replace(
+                "turret_t2_power_milli: 2000",
+                &format!("turret_t2_power_milli: {n}"),
+            );
+            assert!(Tuning::from_ron(&bad).is_err());
+        }
+    }
+    #[test]
+    fn turret_t2_reload_can_retain_legacy_tank_timing() {
+        let shipped = include_str!("../../../data/range-battle.ron");
+        let old = shipped
+            .lines()
+            .filter(|l| !l.contains("turret_t2_reload_ticks:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Tuning::from_ron(&old).unwrap().turret_t2_reload_ticks, None);
+        assert_eq!(
+            Tuning::from_ron(shipped).unwrap().turret_t2_reload_ticks,
+            Some(60)
+        );
+        for n in [0, 1801, u32::MAX] {
+            let bad = shipped.replace(
+                "turret_t2_reload_ticks: Some(60)",
+                &format!("turret_t2_reload_ticks: Some({n})"),
+            );
+            assert!(Tuning::from_ron(&bad).is_err());
+        }
     }
 }

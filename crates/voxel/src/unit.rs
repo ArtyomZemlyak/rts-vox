@@ -1494,12 +1494,12 @@ pub fn turret_t1() -> UnitBody {
 
 /// T2 emplacement: a reinforced socket and a single energy cannon.
 pub fn turret_t2() -> UnitBody {
-    let mut u = UnitBody::new_scaled(48, 42, 48, 10, BODY_MM);
+    let mut u = UnitBody::new_scaled(48, 42, 48, 14, BODY_MM);
     let a = Part::Armour;
     fill_f(&mut u, (2, 46), (1, 6), (2, 46), a, FINISH_STEEL);
-    fill_f(&mut u, (6, 42), (6, 15), (6, 42), a, FINISH_PLATE);
-    fill(&mut u, (18, 30), (6, 17), (18, 30), Part::Core);
-    ring(&mut u, (24, 24), 16, 10, (15, 18), a);
+    fill_f(&mut u, (2, 46), (6, 17), (2, 46), a, FINISH_PLATE);
+    fill(&mut u, (16, 32), (3, 17), (16, 32), Part::Core);
+    ring(&mut u, (24, 24), 16, 12, (15, 18), a);
     fill_f(&mut u, (8, 43), (18, 31), (9, 39), a, FINISH_PLATE);
     fill_f(&mut u, (13, 35), (31, 34), (14, 34), a, FINISH_STEEL);
     for z in [9, 36] {
@@ -1513,6 +1513,8 @@ pub fn turret_t2() -> UnitBody {
         Part::Weapon,
         FINISH_GUN,
     );
+    // Continuous jacket carries the barrel between its breech and muzzle.
+    fill_f(&mut u, (39, 48), (24, 32), (19, 29), a, FINISH_STEEL);
     fill_f(
         &mut u,
         (39, 48),

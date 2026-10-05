@@ -46,7 +46,8 @@
   (kind: Tank, allied: false, at: (8370,16,8450)),
   (kind: Tank, allied: false, at: (8000,16,7500), weapon: Some(Blast)),
   (kind: Tank, allied: false, at: (7180,16,6640)),
-  (kind: ArtilleryT2, allied: false, at: (5310,16,5260)),
+  // Rear fire support: protected by the quarry garrison rather than isolated ahead of it.
+  (kind: ArtilleryT2, allied: false, at: (6060,16,5410)),
   (kind: Tank, allied: false, at: (5580,16,5550), weapon: Some(Energy)),
   (kind: Strider, allied: false, at: (8860,16,8390)),
   (kind: Strider, allied: false, at: (8200,16,7400)),
@@ -90,7 +91,7 @@
   (min: (7904,16,7404), max: (8096,160,7596), material: 0),
   (min: (7084,16,6544), max: (7276,160,6736), material: 0),
   (min: (5484,16,5454), max: (5676,160,5646), material: 0),
-  (min: (5214,16,5164), max: (5406,160,5356), material: 0),
+  (min: (5964,16,5314), max: (6156,160,5506), material: 0),
   (min: (8104,16,7304), max: (8296,160,7496), material: 0),
   (min: (6844,16,6504), max: (7036,160,6696), material: 0),
   (min: (5434,16,5264), max: (5626,160,5456), material: 0),
