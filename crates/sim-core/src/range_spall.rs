@@ -3,14 +3,12 @@ use super::*;
 use std::collections::{BTreeSet, VecDeque};
 
 impl BlastRange {
-    pub(super) fn kinetic_spall(
-        &mut self,
+    pub(in crate::blast) fn kinetic_spall_doses(
+        &self,
         seeds: &[(usize, usize, [usize; 3])],
         work: u32,
         radius: u8,
-        at: [i32; 3],
-        config: &ExplosionConfig,
-    ) {
+    ) -> Vec<(usize, usize, [usize; 3], u32)> {
         let mut weights = BTreeMap::<(usize, usize, [usize; 3]), u32>::new();
         // Stress travels through material connected to the drilled channel;
         // it cannot jump a hollow, cross into another unit, or bypass cover.
@@ -56,44 +54,16 @@ impl BlastRange {
         }
         let total: u64 = weights.values().map(|w| u64::from(*w)).sum();
         if total == 0 {
-            return;
+            return Vec::new();
         }
         // Every share is paid from one finite reserve. Rounding dissipates
         // unused work; no full-strength spherical blast is created.
-        for ((id, part, cell), weight) in weights {
-            let dose = (u64::from(work) * u64::from(weight) / total) as u32;
-            if dose == 0 {
-                continue;
-            }
-            let u = &mut self.units[id];
-            let need = if part == 0 {
-                unit_work(&u.body, cell, config)
-                    .saturating_sub(u.dents.get(&cell.map(|v| v as u8)).copied().unwrap_or(0))
-            } else {
-                unit_work(&u.body.segments[part - 1].body, cell, config)
-                    .saturating_sub(u.seg_dent(part - 1, cell))
-            };
-            if dose >= need {
-                let result = if part == 0 {
-                    self.matter.body(id, u, cell, &u.root_frame(cell[1]), at)
-                } else {
-                    self.matter
-                        .body_segment(id, u, part - 1, cell, &u.seg_frames[part - 1], at)
-                };
-                if !matches!(result, matter::ClaimResult::Applied) {
-                    continue;
-                }
-                if part == 0 {
-                    u.detached += 1;
-                } else {
-                    u.seg_detached += 1;
-                }
-            }
-            if part == 0 {
-                u.receive_cell(cell, dose, config);
-            } else {
-                u.receive_seg_cell(part - 1, cell, dose, config);
-            }
-        }
+        weights
+            .into_iter()
+            .filter_map(|((id, part, cell), weight)| {
+                let dose = (u64::from(work) * u64::from(weight) / total) as u32;
+                (dose > 0).then_some((id, part, cell, dose))
+            })
+            .collect()
     }
 }

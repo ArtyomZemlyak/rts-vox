@@ -1,5 +1,6 @@
 // World units: 100 mm. Simulation: 30 ticks per second.
 (
+    kinetic: (max_jobs: 128, cells_per_tick: 512),
     flame: (burst_ticks: 72, interval_ticks: 2, range: 300,
         standoff_milli: 750,
         spread_milli: 70, work: 85, heat: 55, heat_radius: 2,

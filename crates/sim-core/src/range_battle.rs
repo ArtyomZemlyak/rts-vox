@@ -1575,7 +1575,15 @@ impl BlastRange {
             } else {
                 muzzles.len().min(2)
             };
-            if muzzles.is_empty() || b.rounds.len() + count > b.tuning.max_rounds {
+            let pending_full = matches!(weapon, Weapon::Kinetic | Weapon::Canister)
+                && self.kinetic.jobs.len()
+                    + b.rounds
+                        .iter()
+                        .filter(|r| matches!(r.weapon, Weapon::Kinetic | Weapon::Canister))
+                        .count()
+                    + count
+                    > self.streams.tuning.kinetic.max_jobs;
+            if muzzles.is_empty() || b.rounds.len() + count > b.tuning.max_rounds || pending_full {
                 continue;
             }
             let speed = config.shell_speed;

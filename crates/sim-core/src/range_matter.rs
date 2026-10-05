@@ -167,7 +167,7 @@ impl Matter {
     }
     /// Read capacity once per atomic fracture batch. Body components and
     /// successful terrain claims consume the same conservative reservations.
-    fn claim_room(&mut self) -> u32 {
+    pub(crate) fn claim_room(&mut self) -> u32 {
         self.batch
             .as_ref()
             .and_then(|batch| batch.room)

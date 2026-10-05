@@ -26,6 +26,8 @@ struct TickProfile {
     battle_beam_us: u128,
     battle_halo_us: u128,
     rubble_us: u128,
+    kinetic_resume_us: u128,
+    pending_kinetic: usize,
     heat_flush_us: u128,
     collapse_us: u128,
     collapse_work: sim_core::blast::CollapseWork,
@@ -70,6 +72,7 @@ impl TickProfile {
                 self.battle_orders_us += us
             }
             "rubble" => self.rubble_us = us,
+            "kinetic_resume" => self.kinetic_resume_us = us,
             "heat_flush" => self.heat_flush_us = us,
             name if name == "collapse" || name.starts_with("collapse_") => self.collapse_us += us,
             _ => {}
@@ -407,6 +410,7 @@ fn main() {
     };
     let mut admission_previous = sim.matter.admission;
     let mut wake_previous = sim.matter.debris.wakeups;
+    let mut kinetic_previous = sim.kinetic_progress();
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; Weapon::COUNT];
@@ -585,6 +589,7 @@ fn main() {
                 profile.moving += usize::from(unit.motion.destination.is_some());
                 profile.blocked += usize::from(unit.motion.blocked);
             }
+            profile.pending_kinetic = sim.pending_kinetic_impacts();
             profile.fragments = sim.matter.debris.fragments.len();
             profile.felling = sim.matter.felling_pending();
             for fragment in &sim.matter.debris.fragments {
@@ -711,6 +716,14 @@ fn main() {
                     sim.matter.debris.wakeups - wake_previous
                 );
                 wake_previous = sim.matter.debris.wakeups;
+                let kinetic = sim.kinetic_progress();
+                println!(
+                    "damage_kinetic tick={} pending={} completed_resumed_blocked={:?}",
+                    sim.tick,
+                    sim.pending_kinetic_impacts(),
+                    [0, 1, 2].map(|i| kinetic[i] - kinetic_previous[i])
+                );
+                kinetic_previous = kinetic;
                 damage_previous = damage;
                 shots_previous = shots;
                 impact_window.fill(0);
@@ -804,11 +817,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -840,11 +853,14 @@ fn main() {
                 p.collapse_work.blocked_by,
                 p.collapse_work.blocked_ticks,
                 p.collapse_work.gather_candidates,
-                p.collapse_work.gather_buffer_peak
+                p.collapse_work.gather_buffer_peak,
+                p.kinetic_resume_us,
+                p.pending_kinetic
             )
             .unwrap();
         }
         out.flush().unwrap();
+        println!("kinetic_queue_peak={}", tick_profiles.iter().map(|p| p.pending_kinetic).max().unwrap_or(0));
         for (index, window) in tick_profiles.chunks(300).enumerate() {
             let len = window.len() as u128;
             println!("collapse_window={}..{} mean_us={} queued_max={} submitted_max={} blocked_ticks_max={} candidates_max={} buffer_peak_max={}",

@@ -15,6 +15,8 @@ pub struct Stream {
 }
 #[derive(Clone, Debug, Deserialize)]
 pub struct Tuning {
+    #[serde(default)]
+    pub kinetic: Kinetic,
     pub flame: Stream,
     pub machine_gun: Stream,
     pub laser: Stream,
@@ -22,6 +24,20 @@ pub struct Tuning {
     pub smoke_engine_milli: i32,
     pub smoke_core_milli: i32,
     pub smoke_loss_milli: u32,
+}
+/// Bounded continuation storage and material contacts per retry phase.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Kinetic {
+    pub max_jobs: usize,
+    pub cells_per_tick: usize,
+}
+impl Default for Kinetic {
+    fn default() -> Self {
+        Self {
+            max_jobs: 128,
+            cells_per_tick: 512,
+        }
+    }
 }
 /// Presentation-only track dust. The range simulation never reads it.
 #[derive(Clone, Debug, Deserialize)]
@@ -43,6 +59,11 @@ pub struct Dust {
 impl Tuning {
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let t: Self = ron::from_str(text).map_err(|e| e.to_string())?;
+        if !(1..=128).contains(&t.kinetic.max_jobs)
+            || !(1..=8192).contains(&t.kinetic.cells_per_tick)
+        {
+            return Err("kinetic continuation limits outside bounded limits".into());
+        }
         for s in [&t.flame, &t.machine_gun, &t.laser] {
             if !(1..=300).contains(&s.burst_ticks)
                 || !(1..=30).contains(&s.interval_ticks)
@@ -89,6 +110,28 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kinetic_continuation_limits_are_bounded_and_optional_in_legacy_data() {
+        let text = include_str!("../../../data/range-weapons.ron");
+        let t = Tuning::from_ron(text).unwrap();
+        assert_eq!(t.kinetic.max_jobs, 128);
+        assert_eq!(t.kinetic.cells_per_tick, 512);
+        let legacy = text
+            .lines()
+            .filter(|l| !l.contains("kinetic:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(Tuning::from_ron(&legacy).unwrap().kinetic.max_jobs, 128);
+        for (from, to) in [
+            ("max_jobs: 128", "max_jobs: 0"),
+            ("max_jobs: 128", "max_jobs: 129"),
+            ("cells_per_tick: 512", "cells_per_tick: 0"),
+            ("cells_per_tick: 512", "cells_per_tick: 8193"),
+        ] {
+            assert_ne!(text.replace(from, to), text);
+            assert!(Tuning::from_ron(&text.replace(from, to)).is_err());
+        }
+    }
     #[test]
     fn stock_streams_and_invalid_budget() {
         let text = include_str!("../../../data/range-weapons.ron");

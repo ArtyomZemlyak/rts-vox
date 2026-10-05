@@ -888,6 +888,8 @@ pub fn material_work(m: u16, c: &ExplosionConfig) -> u32 {
     }
 }
 
+#[path = "range_kinetic.rs"]
+mod kinetic;
 #[path = "range_index.rs"]
 mod range_index;
 
@@ -2122,6 +2124,7 @@ pub struct BlastRange {
     witness: bool,
     pub removed_materials: [usize; 16],
     pub surface_work: SurfaceWork,
+    kinetic: kinetic::Pending,
     /// Transient renderer notification; authoritative values live above.
     pub surface_changed: Vec<[i32; 3]>,
     pub fire_tick: u32,
@@ -2555,6 +2558,7 @@ impl BlastRange {
             streams,
             heat_exchange: heat_exchange::Exchange::default(),
             thermals: thermal::Thermals::default(),
+            kinetic: kinetic::Pending::default(),
             thermal_tuning: modding::unit_heat::Tuning::from_ron(include_str!(
                 "../../../data/unit-heat.ron"
             ))
@@ -2662,7 +2666,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(48);
+        b.u32(if self.kinetic.jobs.is_empty() { 48 } else { 49 });
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2834,6 +2838,9 @@ impl BlastRange {
             }
             self.battle.save_wave_contacts(b);
         }
+        if version < 49 && !self.kinetic.jobs.is_empty() {
+            self.kinetic.save(b);
+        }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2860,7 +2867,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=48).contains(&version) {
+        if !(27..=49).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3306,6 +3313,34 @@ impl BlastRange {
             }
             r.battle.load_wave_contacts(&mut s, &r.units)?;
         }
+        if version >= 49 {
+            observe("kinetic_jobs", bytes.len() - s.left(), None);
+            r.kinetic = kinetic::Pending::load(
+                &mut s,
+                &r.config,
+                &r.units,
+                r.size,
+                r.streams.tuning.kinetic.max_jobs,
+            )?;
+            let outstanding = r
+                .kinetic
+                .jobs
+                .iter()
+                .try_fold(0u64, |n, j| n.checked_add(j.remaining_energy()))?;
+            if outstanding > r.matter.supplied_mj - r.matter.spent_mj
+                || r.kinetic.jobs.len()
+                    + r.battle
+                        .rounds
+                        .iter()
+                        .filter(|r| {
+                            matches!(r.weapon, battle::Weapon::Kinetic | battle::Weapon::Canister)
+                        })
+                        .count()
+                    > r.streams.tuning.kinetic.max_jobs
+            {
+                return None;
+            }
+        }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
@@ -3331,6 +3366,7 @@ impl BlastRange {
             && self.gun.status.weapon
             && self.streams.ready(self.tick)
             && self.shell.is_none()
+            && self.kinetic.jobs.len() < self.streams.tuning.kinetic.max_jobs
             && (self.fire_tick == u32::MAX || self.tick > self.fire_tick)
             && self
                 .explosion
@@ -3649,6 +3685,8 @@ impl BlastRange {
         self.shield_hits.clear();
         let changed = self.refresh_rubble(&physics_detail);
         completed("rubble");
+        self.step_kinetic_jobs();
+        completed("kinetic_resume");
         detail("motion_begin");
         // Domes recover before this tick's round flies: a collapsed one
         // counts its outage down, a standing one refills to capacity.

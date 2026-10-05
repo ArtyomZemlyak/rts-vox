@@ -106,6 +106,31 @@ fn canister_capacity_defers_the_whole_salvo_then_allows_reload_and_movement() {
     assert_ne!(r.units[0].at, start, "T2 is not mobile");
 }
 
+#[test]
+fn kinetic_continuation_backpressure_reserves_the_entire_canister_salvo() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.ai.next_tick = u32::MAX;
+    r.streams.tuning.kinetic.max_jobs = r.battle.tuning.canister.pellets - 1;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..100 {
+        r.step();
+    }
+    assert_eq!(r.battle.actors[0].fired, 0);
+    assert!(r.battle.rounds.is_empty());
+    r.streams.tuning.kinetic.max_jobs += 1;
+    r.step();
+    assert_eq!(r.battle.actors[0].fired, 1);
+    assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
+    assert_eq!(r.pending_kinetic_impacts(), 0);
+    assert!(r.battle_order(0, Order::Hold, None));
+    for _ in 0..100 {
+        r.step();
+    }
+    assert!(r.matter.economy.ledger.balanced());
+}
+
 fn arena(kind: RangeUnitKind) -> BlastRange {
     arena_of([kind, kind])
 }

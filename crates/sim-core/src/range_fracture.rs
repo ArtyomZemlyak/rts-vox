@@ -139,9 +139,20 @@ fn motion_mj(f: &Fragment) -> u64 {
 
 impl Matter {
     pub(crate) fn begin_body_batch(&mut self) {
-        assert!(self.batch.is_none());
         let room = self.claim_room();
+        self.begin_body_batch_with_room(room);
+    }
+    /// Consecutive atomic batches in the same serial phase can reuse the
+    /// exact remaining component/terrain reservation count. Never across ticks.
+    pub(crate) fn begin_body_batch_with_room(&mut self, room: u32) {
+        assert!(self.batch.is_none());
         self.batch = Some(Batch::with_room(Some(room)));
+    }
+    pub(crate) fn body_batch_room(&self) -> u32 {
+        self.batch
+            .as_ref()
+            .and_then(|b| b.room)
+            .expect("atomic reservation cache")
     }
     pub(crate) fn finish_body_batch(&mut self) {
         let Some(batch) = self.batch.take() else {
