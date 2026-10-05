@@ -2666,7 +2666,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(if self.kinetic.jobs.is_empty() { 48 } else { 49 });
+        b.u32(self.kinetic.version());
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2867,7 +2867,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=49).contains(&version) {
+        if !(27..=50).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3321,6 +3321,7 @@ impl BlastRange {
                 &r.units,
                 r.size,
                 r.streams.tuning.kinetic.max_jobs,
+                version,
             )?;
             let outstanding = r
                 .kinetic
@@ -3328,13 +3329,21 @@ impl BlastRange {
                 .iter()
                 .try_fold(0u64, |n, j| n.checked_add(j.remaining_energy()))?;
             if outstanding > r.matter.supplied_mj - r.matter.spent_mj
-                || r.kinetic.jobs.len()
+                || r.kinetic.jobs.len() - r.pending_machine_gun_contacts()
                     + r.battle
                         .rounds
                         .iter()
-                        .filter(|r| {
-                            matches!(r.weapon, battle::Weapon::Kinetic | battle::Weapon::Canister)
+                        .filter(|p| {
+                            matches!(p.weapon, battle::Weapon::Kinetic | battle::Weapon::Canister)
                         })
+                        .count()
+                    > r.streams.tuning.kinetic.max_jobs
+                || r.pending_machine_gun_contacts()
+                    + r.streams.rounds.len()
+                    + r.battle
+                        .rounds
+                        .iter()
+                        .filter(|p| p.weapon == battle::Weapon::MachineGun)
                         .count()
                     > r.streams.tuning.kinetic.max_jobs
             {
@@ -3366,7 +3375,7 @@ impl BlastRange {
             && self.gun.status.weapon
             && self.streams.ready(self.tick)
             && self.shell.is_none()
-            && self.kinetic.jobs.len() < self.streams.tuning.kinetic.max_jobs
+            && self.solid_flight_room(&self.battle.rounds, 1)
             && (self.fire_tick == u32::MAX || self.tick > self.fire_tick)
             && self
                 .explosion

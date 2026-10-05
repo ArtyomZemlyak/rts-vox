@@ -3040,3 +3040,27 @@ fn battle_weapon_codes_fit_diagnostic_counters() {
     assert!(counts.into_iter().all(|n| n == 1));
     assert!(Weapon::from_code(Weapon::COUNT as u8).is_none());
 }
+
+#[test]
+fn machine_gun_continuation_capacity_reserves_both_walker_barrels() {
+    let mut r = arena(RangeUnitKind::Strider);
+    r.start_battle().unwrap();
+    r.battle.ai.next_tick = u32::MAX;
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Ground([540, 100, 336]), None));
+    r.streams.tuning.kinetic.max_jobs = 1;
+    for _ in 0..90 {
+        r.step();
+    }
+    assert_eq!(r.battle.actors[0].fired, 0);
+    assert!(r.battle.rounds.is_empty());
+    r.streams.tuning.kinetic.max_jobs = 2;
+    for _ in 0..30 {
+        r.step();
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
+    }
+    assert_eq!(r.battle.actors[0].fired, 1);
+    assert_eq!(r.battle.rounds.len(), 2);
+}

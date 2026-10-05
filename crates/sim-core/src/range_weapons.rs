@@ -527,6 +527,9 @@ impl BlastRange {
     fn emit_stream(&mut self, tuning: &Stream) {
         let flame = self.config.delivery == Delivery::Flame;
         let muzzles = self.stream_muzzles();
+        if !flame && !self.solid_flight_room(&self.battle.rounds, muzzles.len()) {
+            return;
+        }
         for from in muzzles {
             for ray in 0..if flame { 3 } else { 1 } {
                 if self.streams.rounds.len() == MAX_ROUNDS {
@@ -606,6 +609,9 @@ impl BlastRange {
                         .body_segment(id, u, part - 1, cell, &u.seg_frames[part - 1], at)
                 };
                 if !matches!(result, matter::ClaimResult::Applied) {
+                    if matches!(result, matter::ClaimResult::Deferred) {
+                        self.defer_stream_contact(Some((id, part, cell)), p, at, tuning, config);
+                    }
                     return;
                 }
                 if part == 0 {
@@ -650,11 +656,14 @@ impl BlastRange {
                     .saturating_add(tuning.work);
                 if total >= material_work(material(&self.world, p), config) {
                     self.matter.begin(tuning.fracture_j, 1);
-                    if matches!(
-                        self.matter.ground(&mut self.world, p, at),
-                        matter::ClaimResult::Applied
-                    ) {
-                        self.surface_work.remove(&p);
+                    match self.matter.ground(&mut self.world, p, at) {
+                        matter::ClaimResult::Applied => {
+                            self.surface_work.remove(&p);
+                        }
+                        matter::ClaimResult::Deferred => {
+                            self.defer_stream_contact(None, p, at, tuning, config);
+                        }
+                        _ => {}
                     }
                 } else {
                     self.surface_work.insert(p, total);

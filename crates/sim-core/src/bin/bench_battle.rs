@@ -411,6 +411,7 @@ fn main() {
     let mut admission_previous = sim.matter.admission;
     let mut wake_previous = sim.matter.debris.wakeups;
     let mut kinetic_previous = sim.kinetic_progress();
+    let mut direct_previous = sim.machine_gun_continuation_progress();
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; Weapon::COUNT];
@@ -724,6 +725,14 @@ fn main() {
                     [0, 1, 2].map(|i| kinetic[i] - kinetic_previous[i])
                 );
                 kinetic_previous = kinetic;
+                let direct = sim.machine_gun_continuation_progress();
+                println!(
+                    "damage_machine_gun tick={} pending={} completed_retries_blocked={:?}",
+                    sim.tick,
+                    sim.pending_machine_gun_contacts(),
+                    [0, 1, 2].map(|i| direct[i] - direct_previous[i])
+                );
+                direct_previous = direct;
                 damage_previous = damage;
                 shots_previous = shots;
                 impact_window.fill(0);
@@ -860,7 +869,14 @@ fn main() {
             .unwrap();
         }
         out.flush().unwrap();
-        println!("kinetic_queue_peak={}", tick_profiles.iter().map(|p| p.pending_kinetic).max().unwrap_or(0));
+        println!(
+            "kinetic_queue_peak={}",
+            tick_profiles
+                .iter()
+                .map(|p| p.pending_kinetic)
+                .max()
+                .unwrap_or(0)
+        );
         for (index, window) in tick_profiles.chunks(300).enumerate() {
             let len = window.len() as u128;
             println!("collapse_window={}..{} mean_us={} queued_max={} submitted_max={} blocked_ticks_max={} candidates_max={} buffer_peak_max={}",

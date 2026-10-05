@@ -189,12 +189,20 @@ fn corrupt_and_truncated_pending_tail_is_rejected_without_allocating_unbounded_l
     r.kinetic.save(&mut b);
     for n in 0..b.v.len() {
         assert!(
-            Pending::load(&mut Scan::new(&b.v[..n]), &r.config, &r.units, r.size, 128).is_none(),
+            Pending::load(
+                &mut Scan::new(&b.v[..n]),
+                &r.config,
+                &r.units,
+                r.size,
+                128,
+                49
+            )
+            .is_none(),
             "accepted cut {n}"
         );
     }
     b.v[..4].copy_from_slice(&u32::MAX.to_le_bytes());
-    assert!(Pending::load(&mut Scan::new(&b.v), &r.config, &r.units, r.size, 128).is_none());
+    assert!(Pending::load(&mut Scan::new(&b.v), &r.config, &r.units, r.size, 128, 49).is_none());
 }
 
 #[test]
@@ -236,4 +244,171 @@ fn consecutive_retry_batches_reuse_one_capacity_scan_without_changing_physics() 
         assert!(cached.matter.economy.ledger.balanced());
     }
     assert_eq!(cached.pending_kinetic_impacts(), 0);
+}
+
+fn bullet(r: &mut BlastRange, cell: [usize; 3]) {
+    let p = r.units[0].world_pos(cell);
+    assert_eq!(r.units[0].hit(p), Some((0, cell)));
+    let mut tuning = r.streams.tuning.machine_gun.clone();
+    tuning.work = 1_000_000;
+    r.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+}
+
+#[test]
+fn machine_gun_continuation_follows_local_cell_and_does_not_repay() {
+    let mut r = range();
+    occupy(&mut r);
+    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    bullet(&mut reference, [30, 11, 0]);
+    let before = r.units[0].revision;
+    bullet(&mut r, [30, 11, 0]);
+    assert_eq!(r.units[0].revision, before);
+    assert_eq!(r.pending_machine_gun_contacts(), 1);
+    let supplied = r.matter.supplied_mj;
+    for _ in 0..30 {
+        r.step_kinetic_jobs();
+    }
+    assert_eq!(r.matter.supplied_mj, supplied);
+    r.units[0].motion.pos[0] = r.units[0].motion.pos[0].add(Fx::from_int(100));
+    r.units[0].motion.drive.head = fx::angle::QUARTER;
+    r.units[0].update_pose(fx::angle::QUARTER);
+    r.units[1].motion.pos = [285, 16, 336].map(Fx::from_int);
+    r.units[1].update_pose(0);
+    complete(&mut r);
+    same_damage(&r, &reference);
+    assert_eq!(r.machine_gun_continuation_progress(), [1, 31, 31]);
+}
+
+#[test]
+fn mixed_machine_gun_and_penetrator_queue_replays_and_validates_its_tail() {
+    let mut r = range();
+    occupy(&mut r);
+    bullet(&mut r, [30, 11, 0]);
+    shot(&mut r);
+    assert_eq!(r.pending_kinetic_impacts(), 2);
+    assert_eq!(r.kinetic.version(), 50);
+    let mut copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    copy.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(r.snapshot(), copy.snapshot());
+    complete(&mut r);
+    complete(&mut copy);
+    assert_eq!(r.snapshot(), copy.snapshot());
+    assert_eq!(r.kinetic.version(), 48);
+    let mut r = range();
+    occupy(&mut r);
+    bullet(&mut r, [30, 11, 0]);
+    let mut b = Blob::new();
+    r.kinetic.save(&mut b);
+    for n in 0..b.v.len() {
+        assert!(Pending::load(
+            &mut Scan::new(&b.v[..n]),
+            &r.config,
+            &r.units,
+            r.size,
+            128,
+            50
+        )
+        .is_none());
+    }
+    // Body target ID is the final 40-byte cell tuple.
+    let start = b.v.len() - 40;
+    b.v[start..start + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(Pending::load(&mut Scan::new(&b.v), &r.config, &r.units, r.size, 128, 50).is_none());
+}
+
+#[test]
+fn deferred_machine_gun_does_not_redirect_after_another_event_removes_its_source() {
+    let mut r = range();
+    occupy(&mut r);
+    bullet(&mut r, [30, 11, 0]);
+    settle(&mut r);
+    // Another bullet takes the exact source first.
+    bullet(&mut r, [30, 11, 0]);
+    assert!(!r.units[0].body.vol.get(30, 11, 0));
+    let supplied = r.matter.supplied_mj;
+    let spent = r.matter.spent_mj;
+    let removed = r.units[0].removed.clone();
+    complete(&mut r);
+    assert_eq!(r.matter.supplied_mj, supplied);
+    assert_eq!(r.matter.spent_mj, spent);
+    assert_eq!(r.units[0].removed, removed);
+}
+
+#[test]
+fn deferred_machine_gun_preserves_terrain_contact_and_credited_dents() {
+    let mut r = range();
+    occupy(&mut r);
+    let p = [100, 15, 100];
+    let mat = material(&r.world, p);
+    assert_ne!(mat, 0);
+    let mut tuning = r.streams.tuning.machine_gun.clone();
+    tuning.work = material_work(mat, &r.config) / 2 + 1;
+    r.surface_work.insert(p, tuning.work);
+    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    reference.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+    r.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+    assert_eq!(r.pending_machine_gun_contacts(), 1);
+    assert_eq!(material(&r.world, p), mat);
+    let supplied = r.matter.supplied_mj;
+    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    restored.matter.tuning = r.matter.tuning.clone();
+    complete(&mut r);
+    complete(&mut restored);
+    r.world.flush();
+    restored.world.flush();
+    assert_eq!(material(&r.world, p), 0);
+    assert!(!r.surface_work.contains_key(&p));
+    assert_eq!(r.matter.supplied_mj, supplied);
+    assert_eq!(r.matter.spent_mj, reference.matter.spent_mj);
+    assert_eq!(r.snapshot(), restored.snapshot());
+}
+
+#[test]
+fn old_independent_flight_reservations_can_drain_without_overflowing_new_queue() {
+    let mut r = range();
+    occupy(&mut r);
+    let cap = r.streams.tuning.kinetic.max_jobs;
+    for _ in 0..cap {
+        shot(&mut r);
+    }
+    assert_eq!(r.kinetic.version(), 49);
+    // Old producers could additionally have a full set of MG bullets in flight.
+    for _ in 0..cap {
+        bullet(&mut r, [30, 11, 0]);
+    }
+    assert_eq!(r.pending_kinetic_impacts(), cap * 2);
+    assert!(!r.solid_flight_room(&[], 1));
+    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    restored.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(r.snapshot(), restored.snapshot());
+    complete(&mut r);
+    complete(&mut restored);
+    assert_eq!(r.snapshot(), restored.snapshot());
+    assert!(r.solid_flight_room(&[], 1));
+}
+
+#[test]
+fn stock_machine_gun_dents_are_credited_once_before_and_after_waiting() {
+    let mut r = range();
+    occupy(&mut r);
+    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let p = r.units[0].world_pos([30, 11, 0]);
+    let mut tuning = r.streams.tuning.machine_gun.clone();
+    tuning.work = 500;
+    // Force multiple real denting hits before destructive fracture.
+    r.config.unit_ablation_resistance = 2000;
+    reference.config = r.config.clone();
+    for _ in 0..32 {
+        r.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+        reference.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
+        if r.pending_machine_gun_contacts() > 0 {
+            break;
+        }
+    }
+    assert_eq!(r.pending_machine_gun_contacts(), 1);
+    assert!(r.units[0].dents.contains_key(&[30, 11, 0]));
+    let supplied = r.matter.supplied_mj;
+    complete(&mut r);
+    same_damage(&r, &reference);
+    assert_eq!(r.matter.supplied_mj, supplied);
 }

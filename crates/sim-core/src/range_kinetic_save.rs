@@ -3,7 +3,17 @@ use super::*;
 use fx::blob::{Blob, Scan};
 
 impl Pending {
+    pub fn version(&self) -> u32 {
+        if self.jobs.is_empty() {
+            48
+        } else if self.jobs.iter().any(|j| j.direct.is_some()) {
+            50
+        } else {
+            49
+        }
+    }
     pub fn save(&self, b: &mut Blob) {
+        let direct_tags = self.version() >= 50;
         b.u32(self.jobs.len() as u32);
         for j in &self.jobs {
             let c = &j.config;
@@ -67,6 +77,19 @@ impl Pending {
                 }
             }
             b.u16s(&j.ground);
+            if direct_tags {
+                match &j.direct {
+                    None => b.u8(0),
+                    Some(Direct::Body(target)) => {
+                        b.u8(1);
+                        save_cell(b, *target);
+                    }
+                    Some(Direct::Ground(mat)) => {
+                        b.u8(2);
+                        b.u16(*mat);
+                    }
+                }
+            }
         }
     }
 
@@ -76,8 +99,19 @@ impl Pending {
         units: &[RangeUnit],
         size: [u32; 3],
         max_jobs: usize,
+        version: u32,
     ) -> Option<Self> {
-        let count = bounded_count(s, max_jobs, 100)?;
+        // Version 49 reserved penetrators independently of machine-gun flight.
+        // Accept the finite legacy overlap; producers wait until it drains.
+        let count = bounded_count(
+            s,
+            if version >= 50 {
+                max_jobs * 2
+            } else {
+                max_jobs
+            },
+            100,
+        )?;
         if count == 0 {
             return None;
         }
@@ -225,7 +259,38 @@ impl Pending {
                 }
                 ground.push(mat);
             }
+            let direct = if version >= 50 {
+                match s.u8() {
+                    0 => None,
+                    1 => Some(Direct::Body(load_cell(s, units)?)),
+                    2 => {
+                        let mat = s.u16();
+                        if mat == 0 || mat > 15 || ground != [mat] {
+                            return None;
+                        }
+                        Some(Direct::Ground(mat))
+                    }
+                    _ => return None,
+                }
+            } else {
+                None
+            };
+            if direct.is_some()
+                && (ray.len() != 1
+                    || cursor != 0
+                    || work != config.energy
+                    || lateral.is_some()
+                    || !seeds.is_empty()
+                    || spall.is_some()
+                    || spall_cursor != 0
+                    || !poses.is_empty()
+                    || config.spall.is_some()
+                    || config.fragment_box != 1)
+            {
+                return None;
+            }
             jobs.push_back(Job {
+                direct,
                 config,
                 at,
                 ray,
@@ -240,9 +305,14 @@ impl Pending {
                 ground,
             });
         }
+        let direct = jobs.iter().filter(|j| j.direct.is_some()).count();
+        if direct > max_jobs || jobs.len() - direct > max_jobs {
+            return None;
+        }
         s.ok().then_some(Self {
             jobs,
             stats: [0; 3],
+            direct_stats: [0; 3],
         })
     }
 }
