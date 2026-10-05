@@ -406,6 +406,7 @@ fn main() {
         Vec::new()
     };
     let mut admission_previous = sim.matter.admission;
+    let mut wake_previous = sim.matter.debris.wakeups;
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; Weapon::COUNT];
@@ -704,6 +705,12 @@ fn main() {
                     admission.room_scans - admission_previous.room_scans,
                     admission.room_items - admission_previous.room_items);
                 admission_previous = admission;
+                println!(
+                    "damage_wake tick={} resumed={}",
+                    sim.tick,
+                    sim.matter.debris.wakeups - wake_previous
+                );
+                wake_previous = sim.matter.debris.wakeups;
                 damage_previous = damage;
                 shots_previous = shots;
                 impact_window.fill(0);

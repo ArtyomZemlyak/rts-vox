@@ -189,6 +189,7 @@ mod tests {
             b.fragments.iter().all(|f| f.resting),
             "a wakeup stole the claim's working slot"
         );
+        assert_eq!(b.wakeups, 0);
         b.claims.clear();
         b.step_fragments(
             &w,
@@ -203,6 +204,19 @@ mod tests {
             "the first unsupported piece must resume falling"
         );
         assert!(b.fragments[1..].iter().all(|f| f.resting));
+        assert_eq!(b.wakeups, 1);
+        // Runtime diagnostics cannot affect replay state or serialized bytes.
+        let expected = b.hash();
+        let mut bytes = Blob::new();
+        b.save(&mut bytes);
+        b.wakeups += 100;
+        assert_eq!(b.hash(), expected);
+        let mut again = Blob::new();
+        b.save(&mut again);
+        assert_eq!(bytes.v, again.v);
+        let restored = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t).unwrap();
+        assert_eq!(restored.wakeups, 0);
+        assert_eq!(restored.hash(), expected);
         assert_eq!(b.fragment_pools(&t).working, 1);
         assert_eq!(e.wrecks.len(), 2);
         assert!(e.balanced());
@@ -3585,6 +3599,8 @@ pub struct Bursts {
     pub motion_mj: u64,
     pub body_motion_mj: u64,
     pub body_removed: u64,
+    /// Diagnostic only: actual resting-to-flying transitions; not saved or hashed.
+    pub wakeups: u64,
 }
 
 pub const IDENTITY: [V3; 3] = [
@@ -4500,6 +4516,7 @@ impl Bursts {
             if let Some(velocity) = push.filter(|_| !f.resting || can_wake) {
                 if f.resting {
                     f.resting = false;
+                    self.wakeups += 1;
                     room -= 1;
                     working_room -= usize::from(parked);
                     stale_wrecks.insert(f.held);
@@ -4510,6 +4527,7 @@ impl Bursts {
                 // The ground under it was taken (ADR-291): it falls again,
                 // and its wreck entry goes until it settles anew.
                 f.resting = false;
+                self.wakeups += 1;
                 room -= 1;
                 working_room -= usize::from(parked);
                 stale_wrecks.insert(f.held);

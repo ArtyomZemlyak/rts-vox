@@ -52,6 +52,7 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::BattlePreset
         | Action::BattleStart
         | Action::FreeControl
+        | Action::FreeRange
         | Action::BattleReplay
         | Action::BattleChoose
         | Action::SelectAllOwn
@@ -340,19 +341,15 @@ pub fn build(commands: &mut Commands, camera: Entity, font: &TextFont) {
         ))
         .insert(BattleControls)
         .with_children(|p| {
-            label(
-                p,
-                font,
-                "СРАЖЕНИЕ · УПРАВЛЕНИЕ СЦЕНАРИЕМ",
-                11.0,
-                theme::MUTED,
-            );
+            label(p, font, "ПОЛИГОН · РЕЖИМ И СЦЕНАРИЙ", 11.0, theme::MUTED);
             p.spawn(row()).with_children(|p| {
+                button(p, font, "Свободный полигон", Action::FreeRange);
                 button(p, font, "Управлять без боя", Action::FreeControl);
                 button(p, font, "Начать бой", Action::BattleStart);
                 button(p, font, "Повторить бой", Action::BattleReplay);
                 button(p, font, "Другой бой", Action::BattleChoose);
-                button(p, font, "Сводка", Action::Drawer(5));
+                let summary = button(p, font, "Сводка", Action::Drawer(5));
+                p.commands().entity(summary).insert(BattleButton);
             });
         });
     commands.spawn((
@@ -501,24 +498,27 @@ pub fn refresh(
             }
             node.left = px(if compact { 182 } else { 16 });
             node.right = if compact { px(16) } else { Val::Auto };
-            node.top = px(if battle {
-                84.0 + battle_bar
+            node.top = px(84.0
+                + battle_bar
                     .single()
-                    .map_or(108.0, |n| n.size().y * n.inverse_scale_factor())
-            } else {
-                76.0
-            });
+                    .map_or(108.0, |n| n.size().y * n.inverse_scale_factor()));
         }
         if battle_controls.is_some() {
             // Minimap ends at x=170 in the compact layout. The drawer
             // occupies the rightmost 330px, so neither may cover a button.
             node.left = px(if compact { 182 } else { 16 });
-            node.right = if compact {
+            node.right = if battle && compact {
                 px(if panel.drawer != 0 { 362 } else { 16 })
             } else {
                 Val::Auto
             };
-            node.width = if compact { Val::Auto } else { percent(47) };
+            node.width = if !battle {
+                px(230)
+            } else if compact {
+                Val::Auto
+            } else {
+                percent(47)
+            };
         }
         if strip.is_some() {
             let bottom = px(if compact { 234 } else { 184 });
@@ -529,7 +529,7 @@ pub fn refresh(
         let visible = if brand.is_some() {
             Some(!hide_brand)
         } else if battle_controls.is_some() {
-            Some(battle)
+            Some(true)
         } else if drawer.is_some() {
             Some(panel.drawer != 0)
         } else if let Some(Roster(i)) = roster_button {
@@ -546,6 +546,8 @@ pub fn refresh(
         } else if loadout.is_some() {
             Some(battle && loadout_count > 0)
         } else if solo.is_some() {
+            Some(!battle)
+        } else if matches!(action, Some(Action::FreeRange)) {
             Some(!battle)
         } else if matches!(action, Some(Action::FreeControl)) {
             Some(
@@ -971,6 +973,123 @@ mod tests {
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
     }
+    #[test]
+    fn free_range_entry_is_visible_in_solo_and_combat_controls_stay_separate() {
+        let mut app = app();
+        app.add_systems(Startup, |mut commands: Commands| {
+            let camera = commands.spawn_empty().id();
+            build(&mut commands, camera, &TextFont::default());
+        });
+        app.add_systems(PostUpdate, refresh);
+        click(&mut app, Action::RangeMode);
+        rebuild_pending(&mut app);
+        let visible = |app: &mut App, action| {
+            let mut query = app.world_mut().query::<(&Action, &Node)>();
+            query
+                .iter(app.world())
+                .find(|(a, _)| **a == action)
+                .unwrap()
+                .1
+                .display
+                != Display::None
+        };
+        assert!(visible(&mut app, Action::FreeRange));
+        assert!(!visible(&mut app, Action::BattleStart));
+        assert!(!visible(&mut app, Action::FreeControl));
+        assert!(!visible(&mut app, Action::BattleReplay));
+        let mut bars = app
+            .world_mut()
+            .query_filtered::<&Node, With<BattleControls>>();
+        let bar = bars.single(app.world()).unwrap();
+        assert_ne!(bar.display, Display::None);
+        assert_eq!(bar.width, px(230));
+        click(&mut app, Action::FreeRange);
+        rebuild_pending(&mut app);
+        assert!(!visible(&mut app, Action::FreeRange));
+        assert!(visible(&mut app, Action::BattleStart));
+        assert!(!visible(&mut app, Action::Fire));
+        assert!(!visible(&mut app, Action::AutoAttack));
+        click(&mut app, Action::BattleStart);
+        assert!(!visible(&mut app, Action::BattleStart));
+        assert!(visible(&mut app, Action::BattleReplay));
+        assert!(visible(&mut app, Action::Fire));
+        assert!(visible(&mut app, Action::AutoAttack));
+    }
+
+    #[test]
+    fn free_range_button_enters_control_from_solo_without_a_second_click() {
+        let mut app = app();
+        click(&mut app, Action::RangeMode);
+        rebuild_pending(&mut app);
+        assert!(!app.world().resource::<Scene>().sim.battle_mode());
+        let map = app
+            .world()
+            .resource::<Scene>()
+            .sim
+            .layout
+            .as_ref()
+            .unwrap()
+            .blocks
+            .clone();
+        click(&mut app, Action::FreeRange);
+        assert!(app.world().resource::<Panel>().free_launch);
+        rebuild_pending(&mut app);
+        let scene = app.world().resource::<Scene>();
+        assert!(scene.sim.battle_mode());
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Setup
+        );
+        assert!(!scene.sim.battle.autonomous);
+        assert!(!scene.paused);
+        assert_eq!(scene.sim.layout.as_ref().unwrap().blocks, map);
+        assert_eq!(scene.sim.battle_counts(), [2, 2]);
+        let workshop = app.world().resource::<Workshop>();
+        assert!(!workshop.editing);
+        let controlled = workshop.controlled.unwrap();
+        assert!(scene.sim.allied(controlled));
+        assert_eq!(workshop.selected_units, vec![controlled]);
+        assert!(!app.world().resource::<Panel>().free_launch);
+        // A quiet Setup keeps the same roster and never starts combat by itself.
+        for _ in 0..30 {
+            app.world_mut().resource_mut::<Scene>().sim.step();
+        }
+        assert!(app
+            .world()
+            .resource::<Scene>()
+            .sim
+            .battle
+            .actors
+            .iter()
+            .all(|a| a.fired == 0));
+        click(&mut app, Action::BattleStart);
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+    }
+
+    #[test]
+    fn switching_scenarios_cancels_a_pending_free_range_launch() {
+        let mut app = app();
+        click(&mut app, Action::FreeRange);
+        assert!(app.world().resource::<Panel>().free_launch);
+        click(&mut app, Action::BattleWorldAuto);
+        assert!(!app.world().resource::<Panel>().free_launch);
+        rebuild_pending(&mut app);
+        let scene = app.world().resource::<Scene>();
+        assert!(scene.sim.battle.autonomous);
+        assert_eq!(
+            scene.sim.battle.phase,
+            sim_core::blast::battle::Phase::Fighting
+        );
+        click(&mut app, Action::FreeRange);
+        click(&mut app, Action::RangeMode);
+        rebuild_pending(&mut app);
+        assert!(!app.world().resource::<Scene>().sim.battle_mode());
+        assert!(!app.world().resource::<Panel>().free_launch);
+    }
+
     #[test]
     fn free_control_then_start_and_switch_battle_from_buttons() {
         let mut app = app();

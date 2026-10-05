@@ -148,6 +148,7 @@ pub struct Panel {
     pub ranges: bool,
     pub projectile_markers: bool,
     pub battle_launch: bool,
+    pub free_launch: bool,
     pub battle_auto: bool,
     pub battle_name: String,
     pub roster_page: usize,
@@ -170,6 +171,7 @@ impl Panel {
             ranges: true,
             projectile_markers: true,
             battle_launch: false,
+            free_launch: false,
             battle_auto: false,
             battle_name: String::new(),
             roster_page: 0,
@@ -198,6 +200,7 @@ pub enum Action {
     RangeMode,
     BattleStart,
     FreeControl,
+    FreeRange,
     BattleReplay,
     BattleChoose,
     Side(bool),
@@ -686,12 +689,29 @@ pub fn actions(
             Action::BattleWorld
                 | Action::BattleWorldAuto
                 | Action::BattlePreset
+                | Action::FreeRange
+                | Action::Skirmish(_)
                 | Action::RangeMode
                 | Action::Scenario(_)
         ) {
             panel.briefing.clear();
             panel.battle_launch = false;
             panel.battle_auto = false;
+        }
+        if matches!(
+            action,
+            Action::FreeRange
+                | Action::FreeControl
+                | Action::BattleStart
+                | Action::BattleReplay
+                | Action::BattleWorld
+                | Action::BattleWorldAuto
+                | Action::BattlePreset
+                | Action::RangeMode
+                | Action::Skirmish(_)
+                | Action::Scenario(_)
+        ) {
+            panel.free_launch = false;
         }
         match action {
             Action::Drawer(id) => {
@@ -787,18 +807,26 @@ pub fn actions(
                     Err(e) => scene.notice = e,
                 }
             }
-            Action::BattlePreset => match edit.battle_preset(scene.sim.config.clone()) {
-                Ok(()) => {
-                    panel.battle_name = "Бой 2×2 / расстановка".into();
-                    panel.drawer = 0;
-                    panel.pending = None;
-                    scene.view = 1;
-                    scene.repeat = false;
-                    panel.demo = false;
-                    panel.ground_fire = false;
+            Action::BattlePreset | Action::FreeRange => {
+                match edit.battle_preset(scene.sim.config.clone()) {
+                    Ok(()) => {
+                        panel.free_launch = action == Action::FreeRange;
+                        panel.battle_name = if panel.free_launch {
+                            "Свободный полигон"
+                        } else {
+                            "Бой 2×2 / расстановка"
+                        }
+                        .into();
+                        panel.drawer = 0;
+                        panel.pending = None;
+                        scene.view = 1;
+                        scene.repeat = false;
+                        panel.demo = false;
+                        panel.ground_fire = false;
+                    }
+                    Err(e) => scene.notice = e,
                 }
-                Err(e) => scene.notice = e,
-            },
+            }
             Action::RangeMode => match edit.range_mode(scene.sim.config.clone()) {
                 Ok(()) => {
                     panel.battle_name.clear();
@@ -816,31 +844,7 @@ pub fn actions(
                 }
                 Err(e) => scene.notice = e,
             },
-            Action::FreeControl => match scene.sim.start_free_control() {
-                Ok(()) => {
-                    panel.drawer = 0;
-                    edit.editing = false;
-                    scene.paused = false;
-                    panel.drive = true;
-                    panel.demo = false;
-                    panel.ground_fire = false;
-                    panel.battle_launch = false;
-                    scene.repeat = false;
-                    scene.notice = "Свободное управление: ЛКМ — выбор, ПКМ — движение. ИИ и стрельба выключены до начала боя.".into();
-                    edit.controlled = scene
-                        .sim
-                        .units
-                        .iter()
-                        .enumerate()
-                        .find(|(i, u)| {
-                            scene.sim.allied(*i) && u.status.alive && !u.kind.emplacement()
-                        })
-                        .map(|(i, _)| i);
-                    edit.selected_units = edit.controlled.into_iter().collect();
-                    edit.selected = edit.controlled.map(Selection::Unit);
-                }
-                Err(e) => scene.notice = e.into(),
-            },
+            Action::FreeControl => enter_free_control(&mut panel, &mut scene, &mut edit),
             Action::BattleStart => match scene.sim.start_battle() {
                 Ok(()) => {
                     panel.briefing.clear();
@@ -1283,6 +1287,35 @@ fn weapon_of(scene: &Scene) -> u8 {
     }
 }
 
+/// Shared entry for prepared rosters and the one-click free polygon launch.
+fn enter_free_control(panel: &mut Panel, scene: &mut Scene, edit: &mut Workshop) {
+    match scene.sim.start_free_control() {
+        Ok(()) => {
+            panel.drawer = 0;
+            edit.editing = false;
+            scene.paused = false;
+            panel.drive = true;
+            panel.demo = false;
+            panel.ground_fire = false;
+            panel.battle_launch = false;
+            panel.battle_auto = false;
+            panel.free_launch = false;
+            scene.repeat = false;
+            scene.notice = "Свободное управление: ЛКМ — выбор, ПКМ — движение. ИИ и стрельба выключены до начала боя.".into();
+            edit.controlled = scene
+                .sim
+                .units
+                .iter()
+                .enumerate()
+                .find(|(i, u)| scene.sim.allied(*i) && u.status.alive && !u.kind.emplacement())
+                .map(|(i, _)| i);
+            edit.selected_units = edit.controlled.into_iter().collect();
+            edit.selected = edit.controlled.map(Selection::Unit);
+        }
+        Err(e) => scene.notice = e.into(),
+    }
+}
+
 /// Resume an authored series only after the previous physical impact has
 /// finished. Manual control cancels automation without discarding damage.
 pub fn scenario_progress(
@@ -1291,6 +1324,10 @@ pub fn scenario_progress(
     mut edit: ResMut<Workshop>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
+    if panel.free_launch && edit.pending.is_none() && scene.sim.battle_mode() {
+        enter_free_control(&mut panel, &mut scene, &mut edit);
+        panel.free_launch = false;
+    }
     if panel.battle_launch && edit.pending.is_none() && scene.sim.battle_mode() {
         if panel.battle_auto {
             scene.sim.set_ai_vs_ai(true);
