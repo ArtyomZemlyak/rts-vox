@@ -416,6 +416,8 @@ fn main() {
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; Weapon::COUNT];
     let mut laser_contacts = 0usize;
+    // Actual ray contact events, captured before endpoint geometry is edited.
+    let mut laser_contact_kinds = [0usize; 4];
     for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -434,6 +436,17 @@ fn main() {
         let ground_counts = &mut ground_windows[tick_index / 300].1;
         sim.step_observed_tasks(
             |phase| {
+                if damage_trace {
+                    if let Some(kind) = match phase {
+                        "orders_laser_contact_unit" => Some(0),
+                        "orders_laser_contact_world" => Some(1),
+                        "orders_laser_contact_shield" => Some(2),
+                        "orders_laser_contact_miss" => Some(3),
+                        _ => None,
+                    } {
+                        laser_contact_kinds[kind] += 1;
+                    }
+                }
                 let now = Instant::now();
                 let elapsed = now.duration_since(last).as_micros();
                 last = now;
@@ -697,6 +710,16 @@ fn main() {
                     sim.matter.debris.fragments.iter().filter(|f| !f.resting).count(),
                     sim.matter.debris.claims(),
                     sim.matter.debris.fragment_room(&sim.matter.tuning));
+                assert_eq!(
+                    laser_contact_kinds[..3].iter().sum::<usize>(),
+                    laser_contacts,
+                    "laser ray contact events differ from visible traces"
+                );
+                println!(
+                    "damage_laser tick={} unit_world_shield_miss={:?}",
+                    sim.tick, laser_contact_kinds
+                );
+                laser_contact_kinds.fill(0);
                 let admission = sim.matter.admission;
                 let pool = sim.matter.debris.fragment_pools(&sim.matter.tuning);
                 println!("damage_storage tick={} working={} parked={} flying={} working_cap={} parked_cap={} record_bytes={} section_bytes={}",

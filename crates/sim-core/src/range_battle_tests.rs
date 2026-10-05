@@ -3622,3 +3622,195 @@ fn spider_laser_new_target_restarts_opening_but_explicit_ground_aim_is_direct() 
     assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 2));
     assert!(r.matter.economy.ledger.balanced());
 }
+
+#[test]
+fn laser_firing_position_classifies_first_cover_in_firing_direction_and_live_edits() {
+    let mut r = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank]);
+    for (x, material) in [(300, 3), (340, 4)] {
+        r.world.queue_edit(voxel::Edit::put(x, 80, 336, material));
+    }
+    r.world.flush();
+    let from = [250, 80, 336].map(Fx::from_int);
+    let target = [400, 80, 336];
+    assert!(
+        !laser_requires_flank(&r.world, &r.matter.economy.mats, from, target),
+        "meltable front cover should be breached"
+    );
+    assert!(
+        laser_requires_flank(
+            &r.world,
+            &r.matter.economy.mats,
+            target.map(Fx::from_int),
+            [250, 80, 336]
+        ),
+        "foliage first from the other side must cause a flank"
+    );
+    r.world.queue_dig(300, 80, 336);
+    r.world.flush();
+    assert!(
+        laser_requires_flank(&r.world, &r.matter.economy.mats, from, target),
+        "live hole exposed the forest"
+    );
+    r.world.queue_dig(340, 80, 336);
+    r.world.flush();
+    assert!(!laser_requires_flank(
+        &r.world,
+        &r.matter.economy.mats,
+        from,
+        target
+    ));
+    for material in [1, 6, 7] {
+        r.world.queue_edit(voxel::Edit::put(320, 80, 336, material));
+        r.world.flush();
+        assert!(
+            laser_requires_flank(&r.world, &r.matter.economy.mats, from, target),
+            "inert terrain {material} allowed an unproductive beam"
+        );
+    }
+}
+
+#[test]
+fn enemy_spider_leaves_a_forested_line_of_fire_engages_and_replays() {
+    let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::Spider])
+        .layout
+        .unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [320, 16, 260],
+        max: [330, 120, 410],
+        material: 4,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Hold, None));
+    let start = r.units[1].motion.pos;
+    let mut replay = None;
+    let mut first = None;
+    let mut replans_before_fire = 0;
+    for tick in 0..1200 {
+        r.step_observed(|phase| {
+            if first.is_none() && phase == "orders_retarget" {
+                replans_before_fire += 1;
+            }
+        });
+        if let Some(other) = replay.as_mut() {
+            BlastRange::step(other);
+            assert_eq!(
+                r.state_hash(),
+                other.state_hash(),
+                "forested firing position replay tick {tick}"
+            );
+        } else if r.units[1].motion.destination.is_some() {
+            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+        }
+        if !r.battle.lasers.is_empty() {
+            first.get_or_insert(tick);
+        }
+        if !r.units[0].status.alive {
+            break;
+        }
+    }
+    eprintln!(
+        "spider forest first={first:?} at={:?} shots={} target_alive={}",
+        r.units[1].at, r.battle.actors[1].fired, r.units[0].status.alive
+    );
+    assert!(replay.is_some(), "never planned a firing position");
+    assert_ne!(
+        r.units[1].motion.pos, start,
+        "spider kept shooting from its blocked starting point"
+    );
+    assert!(first.is_some(), "spider never reached a firing position");
+    assert_eq!(
+        replans_before_fire, 1,
+        "stationary target repeatedly restarted the lateral route"
+    );
+    assert!(
+        !r.units[0].status.alive,
+        "spider never damaged/finished the target beyond the forest"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn spider_breaches_meltable_cover_without_leaving_its_firing_position() {
+    let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 260],
+        max: [304, 120, 410],
+        material: 3,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let start = r.units[0].motion.pos;
+    for _ in 0..400 {
+        step_spider_opening_trial(&mut r);
+        assert_eq!(
+            r.units[0].motion.pos, start,
+            "laser abandoned meltable cover"
+        );
+        if !r.units[1].status.alive {
+            break;
+        }
+    }
+    assert!(r.heat.melted_total > 0, "steel cover never melted");
+    assert!(
+        !r.units[1].status.alive,
+        "laser did not reach the unit after breaching steel"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn forested_laser_preserves_move_route_and_explicit_point_fire() {
+    let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [320, 16, 260],
+        max: [330, 120, 410],
+        material: 4,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    let dest = [220, 480];
+    assert!(r.battle_order(0, Order::Move, Some(dest)));
+    for _ in 0..4 {
+        step_spider_opening_trial(&mut r);
+        assert_eq!(
+            r.units[0].motion.destination,
+            Some(dest),
+            "blocked laser replaced a manual move"
+        );
+        assert!(r.battle.lasers.is_empty());
+    }
+    assert!(r.battle_order(0, Order::Ground([325, 80, 336]), None));
+    for _ in 0..180 {
+        step_spider_opening_trial(&mut r);
+        if !r.battle.lasers.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        r.battle.lasers.len(),
+        1,
+        "explicit foliage attack never fired"
+    );
+    assert!(r.battle.lasers[0].hit);
+    assert!(r.heat.burning() > 0, "explicit beam did not ignite foliage");
+    assert_eq!(
+        r.units[0].motion.destination,
+        Some(dest),
+        "point fire redirected the existing move route"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}

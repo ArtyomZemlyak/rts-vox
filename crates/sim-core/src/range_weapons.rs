@@ -483,6 +483,7 @@ impl BlastRange {
             if let Some(shield) = self.dome_crossed(previous, p) {
                 completed("orders_laser_query");
                 self.absorb_work(shield, p, tuning.work);
+                completed("orders_laser_contact_shield");
                 hit = true;
                 break;
             }
@@ -493,6 +494,17 @@ impl BlastRange {
                 })
             {
                 completed("orders_laser_query");
+                // Classify before heating/melting changes the endpoint. Body
+                // precedence matches stream_contact_owned, including overlap.
+                let body_hit = near.iter().any(|&id| {
+                    let (lo, hi) = boxes[id];
+                    (0..3).all(|a| p[a] >= lo[a] && p[a] <= hi[a]) && self.units[id].solid(p)
+                });
+                completed(if body_hit {
+                    "orders_laser_contact_unit"
+                } else {
+                    "orders_laser_contact_world"
+                });
                 self.stream_contact_owned(
                     p,
                     tuning,
@@ -510,6 +522,7 @@ impl BlastRange {
         }
         if !hit {
             completed("orders_laser_query");
+            completed("orders_laser_contact_miss");
         }
         drop(beam_task);
         completed("orders_laser_beam");
@@ -851,6 +864,85 @@ mod tests {
         l.units[0].at = [285, 16, 336];
         BlastRange::with_layout(c, l).unwrap()
     }
+
+    #[test]
+    fn laser_contact_observation_distinguishes_world_unit_shield_and_miss_without_state_changes() {
+        let seed = laser_range(vec![]);
+        for (event, from, aim, owner) in [
+            (
+                "orders_laser_contact_world",
+                [100, 100, 336],
+                [200, 15, 336],
+                Some(0),
+            ),
+            (
+                "orders_laser_contact_unit",
+                [100, 25, 336],
+                battle::aim_point(&seed.units[0]),
+                None,
+            ),
+            (
+                "orders_laser_contact_shield",
+                [100, 40, 336],
+                [500, 40, 336],
+                Some(0),
+            ),
+            (
+                "orders_laser_contact_miss",
+                [100, 100, 336],
+                [500, 100, 336],
+                Some(0),
+            ),
+        ] {
+            let mut actual = if event == "orders_laser_contact_shield" {
+                let mut layout = seed.layout.clone().unwrap();
+                layout.shields.push(modding::range::RangeShieldDef {
+                    at: [190, 40, 336],
+                    radius: 30,
+                });
+                BlastRange::with_layout(seed.config.clone(), layout).unwrap()
+            } else {
+                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap()
+            };
+            let mut reference =
+                BlastRange::restore(actual.config.clone(), &actual.snapshot()).unwrap();
+            let tuning = actual.streams.tuning.laser.clone();
+            let config = actual.config.clone();
+            let mut events = Vec::new();
+            let observed = actual.laser_ray(
+                from.map(Fx::from_int),
+                aim,
+                owner,
+                &tuning,
+                &config,
+                (&mut |phase| events.push(phase), &|_, _| {}),
+            );
+            let expected = reference.laser_ray(
+                from.map(Fx::from_int),
+                aim,
+                owner,
+                &tuning,
+                &config,
+                (&mut |_| {}, &|_, _| {}),
+            );
+            assert_eq!(observed.hit, event != "orders_laser_contact_miss");
+            assert_eq!(observed.to, expected.to);
+            assert_eq!(
+                events
+                    .iter()
+                    .copied()
+                    .filter(|e| e.starts_with("orders_laser_contact_"))
+                    .collect::<Vec<_>>(),
+                vec![event]
+            );
+            assert_eq!(
+                actual.state_hash(),
+                reference.state_hash(),
+                "observation changed {event}"
+            );
+        }
+    }
+
     #[test]
     fn observed_laser_beam_preserves_state_and_pairs_all_scopes() {
         let seed = laser_range(vec![]);

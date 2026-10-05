@@ -474,6 +474,34 @@ fn spider_laser_aim(
     })
 }
 
+/// A unit attack needs a useful firing position, rather than burning a forest
+/// indefinitely. Meltable cover may still be breached in place; point orders
+/// deliberately keep their direct ray. Walk in firing direction, since a
+/// symmetric visibility query would classify cover starting at the enemy.
+fn laser_requires_flank(
+    world: &World,
+    mats: &modding::Registry,
+    from: [Fx; 3],
+    target: [i32; 3],
+) -> bool {
+    let p = from.map(Fx::to_int_trunc);
+    let mut blocked = false;
+    voxel::los::walk(
+        (p[0], p[1], p[2]),
+        (target[0], target[1], target[2]),
+        |x, y, z| {
+            if x >= 0 && y >= 0 && z >= 0 && world.solid(x as u32, y as u32, z as u32) {
+                let mat = world.material(x as u32, y as u32, z as u32);
+                blocked = mats.get(mat).is_none_or(|m| m.melt == 0);
+                false
+            } else {
+                true
+            }
+        },
+    );
+    blocked
+}
+
 pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
     let origin = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
     let size = usize::from(u.body.core_size);
@@ -1406,20 +1434,29 @@ impl BlastRange {
             completed("orders_pose");
             let in_range =
                 dx.mul(dx).add(dz.mul(dz)) <= Fx::from_int(range).mul(Fx::from_int(range));
-            // Bullets and penetrators cannot help by firing into a hill.
-            // Check the actual muzzle ray only after entering range; the
-            // normal projectile sweep remains authoritative for a hit.
+            // Direct rounds need a clear line. Siege lasers can melt hard
+            // cover, but should change position instead of indefinitely
+            // burning foliage or firing into terrain that cannot melt.
+            // Explicit point orders retain their ordinary physical contacts.
             completed("orders_misc");
             let blocked_direct = in_range
                 && matches!(
                     weapon,
-                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Canister
+                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Canister | Weapon::Laser
                 )
                 && !kind.emplacement()
                 && !matches!(a.order, Order::Ground(_))
                 && weapons::muzzles(&self.units[id], a.turret.angle)
                     .first()
                     .is_some_and(|muzzle| {
+                        if weapon == Weapon::Laser {
+                            return laser_requires_flank(
+                                &self.world,
+                                &self.matter.economy.mats,
+                                *muzzle,
+                                p,
+                            );
+                        }
                         !voxel::los::line_of_sight(
                             &self.world,
                             (
@@ -1487,7 +1524,7 @@ impl BlastRange {
                         continue;
                     }
                     // Aim for a firing position before the target hull, never its occupied centre.
-                    let standoff = if blocked_direct {
+                    let standoff = if blocked_direct && weapon != Weapon::Laser {
                         (range / 3).min(200)
                     } else {
                         range * b.tuning.standoff_milli / 1000
@@ -1532,7 +1569,11 @@ impl BlastRange {
                             || self.units[id].motion.destination.is_none_or(|old| {
                                 let x = i64::from(p[0]) - i64::from(old[0]);
                                 let z = i64::from(p[2]) - i64::from(old[1]);
-                                let reach = if blocked_direct { 200 } else { range };
+                                let reach = if blocked_direct && weapon != Weapon::Laser {
+                                    200
+                                } else {
+                                    range
+                                };
                                 x * x + z * z > i64::from(reach) * i64::from(reach)
                             })
                     };
