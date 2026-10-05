@@ -2025,7 +2025,7 @@ pub fn strider() -> UnitBody {
 /// independently damageable articulated legs. Coarser 200 mm armour keeps
 /// its large silhouette affordable without inflating the voxel count.
 pub fn spider() -> UnitBody {
-    let mut u = UnitBody::new_scaled(88, 52, 80, 8, 200);
+    let mut u = UnitBody::new_scaled(88, 52, 80, 12, 200);
     for y in 25..40 {
         let inset = (y as i32 - 32).abs() / 2;
         fill_f(
@@ -2283,7 +2283,8 @@ pub fn spider() -> UnitBody {
         Part::Sensor,
         FINISH_OPTIC,
     );
-    fill(&mut u, (40, 49), (29, 38), (35, 45), Part::Core);
+    // Broad reactor stays below the laser turntable and inside the armour.
+    fill(&mut u, (38, 51), (27, 40), (33, 47), Part::Core);
     let mut u = seat(u, "паук");
     u.turret_y = 40;
     u.push_weapon_path(WeaponPath {

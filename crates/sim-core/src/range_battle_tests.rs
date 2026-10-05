@@ -3268,3 +3268,184 @@ fn reinforced_t2_still_loses_a_severed_barrel_and_a_cut_core_section() {
     let (status, _) = model.evaluate(&body, &mut CoreBufs::new());
     assert!(!status.alive && !status.weapon);
 }
+
+#[test]
+fn stationary_spider_survives_stock_tank_fire_from_eight_directions() {
+    for offset in [
+        [-280, 0],
+        [-200, -200],
+        [0, -280],
+        [200, -200],
+        [280, 0],
+        [200, 200],
+        [0, 280],
+        [-200, 200],
+    ] {
+        let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::Spider])
+            .layout
+            .unwrap();
+        layout.size = [896, 192, 896];
+        layout.clear_min = [16, 16];
+        layout.clear_max = [880, 880];
+        layout.units[1].at = [448, 16, 448];
+        layout.units[0].at = [448 + offset[0], 16, 448 + offset[1]];
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r = BlastRange::with_layout(config, layout).unwrap();
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        r.battle.actors[0].order = Order::Attack(1);
+        r.battle.actors[0].weapon = Some(Weapon::Kinetic);
+        let mut hits = 0;
+        for _ in 0..700 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            if r.battle.impacts.iter().any(|p| p.weapon == Weapon::Kinetic) {
+                hits += 1;
+                eprintln!("spider {offset:?} tick={} hits={hits} alive={} armed={} core={:?} removed={} segments={} feet={:?} at={:?}",r.tick,r.units[1].status.alive,r.units[1].status.weapon,r.units[1].integrity.core,r.units[1].removed.len(),r.units[1].seg_removed.len(),r.units[1].seg_gone,r.units[1].at);
+            }
+            if !r.units[1].status.alive || hits >= 6 {
+                break;
+            }
+        }
+        assert_eq!(hits, 6, "direction={offset:?}: too few real impacts");
+        assert!(r.battle_order(0, Order::Hold, None));
+        for _ in 0..30 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+        }
+        eprintln!(
+            "settled spider direction={offset:?} core={:?} pending={} status={:?}",
+            r.units[1].integrity.core,
+            r.pending_kinetic_impacts(),
+            r.units[1].status
+        );
+        assert_eq!(r.pending_kinetic_impacts(), 0);
+        assert!(r.battle.rounds.is_empty());
+        assert!(
+            r.units[1].status.alive && r.units[1].status.weapon,
+            "direction={offset:?}: {:?}",
+            r.units[1].status
+        );
+        assert!(r.units[1].motion.destination.is_none());
+        assert_eq!(
+            [r.units[1].at[0], r.units[1].at[2]],
+            [448, 448],
+            "spider evaded the trial"
+        );
+        r.battle.actors[1].order = Order::Attack(0);
+        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        for _ in 0..300 {
+            let next = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.battle.ai.next_tick = next;
+            replay.battle.ai.next_tick = next;
+            r.step();
+            replay.step();
+            assert_eq!(r.state_hash(), replay.state_hash());
+            if r.battle.actors[1].fired > 0 {
+                break;
+            }
+        }
+        assert!(
+            r.battle.actors[1].fired > 0,
+            "direction={offset:?}: damaged laser never fired"
+        );
+        assert!(!r.battle.lasers.is_empty());
+        assert!(r.matter.economy.ledger.balanced());
+    }
+}
+
+#[test]
+fn stationary_spider_survives_two_tank_salvos_and_can_return_fire() {
+    let mut layout = arena_of([RangeUnitKind::Tank, RangeUnitKind::Spider])
+        .layout
+        .unwrap();
+    layout.size = [896, 192, 896];
+    layout.clear_min = [16, 16];
+    layout.clear_max = [880, 880];
+    layout.units[1].at = [448, 16, 448];
+    layout.units[0].at = [728, 16, 348];
+    layout.units.push(RangeUnitDef {
+        weapon: None,
+        kind: RangeUnitKind::Tank,
+        at: [728, 16, 548],
+        allied: true,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    for id in [0, 2] {
+        r.battle.actors[id].order = Order::Attack(1);
+        r.battle.actors[id].weapon = Some(Weapon::Kinetic);
+    }
+    let mut hits = 0;
+    for _ in 0..400 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        hits += r
+            .battle
+            .impacts
+            .iter()
+            .filter(|p| p.weapon == Weapon::Kinetic)
+            .count();
+        if hits >= 4 || !r.units[1].status.alive {
+            break;
+        }
+    }
+    assert_eq!(hits, 4);
+    for id in [0, 2] {
+        assert!(r.battle.actors[id].fired >= 2);
+        assert!(r.battle_order(id, Order::Hold, None));
+    }
+    for _ in 0..30 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+    }
+    eprintln!(
+        "two tank spider: hits={hits} core={:?} status={:?}",
+        r.units[1].integrity.core, r.units[1].status
+    );
+    assert_eq!(r.pending_kinetic_impacts(), 0);
+    assert!(r.units[1].status.alive && r.units[1].status.weapon);
+    assert_eq!([r.units[1].at[0], r.units[1].at[2]], [448, 448]);
+    r.battle.actors[1].order = Order::Attack(0);
+    for _ in 0..300 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.actors[1].fired > 0 {
+            break;
+        }
+    }
+    assert!(r.battle.actors[1].fired > 0);
+    assert!(!r.battle.lasers.is_empty());
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn spider_reactor_and_laser_remain_physically_severable() {
+    let mut body = voxel::unit::spider();
+    let model = crate::integrity::Model::new(&body);
+    assert!(u16::from(body.core.1) + u16::from(body.core_size) <= u16::from(body.turret_y));
+    let x = usize::from(body.weapon_paths()[0].max[0]) - 3;
+    for y in 0..usize::from(body.vol.ny) {
+        for z in 0..usize::from(body.vol.nz) {
+            body.remove(x, y, z);
+        }
+    }
+    let (status, report) = model.evaluate(&body, &mut CoreBufs::new());
+    assert!(status.alive && !status.weapon);
+    assert_eq!(report.core, Fx::ONE);
+    let mut body = voxel::unit::spider();
+    let model = crate::integrity::Model::new(&body);
+    let min = [body.core.0, body.core.1, body.core.2].map(usize::from);
+    let n = usize::from(body.core_size);
+    for x in min[0]..min[0] + n {
+        for z in min[2]..min[2] + n {
+            body.remove(x, min[1] + n / 2, z);
+        }
+    }
+    let (status, _) = model.evaluate(&body, &mut CoreBufs::new());
+    assert!(!status.alive && !status.weapon);
+}
