@@ -1350,10 +1350,10 @@ mod tests {
             sim_core::blast::battle::Phase::Fighting
         );
         for (id, weapon) in [
-            (4, BattleWeapon::Annihilation),
+            (4, BattleWeapon::Kinetic),
             (17, BattleWeapon::Energy),
             (16, BattleWeapon::Canister),
-            (10, BattleWeapon::Annihilation),
+            (10, BattleWeapon::Kinetic),
             (41, BattleWeapon::Energy),
             (40, BattleWeapon::Canister),
         ] {
@@ -1378,10 +1378,10 @@ mod tests {
         assert!(scene.sim.units[1].motion.destination.is_some());
         drop(scene);
         click(&mut app, Action::SelectUnit(4));
-        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Kinetic)));
+        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Blast)));
         assert_eq!(
             app.world().resource::<Scene>().sim.battle_weapon(4),
-            Some(BattleWeapon::Kinetic)
+            Some(BattleWeapon::Blast)
         );
         click(&mut app, Action::BattleWorldAuto);
         let (config, layout) = app
@@ -1404,7 +1404,9 @@ mod tests {
         );
         assert_eq!(scene.sim.battle.actors[1].target, None);
         assert!(scene.sim.battle.autonomous);
-        assert_eq!(scene.sim.battle_weapon(4), Some(BattleWeapon::Annihilation));
+        assert!((0..scene.sim.units.len())
+            .all(|id| scene.sim.battle_weapon(id) != Some(BattleWeapon::Annihilation)));
+        assert_eq!(scene.sim.battle_weapon(4), Some(BattleWeapon::Kinetic));
         assert_eq!(scene.sim.battle_weapon(41), Some(BattleWeapon::Energy));
         assert_eq!(scene.sim.battle_weapon(16), Some(BattleWeapon::Canister));
     }

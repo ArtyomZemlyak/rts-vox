@@ -3026,7 +3026,7 @@ fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() 
 }
 
 #[test]
-fn world_ai_armies_actually_fire_energy_annihilation_and_frontline_canister() {
+fn world_ai_armies_fire_standard_ammunition_without_annihilation() {
     let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
         "../../../data/battle-world.ron"
     ))
@@ -3044,25 +3044,30 @@ fn world_ai_armies_actually_fire_energy_annihilation_and_frontline_canister() {
             .filter(|&id| sim.allied(id) == side)
             .filter_map(|id| sim.battle_weapon(id).map(|w| w as u8))
             .collect();
-        assert_eq!(weapons, (0..=6).collect(), "missing gun on side {side}");
+        let expected = [
+            Weapon::MachineGun,
+            Weapon::Blast,
+            Weapon::Kinetic,
+            Weapon::Energy,
+            Weapon::Laser,
+            Weapon::Canister,
+        ]
+        .into_iter()
+        .map(|weapon| weapon as u8)
+        .collect();
+        assert_eq!(weapons, expected, "unexpected guns on side {side}");
     }
     sim.start_battle().unwrap();
     let mut observed = std::collections::BTreeSet::new();
     for _ in 0..600 {
         sim.step();
         for round in &sim.battle.rounds {
+            assert_ne!(round.weapon, Weapon::Annihilation);
             observed.insert((sim.allied(round.owner), round.weapon as u8));
-        }
-        if [true, false].into_iter().all(|side| {
-            [Weapon::Energy, Weapon::Annihilation, Weapon::Canister]
-                .into_iter()
-                .all(|weapon| observed.contains(&(side, weapon as u8)))
-        }) {
-            break;
         }
     }
     for side in [true, false] {
-        for weapon in [Weapon::Energy, Weapon::Annihilation, Weapon::Canister] {
+        for weapon in [Weapon::Kinetic, Weapon::Energy, Weapon::Canister] {
             assert!(
                 observed.contains(&(side, weapon as u8)),
                 "{weapon:?} never flew on side {side}; tick={}, observed={observed:?}",

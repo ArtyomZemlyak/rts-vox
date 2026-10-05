@@ -96,11 +96,10 @@ mod tests {
                     .count(),
                 1
             );
-            for weapon in [
-                RangeLoadout::Blast,
-                RangeLoadout::Energy,
-                RangeLoadout::Annihilation,
-            ] {
+            assert!(army
+                .iter()
+                .all(|u| u.weapon != Some(RangeLoadout::Annihilation)));
+            for weapon in [RangeLoadout::Blast, RangeLoadout::Energy] {
                 assert!(army
                     .iter()
                     .any(|u| u.kind == RangeUnitKind::Tank && u.weapon == Some(weapon)));
