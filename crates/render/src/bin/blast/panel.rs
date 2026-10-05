@@ -146,6 +146,7 @@ pub struct Panel {
     pub scenarios_open: bool,
     pub drawer: u8,
     pub ranges: bool,
+    pub projectile_markers: bool,
     pub battle_launch: bool,
     pub battle_auto: bool,
     pub battle_name: String,
@@ -167,6 +168,7 @@ impl Panel {
             scenarios_open: true,
             drawer: 0,
             ranges: true,
+            projectile_markers: true,
             battle_launch: false,
             battle_auto: false,
             battle_name: String::new(),
@@ -183,6 +185,7 @@ impl Panel {
 pub enum Action {
     Drawer(u8),
     Ranges,
+    ProjectileMarkers,
     SelectUnit(usize),
     SelectAllOwn,
     RosterPage(i32),
@@ -497,6 +500,10 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                     ("Цель", Action::Target),
                 ],
             ),
+            (
+                false,
+                vec![("Метки снарядов: вкл", Action::ProjectileMarkers)],
+            ),
             (false, vec![("Настройки", Action::Settings)]),
             (
                 false,
@@ -576,7 +583,11 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                         BackgroundColor(theme::BUTTON),
                     ))
                     .with_children(|b| {
-                        b.spawn((Text::new(label), text_font.clone(), TextColor(theme::TEXT)));
+                        let mut text =
+                            b.spawn((Text::new(label), text_font.clone(), TextColor(theme::TEXT)));
+                        if action == Action::ProjectileMarkers {
+                            text.insert(hud::HudText(7));
+                        }
                     });
                 }
             });
@@ -648,6 +659,7 @@ pub fn actions(
             action,
             Action::Drawer(_)
                 | Action::Ranges
+                | Action::ProjectileMarkers
                 | Action::Settings
                 | Action::SelectUnit(_)
                 | Action::SelectAllOwn
@@ -689,6 +701,7 @@ pub fn actions(
                 }
             }
             Action::Ranges => panel.ranges = !panel.ranges,
+            Action::ProjectileMarkers => panel.projectile_markers = !panel.projectile_markers,
             Action::SelectUnit(id) => {
                 if scene.sim.battle_mode()
                     && scene.sim.allied(id)
@@ -1405,6 +1418,7 @@ pub fn refresh(
         let active = match *a {
             Action::Drawer(id) => panel.drawer == id,
             Action::Ranges => panel.ranges,
+            Action::ProjectileMarkers => panel.projectile_markers,
             Action::SelectUnit(id) => {
                 if edit.selected_units.is_empty() {
                     edit.controlled == Some(id)

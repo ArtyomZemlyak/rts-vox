@@ -332,6 +332,8 @@ fn main() {
     let mut ai_vs_ai = false;
     let mut skirmish = None;
     let mut hud_drawer = 0;
+    let mut camera_zoom = 1.0;
+    let mut projectile_markers = true;
     let mut window_size = [1600, 900];
     let mut ai_rules_file = None;
     let mut attack_unit: Option<usize> = None;
@@ -443,6 +445,15 @@ fn main() {
             "--skirmish" => {
                 i += 1;
                 skirmish = Some(args[i].parse::<u8>().expect("skirmish 0, 1, 2 or 3"));
+            }
+            "--no-projectile-markers" => projectile_markers = false,
+            "--zoom" => {
+                i += 1;
+                camera_zoom = args[i].parse::<f32>().expect("camera zoom factor");
+                assert!(
+                    camera_zoom.is_finite() && (0.3..=32.0).contains(&camera_zoom),
+                    "--zoom 0.3..=32"
+                );
             }
             "--hud-drawer" => {
                 i += 1;
@@ -693,6 +704,8 @@ fn main() {
         String::new()
     };
     hud.drawer = hud_drawer;
+    hud.projectile_markers = projectile_markers;
+    workshop.zoom = camera_zoom;
     let mut sim = range_sim(
         weapon_config(energy, anni, power, delivery),
         workshop.layout.as_ref(),
@@ -956,11 +969,11 @@ fn main() {
                 )
                     .chain(),
                 (
+                    framing,
                     fire::draw,
                     weapon_art,
                     animate_energy,
                     overview::sync,
-                    framing,
                     panel::minimap::update_view,
                     overview::atmosphere,
                     streaming::camera,
@@ -2356,6 +2369,12 @@ fn window_height_limit(offset: Vec3, aspect: f32, size: [u32; 3]) -> f32 {
     ((dims[0] as f32 - 16.0) / extent.x.max(0.01)).min((dims[1] as f32 - 16.0) / extent.z.max(0.01))
 }
 
+fn framing_far(base: f32, eye_offset: Vec3, height: f32, terrain_height: u32) -> f32 {
+    // Zoom pulls the eye back even on legacy small layouts. A fixed 1200
+    // plane can then clip the terrain and every depth-tested projectile.
+    base.max(eye_offset.length() + height + terrain_height as f32)
+}
+
 fn framing(
     scene: Res<Scene>,
     workshop: Res<Workshop>,
@@ -2544,11 +2563,12 @@ fn framing(
                     // The kilometre overview needs a distant plane, but
                     // using it in the local battle wastes depth precision
                     // on tank panels and thin terrain faces while panning.
-                    p.far = if streaming::map_scale(scene.sim.size(), height, stream.map_scale) {
+                    let base = if streaming::map_scale(scene.sim.size(), height, stream.map_scale) {
                         30_000.0
                     } else {
                         1200.0
                     };
+                    p.far = framing_far(base, eye_offset, height, scene.sim.size()[1]);
                 }
             }
         }

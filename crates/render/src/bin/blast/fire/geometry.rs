@@ -11,6 +11,8 @@ pub(super) struct Input<'a> {
     pub now: f32,
     pub fraction: f32,
     pub poses: &'a Poses,
+    pub markers: Option<projectiles::View>,
+    pub single: (Option<Vec3>, f32),
 }
 pub(super) struct Prepared {
     pub hot: Option<Mesh>,
@@ -80,6 +82,8 @@ fn hot(input: Input<'_>) -> MeshBuf {
         now,
         fraction,
         poses,
+        markers,
+        single,
     } = input;
     let mut hot = MeshBuf::default();
     for trace in &sim.battle.lasers {
@@ -243,6 +247,9 @@ fn hot(input: Input<'_>) -> MeshBuf {
         for n in &mut hot.nrm[start..] {
             *n = (rotation * Vec3::from(*n)).to_array();
         }
+    }
+    if let Some(view) = markers {
+        projectiles::append(&mut hot, sim, view, fraction, single);
     }
     hot
 }
@@ -450,6 +457,8 @@ mod tests {
                         now: 0.4,
                         fraction: 0.3,
                         poses: &poses,
+                        markers: None,
+                        single: (None, 2.0),
                     };
                     let reference = Prepared {
                         hot: legacy(hot(input)),
@@ -479,6 +488,8 @@ mod tests {
                 now: 0.4,
                 fraction: 1.0,
                 poses: &poses,
+                markers: None,
+                single: (None, 2.0),
             };
             let expected = prepare(input, None);
             let mut results = pool.scope(|scope| {
@@ -501,6 +512,8 @@ mod tests {
                 now: 0.0,
                 fraction: 0.0,
                 poses: &poses,
+                markers: None,
+                single: (None, 2.0),
             },
             None,
         );
@@ -557,6 +570,8 @@ mod tests {
             now: 0.4,
             fraction: 0.3,
             poses: &poses,
+            markers: None,
+            single: (None, 2.0),
         };
         let workers = [0, 1, 2, 4, 8];
         let pools: Vec<_> = workers

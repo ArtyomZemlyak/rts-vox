@@ -3,6 +3,8 @@
 use super::*;
 #[path = "fire/geometry.rs"]
 mod geometry;
+#[path = "fire/projectiles.rs"]
+mod projectiles;
 use sim_core::blast::battle::Weapon as BattleWeapon;
 use sim_core::blast::thermal::{temperature, Cell as HeatCell};
 const CAP: usize = 1800;
@@ -56,7 +58,7 @@ pub struct Effects {
     fire: Option<Handle<Mesh>>,
     smoke: Option<Handle<Mesh>>,
     serial: u32,
-    last_frame: Option<f32>,
+    last_frame: Option<(f32, Option<projectiles::View>, bool)>,
     last_dust_tick: Option<u32>,
     sources: Vec<(u64, Option<[usize; 3]>)>,
     heat_spots: Vec<(HeatCell, u32)>,
@@ -965,7 +967,8 @@ pub fn draw(
     mut fx: ResMut<Effects>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    camera: Query<&Transform, With<Camera3d>>,
+    camera: Query<(&Transform, &Camera, &Projection), With<Camera3d>>,
+    panel: Option<Res<panel::Panel>>,
     bodies: Query<(&Witness, &Transform)>,
     mut layers: Query<(&Layer, &mut Visibility)>,
     mut death_lights: Query<
@@ -1030,11 +1033,20 @@ pub fn draw(
             light.intensity = 0.0;
         }
     }
-    if fx.last_frame == Some(now) {
+    let view = camera
+        .iter()
+        .next()
+        .and_then(|(t, c, p)| projectiles::View::camera(t, c, p));
+    let enabled = panel.as_ref().is_none_or(|p| p.projectile_markers);
+    let frame = (now, view, enabled);
+    if fx.last_frame == Some(frame) {
         return;
     }
-    fx.last_frame = Some(now);
-    let eye = camera.iter().next().map_or(Vec3::ZERO, |t| t.translation);
+    fx.last_frame = Some(frame);
+    let eye = camera
+        .iter()
+        .next()
+        .map_or(Vec3::ZERO, |(t, _, _)| t.translation);
     let mut particles = Vec::with_capacity(fx.particles.len());
     for p in &fx.particles {
         let age = (now - p.born).max(0.0);
@@ -1081,6 +1093,17 @@ pub fn draw(
                 1.0
             },
             poses: &poses,
+            markers: view.filter(|_| enabled),
+            single: (
+                scene.previous_shell,
+                if scene.anni {
+                    6.0
+                } else if scene.energy {
+                    4.0
+                } else {
+                    2.0
+                },
+            ),
         },
         bevy::tasks::ComputeTaskPool::try_get().map(|pool| &**pool),
     );

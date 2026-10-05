@@ -6,7 +6,7 @@ pub struct Drawer;
 #[derive(Component)]
 pub struct DrawerSection(pub u8);
 #[derive(Component)]
-pub struct HudText(u8);
+pub struct HudText(pub(super) u8);
 #[derive(Component)]
 pub struct Roster(usize);
 #[derive(Component)]
@@ -63,7 +63,8 @@ pub fn section(editor: bool, a: Action) -> u8 {
         | Action::Zoom(_)
         | Action::Pan(..)
         | Action::Orbit(_)
-        | Action::Pitch(_) => 3,
+        | Action::Pitch(_)
+        | Action::ProjectileMarkers => 3,
         Action::Play | Action::Edit | Action::Reset => 4,
         Action::ScenarioMenu
         | Action::Scenario(_)
@@ -585,6 +586,14 @@ pub fn refresh(
     for (id, mut t) in &mut text {
         let value = match id.0 {
             5 => format!("{}/{}", page + 1, pages),
+            7 => format!(
+                "Метки снарядов: {}",
+                if panel.projectile_markers {
+                    "вкл"
+                } else {
+                    "выкл"
+                }
+            ),
             n if n >= 100 => {
                 scene
                     .sim
@@ -1071,6 +1080,23 @@ mod tests {
         assert_eq!(app.world().resource::<Panel>().drawer, 3);
         click(&mut app, Action::Ranges);
         assert!(!app.world().resource::<Panel>().ranges);
+    }
+    #[test]
+    fn projectile_markers_toggle_without_changing_battle_or_selection() {
+        let mut app = app();
+        click(&mut app, Action::BattleStart);
+        click(&mut app, Action::SelectUnit(0));
+        let hash = app.world().resource::<Scene>().sim.state_hash();
+        let controlled = app.world().resource::<Workshop>().controlled;
+        assert_eq!(section(false, Action::ProjectileMarkers), 3);
+        assert!(app.world().resource::<Panel>().projectile_markers);
+        for enabled in [false, true] {
+            click(&mut app, Action::ProjectileMarkers);
+            assert_eq!(app.world().resource::<Panel>().projectile_markers, enabled);
+            assert_eq!(app.world().resource::<Scene>().sim.state_hash(), hash);
+            assert_eq!(app.world().resource::<Workshop>().controlled, controlled);
+            assert!(app.world().resource::<Workshop>().pending.is_none());
+        }
     }
     #[test]
     fn group_selection_and_commands_apply_to_every_selected_ally() {
