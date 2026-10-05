@@ -103,8 +103,8 @@ struct Witness(usize, Transform, Option<usize>, bool);
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
     burned_materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: Arc<[voxel::unit::UnitBody; 7]>,
-    skins: Arc<[SkinBindings; 7]>,
+    pristine: Arc<[voxel::unit::UnitBody; 8]>,
+    skins: Arc<[SkinBindings; 8]>,
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
@@ -444,7 +444,7 @@ fn main() {
             }
             "--skirmish" => {
                 i += 1;
-                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0, 1, 2 or 3"));
+                skirmish = Some(args[i].parse::<u8>().expect("skirmish 0..=4"));
             }
             "--no-projectile-markers" => projectile_markers = false,
             "--zoom" => {
@@ -1370,6 +1370,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::turret_t1()),
             SkinBindings::new(&voxel::unit::turret_t2()),
             SkinBindings::new(&voxel::unit::command_base()),
+            SkinBindings::new(&voxel::unit::artillery_t2()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1379,6 +1380,7 @@ fn setup(
             voxel::unit::turret_t1(),
             voxel::unit::turret_t2(),
             voxel::unit::command_base(),
+            voxel::unit::artillery_t2(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

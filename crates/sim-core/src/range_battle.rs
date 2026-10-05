@@ -15,6 +15,7 @@ pub enum Weapon {
     Energy = 3,
     Annihilation = 4,
     Laser = 5,
+    Canister = 6,
 }
 impl Weapon {
     pub fn from_code(code: u8) -> Option<Self> {
@@ -25,6 +26,7 @@ impl Weapon {
             3 => Self::Energy,
             4 => Self::Annihilation,
             5 => Self::Laser,
+            6 => Self::Canister,
             _ => return None,
         })
     }
@@ -110,6 +112,7 @@ pub struct Battle {
     /// The tank's armour-piercing round (ADR-456).
     pub kinetic_config: ExplosionConfig,
     bullet_config: ExplosionConfig,
+    pub canister_config: ExplosionConfig,
     pub energy_config: ExplosionConfig,
     pub anni_config: ExplosionConfig,
     pub(super) ai: ai::Controller,
@@ -126,6 +129,7 @@ fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gu
         Weapon::Energy => tuning.energy_range,
         Weapon::Annihilation => tuning.anni_range,
         Weapon::MachineGun => machine_gun,
+        Weapon::Canister => tuning.canister.range,
         Weapon::Laser => motion::spider_tuning().laser.range,
     }
 }
@@ -163,6 +167,8 @@ impl Battle {
         };
         let energy_config = energetic(include_str!("../../../data/energy-cannon.ron"));
         let anni_config = energetic(include_str!("../../../data/anni-cannon.ron"));
+        let mut canister_config = energetic(include_str!("../../../data/canister-shell.ron"));
+        canister_config.unit_ablation_resistance = resistance;
         Self {
             phase: Phase::Setup,
             actors: units
@@ -179,6 +185,7 @@ impl Battle {
                     weapon: match u.kind {
                         RangeUnitKind::Tank => Some(Weapon::Kinetic),
                         RangeUnitKind::Artillery => Some(Weapon::Blast),
+                        RangeUnitKind::ArtilleryT2 => Some(Weapon::Canister),
                         _ => None,
                     },
                 })
@@ -194,6 +201,7 @@ impl Battle {
             shell_config,
             kinetic_config,
             bullet_config,
+            canister_config,
             energy_config,
             anni_config,
             ai: ai::Controller::new(),
@@ -204,6 +212,7 @@ impl Battle {
         match weapon {
             Weapon::Blast => &self.shell_config,
             Weapon::Kinetic => &self.kinetic_config,
+            Weapon::Canister => &self.canister_config,
             Weapon::Energy => &self.energy_config,
             Weapon::Annihilation => &self.anni_config,
             Weapon::MachineGun => &self.bullet_config,
@@ -341,13 +350,17 @@ impl Battle {
         for _ in 0..n {
             let owner = s.usize();
             let weapon = Weapon::from_code(s.u8())?;
-            if weapon == Weapon::Laser || (version < 43 && weapon.energetic()) {
+            if weapon == Weapon::Laser
+                || (version < 43 && weapon.energetic())
+                || (version < 48 && weapon == Weapon::Canister)
+            {
                 return None;
             }
             let pos = std::array::from_fn(|_| s.fx());
             let velocity = std::array::from_fn(|_| s.fx());
             let distance = s.fx();
             if owner >= units.len()
+                || (weapon == Weapon::Canister && units[owner].kind != RangeUnitKind::ArtilleryT2)
                 || !super::restored_round(pos, velocity, size)
                 || distance <= Fx::ZERO
                 || distance > Fx::from_int(10000)
@@ -442,6 +455,9 @@ impl BlastRange {
         if u.kind == RangeUnitKind::Strider {
             return Some(Weapon::MachineGun);
         }
+        if u.kind == RangeUnitKind::ArtilleryT2 {
+            return Some(Weapon::Canister);
+        }
         if u.kind == RangeUnitKind::Artillery {
             return Some(a.weapon.unwrap_or(Weapon::Blast));
         }
@@ -458,7 +474,10 @@ impl BlastRange {
                 (_, Some(t))
                     if matches!(
                         t.kind,
-                        RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::Base
+                        RangeUnitKind::Tank
+                            | RangeUnitKind::Artillery
+                            | RangeUnitKind::ArtilleryT2
+                            | RangeUnitKind::Base
                     ) =>
                 {
                     ammo.tank
@@ -494,7 +513,10 @@ impl BlastRange {
             || self.units.get(id).is_none_or(|u| {
                 !u.status.alive || !matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
             })
-            || matches!(weapon, Some(Weapon::MachineGun | Weapon::Laser))
+            || matches!(
+                weapon,
+                Some(Weapon::MachineGun | Weapon::Laser | Weapon::Canister)
+            )
         {
             return false;
         }
@@ -1062,6 +1084,7 @@ impl BlastRange {
             shell_config: self.battle.shell_config.clone(),
             kinetic_config: self.battle.kinetic_config.clone(),
             bullet_config: self.battle.bullet_config.clone(),
+            canister_config: self.battle.canister_config.clone(),
             energy_config: self.battle.energy_config.clone(),
             anni_config: self.battle.anni_config.clone(),
             ai: self.battle.ai.clone(),
@@ -1110,6 +1133,7 @@ impl BlastRange {
                             RangeUnitKind::Strider => Some(Weapon::MachineGun),
                             RangeUnitKind::TurretT1 => Some(Weapon::Kinetic),
                             RangeUnitKind::TurretT2 => Some(Weapon::Energy),
+                            RangeUnitKind::ArtilleryT2 => Some(Weapon::Canister),
                             RangeUnitKind::Artillery => {
                                 Some(battle.actors[id].weapon.unwrap_or(Weapon::Blast))
                             }
@@ -1249,7 +1273,10 @@ impl BlastRange {
                     (_, Some(t))
                         if matches!(
                             self.units[t].kind,
-                            RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::Base
+                            RangeUnitKind::Tank
+                                | RangeUnitKind::Artillery
+                                | RangeUnitKind::ArtilleryT2
+                                | RangeUnitKind::Base
                         ) =>
                     {
                         ammo.tank
@@ -1257,6 +1284,8 @@ impl BlastRange {
                     _ => ammo.strider,
                 };
                 a.weapon.unwrap_or(Weapon::ammo(choice))
+            } else if kind == RangeUnitKind::ArtilleryT2 {
+                Weapon::Canister
             } else if kind == RangeUnitKind::Artillery {
                 a.weapon.unwrap_or(Weapon::Blast)
             } else if kind == RangeUnitKind::TurretT1 {
@@ -1273,6 +1302,7 @@ impl BlastRange {
             let config = match weapon {
                 Weapon::Blast => &b.shell_config,
                 Weapon::Kinetic => &b.kinetic_config,
+                Weapon::Canister => &b.canister_config,
                 Weapon::Energy => &b.energy_config,
                 Weapon::Annihilation => &b.anni_config,
                 Weapon::MachineGun => &b.bullet_config,
@@ -1314,7 +1344,10 @@ impl BlastRange {
             // normal projectile sweep remains authoritative for a hit.
             completed("orders_misc");
             let blocked_direct = in_range
-                && matches!(weapon, Weapon::MachineGun | Weapon::Kinetic)
+                && matches!(
+                    weapon,
+                    Weapon::MachineGun | Weapon::Kinetic | Weapon::Canister
+                )
                 && !kind.emplacement()
                 && !matches!(a.order, Order::Ground(_))
                 && weapons::muzzles(&self.units[id], a.turret.angle)
@@ -1505,6 +1538,7 @@ impl BlastRange {
                 kind,
                 RangeUnitKind::Tank
                     | RangeUnitKind::Artillery
+                    | RangeUnitKind::ArtilleryT2
                     | RangeUnitKind::TurretT1
                     | RangeUnitKind::TurretT2
             );
@@ -1519,15 +1553,19 @@ impl BlastRange {
                 }
             }
             let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
-            if muzzles.is_empty() || b.rounds.len() + muzzles.len() > b.tuning.max_rounds {
+            let count = if weapon == Weapon::Canister {
+                b.tuning.canister.pellets
+            } else if shell {
+                1
+            } else {
+                muzzles.len().min(2)
+            };
+            if muzzles.is_empty() || b.rounds.len() + count > b.tuning.max_rounds {
                 continue;
             }
             let speed = config.shell_speed;
-            for (barrel, muzzle) in muzzles
-                .into_iter()
-                .take(if shell { 1 } else { 2 })
-                .enumerate()
-            {
+            for barrel in 0..count {
+                let muzzle = muzzles[if shell { 0 } else { barrel }];
                 let mut delta: [Fx; 3] = std::array::from_fn(|k| Fx::from_int(p[k]).sub(muzzle[k]));
                 if !shell {
                     let serial = a.fired.wrapping_mul(2).wrapping_add(barrel as u32)
@@ -1550,14 +1588,27 @@ impl BlastRange {
                     .div(Fx::from_int(speed))
                     .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
                 let ballistic = shell && !weapon.energetic();
-                let mut velocity = if weapon == Weapon::Kinetic {
+                let mut velocity = if matches!(weapon, Weapon::Kinetic | Weapon::Canister) {
                     weapons::kinetic_velocity(muzzle, p, config)
                 } else if ballistic {
                     delta.map(|v| v.div(time))
                 } else {
                     weapons::flight_velocity(delta, speed)
                 };
-                if ballistic && weapon != Weapon::Kinetic {
+                if weapon == Weapon::Canister {
+                    velocity = weapons::spread(
+                        velocity,
+                        [
+                            fx::angle::cos(a.turret.angle),
+                            Fx::ZERO,
+                            fx::angle::sin(a.turret.angle),
+                        ],
+                        a.fired.wrapping_mul(257).wrapping_add(barrel as u32)
+                            ^ (id as u32).wrapping_mul(65537),
+                        b.tuning.canister.spread_milli,
+                    );
+                }
+                if ballistic && !matches!(weapon, Weapon::Kinetic | Weapon::Canister) {
                     velocity[1] = velocity[1].add(
                         Fx::from_int(config.gravity)
                             .mul(time)
@@ -1576,7 +1627,12 @@ impl BlastRange {
             a.fired = a.fired.wrapping_add(1);
             a.charge = None;
             if shell {
-                a.next = self.tick + b.tuning.tank_reload_ticks;
+                a.next = self.tick
+                    + if weapon == Weapon::Canister {
+                        b.tuning.canister.reload_ticks
+                    } else {
+                        b.tuning.tank_reload_ticks
+                    };
             } else {
                 let remaining = stream.burst_ticks.saturating_sub(a.burst);
                 a.burst += stream.interval_ticks;
@@ -1686,7 +1742,7 @@ impl BlastRange {
                         drained,
                         collapsed,
                     });
-                } else if r.weapon == Weapon::Kinetic {
+                } else if matches!(r.weapon, Weapon::Kinetic | Weapon::Canister) {
                     // A solid round glances off or spends its work along
                     // its line, as the single gun's (ADR-454, ADR-456).
                     b.impacts.push(Impact {
@@ -1694,7 +1750,7 @@ impl BlastRange {
                         weapon: r.weapon,
                     });
                     let mut velocity = r.velocity;
-                    if self.ricochet(at, prev, &mut velocity, &b.kinetic_config) {
+                    if self.ricochet(at, prev, &mut velocity, &config) {
                         r.velocity = velocity;
                         r.pos = last_free;
                         r.distance = r.distance.sub(travel);
@@ -1702,7 +1758,7 @@ impl BlastRange {
                             b.rounds.push(r);
                         }
                     } else {
-                        self.kinetic_hit_at(at, contact, r.velocity, &b.kinetic_config);
+                        self.kinetic_hit_at(at, contact, r.velocity, &config);
                     }
                 } else if r.weapon.bursts() {
                     let old = self.matter.remaining_mj;

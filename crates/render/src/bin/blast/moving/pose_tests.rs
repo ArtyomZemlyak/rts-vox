@@ -3,7 +3,7 @@ use fx::Fx;
 use sim_core::damage::V3;
 
 fn scene() -> Scene {
-    let mut sim = tests::occupancy_roster(7);
+    let mut sim = tests::occupancy_roster(8);
     sim.battle =
         sim_core::blast::battle::Battle::new(&sim.units, sim.config.unit_ablation_resistance);
     for (i, unit) in sim.units.iter_mut().enumerate() {
@@ -240,7 +240,7 @@ fn interpolated_turrets_feet_death_and_reset_keep_the_same_picture() {
             let mut visual = world.resource_mut::<Visual>();
             visual.previous = previous;
             visual.previous_feet = previous_feet;
-            visual.battle_turrets = vec![65000; 7];
+            visual.battle_turrets = vec![65000; 8];
             let mut scene = world.resource_mut::<Scene>();
             scene.paused = false;
             scene.acc = alpha / 30.0;

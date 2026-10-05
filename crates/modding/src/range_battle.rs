@@ -3,6 +3,25 @@ use crate::explosion::Delivery;
 use crate::range::{RangeUnitDef, RangeZone};
 use serde::Deserialize;
 
+/// A canister opens at the muzzle; each pellet owns finite kinetic work.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Canister {
+    pub pellets: usize,
+    pub spread_milli: i32,
+    pub range: i32,
+    pub reload_ticks: u32,
+}
+impl Default for Canister {
+    fn default() -> Self {
+        Self {
+            pellets: 12,
+            spread_milli: 45,
+            range: 1600,
+            reload_ticks: 150,
+        }
+    }
+}
+
 /// Which round a tank loads for what it aims at (ADR-456): `Blast` is the
 /// high-explosive shell, `Kinetic` the armour-piercing one.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -20,6 +39,8 @@ pub struct Tuning {
     pub tank_range: i32,
     #[serde(default = "default_artillery_range")]
     pub artillery_range: i32,
+    #[serde(default)]
+    pub canister: Canister,
     pub kinetic_range: i32,
     pub energy_range: i32,
     pub anni_range: i32,
@@ -45,6 +66,11 @@ impl Tuning {
             || !(1..=1800).contains(&t.tank_reload_ticks)
             || !(100..=3000).contains(&t.tank_range)
             || !(100..=3000).contains(&t.artillery_range)
+            || !(2..=24).contains(&t.canister.pellets)
+            || t.canister.pellets > t.max_rounds
+            || !(5..=150).contains(&t.canister.spread_milli)
+            || !(100..=3000).contains(&t.canister.range)
+            || !(1..=1800).contains(&t.canister.reload_ticks)
             || !(100..=3000).contains(&t.kinetic_range)
             || !(100..=3000).contains(&t.energy_range)
             || !(100..=3000).contains(&t.anni_range)
@@ -69,6 +95,25 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canister_defaults_and_budget_validation() {
+        let shipped = include_str!("../../../data/range-battle.ron");
+        let old = shipped
+            .lines()
+            .filter(|l| !l.contains("canister:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let t = Tuning::from_ron(&old).unwrap();
+        assert_eq!(t.canister.pellets, 12);
+        for invalid in [
+            shipped.replace("pellets: 12", "pellets: 0"),
+            shipped.replace("spread_milli: 45", "spread_milli: 500"),
+            shipped.replace("reload_ticks: 150", "reload_ticks: 0"),
+        ] {
+            assert!(Tuning::from_ron(&invalid).is_err());
+        }
+    }
 
     #[test]
     fn artillery_range_has_a_legacy_default_and_rejects_invalid_values() {

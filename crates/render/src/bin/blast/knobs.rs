@@ -756,7 +756,11 @@ fn chassis_field<'a>(c: &'a mut Chassis, f: &str) -> Option<&'a mut i32> {
 fn stock_chassis(kind: RangeUnitKind) -> Chassis {
     let t = modding::tuning::Tuning::from_ron(include_str!("../../../../../data/sim.ron"))
         .expect("sim tuning");
-    if matches!(kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) || kind.emplacement() {
+    if matches!(
+        kind,
+        RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+    ) || kind.emplacement()
+    {
         t.tracked
     } else {
         t.walking

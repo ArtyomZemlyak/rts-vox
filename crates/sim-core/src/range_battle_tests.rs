@@ -5,6 +5,107 @@ use super::*;
 use modding::explosion::Delivery;
 use modding::range::RangeUnitDef;
 
+fn canister_salvo() -> BlastRange {
+    let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.ai.next_tick = u32::MAX;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..160 {
+        r.step();
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
+    }
+    assert_eq!(r.battle.actors[0].fired, 1, "T2 never fired");
+    r
+}
+
+#[test]
+fn canister_fires_a_deterministic_fan_and_replays_individual_kinetic_contacts() {
+    let mut r = canister_salvo();
+    assert_eq!(r.battle_weapon(0), Some(Weapon::Canister));
+    assert_eq!(
+        r.battle_attack_range(0),
+        Some(r.battle.tuning.canister.range)
+    );
+    assert!(!r.set_battle_weapon(0, Some(Weapon::Blast)));
+    assert!(!r.set_battle_weapon(1, Some(Weapon::Canister)));
+    assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
+    let velocities: std::collections::BTreeSet<_> = r
+        .battle
+        .rounds
+        .iter()
+        .map(|p| {
+            assert_eq!(p.owner, 0);
+            assert_eq!(p.weapon, Weapon::Canister);
+            p.velocity.map(|v| v.0)
+        })
+        .collect();
+    assert_eq!(velocities.len(), r.battle.tuning.canister.pellets);
+    assert_eq!(r.state_hash(), canister_salvo().state_hash());
+    assert_eq!(
+        r.battle.actors[0].next,
+        r.tick - 1 + r.battle.tuning.canister.reload_ticks
+    );
+    assert!(r.battle_order(0, Order::Hold, None));
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    let mut replay =
+        BlastRange::restore(r.config.clone(), &r.snapshot()).expect("T2 salvo snapshot");
+    let before = r.units[1].body.volume_mm3();
+    let mut contacts = 0;
+    for _ in 0..100 {
+        r.step();
+        replay.step();
+        assert_eq!(r.state_hash(), replay.state_hash());
+        contacts += r
+            .battle
+            .impacts
+            .iter()
+            .filter(|i| i.weapon == Weapon::Canister)
+            .count();
+        assert!(r.battle.waves.is_empty(), "canister produced a blast wave");
+    }
+    assert!(contacts > 1, "pellets never made separate contacts");
+    assert!(
+        r.units[1].body.volume_mm3() < before,
+        "canister caused no material damage"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+    let mut legacy = r.snapshot();
+    legacy[..4].copy_from_slice(&47u32.to_le_bytes());
+    assert!(BlastRange::restore(r.config.clone(), &legacy).is_none());
+    let old = arena(RangeUnitKind::Tank);
+    let mut legacy = old.snapshot();
+    legacy[..4].copy_from_slice(&47u32.to_le_bytes());
+    assert!(BlastRange::restore(old.config.clone(), &legacy).is_some());
+}
+
+#[test]
+fn canister_capacity_defers_the_whole_salvo_then_allows_reload_and_movement() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.ai.next_tick = u32::MAX;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds = 11;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    for _ in 0..100 {
+        r.step();
+    }
+    assert_eq!(r.battle.actors[0].fired, 0);
+    assert!(r.battle.rounds.is_empty());
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds = 12;
+    r.step();
+    assert_eq!(r.battle.actors[0].fired, 1);
+    assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
+    let start = r.units[0].at;
+    assert!(r.battle_order(0, Order::Move, Some([260, 400])));
+    for _ in 0..100 {
+        r.step();
+    }
+    assert_ne!(r.units[0].at, start, "T2 is not mobile");
+}
+
 fn arena(kind: RangeUnitKind) -> BlastRange {
     arena_of([kind, kind])
 }

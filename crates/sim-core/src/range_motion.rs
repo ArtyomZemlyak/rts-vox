@@ -267,6 +267,7 @@ impl Motion {
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank
             | modding::range::RangeUnitKind::Artillery
+            | modding::range::RangeUnitKind::ArtilleryT2
             | modding::range::RangeUnitKind::TurretT1
             | modding::range::RangeUnitKind::TurretT2
             | modding::range::RangeUnitKind::Base => t.tracked,
@@ -319,7 +320,9 @@ impl Motion {
                 spider_tuning().speed
             } else if matches!(
                 kind,
-                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+                modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Artillery
+                    | modding::range::RangeUnitKind::ArtilleryT2
             ) {
                 c.tank_speed
             } else {
@@ -331,7 +334,9 @@ impl Motion {
                 spider_tuning().step
             } else if matches!(
                 kind,
-                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+                modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Artillery
+                    | modding::range::RangeUnitKind::ArtilleryT2
             ) {
                 c.step_height
             } else {
@@ -339,7 +344,9 @@ impl Motion {
             },
             terrain_tilt_pct: if matches!(
                 kind,
-                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+                modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Artillery
+                    | modding::range::RangeUnitKind::ArtilleryT2
             ) {
                 c.tank_terrain_tilt_pct
             } else {
@@ -347,7 +354,9 @@ impl Motion {
             },
             terrain_approach_pct: if matches!(
                 kind,
-                modding::range::RangeUnitKind::Tank | modding::range::RangeUnitKind::Artillery
+                modding::range::RangeUnitKind::Tank
+                    | modding::range::RangeUnitKind::Artillery
+                    | modding::range::RangeUnitKind::ArtilleryT2
             ) {
                 c.tank_terrain_approach_pct
             } else {
@@ -3341,6 +3350,7 @@ mod tests {
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
+                RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -3532,6 +3542,7 @@ mod tests {
                 RangeUnitKind::Strider => voxel::unit::strider(),
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
+                RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -4398,6 +4409,7 @@ mod tests {
                         RangeUnitKind::Strider => voxel::unit::strider(),
                         RangeUnitKind::Spider => voxel::unit::spider(),
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
+                        RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                         RangeUnitKind::Base => voxel::unit::command_base(),

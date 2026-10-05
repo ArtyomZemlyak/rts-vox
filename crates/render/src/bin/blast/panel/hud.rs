@@ -404,6 +404,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
         BattleWeapon::Energy => "Энергопушка",
         BattleWeapon::Annihilation => "Аннигиляционная пушка",
         BattleWeapon::Laser => "Тяжёлый лазер",
+        BattleWeapon::Canister => "Картечь",
     }
 }
 
@@ -606,6 +607,8 @@ pub fn refresh(
                                 "П"
                             } else if u.kind == RangeUnitKind::Tank {
                                 "Т"
+                            } else if u.kind == RangeUnitKind::ArtilleryT2 {
+                                "А2"
                             } else if u.kind == RangeUnitKind::Artillery {
                                 "А"
                             } else if u.kind == RangeUnitKind::TurretT1 {
@@ -692,8 +695,10 @@ pub fn refresh(
                             "ПАУК"
                         } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
+                        } else if u.kind == RangeUnitKind::ArtilleryT2 {
+                            "АРТИЛЛЕРИЯ T2"
                         } else if u.kind == RangeUnitKind::Artillery {
-                            "АРТИЛЛЕРИЯ"
+                            "АРТИЛЛЕРИЯ T1"
                         } else if u.kind == RangeUnitKind::TurretT1 {
                             "ТУРЕЛЬ T1"
                         } else if u.kind == RangeUnitKind::TurretT2 {

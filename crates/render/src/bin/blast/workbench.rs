@@ -26,6 +26,7 @@ pub enum Tool {
     Strider,
     Spider,
     Artillery,
+    ArtilleryT2,
     TurretT1,
     TurretT2,
     Base,
@@ -264,6 +265,7 @@ impl Workshop {
             1 => include_str!("../../../../../data/skirmish-pincer.ron"),
             2 => include_str!("../../../../../data/skirmish-spider.ron"),
             3 => include_str!("../../../../../data/skirmish-turrets.ron"),
+            4 => include_str!("../../../../../data/skirmish-canister.ron"),
             _ => return Err("Неизвестный сценарий боя".into()),
         })?;
         let mut layout = RangeLayout::from_ron(include_str!("../../../../../data/range-km.ron"))?;
@@ -547,6 +549,7 @@ impl Workshop {
             | Tool::Strider
             | Tool::Spider
             | Tool::Artillery
+            | Tool::ArtilleryT2
             | Tool::TurretT1
             | Tool::TurretT2
             | Tool::Base => {
@@ -556,6 +559,8 @@ impl Workshop {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::ArtilleryT2 {
+                        RangeUnitKind::ArtilleryT2
                     } else if self.tool == Tool::Artillery {
                         RangeUnitKind::Artillery
                     } else if self.tool == Tool::TurretT1 {
@@ -1770,6 +1775,7 @@ mod tests {
                 RangeUnitKind::Strider,
                 RangeUnitKind::Spider,
                 RangeUnitKind::Artillery,
+                RangeUnitKind::ArtilleryT2,
                 RangeUnitKind::TurretT1,
                 RangeUnitKind::TurretT2,
             ] {
@@ -2109,6 +2115,30 @@ mod tests {
         assert!(
             sim.battle.actors[4].fired > 0,
             "T2 energy cannon never fired"
+        );
+    }
+
+    #[test]
+    fn canister_skirmish_exposes_the_new_unit_and_preserves_the_range() {
+        let (mut workshop, config) = fixture();
+        assert!(workshop.skirmish(4, config.clone()).unwrap().contains("12"));
+        let layout = workshop.layout.as_ref().unwrap();
+        assert!(layout.battle);
+        assert_eq!(layout.units.len(), 5);
+        assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryT2);
+        assert_eq!(workshop.controlled, Some(0));
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
+        sim.start_battle().unwrap();
+        for _ in 0..120 {
+            sim.step();
+        }
+        assert!(
+            sim.battle.actors[0].fired > 0,
+            "canister scenario never fired"
+        );
+        assert_eq!(
+            sim.battle_weapon(0),
+            Some(sim_core::blast::battle::Weapon::Canister)
         );
     }
 

@@ -76,7 +76,7 @@ impl Footprint {
 }
 
 pub struct Validator {
-    footprints: [std::sync::OnceLock<Footprint>; 14],
+    footprints: [std::sync::OnceLock<Footprint>; RangeUnitKind::COUNT * 2],
 }
 impl Default for Validator {
     fn default() -> Self {
@@ -87,11 +87,11 @@ impl Default for Validator {
 }
 impl Validator {
     fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
-        self.footprints[kind.index() + usize::from(reverse) * 7]
+        self.footprints[kind.index() + usize::from(reverse) * RangeUnitKind::COUNT]
             .get_or_init(|| Footprint::of(kind, if reverse { fx::angle::FULL / 2 } else { 0 }))
     }
 
-    /// Collision checks cover at most fourteen template footprints; the terrain
+    /// Collision checks cover one footprint per kind and side; the terrain
     /// index itself scales with the authored map. Layered blocks retain
     /// their last-writer material semantics.
     pub fn validate(&self, layout: &RangeLayout) -> Result<(), Rejection> {
@@ -200,5 +200,24 @@ mod tests {
             material: 3,
         });
         v.validate(&r).unwrap();
+    }
+
+    #[test]
+    fn canister_artillery_has_separate_cached_footprints_for_both_sides() {
+        let v = Validator::default();
+        for reverse in [false, true] {
+            let t2 = v.footprint(RangeUnitKind::ArtilleryT2, reverse);
+            let tank = v.footprint(RangeUnitKind::Tank, !reverse);
+            assert!(!t2.columns.is_empty());
+            assert!(
+                !std::ptr::eq(t2, tank),
+                "new kind aliased an old orientation"
+            );
+            let fresh = Footprint::of(
+                RangeUnitKind::ArtilleryT2,
+                if reverse { fx::angle::HALF } else { 0 },
+            );
+            assert_eq!(t2.columns, fresh.columns);
+        }
     }
 }

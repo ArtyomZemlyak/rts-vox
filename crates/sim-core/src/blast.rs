@@ -422,6 +422,8 @@ impl RangeUnit {
         // instance. Copy their prepared voxel data instead of redrawing the
         // same shapes for every placement and battle reset.
         static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
+        static ARTILLERY_T2: std::sync::OnceLock<voxel::unit::UnitBody> =
+            std::sync::OnceLock::new();
         static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
@@ -431,6 +433,9 @@ impl RangeUnit {
         let body = match kind {
             RangeUnitKind::Tank => TANK.get_or_init(voxel::unit::tank).clone(),
             RangeUnitKind::Artillery => ARTILLERY.get_or_init(voxel::unit::artillery).clone(),
+            RangeUnitKind::ArtilleryT2 => {
+                ARTILLERY_T2.get_or_init(voxel::unit::artillery_t2).clone()
+            }
             RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
             RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
             RangeUnitKind::Base => BASE.get_or_init(voxel::unit::command_base).clone(),
@@ -2493,7 +2498,10 @@ impl BlastRange {
                     0
                 } else if u.kind == RangeUnitKind::Spider {
                     motion::spider_tuning().speed
-                } else if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) {
+                } else if matches!(
+                    u.kind,
+                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+                ) {
                     c.tank_speed
                 } else {
                     c.walker_speed
@@ -2502,7 +2510,10 @@ impl BlastRange {
                     0
                 } else if u.kind == RangeUnitKind::Spider {
                     motion::spider_tuning().step
-                } else if matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) {
+                } else if matches!(
+                    u.kind,
+                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+                ) {
                     c.step_height
                 } else {
                     c.walker_step_height
@@ -2648,7 +2659,7 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(47);
+        b.u32(48);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2846,7 +2857,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=47).contains(&version) {
+        if !(27..=48).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2865,6 +2876,12 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
+        if version < 48
+            && (r.gun.kind == RangeUnitKind::ArtilleryT2
+                || r.units.iter().any(|u| u.kind == RangeUnitKind::ArtilleryT2))
+        {
+            return None;
+        }
         if r.extended != extended {
             return None;
         }
@@ -3254,10 +3271,20 @@ impl BlastRange {
                     2 => Some(battle::Weapon::Kinetic),
                     3 if version >= 43 => Some(battle::Weapon::Energy),
                     4 if version >= 43 => Some(battle::Weapon::Annihilation),
+                    6 if version >= 48 && unit.kind == RangeUnitKind::ArtilleryT2 => {
+                        Some(battle::Weapon::Canister)
+                    }
                     _ => return None,
                 };
-                if !matches!(unit.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
-                    && actor.weapon.is_some()
+                if !matches!(
+                    unit.kind,
+                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+                ) && actor.weapon.is_some()
+                {
+                    return None;
+                }
+                if unit.kind == RangeUnitKind::ArtilleryT2
+                    && !matches!(actor.weapon, None | Some(battle::Weapon::Canister))
                 {
                     return None;
                 }

@@ -357,6 +357,7 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (false, vec![("Бой 2×2 / расстановка", Action::BattlePreset)]),
             (false, vec![("Паук: лазерный прорыв", Action::Skirmish(2))]),
             (false, vec![("Штурм турелей T1/T2", Action::Skirmish(3))]),
+            (false, vec![("Артиллерия T2: картечь", Action::Skirmish(4))]),
             (false, vec![("Режим испытаний / сброс", Action::RangeMode)]),
             (false, vec![("Сценарии испытаний", Action::ScenarioMenu)]),
             (
@@ -459,7 +460,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
             (
                 true,
                 vec![
-                    ("Артиллерия", Action::Tool(Tool::Artillery)),
+                    ("Артиллерия T1", Action::Tool(Tool::Artillery)),
+                    ("Артиллерия T2", Action::Tool(Tool::ArtilleryT2)),
                     ("Турель T1", Action::Tool(Tool::TurretT1)),
                     ("Турель T2", Action::Tool(Tool::TurretT2)),
                     ("База", Action::Tool(Tool::Base)),
@@ -994,6 +996,7 @@ pub fn actions(
                         RangeUnitKind::Spider => 6,
                         RangeUnitKind::Tank => 5,
                         RangeUnitKind::Artillery => 0,
+                        RangeUnitKind::ArtilleryT2 => 5,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
                         RangeUnitKind::Base => 0,

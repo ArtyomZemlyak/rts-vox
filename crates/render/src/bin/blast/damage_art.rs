@@ -117,6 +117,7 @@ mod tests {
             voxel::unit::turret_t1(),
             voxel::unit::turret_t2(),
             voxel::unit::command_base(),
+            voxel::unit::artillery_t2(),
         ];
         let bindings = templates.each_ref().map(SkinBindings::new);
         let lost: Vec<u32> = range
@@ -131,6 +132,7 @@ mod tests {
                     modding::range::RangeUnitKind::TurretT1 => 4,
                     modding::range::RangeUnitKind::TurretT2 => 5,
                     modding::range::RangeUnitKind::Base => 6,
+                    modding::range::RangeUnitKind::ArtilleryT2 => 7,
                 };
                 let pristine = &templates[kind];
                 pristine

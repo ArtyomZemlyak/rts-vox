@@ -139,15 +139,34 @@ fn hot(input: Input<'_>) -> MeshBuf {
     }
     if sim.battle_mode() {
         let point = |p: [fx::Fx; 3]| Vec3::from(p.map(|v| v.to_f64_lossy() as f32));
-        for r in sim
-            .battle
-            .rounds
-            .iter()
-            .filter(|r| matches!(r.weapon, BattleWeapon::Blast | BattleWeapon::Kinetic))
-        {
+        for r in sim.battle.rounds.iter().filter(|r| {
+            matches!(
+                r.weapon,
+                BattleWeapon::Blast | BattleWeapon::Kinetic | BattleWeapon::Canister
+            )
+        }) {
             let t = fraction;
             let at = point(r.previous).lerp(point(r.pos), t);
-            cube(&mut hot, at, 2.0, [6.0, 3.2, 0.55, 1.0]);
+            if r.weapon == BattleWeapon::Canister {
+                let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
+                beam(
+                    &mut hot,
+                    at - direction * 4.5,
+                    at,
+                    0.55,
+                    [5.0, 2.7, 0.38, 0.85],
+                );
+            }
+            cube(
+                &mut hot,
+                at,
+                if r.weapon == BattleWeapon::Canister {
+                    1.2
+                } else {
+                    2.0
+                },
+                [6.0, 3.2, 0.55, 1.0],
+            );
         }
     }
     for &(p, at, t) in particles.iter().filter(|(p, _, _)| !p.smoke) {
@@ -325,6 +344,7 @@ mod tests {
             RangeUnitKind::TurretT1,
             RangeUnitKind::TurretT2,
             RangeUnitKind::Base,
+            RangeUnitKind::ArtilleryT2,
         ]
         .into_iter()
         .enumerate()

@@ -1040,6 +1040,7 @@ impl Matter {
                 .map(|u| match u.kind {
                     modding::range::RangeUnitKind::Tank => voxel::unit::tank(),
                     modding::range::RangeUnitKind::Artillery => voxel::unit::artillery(),
+                    modding::range::RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
                     modding::range::RangeUnitKind::Strider => voxel::unit::strider(),
                     modding::range::RangeUnitKind::Spider => voxel::unit::spider(),
                     modding::range::RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),

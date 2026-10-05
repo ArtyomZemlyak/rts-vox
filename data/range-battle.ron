@@ -4,6 +4,7 @@
     tank_reload_ticks: 90,
     tank_range: 700,
     artillery_range: 1800,
+    canister: (pellets: 12, spread_milli: 45, range: 1600, reload_ticks: 150),
     kinetic_range: 900,
     energy_range: 1200,
     anni_range: 1000,

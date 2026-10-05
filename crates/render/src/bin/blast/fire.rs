@@ -49,6 +49,7 @@ struct Tracer {
 #[derive(Resource, Default)]
 pub struct Effects {
     alive: Vec<bool>,
+    canister_fired: Vec<u32>,
     deaths: Vec<(Vec3, f32)>,
     particles: Vec<Particle>,
     tracers: Vec<Tracer>,
@@ -149,6 +150,7 @@ fn destruction_origin(u: &sim_core::blast::RangeUnit) -> Vec3 {
 impl Effects {
     pub fn clear(&mut self) {
         self.alive.clear();
+        self.canister_fired.clear();
         self.deaths.clear();
         self.particles.clear();
         self.tracers.clear();
@@ -164,6 +166,9 @@ impl Effects {
     /// Capture the live flags before the first tick too; loading a wreck
     /// establishes a baseline, it does not replay its destruction.
     pub fn before(&mut self, sim: &BlastRange) {
+        self.canister_fired.clear();
+        self.canister_fired
+            .extend(sim.battle.actors.iter().map(|a| a.fired));
         self.alive.clear();
         self.alive.extend(
             sim.units
@@ -465,7 +470,7 @@ impl Effects {
             let at = Vec3::from(i.at.map(|v| v as f32));
             if i.weapon == BattleWeapon::Blast {
                 self.shell_burst(at, now, sim.battle.shell_config.energy);
-            } else if i.weapon == BattleWeapon::Kinetic {
+            } else if matches!(i.weapon, BattleWeapon::Kinetic | BattleWeapon::Canister) {
                 self.kinetic_contact(at, self.kinetic_normal(at), now);
             }
         }
@@ -670,6 +675,14 @@ impl Effects {
         }
         if sim.battle_mode() {
             for (id, unit) in sim.units.iter().enumerate() {
+                if unit.kind == RangeUnitKind::ArtilleryT2 {
+                    let fired = sim.battle.actors[id].fired;
+                    if self.canister_fired.get(id).copied().unwrap_or(fired) != fired {
+                        if let Some(at) = sim.battle_muzzles(id).first() {
+                            self.add(point(*at), Vec3::ZERO, now, 0.11, 6.5, false);
+                        }
+                    }
+                }
                 if unit.kind != RangeUnitKind::Strider {
                     continue;
                 }
@@ -685,13 +698,16 @@ impl Effects {
                 }
             }
         }
+        self.canister_fired.clear();
+        self.canister_fired
+            .extend(sim.battle.actors.iter().map(|a| a.fired));
         self.capture_dust(sim, now);
         self.kinetic_paths.clear();
         self.kinetic_paths.extend(
             sim.battle
                 .rounds
                 .iter()
-                .filter(|r| r.weapon == BattleWeapon::Kinetic)
+                .filter(|r| matches!(r.weapon, BattleWeapon::Kinetic | BattleWeapon::Canister))
                 .take(TRACER_CAP)
                 .map(|r| {
                     let at = point(r.pos);
@@ -833,8 +849,10 @@ impl Effects {
             .iter()
             .chain((!sim.battle_mode()).then_some(&sim.gun))
         {
-            if !matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
-                || !u.status.alive
+            if !matches!(
+                u.kind,
+                RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+            ) || !u.status.alive
                 || !u.motion.hull.grounded()
             {
                 continue;
@@ -1527,6 +1545,72 @@ mod tests {
                 .iter()
                 .any(|t| t.tail == expected.tail && t.head == expected.head));
         }
+    }
+
+    #[test]
+    fn canister_has_one_muzzle_flash_per_salvo_and_no_loaded_salvo_flash() {
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+        layout.battle = true;
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.course = None;
+        layout.units = vec![
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::ArtilleryT2,
+                at: [170, 16, 336],
+                allied: true,
+            },
+            modding::range::RangeUnitDef {
+                kind: RangeUnitKind::Tank,
+                at: [450, 16, 336],
+                allied: false,
+            },
+        ];
+        let mut sim = range_sim(config(false, false), Some(&layout), false, None).unwrap();
+        sim.start_battle().unwrap();
+        assert!(sim.battle_order(0, sim_core::blast::battle::Order::Attack(1), None));
+        sim.battle.actors[1].order = sim_core::blast::battle::Order::Hold;
+        let mut effects = Effects::default();
+        effects.before(&sim);
+        for _ in 0..160 {
+            sim.step();
+            effects.capture(&sim);
+            if sim.battle.actors[0].fired > 0 {
+                break;
+            }
+        }
+        assert_eq!(sim.battle.actors[0].fired, 1);
+        assert_eq!(
+            effects.particles.iter().filter(|p| p.edge == 6.5).count(),
+            1
+        );
+        let pellets: Vec<_> = sim
+            .battle
+            .rounds
+            .iter()
+            .filter(|r| r.owner == 0 && r.weapon == BattleWeapon::Canister)
+            .collect();
+        assert_eq!(pellets.len(), 12);
+        // The enemy can also have a live AP round. Check this salvo's paths.
+        for round in pellets {
+            let at = point(round.pos);
+            assert!(effects
+                .kinetic_paths
+                .contains(&(at, at + at - point(round.previous))));
+        }
+        effects.capture(&sim);
+        assert_eq!(
+            effects.particles.iter().filter(|p| p.edge == 6.5).count(),
+            1
+        );
+        effects.clear();
+        effects.before(&sim);
+        effects.capture(&sim);
+        assert!(
+            !effects.particles.iter().any(|p| p.edge == 6.5),
+            "load replayed muzzle flash"
+        );
     }
 
     #[test]

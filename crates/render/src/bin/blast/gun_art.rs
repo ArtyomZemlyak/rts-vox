@@ -102,6 +102,7 @@ pub fn emitters(
         RangeUnitKind::Tank => 3.0,
         RangeUnitKind::Spider => 12.0,
         RangeUnitKind::Artillery => 3.0,
+        RangeUnitKind::ArtilleryT2 => 4.0,
         RangeUnitKind::TurretT1 => 2.1,
         RangeUnitKind::TurretT2 => 3.5,
         RangeUnitKind::Base => 4.0,

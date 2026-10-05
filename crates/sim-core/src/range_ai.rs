@@ -246,6 +246,7 @@ impl Policy for Rules<'_> {
                             u.kind,
                             RangeUnitKind::Tank
                                 | RangeUnitKind::Artillery
+                                | RangeUnitKind::ArtilleryT2
                                 | RangeUnitKind::Strider
                                 | RangeUnitKind::Spider
                         )
@@ -266,7 +267,7 @@ impl Policy for Rules<'_> {
                 .filter(|u| {
                     u.mobile
                         && u.armed
-                        && u.kind != RangeUnitKind::Artillery
+                        && !u.kind.artillery()
                         && (i64::from(u.position[0] - base[0]).abs()
                             + i64::from(u.position[1] - base[1]).abs())
                             <= 1500
@@ -324,8 +325,7 @@ impl Policy for Rules<'_> {
                         // surviving mobile gun joins that assault instead of
                         // pursuing harmless disabled hulls across rough ground.
                         let siege = (u.armed
-                            && (u.kind == RangeUnitKind::Artillery
-                                || (u.mobile && enemy_field == 0)))
+                            && (u.kind.artillery() || (u.mobile && enemy_field == 0)))
                             .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
                             .flatten();
                         if let Some(base) = siege {

@@ -78,6 +78,7 @@ pub fn setup(
         (RangeUnitKind::Strider, voxel::unit::strider()),
         (RangeUnitKind::Spider, voxel::unit::spider()),
         (RangeUnitKind::Artillery, voxel::unit::artillery()),
+        (RangeUnitKind::ArtilleryT2, voxel::unit::artillery_t2()),
         (RangeUnitKind::TurretT1, voxel::unit::turret_t1()),
         (RangeUnitKind::TurretT2, voxel::unit::turret_t2()),
         (RangeUnitKind::Base, voxel::unit::command_base()),

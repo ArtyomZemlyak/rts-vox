@@ -1386,6 +1386,59 @@ pub fn artillery() -> UnitBody {
     u
 }
 
+/// T2 tracked assault artillery. Thick cheek plates protect the breech;
+/// the broad, short canister bore and ammunition pods distinguish its tier.
+pub fn artillery_t2() -> UnitBody {
+    let mut u = artillery();
+    for z in [3, 24] {
+        fill_f(
+            &mut u,
+            (19, 43),
+            (16, 26),
+            (z, z + 3),
+            Part::Armour,
+            FINISH_STEEL,
+        );
+        for x in [22, 31, 39] {
+            fill_f(
+                &mut u,
+                (x, x + 2),
+                (20, 27),
+                (z, z + 1),
+                Part::Armour,
+                FINISH_GUN,
+            );
+        }
+    }
+    for z in [7, 20] {
+        crate_box(&mut u, (5, 16), (14, 22), (z, z + 3), Part::Armour);
+    }
+    fill_f(
+        &mut u,
+        (34, 48),
+        (19, 28),
+        (11, 19),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(
+        &mut u,
+        (47, 60),
+        (22, 30),
+        (11, 19),
+        Part::Weapon,
+        FINISH_STEEL,
+    );
+    carve(&mut u, (58, 60), (25, 27), (14, 16));
+    // Place the physical muzzle at the centre of the new, wider bore.
+    std::sync::Arc::make_mut(&mut u.weapon_paths)[0] = WeaponPath {
+        min: [34, 22, 11],
+        max: [60, 30, 19],
+        axis: 0,
+    };
+    u
+}
+
 /// T1 point-defence turret: a low armoured socket and one conventional gun.
 /// The base stays fixed; only the upper voxels traverse toward a target.
 pub fn turret_t1() -> UnitBody {
@@ -2833,6 +2886,19 @@ mod wreck_tests {
 #[cfg(test)]
 mod spider_tests {
     use super::*;
+    #[test]
+    fn artillery_t2_has_connected_vitals_a_wider_bore_and_more_armour() {
+        let t1 = artillery();
+        let t2 = artillery_t2();
+        assert_eq!(t1.extent_mm(), t2.extent_mm());
+        assert!(t2.volume_mm3() > t1.volume_mm3());
+        assert_eq!(t2.weapon_paths.len(), 1);
+        assert_eq!(t2.weapon_paths[0].min[1] + t2.weapon_paths[0].max[1], 52);
+        assert_eq!(t2.part_at(48, 28, 11), Part::Weapon);
+        assert_eq!(t2.part_at(20, 19, 3), Part::Armour);
+        let s = t2.status(&mut CoreBufs::new());
+        assert!(s.alive && s.engine && s.weapon, "{s:?}");
+    }
     #[test]
     fn spider_has_eight_articulated_legs_and_one_connected_heavy_weapon() {
         let body = spider();

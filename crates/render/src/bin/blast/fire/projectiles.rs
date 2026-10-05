@@ -91,6 +91,7 @@ pub(super) fn append(
         for round in &sim.battle.rounds {
             let edge = match round.weapon {
                 BattleWeapon::MachineGun => 0.7,
+                BattleWeapon::Canister => 1.2,
                 BattleWeapon::Blast | BattleWeapon::Kinetic => 2.0,
                 BattleWeapon::Energy => 4.0,
                 BattleWeapon::Annihilation => 6.0,
