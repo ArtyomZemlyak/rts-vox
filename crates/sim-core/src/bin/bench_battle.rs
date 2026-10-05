@@ -223,7 +223,8 @@ fn main() {
             "turrets" => include_str!("../../../../data/skirmish-turrets.ron"),
             "pincer" => include_str!("../../../../data/skirmish-pincer.ron"),
             "breakthrough" => include_str!("../../../../data/skirmish-breakthrough.ron"),
-            _ => panic!("--scenario: spider, turrets, pincer or breakthrough"),
+            "canister" => include_str!("../../../../data/skirmish-canister.ron"),
+            _ => panic!("--scenario: spider, turrets, pincer, breakthrough or canister"),
         };
         let preset = modding::range_skirmish::Skirmish::from_ron(ron).unwrap();
         layout.gun = preset.zone.spawn;

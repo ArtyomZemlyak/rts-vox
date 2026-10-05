@@ -110,6 +110,96 @@ fn arena(kind: RangeUnitKind) -> BlastRange {
     arena_of([kind, kind])
 }
 
+fn canister_ground_salvo(layout: RangeLayout) -> BlastRange {
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.ai.next_tick = u32::MAX;
+    let target = aim_point(&r.units[1]);
+    assert!(r.battle_order(0, Order::Ground(target), None));
+    for _ in 0..160 {
+        r.step();
+        if r.battle.actors[0].fired > 0 {
+            break;
+        }
+    }
+    assert_eq!(r.battle.actors[0].fired, 1);
+    assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
+    assert!(r.battle_order(0, Order::Hold, None));
+    r
+}
+
+#[test]
+fn canister_pellets_stop_at_thick_steel_cover_without_damaging_the_hidden_tank() {
+    let mut layout = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 240],
+        max: [332, 96, 432],
+        material: 3,
+    });
+    let mut r = canister_ground_salvo(layout);
+    let before = r.units[1].body.volume_mm3();
+    let mut contacts = 0;
+    for _ in 0..160 {
+        r.step();
+        for impact in &r.battle.impacts {
+            assert_eq!(impact.weapon, Weapon::Canister);
+            assert!((296..=336).contains(&impact.at[0]), "missed steel cover");
+            contacts += 1;
+        }
+        assert!(r.battle.waves.is_empty());
+        if r.battle.rounds.is_empty() {
+            break;
+        }
+    }
+    assert!(r.battle.rounds.is_empty(), "pellets did not resolve");
+    assert!(contacts > 1, "no independent cover contacts");
+    assert_eq!(r.units[1].body.volume_mm3(), before);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn canister_shield_intercepts_individual_pellets_and_replays_after_overload() {
+    let mut layout = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.shields.push(modding::range::RangeShieldDef {
+        at: [450, 32, 336],
+        radius: 80,
+    });
+    let mut r = canister_ground_salvo(layout);
+    let before = r.units[1].body.volume_mm3();
+    let mut intercepted = false;
+    for _ in 0..100 {
+        r.step();
+        if r.shields[0].hits > 0 {
+            intercepted = true;
+            break;
+        }
+    }
+    assert!(intercepted, "the dome never intercepted a pellet");
+    assert!(r.shields[0].charge < r.shield_tuning.capacity);
+    assert_eq!(r.units[1].body.volume_mm3(), before);
+    assert!(r.battle.rounds.len() < r.battle.tuning.canister.pellets);
+    assert!(
+        !r.battle.rounds.is_empty(),
+        "one shield hit erased the entire fan"
+    );
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for _ in 0..30 {
+        r.step();
+        replay.step();
+        assert_eq!(r.state_hash(), replay.state_hash());
+        assert!(r.battle.waves.is_empty());
+    }
+    assert!(r.matter.economy.ledger.balanced());
+}
+
 /// An allied unit of the first kind facing an enemy of the second.
 fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
     let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
