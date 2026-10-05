@@ -151,7 +151,7 @@ fn hot(input: Input<'_>) -> MeshBuf {
                 let direction = (point(r.pos) - point(r.previous)).normalize_or_zero();
                 beam(
                     &mut hot,
-                    at - direction * 4.5,
+                    at - direction * 7.0,
                     at,
                     0.55,
                     [5.0, 2.7, 0.38, 0.85],
@@ -161,7 +161,7 @@ fn hot(input: Input<'_>) -> MeshBuf {
                 &mut hot,
                 at,
                 if r.weapon == BattleWeapon::Canister {
-                    1.2
+                    2.1
                 } else {
                     2.0
                 },

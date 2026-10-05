@@ -48,6 +48,7 @@ impl Tuning {
             crate::range::RangeUnitKind::Strider => &self.walker,
             crate::range::RangeUnitKind::Spider => &self.spider,
             crate::range::RangeUnitKind::TurretT1
+            | crate::range::RangeUnitKind::ArtilleryTurretT2
             | crate::range::RangeUnitKind::TurretT2
             | crate::range::RangeUnitKind::Base => &self.tank,
         }

@@ -76,10 +76,11 @@ pub enum RangeUnitKind {
     TurretT2,
     Base,
     ArtilleryT2,
+    ArtilleryTurretT2,
 }
 
 impl RangeUnitKind {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
     pub const fn index(self) -> usize {
         match self {
             Self::Tank => 0,
@@ -90,14 +91,24 @@ impl RangeUnitKind {
             Self::TurretT2 => 5,
             Self::Base => 6,
             Self::ArtilleryT2 => 7,
+            Self::ArtilleryTurretT2 => 8,
         }
     }
 
     pub const fn emplacement(self) -> bool {
-        matches!(self, Self::TurretT1 | Self::TurretT2 | Self::Base)
+        matches!(
+            self,
+            Self::TurretT1 | Self::TurretT2 | Self::ArtilleryTurretT2 | Self::Base
+        )
+    }
+    pub const fn canister(self) -> bool {
+        matches!(self, Self::ArtilleryT2 | Self::ArtilleryTurretT2)
     }
     pub const fn artillery(self) -> bool {
-        matches!(self, Self::Artillery | Self::ArtilleryT2)
+        matches!(
+            self,
+            Self::Artillery | Self::ArtilleryT2 | Self::ArtilleryTurretT2
+        )
     }
 }
 

@@ -31,7 +31,7 @@
   (kind: Spider, allied: true, at: (3400,16,2700)),
   (kind: Spider, allied: true, at: (4680,16,5650)),
   (kind: Artillery, allied: true, at: (1520,16,1080)),
-  (kind: ArtilleryT2, allied: true, at: (4400,16,4900)),
+  (kind: ArtilleryTurretT2, allied: true, at: (4400,16,4900)),
   (kind: TurretT1, allied: true, at: (1820,16,1050)),
   (kind: TurretT1, allied: true, at: (3150,16,2400)),
   (kind: TurretT1, allied: true, at: (4520,16,4950)),
@@ -57,7 +57,7 @@
   (kind: Spider, allied: false, at: (7830,16,7140)),
   (kind: Spider, allied: false, at: (5780,16,5470)),
   (kind: Artillery, allied: false, at: (9080,16,8480)),
-  (kind: ArtilleryT2, allied: false, at: (8120,16,7830)),
+  (kind: ArtilleryTurretT2, allied: false, at: (8120,16,7830)),
   (kind: TurretT1, allied: false, at: (8950,16,9050)),
   (kind: TurretT1, allied: false, at: (8500,16,8350)),
   (kind: TurretT1, allied: false, at: (7920,16,7330)),
@@ -71,6 +71,7 @@
  // Три пары блокпостов на подходах к базам, перекрёстку и карьеру.
  // Низкие стены оставляют проход между секциями и берут на себя обстрел.
  blocks: [
+  (min: (4636,16,5144), max: (4764,160,5256), material: 0),
   // Заранее расчищенные площадки под технику на неровном рельефе и в лесу.
   (min: (4124,16,2854), max: (4316,160,3046), material: 0),
   (min: (1654,16,804), max: (1846,160,996), material: 0),

@@ -355,6 +355,7 @@ pub(super) fn update(
             RangeUnitKind::TurretT2 => 5,
             RangeUnitKind::Base => 6,
             RangeUnitKind::ArtilleryT2 => 7,
+            RangeUnitKind::ArtilleryTurretT2 => 8,
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();

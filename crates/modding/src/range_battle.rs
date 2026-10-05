@@ -3,19 +3,31 @@ use crate::explosion::Delivery;
 use crate::range::{RangeUnitDef, RangeZone};
 use serde::Deserialize;
 
-/// A canister opens at the muzzle; each pellet owns finite kinetic work.
+/// Bounded salvo of ballistic explosive submunitions.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Canister {
     pub pellets: usize,
+    #[serde(default = "default_canister_loft")]
+    pub flight_time_milli: i32,
     pub spread_milli: i32,
+    #[serde(default = "default_canister_radius")]
+    pub footprint_radius: i32,
     pub range: i32,
     pub reload_ticks: u32,
+}
+fn default_canister_radius() -> i32 {
+    60
+}
+fn default_canister_loft() -> i32 {
+    2000
 }
 impl Default for Canister {
     fn default() -> Self {
         Self {
-            pellets: 12,
+            pellets: 4,
+            flight_time_milli: 2000,
             spread_milli: 45,
+            footprint_radius: 60,
             range: 1600,
             reload_ticks: 150,
         }
@@ -78,7 +90,10 @@ impl Tuning {
             || !(100..=3000).contains(&t.artillery_range)
             || !(2..=24).contains(&t.canister.pellets)
             || t.canister.pellets > t.max_rounds
+            || t.canister.pellets > t.max_waves
+            || !(1500..=4000).contains(&t.canister.flight_time_milli)
             || !(5..=150).contains(&t.canister.spread_milli)
+            || !(10..=150).contains(&t.canister.footprint_radius)
             || !(100..=3000).contains(&t.canister.range)
             || !(1..=1800).contains(&t.canister.reload_ticks)
             || !(100..=3000).contains(&t.kinetic_range)
@@ -88,7 +103,7 @@ impl Tuning {
             || !(100..=950).contains(&t.standoff_milli)
             || !(0..=1000).contains(&t.firing_spacing)
             || !(2..=128).contains(&t.max_rounds)
-            || !(1..=8).contains(&t.max_waves)
+            || !(1..=16).contains(&t.max_waves)
             || [t.tank_ammo.tank, t.tank_ammo.strider, t.tank_ammo.ground]
                 .iter()
                 .any(|d| !matches!(d, Delivery::Blast | Delivery::Kinetic))
@@ -116,11 +131,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let t = Tuning::from_ron(&old).unwrap();
-        assert_eq!(t.canister.pellets, 12);
+        assert_eq!(t.canister.pellets, 4);
         for invalid in [
-            shipped.replace("pellets: 12", "pellets: 0"),
-            shipped.replace("spread_milli: 45", "spread_milli: 500"),
+            shipped.replace("pellets: 6", "pellets: 0"),
+            shipped.replace("spread_milli: 35", "spread_milli: 500"),
             shipped.replace("reload_ticks: 150", "reload_ticks: 0"),
+            shipped.replace("flight_time_milli: 2500", "flight_time_milli: 1499"),
+            shipped.replace("flight_time_milli: 2500", "flight_time_milli: 4001"),
+            shipped.replace("footprint_radius: 60", "footprint_radius: 0"),
+            shipped.replace("footprint_radius: 60", "footprint_radius: 151"),
+            shipped.replace("max_waves: 16", "max_waves: 5"),
+            shipped.replace("max_waves: 16", "max_waves: 17"),
         ] {
             assert!(Tuning::from_ron(&invalid).is_err());
         }

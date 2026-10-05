@@ -464,7 +464,8 @@ pub fn setup(mut commands: Commands, edit: Res<Workshop>, mut fonts: ResMut<Asse
                 true,
                 vec![
                     ("Артиллерия T1", Action::Tool(Tool::Artillery)),
-                    ("Артиллерия T2", Action::Tool(Tool::ArtilleryT2)),
+                    ("САУ T2", Action::Tool(Tool::ArtilleryT2)),
+                    ("Арт. турель T2", Action::Tool(Tool::ArtilleryTurretT2)),
                     ("Турель T1", Action::Tool(Tool::TurretT1)),
                     ("Турель T2", Action::Tool(Tool::TurretT2)),
                     ("База", Action::Tool(Tool::Base)),
@@ -1000,7 +1001,7 @@ pub fn actions(
                         RangeUnitKind::Spider => 6,
                         RangeUnitKind::Tank => 5,
                         RangeUnitKind::Artillery => 0,
-                        RangeUnitKind::ArtilleryT2 => 5,
+                        RangeUnitKind::ArtilleryT2 | RangeUnitKind::ArtilleryTurretT2 => 0,
                         RangeUnitKind::TurretT1 => 5,
                         RangeUnitKind::TurretT2 => 1,
                         RangeUnitKind::Base => 0,

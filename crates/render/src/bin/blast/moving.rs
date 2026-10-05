@@ -667,6 +667,7 @@ pub fn animate(
             voxel::unit::turret_t2(),
             voxel::unit::command_base(),
             voxel::unit::artillery_t2(),
+            voxel::unit::artillery_turret_t2(),
         ]
         .iter()
         .map(|b| gait::rigs_of(b, 0.01, &render::model::segment_frames(b, 0.01)))

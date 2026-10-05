@@ -1293,7 +1293,10 @@ pub fn tank() -> UnitBody {
 /// but the tall rear ammunition bustle and elevated howitzer distinguish it
 /// at the RTS camera distance. Every visible part is damageable geometry.
 pub fn artillery() -> UnitBody {
-    let mut u = UnitBody::new_scaled(60, 32, 30, 4, BODY_MM);
+    artillery_scaled(BODY_MM)
+}
+fn artillery_scaled(mm: u16) -> UnitBody {
+    let mut u = UnitBody::new_scaled(60, 32, 30, 4, mm);
     let a = Part::Armour;
     running_gear(&mut u, (2, 58), 10, (1, 7), a);
     running_gear(&mut u, (2, 58), 10, (23, 29), a);
@@ -1389,7 +1392,7 @@ pub fn artillery() -> UnitBody {
 /// T2 tracked assault artillery. Thick cheek plates protect the breech;
 /// the broad, short canister bore and ammunition pods distinguish its tier.
 pub fn artillery_t2() -> UnitBody {
-    let mut u = artillery();
+    let mut u = artillery_scaled(150);
     for z in [3, 24] {
         fill_f(
             &mut u,
@@ -1436,6 +1439,54 @@ pub fn artillery_t2() -> UnitBody {
         max: [60, 30, 19],
         axis: 0,
     };
+    u
+}
+
+/// Fixed heavy howitzer: a wide steel plinth, armoured ammunition bustle,
+/// connected breech, recoil rails and one damageable cluster shell barrel.
+pub fn artillery_turret_t2() -> UnitBody {
+    let mut u = UnitBody::new_scaled(60, 40, 40, 12, 150);
+    let a = Part::Armour;
+    fill_f(&mut u, (2, 58), (1, 7), (2, 38), a, FINISH_STEEL);
+    fill_f(&mut u, (7, 49), (7, 17), (6, 34), a, FINISH_PLATE);
+    fill(&mut u, (23, 37), (3, 17), (13, 27), Part::Core);
+    ring(&mut u, (30, 20), 16, 12, (16, 19), a);
+    fill_f(&mut u, (12, 46), (19, 30), (8, 32), a, FINISH_PLATE);
+    fill_f(&mut u, (9, 20), (22, 33), (9, 31), a, FINISH_STEEL);
+    fill_f(&mut u, (18, 41), (30, 33), (10, 30), a, FINISH_PLATE);
+    fill(&mut u, (33, 48), (23, 31), (16, 24), Part::Weapon);
+    fill_f(
+        &mut u,
+        (45, 60),
+        (26, 34),
+        (16, 24),
+        Part::Weapon,
+        FINISH_GUN,
+    );
+    fill_f(&mut u, (54, 60), (25, 35), (15, 25), a, FINISH_STEEL);
+    carve(&mut u, (58, 60), (29, 31), (19, 21));
+    for z in [12, 26] {
+        fill_f(&mut u, (30, 54), (24, 28), (z, z + 2), a, FINISH_STEEL);
+        for x in [16, 24, 32] {
+            crate_box(&mut u, (x, x + 6), (32, 36), (z, z + 2), a);
+        }
+    }
+    hatch(&mut u, (22, 17), 3, 33, a);
+    fill_f(
+        &mut u,
+        (29, 33),
+        (33, 37),
+        (18, 22),
+        Part::Sensor,
+        FINISH_OPTIC,
+    );
+    let mut u = seat(u, "артиллерийская турель T2");
+    u.turret_y = 18;
+    u.push_weapon_path(WeaponPath {
+        min: [33, 23, 16],
+        max: [60, 34, 24],
+        axis: 0,
+    });
     u
 }
 
@@ -2890,10 +2941,28 @@ mod wreck_tests {
 mod spider_tests {
     use super::*;
     #[test]
+    fn fixed_artillery_t2_is_heavy_and_has_a_connected_protected_weapon() {
+        let b = artillery_turret_t2();
+        let t = tank();
+        assert_eq!(b.extent_mm().0, t.extent_mm().0 * 3 / 2);
+        assert!(b.volume_mm3() > t.volume_mm3() * 3);
+        let st = b.status(&mut CoreBufs::new());
+        assert!(st.alive && st.weapon && st.sensor, "{st:?}");
+        assert!(!st.engine);
+        assert_eq!(b.weapon_paths().len(), 1);
+    }
+    #[test]
     fn artillery_t2_has_connected_vitals_a_wider_bore_and_more_armour() {
         let t1 = artillery();
         let t2 = artillery_t2();
-        assert_eq!(t1.extent_mm(), t2.extent_mm());
+        assert_eq!(
+            t2.extent_mm(),
+            (
+                t1.extent_mm().0 * 3 / 2,
+                t1.extent_mm().1 * 3 / 2,
+                t1.extent_mm().2 * 3 / 2
+            )
+        );
         assert!(t2.volume_mm3() > t1.volume_mm3());
         assert_eq!(t2.weapon_paths.len(), 1);
         assert_eq!(t2.weapon_paths[0].min[1] + t2.weapon_paths[0].max[1], 52);

@@ -103,8 +103,8 @@ struct Witness(usize, Transform, Option<usize>, bool);
 struct WitnessArt {
     materials: [Handle<StandardMaterial>; look::FINISHES],
     burned_materials: [Handle<StandardMaterial>; look::FINISHES],
-    pristine: Arc<[voxel::unit::UnitBody; 8]>,
-    skins: Arc<[SkinBindings; 8]>,
+    pristine: Arc<[voxel::unit::UnitBody; 9]>,
+    skins: Arc<[SkinBindings; 9]>,
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
@@ -1371,6 +1371,7 @@ fn setup(
             SkinBindings::new(&voxel::unit::turret_t2()),
             SkinBindings::new(&voxel::unit::command_base()),
             SkinBindings::new(&voxel::unit::artillery_t2()),
+            SkinBindings::new(&voxel::unit::artillery_turret_t2()),
         ]),
         pristine: Arc::new([
             voxel::unit::tank(),
@@ -1381,6 +1382,7 @@ fn setup(
             voxel::unit::turret_t2(),
             voxel::unit::command_base(),
             voxel::unit::artillery_t2(),
+            voxel::unit::artillery_turret_t2(),
         ]),
         seen: Vec::new(),
         pending: Vec::new(),

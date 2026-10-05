@@ -12,8 +12,12 @@ impl Pending {
             49
         }
     }
+    #[cfg(test)]
     pub fn save(&self, b: &mut Blob) {
-        let direct_tags = self.version() >= 50;
+        self.save_as(b, self.version());
+    }
+    pub fn save_as(&self, b: &mut Blob, version: u32) {
+        let direct_tags = version >= 50;
         b.u32(self.jobs.len() as u32);
         for j in &self.jobs {
             let c = &j.config;
@@ -112,7 +116,7 @@ impl Pending {
             },
             100,
         )?;
-        if count == 0 {
+        if count == 0 && version < 51 {
             return None;
         }
         let mut jobs = VecDeque::with_capacity(count);

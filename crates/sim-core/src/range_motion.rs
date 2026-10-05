@@ -268,6 +268,7 @@ impl Motion {
             modding::range::RangeUnitKind::Tank
             | modding::range::RangeUnitKind::Artillery
             | modding::range::RangeUnitKind::ArtilleryT2
+            | modding::range::RangeUnitKind::ArtilleryTurretT2
             | modding::range::RangeUnitKind::TurretT1
             | modding::range::RangeUnitKind::TurretT2
             | modding::range::RangeUnitKind::Base => t.tracked,
@@ -3351,6 +3352,7 @@ mod tests {
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
+                RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -3543,6 +3545,7 @@ mod tests {
                 RangeUnitKind::Spider => voxel::unit::spider(),
                 RangeUnitKind::Artillery => voxel::unit::artillery(),
                 RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
+                RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
                 RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                 RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                 RangeUnitKind::Base => voxel::unit::command_base(),
@@ -4410,6 +4413,7 @@ mod tests {
                         RangeUnitKind::Spider => voxel::unit::spider(),
                         RangeUnitKind::Artillery => voxel::unit::artillery(),
                         RangeUnitKind::ArtilleryT2 => voxel::unit::artillery_t2(),
+                        RangeUnitKind::ArtilleryTurretT2 => voxel::unit::artillery_turret_t2(),
                         RangeUnitKind::TurretT1 => voxel::unit::turret_t1(),
                         RangeUnitKind::TurretT2 => voxel::unit::turret_t2(),
                         RangeUnitKind::Base => voxel::unit::command_base(),

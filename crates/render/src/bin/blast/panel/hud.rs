@@ -609,6 +609,8 @@ pub fn refresh(
                                 "П"
                             } else if u.kind == RangeUnitKind::Tank {
                                 "Т"
+                            } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
+                                "АТ2"
                             } else if u.kind == RangeUnitKind::ArtilleryT2 {
                                 "А2"
                             } else if u.kind == RangeUnitKind::Artillery {
@@ -691,12 +693,26 @@ pub fn refresh(
                             u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
                         );
                     }
+                    if u.kind == RangeUnitKind::ArtilleryTurretT2 {
+                        return format!(
+                            "АРТ. ТУРЕЛЬ T2 {:02}  ·  {}\nЯдро {}%",
+                            id + 1,
+                            if u.status.alive {
+                                "В СТРОЮ"
+                            } else {
+                                "УНИЧТОЖЕНА"
+                            },
+                            u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
+                        );
+                    }
                     format!(
                         "{} {}  ·  {}\nЯдро {}%   Ходовая {}%",
                         if u.kind == RangeUnitKind::Spider {
                             "ПАУК"
                         } else if u.kind == RangeUnitKind::Tank {
                             "ТАНК"
+                        } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
+                            "АТ2"
                         } else if u.kind == RangeUnitKind::ArtilleryT2 {
                             "АРТИЛЛЕРИЯ T2"
                         } else if u.kind == RangeUnitKind::Artillery {
@@ -745,6 +761,8 @@ pub fn refresh(
                                         RangeUnitKind::Tank | RangeUnitKind::Artillery
                                     ) {
                                         "Смена заряда сохраняет перезарядку"
+                                    } else if u.kind.emplacement() {
+                                        "Стационарное орудие"
                                     } else {
                                         "Ведёт огонь во время движения"
                                     }

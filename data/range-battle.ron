@@ -7,7 +7,7 @@
     tank_reload_ticks: 90,
     tank_range: 700,
     artillery_range: 1800,
-    canister: (pellets: 12, spread_milli: 45, range: 1600, reload_ticks: 150),
+    canister: (pellets: 6, spread_milli: 35, range: 1600, reload_ticks: 150, flight_time_milli: 2500, footprint_radius: 60),
     kinetic_range: 900,
     energy_range: 1200,
     anni_range: 1000,
@@ -18,7 +18,7 @@
     // otherwise all drive for the same point before it.
     firing_spacing: 70,
     max_rounds: 64,
-    max_waves: 4,
+    max_waves: 16,
     // Какой снаряд танк заряжает по цели (ADR-456): бронебойный
     // (`Kinetic`, kinetic-shell.ron) пробивает корпус и скалывает соседние воксели,
     // фугас (`Blast`) рвёт волной ноги шагохода и укрытие.

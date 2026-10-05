@@ -468,9 +468,14 @@ impl Effects {
                 self.energy_impacts.push((*i, sim.tick));
             }
             let at = Vec3::from(i.at.map(|v| v as f32));
-            if i.weapon == BattleWeapon::Blast {
-                self.shell_burst(at, now, sim.battle.shell_config.energy);
-            } else if matches!(i.weapon, BattleWeapon::Kinetic | BattleWeapon::Canister) {
+            if matches!(i.weapon, BattleWeapon::Blast | BattleWeapon::Canister) {
+                let energy = if i.weapon == BattleWeapon::Canister {
+                    sim.battle.canister_config.energy
+                } else {
+                    sim.battle.shell_config.energy
+                };
+                self.shell_burst(at, now, energy);
+            } else if i.weapon == BattleWeapon::Kinetic {
                 self.kinetic_contact(at, self.kinetic_normal(at), now);
             }
         }
@@ -675,7 +680,7 @@ impl Effects {
         }
         if sim.battle_mode() {
             for (id, unit) in sim.units.iter().enumerate() {
-                if unit.kind == RangeUnitKind::ArtilleryT2 {
+                if unit.kind.canister() {
                     let fired = sim.battle.actors[id].fired;
                     if self.canister_fired.get(id).copied().unwrap_or(fired) != fired {
                         if let Some(at) = sim.battle_muzzles(id).first() {
@@ -1554,6 +1559,8 @@ mod tests {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
         layout.battle = true;
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
         layout.blocks.clear();
         layout.shields.clear();
         layout.course = None;
@@ -1595,7 +1602,7 @@ mod tests {
             .iter()
             .filter(|r| r.owner == 0 && r.weapon == BattleWeapon::Canister)
             .collect();
-        assert_eq!(pellets.len(), 12);
+        assert_eq!(pellets.len(), sim.battle.tuning.canister.pellets);
         // The enemy can also have a live AP round. Check this salvo's paths.
         for round in pellets {
             let at = point(round.pos);

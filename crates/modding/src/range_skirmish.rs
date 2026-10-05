@@ -80,6 +80,7 @@ mod tests {
                 RangeUnitKind::Spider,
                 RangeUnitKind::Artillery,
                 RangeUnitKind::ArtilleryT2,
+                RangeUnitKind::ArtilleryTurretT2,
                 RangeUnitKind::TurretT1,
                 RangeUnitKind::TurretT2,
                 RangeUnitKind::Base,
@@ -93,7 +94,7 @@ mod tests {
                 army.iter()
                     .filter(|u| u.kind == RangeUnitKind::ArtilleryT2)
                     .count(),
-                2
+                1
             );
             for weapon in [
                 RangeLoadout::Blast,
@@ -140,6 +141,7 @@ mod tests {
             RangeUnitKind::Strider,
             RangeUnitKind::Spider,
             RangeUnitKind::ArtilleryT2,
+            RangeUnitKind::ArtilleryTurretT2,
             RangeUnitKind::TurretT1,
             RangeUnitKind::TurretT2,
             RangeUnitKind::Base,

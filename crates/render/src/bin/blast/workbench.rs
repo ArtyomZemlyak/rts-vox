@@ -27,6 +27,7 @@ pub enum Tool {
     Spider,
     Artillery,
     ArtilleryT2,
+    ArtilleryTurretT2,
     TurretT1,
     TurretT2,
     Base,
@@ -550,6 +551,7 @@ impl Workshop {
             | Tool::Spider
             | Tool::Artillery
             | Tool::ArtilleryT2
+            | Tool::ArtilleryTurretT2
             | Tool::TurretT1
             | Tool::TurretT2
             | Tool::Base => {
@@ -560,6 +562,8 @@ impl Workshop {
                         RangeUnitKind::Tank
                     } else if self.tool == Tool::Spider {
                         RangeUnitKind::Spider
+                    } else if self.tool == Tool::ArtilleryTurretT2 {
+                        RangeUnitKind::ArtilleryTurretT2
                     } else if self.tool == Tool::ArtilleryT2 {
                         RangeUnitKind::ArtilleryT2
                     } else if self.tool == Tool::Artillery {
@@ -2122,11 +2126,14 @@ mod tests {
     #[test]
     fn canister_skirmish_exposes_the_new_unit_and_preserves_the_range() {
         let (mut workshop, config) = fixture();
-        assert!(workshop.skirmish(4, config.clone()).unwrap().contains("12"));
+        assert!(workshop
+            .skirmish(4, config.clone())
+            .unwrap()
+            .contains("шесть"));
         let layout = workshop.layout.as_ref().unwrap();
         assert!(layout.battle);
-        assert_eq!(layout.units.len(), 5);
-        assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryT2);
+        assert_eq!(layout.units.len(), 6);
+        assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryTurretT2);
         assert_eq!(workshop.controlled, Some(0));
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_battle().unwrap();

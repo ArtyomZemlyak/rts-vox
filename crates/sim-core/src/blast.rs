@@ -424,6 +424,7 @@ impl RangeUnit {
         static TANK: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY_T2: std::sync::OnceLock<voxel::unit::UnitBody> =
             std::sync::OnceLock::new();
+        static ARTILLERY_TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static ARTILLERY: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T1: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
         static TURRET_T2: std::sync::OnceLock<UnitBody> = std::sync::OnceLock::new();
@@ -436,6 +437,9 @@ impl RangeUnit {
             RangeUnitKind::ArtilleryT2 => {
                 ARTILLERY_T2.get_or_init(voxel::unit::artillery_t2).clone()
             }
+            RangeUnitKind::ArtilleryTurretT2 => ARTILLERY_TURRET_T2
+                .get_or_init(voxel::unit::artillery_turret_t2)
+                .clone(),
             RangeUnitKind::TurretT1 => TURRET_T1.get_or_init(voxel::unit::turret_t1).clone(),
             RangeUnitKind::TurretT2 => TURRET_T2.get_or_init(voxel::unit::turret_t2).clone(),
             RangeUnitKind::Base => BASE.get_or_init(voxel::unit::command_base).clone(),
@@ -2666,7 +2670,12 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        b.u32(self.kinetic.version());
+        let version = if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
+            51
+        } else {
+            self.kinetic.version()
+        };
+        b.u32(version);
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
@@ -2838,8 +2847,18 @@ impl BlastRange {
             }
             self.battle.save_wave_contacts(b);
         }
-        if version < 49 && !self.kinetic.jobs.is_empty() {
-            self.kinetic.save(b);
+        if version < 49
+            && (!self.kinetic.jobs.is_empty()
+                || self.gun.kind.canister()
+                || self.units.iter().any(|u| u.kind.canister()))
+        {
+            let format = if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister())
+            {
+                51
+            } else {
+                self.kinetic.version()
+            };
+            self.kinetic.save_as(b, format);
         }
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
@@ -2867,7 +2886,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=50).contains(&version) {
+        if !(27..=51).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -2886,10 +2905,7 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
-        if version < 48
-            && (r.gun.kind == RangeUnitKind::ArtilleryT2
-                || r.units.iter().any(|u| u.kind == RangeUnitKind::ArtilleryT2))
-        {
+        if version < 51 && (r.gun.kind.canister() || r.units.iter().any(|u| u.kind.canister())) {
             return None;
         }
         if r.extended != extended {
@@ -3281,19 +3297,20 @@ impl BlastRange {
                     2 => Some(battle::Weapon::Kinetic),
                     3 if version >= 43 => Some(battle::Weapon::Energy),
                     4 if version >= 43 => Some(battle::Weapon::Annihilation),
-                    6 if version >= 48 && unit.kind == RangeUnitKind::ArtilleryT2 => {
-                        Some(battle::Weapon::Canister)
-                    }
+                    6 if version >= 51 && unit.kind.canister() => Some(battle::Weapon::Canister),
                     _ => return None,
                 };
                 if !matches!(
                     unit.kind,
-                    RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
+                    RangeUnitKind::Tank
+                        | RangeUnitKind::Artillery
+                        | RangeUnitKind::ArtilleryT2
+                        | RangeUnitKind::ArtilleryTurretT2
                 ) && actor.weapon.is_some()
                 {
                     return None;
                 }
-                if unit.kind == RangeUnitKind::ArtilleryT2
+                if unit.kind.canister()
                     && !matches!(actor.weapon, None | Some(battle::Weapon::Canister))
                 {
                     return None;
@@ -3333,9 +3350,7 @@ impl BlastRange {
                     + r.battle
                         .rounds
                         .iter()
-                        .filter(|p| {
-                            matches!(p.weapon, battle::Weapon::Kinetic | battle::Weapon::Canister)
-                        })
+                        .filter(|p| p.weapon == battle::Weapon::Kinetic)
                         .count()
                     > r.streams.tuning.kinetic.max_jobs
                 || r.pending_machine_gun_contacts()

@@ -3,6 +3,9 @@ use super::*;
 use fx::blob::{Blob, Scan};
 
 fn range() -> BlastRange {
+    range_with_t2(false)
+}
+fn range_with_t2(include_t2: bool) -> BlastRange {
     let mut c = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
     c.spall = None;
     c.fragment_box = 1;
@@ -16,6 +19,16 @@ fn range() -> BlastRange {
     let mut other = layout.units[0].clone();
     other.at = [439, 16, 336];
     layout.units.push(other);
+    if include_t2 {
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
+        layout.units.push(modding::range::RangeUnitDef {
+            kind: RangeUnitKind::ArtilleryTurretT2,
+            allied: true,
+            at: [150, 16, 500],
+            weapon: None,
+        });
+    }
     BlastRange::with_layout(c, layout).unwrap()
 }
 fn shot(r: &mut BlastRange) {
@@ -411,4 +424,25 @@ fn stock_machine_gun_dents_are_credited_once_before_and_after_waiting() {
     complete(&mut r);
     same_damage(&r, &reference);
     assert_eq!(r.matter.supplied_mj, supplied);
+}
+
+#[test]
+fn heavy_artillery_snapshot_preserves_mixed_pending_contacts_and_the_empty_tail() {
+    let mut r = range_with_t2(true);
+    occupy(&mut r);
+    bullet(&mut r, [30, 11, 0]);
+    shot(&mut r);
+    assert_eq!(r.pending_kinetic_impacts(), 2);
+    let snapshot = r.snapshot();
+    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 51);
+    let mut copy = BlastRange::restore(r.config.clone(), &snapshot).unwrap();
+    copy.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(snapshot, copy.snapshot());
+    complete(&mut r);
+    complete(&mut copy);
+    assert_eq!(r.snapshot(), copy.snapshot());
+    assert_eq!(r.pending_kinetic_impacts(), 0);
+    let empty = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert_eq!(r.snapshot(), empty.snapshot());
+    assert!(r.matter.economy.ledger.balanced());
 }

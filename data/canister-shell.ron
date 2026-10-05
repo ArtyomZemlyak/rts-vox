@@ -1,47 +1,45 @@
-// One T2 canister pellet. A salvo opens at the muzzle into 12 physical pellets.
-// Crossing a sloped or thick plate consumes more cells; fragments are real
-// removed matter. World unit = 100 mm, simulation = 30 ticks/second.
+// One explosive submunition in a six-round T2 howitzer salvo; all values per round.
+// The GPU gas is presentation; it cannot issue damage or terrain edits.
 (
-    delivery: Kinetic,
+    delivery: Blast,
     motion: Ballistic,
     charge_ticks: 12,
-    half_cells: 20,
-    cell_units: 2,
-    // Finite work per pellet; the total default salvo is 8.4 MJ.
-    energy: 4000,
-    material_energy_j: 700000,
+    half_cells: 18,
+    cell_units: 3,
+    energy: 20000,
+    material_energy_j: 180000000,
     air_cost: 100,
-    soil_resistance: 1200,
-    concrete_resistance: 1600,
-    steel_resistance: 6500,
-    unit_ablation_resistance: 180,
-    unit_role_resistance_milli: (1000, 700, 650, 1100, 350),
+    soil_resistance: 165,
+    concrete_resistance: 380,
+    // Intact armor still stops the stock shell; repeated hits and a 4x
+    // charge can tear the exposed face instead of leaving it immaculate.
+    steel_resistance: 6000,
+    unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
     wave_work_per_tick: 4096,
     capture_cells_per_tick: 40000,
     edits_per_tick: 8192,
+    // Connected large fragments mixed with smaller chips (ADR-475).
     fragment_box: 4,
-    hull_impulse_milli: 0,
+    // Push on a hull: thousandths of a newton-second per unit of wave
+    // pressure the body absorbed (ADR-297) - what dents the side throws
+    // the machine, and a hull the wave never reached is not pushed.
+    hull_impulse_milli: 2,
     fire_tick: 45,
-    shell_speed: 700,
-    spall: Some((radius: 1, work_milli: 500)),
-    ricochet: Some((
-        material: 3,
-        min_speed: 80,
-        max_normal_milli: 400,
-        wear_milli: 125,
-        speed_retention_milli: 600,
-        max_preexisting_wear_milli: 333,
-    )),
+    shell_speed: 350,
+    // The fireball lights fuel within thirty-two units: eighty heat at the
+    // centre, falling to nothing at the edge, so the crowns of the trees
+    // beside the one it destroys catch (ADR-277).
+    heat_units: 24,
+    heat_per_cell: 80,
     gravity: 98,
-    heat_units: 0,
-    heat_per_cell: 0,
     gas_cell_units: 5,
+    // Visible cubes are larger than the transport grid; the physics is unchanged.
     gas_display_mm: 640,
-    gas_source_radius: 1,
-    gas_temperature_k: 300,
-    gas_fuel_milli: 0,
-    gas_pressure_milli: 0,
-    reaction_milli: 0,
-    cooling_milli: 1250,
-    buoyancy_milli: 1000,
+    gas_source_radius: 32,
+    gas_temperature_k: 2900,
+    gas_fuel_milli: 1800,
+    gas_pressure_milli: 2200,
+    reaction_milli: 1800,
+    cooling_milli: 650,
+    buoyancy_milli: 1600,
 )

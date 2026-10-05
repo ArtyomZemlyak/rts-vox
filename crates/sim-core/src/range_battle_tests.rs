@@ -9,9 +9,10 @@ fn canister_salvo() -> BlastRange {
     let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
-    r.battle.ai.next_tick = u32::MAX;
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     assert!(r.battle_order(0, Order::Attack(1), None));
     for _ in 0..160 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         if r.battle.actors[0].fired > 0 {
             break;
@@ -22,7 +23,7 @@ fn canister_salvo() -> BlastRange {
 }
 
 #[test]
-fn canister_fires_a_deterministic_fan_and_replays_individual_kinetic_contacts() {
+fn canister_fires_a_deterministic_lofted_salvo_and_replays_area_bursts() {
     let mut r = canister_salvo();
     assert_eq!(r.battle_weapon(0), Some(Weapon::Canister));
     assert_eq!(
@@ -54,8 +55,11 @@ fn canister_fires_a_deterministic_fan_and_replays_individual_kinetic_contacts() 
         BlastRange::restore(r.config.clone(), &r.snapshot()).expect("T2 salvo snapshot");
     let before = r.units[1].body.volume_mm3();
     let mut contacts = 0;
-    for _ in 0..100 {
+    let mut area_burst = false;
+    for _ in 0..240 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
+        replay.battle.ai.next_tick = replay.tick + replay.battle.ai.tuning.decision_ticks;
         replay.step();
         assert_eq!(r.state_hash(), replay.state_hash());
         contacts += r
@@ -64,9 +68,10 @@ fn canister_fires_a_deterministic_fan_and_replays_individual_kinetic_contacts() 
             .iter()
             .filter(|i| i.weapon == Weapon::Canister)
             .count();
-        assert!(r.battle.waves.is_empty(), "canister produced a blast wave");
+        area_burst |= !r.battle.waves.is_empty();
     }
     assert!(contacts > 1, "pellets never made separate contacts");
+    assert!(area_burst, "explosive submunitions produced no splash");
     assert!(
         r.units[1].body.volume_mm3() < before,
         "canister caused no material damage"
@@ -86,46 +91,51 @@ fn canister_capacity_defers_the_whole_salvo_then_allows_reload_and_movement() {
     let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
-    r.battle.ai.next_tick = u32::MAX;
-    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds = 11;
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds =
+        r.battle.tuning.canister.pellets - 1;
     assert!(r.battle_order(0, Order::Attack(1), None));
     for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
     }
     assert_eq!(r.battle.actors[0].fired, 0);
     assert!(r.battle.rounds.is_empty());
-    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds = 12;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_rounds = r.battle.tuning.canister.pellets;
     r.step();
     assert_eq!(r.battle.actors[0].fired, 1);
     assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
     let start = r.units[0].at;
     assert!(r.battle_order(0, Order::Move, Some([260, 400])));
     for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
     }
     assert_ne!(r.units[0].at, start, "T2 is not mobile");
 }
 
 #[test]
-fn kinetic_continuation_backpressure_reserves_the_entire_canister_salvo() {
+fn canister_reserves_wave_capacity_for_the_entire_salvo() {
     let mut r = arena_of([RangeUnitKind::ArtilleryT2, RangeUnitKind::Tank]);
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
-    r.battle.ai.next_tick = u32::MAX;
-    r.streams.tuning.kinetic.max_jobs = r.battle.tuning.canister.pellets - 1;
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_waves = r.battle.tuning.canister.pellets - 1;
     assert!(r.battle_order(0, Order::Attack(1), None));
     for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
     }
     assert_eq!(r.battle.actors[0].fired, 0);
     assert!(r.battle.rounds.is_empty());
-    r.streams.tuning.kinetic.max_jobs += 1;
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_waves += 1;
     r.step();
     assert_eq!(r.battle.actors[0].fired, 1);
     assert_eq!(r.battle.rounds.len(), r.battle.tuning.canister.pellets);
     assert_eq!(r.pending_kinetic_impacts(), 0);
     assert!(r.battle_order(0, Order::Hold, None));
     for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
     }
     assert!(r.matter.economy.ledger.balanced());
@@ -141,10 +151,11 @@ fn canister_ground_salvo(layout: RangeLayout) -> BlastRange {
     let mut r = BlastRange::with_layout(config, layout).unwrap();
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
-    r.battle.ai.next_tick = u32::MAX;
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     let target = aim_point(&r.units[1]);
     assert!(r.battle_order(0, Order::Ground(target), None));
     for _ in 0..160 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         if r.battle.actors[0].fired > 0 {
             break;
@@ -170,14 +181,14 @@ fn canister_pellets_stop_at_thick_steel_cover_without_damaging_the_hidden_tank()
     let before = r.units[1].body.volume_mm3();
     let mut contacts = 0;
     for _ in 0..160 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         for impact in &r.battle.impacts {
             assert_eq!(impact.weapon, Weapon::Canister);
             assert!((296..=336).contains(&impact.at[0]), "missed steel cover");
             contacts += 1;
         }
-        assert!(r.battle.waves.is_empty());
-        if r.battle.rounds.is_empty() {
+        if r.battle.rounds.is_empty() && r.battle.waves.is_empty() {
             break;
         }
     }
@@ -200,6 +211,7 @@ fn canister_shield_intercepts_individual_pellets_and_replays_after_overload() {
     let before = r.units[1].body.volume_mm3();
     let mut intercepted = false;
     for _ in 0..100 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
         if r.shields[0].hits > 0 {
             intercepted = true;
@@ -209,7 +221,9 @@ fn canister_shield_intercepts_individual_pellets_and_replays_after_overload() {
     assert!(intercepted, "the dome never intercepted a pellet");
     assert!(r.shields[0].charge < r.shield_tuning.capacity);
     assert_eq!(r.units[1].body.volume_mm3(), before);
-    assert!(r.battle.rounds.len() < r.battle.tuning.canister.pellets);
+    assert!(
+        r.battle.rounds.iter().filter(|p| p.owner == 0).count() < r.battle.tuning.canister.pellets
+    );
     assert!(
         !r.battle.rounds.is_empty(),
         "one shield hit erased the entire fan"
@@ -217,10 +231,11 @@ fn canister_shield_intercepts_individual_pellets_and_replays_after_overload() {
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
     let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
     for _ in 0..30 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
+        replay.battle.ai.next_tick = replay.tick + replay.battle.ai.tuning.decision_ticks;
         replay.step();
         assert_eq!(r.state_hash(), replay.state_hash());
-        assert!(r.battle.waves.is_empty());
     }
     assert!(r.matter.economy.ledger.balanced());
 }
@@ -3813,4 +3828,175 @@ fn forested_laser_preserves_move_route_and_explicit_point_fire() {
         "point fire redirected the existing move route"
     );
     assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn artillery_turret_lofts_over_low_cover_splashes_neighbours_and_replays() {
+    let mut layout = arena_of([RangeUnitKind::ArtilleryTurretT2, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.units.push(RangeUnitDef {
+        allied: false,
+        kind: RangeUnitKind::Tank,
+        at: [450, 16, 384],
+        weapon: None,
+    });
+    layout.units.push(RangeUnitDef {
+        allied: false,
+        kind: RangeUnitKind::Tank,
+        at: [450, 16, 288],
+        weapon: None,
+    });
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 250],
+        max: [315, 48, 425],
+        material: 2,
+    });
+    let config =
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    for a in &mut r.battle.actors {
+        a.order = Order::Hold;
+    }
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let start = r.units[0].motion.pos;
+    let before: Vec<_> = r.units.iter().map(|u| u.body.volume_mm3()).collect();
+    let mut peak = 0;
+    let mut impacts = Vec::new();
+    let mut replay = None;
+    let mut wave = false;
+    for _ in 0..330 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        assert_eq!(r.units[0].motion.pos, start, "fixed artillery moved");
+        for p in &r.battle.rounds {
+            if p.owner == 0 {
+                peak = peak.max(p.pos[1].to_int_trunc());
+            }
+        }
+        for p in &r.battle.impacts {
+            if p.weapon == Weapon::Canister {
+                impacts.push(p.at);
+            }
+        }
+        wave |= !r.battle.waves.is_empty();
+        if let Some(other) = replay.as_mut() {
+            let other: &mut BlastRange = other;
+            other.battle.ai.next_tick = other.tick + other.battle.ai.tuning.decision_ticks;
+            other.step();
+            assert_eq!(r.state_hash(), other.state_hash());
+        } else if !r.battle.waves.is_empty() {
+            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+        }
+        if r.battle.actors[0].fired == 1 {
+            r.battle.actors[0].order = Order::Hold;
+            if let Some(other) = replay.as_mut() {
+                other.battle.actors[0].order = Order::Hold;
+            }
+        }
+    }
+    eprintln!(
+        "loft peak={peak} impacts={impacts:?} remaining={:?}",
+        r.units
+            .iter()
+            .map(|u| u.body.volume_mm3())
+            .collect::<Vec<_>>()
+    );
+    assert!(peak > 65, "rounds flew flat");
+    assert!(wave && replay.is_some());
+    assert_eq!(
+        impacts.len(),
+        r.battle.tuning.canister.pellets,
+        "salvo lost a submunition"
+    );
+    assert!(
+        impacts.iter().all(|p| p[0] > 315),
+        "low cover caught the arc"
+    );
+    for id in 1..4 {
+        assert!(
+            r.units[id].body.volume_mm3() < before[id],
+            "splash missed neighbouring tank {id}"
+        );
+    }
+    let mut old = r.snapshot();
+    old[..4].copy_from_slice(&50u32.to_le_bytes());
+    assert!(
+        BlastRange::restore(r.config.clone(), &old).is_none(),
+        "old canister semantics silently migrated"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn canister_reaches_full_attack_range_on_a_high_arc_and_saves_above_world_ceiling() {
+    let mut l = arena_of([RangeUnitKind::ArtilleryTurretT2, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    l.size[0] = 2208;
+    l.units[1].at[0] = 1750;
+    l.clear_max[0] = 2100;
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    let mut r = BlastRange::with_layout(c, l).unwrap();
+    r.start_battle().unwrap();
+    for a in &mut r.battle.actors {
+        a.order = Order::Hold;
+    }
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    let mut contacted = false;
+    let mut replay = None;
+    for _ in 0..440 {
+        r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+        r.step();
+        if r.battle.actors[0].fired > 0 {
+            r.battle.actors[0].order = Order::Hold;
+        }
+        if let Some(other) = replay.as_mut() {
+            let other: &mut BlastRange = other;
+            other.battle.ai.next_tick = other.tick + other.battle.ai.tuning.decision_ticks;
+            other.step();
+            assert_eq!(r.state_hash(), other.state_hash());
+        } else if r.battle.rounds.iter().any(|p| p.pos[1] > Fx::from_int(500)) {
+            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+        }
+        if r.battle
+            .impacts
+            .iter()
+            .any(|i| i.weapon == Weapon::Canister && i.at[0] > 1600)
+        {
+            contacted = true;
+            break;
+        }
+    }
+    assert!(replay.is_some(), "never rose above the world ceiling");
+    assert!(
+        contacted,
+        "full-range submunition vanished before reaching its target"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn t2_canister_finishes_a_stock_tank_with_at_most_three_salvos() {
+    for kind in [RangeUnitKind::ArtilleryT2, RangeUnitKind::ArtilleryTurretT2] {
+        let mut r = arena_of([kind, RangeUnitKind::Tank]);
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        assert!(r.battle_order(0, Order::Attack(1), None));
+        for _ in 0..1000 {
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            r.step();
+            if !r.units[1].status.alive {
+                break;
+            }
+        }
+        eprintln!(
+            "T2 balance {kind:?} tick={} salvos={} core={} alive={}",
+            r.tick, r.battle.actors[0].fired, r.units[1].integrity.core.0, r.units[1].status.alive
+        );
+        assert!(!r.units[1].status.alive, "T2 never finished its target");
+        assert!(r.battle.actors[0].fired <= 3, "T2 took too many salvos");
+        assert!(r.matter.economy.ledger.balanced());
+    }
 }
