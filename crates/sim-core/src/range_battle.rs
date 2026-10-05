@@ -67,6 +67,7 @@ pub enum Order {
 }
 pub struct Actor {
     pub turret: crate::turret::Traverse,
+    pub elevation: crate::turret::Traverse,
     pub order: Order,
     pub target: Option<usize>,
     next: u32,
@@ -185,6 +186,7 @@ impl Battle {
                     charge: None,
                     pursuit: 0,
                     burst: 0,
+                    elevation: crate::turret::Traverse::new(0),
                     fired: 0,
                     weapon: match u.kind {
                         RangeUnitKind::Tank => Some(Weapon::Kinetic),
@@ -261,11 +263,62 @@ impl Battle {
             burst.wave.save_contacts(b);
         }
     }
+    #[cfg(test)]
     pub(super) fn load_wave_contacts(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
+        self.load_wave_contacts_deferred(s, units, false)
+    }
+    pub(super) fn load_wave_contacts_deferred(
+        &mut self,
+        s: &mut Scan,
+        units: &[RangeUnit],
+        defer: bool,
+    ) -> Option<()> {
         for burst in &mut self.waves {
-            burst.wave.load_contacts(s, units)?;
+            burst.wave.load_contacts(s, units, defer)?;
         }
         Some(())
+    }
+    pub(super) fn save_laser_tracking(&self, b: &mut Blob) {
+        for a in &self.actors {
+            a.elevation.save(b);
+        }
+        for w in &self.waves {
+            for p in &w.wave.turret_pitches {
+                b.i32(*p);
+            }
+        }
+    }
+    pub(super) fn load_laser_tracking(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
+        let tuning = motion::spider_tuning();
+        for (a, u) in self.actors.iter_mut().zip(units) {
+            let limits = crate::turret::Limits::of(
+                tuning.laser_tracking.map_or(
+                    modding::turret::Turret::from_ron(include_str!("../../../data/turret.ron"))
+                        .expect("turret tuning"),
+                    |t| t.elevation,
+                ),
+                crate::TICKS_PER_SECOND,
+            );
+            a.elevation = crate::turret::Traverse::load(s, limits)?;
+            if (u.kind != RangeUnitKind::Spider && a.elevation != crate::turret::Traverse::new(0))
+                || (u.kind == RangeUnitKind::Spider
+                    && fx::angle::diff(a.elevation.angle, 0) != u.turret_pitch)
+            {
+                return None;
+            }
+        }
+        for w in &mut self.waves {
+            for (p, u) in w.wave.turret_pitches.iter_mut().zip(units) {
+                *p = s.i32();
+                if i64::from(*p).abs() > i64::from(fx::angle::QUARTER)
+                    || (*p != 0 && u.kind != RangeUnitKind::Spider)
+                {
+                    return None;
+                }
+            }
+            w.wave.validate_contacts(units)?;
+        }
+        s.ok().then_some(())
     }
     pub(super) fn save(&self, b: &mut Blob) {
         b.u8(match self.phase {
@@ -442,6 +495,16 @@ impl Battle {
             self.ai.next_tick = tick;
         }
         s.ok().then_some(())
+    }
+}
+/// Cancellation consumes the current pulse; retargeting never calls this.
+fn stop_spider_beam(a: &mut Actor, kind: RangeUnitKind, tick: u32) {
+    if kind == RangeUnitKind::Spider && a.burst > 0 {
+        a.next = a
+            .next
+            .max(tick.saturating_add(motion::spider_tuning().laser.reload_ticks));
+        a.burst = 0;
+        a.charge = None;
     }
 }
 /// Smooth opening aim, derived from the already saved active beam sample count.
@@ -836,8 +899,14 @@ impl BlastRange {
         let actor = &mut battle.actors[id];
         actor.order = order;
         actor.target = None;
-        actor.charge = None;
-        actor.burst = 0;
+        if !(self.units[id].kind == RangeUnitKind::Spider
+            && actor.burst > 0
+            && order != Order::Hold)
+        {
+            stop_spider_beam(actor, self.units[id].kind, self.tick);
+            actor.charge = None;
+            actor.burst = 0;
+        }
         actor.pursuit = 0;
         true
     }
@@ -945,8 +1014,11 @@ impl BlastRange {
         let a = &mut self.battle.actors[id];
         a.order = order;
         a.target = None;
-        a.charge = None;
-        a.burst = 0;
+        if !(self.units[id].kind == RangeUnitKind::Spider && a.burst > 0 && order != Order::Hold) {
+            stop_spider_beam(a, self.units[id].kind, self.tick);
+            a.charge = None;
+            a.burst = 0;
+        }
         a.pursuit = 0;
         true
     }
@@ -976,8 +1048,10 @@ impl BlastRange {
                 let actor = &mut self.battle.actors[id];
                 actor.order = Order::Move;
                 actor.target = None;
-                actor.charge = None;
-                actor.burst = 0;
+                if self.units[id].kind != RangeUnitKind::Spider || actor.burst == 0 {
+                    actor.charge = None;
+                    actor.burst = 0;
+                }
                 actor.pursuit = 0;
                 accepted += 1;
             }
@@ -1196,6 +1270,27 @@ impl BlastRange {
         battle.impacts.clear();
         battle.traces.clear();
         battle.lasers.clear();
+        // A surviving siege head carries its current pulse to the next target.
+        for (id, actor) in battle.actors.iter_mut().enumerate() {
+            if !self.units[id].status.alive || !self.units[id].status.weapon {
+                stop_spider_beam(actor, self.units[id].kind, self.tick);
+                actor.target = None;
+                actor.charge = None;
+                actor.burst = 0;
+            } else if actor
+                .target
+                .is_some_and(|target| !self.units[target].status.alive)
+            {
+                actor.target = None;
+                if self.units[id].kind != RangeUnitKind::Spider || actor.burst == 0 {
+                    actor.charge = None;
+                    actor.burst = 0;
+                }
+                if matches!(actor.order, Order::Attack(_)) {
+                    actor.order = Order::Auto;
+                }
+            }
+        }
         if battle.phase == Phase::Fighting {
             self.battle_ai_tick(&mut battle);
             completed("battle_ai");
@@ -1328,6 +1423,7 @@ impl BlastRange {
         for id in 0..self.units.len() {
             if !self.units[id].status.alive || !self.units[id].status.weapon {
                 b.actors[id].charge = None;
+                b.actors[id].burst = 0;
                 b.actors[id].target = None;
                 continue;
             }
@@ -1365,11 +1461,10 @@ impl BlastRange {
             };
             let target_changed = a.target != target;
             if target_changed {
-                a.charge = None;
-                a.pursuit = 0;
-                if kind == RangeUnitKind::Spider && !matches!(a.order, Order::Ground(_)) {
-                    a.burst = 0;
+                if kind != RangeUnitKind::Spider || a.burst == 0 {
+                    a.charge = None;
                 }
+                a.pursuit = 0;
             }
             a.target = target;
             // A tank loads for what it aims at (ADR-456).
@@ -1420,6 +1515,7 @@ impl BlastRange {
             } else if let Some(other) = target {
                 aim_point(&self.units[other])
             } else {
+                stop_spider_beam(a, kind, self.tick);
                 continue;
             };
             if let Some(other) =
@@ -1440,7 +1536,13 @@ impl BlastRange {
             // Traverse independently of the hull and before entering range,
             // so a moving unit does not wait to begin slewing its turret.
             let angle = fx::angle::atan2(dz.raw(), dx.raw());
-            a.turret.step(angle, self.turret_limits);
+            let tracking = (kind == RangeUnitKind::Spider)
+                .then(|| motion::spider_tuning().laser_tracking)
+                .flatten();
+            let yaw_limits = tracking.map_or(self.turret_limits, |t| {
+                crate::turret::Limits::of(t.yaw, crate::TICKS_PER_SECOND)
+            });
+            a.turret.step(angle, yaw_limits);
             completed("orders_misc");
             self.units[id].update_pose(a.turret.angle);
             completed("orders_pose");
@@ -1479,10 +1581,8 @@ impl BlastRange {
                     });
             completed("orders_los");
             if !in_range || blocked_direct {
+                stop_spider_beam(a, kind, self.tick);
                 a.charge = None;
-                if kind == RangeUnitKind::Spider {
-                    a.burst = 0;
-                }
                 if kind.emplacement() {
                     continue;
                 }
@@ -1620,11 +1720,62 @@ impl BlastRange {
                 }
                 continue;
             }
-            if self.tick < a.next || !a.turret.aligned(angle, self.turret_limits) {
+            let laser_aim = if weapon == Weapon::Laser {
+                let tuning = motion::spider_tuning();
+                let muzzle = weapons::muzzles(&self.units[id], a.turret.angle)
+                    .first()
+                    .copied()
+                    .unwrap_or(from);
+                let desired = if matches!(a.order, Order::Ground(_)) {
+                    p
+                } else {
+                    spider_laser_aim(&self.world, muzzle, p, a.burst, tuning)
+                };
+                if let Some(t) = tracking {
+                    let frame = crate::damage::turned(
+                        &self.units[id].pose,
+                        a.turret.angle,
+                        self.units[id].motion.drive.head,
+                    );
+                    let delta = phys::V3::new(
+                        Fx::from_int(desired[0]).sub(muzzle[0]),
+                        Fx::from_int(desired[1]).sub(muzzle[1]),
+                        Fx::from_int(desired[2]).sub(muzzle[2]),
+                    );
+                    let y = delta.dot(frame.y);
+                    let horizontal = delta.len_sq().sub(y.mul(y)).max(Fx::ONE).sqrt();
+                    let limit = t.elevation_limit_degrees * fx::angle::FULL / 360;
+                    let pitch = fx::angle::diff(fx::angle::atan2(y.raw(), horizontal.raw()), 0)
+                        .clamp(-limit, limit);
+                    a.elevation.step(
+                        pitch,
+                        crate::turret::Limits::of(t.elevation, crate::TICKS_PER_SECOND),
+                    );
+                    let bounded = fx::angle::diff(a.elevation.angle, 0).clamp(-limit, limit);
+                    if bounded != fx::angle::diff(a.elevation.angle, 0) {
+                        a.elevation.rate = 0;
+                    }
+                    a.elevation.angle = fx::angle::norm(bounded);
+                    self.units[id].turret_pitch = fx::angle::diff(a.elevation.angle, 0);
+                }
+                desired
+            } else {
+                p
+            };
+            if self.tick < a.next || (tracking.is_none() && !a.turret.aligned(angle, yaw_limits)) {
                 continue;
             }
             if weapon == Weapon::Laser {
                 let tuning = motion::spider_tuning();
+                if let Some(t) = tracking {
+                    if a.burst == 0
+                        && fx::angle::diff(angle, a.turret.angle).abs()
+                            > (i64::from(t.fire_millidegrees) * i64::from(fx::angle::FULL) / 360000)
+                                as i32
+                    {
+                        continue;
+                    }
+                }
                 let ready = *a.charge.get_or_insert(self.tick + tuning.charge_ticks);
                 if self.tick < ready {
                     continue;
@@ -1632,11 +1783,14 @@ impl BlastRange {
                 let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
                 if let Some(from) = muzzles.first().copied() {
                     completed("orders_misc");
-                    let p = if kind == RangeUnitKind::Spider && !matches!(a.order, Order::Ground(_))
-                    {
-                        spider_laser_aim(&self.world, from, p, a.burst, tuning)
+                    let p = if tracking.is_some() {
+                        let f =
+                            self.units[id].root_frame(usize::from(self.units[id].body.turret_y));
+                        let end = phys::V3::new(from[0], from[1], from[2])
+                            .add(f.x.scale(Fx::from_int(tuning.laser.range)));
+                        [end.x, end.y, end.z].map(Fx::to_int_trunc)
                     } else {
-                        p
+                        laser_aim
                     };
                     completed("orders_laser_sweep");
                     let trace = self.laser_ray(
@@ -2047,3 +2201,7 @@ mod tests;
 #[cfg(test)]
 #[path = "range_order_profile_tests.rs"]
 mod order_profile_tests;
+
+#[cfg(test)]
+#[path = "range_laser_tracking_tests.rs"]
+mod tracking_tests;

@@ -809,7 +809,11 @@ pub(super) fn flight_velocity(delta: [Fx; 3], speed: i32) -> [Fx; 3] {
 }
 
 pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
-    let f = crate::damage::turned(&u.pose, angle, u.motion.drive.head);
+    let f = u.aimed_frame(
+        &u.pose,
+        fx::angle::diff(angle, u.motion.drive.head),
+        u.turret_pitch,
+    );
     u.body
         .weapon_paths()
         .iter()

@@ -117,6 +117,23 @@ pub fn turned(root: &Frame, turret_yaw: i32, head: i32) -> Frame {
     }
 }
 
+/// Elevate a weapon about its mount, leaving the chassis frame untouched.
+/// Positive elevation raises local +X; base adjustment keeps the pivot fixed.
+pub fn elevated(root: &Frame, pitch: i32, mount: Fx) -> Frame {
+    if pitch == 0 {
+        return *root;
+    }
+    let (c, s) = (fx::angle::cos(pitch), fx::angle::sin(pitch));
+    let x = root.x.scale(c).add(root.y.scale(s));
+    let y = root.y.scale(c).sub(root.x.scale(s));
+    Frame {
+        base: root.base.add(root.y.sub(y).scale(mount.div(root.scale))),
+        x,
+        y,
+        ..*root
+    }
+}
+
 /// Rest-pose frames of a body's segments in world space, composed along
 /// the parent chain exactly as the renderer places them: pivot on the
 /// parent's attachment point, roll then pitch then yaw about the pivot.

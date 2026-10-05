@@ -60,6 +60,7 @@ pub struct RangeUnit {
     pub motion: Motion,
     pub pose: crate::damage::Frame,
     pub turret_delta: i32,
+    pub turret_pitch: i32,
     pub body: UnitBody,
     pub at: [i32; 3],
     pub removed: Vec<[u8; 3]>,
@@ -219,6 +220,7 @@ impl HitFrames {
         root: crate::damage::Frame,
         segments: &[crate::damage::Frame],
         delta: i32,
+        pitch: i32,
     ) -> Self {
         let boxes = u
             .body
@@ -241,12 +243,12 @@ impl HitFrames {
                 (lo, hi)
             })
             .collect();
-        let turret = crate::damage::turned(&root, delta, 0);
+        let turret = u.aimed_frame(&root, delta, pitch);
         Self {
             root: LocalMap::new(&root),
             turret,
             turret_map: LocalMap::new(&turret),
-            shared_root: delta == 0,
+            shared_root: delta == 0 && pitch == 0,
             segments: segments.iter().map(LocalMap::new).collect(),
             boxes,
         }
@@ -372,7 +374,9 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
             if asked < ASKED_BEFORE_KNOWN {
                 return self
                     .frames
-                    .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+                    .get_or_init(|| {
+                        HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
+                    })
                     .hit(u, p)
                     .is_some();
             }
@@ -400,7 +404,9 @@ impl crate::burst::Voxels for UnitVoxels<'_> {
         }
         let solid = self
             .frames
-            .get_or_init(|| HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta))
+            .get_or_init(|| {
+                HitFrames::new(u, u.pose, &u.seg_frames, u.turret_delta, u.turret_pitch)
+            })
             .hit(u, p)
             .is_some();
         known.bits[word].fetch_or((1 | u64::from(solid) << 1) << shift, Ordering::Relaxed);
@@ -461,6 +467,7 @@ impl RangeUnit {
             motion,
             pose,
             turret_delta: 0,
+            turret_pitch: 0,
             kind,
             body,
             at,
@@ -628,7 +635,7 @@ impl RangeUnit {
         pose: &crate::damage::Frame,
         segs: &[crate::damage::Frame],
     ) -> Option<(usize, [usize; 3])> {
-        self.hit_with_turret(p, pose, segs, self.turret_delta)
+        self.hit_with_turret(p, pose, segs, self.turret_delta, self.turret_pitch)
     }
     fn hit_with_turret(
         &self,
@@ -636,8 +643,9 @@ impl RangeUnit {
         pose: &crate::damage::Frame,
         segs: &[crate::damage::Frame],
         delta: i32,
+        pitch: i32,
     ) -> Option<(usize, [usize; 3])> {
-        if let Some(c) = self.root_local(p, pose, delta) {
+        if let Some(c) = self.root_local(p, pose, delta, pitch) {
             if self.body.vol.get(c[0], c[1], c[2]) {
                 return Some((0, c));
             }
@@ -693,18 +701,31 @@ impl RangeUnit {
     }
     pub fn root_frame(&self, y: usize) -> crate::damage::Frame {
         if y >= usize::from(self.body.turret_y) {
-            crate::damage::turned(&self.pose, self.turret_delta, 0)
+            self.aimed_frame(&self.pose, self.turret_delta, self.turret_pitch)
         } else {
             self.pose
         }
+    }
+    pub fn aimed_frame(
+        &self,
+        pose: &crate::damage::Frame,
+        delta: i32,
+        pitch: i32,
+    ) -> crate::damage::Frame {
+        crate::damage::elevated(
+            &crate::damage::turned(pose, delta, 0),
+            pitch,
+            Fx::from_int(i32::from(self.body.turret_y)),
+        )
     }
     fn root_local(
         &self,
         p: [i32; 3],
         pose: &crate::damage::Frame,
         delta: i32,
+        pitch: i32,
     ) -> Option<[usize; 3]> {
-        if delta == 0 {
+        if delta == 0 && pitch == 0 {
             return local_in(&self.body, p, pose);
         }
         if let Some(c) = local_in(&self.body, p, pose) {
@@ -712,11 +733,11 @@ impl RangeUnit {
                 return Some(c);
             }
         }
-        local_in(&self.body, p, &crate::damage::turned(pose, delta, 0))
+        local_in(&self.body, p, &self.aimed_frame(pose, delta, pitch))
             .filter(|c| c[1] >= usize::from(self.body.turret_y))
     }
     pub fn local_at(&self, p: [i32; 3], pose: &crate::damage::Frame) -> Option<[usize; 3]> {
-        self.root_local(p, pose, self.turret_delta)
+        self.root_local(p, pose, self.turret_delta, self.turret_pitch)
     }
     pub fn local(&self, p: [i32; 3]) -> Option<[usize; 3]> {
         self.local_at(p, &self.pose)
@@ -737,13 +758,14 @@ impl RangeUnit {
         pose: Option<&crate::damage::Frame>,
         segments: &[crate::damage::Frame],
     ) -> ([i32; 3], [i32; 3]) {
-        self.bounds_aimed(pose, segments, self.turret_delta)
+        self.bounds_aimed(pose, segments, self.turret_delta, self.turret_pitch)
     }
     fn bounds_aimed(
         &self,
         pose: Option<&crate::damage::Frame>,
         segments: &[crate::damage::Frame],
         delta: i32,
+        pitch: i32,
     ) -> ([i32; 3], [i32; 3]) {
         let mut lo = [i32::MAX; 3];
         let mut hi = [i32::MIN; 3];
@@ -773,8 +795,11 @@ impl RangeUnit {
         if let Some(pose) = pose {
             for l in corners(size(&self.body)) {
                 take(pose.world(l.map(Fx::from_int)));
-                if delta != 0 {
-                    take(crate::damage::turned(pose, delta, 0).world(l.map(Fx::from_int)));
+                if delta != 0 || pitch != 0 {
+                    take(
+                        self.aimed_frame(pose, delta, pitch)
+                            .world(l.map(Fx::from_int)),
+                    );
                 }
             }
         } else {
@@ -1609,6 +1634,7 @@ pub struct Explosion {
     point_contacts: bool,
     poses: Vec<crate::damage::Frame>,
     turret_deltas: Vec<i32>,
+    turret_pitches: Vec<i32>,
     /// Segment frames of each unit when the burst began (ADR-278).
     seg_poses: Vec<Vec<crate::damage::Frame>>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
@@ -1668,6 +1694,7 @@ impl Explosion {
             point_contacts: false,
             poses: units.iter().map(|u| u.pose).collect(),
             turret_deltas: units.iter().map(|u| u.turret_delta).collect(),
+            turret_pitches: units.iter().map(|u| u.turret_pitch).collect(),
             seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
             origin,
             cell: c.cell_units,
@@ -1744,7 +1771,13 @@ impl Explosion {
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                HitFrames::new(u, self.poses[i], &self.seg_poses[i], self.turret_deltas[i])
+                HitFrames::new(
+                    u,
+                    self.poses[i],
+                    &self.seg_poses[i],
+                    self.turret_deltas[i],
+                    self.turret_pitches[i],
+                )
             })
             .collect();
         let boxes: Vec<_> = units
@@ -1755,6 +1788,7 @@ impl Explosion {
                     Some(&self.poses[i]),
                     &self.seg_poses[i],
                     self.turret_deltas[i],
+                    self.turret_pitches[i],
                 )
             })
             .collect();
@@ -2670,7 +2704,11 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
+        let version = if self.gun.kind == RangeUnitKind::Spider
+            || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
+        {
+            52
+        } else if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
             51
         } else {
             self.kinetic.version()
@@ -2850,16 +2888,72 @@ impl BlastRange {
         if version < 49
             && (!self.kinetic.jobs.is_empty()
                 || self.gun.kind.canister()
-                || self.units.iter().any(|u| u.kind.canister()))
+                || self
+                    .units
+                    .iter()
+                    .any(|u| u.kind.canister() || u.kind == RangeUnitKind::Spider)
+                || self.gun.kind == RangeUnitKind::Spider)
         {
-            let format = if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister())
+            let format = if self.gun.kind == RangeUnitKind::Spider
+                || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
             {
+                52
+            } else if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
                 51
             } else {
                 self.kinetic.version()
             };
             self.kinetic.save_as(b, format);
         }
+        if version < 52
+            && (self.gun.kind == RangeUnitKind::Spider
+                || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider))
+        {
+            self.save_laser_tracking(b);
+        }
+    }
+    fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
+        b.i32(self.gun.turret_pitch);
+        for u in &self.units {
+            b.i32(u.turret_pitch);
+        }
+        self.battle.save_laser_tracking(b);
+        if let Some(e) = &self.explosion {
+            for p in &e.turret_pitches {
+                b.i32(*p);
+            }
+        }
+        self.kinetic.save_pitches(b);
+    }
+    fn load_laser_tracking(&mut self, s: &mut fx::blob::Scan) -> Option<()> {
+        let valid = |p: i32, kind: RangeUnitKind| {
+            i64::from(p).abs() <= i64::from(fx::angle::QUARTER)
+                && (p == 0 || kind == RangeUnitKind::Spider)
+        };
+        self.gun.turret_pitch = s.i32();
+        if !valid(self.gun.turret_pitch, self.gun.kind) {
+            return None;
+        }
+        for u in &mut self.units {
+            u.turret_pitch = s.i32();
+            if !valid(u.turret_pitch, u.kind) {
+                return None;
+            }
+        }
+        self.battle.load_laser_tracking(s, &self.units)?;
+        if let Some(e) = &mut self.explosion {
+            for (p, u) in e.turret_pitches.iter_mut().zip(&self.units) {
+                *p = s.i32();
+                if !valid(*p, u.kind) {
+                    return None;
+                }
+            }
+        }
+        self.kinetic.load_pitches(s, &self.units)?;
+        if let Some(e) = &self.explosion {
+            e.validate_contacts(&self.units)?;
+        }
+        s.ok().then_some(())
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -2886,7 +2980,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=51).contains(&version) {
+        if !(27..=52).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3326,9 +3420,10 @@ impl BlastRange {
         observe("wave_contacts", bytes.len() - s.left(), None);
         if version >= 47 {
             if let Some(e) = &mut r.explosion {
-                e.load_contacts(&mut s, &r.units)?;
+                e.load_contacts(&mut s, &r.units, version >= 52)?;
             }
-            r.battle.load_wave_contacts(&mut s, &r.units)?;
+            r.battle
+                .load_wave_contacts_deferred(&mut s, &r.units, version >= 52)?;
         }
         if version >= 49 {
             observe("kinetic_jobs", bytes.len() - s.left(), None);
@@ -3364,6 +3459,9 @@ impl BlastRange {
             {
                 return None;
             }
+        }
+        if version >= 52 {
+            r.load_laser_tracking(&mut s)?;
         }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
@@ -4544,11 +4642,25 @@ impl Explosion {
         b.bool(self.point_contacts);
         b.usize(self.body_cursor);
     }
-    fn load_contacts(&mut self, s: &mut fx::blob::Scan, units: &[RangeUnit]) -> Option<()> {
+    fn load_contacts(
+        &mut self,
+        s: &mut fx::blob::Scan,
+        units: &[RangeUnit],
+        defer: bool,
+    ) -> Option<()> {
         self.point_contacts = s.bool();
         self.body_cursor = s.usize();
+        if !s.ok() {
+            return None;
+        }
+        if defer {
+            return Some(());
+        }
+        self.validate_contacts(units)
+    }
+    fn validate_contacts(&self, units: &[RangeUnit]) -> Option<()> {
         if self.body_cursor == 0 {
-            return s.ok().then_some(());
+            return Some(());
         }
         let actor = self.contact_cursor % (units.len() + 1);
         if self.point_contacts || self.contact_cursor >= units.len() {
@@ -4562,6 +4674,7 @@ impl Explosion {
             self.poses[actor],
             &self.seg_poses[actor],
             self.turret_deltas[actor],
+            self.turret_pitches[actor],
         );
         let mut cells = Vec::new();
         query.wave_cells(
@@ -4572,7 +4685,7 @@ impl Explosion {
             self.cell,
             &mut cells,
         );
-        (s.ok() && self.body_cursor < cells.len()).then_some(())
+        (self.body_cursor < cells.len()).then_some(())
     }
     fn save(&self, b: &mut fx::blob::Blob) {
         for v in self.at {
@@ -4753,6 +4866,7 @@ impl Explosion {
         }
         Some(Self {
             turret_deltas,
+            turret_pitches: vec![0; units.len()],
             poses,
             seg_poses,
             pending,
@@ -7249,7 +7363,7 @@ mod tests {
             let pose = u.pose;
             let segments = u.seg_frames.clone();
             let delta = u.turret_delta;
-            let batch = HitFrames::new(&u, pose, &segments, delta);
+            let batch = HitFrames::new(&u, pose, &segments, delta, u.turret_pitch);
             let (lo, hi) = u.bounds();
             for damaged in [false, true] {
                 if damaged {
@@ -7278,8 +7392,13 @@ mod tests {
                                 for wy in start[1]..=end[1] {
                                     for wx in start[0]..=end[0] {
                                         let p = [wx, wy, wz];
-                                        let reference =
-                                            u.hit_with_turret(p, &pose, &segments, delta);
+                                        let reference = u.hit_with_turret(
+                                            p,
+                                            &pose,
+                                            &segments,
+                                            delta,
+                                            u.turret_pitch,
+                                        );
                                         assert_eq!(
                                             batch.hit(&u, p),
                                             reference,

@@ -233,12 +233,12 @@ impl BlastRange {
                     }
                 };
             let ny = u.body.vol.ny;
-            if u.turret_delta == 0 {
+            if u.turret_delta == 0 && u.turret_pitch == 0 {
                 volume(&u.body, &u.pose, 0, 0..ny);
             } else {
                 let ring = u.body.turret_y.min(ny);
                 volume(&u.body, &u.pose, 0, 0..ring);
-                let turned = crate::damage::turned(&u.pose, u.turret_delta, 0);
+                let turned = u.root_frame(usize::from(u.body.turret_y));
                 volume(&u.body, &turned, 0, ring..ny);
             }
             for (i, s) in u.body.segments.iter().enumerate() {

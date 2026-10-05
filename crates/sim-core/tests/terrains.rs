@@ -153,7 +153,7 @@ fn passable(t: Terrain, kind: RangeUnitKind, eighth: i32) -> bool {
         | RangeUnitKind::TurretT1
         | RangeUnitKind::TurretT2 => 45,
         RangeUnitKind::Strider | RangeUnitKind::Spider => 65,
-        RangeUnitKind::Base => 0,
+        RangeUnitKind::Base | RangeUnitKind::ArtilleryTurretT2 => 0,
     };
     match t {
         Terrain::Trench { depth, .. } => depth <= 4 || eighth == 2,

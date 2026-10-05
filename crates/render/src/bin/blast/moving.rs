@@ -22,6 +22,9 @@ pub struct Visual {
     pub fragments: super::fragments::history::History,
     pub turret: Option<i32>,
     pub battle_turrets: Vec<i32>,
+    /// Previous authoritative weapon frames, including the fixed-point angle
+    /// table and the hull-local traverse. Interpolate their picture only.
+    battle_heads: Vec<(Quat, Vec3)>,
     occupied: Vec<usize>,
     /// Reuse the merged occupancy allocation from the previous tick.
     scratch: Vec<usize>,
@@ -41,6 +44,7 @@ struct ActorFrame {
     pos: Vec3,
     hull: Quat,
     turret: Quat,
+    turret_offset: Vec3,
     kind: usize,
     legs: Vec<gait::LegPose>,
 }
@@ -58,7 +62,13 @@ impl ActorFrame {
                 }
             }
         }
-        local.translation = self.pos + rotation * local.translation;
+        local.translation = self.pos
+            + if witness.3 {
+                self.turret_offset
+            } else {
+                Vec3::ZERO
+            }
+            + rotation * local.translation;
         local.rotation = rotation * local.rotation;
         local
     }
@@ -125,6 +135,7 @@ pub fn visible(u: &RangeUnit, previous: Option<&Pose>, scene: &Scene) -> Pose {
 pub fn before(sim: &BlastRange, v: &mut Visual, window: &render::gas::TerrainWindow) {
     v.turret = Some(sim.turret.angle);
     v.battle_turrets = sim.battle.actors.iter().map(|a| a.turret.angle).collect();
+    v.battle_heads = sim.units.iter().map(weapon_picture).collect();
     // Capture resting pieces too: one may wake during the upcoming step.
     // Reuse dense origins; each parallel picture leaf merges its sorted IDs.
     v.fragments
@@ -162,6 +173,7 @@ struct Occupied {
     /// re-entry because its pose or damage may have changed offscreen.
     hidden: bool,
     turret_delta: i32,
+    turret_pitch: i32,
     pose: sim_core::damage::Frame,
     segments: Vec<sim_core::damage::Frame>,
     revision: u64,
@@ -254,7 +266,7 @@ fn unit_world_cells(u: &RangeUnit, mut push: impl FnMut(IVec3)) {
     let p = pose(u);
     let rot = render::realtime::hull_rotation(p.up, p.yaw);
     let centre = Vec3::from(render::model::root_centre(&u.body));
-    let turret = (u.turret_delta != 0).then(|| {
+    let turret = (u.turret_delta != 0 || u.turret_pitch != 0).then(|| {
         CellFrame::new(
             &u.root_frame(usize::from(u.body.turret_y)),
             [
@@ -410,6 +422,7 @@ fn new_occupied(u: &RangeUnit, index: &WindowIndex, packed: bool) -> Occupied {
     Occupied {
         hidden: false,
         turret_delta: u.turret_delta,
+        turret_pitch: u.turret_pitch,
         pose: u.pose,
         segments: u.seg_frames.clone(),
         revision: u.revision,
@@ -448,6 +461,7 @@ fn update_occupied(
     }
     let changed = old.hidden
         || old.turret_delta != u.turret_delta
+        || old.turret_pitch != u.turret_pitch
         || old.pose != u.pose
         || old.segments != u.seg_frames
         // Dents/heat update appearance but keep occupancy. Compare the small
@@ -458,6 +472,7 @@ fn update_occupied(
         unit_world_cells(u, |p| old.world_cells.push(p.to_array()));
         old.hidden = false;
         old.turret_delta = u.turret_delta;
+        old.turret_pitch = u.turret_pitch;
         old.pose = u.pose;
         old.segments.clone_from(&u.seg_frames);
         // Pose changes do not require copying intact packed geometry.
@@ -652,6 +667,20 @@ fn append_dirty_word(spans: &mut Vec<std::ops::Range<usize>>, word: usize) {
     }
     spans.push(word..word + 1);
 }
+fn weapon_picture(u: &RangeUnit) -> (Quat, Vec3) {
+    let f = u.root_frame(usize::from(u.body.turret_y));
+    let vec = |v: sim_core::damage::V3| {
+        Vec3::new(
+            v.x.to_f64_lossy() as f32,
+            v.y.to_f64_lossy() as f32,
+            v.z.to_f64_lossy() as f32,
+        )
+    };
+    (
+        Quat::from_mat3(&Mat3::from_cols(vec(f.x), vec(f.y), vec(f.z))).normalize(),
+        vec(f.base.sub(u.pose.base)),
+    )
+}
 pub fn animate(
     scene: Res<Scene>,
     mut v: ResMut<Visual>,
@@ -678,6 +707,7 @@ pub fn animate(
         previous,
         previous_feet,
         battle_turrets,
+        battle_heads,
         rigs,
         frame_poses,
         ..
@@ -703,6 +733,13 @@ pub fn animate(
         } else {
             render::realtime::hull_rotation(p.up, yaw)
         };
+        frame.turret_offset = Vec3::ZERO;
+        if u.kind == modding::range::RangeUnitKind::Spider && scene.sim.battle_mode() {
+            let now = weapon_picture(u);
+            let was = battle_heads.get(i).copied().unwrap_or(now);
+            frame.turret = was.0.slerp(now.0, t);
+            frame.turret_offset = was.1.lerp(now.1, t);
+        }
         frame.kind = u.kind.index();
         frame.legs.clear();
         // The range plants the feet (ADR-279); the picture interpolates

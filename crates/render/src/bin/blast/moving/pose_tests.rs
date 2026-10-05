@@ -102,8 +102,17 @@ fn reference(witness: &Witness, scene: &Scene, visual: &Visual) -> Transform {
             }
         }
     }
-    let rotation = render::realtime::hull_rotation(p.up, yaw);
-    local.translation = p.pos + rotation * local.translation;
+    let (rotation, offset) = if witness.3
+        && unit.kind == modding::range::RangeUnitKind::Spider
+        && scene.sim.battle_mode()
+    {
+        let now = weapon_picture(unit);
+        let was = visual.battle_heads.get(witness.0).copied().unwrap_or(now);
+        (was.0.slerp(now.0, t), was.1.lerp(now.1, t))
+    } else {
+        (render::realtime::hull_rotation(p.up, yaw), Vec3::ZERO)
+    };
+    local.translation = p.pos + offset + rotation * local.translation;
     local.rotation = rotation * local.rotation;
     local
 }
@@ -263,4 +272,77 @@ fn interpolated_turrets_feet_death_and_reset_keep_the_same_picture() {
     reset(&mut app.world_mut().resource_mut::<Visual>());
     app.update();
     assert_reference(&mut app);
+}
+
+#[test]
+fn elevated_spider_picture_matches_physical_mount_and_occupancy_refreshes() {
+    let mut app = app();
+    let id = app
+        .world()
+        .resource::<Scene>()
+        .sim
+        .units
+        .iter()
+        .position(|u| u.kind == modding::range::RangeUnitKind::Spider)
+        .unwrap();
+    let yaw = fx::angle::FULL / 7;
+    let pitch = -fx::angle::FULL / 24;
+    {
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        scene.sim.battle.actors[id].turret = sim_core::turret::Traverse::new(yaw);
+        scene.sim.battle.actors[id].elevation = sim_core::turret::Traverse::new(pitch);
+        let u = &mut scene.sim.units[id];
+        u.motion.hull.up = V3::new(Fx::from_ratio(1, 10), Fx::ONE, Fx::from_ratio(-1, 5));
+        u.turret_pitch = pitch;
+        u.update_pose(yaw);
+    }
+    app.update();
+    let scene = app.world().resource::<Scene>();
+    let u = &scene.sim.units[id];
+    let physical = u.root_frame(usize::from(u.body.turret_y));
+    let visual = &app.world().resource::<Visual>().frame_poses[id];
+    let forward = visual.turret * Vec3::X;
+    let expected = Vec3::new(
+        physical.x.x.to_f64_lossy() as f32,
+        physical.x.y.to_f64_lossy() as f32,
+        physical.x.z.to_f64_lossy() as f32,
+    );
+    assert!((forward - expected).length() < 0.0001);
+    let local = [
+        Fx::from_ratio(u.body.vol.nx as i32, 2),
+        Fx::from_int(u.body.turret_y as i32),
+        Fx::from_ratio(u.body.vol.nz as i32, 2),
+    ];
+    let physical_mount = physical.world(local);
+    let mount = Vec3::new(
+        0.0,
+        u.body.turret_y as f32 * u.body.mm as f32 / voxel::unit::WORLD_MM as f32,
+        0.0,
+    );
+    let rendered_mount = visual.pos + visual.turret_offset + visual.turret * mount;
+    let expected_mount = Vec3::new(
+        physical_mount.x.to_f64_lossy() as f32,
+        physical_mount.y.to_f64_lossy() as f32,
+        physical_mount.z.to_f64_lossy() as f32,
+    );
+    assert!((rendered_mount - expected_mount).length() < 0.001);
+    let window = TerrainWindow {
+        origin: [0; 3],
+        dims: [512, 128, 512],
+    };
+    let index = WindowIndex::new(window);
+    let mut cached_unit =
+        sim_core::blast::RangeUnit::of_kind(modding::range::RangeUnitKind::Spider, u.at);
+    cached_unit.update_pose(yaw);
+    cached_unit.turret_pitch = pitch;
+    let mut old = new_occupied(&cached_unit, &index, false);
+    cached_unit.turret_pitch = 0;
+    assert!(update_occupied(
+        &cached_unit,
+        &mut old,
+        &index,
+        Some(window),
+        false
+    ));
+    assert_eq!(old.turret_pitch, 0);
 }

@@ -32,10 +32,19 @@ pub(super) fn capture(
         .enumerate()
         .filter_map(|(i, u)| {
             let (pose, segs, delta) = (e.poses[i], &e.seg_poses[i], e.turret_deltas[i]);
-            let (lo, hi) = u.bounds_aimed(Some(&pose), segs, delta);
+            let (lo, hi) = u.bounds_aimed(Some(&pose), segs, delta, e.turret_pitches[i]);
             (0..3)
                 .all(|a| far[a] >= lo[a] && origin[a] <= hi[a])
-                .then(|| (u, lo, hi, pose, segs, HitFrames::new(u, pose, segs, delta)))
+                .then(|| {
+                    (
+                        u,
+                        lo,
+                        hi,
+                        pose,
+                        segs,
+                        HitFrames::new(u, pose, segs, delta, e.turret_pitches[i]),
+                    )
+                })
         })
         .collect();
     // Bodies are asked only where they can be (ADR-296): one box test

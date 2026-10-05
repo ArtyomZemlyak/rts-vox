@@ -102,7 +102,13 @@ fn cell_ownership_is_unique_and_independent_of_live_damage() {
     unit.body.turret_y = 5;
     unit.motion.drive.head = fx::angle::FULL / 8;
     unit.update_pose(-fx::angle::FULL / 9);
-    let query = HitFrames::new(&unit, unit.pose, &unit.seg_frames, unit.turret_delta);
+    let query = HitFrames::new(
+        &unit,
+        unit.pose,
+        &unit.seg_frames,
+        unit.turret_delta,
+        unit.turret_pitch,
+    );
     let mut contacts = Vec::new();
     let mut counts = BTreeMap::new();
     for z in 56..72 {
@@ -241,7 +247,7 @@ fn tilted_and_subvoxel_bodies_have_no_missing_or_duplicate_owners() {
                 -fx::angle::FULL / 7,
                 phys::V3::new(Fx::from_ratio(2, 7), Fx::ONE, Fx::from_ratio(-1, 3)),
             );
-            let query = HitFrames::new(&unit, frame, &[], 0);
+            let query = HitFrames::new(&unit, frame, &[], 0, 0);
             let mut expected =
                 BTreeMap::<[i32; 3], std::collections::BTreeSet<wave_cells::Contact>>::new();
             for z in 0..10 {

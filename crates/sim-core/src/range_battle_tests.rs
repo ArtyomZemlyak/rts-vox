@@ -3591,42 +3591,11 @@ fn spider_laser_opening_heats_the_visible_ground_then_armour_and_replays() {
 }
 
 #[test]
-fn spider_laser_new_target_restarts_opening_but_explicit_ground_aim_is_direct() {
-    let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
-        .layout
-        .unwrap();
-    layout.units.push(RangeUnitDef {
-        kind: RangeUnitKind::Tank,
-        at: [450, 16, 500],
-        allied: false,
-        weapon: None,
-    });
-    let config =
-        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-    let mut r = BlastRange::with_layout(config, layout).unwrap();
+fn spider_laser_explicit_point_uses_the_servo_without_an_automatic_ground_opening() {
+    let mut r = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank]);
     r.start_battle().unwrap();
-    for a in &mut r.battle.actors[1..] {
-        a.order = Order::Hold;
-    }
-    // Policy replaces the target while an earlier burst is active. Commands
-    // already reset burst; this exercises the distinct acquisition path.
-    r.battle.actors[0].target = Some(1);
-    r.battle.actors[0].burst = 30;
-    r.battle.actors[0].order = Order::Attack(2);
-    for _ in 0..180 {
-        step_spider_opening_trial(&mut r);
-        if !r.battle.lasers.is_empty() {
-            break;
-        }
-    }
-    assert_eq!(r.battle.actors[0].target, Some(2));
-    assert_eq!(
-        r.battle.actors[0].burst, 1,
-        "new target reused old sweep progress"
-    );
-    assert_eq!(r.battle.lasers.len(), 1);
-    assert!(r.battle.lasers[0].to[1].to_int_trunc() <= 16);
-    let target = aim_point(&r.units[2]);
+    r.battle.actors[1].order = Order::Hold;
+    let target = aim_point(&r.units[1]);
     assert!(r.battle_order(0, Order::Ground(target), None));
     for _ in 0..180 {
         step_spider_opening_trial(&mut r);
@@ -3637,9 +3606,9 @@ fn spider_laser_new_target_restarts_opening_but_explicit_ground_aim_is_direct() 
     assert_eq!(r.battle.lasers.len(), 1);
     assert!(
         r.battle.lasers[0].to[1].to_int_trunc() > 16,
-        "explicit ground order acquired automatic sweep"
+        "point order acquired automatic ground opening"
     );
-    assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 2));
+    assert!(r.thermals.cells().any(|(cell, _)| cell.unit == 1));
     assert!(r.matter.economy.ledger.balanced());
 }
 

@@ -27,6 +27,7 @@ struct Pose {
     root: Frame,
     segments: Vec<Frame>,
     delta: i32,
+    pitch: i32,
 }
 
 enum Direct {
@@ -74,6 +75,7 @@ impl Job {
                             root: u.pose,
                             segments: u.seg_frames.clone(),
                             delta: u.turret_delta,
+                            pitch: u.turret_pitch,
                         })
                 })
                 .collect(),
@@ -86,12 +88,12 @@ impl Job {
             for pose in poses {
                 let u = &units[pose.id];
                 if let Some((part, cell)) =
-                    u.hit_with_turret(p, &pose.root, &pose.segments, pose.delta)
+                    u.hit_with_turret(p, &pose.root, &pose.segments, pose.delta, pose.pitch)
                 {
                     let frame = if part > 0 {
                         pose.segments[part - 1]
                     } else if cell[1] >= usize::from(u.body.turret_y) {
-                        crate::damage::turned(&pose.root, pose.delta, 0)
+                        u.aimed_frame(&pose.root, pose.delta, pose.pitch)
                     } else {
                         pose.root
                     };

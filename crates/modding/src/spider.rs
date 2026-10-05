@@ -9,6 +9,16 @@ pub struct Tuning {
     pub charge_ticks: u32,
     #[serde(default)]
     pub laser_sweep: Option<LaserSweep>,
+    #[serde(default)]
+    pub laser_tracking: Option<LaserTracking>,
+}
+/// A continuously firing siege head has its own finite angular servos.
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct LaserTracking {
+    pub yaw: crate::turret::Turret,
+    pub elevation: crate::turret::Turret,
+    pub fire_millidegrees: i32,
+    pub elevation_limit_degrees: i32,
 }
 /// Opening pass of the siege beam; omitted settings preserve direct aim.
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -40,6 +50,14 @@ impl Tuning {
                     || s.ticks > t.laser.burst_ticks.saturating_sub(1) * t.laser.interval_ticks
                     || !(1..=t.laser.range).contains(&s.lead_units)
             })
+            || t.laser_tracking.is_some_and(|s| {
+                [s.yaw, s.elevation].into_iter().any(|a| {
+                    !(1..=360).contains(&a.speed_deg_s)
+                        || !(1..=3600).contains(&a.accel_deg_s2)
+                        || !(1..=10000).contains(&a.aim_millidegrees)
+                }) || !(s.yaw.aim_millidegrees..=180000).contains(&s.fire_millidegrees)
+                    || !(1..=89).contains(&s.elevation_limit_degrees)
+            })
         {
             return Err("invalid heavy spider tuning".into());
         }
@@ -63,11 +81,11 @@ mod tests {
         assert_eq!((sweep.ticks, sweep.lead_units), (18, 120));
         for (from, to) in [
             ("ticks: 18", "ticks: 0"),
-            ("ticks: 18", "ticks: 120"),
+            ("ticks: 18", "ticks: 240"),
             ("ticks: 18", "ticks: 301"),
             ("lead_units: 120", "lead_units: 0"),
             ("lead_units: 120", "lead_units: 2801"),
-            ("burst_ticks: 120", "burst_ticks: 1"),
+            ("burst_ticks: 240", "burst_ticks: 1"),
         ] {
             assert!(Tuning::from_ron(&source.replace(from, to)).is_err(), "{to}");
         }
@@ -84,6 +102,31 @@ mod tests {
             ("range: 2800", "range: 99999"),
             ("interval_ticks: 1", "interval_ticks: 0"),
             ("heat_radius: 4", "heat_radius: 8"),
+        ] {
+            assert_ne!(source, source.replace(from, to));
+            assert!(Tuning::from_ron(&source.replace(from, to)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tracking_tests {
+    use super::*;
+    #[test]
+    fn tracking_is_optional_and_all_servos_and_early_fire_cone_are_bounded() {
+        let source = include_str!("../../../data/spider.ron");
+        let t = Tuning::from_ron(source).unwrap();
+        assert!(t.laser_tracking.is_some());
+        let begin = source.find("    laser_tracking:").unwrap();
+        let end = begin + source[begin..].find("    )),").unwrap() + "    )),".len();
+        let legacy = format!("{}{}", &source[..begin], &source[end..]);
+        assert!(Tuning::from_ron(&legacy).unwrap().laser_tracking.is_none());
+        for (from, to) in [
+            ("speed_deg_s: 18", "speed_deg_s: 0"),
+            ("accel_deg_s2: 36", "accel_deg_s2: 3601"),
+            ("fire_millidegrees: 60000", "fire_millidegrees: 0"),
+            ("fire_millidegrees: 60000", "fire_millidegrees: 180001"),
+            ("elevation_limit_degrees: 75", "elevation_limit_degrees: 90"),
         ] {
             assert_ne!(source, source.replace(from, to));
             assert!(Tuning::from_ron(&source.replace(from, to)).is_err());
