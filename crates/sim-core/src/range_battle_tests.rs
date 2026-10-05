@@ -122,11 +122,13 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
     l.clear_max = [600, 600];
     l.units = vec![
         RangeUnitDef {
+            weapon: None,
             kind: kinds[0],
             at: [170, 16, 336],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: kinds[1],
             at: [450, 16, 336],
             allied: false,
@@ -143,6 +145,7 @@ fn arena_of(kinds: [RangeUnitKind; 2]) -> BlastRange {
 fn group_move_queues_every_unit_under_the_search_start_budget() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Strider,
         at: [170, 16, 440],
         allied: true,
@@ -179,11 +182,13 @@ fn group_move_queues_every_unit_under_the_search_start_budget() {
 fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [150, 16, 120],
         allied: true,
     });
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [480, 16, 550],
         allied: false,
@@ -235,6 +240,7 @@ fn destroying_a_command_base_wins_even_with_enemy_armour_alive() {
 fn free_control_moves_groups_without_starting_damage_or_ai_and_replays() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Strider,
         at: [170, 16, 440],
         allied: true,
@@ -283,11 +289,13 @@ fn distant_stationary_garrisons_draw_after_the_mobile_attackers_are_gone() {
         .layout
         .unwrap();
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [150, 16, 120],
         allied: true,
     });
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [480, 16, 550],
         allied: false,
@@ -318,21 +326,25 @@ fn stranded_gun_does_not_keep_a_remote_base_assault_fighting() {
     layout.clear_max = [4000, 600];
     layout.units = vec![
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Base,
             at: [150, 16, 336],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [2800, 16, 336],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Artillery,
             at: [3000, 16, 336],
             allied: false,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Base,
             at: [3800, 16, 336],
             allied: false,
@@ -380,21 +392,25 @@ fn northern_base_battle() -> BlastRange {
     }
     layout.units = vec![
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Base,
             at: [1530, 16, 630],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::TurretT1,
             at: [1550, 16, 450],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Base,
             at: [8820, 16, 8870],
             allied: false,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [3000, 16, 760],
             allied: false,
@@ -442,11 +458,13 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
     let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
     layout.units[1].at = [500, 16, 500];
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [150, 16, 120],
         allied: true,
     });
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [450, 16, 336],
         allied: false,
@@ -501,11 +519,13 @@ fn enemy_annihilation_hit_on_our_base_causes_defeat() {
     layout.units[0].at = [100, 16, 500];
     layout.units[1].at = [350, 16, 120];
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [150, 16, 120],
         allied: true,
     });
     layout.units.push(RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Base,
         at: [480, 16, 550],
         allied: false,
@@ -1238,6 +1258,7 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
     l.clear_max = [600, 600];
     l.units = [(100, true), (560, false)]
         .map(|(x, allied)| RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [x, 16, 336],
             allied,
@@ -1754,11 +1775,13 @@ fn a_far_target_does_not_restart_its_route_search_on_each_pursuit_tick() {
     layout.battle = true;
     layout.units = vec![
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [128, 16, 336],
             allied: true,
         },
         RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [1480, 16, 460],
             allied: false,
@@ -1828,6 +1851,7 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
         course.patrols.clear();
     }
     let unit = |at: [i32; 3], allied| RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Tank,
         at,
         allied,
@@ -2049,6 +2073,7 @@ fn tank_squads_crossing_the_field_all_engage() {
             (0..4).map(move |k| {
                 let (dx, dz) = (80 * (k % 2), 80 * (k / 2));
                 RangeUnitDef {
+                    weapon: None,
                     kind: RangeUnitKind::Tank,
                     allied,
                     at: if allied {
@@ -2441,11 +2466,13 @@ fn t2_defends_against_five_stock_tanks() {
         .unwrap();
     layout.units = (0..5)
         .map(|i| RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [170, 16, 240 + i * 48],
             allied: true,
         })
         .chain(std::iter::once(RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::TurretT2,
             at: [450, 16, 336],
             allied: false,
@@ -2774,4 +2801,127 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         assert!(route_tasks > 0, "observer never saw a continuation task");
         assert!(continuations > 0, "observer never saw an active search");
     }
+}
+
+#[test]
+fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() {
+    use modding::range::RangeLoadout;
+    for (loadout, weapon) in [
+        (RangeLoadout::Blast, Weapon::Blast),
+        (RangeLoadout::Kinetic, Weapon::Kinetic),
+        (RangeLoadout::Energy, Weapon::Energy),
+        (RangeLoadout::Annihilation, Weapon::Annihilation),
+    ] {
+        let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+        for unit in &mut layout.units {
+            unit.weapon = Some(loadout);
+        }
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+        assert!(sim.set_battle_weapon(0, Some(Weapon::Kinetic)));
+        // Scenario rebuild restores authored data after a runtime ammo change.
+        sim = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+        assert_eq!(sim.battle_weapon(0), Some(weapon));
+        assert!(sim.set_ai_vs_ai(true));
+        let setup = sim.snapshot();
+        sim.start_battle().unwrap();
+        for _ in 0..160 {
+            sim.step();
+            if sim.battle.actors.iter().all(|a| a.fired > 0) {
+                break;
+            }
+        }
+        for id in 0..2 {
+            assert_eq!(sim.battle_weapon(id), Some(weapon));
+            assert!(
+                sim.battle.actors[id].fired > 0,
+                "side {id} never fired {weapon:?}"
+            );
+        }
+        let mut restored = BlastRange::restore(config.clone(), &sim.snapshot()).unwrap();
+        for _ in 0..10 {
+            sim.step();
+            restored.step();
+            assert_eq!(sim.state_hash(), restored.state_hash());
+        }
+        let mut restarted = BlastRange::restore(config.clone(), &setup).unwrap();
+        assert!(restarted.battle.autonomous);
+        restarted.start_battle().unwrap();
+        assert_eq!(restarted.battle_weapon(1), Some(weapon));
+        let fresh = BlastRange::with_layout(config, layout).unwrap();
+        assert_eq!(fresh.battle_weapon(0), Some(weapon));
+        assert_eq!(fresh.battle_weapon(1), Some(weapon));
+    }
+}
+
+#[test]
+fn world_ai_armies_actually_fire_energy_annihilation_and_frontline_canister() {
+    let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        "../../../data/battle-world.ron"
+    ))
+    .unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.units = preset.units;
+    layout.blocks.extend(preset.blocks);
+    layout.course.as_mut().unwrap().patrols.clear();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut sim = BlastRange::with_layout(config, layout).unwrap();
+    assert!(sim.set_ai_vs_ai(true));
+    for side in [true, false] {
+        let weapons: std::collections::BTreeSet<_> = (0..sim.units.len())
+            .filter(|&id| sim.allied(id) == side)
+            .filter_map(|id| sim.battle_weapon(id).map(|w| w as u8))
+            .collect();
+        assert_eq!(weapons, (0..=6).collect(), "missing gun on side {side}");
+    }
+    sim.start_battle().unwrap();
+    let mut observed = std::collections::BTreeSet::new();
+    for _ in 0..600 {
+        sim.step();
+        for round in &sim.battle.rounds {
+            observed.insert((sim.allied(round.owner), round.weapon as u8));
+        }
+        if [true, false].into_iter().all(|side| {
+            [Weapon::Energy, Weapon::Annihilation, Weapon::Canister]
+                .into_iter()
+                .all(|weapon| observed.contains(&(side, weapon as u8)))
+        }) {
+            break;
+        }
+    }
+    for side in [true, false] {
+        for weapon in [Weapon::Energy, Weapon::Annihilation, Weapon::Canister] {
+            assert!(
+                observed.contains(&(side, weapon as u8)),
+                "{weapon:?} never flew on side {side}; tick={}, observed={observed:?}",
+                sim.tick
+            );
+        }
+    }
+    eprintln!(
+        "world AI content: tick={}, live-round weapon/side coverage={observed:?}",
+        sim.tick
+    );
+    assert!(sim.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn battle_weapon_codes_fit_diagnostic_counters() {
+    let mut counts = [0usize; Weapon::COUNT];
+    for weapon in [
+        Weapon::MachineGun,
+        Weapon::Blast,
+        Weapon::Kinetic,
+        Weapon::Energy,
+        Weapon::Annihilation,
+        Weapon::Laser,
+        Weapon::Canister,
+    ] {
+        assert_eq!(Weapon::from_code(weapon as u8), Some(weapon));
+        counts[weapon as usize] += 1;
+    }
+    assert!(counts.into_iter().all(|n| n == 1));
+    assert!(Weapon::from_code(Weapon::COUNT as u8).is_none());
 }

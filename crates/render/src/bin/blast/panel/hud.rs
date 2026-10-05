@@ -1212,6 +1212,16 @@ mod tests {
             scene.sim.battle.phase,
             sim_core::blast::battle::Phase::Fighting
         );
+        for (id, weapon) in [
+            (4, BattleWeapon::Annihilation),
+            (17, BattleWeapon::Energy),
+            (16, BattleWeapon::Canister),
+            (10, BattleWeapon::Annihilation),
+            (41, BattleWeapon::Energy),
+            (40, BattleWeapon::Canister),
+        ] {
+            assert_eq!(scene.sim.battle_weapon(id), Some(weapon));
+        }
         assert!(!app.world().resource::<Workshop>().editing);
         assert_eq!(app.world().resource::<Workshop>().controlled, Some(1));
         assert!(!app.world().resource::<Panel>().battle_launch);
@@ -1230,7 +1240,13 @@ mod tests {
         assert_eq!(scene.sim.battle.actors[1].target, Some(6));
         assert!(scene.sim.units[1].motion.destination.is_some());
         drop(scene);
-        click(&mut app, Action::BattleWorld);
+        click(&mut app, Action::SelectUnit(4));
+        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Kinetic)));
+        assert_eq!(
+            app.world().resource::<Scene>().sim.battle_weapon(4),
+            Some(BattleWeapon::Kinetic)
+        );
+        click(&mut app, Action::BattleWorldAuto);
         let (config, layout) = app
             .world_mut()
             .resource_mut::<Workshop>()
@@ -1250,6 +1266,10 @@ mod tests {
             sim_core::blast::battle::Phase::Fighting
         );
         assert_eq!(scene.sim.battle.actors[1].target, None);
+        assert!(scene.sim.battle.autonomous);
+        assert_eq!(scene.sim.battle_weapon(4), Some(BattleWeapon::Annihilation));
+        assert_eq!(scene.sim.battle_weapon(41), Some(BattleWeapon::Energy));
+        assert_eq!(scene.sim.battle_weapon(16), Some(BattleWeapon::Canister));
     }
 
     #[test]

@@ -83,6 +83,7 @@ impl Tuning {
                 .iter()
                 .any(|d| !matches!(d, Delivery::Blast | Delivery::Kinetic))
             || t.units.len() > crate::range::MAX_RANGE_UNITS
+            || t.units.iter().any(|u| !u.valid_loadout())
             || !t.units.iter().any(|u| u.allied)
             || !t.units.iter().any(|u| !u.allied)
         {

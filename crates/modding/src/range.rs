@@ -101,12 +101,29 @@ impl RangeUnitKind {
     }
 }
 
+/// Authored ammunition for vehicles with a selectable main gun.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RangeLoadout {
+    Blast,
+    Kinetic,
+    Energy,
+    Annihilation,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeUnitDef {
     #[serde(default)]
     pub allied: bool,
     pub kind: RangeUnitKind,
     pub at: [i32; 3],
+    /// None keeps the kind's stock gun. Fixed weapons cannot be overridden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weapon: Option<RangeLoadout>,
+}
+impl RangeUnitDef {
+    pub fn valid_loadout(&self) -> bool {
+        self.weapon.is_none() || matches!(self.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -263,6 +280,7 @@ impl RangeLayout {
             || r.unit_resistance == 0
             || r.unit_resistance > 1_000_000
             || r.units.len() > MAX_RANGE_UNITS
+            || r.units.iter().any(|u| !u.valid_loadout())
             || !(1..=100_000).contains(&r.auto_attack_range)
             || r.blocks.len() > MAX_RANGE_BLOCKS
             || r.roads.len() > 16

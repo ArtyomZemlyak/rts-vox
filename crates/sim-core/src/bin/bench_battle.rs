@@ -407,7 +407,7 @@ fn main() {
     let mut admission_previous = sim.matter.admission;
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
-    let mut impact_window = [0usize; 6];
+    let mut impact_window = [0usize; Weapon::COUNT];
     let mut laser_contacts = 0usize;
     for tick_index in 0..ticks {
         let start = Instant::now();
@@ -705,7 +705,7 @@ fn main() {
                 admission_previous = admission;
                 damage_previous = damage;
                 shots_previous = shots;
-                impact_window = [0; 6];
+                impact_window.fill(0);
                 laser_contacts = 0;
             }
         }

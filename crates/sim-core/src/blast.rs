@@ -2540,7 +2540,10 @@ impl BlastRange {
                 .map(|d| RangeShield::new(d, shield_tuning.capacity))
                 .collect()
         });
-        let battle = battle::Battle::new(&units, config.unit_ablation_resistance);
+        let mut battle = battle::Battle::new(&units, config.unit_ablation_resistance);
+        if let Some(layout) = &layout {
+            battle.apply_loadouts(&layout.units);
+        }
         let mut streams = weapons::Streams::default();
         if gun.kind == RangeUnitKind::Spider {
             streams.tuning.laser = motion::spider_tuning().laser.clone();
@@ -5552,6 +5555,7 @@ mod tests {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         layout.units = vec![modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Strider,
             at: [300, FLOOR, 336],
@@ -6364,6 +6368,7 @@ mod tests {
     fn a_shell_beside_a_target_shoves_it_and_the_snapshot_keeps_the_shove() {
         let mut layout = walker_layout();
         layout.units = vec![modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [300, FLOOR, 336],
@@ -6417,6 +6422,7 @@ mod tests {
             modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
                 .unwrap();
         layout.units = vec![modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [359, FLOOR, 312],

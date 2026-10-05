@@ -1491,11 +1491,13 @@ mod tests {
         layout.course = None;
         layout.units = vec![
             modding::range::RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::Strider,
                 at: [170, 16, 336],
                 allied: true,
             },
             modding::range::RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::Strider,
                 at: [450, 16, 336],
                 allied: false,
@@ -1557,11 +1559,13 @@ mod tests {
         layout.course = None;
         layout.units = vec![
             modding::range::RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::ArtilleryT2,
                 at: [170, 16, 336],
                 allied: true,
             },
             modding::range::RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::Tank,
                 at: [450, 16, 336],
                 allied: false,

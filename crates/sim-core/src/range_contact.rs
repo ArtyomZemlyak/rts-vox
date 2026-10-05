@@ -155,6 +155,7 @@ mod tests {
         layout.clear_max = [600, 600];
         layout.units = [300, 361]
             .map(|x| modding::range::RangeUnitDef {
+                weapon: None,
                 allied: false,
                 kind: RangeUnitKind::Tank,
                 at: [x, FLOOR, 336],

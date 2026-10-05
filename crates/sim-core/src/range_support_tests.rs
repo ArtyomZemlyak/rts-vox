@@ -63,6 +63,7 @@ fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
     layout.clear_max = [600, 600];
     layout.units = [300, 361]
         .map(|x| modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [x, FLOOR, 336],
@@ -124,6 +125,7 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
     layout.clear_max = [600, 600];
     layout.units = [300, 361]
         .map(|x| modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [x, FLOOR, 336],
@@ -185,6 +187,7 @@ fn a_convoy_contact_uses_its_closing_speed() {
     layout.clear_max = [600, 600];
     layout.units = [300, 361]
         .map(|x| modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [x, FLOOR, 336],
@@ -238,6 +241,7 @@ fn head_on_driving_contact_is_slot_independent() {
     layout.clear_max = [600, 600];
     layout.units = [300, 361]
         .map(|x| modding::range::RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: [x, FLOOR, 336],

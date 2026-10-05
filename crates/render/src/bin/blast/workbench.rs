@@ -554,6 +554,7 @@ impl Workshop {
             | Tool::TurretT2
             | Tool::Base => {
                 next.units.push(RangeUnitDef {
+                    weapon: None,
                     allied: self.allied,
                     kind: if self.tool == Tool::Tank {
                         RangeUnitKind::Tank
@@ -2234,6 +2235,7 @@ mod tests {
         let (mut w, c) = fixture();
         let mut next = w.layout.clone().unwrap();
         next.units.push(RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Strider,
             at: [448, 16, 385],

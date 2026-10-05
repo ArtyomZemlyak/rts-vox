@@ -18,6 +18,7 @@ pub enum Weapon {
     Canister = 6,
 }
 impl Weapon {
+    pub const COUNT: usize = 7;
     pub fn from_code(code: u8) -> Option<Self> {
         Some(match code {
             0 => Self::MachineGun,
@@ -206,6 +207,20 @@ impl Battle {
             anni_config,
             ai: ai::Controller::new(),
             autonomous: false,
+        }
+    }
+    /// Layout validation has already checked compatibility with each unit kind.
+    pub(super) fn apply_loadouts(&mut self, defs: &[modding::range::RangeUnitDef]) {
+        use modding::range::RangeLoadout;
+        for (actor, def) in self.actors.iter_mut().zip(defs) {
+            if let Some(weapon) = def.weapon {
+                actor.weapon = Some(match weapon {
+                    RangeLoadout::Blast => Weapon::Blast,
+                    RangeLoadout::Kinetic => Weapon::Kinetic,
+                    RangeLoadout::Energy => Weapon::Energy,
+                    RangeLoadout::Annihilation => Weapon::Annihilation,
+                });
+            }
         }
     }
     pub fn config(&self, weapon: Weapon) -> &ExplosionConfig {

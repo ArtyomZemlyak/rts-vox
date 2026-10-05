@@ -11,11 +11,13 @@ fn scenario(workers: usize) -> BlastRange {
     layout.clear_max = [600, 600];
     layout.units = vec![
         modding::range::RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [170, 16, 336],
             allied: true,
         },
         modding::range::RangeUnitDef {
+            weapon: None,
             kind: RangeUnitKind::Tank,
             at: [450, 16, 336],
             allied: false,

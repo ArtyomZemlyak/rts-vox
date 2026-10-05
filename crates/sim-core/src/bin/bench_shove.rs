@@ -52,6 +52,7 @@ fn main() {
     // burst's spot.
     let at = [359, FLOOR, 312];
     layout.units = vec![modding::range::RangeUnitDef {
+        weapon: None,
         allied: false,
         kind,
         at,

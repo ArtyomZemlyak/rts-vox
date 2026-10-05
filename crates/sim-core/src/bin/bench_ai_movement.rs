@@ -20,11 +20,13 @@ fn main() {
         layout.clear_max = [600, 600];
         layout.units = vec![
             RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::Tank,
                 at: [170, 16, 336],
                 allied: true,
             },
             RangeUnitDef {
+                weapon: None,
                 kind,
                 at: [450, 16, 336],
                 allied: false,

@@ -172,6 +172,7 @@ pub fn actions(
             // The stock kilometre layout already fills all eight unit slots.
             // Relocate one slot to exercise placement without exceeding the cap.
             layout.units[0] = modding::range::RangeUnitDef {
+                weapon: None,
                 kind: RangeUnitKind::Tank,
                 at: [1480, 16, 560],
                 allied: true,

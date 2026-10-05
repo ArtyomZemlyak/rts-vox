@@ -159,6 +159,7 @@ mod tests {
         let v = Validator::default();
         let mut r = layout();
         r.units.push(RangeUnitDef {
+            weapon: None,
             allied: false,
             kind: RangeUnitKind::Tank,
             at: GUN,

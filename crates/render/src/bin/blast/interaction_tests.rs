@@ -167,6 +167,7 @@ fn bench_range_interactions() {
     let mut next = layout.clone();
     // The authored kilometre range already occupies every unit slot.
     next.units[0] = modding::range::RangeUnitDef {
+        weapon: None,
         kind: RangeUnitKind::Tank,
         at: [1480, 16, 560],
         allied: true,
