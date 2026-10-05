@@ -37,6 +37,10 @@ fn claimable(w: &World, p: [i32; 3]) -> bool {
 #[path = "range_fracture.rs"]
 mod fracture;
 
+#[cfg(test)]
+#[path = "range_section_tests.rs"]
+mod section_tests;
+
 // A signed 21-bit coordinate per axis fits the game's current and planned
 // world sizes. Biasing each component preserves the old lexicographic order
 // of `(position, seed)` while making a queued pair 16 instead of 24 bytes.
@@ -94,6 +98,32 @@ pub struct FellingProfile {
     pub yielding: usize,
     pub claimed: usize,
     pub outside: usize,
+}
+
+/// Root and articulated section extraction only append moving chunks. No
+/// physics, claim confirmation or compaction runs inside this reservation.
+/// Recount on the next phase, never retain capacity across ticks or saves.
+#[derive(Default)]
+struct SectionRoom {
+    available: Option<u32>,
+    #[cfg(test)]
+    recount: bool,
+}
+impl SectionRoom {
+    fn take(&mut self, matter: &mut Matter) -> bool {
+        #[cfg(test)]
+        if self.recount {
+            self.available = None;
+        }
+        let available = self
+            .available
+            .get_or_insert_with(|| matter.scan_claim_room());
+        if *available == 0 {
+            return false;
+        }
+        *available -= 1;
+        true
+    }
 }
 impl Matter {
     pub fn new(units: &[RangeUnit]) -> Self {
@@ -657,7 +687,15 @@ impl Matter {
     pub fn shed_segments(&mut self, units: &mut [RangeUnit]) {
         self.shed_segments_budget(units, self.section_work);
     }
-    pub fn shed_segments_budget(&mut self, units: &mut [RangeUnit], mut budget: u32) {
+    pub fn shed_segments_budget(&mut self, units: &mut [RangeUnit], budget: u32) {
+        self.shed_segments_in(units, budget, &mut SectionRoom::default());
+    }
+    fn shed_segments_in(
+        &mut self,
+        units: &mut [RangeUnit],
+        mut budget: u32,
+        room: &mut SectionRoom,
+    ) {
         for (id, u) in units.iter_mut().enumerate() {
             for &seg in &u.seg_shed {
                 let i = usize::from(seg);
@@ -677,7 +715,7 @@ impl Matter {
                 loop {
                     let source = &u.body.segments[seg].body;
                     job.advance(source, &mut budget);
-                    if !job.ready() || self.debris.fragment_room(&self.tuning) == 0 {
+                    if !job.ready() || !room.take(self) {
                         break;
                     }
                     let (body, part) = job.commit(source);
@@ -774,6 +812,15 @@ impl Matter {
     /// pieces sheds as many of them per tick as work and room allow, so the
     /// wave never waits a tick per piece.
     pub fn step_sections(&mut self, units: &mut [RangeUnit]) -> u32 {
+        self.step_sections_in(units, &mut SectionRoom::default())
+    }
+    /// One lazy capacity scan for root chunks followed by detached limbs.
+    pub(super) fn step_unit_sections(&mut self, units: &mut [RangeUnit]) {
+        let mut room = SectionRoom::default();
+        let work = self.step_sections_in(units, &mut room);
+        self.shed_segments_in(units, work, &mut room);
+    }
+    fn step_sections_in(&mut self, units: &mut [RangeUnit], room: &mut SectionRoom) -> u32 {
         let n = units.len();
         if n == 0 {
             return self.section_work;
@@ -800,7 +847,7 @@ impl Matter {
             let mut committed = false;
             loop {
                 job.advance(&u.body, &mut budget);
-                if !job.ready() || self.debris.fragment_room(&self.tuning) == 0 {
+                if !job.ready() || !room.take(self) {
                     break;
                 }
                 committed = true;

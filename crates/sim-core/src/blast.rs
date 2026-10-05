@@ -4416,8 +4416,7 @@ impl BlastRange {
         // land, through the edit queue like everything else.
         self.bodies.step(&mut self.world);
         detail("debris_bodies");
-        let work = self.matter.step_sections(&mut self.units);
-        self.matter.shed_segments_budget(&mut self.units, work);
+        self.matter.step_unit_sections(&mut self.units);
         detail("debris_sections");
         // Live hulls catch falling pieces (ADR-293) and bulldoze the ones
         // they drive into (ADR-294); the dead lie as debris.
