@@ -1664,29 +1664,36 @@ impl BlastRange {
                 stop_spider_beam(a, kind, self.tick);
                 continue;
             };
+            let mut target_velocity = [Fx::ZERO; 3];
             if let Some(other) =
                 target.filter(|_| weapon != Weapon::Laser && !matches!(a.order, Order::Ground(_)))
             {
                 let u = &self.units[other];
-                let time = distance(other).sqrt().div(Fx::from_int(config.shell_speed));
-                let travel = u.motion.drive.vel.mul(time);
-                p[0] += travel
-                    .mul(fx::angle::cos(u.motion.drive.head))
-                    .to_int_trunc();
-                p[2] += travel
-                    .mul(fx::angle::sin(u.motion.drive.head))
-                    .to_int_trunc();
+                target_velocity = [
+                    u.motion.drive.vel.mul(fx::angle::cos(u.motion.drive.head)),
+                    Fx::ZERO,
+                    u.motion.drive.vel.mul(fx::angle::sin(u.motion.drive.head)),
+                ];
+                if !kind.artillery() {
+                    let time = distance(other).sqrt().div(Fx::from_int(config.shell_speed));
+                    let travel = u.motion.drive.vel.mul(time);
+                    p[0] += travel
+                        .mul(fx::angle::cos(u.motion.drive.head))
+                        .to_int_trunc();
+                    p[2] += travel
+                        .mul(fx::angle::sin(u.motion.drive.head))
+                        .to_int_trunc();
+                }
             }
-            let dx = Fx::from_int(p[0]).sub(from[0]);
-            let dz = Fx::from_int(p[2]).sub(from[2]);
             // Traverse independently of the hull and before entering range,
             // so a moving unit does not wait to begin slewing its turret.
             let artillery_aim = kind
                 .artillery()
                 .then(|| {
-                    artillery::solve(
+                    artillery::solve_moving(
                         &self.units[id],
                         p,
+                        target_velocity,
                         weapon,
                         config,
                         if weapon == Weapon::Canister {
@@ -1697,6 +1704,11 @@ impl BlastRange {
                     )
                 })
                 .flatten();
+            if let Some(aim) = &artillery_aim {
+                p = aim.target;
+            }
+            let dx = Fx::from_int(p[0]).sub(from[0]);
+            let dz = Fx::from_int(p[2]).sub(from[2]);
             let angle = artillery_aim
                 .as_ref()
                 .map_or_else(|| fx::angle::atan2(dz.raw(), dx.raw()), |aim| aim.yaw);
@@ -1978,9 +1990,11 @@ impl BlastRange {
             }
             if tracking.is_none()
                 && (!a.turret.aligned(angle, yaw_limits)
-                    || artillery_aim
-                        .as_ref()
-                        .is_some_and(|aim| !a.elevation.aligned(aim.pitch, self.turret_limits)))
+                    || artillery_aim.as_ref().is_some_and(|aim| {
+                        !a.elevation.aligned(aim.pitch, self.turret_limits)
+                            || !artillery::same_direction(a.turret.angle, aim.yaw)
+                            || !artillery::same_direction(self.units[id].turret_pitch, aim.pitch)
+                    }))
             {
                 record_gate(&mut b.fire_trace, id, FireGate::Aiming);
                 continue;

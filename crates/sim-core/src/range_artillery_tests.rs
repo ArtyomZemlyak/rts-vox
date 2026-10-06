@@ -232,3 +232,148 @@ fn artillery_elevation_brakes_at_vertical_and_keeps_a_valid_saved_pose() {
         assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_some());
     }
 }
+
+#[test]
+fn canister_leads_a_crossing_tank_for_its_actual_lofted_flight() {
+    for kind in [RangeUnitKind::ArtilleryT2, RangeUnitKind::ArtilleryTurretT2] {
+        for speed in [-45, 45] {
+            let mut l = arena(kind).layout.unwrap();
+            l.size = [2208, 192, 1600];
+            l.clear_max = [2100, 1500];
+            l.units[0].at[2] = 800;
+            l.units[1].at = [1450, 16, 800];
+            let c =
+                ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+            let mut r = BlastRange::with_layout(c, l).unwrap();
+            r.start_battle().unwrap();
+            r.battle.actors[1].order = Order::Hold;
+            r.units[1].motion.drive.head = angle::QUARTER;
+            r.units[1].motion.drive.vel = Fx::from_int(speed);
+            r.units[1].update_pose(angle::QUARTER);
+            r.battle_order(0, Order::Attack(1), None);
+            // Isolate the real aiming/charging/launch gates from acceleration
+            // and route changes: the target has a known constant crossing speed.
+            for _ in 0..180 {
+                let mut b = std::mem::replace(&mut r.battle, Battle::new(&r.units, 1));
+                r.battle_orders(&mut b, |_| {}, &|_, _| {});
+                r.battle = b;
+                if !r.battle.rounds.is_empty() {
+                    break;
+                }
+                r.tick += 1;
+            }
+            let p = r.battle.rounds.first().expect("never launched");
+            let target = aim_point(&r.units[1]);
+            let time = Fx::from_int(target[0]).sub(p.pos[0]).div(p.velocity[0]);
+            let shell_z = p.pos[2].add(p.velocity[2].mul(time));
+            let target_z = Fx::from_int(target[2]).add(Fx::from_int(speed).mul(time));
+            let miss = shell_z.sub(target_z).abs();
+            let height = p.pos[1].add(p.velocity[1].mul(time)).sub(
+                Fx::from_int(r.battle.canister_config.gravity)
+                    .mul(time)
+                    .mul(time.add(Fx::from_ratio(1, crate::TICKS_PER_SECOND)))
+                    .mul(Fx::from_ratio(1, 2)),
+            );
+            eprintln!("{kind:?} speed={speed} launch={:?} v={:?} crossing_miss={miss:?} height={height:?} target={target:?} pitch={}", p.pos, p.velocity, r.units[0].turret_pitch);
+            assert!(
+                miss < Fx::from_int(8),
+                "{kind:?} speed={speed} crossing miss={miss:?}"
+            );
+            // Keep only the unspread central round. Translate the target at
+            // its known velocity; production sweep/contact must reach its body.
+            r.battle.rounds.truncate(1);
+            r.battle.actors[0].order = Order::Hold;
+            r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+            let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+            assert_eq!(r.state_hash(), replay.state_hash());
+            let mut hit = false;
+            for _ in 0..600 {
+                for sim in [&mut r, &mut replay] {
+                    sim.units[1].motion.pos[2] = sim.units[1].motion.pos[2]
+                        .add(Fx::from_ratio(speed, crate::TICKS_PER_SECOND));
+                    sim.units[1].update_pose(angle::QUARTER);
+                    let mut b = std::mem::replace(&mut sim.battle, Battle::new(&sim.units, 1));
+                    sim.battle_flight(&mut b);
+                    sim.battle = b;
+                    sim.tick += 1;
+                    sim.battle.ai.next_tick = sim.tick + sim.battle.ai.tuning.decision_ticks;
+                }
+                assert_eq!(r.state_hash(), replay.state_hash(), "moving contact replay");
+                hit = r.battle.impacts.iter().any(|i| r.units[1].solid(i.at));
+                if hit || r.battle.rounds.is_empty() {
+                    break;
+                }
+            }
+            assert!(
+                hit,
+                "{kind:?} speed={speed} central round did not contact the moving body"
+            );
+        }
+    }
+}
+
+#[test]
+fn artillery_interception_matches_each_ammo_flight_time_without_range_overflow() {
+    let r = arena(RangeUnitKind::ArtilleryT2);
+    for (weapon, config, milli) in [
+        (Weapon::Blast, &r.battle.shell_config, 1000),
+        (
+            Weapon::Canister,
+            &r.battle.canister_config,
+            r.battle.tuning.canister.flight_time_milli,
+        ),
+        (Weapon::Kinetic, &r.battle.kinetic_config, 1000),
+        (Weapon::Energy, &r.battle.energy_config, 1000),
+        (Weapon::Annihilation, &r.battle.anni_config, 1000),
+    ] {
+        for target in [[1450, 80, 800], [18000, 1000, 10000]] {
+            let from = [Fx::from_int(170), Fx::from_int(40), Fx::from_int(800)];
+            for motion in [
+                [Fx::ZERO; 3],
+                [Fx::from_int(70), Fx::ZERO, Fx::ZERO],
+                [Fx::from_int(-70), Fx::ZERO, Fx::ZERO],
+                [Fx::ZERO, Fx::ZERO, Fx::from_int(45)],
+                [Fx::from_int(45), Fx::ZERO, Fx::from_int(-30)],
+            ] {
+                let point = artillery::intercept(from, target, motion, weapon, config, milli);
+                let time = if weapon.energetic() {
+                    let delta: [Fx; 3] =
+                        std::array::from_fn(|k| Fx::from_int(point[k]).sub(from[k]));
+                    delta
+                        .iter()
+                        .fold(Fx::ZERO, |n, d| n.add(d.mul(*d)))
+                        .sqrt()
+                        .div(Fx::from_int(config.shell_speed))
+                } else {
+                    artillery::flight_time(from, point, config.shell_speed, milli)
+                };
+                for k in 0..3 {
+                    let future = Fx::from_int(target[k]).add(motion[k].mul(time));
+                    assert!(
+                        future.sub(Fx::from_int(point[k])).abs() < Fx::from_int(2),
+                        "{weapon:?} target={target:?} motion={motion:?} point={point:?}"
+                    );
+                }
+                if motion == [Fx::ZERO; 3] {
+                    assert_eq!(point, target);
+                }
+            }
+        }
+    }
+    let target = [1450, 80, 800];
+    let from = [Fx::from_int(170), Fx::from_int(40), Fx::from_int(800)];
+    // A retreating target faster than the front cannot be intercepted.
+    for speed in [140, 200, 1000] {
+        assert_eq!(
+            artillery::intercept(
+                from,
+                target,
+                [Fx::from_int(speed), Fx::ZERO, Fx::ZERO],
+                Weapon::Canister,
+                &r.battle.canister_config,
+                r.battle.tuning.canister.flight_time_milli
+            ),
+            target
+        );
+    }
+}

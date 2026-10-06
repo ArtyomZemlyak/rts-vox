@@ -4434,6 +4434,8 @@ impl BlastRange {
                     || artillery_aim.as_ref().is_some_and(|a| {
                         fx::angle::diff(a.pitch, self.gun.turret_pitch).abs()
                             > self.turret_limits.tolerance
+                            || !artillery::same_direction(self.turret.angle, a.yaw)
+                            || !artillery::same_direction(self.gun.turret_pitch, a.pitch)
                     }))
             {
                 // Keep the charged round until the actual barrel has traversed.
