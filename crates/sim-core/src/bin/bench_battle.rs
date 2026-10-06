@@ -780,6 +780,12 @@ fn main() {
                     [0, 1, 2, 3]
                         .map(|i| admission.wave_geometry[i] - admission_previous.wave_geometry[i])
                 );
+                println!(
+                    "damage_terrain_melt tick={} attempts_applied_scans_items={:?}",
+                    sim.tick,
+                    [0, 1, 2, 3]
+                        .map(|i| admission.terrain_melt[i] - admission_previous.terrain_melt[i])
+                );
                 admission_previous = admission;
                 println!(
                     "damage_wake tick={} resumed={}",

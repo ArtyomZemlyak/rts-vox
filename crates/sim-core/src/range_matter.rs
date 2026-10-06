@@ -37,6 +37,9 @@ fn claimable(w: &World, p: [i32; 3]) -> bool {
 #[path = "range_fracture.rs"]
 mod fracture;
 
+#[path = "range_ground_melt.rs"]
+mod ground_melt;
+
 #[cfg(test)]
 #[path = "range_section_tests.rs"]
 mod section_tests;
@@ -89,6 +92,9 @@ pub struct AdmissionProfile {
     /// Wave geometry: builds, units prepared, world resumes, builds avoided.
     /// Observations only; like the other counters, excluded from state/save.
     pub wave_geometry: [u64; 4],
+    /// Terrain melt: attempts, applied, capacity scans, fragment records visited.
+    /// Diagnostic only; never persisted or used for admission.
+    pub terrain_melt: [u64; 4],
     /// Body melt: applied, pool deferred.
     pub melt: [u64; 2],
     /// Full fragment array visits for admission (not physics queries).
@@ -387,12 +393,27 @@ impl Matter {
     /// material, its matter moving from the ground to the piece, with no
     /// throw. `false` when the pool has no room; it then stays hot.
     pub fn melt(&mut self, w: &mut World, p: [u32; 3]) -> bool {
+        self.melt_with_room(w, p, &mut None)
+    }
+    /// Claim-only terrain pass. A reservation never survives confirmation,
+    /// fragment physics, tuning changes, or the end of the caller's pass.
+    fn melt_with_room(&mut self, w: &mut World, p: [u32; 3], room: &mut Option<u32>) -> bool {
+        self.admission.terrain_melt[0] += 1;
         let m = w.material(p[0], p[1], p[2]);
         if m == 0 || self.economy.mats.get(m).is_none() || !claimable(w, p.map(|v| v as i32)) {
             return false;
         }
+        let room = room.get_or_insert_with(|| {
+            self.admission.terrain_melt[2] += 1;
+            self.admission.terrain_melt[3] += self.debris.fragments.len() as u64;
+            self.debris.fragment_room(&self.tuning)
+        });
         let at = p.map(|v| v as i32);
-        self.debris.claim_voxel(w, p, m, at, 0, 2, &self.tuning)
+        let applied = self
+            .debris
+            .claim_voxel_with_room(w, p, m, at, 0, 2, &self.tuning, room);
+        self.admission.terrain_melt[1] += u64::from(applied);
+        applied
     }
     /// Heat has already softened this cell. Transfer it without explosive
     /// fracture work or a launch impulse, like melted terrain.

@@ -4505,12 +4505,7 @@ impl BlastRange {
             detail("heat_world");
             // Melted voxels run off as debris (ADR-290); one the pool
             // cannot take keeps its heat for the next tick.
-            for p in heat.melting.clone() {
-                if matter.melt(world, p) {
-                    heat.forget(p);
-                    heat.melted_total += 1;
-                }
-            }
+            matter.melt_ground(world, heat);
             detail("heat_melt");
         }
         self.step_unit_heat_observed(&mut detail, &|_, event| physics_detail(5, event));
