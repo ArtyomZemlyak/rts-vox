@@ -117,6 +117,7 @@ pub struct WaveProgress {
     pub frontier_finished: bool,
     pub heap_examined: usize,
     pub pending: usize,
+    pub queued_continuations: usize,
     pub contact_cursor: usize,
     pub body_cursor: usize,
     pub energy_mj: u64,
@@ -312,6 +313,7 @@ impl Battle {
             frontier_finished: w.wave.wave.finished(),
             heap_examined: w.wave.wave.examined,
             pending: w.wave.pending.len(),
+            queued_continuations: w.wave.contact_resumes.len(),
             contact_cursor: w.wave.contact_cursor,
             body_cursor: w.wave.body_cursor,
             energy_mj: w.energy,
@@ -363,6 +365,22 @@ impl Battle {
         for burst in &self.waves {
             burst.wave.save_contacts(b);
         }
+    }
+    pub(super) fn has_contact_resumes(&self) -> bool {
+        self.waves
+            .iter()
+            .any(|w| !w.wave.contact_resumes.is_empty())
+    }
+    pub(super) fn save_contact_resumes(&self, b: &mut Blob) {
+        for w in &self.waves {
+            w.wave.save_resumes(b);
+        }
+    }
+    pub(super) fn load_contact_resumes(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
+        for w in &mut self.waves {
+            w.wave.load_resumes(s, units)?;
+        }
+        Some(())
     }
     #[cfg(test)]
     pub(super) fn load_wave_contacts(&mut self, s: &mut Scan, units: &[RangeUnit]) -> Option<()> {
@@ -2400,7 +2418,7 @@ impl BlastRange {
                     .map(|u| (u.removed.len(), u.seg_removed.len()))
                     .collect();
                 let room = room.get_or_insert_with(|| self.matter.claim_room());
-                w.wave.step_with_room(
+                w.wave.step_with_room::<true>(
                     &mut self.world,
                     wave_share(config.wave_work_per_tick, n, offset),
                     &mut self.units,

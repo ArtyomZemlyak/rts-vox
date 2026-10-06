@@ -83,7 +83,7 @@ fn step<const FAST: bool>(
         if material {
             r.matter.begin_body_batch();
         }
-        e.step_contacts::<false>(
+        e.step_contacts::<false, false>(
             &mut r.world,
             0,
             &mut r.units,
@@ -311,4 +311,164 @@ fn saved_world_contact_resumes_with_the_same_frozen_geometry_and_payment() {
     same(&a, &x, &b, &y);
     assert!(x.pending.is_empty());
     assert_eq!(x.queued, 8);
+}
+
+fn fair_step(r: &mut BlastRange, e: &mut Explosion, c: &ExplosionConfig, budget: usize) {
+    e.step_with_room::<true>(
+        &mut r.world,
+        budget,
+        &mut r.units,
+        &mut r.surface_work,
+        &mut r.surface_changed,
+        c,
+        Some(&mut r.matter),
+        None,
+    );
+}
+
+fn saved_queue(e: &Explosion) -> Vec<u8> {
+    let mut b = Blob::new();
+    e.save(&mut b);
+    e.save_contacts(&mut b);
+    e.save_resumes(&mut b);
+    b.v
+}
+
+#[test]
+fn battle_damage_reaches_a_body_before_an_older_crater_can_drain() {
+    let (mut a, mut x, c) = fixture(4, false);
+    let (mut legacy, mut old, _) = fixture(4, false);
+    for (r, e) in [(&mut a, &mut x), (&mut legacy, &mut old)] {
+        let p = body_point(r, e);
+        push(e, p, 1_000_000);
+        e.contact_cursor = r.units.len();
+        r.matter.tuning.max_flying = 1;
+    }
+    for _ in 0..2 {
+        fair_step(&mut a, &mut x, &c, 2);
+        step::<true>(&mut legacy, &mut old, &c, true);
+        for r in [&mut a, &mut legacy] {
+            assert!(r.matter.debris.fragment_pools(&r.matter.tuning).flying <= 1);
+            assert!(r.matter.economy.ledger.balanced());
+            flush(r);
+        }
+    }
+    assert!(
+        !a.units[0].removed.is_empty(),
+        "unit hit starved behind crater"
+    );
+    assert!(
+        legacy.units[0].removed.is_empty(),
+        "fixture no longer reproduces the old failure"
+    );
+    assert!(x.working(), "the unpaid terrain must remain queued");
+    assert!(a.matter.admission.ground[2] > 0);
+    for _ in 0..256 {
+        fair_step(&mut a, &mut x, &c, 2);
+        flush(&mut a);
+        if !x.working() {
+            break;
+        }
+    }
+    assert!(!x.working(), "yielded ground contact was lost or stuck");
+    assert!(x.contact_resumes.is_empty());
+    assert_eq!(a.units[0].removed.len(), 4);
+    assert_eq!(
+        a.matter.debris.body_removed, 4,
+        "paid body damage was replayed"
+    );
+    assert_eq!(a.matter.debris.removed, x.queued as u64);
+    assert!(a.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn yielded_body_and_ground_cursors_restore_without_repaying_their_prefixes() {
+    let (mut a, mut x, c) = fixture(4, false);
+    let (mut b, mut y, _) = fixture(4, false);
+    for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+        push(e, body_point(r, e), 1_000_000);
+        e.contact_cursor = r.units.len();
+        r.matter.tuning.max_flying = 1;
+    }
+    for turn in 0..256 {
+        fair_step(&mut a, &mut x, &c, 2);
+        fair_step(&mut b, &mut y, &c, 2);
+        if turn < 3 {
+            assert!(!y.contact_resumes.is_empty());
+            let bytes = saved_queue(&y);
+            let mut s = Scan::new(&bytes);
+            y = Explosion::load(&mut s, &b.units, b.size, true).unwrap();
+            y.load_contacts(&mut s, &b.units, false).unwrap();
+            y.load_resumes(&mut s, &b.units).unwrap();
+            assert!(s.ok() && s.left() == 0);
+        }
+        same(&a, &x, &b, &y);
+        assert_eq!(saved_queue(&x), saved_queue(&y));
+        flush(&mut a);
+        flush(&mut b);
+        if !x.working() {
+            break;
+        }
+    }
+    assert!(!x.working());
+    assert_eq!(a.matter.debris.body_removed, 4);
+    assert!(a.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn yielded_queue_rejects_forged_cell_cursor_and_unbounded_counts() {
+    let (mut r, mut e, c) = fixture(4, false);
+    let p = body_point(&r, &e);
+    push(&mut e, p, 1_000_000);
+    e.contact_cursor = r.units.len();
+    r.matter.tuning.max_flying = 0;
+    fair_step(&mut r, &mut e, &c, 2);
+    assert_eq!(e.contact_resumes.len(), 1);
+    let mut bytes = Blob::new();
+    e.save_resumes(&mut bytes);
+    for forged in 0..4 {
+        let mut bad = bytes.v.clone();
+        match forged {
+            0 => bad[..8].copy_from_slice(&u64::MAX.to_le_bytes()),
+            1 => bad[8..20].copy_from_slice(
+                &e.pending
+                    .front()
+                    .unwrap()
+                    .cell
+                    .into_iter()
+                    .flat_map(i32::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            ),
+            2 => bad[20..28].copy_from_slice(&u64::MAX.to_le_bytes()),
+            _ => bad[28..36].copy_from_slice(&u64::MAX.to_le_bytes()),
+        }
+        e.contact_resumes.clear();
+        assert!(e.load_resumes(&mut Scan::new(&bad), &r.units).is_none());
+    }
+}
+
+#[test]
+fn battle_contact_queue_obeys_small_and_zero_work_slices() {
+    let (mut r, _, mut c) = fixture(1, false);
+    c.energy = 3500;
+    let mut e = Explosion::with_damage(&r.world, [40, 2, 40], &c, &r.units, &r.surface_work);
+    r.matter.tuning.max_flying = 0;
+    for _ in 0..32 {
+        let pops = e.wave.examined;
+        fair_step(&mut r, &mut e, &c, 3);
+        assert!(e.wave.examined - pops <= 3);
+        assert!(e.pending.len() <= 3);
+        assert!(e.contact_resumes.len() < e.pending.len());
+        let queue = saved_queue(&e);
+        let state = r.snapshot();
+        fair_step(&mut r, &mut e, &c, 0);
+        assert_eq!(saved_queue(&e), queue);
+        assert_eq!(r.snapshot(), state);
+    }
+    assert_eq!(
+        e.pending.len(),
+        3,
+        "fixture must exhaust material admission"
+    );
+    assert!(r.matter.economy.ledger.balanced());
 }

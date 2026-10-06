@@ -140,6 +140,7 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
             let mut bytes = Blob::new();
             b.battle.save(&mut bytes);
             b.battle.save_wave_contacts(&mut bytes);
+            b.battle.save_contact_resumes(&mut bytes);
             let mut scan = Scan::new(&bytes.v);
             let mut restored = Battle::new(&b.units, 1);
             restored.shell_config = b.battle.shell_config.clone();
@@ -154,6 +155,7 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
                 )
                 .unwrap();
             restored.load_wave_contacts(&mut scan, &b.units).unwrap();
+            restored.load_contact_resumes(&mut scan, &b.units).unwrap();
             assert!(scan.ok());
             assert_eq!(scan.left(), 0);
             b.battle = restored;
@@ -211,7 +213,7 @@ impl BlastRange {
                     .iter()
                     .map(|u| (u.removed.len(), u.seg_removed.len()))
                     .collect();
-                w.wave.step(
+                w.wave.step_with_room::<true>(
                     &mut self.world,
                     wave_share(config.wave_work_per_tick, n, offset),
                     &mut self.units,
@@ -219,6 +221,7 @@ impl BlastRange {
                     &mut self.surface_changed,
                     config,
                     Some(&mut self.matter),
+                    None,
                 );
                 if config.material_energy_j == 0 {
                     for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
@@ -259,6 +262,7 @@ fn saved_contacts(r: &BlastRange) -> Vec<u8> {
     r.matter.save(&mut b);
     r.battle.save(&mut b);
     r.battle.save_wave_contacts(&mut b);
+    r.battle.save_contact_resumes(&mut b);
     b.v
 }
 

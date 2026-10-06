@@ -15,6 +15,8 @@ pub mod placement;
 mod plate;
 #[path = "range_wave_cells.rs"]
 mod wave_cells;
+#[path = "range_wave_queue.rs"]
+mod wave_queue;
 use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
@@ -1633,6 +1635,9 @@ pub struct Explosion {
     contact_cursor: usize,
     // Stable local-cell cursor within the current coarse contact/actor.
     body_cursor: usize,
+    // Cursors of contacts that yielded admission, keyed by unique wave cell.
+    // The front's cursor remains in the two legacy fields above.
+    contact_resumes: BTreeMap<[i32; 3], (usize, usize)>,
     // Old saved bursts finish with their original point-sampling semantics.
     point_contacts: bool,
     poses: Vec<crate::damage::Frame>,
@@ -1694,6 +1699,7 @@ impl Explosion {
             pending: Default::default(),
             contact_cursor: 0,
             body_cursor: 0,
+            contact_resumes: BTreeMap::new(),
             point_contacts: false,
             poses: units.iter().map(|u| u.pose).collect(),
             turret_deltas: units.iter().map(|u| u.turret_delta).collect(),
@@ -1746,12 +1752,12 @@ impl Explosion {
         c: &ExplosionConfig,
         matter: Option<&mut matter::Matter>,
     ) {
-        self.step_with_room(w, budget, units, dents, changed, c, matter, None);
+        self.step_with_room::<false>(w, budget, units, dents, changed, c, matter, None);
     }
     /// Reuse capacity only between consecutive atomic wave batches. Physics,
     /// terrain confirmation and section extraction must not run between them.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn step_with_room(
+    pub(crate) fn step_with_room<const FAIR: bool>(
         &mut self,
         w: &mut World,
         budget: usize,
@@ -1769,7 +1775,7 @@ impl Explosion {
                 m.begin_body_batch();
             }
         }
-        self.step_inner(w, budget, units, dents, changed, c, matter.as_deref_mut());
+        self.step_inner::<FAIR>(w, budget, units, dents, changed, c, matter.as_deref_mut());
         if let Some(m) = matter {
             if let Some(room) = room {
                 *room = m.body_batch_room();
@@ -1778,7 +1784,7 @@ impl Explosion {
         }
     }
     #[allow(clippy::too_many_arguments)]
-    fn step_inner(
+    fn step_inner<const FAIR: bool>(
         &mut self,
         w: &mut World,
         budget: usize,
@@ -1788,10 +1794,10 @@ impl Explosion {
         c: &ExplosionConfig,
         matter: Option<&mut matter::Matter>,
     ) {
-        self.step_contacts::<true>(w, budget, units, dents, changed, c, matter);
+        self.step_contacts::<true, FAIR>(w, budget, units, dents, changed, c, matter);
     }
     #[allow(clippy::too_many_arguments)]
-    fn step_contacts<const RESUME_GROUND: bool>(
+    fn step_contacts<const RESUME_GROUND: bool, const FAIR: bool>(
         &mut self,
         w: &mut World,
         budget: usize,
@@ -1801,9 +1807,26 @@ impl Explosion {
         c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
     ) {
-        if self.pending.is_empty() {
+        if FAIR && budget == 0 {
+            return;
+        }
+        // Keep the pressure frontier moving past deferred material contacts,
+        // but do not grow an unbounded retry backlog. The existing work slice
+        // bounds both new heap pops and contacts revisited in this call.
+        if FAIR {
+            let room = budget.saturating_sub(self.pending.len());
+            self.pending.extend(self.wave.advance_contacts(room));
+        } else if self.pending.is_empty() {
             self.pending.extend(self.wave.advance_contacts(budget));
         }
+        if FAIR && !self.contact_resumes.is_empty() {
+            self.yield_contact();
+        }
+        let mut visits = if !FAIR {
+            self.pending.len()
+        } else {
+            self.pending.len().min(budget)
+        };
         let edge = self.cell as usize;
         let actors = units.len() + 1;
         let resume_ground = !self.pending.is_empty()
@@ -1815,7 +1838,7 @@ impl Explosion {
         // This cursor has already passed every unit for the current subcell.
         // Retry its live ground contact before rebuilding any unit transforms.
         // The test-only eager instantiation exercises the old preparation order.
-        if RESUME_GROUND && resume_ground {
+        if RESUME_GROUND && resume_ground && (!FAIR || self.pending.len() == 1) {
             let hit = self.pending.front().copied().unwrap();
             let subcell = self.contact_cursor / actors;
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
@@ -1832,8 +1855,7 @@ impl Explosion {
             }
             self.contact_cursor += 1;
             if self.contact_cursor == edge.pow(3) * actors {
-                self.contact_cursor = 0;
-                self.pending.pop_front();
+                self.finish_contact();
             }
             if self.pending.is_empty() {
                 if let Some(m) = matter.as_deref_mut() {
@@ -1871,12 +1893,19 @@ impl Explosion {
                 )
             })
             .collect();
+        if FAIR && !self.contact_resumes.is_empty() {
+            self.prefer_body_contacts(&boxes, units.len());
+        }
         // For each coarse wave cell, skip actors whose complete frozen box
         // cannot intersect it. Keep the canonical contact cursor and actor
         // order: a deferred material claim resumes at exactly the same hit.
         let mut next_actor = vec![units.len(); actors];
         let mut contacts = Vec::new();
-        while let Some(hit) = self.pending.front().copied() {
+        'contact: while visits > 0 {
+            let Some(hit) = self.pending.front().copied() else {
+                break;
+            };
+            visits -= 1;
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
             let mut next = units.len();
             for i in (0..units.len()).rev() {
@@ -1974,7 +2003,13 @@ impl Explosion {
                                                 | matter::ClaimResult::Indestructible => {
                                                     apply = false
                                                 }
-                                                matter::ClaimResult::Deferred => return,
+                                                matter::ClaimResult::Deferred => {
+                                                    if !FAIR {
+                                                        return;
+                                                    }
+                                                    self.yield_contact();
+                                                    continue 'contact;
+                                                }
                                             }
                                         }
                                     }
@@ -2009,7 +2044,13 @@ impl Explosion {
                                             matter::ClaimResult::Applied => u.seg_detached += 1,
                                             matter::ClaimResult::Unaffordable
                                             | matter::ClaimResult::Indestructible => apply = false,
-                                            matter::ClaimResult::Deferred => return,
+                                            matter::ClaimResult::Deferred => {
+                                                if !FAIR {
+                                                    return;
+                                                }
+                                                self.yield_contact();
+                                                continue 'contact;
+                                            }
                                         }
                                     }
                                 }
@@ -2031,13 +2072,78 @@ impl Explosion {
                     c,
                     matter.as_deref_mut(),
                 ) {
-                    return;
+                    if !FAIR {
+                        return;
+                    }
+                    self.yield_contact();
+                    continue 'contact;
                 }
                 self.contact_cursor += 1;
             }
-            self.contact_cursor = 0;
-            self.pending.pop_front();
+            self.finish_contact();
         }
+    }
+    /// A refused claim retains every unpaid cell and its frozen transform.
+    /// Another contact can use admission without replaying the paid prefix.
+    fn yield_contact(&mut self) {
+        if self.pending.len() <= 1 {
+            return;
+        }
+        let hit = self.pending.pop_front().expect("pending contact");
+        self.contact_resumes
+            .insert(hit.cell, (self.contact_cursor, self.body_cursor));
+        self.pending.push_back(hit);
+        self.resume_front();
+    }
+    fn finish_contact(&mut self) {
+        self.pending.pop_front();
+        self.resume_front();
+    }
+    fn resume_front(&mut self) {
+        let (contact, body) = self
+            .pending
+            .front()
+            .and_then(|hit| self.contact_resumes.remove(&hit.cell))
+            .unwrap_or_default();
+        self.contact_cursor = contact;
+        self.body_cursor = body;
+    }
+    /// During pool contention, reached unit contacts precede crater retries.
+    /// Stable partition preserves pressure order within both classes; a hit
+    /// stops having priority as soon as its unit actors have been visited.
+    fn prefer_body_contacts(&mut self, boxes: &[([i32; 3], [i32; 3])], count: usize) {
+        let Some(front) = self.pending.front() else {
+            return;
+        };
+        self.contact_resumes
+            .insert(front.cell, (self.contact_cursor, self.body_cursor));
+        let (mut body, mut ground) = (
+            std::collections::VecDeque::new(),
+            std::collections::VecDeque::new(),
+        );
+        for hit in self.pending.drain(..) {
+            let (cursor, local) = self
+                .contact_resumes
+                .get(&hit.cell)
+                .copied()
+                .unwrap_or_default();
+            let subcell = cursor / (count + 1);
+            let actor = cursor % (count + 1);
+            let low: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
+            let unit = local > 0
+                || ((self.point_contacts || subcell == 0)
+                    && boxes.iter().enumerate().skip(actor).any(|(_, (lo, hi))| {
+                        (0..3).all(|a| low[a] <= hi[a] && low[a] + self.cell > lo[a])
+                    }));
+            if unit {
+                body.push_back(hit);
+            } else {
+                ground.push_back(hit);
+            }
+        }
+        body.append(&mut ground);
+        self.pending = body;
+        self.resume_front();
     }
     /// Apply exactly one live terrain contact. False leaves its cursor and
     /// unpaid work intact, so the same contact can be retried after admission.
@@ -2802,7 +2908,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.gun.kind == RangeUnitKind::Spider
+        let version = if self.has_contact_resumes() {
+            53
+        } else if self.gun.kind == RangeUnitKind::Spider
             || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
         {
             52
@@ -2984,7 +3092,8 @@ impl BlastRange {
             self.battle.save_wave_contacts(b);
         }
         if version < 49
-            && (!self.kinetic.jobs.is_empty()
+            && (self.has_contact_resumes()
+                || !self.kinetic.jobs.is_empty()
                 || self.gun.kind.canister()
                 || self
                     .units
@@ -2992,7 +3101,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || u.kind == RangeUnitKind::Spider)
                 || self.gun.kind == RangeUnitKind::Spider)
         {
-            let format = if self.gun.kind == RangeUnitKind::Spider
+            let format = if self.has_contact_resumes() {
+                53
+            } else if self.gun.kind == RangeUnitKind::Spider
                 || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
             {
                 52
@@ -3004,10 +3115,14 @@ impl BlastRange {
             self.kinetic.save_as(b, format);
         }
         if version < 52
-            && (self.gun.kind == RangeUnitKind::Spider
+            && (self.has_contact_resumes()
+                || self.gun.kind == RangeUnitKind::Spider
                 || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider))
         {
             self.save_laser_tracking(b);
+        }
+        if version < 53 && self.has_contact_resumes() {
+            self.save_contact_resumes(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3078,7 +3193,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=52).contains(&version) {
+        if !(27..=53).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3560,6 +3675,9 @@ impl BlastRange {
         }
         if version >= 52 {
             r.load_laser_tracking(&mut s)?;
+        }
+        if version >= 53 {
+            r.load_contact_resumes(&mut s)?;
         }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
@@ -4753,15 +4871,32 @@ impl Explosion {
         self.validate_contacts(units)
     }
     fn validate_contacts(&self, units: &[RangeUnit]) -> Option<()> {
-        if self.body_cursor == 0 {
+        self.validate_contact_cursor(
+            self.pending.front(),
+            self.contact_cursor,
+            self.body_cursor,
+            units,
+        )
+    }
+    fn validate_contact_cursor(
+        &self,
+        hit: Option<&phys::blast::Hit>,
+        contact: usize,
+        body: usize,
+        units: &[RangeUnit],
+    ) -> Option<()> {
+        if contact >= (self.cell as usize).pow(3) * (units.len() + 1) {
+            return None;
+        }
+        if body == 0 {
             return Some(());
         }
-        let actor = self.contact_cursor % (units.len() + 1);
-        if self.point_contacts || self.contact_cursor >= units.len() {
+        let actor = contact % (units.len() + 1);
+        if self.point_contacts || contact >= units.len() {
             return None;
         }
         let unit = units.get(actor)?;
-        let hit = self.pending.front()?;
+        let hit = hit?;
         let low = [0, 1, 2].map(|a| self.origin[a] + hit.cell[a] * self.cell);
         let query = HitFrames::new(
             unit,
@@ -4779,7 +4914,7 @@ impl Explosion {
             self.cell,
             &mut cells,
         );
-        (self.body_cursor < cells.len()).then_some(())
+        (body < cells.len()).then_some(())
     }
     fn save(&self, b: &mut fx::blob::Blob) {
         for v in self.at {
@@ -4966,6 +5101,7 @@ impl Explosion {
             pending,
             contact_cursor,
             body_cursor: 0,
+            contact_resumes: BTreeMap::new(),
             point_contacts: true,
             at,
             origin,
