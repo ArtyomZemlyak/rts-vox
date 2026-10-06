@@ -90,6 +90,41 @@ class OsPressureTests(unittest.TestCase):
 
 
 class CameraTourTests(unittest.TestCase):
+    def test_camera_work_leaves_require_frame_identity_and_exclusive_parent(self):
+        signature = ('PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1\n'
+                     'PROFILE camera_work_schema=1 camera_work_scope=same_frame_exclusive_wall')
+        header = ('seconds,tick,segment,origin_x,origin_z,progress,blocked,observe_ms,stream_ms,'
+                  'frame_row,generation,work_kind,allocate_ms,rows_ms,publish_ms,retire_ms,occupancy_ms,advance_ms,shift_ms\n')
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name)/'world-battle.camera.csv'
+            good = '0,30,0,0,0,,false,0,4,0,7,publish,0,1,1,.5,1,.25,0\n'
+            main = [dict(tick='30', generation='7')]
+            def analyze(row, log=signature, frames=main):
+                path.write_text(header + row)
+                reasons = []
+                result = profile.camera_tour_capture(name, 'world-battle', log, {'CameraTour':True}, 1, reasons, frames)
+                return result, reasons
+            result, reasons = analyze(good)
+            self.assertEqual(reasons, [])
+            detail = result['work_details']['kinds']['publish']
+            self.assertEqual(detail['phases']['occupancy_ms']['mean'], 1)
+            self.assertEqual(detail['unscoped_ms']['mean'], .25)
+            camera_rows = list(csv.DictReader((header + good + good.replace(',0,7,publish,', ',1,7,shift,')).splitlines()))
+            peaks = [dict(row=0), dict(row=1)]
+            profile.attach_camera_work(peaks, camera_rows)
+            self.assertIsNone(peaks[0]['camera_previous_update'])
+            self.assertEqual(peaks[1]['camera_previous_update']['kind'], 'publish')
+            self.assertEqual(peaks[1]['camera_current_update']['kind'], 'shift')
+            self.assertEqual(peaks[1]['camera_previous_update']['phases']['rows_ms'], 1)
+            for bad in [good.replace(',0,7,publish,', ',1,7,publish,'),
+                        good.replace(',0,7,publish,', ',0,6,publish,'),
+                        good.replace(',publish,', ',unknown,'),
+                        good.replace(',1,.5,1,', ',nan,.5,1,'),
+                        good.replace(',1,.5,1,', ',9,.5,1,')]:
+                self.assertIn('camera_tour_work_alignment_invalid', analyze(bad)[1])
+            self.assertIn('camera_tour_work_alignment_invalid', analyze(good, frames=[dict(tick='31',generation='7')])[1])
+            self.assertIn('camera_tour_work_schema_mismatch', analyze(good, log=signature.splitlines()[0])[1])
+
     def test_wall_clock_tour_retains_stopped_simulation_and_all_tick_groups(self):
         signature = 'PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1'
         with tempfile.TemporaryDirectory() as name:

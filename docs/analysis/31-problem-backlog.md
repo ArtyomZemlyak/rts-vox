@@ -2407,3 +2407,16 @@ alive/shots/damage одинаковы,0blocked camera samples.
 остаются: WBPERF-009/002, rare stalls и P-87 не закрыты. Для следующего
 разбора нужны отдельные COW/strip join/publication/occupancy scopes.
 Подробности — analysis/192-parallel-camera-strips.md.
+
+ADR-600: устранено отсутствие operation/leaf evidence у camera streaming.
+CSV/анализатор различают allocation/rows/publication/retirement/occupancy/
+advance/shift, проверяют schema, parent bounds и frame/tick/generation.
+К предыдущему Update медленного интервала привязываются его собственные
+camera leaves. Пик15.795мс содержит13.295мс occupancy, а не большую allocation.
+Публикация raw window сохраняет geometry cache/animation history, очищая
+только applied shadows; начальный cache отсекает hidden actors по bounds.
+124headless/125Python проходят,1800ticks/hash/gameplay прежние. Mean publish
+operation8.611→4.449/4.794мс,occupancy5.587→2.514/2.819; оба native сравнения
+валидны. Общий FPS gain не устойчив, полный max хуже;≈10мс occupancy peaks
+и synchronous core≈11.4мс остаются.165FPS/rare stalls/P-87 не закрыты.
+Подробности — analysis/193-camera-publication-cache.md.

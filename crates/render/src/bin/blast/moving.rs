@@ -85,6 +85,13 @@ pub fn reset(v: &mut Visual) {
         ..default()
     };
 }
+/// A staged raw window has no actor shadows. Reapply them without discarding
+/// posed geometry caches, animation history or allocations of the live scene.
+/// Scene replacement uses `reset` separately before publishing its window.
+pub fn replace_terrain(v: &mut Visual) {
+    v.occupied.clear();
+    v.window = None;
+}
 /// A range contact as the picture uses it: the ankle point and the sole's
 /// rotation, heading then tilt, the same composition as `footing::Sole`.
 fn foot_of(c: &sim_core::gait::Contact) -> Contact {
@@ -412,15 +419,20 @@ impl WindowIndex {
     }
 }
 fn new_occupied(u: &RangeUnit, index: &WindowIndex, packed: bool) -> Occupied {
+    let (lo, hi) = u.bounds();
+    let hidden =
+        (0..3).any(|a| hi[a] < index.window.origin[a] || lo[a] >= index.window.span(a).end);
     let mut world_cells = Vec::new();
-    unit_world_cells(u, |p| world_cells.push(p.to_array()));
+    if !hidden {
+        unit_world_cells(u, |p| world_cells.push(p.to_array()));
+    }
     let mut cells = world_cells.iter().filter_map(|&p| index.index(p)).collect();
     let mut words = Vec::new();
     if packed {
         packed::pack(&mut cells, &mut words);
     }
     Occupied {
-        hidden: false,
+        hidden,
         turret_delta: u.turret_delta,
         turret_pitch: u.turret_pitch,
         pose: u.pose,
@@ -995,6 +1007,10 @@ mod tests {
         let mut visual = Visual::default();
         occupancy(&sim, &mut gas, &mut visual);
         assert!(visual.occupied.is_empty());
+        assert!(visual
+            .cached
+            .iter()
+            .all(|c| c.hidden && c.world_cells.is_empty()));
         assert!(visual.window == Some(window));
         for _ in 0..3 {
             before(&sim, &mut visual, &window);
@@ -1012,6 +1028,88 @@ mod tests {
         fresh.terrain_words = Arc::new(vec![0; window.words()]);
         write_window(&sim, &mut fresh, window, None);
         assert_eq!(gas.terrain_words, fresh.terrain_words);
+    }
+
+    #[test]
+    fn staged_raw_window_reuses_geometry_and_reapplies_shadows_after_damage_and_reset() {
+        let mut sim = occupancy_roster(8);
+        let window = TerrainWindow {
+            origin: [128, 0, 256],
+            dims: [512, 192, 256],
+        };
+        let mut visual = Visual::default();
+        let mut gas = GasInput::default();
+        gas.terrain_words = Arc::new(vec![0; window.words()]);
+        write_window(&sim, &mut gas, window, None);
+        before(&sim, &mut visual, &window);
+        occupancy(&sim, &mut gas, &mut visual);
+        let previous = visual.previous.clone();
+        let rebuilt = visual.occupancy_rebuilds;
+        let cache_buffers: Vec<_> = visual
+            .cached
+            .iter()
+            .map(|c| c.world_cells.as_ptr())
+            .collect();
+        for (stage, origin) in [
+            [128, 0, 256],
+            [136, 0, 264],
+            [1024, 0, 1024],
+            [128, 0, 256],
+            [128, 0, 256],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if stage == 3 {
+                // Geometry changed while hidden; both damage and mount angle
+                // must refresh on reentry, rather than restoring stale shadows.
+                sim.units[0].body.vol.cols.fill(0);
+                sim.units[0].seg_gone.fill(true);
+                sim.units[0].revision += 1;
+                sim.units[1].turret_delta += 1000;
+            }
+            if stage == 4 {
+                reset(&mut visual);
+                sim.units[0] = RangeUnit::of_kind(RangeUnitKind::Tank, [180, 16, 290]);
+            }
+            let next = TerrainWindow { origin, ..window };
+            // A raw staged publication has terrain without actor shadows.
+            gas.terrain_words = Arc::new(vec![0; next.words()]);
+            write_window(&sim, &mut gas, next, None);
+            // Remove all inserted shadows to model a raw staged publication.
+            for i in cells(&sim, &next) {
+                let p = next.position(i);
+                let shift = (i % 8) * 4;
+                let word = &mut Arc::make_mut(&mut gas.terrain_words)[i / 8];
+                *word = (*word & !(15 << shift))
+                    | (surface_material(&sim, p, sim_core::blast::material(&sim.world, p))
+                        << shift);
+            }
+            gas.terrain_dirty.clear();
+            let mut delivered = gas.terrain_words.as_ref().clone();
+            replace_terrain(&mut visual);
+            occupancy(&sim, &mut gas, &mut visual);
+            for span in &gas.terrain_dirty {
+                delivered[span.clone()].copy_from_slice(&gas.terrain_words[span.clone()]);
+            }
+            let mut reference = GasInput::default();
+            reference.terrain_words = Arc::new(vec![0; next.words()]);
+            write_window(&sim, &mut reference, next, None);
+            assert_eq!(gas.terrain_words, reference.terrain_words, "stage {stage}");
+            assert_eq!(delivered, *reference.terrain_words, "patches stage {stage}");
+            if stage == 0 {
+                assert_eq!(visual.occupancy_rebuilds, rebuilt);
+                assert_eq!(
+                    cache_buffers,
+                    visual
+                        .cached
+                        .iter()
+                        .map(|c| c.world_cells.as_ptr())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(visual.previous, previous);
+            }
+        }
     }
 
     #[test]

@@ -2,7 +2,20 @@
 
 Обновлено: 06.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020, 026 и 027 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-599: малые входящие полосы камеры собираются в
+Последний шаг ADR-600: camera work имеет явные operation kinds и7exclusive
+wall leaves с frame/generation identity. Analyzer проверяет parent bounds
+и main CSV; пики получают previous/current Update раздельно. Пик15.795мс
+оказался occupancy13.295мс, allocation≤0.021мс. Raw publication сохраняет
+actor geometry/animation cache, повторно накладывая shadows; initial cache
+не перечисляет заведомо hidden bodies.124headless/125Python tests проходят.
+Native mean publish operation8.611→4.449/4.794мс,occupancy5.587→2.514/2.819;
+оба compare валидны,1800ticks/hash/gameplay равны,0blocked. Устойчивого FPS
+gain нет, полный max кадра хуже; occupancy peaks≈10мс и core≈11.4мс остаются.
+Следующие scopes: occupancy geometry/join/union/apply и staging rows.
+WBPERF-009/027 частично;002,165FPS,rare stalls/P-87 открыты.
+Данные/ограничения — [193](193-camera-publication-cache.md).
+
+Предыдущий шаг ADR-599: малые входящие полосы камеры собираются в
 существующем compute pool по непересекающимся Z-строкам, без снижения
 детализации или нового staging lag.136render tests проходят; изолированный
 индекс:4streaming/21moving. Native B→A1/A2: малые shifts mean4.756→

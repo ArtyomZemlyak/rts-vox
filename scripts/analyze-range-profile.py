@@ -74,7 +74,7 @@ def interval(a, b):
             "cycles": delta("cpu_cycles"), "os_thread": b.get("os_thread") or None}
 
 
-def camera_tour_capture(directory, scenario, log, manifest, frame_count, reasons):
+def camera_tour_capture(directory, scenario, log, manifest, frame_count, reasons, main_frames=None):
     declared = bool((manifest or {}).get("CameraTour"))
     signature = "PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1"
     observed = bool(re.search(r"^PROFILE camera_tour_schema=", log, re.M))
@@ -107,12 +107,60 @@ def camera_tour_capture(directory, scenario, log, manifest, frame_count, reasons
                 reasons.append("camera_tour_work_invalid")
             else:
                 work[name] = stats(values)
+    phases = ("allocate_ms", "rows_ms", "publish_ms", "retire_ms",
+              "occupancy_ms", "advance_ms", "shift_ms")
+    fields = ("frame_row", "generation", "work_kind") + phases
+    declared_work = "PROFILE camera_work_schema=1 camera_work_scope=same_frame_exclusive_wall" in log.splitlines()
+    has_work = bool(rows and any(k in rows[0] for k in fields))
+    detail = None
+    if declared_work != has_work or (has_work and not all(k in rows[0] for k in fields)):
+        reasons.append("camera_tour_work_schema_mismatch")
+    elif has_work:
+        kinds = {"idle", "map", "shift", "staging", "publish"}
+        try:
+            values = [[float(r[k]) for k in phases] for r in rows]
+            invalid = any(int(r["frame_row"]) != i or int(r["generation"]) < 0 or
+                          r["work_kind"] not in kinds for i, r in enumerate(rows))
+            invalid |= any(any(not math.isfinite(v) or v < 0 for v in vs) or
+                           sum(vs) > float(r["stream_ms"]) + .01 for r, vs in zip(rows, values))
+            if main_frames is not None:
+                invalid |= len(main_frames) != len(rows) or any(
+                    int(r["generation"]) != int(f["generation"]) or int(r["tick"]) != int(f["tick"])
+                    for r, f in zip(rows, main_frames))
+            if invalid:
+                reasons.append("camera_tour_work_alignment_invalid")
+            else:
+                detail = {"schema": 1, "scope": "same_frame_exclusive_wall", "kinds": {}}
+                for kind in sorted(kinds):
+                    group = [r for r in rows if r["work_kind"] == kind]
+                    if not group:
+                        continue
+                    detail["kinds"][kind] = dict(frames=len(group), stream_ms=stats([float(r["stream_ms"]) for r in group]),
+                        phases={k: stats([float(r[k]) for r in group]) for k in phases},
+                        unscoped_ms=stats([max(0, float(r["stream_ms"])-sum(float(r[k]) for k in phases)) for r in group]))
+        except (ValueError, KeyError):
+            reasons.append("camera_tour_work_alignment_invalid")
     return dict(schema=1, clock="wall", route="bases_pan_zoom_v1", frames=len(rows),
                 segments=sorted(set(segments)), blocked_frames=sum(r["blocked"] == "true" for r in rows),
                 streaming_frames=sum(bool(r["progress"]) for r in rows),
                 max_no_tick_seconds=max(no_tick_seconds, default=0),
                 work_per_frame=work,
+                work_details=detail,
                 window_origins=sorted({(int(r["origin_x"]), int(r["origin_z"])) for r in rows}))
+
+
+def attach_camera_work(peaks, rows):
+    """Begin-to-begin interval contains previous Update, not current Update."""
+    def work(index):
+        if index < 0:
+            return None
+        r = rows[index]
+        return dict(frame_row=int(r['frame_row']), generation=int(r['generation']), tick=int(r['tick']),
+                    kind=r['work_kind'], stream_ms=float(r['stream_ms']),
+                    phases={k: float(v) for k, v in r.items() if k.endswith('_ms') and k not in ('stream_ms', 'observe_ms')})
+    for peak in peaks:
+        peak['camera_previous_update'] = work(peak['row'] - 1)
+        peak['camera_current_update'] = work(peak['row'])
 
 
 def union_by_thread(jobs):
@@ -1304,7 +1352,7 @@ def analyze(directory, scenario="world-battle", top=12):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else None
     validity = manifest.get("Validity") or {} if manifest else {}
     reasons = list(validity.get("Reasons") or [])
-    camera_tour = camera_tour_capture(directory, scenario, log, manifest, len(frames), reasons)
+    camera_tour = camera_tour_capture(directory, scenario, log, manifest, len(frames), reasons, frames)
     if not manifest:
         reasons.append("legacy_run_without_manifest")
     elif not manifest.get("BinarySha256") or not manifest.get("InputHashes"):
@@ -1376,6 +1424,8 @@ def analyze(directory, scenario="world-battle", top=12):
             previous_measured_slice_ms=(int(prev["frame_end_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             begin_to_begin_ms=(int(row["frame_start_ns"]) - int(prev["frame_start_ns"])) / 1e6 if aligned and prev else None,
             outside_observed_slice_ms=int(row["frame_gap_ns"]) / 1e6 if aligned else None))
+    if camera_tour and camera_tour['work_details']:
+        attach_camera_work(expensive_frames, list(read_csv(directory / f'{scenario}.camera.csv')))
     return dict(schema=6, directory=str(directory), scenario=scenario, manifest=manifest,
         valid_for_comparison=bool(validity.get("ValidForComparison")) and not reasons,
         meets_simulation_rate=meets_rate,
@@ -1514,6 +1564,11 @@ def markdown(report):
         lines += ["", f"Wall-clock camera tour: {tour['route']}; {len(tour['segments'])} segments; "
                   f"{len(tour['window_origins'])} published origins; {tour['blocked_frames']} blocked frames; "
                   f"longest sampled no-tick interval {tour['max_no_tick_seconds']:.6f} s."]
+        if tour.get('work_details'):
+            lines += ["", "Camera work: exclusive same-frame wall phases; not worker CPU or utilization."]
+            for kind, group in tour['work_details']['kinds'].items():
+                phases = ', '.join(f"{name} mean={v['mean']:.3f}/max={v['max']:.3f}" for name, v in group['phases'].items() if v['max'] > 0)
+                lines.append(f"- {kind}: {group['frames']} frames; stream mean={group['stream_ms']['mean']:.3f}/max={group['stream_ms']['max']:.3f} ms; {phases}.")
     lines += ["", f"Core trace schema: {report['core_trace_schema']}; sampling: {report['physics_task_sampling']}; physics coverage: {report['physics_task_coverage']}.", "",
               "Job totals are inclusive across threads; do not add them to phase time.", "",
               "| Task family | Jobs | Inclusive wall total, ms | Longest job, ms | Sampled CPU total, ms | CPU samples |",
@@ -1556,6 +1611,11 @@ def markdown(report):
     for frame in report["slow_frames"]:
         values = [number(frame[key]) for key in ("frame_delta_ms", "bevy_delta_ms", "previous_core_ms", "current_core_ms", "previous_measured_slice_ms", "outside_observed_slice_ms")]
         lines.append(f"| {frame['row']} | {frame['generation']}/{frame['tick']} | {' | '.join(values)} |")
+    for frame in report['slow_frames']:
+        work = frame.get('camera_previous_update')
+        if work:
+            phases = ', '.join(f'{k}={v:.3f}' for k, v in work['phases'].items() if v > 0)
+            lines += ["", f"Interval row {frame['row']}: preceding Update row {work['frame_row']} camera {work['kind']}, stream={work['stream_ms']:.3f} ms; {phases}. Current Update is recorded separately in JSON."]
     lines += ["", "Main slices (also available without detailed core trace):", "",
               "| Row | Generation / tick range | Steps | Measured wall, ms | Core wall, ms | Following interval row / ms | Following gap, ms | Exclusive Update phases, ms |",
               "|---|---|---:|---:|---:|---|---:|---|"]

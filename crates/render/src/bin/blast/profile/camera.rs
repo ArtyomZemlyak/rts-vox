@@ -1,6 +1,32 @@
 //! Wall-clock camera workload, independent of simulation progress and FPS.
 use super::*;
 
+pub(crate) const PHASE_NAMES: [&str; 7] = [
+    "allocate_ms",
+    "rows_ms",
+    "publish_ms",
+    "retire_ms",
+    "occupancy_ms",
+    "advance_ms",
+    "shift_ms",
+];
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Work {
+    pub kind: &'static str,
+    pub ms: [f64; 7],
+    pub enabled: bool,
+}
+impl Work {
+    pub fn measure<T>(&mut self, phase: usize, f: impl FnOnce() -> T) -> T {
+        let start = self.enabled.then(Instant::now);
+        let result = f();
+        if let Some(start) = start {
+            self.ms[phase] += start.elapsed().as_secs_f64() * 1000.0;
+        }
+        result
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Sample {
     pub segment: u32,
@@ -41,6 +67,9 @@ pub(super) fn sample(seconds: f64, size: [u32; 3]) -> Sample {
 
 #[derive(Clone, Copy)]
 pub(super) struct Frame {
+    pub row: usize,
+    pub generation: u64,
+    pub work: Work,
     pub seconds: f64,
     pub tick: u32,
     pub sample: Sample,
@@ -56,12 +85,13 @@ pub(super) fn save(output: &str, frames: &[Frame]) -> std::io::Result<()> {
     )?);
     writeln!(
         out,
-        "seconds,tick,segment,focus_x,focus_z,height,origin_x,origin_z,progress,blocked,observe_ms,stream_ms"
+        "seconds,tick,segment,focus_x,focus_z,height,origin_x,origin_z,progress,blocked,observe_ms,stream_ms,frame_row,generation,work_kind,{}",
+        PHASE_NAMES.join(",")
     )?;
     for f in frames {
-        writeln!(
+        write!(
             out,
-            "{:.6},{},{},{:.3},{:.3},{:.3},{},{},{},{},{:.6},{:.6}",
+            "{:.6},{},{},{:.3},{:.3},{:.3},{},{},{},{},{:.6},{:.6},{},{},{}",
             f.seconds,
             f.tick,
             f.sample.segment,
@@ -73,8 +103,18 @@ pub(super) fn save(output: &str, frames: &[Frame]) -> std::io::Result<()> {
             f.progress.map_or(String::new(), |v| v.to_string()),
             f.blocked,
             f.observe_ms,
-            f.stream_ms
+            f.stream_ms,
+            f.row,
+            f.generation,
+            f.work.kind
         )?;
+        // All phases partition this call; stream_ms includes unscoped overhead.
+        // These are same-thread wall durations, not CPU or worker utilization.
+        // Keep them on the same CSV row as its exact main-frame identity.
+        for ms in f.work.ms {
+            write!(out, ",{ms:.6}")?;
+        }
+        writeln!(out)?;
     }
     out.flush()
 }

@@ -25711,3 +25711,32 @@ Workers читают неизменный мир; результаты возв�
 Отдельные moving-shadow тесты проверяют cull/reentry и повреждение тел.
 Измерения, воспроизводимость и оставшиеся ограничения —
 analysis/192-parallel-camera-strips.md.165FPS и редкие зависания открыты.
+
+
+## ADR-600 — измеримая публикация камеры с сохранением actor cache
+
+**Решение.** Camera CSV сохраняет явный тип операции idle/map/shift/staging/
+publish, идентичность frame/generation и эксклюзивные wall-фазы allocation,
+rows, publication, retirement, occupancy, atmosphere advance и small shift.
+Время rows включает dispatch/join; это не CPU workers и не чистый wait.
+Родитель содержит измеренные фазы и неразмеченный остаток. Анализатор
+проверяет схему, finite durations, сумму фаз и tick/generation с main CSV;
+legacy captures остаются читаемыми. Медленный begin-to-begin interval
+получает camera work предыдущего Update; текущий Update указан отдельно.
+
+При публикации raw terrain window moving::replace_terrain сбрасывает
+только список уже наложенных теней и window marker. Полное повторное
+наложение обязательно даже при прежнем origin; geometry cache, allocations
+и история поз/ног/башен/обломков живой сцены сохраняются. Scene replacement
+использует отдельный moving::reset. Геометрия hidden actors читается при
+реальном входе в окно; начальное построение cache отсекает их прежним
+консервативным bounds predicate без перечисления body voxels.
+
+**Проверка.** Raw publication сравнивается с fresh terrain/occupancy и GPU
+patch replay при том же origin, сдвиге, пустом окне, reentry с damage/aim и
+scene reset. Проверяется сохранение geometry allocations и pose history.
+Прежние serial/pooled occupancy tests сохраняются. Analyzer fixtures
+отклоняют неверную identity, схему, неизвестные операции, NaN и сумму
+фаз вне parent; проверяют previous/current Update mapping. Измерения и
+оставшиеся пики — analysis/193-camera-publication-cache.md.165FPS и редкие
+зависания остаются открытыми.

@@ -7,6 +7,7 @@ mod core;
 pub use self::core::render_sample;
 #[path = "profile/camera.rs"]
 mod camera;
+pub(crate) use camera::Work as CameraWork;
 
 #[derive(Resource, Default)]
 pub struct Profile {
@@ -18,6 +19,7 @@ pub struct Profile {
     pub camera_tour: bool,
     camera_frames: Vec<camera::Frame>,
     camera_work: [f64; 2],
+    camera_detail: CameraWork,
     pub core: bool,
     trigger: Option<core::Trigger>,
     /// Optional fixed route pool for paired native performance experiments.
@@ -94,7 +96,12 @@ pub fn render_context(
     if let Some(sample) = p.camera_sample(time.elapsed_secs_f64(), scene.sim.size()) {
         let seconds = time.elapsed_secs_f64() - p.start.unwrap();
         let [observe_ms, stream_ms] = p.camera_work;
+        let row = p.rows.len();
+        let work = p.camera_detail;
         p.camera_frames.push(camera::Frame {
+            row,
+            generation: scene.generation,
+            work,
             seconds,
             tick: scene.sim.tick,
             sample,
@@ -274,6 +281,11 @@ impl Profile {
             self.camera_work[phase] += duration.as_secs_f64() * 1000.0;
         }
     }
+    pub fn camera_details(&mut self, work: CameraWork) {
+        if self.start.is_some() && self.camera_tour {
+            self.camera_detail = work;
+        }
+    }
     pub fn measure(&mut self, phase: usize, duration: std::time::Duration) {
         if self.start.is_some() {
             self.detail[phase] += duration.as_secs_f64() * 1000.0;
@@ -306,6 +318,7 @@ pub fn begin(
         return;
     }
     p.camera_work = [0.0; 2];
+    p.camera_detail = CameraWork::default();
     let now = time.elapsed_secs_f64();
     let warm = *p.warm.get_or_insert(now);
     if now - warm < 2.0 {
@@ -326,6 +339,7 @@ pub fn begin(
         );
         if p.camera_tour {
             println!("PROFILE camera_tour_schema=1 camera_tour_clock=wall camera_tour_route=bases_pan_zoom_v1");
+            println!("PROFILE camera_work_schema=1 camera_work_scope=same_frame_exclusive_wall");
         }
         if let Some(adapter) = adapter {
             println!(

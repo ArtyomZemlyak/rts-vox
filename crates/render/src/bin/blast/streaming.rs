@@ -456,6 +456,11 @@ pub fn camera(
         return;
     };
     let started = profile.camera_tour.then(std::time::Instant::now);
+    let mut work = profile::CameraWork {
+        enabled: started.is_some(),
+        kind: "idle",
+        ..default()
+    };
     // At map scale leave the detailed window in place. The same raytracer
     // continues into compact world columns outside it; no picture replacement.
     if matches!(
@@ -463,13 +468,17 @@ pub fn camera(
             Projection::Orthographic(ref p)
                 if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if map_scale(scene.sim.size(), viewport_height, stream.map_scale))
     ) {
-        if let Some(job) = stream.job.take() {
-            stream.spare = job.words;
-        }
+        work.measure(3, || {
+            if let Some(job) = stream.job.take() {
+                stream.spare = job.words;
+            }
+        });
+        work.kind = "map";
         stream.map_scale = true;
         stream.displayed = None;
         gas.params.terrain.w = 0.0;
         if let Some(start) = started {
+            profile.camera_details(work);
             profile.measure_camera(1, start.elapsed());
         }
         return;
@@ -492,75 +501,88 @@ pub fn camera(
         .as_ref()
         .is_some_and(|j| j.generation != scene.generation)
     {
-        stream.spare = stream.job.take().unwrap().words;
+        work.measure(3, || stream.spare = stream.job.take().unwrap().words);
     }
     if !stream.invalid && stream.job.is_none() && small {
         if want != gas.window {
             let had = gas.window;
-            write_window(&scene.sim, &mut gas, want, Some(had));
-            moving::occupancy(&scene.sim, &mut gas, &mut visual);
-            gas.advance(scene.sim.tick * 2);
+            work.kind = "shift";
+            work.measure(6, || write_window(&scene.sim, &mut gas, want, Some(had)));
+            work.measure(4, || moving::occupancy(&scene.sim, &mut gas, &mut visual));
+            work.measure(5, || gas.advance(scene.sim.tick * 2));
         }
         stream.displayed = Some((*transform, projection.clone()));
         if let Some(start) = started {
+            profile.camera_details(work);
             profile.measure_camera(1, start.elapsed());
         }
         return;
     }
+    work.kind = "staging";
     if stream.job.is_none() {
-        let mut words = std::mem::take(&mut stream.spare);
-        if words.len() != want.words() {
-            words = vec![0; want.words()];
-        }
-        stream.job = Some(Job {
-            window: want,
-            generation: scene.generation,
-            row: want.origin[2],
-            words,
-            tops: vec![0; (want.dims[0] * want.dims[2]) as usize],
-            highest: 0,
-            dirty: Vec::new(),
-            repairs: default(),
-            aliases: PatchUnion::new(want.words()),
-            rows: default(),
+        work.measure(0, || {
+            let mut words = std::mem::take(&mut stream.spare);
+            if words.len() != want.words() {
+                words = vec![0; want.words()];
+            }
+            stream.job = Some(Job {
+                window: want,
+                generation: scene.generation,
+                row: want.origin[2],
+                words,
+                tops: vec![0; (want.dims[0] * want.dims[2]) as usize],
+                highest: 0,
+                dirty: Vec::new(),
+                repairs: default(),
+                aliases: PatchUnion::new(want.words()),
+                rows: default(),
+            });
         });
     }
-    if stream
-        .job
-        .as_mut()
-        .unwrap()
-        .step(&scene.sim, &gas.terrain_words)
-    {
+    if work.measure(1, || {
+        stream
+            .job
+            .as_mut()
+            .unwrap()
+            .step(&scene.sim, &gas.terrain_words)
+    }) {
+        work.kind = "publish";
         let job = stream.job.take().unwrap();
         let want = job.window;
-        let old = std::mem::replace(&mut gas.terrain_words, Arc::new(job.words));
-        if let Ok(words) = Arc::try_unwrap(old) {
-            stream.spare = words;
-        }
-        gas.window = want;
-        gas.terrain_column_top = job.tops;
-        gas.terrain_dirty.extend(job.dirty);
-        gas.terrain_dirty.extend(job.aliases.ranges());
-        gas.terrain_revision += 1;
-        gas.params.terrain = Vec4::new(
-            want.dims[0] as f32,
-            want.dims[1] as f32,
-            want.dims[2] as f32,
-            0.0,
-        );
-        let ceiling = job
-            .highest
-            .max(scene.sim.gun.at[1] + 64)
-            .min(want.span(1).end) as f32;
-        gas.params.terrain_origin = Vec4::new(
-            want.origin[0] as f32,
-            want.origin[1] as f32,
-            want.origin[2] as f32,
-            ceiling,
-        );
-        *visual = default();
-        moving::occupancy(&scene.sim, &mut gas, &mut visual);
-        gas.advance(scene.sim.tick * 2);
+        work.measure(2, || {
+            let old = std::mem::replace(&mut gas.terrain_words, Arc::new(job.words));
+            if let Ok(words) = Arc::try_unwrap(old) {
+                stream.spare = words;
+            }
+            gas.window = want;
+            gas.terrain_column_top = job.tops;
+            gas.terrain_dirty.extend(job.dirty);
+            gas.terrain_dirty.extend(job.aliases.ranges());
+            gas.terrain_revision += 1;
+            gas.params.terrain = Vec4::new(
+                want.dims[0] as f32,
+                want.dims[1] as f32,
+                want.dims[2] as f32,
+                0.0,
+            );
+            let ceiling = job
+                .highest
+                .max(scene.sim.gun.at[1] + 64)
+                .min(want.span(1).end) as f32;
+            gas.params.terrain_origin = Vec4::new(
+                want.origin[0] as f32,
+                want.origin[1] as f32,
+                want.origin[2] as f32,
+                ceiling,
+            );
+        });
+        work.measure(3, || {
+            drop(job.aliases);
+            drop(job.rows);
+            moving::replace_terrain(&mut visual);
+        });
+        work.measure(4, || moving::occupancy(&scene.sim, &mut gas, &mut visual));
+        work.measure(5, || gas.advance(scene.sim.tick * 2));
         stream.invalid = false;
         stream.displayed = Some((*transform, projection.clone()));
     } else if scene.sim.size()[0] <= TERRAIN_WINDOW[0] && scene.sim.size()[2] <= TERRAIN_WINDOW[2] {
@@ -570,6 +592,7 @@ pub fn camera(
         }
     }
     if let Some(start) = started {
+        profile.camera_details(work);
         profile.measure_camera(1, start.elapsed());
     }
 }
