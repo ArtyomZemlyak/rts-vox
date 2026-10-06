@@ -1289,7 +1289,7 @@ impl Motion {
             return;
         };
         let blockers = self.local_blockers(hunt.origin(), self.shape(b), others);
-        let result = self.advance_hunt(
+        let result = self.advance_hunt_mode::<true>(
             hunt,
             w,
             b,
@@ -1305,7 +1305,7 @@ impl Motion {
     /// Pure continuation over owned search scratch and immutable surroundings.
     /// Both speculative and serial paths use the same calculation and commit.
     #[allow(clippy::too_many_arguments)]
-    fn advance_hunt(
+    fn advance_hunt_mode<const LOCAL: bool>(
         &self,
         mut hunt: Box<nav::vehicle::Hunt>,
         w: &World,
@@ -1349,14 +1349,17 @@ impl Motion {
         hunt.forget(changed);
         detail("route_forget_end");
         let half = self.shape(b).half.map(Fx::from_int);
-        let clear = |p: [Fx; 2], head: i32| {
-            let answer = !blockers.iter().any(|o| {
+        let is_clear = |p: [Fx; 2], head: i32| {
+            !blockers.iter().any(|o| {
                 o.overlaps(&Obstacle {
                     pos: [p[0], Fx::ZERO, p[1]],
                     head,
                     half,
                 })
-            });
+            })
+        };
+        let clear = |p: [Fx; 2], head: i32| {
+            let answer = is_clear(p, head);
             if let Some(checked) = checked {
                 checked.borrow_mut().push(HuntClearance {
                     position: p,
@@ -1367,13 +1370,18 @@ impl Motion {
             answer
         };
         detail("route_query_begin");
-        let prepared = if checked.is_none()
-            && blockers.is_empty()
+        let prepared = if (LOCAL || checked.is_none() && blockers.is_empty())
             && self.shape(b).half.iter().all(|&n| n >= 40)
             && rayon::current_thread_index().is_some()
             && rayon::current_num_threads() >= 4
         {
             hunt.sweep_samples(slice)
+                // Nearby hulls are immutable for this speculative continuation.
+                // A blocked prefix would discard the wide terrain preparation;
+                // test it without recording callbacks ahead of the actual search.
+                .filter(|(_, samples)| {
+                    blockers.is_empty() || samples[..4].iter().all(|&(p, head)| is_clear(p, head))
+                })
                 .map(|(shape, samples)| {
                     use rayon::prelude::*;
                     let mut seed = hunt.sweep_probe(w, rubble);
@@ -1459,14 +1467,7 @@ impl Motion {
         if self.enabled && self.hunt.is_some() && self.blocked_ticks == 0 && self.escape == 0 {
             detail("terrain_advance_begin");
             self.hunt_step(w, b, &[], rubble, tick, changed, &detail, |batch, begin| {
-                const BEGIN: [&str; 4] = [
-                    "sweep_0_begin",
-                    "sweep_1_begin",
-                    "sweep_2_begin",
-                    "sweep_3_begin",
-                ];
-                const END: [&str; 4] = ["sweep_0_end", "sweep_1_end", "sweep_2_end", "sweep_3_end"];
-                detail(if begin { BEGIN[batch] } else { END[batch] });
+                detail(sweep_event(batch, begin));
             });
             self.prepared_hunt = true;
             detail("terrain_advance_end");
@@ -1492,6 +1493,7 @@ impl Motion {
             && (self.blocked_ticks != 0 || self.escape != 0)
             && self.hunt.is_some()
     }
+    #[cfg(test)]
     pub(super) fn prepare_local_hunt_observed(
         &self,
         w: &World,
@@ -1500,6 +1502,19 @@ impl Motion {
         rubble: &nav::vehicle::Rubble,
         changed: &nav::vehicle::Changed,
         detail: impl Fn(&'static str),
+    ) -> Option<PreparedLocalHunt> {
+        self.prepare_local_hunt_tasks(w, b, others, rubble, changed, detail, |_, _| {})
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_local_hunt_tasks(
+        &self,
+        w: &World,
+        b: &UnitBody,
+        others: &[Obstacle],
+        rubble: &nav::vehicle::Rubble,
+        changed: &nav::vehicle::Changed,
+        detail: impl Fn(&'static str),
+        sweep_detail: impl Fn(usize, bool) + Sync,
     ) -> Option<PreparedLocalHunt> {
         if !self.needs_local_hunt() {
             return None;
@@ -1515,7 +1530,7 @@ impl Motion {
         let candidate = hunt.clone();
         detail("local_clone_end");
         detail("local_advance_begin");
-        let result = self.advance_hunt(
+        let result = self.advance_hunt_mode::<true>(
             candidate,
             w,
             b,
@@ -1524,7 +1539,7 @@ impl Motion {
             changed,
             Some(&checked),
             &detail,
-            |_, _| {},
+            sweep_detail,
         );
         detail("local_advance_end");
         Some(PreparedLocalHunt {
@@ -4458,5 +4473,25 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "range_local_sweep_tests.rs"]
+mod local_sweep_tests;
+
+/// Navigation observers pair each independent leaf by unit and sweep batch.
+pub(super) fn sweep_event(batch: usize, begin: bool) -> &'static str {
+    const BEGIN: [&str; 4] = [
+        "sweep_0_begin",
+        "sweep_1_begin",
+        "sweep_2_begin",
+        "sweep_3_begin",
+    ];
+    const END: [&str; 4] = ["sweep_0_end", "sweep_1_end", "sweep_2_end", "sweep_3_end"];
+    if begin {
+        BEGIN[batch]
+    } else {
+        END[batch]
     }
 }

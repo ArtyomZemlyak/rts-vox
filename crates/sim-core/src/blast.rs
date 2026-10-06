@@ -4020,13 +4020,14 @@ impl BlastRange {
                                 .map(|(_, p)| *p)
                                 .chain(gun_obstacle)
                                 .collect();
-                            let prepared = u.motion.prepare_local_hunt_observed(
+                            let prepared = u.motion.prepare_local_hunt_tasks(
                                 world,
                                 &u.body,
                                 &others,
                                 rubble,
                                 &changed,
                                 |stage| task_detail(id, stage),
+                                |batch, begin| task_detail(id, motion::sweep_event(batch, begin)),
                             );
                             task_detail(id, "route_end");
                             prepared
