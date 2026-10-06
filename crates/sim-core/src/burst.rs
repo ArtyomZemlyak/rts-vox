@@ -3584,6 +3584,15 @@ pub struct Fragment {
     pub resting: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroundClaimError {
+    NoRoom,
+    ClaimLimit,
+    PendingCell,
+    Outside,
+    Frame,
+}
+
 #[derive(Default)]
 pub struct Bursts {
     jobs: VecDeque<Job>,
@@ -3874,17 +3883,39 @@ impl Bursts {
         t: &Blast,
         room: &mut u32,
     ) -> bool {
+        self.claim_voxel_checked(world, p, mat, at, motion_mj, side, t, room)
+            .is_ok()
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn claim_voxel_checked(
+        &mut self,
+        world: &mut voxel::World,
+        p: [u32; 3],
+        mat: Mat,
+        at: [i32; 3],
+        motion_mj: u64,
+        side: u8,
+        t: &Blast,
+        room: &mut u32,
+    ) -> Result<(), GroundClaimError> {
         // The edit queue drops digs on the world's frame (ADR-034); a claim
         // there would never be confirmed and never released, and every
         // wait on claims would wait forever (ADR-420). Callers check it
         // first; this is the last line.
-        if *room == 0
-            || self.claims.len() >= t.max_claims as usize
-            || self.claims.contains_key(&p)
-            || !world.inside(p[0], p[1], p[2])
-            || world.on_frame(p[0], p[1], p[2])
-        {
-            return false;
+        if *room == 0 {
+            return Err(GroundClaimError::NoRoom);
+        }
+        if self.claims.len() >= t.max_claims as usize {
+            return Err(GroundClaimError::ClaimLimit);
+        }
+        if self.claims.contains_key(&p) {
+            return Err(GroundClaimError::PendingCell);
+        }
+        if !world.inside(p[0], p[1], p[2]) {
+            return Err(GroundClaimError::Outside);
+        }
+        if world.on_frame(p[0], p[1], p[2]) {
+            return Err(GroundClaimError::Frame);
         }
         self.claims.insert(
             p,
@@ -3896,7 +3927,7 @@ impl Bursts {
         );
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
         *room -= 1;
-        true
+        Ok(())
     }
     pub fn pending(&self) -> usize {
         self.jobs.len()

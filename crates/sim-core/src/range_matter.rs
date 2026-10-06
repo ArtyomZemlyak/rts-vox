@@ -84,6 +84,8 @@ pub struct Matter {
 pub struct AdmissionProfile {
     /// Body fracture: applied, unaffordable, pool deferred.
     pub body: [u64; 3],
+    /// Ground: applied, unaffordable, no room, claim cap, duplicate, frame/outside.
+    pub ground: [u64; 6],
     /// Body melt: applied, pool deferred.
     pub melt: [u64; 2],
     /// Full fragment array visits for admission (not physics queries).
@@ -471,15 +473,17 @@ impl Matter {
     }
     pub fn ground(&mut self, w: &mut World, p: [i32; 3], at: [i32; 3]) -> ClaimResult {
         if !claimable(w, p) {
+            self.admission.ground[5] += 1;
             return ClaimResult::Indestructible;
         }
         let m = material(w, p);
         let (cost, motion) = self.cost(m);
         if cost > self.remaining_mj {
+            self.admission.ground[1] += 1;
             return ClaimResult::Unaffordable;
         }
         let mut room = self.claim_room();
-        let applied = self.debris.claim_voxel_with_room(
+        let applied = self.debris.claim_voxel_checked(
             w,
             p.map(|v| v as u32),
             m,
@@ -492,9 +496,17 @@ impl Matter {
         if let Some(cached) = self.batch.as_mut().and_then(|batch| batch.room.as_mut()) {
             *cached = room;
         }
-        if !applied {
+        if let Err(reason) = applied {
+            use crate::burst::GroundClaimError;
+            self.admission.ground[match reason {
+                GroundClaimError::NoRoom => 2,
+                GroundClaimError::ClaimLimit => 3,
+                GroundClaimError::PendingCell => 4,
+                GroundClaimError::Outside | GroundClaimError::Frame => 5,
+            }] += 1;
             return ClaimResult::Deferred;
         }
+        self.admission.ground[0] += 1;
         self.pay(cost);
         ClaimResult::Applied
     }

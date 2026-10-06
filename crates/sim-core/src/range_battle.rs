@@ -2368,6 +2368,10 @@ impl BlastRange {
         // canonical wave array: snapshots and stable wave identity keep their
         // order, and the saved tick determines the next turn after loading.
         let first = self.tick as usize % n;
+        // No physics or claim confirmation runs between these atomic batches.
+        // Component commits consume exactly their reservations; terrain claims
+        // keep one slot per conditional edit. Recount at the next phase/tick.
+        let mut room = None;
         for offset in 0..b.waves.len() {
             let w = &mut b.waves[(first + offset) % n];
             let config = match w.weapon {
@@ -2395,7 +2399,8 @@ impl BlastRange {
                     .iter()
                     .map(|u| (u.removed.len(), u.seg_removed.len()))
                     .collect();
-                w.wave.step(
+                let room = room.get_or_insert_with(|| self.matter.claim_room());
+                w.wave.step_with_room(
                     &mut self.world,
                     wave_share(config.wave_work_per_tick, n, offset),
                     &mut self.units,
@@ -2403,6 +2408,7 @@ impl BlastRange {
                     &mut self.surface_changed,
                     config,
                     Some(&mut self.matter),
+                    Some(room),
                 );
                 if config.material_energy_j == 0 {
                     for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {

@@ -1741,13 +1741,36 @@ impl Explosion {
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
         c: &ExplosionConfig,
+        matter: Option<&mut matter::Matter>,
+    ) {
+        self.step_with_room(w, budget, units, dents, changed, c, matter, None);
+    }
+    /// Reuse capacity only between consecutive atomic wave batches. Physics,
+    /// terrain confirmation and section extraction must not run between them.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_room(
+        &mut self,
+        w: &mut World,
+        budget: usize,
+        units: &mut [RangeUnit],
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
+        room: Option<&mut u32>,
     ) {
         if let Some(m) = matter.as_deref_mut() {
-            m.begin_body_batch();
+            if let Some(room) = room.as_deref() {
+                m.begin_body_batch_with_room(*room);
+            } else {
+                m.begin_body_batch();
+            }
         }
         self.step_inner(w, budget, units, dents, changed, c, matter.as_deref_mut());
         if let Some(m) = matter {
+            if let Some(room) = room {
+                *room = m.body_batch_room();
+            }
             m.finish_body_batch();
         }
     }

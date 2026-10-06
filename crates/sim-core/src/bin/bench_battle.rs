@@ -769,6 +769,11 @@ fn main() {
                     [0, 1].map(|i| admission.melt[i] - admission_previous.melt[i]),
                     admission.room_scans - admission_previous.room_scans,
                     admission.room_items - admission_previous.room_items);
+                println!(
+                    "damage_ground tick={} applied_unaffordable_room_claimcap_duplicate_frame={:?}",
+                    sim.tick,
+                    [0, 1, 2, 3, 4, 5].map(|i| admission.ground[i] - admission_previous.ground[i])
+                );
                 admission_previous = admission;
                 println!(
                     "damage_wake tick={} resumed={}",

@@ -174,3 +174,270 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
     );
     assert!(a.matter.economy.ledger.balanced());
 }
+
+// Pre-cache reference: independently recount before every atomic wave.
+impl BlastRange {
+    fn scalar_waves(&mut self, b: &mut Battle, completed: &mut impl FnMut(&'static str)) {
+        let n = b.waves.len().max(1);
+        // A growing old crater must not consume every newly freed fragment
+        // slot before a newer hit reaches its hull. Rotate service, not the
+        // canonical wave array: snapshots and stable wave identity keep their
+        // order, and the saved tick determines the next turn after loading.
+        let first = self.tick as usize % n;
+        for offset in 0..b.waves.len() {
+            let w = &mut b.waves[(first + offset) % n];
+            let config = match w.weapon {
+                Weapon::Energy => &b.energy_config,
+                Weapon::Annihilation => &b.anni_config,
+                Weapon::Canister => &b.canister_config,
+                _ => &b.shell_config,
+            };
+            if w.wave.capturing() {
+                w.wave.capture(
+                    &self.world,
+                    config,
+                    &self.units,
+                    &self.surface_work,
+                    wave_share(config.capture_cells_per_tick, n, offset),
+                );
+                completed("battle_capture");
+            }
+            if !w.wave.capturing() {
+                let old = self.matter.remaining_mj;
+                self.matter.remaining_mj = w.energy;
+                self.matter.fragment_size(config.fragment_box);
+                let before: Vec<_> = self
+                    .units
+                    .iter()
+                    .map(|u| (u.removed.len(), u.seg_removed.len()))
+                    .collect();
+                w.wave.step(
+                    &mut self.world,
+                    wave_share(config.wave_work_per_tick, n, offset),
+                    &mut self.units,
+                    &mut self.surface_work,
+                    &mut self.surface_changed,
+                    config,
+                    Some(&mut self.matter),
+                );
+                if config.material_energy_j == 0 {
+                    for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
+                        self.matter.annihilate_body(
+                            id,
+                            u.removed.len() - root + u.seg_removed.len() - seg,
+                        );
+                    }
+                }
+                completed("battle_wave_step");
+                w.energy = self.matter.remaining_mj;
+                self.matter.remaining_mj = old;
+                for u in &mut self.units {
+                    if u.absorbed > 0 && u.status.alive {
+                        u.motion.impulse(
+                            &u.body,
+                            w.wave.at,
+                            u64::from(u.absorbed) * u64::from(config.hull_impulse_milli) / 1000,
+                        );
+                    }
+                    u.absorbed = 0;
+                }
+            }
+        }
+        b.waves.retain(|w| w.wave.working());
+    }
+}
+
+fn apply_scalar_waves(r: &mut BlastRange) {
+    let mut b = std::mem::replace(&mut r.battle, Battle::new(&r.units, 1));
+    r.scalar_waves(&mut b, &mut |_| {});
+    r.battle = b;
+}
+
+fn saved_contacts(r: &BlastRange) -> Vec<u8> {
+    let mut b = Blob::new();
+    r.world.save(&mut b);
+    r.matter.save(&mut b);
+    r.battle.save(&mut b);
+    r.battle.save_wave_contacts(&mut b);
+    b.v
+}
+
+#[test]
+fn wave_phase_capacity_matches_scalar_at_every_pool_boundary() {
+    for cap in [0, 1, 3, 64] {
+        let mut a = contested_waves();
+        let mut b = contested_waves();
+        for r in [&mut a, &mut b] {
+            r.matter.tuning.max_flying = cap;
+            r.matter.tuning.max_fragments = 64;
+        }
+        for tick in 0..24 {
+            for r in [&mut a, &mut b] {
+                r.tick = tick;
+                // Capacity changes between phases, so a cross-tick cache would
+                // keep waiting after these pieces settle.
+                settle_admitted(r);
+            }
+            let fast = a.matter.admission.room_scans;
+            let slow = b.matter.admission.room_scans;
+            let count = a.battle.waves.len();
+            apply_waves(&mut a);
+            apply_scalar_waves(&mut b);
+            assert_eq!(a.matter.admission.room_scans - fast, u64::from(count > 0));
+            assert_eq!(b.matter.admission.room_scans - slow, count as u64);
+            assert_eq!(a.state_hash(), b.state_hash(), "cap={cap} tick={tick}");
+            assert_eq!(saved_contacts(&a), saved_contacts(&b));
+            assert_eq!(a.matter.admission.body, b.matter.admission.body);
+            assert_eq!(a.matter.admission.ground, b.matter.admission.ground);
+            assert!(a.matter.economy.ledger.balanced());
+        }
+        if cap > 0 {
+            assert!(a.battle.waves.is_empty());
+            assert!(a.units.iter().all(|u| u.removed.len() == 10));
+        } else {
+            assert_eq!(a.battle.waves.len(), 3);
+            assert!(a.units.iter().all(|u| u.removed.is_empty()));
+        }
+    }
+}
+
+fn add_ground_waves(r: &mut BlastRange) {
+    let p = [40, 2, 40];
+    assert_ne!(material(&r.world, p), 0);
+    // All profiles share geometry here, but retain distinct energy and fragment
+    // boundaries. Include annihilation and a genuinely unaffordable contact.
+    r.battle.energy_config = r.battle.shell_config.clone();
+    r.battle.energy_config.fragment_box = 4;
+    r.battle.canister_config = r.battle.shell_config.clone();
+    r.battle.canister_config.fragment_box = 1;
+    r.battle.anni_config = r.battle.shell_config.clone();
+    r.battle.anni_config.material_energy_j = 0;
+    for weapon in [
+        Weapon::Energy,
+        Weapon::Canister,
+        Weapon::Annihilation,
+        Weapon::Blast,
+    ] {
+        let config = match weapon {
+            Weapon::Energy => &r.battle.energy_config,
+            Weapon::Canister => &r.battle.canister_config,
+            Weapon::Annihilation => &r.battle.anni_config,
+            _ => &r.battle.shell_config,
+        };
+        let mut wave = Explosion::with_damage(&r.world, p, config, &r.units, &r.surface_work);
+        wave.wave.advance_contacts(usize::MAX);
+        for x in 0..3 {
+            wave.pending.push_back(phys::blast::Hit {
+                cell: [
+                    p[0] + x - wave.origin[0],
+                    p[1] - wave.origin[1],
+                    p[2] - wave.origin[2],
+                ],
+                pressure: u32::MAX,
+                broken: true,
+            });
+        }
+        r.battle.waves.push(Burst {
+            weapon,
+            wave,
+            energy: if weapon == Weapon::Blast {
+                0
+            } else {
+                u64::from(u32::MAX) * 1000
+            },
+        });
+    }
+}
+
+#[test]
+fn wave_phase_capacity_preserves_mixed_ground_claims_and_partial_confirmation() {
+    for cap in [1, 3, 64] {
+        let mut a = contested_waves();
+        let mut b = contested_waves();
+        for r in [&mut a, &mut b] {
+            r.matter.tuning.max_flying = cap;
+            r.matter.tuning.max_claims = 1;
+            // A pending edit must continue reserving its slot across phases.
+            r.world.max_edits_per_tick = 1;
+            add_ground_waves(r);
+        }
+        for tick in 3..27 {
+            for r in [&mut a, &mut b] {
+                r.tick = tick;
+                settle_admitted(r);
+            }
+            apply_waves(&mut a);
+            apply_scalar_waves(&mut b);
+            assert_eq!(a.state_hash(), b.state_hash(), "cap={cap} tick={tick}");
+            assert_eq!(saved_contacts(&a), saved_contacts(&b));
+            assert_eq!(a.matter.admission.body, b.matter.admission.body);
+            assert_eq!(a.matter.admission.ground, b.matter.admission.ground);
+            for r in [&mut a, &mut b] {
+                r.world.flush();
+                r.matter.debris.confirm(
+                    r.world.completed(),
+                    &mut r.matter.economy,
+                    &r.matter.tuning,
+                );
+                assert!(r.matter.economy.ledger.balanced());
+            }
+            assert_eq!(a.state_hash(), b.state_hash());
+        }
+        assert!(a.matter.admission.ground[0] > 0, "no real ground claim");
+        assert!(a.matter.admission.ground[1] > 0, "no unaffordable contact");
+        if cap < 64 {
+            assert!(a.matter.admission.ground[2] > 0, "no pool deferral");
+        }
+        assert!(a.matter.admission.room_scans < b.matter.admission.room_scans);
+    }
+}
+
+#[test]
+fn ground_admission_reports_the_first_actual_gate_without_spending_on_retries() {
+    let mut r = contested_waves();
+    let p = [40, 2, 40];
+    let q = [41, 2, 40];
+    assert_ne!(material(&r.world, p), 0);
+    let m = &mut r.matter;
+    m.tuning.max_flying = 64;
+    m.tuning.max_fragments = 64;
+    m.tuning.max_claims = 1;
+    for bad in [[-1, 2, 40], [r.world.nx as i32, 2, 40], [0, 2, 40]] {
+        assert!(matches!(
+            m.ground(&mut r.world, bad, p),
+            matter::ClaimResult::Indestructible
+        ));
+    }
+    assert!(matches!(
+        m.ground(&mut r.world, p, p),
+        matter::ClaimResult::Unaffordable
+    ));
+    m.begin(u32::MAX, 2);
+    assert!(matches!(
+        m.ground(&mut r.world, p, p),
+        matter::ClaimResult::Applied
+    ));
+    let paid = (m.remaining_mj, m.spent_mj);
+    // Claim cap wins over duplicate; pool pressure wins over claim cap.
+    for at in [p, q] {
+        assert!(matches!(
+            m.ground(&mut r.world, at, p),
+            matter::ClaimResult::Deferred
+        ));
+    }
+    m.tuning.max_claims = 10;
+    assert!(matches!(
+        m.ground(&mut r.world, p, p),
+        matter::ClaimResult::Deferred
+    ));
+    m.tuning.max_claims = 1;
+    m.tuning.max_flying = 1;
+    assert!(matches!(
+        m.ground(&mut r.world, q, p),
+        matter::ClaimResult::Deferred
+    ));
+    assert_eq!(m.admission.ground, [1, 1, 1, 2, 1, 3]);
+    assert_eq!((m.remaining_mj, m.spent_mj), paid);
+    assert_eq!(m.debris.claims(), 1);
+    assert!(m.economy.ledger.balanced());
+}
