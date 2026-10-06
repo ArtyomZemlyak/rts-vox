@@ -787,3 +787,5 @@
 | 597 | Read-only observer карты обломков различает scratch allocation, classify dispatch/join, support build/query/drop и gather/sort/dedup. Вложенные parent/leaf scopes не складываются как CPU или чистый wait. Порядок, support physics и snapshot прежние. Повторный parallel-support эксперимент отклонён. Разбор — analysis/190-rubble-support-scopes.md. |
 
 | 598 | Индекс опор карты обломков строится по ячейкам фактических half-unit contact queries; swept область с запасом гравитации применяется к движению. Вход неизменный, точная геометрия и fragment order прежние. Индекс не сохраняется. Разбор — analysis/191-rubble-query-reach.md. |
+
+| 599 | Входящие полосы видимого окна рельефа собираются в существующем compute pool по непересекающимся физическим Z-строкам. Тороида, точные материалы, dents и shadow patches сохраняются; публикация завершённых полос выполняется в том же кадре. Разбор — analysis/192-parallel-camera-strips.md. |

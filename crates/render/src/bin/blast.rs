@@ -1043,6 +1043,22 @@ fn write_window(
     window: TerrainWindow,
     had: Option<TerrainWindow>,
 ) {
+    write_window_in(
+        sim,
+        gas,
+        window,
+        had,
+        had.and_then(|_| bevy::tasks::ComputeTaskPool::try_get().map(|p| &**p)),
+    );
+}
+
+fn write_window_in(
+    sim: &BlastRange,
+    gas: &mut GasInput,
+    window: TerrainWindow,
+    had: Option<TerrainWindow>,
+    pool: Option<&bevy::tasks::TaskPool>,
+) {
     let words = Arc::make_mut(&mut gas.terrain_words);
     let tops = &mut gas.terrain_column_top;
     tops.resize((window.dims[0] * window.dims[2]) as usize, 0);
@@ -1056,101 +1072,19 @@ fn write_window(
         0
     };
     let mut dirty: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut before: Vec<(usize, u32)> = Vec::new();
-    let mut column = vec![0u16; window.dims[1] as usize];
     let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
-        // Remember only rows that can change. Sky already empty in both the
-        // old and new slab needs no write, allocation or GPU upload.
-        assert!(window.dims[0].is_multiple_of(8));
-        assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
-        let dx = window.dims[0] as usize;
-        let dy = window.dims[1] as usize;
-        let row_words = dx / 8;
-        let slab_words = row_words * dy;
-        for z in zs.clone() {
-            let z_words = z as usize % window.dims[2] as usize * slab_words;
-            let next_top = xs
-                .clone()
-                .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
-                .max()
-                .unwrap_or(window.origin[1]);
-            // `terrain_origin.w` is a conservative ceiling for every old
-            // occupied cell. Newly exposed columns can only extend it to
-            // `next_top`; scanning the remaining empty sky on every eight-
-            // voxel camera nudge wasted most of this loop's work.
-            let slot = |x: i32| {
-                (x as u32 % window.dims[0] + window.dims[0] * (z as u32 % window.dims[2])) as usize
-            };
-            let old_top = xs
-                .clone()
-                .map(|x| u32::from(tops[slot(x)]))
-                .max()
-                .unwrap_or(0);
-            let scan_end = (old_top as i32).max(next_top).min(window.span(1).end);
-            for y in window.origin[1]..scan_end {
-                let mut x = xs.start;
-                while x < xs.end {
-                    let wrapped_x = x as usize % dx;
-                    let n = (xs.end - x).min((dx - wrapped_x) as i32);
-                    let i = z_words + y as usize % dy * row_words + wrapped_x / 8;
-                    let span = i..i + n as usize / 8;
-                    if had.is_none() || y < next_top || words[span.clone()].iter().any(|w| *w != 0)
-                    {
-                        if had.is_some() {
-                            before.extend(
-                                words[span.clone()]
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(offset, &word)| (span.start + offset, word)),
-                            );
-                        }
-                        words[span].fill(0);
-                    }
-                    x += n;
-                }
-            }
-            for x in xs.clone() {
-                let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
-                *highest = (*highest).max(top);
-                tops[slot(x)] = top.min(window.span(1).end) as u16;
-                let count = (top.min(window.span(1).end) - window.origin[1]).max(0) as usize;
-                sim.world.column(
-                    x as u32,
-                    z as u32,
-                    window.origin[1] as u32,
-                    &mut column[..count],
-                );
-                let wrapped_x = x as usize % dx;
-                let shift = (wrapped_x % 8) * 4;
-                let base = z_words + wrapped_x / 8;
-                let mut word = base + window.origin[1] as usize % dy * row_words;
-                for &material in &column[..count] {
-                    // Entering rows were cleared above. A column has a fixed
-                    // nibble and advances by one packed row, not three modulo
-                    // operations plus a bounds query for every voxel.
-                    words[word] |= u32::from(material) << shift;
-                    word += row_words;
-                    if word >= base + slab_words {
-                        word -= slab_words;
-                    }
-                }
-            }
-            // A toroidal slot often receives exactly the material it already
-            // held. Publish actual differences, including old solids becoming
-            // air, instead of every row in the entering slab.
-            for (i, old) in before.drain(..) {
-                if words[i] == old {
-                    continue;
-                }
-                if let Some(last) = dirty.last_mut() {
-                    if last.end == i {
-                        last.end += 1;
-                        continue;
-                    }
-                }
-                dirty.push(i..i + 1);
-            }
-        }
+        let (top, patches) = streaming::write_slab(
+            sim,
+            window,
+            words,
+            tops,
+            xs.clone(),
+            zs.clone(),
+            had.is_some(),
+            pool,
+        );
+        *highest = (*highest).max(top);
+        dirty.extend(patches);
         // Surface work is sparse and ordered by X. Apply only actual dents in
         // this entering slab; a BTree lookup at every intact voxel dominated
         // camera panning after the first shot. Publish dents even if the raw

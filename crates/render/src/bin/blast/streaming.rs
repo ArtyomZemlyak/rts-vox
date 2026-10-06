@@ -262,6 +262,188 @@ impl Job {
     }
 }
 
+/// Read entering strips into disjoint physical Z rows. The world is immutable
+/// for the scope; neither a full volume copy nor a staging publication is needed.
+pub(super) fn write_slab(
+    sim: &BlastRange,
+    window: TerrainWindow,
+    words: &mut [u32],
+    tops: &mut [u16],
+    xs: std::ops::Range<i32>,
+    zs: std::ops::Range<i32>,
+    incremental: bool,
+    pool: Option<&bevy::tasks::TaskPool>,
+) -> (i32, Vec<std::ops::Range<usize>>) {
+    let dx = window.dims[0] as usize;
+    let slab = dx * window.dims[1] as usize / 8;
+    let dz = window.dims[2] as usize;
+    let pool = pool.filter(|p| p.thread_num() > 1 && xs.len() * zs.len() >= 512);
+    let rows = zs
+        .len()
+        .div_ceil(pool.map_or(1, |p| p.thread_num() * 2))
+        .max(1);
+    let mut highest = 0;
+    let mut dirty = Vec::new();
+    // Split at the toroidal wrap before borrowing row slices. Replaying scope
+    // results in spawn order also keeps upload patches in world row order.
+    let mut z = zs.start;
+    while z < zs.end {
+        let base = z as usize % dz;
+        let end = zs.end.min(z + (dz - base) as i32);
+        let n = (end - z) as usize;
+        let words = &mut words[base * slab..(base + n) * slab];
+        let tops = &mut tops[base * dx..(base + n) * dx];
+        let results = if let Some(pool) = pool {
+            pool.scope(|scope| {
+                for (i, (words, tops)) in words
+                    .chunks_mut(rows * slab)
+                    .zip(tops.chunks_mut(rows * dx))
+                    .enumerate()
+                {
+                    let first = z + (i * rows) as i32;
+                    let last = end.min(first + rows as i32);
+                    let xs = xs.clone();
+                    scope.spawn(async move {
+                        write_rows(
+                            sim,
+                            window,
+                            words,
+                            tops,
+                            xs,
+                            first..last,
+                            base + i * rows,
+                            incremental,
+                        )
+                    });
+                }
+            })
+        } else {
+            vec![write_rows(
+                sim,
+                window,
+                words,
+                tops,
+                xs.clone(),
+                z..end,
+                base,
+                incremental,
+            )]
+        };
+        for (top, patches) in results {
+            highest = highest.max(top);
+            dirty.extend(patches);
+        }
+        z = end;
+    }
+    (highest, dirty)
+}
+
+fn write_rows(
+    sim: &BlastRange,
+    window: TerrainWindow,
+    words: &mut [u32],
+    tops: &mut [u16],
+    xs: std::ops::Range<i32>,
+    zs: std::ops::Range<i32>,
+    base_z: usize,
+    incremental: bool,
+) -> (i32, Vec<std::ops::Range<usize>>) {
+    let mut highest = 0;
+    let mut dirty: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut before: Vec<(usize, u32)> = Vec::new();
+    let mut column = vec![0u16; window.dims[1] as usize];
+    // Remember only rows that can change. Sky already empty in both the
+    // old and new slab needs no write, allocation or GPU upload.
+    assert!(window.dims[0].is_multiple_of(8));
+    assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
+    let dx = window.dims[0] as usize;
+    let dy = window.dims[1] as usize;
+    let row_words = dx / 8;
+    let slab_words = row_words * dy;
+    for z in zs.clone() {
+        let z_words = (z as usize % window.dims[2] as usize - base_z) * slab_words;
+        let next_top = xs
+            .clone()
+            .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
+            .max()
+            .unwrap_or(window.origin[1]);
+        // `terrain_origin.w` is a conservative ceiling for every old
+        // occupied cell. Newly exposed columns can only extend it to
+        // `next_top`; scanning the remaining empty sky on every eight-
+        // voxel camera nudge wasted most of this loop's work.
+        let slot = |x: i32| x as usize % dx + dx * (z as usize % window.dims[2] as usize - base_z);
+        let old_top = xs
+            .clone()
+            .map(|x| u32::from(tops[slot(x)]))
+            .max()
+            .unwrap_or(0);
+        let scan_end = (old_top as i32).max(next_top).min(window.span(1).end);
+        for y in window.origin[1]..scan_end {
+            let mut x = xs.start;
+            while x < xs.end {
+                let wrapped_x = x as usize % dx;
+                let n = (xs.end - x).min((dx - wrapped_x) as i32);
+                let i = z_words + y as usize % dy * row_words + wrapped_x / 8;
+                let span = i..i + n as usize / 8;
+                if !incremental || y < next_top || words[span.clone()].iter().any(|w| *w != 0) {
+                    if incremental {
+                        before.extend(
+                            words[span.clone()]
+                                .iter()
+                                .enumerate()
+                                .map(|(offset, &word)| (span.start + offset, word)),
+                        );
+                    }
+                    words[span].fill(0);
+                }
+                x += n;
+            }
+        }
+        for x in xs.clone() {
+            let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
+            highest = (highest).max(top);
+            tops[slot(x)] = top.min(window.span(1).end) as u16;
+            let count = (top.min(window.span(1).end) - window.origin[1]).max(0) as usize;
+            sim.world.column(
+                x as u32,
+                z as u32,
+                window.origin[1] as u32,
+                &mut column[..count],
+            );
+            let wrapped_x = x as usize % dx;
+            let shift = (wrapped_x % 8) * 4;
+            let base = z_words + wrapped_x / 8;
+            let mut word = base + window.origin[1] as usize % dy * row_words;
+            for &material in &column[..count] {
+                // Entering rows were cleared above. A column has a fixed
+                // nibble and advances by one packed row, not three modulo
+                // operations plus a bounds query for every voxel.
+                words[word] |= u32::from(material) << shift;
+                word += row_words;
+                if word >= base + slab_words {
+                    word -= slab_words;
+                }
+            }
+        }
+        // A toroidal slot often receives exactly the material it already
+        // held. Publish actual differences, including old solids becoming
+        // air, instead of every row in the entering slab.
+        for (i, old) in before.drain(..) {
+            if words[i] == old {
+                continue;
+            }
+            if let Some(last) = dirty.last_mut() {
+                if last.end == base_z * slab_words + i {
+                    last.end += 1;
+                    continue;
+                }
+            }
+            dirty.push(base_z * slab_words + i..base_z * slab_words + i + 1);
+        }
+    }
+    (highest, dirty)
+}
+
 pub fn camera(
     scene: Res<Scene>,
     mut camera: Query<(&mut Transform, &mut Projection), With<GasCamera>>,
@@ -590,25 +772,37 @@ mod tests {
         }
         assert_eq!(steps, 8);
         assert_eq!(&job.words, direct.terrain_words.as_ref());
-        for origin in [[0, 0, 0], [56, 0, 72], [72, 0, 88]] {
-            let mut streamed = GasInput::default();
-            streamed.terrain_words = Arc::new(vec![0; window.words()]);
-            let previous = TerrainWindow {
-                origin,
-                dims: window.dims,
-            };
-            write_window(&sim, &mut streamed, previous, None);
-            let mut patched = streamed.terrain_words.as_ref().clone();
-            streamed.terrain_dirty.clear();
-            write_window(&sim, &mut streamed, window, Some(previous));
-            assert_eq!(streamed.terrain_words, direct.terrain_words);
-            for r in &streamed.terrain_dirty {
-                patched[r.clone()].copy_from_slice(&streamed.terrain_words[r.clone()]);
+        for workers in [1, 2, 4, 8] {
+            let pool = bevy::tasks::TaskPoolBuilder::new()
+                .num_threads(workers)
+                .build();
+            for origin in [
+                [0, 0, 0],
+                [56, 0, 72],
+                [72, 0, 88],
+                [64, 0, 72],
+                [56, 0, 80],
+            ] {
+                let mut streamed = GasInput::default();
+                streamed.terrain_words = Arc::new(vec![0; window.words()]);
+                let previous = TerrainWindow {
+                    origin,
+                    dims: window.dims,
+                };
+                write_window(&sim, &mut streamed, previous, None);
+                let mut patched = streamed.terrain_words.as_ref().clone();
+                streamed.terrain_dirty.clear();
+                write_window_in(&sim, &mut streamed, window, Some(previous), Some(&pool));
+                assert_eq!(streamed.terrain_words, direct.terrain_words);
+                assert_eq!(streamed.terrain_column_top, direct.terrain_column_top);
+                for r in &streamed.terrain_dirty {
+                    patched[r.clone()].copy_from_slice(&streamed.terrain_words[r.clone()]);
+                }
+                assert_eq!(
+                    patched, job.words,
+                    "streamed dents must be included in upload patches"
+                );
             }
-            assert_eq!(
-                patched, job.words,
-                "streamed dents must be included in upload patches"
-            );
         }
         let mut uploaded = before;
         for r in job.aliases.ranges() {

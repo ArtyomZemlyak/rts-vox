@@ -2395,3 +2395,15 @@ rubble mean −3.40/4.49%, без устойчивого выигрыша full t
 Update, presentation15.661мс. Следующий общий приоритет — WBPERF-002 и
 camera presentation/streaming tails; rare stalls/P-87 остаются открыты.
 Подробности — analysis/191-rubble-query-reach.md.
+
+ADR-599: инкрементальные входящие полосы камеры обрабатываются существующим
+compute pool на независимых Z-строках. Тороида, dents, ceilings и GPU patches
+сохранены, детализация прежняя.136render tests проходят; отдельно чистый
+индекс:4streaming/21moving. Оба native сравнения валидны,1800ticks/hash и
+alive/shots/damage одинаковы,0blocked camera samples.
+Малые shifts mean4.756→2.035/1.947мс,max13.798→5.660/5.552; на вошедшую
+колонку −53–55%. Общий FPS остаётся≈106,165FPS не достигнуты.
+Большие publication/occupancy задержки до18мс и synchronous core≈11.4мс
+остаются: WBPERF-009/002, rare stalls и P-87 не закрыты. Для следующего
+разбора нужны отдельные COW/strip join/publication/occupancy scopes.
+Подробности — analysis/192-parallel-camera-strips.md.
