@@ -77,6 +77,37 @@ impl Heat {
     pub fn hot(&self) -> usize {
         self.cells.len()
     }
+    /// Forecast only this field's next bounded source slice, using saved heat
+    /// rather than the transient `melting` list from a previous tick.
+    pub(crate) fn melting_slots(
+        &self,
+        world: &World,
+        mats: &Registry,
+        work: usize,
+        limit: usize,
+        claimed: impl Fn([u32; 3]) -> bool,
+    ) -> usize {
+        if limit == 0 || self.cells.is_empty() {
+            return 0;
+        }
+        let start = self.cursor.unwrap_or([u32::MAX; 3]);
+        // Terrain heat's cursor is the next source, inclusive. Unit heat and
+        // exchange instead save their last processed source.
+        self.cells
+            .range(start..)
+            .chain(self.cells.range(..start))
+            .take(work.max(1))
+            .filter(|&(p, c)| {
+                c.burn == 0
+                    && !claimed(*p)
+                    && !world.on_frame(p[0], p[1], p[2])
+                    && mats
+                        .get(world.material(p[0], p[1], p[2]))
+                        .is_some_and(|m| m.melt > 0 && c.heat >= m.melt)
+            })
+            .take(limit)
+            .count()
+    }
     pub fn burning(&self) -> usize {
         self.cells.values().filter(|c| c.burn > 0).count()
     }
@@ -676,6 +707,35 @@ mod tests {
     fn mats() -> Registry {
         modding::data::materials_from_ron(include_str!("../../../data/range-materials.ron"))
             .unwrap()
+    }
+    #[test]
+    fn melt_reservation_forecast_uses_the_inclusive_saved_cursor_and_bounded_work() {
+        let mut w = World::new(64, 64, 64, 100, Box::new(Flat));
+        let mut heat = Heat::default();
+        for x in 5..8 {
+            w.queue_edit(voxel::Edit::put(x, 20, 5, 3));
+        }
+        w.flush();
+        for x in 5..8 {
+            heat.add(&w, [x, 20, 5], if x == 6 { 1000 } else { 1 });
+        }
+        heat.cursor = Some([6, 20, 5]);
+        let registry = mats();
+        assert_eq!(heat.melting_slots(&w, &registry, 1, 1, |_| false), 1);
+        assert_eq!(heat.melting_slots(&w, &registry, 1, 1, |_| true), 0);
+        assert_eq!(heat.melting_slots(&w, &registry, 1, 0, |_| false), 0);
+        let mut saved = Blob::new();
+        heat.save(&mut saved);
+        let restored = Heat::load(&mut Scan::new(&saved.v), &w, &tuning()).unwrap();
+        assert_eq!(restored.melting_slots(&w, &registry, 1, 1, |_| false), 1);
+        let mut actual = heat.clone();
+        let mut t = tuning();
+        t.cells_per_tick = 1;
+        actual.step(&mut w, &registry, &t, |_| false);
+        assert_eq!(actual.melting, vec![[6, 20, 5]]);
+        heat.cursor = Some([7, 20, 5]);
+        assert_eq!(heat.melting_slots(&w, &registry, 2, 1, |_| false), 0);
+        assert_eq!(heat.melting_slots(&w, &registry, 3, 1, |_| false), 1);
     }
     #[test]
     fn parallel_world_reads_and_ordered_commit_match_reference_across_workers() {

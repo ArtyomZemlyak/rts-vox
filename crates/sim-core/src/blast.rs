@@ -4021,6 +4021,7 @@ impl BlastRange {
     ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
+        self.reserve_thermal_fragments();
         let changed = self.refresh_rubble(&physics_detail);
         completed("rubble");
         self.step_kinetic_jobs();
@@ -4629,6 +4630,7 @@ impl BlastRange {
         }
         self.step_unit_heat_observed(&mut detail, &|_, event| physics_detail(5, event));
         detail("heat_units");
+        self.reserve_thermal_fragments();
         self.world.flush();
         self.world_changed = nav::vehicle::Changed::default();
         for e in self.world.edits() {

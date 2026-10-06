@@ -10,7 +10,7 @@ impl Matter {
         // list and its order, including blocked candidates, exactly as before.
         for i in 0..heat.melting.len() {
             let p = heat.melting[i];
-            if self.melt_with_room(world, p, &mut room) {
+            if self.melt_with_room(world, p, &mut room, true) {
                 heat.forget(p);
                 heat.melted_total += 1;
             }

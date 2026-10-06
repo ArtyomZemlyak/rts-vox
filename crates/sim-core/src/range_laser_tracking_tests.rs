@@ -197,7 +197,11 @@ fn spider_laser_tracking_quickly_melts_the_actual_armour_of_every_combat_class()
         beam(&mut r);
         let first = r.tick;
         let mut death = None;
-        for _ in 0..if kind == RangeUnitKind::Spider { 240 } else { 120 } {
+        for _ in 0..if kind == RangeUnitKind::Spider {
+            240
+        } else {
+            120
+        } {
             if !r.units[1].status.alive {
                 death = Some(r.tick - first);
                 break;
@@ -209,13 +213,103 @@ fn spider_laser_tracking_quickly_melts_the_actual_armour_of_every_combat_class()
             r.units[1].integrity.core, r.thermals.melted
         );
         assert!(
-            death.is_some_and(|t| t <= if kind == RangeUnitKind::Spider { 180 } else { 90 }),
+            death.is_some_and(|t| t
+                <= if kind == RangeUnitKind::Spider {
+                    180
+                } else {
+                    90
+                }),
             "siege beam failed against {kind:?}"
         );
         assert!(r.thermals.melted > 0);
         assert!(r.units[0].removed.is_empty());
         assert!(r.matter.economy.ledger.balanced());
     }
+}
+
+#[test]
+fn spider_live_beam_keeps_melting_armour_while_a_hot_crater_competes_for_slots() {
+    let mut r = trial(
+        &[(RangeUnitKind::Tank, [450, 16, 336])],
+        vec![RangeBlock {
+            min: [40, 20, 40],
+            max: [72, 127, 72],
+            material: 3,
+        }],
+    );
+    r.matter.tuning.max_flying = 512;
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    beam(&mut r);
+    let first = r.tick;
+    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    replay.matter.tuning.max_flying = 512; // authored tuning is not stored in saves
+    for _ in 0..120 {
+        for sim in [&mut r, &mut replay] {
+            for x in 40..72 {
+                for z in 40..72 {
+                    let y = sim.world.column_ceiling(x, z).saturating_sub(1);
+                    sim.heat.add(&sim.world, [x, y, z], 100_000);
+                }
+            }
+            step(sim);
+            assert!(sim.matter.debris.fragment_pools(&sim.matter.tuning).flying <= 512);
+            assert!(sim.matter.economy.ledger.balanced());
+        }
+        assert_eq!(r.state_hash(), replay.state_hash());
+        if !r.units[1].status.alive {
+            break;
+        }
+    }
+    eprintln!(
+        "contested siege beam: ticks={} alive={} melted={} terrain_melt={:?}",
+        r.tick - first,
+        r.units[1].status.alive,
+        r.thermals.melted,
+        r.matter.admission.terrain_melt
+    );
+    assert!(
+        !r.units[1].status.alive,
+        "live siege beam was starved by unrelated terrain melting"
+    );
+    assert!(r.thermals.melted > 0);
+    assert!(r.matter.admission.terrain_melt[1] > 0);
+}
+
+#[test]
+fn laser_heated_steel_cover_reserves_capacity_before_unrelated_wave_damage() {
+    let mut r = trial(
+        &[(RangeUnitKind::Tank, [450, 16, 336])],
+        vec![RangeBlock {
+            min: [40, 20, 40],
+            max: [44, 24, 44],
+            material: 3,
+        }],
+    );
+    r.matter.tuning.max_flying = 1;
+    r.matter.tuning.max_fragments = 1;
+    let p = [41, 23, 41];
+    r.heat.add(&r.world, p, 16_000);
+    r.reserve_thermal_fragments();
+    assert_eq!(r.matter.claim_room(), 0);
+    r.matter.begin(1_000_000, 2);
+    assert!(matches!(
+        r.matter.ground(&mut r.world, [43, 23, 43], [42, 23, 42]),
+        matter::ClaimResult::Deferred
+    ));
+    let before = r.matter.remaining_mj;
+    r.heat.melting.push(p);
+    r.matter.melt_ground(&mut r.world, &mut r.heat);
+    assert_eq!(r.matter.debris.claims(), 1);
+    assert_eq!(r.heat.melted_total, 1);
+    assert_eq!(
+        r.matter.remaining_mj, before,
+        "thermal runoff has no blast cost"
+    );
+    r.world.flush();
+    r.matter.flush(&r.world, true, 98, 0, &[], &[]);
+    assert!(!r.world.solid(p[0], p[1], p[2]));
+    assert!(r.world.solid(43, 23, 43));
+    assert!(r.matter.economy.ledger.balanced());
 }
 
 #[test]

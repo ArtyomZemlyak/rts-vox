@@ -4658,6 +4658,22 @@ impl Bursts {
         gravity: Fx,
         tick: u64,
         around: Surroundings<'_>,
+        completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
+        self.step_fragments_reserved(world, e, t, gravity, tick, around, 0, completed, task);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_fragments_reserved(
+        &mut self,
+        world: &voxel::World,
+        e: &mut Economy,
+        t: &Blast,
+        gravity: Fx,
+        tick: u64,
+        around: Surroundings<'_>,
+        thermal_reserve: u32,
         mut completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
@@ -4686,9 +4702,10 @@ impl Bursts {
         // flying slot until its dig lands and it becomes a piece: a
         // waking piece does not take it (ADR-443).
         let (pool, parked_end) = self.fragment_pool_snapshot(t);
-        let mut room = (t.max_flying as usize).saturating_sub(pool.flying + self.claims.len());
-        let mut working_room =
-            (t.max_fragments as usize).saturating_sub(pool.working + self.claims.len());
+        let mut room = (t.max_flying as usize)
+            .saturating_sub(pool.flying + self.claims.len() + thermal_reserve as usize);
+        let mut working_room = (t.max_fragments as usize)
+            .saturating_sub(pool.working + self.claims.len() + thermal_reserve as usize);
         // Wakeups claim working slots in the frozen source order. A parked
         // piece never borrows a slot reserved by a pending terrain dig.
         // These queries read the frozen surroundings and only this piece.

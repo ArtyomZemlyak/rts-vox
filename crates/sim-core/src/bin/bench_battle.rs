@@ -756,6 +756,13 @@ fn main() {
                     sim.tick, laser_contact_kinds
                 );
                 laser_contact_kinds.fill(0);
+                println!(
+                    "damage_unit_heat tick={} hot={} melted={} rejected_heat={}",
+                    sim.tick,
+                    sim.thermals.hot(),
+                    sim.thermals.melted,
+                    sim.thermals.rejected_heat
+                );
                 let admission = sim.matter.admission;
                 let pool = sim.matter.debris.fragment_pools(&sim.matter.tuning);
                 println!("damage_storage tick={} working={} parked={} flying={} working_cap={} parked_cap={} record_bytes={} section_bytes={}",

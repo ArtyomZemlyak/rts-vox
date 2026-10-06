@@ -64,6 +64,10 @@ fn fell_cell(key: u64) -> [i32; 3] {
 
 pub struct Matter {
     batch: Option<fracture::Batch>,
+    /// Derived phase-local admission guard, rebuilt from the saved heat field.
+    /// It is not additional capacity and never survives a simulation tick.
+    thermal_reserve: u32,
+    body_heat_reserve: u32,
     pub debris: Bursts,
     /// Diagnostic attempts since construction/load; excluded from snapshots
     /// and authoritative hashes. Never used to choose work or damage.
@@ -161,6 +165,8 @@ impl Matter {
             .collect();
         Self {
             batch: None,
+            thermal_reserve: 0,
+            body_heat_reserve: 0,
             debris: Bursts::default(),
             admission: AdmissionProfile::default(),
             fragment_box: 2,
@@ -184,10 +190,21 @@ impl Matter {
             .and_then(|batch| batch.room)
             .unwrap_or_else(|| self.scan_claim_room())
     }
+    pub(super) fn reserve_heat(&mut self, body: usize, ground: usize) {
+        self.body_heat_reserve = body.min(self.tuning.max_flying as usize) as u32;
+        self.thermal_reserve = body
+            .saturating_add(ground)
+            .min(self.tuning.max_flying as usize) as u32;
+    }
+    fn ordinary_fragment_room(&self) -> u32 {
+        self.debris
+            .fragment_room(&self.tuning)
+            .saturating_sub(self.thermal_reserve)
+    }
     fn scan_claim_room(&mut self) -> u32 {
         self.admission.room_scans += 1;
         self.admission.room_items += self.debris.fragments.len() as u64;
-        self.debris.fragment_room(&self.tuning)
+        self.ordinary_fragment_room()
     }
     fn consume_body_slot(&mut self) {
         if let Some(room) = self.batch.as_mut().and_then(|batch| batch.room.as_mut()) {
@@ -274,7 +291,7 @@ impl Matter {
             }
             let (cost, motion) = self.cost(m);
             let claimed = if optimized {
-                let capacity = room.get_or_insert_with(|| self.debris.fragment_room(&self.tuning));
+                let capacity = room.get_or_insert_with(|| self.ordinary_fragment_room());
                 self.debris.claim_voxel_with_room(
                     w,
                     p,
@@ -334,7 +351,7 @@ impl Matter {
             }
             // Felled wood crumbles in two-cell pieces whatever the weapon.
             let claimed = if optimized {
-                let capacity = room.get_or_insert_with(|| self.debris.fragment_room(&self.tuning));
+                let capacity = room.get_or_insert_with(|| self.ordinary_fragment_room());
                 self.debris
                     .claim_voxel_with_room(w, q, m, seed, 0, 2, &self.tuning, capacity)
             } else {
@@ -393,11 +410,17 @@ impl Matter {
     /// material, its matter moving from the ground to the piece, with no
     /// throw. `false` when the pool has no room; it then stays hot.
     pub fn melt(&mut self, w: &mut World, p: [u32; 3]) -> bool {
-        self.melt_with_room(w, p, &mut None)
+        self.melt_with_room(w, p, &mut None, false)
     }
     /// Claim-only terrain pass. A reservation never survives confirmation,
     /// fragment physics, tuning changes, or the end of the caller's pass.
-    fn melt_with_room(&mut self, w: &mut World, p: [u32; 3], room: &mut Option<u32>) -> bool {
+    fn melt_with_room(
+        &mut self,
+        w: &mut World,
+        p: [u32; 3],
+        room: &mut Option<u32>,
+        thermal: bool,
+    ) -> bool {
         self.admission.terrain_melt[0] += 1;
         let m = w.material(p[0], p[1], p[2]);
         if m == 0 || self.economy.mats.get(m).is_none() || !claimable(w, p.map(|v| v as i32)) {
@@ -406,7 +429,13 @@ impl Matter {
         let room = room.get_or_insert_with(|| {
             self.admission.terrain_melt[2] += 1;
             self.admission.terrain_melt[3] += self.debris.fragments.len() as u64;
-            self.debris.fragment_room(&self.tuning)
+            if thermal {
+                self.debris
+                    .fragment_room(&self.tuning)
+                    .saturating_sub(self.body_heat_reserve)
+            } else {
+                self.ordinary_fragment_room()
+            }
         });
         let at = p.map(|v| v as i32);
         let applied = self
@@ -1033,16 +1062,19 @@ impl Matter {
             self.economy.ledger.sink(self.economy.ground, amount, sink);
         }
         completed("debris_confirm");
-        self.debris.step_fragments_observed(
+        self.debris.step_fragments_reserved(
             w,
             &mut self.economy,
             &self.tuning,
             Fx::from_ratio(gravity, crate::TICKS_PER_SECOND.pow(2)),
             tick,
             crate::burst::Surroundings { hulls, yielding },
+            self.thermal_reserve,
             completed,
             task,
         );
+        self.thermal_reserve = 0;
+        self.body_heat_reserve = 0;
     }
     pub fn save(&self, b: &mut Blob) {
         assert!(self.batch.is_none(), "fracture batches are atomic");
@@ -1076,6 +1108,8 @@ impl Matter {
     }
     pub fn load(&mut self, s: &mut Scan, w: &World, units: &[RangeUnit]) -> Option<()> {
         self.admission = AdmissionProfile::default();
+        self.thermal_reserve = 0;
+        self.body_heat_reserve = 0;
         self.fragment_box = s.u8();
         if !(1..=4).contains(&self.fragment_box) {
             return None;

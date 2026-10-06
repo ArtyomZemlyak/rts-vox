@@ -134,6 +134,21 @@ impl Thermals {
     pub fn hot(&self) -> usize {
         self.cells.len()
     }
+    /// Bounded forecast for the next melting pass. Warm smoke/glow alone
+    /// must not withhold capacity from ordinary projectile damage.
+    pub(super) fn melting_slots(&self, units: &[RangeUnit], t: &Tuning) -> usize {
+        self.batch_after(self.cursor, t.cells_per_tick)
+            .into_iter()
+            .filter(|&p| {
+                p.body(units).is_some_and(|body| {
+                    let [x, y, z] = p.at.map(usize::from);
+                    temperature(self.heat(p), body.mm)
+                        >= t.softening[body.part_at(x, y, z) as usize]
+                        && !units[usize::from(p.unit)].section_holds(usize::from(p.part), p.at)
+                })
+            })
+            .count()
+    }
     pub fn heat(&self, p: Cell) -> u32 {
         self.cells.get(&p).copied().unwrap_or(0)
     }
@@ -280,9 +295,6 @@ impl Thermals {
                 self.cells.remove(&p);
                 continue;
             };
-            if room == 0 {
-                continue;
-            }
             let cell = p.at.map(usize::from);
             let role = body.part_at(cell[0], cell[1], cell[2]) as usize;
             if temperature(self.heat(p), body.mm) < t.softening[role] {
@@ -375,6 +387,19 @@ impl Thermals {
     }
 }
 impl BlastRange {
+    pub(super) fn reserve_thermal_fragments(&mut self) {
+        let slots = self
+            .thermals
+            .melting_slots(&self.units, &self.thermal_tuning);
+        let ground = self.heat.melting_slots(
+            &self.world,
+            &self.matter.economy.mats,
+            self.heat_tuning.cells_per_tick,
+            self.thermal_tuning.cells_per_tick.saturating_sub(slots),
+            |p| self.matter.debris.claimed(p),
+        );
+        self.matter.reserve_heat(slots, ground);
+    }
     #[cfg(test)]
     pub(super) fn step_unit_heat(&mut self) {
         self.step_unit_heat_observed(|_| {}, &|_, _| {});
@@ -660,6 +685,11 @@ mod tests {
         r.step_unit_heat();
         assert!(p.body(&r.units).is_some());
         assert_eq!(r.thermals.heat(p), 500);
+        assert_eq!(
+            r.matter.admission.melt,
+            [0, 1],
+            "full-pool melt must be observable"
+        );
         r.matter.tuning.max_fragments = cap;
         r.step_unit_heat();
         assert!(p.body(&r.units).is_none());
@@ -693,6 +723,68 @@ mod tests {
         assert_eq!(r.thermals.melted, 2);
         assert!(waiting.body(&r.units).is_none());
         assert_eq!(r.thermals.hot(), 0);
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    #[test]
+    fn hot_armour_reservation_blocks_terrain_without_increasing_physical_capacity() {
+        let mut r = range();
+        let p = cell(&r, Part::Engine);
+        r.thermal_tuning.cooling_milli = 0;
+        r.thermal_tuning.conduction_milli = 0;
+        r.thermals.deposit(p, 500, &r.thermal_tuning);
+        r.matter.tuning.max_flying = 1;
+        r.matter.tuning.max_fragments = 1;
+        r.reserve_thermal_fragments();
+        assert_eq!(r.matter.claim_room(), 0);
+        assert!(!r.matter.melt(&mut r.world, [40, 3, 40]));
+        assert_eq!(r.matter.debris.claims(), 0);
+        r.step_unit_heat();
+        assert!(p.body(&r.units).is_none());
+        assert_eq!(r.matter.debris.fragments.len(), 1);
+        assert_eq!(r.matter.debris.fragment_room(&r.matter.tuning), 0);
+        assert!(r.matter.economy.ledger.balanced());
+        assert_eq!(r.matter.tuning.max_flying, 1);
+    }
+    #[test]
+    fn warm_smoking_armour_does_not_reserve_projectile_capacity() {
+        let mut r = range();
+        let p = cell(&r, Part::Armour);
+        r.thermals
+            .deposit(p, r.thermal_tuning.smoke, &r.thermal_tuning);
+        r.matter.tuning.max_flying = 1;
+        r.matter.tuning.max_fragments = 1;
+        r.reserve_thermal_fragments();
+        assert_eq!(r.matter.claim_room(), 1);
+        assert!(r.matter.melt(&mut r.world, [40, 3, 40]));
+    }
+    #[test]
+    fn sleeping_debris_cannot_take_the_next_hot_armour_slot() {
+        let mut r = range();
+        let p = cell(&r, Part::Engine);
+        r.thermal_tuning.cooling_milli = 0;
+        r.thermal_tuning.conduction_milli = 0;
+        assert!(r.matter.melt(&mut r.world, [40, 3, 40]));
+        r.world.flush();
+        r.matter
+            .debris
+            .confirm(r.world.completed(), &mut r.matter.economy, &r.matter.tuning);
+        assert_eq!(r.matter.debris.fragments.len(), 1);
+        let f = &mut r.matter.debris.fragments[0];
+        f.resting = true;
+        f.position.y = Fx::from_int(80); // Unsupported pile waiting to wake.
+        r.matter.tuning.max_flying = 1;
+        r.matter.tuning.max_fragments = 2;
+        r.thermals.deposit(p, 500, &r.thermal_tuning);
+        for tick in 0..60 {
+            r.reserve_thermal_fragments();
+            r.world.flush();
+            r.matter.flush(&r.world, true, 98, tick, &[], &[]);
+            assert_eq!(r.matter.debris.fragment_pools(&r.matter.tuning).flying, 0);
+        }
+        assert_eq!(r.matter.debris.wakeups, 0);
+        r.step_unit_heat();
+        assert!(p.body(&r.units).is_none());
+        assert_eq!(r.matter.debris.fragment_pools(&r.matter.tuning).flying, 1);
         assert!(r.matter.economy.ledger.balanced());
     }
     #[test]

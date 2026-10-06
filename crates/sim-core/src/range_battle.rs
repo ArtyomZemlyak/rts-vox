@@ -1429,6 +1429,8 @@ impl BlastRange {
             self.battle_orders(&mut battle, &mut completed, physics);
         }
         completed("battle_orders");
+        // New live beam deposits must reserve admission before wave/crater work.
+        self.reserve_thermal_fragments();
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
         self.battle_flight(&mut battle);
         completed("battle_flight");
