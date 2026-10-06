@@ -41,6 +41,9 @@ mod structure;
 #[cfg(test)]
 #[path = "range_support_tests.rs"]
 mod support_tests;
+#[cfg(test)]
+#[path = "range_wave_resume_tests.rs"]
+mod wave_resume_tests;
 
 /// The range as it is without a layout to say otherwise. A layout
 /// carries its own size (ADR-315), and the scene reads it from there.
@@ -1783,6 +1786,19 @@ impl Explosion {
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
         c: &ExplosionConfig,
+        matter: Option<&mut matter::Matter>,
+    ) {
+        self.step_contacts::<true>(w, budget, units, dents, changed, c, matter);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn step_contacts<const RESUME_GROUND: bool>(
+        &mut self,
+        w: &mut World,
+        budget: usize,
+        units: &mut [RangeUnit],
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
     ) {
         if self.pending.is_empty() {
@@ -1790,6 +1806,46 @@ impl Explosion {
         }
         let edge = self.cell as usize;
         let actors = units.len() + 1;
+        let resume_ground = !self.pending.is_empty()
+            && self.body_cursor == 0
+            && self.contact_cursor % actors == units.len();
+        if let Some(m) = matter.as_deref_mut() {
+            m.admission.wave_geometry[2] += u64::from(resume_ground);
+        }
+        // This cursor has already passed every unit for the current subcell.
+        // Retry its live ground contact before rebuilding any unit transforms.
+        // The test-only eager instantiation exercises the old preparation order.
+        if RESUME_GROUND && resume_ground {
+            let hit = self.pending.front().copied().unwrap();
+            let subcell = self.contact_cursor / actors;
+            let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
+            let q = [
+                p[0] + (subcell % edge) as i32,
+                p[1] + (subcell / edge % edge) as i32,
+                p[2] + (subcell / (edge * edge)) as i32,
+            ];
+            if !self.ground_contact(w, q, hit.pressure, dents, changed, c, matter.as_deref_mut()) {
+                if let Some(m) = matter.as_deref_mut() {
+                    m.admission.wave_geometry[3] += 1;
+                }
+                return;
+            }
+            self.contact_cursor += 1;
+            if self.contact_cursor == edge.pow(3) * actors {
+                self.contact_cursor = 0;
+                self.pending.pop_front();
+            }
+            if self.pending.is_empty() {
+                if let Some(m) = matter.as_deref_mut() {
+                    m.admission.wave_geometry[3] += 1;
+                }
+                return;
+            }
+        }
+        if let Some(m) = matter.as_deref_mut() {
+            m.admission.wave_geometry[0] += 1;
+            m.admission.wave_geometry[1] += units.len() as u64;
+        }
         let queries: Vec<_> = units
             .iter()
             .enumerate()
@@ -1966,55 +2022,74 @@ impl Explosion {
                         self.body_cursor += 1;
                     }
                     self.body_cursor = 0;
-                } else {
-                    let m = material(w, q);
-                    if m != 0 && hit.pressure > 0 {
-                        let total = dents
-                            .get(&q)
-                            .copied()
-                            .unwrap_or(0)
-                            .saturating_add(hit.pressure);
-                        let mut apply = true;
-                        if total >= material_work(m, c) {
-                            if let Some(m) =
-                                matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
-                            {
-                                match m.ground(w, q, self.at) {
-                                    matter::ClaimResult::Applied => (),
-                                    matter::ClaimResult::Unaffordable
-                                    | matter::ClaimResult::Indestructible => apply = false,
-                                    matter::ClaimResult::Deferred => return,
-                                }
-                            } else if matter
-                                .as_ref()
-                                .is_some_and(|m| m.debris.claimed(q.map(|v| v as u32)))
-                            {
-                                apply = false;
-                            } else {
-                                w.queue_edit(voxel::world::Edit::dig_if(
-                                    q[0] as u32,
-                                    q[1] as u32,
-                                    q[2] as u32,
-                                    m,
-                                ));
-                            }
-                            if apply {
-                                dents.remove(&q);
-                                self.queued += 1;
-                            }
-                        } else {
-                            dents.insert(q, total);
-                        }
-                        if apply {
-                            changed.push(q);
-                        }
-                    }
+                } else if !self.ground_contact(
+                    w,
+                    q,
+                    hit.pressure,
+                    dents,
+                    changed,
+                    c,
+                    matter.as_deref_mut(),
+                ) {
+                    return;
                 }
                 self.contact_cursor += 1;
             }
             self.contact_cursor = 0;
             self.pending.pop_front();
         }
+    }
+    /// Apply exactly one live terrain contact. False leaves its cursor and
+    /// unpaid work intact, so the same contact can be retried after admission.
+    #[allow(clippy::too_many_arguments)]
+    fn ground_contact(
+        &mut self,
+        w: &mut World,
+        q: [i32; 3],
+        pressure: u32,
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
+        mut matter: Option<&mut matter::Matter>,
+    ) -> bool {
+        let m = material(w, q);
+        if m != 0 && pressure > 0 {
+            let total = dents.get(&q).copied().unwrap_or(0).saturating_add(pressure);
+            let mut apply = true;
+            if total >= material_work(m, c) {
+                if let Some(m) = matter.as_deref_mut().filter(|_| c.material_energy_j > 0) {
+                    match m.ground(w, q, self.at) {
+                        matter::ClaimResult::Applied => (),
+                        matter::ClaimResult::Unaffordable | matter::ClaimResult::Indestructible => {
+                            apply = false
+                        }
+                        matter::ClaimResult::Deferred => return false,
+                    }
+                } else if matter
+                    .as_ref()
+                    .is_some_and(|m| m.debris.claimed(q.map(|v| v as u32)))
+                {
+                    apply = false;
+                } else {
+                    w.queue_edit(voxel::world::Edit::dig_if(
+                        q[0] as u32,
+                        q[1] as u32,
+                        q[2] as u32,
+                        m,
+                    ));
+                }
+                if apply {
+                    dents.remove(&q);
+                    self.queued += 1;
+                }
+            } else {
+                dents.insert(q, total);
+            }
+            if apply {
+                changed.push(q);
+            }
+        }
+        true
     }
 }
 

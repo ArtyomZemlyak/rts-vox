@@ -86,6 +86,9 @@ pub struct AdmissionProfile {
     pub body: [u64; 3],
     /// Ground: applied, unaffordable, no room, claim cap, duplicate, frame/outside.
     pub ground: [u64; 6],
+    /// Wave geometry: builds, units prepared, world resumes, builds avoided.
+    /// Observations only; like the other counters, excluded from state/save.
+    pub wave_geometry: [u64; 4],
     /// Body melt: applied, pool deferred.
     pub melt: [u64; 2],
     /// Full fragment array visits for admission (not physics queries).

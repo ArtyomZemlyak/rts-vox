@@ -774,6 +774,12 @@ fn main() {
                     sim.tick,
                     [0, 1, 2, 3, 4, 5].map(|i| admission.ground[i] - admission_previous.ground[i])
                 );
+                println!(
+                    "damage_wave_geometry tick={} builds_units_world_resumes_avoided={:?}",
+                    sim.tick,
+                    [0, 1, 2, 3]
+                        .map(|i| admission.wave_geometry[i] - admission_previous.wave_geometry[i])
+                );
                 admission_previous = admission;
                 println!(
                     "damage_wake tick={} resumed={}",
