@@ -65,6 +65,62 @@ pub enum Order {
     Attack(usize),
     Ground([i32; 3]),
 }
+/// Opt-in observations of actual fire gates, never input to simulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FireGate {
+    NoTarget,
+    Disabled,
+    Hold,
+    Approach,
+    Reload,
+    Aiming,
+    Charging,
+    WaveCapacity,
+    RoundCapacity,
+    SolidCapacity,
+    NoMuzzle,
+    Beam,
+    Fired,
+    BurstQueue,
+}
+impl FireGate {
+    pub const COUNT: usize = 14;
+    pub const NAMES: [&'static str; Self::COUNT] = [
+        "no_target",
+        "disabled",
+        "hold",
+        "approach",
+        "reload",
+        "aiming",
+        "charging",
+        "wave_capacity",
+        "round_capacity",
+        "solid_capacity",
+        "no_muzzle",
+        "beam_path",
+        "fired",
+        "burst_queue",
+    ];
+}
+fn record_gate(trace: &mut Option<Vec<FireGate>>, id: usize, gate: FireGate) {
+    if let Some(trace) = trace {
+        trace[id] = gate;
+    }
+}
+/// Read-only progress of each canonical wave; heap pops are not contact counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WaveProgress {
+    pub weapon: Weapon,
+    pub at: [i32; 3],
+    pub capturing: bool,
+    pub frontier_finished: bool,
+    pub heap_examined: usize,
+    pub pending: usize,
+    pub contact_cursor: usize,
+    pub body_cursor: usize,
+    pub energy_mj: u64,
+}
 pub struct Actor {
     pub turret: crate::turret::Traverse,
     pub elevation: crate::turret::Traverse,
@@ -77,6 +133,20 @@ pub struct Actor {
     pub fired: u32,
     /// None selects ammunition by target; explicit choices belong to this actor.
     pub weapon: Option<Weapon>,
+}
+// Only geometry/readiness are frozen in the unit pass. Trajectories are built
+// after admission, so a saturated pool does not repeatedly construct pellets.
+struct ProjectileLaunch {
+    owner: usize,
+    kind: RangeUnitKind,
+    weapon: Weapon,
+    point: [i32; 3],
+    range: i32,
+    angle: i32,
+    shell: bool,
+    count: usize,
+    muzzles: Vec<[Fx; 3]>,
+    ready: u32,
 }
 pub struct Round {
     pub owner: usize,
@@ -129,6 +199,8 @@ pub struct Battle {
     pub(super) ai: ai::Controller,
     /// Both teams use the same deterministic decision clock in spectator mode.
     pub autonomous: bool,
+    // Derived diagnostics: absent in hashes/snapshots, never read by combat.
+    fire_trace: Option<Vec<FireGate>>,
 }
 fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gun: i32) -> i32 {
     if kind == RangeUnitKind::Artillery && weapon == Weapon::Blast {
@@ -220,7 +292,30 @@ impl Battle {
             anni_config,
             ai: ai::Controller::new(),
             autonomous: false,
+            fire_trace: None,
         }
+    }
+    pub fn trace_fire(&mut self, enabled: bool) {
+        self.fire_trace = enabled.then(|| vec![FireGate::NoTarget; self.actors.len()]);
+    }
+    pub fn fire_gate(&self, id: usize) -> Option<FireGate> {
+        if self.phase != Phase::Fighting {
+            return None;
+        }
+        self.fire_trace.as_ref()?.get(id).copied()
+    }
+    pub fn wave_progress(&self) -> impl Iterator<Item = WaveProgress> + '_ {
+        self.waves.iter().map(|w| WaveProgress {
+            weapon: w.weapon,
+            at: w.wave.at,
+            capturing: w.wave.capturing(),
+            frontier_finished: w.wave.wave.finished(),
+            heap_examined: w.wave.wave.examined,
+            pending: w.wave.pending.len(),
+            contact_cursor: w.wave.contact_cursor,
+            body_cursor: w.wave.body_cursor,
+            energy_mj: w.energy,
+        })
     }
     /// Layout validation has already checked compatibility with each unit kind.
     pub(super) fn apply_loadouts(&mut self, defs: &[modding::range::RangeUnitDef]) {
@@ -1283,6 +1378,7 @@ impl BlastRange {
             anni_config: self.battle.anni_config.clone(),
             ai: self.battle.ai.clone(),
             autonomous: self.battle.autonomous,
+            fire_trace: None,
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
@@ -1438,8 +1534,13 @@ impl BlastRange {
         physics: &(impl Fn(usize, &'static str) + Sync),
     ) {
         let stream = self.streams.tuning.machine_gun.clone();
+        if let Some(trace) = &mut b.fire_trace {
+            trace.fill(FireGate::NoTarget);
+        }
+        let mut bursts = Vec::new();
         for id in 0..self.units.len() {
             if !self.units[id].status.alive || !self.units[id].status.weapon {
+                record_gate(&mut b.fire_trace, id, FireGate::Disabled);
                 b.actors[id].charge = None;
                 b.actors[id].burst = 0;
                 b.actors[id].target = None;
@@ -1467,6 +1568,7 @@ impl BlastRange {
                 a.order = Order::Auto;
             }
             if a.order == Order::Hold {
+                record_gate(&mut b.fire_trace, id, FireGate::Hold);
                 a.target = None;
                 continue;
             }
@@ -1599,6 +1701,7 @@ impl BlastRange {
                     });
             completed("orders_los");
             if !in_range || blocked_direct {
+                record_gate(&mut b.fire_trace, id, FireGate::Approach);
                 stop_spider_beam(a, kind, self.tick);
                 a.charge = None;
                 if kind.emplacement() {
@@ -1815,10 +1918,16 @@ impl BlastRange {
             } else {
                 p
             };
-            if self.tick < a.next || (tracking.is_none() && !a.turret.aligned(angle, yaw_limits)) {
+            if self.tick < a.next {
+                record_gate(&mut b.fire_trace, id, FireGate::Reload);
+                continue;
+            }
+            if tracking.is_none() && !a.turret.aligned(angle, yaw_limits) {
+                record_gate(&mut b.fire_trace, id, FireGate::Aiming);
                 continue;
             }
             if weapon == Weapon::Laser {
+                record_gate(&mut b.fire_trace, id, FireGate::Beam);
                 let tuning = motion::spider_tuning();
                 if let Some(t) = tracking {
                     if a.burst == 0
@@ -1888,127 +1997,206 @@ impl BlastRange {
             };
             if shell {
                 let charge = *a.charge.get_or_insert(self.tick + config.charge_ticks);
-                if self.tick < charge
-                    || (weapon.bursts()
-                        && b.waves.len() + b.rounds.iter().filter(|r| r.bursts()).count() + count
-                            > b.tuning.max_waves)
-                {
+                if self.tick < charge {
+                    record_gate(&mut b.fire_trace, id, FireGate::Charging);
                     continue;
                 }
             }
             let muzzles = weapons::muzzles(&self.units[id], a.turret.angle);
             let pending_full = matches!(weapon, Weapon::Kinetic | Weapon::MachineGun)
                 && !self.solid_flight_room(&b.rounds, count);
-            if muzzles.is_empty() || b.rounds.len() + count > b.tuning.max_rounds || pending_full {
+            if muzzles.is_empty() {
+                record_gate(&mut b.fire_trace, id, FireGate::NoMuzzle);
                 continue;
             }
-            let speed = config.shell_speed;
-            for barrel in 0..count {
-                let muzzle = muzzles[if shell { 0 } else { barrel }];
-                let mut delta: [Fx; 3] = std::array::from_fn(|k| Fx::from_int(p[k]).sub(muzzle[k]));
-                if weapon == Weapon::Canister && barrel > 0 {
-                    // One central round and a rotated ring. A finite authored
-                    // footprint spreads the impacts themselves, rather than
-                    // sending every pellet into the same frontal armour voxel.
-                    let angle = (barrel - 1) as i32 * fx::angle::FULL / (count - 1) as i32;
-                    let angle = angle
-                        .wrapping_add(a.turret.angle)
-                        .wrapping_add(i32::from((a.fired as u16).wrapping_mul(7919)));
-                    let radius = Fx::from_int(b.tuning.canister.footprint_radius);
-                    delta[0] = delta[0].add(fx::angle::cos(angle).mul(radius));
-                    delta[2] = delta[2].add(fx::angle::sin(angle).mul(radius));
-                }
-                if !shell {
-                    let serial = a.fired.wrapping_mul(2).wrapping_add(barrel as u32)
-                        ^ (id as u32).wrapping_mul(65537);
-                    delta = weapons::spread(
-                        delta,
-                        [
-                            fx::angle::cos(a.turret.angle),
-                            Fx::ZERO,
-                            fx::angle::sin(a.turret.angle),
-                        ],
-                        serial,
-                        stream.spread_milli,
-                    );
-                }
-                let mut time = delta[0]
-                    .mul(delta[0])
-                    .add(delta[2].mul(delta[2]))
-                    .sqrt()
-                    .div(Fx::from_int(speed))
-                    .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
-                if weapon == Weapon::Canister {
-                    time = time.mul(Fx::from_ratio(b.tuning.canister.flight_time_milli, 1000));
-                }
-                let ballistic = shell && !weapon.energetic();
-                let mut velocity = if weapon == Weapon::Kinetic {
-                    weapons::kinetic_velocity(muzzle, p, config)
-                } else if ballistic {
-                    delta.map(|v| v.div(time))
-                } else {
-                    weapons::flight_velocity(delta, speed)
-                };
-                if weapon == Weapon::Canister {
-                    velocity = weapons::spread(
-                        velocity,
-                        [
-                            fx::angle::cos(a.turret.angle),
-                            Fx::ZERO,
-                            fx::angle::sin(a.turret.angle),
-                        ],
-                        a.fired.wrapping_mul(257).wrapping_add(barrel as u32)
-                            ^ (id as u32).wrapping_mul(65537),
-                        b.tuning.canister.spread_milli,
-                    );
-                }
-                if ballistic && weapon != Weapon::Kinetic {
-                    velocity[1] = velocity[1].add(
-                        Fx::from_int(config.gravity)
-                            .mul(time)
-                            .mul(Fx::from_ratio(1, 2)),
-                    );
-                }
-                b.rounds.push(Round {
-                    owner: id,
-                    weapon,
-                    pos: muzzle,
-                    previous: muzzle,
-                    velocity,
-                    distance: if weapon == Weapon::Canister {
-                        // A lofted arc travels farther than its horizontal range.
-                        Fx::from_int(range * 2)
-                            .add(Fx::from_int(config.gravity).mul(time).mul(time))
-                            .min(Fx::from_int(100000))
-                    } else {
-                        Fx::from_int(range * 2)
-                    },
-                });
+            if !weapon.bursts() && b.rounds.len() + count > b.tuning.max_rounds {
+                record_gate(&mut b.fire_trace, id, FireGate::RoundCapacity);
+                continue;
             }
-            a.fired = a.fired.wrapping_add(1);
-            a.charge = None;
-            if shell {
-                a.next = self.tick
-                    + if weapon == Weapon::Canister {
-                        b.tuning.canister.reload_ticks
-                    } else if kind == RangeUnitKind::TurretT2 {
-                        b.tuning
-                            .turret_t2_reload_ticks
-                            .unwrap_or(b.tuning.tank_reload_ticks)
-                    } else {
-                        b.tuning.tank_reload_ticks
-                    };
+            if pending_full {
+                record_gate(&mut b.fire_trace, id, FireGate::SolidCapacity);
+                continue;
+            }
+            let shot = ProjectileLaunch {
+                owner: id,
+                kind,
+                weapon,
+                point: p,
+                range,
+                angle: a.turret.angle,
+                shell,
+                count,
+                muzzles,
+                ready: a.charge.unwrap_or(self.tick),
+            };
+            if weapon.bursts() {
+                bursts.push(shot);
             } else {
-                let remaining = stream.burst_ticks.saturating_sub(a.burst);
-                a.burst += stream.interval_ticks;
-                a.next = self.tick
-                    + if a.burst >= stream.burst_ticks {
-                        a.burst = 0;
-                        remaining.saturating_sub(1) + stream.reload_ticks
-                    } else {
-                        stream.interval_ticks
-                    };
+                Self::launch_projectiles(self.tick, b, shot, &stream);
             }
+        }
+        // Existing charge deadlines are FIFO tickets, with an explicit owner
+        // tie. Eligibility is rebuilt from live orders/aim/range every tick.
+        bursts.sort_unstable_by_key(|shot| (shot.ready, shot.owner));
+        let mut reserved = b.waves.len() + b.rounds.iter().filter(|r| r.bursts()).count();
+        let mut blocked = false;
+        for shot in bursts {
+            let gate = if blocked {
+                Some(FireGate::BurstQueue)
+            } else if reserved + shot.count > b.tuning.max_waves {
+                Some(FireGate::WaveCapacity)
+            } else if b.rounds.len() + shot.count > b.tuning.max_rounds {
+                Some(FireGate::RoundCapacity)
+            } else {
+                None
+            };
+            if let Some(gate) = gate {
+                record_gate(&mut b.fire_trace, shot.owner, gate);
+                // Do not refill freed slots with younger small bursts while an
+                // older full salvo accumulates room. Solids and beams continue.
+                blocked = true;
+            } else {
+                reserved += shot.count;
+                Self::launch_projectiles(self.tick, b, shot, &stream);
+            }
+        }
+        completed("orders_projectile_commit");
+    }
+    fn launch_projectiles(
+        tick: u32,
+        b: &mut Battle,
+        shot: ProjectileLaunch,
+        stream: &modding::range_weapon::Stream,
+    ) {
+        let ProjectileLaunch {
+            owner: id,
+            kind,
+            weapon,
+            point: p,
+            range,
+            angle: turret_angle,
+            shell,
+            count,
+            muzzles,
+            ..
+        } = shot;
+        let config = match weapon {
+            Weapon::Blast => &b.shell_config,
+            Weapon::Kinetic => &b.kinetic_config,
+            Weapon::Canister => &b.canister_config,
+            Weapon::Energy => &b.energy_config,
+            Weapon::Annihilation => &b.anni_config,
+            Weapon::MachineGun => &b.bullet_config,
+            Weapon::Laser => unreachable!("beam is not a projectile"),
+        };
+        let a = &mut b.actors[id];
+        record_gate(&mut b.fire_trace, id, FireGate::Fired);
+        let speed = config.shell_speed;
+        for barrel in 0..count {
+            let muzzle = muzzles[if shell { 0 } else { barrel }];
+            let mut delta: [Fx; 3] = std::array::from_fn(|k| Fx::from_int(p[k]).sub(muzzle[k]));
+            if weapon == Weapon::Canister && barrel > 0 {
+                // One central round and a rotated ring. A finite authored
+                // footprint spreads the impacts themselves, rather than
+                // sending every pellet into the same frontal armour voxel.
+                let angle = (barrel - 1) as i32 * fx::angle::FULL / (count - 1) as i32;
+                let angle = angle
+                    .wrapping_add(turret_angle)
+                    .wrapping_add(i32::from((a.fired as u16).wrapping_mul(7919)));
+                let radius = Fx::from_int(b.tuning.canister.footprint_radius);
+                delta[0] = delta[0].add(fx::angle::cos(angle).mul(radius));
+                delta[2] = delta[2].add(fx::angle::sin(angle).mul(radius));
+            }
+            if !shell {
+                let serial = a.fired.wrapping_mul(2).wrapping_add(barrel as u32)
+                    ^ (id as u32).wrapping_mul(65537);
+                delta = weapons::spread(
+                    delta,
+                    [
+                        fx::angle::cos(turret_angle),
+                        Fx::ZERO,
+                        fx::angle::sin(turret_angle),
+                    ],
+                    serial,
+                    stream.spread_milli,
+                );
+            }
+            let mut time = delta[0]
+                .mul(delta[0])
+                .add(delta[2].mul(delta[2]))
+                .sqrt()
+                .div(Fx::from_int(speed))
+                .max(Fx::from_ratio(1, crate::TICKS_PER_SECOND));
+            if weapon == Weapon::Canister {
+                time = time.mul(Fx::from_ratio(b.tuning.canister.flight_time_milli, 1000));
+            }
+            let ballistic = shell && !weapon.energetic();
+            let mut velocity = if weapon == Weapon::Kinetic {
+                weapons::kinetic_velocity(muzzle, p, config)
+            } else if ballistic {
+                delta.map(|v| v.div(time))
+            } else {
+                weapons::flight_velocity(delta, speed)
+            };
+            if weapon == Weapon::Canister {
+                velocity = weapons::spread(
+                    velocity,
+                    [
+                        fx::angle::cos(turret_angle),
+                        Fx::ZERO,
+                        fx::angle::sin(turret_angle),
+                    ],
+                    a.fired.wrapping_mul(257).wrapping_add(barrel as u32)
+                        ^ (id as u32).wrapping_mul(65537),
+                    b.tuning.canister.spread_milli,
+                );
+            }
+            if ballistic && weapon != Weapon::Kinetic {
+                velocity[1] = velocity[1].add(
+                    Fx::from_int(config.gravity)
+                        .mul(time)
+                        .mul(Fx::from_ratio(1, 2)),
+                );
+            }
+            b.rounds.push(Round {
+                owner: id,
+                weapon,
+                pos: muzzle,
+                previous: muzzle,
+                velocity,
+                distance: if weapon == Weapon::Canister {
+                    // A lofted arc travels farther than its horizontal range.
+                    Fx::from_int(range * 2)
+                        .add(Fx::from_int(config.gravity).mul(time).mul(time))
+                        .min(Fx::from_int(100000))
+                } else {
+                    Fx::from_int(range * 2)
+                },
+            });
+        }
+        a.fired = a.fired.wrapping_add(1);
+        a.charge = None;
+        if shell {
+            a.next = tick
+                + if weapon == Weapon::Canister {
+                    b.tuning.canister.reload_ticks
+                } else if kind == RangeUnitKind::TurretT2 {
+                    b.tuning
+                        .turret_t2_reload_ticks
+                        .unwrap_or(b.tuning.tank_reload_ticks)
+                } else {
+                    b.tuning.tank_reload_ticks
+                };
+        } else {
+            let remaining = stream.burst_ticks.saturating_sub(a.burst);
+            a.burst += stream.interval_ticks;
+            a.next = tick
+                + if a.burst >= stream.burst_ticks {
+                    a.burst = 0;
+                    remaining.saturating_sub(1) + stream.reload_ticks
+                } else {
+                    stream.interval_ticks
+                };
         }
     }
     fn battle_flight(&mut self, b: &mut Battle) {
@@ -2262,3 +2450,7 @@ mod order_profile_tests;
 #[cfg(test)]
 #[path = "range_laser_tracking_tests.rs"]
 mod tracking_tests;
+
+#[cfg(test)]
+#[path = "range_burst_admission_tests.rs"]
+mod burst_admission_tests;

@@ -105,6 +105,8 @@ fn main() {
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
     let damage_trace = args.iter().any(|a| a == "--damage-trace");
+    let fire_trace = args.iter().any(|a| a == "--fire-trace");
+    let wave_trace = args.iter().any(|a| a == "--wave-trace");
     let profile_workers = args.iter().any(|a| a == "--profile-workers");
     let tick_csv = args
         .windows(2)
@@ -275,6 +277,13 @@ fn main() {
         assert!(sim.set_ai_vs_ai(true));
     }
     sim.start_battle().unwrap();
+    sim.battle.trace_fire(fire_trace);
+    if fire_trace {
+        println!(
+            "fire_gate_names={:?}",
+            sim_core::blast::battle::FireGate::NAMES
+        );
+    }
     if let Some(workers) = workers {
         assert!(sim.set_navigation_workers(workers), "workers: 1..=8");
     }
@@ -369,6 +378,7 @@ fn main() {
     let mut samples = Vec::new();
     let mut tick_profiles = Vec::new();
     let mut peak_rounds = 0;
+    let mut fire_counts = vec![[0u32; sim_core::blast::battle::FireGate::COUNT]; sim.units.len()];
     let mut assault_shots = 0;
     let mut assault_weapon = true;
     let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
@@ -648,6 +658,32 @@ fn main() {
             }
         }
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
+        if wave_trace && sim.tick % 150 == 0 {
+            for (slot, progress) in sim.battle.wave_progress().enumerate() {
+                println!(
+                    "wave_progress tick={} slot={} {:?}",
+                    sim.tick, slot, progress
+                );
+            }
+        }
+        if fire_trace {
+            for (id, counts) in fire_counts.iter_mut().enumerate() {
+                if let Some(gate) = sim.battle.fire_gate(id) {
+                    counts[gate as usize] += 1;
+                }
+            }
+            if sim.tick % 150 == 0 {
+                for (id, counts) in fire_counts.iter_mut().enumerate() {
+                    if sim.units[id].kind.canister() {
+                        println!(
+                            "fire_window tick={} unit={} gates={:?}",
+                            sim.tick, id, counts
+                        );
+                    }
+                    counts.fill(0);
+                }
+            }
+        }
         if trace {
             for impact in &sim.battle.impacts {
                 *impact_bins
@@ -797,6 +833,14 @@ fn main() {
                     u.revision, u.mobility.engine.to_f64_lossy(), u.mobility.traction.to_f64_lossy(),
                     u.motion.destination, u.motion.cursor, u.motion.path.len(), u.motion.searching(),
                     u.motion.blocked, u.motion.recovery_state());
+                if fire_trace {
+                    println!(
+                        "fire_focus tick={} unit={} gate={:?}",
+                        sim.tick,
+                        id,
+                        sim.battle.fire_gate(id)
+                    );
+                }
             }
         }
         if until_end && sim.battle.phase != sim_core::blast::battle::Phase::Fighting {
