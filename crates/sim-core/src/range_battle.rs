@@ -5,6 +5,10 @@ use super::*;
 use fx::blob::{Blob, Scan};
 use modding::{explosion::Delivery, range_battle::Tuning};
 
+#[cfg(test)]
+#[path = "range_artillery_tests.rs"]
+mod artillery_tests;
+
 /// Weapon identity survives selection changes, flight and delayed wave work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -147,6 +151,7 @@ struct ProjectileLaunch {
     shell: bool,
     count: usize,
     muzzles: Vec<[Fx; 3]>,
+    artillery_velocity: Option<[Fx; 3]>,
     ready: u32,
 }
 pub struct Round {
@@ -411,16 +416,19 @@ impl Battle {
         let tuning = motion::spider_tuning();
         for (a, u) in self.actors.iter_mut().zip(units) {
             let limits = crate::turret::Limits::of(
-                tuning.laser_tracking.map_or(
-                    modding::turret::Turret::from_ron(include_str!("../../../data/turret.ron"))
-                        .expect("turret tuning"),
-                    |t| t.elevation,
-                ),
+                tuning
+                    .laser_tracking
+                    .filter(|_| u.kind == RangeUnitKind::Spider)
+                    .map_or(
+                        modding::turret::Turret::from_ron(include_str!("../../../data/turret.ron"))
+                            .expect("turret tuning"),
+                        |t| t.elevation,
+                    ),
                 crate::TICKS_PER_SECOND,
             );
             a.elevation = crate::turret::Traverse::load(s, limits)?;
-            if (u.kind != RangeUnitKind::Spider && a.elevation != crate::turret::Traverse::new(0))
-                || (u.kind == RangeUnitKind::Spider
+            if (!artillery::elevates(u.kind) && a.elevation != crate::turret::Traverse::new(0))
+                || (artillery::elevates(u.kind)
                     && fx::angle::diff(a.elevation.angle, 0) != u.turret_pitch)
             {
                 return None;
@@ -429,9 +437,7 @@ impl Battle {
         for w in &mut self.waves {
             for (p, u) in w.wave.turret_pitches.iter_mut().zip(units) {
                 *p = s.i32();
-                if i64::from(*p).abs() > i64::from(fx::angle::QUARTER)
-                    || (*p != 0 && u.kind != RangeUnitKind::Spider)
-                {
+                if !artillery::valid_pitch(*p, u.kind) {
                     return None;
                 }
             }
@@ -1675,7 +1681,25 @@ impl BlastRange {
             let dz = Fx::from_int(p[2]).sub(from[2]);
             // Traverse independently of the hull and before entering range,
             // so a moving unit does not wait to begin slewing its turret.
-            let angle = fx::angle::atan2(dz.raw(), dx.raw());
+            let artillery_aim = kind
+                .artillery()
+                .then(|| {
+                    artillery::solve(
+                        &self.units[id],
+                        p,
+                        weapon,
+                        config,
+                        if weapon == Weapon::Canister {
+                            b.tuning.canister.flight_time_milli
+                        } else {
+                            1000
+                        },
+                    )
+                })
+                .flatten();
+            let angle = artillery_aim
+                .as_ref()
+                .map_or_else(|| fx::angle::atan2(dz.raw(), dx.raw()), |aim| aim.yaw);
             let tracking = (kind == RangeUnitKind::Spider)
                 .then(|| motion::spider_tuning().laser_tracking)
                 .flatten();
@@ -1683,6 +1707,16 @@ impl BlastRange {
                 crate::turret::Limits::of(t.yaw, crate::TICKS_PER_SECOND)
             });
             a.turret.step(angle, yaw_limits);
+            if let Some(aim) = &artillery_aim {
+                a.elevation.step(aim.pitch, self.turret_limits);
+                let pitch = fx::angle::diff(a.elevation.angle, 0);
+                let bounded = pitch.clamp(-fx::angle::QUARTER, fx::angle::QUARTER);
+                if pitch != bounded {
+                    a.elevation.rate = 0;
+                    a.elevation.angle = fx::angle::norm(bounded);
+                }
+                self.units[id].turret_pitch = bounded;
+            }
             completed("orders_misc");
             self.units[id].update_pose(a.turret.angle);
             completed("orders_pose");
@@ -1942,7 +1976,12 @@ impl BlastRange {
                 record_gate(&mut b.fire_trace, id, FireGate::Reload);
                 continue;
             }
-            if tracking.is_none() && !a.turret.aligned(angle, yaw_limits) {
+            if tracking.is_none()
+                && (!a.turret.aligned(angle, yaw_limits)
+                    || artillery_aim
+                        .as_ref()
+                        .is_some_and(|aim| !a.elevation.aligned(aim.pitch, self.turret_limits)))
+            {
                 record_gate(&mut b.fire_trace, id, FireGate::Aiming);
                 continue;
             }
@@ -2046,6 +2085,22 @@ impl BlastRange {
                 angle: a.turret.angle,
                 shell,
                 count,
+                artillery_velocity: kind.artillery().then(|| {
+                    artillery::along_barrel(
+                        &self.units[id],
+                        artillery::velocity(
+                            muzzles[0],
+                            p,
+                            weapon,
+                            config,
+                            if weapon == Weapon::Canister {
+                                b.tuning.canister.flight_time_milli
+                            } else {
+                                1000
+                            },
+                        ),
+                    )
+                }),
                 muzzles,
                 ready: a.charge.unwrap_or(self.tick),
             };
@@ -2098,6 +2153,7 @@ impl BlastRange {
             shell,
             count,
             muzzles,
+            artillery_velocity,
             ..
         } = shot;
         let config = match weapon {
@@ -2151,14 +2207,29 @@ impl BlastRange {
                 time = time.mul(Fx::from_ratio(b.tuning.canister.flight_time_milli, 1000));
             }
             let ballistic = shell && !weapon.energetic();
-            let mut velocity = if weapon == Weapon::Kinetic {
+            let mut velocity = if let Some(central) = artillery_velocity {
+                if weapon == Weapon::Canister && barrel > 0 {
+                    // Each offset impact has its own flight time and lift.
+                    // Adding offsets to a single central parabola would
+                    // scatter contacts when the ground/target has a height.
+                    let mut v = delta.map(|d| d.div(time));
+                    v[1] = v[1].add(
+                        Fx::from_int(config.gravity)
+                            .mul(time.add(Fx::from_ratio(1, crate::TICKS_PER_SECOND)))
+                            .mul(Fx::from_ratio(1, 2)),
+                    );
+                    v
+                } else {
+                    central
+                }
+            } else if weapon == Weapon::Kinetic {
                 weapons::kinetic_velocity(muzzle, p, config)
             } else if ballistic {
                 delta.map(|v| v.div(time))
             } else {
                 weapons::flight_velocity(delta, speed)
             };
-            if weapon == Weapon::Canister {
+            if weapon == Weapon::Canister && (artillery_velocity.is_none() || barrel > 0) {
                 velocity = weapons::spread(
                     velocity,
                     [
@@ -2171,7 +2242,7 @@ impl BlastRange {
                     b.tuning.canister.spread_milli,
                 );
             }
-            if ballistic && weapon != Weapon::Kinetic {
+            if ballistic && weapon != Weapon::Kinetic && artillery_velocity.is_none() {
                 velocity[1] = velocity[1].add(
                     Fx::from_int(config.gravity)
                         .mul(time)

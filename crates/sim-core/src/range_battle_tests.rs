@@ -174,7 +174,9 @@ fn canister_pellets_stop_at_thick_steel_cover_without_damaging_the_hidden_tank()
         .unwrap();
     layout.blocks.push(modding::range::RangeBlock {
         min: [300, 16, 240],
-        max: [332, 96, 432],
+        // A physically elevated muzzle can loft above the former 96-high
+        // wall. Full-height cover isolates interception, not low-cover arcs.
+        max: [332, layout.size[1] as i32, 432],
         material: 3,
     });
     let mut r = canister_ground_salvo(layout);

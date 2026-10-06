@@ -1366,14 +1366,14 @@ fn artillery_scaled(mm: u16) -> UnitBody {
         FINISH_OPTIC,
     );
 
-    // A continuous breech and rising barrel let connectivity damage disable
+    // A continuous breech and straight bore let connectivity damage disable
     // this specific gun. The thick muzzle brake makes its role legible.
     fill(&mut u, (35, 46), (20, 27), (12, 18), Part::Weapon);
-    for (x, y) in [(45, 23), (50, 24), (55, 25)] {
+    for x in [45, 50, 55] {
         fill_f(
             &mut u,
             (x, (x + 6).min(60)),
-            (y, y + 3),
+            (25, 28),
             (13, 17),
             Part::Weapon,
             FINISH_GUN,
@@ -1399,7 +1399,7 @@ fn artillery_scaled(mm: u16) -> UnitBody {
     let mut u = seat(u, "артиллерия");
     u.turret_y = 16;
     u.push_weapon_path(WeaponPath {
-        min: [35, 20, 12],
+        min: [35, 24, 12],
         max: [60, 29, 18],
         axis: 0,
     });
@@ -1501,7 +1501,7 @@ pub fn artillery_turret_t2() -> UnitBody {
     let mut u = seat(u, "артиллерийская турель T2");
     u.turret_y = 18;
     u.push_weapon_path(WeaponPath {
-        min: [33, 23, 16],
+        min: [33, 26, 16],
         max: [60, 34, 24],
         axis: 0,
     });

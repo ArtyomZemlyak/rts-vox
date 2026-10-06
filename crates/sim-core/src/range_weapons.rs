@@ -820,14 +820,17 @@ pub(super) fn muzzles(u: &RangeUnit, angle: i32) -> Vec<[Fx; 3]> {
         .filter(|p| u.body.barrel_connected(p, u.connectivity.reached_cols()))
         .take(2)
         .map(|p| {
-            let mut cell = std::array::from_fn(|a| {
-                Fx::from_ratio(i32::from(p.min[a]) + i32::from(p.max[a]), 2)
-            });
-            cell[usize::from(p.axis)] = Fx::from_int(i32::from(p.max[usize::from(p.axis)]) + 1);
-            let v = f.world(cell);
+            let v = f.world(muzzle_cell(p));
             [v.x, v.y, v.z]
         })
         .collect()
+}
+
+pub(super) fn muzzle_cell(p: &voxel::unit::WeaponPath) -> [Fx; 3] {
+    let mut cell =
+        std::array::from_fn(|a| Fx::from_ratio(i32::from(p.min[a]) + i32::from(p.max[a]), 2));
+    cell[usize::from(p.axis)] = Fx::from_int(i32::from(p.max[usize::from(p.axis)]) + 1);
+    cell
 }
 
 #[cfg(test)]

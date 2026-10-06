@@ -14,9 +14,7 @@ impl Pending {
         for j in &mut self.jobs {
             for p in j.poses.as_mut()? {
                 p.pitch = s.i32();
-                if i64::from(p.pitch).abs() > i64::from(fx::angle::QUARTER)
-                    || (p.pitch != 0 && units[p.id].kind != RangeUnitKind::Spider)
-                {
+                if !artillery::valid_pitch(p.pitch, units[p.id].kind) {
                     return None;
                 }
             }

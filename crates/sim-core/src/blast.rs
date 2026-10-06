@@ -2309,6 +2309,8 @@ fn shot_point(p: [i32; 3]) -> Point {
     }
 }
 
+#[path = "range_artillery.rs"]
+mod artillery;
 #[path = "range_contact.rs"]
 mod contact;
 #[path = "range_fire.rs"]
@@ -2910,9 +2912,7 @@ impl BlastRange {
         let mut b = fx::blob::Blob::new();
         let version = if self.has_contact_resumes() {
             53
-        } else if self.gun.kind == RangeUnitKind::Spider
-            || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
-        {
+        } else if self.has_elevation() {
             52
         } else if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
             51
@@ -3098,14 +3098,12 @@ impl BlastRange {
                 || self
                     .units
                     .iter()
-                    .any(|u| u.kind.canister() || u.kind == RangeUnitKind::Spider)
-                || self.gun.kind == RangeUnitKind::Spider)
+                    .any(|u| u.kind.canister() || artillery::elevates(u.kind))
+                || artillery::elevates(self.gun.kind))
         {
             let format = if self.has_contact_resumes() {
                 53
-            } else if self.gun.kind == RangeUnitKind::Spider
-                || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider)
-            {
+            } else if self.has_elevation() {
                 52
             } else if self.gun.kind.canister() || self.units.iter().any(|u| u.kind.canister()) {
                 51
@@ -3114,11 +3112,7 @@ impl BlastRange {
             };
             self.kinetic.save_as(b, format);
         }
-        if version < 52
-            && (self.has_contact_resumes()
-                || self.gun.kind == RangeUnitKind::Spider
-                || self.units.iter().any(|u| u.kind == RangeUnitKind::Spider))
-        {
+        if version < 52 && (self.has_contact_resumes() || self.has_elevation()) {
             self.save_laser_tracking(b);
         }
         if version < 53 && self.has_contact_resumes() {
@@ -3139,10 +3133,7 @@ impl BlastRange {
         self.kinetic.save_pitches(b);
     }
     fn load_laser_tracking(&mut self, s: &mut fx::blob::Scan) -> Option<()> {
-        let valid = |p: i32, kind: RangeUnitKind| {
-            i64::from(p).abs() <= i64::from(fx::angle::QUARTER)
-                && (p == 0 || kind == RangeUnitKind::Spider)
-        };
+        let valid = artillery::valid_pitch;
         self.gun.turret_pitch = s.i32();
         if !valid(self.gun.turret_pitch, self.gun.kind) {
             return None;
@@ -3167,6 +3158,9 @@ impl BlastRange {
             e.validate_contacts(&self.units)?;
         }
         s.ok().then_some(())
+    }
+    fn has_elevation(&self) -> bool {
+        artillery::elevates(self.gun.kind) || self.units.iter().any(|u| artillery::elevates(u.kind))
     }
     fn save_structure(&self, b: &mut fx::blob::Blob) {
         for u in &self.units {
@@ -4387,8 +4381,28 @@ impl BlastRange {
                 self.manual_route = false;
             }
             self.acquire_auto_target();
-            let target_angle = self.aim_angle();
+            let gun_weapon = if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                battle::Weapon::Kinetic
+            } else if self.config.motion == ProjectileMotion::Direct {
+                battle::Weapon::Energy
+            } else {
+                battle::Weapon::Blast
+            };
+            let artillery_aim = self
+                .gun
+                .kind
+                .artillery()
+                .then(|| artillery::solve(&self.gun, self.target(), gun_weapon, &self.config, 1000))
+                .flatten();
+            let target_angle = artillery_aim
+                .as_ref()
+                .map_or_else(|| self.aim_angle(), |a| a.yaw);
             self.turret.step(target_angle, self.turret_limits);
+            if let Some(a) = &artillery_aim {
+                self.gun.turret_pitch += fx::angle::diff(a.pitch, self.gun.turret_pitch)
+                    .clamp(-self.turret_limits.speed, self.turret_limits.speed);
+                self.gun.update_pose(self.turret.angle);
+            }
             if let Some(id) = self.attack {
                 if !self.units[id].status.alive {
                     self.attack = None;
@@ -4415,7 +4429,12 @@ impl BlastRange {
                 ProjectileMotion::Ballistic => self.config.gravity,
                 ProjectileMotion::Direct => 0,
             };
-            if self.tick == self.fire_tick && !self.turret.aligned(target_angle, self.turret_limits)
+            if self.tick == self.fire_tick
+                && (!self.turret.aligned(target_angle, self.turret_limits)
+                    || artillery_aim.as_ref().is_some_and(|a| {
+                        fx::angle::diff(a.pitch, self.gun.turret_pitch).abs()
+                            > self.turret_limits.tolerance
+                    }))
             {
                 // Keep the charged round until the actual barrel has traversed.
                 self.fire_tick = self.fire_tick.saturating_add(1);
@@ -4438,7 +4457,12 @@ impl BlastRange {
                     .sqrt()
                     .div(Fx::from_int(self.config.shell_speed))
                     .max(Fx::from_ratio(1, 1000));
-                self.velocity = if self.config.delivery == modding::explosion::Delivery::Kinetic {
+                self.velocity = if self.gun.kind.artillery() {
+                    artillery::along_barrel(
+                        &self.gun,
+                        artillery::velocity(from, target, gun_weapon, &self.config, 1000),
+                    )
+                } else if self.config.delivery == modding::explosion::Delivery::Kinetic {
                     weapons::kinetic_velocity(from, target, &self.config)
                 } else {
                     [

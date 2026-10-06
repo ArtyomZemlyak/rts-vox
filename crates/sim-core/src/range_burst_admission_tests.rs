@@ -42,6 +42,20 @@ fn contention() -> BlastRange {
         a.charge = Some(if id == 0 { 100 } else { 0 });
     }
     r.battle.actors[0].weapon = Some(Weapon::Energy);
+    // This fixture isolates capacity/FIFO gates after aiming has completed.
+    // Artillery now needs both axes aligned to its real lofted launch.
+    let aim = artillery::solve(
+        &r.units[1],
+        [600, 20, 336],
+        Weapon::Canister,
+        &r.battle.canister_config,
+        r.battle.tuning.canister.flight_time_milli,
+    )
+    .unwrap();
+    r.battle.actors[1].turret = crate::turret::Traverse::new(aim.yaw);
+    r.battle.actors[1].elevation = crate::turret::Traverse::new(aim.pitch);
+    r.units[1].turret_pitch = aim.pitch;
+    r.units[1].update_pose(aim.yaw);
     for _ in 0..r.battle.tuning.max_waves {
         r.battle.rounds.push(Round {
             owner: 0,

@@ -434,7 +434,7 @@ fn heavy_artillery_snapshot_preserves_mixed_pending_contacts_and_the_empty_tail(
     shot(&mut r);
     assert_eq!(r.pending_kinetic_impacts(), 2);
     let snapshot = r.snapshot();
-    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 51);
+    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 52);
     let mut copy = BlastRange::restore(r.config.clone(), &snapshot).unwrap();
     copy.matter.tuning = r.matter.tuning.clone();
     assert_eq!(snapshot, copy.snapshot());
