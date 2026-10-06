@@ -491,6 +491,126 @@ mod tests {
         }
     }
     #[test]
+    fn narrow_support_index_matches_motion_index_contacts() {
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for count in [31, 1023, 1024, 1025] {
+                let fragments: Vec<_> = (0..count)
+                    .map(|i| {
+                        let side = (i % 4 + 1) as u8;
+                        let shape = u64::MAX >> (64 - u32::from(side).pow(3));
+                        let (c, s) = (angle::cos(i * 2731), angle::sin(i * 2731));
+                        let mut f = Fragment {
+                            id: i as u64 + 1,
+                            position: V3::new(
+                                Fx::from_int(i % 19 * 4 - 40).add(Fx::from_ratio(i % 4, 4)),
+                                Fx::from_int(i / 19 % 7 * 3 - 9),
+                                Fx::from_int(i / 133 * 5 - 30),
+                            ),
+                            velocity: V3::new(Fx::from_int(10), Fx::from_int(-2), Fx::ONE),
+                            material: 1,
+                            paint: None,
+                            mm: 100,
+                            basis: [
+                                V3::new(c, s, Fx::ZERO),
+                                V3::new(s.neg(), c, Fx::ZERO),
+                                V3::new(Fx::ZERO, Fx::ZERO, Fx::ONE),
+                            ],
+                            mass_g: 1200,
+                            count: shape.count_ones(),
+                            shape,
+                            side,
+                            chunk: None,
+                            held: i as u32 + 1,
+                            resting: i % 6 != 0,
+                        };
+                        if i < 2 {
+                            f.position = V3::new(
+                                Fx::from_int(-8),
+                                if i == 0 {
+                                    Fx::from_int(2)
+                                } else {
+                                    Fx::from_ratio(17, 4)
+                                },
+                                Fx::from_int(-8),
+                            );
+                            f.basis = IDENTITY;
+                            f.side = 2;
+                            f.shape = 255;
+                            f.count = 8;
+                            f.resting = true;
+                        }
+                        f
+                    })
+                    .collect();
+                let hull = Hull {
+                    pos: [Fx::from_int(8), Fx::from_int(4), Fx::from_int(8)],
+                    head: 2731,
+                    half: [Fx::from_int(4), Fx::from_int(3)],
+                    height: Fx::from_int(8),
+                    vel: [Fx::ZERO; 3],
+                    step: Fx::ONE,
+                    solid: None,
+                };
+                for hulls in [&[][..], std::slice::from_ref(&hull)] {
+                    let build = |reach| {
+                        pool.install(|| {
+                            Settled::around_bounds(
+                                &fragments,
+                                hulls,
+                                |i, _| i == 1 || i % 7 == 0,
+                                |_, f| f.bounds(),
+                                reach,
+                                &|_, _| {},
+                            )
+                        })
+                    };
+                    let wide = build(SettledReach::Motion);
+                    let narrow = build(SettledReach::Support);
+                    assert_eq!(narrow.boxes, wide.boxes);
+                    assert!(narrow.cells.len() < wide.cells.len());
+                    let (mut hits, mut misses) = (0, 0);
+                    for (i, f) in fragments
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| *i == 1 || i % 7 == 0)
+                    {
+                        let (low, high) = f.bounds();
+                        let mut p = arr(f.position);
+                        p[1] = p[1].sub(Fx::from_ratio(1, 2));
+                        let lo = [0, 1, 2].map(|a| p[a].add(low[a]));
+                        let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
+                        for skip in [i as u32, u32::MAX] {
+                            for above in [None, Some(f.position.y.add(low[1]))] {
+                                let expected = wide.hit(lo, hi, skip, above);
+                                assert_eq!(
+                                    narrow.hit(lo, hi, skip, above),
+                                    expected,
+                                    "workers={workers} count={count} fragment={i} skip={skip}"
+                                );
+                                if expected {
+                                    hits += 1;
+                                } else {
+                                    misses += 1;
+                                }
+                            }
+                        }
+                    }
+                    assert!(hits > 0 && misses > 0);
+                    assert!(narrow.hit(
+                        [Fx::from_int(-9), Fx::from_ratio(11, 4), Fx::from_int(-9)],
+                        [Fx::from_int(-7), Fx::from_ratio(19, 4), Fx::from_int(-7)],
+                        1,
+                        Some(Fx::from_ratio(13, 4)),
+                    ));
+                }
+            }
+        }
+    }
+    #[test]
     fn rubble_support_scopes_preserve_contacts_and_cover_cleanup() {
         let w = world();
         for workers in [1, 4, 8] {
@@ -2827,6 +2947,7 @@ mod tests {
                         &[],
                         |_, f| generation != 4 && (!f.resting || due(f.id, tick, &t)),
                         |_, f| f.bounds(),
+                        SettledReach::Motion,
                         &mut index,
                         &mut queries,
                         &mut |_| {},
@@ -4901,6 +5022,7 @@ impl Bursts {
                     hulls,
                     |i, _| stacked.binary_search(&i).is_ok(),
                     |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
+                    SettledReach::Support,
                     task,
                 )
             };
@@ -5750,6 +5872,34 @@ fn settled_cells(lo: [Fx; 3], hi: [Fx; 3]) -> ([i32; 3], [i32; 3]) {
         [0, 1, 2].map(|a| cell(hi[a])),
     )
 }
+/// The index contains only cells its immutable caller will actually query.
+/// Motion needs a swept box and gravity margin; rubble asks only the box
+/// lowered by half a unit. Contact geometry and insertion order are unchanged.
+#[derive(Clone, Copy)]
+enum SettledReach {
+    Motion,
+    Support,
+}
+impl SettledReach {
+    fn cells(self, f: &Fragment, (mut lo, mut hi): ([Fx; 3], [Fx; 3])) -> ([i32; 3], [i32; 3]) {
+        match self {
+            Self::Support => {
+                lo[1] = lo[1].sub(Fx::from_ratio(1, 2));
+                hi[1] = hi[1].sub(Fx::from_ratio(1, 2));
+                settled_cells(lo, hi)
+            }
+            Self::Motion => {
+                // The full existing reach is required by flying pieces:
+                // velocity plus a cell beyond for gravity (ADR-438).
+                let v = arr(f.velocity);
+                let reach_lo = [0, 1, 2].map(|a| lo[a].add(v[a].min(Fx::ZERO)));
+                let reach_hi = [0, 1, 2].map(|a| hi[a].add(v[a].max(Fx::ZERO)));
+                let (c0, c1) = settled_cells(reach_lo, reach_hi);
+                (c0.map(|v| v - 1), c1.map(|v| v + 1))
+            }
+        }
+    }
+}
 impl Settled {
     /// The world boxes were built from this immutable phase input. Subtract
     /// that same centre using wrapping Fx arithmetic: (p + bound) - p is
@@ -5793,6 +5943,7 @@ impl Settled {
             hulls,
             |_, f| !f.resting || due(f.id, tick, t),
             |_, f| f.bounds(),
+            SettledReach::Motion,
             out,
             want,
             completed,
@@ -5807,7 +5958,14 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool + Sync,
     ) -> Settled {
-        Self::around_bounds(fragments, hulls, asks, |_, f| f.bounds(), &|_, _| {})
+        Self::around_bounds(
+            fragments,
+            hulls,
+            asks,
+            |_, f| f.bounds(),
+            SettledReach::Motion,
+            &|_, _| {},
+        )
     }
     /// A caller that already measured pieces can supply the same local
     /// boxes. They must describe this exact immutable fragment slice.
@@ -5816,6 +5974,7 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool + Sync,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
+        reach: SettledReach,
         task: &(impl Fn(usize, &'static str) + Sync),
     ) -> Settled {
         let mut out = Settled::default();
@@ -5824,6 +5983,7 @@ impl Settled {
             hulls,
             asks,
             bounds,
+            reach,
             &mut out,
             &mut SettledQueries::default(),
             &mut |_| {},
@@ -5837,6 +5997,7 @@ impl Settled {
         hulls: &[Hull],
         asks: impl Fn(usize, &Fragment) -> bool + Sync,
         bounds: impl Fn(usize, &Fragment) -> ([Fx; 3], [Fx; 3]) + Sync,
+        reach: SettledReach,
         out: &mut Settled,
         want: &mut SettledQueries,
         completed: &mut impl FnMut(&'static str),
@@ -5860,18 +6021,6 @@ impl Settled {
             let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
             (lo, hi)
         };
-        let swept = |f: &Fragment, (lo, hi): ([Fx; 3], [Fx; 3])| {
-            // Where the piece may get to this tick: its box swept by its
-            // velocity, and a cell beyond for what gravity adds (ADR-438).
-            // A cell beside the one it is in was all it asked about, and a
-            // piece moves up to two and a half cells a tick: a fast one
-            // fell through a settled piece outside the cells it asked for.
-            let v = arr(f.velocity);
-            let reach_lo = [0, 1, 2].map(|a| lo[a].add(v[a].min(Fx::ZERO)));
-            let reach_hi = [0, 1, 2].map(|a| hi[a].add(v[a].max(Fx::ZERO)));
-            let (c0, c1) = settled_cells(reach_lo, reach_hi);
-            (c0.map(|v| v - 1), c1.map(|v| v + 1))
-        };
         let ranges = if fragments.len() >= 1024 {
             // Both reads belong to the same immutable fragment. A worker
             // writes only its boxes and owns its compact list of requests.
@@ -5888,7 +6037,7 @@ impl Settled {
                         let f = &fragments[i];
                         *box_at = world_box((i, f));
                         if asks(i, f) {
-                            ranges.push(swept(f, *box_at));
+                            ranges.push(reach.cells(f, *box_at));
                         }
                     }
                     ranges
@@ -5909,7 +6058,7 @@ impl Settled {
                 .iter()
                 .enumerate()
                 .filter(|&(i, f)| asks(i, f))
-                .map(|(i, f)| swept(f, out.boxes[i]))
+                .map(|(i, f)| reach.cells(f, out.boxes[i]))
                 .collect()
         };
         completed("settled_ranges");

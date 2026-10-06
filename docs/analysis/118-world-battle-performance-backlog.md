@@ -2,7 +2,21 @@
 
 Обновлено: 06.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020, 026 и 027 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-597: карта обломков получила отдельные observer scopes
+Последний шаг ADR-598: индекс карты обломков строится по фактическому
+half-unit support query; движение сохраняет swept reach с гравитацией.
+Frozen boxes, contacts/order, matter и snapshots прежние. Два CPU pair:
+rubble mean −3.40/4.49%, полный tick −0.77/0.10%; tails не исправлены.
+652lib/4golden/19save/CLI проходят, все1800 tick counters и окна боя равны.
+Первая native серия отклонена из-за разных recorded build contexts;
+fresh tracked пара валидна:105.9→105.6FPS,core11.453→11.389мс,
+max37.865→41.323мс. Общий FPS gain не доказан. Полный camera trace сохраняет
+1800ticks и78806render spans без потерь; build mean0.452мс/drop0.017мс.
+На пике previous Update33.231мс включает core12.294/presentation15.661мс,
+затем gap8.127мс. WBPERF-002 и camera presentation/streaming tails —
+приоритет по общему кадру;165FPS, rare stalls и P-87 открыты.
+Данные/ограничения — [191](191-rubble-query-reach.md).
+
+Предыдущий шаг ADR-597: карта обломков получила отдельные observer scopes
 для подготовки, classify dispatch/join, построения/проверки/освобождения
 индекса опор и gather dispatch/sort/dedup. Вложенный wall не складывается
 с родителем и не означает CPU или чистое ожидание. Повтор parallel support

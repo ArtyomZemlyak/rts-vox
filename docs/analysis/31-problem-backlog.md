@@ -2378,3 +2378,20 @@ mean0.501мс против query0.030мс: дальше оптимизирова
 Пик кадра41.164мс включает previous update33.074мс +gap8.090мс;
 старые10мс rubble и59мс interval не воспроизвелись. Длинные зависания
 и165FPS этим диагностическим фиксом не закрыты.
+
+### Фактическая область индекса опор, 06.10.2026
+
+ADR-598: карта обломков перестала строить swept область полёта для
+статического half-unit contact query. Индекс движения сохраняет весь
+запас по скорости/гравитации; контактная геометрия и порядок прежние.
+Новый differential test и652lib/4golden/19save/CLI проходят. Все1800tick
+counters и damage/fire/wave windows сохраняются. Два CPU pair дают
+rubble mean −3.40/4.49%, без устойчивого выигрыша full tick/tails.
+
+Первое native сравнение отклонено analyzer по build context. Fresh tracked
+пара валидна:105.9→105.6FPS, core11.453→11.389мс;165FPS не достигнуты.
+Полный camera-core trace сохраняет1800ticks и78806render spans без потерь.
+Пик41.358мс: previous Update33.231мс +gap8.127мс, core12.294мс вложен в
+Update, presentation15.661мс. Следующий общий приоритет — WBPERF-002 и
+camera presentation/streaming tails; rare stalls/P-87 остаются открыты.
+Подробности — analysis/191-rubble-query-reach.md.

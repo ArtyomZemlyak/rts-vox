@@ -25666,3 +25666,25 @@ candidates, настоящая опора и floating rejection, nonzero Bursts 
 опор/корпусов, restore, golden и полный lib продолжают прежние проверки.
 Полный native trace проверяет поздний контекст и новые scopes. Данные —
 analysis/190-rubble-support-scopes.md.165FPS/rare freezes/P-87 открыты.
+
+### ADR-598 — фактическая область запросов опор
+
+**Контекст.** ADR-597 разделил rubble support build/query: mean0.501мс
+против0.030мс. Строитель использовал swept velocity box и cell margin
+для гравитации, хотя карта обломков спрашивает только half-unit support.
+Большая область добавляла таблицы и кандидатов, недостижимых этим запросом.
+
+**Решение.** Private SettledReach различает Motion и Support. Карта
+обломков передаёт Support: world box снижается на половину единицы перед
+прежним settled_cells rounding. Motion оставляет исходный swept reach.
+Только membership области меньше; world boxes, hull roof exclusion,
+fragment order, exact overlap/from_above/skip и task observers прежние.
+Ни cap, ни запас материи, ни кадр обновления, ни snapshot не меняются.
+
+**Приёмка.** Differential test сравнивает контакты обоих индексов на
+workers1/4/8 и по обе стороны1024 threshold, с negative/fractional
+positions, поворотами, скоростью, resting/flying, skip и from_above.
+Требует настоящие hits/misses и меньший индекс. Прежние reference rubble
+tests проверяют terrain/hull edits и yielding. Бой сравнивает все окна
+damage/fire/waves, hash и every-tick counters. Данные и ограничения —
+analysis/191-rubble-query-reach.md.165FPS и rare stalls остаются открыты.
