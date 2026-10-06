@@ -18,6 +18,11 @@ pub(super) fn capture(
     if e.captured >= cells {
         return true;
     }
+    // A queued wave can legitimately get no share on this tick. It must
+    // wait without rebuilding body frames or allocating a domain-sized map.
+    if budget == 0 {
+        return false;
+    }
     let half = n / 2;
     let origin = e.origin;
     let radius2 = (half * half) as i32;

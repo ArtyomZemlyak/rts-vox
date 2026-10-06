@@ -98,6 +98,12 @@ pub struct Burst {
     wave: Explosion,
     energy: u64,
 }
+/// Divide a phase quota without losing its remainder. `turn` is the offset
+/// in the tick's rotated service order, not an index into reordered state.
+fn wave_share(budget: usize, count: usize, turn: usize) -> usize {
+    debug_assert!(count > 0 && turn < count);
+    budget / count + usize::from(turn < budget % count)
+}
 #[derive(Clone, Copy)]
 pub struct Impact {
     pub at: [i32; 3],
@@ -2188,7 +2194,7 @@ impl BlastRange {
                     config,
                     &self.units,
                     &self.surface_work,
-                    config.capture_cells_per_tick / n,
+                    wave_share(config.capture_cells_per_tick, n, offset),
                 );
                 completed("battle_capture");
             }
@@ -2203,7 +2209,7 @@ impl BlastRange {
                     .collect();
                 w.wave.step(
                     &mut self.world,
-                    config.wave_work_per_tick / n,
+                    wave_share(config.wave_work_per_tick, n, offset),
                     &mut self.units,
                     &mut self.surface_work,
                     &mut self.surface_changed,
@@ -2240,6 +2246,10 @@ impl BlastRange {
 #[cfg(test)]
 #[path = "range_wave_admission_tests.rs"]
 mod wave_admission_tests;
+
+#[cfg(test)]
+#[path = "range_wave_budget_tests.rs"]
+mod wave_budget_tests;
 
 #[cfg(test)]
 #[path = "range_battle_tests.rs"]
