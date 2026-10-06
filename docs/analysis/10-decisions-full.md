@@ -25641,3 +25641,28 @@ bytes Motion, точный clearance journal, workers1/4/8, реальная н�
 A/B сравнивает бой и все окна урона/огня; выигрыш первоначального
 trial мал и требует повторного измерения. Протокол/ограничения —
 analysis/189-local-terrain-sweeps.md. P-87 и165FPS остаются открыты.
+
+
+### ADR-597 — границы скрытых этапов карты обломков
+
+**Контекст.** Поздний parent rubble wall10.481мс при longest columns0.611мс
+и floor0.059мс не объясняется суммой leaf scopes. Между ними неразличимы
+classify join, построение stacked index, contact queries и release.
+Разница не является доказательством OS wait или простаивания workers.
+
+**Решение.** PhysicsTask observer получает парные boundaries подготовки,
+classify dispatch/join, support index build/query/drop, gather dispatch,
+sort/dedup. No-op observer не читает часы/ОС. Эти данные не входят в
+snapshot и не управляют работой. Алгоритм контактов и порядок прежние.
+
+Повторный кандидат indexed stacked-support chunks256 при1024+ rejected:
+rubble mean1102→1106мкс без общего устойчивого gain. Это подтверждает
+прежнее отклонение ADR-565. Итоговый код оставляет серийный support iterator.
+Нет нового scheduler/caps/balancing change без измеренного выигрыша.
+
+**Приёмка.** Reference comparison карт на разных workers и1023/1024/1025
+candidates, настоящая опора и floating rejection, nonzero Bursts hash,
+проверка всех parent scopes и ровно одного support-query scope. Изменение
+опор/корпусов, restore, golden и полный lib продолжают прежние проверки.
+Полный native trace проверяет поздний контекст и новые scopes. Данные —
+analysis/190-rubble-support-scopes.md.165FPS/rare freezes/P-87 открыты.

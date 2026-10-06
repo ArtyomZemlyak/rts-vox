@@ -2357,3 +2357,24 @@ longest columns0.611мс/floor0.059мс; columns начинают лишь на9
 Следующий разбор: dispatch/join и off-CPU/неучтённые промежутки, затем
 frame handoff/present. Нельзя объявлять весь parent wall активным CPU.
 Подробности/протокол — analysis/189-local-terrain-sweeps.md.
+
+### Невидимые этапы карты обломков, 06.10.2026
+
+ADR-597: parent rubble имел длинные промежутки, которые прежние leaf scopes
+не объясняли. Теперь отдельно видны подготовка, classify dispatch/join,
+support index build/query/drop и gather dispatch/sort/dedup. Observer
+не меняет решения симуляции. Проверяются reference контакты, поддержанные
+и висящие куски, неизменный nonzero hash и парность scopes на workers1/4/8.
+
+Повтор parallel support уже отклонённого ADR-565 не дал выигрыша
+(rubble mean1102→1106мкс); эксперимент отменён. Этот фикс улучшает
+атрибуцию задержек, не объявляет165FPS или зависания исправленными.
+Следующий приоритет выбирается по полному native CorePhases с camera tour,
+а не по четырём ранним trigger windows. Подробности —
+analysis/190-rubble-support-scopes.md. WBPERF-002 и P-87 остаются открыты.
+Итоговые651lib/4golden/19save проходят. Полный native1800ticks/hash совпал,
+камера11segments/104origins/0blocked, render0lost spans. Support build
+mean0.501мс против query0.030мс: дальше оптимизировать построение индекса.
+Пик кадра41.164мс включает previous update33.074мс +gap8.090мс;
+старые10мс rubble и59мс interval не воспроизвелись. Длинные зависания
+и165FPS этим диагностическим фиксом не закрыты.

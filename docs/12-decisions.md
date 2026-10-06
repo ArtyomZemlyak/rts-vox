@@ -782,3 +782,6 @@
 | 595 | Плавление грунта пересчитывает физическую вместимость один раз на упорядоченный проход условных claims. Успешная правка резервирует один слот; отказ не расходует место и сохраняет нагрев. Резерв не переживает проход и не смешивается с волнами/плавлением тел. Диагностика попыток, успешных claims и обходов не входит в snapshot/hash. Разбор — analysis/188-ground-melt-admission.md. |
 
 | 596 | Широкие локальные продолжения готовят sweep geometry независимыми пакетами на неизменном рельефе. Чистая проверка snapshot blockers в prefix отсеивает заведомо лишнюю подготовку; logical clearance journal и spatial commit сохраняют прежний порядок. Observer получает geometry leaf events и для локальных поисков. Разбор — analysis/189-local-terrain-sweeps.md. |
+
+
+| 597 | Read-only observer карты обломков различает scratch allocation, classify dispatch/join, support build/query/drop и gather/sort/dedup. Вложенные parent/leaf scopes не складываются как CPU или чистый wait. Порядок, support physics и snapshot прежние. Повторный parallel-support эксперимент отклонён. Разбор — analysis/190-rubble-support-scopes.md. |

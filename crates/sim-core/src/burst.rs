@@ -491,6 +491,82 @@ mod tests {
         }
     }
     #[test]
+    fn rubble_support_scopes_preserve_contacts_and_cover_cleanup() {
+        let w = world();
+        for workers in [1, 4, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for count in [1023usize, 1024, 1025] {
+                let mut b = Bursts::default();
+                b.fragments.push(Fragment {
+                    id: 1,
+                    position: V3::new(Fx::from_int(50), Fx::from_int(14), Fx::from_int(50)),
+                    velocity: V3::ZERO,
+                    material: 2,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 76800,
+                    count: 64,
+                    shape: u64::MAX,
+                    side: 4,
+                    chunk: None,
+                    held: 0,
+                    resting: true,
+                });
+                for i in 0..count {
+                    b.fragments.push(Fragment {
+                        id: i as u64 + 2,
+                        position: centre(if i + 1 == count {
+                            [60, 20, 60]
+                        } else {
+                            [49, 16, 49]
+                        }),
+                        mass_g: 1200,
+                        count: 1,
+                        shape: 1,
+                        side: 1,
+                        material: 1,
+                        held: i as u32 + 1,
+                        velocity: V3::ZERO,
+                        paint: None,
+                        mm: 100,
+                        basis: IDENTITY,
+                        chunk: None,
+                        resting: true,
+                    });
+                }
+                b.next_id = count as u64 + 2;
+                let reference = b.reference_rubble(&w, &[], &[]);
+                assert_eq!(reference.get(&[49, 49]), Some(&17));
+                assert_eq!(reference.get(&[60, 60]), None);
+                let trace = crate::task_trace::Trace::default();
+                let before = b.hash();
+                assert_ne!(before, 0);
+                let actual = pool.install(|| {
+                    b.rubble_observed(&w, &[], &[], &|stage, event| trace.record(stage, event))
+                });
+                assert_eq!(actual, reference, "workers={workers} count={count}");
+                assert_eq!(b.hash(), before);
+                trace.balanced(&[
+                    "physics_rubble_prepare",
+                    "physics_rubble_classify",
+                    "physics_rubble_floor",
+                    "physics_rubble_support_build",
+                    "physics_rubble_support_query",
+                    "physics_rubble_support_drop",
+                    "physics_rubble_gather_dispatch",
+                    "physics_rubble_gather",
+                    "physics_rubble_sort",
+                    "physics_rubble_dedup",
+                ]);
+                assert_eq!(trace.jobs("physics_rubble_support_query_begin"), 1);
+            }
+        }
+    }
+    #[test]
     fn rubble_batches_match_reference_at_thresholds_and_trace_worker_calls() {
         let w = world();
         let pools: Vec<_> = [1, 2, 4, 8]
@@ -4749,7 +4825,14 @@ impl Bursts {
         // hull carries is not asked about the pieces (ADR-469).
         // Reuse local boxes only within this immutable query: support edits,
         // hull movement and fragment changes are visible on the next call.
-        let mut bounds = vec![None; self.fragments.len()];
+        let mut bounds = {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_prepare_begin",
+                "physics_rubble_prepare_end",
+            );
+            vec![None; self.fragments.len()]
+        };
         let mut floor = Vec::new();
         let mut stacked = Vec::new();
         // Each batch owns its boxes and candidate lists. World/hulls/fragments
@@ -4784,41 +4867,72 @@ impl Bursts {
             }
             (floor, stacked)
         };
-        if self.fragments.len() >= 1024 {
-            let groups: Vec<_> = bounds
-                .par_chunks_mut(256)
-                .enumerate()
-                .map(|(batch, boxes)| classify(batch * 256, boxes))
-                .collect();
-            for (on_world, on_pieces) in groups {
-                floor.extend(on_world);
-                stacked.extend(on_pieces);
+        {
+            // Includes dispatch, pool join and ordered candidate concatenation.
+            // Leaf timings alone cannot explain waiting at the join.
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_classify_begin",
+                "physics_rubble_classify_end",
+            );
+            if self.fragments.len() >= 1024 {
+                let groups: Vec<_> = bounds
+                    .par_chunks_mut(256)
+                    .enumerate()
+                    .map(|(batch, boxes)| classify(batch * 256, boxes))
+                    .collect();
+                for (on_world, on_pieces) in groups {
+                    floor.extend(on_world);
+                    stacked.extend(on_pieces);
+                }
+            } else {
+                (floor, stacked) = classify(0, &mut bounds);
             }
-        } else {
-            (floor, stacked) = classify(0, &mut bounds);
         }
         if !stacked.is_empty() {
-            let settled = Settled::around_bounds(
-                &self.fragments,
-                hulls,
-                |i, _| stacked.binary_search(&i).is_ok(),
-                |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
-                task,
-            );
+            let settled = {
+                let _task = PhysicsTask::new(
+                    task,
+                    "physics_rubble_support_build_begin",
+                    "physics_rubble_support_build_end",
+                );
+                Settled::around_bounds(
+                    &self.fragments,
+                    hulls,
+                    |i, _| stacked.binary_search(&i).is_ok(),
+                    |i, f| bounds[i].unwrap_or_else(|| f.bounds()),
+                    task,
+                )
+            };
             // These pieces already failed the world support test above.
             // No world or hull changes occur while this query is running.
-            floor.extend(stacked.into_iter().filter(|&i| {
-                let f = &self.fragments[i];
-                let (low, high) = bounds[i].unwrap();
-                let mut p = arr(f.position);
-                p[1] = p[1].sub(Fx::from_ratio(1, 2));
-                settled.hit(
-                    [0, 1, 2].map(|a| p[a].add(low[a])),
-                    [0, 1, 2].map(|a| p[a].add(high[a])),
-                    i as u32,
-                    Some(f.position.y.add(low[1])),
-                )
-            }));
+            {
+                let _task = PhysicsTask::new(
+                    task,
+                    "physics_rubble_support_query_begin",
+                    "physics_rubble_support_query_end",
+                );
+                floor.extend(stacked.into_iter().filter(|&i| {
+                    let f = &self.fragments[i];
+                    let (low, high) = bounds[i].unwrap();
+                    let mut p = arr(f.position);
+                    p[1] = p[1].sub(Fx::from_ratio(1, 2));
+                    settled.hit(
+                        [0, 1, 2].map(|a| p[a].add(low[a])),
+                        [0, 1, 2].map(|a| p[a].add(high[a])),
+                        i as u32,
+                        Some(f.position.y.add(low[1])),
+                    )
+                }));
+            }
+            // Temporary contact tables can own many small lists. Their release
+            // must be visible separately from support queries and pool waits.
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_support_drop_begin",
+                "physics_rubble_support_drop_end",
+            );
+            drop(settled);
         }
         // A hull covers no column outside the box around its footprint:
         // a piece far from every hull asks none of them (ADR-465).
@@ -4866,25 +4980,43 @@ impl Bursts {
             }
             columns
         };
-        let mut columns = if floor.len() >= 1024 {
-            let groups: Vec<_> = floor.par_chunks(256).map(gather).collect();
-            let mut columns = Vec::with_capacity(groups.iter().map(Vec::len).sum());
-            for group in groups {
-                columns.extend(group);
+        let mut columns = {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_gather_dispatch_begin",
+                "physics_rubble_gather_dispatch_end",
+            );
+            if floor.len() >= 1024 {
+                let groups: Vec<_> = floor.par_chunks(256).map(gather).collect();
+                let mut columns = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+                for group in groups {
+                    columns.extend(group);
+                }
+                columns
+            } else {
+                gather(&floor)
             }
-            columns
-        } else {
-            gather(&floor)
         };
         // A column under several pieces holds the highest top.
-        sort_columns(&mut columns);
-        columns.dedup_by(|later, kept| {
-            let same = later.0 == kept.0;
-            if same {
-                kept.1 = kept.1.max(later.1);
-            }
-            same
-        });
+        {
+            let _task =
+                PhysicsTask::new(task, "physics_rubble_sort_begin", "physics_rubble_sort_end");
+            sort_columns(&mut columns);
+        }
+        {
+            let _task = PhysicsTask::new(
+                task,
+                "physics_rubble_dedup_begin",
+                "physics_rubble_dedup_end",
+            );
+            columns.dedup_by(|later, kept| {
+                let same = later.0 == kept.0;
+                if same {
+                    kept.1 = kept.1.max(later.1);
+                }
+                same
+            });
+        }
         nav::vehicle::Rubble::from_sorted(columns)
     }
     /// Before empty wreck containers are released/reused, remove their geometry.

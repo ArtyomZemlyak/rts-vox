@@ -1,8 +1,20 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
-Обновлено: 04.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
+Обновлено: 06.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020, 026 и 027 частично выполняются, остальные задачи открыты.
-Последний шаг ADR-566: parallel route phase не собирает neighbours для
+Последний шаг ADR-597: карта обломков получила отдельные observer scopes
+для подготовки, classify dispatch/join, построения/проверки/освобождения
+индекса опор и gather dispatch/sort/dedup. Вложенный wall не складывается
+с родителем и не означает CPU или чистое ожидание. Повтор parallel support
+из ADR-565 не дал устойчивого выигрыша и отменён; алгоритм сохранён.
+Для поздних пауз нужен полный CorePhases: четыре trigger windows могут
+закончиться до симптома. WBPERF-027 частично; 002, rare stalls, P-87 и
+165FPS открыты. Полный native1800ticks/camera/hash сохранён,0lost spans;
+build mean0.501мс против query0.030мс — следующий rubble кандидат build.
+Diagnostic99.1FPS/max41.164мс не доказывает ускорение или устранение пауз.
+Квалификация и данные — [190](190-rubble-support-scopes.md).
+
+Предыдущий шаг ADR-566: parallel route phase не собирает neighbours для
 неактивных local hunts; shared guard проверяется после terrain continuation.
 Новые nested sweeps с 4/2 batches отвергнуты по native FPS регрессии.
 Builder фиксирует Rust/Cargo/flags и optional tracked-input refresh;

@@ -10,6 +10,14 @@ impl Trace {
             .unwrap()
             .push((std::thread::current().id(), stage, event));
     }
+    pub(crate) fn jobs(&self, begin: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, event)| *event == begin)
+            .count()
+    }
     pub(crate) fn balanced(&self, expected: &[&str]) {
         let marks = self.0.lock().unwrap();
         let mut pending = HashMap::new();
