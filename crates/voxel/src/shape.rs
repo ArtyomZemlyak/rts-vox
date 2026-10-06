@@ -116,6 +116,21 @@ pub(crate) fn fill_f(
     mark(b, xs, ys, zs, code);
 }
 
+/// Pack an authored internal volume without repainting its mechanisms.
+/// Ordinary `fill` would erase core/subsystem labels in an overlapping box.
+/// This brush is used during template construction, never to repair damage.
+pub(crate) fn pack(b: &mut UnitBody, xs: (usize, usize), ys: (usize, usize), zs: (usize, usize)) {
+    for z in zs.0..zs.1.min(b.vol.nz as usize) {
+        for y in ys.0..ys.1.min(b.vol.ny as usize) {
+            for x in xs.0..xs.1.min(b.vol.nx as usize) {
+                if !b.vol.get(x, y, z) {
+                    b.set(x, y, z, Part::Armour);
+                }
+            }
+        }
+    }
+}
+
 /// Снять параллелепипед — паз, проём, смотровая щель.
 ///
 /// Кисть, которая **убирает**: рельеф читается по тому, где брони нет,
@@ -489,28 +504,6 @@ pub(crate) fn bone(b: &mut UnitBody, a: (i32, i32, i32), e: (i32, i32, i32), r: 
         let (s, f) = (chain[k], chain[chain.len() - 1 - k]);
         limb(b, (s[0], s[1], s[2]), (f[0], f[1], f[2]), r, r, 0, p);
     }
-}
-
-/// Коробка с полыми стенами: четыре стены, пол и крыша толщиной `t`.
-///
-/// Постройка — это прежде всего оболочка. Сплошной параллелепипед
-/// того же габарита стоил бы вчетверо больше вокселей и читался бы
-/// как брусок; оболочка даёт ту же форму и оставляет внутренность
-/// под механизмы.
-pub(crate) fn shell(
-    b: &mut UnitBody,
-    xs: (usize, usize),
-    ys: (usize, usize),
-    zs: (usize, usize),
-    t: usize,
-    p: Part,
-) {
-    fill(b, (xs.0, xs.0 + t), ys, zs, p);
-    fill(b, (xs.1.saturating_sub(t), xs.1), ys, zs, p);
-    fill(b, xs, ys, (zs.0, zs.0 + t), p);
-    fill(b, xs, ys, (zs.1.saturating_sub(t), zs.1), p);
-    fill(b, xs, (ys.0, ys.0 + t), zs, p);
-    fill(b, xs, (ys.1.saturating_sub(t), ys.1), zs, p);
 }
 
 // ---------------------------------------------------------------------
@@ -1602,6 +1595,33 @@ mod tests {
 
     fn count(b: &UnitBody) -> u32 {
         b.solid_count()
+    }
+
+    #[test]
+    fn packing_keeps_mechanism_labels_finishes_and_exterior_air() {
+        let mut body = UnitBody::new_scaled(7, 7, 7, 1, BODY_MM);
+        for (i, role) in [Part::Core, Part::Engine, Part::Weapon, Part::Sensor]
+            .into_iter()
+            .enumerate()
+        {
+            body.set(2 + i, 3, 3, role);
+            body.set_finish(2 + i, 3, 3, FINISH_STEEL);
+        }
+        pack(&mut body, (1, 6), (1, 6), (1, 6));
+        for (i, role) in [Part::Core, Part::Engine, Part::Weapon, Part::Sensor]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(body.part_at(2 + i, 3, 3), role);
+            assert_eq!(body.finish_at(2 + i, 3, 3), FINISH_STEEL);
+        }
+        assert_eq!(body.solid_count(), 125);
+        assert!(!body.vol.get(0, 3, 3));
+        assert!(!body.vol.get(6, 3, 3));
+        assert_eq!(body.part_at(1, 1, 1), Part::Armour);
+        // Nothing in the packing brush installs an automatic damage repair.
+        assert!(body.remove(1, 1, 1));
+        assert!(!body.vol.get(1, 1, 1));
     }
 
     /// **Цифровой круг без одиночек на осях.** Ряды круга радиуса

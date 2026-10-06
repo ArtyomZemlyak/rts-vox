@@ -554,6 +554,142 @@ fn northern_base_battle() -> BlastRange {
 }
 
 #[test]
+fn pursuit_keeps_a_lateral_firing_goal_until_it_leaves_weapon_reach() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [300, 16, 240],
+        max: [332, 96, 432],
+        material: 3,
+    });
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.actors[0].target = Some(1);
+    let goal = [300, 516]; // 234 units from the target, clear around the wall.
+    let from = r.battle_muzzles(0)[0].map(Fx::to_int_trunc);
+    let target = aim_point(&r.units[1]);
+    assert!(
+        !voxel::los::line_of_sight(
+            &r.world,
+            (from[0], from[1], from[2]),
+            (target[0], target[1], target[2])
+        )
+        .clear
+    );
+    assert!(
+        voxel::los::line_of_sight(
+            &r.world,
+            (goal[0], from[1], goal[1]),
+            (target[0], target[1], target[2])
+        )
+        .clear
+    );
+    // A previously planned detour still under way. Isolate pursuit orders
+    // from drive/route latency, which the northern-track regression covers.
+    r.units[0].motion.stop();
+    r.units[0].motion.path = vec![goal];
+    r.units[0].motion.destination = Some(goal);
+    for _ in 0..6 {
+        let mut battle = std::mem::replace(&mut r.battle, Battle::new(&[], 1));
+        r.battle_orders(&mut battle, |_| {}, &|_, _| {});
+        r.battle = battle;
+        assert_eq!(r.units[0].motion.destination, Some(goal));
+        assert!(!r.units[0].motion.searching(), "usable flank was replanned");
+        assert_eq!(r.battle.actors[0].fired, 0, "wall was ignored");
+        r.tick += r.battle.tuning.pursuit_ticks;
+    }
+    // Changing the actual weapon reach must invalidate the old position.
+    std::sync::Arc::make_mut(&mut r.battle.tuning).kinetic_range = 220;
+    let mut battle = std::mem::replace(&mut r.battle, Battle::new(&[], 1));
+    r.battle_orders(&mut battle, |_| {}, &|_, _| {});
+    r.battle = battle;
+    assert_ne!(r.units[0].motion.destination, Some(goal));
+}
+
+#[test]
+fn pursuit_does_not_restart_the_identical_obscured_fallback_route() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [350, 16, 64],
+        max: [366, 96, 600],
+        material: 3,
+    });
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.actors[0].target = Some(1);
+    let target = aim_point(&r.units[1]);
+    let muzzle_y = r.battle_muzzles(0)[0][1].to_int_trunc();
+    let goal = r.visible_flank(
+        0,
+        target,
+        [250, 336],
+        muzzle_y,
+        r.battle.tuning.pursuit_ticks,
+        r.battle.tuning.firing_spacing,
+    );
+    assert!(!r.firing_line_clear(0, target, goal, muzzle_y));
+    r.units[0].motion.stop();
+    r.units[0].motion.path = vec![goal];
+    r.units[0].motion.destination = Some(goal);
+    for _ in 0..6 {
+        let mut battle = std::mem::replace(&mut r.battle, Battle::new(&[], 1));
+        r.battle_orders(&mut battle, |_| {}, &|_, _| {});
+        r.battle = battle;
+        assert_eq!(r.units[0].motion.destination, Some(goal));
+        assert!(
+            !r.units[0].motion.searching(),
+            "identical fallback restarted a usable route"
+        );
+        assert_eq!(r.battle.actors[0].fired, 0);
+        // Repeat the same flank phase, with unchanged target and geometry.
+        r.tick += 2 * r.battle.tuning.pursuit_ticks;
+    }
+}
+
+#[test]
+fn pursuit_finishes_a_checked_partial_flank_before_choosing_another() {
+    let mut layout = arena(RangeUnitKind::Tank).layout.unwrap();
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [350, 16, 64],
+        max: [366, 96, 600],
+        material: 3,
+    });
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.start_battle().unwrap();
+    assert!(r.battle_order(0, Order::Attack(1), None));
+    r.battle.actors[1].order = Order::Hold;
+    r.battle.actors[0].target = Some(1);
+    let goal = [300, 516];
+    r.units[0].motion.stop();
+    r.units[0].motion.path = vec![[250, 516]];
+    r.units[0].motion.destination = Some(goal);
+    r.units[0].motion.partial_path = true;
+    for _ in 0..6 {
+        let mut battle = std::mem::replace(&mut r.battle, Battle::new(&[], 1));
+        r.battle_orders(&mut battle, |_| {}, &|_, _| {});
+        r.battle = battle;
+        assert_eq!(r.units[0].motion.destination, Some(goal));
+        assert!(
+            !r.units[0].motion.searching(),
+            "pursuit abandoned its checked prefix"
+        );
+        r.tick += r.battle.tuning.pursuit_ticks;
+    }
+    // Ending the prefix permits a fresh approach to the still obscured target.
+    r.units[0].motion.path.clear();
+    let mut battle = std::mem::replace(&mut r.battle, Battle::new(&[], 1));
+    r.battle_orders(&mut battle, |_| {}, &|_, _| {});
+    r.battle = battle;
+    assert_ne!(r.units[0].motion.destination, Some(goal));
+}
+
+#[test]
 fn tank_eventually_recovers_after_northern_turret_hits_its_tracks() {
     let mut battle = northern_base_battle();
     for _ in 0..1500 {

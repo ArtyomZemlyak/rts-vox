@@ -1759,14 +1759,13 @@ impl Motion {
             self.hunt_step(w, b, others, rubble, tick, changed, |_| {}, |_, _| {});
         }
         completed("hunt");
-        // A partial route is a prefix the budget ran out on, planned
-        // around whatever stood there then: the hull searches again on its
-        // cadence while it drives it and takes the new route up (ADR-467).
+        // Finish a checked prefix before searching its continuation. Replacing
+        // it on the cadence from a moving source can lead back behind the hull
+        // into the pocket it just left. A block or a new pursuit goal still
+        // requests a replacement; real steps always check fresh geometry.
         if self.hunt.is_none()
             && self.escape_left == 0
-            && (self.blocked
-                || self.path.is_empty()
-                || (self.partial_path && self.cursor < self.path.len()))
+            && (self.blocked || self.path.is_empty())
             && tick >= self.next_plan
             && self.may_start
         {
@@ -2461,8 +2460,17 @@ mod tests {
                 assert_eq!(bytes.v, check.v);
                 motion = restored;
             }
+            let following = motion.partial_path
+                && motion.cursor < motion.path.len()
+                && !motion.blocked
+                && !motion.searching()
+                && motion.escape_left == 0;
             motion.allow_start(true);
             step(&mut motion, &world, &body, &[], tick);
+            assert!(
+                !following || !motion.started_search(),
+                "usable prefix started a speculative replacement at tick {tick}"
+            );
             if motion.destination.is_none() && motion.waypoint == 1 {
                 assert!((motion.pos[0].to_int_trunc() - goal[0]).abs() <= motion.arrival);
                 reached = true;

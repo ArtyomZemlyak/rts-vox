@@ -23,8 +23,8 @@
 
 use crate::shape::{
     ball, carve, crate_box, cyl, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, lid, link,
-    link_pivot, mark, mark_ball, mark_cyl, mount, plated_turret, ring, rod, running_gear, seat,
-    skirt, slab,
+    link_pivot, mark, mark_ball, mark_cyl, mount, pack, plated_turret, ring, rod, running_gear,
+    seat, skirt, slab,
 };
 use crate::topo::unit::{core_connectivity, CoreBufs, UnitVol};
 
@@ -1277,6 +1277,21 @@ pub fn tank() -> UnitBody {
         true,
     );
 
+    // Close the covered pockets above the running gear and beside the
+    // turret bearing. Leave the exterior wheel/track clearances intact.
+    for z in [(1, 7), (23, 29)] {
+        for x in [(34, 36), (43, 45)] {
+            pack(&mut u, x, (10, 11), z);
+        }
+    }
+    for z in [(1, 4), (26, 29)] {
+        pack(&mut u, (49, 51), (10, 11), z);
+        pack(&mut u, (52, 53), (10, 11), z);
+    }
+    pack(&mut u, (40, 42), (17, 18), (7, 8));
+    pack(&mut u, (41, 42), (17, 18), (22, 23));
+    pack(&mut u, (26, 35), (17, 18), (24, 25));
+
     let mut u = seat(u, "танк");
     // Башня — всё, что выше погона. Одна величина, записанная
     // один раз: линия та же, на которой обрывается разметка корпуса.
@@ -1379,6 +1394,8 @@ fn artillery_scaled(mm: u16) -> UnitBody {
         fill_f(&mut u, (5, 13), (13, 16), (z, z + 1), a, FINISH_STEEL);
     }
 
+    // The covered bearing is a packed physical coupling, not an empty ring.
+    pack(&mut u, (24, 41), (14, 16), (7, 24));
     let mut u = seat(u, "артиллерия");
     u.turret_y = 16;
     u.push_weapon_path(WeaponPath {
@@ -1480,6 +1497,7 @@ pub fn artillery_turret_t2() -> UnitBody {
         Part::Sensor,
         FINISH_OPTIC,
     );
+    pack(&mut u, (19, 42), (17, 19), (9, 32));
     let mut u = seat(u, "артиллерийская турель T2");
     u.turret_y = 18;
     u.push_weapon_path(WeaponPath {
@@ -1533,6 +1551,7 @@ pub fn turret_t1() -> UnitBody {
         Part::Sensor,
         FINISH_OPTIC,
     );
+    pack(&mut u, (11, 26), (12, 14), (11, 26));
     let mut u = seat(u, "турель T1");
     u.turret_y = 13;
     u.push_weapon_path(WeaponPath {
@@ -1602,6 +1621,7 @@ pub fn turret_t2() -> UnitBody {
         fill_f(&mut u, (15, 21), (39, 41), (z + 1, z + 5), a, FINISH_CORE);
         fill_f(&mut u, (16, 20), (33, 35), (z, z + 6), a, FINISH_CORE);
     }
+    pack(&mut u, (13, 36), (17, 18), (13, 36));
     let mut u = seat(u, "турель T2");
     u.turret_y = 17;
     u.push_weapon_path(WeaponPath {
@@ -2336,6 +2356,8 @@ pub fn spider() -> UnitBody {
     );
     // Broad reactor stays below the laser turntable and inside the armour.
     fill(&mut u, (38, 51), (27, 40), (33, 47), Part::Core);
+    // No sealed air behind the laser-head shoulder.
+    pack(&mut u, (60, 62), (40, 41), (43, 45));
     let mut u = seat(u, "паук");
     u.turret_y = 40;
     u.push_weapon_path(WeaponPath {

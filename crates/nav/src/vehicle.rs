@@ -398,13 +398,18 @@ pub type PrepareStart<'a> = dyn FnMut(StartSweep, &mut Probe<'_>) -> PreparedSwe
 impl StartSweep {
     pub fn prefix_open(&self, poses: &[Pose]) -> bool {
         let mut height = self.height;
+        let mut steep = None;
         for (i, pose) in poses.iter().enumerate() {
             if !(i == 0 && self.initial)
-                && (pose.refused() || pose.height.sub(height).abs() > Fx::from_int(self.shape.step))
+                && (pose.blocked != 0
+                    || pose.tilt
+                    || pose.steep && steep == Some(false)
+                    || pose.height.sub(height).abs() > Fx::from_int(self.shape.step))
             {
                 return false;
             }
             height = pose.height;
+            steep = Some(pose.steep);
         }
         true
     }
@@ -993,13 +998,24 @@ impl<'a> Probe<'a> {
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
     fn route_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> Pose {
+        self.route_pose_mode(pos, head, s, false)
+    }
+    fn route_pose_mode(&mut self, pos: [Fx; 2], head: i32, s: Shape, leave_steep: bool) -> Pose {
         if let Some(pose) = self.prepared_routes.get(&(pos[0], pos[1], head)) {
-            return *pose;
+            // Ordinary speculative poses may stop before scanning the belly
+            // on a steep contact. An exit must validate that clearance too.
+            if !leave_steep || !pose.steep || pose.tilt || pose.blocked != 0 {
+                return *pose;
+            }
         }
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose;
         }
-        self.probe_pose(pos, head, s, true)
+        self.probe_pose_cost(pos, head, s, true, true, leave_steep)
+    }
+    fn contact_steep(&mut self, pos: [Fx; 2], head: i32, s: Shape) -> bool {
+        self.flat_pose(pos, s)
+            .map_or_else(|| self.contacts(pos, head, s).1, |p| p.steep)
     }
     /// Immutable-world geometry for one speculative sweep batch. Logical
     /// progress and blocker callbacks remain with the owning search.
@@ -1063,10 +1079,11 @@ impl<'a> Probe<'a> {
         if let Some(pose) = self.flat_pose(pos, s) {
             return pose.refused();
         }
-        self.probe_pose_cost(pos, head, s, true, false).refused()
+        self.probe_pose_cost(pos, head, s, true, false, false)
+            .refused()
     }
     fn probe_pose(&mut self, pos: [Fx; 2], head: i32, s: Shape, stop_on_refusal: bool) -> Pose {
-        self.probe_pose_cost(pos, head, s, stop_on_refusal, true)
+        self.probe_pose_cost(pos, head, s, stop_on_refusal, true, false)
     }
     fn probe_pose_cost(
         &mut self,
@@ -1075,6 +1092,7 @@ impl<'a> Probe<'a> {
         s: Shape,
         stop_on_refusal: bool,
         count_crush: bool,
+        leave_steep: bool,
     ) -> Pose {
         let (floors, steep) = self.contacts(pos, head, s);
         let (c, sin) = (angle::cos(head), angle::sin(head));
@@ -1105,7 +1123,7 @@ impl<'a> Probe<'a> {
             tilt,
             crush: 0,
         };
-        if stop_on_refusal && (steep || tilt) {
+        if stop_on_refusal && (tilt || steep && !leave_steep) {
             return result;
         }
         let (lo, hi) = self.extent(pos, head, s);
@@ -1286,7 +1304,9 @@ fn connects(
     for i in 1..=turns {
         let h = angle::norm(head + turn * i / turns);
         let next = ground.pose(from, h, shape);
-        if next.refused()
+        if next.blocked != 0
+            || next.tilt
+            || next.steep && !old.steep
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(from, h)
         {
@@ -1300,7 +1320,9 @@ fn connects(
         let f = Fx::from_ratio(i, steps);
         let p = [from[0].add(delta[0].mul(f)), from[1].add(delta[1].mul(f))];
         let next = ground.pose(p, yaw, shape);
-        if next.refused()
+        if next.blocked != 0
+            || next.tilt
+            || next.steep && !old.steep
             || next.height.sub(old.height).abs() > Fx::from_int(shape.step)
             || !clear(p, yaw)
         {
@@ -1549,6 +1571,16 @@ impl Hunt {
                 samples: 0,
             })
         };
+        // Recovery uses exactly the executor's contacts. Padding a grade
+        // can call a physically flat source steep and permit an illegal entry.
+        let cfg = Search {
+            margin: if cfg.margin > 0 && ground.contact_steep(from, head, shape) {
+                0
+            } else {
+                cfg.margin
+            },
+            ..cfg
+        };
         let shape = Shape {
             span: if shape.span >= 2 {
                 shape.span + cfg.margin.max(0)
@@ -1713,7 +1745,15 @@ impl Hunt {
             }
             completed("plan_prepare");
             let before = *allowance;
-            let answer = run.advance(ground, self.shape, clear, allowance);
+            let answer = run.advance_with_endpoints(
+                ground,
+                self.shape,
+                clear,
+                allowance,
+                None,
+                None,
+                self.cfg.margin <= 0,
+            );
             completed("plan_direct");
             self.probed += (before - *allowance) as u32;
             match answer {
@@ -2231,7 +2271,15 @@ impl Hunt {
             }
             if let Some((node, cost, run)) = &mut self.connection {
                 let before = allowance;
-                let answer = run.advance(ground, self.shape, clear, &mut allowance);
+                let answer = run.advance_with_endpoints(
+                    ground,
+                    self.shape,
+                    clear,
+                    &mut allowance,
+                    None,
+                    None,
+                    self.cfg.margin <= 0,
+                );
                 self.probed += (before - allowance) as u32;
                 match answer {
                     None => break,
@@ -2303,6 +2351,16 @@ impl Hunt {
         let direction = e.node % 8;
         let at = self.point(e.node / 8);
         let yaw = self.heading(e.node);
+        // Pure validation of the reached source, including the real heading
+        // at the initial node. Derived cache only; it adds no graph state.
+        let source = if let Some(pose) = self.poses.get(&e.node) {
+            *pose
+        } else {
+            let pose = ground.pose(at, yaw, self.shape);
+            self.poses.insert(e.node, pose);
+            pose
+        };
+        let leave_steep = source.steep && self.cfg.margin <= 0;
         while e.edge < 3 && *allowance > 0 {
             if e.pending.is_none() {
                 let turn = i32::from(e.edge) - 1;
@@ -2348,19 +2406,25 @@ impl Hunt {
                     e.edge += 1;
                     continue;
                 }
-                let pose = if let Some(p) = self.poses.get(&j) {
-                    *p
-                } else {
-                    self.probed += 1;
-                    let p = ground.route_pose(q, next_yaw, self.shape);
-                    self.poses.insert(j, p);
-                    p
+                let cached = self.poses.get(&j).copied();
+                let pose = match cached {
+                    Some(p) if !leave_steep || !p.steep || p.tilt || p.blocked != 0 => p,
+                    _ => {
+                        self.probed += 1;
+                        let p = ground.route_pose_mode(q, next_yaw, self.shape, leave_steep);
+                        self.poses.insert(j, p);
+                        p
+                    }
                 };
                 let next_cost = base
                     + (pose.crush as u32)
                         .saturating_mul(self.cfg.crush_cost)
                         .min(self.cfg.crush_cap);
-                if next_cost >= self.cost(j) || pose.refused() {
+                if next_cost >= self.cost(j)
+                    || pose.blocked != 0
+                    || pose.tilt
+                    || pose.steep && !leave_steep
+                {
                     e.edge += 1;
                     continue;
                 }
@@ -2377,6 +2441,7 @@ impl Hunt {
                 allowance,
                 origin_pose,
                 target_pose,
+                self.cfg.margin <= 0,
             );
             self.probed += (before - *allowance) as u32;
             match answer {
@@ -2885,10 +2950,10 @@ mod tests {
                         }
                     };
                     assert_eq!(actual, expected);
-                    assert_eq!(
-                        ground.samples, reference.samples,
-                        "a pose was skipped or repeated"
-                    );
+                    // Resuming just before a steep refusal reconstructs the
+                    // previous contacts; it never redoes a full footprint.
+                    assert!(ground.samples >= reference.samples);
+                    assert!(ground.samples <= reference.samples * 2);
                 }
             }
         }
@@ -2916,6 +2981,7 @@ mod tests {
             &mut left_b,
             Some(start),
             Some(end),
+            true,
         );
         assert_eq!(actual, expected);
         assert_eq!(left_b, left_a);
@@ -3751,16 +3817,16 @@ mod tests {
             .height;
         assert!(after.sub(before) > Fx::from_ratio(1, 2));
     }
+    struct Rim;
+    impl voxel::Generator for Rim {
+        fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+            // A 45-degree bank ten units long between two flats.
+            let h = 16 + (x as i32 - 120).clamp(0, 10);
+            u16::from((y as i32) < h)
+        }
+    }
     #[test]
     fn a_grade_steeper_than_the_tilt_limit_blocks_even_a_level_hull() {
-        struct Rim;
-        impl voxel::Generator for Rim {
-            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
-                // A 45-degree bank ten units long between two flats.
-                let h = 16 + (x as i32 - 120).clamp(0, 10);
-                u16::from((y as i32) < h)
-            }
-        }
         let w = World::new(256, 64, 256, 100, Box::new(Rim));
         let mut p = Probe::new(&w);
         // Front supports two units short of the bank: the chord over the
@@ -3775,6 +3841,197 @@ mod tests {
         point.span = 0;
         assert!(!p.pose(at, 0, point).refused(), "a point sees no grade");
     }
+    #[test]
+    fn a_sweep_can_leave_a_steep_contact_but_cannot_enter_one() {
+        let w = World::new(256, 64, 256, 100, Box::new(Rim));
+        for (from, to, head, open) in [
+            ([93, 100], [70, 100], angle::FULL / 2, true),
+            ([70, 100], [93, 100], 0, false),
+            ([93, 100], [130, 100], 0, true), // already on the grade
+        ] {
+            let from = from.map(Fx::from_int);
+            let to = to.map(Fx::from_int);
+            let expected = connects(&mut Probe::new(&w), tank(), from, head, to, &|_, _| true);
+            assert_eq!(expected.is_some(), open, "from={from:?}, to={to:?}");
+            for budget in [1, 7, 96] {
+                let mut run = Connection::new(from, head, to);
+                let mut probe = Probe::new(&w);
+                let mut finished = false;
+                for _ in 0..200 {
+                    let mut left = budget;
+                    let answer = run.advance(&mut probe, tank(), &|_, _| true, &mut left);
+                    let mut bytes = fx::blob::Blob::new();
+                    run.save(&mut bytes);
+                    run = Connection::load(&mut fx::blob::Scan::new(&bytes.v), true).unwrap();
+                    if let Some(answer) = answer {
+                        assert_eq!(answer, expected);
+                        finished = true;
+                        break;
+                    }
+                }
+                assert!(finished);
+            }
+        }
+        // Exiting a grade does not excuse a blocked belly or a live obstacle.
+        let from = [93, 100].map(Fx::from_int);
+        let to = [70, 100].map(Fx::from_int);
+        assert!(connects(
+            &mut Probe::new(&w),
+            tank(),
+            from,
+            angle::FULL / 2,
+            to,
+            &|p, _| p[0] > Fx::from_int(86)
+        )
+        .is_none());
+        let mut rubble = Rubble::new();
+        rubble.insert([80, 100], 26);
+        assert!(connects(
+            &mut Probe::new(&w).with_rubble(&rubble),
+            tank(),
+            from,
+            angle::FULL / 2,
+            to,
+            &|_, _| true
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn a_padded_contact_does_not_let_a_flat_start_enter_a_steep_grade() {
+        struct TallRim;
+        impl voxel::Generator for TallRim {
+            fn material(&self, x: u32, y: u32, _z: u32) -> u16 {
+                u16::from((y as i32) < 16 + (x as i32 - 120).clamp(0, 30))
+            }
+        }
+        let w = World::new(256, 64, 256, 100, Box::new(TallRim));
+        let mut probe = Probe::new(&w);
+        let padded = Shape {
+            span: tank().span + search().margin,
+            ..tank()
+        };
+        let from = (60..100)
+            .map(|x| [x, 100].map(Fx::from_int))
+            .find(|&at| !probe.pose(at, 0, tank()).steep && probe.pose(at, 0, padded).steep)
+            .expect("margin must reach the bank before the actual belt");
+        assert!(
+            probe.pose(from, 0, padded).steep,
+            "padding must reach the bank"
+        );
+        let result = plan(
+            Probe::new(&w),
+            tank(),
+            from,
+            0,
+            [200, 100],
+            search(),
+            |_, _| true,
+        );
+        assert_ne!(
+            result.path.last(),
+            Some(&[200, 100]),
+            "false recovery crossed the bank"
+        );
+        let Hunting::Open(hunt) = Hunt::start_bounded(
+            &mut Probe::new(&w),
+            tank(),
+            from,
+            0,
+            [200, 100],
+            search(),
+            &|_, _| true,
+            1,
+        ) else {
+            panic!("bounded target prelude should stay open");
+        };
+        assert_eq!(hunt.cfg.margin, search().margin);
+        assert_eq!(hunt.shape.span, padded.span);
+    }
+
+    #[test]
+    fn steep_start_searches_match_reloaded_and_prepared_slices() {
+        let w = World::new(256, 64, 256, 100, Box::new(Rim));
+        let rubble = Rubble::new();
+        let clear = |p: [Fx; 2], _: i32| {
+            !(p[0] > Fx::from_int(75)
+                && p[0] < Fx::from_int(80)
+                && p[1] > Fx::from_int(90)
+                && p[1] < Fx::from_int(110))
+        };
+        let from = [93, 100].map(Fx::from_int);
+        let head = angle::FULL / 2;
+        let mut batches = 0;
+        for budget in [1, 7, 32, 96] {
+            let Hunting::Open(mut live) = Hunt::start_bounded(
+                &mut Probe::new(&w),
+                tank(),
+                from,
+                head,
+                [40, 100],
+                search(),
+                &clear,
+                1,
+            ) else {
+                panic!("the detour must remain pending");
+            };
+            assert_eq!(
+                live.shape.span,
+                tank().span,
+                "escape must use the executor's exact grade contacts"
+            );
+            for tick in 0..10000 {
+                let mut bytes = fx::blob::Blob::new();
+                live.save(&mut bytes);
+                let mut restored = Hunt::load(&mut fx::blob::Scan::new(&bytes.v), &[]).unwrap();
+                let prepared = restored
+                    .sweep_samples(budget)
+                    .map(|(shape, samples)| {
+                        batches += 1;
+                        let mut probe = restored.sweep_probe(&w, &rubble);
+                        let poses = probe.route_samples(shape, &samples);
+                        PreparedSweep {
+                            poses: samples.into_iter().zip(poses).collect(),
+                            columns: Some(probe.take_columns()),
+                            reads: [0; 2],
+                        }
+                    })
+                    .unwrap_or_default();
+                let before = live.spent;
+                let result = live.advance_in(&w, &rubble, &clear, budget);
+                assert!(live.spent - before <= budget);
+                let other = restored.advance_in_prepared(&w, &rubble, &clear, budget, prepared);
+                assert_eq!(result.is_some(), other.is_some());
+                let mut a = fx::blob::Blob::new();
+                let mut b = fx::blob::Blob::new();
+                live.save(&mut a);
+                restored.save(&mut b);
+                assert_eq!(a.v, b.v, "budget={budget}, tick={tick}");
+                if let Some(result) = result {
+                    let other = other.unwrap();
+                    assert_eq!(
+                        (&result.path, result.partial, result.stranded),
+                        (&other.path, other.partial, other.stranded)
+                    );
+                    assert!(!result.path.is_empty() && !result.stranded);
+                    let mut probe = Probe::new(&w);
+                    let mut at = from;
+                    let mut yaw = head;
+                    for point in &result.path {
+                        let to = point.map(Fx::from_int);
+                        assert!(connects(&mut probe, tank(), at, yaw, to, &clear).is_some());
+                        yaw = angle::atan2(to[1].sub(at[1]).raw(), to[0].sub(at[0]).raw());
+                        at = to;
+                    }
+                    assert!(!probe.pose(at, yaw, tank()).refused());
+                    break;
+                }
+                assert!(tick < 9999);
+            }
+        }
+        assert!(batches > 0);
+    }
+
     /// Flat soil with a 60 cm boulder, seven columns square.
     struct Boulder;
     impl voxel::Generator for Boulder {

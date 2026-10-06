@@ -1126,6 +1126,26 @@ impl BlastRange {
         }
         natural
     }
+    /// Project the current muzzle height onto a candidate firing position.
+    /// The same terrain test validates a held detour and selects a new flank.
+    fn firing_line_clear(
+        &self,
+        id: usize,
+        target: [i32; 3],
+        point: [i32; 2],
+        muzzle_y: i32,
+    ) -> bool {
+        let here = self.units[id].motion.pos;
+        let above =
+            muzzle_y - motion::floor(&self.world, here[0].to_int_trunc(), here[2].to_int_trunc());
+        let y = motion::floor(&self.world, point[0], point[1]) + above;
+        voxel::los::line_of_sight(
+            &self.world,
+            (point[0], y, point[1]),
+            (target[0], target[1], target[2]),
+        )
+        .clear
+    }
     /// Try short lateral firing positions when a hill hides a target that is
     /// already inside weapon range. This runs only on the pursuit cadence.
     fn visible_flank(
@@ -1150,7 +1170,6 @@ impl BlastRange {
         } else {
             -1
         };
-        let muzzle_above_floor = muzzle_y - motion::floor(&self.world, here[0], here[1]);
         let free = |p: [i32; 2]| {
             self.units.iter().enumerate().all(|(other, u)| {
                 if other == id || !u.status.alive || self.allied(other) != self.allied(id) {
@@ -1188,14 +1207,7 @@ impl BlastRange {
                 if fallback == natural {
                     fallback = candidate;
                 }
-                let y = motion::floor(&self.world, candidate[0], candidate[1]) + muzzle_above_floor;
-                if voxel::los::line_of_sight(
-                    &self.world,
-                    (candidate[0], y, candidate[1]),
-                    (target[0], target[1], target[2]),
-                )
-                .clear
-                {
+                if self.firing_line_clear(id, target, candidate, muzzle_y) {
                     return candidate;
                 }
             }
@@ -1667,10 +1679,24 @@ impl BlastRange {
                     // the old one replanned even against a stationary target.
                     // A moving target still invalidates it on leaving its reach.
                     let dest = road_goal.unwrap_or(dest);
+                    // A checked local prefix is a committed leg of the same
+                    // firing approach. Our changing angle must not replace it
+                    // with a nearby flank before its endpoint is reached.
+                    let motion = &self.units[id].motion;
+                    let following_prefix = blocked_direct
+                        && motion.partial_path
+                        && motion.cursor < motion.path.len()
+                        && motion.destination.is_some_and(|old| {
+                            let x = i64::from(p[0]) - i64::from(old[0]);
+                            let z = i64::from(p[2]) - i64::from(old[1]);
+                            x * x + z * z <= i64::from(range) * i64::from(range)
+                        });
                     let changed = if road_goal.is_some() {
                         target_changed
                             || needs_detour
                             || self.units[id].motion.destination != Some(dest)
+                    } else if following_prefix && !target_changed && !needs_detour {
+                        false
                     } else {
                         target_changed
                             || needs_detour
@@ -1678,15 +1704,36 @@ impl BlastRange {
                             || self.units[id].motion.destination.is_none_or(|old| {
                                 let x = i64::from(p[0]) - i64::from(old[0]);
                                 let z = i64::from(p[2]) - i64::from(old[1]);
+                                // The fallback may still have no firing line.
+                                // Only a visible lateral point can use the full
+                                // weapon reach rather than the radial standoff.
                                 let reach = if blocked_direct && weapon != Weapon::Laser {
-                                    200
+                                    let muzzle_y =
+                                        weapons::muzzles(&self.units[id], a.turret.angle)
+                                            .first()
+                                            .map_or(from[1].to_int_trunc(), |m| {
+                                                m[1].to_int_trunc()
+                                            });
+                                    if self.firing_line_clear(id, p, old, muzzle_y) {
+                                        range
+                                    } else {
+                                        200
+                                    }
                                 } else {
                                     range
                                 };
                                 x * x + z * z > i64::from(reach) * i64::from(reach)
                             })
                     };
-                    if changed {
+                    // Reissuing the identical firing point cannot improve a
+                    // live route or its sight line. It only restarts work from
+                    // a moved origin and can send the hull back into a pocket.
+                    // A block or a different target still needs a fresh search.
+                    if changed
+                        && (needs_detour
+                            || target_changed
+                            || self.units[id].motion.destination != Some(dest))
+                    {
                         completed("orders_retarget_setup");
                         let others: Vec<_> = self
                             .units

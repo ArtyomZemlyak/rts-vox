@@ -29,8 +29,8 @@
 
 use crate::shape::{
     carve, crate_box, cyl_f, disc, exhaust, fill, fill_f, hatch, headlight, joint, lamp, leg, lid,
-    link, link_pivot, mark, mark_cyl, mount, plate_ring, plated_turret, rail, ram, ring, rivets,
-    rod, running_gear, seat, shell, skirt, slab, span,
+    link, link_pivot, mark, mark_cyl, mount, pack, plate_ring, plated_turret, rail, ram, ring,
+    rivets, rod, running_gear, seat, skirt, slab, span,
 };
 use crate::topo::unit::UnitVol;
 use crate::unit::{
@@ -582,6 +582,7 @@ pub fn commander() -> UnitBody {
     disc(&mut b, (36, 35), 6, (100, 104), Part::Sensor);
     antenna(&mut b, (28, 100, 28), 8, false);
     antenna(&mut b, (28, 100, 42), 7, false);
+    pack(&mut b, (40, 41), (52, 53), (55, 56));
     seat(b, "командная машина")
 }
 
@@ -877,6 +878,10 @@ pub fn fortress() -> UnitBody {
     antenna(&mut b, (44, 48, 74), 12, false);
 
     fill(&mut b, (104, 112), (20, 28), (48, 56), Part::Core);
+    // Fill closed roof pockets under the rear turret; external vents remain.
+    pack(&mut b, (152, 173), (47, 48), (50, 53));
+    pack(&mut b, (175, 184), (47, 48), (50, 53));
+    pack(&mut b, (175, 184), (47, 48), (56, 59));
     seat(b, "мобильная крепость")
 }
 
@@ -1412,7 +1417,8 @@ pub fn depot() -> UnitBody {
         (52, 26),
         (52, 44),
     ] {
-        shell(&mut b, (x0, x0 + 16), (0, 20), (z0, z0 + 12), 2, a);
+        // Packed cargo boxes; the courtyard between boxes remains open.
+        fill(&mut b, (x0, x0 + 16), (0, 20), (z0, z0 + 12), a);
         rivets(&mut b, (x0 + 1, 19, z0 + 1), 0, 14, 3, a);
     }
     // Обходной мостик по верху с поручнем по наружной кромке: он
@@ -1677,6 +1683,8 @@ pub fn drill_rig() -> UnitBody {
     antenna(&mut b, (30, 48, 30), 6, false);
     fill(&mut b, (22, 26), (10, 14), (22, 26), Part::Core);
 
+    pack(&mut b, (27, 28), (37, 38), (19, 20));
+    pack(&mut b, (20, 21), (37, 38), (28, 29));
     seat(b, "буровая")
 }
 
