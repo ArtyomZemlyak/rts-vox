@@ -497,6 +497,39 @@ fn main() {
                 );
             }
         }
+        // Would the whole-map planner route these hulls from where they
+        // stand? A refusal sends them to the budgeted fine search.
+        for (k, &id) in ids.iter().enumerate() {
+            if first_motion[k].is_none() {
+                let u = &sim.units[id];
+                let m = &u.motion;
+                let dest = m.destination.unwrap_or([5000, 5000]);
+                let here = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
+                for (label, to) in [("slot", dest), ("near_start", [here[0] + 400, here[1]]), ("near_start_z", [here[0], here[1] + 400])] {
+                let nodes = 1 << 20;
+                {
+                    let plan = nav::vehicle::coarse::plan(
+                        &sim.world,
+                        &sim.rubble,
+                        m.probe_shape(&u.body),
+                        [m.pos[0], m.pos[2]],
+                        to,
+                        nav::vehicle::coarse::Config {
+                            cell: sim.navigation.global_cell_units,
+                            nodes,
+                            yielding: sim.navigation.fell.materials,
+                            local_grade: u.kind == modding::range::RangeUnitKind::Spider,
+                        },
+                    );
+                    println!(
+                        "coarse_probe id={id} {label} to={to:?} nodes_cap={nodes} found={} expanded={:?}",
+                        plan.is_some(),
+                        plan.map(|p| p.nodes)
+                    );
+                }
+                }
+            }
+        }
         let mut reacted: Vec<u32> = first_reaction.iter().flatten().copied().collect();
         reacted.sort_unstable();
         println!(
