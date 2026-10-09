@@ -217,6 +217,7 @@ fn main() {
             {
                 let decisions = Rules {
                     tuning: run.world().enemy_ai_tuning(),
+                    radii: run.world().enemy_ai_radii(),
                     controlled_allied: false,
                 }
                 .whole_plan(&observation);

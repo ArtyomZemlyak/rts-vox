@@ -4734,10 +4734,18 @@ impl Bursts {
             *groups.entry((origin, m)).or_default() |= 1u64 << sub;
         }
         let (mut made, mut returned) = (0, 0);
+        // One scan of the pool, not one per shape: each spawn takes one
+        // slot from both the flying and the working budget.
+        let mut room = if groups.is_empty() {
+            0
+        } else {
+            self.fragment_room(t)
+        };
         for ((key, m), whole) in groups {
             let at = key.map(|v| v as i32 + i32::from(side) / 2);
             for shape in shape_components(whole, side) {
-                if self.fragment_room(t) > 0 && self.spawn(key, m, at, side, shape, 0, e, t) {
+                if room > 0 && self.spawn(key, m, at, side, shape, 0, e, t) {
+                    room -= 1;
                     made += 1;
                     continue;
                 }

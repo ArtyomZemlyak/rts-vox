@@ -1718,7 +1718,9 @@ fn advance(
         scene.acc += time.delta_secs();
         // Bounded debt (analysis 240, B5): a long overload slows the scene
         // rather than replaying the backlog as a later fast-forward.
-        scene.acc = scene.acc.min(render::realtime::MAX_DEBT_TICKS as f32 / 30.0);
+        scene.acc = scene
+            .acc
+            .min(render::realtime::MAX_DEBT_TICKS as f32 / 30.0);
         scene.live_elapsed += time.delta_secs();
         if scene.acc < 1.0 / 30.0 {
             return;

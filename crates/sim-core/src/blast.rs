@@ -2617,10 +2617,10 @@ pub struct BlastRange {
     /// route search in flight keeps what it scanned elsewhere. In the
     /// snapshot.
     world_changed: nav::vehicle::Changed,
-    /// Edits the layer has not seen yet: it waits for the wave's claims
-    /// to clear and for room in the piece pool, and takes them in a batch.
-    /// The latest edit per cell. In the snapshot.
-    collapse_backlog: BTreeMap<[u32; 3], voxel::world::Edit>,
+    /// Edits the layer has not seen yet: each waits while its chunk lies in
+    /// a live wave's field or next to a claimed cell, and the layer takes
+    /// the rest in a batch. The latest edit per cell. In the snapshot.
+    collapse_backlog: CollapseBacklog,
     /// The data ceiling on one fallen body; the room in the pool caps it
     /// further tick by tick.
     collapse_cap: usize,
@@ -3099,7 +3099,7 @@ impl BlastRange {
             bodies,
             collapsed_cells: 0,
             world_changed: nav::vehicle::Changed::default(),
-            collapse_backlog: BTreeMap::new(),
+            collapse_backlog: CollapseBacklog::default(),
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
         };
@@ -3314,7 +3314,7 @@ impl BlastRange {
         self.collapse.save(&mut b);
         b.u64(self.collapsed_cells);
         b.u32(self.collapse_backlog.len() as u32);
-        for (p, e) in &self.collapse_backlog {
+        for (p, e) in self.collapse_backlog.cells() {
             for v in p {
                 b.u32(*v);
             }
@@ -3846,7 +3846,7 @@ impl BlastRange {
         }
         observe("collapse_backlog", bytes.len() - s.left(), None);
         r.collapsed_cells = s.u64();
-        r.collapse_backlog = load_collapse_backlog(&mut s, r.size)?;
+        r.collapse_backlog = CollapseBacklog::from_cells(load_collapse_backlog(&mut s, r.size)?);
         observe("body_jobs", bytes.len() - s.left(), None);
         if !r.bodies.load_version(&mut s, version >= 37) {
             return None;
@@ -4604,7 +4604,8 @@ impl BlastRange {
                 u.motion.defer_feet();
             }
             u.motion.cut_limit = cut_limit;
-            u.motion.allow_start(starts > 0 && offered.binary_search(&id).is_ok());
+            u.motion
+                .allow_start(starts > 0 && offered.binary_search(&id).is_ok());
             {
                 let others: Vec<_> = positions
                     .iter()
@@ -5100,7 +5101,7 @@ impl BlastRange {
         // cell from under the wave. Cohesive bodies have their own pool;
         // spare particle slots must not decide whether a building can fall.
         for e in self.world.edits() {
-            self.collapse_backlog.insert([e.x, e.y, e.z], *e);
+            self.collapse_backlog.insert(*e);
         }
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
         // Regional readiness (analysis 240, C1). The layer used to wait for
@@ -5137,23 +5138,6 @@ impl BlastRange {
                 .collect()
         };
         let has_collapse = !self.collapse_backlog.is_empty() || self.collapse.pending();
-        let mut ready: Vec<voxel::world::Edit> = Vec::new();
-        let (mut by_wave, mut by_claim) = (false, false);
-        if has_collapse {
-            for (p, e) in &self.collapse_backlog {
-                let q = p.map(|v| v as i32);
-                if wave_boxes
-                    .iter()
-                    .any(|(lo, hi)| (0..3).all(|a| q[a] >= lo[a] && q[a] < hi[a]))
-                {
-                    by_wave = true;
-                } else if claim_chunks.contains(&q.map(|v| v / chunk)) {
-                    by_claim = true;
-                } else {
-                    ready.push(*e);
-                }
-            }
-        }
         // A body whose source digs have not drained yet still stands in the
         // world; a pass now could tear the same cells off twice. Global, and
         // short: the transfer queue drains whole each flush (ADR-431).
@@ -5163,10 +5147,27 @@ impl BlastRange {
                 .list
                 .iter()
                 .any(|b| b.awaiting_removal(&self.world));
+        // Per chunk, not per edit: a waiting chunk is not touched, so a
+        // backlog parked under a long fight costs nothing a tick.
+        let (mut by_wave, mut by_claim) = (false, false);
+        let mut ready: Vec<voxel::world::Edit> = Vec::new();
+        if has_collapse && !awaiting {
+            ready = self.collapse_backlog.admit(|c| {
+                let lo = c.map(|v| v as i32 * chunk);
+                let in_wave = wave_boxes
+                    .iter()
+                    .any(|(blo, bhi)| (0..3).all(|a| lo[a] < bhi[a] && lo[a] + chunk > blo[a]));
+                let near_claim = claim_chunks.contains(&c.map(|v| v as i32));
+                by_wave |= in_wave;
+                by_claim |= !in_wave && near_claim;
+                !in_wave && !near_claim
+            });
+        }
         let blocked_by = u8::from(by_wave) | (u8::from(by_claim) << 1) | (u8::from(awaiting) << 2);
         let runs = has_collapse && !awaiting && (!ready.is_empty() || self.collapse.pending());
+        let queued = ready.len() + self.collapse_backlog.len();
         self.collapse_work = CollapseWork {
-            queued: self.collapse_backlog.len(),
+            queued,
             blocked_by,
             blocked_ticks: if has_collapse && !runs {
                 self.collapse_work.blocked_ticks.saturating_add(1)
@@ -5175,6 +5176,7 @@ impl BlastRange {
             },
             ..CollapseWork::default()
         };
+        completed("collapse_admit");
         if runs {
             self.collapse.set_max_body_cells(self.collapse_cap);
             self.collapse_work.submitted = ready.len();
@@ -5191,6 +5193,21 @@ impl BlastRange {
             // A body torn off this tick keeps its cohesive cells, rebuilt
             // without the loose ones, which crumble; one of loose cells
             // alone is all crumbs. Bodies already falling pass through.
+            //
+            // Crumbs become pieces only where the fragment pool has a slot
+            // for every one of them (analysis 240, C1). A body whose loose
+            // cells would not all fit falls whole instead and bakes where
+            // it lands, loose cells and all. Shedding them anyway put the
+            // rest back as hanging cells, found again next tick: under
+            // steady fire the pool is full of flying ejecta, and the same
+            // five thousand cells were torn off and put back every tick,
+            // their transfers draining ahead of the claims that hold the
+            // pool (ADR-431), so it never freed.
+            let mut crumb_room = if battle_mode || self.config.material_energy_j > 0 {
+                self.matter.debris.fragment_room(&self.matter.tuning) as usize
+            } else {
+                usize::MAX
+            };
             let mats = &self.matter.economy.mats;
             let mut whole = Vec::new();
             for b in std::mem::take(&mut self.bodies.list) {
@@ -5217,15 +5234,23 @@ impl BlastRange {
                     whole.push(b);
                     continue;
                 }
-                crumbs.append(&mut shed);
-                if keep.is_empty() {
-                    continue;
-                }
                 // The cells are still in the world: the layer's digs are
                 // queued, not applied, so the rest of the body reads from it.
-                let cells: Vec<(u32, u32, u32)> =
-                    keep.iter().map(|(p, _)| (p[0], p[1], p[2])).collect();
-                match voxel::bodies::Body::from_world_cells(&self.world, &cells) {
+                let rest = (!keep.is_empty())
+                    .then(|| {
+                        let cells: Vec<(u32, u32, u32)> =
+                            keep.iter().map(|(p, _)| (p[0], p[1], p[2])).collect();
+                        voxel::bodies::Body::from_world_cells(&self.world, &cells)
+                    })
+                    .flatten();
+                let crumbling = shed.len() + if rest.is_none() { keep.len() } else { 0 };
+                if crumbling > crumb_room {
+                    whole.push(b);
+                    continue;
+                }
+                crumb_room -= crumbling;
+                crumbs.append(&mut shed);
+                match rest {
                     Some(mut rest) => {
                         rest.id = b.id;
                         whole.push(rest);
@@ -5235,6 +5260,7 @@ impl BlastRange {
             }
             self.bodies.list = whole;
             self.bodies.spawned.clear();
+            completed("collapse_crumble");
             if let Some(layout) = &self.layout {
                 let before = self.bodies.list.len();
                 plate::fracture_iter(
@@ -5257,10 +5283,8 @@ impl BlastRange {
                     .sum::<u64>();
                 self.bodies.spawned.clear();
             }
-            for e in &ready {
-                self.collapse_backlog.remove(&[e.x, e.y, e.z]);
-            }
         }
+        completed("collapse_plate");
         if !crumbs.is_empty() {
             // Crumbled cells — the layer's loose ones and the supports a
             // tearing plate crushed (ADR-439) — are removed matter now
@@ -5613,6 +5637,59 @@ impl Explosion {
 
 /// One pending edit per world cell. Bound by the actual encoded records and
 /// map volume instead of rejecting a valid long battle at a fixed count.
+/// Collapse edits waiting for their region (analysis 240, C1), grouped by
+/// chunk: admission looks at each chunk once and never touches the edits of
+/// a chunk that keeps waiting. The latest edit per cell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CollapseBacklog {
+    chunks: BTreeMap<[u32; 3], BTreeMap<[u32; 3], voxel::world::Edit>>,
+    len: usize,
+}
+
+impl CollapseBacklog {
+    fn chunk_of(p: [u32; 3]) -> [u32; 3] {
+        p.map(|v| v / voxel::store::CS as u32)
+    }
+    fn insert(&mut self, e: voxel::world::Edit) {
+        let p = [e.x, e.y, e.z];
+        let cells = self.chunks.entry(Self::chunk_of(p)).or_default();
+        self.len += usize::from(cells.insert(p, e).is_none());
+    }
+    fn from_cells(cells: BTreeMap<[u32; 3], voxel::world::Edit>) -> Self {
+        let mut out = Self::default();
+        for e in cells.into_values() {
+            out.insert(e);
+        }
+        out
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    /// Every edit in ascending cell order, as the snapshot stores them.
+    fn cells(&self) -> Vec<(&[u32; 3], &voxel::world::Edit)> {
+        let mut out: Vec<_> = self.chunks.values().flatten().collect();
+        out.sort_unstable_by_key(|(p, _)| **p);
+        out
+    }
+    /// Take out the edits of every chunk `admits` accepts, in ascending
+    /// cell order. Chunks are asked in ascending order, each once.
+    fn admit(&mut self, mut admits: impl FnMut([u32; 3]) -> bool) -> Vec<voxel::world::Edit> {
+        let taken: Vec<[u32; 3]> = self.chunks.keys().copied().filter(|&c| admits(c)).collect();
+        let mut out = Vec::new();
+        for c in taken {
+            if let Some(cells) = self.chunks.remove(&c) {
+                out.extend(cells.into_values());
+            }
+        }
+        self.len -= out.len();
+        out.sort_unstable_by_key(|e| [e.x, e.y, e.z]);
+        out
+    }
+}
+
 fn load_collapse_backlog(
     s: &mut fx::blob::Scan,
     size: [u32; 3],

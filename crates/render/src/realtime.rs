@@ -196,7 +196,11 @@ mod debt_tests {
         for _ in 0..100 {
             total += clock.advance(0.0, 1, step, 8);
         }
-        assert_eq!(total, 8 + MAX_DEBT_TICKS, "the debt beyond one second was replayed");
+        assert_eq!(
+            total,
+            8 + MAX_DEBT_TICKS,
+            "the debt beyond one second was replayed"
+        );
         assert_eq!(clock.advance(step, 1, step, 8), 1);
     }
 }

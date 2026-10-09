@@ -97,7 +97,13 @@ mod support_tests {
             decision_tick: 0,
             size: [10_000, 192, 10_000],
             units: vec![
-                unit(26, true, RangeUnitKind::ArtilleryTurretT2, [4400, 4900], 1600),
+                unit(
+                    26,
+                    true,
+                    RangeUnitKind::ArtilleryTurretT2,
+                    [4400, 4900],
+                    1600,
+                ),
                 unit(6, false, RangeUnitKind::Base, [8820, 8870], 0),
                 unit(10, false, RangeUnitKind::Tank, [5480, 5210], 700),
             ],
@@ -342,7 +348,9 @@ impl Rules<'_> {
         let mut support = std::collections::BTreeMap::new();
         if self.tuning.focus_fire {
             for ally in allies {
-                if ally.id != actor.id && Self::distance(ally, actor) <= i64::from(self.radii.support) {
+                if ally.id != actor.id
+                    && Self::distance(ally, actor) <= i64::from(self.radii.support)
+                {
                     if let Some(target) = ally.ordered_target {
                         let count = support.entry(target).or_insert(0);
                         *count = (*count + 1).min(2);

@@ -1708,9 +1708,7 @@ impl Motion {
             && ((self.destination.is_some()
                 && (self.blocked || self.path.is_empty())
                 && tick >= self.next_plan)
-                || (self.cursor == self.path.len()
-                    && !self.route.is_empty()
-                    && !self.partial_path))
+                || (self.cursor == self.path.len() && !self.route.is_empty() && !self.partial_path))
     }
     /// Override the global graph allowance (zero selects the oriented planner).
     pub fn set_global_search_limit(&mut self, nodes: usize) {

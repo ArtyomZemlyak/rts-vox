@@ -427,17 +427,17 @@ fn main() {
             if elapsed as usize > ids.len() + 1 {
                 sim.step();
             } else {
-            let now = Instant::now();
-            let mut last = now;
-            sim.step_observed(|phase| {
-                let at = Instant::now();
-                phases
-                    .entry(phase)
-                    .or_default()
-                    .push(at.duration_since(last).as_micros());
-                last = at;
-            });
-            ticks.push(now.elapsed().as_micros());
+                let now = Instant::now();
+                let mut last = now;
+                sim.step_observed(|phase| {
+                    let at = Instant::now();
+                    phases
+                        .entry(phase)
+                        .or_default()
+                        .push(at.duration_since(last).as_micros());
+                    last = at;
+                });
+                ticks.push(now.elapsed().as_micros());
             }
             for (k, &id) in ids.iter().enumerate() {
                 if first_motion[k].is_none() && sim.units[id].motion.pos != start[k] {

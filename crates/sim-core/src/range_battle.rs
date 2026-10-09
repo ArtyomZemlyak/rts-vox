@@ -434,9 +434,6 @@ impl Battle {
         let capturing = self.waves.iter().filter(|w| w.wave.capturing()).count();
         [capturing, self.waves.len() - capturing]
     }
-    pub(super) fn working(&self) -> bool {
-        !self.waves.is_empty()
-    }
     /// Field boxes of the live waves, in storage order.
     pub(super) fn domains(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
         self.waves.iter().map(|w| w.wave.domain())
@@ -869,6 +866,11 @@ impl BlastRange {
     }
     pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
         &self.battle.ai.tuning
+    }
+    /// Tactical radii of the pack (analysis 240, B3); a plan producer
+    /// outside the simulation reads the same ones.
+    pub fn enemy_ai_radii(&self) -> &modding::battle_ai::Radii {
+        &self.battle.ai.radii
     }
     /// Enable autonomous orders for both teams before the fight starts.
     pub fn set_ai_vs_ai(&mut self, enabled: bool) -> bool {
