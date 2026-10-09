@@ -2587,6 +2587,12 @@ pub struct BlastRange {
     /// infrastructure, never part of the authoritative snapshot or hash.
     navigation_pool: Option<rayon::ThreadPool>,
     navigation_workers: usize,
+    /// Fixed-size pool every tick runs in (analysis 240, B4): the physics
+    /// phases' Rayon work used the global pool, sized by the machine's
+    /// core count. Built on the first step; runtime infrastructure, never
+    /// in the snapshot or the hash.
+    physics_pool: Option<rayon::ThreadPool>,
+    physics_workers: usize,
     pub shields: Vec<RangeShield>,
     /// Transient renderer notification, like `surface_changed`.
     pub shield_hits: Vec<ShieldHit>,
@@ -2652,6 +2658,10 @@ fn relative_contact_velocity(
 
 // The crowded full-map battle uses a larger persistent pool; smaller
 // rosters retain the training battle's pool. This affects scheduling only.
+/// Physics workers of a scene until told otherwise: a constant, never the
+/// machine's core count (CLAUDE.md, ADR-080).
+const DEFAULT_PHYSICS_WORKERS: usize = 4;
+
 fn default_navigation_workers(units: usize) -> usize {
     if units >= 48 {
         8
@@ -2661,10 +2671,21 @@ fn default_navigation_workers(units: usize) -> usize {
 }
 
 impl BlastRange {
-    /// Observed from the caller: physics uses its Rayon pool (global on the
-    /// renderer main thread), while routes have this scene's fixed pool.
+    /// Physics and route workers of this scene, both fixed pools.
     pub fn worker_counts(&self) -> [usize; 2] {
-        [rayon::current_num_threads(), self.navigation_workers]
+        [self.physics_workers, self.navigation_workers]
+    }
+    /// Set a fixed physics-worker count for this scene (1..=8). The tick's
+    /// result does not depend on it; only its wall time does.
+    pub fn set_physics_workers(&mut self, workers: usize) -> bool {
+        if !(1..=8).contains(&workers) {
+            return false;
+        }
+        if workers != self.physics_workers {
+            self.physics_workers = workers;
+            self.physics_pool = None;
+        }
+        true
     }
     /// Set a fixed route-worker count for this scene. One keeps the serial
     /// path; all worker counts execute the same logical search allowances.
@@ -3084,6 +3105,8 @@ impl BlastRange {
             navigation,
             navigation_pool: None,
             navigation_workers,
+            physics_pool: None,
+            physics_workers: DEFAULT_PHYSICS_WORKERS,
             shields,
             shield_hits: Vec::new(),
             shield_tuning,
@@ -3152,7 +3175,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_wave_energy() {
+        let version = if self.battle.has_wave_sides() {
+            60
+        } else if self.has_wave_energy() {
             59
         } else if self.weapon_configured {
             58
@@ -3335,11 +3360,13 @@ impl BlastRange {
         let debris_tuned = self.has_debris_tuning();
         let material_tuned = self.matter.density_history || self.has_material_tuning();
         let energy_split = self.has_wave_energy();
+        let sides = self.battle.has_wave_sides();
         let tuned = self.weapon_configured
             || motion_tuned
             || debris_tuned
             || material_tuned
-            || energy_split;
+            || energy_split
+            || sides;
         if version < 31 {
             self.streams.save(b);
         }
@@ -3394,7 +3421,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if energy_split {
+            let format = if sides {
+                60
+            } else if energy_split {
                 59
             } else if self.weapon_configured {
                 58
@@ -3424,8 +3453,11 @@ impl BlastRange {
         if version < 54 && motion_tuned {
             self.save_motion_tuning(b);
         }
-        if version < 59 && energy_split {
+        if version < 59 && (energy_split || sides) {
             self.save_wave_energy(b);
+        }
+        if version < 60 && sides {
+            self.battle.save_wave_sides(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3496,7 +3528,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=59).contains(&version) {
+        if !(27..=60).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -4054,6 +4086,9 @@ impl BlastRange {
         if version >= 59 {
             r.load_wave_energy(&mut s)?;
         }
+        if version >= 60 {
+            r.battle.load_wave_sides(&mut s)?;
+        }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
@@ -4374,16 +4409,16 @@ impl BlastRange {
     }
     /// Report completed phases to a read-only observer. The simulation never
     /// reads clocks or consumes a result from it; benches own their timers.
-    pub fn step_observed(&mut self, completed: impl FnMut(&'static str)) {
+    pub fn step_observed(&mut self, completed: impl FnMut(&'static str) + Send) {
         self.step_observed_detail(completed, |_| {}, |_, _| {});
     }
     /// Optional boundaries inside motion for external profilers. The
     /// simulation never reads their timing or changes scheduling from them.
     pub fn step_observed_detail(
         &mut self,
-        completed: impl FnMut(&'static str),
-        detail: impl FnMut(&'static str),
-        unit_detail: impl FnMut(usize, &'static str),
+        completed: impl FnMut(&'static str) + Send,
+        detail: impl FnMut(&'static str) + Send,
+        unit_detail: impl FnMut(usize, &'static str) + Send,
     ) {
         self.step_observed_tasks(completed, detail, unit_detail, |_, _| {});
     }
@@ -4391,10 +4426,10 @@ impl BlastRange {
     /// Observers own any clocks or collection; their output never enters the tick.
     pub fn step_observed_tasks(
         &mut self,
-        completed: impl FnMut(&'static str),
-        detail: impl FnMut(&'static str),
-        unit_detail: impl FnMut(usize, &'static str),
-        task_detail: impl Fn(usize, &'static str) + Sync,
+        completed: impl FnMut(&'static str) + Send,
+        detail: impl FnMut(&'static str) + Send,
+        unit_detail: impl FnMut(usize, &'static str) + Send,
+        task_detail: impl Fn(usize, &'static str) + Sync + Send,
     ) {
         self.step_observed_all_tasks(completed, detail, unit_detail, task_detail, |_, _| {});
     }
@@ -4404,6 +4439,28 @@ impl BlastRange {
     /// observers pair them by OS thread and event family. Navigation-only
     /// observers keep the existing API and receive no physics events.
     pub fn step_observed_all_tasks(
+        &mut self,
+        completed: impl FnMut(&'static str) + Send,
+        detail: impl FnMut(&'static str) + Send,
+        unit_detail: impl FnMut(usize, &'static str) + Send,
+        task_detail: impl Fn(usize, &'static str) + Sync + Send,
+        physics_detail: impl Fn(usize, &'static str) + Sync + Send,
+    ) {
+        // Every parallel phase of the tick runs on this scene's fixed pool;
+        // the route pool is entered explicitly from inside it.
+        let pool = self.physics_pool.take().unwrap_or_else(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(self.physics_workers)
+                .thread_name(|i| format!("range-physics-{i}"))
+                .build()
+                .expect("physics pool")
+        });
+        pool.install(|| {
+            self.step_in_pool(completed, detail, unit_detail, task_detail, physics_detail)
+        });
+        self.physics_pool = Some(pool);
+    }
+    fn step_in_pool(
         &mut self,
         mut completed: impl FnMut(&'static str),
         mut detail: impl FnMut(&'static str),
@@ -4492,21 +4549,13 @@ impl BlastRange {
         // too: the hull with the smallest X took the single start every tick
         // it wanted one. The offer now rotates with the tick over the hulls
         // that want a start, in slot order; no scheduler state is kept.
-        let offered: Vec<usize> = {
-            let wanting: Vec<usize> = (0..self.units.len())
+        let offered = start_offers(
+            (0..self.units.len())
                 .filter(|&id| self.units[id].motion.wants_start(self.tick))
-                .collect();
-            if wanting.len() <= starts {
-                wanting
-            } else {
-                let first = self.tick as usize % wanting.len();
-                let mut chosen: Vec<usize> = (0..starts)
-                    .map(|k| wanting[(first + k) % wanting.len()])
-                    .collect();
-                chosen.sort_unstable();
-                chosen
-            }
-        };
+                .collect(),
+            starts,
+            self.tick,
+        );
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
             let p = self.units[id].motion.pos;
@@ -5637,6 +5686,23 @@ impl Explosion {
 
 /// One pending edit per world cell. Bound by the actual encoded records and
 /// map volume instead of rejecting a valid long battle at a fixed count.
+/// Who is offered a search start this tick (analysis 240, C3): all who
+/// want one when they fit, else a window of `starts` over them that moves
+/// with the tick. Ascending slot order in and out; no scheduler state.
+fn start_offers(wanting: Vec<usize>, starts: usize, tick: u32) -> Vec<usize> {
+    if wanting.len() <= starts {
+        return wanting;
+    }
+    // The window moves by its own width, so every hull is reached within
+    // ⌈wanting / starts⌉ ticks.
+    let first = (u64::from(tick) * starts as u64 % wanting.len() as u64) as usize;
+    let mut chosen: Vec<usize> = (0..starts)
+        .map(|k| wanting[(first + k) % wanting.len()])
+        .collect();
+    chosen.sort_unstable();
+    chosen
+}
+
 /// Collapse edits waiting for their region (analysis 240, C1), grouped by
 /// chunk: admission looks at each chunk once and never touches the edits of
 /// a chunk that keeps waiting. The latest edit per cell.
@@ -8504,6 +8570,80 @@ mod tests {
         a.step();
         assert!(cells.iter().all(|p| material(&a.world, *p) == mat));
         (a, cells, pieces_before)
+    }
+    /// **No hull waits for a search start longer than its turn** (ADR-646).
+    /// With a fixed set of hulls wanting a start, each is offered one
+    /// within ⌈wanting / starts⌉ consecutive ticks, from any tick. Spatial
+    /// order used to hand the single start to the same hull every tick.
+    #[test]
+    fn start_offers_reach_every_hull_within_its_turn() {
+        for (count, starts) in [(1usize, 1usize), (7, 1), (18, 1), (18, 2), (60, 3), (5, 8)] {
+            let wanting: Vec<usize> = (0..count).map(|k| k * 3 + 1).collect();
+            let bound = count.div_ceil(starts) as u32;
+            for from in [0u32, 1, 17, 1000] {
+                let mut seen = std::collections::BTreeSet::new();
+                for tick in from..from + bound {
+                    let offers = start_offers(wanting.clone(), starts, tick);
+                    assert!(offers.len() <= starts);
+                    assert!(offers.windows(2).all(|w| w[0] < w[1]));
+                    seen.extend(offers);
+                }
+                assert_eq!(
+                    seen.len(),
+                    count,
+                    "{count} hulls, {starts} starts, from tick {from}"
+                );
+            }
+        }
+    }
+    /// **Collapse waits only where a wave is** (ADR-645). A concrete block
+    /// left in the air falls in the same tick while a live wave works far
+    /// away, and waits while a wave's field reaches its chunk. The layer
+    /// used to wait for every wave on the map, and under steady fire never
+    /// ran.
+    #[test]
+    fn collapse_proceeds_while_an_independent_wave_is_active() {
+        for (offset, falls) in [(400, true), (60, false)] {
+            let mut a = BlastRange::new(config());
+            a.patrols_running = false;
+            a.fire_tick = u32::MAX;
+            let base = [GUN[0] - 40, FLOOR + 8, GUN[2] + 20];
+            for x in 0..4 {
+                for y in 0..4 {
+                    for z in 0..4 {
+                        a.world.queue_edit(voxel::world::Edit::put(
+                            (base[0] + x) as u32,
+                            (base[1] + y) as u32,
+                            (base[2] + z) as u32,
+                            2,
+                        ));
+                    }
+                }
+            }
+            let at = [base[0] + 4 + offset, base[1], base[2]];
+            a.explosion = Some(Explosion::begin(at, &a.config, &a.units));
+            let (lo, hi) = a.explosion.as_ref().unwrap().domain();
+            assert!(
+                (0..3).any(|k| base[k] + 4 <= lo[k] || base[k] >= hi[k]),
+                "the wave's field must not touch the block itself"
+            );
+            a.step();
+            assert!(
+                a.explosion.as_ref().is_some_and(|e| e.working()),
+                "the wave ended within the tick; it proves nothing"
+            );
+            assert_eq!(
+                a.bodies.list.len(),
+                usize::from(falls),
+                "offset {offset}: blocked_by={}",
+                a.collapse_work.blocked_by
+            );
+            assert_eq!(
+                a.collapse_work.blocked_by & 1 != 0,
+                !falls,
+                "offset {offset}"
+            );
+        }
     }
     /// A block of concrete under a layer of soil left in the air falls
     /// whole (ADR-300): the collapse layer tears the lot off as one body,

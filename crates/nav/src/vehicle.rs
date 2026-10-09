@@ -71,8 +71,16 @@ impl Pose {
 /// a millisecond a step, built from sorted columns at once almost none.
 /// A derived bounds/max tree rejects distant columns in rectangle queries;
 /// point lookup, iteration and equality use only the canonical sorted slice.
+///
+/// The coarse planner's debris tile map is derived too, built on first use
+/// and shared by every route planned until the rubble changes
+/// (analysis 240, B6).
 #[derive(Clone, Debug, Default)]
-pub struct Rubble(Vec<([i32; 2], u16)>, rubble_index::Index);
+pub struct Rubble(
+    Vec<([i32; 2], u16)>,
+    rubble_index::Index,
+    std::sync::OnceLock<([u32; 2], std::sync::Arc<coarse::DebrisTiles>)>,
+);
 impl Rubble {
     pub fn new() -> Self {
         Self::default()
@@ -83,7 +91,7 @@ impl Rubble {
         debug_assert!(columns.windows(2).all(|p| p[0].0 < p[1].0));
         let mut index = rubble_index::Index::default();
         index.rebuild(&columns);
-        Self(columns, index)
+        Self(columns, index, Default::default())
     }
     pub fn get(&self, at: &[i32; 2]) -> Option<&u16> {
         self.0
@@ -98,6 +106,7 @@ impl Rubble {
     pub fn insert(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
         let old = self.insert_column(at, top);
         self.1.rebuild(&self.0);
+        self.2 = Default::default();
         old
     }
     fn insert_column(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
@@ -114,6 +123,7 @@ impl Rubble {
         let i = self.0.binary_search_by(|(c, _)| c.cmp(at)).ok()?;
         let old = self.0.remove(i).1;
         self.1.rebuild(&self.0);
+        self.2 = Default::default();
         Some(old)
     }
     pub fn len(&self) -> usize {
@@ -161,6 +171,25 @@ impl Rubble {
     /// Columns and tops in ascending column order.
     pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
         self.0.iter().map(|(c, t)| (c, t))
+    }
+    /// The coarse planner's debris tiles for a map of `size` columns:
+    /// built once per rubble state and size, a pure function of both.
+    pub(crate) fn coarse_tiles(&self, size: [u32; 2]) -> std::sync::Arc<coarse::DebrisTiles> {
+        if let Some((built, tiles)) = self.2.get() {
+            if *built == size {
+                return tiles.clone();
+            }
+            return std::sync::Arc::new(coarse::DebrisTiles::build(size, &self.0));
+        }
+        self.2
+            .get_or_init(|| {
+                (
+                    size,
+                    std::sync::Arc::new(coarse::DebrisTiles::build(size, &self.0)),
+                )
+            })
+            .1
+            .clone()
     }
 }
 /// A later entry for a column replaces an earlier one, as insertion does.

@@ -90,7 +90,8 @@ impl Tuning {
             || !(100..=3000).contains(&t.artillery_range)
             || !(2..=24).contains(&t.canister.pellets)
             || t.canister.pellets > t.max_rounds
-            || t.canister.pellets > t.max_waves
+            // Each side owns half of the wave ceiling (ADR-649).
+            || t.canister.pellets > t.max_waves / 2
             || !(1500..=4000).contains(&t.canister.flight_time_milli)
             || !(5..=150).contains(&t.canister.spread_milli)
             || !(10..=150).contains(&t.canister.footprint_radius)
@@ -141,6 +142,8 @@ mod tests {
             shipped.replace("footprint_radius: 60", "footprint_radius: 0"),
             shipped.replace("footprint_radius: 60", "footprint_radius: 151"),
             shipped.replace("max_waves: 16", "max_waves: 5"),
+            // Half of 11 is 5: a side could never fire a six-pellet salvo.
+            shipped.replace("max_waves: 16", "max_waves: 11"),
             shipped.replace("max_waves: 16", "max_waves: 17"),
         ] {
             assert!(Tuning::from_ron(&invalid).is_err());

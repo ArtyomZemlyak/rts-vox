@@ -44,53 +44,10 @@ pub fn plan(
     // A broad travel corridor, not an oriented turning/clearance proof.
     // Short maneuvers and actual movement keep the detailed footprint probe.
     let radius = shape.half[0].min(shape.half[1]) + 1;
-    const PAGE: usize = 32;
-    let tiles = [
-        (world.nx as usize).div_ceil(8),
-        (world.nz as usize).div_ceil(8),
-    ];
-    // A kilometre map needs only about 3 MiB for direct tile lookups. Keep
-    // that fast path, but cap its size: a 10 km map would otherwise allocate
-    // hundreds of MiB for every route even with only a few debris columns.
-    let dense = !rubble.0.is_empty() && tiles[0] * tiles[1] <= 2_000_000;
-    let mut debris_dense = if dense {
-        vec![0u16; tiles[0] * tiles[1]]
-    } else {
-        Vec::new()
-    };
-    let page_width = tiles[0].div_ceil(PAGE);
-    let mut debris_pages: Vec<Option<Box<[u16; PAGE * PAGE]>>> = if rubble.0.is_empty() || dense {
-        Vec::new()
-    } else {
-        vec![None; page_width * tiles[1].div_ceil(PAGE)]
-    };
-    for &(p, top) in &rubble.0 {
-        let x = p[0].div_euclid(8);
-        let z = p[1].div_euclid(8);
-        if x < 0 || z < 0 || x as usize >= tiles[0] || z as usize >= tiles[1] {
-            continue;
-        }
-        let (x, z) = (x as usize, z as usize);
-        let pile = if dense {
-            &mut debris_dense[z * tiles[0] + x]
-        } else {
-            let page = &mut debris_pages[z / PAGE * page_width + x / PAGE];
-            let page = page.get_or_insert_with(|| Box::new([0; PAGE * PAGE]));
-            &mut page[z % PAGE * PAGE + x % PAGE]
-        };
-        *pile = (*pile).max(top);
-    }
+    let debris = rubble.coarse_tiles([world.nx, world.nz]);
     let tile = |x: i32, z: i32| {
-        let [bottom, mut top] = world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
-        if !debris_dense.is_empty() {
-            top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
-        } else if !debris_pages.is_empty() {
-            let (x, z) = (x as usize, z as usize);
-            if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
-                top = top.max(page[z % PAGE * PAGE + x % PAGE]);
-            }
-        }
-        [bottom, top]
+        let [bottom, top] = world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
+        [bottom, top.max(debris.top(x as usize, z as usize))]
     };
     let clear = |a: [i32; 2], b: [i32; 2]| -> bool {
         let lo = [0, 1].map(|k| a[k].min(b[k]) - radius);
@@ -124,16 +81,7 @@ pub fn plan(
             let mut high = 0;
             for z in lo[1] / 8..=hi[1] / 8 {
                 for x in lo[0] / 8..=hi[0] / 8 {
-                    let [bottom, mut top] =
-                        world.floor_tile(x as u32, z as u32, cfg.yielding).unwrap();
-                    if !debris_dense.is_empty() {
-                        top = top.max(debris_dense[z as usize * tiles[0] + x as usize]);
-                    } else if !debris_pages.is_empty() {
-                        let (x, z) = (x as usize, z as usize);
-                        if let Some(page) = &debris_pages[z / PAGE * page_width + x / PAGE] {
-                            top = top.max(page[z % PAGE * PAGE + x % PAGE]);
-                        }
-                    }
+                    let [bottom, top] = tile(x, z);
                     low = low.min(bottom);
                     high = high.max(top);
                 }
@@ -502,5 +450,126 @@ mod tests {
             plan(&world, &r, shape(), from, to, config()).is_some(),
             "fresh hole not seen"
         );
+    }
+    /// **The cached debris tiles are the tiles a fresh build gives**, on
+    /// a dense and a paged map, after every insert and removal, and a route
+    /// over cached tiles equals one over a cold rubble (analysis 240, B6).
+    #[test]
+    fn cached_debris_tiles_follow_every_rubble_change() {
+        for size in [[1024u32, 1024], [12_000, 12_000]] {
+            let mut rubble = Rubble::default();
+            let mut columns: Vec<([i32; 2], u16)> = Vec::new();
+            let mut seed = 0x9e37_79b9u32;
+            for step in 0..60 {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let at = [(seed >> 8) as i32 % 900, (seed >> 20) as i32 % 900];
+                if step % 4 == 3 && !columns.is_empty() {
+                    let (gone, _) = columns.remove(columns.len() / 2);
+                    rubble.remove(&gone);
+                } else {
+                    let top = 6 + (seed % 9) as u16;
+                    columns.retain(|(c, _)| *c != at);
+                    columns.push((at, top));
+                    columns.sort_unstable();
+                    rubble.insert(at, top);
+                }
+                let cached = rubble.coarse_tiles(size);
+                let fresh = DebrisTiles::build(size, &columns);
+                for &(at, _) in &columns {
+                    let (x, z) = ((at[0] / 8) as usize, (at[1] / 8) as usize);
+                    assert_eq!(cached.top(x, z), fresh.top(x, z), "{size:?} step {step}");
+                }
+                assert_eq!(cached.top(120, 120), fresh.top(120, 120));
+            }
+        }
+        let mut world = World::new(1024, 32, 1024, 100000, Box::new(Floor));
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let rubble: Rubble = (0..40).map(|k| ([300 + k, 500], 20)).collect();
+        let (from, to) = ([100, 500].map(Fx::from_int), [900, 500]);
+        let cold = plan(&world, &rubble.clone(), shape(), from, to, config()).unwrap();
+        let warm = plan(&world, &rubble, shape(), from, to, config()).unwrap();
+        let again = plan(&world, &rubble, shape(), from, to, config()).unwrap();
+        assert_eq!(cold.path, warm.path);
+        assert_eq!(warm.path, again.path);
+        assert_eq!(cold.nodes, again.nodes);
+        assert_ne!(
+            cold.path,
+            plan(&world, &Rubble::new(), shape(), from, to, config())
+                .unwrap()
+                .path,
+            "the debris wall must shape the route, or this proves nothing"
+        );
+    }
+}
+
+const PAGE: usize = 32;
+
+/// Highest debris top per 8×8 tile, for the coarse corridor test. Built
+/// from the rubble columns once per rubble state (analysis 240, B6): every
+/// route used to rebuild it, three megabytes on a kilometre map.
+#[derive(Clone, Debug, Default)]
+pub struct DebrisTiles {
+    width: usize,
+    dense: Vec<u16>,
+    pages: Vec<Option<Box<[u16; PAGE * PAGE]>>>,
+    page_width: usize,
+}
+
+impl DebrisTiles {
+    pub(crate) fn build(size: [u32; 2], columns: &[([i32; 2], u16)]) -> Self {
+        let tiles = [
+            (size[0] as usize).div_ceil(8),
+            (size[1] as usize).div_ceil(8),
+        ];
+        // A kilometre map needs only about 3 MiB for direct tile lookups. Keep
+        // that fast path, but cap its size: a 10 km map would otherwise allocate
+        // hundreds of MiB even with only a few debris columns.
+        let dense = !columns.is_empty() && tiles[0] * tiles[1] <= 2_000_000;
+        let page_width = tiles[0].div_ceil(PAGE);
+        let mut out = Self {
+            width: tiles[0],
+            dense: if dense {
+                vec![0u16; tiles[0] * tiles[1]]
+            } else {
+                Vec::new()
+            },
+            pages: if columns.is_empty() || dense {
+                Vec::new()
+            } else {
+                vec![None; page_width * tiles[1].div_ceil(PAGE)]
+            },
+            page_width,
+        };
+        for &(p, top) in columns {
+            let x = p[0].div_euclid(8);
+            let z = p[1].div_euclid(8);
+            if x < 0 || z < 0 || x as usize >= tiles[0] || z as usize >= tiles[1] {
+                continue;
+            }
+            let (x, z) = (x as usize, z as usize);
+            let pile = if dense {
+                &mut out.dense[z * tiles[0] + x]
+            } else {
+                let page = &mut out.pages[z / PAGE * page_width + x / PAGE];
+                let page = page.get_or_insert_with(|| Box::new([0; PAGE * PAGE]));
+                &mut page[z % PAGE * PAGE + x % PAGE]
+            };
+            *pile = (*pile).max(top);
+        }
+        out
+    }
+    /// Highest debris top on the tile, zero with none.
+    pub(crate) fn top(&self, x: usize, z: usize) -> u16 {
+        if !self.dense.is_empty() {
+            self.dense[z * self.width + x]
+        } else if !self.pages.is_empty() {
+            self.pages[z / PAGE * self.page_width + x / PAGE]
+                .as_ref()
+                .map_or(0, |page| page[z % PAGE * PAGE + x % PAGE])
+        } else {
+            0
+        }
     }
 }

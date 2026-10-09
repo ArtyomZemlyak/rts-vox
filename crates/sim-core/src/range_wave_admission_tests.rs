@@ -53,6 +53,7 @@ fn contested_waves() -> BlastRange {
             });
         }
         r.battle.waves.push(Burst {
+            side: None,
             weapon: Weapon::Blast,
             wave,
             energy: u64::from(c.material_energy_j) * 1000,
@@ -342,6 +343,7 @@ fn add_ground_waves(r: &mut BlastRange) {
             });
         }
         r.battle.waves.push(Burst {
+            side: None,
             weapon,
             wave,
             energy: if weapon == Weapon::Blast {

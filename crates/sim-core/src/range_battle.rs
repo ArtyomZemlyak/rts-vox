@@ -187,6 +187,11 @@ pub struct Burst {
     weapon: Weapon,
     wave: Explosion,
     energy: u64,
+    /// The side that fired it (`allied`), for the per-side half of the
+    /// wave ceiling (ADR-649). `None` only for a wave restored from a
+    /// snapshot older than version 60: it counts against the whole
+    /// ceiling and against neither half.
+    pub(super) side: Option<bool>,
 }
 #[path = "range_wave_energy.rs"]
 mod energy;
@@ -433,6 +438,30 @@ impl Battle {
     pub fn wave_counts(&self) -> [usize; 2] {
         let capturing = self.waves.iter().filter(|w| w.wave.capturing()).count();
         [capturing, self.waves.len() - capturing]
+    }
+    /// Whether a live wave knows its side (ADR-649): snapshot version 60.
+    pub(super) fn has_wave_sides(&self) -> bool {
+        self.waves.iter().any(|w| w.side.is_some())
+    }
+    pub(super) fn save_wave_sides(&self, b: &mut Blob) {
+        for w in &self.waves {
+            b.u8(match w.side {
+                None => 0,
+                Some(true) => 1,
+                Some(false) => 2,
+            });
+        }
+    }
+    pub(super) fn load_wave_sides(&mut self, s: &mut Scan) -> Option<()> {
+        for w in &mut self.waves {
+            w.side = match s.u8() {
+                0 => None,
+                1 => Some(true),
+                2 => Some(false),
+                _ => return None,
+            };
+        }
+        s.ok().then_some(())
     }
     /// Field boxes of the live waves, in storage order.
     pub(super) fn domains(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
@@ -683,6 +712,7 @@ impl Battle {
                 weapon,
                 energy,
                 wave: Explosion::load(s, units, size, true)?,
+                side: None,
             });
         }
         if version >= 38 {
@@ -2416,11 +2446,33 @@ impl BlastRange {
         // tie. Eligibility is rebuilt from live orders/aim/range every tick.
         bursts.sort_unstable_by_key(|shot| (shot.ready, shot.owner));
         let mut reserved = b.waves.len() + b.rounds.iter().filter(|r| r.bursts()).count();
-        let mut blocked = false;
+        // In a battle each side owns half of the wave ceiling (ADR-649).
+        // The ceiling protects the tick, and a shared one decided the fight:
+        // two salvos of one side held it for as long as their waves lived,
+        // and the other side's canister never fired. A side's salvo queues
+        // only behind its own older ones.
+        let battle_sides = self.battle_mode();
+        let side_of = |owner: usize| usize::from(battle_sides && !self.allied(owner));
+        let half = b.tuning.max_waves / 2;
+        let mut by_side = [0usize; 2];
+        if battle_sides {
+            for w in &b.waves {
+                if let Some(allied) = w.side {
+                    by_side[usize::from(!allied)] += 1;
+                }
+            }
+            for r in b.rounds.iter().filter(|r| r.bursts()) {
+                by_side[side_of(r.owner)] += 1;
+            }
+        }
+        let mut blocked = [false; 2];
         for shot in bursts {
-            let gate = if blocked {
+            let side = side_of(shot.owner);
+            let gate = if blocked[side] {
                 Some(FireGate::BurstQueue)
-            } else if reserved + shot.count > b.tuning.max_waves {
+            } else if reserved + shot.count > b.tuning.max_waves
+                || (battle_sides && by_side[side] + shot.count > half)
+            {
                 Some(FireGate::WaveCapacity)
             } else if b.rounds.len() + shot.count > b.tuning.max_rounds {
                 Some(FireGate::RoundCapacity)
@@ -2431,9 +2483,10 @@ impl BlastRange {
                 record_gate(&mut b.fire_trace, shot.owner, gate);
                 // Do not refill freed slots with younger small bursts while an
                 // older full salvo accumulates room. Solids and beams continue.
-                blocked = true;
+                blocked[side] = true;
             } else {
                 reserved += shot.count;
+                by_side[side] += shot.count;
                 Self::launch_projectiles(self.tick, b, shot, &stream);
             }
         }
@@ -2714,7 +2767,9 @@ impl BlastRange {
                         .begin(config.material_energy_j, config.fragment_box);
                     let energy = self.matter.remaining_mj;
                     self.matter.remaining_mj = old;
+                    let side = (r.owner < self.units.len()).then(|| self.allied(r.owner));
                     b.waves.push(Burst {
+                        side,
                         weapon: r.weapon,
                         wave: Explosion::begin_impact(
                             &self.world,

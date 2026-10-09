@@ -270,14 +270,31 @@ pub fn advance(
         (0, 0)
     } else {
         let err = angle::diff(want, d.head);
-        // Скорость пропорциональна промаху с тем коэффициентом, при
-        // котором торможение доворота укладывается в угловое ускорение:
-        // машина подходит к курсу без перелёта и без дрожи около него.
+        // Кривая торможения: самая большая угловая скорость, с которой
+        // машина, гася доворот на `alpha` за тик, останавливается не
+        // дальше промаха. Дискретная сумма w + (w − α) + … не больше
+        // w·(w + α)/(2α), отсюда w = ⌊(√(α² + 8αe) − α)/2⌋ — целый
+        // корень, без `Fx`. Машина подходит к курсу без перелёта и без
+        // дрожи за конечное число тиков. Прежняя пропорциональная
+        // скорость гасла экспонентой: последние двадцать градусов
+        // разворота занимали больше времени, чем первые сорок, а
+        // корпус трогается только на курсе (анализ 240, B1).
         // И не быстрее, чем сам промах: лёгкая машина с большим
         // ускорением иначе проскакивала бы цель за один тик.
-        let wanted = ((err as i64 * alpha as i64) / l.turn.max(1) as i64)
-            .clamp(-(err.abs() as i64), err.abs() as i64)
-            .clamp(-(l.turn as i64), l.turn as i64) as i32;
+        let e = u64::from(err.unsigned_abs());
+        let a = alpha as u64;
+        // Точная дискретная сумма w + (w − α) + … по положительным членам;
+        // формула выше занижает её не больше чем на α/8, и шаг вниз
+        // находит самую большую скорость, у которой сумма не больше промаха.
+        let stop_sum = |w: u64| {
+            let (k, r) = (w / a, w % a);
+            a * k * (k + 1) / 2 + if r == 0 { 0 } else { (k + 1) * r }
+        };
+        let mut brake_rate = ((a * a + 8 * a * e).isqrt() - a) / 2;
+        while brake_rate > 0 && stop_sum(brake_rate) > e {
+            brake_rate -= 1;
+        }
+        let wanted = (brake_rate.min(e).min(l.turn.max(0) as u64) as i32) * err.signum();
         (err, wanted)
     };
     let rate = d
@@ -649,6 +666,40 @@ mod tests {
                 d.head
             );
             assert_eq!(d.yaw_rate, 0, "у машины на курсе доворот не погас");
+        }
+    }
+
+    /// **Разворот кончается за время трапеции**, а не тянется хвостом
+    /// экспоненты (анализ 240, B1): разгон доворота, ход на пределе,
+    /// торможение — и курс взят. Граница — время профиля с запасом в три
+    /// тика на дискретность; прежний пропорциональный доворот четверть
+    /// оборота брал почти вдвое дольше.
+    #[test]
+    fn a_turn_takes_the_trapezoid_time_not_an_exponential_tail() {
+        let l = limits();
+        let alpha = l.turn_acc.to_int_trunc().max(1) as u64;
+        for want in [2000, angle::QUARTER / 2, angle::QUARTER, angle::HALF - 1] {
+            let e = want as u64;
+            let ramp = (l.turn as u64).div_ceil(alpha);
+            let bound = if e >= ramp * l.turn as u64 {
+                2 * ramp + e.div_ceil(l.turn as u64)
+            } else {
+                2 * (e.div_ceil(alpha)).isqrt() + 2
+            } + 3;
+            let mut d = Drive {
+                head: 0,
+                vel: Fx::ZERO,
+                yaw_rate: 0,
+            };
+            let mut ticks = 0u64;
+            while d.head != want || d.yaw_rate != 0 {
+                d = advance(d, want, Fx::from_int(6), &l, Fx::ONE, inv_tick()).0;
+                ticks += 1;
+                assert!(
+                    ticks <= bound,
+                    "разворот на {want} не кончился за {bound} тиков"
+                );
+            }
         }
     }
 

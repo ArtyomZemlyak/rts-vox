@@ -419,8 +419,15 @@ fn main() {
             .windows(2)
             .find(|w| w[0] == "--latency-ticks")
             .map_or(300, |w| w[1].parse::<u32>().expect("latency ticks"));
+        let trace_latency = args.iter().any(|a| a == "--latency-trace");
         let start: Vec<_> = ids.iter().map(|&id| sim.units[id].motion.pos).collect();
+        let start_head: Vec<_> = ids
+            .iter()
+            .map(|&id| sim.units[id].motion.drive.head)
+            .collect();
         let mut first_motion: Vec<Option<u32>> = vec![None; ids.len()];
+        // First visible reaction: the hull turns or moves.
+        let mut first_reaction: Vec<Option<u32>> = vec![None; ids.len()];
         let mut ticks = Vec::with_capacity(ids.len() + 1);
         let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
         for elapsed in 1..=latency_ticks.max(ids.len() as u32 + 1) {
@@ -439,7 +446,27 @@ fn main() {
                 });
                 ticks.push(now.elapsed().as_micros());
             }
+            if trace_latency {
+                let m = &sim.units[ids[0]].motion;
+                println!(
+                    "latency_trace tick={elapsed} searching={} recovering={} started={} frontier={} head={} vel={:?} yaw={} pos={:?}",
+                    m.searching(),
+                    m.recovering(),
+                    m.started_search(),
+                    m.frontier_nodes(),
+                    m.drive.head,
+                    m.drive.vel,
+                    m.drive.yaw_rate,
+                    m.pos
+                );
+            }
             for (k, &id) in ids.iter().enumerate() {
+                let m = &sim.units[id].motion;
+                if first_reaction[k].is_none()
+                    && (m.pos != start[k] || m.drive.head != start_head[k])
+                {
+                    first_reaction[k] = Some(elapsed);
+                }
                 if first_motion[k].is_none() && sim.units[id].motion.pos != start[k] {
                     first_motion[k] = Some(elapsed);
                 }
@@ -448,6 +475,37 @@ fn main() {
                 break;
             }
         }
+        for (k, &id) in ids.iter().enumerate() {
+            if first_motion[k].is_none() {
+                let u = &sim.units[id];
+                let m = &u.motion;
+                println!(
+                    "never_moved id={id} kind={:?} alive={} route={} frontier={} searching={} recovering={} recovery={:?} dest={:?} path={} cursor={} blocked={} head={} pos={:?}",
+                    u.kind,
+                    u.status.alive,
+                    m.route.len(),
+                    m.frontier_nodes(),
+                    m.searching(),
+                    m.recovering(),
+                    m.recovery_state(),
+                    m.destination,
+                    m.path.len(),
+                    m.cursor,
+                    m.blocked,
+                    m.drive.head,
+                    m.pos
+                );
+            }
+        }
+        let mut reacted: Vec<u32> = first_reaction.iter().flatten().copied().collect();
+        reacted.sort_unstable();
+        println!(
+            "order_to_reaction_ticks group={} reacted={} p50={:?} max={:?}",
+            ids.len(),
+            reacted.len(),
+            reacted.get(reacted.len() / 2),
+            reacted.last()
+        );
         let mut moved: Vec<u32> = first_motion.iter().flatten().copied().collect();
         moved.sort_unstable();
         let pick = |q: usize| moved.get((moved.len() * q / 100).min(moved.len().saturating_sub(1)));

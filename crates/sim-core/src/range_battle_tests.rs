@@ -119,7 +119,9 @@ fn canister_reserves_wave_capacity_for_the_entire_salvo() {
     r.start_battle().unwrap();
     r.battle.actors[1].order = Order::Hold;
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
-    std::sync::Arc::make_mut(&mut r.battle.tuning).max_waves = r.battle.tuning.canister.pellets - 1;
+    // A side owns half of the ceiling (ADR-649): one slot short of a salvo.
+    std::sync::Arc::make_mut(&mut r.battle.tuning).max_waves =
+        2 * r.battle.tuning.canister.pellets - 1;
     assert!(r.battle_order(0, Order::Attack(1), None));
     for _ in 0..100 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
@@ -3408,6 +3410,60 @@ fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() 
         assert_eq!(fresh.battle_weapon(0), Some(weapon));
         assert_eq!(fresh.battle_weapon(1), Some(weapon));
     }
+}
+
+/// State hash of the stock world battle after 600 ticks (analysis 240,
+/// B7). The range engine had no pinned hash: an unintended change to the
+/// game the window plays passed every test. If this fails and the change
+/// was intended, record the new number here and say why in the commit;
+/// if it was not, it is a desync.
+const RANGE_GOLDEN_600: u64 = 0xc68d_b52d_9f45_e6d0;
+
+/// **The world battle hashes what was recorded**, and the run loads what
+/// the hash claims to cover (ADR-116): both armies fire, hulls take
+/// damage, units die, the collapse layer brings terrain down, and pieces
+/// fly. A hash over an idle phase would pin nothing.
+#[test]
+fn the_world_battle_hashes_what_was_recorded() {
+    let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+        "../../../data/battle-world.ron"
+    ))
+    .unwrap();
+    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    layout.battle = true;
+    layout.units = preset.units;
+    layout.blocks.extend(preset.blocks);
+    layout.course.as_mut().unwrap().patrols.clear();
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut sim = BlastRange::with_layout(config, layout).unwrap();
+    assert!(sim.set_ai_vs_ai(true));
+    sim.start_battle().unwrap();
+    let mut waves = 0usize;
+    for _ in 0..600 {
+        sim.step();
+        waves = waves.max(sim.battle.waves.len());
+    }
+    let fired = [true, false].map(|side| {
+        (0..sim.units.len())
+            .filter(|&id| sim.allied(id) == side)
+            .map(|id| sim.battle.actors[id].fired)
+            .sum::<u32>()
+    });
+    let dead = sim.units.iter().filter(|u| !u.status.alive).count();
+    assert!(
+        fired.iter().all(|&n| n > 0),
+        "a side never fired: {fired:?}"
+    );
+    assert!(dead > 0, "nobody died in 600 ticks of battle");
+    assert!(sim.collapsed_cells > 0, "the collapse layer never ran");
+    assert!(waves > 0, "no blast wave ever lived");
+    assert!(!sim.matter.debris.fragments.is_empty(), "no pieces");
+    assert!(sim.matter.economy.ledger.balanced());
+    let hash = sim.state_hash();
+    assert_eq!(
+        hash, RANGE_GOLDEN_600,
+        "range battle hash changed: {hash:016x} instead of {RANGE_GOLDEN_600:016x}"
+    );
 }
 
 #[test]

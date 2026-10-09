@@ -22,6 +22,7 @@ fn crowded_waves(count: usize, capture: usize, propagation: usize) -> BlastRange
     r.battle.shell_config = ExplosionConfig::from_ron(&text).unwrap();
     for i in 0..count {
         r.battle.waves.push(Burst {
+            side: None,
             weapon: Weapon::Blast,
             wave: Explosion::begin(
                 [320 + i as i32 * 5, 120, 336],
@@ -158,4 +159,20 @@ fn wave_shares_preserve_phase_caps_and_rotate_every_remainder() {
             assert!(paid <= cap, "mixed profiles exceeded the phase cap");
         }
     }
+}
+
+/// A wave's side survives a snapshot (version 60), and a wave restored
+/// from an older one has none and counts against neither half (ADR-649).
+#[test]
+fn wave_sides_survive_a_snapshot() {
+    let mut r = crowded_waves(3, 1, 1);
+    r.battle.waves[0].side = Some(true);
+    r.battle.waves[1].side = Some(false);
+    let saved = r.snapshot();
+    assert_eq!(u32::from_le_bytes(saved[..4].try_into().unwrap()), 60);
+    let restored = BlastRange::restore(r.config, &saved).unwrap();
+    let sides: Vec<_> = restored.battle.waves.iter().map(|w| w.side).collect();
+    assert_eq!(sides, [Some(true), Some(false), None]);
+    assert_eq!(restored.state_hash(), r.state_hash());
+    assert_eq!(restored.snapshot(), saved);
 }

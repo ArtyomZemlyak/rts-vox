@@ -56,7 +56,9 @@ fn contention() -> BlastRange {
     r.battle.actors[1].elevation = crate::turret::Traverse::new(aim.pitch);
     r.units[1].turret_pitch = aim.pitch;
     r.units[1].update_pose(aim.yaw);
-    for _ in 0..r.battle.tuning.max_waves {
+    // Units 0 and 1 are one side, which owns half of the wave ceiling
+    // (ADR-649): these rounds fill exactly that half.
+    for _ in 0..r.battle.tuning.max_waves / 2 {
         r.battle.rounds.push(Round {
             owner: 0,
             weapon: Weapon::Energy,
@@ -215,4 +217,34 @@ fn round_capacity_wait_is_distinct_from_wave_capacity() {
     assert_eq!(r.battle.fire_gate(0), Some(FireGate::BurstQueue));
     assert_eq!(r.battle.actors[0].fired, 0);
     assert_eq!(r.battle.actors[1].fired, 0);
+}
+
+/// **Each side owns half of the wave ceiling** (ADR-649). The allied half
+/// is full and its canister salvo, first in the queue, waits; the enemy
+/// tank's shell behind it still fires into the enemy half. With one shared ceiling the
+/// allied salvo would have launched into the other half, and its wait
+/// would have queued the enemy behind it.
+#[test]
+fn a_side_waits_on_its_own_half_and_never_blocks_the_other() {
+    let mut r = contention();
+    let a = &mut r.battle.actors[2];
+    a.order = Order::Ground([600, 20, 336]);
+    a.target = Some(1);
+    a.turret = crate::turret::Traverse::new(0);
+    a.next = 0;
+    // Charged as long as the allied salvo, behind it on the owner tie.
+    a.charge = Some(0);
+    a.weapon = Some(Weapon::Energy);
+    r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
+    orders(&mut r);
+    assert_eq!(r.battle.actors[1].fired, 0, "the allied half is full");
+    assert_eq!(r.battle.fire_gate(1), Some(FireGate::WaveCapacity));
+    assert_eq!(r.battle.fire_gate(0), Some(FireGate::BurstQueue));
+    assert_eq!(
+        r.battle.actors[2].fired,
+        1,
+        "the enemy half was free: {:?}",
+        r.battle.fire_gate(2)
+    );
+    assert_eq!(r.battle.fire_gate(2), Some(FireGate::Fired));
 }

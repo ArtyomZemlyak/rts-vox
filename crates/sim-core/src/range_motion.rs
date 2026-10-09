@@ -261,9 +261,40 @@ pub(super) fn spider_tuning() -> &'static modding::spider::Tuning {
             .expect("spider tuning")
     })
 }
+/// The stock packs every hull is built from, parsed once per process
+/// (analysis 240, B2): four RON files per unit made a 60-unit layout parse
+/// 240 files. Each is a pure function of a compiled-in constant, so the
+/// cache is that constant, not state.
+struct StockPacks {
+    sim: crate::Tuning,
+    course: modding::range::RangeCourse,
+    navigation: modding::navigation::Navigation,
+    integrity: modding::integrity::Integrity,
+}
+fn stock_packs() -> &'static StockPacks {
+    static P: std::sync::OnceLock<StockPacks> = std::sync::OnceLock::new();
+    P.get_or_init(|| StockPacks {
+        sim: crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning"),
+        course: modding::range::RangeLayout::from_ron(include_str!(
+            "../../../data/range-cover.ron"
+        ))
+        .expect("range tuning")
+        .course
+        .expect("course tuning"),
+        navigation: modding::navigation::Navigation::from_ron(include_str!(
+            "../../../data/range-navigation.ron"
+        ))
+        .expect("navigation"),
+        integrity: modding::integrity::Integrity::from_ron(include_str!(
+            "../../../data/unit-integrity.ron"
+        ))
+        .expect("unit integrity tuning"),
+    })
+}
 impl Motion {
     pub fn new(at: [i32; 3], kind: modding::range::RangeUnitKind, body: &UnitBody) -> Self {
-        let t = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("tuning");
+        let packs = stock_packs();
+        let t = &packs.sim;
         let chassis = match kind {
             modding::range::RangeUnitKind::Tank
             | modding::range::RangeUnitKind::Artillery
@@ -276,22 +307,12 @@ impl Motion {
             _ => t.walking,
         };
         let r = crate::ride::ride_of(&chassis);
-        let c =
-            modding::range::RangeLayout::from_ron(include_str!("../../../data/range-cover.ron"))
-                .expect("range tuning")
-                .course
-                .expect("course tuning");
-        let navigation = modding::navigation::Navigation::from_ron(include_str!(
-            "../../../data/range-navigation.ron"
-        ))
-        .expect("navigation");
+        let c = &packs.course;
+        let navigation = packs.navigation.clone();
         let yielding = navigation.fell.materials.to_vec();
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];
-        let integrity = modding::integrity::Integrity::from_ron(include_str!(
-            "../../../data/unit-integrity.ron"
-        ))
-        .expect("unit integrity tuning");
+        let integrity = &packs.integrity;
         let fold_milli = integrity.leg_fold_pct.clamp(0, 100) as u32 * 10;
         let collapse_pct = integrity.collapse_clearance_pct.clamp(0, 100);
         let legs_lost = vec![false; rigs.len()];

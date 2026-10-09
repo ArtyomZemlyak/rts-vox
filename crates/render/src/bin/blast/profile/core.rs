@@ -2,12 +2,9 @@
 //! Boundaries share one tick epoch. Phase/detail lanes overlap; their durations
 //! must not be added together. Worker parents may include nested child jobs.
 use super::{BlastRange, Instant, Write};
-use std::{
-    cell::RefCell,
-    sync::{
-        atomic::{AtomicU32, Ordering},
-        Mutex,
-    },
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Mutex,
 };
 #[path = "physics.rs"]
 mod physics;
@@ -194,18 +191,31 @@ impl Tick {
         generation: u64,
         profile_epoch: Instant,
     ) -> Self {
-        let marks = RefCell::new(Vec::with_capacity(64));
+        // The tick runs on the scene's physics pool, so the observers are
+        // `Send`; the lock is uncontended, diagnostic mode only.
+        let marks = std::sync::Mutex::new(Vec::with_capacity(64));
         let epoch = Instant::now();
         let start_ns = epoch.duration_since(profile_epoch).as_nanos();
         marks
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(Mark::new(epoch, "tick", "begin", None));
         sim.step_observed_detail(
-            |event| marks.borrow_mut().push(Mark::phase(epoch, "phase", event)),
-            |event| marks.borrow_mut().push(Mark::phase(epoch, "detail", event)),
+            |event| {
+                marks
+                    .lock()
+                    .unwrap()
+                    .push(Mark::phase(epoch, "phase", event))
+            },
+            |event| {
+                marks
+                    .lock()
+                    .unwrap()
+                    .push(Mark::phase(epoch, "detail", event))
+            },
             |_, _| {},
         );
-        let mut marks = marks.into_inner();
+        let mut marks = marks.into_inner().unwrap();
         marks.push(Mark::new(epoch, "tick", "end", None));
         Self {
             generation,
@@ -234,26 +244,32 @@ impl Tick {
         // Allocate only in the diagnostic mode, before starting the tick clock.
         // No common worker lock: each known OS thread owns its event buffer.
         let workers = WorkerMarks::new();
-        let marks = RefCell::new(Vec::with_capacity(128 + sim.units.len() * 14));
+        // The tick runs on the scene's physics pool, so the observers are
+        // `Send`; the lock is uncontended, diagnostic mode only.
+        let marks = std::sync::Mutex::new(Vec::with_capacity(128 + sim.units.len() * 14));
         let epoch = Instant::now();
         let start_ns = epoch.duration_since(profile_epoch).as_nanos();
         marks
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .push(Mark::new(epoch, "tick", "begin", None));
         sim.step_observed_all_tasks(
             |event| {
                 marks
-                    .borrow_mut()
+                    .lock()
+                    .unwrap()
                     .push(Mark::new(epoch, "phase", event, None))
             },
             |event| {
                 marks
-                    .borrow_mut()
+                    .lock()
+                    .unwrap()
                     .push(Mark::new(epoch, "detail", event, None))
             },
             |unit, event| {
                 marks
-                    .borrow_mut()
+                    .lock()
+                    .unwrap()
                     .push(Mark::new(epoch, "unit", event, Some(unit)))
             },
             |unit, event| {
@@ -264,7 +280,7 @@ impl Tick {
                 workers.push(Mark::new(epoch, "task", event, Some(slot)));
             },
         );
-        let mut marks = marks.into_inner();
+        let mut marks = marks.into_inner().unwrap();
         marks.push(Mark::new(epoch, "tick", "end", None));
         let physics = workers.append_to(&mut marks);
         Self {
