@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn a_crash_replays_exactly_from_a_snapshot() {
         let mut a = head_on(40);
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..30 {
             a.step();
             b.step();

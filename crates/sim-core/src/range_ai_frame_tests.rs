@@ -293,7 +293,7 @@ fn replica(r: &CommandRuntime) -> CommandRuntime {
         },
     )
     .unwrap();
-    CommandRuntime::restore(r.world.config.clone(), cp).unwrap()
+    CommandRuntime::restore(r.world.config, cp).unwrap()
 }
 fn plan(r: &mut CommandRuntime, ai_order: AiOrder) -> CommandId {
     r.submit_plan(PlanEnvelope {
@@ -438,7 +438,7 @@ fn empty_enemy_and_terminal_steps_do_not_invoke_policy_on_replay() {
     same(r.world(), replay.world());
 }
 
-fn reseal(v: &mut Vec<u8>) {
+fn reseal(v: &mut [u8]) {
     let end = v.len() - 8;
     let h = checksum(&v[..end]);
     v[end..].copy_from_slice(&h.to_le_bytes());

@@ -52,7 +52,7 @@ fn publication_is_owned_and_does_not_change_physics_or_save() {
         assert_eq!(u.weapon, sim.battle_weapon(id));
         assert_eq!(u.attack_range, sim.battle_attack_range(id));
     }
-    let config = sim.config.clone();
+    let config = sim.config;
     let restored = BlastRange::restore(config, &before).unwrap();
     assert_eq!(old, View::new(&restored, 7));
 }
@@ -90,7 +90,7 @@ fn reset_replaces_generation_and_shorter_roster_without_old_slots() {
     let mut layout = sim.layout.clone().unwrap();
     layout.units.truncate(1);
     layout.units[0].allied = false;
-    let next = BlastRange::with_layout(sim.config.clone(), layout).unwrap();
+    let next = BlastRange::with_layout(sim.config, layout).unwrap();
     view.update(&next, 9);
     assert_eq!((view.generation, view.tick, view.units.len()), (9, 0, 1));
     assert_eq!(view.phase, Phase::Setup);

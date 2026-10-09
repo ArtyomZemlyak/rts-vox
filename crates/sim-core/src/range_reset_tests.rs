@@ -6,7 +6,7 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     let validator = placement::Validator::default();
-    let mut scene = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+    let mut scene = BlastRange::with_layout(config, layout.clone()).unwrap();
     let mut cases = vec![layout.clone()];
     let mut next = layout.clone();
     next.units[0].allied = true;
@@ -45,9 +45,9 @@ fn restored_experiments_match_fresh_worlds_and_future_ticks() {
         scene.world.flush();
         scene.world.queue_dig(91, 8, 450);
         let bits = scene.world.bits().as_ptr();
-        let mut fresh = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+        let mut fresh = BlastRange::with_layout(config, layout.clone()).unwrap();
         scene = scene
-            .rebuilt_with_layout(config.clone(), layout, &validator)
+            .rebuilt_with_layout(config, layout, &validator)
             .unwrap();
         assert_eq!(bits, scene.world.bits().as_ptr());
         assert_eq!(scene.world.bits(), fresh.world.bits());
@@ -81,11 +81,11 @@ fn resized_range_rebuild_matches_a_fresh_world() {
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
     let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     let validator = placement::Validator::default();
-    let mut scene = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+    let mut scene = BlastRange::with_layout(config, layout.clone()).unwrap();
     let mut larger = layout;
     larger.size[0] += 128;
     larger.size[2] += 128;
-    let fresh = BlastRange::with_layout(config.clone(), larger.clone()).unwrap();
+    let fresh = BlastRange::with_layout(config, larger.clone()).unwrap();
     scene = scene
         .rebuilt_with_layout(config, larger, &validator)
         .unwrap();

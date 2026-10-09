@@ -44,10 +44,8 @@ impl Index {
         };
         if end - start <= LEAF {
             for &(at, top) in &columns[start..end] {
-                for a in 0..2 {
-                    node.lo[a] = node.lo[a].min(at[a]);
-                    node.hi[a] = node.hi[a].max(at[a]);
-                }
+                node.lo = [node.lo[0].min(at[0]), node.lo[1].min(at[1])];
+                node.hi = [node.hi[0].max(at[0]), node.hi[1].max(at[1])];
                 node.top = node.top.max(top);
             }
         } else {

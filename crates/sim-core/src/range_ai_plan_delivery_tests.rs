@@ -54,6 +54,7 @@ fn common_rules_adapter_covers_living_inactive_actors_without_selecting_them() {
     let observation = world.enemy_ai_observation().unwrap();
     let rules = Rules {
         tuning: world.enemy_ai_tuning(),
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: false,
     };
     assert!(rules.decide(&observation).is_empty());
@@ -264,7 +265,7 @@ fn pending_plan_checkpoint_replays_execution_and_preserves_completed_receipts() 
     assert_eq!(before, r.state_hash());
     let tick = r.world().enemy_ai_observation().unwrap().decision_tick;
     let id = r.submit_plan(plan(0, tick, AiOrder::Attack(0))).unwrap();
-    let mut replica = CommandRuntime::restore(r.world().config.clone(), r.checkpoint()).unwrap();
+    let mut replica = CommandRuntime::restore(r.world().config, r.checkpoint()).unwrap();
     assert_eq!(r.state_hash(), replica.state_hash());
     while r.world().tick <= tick {
         r.step().unwrap();
@@ -276,7 +277,7 @@ fn pending_plan_checkpoint_replays_execution_and_preserves_completed_receipts() 
     assert!(
         matches!(r.plan_receipt(id).unwrap().state, PlanState::Executed { tick: applied, .. } if applied == tick)
     );
-    let mut restored = CommandRuntime::restore(r.world().config.clone(), r.checkpoint()).unwrap();
+    let mut restored = CommandRuntime::restore(r.world().config, r.checkpoint()).unwrap();
     assert_eq!(r.state_hash(), restored.state_hash());
     assert_eq!(r.acknowledge_plan(id), restored.acknowledge_plan(id));
     assert_eq!(r.state_hash(), restored.state_hash());
@@ -316,7 +317,7 @@ fn battle_end_cancels_future_plan_and_keeps_the_snapshot_loadable() {
         PlanState::Cancelled { tick: end_tick }
     );
     assert!(r.world().battle.ai.pending.is_none());
-    let restored = CommandRuntime::restore(r.world().config.clone(), r.checkpoint()).unwrap();
+    let restored = CommandRuntime::restore(r.world().config, r.checkpoint()).unwrap();
     assert_eq!(r.state_hash(), restored.state_hash());
     assert_eq!(r.plan_receipt(id), restored.plan_receipt(id));
 }
@@ -327,7 +328,7 @@ fn owned_whole_plans_match_direct_delivery_through_real_tank_and_spider_battles(
         let mut world = arena(kind);
         world.start_battle().unwrap();
         let mut direct =
-            crate::blast::BlastRange::restore(world.config.clone(), &world.snapshot()).unwrap();
+            crate::blast::BlastRange::restore(world.config, &world.snapshot()).unwrap();
         let mut r = CommandRuntime::new(
             world,
             7,

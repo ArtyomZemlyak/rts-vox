@@ -421,7 +421,7 @@ impl Battle {
         }
     }
     pub(super) fn shot_config(&self, weapon: Weapon, kind: RangeUnitKind) -> ExplosionConfig {
-        let mut config = self.config(weapon).clone();
+        let mut config = *self.config(weapon);
         if kind == RangeUnitKind::TurretT2 && weapon == Weapon::Energy {
             config.energy = (u64::from(config.energy)
                 * u64::from(self.tuning.turret_t2_power_milli)
@@ -436,6 +436,10 @@ impl Battle {
     }
     pub(super) fn working(&self) -> bool {
         !self.waves.is_empty()
+    }
+    /// Field boxes of the live waves, in storage order.
+    pub(super) fn domains(&self) -> impl Iterator<Item = ([i32; 3], [i32; 3])> + '_ {
+        self.waves.iter().map(|w| w.wave.domain())
     }
     pub(super) fn save_wave_contacts(&self, b: &mut Blob) {
         for burst in &self.waves {
@@ -1024,12 +1028,14 @@ impl BlastRange {
             let observation = self.enemy_ai_observation_for(battle);
             let rules = ai::Rules {
                 tuning: &battle.ai.tuning,
+                radii: &battle.ai.radii,
                 controlled_allied: false,
             }
             .decide(&observation);
             let allied = battle.autonomous.then(|| {
                 ai::Rules {
                     tuning: &battle.ai.tuning,
+                    radii: &battle.ai.radii,
                     controlled_allied: true,
                 }
                 .decide(&observation)
@@ -1682,14 +1688,14 @@ impl BlastRange {
             impacts: Vec::new(),
             traces: Vec::new(),
             lasers: Vec::new(),
-            laser_config: self.battle.laser_config.clone(),
+            laser_config: self.battle.laser_config,
             tuning: self.battle.tuning.clone(),
-            shell_config: self.battle.shell_config.clone(),
-            kinetic_config: self.battle.kinetic_config.clone(),
-            bullet_config: self.battle.bullet_config.clone(),
-            canister_config: self.battle.canister_config.clone(),
-            energy_config: self.battle.energy_config.clone(),
-            anni_config: self.battle.anni_config.clone(),
+            shell_config: self.battle.shell_config,
+            kinetic_config: self.battle.kinetic_config,
+            bullet_config: self.battle.bullet_config,
+            canister_config: self.battle.canister_config,
+            energy_config: self.battle.energy_config,
+            anni_config: self.battle.anni_config,
             ai: self.battle.ai.clone(),
             autonomous: self.battle.autonomous,
             fire_trace: None,

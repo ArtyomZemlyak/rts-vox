@@ -75,7 +75,7 @@ fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
             layout.units.reverse();
         }
         let (source, target) = if reverse { (1, 0) } else { (0, 1) };
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         a.patrols_running = false;
         for _ in 0..20 {
             a.step();
@@ -88,7 +88,7 @@ fn blast_shove_reaches_the_next_tank_and_replays_after_a_snapshot() {
         for _ in 0..3 {
             a.step();
         }
-        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..90 {
             a.step();
             b.step();
@@ -137,7 +137,7 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
             layout.units.reverse();
         }
         let (source, target) = if reverse { (1, 0) } else { (0, 1) };
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         a.patrols_running = true;
         for _ in 0..20 {
             a.step();
@@ -153,7 +153,7 @@ fn a_driving_tank_pushes_a_parked_tank_without_overlap_or_replay_drift() {
             let q = motion::Obstacle::of(&a.units[target].motion, &a.units[target].body);
             assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
         }
-        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..180 {
             a.step();
             b.step();
@@ -195,7 +195,7 @@ fn a_convoy_contact_uses_its_closing_speed() {
         .to_vec();
     let mut push = Vec::new();
     for moving_target in [false, true] {
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         a.patrols_running = true;
         for _ in 0..20 {
             a.step();
@@ -217,7 +217,7 @@ fn a_convoy_contact_uses_its_closing_speed() {
         let p = motion::Obstacle::of(&a.units[0].motion, &a.units[0].body);
         let q = motion::Obstacle::of(&a.units[1].motion, &a.units[1].body);
         assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
-        let mut replay = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..8 {
             a.step();
             replay.step();
@@ -253,7 +253,7 @@ fn head_on_driving_contact_is_slot_independent() {
             layout.units.reverse();
         }
         let (left, right) = if reverse { (1, 0) } else { (0, 1) };
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         a.patrols_running = true;
         for _ in 0..20 {
             a.step();
@@ -275,7 +275,7 @@ fn head_on_driving_contact_is_slot_independent() {
         assert!(q.pos[0].sub(p.pos[0]) >= p.half[0].add(q.half[0]));
         assert!(a.units[left].motion.shove.x < Fx::ZERO);
         assert!(a.units[right].motion.shove.x > Fx::ZERO);
-        let mut replay = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..60 {
             a.step();
             replay.step();
@@ -306,7 +306,7 @@ fn solo_shooter_and_target_exchange_contact_shove() {
         layout.gun = [if gun_is_source { 300 } else { 361 }, FLOOR, 336];
         layout.units.truncate(1);
         layout.units[0].at = [if gun_is_source { 361 } else { 300 }, FLOOR, 336];
-        let mut r = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
         r.patrols_running = false;
         for _ in 0..20 {
             r.step();
@@ -375,7 +375,7 @@ fn destroying_the_core_does_not_disable_structural_separation() {
         r.units[0].section.is_some(),
         "dead root stopped shedding geometry"
     );
-    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..180 {
         r.step();
         restored.step();
@@ -584,11 +584,11 @@ fn partial_segment_extraction_waits_for_room_and_replays_after_loading() {
                 .solid_count(),
             original
         );
-        let copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         assert_eq!(r.state_hash(), copy.state_hash());
     }
     r.matter.tuning.max_flying = cap;
-    let mut copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..120 {
         r.step();
         copy.step();
@@ -611,9 +611,9 @@ fn version_34_loads_and_new_structure_jobs_reject_truncated_data() {
     r.save_after(&mut tail, 34);
     let mut old = bytes[..bytes.len() - tail.v.len()].to_vec();
     old[..4].copy_from_slice(&34u32.to_le_bytes());
-    let copy = BlastRange::restore(r.config.clone(), &old).unwrap();
+    let copy = BlastRange::restore(r.config, &old).unwrap();
     assert_eq!(copy.state_hash(), r.state_hash());
-    assert!(BlastRange::restore(r.config.clone(), &bytes[..bytes.len() - 1]).is_none());
+    assert!(BlastRange::restore(r.config, &bytes[..bytes.len() - 1]).is_none());
 }
 
 #[test]
@@ -738,7 +738,7 @@ fn losing_three_legs_lowers_the_actual_geometry_and_stops_the_drive() {
         (FLOOR..=FLOOR + 6).contains(&bottom),
         "belly did not land: {bottom}"
     );
-    let copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.state_hash(), copy.state_hash());
 }
 
@@ -782,7 +782,7 @@ fn viaduct_loses_a_severed_half_with_rails_and_overlapping_caps() {
                 material: 0,
             });
         }
-        let mut r = BlastRange::with_layout(base.config.clone(), layout).unwrap();
+        let mut r = BlastRange::with_layout(base.config, layout).unwrap();
         r.control();
         // Warm the support graph first: the connectivity solver can then
         // claim a wholly disconnected half before the bending pass sees it.
@@ -830,7 +830,7 @@ fn viaduct_loses_a_severed_half_with_rails_and_overlapping_caps() {
                 );
             }
             if step == 1 {
-                replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+                replay = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
             }
             if step == 8 {
                 replay = None;
@@ -854,7 +854,7 @@ fn viaduct_loses_a_severed_half_with_rails_and_overlapping_caps() {
             r.world.solid(120, 95, 60),
             "supported half disappeared (split={split})"
         );
-        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         for _ in 0..6 {
             r.step();
             replay.step();

@@ -397,6 +397,7 @@ grep -rn '\[QUESTION' docs/
 | [09-gpu-compute.md](docs/analysis/09-gpu-compute.md) | Вычисления на GPU: почему симуляция остаётся на CPU |
 | [10-decisions-full.md](docs/analysis/10-decisions-full.md) | ADR целиком: контекст, основание, цена, поправки |
 | [239-mega-review-october.md](docs/analysis/239-mega-review-october.md) | Сквозное ревью 09.10.2026: два ядра, физика, баланс, играбельность, план работ |
+| [240-improvement-plan.md](docs/analysis/240-improvement-plan.md) | Итоговый план после проверки 239: поправки, внешние практики, этапы A–D, вопросы Q-72…Q-77 |
 
 **Замеры — `docs/analysis/11`…`20`.** Всё, что ниже, получено на работающем
 коде в `crates/`, а не оценкой. Каждый документ говорит и что померено,

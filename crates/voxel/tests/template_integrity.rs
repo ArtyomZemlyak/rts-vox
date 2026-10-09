@@ -87,9 +87,9 @@ fn pockets(v: &UnitVol) -> Vec<Pocket> {
         while let Some(i) = queue.pop_front() {
             let p = [i % n[0], i / n[0] % n[1], i / (n[0] * n[1])];
             pocket.cells += 1;
-            for axis in 0..3 {
-                pocket.min[axis] = pocket.min[axis].min(p[axis]);
-                pocket.max[axis] = pocket.max[axis].max(p[axis]);
+            for (axis, &v) in p.iter().enumerate() {
+                pocket.min[axis] = pocket.min[axis].min(v);
+                pocket.max[axis] = pocket.max[axis].max(v);
             }
             neighbours(i, n, |j| {
                 if seen[j] == 0 {

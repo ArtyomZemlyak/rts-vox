@@ -51,8 +51,7 @@ fn canister_fires_a_deterministic_lofted_salvo_and_replays_area_bursts() {
     );
     assert!(r.battle_order(0, Order::Hold, None));
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
-    let mut replay =
-        BlastRange::restore(r.config.clone(), &r.snapshot()).expect("T2 salvo snapshot");
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("T2 salvo snapshot");
     let before = r.units[1].body.volume_mm3();
     let mut contacts = 0;
     let mut area_burst = false;
@@ -79,11 +78,11 @@ fn canister_fires_a_deterministic_lofted_salvo_and_replays_area_bursts() {
     assert!(r.matter.economy.ledger.balanced());
     let mut legacy = r.snapshot();
     legacy[..4].copy_from_slice(&47u32.to_le_bytes());
-    assert!(BlastRange::restore(r.config.clone(), &legacy).is_none());
+    assert!(BlastRange::restore(r.config, &legacy).is_none());
     let old = arena(RangeUnitKind::Tank);
     let mut legacy = old.snapshot();
     legacy[..4].copy_from_slice(&47u32.to_le_bytes());
-    assert!(BlastRange::restore(old.config.clone(), &legacy).is_some());
+    assert!(BlastRange::restore(old.config, &legacy).is_some());
 }
 
 #[test]
@@ -231,7 +230,7 @@ fn canister_shield_intercepts_individual_pellets_and_replays_after_overload() {
         "one shield hit erased the entire fan"
     );
     r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..30 {
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
         r.step();
@@ -393,7 +392,7 @@ fn free_control_moves_groups_without_starting_damage_or_ai_and_replays() {
     for _ in 0..120 {
         r.step();
     }
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..280 {
         r.step();
         replay.step();
@@ -434,7 +433,7 @@ fn distant_stationary_garrisons_draw_after_the_mobile_attackers_are_gone() {
     });
     let config =
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-    let mut near = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+    let mut near = BlastRange::with_layout(config, layout.clone()).unwrap();
     near.start_battle().unwrap();
     near.battle_tick();
     assert_eq!(near.battle.phase, Phase::Fighting);
@@ -743,7 +742,7 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
     )
     .unwrap();
     battle.start_battle().unwrap();
-    let restored = BlastRange::restore(battle.config.clone(), &battle.snapshot())
+    let restored = BlastRange::restore(battle.config, &battle.snapshot())
         .expect("battle with both command bases restores before the first hit");
     assert_eq!(battle.state_hash(), restored.state_hash());
     battle.battle.actors[1].order = Order::Hold;
@@ -776,7 +775,7 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
         battle.battle.actors[0].fired,
         battle.units[3].revision
     );
-    let restored = BlastRange::restore(battle.config.clone(), &battle.snapshot())
+    let restored = BlastRange::restore(battle.config, &battle.snapshot())
         .expect("battle with a destroyed command base restores");
     assert_eq!(battle.state_hash(), restored.state_hash());
 }
@@ -882,6 +881,7 @@ fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
     };
     let rules = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: false,
     };
     assert_eq!(
@@ -989,6 +989,7 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
     assert_eq!(
         Rules {
             tuning: &tuning,
+            radii: &modding::battle_ai::Radii::stock(),
             controlled_allied: false
         }
         .decide(&Observation {
@@ -1008,6 +1009,7 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
     assert_eq!(
         Rules {
             tuning: &tuning,
+            radii: &modding::battle_ai::Radii::stock(),
             controlled_allied: false
         }
         .decide(&Observation {
@@ -1032,7 +1034,7 @@ fn autonomous_battle_orders_both_sides_and_replays() {
     r.step();
     assert_eq!(r.battle.actors[0].order, Order::Attack(1));
     assert_eq!(r.battle.actors[1].order, Order::Attack(0));
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert!(replay.battle.autonomous);
     for _ in 0..20 {
         r.step();
@@ -1071,11 +1073,13 @@ fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
     };
     let red = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: false,
     }
     .decide(&observation);
     let blue = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: true,
     }
     .decide(&observation);
@@ -1135,6 +1139,7 @@ fn mobile_guns_switch_to_the_base_after_field_weapons_are_disabled() {
     };
     let rules = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: true,
     };
     assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(2));
@@ -1239,6 +1244,7 @@ fn artillery_attacks_the_base_until_an_armed_defender_is_close() {
     };
     let rules = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: true,
     };
     assert_eq!(rules.decide(&observation)[0].order, AiOrder::Attack(2));
@@ -1352,7 +1358,7 @@ fn autonomous_immobile_artillery_fires_at_local_defender_and_replays() {
     .unwrap();
     r.step();
     assert_eq!(r.battle.actors[0].order, Order::Attack(1));
-    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for tick in 0..300 {
         for sim in [&mut r, &mut restored] {
             // External Hold orders isolate return fire; the autonomous allied
@@ -1425,6 +1431,7 @@ fn outnumbered_army_keeps_a_rear_guard_without_abandoning_its_siege() {
     };
     let rules = Rules {
         tuning: &tuning,
+        radii: &modding::battle_ai::Radii::stock(),
         controlled_allied: true,
     };
     let orders = rules.decide(&observation);
@@ -1537,7 +1544,7 @@ fn external_ai_plan_is_validated_scheduled_and_saved() {
     assert!(r
         .submit_enemy_ai_plan(observation.decision_tick, plan)
         .is_err());
-    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.state_hash(), restored.state_hash());
     r.step();
     restored.step();
@@ -1589,7 +1596,7 @@ fn external_move_uses_the_regular_pathfinder_and_replays() {
     r.step();
     assert_eq!(r.battle.actors[1].order, Order::Move);
     assert!(r.units[1].motion.destination.is_some());
-    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..3 {
         r.step();
         restored.step();
@@ -1600,12 +1607,12 @@ fn external_move_uses_the_regular_pathfinder_and_replays() {
 #[test]
 fn custom_enemy_rules_survive_snapshot() {
     let mut r = arena(RangeUnitKind::Tank);
-    let mut tuning = r.battle.ai.tuning.clone();
+    let mut tuning = r.battle.ai.tuning;
     tuning.decision_ticks = 8;
     tuning.focus_fire = false;
-    assert!(r.configure_enemy_ai(tuning.clone()).is_ok());
+    assert!(r.configure_enemy_ai(tuning).is_ok());
     assert_eq!(r.battle.ai.tuning, tuning);
-    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(restored.battle.ai.tuning, tuning);
     assert_eq!(restored.state_hash(), r.state_hash());
     tuning.decision_ticks = 0;
@@ -1695,7 +1702,7 @@ fn stationary_turrets_traverse_fire_and_refuse_move_orders() {
         }
         assert_eq!(r.units[0].at, start, "{kind:?} left its emplacement");
         assert!(r.battle.actors[0].fired > 0, "{kind:?} did not fire");
-        let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         assert_eq!(r.state_hash(), restored.state_hash());
     }
 }
@@ -1752,7 +1759,7 @@ fn a_shell_lobbed_over_the_ceiling_still_lands() {
         "a shell over the ceiling never landed: damage {:?}",
         r.units.iter().map(|u| u.revision).collect::<Vec<_>>()
     );
-    let mut b = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut b = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     high_explosive(&mut b);
     for _ in 0..60 {
         r.step();
@@ -1801,7 +1808,7 @@ fn replay_with_multiple_projectiles_and_waves() {
         }
     }
     assert!(!a.battle.rounds.is_empty());
-    let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+    let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
     high_explosive(&mut b);
     assert_eq!(a.state_hash(), b.state_hash());
     let mut waves = 0;
@@ -2015,7 +2022,7 @@ fn simultaneous_impacts_keep_both_waves_and_replay() {
     }
     a.step();
     assert_eq!(a.battle.waves.len(), 2, "one impact replaced another");
-    let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+    let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
     for _ in 0..50 {
         a.step();
         b.step();
@@ -2085,7 +2092,7 @@ fn a_battle_armour_piercing_round_breaks_the_hull_without_a_wave() {
         velocity: [speed, Fx::ZERO, Fx::ZERO],
         distance: Fx::from_int(400),
     });
-    let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+    let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
     assert!(
         (b.battle.rounds[0].weapon == Weapon::Kinetic),
         "the round lost its kind"
@@ -2224,7 +2231,7 @@ fn snapshot_rejects_projectile_positions_outside_the_range() {
     }
     assert!(!r.battle.rounds.is_empty());
     r.battle.rounds[0].pos[0] = Fx::from_int(1_000_000);
-    assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_none());
+    assert!(BlastRange::restore(r.config, &r.snapshot()).is_none());
 }
 
 #[test]
@@ -2320,7 +2327,7 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
         unit([3900, 16, 2760], false),
     ];
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
+    let mut a = BlastRange::with_layout(config, layout).unwrap();
     // A short reach: the pursuer has to close in on each target in turn.
     let short = |r: &mut BlastRange| {
         let tuning = std::sync::Arc::make_mut(&mut r.battle.tuning);
@@ -2391,7 +2398,7 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
             assert_eq!(a.state_hash(), b.state_hash(), "diverged at {tick}");
         }
         if tick == 1200 {
-            let mut b = BlastRange::restore(config.clone(), &a.snapshot()).unwrap();
+            let mut b = BlastRange::restore(config, &a.snapshot()).unwrap();
             short(&mut b);
             replay = Some(b);
         }
@@ -2454,7 +2461,7 @@ fn sixteen_machines_fight_the_training_battle_and_replay() {
         .collect();
     assert_eq!(layout.units.len(), 16);
     let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut a = BlastRange::with_layout(config.clone(), layout).unwrap();
+    let mut a = BlastRange::with_layout(config, layout).unwrap();
     a.start_battle().unwrap();
     for _ in 0..360 {
         a.step();
@@ -2596,7 +2603,7 @@ fn manual_ammunition_preserves_cooldown_order_and_snapshot() {
         r.battle_attack_range(0),
         Some(r.battle.tuning.kinetic_range)
     );
-    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.state_hash(), restored.state_hash());
     assert_eq!(restored.battle.actors[0].weapon, Some(Weapon::Kinetic));
     assert!(r.set_battle_weapon(0, None));
@@ -2668,7 +2675,7 @@ fn weapon_range_controls_pursuit_and_old_snapshots_default_to_auto() {
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&41u32.to_le_bytes());
     old.truncate(old.len() - r.battle.actors.len() - 2);
-    let old = BlastRange::restore(r.config.clone(), &old).unwrap();
+    let old = BlastRange::restore(r.config, &old).unwrap();
     assert!(old.battle.actors.iter().all(|a| a.weapon.is_none()));
 }
 
@@ -2751,8 +2758,7 @@ fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
         }
         // A valid future AI deadline for snapshot validation, with quiet enemies.
         r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
-        let mut replay =
-            BlastRange::restore(r.config.clone(), &r.snapshot()).expect("in-flight snapshot");
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).expect("in-flight snapshot");
         let mut impact = false;
         let mut wave = false;
         for _ in 0..120 {
@@ -2763,8 +2769,7 @@ fn energy_weapons_keep_identity_in_flight_and_replay_their_own_wave() {
             if r.battle.waves.iter().any(|w| w.weapon == weapon) {
                 wave = true;
                 // Restore during the delayed wave as well, not just during flight.
-                replay = BlastRange::restore(r.config.clone(), &r.snapshot())
-                    .expect("typed wave snapshot");
+                replay = BlastRange::restore(r.config, &r.snapshot()).expect("typed wave snapshot");
             }
         }
         assert!(impact && wave, "bolt never produced its typed impact/wave");
@@ -2782,7 +2787,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     for (weapon, range) in [(Weapon::Energy, 1200), (Weapon::Annihilation, 1000)] {
         assert!(r.set_battle_weapon(0, Some(weapon)));
         assert_eq!(r.battle_attack_range(0), Some(range));
-        let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         assert_eq!(restored.battle_weapon(0), Some(weapon));
     }
     r.set_battle_weapon(0, Some(Weapon::Kinetic));
@@ -2792,7 +2797,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     old.pop(); // Version 46's autonomous battle flag is absent from 42.
     old.pop(); // Version 45's manual-route flag is absent from 42.
     assert_eq!(
-        BlastRange::restore(r.config.clone(), &old)
+        BlastRange::restore(r.config, &old)
             .unwrap()
             .battle_weapon(0),
         Some(Weapon::Kinetic)
@@ -2802,7 +2807,7 @@ fn energy_loadouts_have_distinct_ranges_and_preserve_old_snapshot_choices() {
     invalid[..4].copy_from_slice(&42u32.to_le_bytes());
     invalid.pop();
     invalid.pop();
-    assert!(BlastRange::restore(r.config.clone(), &invalid).is_none());
+    assert!(BlastRange::restore(r.config, &invalid).is_none());
 }
 
 #[test]
@@ -2826,7 +2831,7 @@ fn mixed_annihilation_and_shell_waves_keep_their_material_accounting() {
         kinds.extend(r.battle.impacts.iter().map(|i| i.weapon));
     }
     assert!(kinds.contains(&Weapon::Annihilation) && kinds.contains(&Weapon::Blast));
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..100 {
         r.step();
         replay.step();
@@ -3199,7 +3204,7 @@ fn spider_walks_on_eight_feet_then_burns_a_target_without_self_damage_and_replay
         beams += r.battle.lasers.len();
         // Snapshot a live beam, rather than the already-ended siege duel.
         if replay.is_none() && !r.battle.lasers.is_empty() {
-            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+            replay = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
         } else if let Some(other) = replay.as_mut() {
             step(other);
             assert_eq!(
@@ -3242,7 +3247,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
     for (count, workers) in [(24, 4), (60, 8)] {
         let mut layout = layout.clone();
         layout.units.truncate(count);
-        let mut parallel = BlastRange::with_layout(config.clone(), layout).unwrap();
+        let mut parallel = BlastRange::with_layout(config, layout).unwrap();
         assert!(parallel.navigation_pool.is_none());
         assert!(parallel.set_ai_vs_ai(true));
         let setup = parallel.snapshot();
@@ -3259,7 +3264,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
             parallel.step();
         }
         assert!(parallel.units.iter().any(|u| u.motion.searching()));
-        let mut serial = BlastRange::restore(config.clone(), &parallel.snapshot()).unwrap();
+        let mut serial = BlastRange::restore(config, &parallel.snapshot()).unwrap();
         assert_eq!(
             serial
                 .navigation_pool
@@ -3271,7 +3276,7 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         assert_eq!(serial.state_hash(), parallel.state_hash());
         assert!(serial.set_navigation_workers(1));
         assert!(serial.navigation_pool.is_none());
-        let mut restarted = BlastRange::restore(config.clone(), &setup).unwrap();
+        let mut restarted = BlastRange::restore(config, &setup).unwrap();
         assert!(restarted.set_navigation_workers(1));
         restarted.start_battle().unwrap();
         assert!(restarted.navigation_pool.is_none());
@@ -3368,10 +3373,10 @@ fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() 
         }
         let config =
             ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-        let mut sim = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         assert!(sim.set_battle_weapon(0, Some(Weapon::Kinetic)));
         // Scenario rebuild restores authored data after a runtime ammo change.
-        sim = BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+        sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         assert_eq!(sim.battle_weapon(0), Some(weapon));
         assert!(sim.set_ai_vs_ai(true));
         let setup = sim.snapshot();
@@ -3389,13 +3394,13 @@ fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() 
                 "side {id} never fired {weapon:?}"
             );
         }
-        let mut restored = BlastRange::restore(config.clone(), &sim.snapshot()).unwrap();
+        let mut restored = BlastRange::restore(config, &sim.snapshot()).unwrap();
         for _ in 0..10 {
             sim.step();
             restored.step();
             assert_eq!(sim.state_hash(), restored.state_hash());
         }
-        let mut restarted = BlastRange::restore(config.clone(), &setup).unwrap();
+        let mut restarted = BlastRange::restore(config, &setup).unwrap();
         assert!(restarted.battle.autonomous);
         restarted.start_battle().unwrap();
         assert_eq!(restarted.battle_weapon(1), Some(weapon));
@@ -3598,7 +3603,7 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
         distance: Fx::from_int(100),
     });
     r.matter.begin(r.battle.kinetic_config.material_energy_j, 1);
-    let config = r.battle.kinetic_config.clone();
+    let config = r.battle.kinetic_config;
     let u = &mut r.units[1];
     let path = u.body.weapon_paths()[0];
     for y in path.min[1]..path.max[1] {
@@ -3618,7 +3623,7 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
     u.refresh_damage(1);
     assert!(u.status.alive && !u.status.weapon);
     let mut last = ("header", 0, None);
-    let mut copy = BlastRange::restore_observed(r.config.clone(), &r.snapshot(), |s, o, u| {
+    let mut copy = BlastRange::restore_observed(r.config, &r.snapshot(), |s, o, u| {
         last = (s, o, u);
     })
     .unwrap_or_else(|| panic!("T2 contact restore refused at {last:?}"));
@@ -3633,7 +3638,7 @@ fn t2_energy_round_preserves_class_power_after_owner_loss_and_save() {
     assert_eq!(r.battle.waves.len(), 1);
     let wave = &r.battle.waves[0].wave.wave;
     assert_eq!(wave.pressure_at([wave.size() / 2; 3]), heavy);
-    let mut wave_copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut wave_copy = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..30 {
         r.step();
         wave_copy.step();
@@ -3734,7 +3739,7 @@ fn stationary_spider_survives_stock_tank_fire_from_eight_directions() {
             "spider evaded the trial"
         );
         r.battle.actors[1].order = Order::Attack(0);
-        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         for _ in 0..300 {
             let next = r.tick + r.battle.ai.tuning.decision_ticks;
             r.battle.ai.next_tick = next;
@@ -3942,7 +3947,7 @@ fn spider_laser_opening_heats_the_visible_ground_then_armour_and_replays() {
         !r.thermals.cells().any(|(cell, _)| cell.unit == 1),
         "target heated before beam reached it"
     );
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     let mut target_heated = false;
     for _ in 0..100 {
         step_spider_opening_trial(&mut r);
@@ -4071,7 +4076,7 @@ fn enemy_spider_leaves_a_forested_line_of_fire_engages_and_replays() {
                 "forested firing position replay tick {tick}"
             );
         } else if r.units[1].motion.destination.is_some() {
-            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+            replay = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
         }
         if !r.battle.lasers.is_empty() {
             first.get_or_insert(tick);
@@ -4241,7 +4246,7 @@ fn artillery_turret_lofts_over_low_cover_splashes_neighbours_and_replays() {
             other.step();
             assert_eq!(r.state_hash(), other.state_hash());
         } else if !r.battle.waves.is_empty() {
-            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+            replay = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
         }
         if r.battle.actors[0].fired == 1 {
             r.battle.actors[0].order = Order::Hold;
@@ -4268,16 +4273,16 @@ fn artillery_turret_lofts_over_low_cover_splashes_neighbours_and_replays() {
         impacts.iter().all(|p| p[0] > 315),
         "low cover caught the arc"
     );
-    for id in 1..4 {
+    for (id, &was) in before.iter().enumerate().take(4).skip(1) {
         assert!(
-            r.units[id].body.volume_mm3() < before[id],
+            r.units[id].body.volume_mm3() < was,
             "splash missed neighbouring tank {id}"
         );
     }
     let mut old = r.snapshot();
     old[..4].copy_from_slice(&50u32.to_le_bytes());
     assert!(
-        BlastRange::restore(r.config.clone(), &old).is_none(),
+        BlastRange::restore(r.config, &old).is_none(),
         "old canister semantics silently migrated"
     );
     assert!(r.matter.economy.ledger.balanced());
@@ -4312,7 +4317,7 @@ fn canister_reaches_full_attack_range_on_a_high_arc_and_saves_above_world_ceilin
             other.step();
             assert_eq!(r.state_hash(), other.state_hash());
         } else if r.battle.rounds.iter().any(|p| p.pos[1] > Fx::from_int(500)) {
-            replay = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+            replay = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
         }
         if r.battle
             .impacts

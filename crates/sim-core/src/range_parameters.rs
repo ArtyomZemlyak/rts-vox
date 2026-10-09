@@ -38,7 +38,7 @@ impl Parameters {
         let mut view = Self {
             generation,
             tick: world.tick,
-            weapon: world.config.clone(),
+            weapon: world.config,
             gun: MotionParameters::new(&world.gun.motion),
             motions: [None; RangeUnitKind::COUNT],
             course: None,

@@ -145,7 +145,7 @@ impl BlastRange {
         config: &ExplosionConfig,
     ) {
         assert!(self.pending_machine_gun_contacts() < self.streams.tuning.kinetic.max_jobs);
-        let mut config = config.clone();
+        let mut config = *config;
         config.energy = tuning.work;
         config.material_energy_j = tuning.fracture_j;
         config.fragment_box = 1;
@@ -238,7 +238,7 @@ impl BlastRange {
         self.matter.fragment_size(u32::from(previous.1));
         let mut job = Job {
             direct: None,
-            config: config.clone(),
+            config: *config,
             at,
             ray,
             cursor: 0,

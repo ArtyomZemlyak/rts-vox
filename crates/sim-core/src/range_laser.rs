@@ -398,11 +398,11 @@ mod tests {
                     radius: 40,
                 });
             }
-            let seed = BlastRange::with_layout(initial.config.clone(), layout).unwrap();
+            let seed = BlastRange::with_layout(initial.config, layout).unwrap();
             let snapshot = seed.snapshot();
             for (case, (from, to, contact)) in cases.into_iter().enumerate() {
                 for owner in [None, Some(0)] {
-                    let mut serial = BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
+                    let mut serial = BlastRange::restore(seed.config, &snapshot).unwrap();
                     // Tuning is authored rather than stored in the snapshot.
                     // Exercise the cap that makes unit deposit order significant.
                     serial.thermal_tuning.max_cells = 7;
@@ -429,8 +429,7 @@ mod tests {
                         );
                     }
                     for pool in &pools {
-                        let mut parallel =
-                            BlastRange::restore(seed.config.clone(), &snapshot).unwrap();
+                        let mut parallel = BlastRange::restore(seed.config, &snapshot).unwrap();
                         parallel.thermal_tuning.max_cells = 7;
                         let trace = crate::task_trace::Trace::default();
                         pool.install(|| {

@@ -105,7 +105,7 @@ fn all_debris_configuration_fields_affect_hash_and_restore_with_legacy_motion_fo
         assert_ne!(r.state_hash(), stock_hash, "field {index}");
         let bytes = r.snapshot();
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 55);
-        let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(r.matter.tuning, restored.matter.tuning, "field {index}");
         assert_eq!(bytes, restored.snapshot());
     }
@@ -123,7 +123,7 @@ fn all_debris_configuration_fields_affect_hash_and_restore_with_legacy_motion_fo
         field: DebrisField::DragPct,
         value: 17,
     });
-    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.snapshot(), restored.snapshot());
     assert_eq!(r.gun.motion.speed, restored.gun.motion.speed);
     r.matter.tuning = r.debris_defaults;
@@ -157,13 +157,13 @@ fn debris_prelude_rejects_empty_redundant_truncated_and_invalid_motion_flags() {
     for (offset, value) in [(0, 0u32), (4, r.debris_defaults.drag_pct)] {
         let mut bad = bytes.clone();
         bad[at + offset..at + offset + 4].copy_from_slice(&value.to_le_bytes());
-        assert!(BlastRange::restore(r.config.clone(), &bad).is_none());
+        assert!(BlastRange::restore(r.config, &bad).is_none());
     }
     let mut bad = bytes.clone();
     bad[at + 8] = 2;
-    assert!(BlastRange::restore(r.config.clone(), &bad).is_none());
+    assert!(BlastRange::restore(r.config, &bad).is_none());
     for n in 0..=8 {
-        assert!(BlastRange::restore(r.config.clone(), &bytes[..at + n]).is_none());
+        assert!(BlastRange::restore(r.config, &bytes[..at + n]).is_none());
     }
     for case in 0..3 {
         r.matter.tuning = r.debris_defaults;
@@ -172,7 +172,7 @@ fn debris_prelude_rejects_empty_redundant_truncated_and_invalid_motion_flags() {
             1 => r.matter.tuning.motion_pct = 100,
             _ => r.matter.tuning.fragment_box = 5,
         }
-        assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_none());
+        assert!(BlastRange::restore(r.config, &r.snapshot()).is_none());
     }
 }
 
@@ -218,7 +218,7 @@ fn debris_storage_ceiling_loads_before_fragment_validation_and_lower_flying_cap_
     assert_eq!(r.matter.debris.fragments.len(), count as usize);
     assert_eq!(r.matter.debris.fragment_room(&r.matter.tuning), 0);
     let bytes = r.snapshot();
-    let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+    let restored = BlastRange::restore(r.config, &bytes).unwrap();
     assert_eq!(r.matter.tuning, restored.matter.tuning);
     assert_eq!(bytes, restored.snapshot());
     assert_eq!(restored.matter.debris.fragments.len(), count as usize);
@@ -249,5 +249,5 @@ fn debris_storage_ceiling_loads_before_fragment_validation_and_lower_flying_cap_
     let mut legacy = bytes.clone();
     legacy.drain(at..end);
     legacy[..4].copy_from_slice(&53u32.to_le_bytes());
-    assert!(BlastRange::restore(r.config.clone(), &legacy).is_none());
+    assert!(BlastRange::restore(r.config, &legacy).is_none());
 }

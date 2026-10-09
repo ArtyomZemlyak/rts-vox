@@ -284,7 +284,7 @@ fn material_commands_preserve_live_combat_ledger_and_pending_portable_restore() 
     use crate::blast::battle::commands::MaterialField;
     let mut r = owner(RangeUnitKind::Tank);
     let mut direct =
-        crate::blast::BlastRange::restore(r.world().config.clone(), &r.world().snapshot()).unwrap();
+        crate::blast::BlastRange::restore(r.world().config, &r.world().snapshot()).unwrap();
     let schedule = [
         (0, 3, MaterialField::Strength, 550),
         (35, 3, MaterialField::Melt, 380),
@@ -379,7 +379,7 @@ fn pending_material_id_field_and_value_participate_in_runtime_hash_and_missing_i
     ] {
         let mut changed = r.checkpoint();
         changed.inbox.entries[0].envelope.command = command;
-        let changed = CommandRuntime::restore(r.world().config.clone(), changed).unwrap();
+        let changed = CommandRuntime::restore(r.world().config, changed).unwrap();
         assert_ne!(r.state_hash(), changed.state_hash());
     }
     let receipt = r
@@ -410,7 +410,7 @@ fn debris_commands_keep_live_combat_and_pending_portable_restore_identical() {
     use crate::blast::battle::commands::DebrisField;
     let mut r = owner(RangeUnitKind::Tank);
     let mut direct =
-        crate::blast::BlastRange::restore(r.world().config.clone(), &r.world().snapshot()).unwrap();
+        crate::blast::BlastRange::restore(r.world().config, &r.world().snapshot()).unwrap();
     let schedule = [
         (0, DebrisField::DragPct, 17),
         (35, DebrisField::PushPct, 110),
@@ -489,7 +489,7 @@ fn pending_debris_field_and_value_both_participate_in_runtime_hash() {
     ] {
         let mut changed = r.checkpoint();
         changed.inbox.entries[0].envelope.command = command;
-        let changed = CommandRuntime::restore(r.world().config.clone(), changed).unwrap();
+        let changed = CommandRuntime::restore(r.world().config, changed).unwrap();
         assert_ne!(r.state_hash(), changed.state_hash());
     }
 }
@@ -501,8 +501,7 @@ fn motion_commands_restore_applied_values_and_pending_edits_during_real_combat()
     for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
         let mut r = owner(kind);
         let mut direct =
-            crate::blast::BlastRange::restore(r.world().config.clone(), &r.world().snapshot())
-                .unwrap();
+            crate::blast::BlastRange::restore(r.world().config, &r.world().snapshot()).unwrap();
         let schedule = [
             (0, MotionField::Speed, 19),
             (35, MotionField::Stiffness, 23),
@@ -591,7 +590,7 @@ fn pending_motion_values_participate_in_runtime_hash() {
     if let Command::TuneMotion { value, .. } = &mut changed.inbox.entries[0].envelope.command {
         *value += 1;
     }
-    let changed = CommandRuntime::restore(r.world().config.clone(), changed).unwrap();
+    let changed = CommandRuntime::restore(r.world().config, changed).unwrap();
     assert_ne!(before, changed.state_hash());
 }
 
@@ -642,7 +641,7 @@ fn restored(r: &CommandRuntime) -> CommandRuntime {
     let bytes = r.checkpoint().to_bytes();
     let checkpoint = Checkpoint::from_bytes(&bytes, bounds()).unwrap();
     assert_eq!(bytes, checkpoint.to_bytes());
-    let replica = CommandRuntime::restore(r.world().config.clone(), checkpoint).unwrap();
+    let replica = CommandRuntime::restore(r.world().config, checkpoint).unwrap();
     assert_eq!(r.state_hash(), replica.state_hash());
     same(r.world(), replica.world());
     replica
@@ -940,7 +939,7 @@ fn portable_restore_rejects_forged_ids_order_watermarks_capacity_and_timeline() 
             _ => unreachable!(),
         }
         let result = Checkpoint::from_bytes(&bad.to_bytes(), bounds())
-            .and_then(|cp| CommandRuntime::restore(r.world().config.clone(), cp));
+            .and_then(|cp| CommandRuntime::restore(r.world().config, cp));
         assert!(result.is_none(), "forged case {case}");
     }
 }
@@ -953,7 +952,7 @@ fn portable_restore_rejects_pending_mismatch_and_impossible_attempts() {
     let mut bad = r.checkpoint();
     bad.inbox.plans[0].envelope.decisions[0].order = AiOrder::Hold;
     assert!(CommandRuntime::restore(
-        r.world().config.clone(),
+        r.world().config,
         Checkpoint::from_bytes(&bad.to_bytes(), bounds()).unwrap()
     )
     .is_none());
@@ -977,7 +976,7 @@ fn portable_restore_rejects_pending_mismatch_and_impossible_attempts() {
         }
         assert!(
             CommandRuntime::restore(
-                r.world().config.clone(),
+                r.world().config,
                 Checkpoint::from_bytes(&bad.to_bytes(), bounds()).unwrap()
             )
             .is_none(),

@@ -146,6 +146,9 @@ pub struct FlushStats {
     pub examined: usize,
 }
 
+/// Lazily computed summary of one navigation floor tile.
+type FloorTile = ([Mat; 2], [u16; 2], Option<u16>, bool);
+
 pub struct World {
     pub nx: u32,
     pub ny: u32,
@@ -191,7 +194,7 @@ pub struct World {
     /// четыре пустые ячейки на колонку полигона.
     ceiling: Vec<u16>,
     /// Derived 8x8-column terrain tiles; a write invalidates its tile immediately.
-    floor_tiles: Vec<std::sync::OnceLock<([Mat; 2], [u16; 2], Option<u16>, bool)>>,
+    floor_tiles: Vec<std::sync::OnceLock<FloorTile>>,
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,

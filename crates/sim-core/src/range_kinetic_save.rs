@@ -140,7 +140,7 @@ impl Pending {
         }
         let mut jobs = VecDeque::with_capacity(count);
         for _ in 0..count {
-            let mut config = base.clone();
+            let mut config = *base;
             config.delivery = modding::explosion::Delivery::Kinetic;
             config.energy = s.u32();
             config.material_energy_j = s.u32();

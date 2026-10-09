@@ -101,7 +101,7 @@ fn crowded_wave_budget_turn_survives_loading_a_partial_capture() {
     b.battle.save_wave_contacts(&mut bytes);
     let mut scan = Scan::new(&bytes.v);
     let mut restored = Battle::new(&b.units, 1);
-    restored.shell_config = b.battle.shell_config.clone();
+    restored.shell_config = b.battle.shell_config;
     let allied: Vec<_> = (0..b.units.len()).map(|id| b.allied(id)).collect();
     restored
         .load(

@@ -152,7 +152,7 @@ fn waiting_salvo_priority_and_diagnostics_survive_replay_without_snapshot_fields
     let bytes = a.snapshot();
     a.battle.trace_fire(false);
     assert_eq!(a.snapshot(), bytes);
-    let mut b = BlastRange::restore(a.config.clone(), &bytes).expect("waiting salvo snapshot");
+    let mut b = BlastRange::restore(a.config, &bytes).expect("waiting salvo snapshot");
     b.battle.trace_fire(true);
     assert_eq!(a.state_hash(), b.state_hash());
     for _ in 0..3 {

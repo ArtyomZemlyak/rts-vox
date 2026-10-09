@@ -5,4 +5,14 @@
     armed_bonus: 110,
     mobile_bonus: 45,
     switch_margin: 80,
+    // Tactical radii, world units (0.1 m). Pack data, not runtime tuning:
+    // they are not saved with the controller (analysis 240, B3).
+    radii: (
+        support: 600,
+        guard_pick: 1500,
+        defend: 1800,
+        defend_keep: 2200,
+        guard_post: 300,
+        siege_threat: 1200,
+    ),
 )

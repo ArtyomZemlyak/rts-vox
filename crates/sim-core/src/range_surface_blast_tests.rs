@@ -58,8 +58,7 @@ fn steel_wall_impact(ai: bool) {
         }
         if replay.is_none() && (r.explosion.is_some() || !r.battle.waves.is_empty()) {
             let bytes = r.snapshot();
-            let copy =
-                BlastRange::restore(r.config.clone(), &bytes).expect("surface wave snapshot");
+            let copy = BlastRange::restore(r.config, &bytes).expect("surface wave snapshot");
             assert_eq!(bytes, copy.snapshot());
             replay = Some(copy);
         }

@@ -72,7 +72,7 @@ fn all_fields_match_legacy_group_edits_and_roundtrip_without_changing_stock_byte
     let mut r = arena();
     let original = r.snapshot();
     let defaults = r.motion_defaults.clone();
-    let mut reference = BlastRange::restore(r.config.clone(), &original).unwrap();
+    let mut reference = BlastRange::restore(r.config, &original).unwrap();
     for (index, field) in MotionField::ALL.into_iter().enumerate() {
         assert_eq!(MotionField::from_code(index as u8), Some(field));
         let value = if field == MotionField::Step {
@@ -94,13 +94,13 @@ fn all_fields_match_legacy_group_edits_and_roundtrip_without_changing_stock_byte
         assert_eq!(r.snapshot(), reference.snapshot());
         assert_ne!(
             r.state_hash(),
-            BlastRange::restore(r.config.clone(), &original)
+            BlastRange::restore(r.config, &original)
                 .unwrap()
                 .state_hash()
         );
         let bytes = r.snapshot();
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 54);
-        let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(bytes, restored.snapshot());
         assert_eq!(
             r.execute_command(edit(RangeUnitKind::Tank, true, field, value)),
@@ -182,11 +182,11 @@ fn tuning_tail_rejects_noncanonical_ids_masks_defaults_and_truncation() {
         let mut bad = bytes.clone();
         bad[offset + at..offset + at + 4].copy_from_slice(&value.to_le_bytes());
         assert!(
-            BlastRange::restore(r.config.clone(), &bad).is_none(),
+            BlastRange::restore(r.config, &bad).is_none(),
             "offset {at}, value {value}"
         );
     }
     for omitted in 1..=tail.len() {
-        assert!(BlastRange::restore(r.config.clone(), &bytes[..bytes.len() - omitted]).is_none());
+        assert!(BlastRange::restore(r.config, &bytes[..bytes.len() - omitted]).is_none());
     }
 }

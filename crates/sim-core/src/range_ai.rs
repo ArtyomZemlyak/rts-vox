@@ -71,6 +71,55 @@ pub trait Policy {
 mod support_tests {
     use super::*;
 
+    /// Audit 199: the T2 artillery turret at (4400, 4900) chose the enemy
+    /// base 6 km away and stood idle beside a tank 112 m off, inside its
+    /// 160 m reach but outside the L1 siege radius. An emplacement now
+    /// attacks only what its weapon reaches, and waits on Auto otherwise.
+    #[test]
+    fn rules_filters_emplacement_targets_by_attack_range() {
+        let tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let radii = modding::battle_ai::Radii::stock();
+        let unit = |id, allied, kind, position: [i32; 2], range| UnitObservation {
+            id,
+            allied,
+            alive: true,
+            armed: range > 0,
+            mobile: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::ArtilleryTurretT2),
+            can_reposition: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::ArtilleryTurretT2),
+            kind,
+            position,
+            ordered_target: None,
+            attack_ranges: [range; RangeUnitKind::COUNT],
+        };
+        let mut observation = Observation {
+            version: OBSERVATION_VERSION,
+            observed_tick: 0,
+            decision_tick: 0,
+            size: [10_000, 192, 10_000],
+            units: vec![
+                unit(26, true, RangeUnitKind::ArtilleryTurretT2, [4400, 4900], 1600),
+                unit(6, false, RangeUnitKind::Base, [8820, 8870], 0),
+                unit(10, false, RangeUnitKind::Tank, [5480, 5210], 700),
+            ],
+        };
+        let rules = Rules {
+            tuning: &tuning,
+            radii: &radii,
+            controlled_allied: true,
+        };
+        let order = |o: &Observation| {
+            rules
+                .decide(o)
+                .into_iter()
+                .find(|d| d.actor == 26)
+                .map(|d| d.order)
+        };
+        assert_eq!(order(&observation), Some(AiOrder::Attack(10)));
+        // Nothing in reach: wait on Auto instead of an unexecutable siege.
+        observation.units[2].position = [7000, 7000];
+        assert_eq!(order(&observation), Some(AiOrder::Auto));
+    }
+
     #[test]
     fn focus_fire_scores_match_scalar_with_sparse_ids_and_radius_boundaries() {
         let mut tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
@@ -93,6 +142,7 @@ mod support_tests {
             tuning.focus_fire = focus_fire;
             let rules = Rules {
                 tuning: &tuning,
+                radii: &modding::battle_ai::Radii::stock(),
                 controlled_allied: true,
             };
             for actor in &units {
@@ -249,6 +299,8 @@ pub(super) fn road_waypoint(
 
 pub struct Rules<'a> {
     pub tuning: &'a Tuning,
+    /// Tactical radii from the pack (`battle-ai.ron`), not saved state.
+    pub radii: &'a modding::battle_ai::Radii,
     /// Which team's orders this policy is producing. The observation keeps
     /// absolute allegiance so a model adapter can use the same input.
     pub controlled_allied: bool,
@@ -290,7 +342,7 @@ impl Rules<'_> {
         let mut support = std::collections::BTreeMap::new();
         if self.tuning.focus_fire {
             for ally in allies {
-                if ally.id != actor.id && Self::distance(ally, actor) <= 600 {
+                if ally.id != actor.id && Self::distance(ally, actor) <= i64::from(self.radii.support) {
                     if let Some(target) = ally.ordered_target {
                         let count = support.entry(target).or_insert(0);
                         *count = (*count + 1).min(2);
@@ -373,7 +425,7 @@ impl Policy for Rules<'_> {
                         && !u.kind.artillery()
                         && (i64::from(u.position[0] - base[0]).abs()
                             + i64::from(u.position[1] - base[1]).abs())
-                            <= 1500
+                            <= i64::from(self.radii.guard_pick)
                 })
                 .min_by_key(|u| {
                     (
@@ -391,14 +443,38 @@ impl Policy for Rules<'_> {
             ];
             let length = delta[0].abs().max(delta[1].abs()).max(1);
             [
-                (i64::from(base[0]) + delta[0] * 300 / length) as i32,
-                (i64::from(base[1]) + delta[1] * 300 / length) as i32,
+                (i64::from(base[0]) + delta[0] * i64::from(self.radii.guard_post) / length) as i32,
+                (i64::from(base[1]) + delta[1] * i64::from(self.radii.guard_post) / length) as i32,
             ]
         });
         allies
             .iter()
             .map(|u| {
                 let support = self.support(u, &allies);
+                // An emplacement cannot close the distance, so only targets
+                // its weapon reaches are executable (EP-09, analysis 240 C2).
+                // With none in reach it stays on Auto and engages whatever
+                // enters range between decisions; a siege order on a distant
+                // base would leave it idle beside a tank it could hit.
+                if !u.can_reposition {
+                    let best = targets
+                        .iter()
+                        .filter(|v| u.in_weapon_reach(v))
+                        .min_by_key(|v| (self.score(u, v, &support), v.id));
+                    let order = best.map_or(AiOrder::Auto, |best| {
+                        let kept = targets
+                            .iter()
+                            .find(|v| Some(v.id) == u.ordered_target)
+                            .filter(|old| {
+                                u.in_weapon_reach(old)
+                                    && self.score(u, old, &support)
+                                        <= self.score(u, best, &support)
+                                            + i64::from(self.tuning.switch_margin)
+                            });
+                        AiOrder::Attack(kept.unwrap_or(best).id)
+                    });
+                    return Decision { actor: u.id, order };
+                }
                 Decision {
                     actor: u.id,
                     order: if guard == Some(u.id) {
@@ -411,9 +487,9 @@ impl Policy for Rules<'_> {
                                         && (i64::from(v.position[0] - base[0]).abs()
                                             + i64::from(v.position[1] - base[1]).abs())
                                             <= if u.ordered_target == Some(v.id) {
-                                                2200
+                                                i64::from(self.radii.defend_keep)
                                             } else {
-                                                1800
+                                                i64::from(self.radii.defend)
                                             }
                                 })
                                 .min_by_key(|v| (self.score(u, v, &support), v.id))
@@ -434,7 +510,7 @@ impl Policy for Rules<'_> {
                                 .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
                                 .flatten();
                             if let Some(base) = siege {
-                                let threat_radius = 1200
+                                let threat_radius = self.radii.siege_threat
                                     + if u.ordered_target == Some(base.id) {
                                         0
                                     } else {
@@ -480,6 +556,8 @@ impl Policy for Rules<'_> {
 #[derive(Clone, Debug)]
 pub(super) struct Controller {
     pub tuning: Tuning,
+    /// Pack data, rebuilt with the controller; never serialized.
+    pub radii: modding::battle_ai::Radii,
     pub next_tick: u32,
     pub pending: Option<Vec<Decision>>,
 }
@@ -489,6 +567,7 @@ impl Controller {
         Self {
             tuning: Tuning::from_ron(include_str!("../../../data/battle-ai.ron"))
                 .expect("battle AI tuning"),
+            radii: modding::battle_ai::Radii::stock(),
             next_tick: 0,
             pending: None,
         }

@@ -143,7 +143,7 @@ fn owned_commands_match_direct_kernel_in_real_combat_and_pending_checkpoint_repl
         let mut world = arena(kind);
         world.start_battle().unwrap();
         let mut direct =
-            crate::blast::BlastRange::restore(world.config.clone(), &world.snapshot()).unwrap();
+            crate::blast::BlastRange::restore(world.config, &world.snapshot()).unwrap();
         let mut r = CommandRuntime::new(
             world,
             7,
@@ -199,8 +199,7 @@ fn owned_commands_match_direct_kernel_in_real_combat_and_pending_checkpoint_repl
             }
             if tick == 70 {
                 // Two completed receipts, two pending commands; preserve both.
-                let restored =
-                    CommandRuntime::restore(r.world().config.clone(), r.checkpoint()).unwrap();
+                let restored = CommandRuntime::restore(r.world().config, r.checkpoint()).unwrap();
                 assert_eq!(restored.state_hash(), r.state_hash());
                 assert_eq!(restored.retained(), 4);
                 replay = Some(restored);

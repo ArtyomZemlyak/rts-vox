@@ -66,7 +66,7 @@ fn spider_laser_tracking_starts_before_alignment_and_ray_follows_the_real_barrel
         "ray left barrel axis"
     );
     assert_ne!(r.units[0].turret_pitch, 0);
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     for _ in 0..120 {
         let was = r.battle.actors[0].turret;
         step(&mut r);
@@ -113,7 +113,7 @@ fn spider_laser_tracking_live_retarget_burns_an_unselected_unit_between_targets(
     );
     assert_eq!(r.battle.actors[0].burst, burst + 1);
     assert!(fx::angle::diff(r.battle.actors[0].turret.angle, yaw).abs() < fx::angle::FULL / 360);
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     let mut collateral = false;
     for _ in 0..210 {
         let active = r.battle.actors[0].burst;
@@ -241,7 +241,7 @@ fn spider_live_beam_keeps_melting_armour_while_a_hot_crater_competes_for_slots()
     assert!(r.battle_order(0, Order::Attack(1), None));
     beam(&mut r);
     let first = r.tick;
-    let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     replay.matter.tuning.max_flying = 512; // authored tuning is not stored in saves
     for _ in 0..120 {
         for sim in [&mut r, &mut replay] {
@@ -339,7 +339,7 @@ fn spider_laser_tracking_frozen_wave_pose_survives_aim_changes_and_snapshot_corr
     let mut r = trial(&[(RangeUnitKind::Tank, [440, 16, 336])], vec![]);
     assert!(r.battle_order(0, Order::Attack(1), None));
     beam(&mut r);
-    let mut c = r.config.clone();
+    let mut c = r.config;
     c.energy = 1;
     r.explosion = Some(Explosion::new(&r.world, [280, 75, 336], &c, &r.units));
     let captured = r.explosion.as_ref().unwrap().turret_pitches.clone();
@@ -350,7 +350,7 @@ fn spider_laser_tracking_frozen_wave_pose_survives_aim_changes_and_snapshot_corr
     }
     let bytes = r.snapshot();
     assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 52);
-    let mut replay = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+    let mut replay = BlastRange::restore(r.config, &bytes).unwrap();
     assert_eq!(r.state_hash(), replay.state_hash());
     if let Some(e) = &replay.explosion {
         assert_eq!(e.turret_pitches, captured);
@@ -362,7 +362,7 @@ fn spider_laser_tracking_frozen_wave_pose_survives_aim_changes_and_snapshot_corr
     }
     let mut truncated = bytes;
     truncated.pop();
-    assert!(BlastRange::restore(r.config.clone(), &truncated).is_none());
+    assert!(BlastRange::restore(r.config, &truncated).is_none());
 }
 
 #[test]

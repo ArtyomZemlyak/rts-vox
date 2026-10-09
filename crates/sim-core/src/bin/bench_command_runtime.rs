@@ -319,7 +319,7 @@ fn main() {
             } else {
                 checkpoint
             };
-            let restored = CommandRuntime::restore(world.config.clone(), checkpoint).unwrap();
+            let restored = CommandRuntime::restore(world.config, checkpoint).unwrap();
             assert_eq!(owner.state_hash(), restored.state_hash());
             replica = Some(restored);
         }

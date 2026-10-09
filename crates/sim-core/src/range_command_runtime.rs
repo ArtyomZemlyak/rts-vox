@@ -368,19 +368,19 @@ impl CommandRuntime {
                 tick: execution.tick.unwrap(),
                 attempts: execution.attempts,
             };
-        } else if self.world.battle.phase != Phase::Fighting {
-            if self.world.battle.plan_execution.take().is_some() {
-                let receipt = self
-                    .inbox
-                    .plans
-                    .iter_mut()
-                    .rev()
-                    .find(|receipt| receipt.state == PlanState::Delivered)
-                    .unwrap();
-                receipt.state = PlanState::Cancelled {
-                    tick: self.world.tick - 1,
-                };
-            }
+        } else if self.world.battle.phase != Phase::Fighting
+            && self.world.battle.plan_execution.take().is_some()
+        {
+            let receipt = self
+                .inbox
+                .plans
+                .iter_mut()
+                .rev()
+                .find(|receipt| receipt.state == PlanState::Delivered)
+                .unwrap();
+            receipt.state = PlanState::Cancelled {
+                tick: self.world.tick - 1,
+            };
         }
         Ok(())
     }

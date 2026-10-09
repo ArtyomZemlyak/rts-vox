@@ -1696,6 +1696,22 @@ impl Motion {
     pub fn started_search(&self) -> bool {
         self.started
     }
+    /// Whether this tick's step may begin a new route search, read before
+    /// the step. A superset of the start conditions in `step_observed_ground`:
+    /// the range only uses it to choose who is offered the shared start
+    /// allowance (analysis 240, C3), and an offer that is not taken is lost
+    /// for this tick, never mis-spent.
+    pub(super) fn wants_start(&self, tick: u32) -> bool {
+        self.enabled
+            && self.hunt.is_none()
+            && self.escape_left == 0
+            && ((self.destination.is_some()
+                && (self.blocked || self.path.is_empty())
+                && tick >= self.next_plan)
+                || (self.cursor == self.path.len()
+                    && !self.route.is_empty()
+                    && !self.partial_path))
+    }
     /// Override the global graph allowance (zero selects the oriented planner).
     pub fn set_global_search_limit(&mut self, nodes: usize) {
         self.navigation.global_nodes = nodes;

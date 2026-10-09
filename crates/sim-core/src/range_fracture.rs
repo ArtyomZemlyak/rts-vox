@@ -348,8 +348,7 @@ mod tests {
                 .unwrap();
         for (total, flying, claims) in [(1, 1, 1), (31, 7, 3), (31, 31, 31), (4096, 4096, 4096)] {
             let run = |cached: bool| {
-                let mut r =
-                    crate::blast::BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+                let mut r = crate::blast::BlastRange::with_layout(config, layout.clone()).unwrap();
                 let u = &r.units[0];
                 let m = &mut r.matter;
                 m.tuning.max_fragments = total;
@@ -427,8 +426,7 @@ mod tests {
                 .unwrap();
         for cap in [1, 7, 128] {
             let run = |reserved: bool| {
-                let mut r =
-                    crate::blast::BlastRange::with_layout(config.clone(), layout.clone()).unwrap();
+                let mut r = crate::blast::BlastRange::with_layout(config, layout.clone()).unwrap();
                 let u = &r.units[0];
                 let m = &mut r.matter;
                 m.tuning.max_flying = cap;
@@ -579,8 +577,8 @@ mod tests {
                     Fx::from_int((bit / (side * side)) as i32).sub(centre.z),
                 ];
                 let mut world = f.position;
-                for a in 0..3 {
-                    world = world.add(f.basis[a].scale(delta[a].mul(scale)));
+                for (axis, d) in f.basis.iter().zip(delta) {
+                    world = world.add(axis.scale(d.mul(scale)));
                 }
                 let local = u
                     .root_frame(cells[0][1])
@@ -613,7 +611,7 @@ mod tests {
         m.save(&mut bytes);
         assert!(m.economy.ledger.snapshot().0.len() > 5 + r.units.len() * 2 + 2);
         let mut copy = Matter::new(&r.units);
-        copy.tuning = m.tuning.clone();
+        copy.tuning = m.tuning;
         assert!(copy
             .load(&mut Scan::new(&bytes.v), &r.world, &r.units)
             .is_some());
@@ -690,8 +688,8 @@ mod tests {
                     Fx::from_int((bit / s / s) as i32).sub(centre.z),
                 ];
                 let mut world = f.position;
-                for a in 0..3 {
-                    world = world.add(f.basis[a].scale(delta[a].mul(scale)));
+                for (axis, d) in f.basis.iter().zip(delta) {
+                    world = world.add(axis.scale(d.mul(scale)));
                 }
                 // Cells chosen first come from the lower hull in this fixture.
                 let local = u

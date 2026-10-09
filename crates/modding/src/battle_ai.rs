@@ -28,3 +28,65 @@ impl Tuning {
         Ok(())
     }
 }
+
+/// Tactical radii of the rule-based controller, world units. Read from the
+/// same `battle-ai.ron`; unlike [`Tuning`] they are fixed data of the pack,
+/// not runtime configuration, so they enter neither snapshots nor
+/// checkpoints (analysis 240, B3). A missing field is a parse error.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct Radii {
+    /// Allies within this L1 distance count toward focus fire.
+    pub support: i32,
+    /// A defender is picked among armed movers this close to its base.
+    pub guard_pick: i32,
+    /// The defender engages hostiles this close to its base...
+    pub defend: i32,
+    /// ...and keeps a target it already holds out to this distance.
+    pub defend_keep: i32,
+    /// The defender's post, this far from its base toward the map centre.
+    pub guard_post: i32,
+    /// Siege units divert to armed threats within this L1 distance.
+    pub siege_threat: i32,
+}
+
+impl Radii {
+    pub fn from_ron(src: &str) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        struct File {
+            radii: Radii,
+        }
+        let value = ron::from_str::<File>(src).map_err(|e| e.to_string())?.radii;
+        let all = [
+            value.support,
+            value.guard_pick,
+            value.defend,
+            value.defend_keep,
+            value.guard_post,
+            value.siege_threat,
+        ];
+        if all.iter().any(|r| !(1..=100_000).contains(r)) || value.defend_keep < value.defend {
+            return Err("invalid battle AI radii".into());
+        }
+        Ok(value)
+    }
+
+    /// The stock pack's radii.
+    pub fn stock() -> Self {
+        Self::from_ron(include_str!("../../../data/battle-ai.ron")).expect("battle AI radii")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stock_radii_parse_and_tuning_ignores_them() {
+        let src = include_str!("../../../data/battle-ai.ron");
+        let r = Radii::from_ron(src).unwrap();
+        assert_eq!((r.support, r.siege_threat), (600, 1200));
+        assert!(Tuning::from_ron(src).is_ok());
+        let broken = src.replace("defend_keep: 2200", "defend_keep: 100");
+        assert!(Radii::from_ron(&broken).is_err());
+    }
+}

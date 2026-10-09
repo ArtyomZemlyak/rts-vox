@@ -143,10 +143,10 @@ fn command_capture_does_not_change_real_combat_or_midfight_restore() {
             fired |= a.battle.actors.iter().any(|a| a.fired > 0);
             damage |= a.units.iter().any(|u| u.revision > 0);
             if tick == 120 {
-                b = BlastRange::restore(b.config.clone(), &b.snapshot()).unwrap();
+                b = BlastRange::restore(b.config, &b.snapshot()).unwrap();
                 assert!(b.finish_battle_command_capture().is_none());
                 // Restoring the captured state also drops only observation.
-                let mut restored = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+                let mut restored = BlastRange::restore(a.config, &a.snapshot()).unwrap();
                 same(&a, &restored);
                 assert!(restored.finish_battle_command_capture().is_none());
             }

@@ -427,7 +427,7 @@ mod tests {
             assert_eq!(a.v, b.v);
             assert!(edited.matter.economy.ledger.balanced());
             if [1, 15, 35].contains(&tick) {
-                edited = BlastRange::restore(edited.config.clone(), &edited.snapshot()).unwrap();
+                edited = BlastRange::restore(edited.config, &edited.snapshot()).unwrap();
             }
         }
         assert!(edited.combustion.consumed > 0 && edited.combustion.generated_heat > 0);
@@ -538,7 +538,7 @@ mod tests {
         );
         a.step();
         assert!(a.combustion.stocks[0].spill.is_some());
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..65 {
             a.step();
             b.step();
@@ -552,10 +552,10 @@ mod tests {
     fn older_snapshots_do_not_invent_fuel_and_invalid_inventory_is_rejected() {
         let mut r = range();
         r.combustion.stocks[0].held = Some(r.matter.body_container(0));
-        assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_none());
+        assert!(BlastRange::restore(r.config, &r.snapshot()).is_none());
         r.combustion = Combustion::empty(r.units.len());
         assert!(
-            BlastRange::restore(r.config.clone(), &r.snapshot()).is_none(),
+            BlastRange::restore(r.config, &r.snapshot()).is_none(),
             "orphan fuel container"
         );
         r.matter = Matter::new(&r.units);
@@ -564,7 +564,7 @@ mod tests {
         r.save_after(&mut tail, 33);
         bytes.truncate(bytes.len() - tail.v.len());
         bytes[..4].copy_from_slice(&33u32.to_le_bytes());
-        let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        let restored = BlastRange::restore(r.config, &bytes).unwrap();
         assert_eq!(restored.combustion.remaining(0, &restored.matter), 0);
         assert_eq!(r.state_hash(), restored.state_hash());
     }
@@ -584,7 +584,7 @@ mod tests {
                 material: 5,
             },
         ];
-        r = BlastRange::with_layout(r.config.clone(), layout).unwrap();
+        r = BlastRange::with_layout(r.config, layout).unwrap();
         let at = [
             Fx::from_ratio(561, 2),
             Fx::from_ratio(61, 2),

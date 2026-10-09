@@ -13,13 +13,16 @@ use connection::Connection;
 use fx::{angle, Fx};
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     sync::Arc,
 };
 use voxel::{
     store::{Mat, AIR},
     World,
 };
+
+/// A footprint and its swept sample poses, prepared independently.
+pub type SweepSamples = (Shape, Vec<([Fx; 2], i32)>);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
@@ -1433,9 +1436,9 @@ pub struct Hunt {
     /// map (ADR-316): a route search reaches thousands, and a map of a
     /// kilometre has twelve million, which at the poses alone is most of a
     /// gigabyte for every order given.
-    distance: HashMap<usize, u32>,
-    previous: HashMap<usize, usize>,
-    poses: HashMap<usize, Pose>,
+    distance: fx::lookup::Lookup<usize, u32>,
+    previous: fx::lookup::Lookup<usize, usize>,
+    poses: fx::lookup::Lookup<usize, Pose>,
     open: BinaryHeap<Reverse<(u32, u32, usize)>>,
     /// Graph work spent, expansions made, poses probed.
     spent: usize,
@@ -1606,9 +1609,9 @@ impl Hunt {
         ];
         let start_dir = (angle::norm(head + angle::FULL / 16) / (angle::FULL / 8)) as usize % 8;
         let initial = start * 8 + start_dir;
-        let mut distance = HashMap::new();
-        let previous = HashMap::new();
-        let poses = HashMap::new();
+        let mut distance = fx::lookup::Lookup::new();
+        let previous = fx::lookup::Lookup::new();
+        let poses = fx::lookup::Lookup::new();
         let mut open = BinaryHeap::new();
         distance.insert(initial, 0);
         open.push(Reverse((0, 0, initial)));
@@ -1666,6 +1669,9 @@ impl Hunt {
     ) -> Option<Route> {
         self.prepare_sweep(ground, clear, allowance, None, |_| {})
     }
+    // `start_batch` advances the run, so it must not be called when there is
+    // no preparer; `Option::zip` would evaluate it eagerly.
+    #[allow(clippy::manual_option_zip)]
     fn prepare_sweep(
         &mut self,
         ground: &mut Probe<'_>,
@@ -1815,7 +1821,7 @@ impl Hunt {
     /// Exact poses ahead of the currently suspended swept connection. A caller
     /// may prepare them independently; branch decisions still consume them in
     /// original order and pay the original logical allowance.
-    pub fn sweep_samples(&self, budget: usize) -> Option<(Shape, Vec<([Fx; 2], i32)>)> {
+    pub fn sweep_samples(&self, budget: usize) -> Option<SweepSamples> {
         let run = self.pending_connection()?;
         let samples = run.samples(self.shape, budget);
         (samples.len() >= 16).then_some((self.shape, samples))
@@ -1882,18 +1888,21 @@ impl Hunt {
         }
         self.columns.forget(changed);
         let r = reach(self.shape);
-        let stale: Vec<usize> = self
-            .poses
-            .keys()
-            .copied()
-            .filter(|j| {
-                let p = self.point(j / 8).map(Fx::to_int_trunc);
-                changed.touches([p[0] - r, p[1] - r], [p[0] + 1 + r, p[1] + 1 + r])
-            })
-            .collect();
-        for j in stale {
-            self.poses.remove(&j);
-        }
+        // The same point as `Hunt::point`, including the sub-voxel start.
+        let (n, anchor, cell) = (self.n, self.anchor, self.cfg.cell);
+        let (start, from) = (self.initial / 8, self.from.map(Fx::to_int_trunc));
+        self.poses.remove_where(|j| {
+            let i = j / 8;
+            let p = if i == start {
+                from
+            } else {
+                [
+                    (i % n) as i32 * cell + anchor[0],
+                    (i / n) as i32 * cell + anchor[1],
+                ]
+            };
+            changed.touches([p[0] - r, p[1] - r], [p[0] + 1 + r, p[1] + 1 + r])
+        });
         let shape = self.shape;
         let touched = |run: &Connection| {
             run.checked(shape)
@@ -1981,8 +1990,7 @@ impl Hunt {
         // A map keeps them in the order of the cell, which is the order
         // the dense array was written in before (ADR-316).
         b.u32(self.distance.len() as u32);
-        let mut reached: Vec<_> = self.distance.iter().collect();
-        reached.sort_unstable_by_key(|(&i, _)| i);
+        let reached = self.distance.sorted_entries();
         for (&i, &d) in reached {
             b.u32(i as u32);
             b.u32(d);
@@ -2093,9 +2101,9 @@ impl Hunt {
             anchor,
             initial,
             end,
-            distance: HashMap::new(),
-            previous: HashMap::new(),
-            poses: HashMap::new(),
+            distance: fx::lookup::Lookup::new(),
+            previous: fx::lookup::Lookup::new(),
+            poses: fx::lookup::Lookup::new(),
             open: BinaryHeap::new(),
             spent,
             nodes,
@@ -2126,7 +2134,7 @@ impl Hunt {
         // with a gap or a loop sent the route walk off the grid or round
         // it forever, where a bad snapshot must simply not load.
         let mut rooted = BTreeSet::from([initial]);
-        for &i in hunt.distance.keys() {
+        for i in hunt.distance.sorted_keys() {
             let mut chain = Vec::new();
             let mut j = i;
             while !rooted.contains(&j) {
@@ -4370,8 +4378,8 @@ mod tests {
         assert!(Hunt::load(&mut fx::blob::Scan::new(&bytes(&hunt)), &[]).is_some());
         let reached: Vec<usize> = hunt
             .distance
-            .keys()
-            .copied()
+            .sorted_keys()
+            .into_iter()
             .filter(|&i| i != hunt.initial)
             .collect();
         let mut gap = hunt.clone();

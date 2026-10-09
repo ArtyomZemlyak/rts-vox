@@ -1089,6 +1089,63 @@ fn changed_span<T: PartialEq>(
 
 const ROAD_GRADE_SHOULDER: i32 = 80;
 
+/// Height above the road floor at `(x, z)` for one road segment, out of
+/// `rise` for the untouched ground: zero within `half` of the centre line,
+/// then a linear shoulder `ROAD_GRADE_SHOULDER` wide, rounded half up.
+/// `None` for a degenerate segment.
+///
+/// Integer-only (`CLAUDE.md`: no float, no libm in the simulation). The
+/// distance is never taken: every threshold and the rounding are decided by
+/// comparing squares exactly in `i128`. It replaces an `f64`/`hypot` form
+/// whose last bit depended on the platform's maths library (analysis 239,
+/// P-74); the test `road_grade_matches_the_former_float_profile` holds the
+/// two equal on every road column of the stock kilometre map.
+fn road_grade(x: i32, z: i32, a: [i32; 2], b: [i32; 2], half: i32, rise: u32) -> Option<u32> {
+    let (dx, dz) = (i128::from(b[0] - a[0]), i128::from(b[1] - a[1]));
+    let len2 = dx * dx + dz * dz;
+    if len2 == 0 {
+        return None;
+    }
+    let (px, pz) = (i128::from(x - a[0]), i128::from(z - a[1]));
+    let along = px * dx + pz * dz;
+    // Squared distance to the segment as num / den, exactly.
+    let (num, den) = if along <= 0 {
+        (px * px + pz * pz, 1)
+    } else if along >= len2 {
+        let (qx, qz) = (px - dx, pz - dz);
+        (qx * qx + qz * qz, 1)
+    } else {
+        ((px * px + pz * pz) * len2 - along * along, len2)
+    };
+    // distance >= v, for an integer v.
+    let at_least = |v: i128| v <= 0 || num >= v * v * den;
+    let half = i128::from(half);
+    let shoulder = i128::from(ROAD_GRADE_SHOULDER);
+    if half >= 0 && num <= half * half * den {
+        return Some(0);
+    }
+    if at_least(half + shoulder) {
+        return Some(rise);
+    }
+    // round(rise * (d - half) / shoulder) = the largest k with
+    // 2·rise·d >= 2·shoulder·k + 2·rise·half - shoulder.
+    let h = i128::from(rise);
+    let holds = |k: i128| {
+        let r = 2 * shoulder * k + 2 * h * half - shoulder;
+        r <= 0 || 4 * h * h * num >= r * r * den
+    };
+    let (mut lo, mut hi) = (0i128, h);
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2;
+        if holds(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo as u32)
+}
+
 impl RangeTerrain {
     // A road must be a drivable cut through procedural hills, including at
     // the edge of an authored flat zone. Fade the cut into the surrounding
@@ -1100,29 +1157,18 @@ impl RangeTerrain {
         let Some(layout) = &self.layout else {
             return natural;
         };
-        let mut edge = ROAD_GRADE_SHOULDER as f64;
+        // The grade is monotone in the distance past the verge, so the
+        // nearest segment decides and each one can be graded on its own.
+        let rise = natural - FLOOR as u32;
+        let mut grade = rise;
         for &(i, segment) in &self.index.at(x, z).roads {
             let road = &layout.roads[i];
-            let a = road.points[segment];
-            let b = road.points[segment + 1];
-            let dx = (b[0] - a[0]) as f64;
-            let dz = (b[1] - a[1]) as f64;
-            let along = (((x as i32 - a[0]) as f64 * dx + (z as i32 - a[1]) as f64 * dz)
-                / (dx * dx + dz * dz))
-                .clamp(0.0, 1.0);
-            let offset_x = x as f64 - (a[0] as f64 + along * dx);
-            let offset_z = z as f64 - (a[1] as f64 + along * dz);
-            edge = edge.min(offset_x.hypot(offset_z) - f64::from(road.width / 2));
+            let (a, b) = (road.points[segment], road.points[segment + 1]);
+            if let Some(g) = road_grade(x as i32, z as i32, a, b, road.width / 2, rise) {
+                grade = grade.min(g);
+            }
         }
-        if edge <= 0.0 {
-            FLOOR as u32
-        } else if edge < ROAD_GRADE_SHOULDER as f64 {
-            FLOOR as u32
-                + ((natural - FLOOR as u32) as f64 * edge / ROAD_GRADE_SHOULDER as f64).round()
-                    as u32
-        } else {
-            natural
-        }
+        FLOOR as u32 + grade
     }
 
     fn road_at(&self, x: u32, z: u32, margin: i32) -> bool {
@@ -1756,6 +1802,11 @@ impl Explosion {
     /// not depend on how the wave is sliced across ticks.
     pub fn working(&self) -> bool {
         self.capturing() || !self.pending.is_empty() || !self.wave.finished()
+    }
+    /// World box the wave's field covers: inclusive minimum, exclusive maximum.
+    pub(super) fn domain(&self) -> ([i32; 3], [i32; 3]) {
+        let span = self.wave.size() as i32 * self.cell;
+        (self.origin, self.origin.map(|v| v + span))
     }
     // Separate authoritative outputs keep world edits and material claims explicit.
     #[allow(clippy::too_many_arguments)]
@@ -2471,10 +2522,12 @@ pub mod battle;
 pub struct CollapseWork {
     pub queued: usize,
     pub submitted: usize,
-    /// Bits 0/1: active wave/debris claim. Only when both clear, bit 2
-    /// reports a pending body source dig, preserving the cheap early guards.
+    /// Why edits waited this tick (analysis 240, C1). Bit 0: some edits lie
+    /// in a live wave's field; bit 1: some lie next to a claimed cell; bit 2:
+    /// a body's source digs have not drained, and the whole pass waits.
     pub blocked_by: u8,
-    /// Consecutive blocked ticks in this runtime (starts anew after restore).
+    /// Consecutive ticks with collapse work and no pass at all, in this
+    /// runtime (starts anew after restore).
     pub blocked_ticks: u32,
     pub gather_candidates: usize,
     pub gather_buffer_peak: usize,
@@ -4434,6 +4487,26 @@ impl BlastRange {
             };
             m.allow_resume(work);
         }
+        // Fair start allowance (analysis 240, C3). Spatial order decides who
+        // commits motion first, but it used to decide who may begin a search
+        // too: the hull with the smallest X took the single start every tick
+        // it wanted one. The offer now rotates with the tick over the hulls
+        // that want a start, in slot order; no scheduler state is kept.
+        let offered: Vec<usize> = {
+            let wanting: Vec<usize> = (0..self.units.len())
+                .filter(|&id| self.units[id].motion.wants_start(self.tick))
+                .collect();
+            if wanting.len() <= starts {
+                wanting
+            } else {
+                let first = self.tick as usize % wanting.len();
+                let mut chosen: Vec<usize> = (0..starts)
+                    .map(|k| wanting[(first + k) % wanting.len()])
+                    .collect();
+                chosen.sort_unstable();
+                chosen
+            }
+        };
         let mut motion_order: Vec<_> = (0..self.units.len()).collect();
         motion_order.sort_unstable_by_key(|&id| {
             let p = self.units[id].motion.pos;
@@ -4531,7 +4604,7 @@ impl BlastRange {
                 u.motion.defer_feet();
             }
             u.motion.cut_limit = cut_limit;
-            u.motion.allow_start(starts > 0);
+            u.motion.allow_start(starts > 0 && offered.binary_search(&id).is_ok());
             {
                 let others: Vec<_> = positions
                     .iter()
@@ -4870,7 +4943,7 @@ impl BlastRange {
                     {
                         self.shell = Some(last_free);
                     } else if self.config.delivery == modding::explosion::Delivery::Kinetic {
-                        let config = self.config.clone();
+                        let config = self.config;
                         self.kinetic_hit_at(at, contact, self.velocity, &config);
                         self.shell = None;
                     } else {
@@ -5030,42 +5103,84 @@ impl BlastRange {
             self.collapse_backlog.insert([e.x, e.y, e.z], *e);
         }
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
-        let wave_working =
-            self.explosion.as_ref().is_some_and(|e| e.working()) || self.battle.working();
-        let has_collapse = !self.collapse_backlog.is_empty() || self.collapse.pending();
-        let blocked_by = if has_collapse {
-            let cheap = u8::from(wave_working) | (u8::from(self.matter.debris.claims() != 0) << 1);
-            if cheap != 0 {
-                cheap
-            } else {
-                u8::from(
-                    self.bodies
-                        .list
-                        .iter()
-                        .any(|b| b.awaiting_removal(&self.world)),
-                ) << 2
-            }
-        } else {
-            0
+        // Regional readiness (analysis 240, C1). The layer used to wait for
+        // every wave and claim on the map, and under steady fire it never ran
+        // again (3436 blocked ticks in a 3600-tick battle, analysis 237).
+        // Now only edits in chunks a live wave's field reaches, or next to a
+        // claimed cell, wait; the rest of the map collapses this tick. A
+        // body torn off here may still reach into a busy region: its source
+        // digs are transfers and drain before any claim, so a claim on one of
+        // its cells finds air and is released, and no matter is taken twice
+        // (`confirmed_noop_releases_claim_without_duplicating_a_removed_voxel`).
+        let chunk = voxel::store::CS as i32;
+        let mut wave_boxes: Vec<([i32; 3], [i32; 3])> = self
+            .explosion
+            .as_ref()
+            .filter(|e| e.working())
+            .map(|e| e.domain())
+            .into_iter()
+            .chain(self.battle.domains())
+            .map(|(lo, hi)| (lo.map(|v| v - chunk), hi.map(|v| v + chunk)))
+            .collect();
+        wave_boxes.sort_unstable();
+        let claim_chunks: std::collections::BTreeSet<[i32; 3]> = {
+            let own: std::collections::BTreeSet<[i32; 3]> = self
+                .matter
+                .debris
+                .claimed_cells()
+                .map(|p| p.map(|v| v as i32 / chunk))
+                .collect();
+            own.iter()
+                .flat_map(|c| {
+                    (0..27).map(move |k| [c[0] + k % 3 - 1, c[1] + k / 3 % 3 - 1, c[2] + k / 9 - 1])
+                })
+                .collect()
         };
+        let has_collapse = !self.collapse_backlog.is_empty() || self.collapse.pending();
+        let mut ready: Vec<voxel::world::Edit> = Vec::new();
+        let (mut by_wave, mut by_claim) = (false, false);
+        if has_collapse {
+            for (p, e) in &self.collapse_backlog {
+                let q = p.map(|v| v as i32);
+                if wave_boxes
+                    .iter()
+                    .any(|(lo, hi)| (0..3).all(|a| q[a] >= lo[a] && q[a] < hi[a]))
+                {
+                    by_wave = true;
+                } else if claim_chunks.contains(&q.map(|v| v / chunk)) {
+                    by_claim = true;
+                } else {
+                    ready.push(*e);
+                }
+            }
+        }
+        // A body whose source digs have not drained yet still stands in the
+        // world; a pass now could tear the same cells off twice. Global, and
+        // short: the transfer queue drains whole each flush (ADR-431).
+        let awaiting = has_collapse
+            && self
+                .bodies
+                .list
+                .iter()
+                .any(|b| b.awaiting_removal(&self.world));
+        let blocked_by = u8::from(by_wave) | (u8::from(by_claim) << 1) | (u8::from(awaiting) << 2);
+        let runs = has_collapse && !awaiting && (!ready.is_empty() || self.collapse.pending());
         self.collapse_work = CollapseWork {
             queued: self.collapse_backlog.len(),
             blocked_by,
-            blocked_ticks: if blocked_by != 0 {
+            blocked_ticks: if has_collapse && !runs {
                 self.collapse_work.blocked_ticks.saturating_add(1)
             } else {
                 0
             },
             ..CollapseWork::default()
         };
-        // Plate fracture also owns cells whose source digs are still draining.
-        // Retain all ownership guards: diagnostics must not change admission.
-        if has_collapse && blocked_by == 0 {
+        if runs {
             self.collapse.set_max_body_cells(self.collapse_cap);
-            self.collapse_work.submitted = self.collapse_backlog.len();
+            self.collapse_work.submitted = ready.len();
             let collapse_stats = self.collapse.apply_iter_observed(
                 &mut self.world,
-                self.collapse_backlog.values().copied(),
+                ready.iter().copied(),
                 &mut self.bodies,
                 &mut completed,
             );
@@ -5126,7 +5241,7 @@ impl BlastRange {
                     layout,
                     &mut self.world,
                     &mut self.bodies,
-                    self.collapse_backlog.values().copied(),
+                    ready.iter().copied(),
                     &mut crumbs,
                     |mat| {
                         self.matter
@@ -5142,7 +5257,9 @@ impl BlastRange {
                     .sum::<u64>();
                 self.bodies.spawned.clear();
             }
-            self.collapse_backlog.clear();
+            for e in &ready {
+                self.collapse_backlog.remove(&[e.x, e.y, e.z]);
+            }
         }
         if !crumbs.is_empty() {
             // Crumbled cells — the layer's loose ones and the supports a
@@ -5190,7 +5307,7 @@ impl BlastRange {
             u64::from(self.tick),
             &hulls,
             &self.navigation.fell.materials,
-            |stage| detail(stage),
+            detail,
             &|_, event| physics_detail(1, event),
         );
         completed("debris");
@@ -5540,6 +5657,62 @@ mod tests {
     }
     use super::*;
 
+    /// The integer road profile equals the former `f64`/`hypot` one on every
+    /// column of every road shoulder of the stock kilometre map (P-74). The
+    /// float reference lives only here, in test code.
+    #[test]
+    fn road_grade_matches_the_former_float_profile() {
+        fn float(x: i32, z: i32, a: [i32; 2], b: [i32; 2], half: i32, rise: u32) -> u32 {
+            let shoulder = ROAD_GRADE_SHOULDER as f64;
+            let dx = (b[0] - a[0]) as f64;
+            let dz = (b[1] - a[1]) as f64;
+            let along = (((x - a[0]) as f64 * dx + (z - a[1]) as f64 * dz) / (dx * dx + dz * dz))
+                .clamp(0.0, 1.0);
+            let ox = x as f64 - (a[0] as f64 + along * dx);
+            let oz = z as f64 - (a[1] as f64 + along * dz);
+            let edge = shoulder.min(ox.hypot(oz) - f64::from(half));
+            if edge <= 0.0 {
+                0
+            } else if edge < shoulder {
+                (rise as f64 * edge / shoulder).round() as u32
+            } else {
+                rise
+            }
+        }
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).expect("km layout");
+        let (mut columns, mut mismatches) = (0u64, Vec::new());
+        for road in &layout.roads {
+            let half = road.width / 2;
+            let reach = half + ROAD_GRADE_SHOULDER + 2;
+            for seg in road.points.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                for x in a[0].min(b[0]) - reach..=a[0].max(b[0]) + reach {
+                    for z in a[1].min(b[1]) - reach..=a[1].max(b[1]) + reach {
+                        if x < 0 || z < 0 {
+                            continue;
+                        }
+                        let natural = range_height(x as u32, z as u32);
+                        let rise = natural.saturating_sub(FLOOR as u32);
+                        let exact = road_grade(x, z, a, b, half, rise).expect("segment");
+                        columns += 1;
+                        if exact != float(x, z, a, b, half, rise) && mismatches.len() < 8 {
+                            mismatches.push((x, z, exact, float(x, z, a, b, half, rise)));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            columns > 1_000_000,
+            "the comparison saw too little road: {columns}"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "integer profile differs: {mismatches:?}"
+        );
+    }
+
     #[test]
     #[ignore = "stock 1x weapon balance on the full range"]
     fn stock_weapons_against_exposed_tank() {
@@ -5711,7 +5884,7 @@ mod tests {
         r.step();
         assert!(r.gun.motion.destination.is_some(), "flame did not pursue");
         assert_eq!(r.streams.emitted(), 0, "flame fired beyond its range");
-        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         for _ in 0..300 {
             replay.step();
             if replay.units[0].revision > 0 {
@@ -5762,12 +5935,12 @@ mod tests {
         r.step();
         assert!(r.gun.motion.destination.is_some(), "no approach route");
         assert_eq!(r.streams.emitted(), 0, "fired beyond flame range");
-        let mut abandoned = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut abandoned = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         abandoned.units[0].status.alive = false;
         abandoned.step();
         assert!(abandoned.attack.is_none());
         assert!(abandoned.gun.motion.destination.is_none());
-        let mut moving = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut moving = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         let old_destination = moving.gun.motion.destination;
         moving.units[0].motion.pos[2] = Fx::from_int(546);
         moving.step();
@@ -5849,7 +6022,7 @@ mod tests {
                     && r.gun.motion.destination.is_some()
                     && (r.streams.emitted() > before || (!shell_before && r.shell.is_some()));
                 if firing_on_route {
-                    let restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+                    let restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
                     assert_eq!(restored.state_hash(), r.state_hash(), "{name}");
                     break;
                 }
@@ -5873,7 +6046,7 @@ mod tests {
         a.set_auto_attack(true);
         a.step();
         assert_eq!(a.attack, Some(0));
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert!(b.auto_attack);
         let mut impacted = false;
         for tick in 0..240 {
@@ -5917,7 +6090,7 @@ mod tests {
         let offset = bytes.len() - s.left();
         bytes.remove(offset);
         bytes[..4].copy_from_slice(&29u32.to_le_bytes());
-        let old = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        let old = BlastRange::restore(r.config, &bytes).unwrap();
         assert!(!old.auto_attack);
         assert_eq!(old.attack, r.attack);
     }
@@ -5997,7 +6170,7 @@ mod tests {
     #[test]
     fn a_track_break_brakes_the_range_tank_and_resumes_without_powered_turning() {
         let c = config();
-        let mut a = BlastRange::new(c.clone());
+        let mut a = BlastRange::new(c);
         a.control();
         a.gun.motion.drive.vel = Fx::from_int(30);
         for y in 0..10 {
@@ -6029,7 +6202,7 @@ mod tests {
     #[test]
     fn changing_aim_traverses_before_firing_and_resumes_mid_turn() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-        let mut a = BlastRange::new(c.clone());
+        let mut a = BlastRange::new(c);
         a.control();
         let start = a.muzzle();
         a.aim = Some([128, 30, 520]);
@@ -6073,7 +6246,7 @@ mod tests {
     fn check_range_sections_wait_atomically_resume_and_keep_mass_and_pose(tune_density: bool) {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         if tune_density {
             assert_eq!(
                 a.execute_command(battle::commands::Command::TuneMaterial {
@@ -6113,7 +6286,7 @@ mod tests {
                     value: 1,
                 });
             }
-            let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+            let restored = BlastRange::restore(c, &a.snapshot()).unwrap();
             assert_eq!(a.state_hash(), restored.state_hash(), "partial extraction");
         }
         a.matter.tuning.max_flying = 0;
@@ -6164,7 +6337,7 @@ mod tests {
             initial,
             a.units[0].body.solid_count() + a.units[0].removed.len() as u32
         );
-        let restored = BlastRange::restore(b.config.clone(), &a.snapshot()).unwrap();
+        let restored = BlastRange::restore(b.config, &a.snapshot()).unwrap();
         assert_eq!(
             a.state_hash(),
             restored.state_hash(),
@@ -6298,11 +6471,11 @@ mod tests {
             material: 3,
         }];
         let mut stock = config();
-        let mut heavy = stock.clone();
+        let mut heavy = stock;
         heavy.energy *= 4;
         heavy.material_energy_j *= 4;
         for (c, should_chip) in [(&mut stock, false), (&mut heavy, true)] {
-            let mut sim = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+            let mut sim = BlastRange::with_layout(*c, layout.clone()).unwrap();
             let mut steel = 0;
             let mut soil = 0;
             for _ in 0..240 {
@@ -6518,7 +6691,7 @@ mod tests {
         for _ in 0..150 {
             a.step();
         }
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.units[0].motion.feet, b.units[0].motion.feet);
         for (x, y) in a.units[0].seg_frames.iter().zip(&b.units[0].seg_frames) {
             assert_eq!(x.base, y.base);
@@ -6610,7 +6783,7 @@ mod tests {
             }
             demo.target = [start[0], 22, start[1]];
             for round in 0..8 {
-                let mut a = BlastRange::with_layout(config.clone(), demo.clone()).unwrap();
+                let mut a = BlastRange::with_layout(config, demo.clone()).unwrap();
                 let mut impact = None;
                 for _ in 0..600 {
                     a.step();
@@ -6908,7 +7081,7 @@ mod tests {
             a.matter.economy.ledger.held(a.matter.body_container(0)),
             held - (u64::from(shed) + mounts.len() as u64) * amount
         );
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].seg_gone, a.units[0].seg_gone);
     }
@@ -6954,7 +7127,7 @@ mod tests {
             hull.up
         );
         assert!(hull.load > Fx::ZERO);
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.units[0].motion.legs_lost, a.units[0].motion.legs_lost);
     }
@@ -7035,7 +7208,7 @@ mod tests {
         );
         // Folded by death, not by broken links: the snapshot still loads
         // and replays bit for bit.
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot())
+        let mut b = BlastRange::restore(a.config, &a.snapshot())
             .expect("the snapshot of a dead walker does not load");
         for _ in 0..30 {
             a.step();
@@ -7151,7 +7324,7 @@ mod tests {
         );
         let moved = u.seg_frames[shin].base.sub(rest[shin].base).len_sq().sqrt();
         assert!(moved > Fx::ONE, "the shin stayed at rest: moved {moved:?}");
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(
             b.units[0].motion.legs_buckled,
@@ -7182,7 +7355,7 @@ mod tests {
                 "missing mixed sizes: large={large}, small={small}"
             );
             assert!(range.matter.economy.ledger.balanced());
-            let restored = BlastRange::restore(range.config.clone(), &range.snapshot()).unwrap();
+            let restored = BlastRange::restore(range.config, &range.snapshot()).unwrap();
             assert_eq!(range.state_hash(), restored.state_hash());
         }
     }
@@ -7249,7 +7422,7 @@ mod tests {
             pushed |= a.units[0].motion.shove.len_sq() > Fx::ZERO;
         }
         assert!(pushed, "no shove from the wave");
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.units[0].motion.shove, b.units[0].motion.shove);
         let level = a.units[0].motion.hull.y;
         let mut hopped = Fx::ZERO;
@@ -7379,7 +7552,7 @@ mod tests {
         assert_eq!(steel_pieces, 1, "steel pieces");
         assert_eq!(steel_matter, a.matter.economy.per_voxel(3));
         assert!(a.matter.economy.ledger.balanced());
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.heat.melted_total, 1);
     }
@@ -7447,7 +7620,7 @@ mod tests {
         // Half-metre cells: a heap taller than the belt's step.
         drop_heap(&mut a, [GUN[0] + 30, FLOOR, GUN[2] + belt], 500, 32);
         a.step();
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         let goal = [GUN[0] + 60, GUN[2]];
         assert!(a.order_move(goal));
         assert!(b.order_move(goal));
@@ -7468,7 +7641,7 @@ mod tests {
             assert!(fine_order(&mut a, [128, 470]), "the order was refused");
             assert!(a.gun.motion.searching(), "the route was found at once");
             drop_heap(&mut a, [128, 16, z], 500, 32);
-            let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+            let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
             for tick in 0..40 {
                 a.step();
                 b.step();
@@ -7493,7 +7666,7 @@ mod tests {
         // Around the wall: a search of many slices.
         assert!(fine_order(&mut a, [450, 336]), "the order was refused");
         assert!(a.gun.motion.searching(), "the route was found at once");
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for tick in 0..40 {
             a.step();
             b.step();
@@ -7551,7 +7724,7 @@ mod tests {
             a.step();
         }
         assert!(a.gun.motion.searching(), "the search ended early");
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for tick in 4..60 {
             dig(&mut a, tick);
             dig(&mut b, tick);
@@ -7579,7 +7752,7 @@ mod tests {
         };
         assert_eq!(r.snapshot(), saved);
         assert_eq!(r.state_hash(), hash);
-        let restored = BlastRange::restore(r.config.clone(), &saved).unwrap();
+        let restored = BlastRange::restore(r.config, &saved).unwrap();
         assert_eq!(restored.collapse_work, CollapseWork::default());
         assert_eq!(restored.state_hash(), hash);
     }
@@ -7691,7 +7864,7 @@ mod tests {
         print.u64(0x1234);
         bytes.extend_from_slice(&print.v);
         bytes[..4].copy_from_slice(&39u32.to_le_bytes());
-        let b = BlastRange::restore(a.config.clone(), &bytes).unwrap();
+        let b = BlastRange::restore(a.config, &bytes).unwrap();
         // Version 39 did not store explicit ammunition selections; restoring
         // one intentionally returns every actor to target-based automatic ammo.
         for actor in &mut a.battle.actors {
@@ -8005,7 +8178,7 @@ mod tests {
     fn a_sliced_capture_holds_a_moving_hull_in_its_frozen_pose() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.patrols_running = false;
         let at = a.units[0].motion.pos.map(|v| v.to_int_trunc());
         let dents = SurfaceWork::new();
@@ -8286,7 +8459,7 @@ mod tests {
             "the block stood"
         );
         assert_eq!(a.bodies.list.len(), 1, "the body landed at once");
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.bodies.list.len(), 1);
         assert_eq!(b.collapsed_cells, 80);
@@ -8352,7 +8525,7 @@ mod tests {
             .sum();
         assert_eq!(held, 64, "the pieces do not hold the block's cells");
         assert!(a.matter.economy.ledger.balanced());
-        let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(b.collapsed_cells, 64);
         for _ in 0..300 {
@@ -8421,7 +8594,7 @@ mod tests {
         // Save after the bounded initial slice. A continuation borrowing
         // idle capacity may already finish on the first following tick.
         assert!(a.gun.motion.searching(), "the search ended too early");
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         let mut answered = None;
         for i in 0..200 {
@@ -8469,7 +8642,7 @@ mod tests {
             !a.units[0].seg_removed.is_empty(),
             "no segment damage to save"
         );
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         assert_eq!(a.units[0].seg_removed, b.units[0].seg_removed);
         for _ in 0..30 {
@@ -8613,7 +8786,7 @@ mod tests {
             }
         }
         assert!(a.heat.burning() > 0, "nothing burns to save");
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         for _ in 0..60 {
             a.step();
@@ -8621,7 +8794,7 @@ mod tests {
             assert_eq!(a.state_hash(), b.state_hash());
         }
         assert_eq!(a.heat.hot(), b.heat.hot());
-        let mut c = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut c = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         let (p, _) = c.heat.hottest().unwrap();
         c.heat.add(&c.world, p, 1);
         assert_ne!(a.state_hash(), c.state_hash());
@@ -8736,7 +8909,7 @@ mod tests {
     fn dome_charge_and_outage_are_saved_and_hashed() {
         let mut a = BlastRange::with_layout(config(), shielded_layout()).unwrap();
         assert!(caught(&mut a).is_some());
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), b.state_hash());
         for _ in 0..60 {
             a.step();
@@ -8744,7 +8917,7 @@ mod tests {
             assert_eq!(a.state_hash(), b.state_hash());
         }
         assert_eq!(a.shields[0].charge, b.shields[0].charge);
-        let mut c = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut c = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         c.shields[0].charge -= 1;
         assert_ne!(a.state_hash(), c.state_hash());
         let mut wide = shielded_layout();
@@ -8755,7 +8928,7 @@ mod tests {
     fn a_tank_pushes_through_the_forest_and_the_trees_fall_as_debris() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.control();
         a.patrols_running = false;
         assert!(
@@ -8786,7 +8959,7 @@ mod tests {
             if !m.cut.is_empty() {
                 cut_ticks += 1;
                 if b.is_none() {
-                    b = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+                    b = Some(BlastRange::restore(c, &a.snapshot()).unwrap());
                 }
             }
             released = released.max(a.matter.felling_pending());
@@ -8851,7 +9024,7 @@ mod tests {
     fn a_walker_fells_trees_on_the_live_range_and_replays() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.control();
         // Only this walker moves; neither gunfire nor a tracked patrol may
         // fell trees on its behalf.
@@ -8887,7 +9060,7 @@ mod tests {
             }
             cut |= !a.units[id].motion.cut.is_empty();
             if cut && replay.is_none() {
-                replay = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+                replay = Some(BlastRange::restore(c, &a.snapshot()).unwrap());
             }
             if a.units[id].motion.destination.is_none() && a.matter.felling_pending() == 0 {
                 break;
@@ -8905,7 +9078,7 @@ mod tests {
     fn a_waiting_section_does_not_freeze_damage_elsewhere_on_the_body() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.control();
         a.patrols_running = false;
         let u = &mut a.units[0];
@@ -8941,7 +9114,7 @@ mod tests {
         a.units[0].refresh_damage(0);
         assert_eq!(a.units[0].body.solid_count(), after_cut - 1);
         assert!(a.units[0].status.alive && a.units[0].section.is_some());
-        let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let restored = BlastRange::restore(c, &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), restored.state_hash());
         assert_eq!(restored.matter.tuning.max_flying, 0);
         a.matter.tuning.max_flying = a.debris_defaults.max_flying;
@@ -8982,7 +9155,7 @@ mod tests {
     fn cells_cut_loose_behind_a_running_section_still_leave() {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.control();
         a.patrols_running = false;
         let u = &mut a.units[0];
@@ -9024,7 +9197,7 @@ mod tests {
     fn damage_arrives_with_the_wave_while_sections_are_still_leaving() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.control();
         let mut b: Option<BlastRange> = None;
         // The opening round lands on the default target; `hit` is the impact
@@ -9080,7 +9253,7 @@ mod tests {
             }
             previous_examined = examined;
             if b.is_none() && hit.is_some_and(|t| tick == t + 2) {
-                b = Some(BlastRange::restore(c.clone(), &a.snapshot()).unwrap());
+                b = Some(BlastRange::restore(c, &a.snapshot()).unwrap());
             }
             assert!(a.matter.economy.ledger.balanced());
         }
@@ -9123,7 +9296,7 @@ mod tests {
             RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         layout.target = [359, 28, 312];
         layout.airburst_on_target = false;
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         for _ in 0..300 {
             a.step();
             if a.units[0].detached > 0 {
@@ -9284,7 +9457,7 @@ mod tests {
         assert!(r.matter.economy.ledger.sunk_total() > 0 && r.matter.economy.ledger.balanced());
         assert_eq!(
             r.state_hash(),
-            BlastRange::restore(r.config.clone(), &r.snapshot())
+            BlastRange::restore(r.config, &r.snapshot())
                 .unwrap()
                 .state_hash()
         );
@@ -9368,7 +9541,7 @@ mod tests {
             highest[0] > 20 && highest[1] > 19 && tilted,
             "ramps {highest:?}"
         );
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..100 {
             a.step();
             b.step();
@@ -9408,7 +9581,7 @@ mod tests {
         layout.units.clear();
         layout.course = None;
         layout.target = [450, 24, 380];
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         assert!(a.muzzle()[2] > Fx::from_int(MUZZLE[2]));
         assert!(a.muzzle()[0] < Fx::from_int(MUZZLE[0]));
         a.step();
@@ -9430,7 +9603,7 @@ mod tests {
     fn steel_receives_work_and_repeated_rounds_erode_its_front_without_immunity() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut r = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
         for _ in 0..250 {
             r.step();
         }
@@ -9452,7 +9625,7 @@ mod tests {
             assert!(r.refire());
             assert!(!r.refire(), "a charging shot was overwritten");
             let bytes = r.snapshot();
-            let mut resumed = BlastRange::restore(c.clone(), &bytes).unwrap();
+            let mut resumed = BlastRange::restore(c, &bytes).unwrap();
             for _ in 0..160 {
                 r.step();
                 resumed.step();
@@ -9474,7 +9647,7 @@ mod tests {
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         c.energy *= 4;
-        let mut r = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
         for _ in 0..300 {
             r.step();
         }
@@ -9506,13 +9679,13 @@ mod tests {
     fn weapon_switch_restores_the_original_generator_and_roster() {
         let energy =
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-        for (initial, current) in [(config(), energy.clone()), (energy, config())] {
+        for (initial, current) in [(config(), energy), (energy, config())] {
             let mut a = BlastRange::new(initial);
             for _ in 0..200 {
                 a.step();
             }
             a.config = current;
-            let b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+            let b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
             assert_eq!(a.state_hash(), b.state_hash());
             assert_eq!(a.units.len(), b.units.len());
             for x in [234, 258, 340, 394, 418] {
@@ -9528,7 +9701,7 @@ mod tests {
         layout.target = [359, 28, 312];
         layout.airburst_on_target = false;
         let c = config();
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.matter.tuning.max_flying = 1;
         for _ in 0..400 {
             a.step();
@@ -9614,7 +9787,7 @@ mod tests {
         assert!(!a.gun.motion.searching());
         assert!(a.gun.motion.blocked);
         assert_eq!(a.gun.motion.destination, Some(goal));
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         let blocked_at = b.gun.motion.pos;
         for tick in contact_tick + 1..contact_tick + 301 {
             b.gun.motion.step(
@@ -10115,7 +10288,7 @@ mod tests {
         }
         assert!(!r.surface_work.is_empty(), "no dents to fall between cells");
         assert!(!r.units.is_empty(), "the cover range brings machines");
-        let c = r.config.clone();
+        let c = r.config;
         let walk = |at: [i32; 3]| {
             let mut e = Explosion::begin(at, &c, &r.units);
             // Preserve the exact point sampler for pre-47 saved bursts.
@@ -10466,7 +10639,7 @@ mod tests {
         let mut c =
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         c.energy = 2700;
-        let mut a = BlastRange::new(c.clone());
+        let mut a = BlastRange::new(c);
         for _ in 0..=c.fire_tick {
             a.step();
         }
@@ -10503,11 +10676,11 @@ mod tests {
     #[test]
     fn witness_damage_resumes_mid_wave_and_is_budget_independent() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
-        let mut a = BlastRange::new(c.clone());
+        let mut a = BlastRange::new(c);
         while a.units.first().unwrap().removed.is_empty() {
             a.step();
         }
-        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..90 {
             a.step();
             b.step();
@@ -10549,10 +10722,10 @@ mod tests {
             ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         c.energy = 2700;
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         let mut open = layout;
         open.blocks.clear();
-        let mut b = BlastRange::with_layout(c.clone(), open).unwrap();
+        let mut b = BlastRange::with_layout(c, open).unwrap();
         for _ in 0..300 {
             a.step();
             b.step();
@@ -10583,11 +10756,11 @@ mod tests {
     fn cover_layout_and_every_body_resume_during_damage() {
         let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+        let mut a = BlastRange::with_layout(c, layout.clone()).unwrap();
         while a.units[0].removed.is_empty() {
             a.step();
         }
-        let mut b = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         for _ in 0..50 {
             a.step();
             b.step();
@@ -10613,10 +10786,10 @@ mod tests {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         layout.units[0].at = [400, FLOOR, 336];
-        assert!(BlastRange::with_layout(c.clone(), layout.clone()).is_err());
+        assert!(BlastRange::with_layout(c, layout.clone()).is_err());
         layout.units[0].at = [359, FLOOR, 312];
         layout.units[0].kind = RangeUnitKind::Strider;
-        let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        let mut a = BlastRange::with_layout(c, layout).unwrap();
         for _ in 0..200 {
             a.step();
         }

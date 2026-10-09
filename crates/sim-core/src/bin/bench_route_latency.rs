@@ -79,7 +79,7 @@ fn main() {
                 let m = Motion::new([from[0], 16, from[1]], kind, &body);
                 for offset in offsets {
                     let to = [from[0] + offset[0], from[1] + offset[1]];
-                    if to.iter().any(|&v| v < 16 || v >= 9984) {
+                    if to.iter().any(|&v| !(16..9984).contains(&v)) {
                         continue;
                     }
                     let search = nav::vehicle::Search {

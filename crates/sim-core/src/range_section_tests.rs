@@ -184,7 +184,7 @@ fn section_room_matches_recount_for_roots_limbs_claims_and_both_pool_caps() {
     ] {
         let mut fast = damaged_roots_and_legs();
         let mut slow = damaged_roots_and_legs();
-        let stock = fast.matter.tuning.clone();
+        let stock = fast.matter.tuning;
         for r in [&mut fast, &mut slow] {
             r.matter.tuning.max_flying = flying;
             r.matter.tuning.max_fragments = working;
@@ -192,8 +192,8 @@ fn section_room_matches_recount_for_roots_limbs_claims_and_both_pool_caps() {
         }
         for phase in 0..48 {
             if phase == 8 {
-                fast.matter.tuning = stock.clone();
-                slow.matter.tuning = stock.clone();
+                fast.matter.tuning = stock;
+                slow.matter.tuning = stock;
             }
             let before = fast.matter.admission.room_scans;
             fast.matter.step_unit_sections(&mut fast.units);
@@ -233,7 +233,7 @@ fn section_room_matches_recount_for_roots_limbs_claims_and_both_pool_caps() {
                 > 4
         );
         assert!(fast.matter.admission.room_scans < slow.matter.admission.room_scans);
-        let copy = BlastRange::restore(fast.config.clone(), &fast.snapshot()).unwrap();
+        let copy = BlastRange::restore(fast.config, &fast.snapshot()).unwrap();
         assert_eq!(fast.state_hash(), copy.state_hash());
     }
 }

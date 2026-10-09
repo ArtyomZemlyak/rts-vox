@@ -948,7 +948,7 @@ mod tests {
         a.exchange_heat();
         assert!(a.heat_exchange.world_cursor.is_some());
         assert!(a.heat_exchange.body_cursor.is_some());
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..35 {
             a.step();
             b.step();
@@ -961,7 +961,7 @@ mod tests {
         a.save_after(&mut tail, 32);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&32u32.to_le_bytes());
-        let b = BlastRange::restore(a.config.clone(), &data).unwrap();
+        let b = BlastRange::restore(a.config, &data).unwrap();
         assert_eq!(
             b.thermals.cells().collect::<Vec<_>>(),
             a.thermals.cells().collect::<Vec<_>>()

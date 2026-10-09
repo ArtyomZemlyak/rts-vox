@@ -150,7 +150,8 @@ fn invalid_or_over_budget_request_preserves_previous_publication() {
             ..request()
         },
         Request {
-            x: 96..64,
+            // Deliberately reversed: the request must be refused.
+            x: std::ops::Range { start: 96, end: 64 },
             ..request()
         },
         Request {
@@ -224,7 +225,7 @@ fn changed_rows_filter_deduplicate_and_reuse_without_changing_source_order() {
     );
     assert_eq!(changes, before);
     assert_eq!(
-        changes.update(&sim, 2, 96..64, 80..88, 8),
+        changes.update(&sim, 2, std::ops::Range { start: 96, end: 64 }, 80..88, 8),
         Err(Error::InvalidRequest)
     );
     assert_eq!(changes, before);

@@ -207,14 +207,88 @@ fn sources(dir: &Path, skip_bin: bool) -> Vec<(PathBuf, String)> {
     }
     let mut files = Vec::new();
     walk(&dir.join("src"), &mut files, skip_bin);
+    let test_only = test_only_files(&files);
     files
         .into_iter()
+        .filter(|f| !test_only.contains(f))
         .map(|f| {
             let text = std::fs::read_to_string(&f).unwrap_or_default();
             let prod = without_test_code(&text);
             (f, prod)
         })
         .collect()
+}
+
+/// Файлы, которые компилируются **только** под `#[cfg(test)]`.
+///
+/// Тестовые модули проекта лежат отдельными файлами и подключаются из
+/// родителя: `#[cfg(test)] #[path = "x_tests.rs"] mod x_tests;` или
+/// `#[cfg(test)] mod task_trace;`. Атрибут стоит в родителе, а не в самом
+/// файле, поэтому `without_test_code` их не видит: тестовые таймеры,
+/// `f64` в сообщениях и записи в состояние из тестов рендера считались
+/// боевым кодом (анализ 239, P-74). Здесь их находят по объявлению, без
+/// списка имён: файл, не объявленный тестовым, остаётся под линтом,
+/// как бы он ни назывался. Модули, объявленные внутри тестового файла,
+/// тоже тестовые.
+fn test_only_files(files: &[PathBuf]) -> std::collections::BTreeSet<PathBuf> {
+    use std::collections::BTreeSet;
+    let known: BTreeSet<PathBuf> = files.iter().cloned().collect();
+    // (файл, объявленные в нём модули: путь, только ли под cfg(test))
+    let declared = |f: &Path| -> Vec<(PathBuf, bool)> {
+        let text = std::fs::read_to_string(f).unwrap_or_default();
+        let dir = f.parent().unwrap_or(Path::new("")).to_path_buf();
+        let stem = f.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let owns_dir = matches!(stem, "lib" | "main" | "mod");
+        let mut out = Vec::new();
+        let (mut cfg_test, mut path_attr): (bool, Option<String>) = (false, None);
+        for line in text.lines() {
+            let t = line.trim();
+            if t == "#[cfg(test)]" {
+                cfg_test = true;
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("#[path = \"") {
+                path_attr = rest.split('"').next().map(str::to_string);
+                continue;
+            }
+            if t.starts_with("#[") {
+                continue;
+            }
+            let decl = t
+                .strip_prefix("pub mod ")
+                .or_else(|| t.strip_prefix("pub(crate) mod "))
+                .or_else(|| t.strip_prefix("pub(super) mod "))
+                .or_else(|| t.strip_prefix("mod "));
+            if let Some(name) = decl.and_then(|d| d.strip_suffix(';')) {
+                let target = match path_attr.take() {
+                    Some(p) => dir.join(p),
+                    None if owns_dir => dir.join(format!("{name}.rs")),
+                    None => dir.join(stem).join(format!("{name}.rs")),
+                };
+                out.push((target, cfg_test));
+            }
+            cfg_test = false;
+            path_attr = None;
+        }
+        out
+    };
+    let mut test_only = BTreeSet::new();
+    let mut stack = Vec::new();
+    for f in files {
+        for (target, cfg) in declared(f) {
+            if cfg && known.contains(&target) && test_only.insert(target.clone()) {
+                stack.push(target);
+            }
+        }
+    }
+    while let Some(f) = stack.pop() {
+        for (target, _) in declared(&f) {
+            if known.contains(&target) && test_only.insert(target.clone()) {
+                stack.push(target);
+            }
+        }
+    }
+    test_only
 }
 
 /// Исходник без всего, что помечено `#[cfg(test)]`.
@@ -251,7 +325,11 @@ fn without_test_code(text: &str) -> String {
             opened = true;
         }
         out.push('\n');
-        if opened && depth <= 0 {
+        // `#[cfg(test)] mod x;` has no body: the item ends at its `;`.
+        // Waiting for a brace here hid the next production item (P-74).
+        let bodiless =
+            !opened && !line.trim_start().starts_with("#[") && line.trim_end().ends_with(';');
+        if (opened && depth <= 0) || bodiless {
             skipping = false;
         }
     }
@@ -362,7 +440,7 @@ fn assigned_path(line: &str) -> Option<&str> {
                 // Не сравнение и не стрелка.
                 let prev = if i > 0 { b[i - 1] } else { b' ' };
                 let next = if i + 1 < b.len() { b[i + 1] } else { b' ' };
-                if next == b'=' || matches!(prev, b'=' | b'!' | b'<' | b'>') {
+                if matches!(next, b'=' | b'>') || matches!(prev, b'=' | b'!' | b'<' | b'>') {
                     i += 1;
                 } else {
                     return Some(&line[..i]);
@@ -519,25 +597,9 @@ fn the_simulation_has_no_hash_containers() {
     for c in sim_closure(&ms) {
         for (f, text) in production_sources(&root().join("crates").join(&c)) {
             for (n, line) in text.lines().enumerate() {
-                // SettledQueries only inserts and tests membership. Contact
-                // order comes from the fragment slice, never from this map.
-                // Keep the exception tied to its exact declaration so a
-                // different hash container still fails this architecture test.
-                let membership_only = f.ends_with(Path::new("crates/sim-core/src/burst.rs"))
-                    && line.trim()
-                        == "struct SettledQueries(std::collections::HashMap<[i32; 3], u64>);";
-                if membership_only {
-                    let methods = text
-                        .split_once("impl SettledQueries {")
-                        .and_then(|(_, rest)| rest.split_once("\nfn settled_cells"))
-                        .expect("SettledQueries methods");
-                    assert_eq!(
-                        methods.0.matches("self.0").count(),
-                        2,
-                        "SettledQueries must remain membership-only"
-                    );
-                    assert!(methods.0.contains("self.0.entry(") && methods.0.contains(".get("));
-                }
+                // The one sanctioned map: `fx::lookup::Lookup` exposes queries
+                // and sorted views only, so no caller can iterate hash order.
+                let membership_only = f.ends_with(Path::new("crates/fx/src/lookup.rs"));
                 if is_code(line)
                     && (line.contains("HashMap") || line.contains("HashSet"))
                     && !membership_only
@@ -620,5 +682,62 @@ fn every_crate_is_one_the_architecture_declares() {
             declared.contains(&name.as_str()),
             "крейт {name} не объявлен в docs/02-architecture.md"
         );
+    }
+}
+
+/// **Тестовыми считаются только файлы, объявленные под `#[cfg(test)]`.**
+///
+/// Сторож на исключение P-74: боевой файл с любым именем остаётся
+/// под линтом, тестовый модуль снаружи него — нет, а модуль без тела
+/// после `#[cfg(test)]` не прячет следующий за ним боевой код.
+#[test]
+fn the_lint_skips_only_cfg_test_declared_files() {
+    let sim = root().join("crates/sim-core/src");
+    let files: Vec<PathBuf> = sources(&root().join("crates/sim-core"), false)
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
+    assert!(
+        files.iter().any(|f| f.ends_with("blast.rs")),
+        "боевой файл исчез из линта"
+    );
+    assert!(
+        !files.iter().any(|f| f.ends_with("range_battle_tests.rs")),
+        "тестовый модуль остался боевым кодом"
+    );
+    let all: Vec<PathBuf> = ["blast.rs", "range_battle_tests.rs", "range_battle.rs"]
+        .iter()
+        .map(|n| sim.join(n))
+        .collect();
+    let only = test_only_files(&all);
+    assert!(only.contains(&sim.join("range_battle_tests.rs")));
+    assert!(!only.contains(&sim.join("blast.rs")) && !only.contains(&sim.join("range_battle.rs")));
+    let kept = without_test_code("#[cfg(test)]\nmod t;\nfn prod() { let _x: f64 = 0.0; }\n");
+    assert!(
+        kept.contains("fn prod()"),
+        "модуль без тела спрятал боевой код"
+    );
+}
+
+/// Стрелка ветки `match` — не присваивание.
+#[test]
+fn assigned_path_ignores_match_arms() {
+    assert!(assigned_path("Some(x) if scene.sim.units[i].alive =>").is_none());
+    assert!(assigned_path("scene.sim.units[i].x = 1;").is_some());
+}
+
+/// Единственный разрешённый хеш-словарь не отдаёт обход в хеш-порядке.
+#[test]
+fn the_lookup_map_exposes_no_hash_order() {
+    let text = std::fs::read_to_string(root().join("crates/fx/src/lookup.rs")).expect("lookup.rs");
+    for banned in [
+        "pub fn iter",
+        "pub fn keys",
+        "pub fn values",
+        "pub fn drain(",
+        "impl<K, V, S> IntoIterator",
+        "Deref",
+    ] {
+        assert!(!text.contains(banned), "Lookup отдаёт обход: {banned}");
     }
 }

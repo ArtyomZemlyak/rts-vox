@@ -2,6 +2,12 @@
 use crate::gait::{self, Pose};
 use bevy::prelude::{Mat3, Quat, Resource, Vec3};
 
+/// Most real time a window may owe the simulation, in ticks: one second at
+/// 30 Hz. Debt beyond it is dropped, so a long overload slows the game
+/// instead of being replayed later as a fast-forward burst (analysis 240, B5).
+/// Presentation only: the ticks themselves are unchanged.
+pub const MAX_DEBT_TICKS: u32 = 30;
+
 #[derive(Default)]
 pub struct TickClock {
     pub debt: f64,
@@ -21,6 +27,7 @@ impl TickClock {
         self.debt += elapsed.max(0.0) * speed as f64;
         let count = (self.debt / step).floor().min(cap as f64) as u32;
         self.debt -= count as f64 * step;
+        self.debt = self.debt.min(f64::from(MAX_DEBT_TICKS) * step);
         count
     }
     pub fn fraction(&self, step: f64) -> f32 {
@@ -171,5 +178,25 @@ mod tests {
             }
             assert!((ticks as f64 / 30.0 + c.debt - 10.0).abs() < 1e-8);
         }
+    }
+}
+
+#[cfg(test)]
+mod debt_tests {
+    use super::*;
+
+    /// A long stall owes at most a second; the clock then runs at 1x again.
+    #[test]
+    fn a_long_stall_does_not_fast_forward_later() {
+        let step = 1.0 / 30.0;
+        let mut clock = TickClock::default();
+        assert_eq!(clock.advance(0.0, 1, step, 8), 0);
+        let mut total = clock.advance(10.0, 1, step, 8);
+        assert_eq!(total, 8);
+        for _ in 0..100 {
+            total += clock.advance(0.0, 1, step, 8);
+        }
+        assert_eq!(total, 8 + MAX_DEBT_TICKS, "the debt beyond one second was replayed");
+        assert_eq!(clock.advance(step, 1, step, 8), 1);
     }
 }

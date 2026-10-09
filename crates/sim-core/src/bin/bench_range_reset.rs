@@ -23,7 +23,7 @@ fn main() {
         mark.elapsed().as_secs_f64() * 1000.0
     );
     let mark = Instant::now();
-    let mut sim = BlastRange::with_layout(config.clone(), layout.clone()).expect("range");
+    let mut sim = BlastRange::with_layout(config, layout.clone()).expect("range");
     println!(
         "RESET initial-world ms={:.3}",
         mark.elapsed().as_secs_f64() * 1000.0
@@ -35,7 +35,7 @@ fn main() {
         mark.elapsed().as_secs_f64() * 1000.0
     );
     sim = sim
-        .rebuilt_with_layout(config.clone(), layout.clone(), &validator)
+        .rebuilt_with_layout(config, layout.clone(), &validator)
         .expect("warm reset");
 
     for run in 0..3 {
@@ -56,7 +56,7 @@ fn main() {
         let mark = Instant::now();
         let mut phase = mark;
         sim = sim
-            .rebuilt_with_layout_observed(config.clone(), layout.clone(), &validator, |name| {
+            .rebuilt_with_layout_observed(config, layout.clone(), &validator, |name| {
                 println!(
                     "RESET phase run={run} name={name} ms={:.3}",
                     phase.elapsed().as_secs_f64() * 1000.0

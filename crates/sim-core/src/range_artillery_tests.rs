@@ -16,7 +16,7 @@ fn artillery_impacts_remove_soil_in_manual_and_ai_combat() {
             let mut r = arena(kind);
             if ai {
                 let l = r.layout.take().unwrap();
-                r = BlastRange::with_layout(r.config.clone(), l).unwrap();
+                r = BlastRange::with_layout(r.config, l).unwrap();
                 assert!(r.set_ai_vs_ai(true));
                 r.start_battle().unwrap();
                 r.battle.ai.next_tick = r.tick;
@@ -76,8 +76,7 @@ fn artillery_impacts_remove_soil_in_manual_and_ai_combat() {
                     })
                 {
                     let bytes = r.snapshot();
-                    let copy =
-                        BlastRange::restore(r.config.clone(), &bytes).expect("mid-crater snapshot");
+                    let copy = BlastRange::restore(r.config, &bytes).expect("mid-crater snapshot");
                     assert_eq!(bytes, copy.snapshot());
                     replay = Some(copy);
                 }
@@ -445,7 +444,7 @@ fn artillery_elevates_before_launch_and_replays_during_the_slew_and_flight() {
         step(&mut r);
         assert_ne!(r.units[0].turret_pitch, 0);
         assert_eq!(r.battle.actors[0].fired, 0, "fired before elevation");
-        let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         let mut fired = false;
         for _ in 0..180 {
             let before = r.battle.actors[0].fired;
@@ -473,7 +472,7 @@ fn artillery_elevates_before_launch_and_replays_during_the_slew_and_flight() {
                 assert_eq!(p.previous, muzzle);
                 fired = true;
                 r.battle_order(0, Order::Hold, None);
-                replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+                replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
                 for _ in 0..12 {
                     step(&mut r);
                     step(&mut replay);
@@ -504,7 +503,7 @@ fn player_artillery_uses_the_same_barrel_solution_and_preserves_it_on_restore() 
             v[1] = v[1].add(Fx::from_ratio(r.config.gravity, crate::TICKS_PER_SECOND));
             let axis = r.gun.root_frame(usize::from(r.gun.body.turret_y)).x;
             assert!(angle_between(axis, V3::new(v[0], v[1], v[2])) <= 12);
-            let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+            let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
             for _ in 0..20 {
                 step(&mut r);
                 step(&mut replay);
@@ -531,7 +530,7 @@ fn legacy_artillery_without_elevation_restores_and_invalid_pitch_is_rejected() {
         let mut old = r.snapshot();
         old.truncate(old.len() - tail.v.len());
         old[..4].copy_from_slice(&version.to_le_bytes());
-        let restored = BlastRange::restore(r.config.clone(), &old).unwrap();
+        let restored = BlastRange::restore(r.config, &old).unwrap();
         assert_eq!(restored.units[0].turret_pitch, 0);
         assert_eq!(
             restored.battle.actors[0].elevation,
@@ -539,7 +538,7 @@ fn legacy_artillery_without_elevation_restores_and_invalid_pitch_is_rejected() {
         );
         let mut invalid = r;
         invalid.units[0].turret_pitch = angle::QUARTER + 1;
-        assert!(BlastRange::restore(invalid.config.clone(), &invalid.snapshot()).is_none());
+        assert!(BlastRange::restore(invalid.config, &invalid.snapshot()).is_none());
     }
 }
 
@@ -556,7 +555,7 @@ fn artillery_elevation_brakes_at_vertical_and_keeps_a_valid_saved_pose() {
         step(&mut r);
         assert_eq!(r.units[0].turret_pitch, sign * angle::QUARTER);
         assert_eq!(r.battle.actors[0].elevation.rate, 0);
-        assert!(BlastRange::restore(r.config.clone(), &r.snapshot()).is_some());
+        assert!(BlastRange::restore(r.config, &r.snapshot()).is_some());
     }
 }
 
@@ -611,7 +610,7 @@ fn canister_leads_a_crossing_tank_for_its_actual_lofted_flight() {
             r.battle.rounds.truncate(1);
             r.battle.actors[0].order = Order::Hold;
             r.battle.ai.next_tick = r.tick + r.battle.ai.tuning.decision_ticks;
-            let mut replay = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+            let mut replay = BlastRange::restore(r.config, &r.snapshot()).unwrap();
             assert_eq!(r.state_hash(), replay.state_hash());
             let mut hit = false;
             for _ in 0..600 {

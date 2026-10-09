@@ -180,7 +180,7 @@ impl BlastRange {
     }
     /// The single gun's round against what it met: [`Self::ricochet`].
     pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
-        let config = self.config.clone();
+        let config = self.config;
         let mut velocity = self.velocity;
         let turned = self.ricochet(at, from, &mut velocity, &config);
         self.velocity = velocity;
@@ -199,7 +199,7 @@ impl BlastRange {
         velocity: &mut [Fx; 3],
         config: &ExplosionConfig,
     ) -> bool {
-        let Some(tuning) = config.ricochet.clone() else {
+        let Some(tuning) = config.ricochet else {
             return false;
         };
         if from == at {
@@ -400,7 +400,7 @@ impl BlastRange {
     /// wave is created and blocked shots cannot damage sheltered units.
     #[cfg(test)]
     pub(super) fn kinetic_impact(&mut self, at: [i32; 3]) {
-        let config = self.config.clone();
+        let config = self.config;
         self.kinetic_hit(at, self.velocity, &config);
     }
 
@@ -920,14 +920,13 @@ mod tests {
                     at: [190, 40, 336],
                     radius: 30,
                 });
-                BlastRange::with_layout(seed.config.clone(), layout).unwrap()
+                BlastRange::with_layout(seed.config, layout).unwrap()
             } else {
-                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap()
+                BlastRange::restore(seed.config, &seed.snapshot()).unwrap()
             };
-            let mut reference =
-                BlastRange::restore(actual.config.clone(), &actual.snapshot()).unwrap();
+            let mut reference = BlastRange::restore(actual.config, &actual.snapshot()).unwrap();
             let tuning = actual.streams.tuning.laser.clone();
-            let config = actual.config.clone();
+            let config = actual.config;
             let mut events = Vec::new();
             let observed = actual.laser_ray(
                 from.map(Fx::from_int),
@@ -972,8 +971,8 @@ mod tests {
                 .build()
                 .unwrap();
             let (mut reference, mut actual) = (
-                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap(),
-                BlastRange::restore(seed.config.clone(), &seed.snapshot()).unwrap(),
+                BlastRange::restore(seed.config, &seed.snapshot()).unwrap(),
+                BlastRange::restore(seed.config, &seed.snapshot()).unwrap(),
             );
             let from = [100, 100, 336].map(Fx::from_int);
             let tuning = seed.streams.tuning.laser.clone();
@@ -1103,7 +1102,7 @@ mod tests {
             r.heat.cell([200, 100, 338]).heat,
             2 * (tuning.heat * 12 / 16)
         );
-        let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+        let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
         assert_eq!(r.state_hash(), restored.state_hash());
         for _ in 0..3 {
             r.step();
@@ -1356,7 +1355,7 @@ mod tests {
             assert_eq!(r.streams.left, 0);
             assert_eq!(r.attack, None);
             assert_eq!(r.fire_tick, u32::MAX);
-            let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+            let mut restored = BlastRange::restore(r.config, &r.snapshot()).unwrap();
             for _ in 0..10 {
                 r.step();
                 restored.step();
@@ -1433,7 +1432,7 @@ mod tests {
             at: [285, 16, 336],
             radius: 40,
         }];
-        let mut a = BlastRange::with_layout(c.clone(), l).unwrap();
+        let mut a = BlastRange::with_layout(c, l).unwrap();
         a.control();
         a.aim = Some([285, 39, 336]);
         assert!(a.refire());
@@ -1481,7 +1480,7 @@ mod tests {
                 last = r.impact_tick;
                 hits += 1;
                 if hits == 1 {
-                    restored = Some(BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap());
+                    restored = Some(BlastRange::restore(r.config, &r.snapshot()).unwrap());
                 }
             }
             if !r.units[0].status.alive {
@@ -1511,9 +1510,9 @@ mod tests {
             let mut hit = false;
             for _ in 0..240 {
                 r.step();
-                if r.impact.is_some() && r.impact_tick == r.tick - 1 {
+                if let Some(at) = r.impact.filter(|_| r.impact_tick == r.tick - 1) {
                     hit = true;
-                    contacts.push(r.impact.unwrap());
+                    contacts.push(at);
                     break;
                 }
             }
@@ -1535,7 +1534,7 @@ mod tests {
     #[test]
     fn stock_kinetic_spall_keeps_cover_and_a_finite_work_budget() {
         let mut r = stock_kinetic_range();
-        let config = r.config.clone();
+        let config = r.config;
         let (at, _, _) = hull_side(&r);
         r.kinetic_hit(
             at,
@@ -1573,7 +1572,7 @@ mod tests {
             max: [242, 60, 352],
             material: 3,
         }]);
-        covered.reconfigure(config.clone());
+        covered.reconfigure(config);
         covered.kinetic_hit(
             [230, 23, 336],
             [Fx::from_int(config.shell_speed), Fx::ZERO, Fx::ZERO],
@@ -1640,7 +1639,7 @@ mod tests {
             "the bounced round got full work"
         );
 
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..80 {
             a.step();
             b.step();
@@ -1769,7 +1768,7 @@ mod tests {
             "a glancing round bored the hull"
         );
         assert!(!a.units[0].dents.is_empty());
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..60 {
             a.step();
             b.step();
@@ -1861,7 +1860,7 @@ mod tests {
             radius: 40,
         }];
         let c = ExplosionConfig::from_ron(include_str!("../../../data/kinetic-shell.ron")).unwrap();
-        let mut a = BlastRange::with_layout(c.clone(), l).unwrap();
+        let mut a = BlastRange::with_layout(c, l).unwrap();
         a.control();
         assert!(a.order_ground_fire([392, 24, 336]));
         for _ in 0..20 {
@@ -2084,7 +2083,7 @@ mod tests {
         for _ in 0..9 {
             a.step();
         }
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).expect("stream save");
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).expect("stream save");
         for _ in 0..50 {
             a.step();
             b.step();
@@ -2107,8 +2106,8 @@ mod tests {
             a.step();
         }
         a.order_stop();
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
-        let mut faster = b.config.clone();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
+        let mut faster = b.config;
         faster.shell_speed = 10000;
         b.reconfigure(faster);
         // The live setting is now authoritative and included in the hash.

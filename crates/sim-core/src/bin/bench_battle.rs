@@ -363,7 +363,7 @@ fn main() {
         .map(|w| &w[1])
     {
         let bytes = std::fs::read(path).expect("read snapshot");
-        let restored = restore_snapshot(sim.config.clone(), &bytes);
+        let restored = restore_snapshot(sim.config, &bytes);
         println!(
             "restored tick={} hash={:016x}",
             restored.tick,
@@ -379,6 +379,11 @@ fn main() {
             .enumerate()
             .filter(|(i, u)| sim.allied(*i) && !u.kind.emplacement())
             .map(|(i, _)| i)
+            .take(
+                args.windows(2)
+                    .find(|w| w[0] == "--group-size")
+                    .map_or(usize::MAX, |w| w[1].parse().expect("group size")),
+            )
             .collect();
         let columns = (1..=ids.len()).find(|n| n * n >= ids.len()).unwrap() as i32;
         let rows = (ids.len() as i32 + columns - 1) / columns;
@@ -408,9 +413,20 @@ fn main() {
             now.elapsed().as_micros(),
             ids.len()
         );
+        // Order-to-motion latency (WBPERF-016, analysis 240 B1): the first
+        // tick after the order on which each hull's position changed.
+        let latency_ticks = args
+            .windows(2)
+            .find(|w| w[0] == "--latency-ticks")
+            .map_or(300, |w| w[1].parse::<u32>().expect("latency ticks"));
+        let start: Vec<_> = ids.iter().map(|&id| sim.units[id].motion.pos).collect();
+        let mut first_motion: Vec<Option<u32>> = vec![None; ids.len()];
         let mut ticks = Vec::with_capacity(ids.len() + 1);
         let mut phases = std::collections::BTreeMap::<&str, Vec<u128>>::new();
-        for _ in 0..=ids.len() {
+        for elapsed in 1..=latency_ticks.max(ids.len() as u32 + 1) {
+            if elapsed as usize > ids.len() + 1 {
+                sim.step();
+            } else {
             let now = Instant::now();
             let mut last = now;
             sim.step_observed(|phase| {
@@ -422,7 +438,28 @@ fn main() {
                 last = at;
             });
             ticks.push(now.elapsed().as_micros());
+            }
+            for (k, &id) in ids.iter().enumerate() {
+                if first_motion[k].is_none() && sim.units[id].motion.pos != start[k] {
+                    first_motion[k] = Some(elapsed);
+                }
+            }
+            if elapsed as usize > ids.len() && first_motion.iter().all(Option::is_some) {
+                break;
+            }
         }
+        let mut moved: Vec<u32> = first_motion.iter().flatten().copied().collect();
+        moved.sort_unstable();
+        let pick = |q: usize| moved.get((moved.len() * q / 100).min(moved.len().saturating_sub(1)));
+        println!(
+            "order_to_motion_ticks group={} moved={} never={} p50={:?} p99={:?} max={:?}",
+            ids.len(),
+            moved.len(),
+            ids.len() - moved.len(),
+            pick(50),
+            pick(99),
+            moved.last()
+        );
         ticks.sort_unstable();
         println!(
             "group_first_ticks_us_median={} p95={} max={}",
@@ -696,7 +733,7 @@ fn main() {
                     *terrain_filled.entry(edit.mat).or_insert(0usize) += 1;
                 }
             }
-            if sim.tick % 150 == 0 {
+            if sim.tick.is_multiple_of(150) {
                 let remaining = terrain_soil_holes
                     .iter()
                     .filter(|p| sim.world.material(p[0], p[1], p[2]) == 0)
@@ -809,7 +846,7 @@ fn main() {
                 std::fs::write(path, &bytes).expect("write replay snapshot");
                 println!("snapshot_file={path}");
             }
-            let replica = restore_snapshot(sim.config.clone(), &bytes);
+            let replica = restore_snapshot(sim.config, &bytes);
             assert_eq!(sim.state_hash(), replica.state_hash());
             restored = Some(replica);
         } else if let Some(replica) = &mut restored {
@@ -829,7 +866,7 @@ fn main() {
             }
         }
         peak_rounds = peak_rounds.max(sim.battle.rounds.len());
-        if wave_trace && sim.tick % 150 == 0 {
+        if wave_trace && sim.tick.is_multiple_of(150) {
             for (slot, progress) in sim.battle.wave_progress().enumerate() {
                 println!(
                     "wave_progress tick={} slot={} {:?}",
@@ -843,7 +880,7 @@ fn main() {
                     counts[gate as usize] += 1;
                 }
             }
-            if sim.tick % 150 == 0 {
+            if sim.tick.is_multiple_of(150) {
                 for (id, counts) in fire_counts.iter_mut().enumerate() {
                     if sim.units[id].kind.canister() {
                         println!(
@@ -883,7 +920,7 @@ fn main() {
             assault_shots = fired;
             assault_weapon = sim.units[1].status.weapon;
         }
-        if world_battle && (progress || assault) && sim.tick % 3000 == 0 {
+        if world_battle && (progress || assault) && sim.tick.is_multiple_of(3000) {
             println!(
                 "progress tick={} phase={:?} alive={:?} bases={:?}",
                 sim.tick,
@@ -897,7 +934,7 @@ fn main() {
                 impact_window[impact.weapon as usize] += 1;
             }
             laser_contacts += sim.battle.lasers.iter().filter(|trace| trace.hit).count();
-            if sim.tick % 150 == 0 {
+            if sim.tick.is_multiple_of(150) {
                 let mut damage = [0u64; 2];
                 let mut shots = [0u64; 2];
                 let mut armed = [0usize; 2];
@@ -1000,7 +1037,7 @@ fn main() {
                 laser_contacts = 0;
             }
         }
-        if trace && sim.tick % 600 == 0 {
+        if trace && sim.tick.is_multiple_of(600) {
             println!(
                 "trace tick={} phase={:?} bases={:?}",
                 sim.tick,
@@ -1026,7 +1063,7 @@ fn main() {
             }
         }
         if let Some(id) = focus.filter(|&id| id < sim.units.len()) {
-            if sim.tick >= focus_from && sim.tick % focus_every == 0 {
+            if sim.tick >= focus_from && sim.tick.is_multiple_of(focus_every) {
                 let u = &sim.units[id];
                 let a = &sim.battle.actors[id];
                 println!("focus tick={} unit={} at={:?} alive={} weapon_ok={} order={:?} target={:?} ammo={:?} range={:?} fired={} damage={} motor={} traction={} dest={:?} path={}/{} searching={} blocked={} recovery={:?}",
@@ -1423,64 +1460,6 @@ fn main() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn repeated_wave_callbacks_accumulate_without_double_counting_orders() {
-        let mut profile = TickProfile::default();
-        profile.record_phase("battle_wave_step", 12);
-        profile.record_phase("battle_wave_step", 31);
-        profile.record_phase("battle_capture", 9);
-        profile.record_phase("orders_pose", 7);
-        profile.record_phase("battle_orders", 2);
-        profile.record_phase("heat_exchange", 11);
-        profile.record_phase("motion", 5);
-        profile.record_phase("motion", 8);
-        assert_eq!(profile.battle_wave_step_us, 43);
-        assert_eq!(profile.battle_wave_steps, 2);
-        assert_eq!(profile.battle_capture_us, 9);
-        assert_eq!(profile.battle_orders_us, 9);
-        assert_eq!(profile.motion_us, 13);
-        assert_eq!(profile.observed_phases_us, 85);
-    }
-
-    #[test]
-    fn queue_age_resets_on_progress_or_empty_queue() {
-        let mut age = QueueAge::default();
-        assert_eq!(age.observe(10, Some((3, 4))), 1);
-        assert_eq!(age.observe(17, Some((3, 4))), 8);
-        assert_eq!(age.observe(18, Some((3, 5))), 1);
-        assert_eq!(age.observe(19, None), 0);
-        assert_eq!(age.observe(21, Some((3, 5))), 1);
-    }
-
-    #[test]
-    fn pursuit_subphases_remain_in_the_total_order_time() {
-        let mut profile = TickProfile::default();
-        for name in [
-            "orders_retarget_coarse",
-            "orders_retarget_target",
-            "orders_retarget_prepare",
-            "orders_retarget_direct",
-            "orders_retarget_fine",
-            "orders_approach",
-            "orders_firing_point",
-            "orders_flank",
-            "orders_retarget_setup",
-            "orders_retarget",
-            "battle_orders",
-        ] {
-            profile.record_phase(name, 17);
-        }
-        assert_eq!(profile.battle_orders_us, 11 * 17);
-        profile.record_phase("orders_laser_halo", 23);
-        assert_eq!(profile.battle_orders_us, 11 * 17 + 23);
-        assert_eq!(profile.battle_laser_us, 23);
-        assert_eq!(profile.battle_halo_us, 23);
-    }
-}
-
 fn restore_snapshot(config: modding::explosion::ExplosionConfig, bytes: &[u8]) -> BlastRange {
     let mut last = ("header", 0, None);
     BlastRange::restore_observed(config, bytes, |section, offset, unit| {
@@ -1606,4 +1585,62 @@ fn collapse_stress(mode: &str) {
         samples[samples.len() * 95 / 100],
         samples.last().unwrap()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn repeated_wave_callbacks_accumulate_without_double_counting_orders() {
+        let mut profile = TickProfile::default();
+        profile.record_phase("battle_wave_step", 12);
+        profile.record_phase("battle_wave_step", 31);
+        profile.record_phase("battle_capture", 9);
+        profile.record_phase("orders_pose", 7);
+        profile.record_phase("battle_orders", 2);
+        profile.record_phase("heat_exchange", 11);
+        profile.record_phase("motion", 5);
+        profile.record_phase("motion", 8);
+        assert_eq!(profile.battle_wave_step_us, 43);
+        assert_eq!(profile.battle_wave_steps, 2);
+        assert_eq!(profile.battle_capture_us, 9);
+        assert_eq!(profile.battle_orders_us, 9);
+        assert_eq!(profile.motion_us, 13);
+        assert_eq!(profile.observed_phases_us, 85);
+    }
+
+    #[test]
+    fn queue_age_resets_on_progress_or_empty_queue() {
+        let mut age = QueueAge::default();
+        assert_eq!(age.observe(10, Some((3, 4))), 1);
+        assert_eq!(age.observe(17, Some((3, 4))), 8);
+        assert_eq!(age.observe(18, Some((3, 5))), 1);
+        assert_eq!(age.observe(19, None), 0);
+        assert_eq!(age.observe(21, Some((3, 5))), 1);
+    }
+
+    #[test]
+    fn pursuit_subphases_remain_in_the_total_order_time() {
+        let mut profile = TickProfile::default();
+        for name in [
+            "orders_retarget_coarse",
+            "orders_retarget_target",
+            "orders_retarget_prepare",
+            "orders_retarget_direct",
+            "orders_retarget_fine",
+            "orders_approach",
+            "orders_firing_point",
+            "orders_flank",
+            "orders_retarget_setup",
+            "orders_retarget",
+            "battle_orders",
+        ] {
+            profile.record_phase(name, 17);
+        }
+        assert_eq!(profile.battle_orders_us, 11 * 17);
+        profile.record_phase("orders_laser_halo", 23);
+        assert_eq!(profile.battle_orders_us, 11 * 17 + 23);
+        assert_eq!(profile.battle_laser_us, 23);
+        assert_eq!(profile.battle_halo_us, 23);
+    }
 }

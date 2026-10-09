@@ -23,7 +23,7 @@ fn fixture(edge: i32, points: bool) -> (BlastRange, Explosion, ExplosionConfig) 
     c.cell_units = edge;
     c.unit_ablation_resistance = 1;
     c.unit_role_resistance_milli = [1000; 5];
-    let mut r = BlastRange::with_layout(c.clone(), layout).unwrap();
+    let mut r = BlastRange::with_layout(c, layout).unwrap();
     r.units[1] = RangeUnit::of_kind(RangeUnitKind::Strider, [270, 16, 336]);
     r.units[2] = RangeUnit::of_kind(RangeUnitKind::Spider, [440, 16, 336]);
     let u = &mut r.units[0];

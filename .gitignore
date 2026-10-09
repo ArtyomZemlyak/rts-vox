@@ -31,3 +31,4 @@ Desktop.ini
 
 # Python performance diagnostics
 __pycache__/
+/target-render/

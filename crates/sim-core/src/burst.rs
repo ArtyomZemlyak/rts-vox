@@ -16,8 +16,10 @@ use phys::{
     V3,
 };
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+/// Query-only hash map with the deterministic Fx hasher (`fx::lookup`).
+type FxLookup<K, V> = fx::lookup::Lookup<K, V, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
 use voxel::{
     store::{Mat, AIR},
     world::{snapshot::Snapshot, Edit},
@@ -92,6 +94,7 @@ pub(crate) fn fracture_cost_mj(strength: u32, mm: u16, t: &Blast) -> (u64, u64) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn sleeping_history_keeps_its_matter_and_does_not_block_new_claims() {
@@ -287,9 +290,8 @@ mod tests {
                     (10, 10, 1),
                     (10, 10, 64),
                 ] {
-                    let make = || {
-                        let mut b = Bursts::default();
-                        b.fragments = (0..n)
+                    let make = || Bursts {
+                        fragments: (0..n)
                             .map(|i| Fragment {
                                 id: i as u64 + 1,
                                 position: V3::ZERO,
@@ -306,8 +308,8 @@ mod tests {
                                 held: 0,
                                 resting: i % resting_every == 0,
                             })
-                            .collect();
-                        b
+                            .collect(),
+                        ..Bursts::default()
                     };
                     let (mut actual, mut reference) = (make(), make());
                     let (mut w, mut old_world) = (world(), world());
@@ -432,7 +434,7 @@ mod tests {
                         } else {
                             [(i * 17 + 3) % limit, (i * 31 + 1) % limit]
                         };
-                        (at.map(|v| v as i32), (i % 65_536) as u16)
+                        (at.map(|v| v), (i % 65_536) as u16)
                     })
                     .collect();
                 let mut expected = actual.clone();
@@ -2691,7 +2693,8 @@ mod tests {
     fn parallel_pile_grouping_matches_ordered_merging_and_ledger() {
         const GROUPS: usize = 256;
         fn reference(pieces: &mut Bursts, world: &voxel::World, economy: &mut Economy, t: &Blast) {
-            let mut piles: HashMap<([i32; 3], Mat, Option<[u8; 3]>, u16), usize> = HashMap::new();
+            type PileKey = ([i32; 3], Mat, Option<[u8; 3]>, u16);
+            let mut piles: HashMap<PileKey, usize> = HashMap::new();
             let mut merged = BTreeSet::new();
             for i in 0..pieces.fragments.len() {
                 let f = &pieces.fragments[i];
@@ -2928,7 +2931,17 @@ mod tests {
                     &mut |_| {},
                     &|_, _| {},
                 );
-                (index.boxes, index.cells.ordered(), queries.0)
+                let masks: Vec<Vec<([i32; 3], u64)>> = queries
+                    .0
+                    .iter()
+                    .map(|t| {
+                        t.sorted_entries()
+                            .into_iter()
+                            .map(|(k, v)| (*k, *v))
+                            .collect()
+                    })
+                    .collect();
+                (index.boxes, index.cells.ordered(), masks)
             })
         };
         assert_eq!(run(1), run(4));
@@ -4242,6 +4255,10 @@ impl Bursts {
     pub fn claimed(&self, p: [u32; 3]) -> bool {
         self.claims.contains_key(&p)
     }
+    /// Claimed cells in ascending order.
+    pub fn claimed_cells(&self) -> impl Iterator<Item = &[u32; 3]> + '_ {
+        self.claims.keys()
+    }
     pub fn fragment_room(&self, t: &Blast) -> u32 {
         let pool = self.fragment_pools(t);
         (t.max_flying as usize)
@@ -5007,7 +5024,7 @@ impl Bursts {
         completed("debris_merge_keys");
         let group = |entries: &Vec<(RestingPile, usize)>| {
             let _task = PhysicsTask::new(task, "physics_merge_begin", "physics_merge_end");
-            let mut piles: HashMap<RestingPile, usize> = HashMap::with_capacity(entries.len());
+            let mut piles: FxLookup<RestingPile, usize> = FxLookup::with_capacity(entries.len());
             let mut pairs = Vec::new();
             for &(key, donor) in entries {
                 if let Some(&head) = piles.get(&key) {
@@ -5975,13 +5992,13 @@ struct SettledCells {
 }
 #[derive(Default)]
 struct SettledCellStripe {
-    cells: FxHashMap<[i32; 3], Vec<u32>>,
+    cells: FxLookup<[i32; 3], Vec<u32>>,
     free_lists: Vec<Vec<u32>>,
 }
 impl SettledCells {
     fn clear(&mut self) {
         for stripe in &mut self.stripes {
-            for (_, mut list) in stripe.cells.drain() {
+            for mut list in stripe.cells.drain_values_unordered() {
                 list.clear();
                 stripe.free_lists.push(list);
             }
@@ -6005,7 +6022,8 @@ impl SettledCells {
             .flat_map(|stripe| {
                 stripe
                     .cells
-                    .iter()
+                    .sorted_entries()
+                    .into_iter()
                     .map(|(&cell, list)| (cell, list.clone()))
             })
             .collect()
@@ -6071,7 +6089,7 @@ impl SettledCells {
 /// insertion ORs a range instead of hashing every Y coordinate. No path
 /// iterates the hash table: contact order comes from the fragment slice.
 #[derive(Default)]
-struct SettledQueries([FxHashMap<[i32; 3], u64>; 8]);
+struct SettledQueries([FxLookup<[i32; 3], u64>; 8]);
 impl SettledQueries {
     fn clear(&mut self) {
         for stripe in &mut self.0 {
@@ -6079,7 +6097,7 @@ impl SettledQueries {
         }
     }
     fn is_empty(&self) -> bool {
-        self.0.iter().all(FxHashMap::is_empty)
+        self.0.iter().all(FxLookup::is_empty)
     }
     fn build(
         &mut self,
@@ -6089,7 +6107,7 @@ impl SettledQueries {
     ) {
         // X modulo eight owns the word, so workers never share a table and
         // need no unordered merge. Ranges are captured in fragment order.
-        let fill = |(stripe, table): (usize, &mut FxHashMap<[i32; 3], u64>)| {
+        let fill = |(stripe, table): (usize, &mut FxLookup<[i32; 3], u64>)| {
             let _task = PhysicsTask::new(task, "physics_queries_begin", "physics_queries_end");
             for &(lo, hi) in ranges {
                 Self::include(table, stripe as i32, lo, hi);
@@ -6101,7 +6119,7 @@ impl SettledQueries {
             self.0.iter_mut().enumerate().for_each(fill);
         }
     }
-    fn include(table: &mut FxHashMap<[i32; 3], u64>, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
+    fn include(table: &mut FxLookup<[i32; 3], u64>, stripe: i32, lo: [i32; 3], hi: [i32; 3]) {
         let x0 = lo[0] + (stripe - lo[0]).rem_euclid(8);
         if x0 > hi[0] {
             return;

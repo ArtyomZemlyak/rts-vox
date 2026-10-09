@@ -843,7 +843,7 @@ mod tests {
             a.step();
         }
         assert!(a.thermals.hot() > 0);
-        let mut b = BlastRange::restore(a.config.clone(), &a.snapshot()).unwrap();
+        let mut b = BlastRange::restore(a.config, &a.snapshot()).unwrap();
         for _ in 0..75 {
             a.step();
             b.step();
@@ -860,7 +860,7 @@ mod tests {
         r.save_after(&mut tail, 31);
         data.truncate(data.len() - tail.v.len());
         data[..4].copy_from_slice(&31u32.to_le_bytes());
-        let restored = BlastRange::restore(r.config.clone(), &data).unwrap();
+        let restored = BlastRange::restore(r.config, &data).unwrap();
         assert_eq!(restored.thermals.hot(), 0);
         assert_eq!(r.state_hash(), restored.state_hash());
     }

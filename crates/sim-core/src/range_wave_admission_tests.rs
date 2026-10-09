@@ -143,7 +143,7 @@ fn wave_admission_keeps_blocked_contacts_and_resumes_the_saved_turn() {
             b.battle.save_contact_resumes(&mut bytes);
             let mut scan = Scan::new(&bytes.v);
             let mut restored = Battle::new(&b.units, 1);
-            restored.shell_config = b.battle.shell_config.clone();
+            restored.shell_config = b.battle.shell_config;
             let allied: Vec<_> = (0..b.units.len()).map(|id| b.allied(id)).collect();
             restored
                 .load(
@@ -310,11 +310,11 @@ fn add_ground_waves(r: &mut BlastRange) {
     assert_ne!(material(&r.world, p), 0);
     // All profiles share geometry here, but retain distinct energy and fragment
     // boundaries. Include annihilation and a genuinely unaffordable contact.
-    r.battle.energy_config = r.battle.shell_config.clone();
+    r.battle.energy_config = r.battle.shell_config;
     r.battle.energy_config.fragment_box = 4;
-    r.battle.canister_config = r.battle.shell_config.clone();
+    r.battle.canister_config = r.battle.shell_config;
     r.battle.canister_config.fragment_box = 1;
-    r.battle.anni_config = r.battle.shell_config.clone();
+    r.battle.anni_config = r.battle.shell_config;
     r.battle.anni_config.material_energy_j = 0;
     for weapon in [
         Weapon::Energy,

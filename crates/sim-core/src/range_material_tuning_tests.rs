@@ -134,7 +134,7 @@ fn material_properties_hash_and_restore_with_all_motion_and_debris_combinations(
                     assert_ne!(r.state_hash(), stock_hash);
                     let bytes = r.snapshot();
                     assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 56);
-                    let restored = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+                    let restored = BlastRange::restore(r.config, &bytes).unwrap();
                     assert_eq!(bytes, restored.snapshot());
                     assert_eq!(
                         r.matter.economy.mats.hash(),
@@ -197,9 +197,7 @@ fn density_changes_preserve_stock_validate_inputs_and_keep_history_after_reset()
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 57);
         assert_eq!(
             bytes,
-            BlastRange::restore(r.config.clone(), &bytes)
-                .unwrap()
-                .snapshot()
+            BlastRange::restore(r.config, &bytes).unwrap().snapshot()
         );
     }
     let bytes = r.snapshot();
@@ -222,18 +220,18 @@ fn density_prelude_rejects_invalid_density_masks_and_legacy_reinterpretation() {
     for value in [0, 120, modding::MAX_DENSITY + 1] {
         let mut bad = bytes.clone();
         bad[at + 7..at + 11].copy_from_slice(&value.to_le_bytes());
-        assert!(BlastRange::restore(r.config.clone(), &bad).is_none());
+        assert!(BlastRange::restore(r.config, &bad).is_none());
     }
     for mask in [0, 8, 255] {
         let mut bad = bytes.clone();
         bad[at + 6] = mask;
-        assert!(BlastRange::restore(r.config.clone(), &bad).is_none());
+        assert!(BlastRange::restore(r.config, &bad).is_none());
     }
     let mut old = bytes.clone();
     old[..4].copy_from_slice(&56u32.to_le_bytes());
-    assert!(BlastRange::restore(r.config.clone(), &old).is_none());
+    assert!(BlastRange::restore(r.config, &old).is_none());
     for end in at..at + 13 {
-        assert!(BlastRange::restore(r.config.clone(), &bytes[..end]).is_none());
+        assert!(BlastRange::restore(r.config, &bytes[..end]).is_none());
     }
 }
 
@@ -263,7 +261,7 @@ fn density_terrain_claims_use_confirmation_density_and_mixed_piles_keep_matter_o
     assert_eq!(r.world.material(q[0], q[1], q[2]), mat);
     assert!(r.matter.melt(&mut r.world, q));
     density(&mut r, mat, base + 1);
-    let mut r = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut r = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     assert_eq!(r.matter.debris.claims(), 1);
     r.world.flush();
     r.matter
@@ -317,7 +315,7 @@ fn density_terrain_claims_use_confirmation_density_and_mixed_piles_keep_matter_o
         (2, mass, total)
     );
     density(&mut r, mat, base);
-    let mut r = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut r = BlastRange::restore(r.config, &r.snapshot()).unwrap();
     let f = &r.matter.debris.fragments[0];
     assert_eq!(
         (f.count, f.mass_g, r.matter.economy.ledger.held(f.held)),
@@ -428,9 +426,7 @@ fn density_snapshot_combines_all_material_fields_motion_and_debris() {
             let bytes = r.snapshot();
             assert_eq!(
                 bytes,
-                BlastRange::restore(r.config.clone(), &bytes)
-                    .unwrap()
-                    .snapshot()
+                BlastRange::restore(r.config, &bytes).unwrap().snapshot()
             );
         }
     }
@@ -445,7 +441,7 @@ fn density_restore_rejects_impossible_quantities_even_in_balanced_ledgers() {
     extract(&mut r, [240, 15, 240]);
     let bytes = r.snapshot();
     for case in 0..5 {
-        let mut forged = BlastRange::restore(r.config.clone(), &bytes).unwrap();
+        let mut forged = BlastRange::restore(r.config, &bytes).unwrap();
         let id = forged.matter.debris.fragments[0].held as usize;
         let (mut containers, sunk, mut initial, head, free) =
             forged.matter.economy.ledger.snapshot();
@@ -473,7 +469,7 @@ fn density_restore_rejects_impossible_quantities_even_in_balanced_ledgers() {
             Ledger::from_snapshot(containers, sunk, initial, head, free).unwrap();
         assert!(forged.matter.economy.ledger.balanced());
         assert!(
-            BlastRange::restore(forged.config.clone(), &forged.snapshot()).is_none(),
+            BlastRange::restore(forged.config, &forged.snapshot()).is_none(),
             "case {case}"
         );
     }
@@ -525,9 +521,7 @@ fn density_body_melt_fracture_and_annihilation_use_original_stock_quantities_and
         let bytes = r.snapshot();
         assert_eq!(
             bytes,
-            BlastRange::restore(r.config.clone(), &bytes)
-                .unwrap()
-                .snapshot()
+            BlastRange::restore(r.config, &bytes).unwrap().snapshot()
         );
         assert!(r.matter.economy.ledger.balanced());
     }
@@ -549,7 +543,7 @@ fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncati
     });
     let bytes = r.snapshot();
     let at = prefix(&bytes);
-    assert!(BlastRange::restore(r.config.clone(), &bytes).is_some());
+    assert!(BlastRange::restore(r.config, &bytes).is_some());
     for (offset, value) in [
         (0, 0u32),
         (0, u32::MAX),
@@ -560,7 +554,7 @@ fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncati
         let mut bad = bytes.clone();
         bad[at + offset..at + offset + 4].copy_from_slice(&value.to_le_bytes());
         assert!(
-            BlastRange::restore(r.config.clone(), &bad).is_none(),
+            BlastRange::restore(r.config, &bad).is_none(),
             "offset {offset} value {value}"
         );
     }
@@ -570,11 +564,11 @@ fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncati
         let mut bad = bytes.clone();
         bad[at + offset] = value;
         assert!(
-            BlastRange::restore(r.config.clone(), &bad).is_none(),
+            BlastRange::restore(r.config, &bad).is_none(),
             "offset {offset}"
         );
     }
     for end in at..=at + 19 {
-        assert!(BlastRange::restore(r.config.clone(), &bytes[..end]).is_none());
+        assert!(BlastRange::restore(r.config, &bytes[..end]).is_none());
     }
 }

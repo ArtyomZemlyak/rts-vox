@@ -276,7 +276,7 @@ fn tilted_and_subvoxel_bodies_have_no_missing_or_duplicate_owners() {
 fn pre_47_active_bursts_restore_with_their_legacy_contact_semantics() {
     let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
     let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
-    let mut range = BlastRange::with_layout(c.clone(), layout).unwrap();
+    let mut range = BlastRange::with_layout(c, layout).unwrap();
     let mut explosion = Explosion::begin(range.units[0].at, &c, &range.units);
     explosion.point_contacts = true;
     range.explosion = Some(explosion);

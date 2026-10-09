@@ -265,7 +265,7 @@ fn shared_order_handler_preserves_real_combat_movement_and_midfight_restore() {
             shots = shots.max(a.battle.actors.iter().map(|a| a.fired).sum::<u32>());
             damage |= a.units.iter().any(|u| u.revision > 0);
             if tick == 120 {
-                b = BlastRange::restore(b.config.clone(), &b.snapshot()).unwrap();
+                b = BlastRange::restore(b.config, &b.snapshot()).unwrap();
                 same(&a, &b);
             }
         }

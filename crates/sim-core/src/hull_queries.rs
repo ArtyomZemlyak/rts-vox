@@ -13,130 +13,6 @@ pub struct HullQueries<'h, 's> {
     order: Vec<usize>,
     centres: [[i64; 2]; 2],
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::burst::Solid;
-
-    fn hull(i: usize) -> Hull<'static> {
-        Hull {
-            pos: [
-                Fx::from_int((i % 12) as i32 * 16),
-                Fx::from_ratio((i % 3) as i32, 2),
-                Fx::from_int((i / 12) as i32 * 16),
-            ],
-            head: i as i32 * 911,
-            half: [Fx::from_int(12), Fx::from_int(8)],
-            height: Fx::from_int(12),
-            vel: [Fx::from_int(i as i32), Fx::ZERO, Fx::ZERO],
-            step: Fx::ONE,
-            solid: None,
-        }
-    }
-    fn identity(hit: Option<&Hull<'_>>) -> Option<Fx> {
-        hit.map(|h| h.vel[0])
-    }
-    #[test]
-    fn indexed_contacts_match_source_order_with_voxel_holes_turns_and_skip_masks() {
-        let holes = |p: [i32; 3]| (p[0] + p[1] + p[2]).rem_euclid(3) == 0;
-        let empty = |_: [i32; 3]| false;
-        for count in [0, 1, 8, 15, 16, 17, 63, 64, 65, 96] {
-            for geometry in [0, 1, 2] {
-                let hulls: Vec<_> = (0..count)
-                    .map(|i| {
-                        // Source IDs deliberately interleave spatial positions.
-                        let mut h = hull((i * 37) % count);
-                        h.solid = match geometry {
-                            1 => Some(Solid(&holes)),
-                            2 => Some(Solid(&empty)),
-                            _ => None,
-                        };
-                        h
-                    })
-                    .collect();
-                let index = HullQueries::new(&hulls);
-                assert_eq!(index.nodes.is_empty(), count < MIN_HULLS);
-                for i in 0..384 {
-                    let p = [
-                        Fx::from_ratio(i % 180 * 3 - 12, 3),
-                        Fx::from_ratio(i % 24 - 4, 2),
-                        Fx::from_ratio(i % 100 * 2 - 5, 2),
-                    ];
-                    for size in [1, 3, 12] {
-                        let low = [Fx::from_ratio(-size, 2); 3];
-                        let high = [Fx::from_ratio(size, 2); 3];
-                        for skip in [0, 1, u64::MAX, 0xa518_3ec2_d947_6b0f] {
-                            assert_eq!(identity(index.hit(p, low, high, skip)), identity(hull_hit(p, low, high, &hulls, skip)), "count={count}, geometry={geometry}, query={i}, size={size}, skip={skip}");
-                        }
-                    }
-                }
-                // Overlapping identical bounds must still select the first
-                // source whose exact voxels answer, rather than a tree leaf.
-                if count >= MIN_HULLS {
-                    let mut overlap = hulls;
-                    for h in &mut overlap {
-                        h.pos = [Fx::ZERO; 3];
-                    }
-                    let query = HullQueries::new(&overlap);
-                    let p = [Fx::ZERO, Fx::ONE, Fx::ZERO];
-                    for skip in [0, 1, 3, u64::MAX] {
-                        assert_eq!(
-                            identity(query.hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], skip)),
-                            identity(hull_hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], &overlap, skip))
-                        );
-                    }
-                }
-            }
-        }
-    }
-    #[test]
-    fn hull_index_falls_back_when_fixed_point_intervals_or_differences_can_wrap() {
-        let mut hulls: Vec<_> = (0..32).map(hull).collect();
-        hulls[0].pos[0] = Fx(i64::MAX - 1);
-        let invalid = HullQueries::new(&hulls);
-        assert!(invalid.nodes.is_empty());
-        let low = [Fx::from_int(-2); 3];
-        let high = [Fx::from_int(2); 3];
-        for raw in [i64::MIN, i64::MIN + 9, 0, i64::MAX - 9, i64::MAX] {
-            let p = [Fx(raw), Fx::ONE, Fx::ZERO];
-            assert_eq!(
-                identity(invalid.hit(p, low, high, 0)),
-                identity(hull_hit(p, low, high, &hulls, 0))
-            );
-        }
-        hulls[0].pos[0] = Fx::ZERO;
-        let valid = HullQueries::new(&hulls);
-        assert!(!valid.nodes.is_empty());
-        for raw in [i64::MIN, i64::MIN + 1, i64::MAX] {
-            let p = [Fx(raw), Fx::ONE, Fx::ZERO];
-            assert_eq!(
-                identity(valid.hit(p, low, high, 0)),
-                identity(hull_hit(p, low, high, &hulls, 0))
-            );
-        }
-    }
-    #[test]
-    fn local_hull_contact_rejects_distant_roster_without_testing_every_hull() {
-        for count in [64, 256, 1024] {
-            let hulls: Vec<_> = (0..count)
-                .map(|i| {
-                    let mut h = hull(i);
-                    h.pos[0] = Fx::from_int((i % 32) as i32 * 128);
-                    h.pos[2] = Fx::from_int((i / 32) as i32 * 128);
-                    h
-                })
-                .collect();
-            let index = HullQueries::new(&hulls);
-            let h = &hulls[count - 1];
-            let p = [h.pos[0], Fx::from_int(4), h.pos[2]];
-            let mut examined = 0;
-            let hit = index.hit_with(p, [Fx::ZERO; 3], [Fx::ONE; 3], 0, &mut |_| examined += 1);
-            assert_eq!(identity(hit), Some(h.vel[0]));
-            assert!(examined <= LEAF, "count={count}, examined={examined}");
-        }
-    }
-}
 struct Contact {
     p: [Fx; 3],
     low: [Fx; 3],
@@ -360,6 +236,130 @@ impl<'h, 's> HullQueries<'h, 's> {
                 *best = Some(i);
                 break;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::burst::Solid;
+
+    fn hull(i: usize) -> Hull<'static> {
+        Hull {
+            pos: [
+                Fx::from_int((i % 12) as i32 * 16),
+                Fx::from_ratio((i % 3) as i32, 2),
+                Fx::from_int((i / 12) as i32 * 16),
+            ],
+            head: i as i32 * 911,
+            half: [Fx::from_int(12), Fx::from_int(8)],
+            height: Fx::from_int(12),
+            vel: [Fx::from_int(i as i32), Fx::ZERO, Fx::ZERO],
+            step: Fx::ONE,
+            solid: None,
+        }
+    }
+    fn identity(hit: Option<&Hull<'_>>) -> Option<Fx> {
+        hit.map(|h| h.vel[0])
+    }
+    #[test]
+    fn indexed_contacts_match_source_order_with_voxel_holes_turns_and_skip_masks() {
+        let holes = |p: [i32; 3]| (p[0] + p[1] + p[2]).rem_euclid(3) == 0;
+        let empty = |_: [i32; 3]| false;
+        for count in [0, 1, 8, 15, 16, 17, 63, 64, 65, 96] {
+            for geometry in [0, 1, 2] {
+                let hulls: Vec<_> = (0..count)
+                    .map(|i| {
+                        // Source IDs deliberately interleave spatial positions.
+                        let mut h = hull((i * 37) % count);
+                        h.solid = match geometry {
+                            1 => Some(Solid(&holes)),
+                            2 => Some(Solid(&empty)),
+                            _ => None,
+                        };
+                        h
+                    })
+                    .collect();
+                let index = HullQueries::new(&hulls);
+                assert_eq!(index.nodes.is_empty(), count < MIN_HULLS);
+                for i in 0..384 {
+                    let p = [
+                        Fx::from_ratio(i % 180 * 3 - 12, 3),
+                        Fx::from_ratio(i % 24 - 4, 2),
+                        Fx::from_ratio(i % 100 * 2 - 5, 2),
+                    ];
+                    for size in [1, 3, 12] {
+                        let low = [Fx::from_ratio(-size, 2); 3];
+                        let high = [Fx::from_ratio(size, 2); 3];
+                        for skip in [0, 1, u64::MAX, 0xa518_3ec2_d947_6b0f] {
+                            assert_eq!(identity(index.hit(p, low, high, skip)), identity(hull_hit(p, low, high, &hulls, skip)), "count={count}, geometry={geometry}, query={i}, size={size}, skip={skip}");
+                        }
+                    }
+                }
+                // Overlapping identical bounds must still select the first
+                // source whose exact voxels answer, rather than a tree leaf.
+                if count >= MIN_HULLS {
+                    let mut overlap = hulls;
+                    for h in &mut overlap {
+                        h.pos = [Fx::ZERO; 3];
+                    }
+                    let query = HullQueries::new(&overlap);
+                    let p = [Fx::ZERO, Fx::ONE, Fx::ZERO];
+                    for skip in [0, 1, 3, u64::MAX] {
+                        assert_eq!(
+                            identity(query.hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], skip)),
+                            identity(hull_hit(p, [Fx::ZERO; 3], [Fx::ONE; 3], &overlap, skip))
+                        );
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn hull_index_falls_back_when_fixed_point_intervals_or_differences_can_wrap() {
+        let mut hulls: Vec<_> = (0..32).map(hull).collect();
+        hulls[0].pos[0] = Fx(i64::MAX - 1);
+        let invalid = HullQueries::new(&hulls);
+        assert!(invalid.nodes.is_empty());
+        let low = [Fx::from_int(-2); 3];
+        let high = [Fx::from_int(2); 3];
+        for raw in [i64::MIN, i64::MIN + 9, 0, i64::MAX - 9, i64::MAX] {
+            let p = [Fx(raw), Fx::ONE, Fx::ZERO];
+            assert_eq!(
+                identity(invalid.hit(p, low, high, 0)),
+                identity(hull_hit(p, low, high, &hulls, 0))
+            );
+        }
+        hulls[0].pos[0] = Fx::ZERO;
+        let valid = HullQueries::new(&hulls);
+        assert!(!valid.nodes.is_empty());
+        for raw in [i64::MIN, i64::MIN + 1, i64::MAX] {
+            let p = [Fx(raw), Fx::ONE, Fx::ZERO];
+            assert_eq!(
+                identity(valid.hit(p, low, high, 0)),
+                identity(hull_hit(p, low, high, &hulls, 0))
+            );
+        }
+    }
+    #[test]
+    fn local_hull_contact_rejects_distant_roster_without_testing_every_hull() {
+        for count in [64, 256, 1024] {
+            let hulls: Vec<_> = (0..count)
+                .map(|i| {
+                    let mut h = hull(i);
+                    h.pos[0] = Fx::from_int((i % 32) as i32 * 128);
+                    h.pos[2] = Fx::from_int((i / 32) as i32 * 128);
+                    h
+                })
+                .collect();
+            let index = HullQueries::new(&hulls);
+            let h = &hulls[count - 1];
+            let p = [h.pos[0], Fx::from_int(4), h.pos[2]];
+            let mut examined = 0;
+            let hit = index.hit_with(p, [Fx::ZERO; 3], [Fx::ONE; 3], 0, &mut |_| examined += 1);
+            assert_eq!(identity(hit), Some(h.vel[0]));
+            assert!(examined <= LEAF, "count={count}, examined={examined}");
         }
     }
 }

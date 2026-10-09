@@ -127,7 +127,7 @@ fn each_sector_takes_a_real_shot_and_replays_mid_flight() {
     for i in 0..layout().zones.len() {
         let r = crop(layout(), i);
         let name = r.zones[0].name.clone();
-        let mut sim = BlastRange::with_layout(config.clone(), r.clone()).unwrap();
+        let mut sim = BlastRange::with_layout(config, r.clone()).unwrap();
         assert_eq!(sim.gun.at, r.gun, "{name}");
         sim.control();
         assert!(sim.order_ground_fire(r.target), "{name}");
@@ -135,8 +135,7 @@ fn each_sector_takes_a_real_shot_and_replays_mid_flight() {
             sim.step();
         }
         assert!(sim.shell.is_some(), "no projectile in flight: {name}");
-        let mut restored =
-            BlastRange::restore(config.clone(), &sim.snapshot()).expect("sector snapshot");
+        let mut restored = BlastRange::restore(config, &sim.snapshot()).expect("sector snapshot");
         while sim.tick < 160 {
             sim.step();
             restored.step();

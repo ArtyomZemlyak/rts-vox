@@ -11,7 +11,7 @@ fn main() {
     println!("scenario,power,impact_tick,world_removed,unit_removed,segment_removed,root_dents,segment_dents,unit_alive,engine_alive,surface_dents,max_surface_work,world_chunks");
     for scenario in ["open", "front", "walker_torso", "covered", "ground"] {
         for power in [500u32, 1000, 2000, 4000] {
-            let mut c = stock.clone();
+            let mut c = stock;
             c.energy = c.energy * power / 1000;
             c.material_energy_j = (u64::from(c.material_energy_j) * u64::from(power) / 1000) as u32;
             c.gas_pressure_milli = (c.gas_pressure_milli * power as i32 / 1000).min(10000);
