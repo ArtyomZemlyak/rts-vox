@@ -3471,7 +3471,7 @@ fn the_world_battle_hash_does_not_depend_on_physics_workers() {
 /// game the window plays passed every test. If this fails and the change
 /// was intended, record the new number here and say why in the commit;
 /// if it was not, it is a desync.
-const RANGE_GOLDEN_600: u64 = 0x429b_9efd_4f6c_f1e1;
+const RANGE_GOLDEN_600: u64 = 0x52cf_ed27_81dd_123f;
 
 /// **The world battle hashes what was recorded**, and the run loads what
 /// the hash claims to cover (ADR-116): both armies fire, hulls take

@@ -1180,43 +1180,6 @@ impl Motion {
             }
             completed("plan_coarse");
         }
-        // A hull that met an obstacle searches around it with the other
-        // hulls as blockers, and that search used to aim at the order's
-        // goal across the map: hundreds of nodes at the shared allowance,
-        // the largest cost of a late battle (analysis 240, E2). The detour
-        // now aims at the first turn of the terrain-only corridor at least
-        // the global minimum distance away; the route that reaches it is
-        // partial, and the corridor takes over from there.
-        let goal = if self.destination.is_some()
-            && self.route.is_empty()
-            && (self.blocked || self.needs_recovery || avoid)
-            && (0..2).any(|a| {
-                from[a].sub(Fx::from_int(to[a])).abs()
-                    >= Fx::from_int(self.navigation.global_min_distance)
-            }) {
-            let horizon = Fx::from_int(self.navigation.global_min_distance);
-            nav::vehicle::coarse::plan(
-                w,
-                rubble,
-                shape,
-                from,
-                to,
-                nav::vehicle::coarse::Config {
-                    cell: self.navigation.global_cell_units,
-                    nodes: self.navigation.global_nodes,
-                    yielding: self.navigation.fell.materials,
-                    local_grade: self.coarse_local_grade,
-                },
-            )
-            .and_then(|plan| {
-                plan.path
-                    .into_iter()
-                    .find(|p| (0..2).any(|a| from[a].sub(Fx::from_int(p[a])).abs() >= horizon))
-            })
-            .unwrap_or(to)
-        } else {
-            to
-        };
         // Prepared motion geometry already invalidated changed pages against
         // this tick's immutable sources. Share its exact column answers, not
         // its pose: route contacts can use a different approach margin.
@@ -1285,7 +1248,7 @@ impl Motion {
             shape,
             from,
             self.drive.head,
-            goal,
+            to,
             self.search(w),
             &clear,
             budget,
@@ -1331,14 +1294,7 @@ impl Motion {
         self.needs_recovery = plan.stranded || self.dry;
         self.last_plan = [plan.nodes, plan.poses];
         self.last_probe = [plan.scans, plan.samples];
-        // A complete route ends at its search's goal. One that ends short
-        // of the order's destination was a detour (analysis 240, E2): the
-        // hull continues from its end, it has not arrived.
-        self.partial_path = plan.partial
-            || plan
-                .path
-                .last()
-                .is_some_and(|end| self.destination.is_some_and(|d| d != *end));
+        self.partial_path = plan.partial;
         self.path = plan.path;
         self.cursor = 0;
     }
