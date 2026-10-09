@@ -2415,7 +2415,20 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
     // Stopping for every new goal and restarting the search on every
     // tick of braking, the pursuer started 139 searches and fired first
     // at tick 1137; holding the search but still stopping for it, it
-    // fired first at 1665 and six rounds in all. Now 589 and fifteen.
+    // fired first at 1665 and six rounds in all; then 589 and fifteen.
+    //
+    // Requalified with the braking-curve turn (ADR-648). The bounds held
+    // one trajectory, not a property: shifting only the targets' shuttle
+    // period (240…360 ticks) moves the first shot under either turn law.
+    //
+    // | variant | old turn: first shot mean / worst, shots | new turn |
+    // |---|---|---|
+    // | fine planner  | 952 / 1242, 11.6  | 1101 / 1229, 11.0 |
+    // | whole-map     | 1263 / 1878, 9.4  | 1255 / 1688, 9.4  |
+    //
+    // At this period the old turn fired first at 700 (fine) and 983
+    // (whole-map); the new one at 976 and 1688. The fine-planner bounds
+    // still reject both regressions above.
     assert!(
         taken_at_speed >= if borrow_idle { 1 } else { 2 },
         "routes taken up at speed: {taken_at_speed}"
@@ -2425,11 +2438,11 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
         "the route search restarted {restarts} times"
     );
     assert!(
-        first_shot.is_some_and(|t| t < if global { 1300 } else { 800 }),
+        first_shot.is_some_and(|t| t < if global { 1750 } else { 1100 }),
         "first shot at {first_shot:?}"
     );
     assert!(
-        a.battle.actors[0].fired >= if global { 8 } else { 10 },
+        a.battle.actors[0].fired >= if global { 5 } else { 10 },
         "fired {}",
         a.battle.actors[0].fired
     );
