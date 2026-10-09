@@ -3425,6 +3425,47 @@ fn authored_loadouts_fire_for_either_ai_team_and_survive_snapshot_and_restart() 
     }
 }
 
+/// **The tick does not depend on the physics pool's size** (ADR-652).
+/// The stock world battle, 150 ticks, with one, two, four and eight
+/// physics workers: one hash.
+#[test]
+fn the_world_battle_hash_does_not_depend_on_physics_workers() {
+    let run = |workers: usize| {
+        let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
+            "../../../data/battle-world.ron"
+        ))
+        .unwrap();
+        let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+        layout.battle = true;
+        layout.units = preset.units;
+        layout.blocks.extend(preset.blocks);
+        layout.course.as_mut().unwrap().patrols.clear();
+        let config =
+            ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut sim = BlastRange::with_layout(config, layout).unwrap();
+        assert!(sim.set_physics_workers(workers));
+        assert_eq!(sim.worker_counts()[0], workers);
+        assert!(sim.set_ai_vs_ai(true));
+        sim.start_battle().unwrap();
+        for _ in 0..150 {
+            sim.step();
+        }
+        assert!(
+            sim.battle.actors.iter().any(|a| a.fired > 0),
+            "nobody fired"
+        );
+        sim.state_hash()
+    };
+    let one = run(1);
+    for workers in [2, 4, 8] {
+        assert_eq!(run(workers), one, "{workers} physics workers");
+    }
+    let mut r = BlastRange::new(
+        ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap(),
+    );
+    assert!(!r.set_physics_workers(0) && !r.set_physics_workers(9));
+}
+
 /// State hash of the stock world battle after 600 ticks (analysis 240,
 /// B7). The range engine had no pinned hash: an unintended change to the
 /// game the window plays passed every test. If this fails and the change
