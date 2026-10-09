@@ -160,12 +160,28 @@ pub fn plan_explained(
             exhausted: false,
         });
     }
-    if !clear(origin, point(start)) {
-        return Err(Refusal::StartCorridor);
-    }
-    if !clear(point(end), to) {
-        return Err(Refusal::GoalCorridor);
-    }
+    // A hull in a cleared pad may have no clear corridor to its nearest
+    // node: take the nearest node within two cells that has one, by
+    // distance and then index.
+    let start = {
+        let c = [(start % n) as i32, (start / n) as i32];
+        let mut candidates: Vec<(i64, usize)> = (-2..=2)
+            .flat_map(|dz| (-2..=2).map(move |dx| [c[0] + dx, c[1] + dz]))
+            .filter(|q| q[0] >= 0 && q[1] >= 0 && q[0] < n as i32 && q[1] < rows as i32)
+            .map(|q| {
+                let i = q[0] as usize + n * q[1] as usize;
+                let at = point(i);
+                let d = [0, 1].map(|a| i64::from(at[a] - origin[a]));
+                (d[0] * d[0] + d[1] * d[1], i)
+            })
+            .collect();
+        candidates.sort_unstable();
+        candidates
+            .into_iter()
+            .map(|(_, i)| i)
+            .find(|&i| clear(origin, point(i)))
+            .ok_or(Refusal::StartCorridor)?
+    };
     let mut distance = vec![[u32::MAX; 2]; n * rows];
     let mut previous = vec![[u32::MAX; 2]; n * rows];
     let mut open = [BinaryHeap::new(), BinaryHeap::new()];
@@ -178,6 +194,99 @@ pub fn plan_explained(
         ];
         (10 * d[0].max(d[1]) + 4 * d[0].min(d[1])) * 2 / cfg.cell as u32
     };
+    // Join the first grid leg directly where possible, without a needless
+    // backwards move to the snapped start node, and merge straight runs.
+    let finish = |mut path: Vec<[i32; 2]>| -> Vec<[i32; 2]> {
+        if (path.len() > 1 && clear(origin, path[1])) || path.first() == Some(&origin) {
+            path.remove(0);
+        }
+        let mut compact: Vec<[i32; 2]> = Vec::new();
+        let mut last = origin;
+        for (k, &p) in path.iter().enumerate() {
+            if let Some(&next) = path.get(k + 1) {
+                let a = [p[0] - last[0], p[1] - last[1]];
+                let b = [next[0] - p[0], next[1] - p[1]];
+                if i64::from(a[0]) * i64::from(b[1]) == i64::from(a[1]) * i64::from(b[0])
+                    && i64::from(a[0]) * i64::from(b[0]) + i64::from(a[1]) * i64::from(b[1]) > 0
+                {
+                    continue;
+                }
+            }
+            compact.push(p);
+            last = p;
+        }
+        compact
+    };
+    // Go as close as the corridor allows (analysis 240, C5). A goal whose
+    // node has no clear corridor to it, or whose side of the lattice is
+    // enclosed for this shape, used to refuse the whole route, and the hull
+    // stood while the budgeted fine search crossed the map. Now a one-sided
+    // search from the start returns a partial route to the reached node
+    // nearest the goal, ties by index: the hull drives there, and the fine
+    // search covers the rest. A node not a full cell nearer the goal than
+    // the start is no progress, and the refusal stands. `heuristic` counts
+    // twenty per cell along an axis.
+    let approach = |refusal: Refusal| -> Result<Route, Refusal> {
+        let mut distance = vec![u32::MAX; n * rows];
+        let mut previous = vec![u32::MAX; n * rows];
+        let mut open = BinaryHeap::new();
+        distance[start] = 0;
+        open.push(Reverse((heuristic(start, 0), 0u32, start)));
+        let mut best = (heuristic(start, 0), start);
+        let mut expanded = 0;
+        while let Some(Reverse((_, cost, i))) = open.pop() {
+            if cost != distance[i] {
+                continue;
+            }
+            best = best.min((heuristic(i, 0), i));
+            if expanded >= cfg.nodes {
+                break;
+            }
+            expanded += 1;
+            let at = point(i);
+            for d in DIR {
+                let q = [at[0] + d[0] * cfg.cell, at[1] + d[1] * cfg.cell];
+                let Some(j) = index(q) else {
+                    continue;
+                };
+                let next = cost + if d[0] != 0 && d[1] != 0 { 14 } else { 10 };
+                if next >= distance[j] || !clear(at, q) {
+                    continue;
+                }
+                distance[j] = next;
+                previous[j] = i as u32;
+                open.push(Reverse((next + heuristic(j, 0), next, j)));
+            }
+        }
+        if best.1 == start || best.0 + 20 > heuristic(start, 0) {
+            return Err(refusal);
+        }
+        let mut path = Vec::new();
+        let mut j = best.1;
+        while j != start {
+            path.push(point(j));
+            j = previous[j] as usize;
+        }
+        path.push(point(start));
+        path.reverse();
+        let path = finish(path);
+        if path.len() > 6400 {
+            return Err(Refusal::TooLong);
+        }
+        Ok(Route {
+            path,
+            partial: true,
+            stranded: false,
+            nodes: expanded as u32,
+            poses: 0,
+            scans: 0,
+            samples: 0,
+            exhausted: false,
+        })
+    };
+    if !clear(point(end), to) {
+        return approach(Refusal::GoalCorridor);
+    }
     for (side, root) in [start, end].into_iter().enumerate() {
         distance[root][side] = 0;
         open[side].push(Reverse((heuristic(root, side), 0, root)));
@@ -188,7 +297,12 @@ pub fn plan_explained(
         // A remote obstacle cannot monopolize a one-sided greedy search.
         let side = expanded % 2;
         let Some(Reverse((_, cost, i))) = open[side].pop() else {
-            return Err(Refusal::Enclosed { side, expanded });
+            let refusal = Refusal::Enclosed { side, expanded };
+            return if side == 1 {
+                approach(refusal)
+            } else {
+                Err(refusal)
+            };
         };
         if cost != distance[i][side] {
             continue;
@@ -210,26 +324,7 @@ pub fn plan_explained(
             if path.last() != Some(&to) {
                 path.push(to);
             }
-            // Join the first grid leg directly where possible, without a
-            // needless backwards move to the snapped start node.
-            if (path.len() > 1 && clear(origin, path[1])) || path.first() == Some(&origin) {
-                path.remove(0);
-            }
-            let mut compact: Vec<[i32; 2]> = Vec::new();
-            let mut last = origin;
-            for (k, &p) in path.iter().enumerate() {
-                if let Some(&next) = path.get(k + 1) {
-                    let a = [p[0] - last[0], p[1] - last[1]];
-                    let b = [next[0] - p[0], next[1] - p[1]];
-                    if i64::from(a[0]) * i64::from(b[1]) == i64::from(a[1]) * i64::from(b[0])
-                        && i64::from(a[0]) * i64::from(b[0]) + i64::from(a[1]) * i64::from(b[1]) > 0
-                    {
-                        continue;
-                    }
-                }
-                compact.push(p);
-                last = p;
-            }
+            let compact = finish(path);
             if compact.len() > 6400 {
                 return Err(Refusal::TooLong);
             }
@@ -346,6 +441,15 @@ mod tests {
             at = q;
         }
     }
+    /// A route that goes no farther than `x`: refused, or partial and
+    /// wholly on the near side (analysis 240, C5: a blocked goal gives a
+    /// partial route as close as the corridor allows, never one across).
+    fn stops_before(route: Option<Route>, x: i32) -> bool {
+        route.is_none_or(|r| r.partial && r.path.iter().all(|p| p[0] < x))
+    }
+    fn complete(route: Option<Route>) -> bool {
+        route.is_some_and(|r| !r.partial)
+    }
     #[test]
     fn tile_aligned_cliffs_and_live_debris_do_not_become_flat_corridors() {
         let mut world = World::new(512, 32, 256, 100000, Box::new(Floor));
@@ -361,24 +465,46 @@ mod tests {
         while world.queued() > 0 {
             world.flush();
         }
-        assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_none());
-        assert!(plan(
+        assert!(stops_before(
+            plan(&world, &Rubble::new(), shape(), from, to, config()),
+            248
+        ));
+        assert!(stops_before(
+            plan(
+                &world,
+                &Rubble::new(),
+                shape(),
+                from,
+                to,
+                Config {
+                    local_grade: true,
+                    ..config()
+                }
+            ),
+            248
+        ));
+        world.restore_pristine();
+        assert!(complete(plan(
             &world,
             &Rubble::new(),
             shape(),
             from,
             to,
-            Config {
-                local_grade: true,
-                ..config()
-            }
-        )
-        .is_none());
-        world.restore_pristine();
-        assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_some());
+            config()
+        )));
         let rubble = Rubble::from_sorted((0..256).map(|z| ([256, z], 26)).collect());
-        assert!(plan(&world, &rubble, shape(), from, to, config()).is_none());
-        assert!(plan(&world, &Rubble::new(), shape(), from, to, config()).is_some());
+        assert!(stops_before(
+            plan(&world, &rubble, shape(), from, to, config()),
+            256
+        ));
+        assert!(complete(plan(
+            &world,
+            &Rubble::new(),
+            shape(),
+            from,
+            to,
+            config()
+        )));
     }
     #[test]
     fn articulated_hull_can_route_up_a_gradual_hill() {
@@ -464,7 +590,7 @@ mod tests {
             world.flush();
         }
         assert!(
-            plan(&world, &r, shape(), from, to, config()).is_some(),
+            complete(plan(&world, &r, shape(), from, to, config())),
             "forest is crushable"
         );
         for y in 6..26 {
@@ -476,8 +602,16 @@ mod tests {
             world.flush();
         }
         assert!(
-            plan(&world, &r, shape(), from, to, config()).is_none(),
+            stops_before(plan(&world, &r, shape(), from, to, config()), 256),
             "sealed wall crossed"
+        );
+        // As close as the corridor allows: up to the wall, not refused.
+        let near = plan(&world, &r, shape(), from, to, config()).expect("partial route");
+        assert!(near.partial);
+        assert!(
+            near.path.last().is_some_and(|p| p[0] >= 200),
+            "{:?}",
+            near.path
         );
         for y in 6..26 {
             for z in 96..160 {
@@ -488,7 +622,7 @@ mod tests {
             world.flush();
         }
         assert!(
-            plan(&world, &r, shape(), from, to, config()).is_some(),
+            complete(plan(&world, &r, shape(), from, to, config())),
             "fresh hole not seen"
         );
     }

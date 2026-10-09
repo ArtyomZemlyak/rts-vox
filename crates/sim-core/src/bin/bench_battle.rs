@@ -446,6 +446,20 @@ fn main() {
                 });
                 ticks.push(now.elapsed().as_micros());
             }
+            if let Some(watch) = args
+                .windows(2)
+                .find(|w| w[0] == "--latency-watch")
+                .map(|w| w[1].parse::<usize>().expect("unit id"))
+            {
+                if elapsed % 20 == 1 {
+                    let m = &sim.units[watch].motion;
+                    println!(
+                        "watch tick={elapsed} id={watch} started={} searching={} frontier={} path={} cursor={} blocked={} recovering={} vel={:?} head={} dest={:?} last_plan={:?} pos={:?}",
+                        m.started_search(), m.searching(), m.frontier_nodes(), m.path.len(), m.cursor, m.blocked, m.recovering(),
+                        m.drive.vel, m.drive.head, m.destination, m.last_plan, m.pos
+                    );
+                }
+            }
             if trace_latency {
                 let m = &sim.units[ids[0]].motion;
                 println!(
