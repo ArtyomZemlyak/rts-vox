@@ -79,7 +79,8 @@
 | `cargo test --release` для `fx`, `harness`, `meshing`, `modding`, `nav`, `phys`, `sim-cli` | 28 + 9 + 24 + 53 + 111 + 25 + 1 прошли |
 | `harness --test architecture` | **5 из 9**: падают `the_render_layer_never_writes_into_the_simulation`, `the_simulation_has_no_floating_point`, `the_simulation_has_no_hash_containers`, `the_simulation_never_reads_the_clock` |
 | `harness --test docs` | **2 из 3**: `every_decision_is_in_both_files` — 63 номера только в реестре |
-| `sim-core` тесты, 4 потока | 371 прошёл, затем процесс **убит OOM** на 11,1 ГБ RSS (cgroup 15 ГБ); повтор в один поток — см. приложение |
+| `sim-core` тесты, 4 потока | 371 прошёл, затем процесс **убит OOM** на 11,1 ГБ RSS (cgroup 15 ГБ) |
+| `sim-core`, `voxel`, `worldgen`, один поток | **1072 прошли, 0 упали, 6 ручных пропущены**; `sim-core` lib — 841 за 21 минуту, пик RSS 5,7 ГБ (приложение B) |
 | `sim-cli --seed 42 --ticks 1000 --dump-hash`, 1 и 4 воркера | `66041a9f60189841` оба раза — эталон совпал с записанным |
 | `bench_battle --world --ai-vs-ai --ticks 900 --workers 4` | завершился, хеш `1dd5c0c149b203e3`; числа в разделах 7–8 |
 | `render`, `demo`, `gpu` | не собраны: в контейнере нет `wayland-client`; клиент оценён по исходнику и отчётам 215/232 |
@@ -573,6 +574,20 @@ collapse_window=601..900 queued_max=754946 submitted_max=0 blocked_ticks_max=736
 ## Приложение B. Повтор тестов `sim-core` в один поток
 
 `cargo test --release -p sim-core -p voxel -p worldgen --no-fail-fast --
---test-threads=1` запущен после OOM четырёхпоточного прогона; на момент
-этого коммита он ещё шёл (пик RSS одного потока — 5,7 ГБ). Итог
-дописывается отдельным коммитом.
+--test-threads=1` после OOM четырёхпоточного прогона, 4 vCPU, 15 ГБ:
+
+| Набор | Прошли | Упали | Пропущены | Время |
+|---|---:|---:|---:|---:|
+| `sim-core` lib | 841 | 0 | 4 | 1264,8 с |
+| `sim-core` tests/economy | 15 | 0 | 0 | 3,3 с |
+| `sim-core` tests/golden | 4 | 0 | 0 | 79,2 с |
+| `sim-core` tests/save | 19 | 0 | 0 | 66,2 с |
+| `sim-core` tests/sectors | 5 | 0 | 0 | 12,5 с |
+| `sim-core` tests/terrains | 1 | 0 | 2 | 17,8 с |
+| `voxel` lib и tests | 175 | 0 | 0 | 3,6 с |
+| `worldgen` lib и tests | 9 | 0 | 0 | 1,0 с |
+| Итого | 1072 | 0 | 6 | ~24 мин |
+
+Пик RSS одного потока — 5,7 ГБ: один тест строит километровый мир
+целиком. В четыре потока набор не помещается в 15 ГБ. Содержательных
+падений в sim-крейтах нет; красные только гейты `harness` (раздел 1).
