@@ -3,20 +3,34 @@
 //! geometry; no GPU result is allowed to alter the authoritative world.
 
 use fx::Fx;
+#[path = "range_blast_source.rs"]
+mod blast_source;
 #[path = "range_capture.rs"]
 mod capture;
+#[path = "range_debris_tuning.rs"]
+mod debris_tuning;
+#[path = "range_gun_commands.rs"]
+mod gun_commands;
+#[path = "range_material_tuning.rs"]
+mod material_tuning;
 #[path = "range_matter.rs"]
 pub mod matter;
 #[path = "range_motion.rs"]
 pub mod motion;
+#[path = "range_motion_tuning.rs"]
+mod motion_tuning;
 #[path = "range_placement.rs"]
 pub mod placement;
 #[path = "range_plate.rs"]
 mod plate;
+#[path = "range_read_model.rs"]
+pub mod read_model;
 #[path = "range_wave_cells.rs"]
 mod wave_cells;
 #[path = "range_wave_queue.rs"]
 mod wave_queue;
+#[path = "range_weapon_configuration.rs"]
+mod weapon_configuration;
 use crate::heat::Heat;
 use crate::shield::{inside, Point, Shield};
 use modding::explosion::{ExplosionConfig, ProjectileMotion};
@@ -1631,6 +1645,8 @@ pub struct Explosion {
     cell: i32,
     pub wave: Wave,
     pub queued: usize,
+    // None preserves legacy/shared energy; Some reserves remaining body work.
+    body_energy_mj: Option<u64>,
     // Next subcell/actor in the first pending contact; committed work is never replayed.
     contact_cursor: usize,
     // Stable local-cell cursor within the current coarse contact/actor.
@@ -1709,6 +1725,7 @@ impl Explosion {
             cell: c.cell_units,
             wave: Wave::new(n, c.energy, vec![0; n * n * n]).expect("validated explosion"),
             queued: 0,
+            body_energy_mj: None,
             captured: 0,
         }
     }
@@ -1797,7 +1814,7 @@ impl Explosion {
         self.step_contacts::<true, FAIR>(w, budget, units, dents, changed, c, matter);
     }
     #[allow(clippy::too_many_arguments)]
-    fn step_contacts<const RESUME_GROUND: bool, const FAIR: bool>(
+    fn step_contacts<const LAZY_GEOMETRY: bool, const FAIR: bool>(
         &mut self,
         w: &mut World,
         budget: usize,
@@ -1838,7 +1855,7 @@ impl Explosion {
         // This cursor has already passed every unit for the current subcell.
         // Retry its live ground contact before rebuilding any unit transforms.
         // The test-only eager instantiation exercises the old preparation order.
-        if RESUME_GROUND && resume_ground && (!FAIR || self.pending.len() == 1) {
+        if LAZY_GEOMETRY && resume_ground && (!FAIR || self.pending.len() == 1) {
             let hit = self.pending.front().copied().unwrap();
             let subcell = self.contact_cursor / actors;
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
@@ -1864,21 +1881,48 @@ impl Explosion {
                 return;
             }
         }
+        // A heap slice can advance without reaching any material contact.
+        // There is no geometry to prepare, even while the frontier remains live.
+        if LAZY_GEOMETRY && self.pending.is_empty() {
+            return;
+        }
+        // Saved cursors can prove that every unit contact has already paid
+        // its prefix. The remaining terrain still runs under the same quota;
+        // no broad phase or body-priority partition can change this queue.
+        if LAZY_GEOMETRY && self.only_ground_contacts(units.len()) {
+            self.step_ground_contacts::<FAIR>(
+                w,
+                visits,
+                units.len(),
+                dents,
+                changed,
+                c,
+                matter.as_deref_mut(),
+            );
+            return;
+        }
         if let Some(m) = matter.as_deref_mut() {
             m.admission.wave_geometry[0] += 1;
-            m.admission.wave_geometry[1] += units.len() as u64;
+            if !LAZY_GEOMETRY {
+                m.admission.wave_geometry[1] += units.len() as u64;
+            }
         }
-        let queries: Vec<_> = units
+        // Bounds still cover the complete frozen roster. Narrow-phase maps
+        // are built only for actors whose contacts actually reach the body.
+        // The eager test instantiation remains an independent reference.
+        let mut queries: Vec<Option<HitFrames>> = units
             .iter()
             .enumerate()
             .map(|(i, u)| {
-                HitFrames::new(
-                    u,
-                    self.poses[i],
-                    &self.seg_poses[i],
-                    self.turret_deltas[i],
-                    self.turret_pitches[i],
-                )
+                (!LAZY_GEOMETRY).then(|| {
+                    HitFrames::new(
+                        u,
+                        self.poses[i],
+                        &self.seg_poses[i],
+                        self.turret_deltas[i],
+                        self.turret_pitches[i],
+                    )
+                })
             })
             .collect();
         let boxes: Vec<_> = units
@@ -1945,10 +1989,23 @@ impl Explosion {
                         continue;
                     }
                     contacts.clear();
+                    if queries[actor].is_none() {
+                        queries[actor] = Some(HitFrames::new(
+                            u,
+                            self.poses[actor],
+                            &self.seg_poses[actor],
+                            self.turret_deltas[actor],
+                            self.turret_pitches[actor],
+                        ));
+                        if let Some(m) = matter.as_deref_mut() {
+                            m.admission.wave_geometry[1] += 1;
+                        }
+                    }
+                    let query = queries[actor].as_ref().expect("prepared hit frames");
                     if self.point_contacts {
-                        contacts.extend(queries[actor].hit(u, q));
+                        contacts.extend(query.hit(u, q));
                     } else {
-                        queries[actor].wave_cells(
+                        query.wave_cells(
                             u,
                             &self.poses[actor],
                             &self.seg_poses[actor],
@@ -1993,11 +2050,14 @@ impl Explosion {
                                             .filter(|_| c.material_energy_j > 0)
                                         {
                                             let frame = if cell[1] >= usize::from(u.body.turret_y) {
-                                                queries[actor].turret
+                                                query.turret
                                             } else {
                                                 self.poses[actor]
                                             };
-                                            match m.body(actor, u, cell, &frame, self.at) {
+                                            let at = self.at;
+                                            match self.claim_energy(m, true, |m| {
+                                                m.body(actor, u, cell, &frame, at)
+                                            }) {
                                                 matter::ClaimResult::Applied => u.detached += 1,
                                                 matter::ClaimResult::Unaffordable
                                                 | matter::ClaimResult::Indestructible => {
@@ -2033,14 +2093,11 @@ impl Explosion {
                                     if let Some(m) =
                                         matter.as_deref_mut().filter(|_| c.material_energy_j > 0)
                                     {
-                                        match m.body_segment(
-                                            actor,
-                                            u,
-                                            seg,
-                                            cell,
-                                            &self.seg_poses[actor][seg],
-                                            self.at,
-                                        ) {
+                                        let at = self.at;
+                                        let frame = self.seg_poses[actor][seg];
+                                        match self.claim_energy(m, true, |m| {
+                                            m.body_segment(actor, u, seg, cell, &frame, at)
+                                        }) {
                                             matter::ClaimResult::Applied => u.seg_detached += 1,
                                             matter::ClaimResult::Unaffordable
                                             | matter::ClaimResult::Indestructible => apply = false,
@@ -2064,6 +2121,87 @@ impl Explosion {
                     }
                     self.body_cursor = 0;
                 } else if !self.ground_contact(
+                    w,
+                    q,
+                    hit.pressure,
+                    dents,
+                    changed,
+                    c,
+                    matter.as_deref_mut(),
+                ) {
+                    if !FAIR {
+                        return;
+                    }
+                    self.yield_contact();
+                    continue 'contact;
+                }
+                self.contact_cursor += 1;
+            }
+            self.finish_contact();
+        }
+    }
+    /// Local-cell waves visit each body's voxels only in the first subcell.
+    /// Legacy point-sampled waves may still reach a body in later subcells:
+    /// only their last ground cursor proves that no body work remains.
+    fn only_ground_contacts(&self, count: usize) -> bool {
+        let last = (self.cell as usize).pow(3) * (count + 1) - 1;
+        self.pending.iter().enumerate().all(|(i, hit)| {
+            let (cursor, local) = if i == 0 {
+                (self.contact_cursor, self.body_cursor)
+            } else {
+                self.contact_resumes
+                    .get(&hit.cell)
+                    .copied()
+                    .unwrap_or_default()
+            };
+            local == 0
+                && (count == 0
+                    || if self.point_contacts {
+                        cursor == last
+                    } else {
+                        cursor >= count
+                    })
+        })
+    }
+    /// Same ordered live ground applications as the full contact loop, after
+    /// every body cursor has been proved complete. A failed claim keeps its
+    /// exact subcell, yields in FAIR mode and spends one ordinary visit.
+    #[allow(clippy::too_many_arguments)]
+    fn step_ground_contacts<const FAIR: bool>(
+        &mut self,
+        w: &mut World,
+        mut visits: usize,
+        count: usize,
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
+        mut matter: Option<&mut matter::Matter>,
+    ) {
+        if let Some(m) = matter.as_deref_mut() {
+            m.admission.wave_ground_only[0] += 1;
+        }
+        let edge = self.cell as usize;
+        let actors = count + 1;
+        'contact: while visits > 0 {
+            let Some(hit) = self.pending.front().copied() else {
+                break;
+            };
+            visits -= 1;
+            if let Some(m) = matter.as_deref_mut() {
+                m.admission.wave_ground_only[1] += 1;
+            }
+            let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
+            while self.contact_cursor < edge.pow(3) * actors {
+                let subcell = self.contact_cursor / actors;
+                // No body can remain in this subcell. Preserve the canonical
+                // ground cursor before attempting a possibly deferred claim.
+                self.contact_cursor = subcell * actors + count;
+                let q = [
+                    p[0] + (subcell % edge) as i32,
+                    p[1] + (subcell / edge % edge) as i32,
+                    p[2] + (subcell / (edge * edge)) as i32,
+                ];
+                if !self.ground_contact(
                     w,
                     q,
                     hit.pressure,
@@ -2164,7 +2302,8 @@ impl Explosion {
             let mut apply = true;
             if total >= material_work(m, c) {
                 if let Some(m) = matter.as_deref_mut().filter(|_| c.material_energy_j > 0) {
-                    match m.ground(w, q, self.at) {
+                    let at = self.at;
+                    match self.claim_energy(m, false, |m| m.ground(w, q, at)) {
                         matter::ClaimResult::Applied => (),
                         matter::ClaimResult::Unaffordable | matter::ClaimResult::Indestructible => {
                             apply = false
@@ -2342,6 +2481,10 @@ pub struct CollapseWork {
 }
 
 pub struct BlastRange {
+    // Derived once from the constructed layout; never part of tick work.
+    motion_defaults: Vec<motion_tuning::Values>,
+    debris_defaults: modding::tuning::Blast,
+    material_defaults: Vec<material_tuning::DefaultValues>,
     pub battle: battle::Battle,
     pub combustion: fire::Combustion,
     pub heat_exchange: heat_exchange::Exchange,
@@ -2354,6 +2497,8 @@ pub struct BlastRange {
     /// layout says it; without a layout it is the stock [`SIZE`].
     size: [u32; 3],
     pub config: ExplosionConfig,
+    weapon_initial: ExplosionConfig,
+    weapon_configured: bool,
     pub tick: u32,
     pub shell: Option<[Fx; 3]>,
     velocity: [Fx; 3],
@@ -2585,6 +2730,36 @@ impl BlastRange {
         Ok(Self::build(config, Some(layout)))
     }
 
+    /// Replace an experiment in place. All recoverable validation happens
+    /// before moving the old world; errors leave the experiment usable.
+    /// Authored layouts retain AI tuning. The layout-less factory retains
+    /// its legacy defaults, just as a newly constructed experiment does.
+    pub fn reset_world(
+        &mut self,
+        config: ExplosionConfig,
+        layout: Option<RangeLayout>,
+        validator: &placement::Validator,
+    ) -> Result<(), String> {
+        let next = self.reset_candidate(config, layout, validator)?;
+        *self = next;
+        Ok(())
+    }
+    // On success the caller commits immediately. Runtime can move the existing
+    // navigation pool into the candidate before discarding the old experiment.
+    fn reset_candidate(
+        &mut self,
+        config: ExplosionConfig,
+        layout: Option<RangeLayout>,
+        validator: &placement::Validator,
+    ) -> Result<Self, String> {
+        if let Some(layout) = layout {
+            self.rebuilt_with_layout(config, layout, validator)
+        } else {
+            config.validate()?;
+            Ok(Self::new(config))
+        }
+    }
+
     /// Reuse the occupancy allocation, restoring only damaged or reauthored
     /// columns. Validation precedes mutation: errors preserve the old scene.
     /// On success the caller must replace/discard `self` immediately; its world
@@ -2605,10 +2780,12 @@ impl BlastRange {
         validator: &placement::Validator,
         mut completed: impl FnMut(&'static str),
     ) -> Result<Self, String> {
+        config.unit_ablation_resistance = layout.unit_resistance;
+        config.validate()?;
+        let ai_tuning = self.battle.ai.tuning;
+        ai_tuning.validate()?;
         let terrain = validator.prepare(&layout).map_err(|e| e.to_string())?;
         completed("validate");
-        config.unit_ablation_resistance = layout.unit_resistance;
-        let ai_tuning = self.battle.ai.tuning.clone();
         let Some(old) = self.layout.as_ref().filter(|old| old.size == layout.size) else {
             let world = World::new(
                 layout.size[0],
@@ -2627,7 +2804,8 @@ impl BlastRange {
                 world,
                 &mut completed,
             );
-            next.configure_enemy_ai(ai_tuning)?;
+            next.configure_enemy_ai(ai_tuning)
+                .expect("validated AI tuning");
             completed("ai");
             return Ok(next);
         };
@@ -2649,7 +2827,8 @@ impl BlastRange {
             world,
             &mut completed,
         );
-        next.configure_enemy_ai(ai_tuning)?;
+        next.configure_enemy_ai(ai_tuning)
+            .expect("validated AI tuning");
         completed("ai");
         Ok(next)
     }
@@ -2796,7 +2975,15 @@ impl BlastRange {
             streams.tuning.laser = motion::spider_tuning().laser.clone();
         }
         let navigation_workers = default_navigation_workers(units.len());
+        let motion_defaults = units
+            .iter()
+            .chain(std::iter::once(&gun))
+            .map(|u| motion_tuning::values(&u.motion))
+            .collect();
         let mut result = Self {
+            motion_defaults,
+            debris_defaults: matter.tuning,
+            material_defaults: material_tuning::defaults(&matter.economy.mats),
             battle,
             combustion,
             streams,
@@ -2818,6 +3005,8 @@ impl BlastRange {
             world,
             size,
             fire_tick: config.fire_tick,
+            weapon_initial: config,
+            weapon_configured: false,
             config,
             tick: 0,
             shell: None,
@@ -2910,7 +3099,19 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_contact_resumes() {
+        let version = if self.has_wave_energy() {
+            59
+        } else if self.weapon_configured {
+            58
+        } else if self.matter.density_history {
+            57
+        } else if self.has_material_tuning() {
+            56
+        } else if self.has_debris_tuning() {
+            55
+        } else if self.has_motion_tuning() {
+            54
+        } else if self.has_contact_resumes() {
             53
         } else if self.has_elevation() {
             52
@@ -2923,9 +3124,38 @@ impl BlastRange {
         b.bool(self.extended);
         b.bool(self.witness);
         b.u32(self.fire_tick);
+        if version >= 59 {
+            b.bool(self.weapon_configured);
+        }
+        if version >= 58 {
+            weapon_configuration::save(&self.weapon_initial, &mut b);
+            weapon_configuration::save(&self.config, &mut b);
+        }
         b.bool(self.layout.is_some());
         if let Some(r) = &self.layout {
             b.u8s(r.to_ron().expect("validated layout").as_bytes());
+        }
+        let material_format = if self.matter.density_history {
+            57
+        } else if self.has_material_tuning() {
+            56
+        } else {
+            0
+        };
+        if version >= 58 {
+            b.u8(material_format);
+        }
+        if version >= 56 {
+            if version < 58 || material_format != 0 {
+                self.save_material_tuning(&mut b);
+            }
+            b.bool(self.has_debris_tuning());
+        }
+        if version >= 55 {
+            if self.has_debris_tuning() {
+                self.save_debris_tuning(&mut b);
+            }
+            b.bool(self.has_motion_tuning());
         }
         self.turret.save(&mut b);
         b.bool(self.player);
@@ -3048,6 +3278,15 @@ impl BlastRange {
     /// the whole tail after the version-30 layout for a snapshot, and the
     /// part a test cuts off to forge an older one.
     fn save_after(&self, b: &mut fx::blob::Blob, version: u32) {
+        let motion_tuned = self.has_motion_tuning();
+        let debris_tuned = self.has_debris_tuning();
+        let material_tuned = self.matter.density_history || self.has_material_tuning();
+        let energy_split = self.has_wave_energy();
+        let tuned = self.weapon_configured
+            || motion_tuned
+            || debris_tuned
+            || material_tuned
+            || energy_split;
         if version < 31 {
             self.streams.save(b);
         }
@@ -3092,7 +3331,8 @@ impl BlastRange {
             self.battle.save_wave_contacts(b);
         }
         if version < 49
-            && (self.has_contact_resumes()
+            && (tuned
+                || self.has_contact_resumes()
                 || !self.kinetic.jobs.is_empty()
                 || self.gun.kind.canister()
                 || self
@@ -3101,7 +3341,17 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if self.has_contact_resumes() {
+            let format = if energy_split {
+                59
+            } else if self.weapon_configured {
+                58
+            } else if material_tuned {
+                56
+            } else if debris_tuned {
+                55
+            } else if tuned {
+                54
+            } else if self.has_contact_resumes() {
                 53
             } else if self.has_elevation() {
                 52
@@ -3112,11 +3362,17 @@ impl BlastRange {
             };
             self.kinetic.save_as(b, format);
         }
-        if version < 52 && (self.has_contact_resumes() || self.has_elevation()) {
+        if version < 52 && (tuned || self.has_contact_resumes() || self.has_elevation()) {
             self.save_laser_tracking(b);
         }
-        if version < 53 && self.has_contact_resumes() {
+        if version < 53 && (tuned || self.has_contact_resumes()) {
             self.save_contact_resumes(b);
+        }
+        if version < 54 && motion_tuned {
+            self.save_motion_tuning(b);
+        }
+        if version < 59 && energy_split {
+            self.save_wave_energy(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3187,12 +3443,30 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=53).contains(&version) {
+        if !(27..=59).contains(&version) {
             return None;
         }
         let extended = s.bool();
         let witness = s.bool();
         let fire_tick = s.u32();
+        let weapon_configured = if version >= 59 {
+            match s.u8() {
+                0 => false,
+                1 => true,
+                _ => return None,
+            }
+        } else {
+            version >= 58
+        };
+        let (config, configured) = if version >= 58 {
+            let initial = weapon_configuration::load(&mut s)?;
+            let current = weapon_configuration::load(&mut s)?;
+            initial.validate().ok()?;
+            current.validate().ok()?;
+            (initial, Some(current))
+        } else {
+            (config, None)
+        };
         let mut r = if s.bool() {
             let data = s.u8s();
             if data.len() > 65536 {
@@ -3205,6 +3479,54 @@ impl BlastRange {
             .ok()?
         } else {
             Self::build_scene(config, None, extended, witness)
+        };
+        if let Some(current) = configured {
+            // The constructor's pack and world limits come from the saved base.
+            if r.config != config
+                || r.layout
+                    .as_ref()
+                    .is_some_and(|l| current.unit_ablation_resistance != l.unit_resistance)
+            {
+                return None;
+            }
+            if !weapon_configured && current != r.config {
+                return None;
+            }
+            r.config = current;
+            r.weapon_configured = weapon_configured;
+        }
+        let material_format = if version >= 58 {
+            match s.u8() {
+                n @ (0 | 56 | 57) => n,
+                _ => return None,
+            }
+        } else {
+            version as u8
+        };
+        let debris_tuned = if version >= 56 {
+            if material_format >= 56 {
+                r.load_material_tuning(&mut s, material_format == 57)?;
+            }
+            match s.u8() {
+                0 => false,
+                1 => true,
+                _ => return None,
+            }
+        } else {
+            version == 55
+        };
+        let motion_tuned = if version >= 55 {
+            // The following body/debris loaders validate against these ceilings.
+            if debris_tuned {
+                r.load_debris_tuning(&mut s)?;
+            }
+            match s.u8() {
+                0 => false,
+                1 => true,
+                _ => return None,
+            }
+        } else {
+            version == 54
         };
         if version < 51 && (r.gun.kind.canister() || r.units.iter().any(|u| u.kind.canister())) {
             return None;
@@ -3673,6 +3995,12 @@ impl BlastRange {
         if version >= 53 {
             r.load_contact_resumes(&mut s)?;
         }
+        if motion_tuned {
+            r.load_motion_tuning(&mut s)?;
+        }
+        if version >= 59 {
+            r.load_wave_energy(&mut s)?;
+        }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
             return None;
@@ -3707,27 +4035,35 @@ impl BlastRange {
             && self.world.queued() == 0
             && self.units.iter().all(|u| u.section.is_none())
     }
-    pub fn refire(&mut self) -> bool {
+    fn refire_inner(&mut self) -> bool {
         if !self.ready() {
             return false;
         }
-        self.fire_tick = self.tick + self.config.charge_ticks + 1;
+        let Some(fire_tick) = self
+            .tick
+            .checked_add(self.config.charge_ticks)
+            .and_then(|t| t.checked_add(1))
+            .filter(|&t| t < u32::MAX)
+        else {
+            return false;
+        };
+        self.fire_tick = fire_tick;
         self.impact = None;
         self.explosion = None;
         true
     }
 
-    pub fn control(&mut self) {
+    fn control_inner(&mut self) {
         if !self.player && self.impact.is_none() && self.shell.is_none() {
             self.fire_tick = u32::MAX;
         }
         self.player = true;
     }
-    pub fn order_move(&mut self, to: [i32; 2]) -> bool {
+    fn order_move_inner(&mut self, to: [i32; 2]) -> bool {
         if self.gun.kind.emplacement() {
             return false;
         }
-        self.control();
+        self.control_inner();
         self.gun.motion.route.clear();
         let rubble = self.current_rubble();
         let accepted = self.gun.motion.move_to(
@@ -3744,22 +4080,28 @@ impl BlastRange {
         self.manual_route = accepted && self.gun.motion.destination.is_some();
         accepted
     }
-    pub fn order_attack(&mut self, id: usize) -> bool {
+    fn order_attack_inner(&mut self, id: usize) -> bool {
         if id >= self.units.len() || !self.units[id].status.alive {
             return false;
         }
-        self.set_auto_attack(false);
-        self.control();
+        self.set_auto_attack_inner(false);
+        self.control_inner();
+        if self.attack.is_some_and(|old| old != id) {
+            self.cancel_target_stream();
+        }
         self.attack = Some(id);
         true
     }
     /// All placed range units are targets. Team rules belong to the battle
     /// scenario; this mode never retargets a manual order (ADR-338).
-    pub fn set_auto_attack(&mut self, enabled: bool) {
+    fn set_auto_attack_inner(&mut self, enabled: bool) {
         if self.auto_attack && !enabled && !self.manual_route && self.stream_tuning().is_some() {
             self.gun.motion.stop();
         }
         if self.auto_attack || enabled {
+            if self.attack.is_some() {
+                self.cancel_target_stream();
+            }
             self.attack = None;
             // Cancel a charged but unfired automatic round. A flying round
             // and its explosion remain physical events when the mode ends.
@@ -3769,7 +4111,7 @@ impl BlastRange {
         }
         self.auto_attack = enabled && self.layout.is_some();
         if self.auto_attack {
-            self.control();
+            self.control_inner();
         }
     }
     fn reload_ticks(&self) -> u32 {
@@ -3791,7 +4133,7 @@ impl BlastRange {
             return;
         }
         if !self.gun.status.alive || !self.gun.status.weapon {
-            self.set_auto_attack(false);
+            self.set_auto_attack_inner(false);
             return;
         }
         let radius = self
@@ -3816,6 +4158,9 @@ impl BlastRange {
             .filter_map(|id| distance(id).map(|d| (d, id)))
             .min()
             .map(|(_, id)| id);
+        if self.attack.is_some() {
+            self.cancel_target_stream();
+        }
         self.attack = None;
         if self.stream_tuning().is_some()
             && !self.manual_route
@@ -3880,8 +4225,8 @@ impl BlastRange {
         false
     }
     /// Отмена приказа: цель снята, машина останавливается.
-    pub fn order_stop(&mut self) {
-        self.set_auto_attack(false);
+    fn order_stop_inner(&mut self) {
+        self.set_auto_attack_inner(false);
         self.attack = None;
         self.manual_route = false;
         self.gun.motion.stop();
@@ -3892,15 +4237,17 @@ impl BlastRange {
     }
     /// Пуск и остановка маршрутов мишеней.
     pub fn toggle_patrols(&mut self) {
-        self.patrols_running = !self.patrols_running;
+        self.execute_command(battle::commands::Command::SetPatrols {
+            enabled: !self.patrols_running,
+        });
     }
     /// Выстрел по точке земли вместо тела: прежняя цель снимается.
     /// Возвращает `false`, если орудие ещё занято.
-    pub fn order_ground_fire(&mut self, at: [i32; 3]) -> bool {
-        self.set_auto_attack(false);
+    fn order_ground_fire_inner(&mut self, at: [i32; 3]) -> bool {
+        self.set_auto_attack_inner(false);
         self.attack = None;
         self.aim = Some(at);
-        self.refire()
+        self.refire_inner()
     }
     /// Замена пресета оружия.
     ///
@@ -3909,11 +4256,9 @@ impl BlastRange {
     /// что забыть его на стороне вызывающего — значит молча обнулить
     /// стойкость мишеней при каждом переключении.
     pub fn reconfigure(&mut self, config: ExplosionConfig) {
-        self.config = config;
-        if let Some(r) = &self.layout {
-            self.config.unit_ablation_resistance = r.unit_resistance;
-        }
+        self.execute_command(battle::commands::Command::ConfigureWeapon { config });
     }
+
     pub fn step(&mut self) {
         self.step_observed(|_| {});
     }
@@ -4015,6 +4360,7 @@ impl BlastRange {
     ) {
         self.surface_changed.clear();
         self.shield_hits.clear();
+        self.reserve_pending_damage();
         self.reserve_thermal_fragments();
         let changed = self.refresh_rubble(&physics_detail);
         completed("rubble");
@@ -4359,19 +4705,14 @@ impl BlastRange {
         detail("motion_contacts");
         // Hulls cut yielding vegetation along their path; the crown that
         // hung from those cells follows over the next ticks.
-        let cuts: Vec<(Vec<[u32; 3]>, [i32; 3])> = self
+        let cuts = self
             .units
             .iter()
             .chain((!self.battle_mode()).then_some(&self.gun))
             .filter(|u| u.status.alive && !u.motion.cut.is_empty())
-            .map(|u| (u.motion.cut.clone(), u.at))
-            .collect();
-        for (cut, at) in cuts {
-            self.matter
-                .fell(&mut self.world, &cut, at, &self.navigation.fell);
-        }
+            .map(|u| (u.motion.cut.as_slice(), u.at));
         self.matter
-            .step_felling(&mut self.world, &self.navigation.fell);
+            .felling_phase(&mut self.world, cuts, &self.navigation.fell);
         detail("motion_felling");
         if battle_mode {
             completed("motion");
@@ -4405,6 +4746,7 @@ impl BlastRange {
             }
             if let Some(id) = self.attack {
                 if !self.units[id].status.alive {
+                    self.cancel_target_stream();
                     self.attack = None;
                     if !self.manual_route && self.stream_tuning().is_some() {
                         self.gun.motion.stop();
@@ -4419,7 +4761,7 @@ impl BlastRange {
                         && (self.fire_tick == u32::MAX
                             || (self.impact.is_some() && self.tick >= self.impact_tick + reload))
                     {
-                        self.refire();
+                        self.refire_inner();
                     }
                 }
             }
@@ -4541,7 +4883,14 @@ impl BlastRange {
                         );
                         self.matter
                             .begin(self.config.material_energy_j, self.config.fragment_box);
-                        self.explosion = Some(Explosion::begin(at, &self.config, &self.units));
+                        self.explosion = Some(Explosion::begin_impact(
+                            &self.world,
+                            at,
+                            from,
+                            &self.config,
+                            &self.units,
+                            self.matter.tuning.body_energy_pct,
+                        ));
                         self.shell = None;
                     }
                 } else if !in_flight_bounds(q, self.size, self.velocity[1], gravity) {
@@ -4580,6 +4929,8 @@ impl BlastRange {
                 }
             }
             completed("capture");
+            self.reserve_pending_damage();
+            self.reserve_thermal_fragments();
             if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
                 let before: Vec<_> = self
                     .units
@@ -4656,6 +5007,7 @@ impl BlastRange {
         }
         self.step_unit_heat_observed(&mut detail, &|_, event| physics_detail(5, event));
         detail("heat_units");
+        self.reserve_pending_damage();
         self.reserve_thermal_fragments();
         self.world.flush();
         self.world_changed = nav::vehicle::Changed::default();
@@ -5137,6 +5489,7 @@ impl Explosion {
             queued,
             wave,
             captured,
+            body_energy_mj: None,
         })
     }
 }
@@ -5711,9 +6064,26 @@ mod tests {
 
     #[test]
     fn range_sections_wait_atomically_resume_and_keep_mass_and_pose() {
+        check_range_sections_wait_atomically_resume_and_keep_mass_and_pose(false);
+    }
+    #[test]
+    fn density_range_sections_wait_atomically_resume_and_keep_mass_and_pose() {
+        check_range_sections_wait_atomically_resume_and_keep_mass_and_pose(true);
+    }
+    fn check_range_sections_wait_atomically_resume_and_keep_mass_and_pose(tune_density: bool) {
         let c = config();
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         let mut a = BlastRange::with_layout(c.clone(), layout).unwrap();
+        if tune_density {
+            assert_eq!(
+                a.execute_command(battle::commands::Command::TuneMaterial {
+                    material: 3,
+                    field: battle::commands::MaterialField::Density,
+                    value: modding::MAX_DENSITY,
+                }),
+                battle::commands::Outcome::Applied
+            );
+        }
         a.control();
         a.patrols_running = false;
         let initial = a.units[0].body.solid_count();
@@ -5736,6 +6106,13 @@ mod tests {
         for mut budget in [1, 40, 100] {
             let u = &mut a.units[0];
             u.section.as_mut().unwrap().advance(&u.body, &mut budget);
+            if tune_density {
+                a.execute_command(battle::commands::Command::TuneMaterial {
+                    material: 3,
+                    field: battle::commands::MaterialField::Density,
+                    value: 1,
+                });
+            }
             let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
             assert_eq!(a.state_hash(), restored.state_hash(), "partial extraction");
         }
@@ -5748,8 +6125,11 @@ mod tests {
         assert!(a.units[0].section.as_ref().unwrap().ready());
         let snapshot = a.snapshot();
         let mut b = BlastRange::restore(c, &snapshot).unwrap();
-        a.matter.tuning.max_flying = b.matter.tuning.max_flying;
+        assert_eq!(b.matter.tuning.max_flying, 0);
         assert_eq!(a.state_hash(), b.state_hash());
+        // Reopening capacity is explicit; restore preserves the closed ceiling.
+        a.matter.tuning.max_flying = a.debris_defaults.max_flying;
+        b.matter.tuning.max_flying = a.matter.tuning.max_flying;
         let frame = a.units[0].pose;
         for _ in 0..40 {
             a.step();
@@ -5903,7 +6283,7 @@ mod tests {
         assert!(high * 100 <= low * 125, "a ray is far off: {radii:?}");
     }
     #[test]
-    fn heavy_shell_scars_steel_cover_without_hitting_the_sheltered_tank() {
+    fn surface_shell_preserves_stock_steel_shielding_and_heavy_blast_wraps_its_edges() {
         let mut layout =
             RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
         layout.course = None;
@@ -5923,14 +6303,36 @@ mod tests {
         heavy.material_energy_j *= 4;
         for (c, should_chip) in [(&mut stock, false), (&mut heavy, true)] {
             let mut sim = BlastRange::with_layout(c.clone(), layout.clone()).unwrap();
+            let mut steel = 0;
+            let mut soil = 0;
             for _ in 0..240 {
                 sim.step();
+                for &(edit, before) in sim.world.completed() {
+                    if edit.mat == 0 {
+                        steel += usize::from(before == 3);
+                        soil += usize::from(matches!(before, 1 | 7 | 8));
+                    }
+                }
             }
             assert!(sim.impact.is_some());
-            assert_eq!(sim.removed > 0, should_chip);
+            eprintln!(
+                "steel cover heavy={should_chip} steel={steel} soil={soil} body={}",
+                sim.units[0].removed.len() + sim.units[0].seg_removed.len()
+            );
             assert_eq!(
-                sim.units[0].removed.len() + sim.units[0].seg_removed.len(),
-                0
+                steel > 0,
+                should_chip,
+                "count steel separately from adjacent soil"
+            );
+            assert!(
+                soil > 0,
+                "the exposed ground must receive the surface pulse"
+            );
+            // This finite wall has open upper and side edges. A strong
+            // exterior pulse can go around them; the stock pulse cannot.
+            assert_eq!(
+                sim.units[0].removed.len() + sim.units[0].seg_removed.len() > 0,
+                should_chip
             );
             assert!(sim.units[0].status.alive);
             assert!(
@@ -6434,7 +6836,24 @@ mod tests {
     /// the body no longer has it.
     #[test]
     fn a_leg_whose_mount_is_gone_falls_off_whole() {
+        check_a_leg_whose_mount_is_gone_falls_off_whole(false);
+    }
+    #[test]
+    fn density_a_leg_whose_mount_is_gone_falls_off_whole() {
+        check_a_leg_whose_mount_is_gone_falls_off_whole(true);
+    }
+    fn check_a_leg_whose_mount_is_gone_falls_off_whole(tune_density: bool) {
         let mut a = BlastRange::with_layout(config(), walker_layout()).unwrap();
+        if tune_density {
+            assert_eq!(
+                a.execute_command(battle::commands::Command::TuneMaterial {
+                    material: 3,
+                    field: battle::commands::MaterialField::Density,
+                    value: modding::MAX_DENSITY,
+                }),
+                battle::commands::Outcome::Applied
+            );
+        }
         a.control();
         let leg = a.units[0].body.legs[0];
         let thigh = leg.thigh as usize;
@@ -6484,7 +6903,7 @@ mod tests {
             .sum();
         assert!(shed >= leg_cells, "shed {shed} of {leg_cells} leg cells");
         assert!(a.matter.economy.ledger.balanced());
-        let amount = a.matter.economy.per_voxel(3);
+        let amount = 785;
         assert_eq!(
             a.matter.economy.ledger.held(a.matter.body_container(0)),
             held - (u64::from(shed) + mounts.len() as u64) * amount
@@ -6807,7 +7226,10 @@ mod tests {
             at: [300, FLOOR, 336],
         }];
         layout.target = [286, 20, 336];
-        let mut a = BlastRange::with_layout(config(), layout).unwrap();
+        let mut charge = config();
+        // Keep this historical shove's 18 MJ body budget under the 40/60 split.
+        charge.material_energy_j = 45_000_000;
+        let mut a = BlastRange::with_layout(charge, layout).unwrap();
         assert!(a.config.hull_impulse_milli > 0, "the shell must push");
         let start = a.units[0].motion.pos;
         let mut impact = None;
@@ -6867,6 +7289,8 @@ mod tests {
             course.patrols.clear();
         }
         let mut charge = config();
+        // Keep this historical shove's 18 MJ body budget under the 40/60 split.
+        charge.material_energy_j = 45_000_000;
         charge.energy *= 4;
         let mut a = BlastRange::with_layout(charge, layout).unwrap();
         for _ in 0..300 {
@@ -8519,7 +8943,8 @@ mod tests {
         assert!(a.units[0].status.alive && a.units[0].section.is_some());
         let restored = BlastRange::restore(c.clone(), &a.snapshot()).unwrap();
         assert_eq!(a.state_hash(), restored.state_hash());
-        a.matter.tuning.max_flying = restored.matter.tuning.max_flying;
+        assert_eq!(restored.matter.tuning.max_flying, 0);
+        a.matter.tuning.max_flying = a.debris_defaults.max_flying;
         for _ in 0..40 {
             a.step();
             if a.units[0].section.is_none() {

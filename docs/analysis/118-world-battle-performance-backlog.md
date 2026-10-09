@@ -1,6 +1,221 @@
 # Производительность боя на всей карте: аудит и отдельный бэклог
 
-Обновлено: 06.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
+Уточнение237: [почему разрушение растягивается и что можно считать пакетно](237-explosion-batch-latency.md).
+EP-04–06 включает component admission грунта и локальные зависимости collapse:
+дешёвый повтор NoRoom не ускоряет само удаление. В CSV236 collapse ждёт непрерывно
+3436 тиков; это прогресс общей очереди, не latency отдельного снаряда и не FPS.
+Предложение ещё не внедрено; квоты, matter ownership и deterministic commit сохраняют
+явный контракт. Подробный порядок и приёмка находятся в 237 и плане 200.
+
+Актуальный порядок от09.10.2026: [оптимизация236](236-rubble-column-sorting.md),
+[пересмотренный план с зависимостями и приёмкой](200-engine-performance-plan.md).
+[Повторный анализ215](215-engine-performance-review.md) — полный CPU/native
+срез до исправления разрушения почвы233–235.
+[Аудит 199](199-engine-performance-audit.md) сохранён как история до 201–214.
+В ревизии 215 headless mean — **13,149 мс**, позднее окно — **16,570 мс**;
+ordinary-пара — **70,87/68,37 FPS**, p99 **33,616/35,393 мс**, по
+3600 тиков/120 секунд с прежним physical hash. Ни 165 FPS, ни устойчивый
+прогресс миллионных физических очередей этим не подтверждены.
+
+Функциональный baseline после235:60 юнитов/3600 тиков ИИ×ИИ,
+hash `bd7ada90567d88ab`,1515348 снятых почвенных вокселей, одинаковые1/8
+workers и replay. Свежий headless замер до236 на8 workers:
+p50/p95/p99 =22,618/29,330/31,393мс. Прежний native FPS не является
+приёмкой этой физической нагрузки. Пакет236 сокращает стоимость общей
+карты обломков, сохраняя точные столбцы; capacity/release, физический
+прогресс и ограниченная публикация остаются открытыми.
+
+Ближайшие результаты: общий owner/read model в самом игровом окне и
+ограниченная публикация; отдельно — capacity/release и прогресс collapse/felling.
+Журнал не должен откладывать все product readers до завершения durable archive.
+Следующая CPU-работа выбирается по актуальному профилю движения/debris/rubble,
+а не старым 25,43% волн или уже устранённому повторному focus-fire score.
+Статусы WBPERF не закрываются фактом анализа. Рекомендации «следующий шаг»
+в истории пакетов ниже относятся к моменту каждого пакета; актуальный порядок — в 200.
+
+Пакет [234](234-artillery-terrain-admission.md), ADR-639: ожидающее материальное
+повреждение получает долю свободных flying/working мест при конкуренции
+с валкой, тепловым прогнозом и wake. Нечётный slot чередуется по tick;
+сценарных условий и увеличения ceilings нет. Проверены настоящая воронка
+на поверхности от ИИ при продолжающейся валке, ограниченная вместимость,
+ledger и replay. WBPERF-017/026 продвинуты; remaining release/wait,
+дренаж очередей и стоимость debris/rubble остаются открытыми. Итоговые
+числа большого боя и полная приёмка находятся в отчёте234.
+
+Приёмка234: 1045 headless/data и 166 UI tests, replay3300→3600 и
+совпадение одного/восьми workers. Оплаченные ground claims выросли
+40619→717763; фактическая почва от всего оружия — 728085→1450345.
+На восьми workers p50 headless тика 24,007 мс, p99 33,129 мс; это дороже
+прежней заблокированной физики. Native FPS не измерен; 11,48 млн capacity
+retries и 7 waves остаются основанием для дальнейшей работы по плану200.
+
+Пакет [233](233-artillery-terrain-energy.md), ADR-638: общий материальный
+взрыв игрока/ИИ разделяет body/ground энергию через существующие данные.
+На репродукции обычная артиллерия после попаданий в танк теперь снимает
+почву; до исправления весь запас уходил корпусу. Snapshot59 сохраняет
+остаток резерва каждой активной волны. Физическое поведение и исходы могут
+измениться; прежние FPS/хеши не доказывают новую приёмку. Продвижение crater
+контактов при полном пуле остаётся открытым. Все 1036 headless/data и
+17 целевых artillery tests, 165 UI tests и большой бой 60 юнитов/3600 тиков
+прошли; replay 3300→3600 совпал, hash `91232229c4302cb6`. Старые четыре
+architecture failures/46 диагностик без добавлений. Ground claims 40619,
+отказов по энергии 0, capacity retries 12915422; 12 волн ещё незавершены.
+Последнее окно оплатило 2296 ground claims: прогресс есть, но ограничение
+пула и release/wait dependencies не устранены. Сборка игры обновлена.
+Полные запасы фугаса/Т2 в данных сохраняют прежнюю энергию корпуса и
+оплачивают грунт отдельно; прежние профили 215/232 не заменяют измерений
+новой физической нагрузки.
+
+Пакет [232](232-engine-owned-terrain-rows.md), ADR-637: начальное окно,
+entering slabs и staging/repair terrain получают общий owned Row/Changes.
+Raw материалы, ceilings и sparse work/cost принадлежат publication; packing
+workers не читают мир. Request/Budget проверяются до копирования. Staging
+сохраняет восемь строк за кадр; entering slabs ограничены колонками восьми
+полных строк, поэтому узкие полосы группируются. Late changes/shadow uploads,
+generation guards и repairs после смены costs сохранены/проверены.
+Следующие границы — visible terrain patches/occupancy, distant/minimap,
+затем остальные geometry/effects и общий coherent publication перед owner.
+Полная приёмка 232: 1033 headless/data и 164 UI pass;
+прежние четыре architecture failures/46 диагностик без добавлений. Явный
+air-padding contract сохраняет окна вне мира; исходная staged-shadow/reset
+регрессия и семь новых engine tests проходят без ослабления.
+Late export восьми строк: reuse/capture/drop 2028,399/
+2066,037/3,312 мкс,
+logical batch 686528 bytes; это не RSS и не direct-copy speedup.
+Три stock боя сохраняют 25 fields/hash и late replay; mean step
+13,241→13,339/13,323 мс.
+Заранее заданные три ordinary пары: медианы 69,9→68,7 FPS,
+p99 33,562→33,587 мс; valid/eligible/tempo и gate 3% сохранены.
+Отдельная camera-tour пара valid для диагностики, но не eligible/tempo:
+3537/3566 тиков вместо 3600.
+Staging и shift стали дороже; ускорение не подтверждено, подробные фазы
+и первоначальный отказ агрегатора сохранены в 232. Native gate не ослаблен.
+Устойчивое ускорение, полный export, owner/lifecycle, память поколений
+и 165 FPS ещё не доказаны/не завершены.
+
+Пакет [231](231-engine-owned-unit-geometry.md), ADR-636: witness worker
+и coordinator используют общий owned export metadata, bounded removed
+samples и on-demand body/segments/damage/config. Тела армии не копируются
+каждый кадр; прежние два jobs, source order и reset guards сохранены.
+WBPERF-002/020 остаются частичными: terrain/surface и остальные geometry,
+pose/occupancy/effects readers, coherent publication и отдельный owner
+не завершены. Проверки и сравнительная приёмка — в отчёте 231.
+1026 headless/data и 162 UI pass;
+прежние четыре architecture failures/46 диагностик. На 60 units metadata
+4120 bytes, поздний refresh 0,204 мкс;
+mesh capture/drop 3,346/0,870 мкс,
+private pair 671872 bytes без shared/capacity/BTree
+node overhead. Три боя сохраняют все 25 fields/hash и late replay; mean
+step 13,304→13,347/13,399 мс.
+Первая финальная native пара не прошла FPS gate: 70,1→67,7 FPS (−3,424%).
+Из-за разброса идентичного frozen control 67,1/70,1 FPS заранее объявлены
+две дополнительные пары с переменой порядка, без изменения кода/порога.
+Медианы всех трёх пар 68,5→70,2 FPS,
+p99 33,699→33,342 мс проходят gate 3%, tempo/hash сохранены.
+Первый отказ и все запуски включены в отчёт; первоначальный однопарный
+критерий не пройден. Малую регрессию эти короткие серии не исключают.
+Устойчивое ускорение и полная память поколений не доказаны; EP-02/03 и
+165 FPS ещё открыты.
+
+Пакет [230](230-engine-world-reset-lifecycle.md), ADR-635: общий
+синхронный reset связывает замену мира, epoch и Inbox. Старые результаты
+возвращаются вместе с явной отменой pending команд/AI plans; ошибки
+до commit сохраняют прежнее состояние. Пул навигации переносится,
+равные authored размеры сохраняют occupancy allocation; product reset
+использует общий kernel и checked generation. WBPERF-002/016/020 остаются
+частичными: geometry/terrain export, включение owner в Scene и перенос
+из кадра, async jobs/cancellation и durable retirement journal открыты.
+1020 headless/data и 160 UI pass; прежние четыре architecture failures
+и 46 диагностик. Три stock боя сохраняют 25 потиковых полей/hash и late
+restore; mean step 13,323→13,389/13,460 мс. Ordinary пара 69,7→69,6 FPS,
+p99 33,342→33,148 мс при прежних tempo/hash прошла gate 3%.
+Полная приёмка относительно frozen 229 — в отчёте 230; устойчивое
+ускорение обычного боя этим структурным переходом не подтверждено.
+
+Пакет [229](229-engine-manual-gun-commands.md), ADR-634: управление ручным
+орудием и патрули проходят общий executor и portable checkpoint; owner
+принимает обычный полигон. ScenarioRun больше не пишет aim/patrols напрямую.
+Результат Busy сохраняет прежнюю смену цели без заряда, invalid aim атомарен,
+срок заряда проверяется на overflow/sentinel. Внутренние автооперации и
+lifecycle не создают дополнительные команды игрока. WBPERF-002/016/020
+остаются частичными: reset/epoch, geometry/terrain export и выделение owner
+из кадра впереди; gun/actor equivalence и scenario runner остаются EP-12.
+1013 headless/data и 159 UI-проверок прошли; stock бой, late restore,
+25 потиковых полей и hash совпали. Архитектурные 4 failures/46 диагностик
+прежние. Mean step 13,334→13,414/13,483 мс; одна ordinary пара
+71,4→69,6 FPS, p99 33,201→33,575 мс при прежнем tempo/hash. Заданный
+допуск 3% пройден, но ускорение не показано; замер кандидата медленнее.
+
+Пакет [216](216-engine-hud-read-model.md): первый product read model общего
+движка используется HUD и маркерами миникарты без доступа к Scene. Публикация
+учитывает изменения между тиками и reset; фон миникарты обновляется после
+rebuild. WBPERF-002/020 остаются частичными: полный geometry/terrain export,
+product writers и отдельный owner не завершены. Три ordinary A/B пары:
+медиана FPS 69,5→69,6, p99 33,867→33,867 мс; все шесть запусков сохраняют
+3600 ticks/120 s и hash. Ускорение FPS самим переносом читателей не объявляется.
+
+Пакет [217](217-engine-panel-read-model.md) убирает чтение Scene из основной
+панели. Подробный readout запрашивает отдельный Inspection только при открытии:
+закрытый раздел больше не пересчитывает resting fragments и не форматирует
+скрытый текст. Compact View остаётся независимым от размера истории материи;
+при 60 units его mean export 0,685–0,744 мкс, payload 5960 bytes. Все 25
+потиковых workload полей четырёх боёв и hash прежние. Полный read model,
+product writers и отдельный owner по-прежнему не завершены. Три native пары:
+медиана FPS 71,3→72,3, p99 33,290→33,400 мс, tempo/hash сохранены. Третья
+пара медленнее control; устойчивого ускорения окна серия не доказывает.
+
+Пакеты [218](218-engine-rubble-flank-queries.md) и
+[219](219-engine-fragment-geometry-table.md) сохранены как отрицательные
+эксперименты; их код убран после провала полного battle gate. В
+[220](220-engine-fragment-identity-transforms.md) сокращены только
+тождественные операции общего расчёта границ фрагментов. Mean tick четырёх
+боёв −0,16%, rubble −0,64%, но debris +0,38% и поздний tick +0,34%:
+устойчивое ускорение боя не доказано. Workload/hash прежние, миллионные
+очереди сохраняются; статусы WBPERF не закрываются этим локальным изменением.
+892 headless tests и late replay прошли; одна ordinary пара 74,6→73,9 FPS
+сохраняет tempo/hash, но роста FPS не показывает. Четыре architecture
+failures прежние.
+
+Пакет [221](221-engine-settings-read-model.md): чтение настроек переведено
+на owned Parameters, повторный разбор sim.ron для полей отсутствующего
+шагающего юнита устранён. Закрытый consumer не запрашивает снимок.
+894 headless и 292 render tests проходят; четыре полных боя и late replay
+сохраняют workload/hash. Export mean 0,206–0,226 мкс на 60 юнитах,
+product payload 2000 bytes. WBPERF-002/020 остаются частичными: product
+writers, geometry/terrain и отдельный owner впереди; четыре architecture
+failures прежние. Ускорение целого боя из микрозамера defaults не следует.
+Три ordinary native пары сохраняют tempo/hash и проходят допуск:
+медиана FPS 74,6→74,4, p99 32,843→32,615 мс. Рост FPS не подтверждён.
+
+Первый пакет внедрения — [201](201-engine-performance-first-implementation.md): сумма фаз/queue metrics/invariant CSV, общий capacity cache валки и сокращение повторного AI score work. Валка в контроле дешевле примерно на 49%, общий тик — на 1,1% в одной паре при прежнем hash. WBPERF-001/017/026/027 остаются частичными; политика неподвижных орудий отложена после нарушения проверки боевой активности, поток симуляции и дренаж очередей ещё не реализованы.
+
+Второй пакет — [202](202-engine-wave-lazy-geometry.md), ADR-608: общий wave path готовит narrow-phase maps только посещаемым телам и пропускает подготовку при пустых contacts после heap slice. Средний headless tick 16,463→15,009/14,907 мс (−8,8…9,5%), wave step −34,8…35,3%; hash, shots/damage и per-tick workload совпали. 728 sim-core tests passed, 0 failed. EP-04b/WBPERF-017 частичны: освобождение вместимости, дренаж очередей и native FPS этим не закрыты.
+
+Третий пакет — [203](203-engine-ground-continuations.md), ADR-609: общий kernel выводит отсутствие дальнейших body contacts из saved cursors, исключая повторные bounds/partition для грунтовой очереди. Относительно frozen 202 средний tick 14,985→13,464/13,504 мс (−9,9…10,1%), wave step −52,7%; hash, per-tick workload и физические окна урона совпали. 731 sim-core tests passed, 0 failed. EP-04b/WBPERF-017 остаются частичными: retries/ownership/quota прежние, physical capacity и дренаж очередей ещё открыты.
+
+Четвёртый пакет — [204](204-engine-rubble-rectangle-index.md), ADR-610: exact rectangle queries общей навигации используют производный bounds/max индекс поверх прежних sorted columns. Motion −3,9%, routes −6,0…6,2%, средний tick −0,9…1,0% с учётом build/free; устойчивого позднего ускорения нет. 842 nav/sim-core tests passed, 0 failed; hash и весь per-tick workload прежние. EP-07/08/WBPERF-003/005/011 частичны: active/sleep physics, полный rubble gather и admission не изменены.
+
+Пятый пакет — [205](205-engine-debris-hull-index.md), ADR-611: фазовый пространственный индекс корпусов для push/wake сохраняет точные воксельные контакты, первый source slot и ordered reservations. После отклонённого первого прототипа средние двух контролей/двух новых прогонов дают debris −4,5%, tick −0,9%; пиковые задержки остаются. EP-07/WBPERF-005/011 частичны: translation/support, active/sleep migration, полный gather и освобождение вместимости ещё открыты.
+
+Проверка [206](206-engine-roof-support-queries.md), ADR-612: roof index ускорил разреженный raw query microbench, но даже адаптивная версия дала полный tick +0,44%, debris +1,56% в четырёх AI runs. Физика и replay совпали; 848 тестов прошли. Оптимизация не принята, все 361 inputs рабочего движка восстановлены к 205. Следующая работа EP-07 требует выделить цену Settled и historical gather; перенос ещё одного скалярного цикла на дерево без выигрыша полного пути не закрывает WBPERF-005/011.
+
+Пакет [207](207-engine-compact-wake-actions.md), ADR-613: общий wake collector сохраняет только реальные push/unsupported actions с исходными slots, а predicates и ordered reservations прежние. В четырёх AI runs средние двух контролей/двух новых дают wake −13,7%, debris −3,2%, tick −1,0%; per-tick workload, физика и поздний replay совпали. 847 nav/sim-core tests passed, 0 failed. EP-07/WBPERF-005/011 частичны: полный predicate scan, Settled/rubble gather и active/sleep migration ещё открыты; native FPS не квалифицирован.
+
+Проверка [208](208-engine-translation-experiments.md), ADR-614: три варианта общего translation storage отклонены после 12 полных боёв. Компактные outputs, временный active input и reusable dense scratch дали полный tick +1,06%/+1,24%/+0,12%; даже небольшое снижение target phase не подтвердило ускорения всего шага. Все 25 per-tick workload fields и физическое состояние совпали, каждый prototype прошёл 848 тестов. Весь рабочий код возвращён к 207; этот разбор не закрывает WBPERF-005/011 и не добавляет новое ускорение. EP-02a/02b/03 и EP-04b/c сохраняют приоритет; следующая EP-07 гипотеза должна уменьшать полную работу истории, а не ещё раз перестраивать collector.
+
+Пакет [209](209-engine-shared-order-handler.md), ADR-615: первый структурный шаг EP-02a/WBPERF-002/016/020. Валидация и immediate применение боевых приказов игрока/ИИ общие; формация сохраняет budgeted очередь и использует общую валидацию/финальный commit. Текущие фазы, различия ручного Move и поддержания решения ИИ, активный Spider pulse и save/hash сохраняются. 850 nav/sim-core tests passed; четыре полных AI battles сохраняют все 25 workload fields и физические окна. Средний tick +0,11%, AI scope +0,250 мкс/tick — в заранее заданной цене adapter; ускорение не заявлено. Command journal, generations/ack, bounded drain, остальные writers/read model и отдельный владелец ещё открыты. Четыре прежних architecture failures подтверждены повторно; native FPS не квалифицирован.
+
+Пакет [210](210-engine-command-receipts.md), ADR-616: типизированный синхронный вход и Rejected/PathFailed/Unchanged/Applied/Queued, formation queue в общем executor, ограниченная запись исполнения с tick/phase/producer/sequence сессии. 854 nav/sim-core tests прошли; четыре обычных и один captured AI battle сохраняют 25 per-tick fields и физику. Capture содержит 11 682 records без пропусков; overflow явно сообщается без остановки команд. Средний default tick −0,39% не заявлен как устойчивый speedup. Запись диагностическая, не авторитетный command replay; внешний envelope/delivery/scheduler/ack, остальные writers, read model и владелец открыты. EP-02a/WBPERF-002/016/020 частичны, прежние четыре architecture failures сохраняются, native FPS не квалифицирован.
+
+Пакет [211](211-engine-command-runtime.md), ADR-617: bounded envelope/scheduler/ack для внешних боевых приказов в синхронный owner общего BlastRange. Epoch входит и в запрос, и в ID подтверждения; Full сохраняет принятые команды, checkpoint в памяти/hash включают Inbox. 861 tests; 11 полных боёв, прежние 25 workload fields/физические окна, direct/owned snapshots и pending replay 3300→3600 равны. Повторная серия после шумного control: mean tick 13,214→13,141 мс, structural gate пройден; устойчивый speedup не заявлен. UI, переносимый journal, whole-plan AI delivery/fallback, остальные writers и read model/threaded lifecycle открыты. EP-02a/WBPERF-002/016/020 остаются частичными; четыре прежних architecture failures подтверждены, native FPS не квалифицирован.
+
+Пакет [212](212-engine-ai-plan-delivery.md), ADR-618: whole enemy plan admission через общий engine validator и Rules adapter, shared IDs/sequence/capacity, retained selected/fallback Outcomes и terminal cancellation. 869 tests, восемь полных боёв; stock physical hash, 25 per-tick fields и damage windows прежние. Stock mean 13,193389→13,196574 мс (+0,024%), structural gate пройден. Direct/owned равны на 240 plans / 5982 decisions; pending replay 3300→3600 сохраняет также все 240 receipts. Внешнее observation до AfterMotion меняет выбранные входы относительно stock: это отдельный workload, его меньшее время не заявлено как speedup. Whole-plan delivery закрыта в пределах синхронного enemy ingress; portable journal/replay без policy, остальные writers/UI и read model/threaded lifecycle открыты. EP-02a/WBPERF-002/016/020 частичны; прежние четыре architecture failures и native FPS не закрыты, physics queues не дренированы.
+
+Пакет [213](213-engine-command-checkpoint.md), ADR-619: versioned portable checkpoint общего мира и authoritative Inbox, caller bounds/checksum и semantic guards загрузки. Pending/retained player/AI requests/results, IDs и watermarks сохраняются; physical format/hash layout прежние. 879 tests; восемь полных боёв, два файла проверены новыми процессами и побайтно равны. Stock tick 13,183753→13,195718 мс (+0,091%), прежние 25 fields/damage windows/hash, memory/portable replay 3300→3600 равны. Late codec 117/115 мс в одной whole-plan пробе, вне step и без полного physical restore; render export этим не заменяется. Portable checkpoint закрыт в пределах данного owner, event journal/replay без policy, остальные writers/UI/read model/threaded lifecycle открыты. EP-02a/WBPERF-002/016/020 частичны; native FPS и четыре прежних architecture failures не закрыты.
+
+Пакет [214](214-engine-ai-decision-replay.md), ADR-620: portable one-step frames фактических Rules/fallback и autonomous allied decisions в общей AfterMotion-фазе, replay через прежний executor без внутренней policy. 886 tests, девять полных боёв, три равных continuation 3300→3600; два новых процесса получили побайтно равные конечные owner checkpoints. Все прежние workload/damage/hash, IDs/pending/results сохранены. Stock tick 13,178860→13,149324 мс (−0,224%), structural gate пройден; speedup/FPS не заявлены. Диагностический full pre-step hash позднего мира дорог: около 414 мс на recorded AI step; запись не включена по умолчанию. Production event journal должен убрать полный world hash из каждого AI deadline и обеспечить bounded sink/backpressure, с отдельным offline hash guard. History external admissions/results/acks, остальные writers/UI, read model/threaded lifecycle, physics debt и четыре прежних architecture failures открыты. WBPERF-002/016/020 и EP-02a остаются частичными.
+
+Исторический срез от 06.10.2026. Исходный аудит: `a31764f`, `main`. WBPERF-021 выполнена;
 WBPERF-001, 002, 003, 004, 005, 006, 009, 010, 012, 013, 017, 020, 026 и 027 частично выполняются, остальные задачи открыты.
 Последний шаг ADR-600: camera work имеет явные operation kinds и7exclusive
 wall leaves с frame/generation identity. Analyzer проверяет parent bounds
@@ -258,6 +473,85 @@ ADR-526 добавляет наблюдаемые размер/масштаб о
 Цель владельца — **165 FPS, 6,06 мс на кадр, при скорости боя 1×**.
 Предыдущие исследования: [117](117-world-battle-165-audit.md),
 [114](114-late-battle-debris.md), [общий бэклог](31-problem-backlog.md).
+
+Пакет [222](222-engine-motion-commands.md) переносит writer ходовой в общий
+TuneMotion с результатом и portable checkpoint. Исправлены потеря этих
+параметров из physical save/hash и пропуск настроек при paused rebuild0→0.
+Неизменённые миры сохраняют прежние snapshot bytes. WBPERF-002/020 и EP-02/03
+остаются частичными: остальные writers, geometry/terrain и потоковый owner
+впереди. В следующем writer-пакете проверять и очередь, и уже применённое
+состояние; одной сериализации pending команды недостаточно. Это исправление
+границы и восстановления: 900 headless и 148 blast tests, stock workload/hash
+и late replay пройдены. Три native пары дают медиану FPS72,8→73,0,
+p99 33,098→33,092мс, gate пройден; устойчивого ускорения нет. Четыре прежних
+architecture failures остаются. Полная приёмка — в 222.
+
+Пакет [223](223-engine-debris-commands.md): UI-параметры обломков идут через
+общую TuneDebris; snapshot55 сохраняет все поля Blast до проверки
+физических очередей. Снижение лимита не теряет материю, restore не
+открывает закрытый пул. WBPERF-002/020 остаются частичными: материалы,
+оружие, lifecycle и полный export/owner ещё впереди. Плотность материалов
+требует согласования с существующим ledger, а не только сохранения registry.
+907 headless и 150 blast tests прошли; stock бой и late replay совпали.
+Одна native пара: 72,6→72,3 FPS, p99 32,994→33,145 мс, темп/hash прежние;
+допуск 3% пройден, ускорение не показано. Четыре архитектурных отказа
+остаются. Подробная приёмка и ограничения измерений — в 223.
+
+Пакет [224](224-engine-material-commands.md): прочность и плавление идут
+через TuneMaterial; snapshot56 сохраняет применённые свойства и совместим
+с настройками ходовой/обломков. Плотность пока меняется старым writer и
+требует отдельного перехода ledger: существующие количества Body/Debris
+не обновляются вслед за per_voxel. 966 headless tests (включая 53 проверки
+данных) и 152 blast tests прошли; stock бой и late replay совпали.
+Native пара: 71,8→71,6 FPS, p99 33,128→33,320 мс, темп/hash прежние,
+допуск 3% пройден. Ускорение не показано; четыре архитектурных отказа
+остаются. WBPERF-002/020 остаются частичными; приёмка и остаток работ — в 224.
+
+Пакет [225](225-engine-density-commands.md) закрывает незавершённый density
+writer из 224. Общая команда сохраняет исходную материю Body/Fuel и
+quantity/mass обломков; текущая плотность грунта используется при
+подтверждении извлечения. Snapshot57 сохраняет mixed-density состояние
+даже после reset. Дальше — weapon config/restore, lifecycle/setup,
+geometry/terrain и owner. Прошли 976 headless/data и 154 blast tests;
+stock workload/hash и late replay прежние. Native пара: 74,2→74,3 FPS,
+p99 33,044→32,765 мс, темп/hash сохранены; допуск 3% пройден,
+устойчивое ускорение не доказано. Четыре архитектурных отказа остались.
+Приёмка и ограничения — в 225; WBPERF-002/020 остаются частичными,
+достижение 165 FPS этим пакетом не заявляется.
+
+Пакет [226](226-engine-weapon-commands.md) переводит live настройки оружия,
+пресеты и мощность панели в общий executor. Snapshot58 сохраняет исходную
+и текущую конфигурацию, переносимый checkpoint — pending ввод/результаты.
+Четыре предела UI согласованы с loader. WBPERF-002/020 остаются частичными:
+lifecycle/setup, geometry/terrain export и выделение owner ещё впереди.
+984 headless/data и 157 уникальных UI-проверок прошли; stock workload/hash
+и late replay сохранены. Native пара 71,8→72,7 FPS, p99 33,337→33,154 мс
+сохраняет tempo/hash и проходит допуск. Четыре architecture failures прежние.
+Приёмка и ограничения — в 226; устойчивое ускорение не доказано,
+165 FPS не достигнуты.
+
+Пакет [227](227-engine-battle-lifecycle-commands.md) закрывает общий вход
+запуска подготовленной расстановки, свободного управления, автономности и
+смены боеприпаса акторов. Owner принимает Setup/Fighting; checkpoint сохраняет
+команды до запуска, diagnostic replay проверяет первый AI frame с учётом
+их порядка до мутации. Reset/rebuild, смена epoch, AI tuning, ручное орудие
+и geometry/terrain export остаются следующими границами WBPERF-002/020.
+993 headless/data и 159 UI-проверок прошли, прежние четыре architecture
+failures и 46 диагностик сохранены. Полный бой и late replay совпали по
+25 полям/hash. Native 70,5→70,6 FPS, p99 33,455→33,594 мс; tempo/hash
+сохранены, допуск 3% пройден. Приёмка и ограничения — в 227. Завершение
+всего lifecycle или устойчивое ускорение этим переносом не заявляется.
+
+Пакет [228](228-engine-ai-configuration-commands.md) переводит настройку
+Rules в общий executor и сохраняет явный результат отмены внешнего плана
+при перезапуске цикла. Очередь, restore и diagnostic replay учитывают смену
+deadline. Исправлена загрузка полной очереди коротких lifecycle команд.
+WBPERF-002/020 остаются частичными: rebuild/epoch, ручное орудие,
+geometry/terrain export и отдельный owner ещё открыты. Прошли 1005
+headless/data и 159 UI-проверок; четыре architecture failures и все
+46 диагностик прежние. Stock бой и late replay сохранили 25 полей/hash.
+Native 69,5→70,4 FPS, p99 33,605→33,177 мс; tempo/hash прежние, допуск
+3% пройден. Приёмка — в 228; устойчивое ускорение не доказано.
 
 ## Вывод аудита
 
@@ -4990,3 +5284,32 @@ longest columns0.611мс/floor0.059мс; columns начинают лишь на9
 Следующий разбор: dispatch/join и off-CPU/неучтённые промежутки, затем
 frame handoff/present. Нельзя объявлять весь parent wall активным CPU.
 Подробности/протокол — analysis/189-local-terrain-sweeps.md.
+
+## Поверхностный взрыв артиллерии — ADR-640, 09.10.2026
+
+Дополнительный отказ устранён общим источником поверхностного взрыва:
+контактная сталь не гасит выход в воздух со стороны прилёта, и экран
+сохраняется. Ручной выстрел и бой используют один entry point, сценарии
+и параметры оружия не меняются. Причинные проверки различают снятую
+почву, сталь и корпуса; формат сохранения прежний. Приёмка —
+[235](235-artillery-surface-blast.md).
+
+Актуальный baseline ИИ×ИИ:60 юнитов/3600 тиков,1/8 workers,
+hash `bd7ada90567d88ab`,24 одинаковых terrain windows и replay3300→3600.
+Снято 1 515 348 почвенных вокселей всеми источниками;
+8 workers p50/p95/p99 = 22,648/30,135/32,421 мс.
+Это новое физическое поведение, не доказательство ускорения или native FPS.
+EP-04b/06, EP-07 и EP-02b/10 остаются открытыми: зависимости ожидания
+вместимости, active/sleep физики и публикация разрушенного рельефа.
+
+## Карта обломков — ADR-641, 09.10.2026
+
+[236](236-rubble-column-sorting.md): общий dense gather сортируется двумя
+стабильными проходами. Изолированная карта на8 workers быстрее на13,5%;
+в полной повторной паре mean тика20,730→20,267мс, p50 22,646→22,125мс,
+mean rubble3,699→3,278мс. Hash `bd7ada90567d88ab`,24 terrain windows,
+1515348 почвенных удалений,1/8 workers, поздний replay и байты snapshot
+сохраняются.1077 headless/data и166 UI tests прошли; игровые release
+бинарники обновлены. WBPERF-005/011/023 продвинуты внутри EP-07, но не
+закрыты целиком. Capacity/release, исторические обходы, построение опор,
+движение, публикация terrain и native FPS остаются в плане200.

@@ -41,6 +41,10 @@ mod fracture;
 mod ground_melt;
 
 #[cfg(test)]
+#[path = "range_fragment_admission_tests.rs"]
+mod fragment_admission_tests;
+
+#[cfg(test)]
 #[path = "range_section_tests.rs"]
 mod section_tests;
 
@@ -68,6 +72,8 @@ pub struct Matter {
     /// It is not additional capacity and never survives a simulation tick.
     thermal_reserve: u32,
     body_heat_reserve: u32,
+    damage_waiting: bool,
+    damage_tick: u64,
     pub debris: Bursts,
     /// Diagnostic attempts since construction/load; excluded from snapshots
     /// and authoritative hashes. Never used to choose work or damage.
@@ -80,6 +86,10 @@ pub struct Matter {
     pub supplied_mj: u64,
     pub spent_mj: u64,
     bodies: Vec<u32>,
+    /// Fixed pack used to create initial bodies and fuel, reconstructed on load.
+    source_densities: Vec<(modding::Mat, u32)>,
+    /// Snapshot57: fragment quantities are intrinsic, possibly mixed-density.
+    pub(super) density_history: bool,
     section_work: u32,
     section_jobs: u32,
     section_cursor: usize,
@@ -93,17 +103,26 @@ pub struct AdmissionProfile {
     pub body: [u64; 3],
     /// Ground: applied, unaffordable, no room, claim cap, duplicate, frame/outside.
     pub ground: [u64; 6],
-    /// Wave geometry: builds, units prepared, world resumes, builds avoided.
+    /// Wave geometry: bound preparations, actor maps prepared, world resumes, early ground returns.
     /// Observations only; like the other counters, excluded from state/save.
     pub wave_geometry: [u64; 4],
+    /// Cursor-proven ground-only wave calls and contact visits; diagnostic only.
+    pub wave_ground_only: [u64; 2],
     /// Terrain melt: attempts, applied, capacity scans, fragment records visited.
     /// Diagnostic only; never persisted or used for admission.
     pub terrain_melt: [u64; 4],
     /// Body melt: applied, pool deferred.
     pub melt: [u64; 2],
-    /// Full fragment array visits for admission (not physics queries).
+    /// Fragment scans through claim_room (not all capacity/physics queries).
     pub room_scans: u64,
     pub room_items: u64,
+    /// All ordinary_fragment_room scans, including felling and terrain melt.
+    /// Does not include direct Debris queries or wake's pool classification.
+    pub ordinary_room_scans: u64,
+    pub ordinary_room_items: u64,
+    /// Felling records: unique arrivals, visits (including retries), retired,
+    /// released cells, capacity deferrals. Diagnostic only, absent in save/hash.
+    pub felling: [u64; 5],
 }
 #[derive(Debug, Default)]
 pub struct FellingProfile {
@@ -163,10 +182,19 @@ impl Matter {
                 economy.ledger.create(Kind::Body, n, n)
             })
             .collect();
+        let source_densities = economy
+            .mats
+            .definitions()
+            .map(|d| (d.id, d.density))
+            .collect();
         Self {
+            source_densities,
+            density_history: false,
             batch: None,
             thermal_reserve: 0,
             body_heat_reserve: 0,
+            damage_waiting: false,
+            damage_tick: 0,
             debris: Bursts::default(),
             admission: AdmissionProfile::default(),
             fragment_box: 2,
@@ -182,6 +210,13 @@ impl Matter {
             felling: BTreeSet::new(),
         }
     }
+    /// Density of initial stock, never a live registry price. The fixed world
+    /// pack is reconstructed before restoring its existing bodies and fuel.
+    pub(super) fn source_density(&self, material: modding::Mat) -> u32 {
+        self.source_densities
+            .binary_search_by_key(&material, |d| d.0)
+            .map_or(0, |i| self.source_densities[i].1)
+    }
     /// Read capacity once per atomic fracture batch. Body components and
     /// successful terrain claims consume the same conservative reservations.
     pub(crate) fn claim_room(&mut self) -> u32 {
@@ -191,12 +226,38 @@ impl Matter {
             .unwrap_or_else(|| self.scan_claim_room())
     }
     pub(super) fn reserve_heat(&mut self, body: usize, ground: usize) {
-        self.body_heat_reserve = body.min(self.tuning.max_flying as usize) as u32;
-        self.thermal_reserve = body
-            .saturating_add(ground)
-            .min(self.tuning.max_flying as usize) as u32;
+        let limit = if self.damage_waiting {
+            crate::burst::routine_fragment_share(
+                self.debris.fragment_room(&self.tuning),
+                true,
+                self.damage_tick,
+            ) as usize
+        } else {
+            self.tuning.max_flying as usize
+        };
+        self.body_heat_reserve = body.min(limit) as u32;
+        self.thermal_reserve = body.saturating_add(ground).min(limit) as u32;
     }
-    fn ordinary_fragment_room(&self) -> u32 {
+    /// Rebuilt from authoritative continuations; never saved as scheduler state.
+    pub(super) fn reserve_damage(&mut self, waiting: bool, tick: u64) {
+        self.damage_waiting = waiting;
+        self.damage_tick = tick;
+    }
+    fn routine_fragment_room(&mut self) -> u32 {
+        let available = self.ordinary_fragment_room();
+        if !self.damage_waiting {
+            return available;
+        }
+        crate::burst::routine_fragment_share(
+            available.saturating_add(self.thermal_reserve),
+            true,
+            self.damage_tick,
+        )
+        .saturating_sub(self.thermal_reserve)
+    }
+    fn ordinary_fragment_room(&mut self) -> u32 {
+        self.admission.ordinary_room_scans += 1;
+        self.admission.ordinary_room_items += self.debris.fragments.len() as u64;
         self.debris
             .fragment_room(&self.tuning)
             .saturating_sub(self.thermal_reserve)
@@ -214,6 +275,11 @@ impl Matter {
     }
     pub fn felling_pending(&self) -> usize {
         self.felling.len()
+    }
+    /// Stable identity of the first pending record, without a full queue scan.
+    /// Not a work selector: felling still uses its existing ordered queue.
+    pub fn felling_head(&self) -> Option<(u64, u64)> {
+        self.felling.first().copied()
     }
     /// Read-only, potentially expensive diagnostic for a completed bench.
     /// It never influences the felling order or simulation state.
@@ -258,7 +324,8 @@ impl Matter {
                 q[a] += d;
                 let far = (0..3).map(|k| (q[k] - seed[k]).pow(2)).sum::<i32>() > radius * radius;
                 if !far && q[1] >= seed[1] {
-                    self.felling.insert((fell_key(q), seed_key));
+                    self.admission.felling[0] +=
+                        u64::from(self.felling.insert((fell_key(q), seed_key)));
                 }
             }
         }
@@ -270,6 +337,21 @@ impl Matter {
     pub fn fell(&mut self, w: &mut World, cells: &[[u32; 3]], at: [i32; 3], f: &Felling) -> usize {
         self.fell_in(w, cells, at, f, true)
     }
+    /// One atomic claim-only phase. All hull cuts and the existing frontier
+    /// share a lazy capacity scan; no confirmation, physics, heat reservation
+    /// or tuning mutation can intervene while this method owns Matter/World.
+    pub fn felling_phase<'a>(
+        &mut self,
+        w: &mut World,
+        cuts: impl IntoIterator<Item = (&'a [[u32; 3]], [i32; 3])>,
+        f: &Felling,
+    ) {
+        let mut room = None;
+        for (cells, at) in cuts {
+            self.fell_with_room(w, cells, at, f, true, &mut room);
+        }
+        self.step_felling_with_room(w, f, true, &mut room);
+    }
     fn fell_in(
         &mut self,
         w: &mut World,
@@ -278,8 +360,18 @@ impl Matter {
         f: &Felling,
         optimized: bool,
     ) -> usize {
+        self.fell_with_room(w, cells, at, f, optimized, &mut None)
+    }
+    fn fell_with_room(
+        &mut self,
+        w: &mut World,
+        cells: &[[u32; 3]],
+        at: [i32; 3],
+        f: &Felling,
+        optimized: bool,
+        room: &mut Option<u32>,
+    ) -> usize {
         let mut cut = 0;
-        let mut room = None;
         for &p in cells {
             let m = w.material(p[0], p[1], p[2]);
             if m == AIR
@@ -291,7 +383,7 @@ impl Matter {
             }
             let (cost, motion) = self.cost(m);
             let claimed = if optimized {
-                let capacity = room.get_or_insert_with(|| self.ordinary_fragment_room());
+                let capacity = room.get_or_insert_with(|| self.routine_fragment_room());
                 self.debris.claim_voxel_with_room(
                     w,
                     p,
@@ -323,7 +415,15 @@ impl Matter {
         self.step_felling_in(w, f, true);
     }
     fn step_felling_in(&mut self, w: &mut World, f: &Felling, optimized: bool) {
-        let mut room = None;
+        self.step_felling_with_room(w, f, optimized, &mut None);
+    }
+    fn step_felling_with_room(
+        &mut self,
+        w: &mut World,
+        f: &Felling,
+        optimized: bool,
+        room: &mut Option<u32>,
+    ) {
         let mut left = f.cells_per_tick;
         while left > 0 {
             let Some((p, seed)) = self.felling.pop_first() else {
@@ -331,6 +431,8 @@ impl Matter {
             };
             let (p, seed) = (fell_cell(p), fell_cell(seed));
             left -= 1;
+            self.admission.felling[1] += 1;
+            self.admission.felling[2] += 1;
             if p[0] < 0
                 || p[1] < 0
                 || p[2] < 0
@@ -351,7 +453,7 @@ impl Matter {
             }
             // Felled wood crumbles in two-cell pieces whatever the weapon.
             let claimed = if optimized {
-                let capacity = room.get_or_insert_with(|| self.ordinary_fragment_room());
+                let capacity = room.get_or_insert_with(|| self.routine_fragment_room());
                 self.debris
                     .claim_voxel_with_room(w, q, m, seed, 0, 2, &self.tuning, capacity)
             } else {
@@ -359,8 +461,11 @@ impl Matter {
             };
             if !claimed {
                 self.felling.insert((fell_key(p), fell_key(seed)));
+                self.admission.felling[2] -= 1;
+                self.admission.felling[4] += 1;
                 break;
             }
+            self.admission.felling[3] += 1;
             self.spread(p, seed, f.radius);
         }
     }
@@ -478,13 +583,13 @@ impl Matter {
         if !body.vol.get(x, y, z) {
             return false;
         }
-        let amount = self.economy.per_voxel(3);
+        let amount = u64::from(self.source_density(3));
         let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
         assert_eq!(
             self.economy.ledger.transfer(self.bodies[id], held, amount),
             amount
         );
-        let density = self.economy.mats.get(3).unwrap().density;
+        let density = self.source_density(3);
         let position = frame.world(cell.map(|v| Fx::from_int(v as i32).add(Fx::from_ratio(1, 2))));
         let speed = u
             .motion
@@ -693,14 +798,13 @@ impl Matter {
             }
             None => frame.y,
         };
-        let amount = self.economy.per_voxel(3);
+        let amount = u64::from(self.source_density(3));
         let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
         assert_eq!(
             self.economy.ledger.transfer(self.bodies[id], held, amount),
             amount
         );
-        let d = self.economy.mats.get(3).unwrap();
-        let mass_g = u64::from(d.density)
+        let mass_g = u64::from(self.source_density(3))
             * u64::from(self.tuning.density_kg_m3_per_density)
             * u64::from(body.mm).pow(3)
             / 1_000_000;
@@ -791,7 +895,7 @@ impl Matter {
                         id as u16, 1, part.cells, [frame; 2], part.shape,
                     )
                     .in_segment(seg as u8);
-                    let amount = u64::from(count) * self.economy.per_voxel(3);
+                    let amount = u64::from(count) * u64::from(self.source_density(3));
                     let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
                     assert_eq!(
                         self.economy.ledger.transfer(self.bodies[id], held, amount),
@@ -814,7 +918,7 @@ impl Matter {
                     if velocity.len_sq() > vmax.mul(vmax) {
                         velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
                     }
-                    let density = self.economy.mats.get(3).unwrap().density;
+                    let density = self.source_density(3);
                     for c in &chunk.cells {
                         u.seg_dents.remove(&(seg as u8, *c));
                         u.seg_removed.push((seg as u8, *c));
@@ -863,7 +967,7 @@ impl Matter {
         }
     }
     pub fn annihilate_body(&mut self, id: usize, count: usize) {
-        let amount = count as u64 * self.economy.per_voxel(3);
+        let amount = count as u64 * u64::from(self.source_density(3));
         assert_eq!(
             self.economy
                 .ledger
@@ -918,7 +1022,7 @@ impl Matter {
                 committed = true;
                 let (body, part) = job.commit(&u.body);
                 let count = part.cells.len() as u32;
-                let amount = u64::from(count) * self.economy.per_voxel(3);
+                let amount = u64::from(count) * u64::from(self.source_density(3));
                 let held = self.economy.ledger.create(Kind::Debris, 0, u64::MAX);
                 assert_eq!(
                     self.economy.ledger.transfer(self.bodies[id], held, amount),
@@ -956,7 +1060,7 @@ impl Matter {
                 if velocity.len_sq() > vmax.mul(vmax) {
                     velocity = velocity.scale(vmax.div(velocity.len_sq().sqrt()));
                 }
-                let density = self.economy.mats.get(3).unwrap().density;
+                let density = self.source_density(3);
                 self.debris.emit_section(Fragment {
                     id: 0,
                     position: chunk.centre,
@@ -1070,11 +1174,13 @@ impl Matter {
             tick,
             crate::burst::Surroundings { hulls, yielding },
             self.thermal_reserve,
+            self.damage_waiting,
             completed,
             task,
         );
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
+        self.damage_waiting = false;
     }
     pub fn save(&self, b: &mut Blob) {
         assert!(self.batch.is_none(), "fracture batches are atomic");
@@ -1110,6 +1216,8 @@ impl Matter {
         self.admission = AdmissionProfile::default();
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
+        self.damage_waiting = false;
+        self.damage_tick = 0;
         self.fragment_box = s.u8();
         if !(1..=4).contains(&self.fragment_box) {
             return None;
@@ -1218,7 +1326,7 @@ impl Matter {
                             .iter()
                             .map(|s| u64::from(s.body.solid_count()))
                             .sum::<u64>())
-                        * self.economy.per_voxel(3)
+                        * u64::from(self.source_density(3))
             {
                 return None;
             }
@@ -1226,11 +1334,24 @@ impl Matter {
         let mut ids = std::collections::BTreeSet::new();
         for f in &self.debris.fragments {
             let c = l.try_get(f.held)?;
-            if !c.alive
-                || c.kind != Kind::Debris
-                || !ids.insert(f.held)
-                || c.held != u64::from(f.count) * self.economy.per_voxel(f.material)
-            {
+            // A resting pile may combine material revealed at different densities.
+            // Its ledger quantity and mass are conserved state, not a valuation
+            // at today's registry setting. Old formats retain exact validation.
+            let valid_quantity = if self.density_history {
+                self.economy
+                    .mats
+                    .get(f.material)
+                    .is_some_and(|d| d.density != 0)
+                    && if f.paint.is_some() {
+                        c.held == u64::from(f.count) * u64::from(self.source_density(f.material))
+                    } else {
+                        c.held >= u64::from(f.count)
+                            && c.held <= u64::from(f.count) * u64::from(modding::MAX_DENSITY)
+                    }
+            } else {
+                c.held == u64::from(f.count) * self.economy.per_voxel(f.material)
+            };
+            if !c.alive || c.kind != Kind::Debris || !ids.insert(f.held) || !valid_quantity {
                 return None;
             }
             if f.resting {
@@ -1251,6 +1372,79 @@ mod felling_key_tests {
     use super::{fell_cell, fell_key, Matter};
     use fx::blob::Blob;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn shared_felling_phase_matches_separate_claim_batches_at_pool_boundaries() {
+        struct Grove;
+        impl voxel::Generator for Grove {
+            fn material(&self, _: u32, y: u32, _: u32) -> u16 {
+                if y < 4 {
+                    1
+                } else if y < 12 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let snapshot = |m: &Matter, w: &voxel::World| {
+            let mut b = Blob::new();
+            m.save(&mut b);
+            w.save(&mut b);
+            b.v
+        };
+        let cuts = [
+            (vec![[4, 4, 4], [5, 4, 4], [4, 4, 4]], [4, 4, 4]),
+            (vec![[5, 4, 4], [6, 4, 4], [7, 4, 4]], [6, 4, 4]),
+            (vec![[12, 4, 4], [0, 4, 4], [13, 4, 4]], [12, 4, 4]),
+        ];
+        for cap in [0, 1, 3, 64] {
+            for reserve in [0, 1, 4] {
+                let mut actual = Matter::new(&[]);
+                let mut reference = Matter::new(&[]);
+                let mut world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+                let mut old_world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
+                let mut f = modding::navigation::Navigation::from_ron(include_str!(
+                    "../../../data/range-navigation.ron"
+                ))
+                .unwrap()
+                .fell;
+                f.cells_per_tick = 31;
+                for tick in 0..4 {
+                    for m in [&mut actual, &mut reference] {
+                        // Invalidate at phase boundaries: capacity and thermal
+                        // reservations change after the initial exhausted pass.
+                        m.tuning.max_flying = if tick < 2 { cap } else { 128 };
+                        m.tuning.max_fragments = if tick < 2 { cap } else { 128 };
+                        m.tuning.max_claims = if tick < 2 { cap } else { 128 };
+                        m.reserve_heat(0, if tick < 2 { reserve } else { 0 });
+                    }
+                    let fast = actual.admission.ordinary_room_scans;
+                    actual.felling_phase(
+                        &mut world,
+                        cuts.iter().map(|(cells, at)| (cells.as_slice(), *at)),
+                        &f,
+                    );
+                    for (cells, at) in &cuts {
+                        reference.fell(&mut old_world, cells, *at, &f);
+                    }
+                    reference.step_felling(&mut old_world, &f);
+                    assert!(actual.admission.ordinary_room_scans - fast <= 1);
+                    assert_eq!(
+                        snapshot(&actual, &world),
+                        snapshot(&reference, &old_world),
+                        "cap={cap}, reserve={reserve}, tick={tick}"
+                    );
+                    assert_eq!(actual.admission.felling, reference.admission.felling);
+                    world.flush();
+                    old_world.flush();
+                }
+                assert!(
+                    actual.admission.ordinary_room_scans < reference.admission.ordinary_room_scans
+                );
+            }
+        }
+    }
 
     #[test]
     fn batched_felling_claims_preserve_frontier_edits_and_pool_deferral() {
@@ -1338,6 +1532,15 @@ mod felling_key_tests {
                         }
                         reference.step_felling_in(&mut old_world, &f, false);
                         pool.install(|| actual.step_felling_in(&mut world, &f, true));
+                        let [arrivals, visits, retired, released, deferrals] =
+                            actual.admission.felling;
+                        assert_eq!(visits, retired + deferrals);
+                        assert!(released <= retired);
+                        assert_eq!(
+                            initial.len() as u64 + arrivals - retired,
+                            actual.felling.len() as u64,
+                            "diagnostics must account for deduplication and retries"
+                        );
                         assert_eq!(
                             snapshot(&actual, &world),
                             snapshot(&reference, &old_world),

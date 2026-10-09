@@ -8,6 +8,7 @@
 //! it and the planner can price the detour.
 pub mod coarse;
 mod connection;
+mod rubble_index;
 use connection::Connection;
 use fx::{angle, Fx};
 use std::{
@@ -65,8 +66,10 @@ impl Pose {
 /// is rebuilt from the pieces every step, and a battlefield holds some
 /// fifteen thousand columns: built into a tree they cost more than half
 /// a millisecond a step, built from sorted columns at once almost none.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Rubble(Vec<([i32; 2], u16)>);
+/// A derived bounds/max tree rejects distant columns in rectangle queries;
+/// point lookup, iteration and equality use only the canonical sorted slice.
+#[derive(Clone, Debug, Default)]
+pub struct Rubble(Vec<([i32; 2], u16)>, rubble_index::Index);
 impl Rubble {
     pub fn new() -> Self {
         Self::default()
@@ -75,7 +78,9 @@ impl Rubble {
     /// gather gives them.
     pub fn from_sorted(columns: Vec<([i32; 2], u16)>) -> Self {
         debug_assert!(columns.windows(2).all(|p| p[0].0 < p[1].0));
-        Self(columns)
+        let mut index = rubble_index::Index::default();
+        index.rebuild(&columns);
+        Self(columns, index)
     }
     pub fn get(&self, at: &[i32; 2]) -> Option<&u16> {
         self.0
@@ -88,6 +93,11 @@ impl Rubble {
     }
     /// Set the top of a column, returning the one it replaced.
     pub fn insert(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
+        let old = self.insert_column(at, top);
+        self.1.rebuild(&self.0);
+        old
+    }
+    fn insert_column(&mut self, at: [i32; 2], top: u16) -> Option<u16> {
         match self.0.binary_search_by(|(c, _)| c.cmp(&at)) {
             Ok(i) => Some(std::mem::replace(&mut self.0[i].1, top)),
             Err(i) => {
@@ -99,7 +109,9 @@ impl Rubble {
     /// Clear a column, returning its top.
     pub fn remove(&mut self, at: &[i32; 2]) -> Option<u16> {
         let i = self.0.binary_search_by(|(c, _)| c.cmp(at)).ok()?;
-        Some(self.0.remove(i).1)
+        let old = self.0.remove(i).1;
+        self.1.rebuild(&self.0);
+        Some(old)
     }
     pub fn len(&self) -> usize {
         self.0.len()
@@ -111,25 +123,18 @@ impl Rubble {
     /// columns are sorted by X then Z; a dense X strip elsewhere along Z
     /// must not force a wide hull into an exact footprint scan.
     pub fn touches(&self, lo: [i32; 2], hi: [i32; 2]) -> bool {
+        if (0..2).any(|a| lo[a] > hi[a]) {
+            return false;
+        }
+        if !self.1.is_empty() {
+            return self.1.touches(&self.0, lo, hi);
+        }
         let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
         let rest = &self.0[first..];
         let count = rest.partition_point(|(at, _)| at[0] <= hi[0]);
-        if count <= 512 {
-            return rest[..count]
-                .iter()
-                .any(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1]);
-        }
-        let mut remaining = &rest[..count];
-        while let Some((at, _)) = remaining.first() {
-            let x = at[0];
-            let n = remaining.partition_point(|(p, _)| p[0] == x);
-            let z = remaining[..n].partition_point(|(p, _)| p[1] < lo[1]);
-            if z < n && remaining[z].0[1] <= hi[1] {
-                return true;
-            }
-            remaining = &remaining[n..];
-        }
-        false
+        rest[..count]
+            .iter()
+            .any(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
     }
     /// Exact upper bound of debris inside a terrain box. A pile below the
     /// lowest belly cannot invalidate a bare-terrain clearance proof.
@@ -137,30 +142,18 @@ impl Rubble {
         if (0..2).any(|a| lo[a] > hi[a]) {
             return 0;
         }
+        if !self.1.is_empty() {
+            return self.1.upper(&self.0, lo, hi, &mut || {});
+        }
         let first = self.0.partition_point(|(at, _)| at[0] < lo[0]);
         let rest = &self.0[first..];
         let count = rest.partition_point(|(at, _)| at[0] <= hi[0]);
-        if count <= 512 {
-            return rest[..count]
-                .iter()
-                .filter(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
-                .map(|(_, top)| *top)
-                .max()
-                .unwrap_or(0);
-        }
-        let mut remaining = &rest[..count];
-        let mut upper = 0;
-        while let Some((at, _)) = remaining.first() {
-            let x = at[0];
-            let n = remaining.partition_point(|(p, _)| p[0] == x);
-            let first = remaining[..n].partition_point(|(p, _)| p[1] < lo[1]);
-            let last = remaining[..n].partition_point(|(p, _)| p[1] <= hi[1]);
-            for (_, top) in &remaining[first..last] {
-                upper = upper.max(*top);
-            }
-            remaining = &remaining[n..];
-        }
-        upper
+        rest[..count]
+            .iter()
+            .filter(|(at, _)| at[1] >= lo[1] && at[1] <= hi[1])
+            .map(|(_, top)| *top)
+            .max()
+            .unwrap_or(0)
     }
     /// Columns and tops in ascending column order.
     pub fn iter(&self) -> impl Iterator<Item = (&[i32; 2], &u16)> {
@@ -172,8 +165,9 @@ impl FromIterator<([i32; 2], u16)> for Rubble {
     fn from_iter<I: IntoIterator<Item = ([i32; 2], u16)>>(items: I) -> Self {
         let mut r = Self::new();
         for (at, top) in items {
-            r.insert(at, top);
+            r.insert_column(at, top);
         }
+        r.1.rebuild(&r.0);
         r
     }
 }

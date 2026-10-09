@@ -49,6 +49,32 @@ impl Wave {
         })
     }
 
+    /// A surface detonation also enters verified exterior air on its incoming
+    /// side. The contact cell keeps its pressure and resistance, so an intact
+    /// wall still shields its far side. Call only before propagation, after
+    /// checking that this adjacent cell and the path to it contain no matter.
+    /// The existing frontier persists the source without additional state.
+    pub fn seed_exterior(&mut self, direction: [i32; 3]) -> bool {
+        if self.examined != 0 || direction.iter().any(|d| !(-1..=1).contains(d)) {
+            return false;
+        }
+        let axes = direction.iter().map(|d| d.abs()).sum::<i32>();
+        let Some(cost) = step_cost(axes) else {
+            return false;
+        };
+        let c = self.n / 2;
+        let centre = c + self.n * (c + self.n * c);
+        let q = direction.map(|d| (c as i32 + d) as usize);
+        let index = q[0] + self.n * (q[1] + self.n * q[2]);
+        let pressure = self.pressure[centre].saturating_sub(cost);
+        if self.resistance[index] != 0 || pressure <= self.pressure[index] {
+            return false;
+        }
+        self.pressure[index] = pressure;
+        self.frontier.push((pressure, Reverse(index)));
+        true
+    }
+
     pub fn size(&self) -> usize {
         self.n
     }
@@ -173,11 +199,8 @@ impl Wave {
                 for dy in -1i32..=1 {
                     for dx in -1i32..=1 {
                         let axes = dx.abs() + dy.abs() + dz.abs();
-                        let cost = match axes {
-                            1 => 100,
-                            2 => 141,
-                            3 => 173,
-                            _ => continue,
+                        let Some(cost) = step_cost(axes) else {
+                            continue;
                         };
                         let q = [p[0] + dx, p[1] + dy, p[2] + dz];
                         if q.iter().any(|&v| v < 0 || v >= n) {
@@ -217,6 +240,15 @@ impl Wave {
             }
         }
         hits
+    }
+}
+
+fn step_cost(axes: i32) -> Option<u32> {
+    match axes {
+        1 => Some(100),
+        2 => Some(141),
+        3 => Some(173),
+        _ => None,
     }
 }
 
@@ -315,6 +347,39 @@ mod tests {
             "axis {axis} cells, diagonal {diagonal}: ratio {ratio} of 1000"
         );
     }
+    #[test]
+    fn a_surface_pulse_enters_air_and_preserves_steel_shielding_after_reload() {
+        let n = 9;
+        for (energy, thickness) in [(3500, 1), (9200, 3)] {
+            let mut resistance = vec![0; n * n * n];
+            for z in 0..n {
+                for y in 0..n {
+                    for x in 4..4 + thickness {
+                        resistance[x + n * (y + n * z)] = 6000;
+                    }
+                }
+            }
+            let mut original = Wave::new(n, energy, resistance).unwrap();
+            assert!(original.seed_exterior([-1, 0, 0]));
+            assert!(!original.seed_exterior([-1, 0, 0]));
+            let mut blob = fx::blob::Blob::new();
+            original.save(&mut blob);
+            let restored = Wave::load(&mut fx::blob::Scan::new(&blob.v)).unwrap();
+            let mut contact = original.clone();
+            let hits = contact.advance_contacts(1);
+            assert_eq!(hits[0].cell, [4, 4, 4]);
+            assert_eq!(hits[0].broken, energy > 6000);
+            assert!(!contact.seed_exterior([1, 0, 0]));
+            let single = solve(original, 1);
+            let batch = solve(restored, 4096);
+            assert_eq!(single.pressure, batch.pressure);
+            assert_eq!(single.examined, batch.examined);
+            assert_eq!(single.pressure_at([3, 4, 4]), energy - 100);
+            assert!(single.pressure_at([0, 4, 4]) > 0);
+            assert_eq!(single.pressure_at([4 + thickness, 4, 4]), 0);
+        }
+    }
+
     #[test]
     fn invalid_grids_are_rejected() {
         assert!(Wave::new(1000, 1, vec![]).is_err());

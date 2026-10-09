@@ -3,6 +3,7 @@
 //! staged rows replay terrain changes before publication. Scene resets still
 //! hold their loading boundary until the new generation is ready.
 use super::*;
+use sim_core::blast::read_model::terrain::{Budget, Changes, Header, Request, Row as TerrainRow};
 
 const ROWS_PER_FRAME: i32 = 8;
 
@@ -38,6 +39,8 @@ struct Job {
     repairs: std::collections::BTreeSet<i32>,
     aliases: PatchUnion,
     rows: Vec<Row>,
+    changes: Changes,
+    costs: Option<[u32; 3]>,
 }
 impl Streaming {
     pub fn loading(&self) -> bool {
@@ -53,21 +56,24 @@ impl Streaming {
     }
     /// Called after every completed tick and its visible terrain/occupancy
     /// patches. An unfilled row already reads the latest authoritative world.
-    pub fn observe(&mut self, sim: &BlastRange, dirty: &[std::ops::Range<usize>]) {
+    pub fn observe(&mut self, sim: &BlastRange, generation: u64, dirty: &[std::ops::Range<usize>]) {
         if let Some(job) = &mut self.job {
-            job.observe(sim, dirty);
+            if job.generation == generation {
+                job.observe(sim, dirty);
+            }
         }
     }
 }
 #[derive(Default)]
 struct Row {
     z: i32,
+    input: TerrainRow,
     words: Vec<u32>,
     tops: Vec<u16>,
     highest: i32,
 }
 impl Row {
-    fn read(&mut self, sim: &BlastRange, w: TerrainWindow) {
+    fn read(&mut self, w: TerrainWindow) {
         let dx = w.dims[0] as usize;
         let dy = w.dims[1] as usize;
         let stride = dx / 8;
@@ -75,22 +81,14 @@ impl Row {
         self.words.fill(0);
         self.tops.resize(dx, 0);
         self.highest = 0;
-        let mut column = vec![0; dy];
-        for x in w.span(0) {
-            let top = sim.world.column_ceiling(x as u32, self.z as u32) as i32;
+        for x in self.input.request.as_ref().unwrap().x.clone() {
+            let (column, materials) = self.input.column(x).unwrap();
+            let top = column.top as i32;
             self.highest = self.highest.max(top);
             self.tops[x as usize % dx] = top.min(w.span(1).end) as u16;
-            let n = (top.min(w.span(1).end) - w.origin[1]).max(0) as usize;
-            sim.world.column(
-                x as u32,
-                self.z as u32,
-                w.origin[1] as u32,
-                &mut column[..n],
-            );
-            let wrapped_x = x as usize % dx;
-            let shift = (wrapped_x % 8) * 4;
-            let mut word = wrapped_x / 8 + w.origin[1] as usize % dy * stride;
-            for &material in &column[..n] {
+            let shift = (x as usize % dx % 8) * 4;
+            let mut word = x as usize % dx / 8 + w.origin[1] as usize % dy * stride;
+            for &material in materials {
                 self.words[word] |= u32::from(material) << shift;
                 word += stride;
                 if word >= self.words.len() {
@@ -98,23 +96,12 @@ impl Row {
                 }
             }
         }
-        // Raw columns avoid a tree lookup at every intact voxel. Only actual
-        // surface work needs the presentation material substitution.
-        for (p, _) in sim
-            .surface_work
-            .range([w.origin[0], i32::MIN, i32::MIN]..[w.span(0).end, i32::MIN, i32::MIN])
-        {
-            if p[2] != self.z {
-                continue;
-            }
-            let Some(i) = w.index(*p) else {
-                continue;
-            };
+        for damage in &self.input.damage {
+            let i = w.index(damage.position).unwrap();
             let word = i / 8 % self.words.len();
             let shift = (i % 8) * 4;
-            let material = ((self.words[word] >> shift) & 15) as u16;
             self.words[word] = (self.words[word] & !(15 << shift))
-                | (surface_material(sim, *p, material) << shift);
+                | (surface_tint(damage.material, damage.work, damage.cost) << shift);
         }
     }
 }
@@ -170,22 +157,19 @@ impl PatchUnion {
 }
 impl Job {
     fn observe(&mut self, sim: &BlastRange, dirty: &[std::ops::Range<usize>]) {
-        let w = self.window;
-        let mut changed = |x: i32, z: i32| {
-            if w.span(0).contains(&x) && (w.origin[2]..self.row).contains(&z) {
-                self.repairs.insert(z);
-            }
-        };
-        for edit in sim.world.edits() {
-            changed(edit.x as i32, edit.z as i32);
+        if self.row > self.window.origin[2] {
+            self.changes
+                .update_padded(
+                    sim,
+                    self.generation,
+                    self.window.span(0),
+                    self.window.origin[2]..self.row,
+                    self.window.dims[2] as usize,
+                )
+                .expect("completed rows respect their padded window and row budget");
+            self.repairs.extend(self.changes.rows.iter().copied());
         }
-        for p in &sim.surface_changed {
-            changed(p[0], p[2]);
-        }
-        // The old visible toroidal volume can change after a row was compared
-        // with it (moving unit shadows included). Retain those physical word
-        // ranges too; otherwise a correct staged CPU volume could publish an
-        // incomplete GPU patch and leave old occupancy in the new window.
+        // Include changes to the old visible GPU volume, including shadows.
         for span in dirty {
             self.aliases.insert(span.clone());
         }
@@ -204,6 +188,11 @@ impl Job {
         pool: Option<&bevy::tasks::TaskPool>,
     ) -> bool {
         let w = self.window;
+        let costs = Header::of(sim, self.generation).costs;
+        if self.costs.is_some_and(|old| old != costs) {
+            self.repairs.extend(w.origin[2]..self.row);
+        }
+        self.costs = Some(costs);
         let end = (self.row + ROWS_PER_FRAME).min(w.span(2).end);
         let mut selected: Vec<_> = (self.row..end).collect();
         for z in &selected {
@@ -222,15 +211,28 @@ impl Job {
         for (row, z) in rows.iter_mut().zip(selected) {
             row.z = z;
         }
+        let capture =
+            |row: &mut Row| capture_row(&mut row.input, sim, self.generation, w, w.span(0), row.z);
         if let Some(pool) = pool.filter(|p| p.thread_num() > 1 && rows.len() > 1) {
             pool.scope(|scope| {
                 for row in rows.iter_mut() {
-                    scope.spawn(async move { row.read(sim, w) });
+                    scope.spawn(async move { capture(row) });
                 }
             });
         } else {
             for row in rows.iter_mut() {
-                row.read(sim, w);
+                capture(row);
+            }
+        }
+        if let Some(pool) = pool.filter(|p| p.thread_num() > 1 && rows.len() > 1) {
+            pool.scope(|scope| {
+                for row in rows.iter_mut() {
+                    scope.spawn(async move { row.read(w) });
+                }
+            });
+        } else {
+            for row in rows.iter_mut() {
+                row.read(w);
             }
         }
         let slab = w.dims[0] as usize * w.dims[1] as usize / 8;
@@ -262,10 +264,36 @@ impl Job {
     }
 }
 
-/// Read entering strips into disjoint physical Z rows. The world is immutable
-/// for the scope; neither a full volume copy nor a staging publication is needed.
+/// The publication scope finishes before detached rows are packed. At most
+/// eight full-width rows' columns are resident. Narrow entering strips can
+/// group more Z rows without increasing that material/column budget.
+fn capture_row(
+    row: &mut TerrainRow,
+    sim: &BlastRange,
+    generation: u64,
+    window: TerrainWindow,
+    xs: std::ops::Range<i32>,
+    z: i32,
+) {
+    row.update_padded(
+        sim,
+        generation,
+        Request {
+            x: xs,
+            y: window.span(1),
+            z,
+        },
+        Budget {
+            columns: window.dims[0] as usize,
+            cells: window.dims[0] as usize * window.dims[1] as usize,
+        },
+    )
+    .expect("terrain requests respect the nonnegative window and column budget");
+}
+
 pub(super) fn write_slab(
     sim: &BlastRange,
+    generation: u64,
     window: TerrainWindow,
     words: &mut [u32],
     tops: &mut [u16],
@@ -278,56 +306,61 @@ pub(super) fn write_slab(
     let slab = dx * window.dims[1] as usize / 8;
     let dz = window.dims[2] as usize;
     let pool = pool.filter(|p| p.thread_num() > 1 && xs.len() * zs.len() >= 512);
-    let rows = zs
-        .len()
-        .div_ceil(pool.map_or(1, |p| p.thread_num() * 2))
+    if xs.is_empty() || zs.is_empty() {
+        return (0, Vec::new());
+    }
+    let admitted_rows = (ROWS_PER_FRAME as usize * dx / xs.len())
+        .min(zs.len())
         .max(1);
+    let mut inputs: Vec<TerrainRow> = (0..admitted_rows).map(|_| TerrainRow::default()).collect();
     let mut highest = 0;
     let mut dirty = Vec::new();
-    // Split at the toroidal wrap before borrowing row slices. Replaying scope
-    // results in spawn order also keeps upload patches in world row order.
     let mut z = zs.start;
     while z < zs.end {
         let base = z as usize % dz;
-        let end = zs.end.min(z + (dz - base) as i32);
+        let end = zs
+            .end
+            .min(z + (dz - base) as i32)
+            .min(z + admitted_rows as i32);
         let n = (end - z) as usize;
+        let inputs = &mut inputs[..n];
+        let capture = |i: usize, row: &mut TerrainRow| {
+            capture_row(row, sim, generation, window, xs.clone(), z + i as i32)
+        };
+        if let Some(pool) = pool.filter(|_| n > 1) {
+            let chunk = n.div_ceil(pool.thread_num() * 2).max(1);
+            pool.scope(|scope| {
+                for (i, rows) in inputs.chunks_mut(chunk).enumerate() {
+                    scope.spawn(async move {
+                        for (j, row) in rows.iter_mut().enumerate() {
+                            capture(i * chunk + j, row);
+                        }
+                    });
+                }
+            });
+        } else {
+            for (i, row) in inputs.iter_mut().enumerate() {
+                capture(i, row);
+            }
+        }
         let words = &mut words[base * slab..(base + n) * slab];
         let tops = &mut tops[base * dx..(base + n) * dx];
-        let results = if let Some(pool) = pool {
+        let results = if let Some(pool) = pool.filter(|_| n > 1) {
+            let chunk = n.div_ceil(pool.thread_num() * 2).max(1);
             pool.scope(|scope| {
-                for (i, (words, tops)) in words
-                    .chunks_mut(rows * slab)
-                    .zip(tops.chunks_mut(rows * dx))
+                for (i, ((inputs, words), tops)) in inputs
+                    .chunks(chunk)
+                    .zip(words.chunks_mut(chunk * slab))
+                    .zip(tops.chunks_mut(chunk * dx))
                     .enumerate()
                 {
-                    let first = z + (i * rows) as i32;
-                    let last = end.min(first + rows as i32);
-                    let xs = xs.clone();
                     scope.spawn(async move {
-                        write_rows(
-                            sim,
-                            window,
-                            words,
-                            tops,
-                            xs,
-                            first..last,
-                            base + i * rows,
-                            incremental,
-                        )
+                        write_rows(inputs, window, words, tops, base + i * chunk, incremental)
                     });
                 }
             })
         } else {
-            vec![write_rows(
-                sim,
-                window,
-                words,
-                tops,
-                xs.clone(),
-                z..end,
-                base,
-                incremental,
-            )]
+            vec![write_rows(inputs, window, words, tops, base, incremental)]
         };
         for (top, patches) in results {
             highest = highest.max(top);
@@ -339,32 +372,34 @@ pub(super) fn write_slab(
 }
 
 fn write_rows(
-    sim: &BlastRange,
+    inputs: &[TerrainRow],
     window: TerrainWindow,
     words: &mut [u32],
     tops: &mut [u16],
-    xs: std::ops::Range<i32>,
-    zs: std::ops::Range<i32>,
     base_z: usize,
     incremental: bool,
 ) -> (i32, Vec<std::ops::Range<usize>>) {
     let mut highest = 0;
     let mut dirty: Vec<std::ops::Range<usize>> = Vec::new();
     let mut before: Vec<(usize, u32)> = Vec::new();
-    let mut column = vec![0u16; window.dims[1] as usize];
+
     // Remember only rows that can change. Sky already empty in both the
     // old and new slab needs no write, allocation or GPU upload.
     assert!(window.dims[0].is_multiple_of(8));
-    assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
+
     let dx = window.dims[0] as usize;
     let dy = window.dims[1] as usize;
     let row_words = dx / 8;
     let slab_words = row_words * dy;
-    for z in zs.clone() {
+    for input in inputs {
+        let request = input.request.as_ref().unwrap();
+        let xs = request.x.clone();
+        let z = request.z;
+        assert!(xs.start % 8 == 0 && xs.end % 8 == 0);
         let z_words = (z as usize % window.dims[2] as usize - base_z) * slab_words;
         let next_top = xs
             .clone()
-            .map(|x| sim.world.column_ceiling(x as u32, z as u32) as i32)
+            .map(|x| input.column(x).unwrap().0.top as i32)
             .max()
             .unwrap_or(window.origin[1]);
         // `terrain_origin.w` is a conservative ceiling for every old
@@ -400,21 +435,15 @@ fn write_rows(
             }
         }
         for x in xs.clone() {
-            let top = sim.world.column_ceiling(x as u32, z as u32) as i32;
+            let (column, materials) = input.column(x).unwrap();
+            let top = column.top as i32;
             highest = (highest).max(top);
             tops[slot(x)] = top.min(window.span(1).end) as u16;
-            let count = (top.min(window.span(1).end) - window.origin[1]).max(0) as usize;
-            sim.world.column(
-                x as u32,
-                z as u32,
-                window.origin[1] as u32,
-                &mut column[..count],
-            );
             let wrapped_x = x as usize % dx;
             let shift = (wrapped_x % 8) * 4;
             let base = z_words + wrapped_x / 8;
             let mut word = base + window.origin[1] as usize % dy * row_words;
-            for &material in &column[..count] {
+            for &material in materials {
                 // Entering rows were cleared above. A column has a fixed
                 // nibble and advances by one packed row, not three modulo
                 // operations plus a bounds query for every voxel.
@@ -424,6 +453,13 @@ fn write_rows(
                     word -= slab_words;
                 }
             }
+        }
+        for damage in &input.damage {
+            let i = window.index(damage.position).unwrap();
+            let word = i / 8 - base_z * slab_words;
+            let shift = (i % 8) * 4;
+            words[word] = (words[word] & !(15 << shift))
+                | (surface_tint(damage.material, damage.work, damage.cost) << shift);
         }
         // A toroidal slot often receives exactly the material it already
         // held. Publish actual differences, including old solids becoming
@@ -507,7 +543,9 @@ pub fn camera(
         if want != gas.window {
             let had = gas.window;
             work.kind = "shift";
-            work.measure(6, || write_window(&scene.sim, &mut gas, want, Some(had)));
+            work.measure(6, || {
+                write_window_for(&scene.sim, scene.generation, &mut gas, want, Some(had))
+            });
             work.measure(4, || moving::occupancy(&scene.sim, &mut gas, &mut visual));
             work.measure(5, || gas.advance(scene.sim.tick * 2));
         }
@@ -536,6 +574,8 @@ pub fn camera(
                 repairs: default(),
                 aliases: PatchUnion::new(want.words()),
                 rows: default(),
+                changes: default(),
+                costs: None,
             });
         });
     }
@@ -611,6 +651,8 @@ pub(super) fn bench(sim: &BlastRange, gas: &GasInput, focus: [i32; 3]) {
         repairs: default(),
         aliases: PatchUnion::new(window.words()),
         rows: default(),
+        changes: default(),
+        costs: None,
     };
     let mut samples = Vec::new();
     loop {
@@ -635,6 +677,100 @@ pub(super) fn bench(sim: &BlastRange, gas: &GasInput, focus: [i32; 3]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(test)]
+    #[test]
+    fn detached_row_packing_matches_direct_world_after_source_mutation() {
+        let mut sim = BlastRange::new(config(false, false));
+        let window = TerrainWindow {
+            origin: [64, 8, 80],
+            dims: [64, 64, 64],
+        };
+        sim.world.queue_edit(voxel::world::Edit::put(72, 24, 82, 3));
+        sim.world.flush();
+        sim.surface_work.insert([72, 24, 82], 380);
+        let mut expected = vec![0; (window.dims[0] * window.dims[1] / 8) as usize];
+        for x in window.span(0) {
+            for y in window.span(1) {
+                let p = [x, y, 82];
+                let material = sim_core::blast::material(&sim.world, p);
+                let i = window.index(p).unwrap();
+                let word = i / 8 % expected.len();
+                expected[word] |= surface_material(&sim, p, material) << ((i % 8) * 4);
+            }
+        }
+        let mut row = Row { z: 82, ..default() };
+        capture_row(&mut row.input, &sim, 7, window, window.span(0), 82);
+        let captured = row.input.clone();
+        sim.world.queue_dig(72, 24, 82);
+        sim.world.flush();
+        sim.surface_work.clear();
+        sim.config.steel_resistance *= 2;
+        row.read(window);
+        assert_eq!(row.words, expected);
+        assert_eq!(row.input, captured);
+        assert_eq!(row.input.header.generation, 7);
+        assert_eq!(
+            surface_tint(3, u32::MAX, 1),
+            11,
+            "saturated work cannot overflow presentation"
+        );
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn staged_cost_change_repairs_completed_rows_and_ignores_old_generation_observation() {
+        let mut sim = BlastRange::new(config(false, false));
+        let window = TerrainWindow {
+            origin: [64, 8, 80],
+            dims: [64, 64, 64],
+        };
+        sim.world.queue_edit(voxel::world::Edit::put(72, 24, 82, 3));
+        sim.world.flush();
+        let work = sim_core::blast::material_work(3, &sim.config) / 2;
+        sim.surface_work.insert([72, 24, 82], work);
+        let previous = vec![0; window.words()];
+        let mut job = Job {
+            window,
+            generation: 7,
+            row: 80,
+            words: previous.clone(),
+            tops: vec![0; 4096],
+            highest: 0,
+            dirty: default(),
+            repairs: default(),
+            aliases: PatchUnion::new(window.words()),
+            rows: default(),
+            changes: default(),
+            costs: None,
+        };
+        assert!(!job.step_in(&sim, &previous, None));
+        let i = window.index([72, 24, 82]).unwrap();
+        let before = (job.words[i / 8] >> ((i % 8) * 4)) & 15;
+        sim.config.steel_resistance *= 2;
+        let mut steps = 0;
+        while !job.step_in(&sim, &previous, None) {
+            steps += 1;
+            assert!(steps < 20);
+        }
+        let after = (job.words[i / 8] >> ((i % 8) * 4)) & 15;
+        assert_ne!(
+            before, after,
+            "cost changes on pause refresh already captured scars"
+        );
+        assert_eq!(after, surface_material(&sim, [72, 24, 82], 3));
+        assert!(job.rows.len() <= ROWS_PER_FRAME as usize);
+        let mut stream = Streaming {
+            job: Some(job),
+            ..default()
+        };
+        sim.world.queue_dig(72, 24, 82);
+        sim.world.flush();
+        stream.observe(&sim, 8, &[]);
+        assert!(stream.job.as_ref().unwrap().repairs.is_empty());
+        stream.observe(&sim, 7, &[]);
+        assert!(stream.job.as_ref().unwrap().repairs.contains(&82));
+    }
 
     #[test]
     fn patch_union_matches_dense_reference_for_repeated_wrapped_ranges() {
@@ -687,6 +823,8 @@ mod tests {
                 repairs: default(),
                 aliases: PatchUnion::new(window.words()),
                 rows: default(),
+                changes: default(),
+                costs: None,
             };
             assert!(!job.step_in(&sim, &previous, Some(&pool)));
             // Both additions/removals and a cosmetic-only surface change on
@@ -788,6 +926,8 @@ mod tests {
             repairs: default(),
             aliases: PatchUnion::new(window.words()),
             rows: default(),
+            changes: default(),
+            costs: None,
         };
         let mut steps = 1;
         while !job.step(&sim, &before) {

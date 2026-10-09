@@ -831,41 +831,49 @@ fn enemy_rules_focus_fire_and_switch_only_for_a_better_target() {
         size: [640, 192, 640],
         units: vec![
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 0,
                 allied: true,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [100, 100],
                 ordered_target: None,
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 1,
                 allied: true,
                 alive: true,
                 armed: false,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [350, 100],
                 ordered_target: None,
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 2,
                 allied: false,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [230, 100],
                 ordered_target: Some(1),
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 3,
                 allied: false,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [250, 100],
                 ordered_target: Some(1),
@@ -918,51 +926,61 @@ fn enemy_base_does_not_vote_on_targets_or_receive_attack_orders() {
     tuning.mobile_bonus = 0;
     let mut units = vec![
         UnitObservation {
+            attack_ranges: [1600; RangeUnitKind::COUNT],
             id: 0,
             allied: true,
             alive: true,
             armed: true,
             mobile: true,
+            can_reposition: true,
             kind: RangeUnitKind::Tank,
             position: [100, 100],
             ordered_target: None,
         },
         UnitObservation {
+            attack_ranges: [1600; RangeUnitKind::COUNT],
             id: 1,
             allied: true,
             alive: true,
             armed: true,
             mobile: true,
+            can_reposition: true,
             kind: RangeUnitKind::Tank,
             position: [500, 100],
             ordered_target: None,
         },
         UnitObservation {
+            attack_ranges: [1600; RangeUnitKind::COUNT],
             id: 2,
             allied: false,
             alive: true,
             armed: true,
             mobile: true,
+            can_reposition: true,
             kind: RangeUnitKind::Tank,
             position: [230, 100],
             ordered_target: None,
         },
         UnitObservation {
+            attack_ranges: [1600; RangeUnitKind::COUNT],
             id: 3,
             allied: false,
             alive: true,
             armed: false,
             mobile: false,
+            can_reposition: false,
             kind: RangeUnitKind::Base,
             position: [550, 100],
             ordered_target: None,
         },
         UnitObservation {
+            attack_ranges: [1600; RangeUnitKind::COUNT],
             id: 4,
             allied: true,
             alive: true,
             armed: false,
             mobile: false,
+            can_reposition: false,
             kind: RangeUnitKind::Base,
             position: [50, 100],
             ordered_target: None,
@@ -1028,11 +1046,13 @@ fn rules_defend_local_fronts_instead_of_chasing_a_global_target() {
     let tuning =
         modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
     let unit = |id, allied, x| UnitObservation {
+        attack_ranges: [1600; RangeUnitKind::COUNT],
         id,
         allied,
         alive: true,
         armed: true,
         mobile: true,
+        can_reposition: true,
         kind: RangeUnitKind::Tank,
         position: [x, 100],
         ordered_target: None,
@@ -1076,31 +1096,37 @@ fn mobile_guns_switch_to_the_base_after_field_weapons_are_disabled() {
         size: [10000, 192, 10000],
         units: vec![
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 0,
                 allied: true,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [8000, 4000],
                 ordered_target: Some(1),
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 1,
                 allied: false,
                 alive: true,
                 armed: false,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Strider,
                 position: [8100, 4000],
                 ordered_target: None,
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 2,
                 allied: false,
                 alive: true,
                 armed: false,
                 mobile: false,
+                can_reposition: false,
                 kind: RangeUnitKind::Base,
                 position: [1500, 600],
                 ordered_target: None,
@@ -1121,6 +1147,7 @@ fn observation_does_not_call_a_tank_mobile_without_traction() {
     r.units[0].mobility.traction = Fx::ZERO;
     assert!(r.units[0].status.engine);
     assert!(!r.enemy_ai_observation().unwrap().units[0].mobile);
+    assert!(!r.enemy_ai_observation().unwrap().units[0].can_reposition);
 }
 
 #[test]
@@ -1133,6 +1160,17 @@ fn observation_does_not_call_an_unsupported_walker_mobile() {
     }
     assert!(r.units[0].status.engine);
     assert!(!r.enemy_ai_observation().unwrap().units[0].mobile);
+    assert!(!r.enemy_ai_observation().unwrap().units[0].can_reposition);
+}
+
+#[test]
+fn observation_keeps_reposition_capability_while_a_walkers_legs_are_buckled() {
+    let mut r = arena(RangeUnitKind::Strider);
+    r.start_battle().unwrap();
+    r.units[0].motion.legs_buckled.fill(true);
+    let observation = r.enemy_ai_observation().unwrap();
+    assert!(!observation.units[0].mobile);
+    assert!(observation.units[0].can_reposition);
 }
 
 #[test]
@@ -1162,31 +1200,37 @@ fn artillery_attacks_the_base_until_an_armed_defender_is_close() {
         size: [10000, 192, 10000],
         units: vec![
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 0,
                 allied: true,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Artillery,
                 position: [1000, 1000],
                 ordered_target: None,
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 1,
                 allied: false,
                 alive: true,
                 armed: true,
                 mobile: true,
+                can_reposition: true,
                 kind: RangeUnitKind::Tank,
                 position: [4000, 4000],
                 ordered_target: None,
             },
             UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
                 id: 2,
                 allied: false,
                 alive: true,
                 armed: false,
                 mobile: false,
+                can_reposition: false,
                 kind: RangeUnitKind::Base,
                 position: [8500, 8500],
                 ordered_target: None,
@@ -1203,15 +1247,161 @@ fn artillery_attacks_the_base_until_an_armed_defender_is_close() {
 }
 
 #[test]
+fn observed_weapon_reach_uses_euclidean_boundaries_and_safe_coordinate_extremes() {
+    let mut r = arena_of([RangeUnitKind::ArtilleryTurretT2, RangeUnitKind::Tank]);
+    r.start_battle().unwrap();
+    let mut observation = r.enemy_ai_observation().unwrap();
+    let mut actor = observation.units[0];
+    actor.id = 41;
+    actor.position = [4400, 4900];
+    observation.units[1].position = [5480, 5210];
+    assert!(actor.in_weapon_reach(&observation.units[1]));
+    observation.units[1].position = [5360, 6180];
+    assert!(actor.in_weapon_reach(&observation.units[1]));
+    observation.units[1].position[0] += 1;
+    assert!(!actor.in_weapon_reach(&observation.units[1]));
+    actor.attack_ranges.fill(0);
+    assert!(!actor.in_weapon_reach(&observation.units[1]));
+    actor.attack_ranges.fill(i32::MAX);
+    actor.position = [i32::MIN, i32::MIN];
+    observation.units[1].position = [i32::MAX, i32::MAX];
+    assert!(!actor.in_weapon_reach(&observation.units[1]));
+}
+
+#[test]
+fn observation_ranges_follow_live_weapon_tuning_and_target_ammunition() {
+    for kind in RangeUnitKind::ALL {
+        let mut r = arena_of([kind, RangeUnitKind::Tank]);
+        r.start_battle().unwrap();
+        r.battle.actors[0].order = Order::Attack(1);
+        r.battle.actors[0].target = Some(1);
+        for target_kind in RangeUnitKind::ALL {
+            r.units[1].kind = target_kind;
+            let observation = r.enemy_ai_observation().unwrap();
+            assert_eq!(
+                observation.units[0].attack_ranges[target_kind.index()],
+                r.battle_attack_range(0).unwrap_or(0),
+                "{kind:?} vs {target_kind:?}"
+            );
+        }
+        if matches!(kind, RangeUnitKind::Tank | RangeUnitKind::Artillery) {
+            for weapon in [
+                Weapon::Blast,
+                Weapon::Kinetic,
+                Weapon::Energy,
+                Weapon::Annihilation,
+            ] {
+                assert!(r.set_battle_weapon(0, Some(weapon)));
+                let observation = r.enemy_ai_observation().unwrap();
+                assert!(observation.units[0]
+                    .attack_ranges
+                    .iter()
+                    .all(|&range| Some(range) == r.battle_attack_range(0)));
+            }
+        }
+        if kind.canister() {
+            std::sync::Arc::make_mut(&mut r.battle.tuning)
+                .canister
+                .range = 777;
+            assert!(r.enemy_ai_observation().unwrap().units[0]
+                .attack_ranges
+                .iter()
+                .all(|&range| range == 777));
+        }
+        r.units[0].status.weapon = false;
+        assert_eq!(
+            r.enemy_ai_observation().unwrap().units[0].attack_ranges,
+            [0; RangeUnitKind::COUNT]
+        );
+    }
+}
+
+#[test]
+fn autonomous_immobile_artillery_fires_at_local_defender_and_replays() {
+    let mut layout = arena_of([RangeUnitKind::ArtilleryTurretT2, RangeUnitKind::Tank])
+        .layout
+        .unwrap();
+    layout.size = [2000, 192, 2000];
+    layout.clear_max = [1936, 1936];
+    layout.units.push(RangeUnitDef {
+        allied: false,
+        kind: RangeUnitKind::Base,
+        at: [1850, 16, 1850],
+        weapon: None,
+    });
+    let mut r = BlastRange::with_layout(
+        ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap(),
+        layout,
+    )
+    .unwrap();
+    r.start_battle().unwrap();
+    r.battle.autonomous = true;
+    r.submit_enemy_ai_plan(
+        r.battle.ai.next_tick,
+        vec![
+            Decision {
+                actor: 1,
+                order: AiOrder::Hold,
+            },
+            Decision {
+                actor: 2,
+                order: AiOrder::Hold,
+            },
+        ],
+    )
+    .unwrap();
+    r.step();
+    assert_eq!(r.battle.actors[0].order, Order::Attack(1));
+    let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    for tick in 0..300 {
+        for sim in [&mut r, &mut restored] {
+            // External Hold orders isolate return fire; the autonomous allied
+            // controller continues making real decisions on its normal ticks.
+            if let Some(observation) = sim
+                .enemy_ai_observation()
+                .filter(|o| o.decision_tick == sim.tick)
+            {
+                let plan = observation
+                    .units
+                    .iter()
+                    .filter(|u| !u.allied && u.alive)
+                    .map(|u| Decision {
+                        actor: u.id,
+                        order: AiOrder::Hold,
+                    })
+                    .collect();
+                sim.submit_enemy_ai_plan(observation.decision_tick, plan)
+                    .unwrap();
+            }
+            sim.step();
+        }
+        if tick % 50 == 49 {
+            assert_eq!(r.state_hash(), restored.state_hash());
+        }
+    }
+    assert!(
+        r.battle.actors[0].fired > 0,
+        "the chosen defender was never fired on"
+    );
+    assert!(
+        r.units[1].revision > 0,
+        "the autonomous attack never damaged the defender"
+    );
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
 fn outnumbered_army_keeps_a_rear_guard_without_abandoning_its_siege() {
     let tuning =
         modding::battle_ai::Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
     let unit = |id, allied, kind, position| UnitObservation {
+        attack_ranges: [1600; RangeUnitKind::COUNT],
         id,
         allied,
         alive: true,
         armed: kind != RangeUnitKind::Base,
         mobile: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::TurretT1),
+        can_reposition: !matches!(kind, RangeUnitKind::Base | RangeUnitKind::TurretT1),
         kind,
         position,
         ordered_target: None,
@@ -2884,6 +3074,58 @@ fn enemy_tank_detours_around_cover_and_engages() {
 #[test]
 fn enemy_walker_detours_around_cover_and_engages() {
     enemy_detours_to_firing_range(RangeUnitKind::Strider);
+}
+
+#[test]
+fn siege_laser_finishes_tanks_from_each_side_and_drops_the_dead_target() {
+    for offset in [[-180, 0], [180, 0], [0, -180], [0, 180]] {
+        let mut layout = arena_of([RangeUnitKind::Spider, RangeUnitKind::Tank])
+            .layout
+            .unwrap();
+        layout.clear_min = [16, 16];
+        layout.clear_max = [624, 624];
+        layout.units[1].at = [320, 16, 320];
+        layout.units[0].at = [320 + offset[0], 16, 320 + offset[1]];
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
+        r.start_battle().unwrap();
+        r.battle.actors[1].order = Order::Hold;
+        r.units[1].status.weapon = false;
+        assert!(r.battle_order(0, Order::Attack(1), None));
+        let mut death = None;
+        for tick in 0..600 {
+            if r.battle.ai.pending.is_none() && r.battle.phase == Phase::Fighting {
+                r.submit_enemy_ai_plan(
+                    r.battle.ai.next_tick,
+                    if r.units[1].status.alive {
+                        vec![Decision {
+                            actor: 1,
+                            order: AiOrder::Hold,
+                        }]
+                    } else {
+                        vec![]
+                    },
+                )
+                .unwrap();
+            }
+            r.step();
+            if !r.units[1].status.alive {
+                death = Some(tick);
+                break;
+            }
+        }
+        eprintln!("siege {offset:?}: death={death:?} core={:?} removed={} melted={} fragments={} hot={} at={:?}", r.units[1].integrity.core, r.units[1].removed.len(), r.thermals.melted, r.matter.debris.fragments.len(), r.thermals.hot(), r.units[1].at);
+        assert!(
+            death.is_some(),
+            "beam could not finish tank from {offset:?}"
+        );
+        r.step();
+        assert!(
+            r.battle.lasers.is_empty(),
+            "beam persisted after target death"
+        );
+        assert_eq!(r.battle.actors[0].target, None);
+    }
 }
 
 #[test]

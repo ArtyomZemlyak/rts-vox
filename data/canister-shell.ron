@@ -7,7 +7,9 @@
     half_cells: 18,
     cell_units: 3,
     energy: 20000,
-    material_energy_j: 180000000,
+    // The authored 40% body share retains the former 180 MJ hull budget;
+    // the remaining 270 MJ pays terrain fracture for this submunition.
+    material_energy_j: 450000000,
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,

@@ -1,6 +1,15 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/range-profile-tools.ps1"
 function Assert-Profile($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$savedCulture = [System.Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $sourceRow = [pscustomobject]@{ Seconds = 1.25; CpuMs = 23.5; Name = 'pool,1'; Missing = $null; Count = 12 }
+    $csv = $sourceRow | ConvertTo-RangeInvariantCsvRow | ConvertTo-Csv -NoTypeInformation
+    $parsed = $csv | ConvertFrom-Csv
+    Assert-Profile ($parsed.Seconds -ceq '1.25' -and $parsed.CpuMs -ceq '23.5' -and $parsed.Name -ceq 'pool,1' -and $parsed.Missing -ceq '' -and $parsed.Count -ceq '12') 'OS CSV depends on current culture or corrupts nonnumeric fields'
+    Assert-Profile ($sourceRow.Seconds -is [double] -and $sourceRow.Seconds -eq 1.25) 'CSV conversion mutated CPU counters'
+} finally { [System.Threading.Thread]::CurrentThread.CurrentCulture = $savedCulture }
 $log = 'PROFILE tick_rate=30 state=Fighting
 PROFILE adapter_name="GPU" adapter_backend=Vulkan adapter_device_type=DiscreteGpu
 PROFILE state_hash=0123456789abcdef

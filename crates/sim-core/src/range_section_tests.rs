@@ -5,6 +5,63 @@ use modding::{
     range::{RangeLayout, RangeUnitDef, RangeUnitKind},
 };
 
+#[test]
+fn sections_born_below_the_crater_floor_keep_matter_and_roundtrip() {
+    let mut r = damaged_roots_and_legs();
+    // The shared fixture includes a pending terrain claim. Confirm it before
+    // measuring the sections, so their boundary correction is the only change.
+    r.world.flush();
+    r.matter
+        .debris
+        .confirm(r.world.completed(), &mut r.matter.economy, &r.matter.tuning);
+    for u in &mut r.units {
+        u.pose.base.y = Fx::from_int(-80);
+        for frame in &mut u.seg_frames {
+            frame.base.y = Fx::from_int(-80);
+        }
+    }
+    r.matter.step_unit_sections(&mut r.units);
+    assert!(
+        r.matter
+            .debris
+            .fragments
+            .iter()
+            .any(|f| f.chunk.is_some() && f.position.y < Fx::ZERO),
+        "fixture must shed a real section below the map"
+    );
+    let before: u64 = r
+        .matter
+        .debris
+        .fragments
+        .iter()
+        .map(|f| r.matter.economy.ledger.held(f.held))
+        .sum();
+    let count = r.matter.debris.fragments.len();
+    r.world.flush();
+    r.matter.flush(&r.world, true, 98, 0, &[], &[]);
+    assert_eq!(count, r.matter.debris.fragments.len());
+    assert_eq!(
+        before,
+        r.matter
+            .debris
+            .fragments
+            .iter()
+            .map(|f| r.matter.economy.ledger.held(f.held))
+            .sum::<u64>()
+    );
+    assert!(r
+        .matter
+        .debris
+        .fragments
+        .iter()
+        .all(|f| f.position.y >= Fx::ZERO));
+    assert!(r.matter.economy.ledger.balanced());
+    let bytes = r.snapshot();
+    let restored = BlastRange::restore(r.config, &bytes).expect("below-floor section snapshot");
+    assert_eq!(bytes, restored.snapshot());
+    assert!(restored.matter.economy.ledger.balanced());
+}
+
 fn damaged_roots_and_legs() -> BlastRange {
     let config =
         ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();

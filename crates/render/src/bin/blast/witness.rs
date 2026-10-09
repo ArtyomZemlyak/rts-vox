@@ -1,10 +1,10 @@
 //! Damage meshing runs off the frame thread; a bounded job per changed unit.
 use super::*;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
-use sim_core::blast::RangeUnit;
-use std::collections::BTreeMap;
-
-pub(super) type Revision = (usize, u64, RangeUnitKind, bool);
+pub(super) use sim_core::blast::read_model::geometry::Revision;
+#[cfg(test)]
+use sim_core::blast::read_model::geometry::View;
+use sim_core::blast::read_model::geometry::{Cursor, Mesh as Snapshot, Sampling};
 pub(super) struct Pending {
     revision: Revision,
     task: Task<Vec<Built>>,
@@ -16,35 +16,9 @@ struct Built {
     segment: Option<usize>,
     turret: bool,
 }
-struct Snapshot {
-    dead: bool,
-    body: voxel::unit::UnitBody,
-    dents: BTreeMap<[u8; 3], u32>,
-    segment_dents: BTreeMap<(u8, [u8; 3]), u32>,
-    revision: u64,
-    seg_gone: Vec<bool>,
-    allied: Option<bool>,
-}
-impl From<&RangeUnit> for Snapshot {
-    fn from(u: &RangeUnit) -> Self {
-        Self {
-            dead: !u.status.alive,
-            body: u.body.clone(),
-            allied: None,
-            dents: u.dents.clone(),
-            segment_dents: u.segment_dents().clone(),
-            revision: u.revision,
-            seg_gone: u.seg_gone.clone(),
-        }
-    }
-}
-fn build(
-    unit: &Snapshot,
-    id: usize,
-    pristine: &voxel::unit::UnitBody,
-    skins: &SkinBindings,
-    config: &ExplosionConfig,
-) -> Vec<Built> {
+fn build(unit: &Snapshot, pristine: &voxel::unit::UnitBody, skins: &SkinBindings) -> Vec<Built> {
+    let config = &unit.config;
+    let id = unit.id;
     let mut result = Vec::new();
     let centre = Vec3::from(render::model::root_centre(&unit.body));
     let lost = |v: Vec3| {
@@ -91,7 +65,7 @@ fn build(
                 continue;
             }
             weather(buf, k);
-            if unit.revision > 0 {
+            if unit.revision.damage > 0 {
                 for j in 0..buf.pos.len() {
                     let normal = Vec3::from(buf.nrm[j]);
                     let local = Vec3::from(buf.pos[j]) + Vec3::from(pivot) - normal * 0.08;
@@ -176,7 +150,7 @@ fn build(
                     }
                 }
             }
-            if unit.dead {
+            if unit.revision.dead {
                 wreck::charred(buf);
             }
             let scale = body.mm as f32 / voxel::unit::WORLD_MM as f32;
@@ -243,15 +217,28 @@ pub(super) fn update(
     mut meshes: ResMut<Assets<Mesh>>,
     mut old: Query<(Entity, &Witness, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
+    let art = &mut *art;
     if art.generation != scene.generation {
         art.pending.clear();
         art.seen.clear();
         art.emitted.clear();
         art.generation = scene.generation;
     }
+    art.geometry.update(
+        &scene.sim,
+        scene.generation,
+        Cursor {
+            generation: art.generation,
+            counts: &art.emitted,
+        },
+        Sampling {
+            stride: std::num::NonZeroUsize::new(97).unwrap(),
+            per_unit: 32,
+        },
+    );
     for (entity, w, mut material) in &mut old {
-        if let Some(unit) = scene.sim.units.get(w.0) {
-            if !unit.status.alive {
+        if let Some(unit) = art.geometry.units.get(w.0) {
+            if unit.revision.dead {
                 // Darken immediately while the bounded mesh worker bakes soot.
                 if let Some(finish) = art.materials.iter().position(|m| *m == material.0) {
                     material.0 = art.burned_materials[finish].clone();
@@ -261,23 +248,21 @@ pub(super) fn update(
             commands.entity(entity).despawn();
         }
     }
-    let count = scene.sim.units.len();
+    let count = art.geometry.units.len();
     art.seen.resize(count, None);
     art.emitted.resize(count, 0);
     art.pending.resize_with(count, || None);
     // Limit concurrent snapshots and CPU work, regardless of the unit count.
     let mut active = art.pending.iter().filter(|p| p.is_some()).count();
-    for (id, unit) in scene.sim.units.iter().enumerate() {
-        let removed = unit.removed.len();
-        let from = art.emitted[id].min(removed);
-        if let Some(at) = scene
-            .sim
-            .impact
-            .filter(|_| scene.sim.config.material_energy_j == 0)
-        {
+    let mut removed_cells = art.geometry.removed.iter().peekable();
+    for (id, unit) in art.geometry.units.iter().enumerate() {
+        let removed = unit.revision.removed;
+        if let Some(at) = art.geometry.impact {
             let hit = Vec3::from(at.map(|v| v as f32));
-            for p in unit.removed[from..].iter().step_by(97).take(32) {
-                let pos = Vec3::from(unit.world_pos(p.map(usize::from)).map(|v| v as f32));
+            while removed_cells.peek().is_some_and(|cell| cell.unit == id) {
+                let cell = removed_cells.next().unwrap();
+                let p = cell.cell;
+                let pos = Vec3::from(cell.position.map(|v| v as f32));
                 let seed = f32::from(p[0] ^ p[1] ^ p[2]) / 63.0;
                 commands.spawn((
                     Mesh3d(debris_art.cube.clone()),
@@ -306,13 +291,13 @@ pub(super) fn update(
                         commands.entity(entity).despawn();
                     }
                 }
-                let base = Vec3::from(unit.at.map(|v| v as f32));
+                let base = Vec3::from(unit.anchor.map(|v| v as f32));
                 for b in parts {
                     let mut transform = b.local;
                     transform.translation += base;
                     commands.spawn((
                         Mesh3d(meshes.add(b.mesh)),
-                        MeshMaterial3d(if unit.status.alive {
+                        MeshMaterial3d(if !unit.revision.dead {
                             art.materials[b.finish].clone()
                         } else {
                             art.burned_materials[b.finish].clone()
@@ -331,22 +316,15 @@ pub(super) fn update(
             break;
         }
         let id = (first + offset) % count;
-        let unit = &scene.sim.units[id];
-        let revision = (
-            unit.removed.len(),
-            unit.revision,
-            unit.kind,
-            !unit.status.alive,
-        );
+        let revision = art.geometry.units[id].revision;
         if art.seen[id] == Some(revision) || art.pending[id].is_some() {
             continue;
         }
+        let Some(snapshot) = art.geometry.mesh(&scene.sim, scene.generation, id) else {
+            continue;
+        };
         art.next_mesh = (id + 1) % count;
-        let mut snapshot = Snapshot::from(unit);
-        if scene.sim.battle_mode() {
-            snapshot.allied = Some(scene.sim.allied(id));
-        }
-        let kind = match unit.kind {
+        let kind = match snapshot.revision.kind {
             RangeUnitKind::Tank => 0,
             RangeUnitKind::Strider => 1,
             RangeUnitKind::Spider => 2,
@@ -359,11 +337,10 @@ pub(super) fn update(
         };
         let pristine = art.pristine.clone();
         let skins = art.skins.clone();
-        let config = scene.sim.config.clone();
         art.pending[id] = Some(Pending {
             revision,
             task: AsyncComputeTaskPool::get()
-                .spawn(async move { build(&snapshot, id, &pristine[kind], &skins[kind], &config) }),
+                .spawn(async move { build(&snapshot, &pristine[kind], &skins[kind]) }),
         });
         active += 1;
     }
@@ -372,6 +349,31 @@ pub(super) fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_core::blast::RangeUnit;
+
+    #[cfg(test)]
+    fn single(kind: RangeUnitKind) -> BlastRange {
+        let mut sim = BlastRange::new(scaled_config(true, false, 1000));
+        sim.units = vec![RangeUnit::of_kind(kind, [300, 16, 300])];
+        sim
+    }
+    #[cfg(test)]
+    fn snapshot(sim: &BlastRange, id: usize) -> Snapshot {
+        let mut view = View::default();
+        view.update(
+            sim,
+            1,
+            Cursor {
+                generation: 1,
+                counts: &[],
+            },
+            Sampling {
+                stride: std::num::NonZeroUsize::new(97).unwrap(),
+                per_unit: 32,
+            },
+        );
+        view.mesh(sim, 1, id).unwrap()
+    }
     #[test]
     fn destruction_chars_every_root_and_segment_without_erasing_geometry() {
         for kind in [
@@ -383,16 +385,16 @@ mod tests {
             RangeUnitKind::TurretT2,
             RangeUnitKind::Base,
             RangeUnitKind::ArtilleryT2,
+            RangeUnitKind::ArtilleryTurretT2,
         ] {
-            let unit = RangeUnit::of_kind(kind, [300, 16, 300]);
-            let pristine = unit.body.clone();
+            let sim = single(kind);
+            let pristine = sim.units[0].body.clone();
             let skins = SkinBindings::new(&pristine);
-            let clean = Snapshot::from(&unit);
-            let mut dead = Snapshot::from(&unit);
-            dead.dead = true; // No dent revision: alive state itself invalidates the finish.
-            let config = scaled_config(true, false, 1000);
-            let clean = build(&clean, 0, &pristine, &skins, &config);
-            let dead = build(&dead, 0, &pristine, &skins, &config);
+            let clean = snapshot(&sim, 0);
+            let mut dead = clean.clone();
+            dead.revision.dead = true; // No dent revision: alive state itself invalidates the finish.
+            let clean = build(&clean, &pristine, &skins);
+            let dead = build(&dead, &pristine, &skins);
             assert_eq!(clean.len(), dead.len());
             assert!(dead.iter().any(|p| p.segment.is_none()));
             if !pristine.segments.is_empty() {
@@ -426,17 +428,17 @@ mod tests {
     fn damaged_tank_plate_changes_its_own_visible_mesh() {
         let pristine = voxel::unit::tank();
         let skins = SkinBindings::new(&pristine);
-        let config = scaled_config(true, false, 1000);
-        let unit = RangeUnit::of_kind(RangeUnitKind::Tank, [300, 16, 300]);
-        let clean = Snapshot::from(&unit);
-        let mut marked = Snapshot::from(&unit);
+        let sim = single(RangeUnitKind::Tank);
+        let clean = snapshot(&sim, 0);
+        let mut marked = clean.clone();
         let cell = [0, 0, 0];
         assert!(marked.body.segments[0].body.vol.get(0, 0, 0));
-        let cost = sim_core::blast::unit_work(&marked.body.segments[0].body, [0, 0, 0], &config);
+        let cost =
+            sim_core::blast::unit_work(&marked.body.segments[0].body, [0, 0, 0], &marked.config);
         marked.segment_dents.insert((0, cell), cost / 2);
-        marked.revision = 1;
-        let clean = build(&clean, 0, &pristine, &skins, &config);
-        let marked = build(&marked, 0, &pristine, &skins, &config);
+        marked.revision.damage = 1;
+        let clean = build(&clean, &pristine, &skins);
+        let marked = build(&marked, &pristine, &skins);
         let colors = |meshes: &Vec<Built>| {
             meshes
                 .iter()
@@ -445,6 +447,107 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_ne!(colors(&clean), colors(&marked));
+    }
+    #[cfg(test)]
+    #[test]
+    fn engine_owned_mesh_matches_direct_inputs_for_every_unit_kind() {
+        for kind in [
+            RangeUnitKind::Tank,
+            RangeUnitKind::Strider,
+            RangeUnitKind::Spider,
+            RangeUnitKind::Artillery,
+            RangeUnitKind::TurretT1,
+            RangeUnitKind::TurretT2,
+            RangeUnitKind::Base,
+            RangeUnitKind::ArtilleryT2,
+            RangeUnitKind::ArtilleryTurretT2,
+        ] {
+            let mut sim = single(kind);
+            let pristine = sim.units[0].body.clone();
+            let skins = SkinBindings::new(&pristine);
+            let unit = &mut sim.units[0];
+            unit.body.vol.cols[0] = 0;
+            unit.dents.insert([1, 1, 1], 100);
+            unit.revision = 1;
+            let expected = Snapshot {
+                generation: 1,
+                tick: sim.tick,
+                id: 0,
+                revision: Revision {
+                    removed: unit.removed.len(),
+                    damage: unit.revision,
+                    kind: unit.kind,
+                    dead: !unit.status.alive,
+                    resistance: sim.config.unit_ablation_resistance,
+                    role_resistance_milli: sim.config.unit_role_resistance_milli,
+                },
+                body: unit.body.clone(),
+                dents: unit.dents.clone(),
+                segment_dents: unit.segment_dents().clone(),
+                seg_gone: unit.seg_gone.clone(),
+                allied: None,
+                config: sim.config,
+            };
+            let actual = snapshot(&sim, 0);
+            let expected = build(&expected, &pristine, &skins);
+            let actual = build(&actual, &pristine, &skins);
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(&expected) {
+                assert_eq!(actual.finish, expected.finish);
+                assert_eq!(actual.local, expected.local);
+                assert_eq!(actual.segment, expected.segment);
+                assert_eq!(actual.turret, expected.turret);
+                assert_eq!(actual.mesh.indices(), expected.mesh.indices());
+                for attribute in [
+                    Mesh::ATTRIBUTE_POSITION,
+                    Mesh::ATTRIBUTE_NORMAL,
+                    Mesh::ATTRIBUTE_COLOR,
+                    Mesh::ATTRIBUTE_UV_0,
+                    Mesh::ATTRIBUTE_TANGENT,
+                ] {
+                    assert_eq!(
+                        actual.mesh.attribute(attribute),
+                        expected.mesh.attribute(attribute)
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(test)]
+    #[test]
+    fn work_cost_change_refreshes_visible_dents_without_new_damage() {
+        let mut sim = single(RangeUnitKind::Tank);
+        let pristine = sim.units[0].body.clone();
+        let skins = SkinBindings::new(&pristine);
+        let mut cell = None;
+        'found: for z in 0..pristine.vol.nz as usize {
+            for y in 0..pristine.vol.ny as usize {
+                for x in 0..pristine.vol.nx as usize {
+                    if pristine.vol.get(x, y, z) {
+                        cell = Some([x, y, z]);
+                        break 'found;
+                    }
+                }
+            }
+        }
+        let cell = cell.unwrap();
+        let cost = sim_core::blast::unit_work(&pristine, cell, &sim.config);
+        sim.units[0].dents.insert(cell.map(|v| v as u8), cost / 2);
+        sim.units[0].revision = 1;
+        let before = snapshot(&sim, 0);
+        let mut config = sim.config;
+        config.unit_role_resistance_milli = config.unit_role_resistance_milli.map(|v| v * 2);
+        sim.reconfigure(config);
+        let after = snapshot(&sim, 0);
+        assert_eq!(before.revision.damage, after.revision.damage);
+        assert_ne!(before.revision, after.revision);
+        let colors = |unit: &Snapshot| {
+            build(unit, &pristine, &skins)
+                .iter()
+                .map(|part| part.mesh.attribute(Mesh::ATTRIBUTE_COLOR).unwrap().clone())
+                .collect::<Vec<_>>()
+        };
+        assert_ne!(colors(&before), colors(&after));
     }
     #[test]
     fn worker_owns_a_snapshot_while_the_authoritative_body_keeps_changing() {
@@ -455,19 +558,18 @@ mod tests {
         for _ in 0..250 {
             sim.step();
         }
-        let unit = &mut sim.units[0];
-        assert!(!unit.removed.is_empty());
+        assert!(!sim.units[0].removed.is_empty());
         let pristine = Arc::new(voxel::unit::tank());
         let skins = Arc::new(SkinBindings::new(&pristine));
-        let captured = Snapshot::from(&*unit);
-        let reference = build(&captured, 0, &pristine, &skins, &sim.config);
+        let captured = snapshot(&sim, 0);
+        let reference = build(&captured, &pristine, &skins);
         assert!(!reference.is_empty());
+        let unit = &mut sim.units[0];
         unit.body.vol.cols.fill(0);
         unit.seg_gone.fill(true);
         unit.dents.clear();
-        let config = sim.config.clone();
         let pool = bevy::tasks::TaskPoolBuilder::new().num_threads(1).build();
-        let work = pool.spawn(async move { build(&captured, 0, &pristine, &skins, &config) });
+        let work = pool.spawn(async move { build(&captured, &pristine, &skins) });
         let result = block_on(work);
         assert_eq!(result.len(), reference.len());
         for (actual, expected) in result.iter().zip(&reference) {

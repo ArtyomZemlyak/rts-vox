@@ -145,6 +145,11 @@ impl Registry {
         self.defs.get(m as usize).and_then(|o| o.as_ref())
     }
 
+    /// Existing definitions in explicit ID order; holes remain absent.
+    pub fn definitions(&self) -> impl Iterator<Item = &MatDef> {
+        self.defs.iter().flatten()
+    }
+
     /// Заменить определение материала с тем же номером (ADR-298: живые
     /// настройки полигона). Номер обязан уже быть в реестре.
     pub fn replace(&mut self, d: MatDef) -> Result<(), RegistryError> {

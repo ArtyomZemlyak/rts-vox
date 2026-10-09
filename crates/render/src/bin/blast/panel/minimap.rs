@@ -177,7 +177,7 @@ fn clip_to_map(corners: [Vec2; 4]) -> Vec<Vec2> {
 }
 
 pub fn update_view(
-    scene: Res<Scene>,
+    snapshot: Res<super::super::ui_snapshot::UiSnapshot>,
     windows: Query<&Window>,
     cameras: Query<(&Camera, &Transform, &Projection), With<GasCamera>>,
     mut edges: Query<(&ViewEdge, &mut Node, &mut UiTransform)>,
@@ -195,7 +195,8 @@ pub fn update_view(
                 .map(|w| Vec2::new(w.width(), w.height()))
         })
         .unwrap_or(Vec2::new(1600.0, 900.0));
-    let size = scene.sim.size();
+    let Some(view) = &snapshot.view else { return };
+    let size = view.size;
     let polygon = ground_footprint(transform, projection, viewport)
         .map(|corners| {
             clip_to_map(corners.map(|p| Vec2::new(p.x / size[0] as f32, p.y / size[2] as f32)))
@@ -228,20 +229,13 @@ pub fn update_view(
     }
     *previous = pixels;
 }
-pub fn update(
-    mut scene: ResMut<Scene>,
-    mut edit: ResMut<Workshop>,
+pub fn update_terrain(
+    scene: Res<Scene>,
     mut images: ResMut<Assets<Image>>,
-    mut maps: Query<(
-        &mut MiniMap,
-        &mut ImageNode,
-        &Interaction,
-        &bevy::ui::RelativeCursorPosition,
-    )>,
-    mut markers: Query<(&Marker, &mut Node, &mut BackgroundColor)>,
+    mut maps: Query<(&mut MiniMap, &mut ImageNode)>,
 ) {
     let size = scene.sim.size();
-    for (mut map, mut image, interaction, cursor) in &mut maps {
+    for (mut map, mut image) in &mut maps {
         if map.generation != Some(scene.generation) {
             let mut pixels = Vec::with_capacity((SIDE * SIDE * 4) as usize);
             for z in 0..SIDE {
@@ -287,6 +281,16 @@ pub fn update(
             }
             map.generation = Some(scene.generation);
         }
+    }
+}
+
+pub fn input(
+    mut scene: ResMut<Scene>,
+    mut edit: ResMut<Workshop>,
+    maps: Query<(&Interaction, &bevy::ui::RelativeCursorPosition), With<MiniMap>>,
+) {
+    let size = scene.sim.size();
+    for (interaction, cursor) in &maps {
         if *interaction == Interaction::Pressed && cursor.cursor_over() {
             if let Some(uv) = cursor.normalized {
                 let centre = edit.sector().map_or(
@@ -304,11 +308,20 @@ pub fn update(
             }
         }
     }
+}
+
+pub fn refresh_markers(
+    snapshot: Res<super::super::ui_snapshot::UiSnapshot>,
+    edit: Res<Workshop>,
+    mut markers: Query<(&Marker, &mut Node, &mut BackgroundColor)>,
+) {
+    let Some(view) = &snapshot.view else { return };
+    let size = view.size;
     for (Marker(i), mut node, mut color) in &mut markers {
         let unit = if *i == modding::range::MAX_RANGE_UNITS {
-            (!scene.sim.battle_mode()).then_some(&scene.sim.gun)
+            (!view.battle).then_some(&view.gun)
         } else {
-            scene.sim.units.get(*i)
+            view.units.get(*i)
         };
         node.display = if unit.is_some_and(|u| u.status.alive) {
             Display::Flex
@@ -325,11 +338,11 @@ pub fn update(
             } + if selected { 3.0 } else { 0.0 };
             node.width = px(width);
             node.height = px(width);
-            node.left = percent(100.0 * u.motion.pos[0].to_f64_lossy() as f32 / size[0] as f32);
-            node.top = percent(100.0 * u.motion.pos[2].to_f64_lossy() as f32 / size[2] as f32);
+            node.left = percent(100.0 * u.position[0].to_f64_lossy() as f32 / size[0] as f32);
+            node.top = percent(100.0 * u.position[2].to_f64_lossy() as f32 / size[2] as f32);
             color.0 = if selected {
                 Color::srgb(0.99, 0.94, 0.56)
-            } else if *i == modding::range::MAX_RANGE_UNITS || scene.sim.allied(*i) {
+            } else if *i == modding::range::MAX_RANGE_UNITS || u.allied {
                 Color::srgb(0.2, 0.85, 1.0)
             } else {
                 Color::srgb(1.0, 0.32, 0.2)
@@ -345,6 +358,47 @@ fn destination(cursor: Vec2, size: [u32; 3]) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detached_markers_follow_publication_and_hide_removed_generation_slots() {
+        use super::super::super::ui_snapshot::UiSnapshot;
+        let layout =
+            RangeLayout::from_ron(include_str!("../../../../../../data/range-cover.ron")).unwrap();
+        let sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+        let view = sim_core::blast::read_model::View::new(&sim, 4);
+        let pos = view.units[0].position;
+        let size = view.size;
+        drop(sim);
+        let mut app = App::new();
+        app.insert_resource(UiSnapshot {
+            view: Some(view),
+            ..default()
+        })
+        .insert_resource(Workshop::new(None, false))
+        .add_systems(Update, refresh_markers);
+        let marker = app
+            .world_mut()
+            .spawn((Marker(0), Node::default(), BackgroundColor::default()))
+            .id();
+        app.update();
+        let node = app.world().get::<Node>(marker).unwrap();
+        assert_eq!(node.display, Display::Flex);
+        assert_eq!(
+            node.left,
+            percent(100.0 * pos[0].to_f64_lossy() as f32 / size[0] as f32)
+        );
+        {
+            let mut snapshot = app.world_mut().resource_mut::<UiSnapshot>();
+            let view = snapshot.view.as_mut().unwrap();
+            view.generation += 1;
+            view.units.clear();
+        }
+        app.update();
+        assert_eq!(
+            app.world().get::<Node>(marker).unwrap().display,
+            Display::None
+        );
+    }
+
     #[test]
     fn minimap_cursor_maps_centre_and_corners_to_world() {
         let size = [10000, 192, 8000];

@@ -80,7 +80,19 @@ pub enum RangeUnitKind {
 }
 
 impl RangeUnitKind {
-    pub const COUNT: usize = 9;
+    /// Canonical order for kind-indexed capability tables.
+    pub const ALL: [Self; 9] = [
+        Self::Tank,
+        Self::Strider,
+        Self::Spider,
+        Self::Artillery,
+        Self::TurretT1,
+        Self::TurretT2,
+        Self::Base,
+        Self::ArtilleryT2,
+        Self::ArtilleryTurretT2,
+    ];
+    pub const COUNT: usize = Self::ALL.len();
     pub const fn index(self) -> usize {
         match self {
             Self::Tank => 0,

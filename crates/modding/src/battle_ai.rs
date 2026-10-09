@@ -1,7 +1,7 @@
 //! Deterministic enemy decision rules. All weights are integer world units.
 use serde::Deserialize;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 pub struct Tuning {
     pub decision_ticks: u32,
     pub focus_fire: bool,

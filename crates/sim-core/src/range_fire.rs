@@ -59,17 +59,12 @@ impl Combustion {
     }
     fn amount(&self, matter: &Matter, ml: u32) -> u64 {
         // Density units per world cell, converted from physical millilitres.
-        u64::from(ml) * 1000 * matter.economy.per_voxel(self.tuning.material)
+        u64::from(ml) * 1000 * u64::from(matter.source_density(self.tuning.material))
             / u64::from(WORLD_MM).pow(3)
     }
     pub fn new(units: &[RangeUnit], matter: &mut Matter) -> Self {
         let mut f = Self::empty(units.len());
-        let density = matter
-            .economy
-            .mats
-            .get(f.tuning.material)
-            .expect("fuel material")
-            .density;
+        let density = matter.source_density(f.tuning.material);
         f.tuning
             .validate_density(density)
             .expect("exact fuel quantities");
@@ -391,6 +386,53 @@ mod tests {
         assert_eq!(r.combustion.remaining(0, &r.matter), fuel);
         assert!(r.combustion.sources(&r.units, &r.matter).is_empty());
         assert!(r.matter.economy.ledger.balanced());
+    }
+    #[test]
+    fn density_edits_preserve_fuel_burn_heat_spill_and_restore() {
+        use crate::blast::battle::commands::{Command, MaterialField};
+        let mut reference = range();
+        let mut edited = range();
+        for r in [&mut reference, &mut edited] {
+            let p = cell(r, 0);
+            r.thermals.deposit(p, 120, &r.thermal_tuning);
+        }
+        for tick in 0..65 {
+            if let Some(value) = match tick {
+                0 => Some(1),
+                12 => Some(modding::MAX_DENSITY),
+                30 => Some(80),
+                _ => None,
+            } {
+                edited.execute_command(Command::TuneMaterial {
+                    material: 9,
+                    field: MaterialField::Density,
+                    value,
+                });
+            }
+            reference.step();
+            edited.step();
+            assert_eq!(
+                reference.combustion.remaining(0, &reference.matter),
+                edited.combustion.remaining(0, &edited.matter)
+            );
+            assert_eq!(reference.combustion.consumed, edited.combustion.consumed);
+            assert_eq!(
+                reference.combustion.generated_heat,
+                edited.combustion.generated_heat
+            );
+            let mut a = Blob::new();
+            let mut b = Blob::new();
+            reference.combustion.save(&mut a);
+            edited.combustion.save(&mut b);
+            assert_eq!(a.v, b.v);
+            assert!(edited.matter.economy.ledger.balanced());
+            if [1, 15, 35].contains(&tick) {
+                edited = BlastRange::restore(edited.config.clone(), &edited.snapshot()).unwrap();
+            }
+        }
+        assert!(edited.combustion.consumed > 0 && edited.combustion.generated_heat > 0);
+        assert!(edited.combustion.stocks[0].spill.is_some());
+        assert!(edited.thermals.melted > 0);
     }
     #[test]
     fn ignition_is_local_to_the_engine_bay_and_consumes_real_matter() {

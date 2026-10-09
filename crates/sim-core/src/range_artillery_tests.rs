@@ -5,6 +5,333 @@ use fx::angle;
 use modding::range::{RangeLayout, RangeUnitDef};
 use phys::V3;
 
+#[path = "range_surface_blast_tests.rs"]
+mod surface_blast_tests;
+
+#[cfg(test)]
+#[test]
+fn artillery_impacts_remove_soil_in_manual_and_ai_combat() {
+    for kind in [RangeUnitKind::Artillery, RangeUnitKind::ArtilleryT2] {
+        for ai in [false, true] {
+            let mut r = arena(kind);
+            if ai {
+                let l = r.layout.take().unwrap();
+                r = BlastRange::with_layout(r.config.clone(), l).unwrap();
+                assert!(r.set_ai_vs_ai(true));
+                r.start_battle().unwrap();
+                r.battle.ai.next_tick = r.tick;
+            } else {
+                assert!(r.battle_order(0, Order::Attack(1), None));
+            }
+            let mut soil = 0;
+            let mut contacts = 0;
+            let mut first = None;
+            let mut replay = None;
+            let mut holes = std::collections::BTreeSet::new();
+            for _ in 0..600 {
+                if ai {
+                    r.step();
+                } else {
+                    step(&mut r);
+                }
+                if let Some(copy) = replay.as_mut() {
+                    if ai {
+                        BlastRange::step(copy);
+                    } else {
+                        step(copy);
+                    }
+                    assert_eq!(
+                        r.state_hash(),
+                        copy.state_hash(),
+                        "{kind:?} ai={ai} damage replay"
+                    );
+                }
+                for impact in &r.battle.impacts {
+                    if matches!(impact.weapon, Weapon::Blast | Weapon::Canister) {
+                        contacts += 1;
+                        first.get_or_insert(impact.at);
+                    }
+                }
+                soil += r
+                    .world
+                    .completed()
+                    .iter()
+                    .filter(|(edit, before)| {
+                        let dug = edit.mat == 0 && matches!(before, 1 | 7 | 8);
+                        if dug {
+                            holes.insert([edit.x, edit.y, edit.z]);
+                        }
+                        dug
+                    })
+                    .count();
+                if replay.is_none()
+                    && r.matter.admission.ground[0] > 0
+                    && r.battle.waves.iter().any(|w| {
+                        w.wave.body_energy_mj.is_some_and(|left| {
+                            left < u64::from(r.battle.config(w.weapon).material_energy_j)
+                                * 1000
+                                * u64::from(r.matter.tuning.body_energy_pct)
+                                / 100
+                        })
+                    })
+                {
+                    let bytes = r.snapshot();
+                    let copy =
+                        BlastRange::restore(r.config.clone(), &bytes).expect("mid-crater snapshot");
+                    assert_eq!(bytes, copy.snapshot());
+                    replay = Some(copy);
+                }
+            }
+            eprintln!("{kind:?} ai={ai} fired={} contacts={contacts} first={first:?} soil={soil} ground={:?} waves={:?}", r.battle.actors[0].fired, r.matter.admission.ground, r.battle.wave_counts());
+            assert!(r.battle.actors[0].fired > 0 && contacts > 0);
+            assert!(
+                soil > 0,
+                "{kind:?} ai={ai} explosive impacts did not dig soil"
+            );
+            assert!(
+                holes
+                    .iter()
+                    .any(|p| r.world.material(p[0], p[1], p[2]) == 0),
+                "no actual crater remained"
+            );
+            assert!(
+                replay.is_some(),
+                "no saved partially spent body/terrain blast"
+            );
+            assert!(r.matter.economy.ledger.balanced());
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn player_artillery_surface_blast_keeps_ground_energy_and_replays() {
+    let mut l = arena(RangeUnitKind::Artillery).layout.unwrap();
+    l.battle = false;
+    l.gun_kind = RangeUnitKind::Artillery;
+    l.gun = [170, 16, 336];
+    l.target = [450, 24, 336];
+    l.airburst_on_target = false;
+    l.units.remove(0);
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(c, l).unwrap();
+    let mut replay = None;
+    for _ in 0..600 {
+        r.step();
+        if let Some(copy) = replay.as_mut() {
+            BlastRange::step(copy);
+            assert_eq!(r.snapshot(), copy.snapshot());
+        }
+        if replay.is_none() && r.matter.admission.ground[0] > 0 && r.has_wave_energy() {
+            let bytes = r.snapshot();
+            assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 59);
+            let copy = BlastRange::restore(c, &bytes).expect("player material blast snapshot");
+            assert!(
+                !copy.weapon_configured,
+                "save promotion invented a weapon edit"
+            );
+            assert_eq!(bytes, copy.snapshot());
+            for (offset, value) in [(10, 2), (bytes.len() - 9, 2)] {
+                let mut corrupt = bytes.clone();
+                corrupt[offset] = value;
+                assert!(BlastRange::restore(c, &corrupt).is_none());
+            }
+            let mut corrupt = bytes.clone();
+            let last = corrupt.len() - 8;
+            corrupt[last..].copy_from_slice(&u64::MAX.to_le_bytes());
+            assert!(
+                BlastRange::restore(c, &corrupt).is_none(),
+                "budget exceeded total energy"
+            );
+            replay = Some(copy);
+        }
+    }
+    assert!(replay.is_some());
+    assert!(r.matter.admission.body[0] > 0 && r.matter.admission.ground[0] > 0);
+    assert!([1, 7, 8].iter().any(|&m| r.removed_materials[m] > 0));
+    assert!(r.matter.spent_mj <= r.matter.supplied_mj);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[cfg(test)]
+#[test]
+fn player_artillery_impact_digs_soil_with_stock_charge() {
+    let mut l = arena(RangeUnitKind::Artillery).layout.unwrap();
+    l.battle = false;
+    l.gun_kind = RangeUnitKind::Artillery;
+    l.gun = [170, 16, 336];
+    l.target = [450, 15, 336];
+    l.airburst_on_target = false;
+    l.units.clear();
+    let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(c, l).unwrap();
+    let mut soil = 0;
+    for _ in 0..600 {
+        r.step();
+        soil += r
+            .world
+            .completed()
+            .iter()
+            .filter(|(edit, before)| edit.mat == 0 && matches!(before, 1 | 7 | 8))
+            .count();
+    }
+    eprintln!(
+        "player impact={:?} removed={} soil={soil} ground={:?}",
+        r.impact, r.removed, r.matter.admission.ground
+    );
+    assert!(r.impact.is_some());
+    assert!(soil > 0);
+    assert!(r.matter.economy.ledger.balanced());
+}
+
+#[test]
+fn ai_artillery_crater_progresses_while_felling_waits_and_replays() {
+    contended_ai_artillery_crater(RangeUnitKind::Artillery);
+}
+
+#[test]
+fn ai_t2_artillery_crater_progresses_while_felling_waits_and_replays() {
+    for kind in [RangeUnitKind::ArtilleryT2, RangeUnitKind::ArtilleryTurretT2] {
+        contended_ai_artillery_crater(kind);
+    }
+}
+
+fn contended_ai_artillery_crater(kind: RangeUnitKind) {
+    use crate::blast::{battle::commands::Command, debris_tuning::DebrisField};
+    let mut layout = arena(kind).layout.unwrap();
+    layout.units[0].allied = false;
+    layout.units[1].allied = true;
+    layout.blocks.push(modding::range::RangeBlock {
+        min: [250, 16, 250],
+        max: [300, 64, 300],
+        material: 5,
+    });
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.execute_command(Command::TuneDebris {
+        field: DebrisField::MaxFlying,
+        value: 128,
+    });
+    r.start_battle().unwrap();
+    assert!(r.battle_order(1, Order::Hold, None));
+    assert_eq!(
+        r.matter.fell(
+            &mut r.world,
+            &[[260, 16, 260]],
+            [260, 16, 260],
+            &r.navigation.fell
+        ),
+        1
+    );
+    let mut soil = 0;
+    let mut wood = 0;
+    let mut surface = std::collections::BTreeSet::new();
+    let mut replay = None;
+    for _ in 0..600 {
+        r.step();
+        if let Some(copy) = replay.as_mut() {
+            BlastRange::step(copy);
+            assert_eq!(r.state_hash(), copy.state_hash(), "contended crater replay");
+        }
+        for &(edit, before) in r.world.completed() {
+            if edit.mat != 0 {
+                continue;
+            }
+            if matches!(before, 1 | 7 | 8) {
+                soil += 1;
+                if edit.y == 15 {
+                    surface.insert([edit.x, edit.y, edit.z]);
+                }
+            } else if before == 5 {
+                wood += 1;
+            }
+        }
+        assert!(r.matter.debris.fragment_pools(&r.matter.tuning).flying <= 128);
+        assert!(r.matter.economy.ledger.balanced());
+        if replay.is_none()
+            && soil > 0
+            && r.matter.felling_pending() > 0
+            && r.battle.has_material_work()
+        {
+            let bytes = r.snapshot();
+            let copy = BlastRange::restore(config, &bytes).expect("contended crater snapshot");
+            assert_eq!(bytes, copy.snapshot());
+            replay = Some(copy);
+        }
+    }
+    eprintln!(
+        "AI contested {kind:?} fired={} soil={soil} wood={wood} surface={} ground={:?} felling={}",
+        r.battle.actors[0].fired,
+        surface.len(),
+        r.matter.admission.ground,
+        r.matter.felling_pending()
+    );
+    assert!(r.battle.actors[0].fired > 0);
+    assert_eq!(r.battle.actors[1].fired, 0);
+    assert!(soil > 0 && wood > 0, "both competing queues must progress");
+    assert!(
+        surface
+            .iter()
+            .any(|p| r.world.material(p[0], p[1], p[2]) == 0),
+        "no surface crater"
+    );
+    assert!(replay.is_some());
+}
+
+#[test]
+fn isolated_first_artillery_salvo_opens_surface_soil() {
+    for kind in [
+        RangeUnitKind::Artillery,
+        RangeUnitKind::ArtilleryT2,
+        RangeUnitKind::ArtilleryTurretT2,
+    ] {
+        for target in [RangeUnitKind::Tank, RangeUnitKind::Base] {
+            let mut layout = arena(kind).layout.unwrap();
+            layout.units[0].allied = false;
+            layout.units[1].allied = true;
+            layout.units[1].kind = target;
+            let config =
+                ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+            let mut r = BlastRange::with_layout(config, layout).unwrap();
+            r.start_battle().unwrap();
+            assert!(r.battle_order(1, Order::Hold, None));
+            let mut first = None;
+            let mut soil = 0;
+            let mut surface = std::collections::BTreeSet::new();
+            for _ in 0..300 {
+                if r.battle.actors[0].fired > 0 {
+                    r.battle.actors[0].order = Order::Hold;
+                    step(&mut r);
+                } else {
+                    r.step();
+                }
+                for impact in &r.battle.impacts {
+                    first.get_or_insert((r.tick, impact.at));
+                }
+                for &(edit, before) in r.world.completed() {
+                    if edit.mat == 0 && matches!(before, 1 | 7 | 8) {
+                        soil += 1;
+                        if edit.y == 15 {
+                            surface.insert([edit.x, edit.y, edit.z]);
+                        }
+                    }
+                }
+            }
+            assert_eq!(r.battle.actors[0].fired, 1, "only the first salvo may dig");
+            eprintln!("isolated {kind:?} -> {target:?}: first={first:?} fired={} soil={soil} surface={} ground={:?} waves={:?}", r.battle.actors[0].fired, surface.len(), r.matter.admission.ground, r.battle.wave_counts());
+            assert_eq!(r.battle.actors[1].fired, 0);
+            assert!(first.is_some(), "{kind:?} -> {target:?}: no impact");
+            assert!(
+                surface
+                    .iter()
+                    .any(|p| r.world.material(p[0], p[1], p[2]) == 0),
+                "{kind:?} -> {target:?}: first salvo left no surface crater"
+            );
+            assert!(r.matter.economy.ledger.balanced());
+        }
+    }
+}
+
 fn arena(kind: RangeUnitKind) -> BlastRange {
     let mut l = RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
     l.battle = true;

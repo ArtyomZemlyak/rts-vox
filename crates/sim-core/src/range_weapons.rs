@@ -165,6 +165,19 @@ pub(super) fn kinetic_velocity(
 }
 
 impl BlastRange {
+    /// A targeted burst belongs to that live target. Already flying rounds
+    /// remain physical; the burst must not become untargeted ground fire.
+    pub(super) fn cancel_target_stream(&mut self) {
+        if self.streams.left > 0 {
+            self.streams.left = 0;
+            if let Some(tuning) = self.stream_tuning() {
+                self.streams.cooldown = self.streams.cooldown.max(self.tick + tuning.reload_ticks);
+            }
+        }
+        if self.shell.is_none() {
+            self.fire_tick = u32::MAX;
+        }
+    }
     /// The single gun's round against what it met: [`Self::ricochet`].
     pub(super) fn kinetic_ricochet(&mut self, at: [i32; 3], from: [i32; 3]) -> bool {
         let config = self.config.clone();
@@ -1069,8 +1082,8 @@ mod tests {
             None,
             &tuning,
         );
-        assert_eq!(r.heat.cell([200, 100, 338]).heat, 30);
-        assert_eq!(r.heat.cell([210, 100, 339]).heat, 17);
+        assert_eq!(r.heat.cell([200, 100, 338]).heat, tuning.heat * 12 / 16);
+        assert_eq!(r.heat.cell([210, 100, 339]).heat, tuning.heat * 7 / 16);
         assert_eq!(
             r.heat.cell([200, 100, 339]).heat,
             0,
@@ -1086,7 +1099,10 @@ mod tests {
             None,
             &tuning,
         );
-        assert_eq!(r.heat.cell([200, 100, 338]).heat, 60);
+        assert_eq!(
+            r.heat.cell([200, 100, 338]).heat,
+            2 * (tuning.heat * 12 / 16)
+        );
         let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
         assert_eq!(r.state_hash(), restored.state_hash());
         for _ in 0..3 {
@@ -1180,6 +1196,8 @@ mod tests {
             max: [246, 60, 342],
             material: 3,
         }]);
+        // Low-power beam: retain coverage of slow heating and sheltering.
+        r.streams.tuning.laser.heat = 40;
         r.control();
         r.aim = Some([392, 40, 336]);
         assert!(r.refire());
@@ -1262,12 +1280,98 @@ mod tests {
         );
     }
     #[test]
+    fn stock_tank_laser_finishes_a_tank_instead_of_drilling_forever() {
+        let mut r = laser_range(vec![]);
+        r.control();
+        assert!(r.order_attack(0));
+        let own = r.gun.body.volume_mm3();
+        let mut death = None;
+        for tick in 0..300 {
+            r.step();
+            if !r.units[0].status.alive {
+                death = Some(tick);
+                break;
+            }
+        }
+        eprintln!(
+            "tank laser death={death:?} core={:?} melted={} fragments={}",
+            r.units[0].integrity.core,
+            r.thermals.melted,
+            r.matter.debris.fragments.len()
+        );
+        assert!(
+            death.is_some(),
+            "stock beam could not finish its target in ten seconds"
+        );
+        assert_eq!(r.gun.body.volume_mm3(), own);
+        r.step();
+        assert!(r.streams.traces.is_empty());
+        assert!(r.explosion.is_none());
+        assert!(r.matter.economy.ledger.balanced());
+    }
+
+    #[test]
+    fn targeted_laser_cancels_its_burst_when_the_target_dies() {
+        for automatic in [false, true] {
+            let mut r = laser_range(vec![]);
+            r.control();
+            if automatic {
+                r.set_auto_attack(true);
+            } else {
+                assert!(r.order_attack(0));
+            }
+            for _ in 0..60 {
+                r.step();
+                if !r.streams.traces.is_empty() {
+                    break;
+                }
+            }
+            assert!(!r.streams.traces.is_empty(), "laser never started");
+            assert!(r.streams.left > 0);
+            let u = &r.units[0];
+            let [cx, cy, cz] = [u.body.core.0, u.body.core.1, u.body.core.2].map(usize::from);
+            let size = usize::from(u.body.core_size);
+            for z in cz..cz + size {
+                for y in cy..cy + size {
+                    for x in cx..cx + size {
+                        r.thermals.deposit(
+                            thermal::Cell {
+                                unit: 0,
+                                part: 0,
+                                at: [x as u8, y as u8, z as u8],
+                            },
+                            10_000,
+                            &r.thermal_tuning,
+                        );
+                    }
+                }
+            }
+            r.step_unit_heat();
+            assert!(!r.units[0].status.alive);
+            r.step();
+            assert!(
+                r.streams.traces.is_empty(),
+                "laser kept firing after target death (auto={automatic})"
+            );
+            assert_eq!(r.streams.left, 0);
+            assert_eq!(r.attack, None);
+            assert_eq!(r.fire_tick, u32::MAX);
+            let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+            for _ in 0..10 {
+                r.step();
+                restored.step();
+                assert_eq!(r.state_hash(), restored.state_hash());
+            }
+        }
+    }
+
+    #[test]
     fn laser_softens_and_removes_armour_without_a_blast() {
         let mut r = laser_range(vec![]);
         r.control();
         r.aim = Some([285, 39, 336]);
         assert!(r.refire());
-        for _ in 0..3 {
+        for _ in 0..1 {
             r.step();
         }
         assert!(
@@ -1289,6 +1393,7 @@ mod tests {
             max: [231, 60, 342],
             material: 2,
         }]);
+        r.streams.tuning.laser.heat = 40;
         r.control();
         r.aim = Some([392, 40, 336]);
         assert!(r.refire());
@@ -2006,15 +2111,24 @@ mod tests {
         let mut faster = b.config.clone();
         faster.shell_speed = 10000;
         b.reconfigure(faster);
+        // The live setting is now authoritative and included in the hash.
+        // Restore must use it even when the caller still has the old preset.
+        let mut copy = BlastRange::restore(a.config, &b.snapshot()).unwrap();
         for _ in 0..40 {
             a.step();
             b.step();
+            copy.step();
+            assert_eq!(b.snapshot(), copy.snapshot());
         }
         assert!(
             a.thermals.hot() > 0,
             "in-flight heat never reached the body"
         );
-        assert_eq!(a.state_hash(), b.state_hash());
+        assert_ne!(a.state_hash(), b.state_hash());
+        // Compare the complete physical result with identical configuration
+        // metadata, after all existing rounds have already travelled.
+        a.reconfigure(faster);
+        assert_eq!(a.snapshot(), b.snapshot());
     }
     #[test]
     fn flame_ignites_wood_and_shield_stops_packets() {

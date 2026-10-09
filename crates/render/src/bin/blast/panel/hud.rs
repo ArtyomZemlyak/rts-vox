@@ -406,7 +406,7 @@ fn weapon_name(w: BattleWeapon) -> &'static str {
 }
 
 pub fn refresh(
-    scene: Res<Scene>,
+    scene: Res<super::super::ui_snapshot::UiSnapshot>,
     edit: Res<Workshop>,
     panel: Res<Panel>,
     windows: Query<&Window>,
@@ -427,36 +427,35 @@ pub fn refresh(
         Option<&BattleControls>,
     )>,
 ) {
-    let battle = scene.sim.battle_mode();
+    let Some(view) = &scene.view else { return };
+    let battle = view.battle;
     let (compact, hide_brand) = windows.single().map_or((false, false), |w| {
         (w.width() < 1280.0 || w.height() < 760.0, w.width() < 1280.0)
     });
     let selected = if battle {
         edit.controlled
-            .and_then(|i| scene.sim.units.get(i).map(|u| (i, u)))
+            .and_then(|i| view.units.get(i).map(|u| (i, u)))
     } else {
-        Some((usize::MAX, &scene.sim.gun))
+        Some((usize::MAX, &view.gun))
     };
     let selected_ids = if battle {
-        edit.battle_selected_ids(&scene.sim)
+        view.selected_allies(edit.controlled, &edit.selected_units)
     } else {
         Vec::new()
     };
-    let loadout_count =
-        selected_ids
-            .iter()
-            .filter(|&&i| {
-                scene.sim.units.get(i).is_some_and(|u| {
-                    matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery)
-                })
-            })
-            .count();
-    let roster: Vec<_> = scene
-        .sim
+    let loadout_count = selected_ids
+        .iter()
+        .filter(|&&i| {
+            view.units
+                .get(i)
+                .is_some_and(|u| matches!(u.kind, RangeUnitKind::Tank | RangeUnitKind::Artillery))
+        })
+        .count();
+    let roster: Vec<_> = view
         .units
         .iter()
         .enumerate()
-        .filter(|(i, u)| scene.sim.allied(*i) && u.status.alive)
+        .filter(|(_, u)| u.allied && u.status.alive)
         .map(|(i, _)| i)
         .collect();
     let page_size = windows
@@ -550,15 +549,11 @@ pub fn refresh(
         } else if matches!(action, Some(Action::FreeRange)) {
             Some(!battle)
         } else if matches!(action, Some(Action::FreeControl)) {
-            Some(
-                battle
-                    && edit.editing
-                    && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup,
-            )
+            Some(battle && edit.editing && view.phase == sim_core::blast::battle::Phase::Setup)
         } else if matches!(action, Some(Action::Fire | Action::AutoAttack)) {
-            Some(!battle || scene.sim.battle.phase == sim_core::blast::battle::Phase::Fighting)
+            Some(!battle || view.phase == sim_core::blast::battle::Phase::Fighting)
         } else if matches!(action, Some(Action::BattleReplay)) {
-            Some(battle && scene.sim.battle.phase != sim_core::blast::battle::Phase::Setup)
+            Some(battle && view.phase != sim_core::blast::battle::Phase::Setup)
         } else if matches!(action, Some(Action::BattleChoose)) {
             Some(battle)
         } else if matches!(action, Some(Action::Pause)) {
@@ -567,18 +562,17 @@ pub fn refresh(
             Some(
                 battle
                     && (action != Some(&Action::BattleStart)
-                        || scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup),
+                        || view.phase == sim_core::blast::battle::Phase::Setup),
             )
         } else if briefing.is_some() {
             Some(
                 !(compact && panel.drawer != 0)
                     && (!scene.notice.is_empty()
-                        || (battle
-                            && scene.sim.battle.phase == sim_core::blast::battle::Phase::Setup)
+                        || (battle && view.phase == sim_core::blast::battle::Phase::Setup)
                         || (!battle && !panel.briefing.is_empty())),
             )
         } else if strip.is_some() {
-            Some(battle && scene.sim.battle_counts()[0] > 0)
+            Some(battle && view.counts[0] > 0)
         } else {
             None
         };
@@ -597,38 +591,35 @@ pub fn refresh(
                     "выкл"
                 }
             ),
-            n if n >= 100 => {
-                scene
-                    .sim
-                    .units
-                    .get((n - 100) as usize)
-                    .map_or_else(String::new, |u| {
-                        format!(
-                            "{} {:02} · {}%",
-                            if u.kind == RangeUnitKind::Spider {
-                                "П"
-                            } else if u.kind == RangeUnitKind::Tank {
-                                "Т"
-                            } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
-                                "АТ2"
-                            } else if u.kind == RangeUnitKind::ArtilleryT2 {
-                                "А2"
-                            } else if u.kind == RangeUnitKind::Artillery {
-                                "А"
-                            } else if u.kind == RangeUnitKind::TurretT1 {
-                                "1"
-                            } else if u.kind == RangeUnitKind::TurretT2 {
-                                "2"
-                            } else if u.kind == RangeUnitKind::Base {
-                                "Б"
-                            } else {
-                                "Ш"
-                            },
-                            n - 99,
-                            u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
-                        )
-                    })
-            }
+            n if n >= 100 => view
+                .units
+                .get((n - 100) as usize)
+                .map_or_else(String::new, |u| {
+                    format!(
+                        "{} {:02} · {}%",
+                        if u.kind == RangeUnitKind::Spider {
+                            "П"
+                        } else if u.kind == RangeUnitKind::Tank {
+                            "Т"
+                        } else if u.kind == RangeUnitKind::ArtilleryTurretT2 {
+                            "АТ2"
+                        } else if u.kind == RangeUnitKind::ArtilleryT2 {
+                            "А2"
+                        } else if u.kind == RangeUnitKind::Artillery {
+                            "А"
+                        } else if u.kind == RangeUnitKind::TurretT1 {
+                            "1"
+                        } else if u.kind == RangeUnitKind::TurretT2 {
+                            "2"
+                        } else if u.kind == RangeUnitKind::Base {
+                            "Б"
+                        } else {
+                            "Ш"
+                        },
+                        n - 99,
+                        u.integrity.core.mul(fx::Fx::from_int(100)).to_int_trunc()
+                    )
+                }),
             4 => {
                 if scene.paused {
                     "Продолжить".into()
@@ -645,8 +636,8 @@ pub fn refresh(
             }
             0 => {
                 if battle {
-                    let [a, b] = scene.sim.battle_counts();
-                    let phase = match scene.sim.battle.phase {
+                    let [a, b] = view.counts;
+                    let phase = match view.phase {
                         sim_core::blast::battle::Phase::Setup if !edit.editing => "БЕЗ БОЯ",
                         sim_core::blast::battle::Phase::Setup => "РАССТАНОВКА",
                         sim_core::blast::battle::Phase::Fighting => "ИИ АКТИВЕН",
@@ -661,7 +652,7 @@ pub fn refresh(
                     };
                     if compact {
                         format!("{name} · {phase}")
-                    } else if let Some([own, enemy]) = scene.sim.battle_base_integrity() {
+                    } else if let Some([own, enemy]) = view.base_integrity {
                         format!("{name} · БАЗЫ {own}% / {enemy}% · {phase}")
                     } else {
                         format!("{name} · СВОИ {a} / ВРАГИ {b} · {phase}")
@@ -749,13 +740,11 @@ pub fn refresh(
                     } else {
                         selected.map_or_else(
                             || "Выберите танк или артиллерию для смены боеприпаса".into(),
-                            |(i, u)| {
+                            |(_, u)| {
                                 format!(
                                     "{} · дальность {} м\n{}",
-                                    weapon_name(
-                                        scene.sim.battle_weapon(i).unwrap_or(BattleWeapon::Blast)
-                                    ),
-                                    scene.sim.battle_attack_range(i).unwrap_or(0) / 10,
+                                    weapon_name(u.weapon.unwrap_or(BattleWeapon::Blast)),
+                                    u.attack_range.unwrap_or(0) / 10,
                                     if matches!(
                                         u.kind,
                                         RangeUnitKind::Tank | RangeUnitKind::Artillery
@@ -774,7 +763,7 @@ pub fn refresh(
                     format!(
                         "Мощность {:.1}×  ·  {}",
                         scene.power as f32 / 1000.0,
-                        if scene.sim.ready() {
+                        if view.ready {
                             "Готов к выстрелу"
                         } else {
                             "Заряд / выстрел"
@@ -784,7 +773,7 @@ pub fn refresh(
             }
             _ => {
                 let phase = if battle {
-                    match scene.sim.battle.phase {
+                    match view.phase {
                         sim_core::blast::battle::Phase::Setup if !edit.editing => {
                             "СВОБОДНОЕ УПРАВЛЕНИЕ · стрельба и ИИ выключены"
                         }
@@ -881,8 +870,230 @@ pub fn refresh_selection_box(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    #[test]
+    fn inspection_is_published_only_for_an_open_populated_drawer() {
+        use super::super::{super::ui_snapshot, Readout};
+        let mut app = app();
+        app.add_systems(
+            PostUpdate,
+            super::super::refresh.after(ui_snapshot::publish),
+        );
+        let readout = app
+            .world_mut()
+            .spawn((Readout, Text::new("hidden sentinel")))
+            .id();
+        app.update();
+        assert!(app
+            .world()
+            .resource::<ui_snapshot::UiSnapshot>()
+            .inspection
+            .is_none());
+        assert_eq!(
+            app.world().get::<Text>(readout).unwrap().0,
+            "hidden sentinel"
+        );
+        app.world_mut().resource_mut::<Panel>().drawer = 5;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<ui_snapshot::UiSnapshot>()
+            .inspection
+            .is_some());
+        assert!(app
+            .world()
+            .get::<Text>(readout)
+            .unwrap()
+            .0
+            .contains("Свои:"));
+        app.world_mut().resource_mut::<Panel>().drawer = 0;
+        app.update();
+        assert!(app
+            .world()
+            .resource::<ui_snapshot::UiSnapshot>()
+            .inspection
+            .is_none());
+        app.world_mut().resource_mut::<Panel>().drawer = 5;
+        app.world_mut().despawn(readout);
+        app.update();
+        assert!(app
+            .world()
+            .resource::<ui_snapshot::UiSnapshot>()
+            .inspection
+            .is_none());
+    }
+
+    #[test]
+    fn detached_panel_preserves_auto_loadout_and_rejects_stale_details() {
+        use super::super::{super::ui_snapshot::UiSnapshot, Readout};
+        use sim_core::blast::read_model::{Inspection, View};
+        let source = app();
+        let sim = &source.world().resource::<Scene>().sim;
+        let mut view = View::new(sim, 9);
+        let mut inspection = Inspection::new(sim, 9);
+        drop(source);
+        // Effective blast and automatic loadout are different UI states.
+        view.units[0].kind = RangeUnitKind::Tank;
+        view.units[0].allied = true;
+        view.units[0].status.alive = true;
+        view.units[0].loadout = Some(None);
+        view.units[0].weapon = Some(BattleWeapon::Blast);
+        inspection.fragments = 7;
+        inspection.resting_fragments = 5;
+        let mut ui = App::new();
+        let mut edit = Workshop::new(None, false);
+        edit.controlled = Some(0);
+        let mut panel = Panel::new(true, false);
+        panel.drawer = 5;
+        ui.insert_resource(edit)
+            .insert_resource(panel)
+            .insert_resource(UiSnapshot {
+                view: Some(view),
+                inspection: Some(inspection),
+                ..default()
+            })
+            .add_systems(Update, super::super::refresh);
+        let readout = ui.world_mut().spawn((Readout, Text::new(""))).id();
+        let auto = ui
+            .world_mut()
+            .spawn((
+                Action::BattleWeapon(None),
+                Interaction::None,
+                BackgroundColor::default(),
+            ))
+            .id();
+        let blast = ui
+            .world_mut()
+            .spawn((
+                Action::BattleWeapon(Some(BattleWeapon::Blast)),
+                Interaction::None,
+                BackgroundColor::default(),
+            ))
+            .id();
+        ui.update();
+        assert_eq!(
+            ui.world().get::<BackgroundColor>(auto).unwrap().0,
+            theme::ACTIVE
+        );
+        assert_eq!(
+            ui.world().get::<BackgroundColor>(blast).unwrap().0,
+            theme::BUTTON
+        );
+        assert!(ui
+            .world()
+            .get::<Text>(readout)
+            .unwrap()
+            .0
+            .contains("Обломки: 2 летят / 5 на земле"));
+        {
+            let mut snapshot = ui.world_mut().resource_mut::<UiSnapshot>();
+            let view = snapshot.view.as_mut().unwrap();
+            view.units[0].loadout = Some(Some(BattleWeapon::Blast));
+            view.generation += 1;
+        }
+        ui.update();
+        assert_eq!(
+            ui.world().get::<BackgroundColor>(auto).unwrap().0,
+            theme::BUTTON
+        );
+        assert_eq!(
+            ui.world().get::<BackgroundColor>(blast).unwrap().0,
+            theme::ACTIVE
+        );
+        assert!(ui.world().get::<Text>(readout).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn detached_solo_inspection_keeps_shields_and_stream_weapon_readout() {
+        use super::super::{super::ui_snapshot::UiSnapshot, Readout};
+        use sim_core::blast::read_model::{Inspection, View};
+        let mut sim = BlastRange::new(
+            ExplosionConfig::from_ron(include_str!("../../../../../../data/machine-gun.ron"))
+                .unwrap(),
+        );
+        sim.shields.push(sim_core::blast::RangeShield {
+            at: [160, 32, 320],
+            radius: 40,
+            charge: 0,
+            down: 30,
+            hits: 0,
+        });
+        let snapshot = UiSnapshot {
+            view: Some(View::new(&sim, 4)),
+            inspection: Some(Inspection::new(&sim, 4)),
+            ..default()
+        };
+        let range = sim.streams.tuning.machine_gun.range / 10;
+        let barrels = sim.stream_muzzles().len();
+        drop(sim);
+        let mut panel = Panel::new(true, false);
+        panel.drawer = 5;
+        let mut edit = Workshop::new(None, false);
+        edit.selected = Some(Selection::Shield(0));
+        let mut ui = App::new();
+        ui.insert_resource(snapshot)
+            .insert_resource(panel)
+            .insert_resource(edit)
+            .add_systems(Update, super::super::refresh);
+        let readout = ui.world_mut().spawn((Readout, Text::new(""))).id();
+        ui.update();
+        let text = &ui.world().get::<Text>(readout).unwrap().0;
+        assert!(text.contains(&format!("Пулемёт · {barrels} ствола · дальность {range} м")));
+        assert!(text.contains("Щит 1 · радиус 40 · заряд 0% · перегружен"));
+        assert!(text.contains("перегружен 1.0 с"));
+    }
+
+    #[test]
+    fn detached_hud_publication_needs_no_scene_and_replaces_old_roster() {
+        use super::super::super::ui_snapshot::UiSnapshot;
+        let source = app();
+        let view =
+            sim_core::blast::read_model::View::new(&source.world().resource::<Scene>().sim, 8);
+        drop(source);
+        let mut ui = App::new();
+        let mut edit = Workshop::new(None, false);
+        edit.controlled = Some(0);
+        ui.insert_resource(UiSnapshot {
+            view: Some(view),
+            ..default()
+        })
+        .insert_resource(edit)
+        .insert_resource(Panel::new(true, false))
+        .add_systems(Update, refresh);
+        let status = ui.world_mut().spawn((HudText(0), Text::new(""))).id();
+        let actor = ui.world_mut().spawn((HudText(100), Text::new(""))).id();
+        let selected = ui.world_mut().spawn((HudText(1), Text::new(""))).id();
+        let row = ui.world_mut().spawn((Roster(0), Node::default())).id();
+        ui.update();
+        assert!(
+            ui.world()
+                .resource::<UiSnapshot>()
+                .view
+                .as_ref()
+                .unwrap()
+                .battle
+        );
+        assert!(!ui.world().get::<Text>(status).unwrap().0.is_empty());
+        assert!(!ui.world().get::<Text>(actor).unwrap().0.is_empty());
+        assert_eq!(ui.world().get::<Node>(row).unwrap().display, Display::Flex);
+        {
+            let mut publication = ui.world_mut().resource_mut::<UiSnapshot>();
+            let view = publication.view.as_mut().unwrap();
+            view.generation += 1;
+            view.units.clear();
+            view.counts = [0, 0];
+            view.base_integrity = None;
+        }
+        ui.update();
+        assert!(ui.world().get::<Text>(actor).unwrap().0.is_empty());
+        assert_eq!(
+            ui.world().get::<Text>(selected).unwrap().0,
+            "Выберите свой юнит"
+        );
+        assert_eq!(ui.world().get::<Node>(row).unwrap().display, Display::None);
+    }
+
     #[test]
     fn selection_outline_only_appears_during_a_real_drag() {
         let mut app = App::new();
@@ -924,7 +1135,7 @@ mod tests {
             Display::None
         );
     }
-    fn app() -> App {
+    pub(crate) fn app() -> App {
         let layout =
             RangeLayout::from_ron(include_str!("../../../../../../data/range-km.ron")).unwrap();
         let mut workshop = Workshop::new(Some(layout), false);
@@ -968,6 +1179,11 @@ mod tests {
             .insert_resource(workshop)
             .insert_resource(Panel::new(true, false))
             .insert_resource(GasInput::default())
+            .init_resource::<super::super::super::ui_snapshot::UiSnapshot>()
+            .add_systems(
+                PostUpdate,
+                super::super::super::ui_snapshot::publish.before(refresh),
+            )
             .init_resource::<ButtonInput<KeyCode>>()
             .add_systems(
                 Update,
@@ -990,6 +1206,83 @@ mod tests {
         app.world_mut().resource_mut::<Scene>().sim =
             BlastRange::with_layout(config, layout).unwrap();
         app.update();
+    }
+
+    #[test]
+    fn lifecycle_buttons_use_common_commands_and_keep_launch_errors_visible() {
+        use sim_core::blast::battle::commands::{BattleLifecycle as L, Command, Outcome};
+        let mut app = app();
+        app.world_mut()
+            .resource_mut::<Scene>()
+            .sim
+            .start_battle_command_capture(16)
+            .unwrap();
+        click(&mut app, Action::FreeControl);
+        let actor = app.world().resource::<Workshop>().controlled.unwrap();
+        click(&mut app, Action::BattleWeapon(Some(BattleWeapon::Energy)));
+        click(&mut app, Action::BattleStart);
+        click(&mut app, Action::BattleStart);
+        let mut scene = app.world_mut().resource_mut::<Scene>();
+        assert!(!scene.paused);
+        assert_eq!(
+            scene.notice,
+            "Бой уже начат; восстановите расстановку для нового боя"
+        );
+        let trace = scene.sim.finish_battle_command_capture().unwrap();
+        assert!(trace.complete());
+        assert_eq!(
+            trace.records.iter().map(|r| r.command).collect::<Vec<_>>(),
+            vec![
+                Command::BattleLifecycle(L::FreeControl),
+                Command::SetBattleWeapon {
+                    actor,
+                    weapon: Some(BattleWeapon::Energy)
+                },
+                Command::BattleLifecycle(L::StartBattle),
+                Command::BattleLifecycle(L::StartBattle),
+            ]
+        );
+        assert_eq!(trace.records[0].outcome, Outcome::Applied);
+        assert_eq!(trace.records[2].outcome, Outcome::Applied);
+        assert_eq!(trace.records[3].outcome, Outcome::Rejected);
+    }
+
+    #[test]
+    fn lifecycle_pending_menu_launch_and_replay_record_autonomy_before_start() {
+        use sim_core::blast::battle::commands::{BattleLifecycle as L, Command, Outcome};
+        let mut app = app();
+        for action in [Action::BattleWorldAuto, Action::BattleReplay] {
+            click(&mut app, action);
+            let (config, layout) = app
+                .world_mut()
+                .resource_mut::<Workshop>()
+                .pending
+                .take()
+                .unwrap();
+            let mut sim = BlastRange::with_layout(config, layout).unwrap();
+            sim.start_battle_command_capture(4).unwrap();
+            app.world_mut().resource_mut::<Scene>().sim = sim;
+            app.update();
+            let mut scene = app.world_mut().resource_mut::<Scene>();
+            assert!(!scene.paused);
+            assert!(scene.sim.battle.autonomous);
+            let trace = scene.sim.finish_battle_command_capture().unwrap();
+            assert_eq!(
+                trace
+                    .records
+                    .iter()
+                    .map(|r| (r.command, r.outcome))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (
+                        Command::BattleLifecycle(L::Autonomy { enabled: true }),
+                        Outcome::Applied
+                    ),
+                    (Command::BattleLifecycle(L::StartBattle), Outcome::Applied),
+                ]
+            );
+            assert!(trace.complete());
+        }
     }
     #[test]
     fn free_range_entry_is_visible_in_solo_and_combat_controls_stay_separate() {

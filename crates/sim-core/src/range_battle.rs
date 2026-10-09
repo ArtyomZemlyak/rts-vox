@@ -5,6 +5,20 @@ use super::*;
 use fx::blob::{Blob, Scan};
 use modding::{explosion::Delivery, range_battle::Tuning};
 
+#[path = "range_orders.rs"]
+mod orders;
+
+#[path = "range_commands.rs"]
+pub mod commands;
+
+#[cfg(test)]
+#[path = "range_command_tests.rs"]
+mod command_tests;
+
+#[cfg(test)]
+#[path = "range_order_handler_tests.rs"]
+mod order_handler_tests;
+
 #[cfg(test)]
 #[path = "range_artillery_tests.rs"]
 mod artillery_tests;
@@ -174,6 +188,8 @@ pub struct Burst {
     wave: Explosion,
     energy: u64,
 }
+#[path = "range_wave_energy.rs"]
+mod energy;
 /// Divide a phase quota without losing its remainder. `turn` is the offset
 /// in the tick's rotated service order, not an index into reordered state.
 fn wave_share(budget: usize, count: usize, turn: usize) -> usize {
@@ -207,6 +223,11 @@ pub struct Battle {
     pub autonomous: bool,
     // Derived diagnostics: absent in hashes/snapshots, never read by combat.
     fire_trace: Option<Vec<FireGate>>,
+    command_capture: Option<Box<commands::Capture>>,
+    // Transient phase handoff; the command owner retains the authoritative
+    // receipt and re-arms this buffer when restoring its pending checkpoint.
+    plan_execution: Option<Box<commands::runtime::PlanExecution>>,
+    pub(crate) ai_step: Option<Box<commands::runtime::AiStep>>,
 }
 fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gun: i32) -> i32 {
     if kind == RangeUnitKind::Artillery && weapon == Weapon::Blast {
@@ -221,6 +242,53 @@ fn attack_range(tuning: &Tuning, kind: RangeUnitKind, weapon: Weapon, machine_gu
         Weapon::Canister => tuning.canister.range,
         Weapon::Laser => motion::spider_tuning().laser.range,
     }
+}
+
+/// One loadout rule for combat, presentation and controller observations.
+fn effective_weapon(
+    kind: RangeUnitKind,
+    explicit: Option<Weapon>,
+    ground: bool,
+    target: Option<RangeUnitKind>,
+    tuning: &Tuning,
+) -> Option<Weapon> {
+    if kind == RangeUnitKind::Base {
+        return None;
+    }
+    if kind == RangeUnitKind::Spider {
+        return Some(Weapon::Laser);
+    }
+    if kind == RangeUnitKind::Strider {
+        return Some(Weapon::MachineGun);
+    }
+    if kind.canister() {
+        return Some(Weapon::Canister);
+    }
+    if kind == RangeUnitKind::Artillery {
+        return Some(explicit.unwrap_or(Weapon::Blast));
+    }
+    if kind == RangeUnitKind::TurretT1 {
+        return Some(Weapon::Kinetic);
+    }
+    if kind == RangeUnitKind::TurretT2 {
+        return Some(Weapon::Energy);
+    }
+    let ammo = tuning.tank_ammo;
+    Some(explicit.unwrap_or_else(|| {
+        Weapon::ammo(match (ground, target) {
+            (true, _) | (_, None) => ammo.ground,
+            (
+                _,
+                Some(
+                    RangeUnitKind::Tank
+                    | RangeUnitKind::Artillery
+                    | RangeUnitKind::ArtilleryT2
+                    | RangeUnitKind::Base,
+                ),
+            ) => ammo.tank,
+            _ => ammo.strider,
+        })
+    }))
 }
 
 impl Battle {
@@ -299,6 +367,9 @@ impl Battle {
             ai: ai::Controller::new(),
             autonomous: false,
             fire_trace: None,
+            command_capture: None,
+            plan_execution: None,
+            ai_step: None,
         }
     }
     pub fn trace_fire(&mut self, enabled: bool) {
@@ -736,45 +807,13 @@ impl BlastRange {
     pub fn battle_weapon(&self, id: usize) -> Option<Weapon> {
         let u = self.units.get(id)?;
         let a = self.battle.actors.get(id)?;
-        if u.kind == RangeUnitKind::Base {
-            return None;
-        }
-        if u.kind == RangeUnitKind::Spider {
-            return Some(Weapon::Laser);
-        }
-        if u.kind == RangeUnitKind::Strider {
-            return Some(Weapon::MachineGun);
-        }
-        if u.kind.canister() {
-            return Some(Weapon::Canister);
-        }
-        if u.kind == RangeUnitKind::Artillery {
-            return Some(a.weapon.unwrap_or(Weapon::Blast));
-        }
-        if u.kind == RangeUnitKind::TurretT1 {
-            return Some(Weapon::Kinetic);
-        }
-        if u.kind == RangeUnitKind::TurretT2 {
-            return Some(Weapon::Energy);
-        }
-        Some(a.weapon.unwrap_or_else(|| {
-            let ammo = self.battle.tuning.tank_ammo;
-            Weapon::ammo(match (a.order, a.target.and_then(|t| self.units.get(t))) {
-                (Order::Ground(_), _) | (_, None) => ammo.ground,
-                (_, Some(t))
-                    if matches!(
-                        t.kind,
-                        RangeUnitKind::Tank
-                            | RangeUnitKind::Artillery
-                            | RangeUnitKind::ArtilleryT2
-                            | RangeUnitKind::Base
-                    ) =>
-                {
-                    ammo.tank
-                }
-                _ => ammo.strider,
-            })
-        }))
+        effective_weapon(
+            u.kind,
+            a.weapon,
+            matches!(a.order, Order::Ground(_)),
+            a.target.and_then(|id| self.units.get(id)).map(|u| u.kind),
+            &self.battle.tuning,
+        )
     }
     /// Connected barrels in the actor's current posed weapon, for muzzle effects.
     pub fn battle_charge(&self, id: usize) -> Option<u32> {
@@ -798,6 +837,10 @@ impl BlastRange {
     /// Switching ammunition keeps the current order and reload deadline.
     /// Rounds already in flight retain their original configuration.
     pub fn set_battle_weapon(&mut self, id: usize, weapon: Option<Weapon>) -> bool {
+        self.execute_command(commands::Command::SetBattleWeapon { actor: id, weapon })
+            .accepted()
+    }
+    fn apply_battle_weapon(&mut self, id: usize, weapon: Option<Weapon>) -> commands::Outcome {
         if !self.battle_mode()
             || !self.allied(id)
             || self.units.get(id).is_none_or(|u| {
@@ -808,36 +851,51 @@ impl BlastRange {
                 Some(Weapon::MachineGun | Weapon::Laser | Weapon::Canister)
             )
         {
-            return false;
+            return commands::Outcome::Rejected;
         }
         let Some(actor) = self.battle.actors.get_mut(id) else {
-            return false;
+            return commands::Outcome::Rejected;
         };
-        if actor.weapon != weapon {
-            actor.weapon = weapon;
-            actor.charge = None;
+        if actor.weapon == weapon {
+            return commands::Outcome::Unchanged;
         }
-        true
+        actor.weapon = weapon;
+        actor.charge = None;
+        commands::Outcome::Applied
     }
     pub fn enemy_ai_tuning(&self) -> &modding::battle_ai::Tuning {
         &self.battle.ai.tuning
     }
     /// Enable autonomous orders for both teams before the fight starts.
     pub fn set_ai_vs_ai(&mut self, enabled: bool) -> bool {
-        if !self.battle_mode() || self.battle.phase != Phase::Setup {
-            return false;
-        }
-        self.battle.autonomous = enabled;
-        true
+        self.execute_battle_lifecycle(commands::BattleLifecycle::Autonomy { enabled })
+            .is_ok()
     }
     /// Rules are data-driven and can be replaced while setting up a battle.
     /// Changing them during a fight starts a new decision cycle on this tick.
     pub fn configure_enemy_ai(&mut self, tuning: modding::battle_ai::Tuning) -> Result<(), String> {
-        tuning.validate()?;
-        self.battle.ai.tuning = tuning;
-        self.battle.ai.next_tick = self.tick;
-        self.battle.ai.pending = None;
-        Ok(())
+        self.configure_enemy_ai_command(tuning).map(|_| ())
+    }
+    fn configure_enemy_ai_command(
+        &mut self,
+        tuning: modding::battle_ai::Tuning,
+    ) -> Result<commands::Outcome, String> {
+        let result = tuning.validate().map(|()| {
+            self.battle.ai.tuning = tuning;
+            // Equal tuning still restarts the current decision cycle and
+            // invalidates a supplied plan, matching the existing API.
+            self.battle.ai.next_tick = self.tick;
+            self.battle.ai.pending = None;
+            commands::Outcome::Applied
+        });
+        self.record_player_command(
+            commands::Command::ConfigureEnemyAi { tuning },
+            result
+                .as_ref()
+                .copied()
+                .unwrap_or(commands::Outcome::Rejected),
+        );
+        result
     }
     /// Snapshot for a rule engine or an asynchronous model runner. The caller
     /// must return a plan tagged with `decision_tick`; a late plan is rejected.
@@ -858,11 +916,35 @@ impl BlastRange {
                 .iter()
                 .enumerate()
                 .map(|(id, unit)| ai::UnitObservation {
+                    attack_ranges: std::array::from_fn(|target| {
+                        if !unit.status.weapon {
+                            return 0;
+                        }
+                        let target = RangeUnitKind::ALL[target];
+                        effective_weapon(
+                            unit.kind,
+                            battle.actors[id].weapon,
+                            false,
+                            Some(target),
+                            &battle.tuning,
+                        )
+                        .map_or(0, |weapon| {
+                            attack_range(
+                                &battle.tuning,
+                                unit.kind,
+                                weapon,
+                                self.streams.tuning.machine_gun.range,
+                            )
+                        })
+                    }),
                     id,
                     allied: self.allied(id),
                     alive: unit.status.alive,
                     armed: unit.status.weapon,
                     mobile: unit.status.engine && unit.motion.can_drive(unit.mobility),
+                    can_reposition: unit.status.engine
+                        && !unit.kind.emplacement()
+                        && unit.motion.can_reposition(unit.mobility),
                     kind: unit.kind,
                     position: [
                         unit.motion.pos[0].to_int_trunc(),
@@ -932,108 +1014,158 @@ impl BlastRange {
         if self.tick < battle.ai.next_tick {
             return;
         }
-        let observation = self.enemy_ai_observation_for(battle);
-        let rules = ai::Rules {
-            tuning: &battle.ai.tuning,
-            controlled_allied: false,
-        }
-        .decide(&observation);
-        let allied_rules = battle.autonomous.then(|| {
-            ai::Rules {
+        // Replay supplies both sides from the SAME recorded AfterMotion phase.
+        // It never falls back to policy, including rejected external plans.
+        let replay = battle.ai_step.as_mut().and_then(|step| step.input.take());
+        let (rules, allied_rules) = if let Some(input) = replay {
+            input
+        } else {
+            assert!(!battle.ai_step.as_ref().is_some_and(|step| step.replay));
+            let observation = self.enemy_ai_observation_for(battle);
+            let rules = ai::Rules {
                 tuning: &battle.ai.tuning,
-                controlled_allied: true,
+                controlled_allied: false,
             }
-            .decide(&observation)
-        });
+            .decide(&observation);
+            let allied = battle.autonomous.then(|| {
+                ai::Rules {
+                    tuning: &battle.ai.tuning,
+                    controlled_allied: true,
+                }
+                .decide(&observation)
+            });
+            (rules, allied)
+        };
         let supplied = battle.ai.pending.take();
-        for fallback in rules {
-            let decision = supplied
+        if supplied.is_some() {
+            if let Some(execution) = &mut battle.plan_execution {
+                execution.tick = Some(self.tick);
+            }
+        }
+        for fallback in rules.iter().copied() {
+            let chosen = supplied
                 .as_ref()
                 .and_then(|plan| plan.iter().find(|d| d.actor == fallback.actor))
-                .copied()
-                .unwrap_or(fallback);
-            if !self.apply_ai_decision(battle, decision, false) {
-                self.apply_ai_decision(battle, fallback, false);
+                .copied();
+            let producer = if chosen.is_some() {
+                commands::Producer::EnemyPlan
+            } else {
+                commands::Producer::EnemyRules
+            };
+            let outcome =
+                self.apply_ai_decision_from(battle, chosen.unwrap_or(fallback), false, producer);
+            if let Some(decision) = chosen {
+                if let Some(execution) = &mut battle.plan_execution {
+                    execution.attempts.push(commands::runtime::PlanAttempt {
+                        decision,
+                        outcome,
+                        fallback: false,
+                    });
+                }
+            }
+            if !outcome.accepted() {
+                let outcome = self.apply_ai_decision_from(
+                    battle,
+                    fallback,
+                    false,
+                    commands::Producer::EnemyFallback,
+                );
+                if chosen.is_some() {
+                    if let Some(execution) = &mut battle.plan_execution {
+                        execution.attempts.push(commands::runtime::PlanAttempt {
+                            decision: fallback,
+                            outcome,
+                            fallback: true,
+                        });
+                    }
+                }
             }
         }
-        if let Some(rules) = allied_rules {
-            for decision in rules {
-                self.apply_ai_decision(battle, decision, true);
+        if let Some(rules) = &allied_rules {
+            for decision in rules.iter().copied() {
+                self.apply_ai_decision_from(
+                    battle,
+                    decision,
+                    true,
+                    commands::Producer::AlliedRules,
+                );
             }
         }
         battle.ai.next_tick = self.tick.saturating_add(battle.ai.tuning.decision_ticks);
+        if let Some(step) = &mut battle.ai_step {
+            step.output = Some((rules, allied_rules));
+        }
     }
+    #[cfg(test)]
     fn apply_ai_decision(
         &mut self,
         battle: &mut Battle,
         decision: ai::Decision,
         side: bool,
     ) -> bool {
-        let id = decision.actor;
-        if self.allied(id) != side || !self.units.get(id).is_some_and(|u| u.status.alive) {
-            return false;
-        }
-        let order = match decision.order {
-            ai::AiOrder::Attack(target) => {
-                if self.allied(target) == side
-                    || !self.units.get(target).is_some_and(|u| u.status.alive)
-                {
-                    return false;
-                }
-                Order::Attack(target)
-            }
-            ai::AiOrder::Move(_) => Order::Move,
-            ai::AiOrder::Hold => Order::Hold,
-            ai::AiOrder::Auto => Order::Auto,
+        self.apply_ai_decision_from(
+            battle,
+            decision,
+            side,
+            if side {
+                commands::Producer::AlliedRules
+            } else {
+                commands::Producer::EnemyRules
+            },
+        )
+        .accepted()
+    }
+    fn apply_ai_decision_from(
+        &mut self,
+        battle: &mut Battle,
+        decision: ai::Decision,
+        side: bool,
+        producer: commands::Producer,
+    ) -> commands::Outcome {
+        let (order, destination) = match decision.order {
+            ai::AiOrder::Attack(target) => (Order::Attack(target), None),
+            ai::AiOrder::Move(p) => (Order::Move, Some(p)),
+            ai::AiOrder::Hold => (Order::Hold, None),
+            ai::AiOrder::Auto => (Order::Auto, None),
         };
-        if battle.actors[id].order == order && !matches!(decision.order, ai::AiOrder::Move(_)) {
-            return true;
-        }
-        if let ai::AiOrder::Move(p) = decision.order {
-            if self.units[id].kind.emplacement() {
-                return false;
+        let request = orders::Request {
+            actor: decision.actor,
+            order,
+            destination,
+        };
+        let outcome = match orders::validate(
+            self,
+            &battle.actors,
+            request,
+            side,
+            orders::Replacement::Maintain,
+        ) {
+            orders::Admission::Rejected => commands::Outcome::Rejected,
+            orders::Admission::Unchanged => commands::Outcome::Unchanged,
+            orders::Admission::Apply => orders::Executor {
+                units: &mut self.units,
+                actors: &mut battle.actors,
+                world: &self.world,
+                rubble: &self.rubble,
+                tick: self.tick,
             }
-            if battle.actors[id].order == Order::Move {
-                let motion = &self.units[id].motion;
-                let dx = i64::from(motion.pos[0].to_int_trunc() - p[0]);
-                let dz = i64::from(motion.pos[2].to_int_trunc() - p[1]);
-                let arrival = i64::from(motion.arrival.max(1));
-                if motion.destination == Some(p)
-                    || (motion.destination.is_none() && dx * dx + dz * dz <= arrival * arrival)
-                {
-                    return true;
-                }
-            }
-            let others: Vec<_> = self
-                .units
-                .iter()
-                .enumerate()
-                .filter(|(other, _)| *other != id)
-                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
-                .collect();
-            let u = &mut self.units[id];
-            if !u
-                .motion
-                .move_to(&self.world, p, &u.body, &others, &self.rubble)
-            {
-                return false;
-            }
-        } else if order == Order::Hold {
-            self.units[id].motion.stop();
+            .apply(request, orders::Replacement::Maintain),
+        };
+        if let Some(capture) = &mut battle.command_capture {
+            capture.record(
+                battle.ai.next_tick,
+                self.tick,
+                commands::CommandPhase::AfterMotion,
+                producer,
+                commands::Command::Order {
+                    actor: decision.actor,
+                    order,
+                    destination,
+                },
+                outcome,
+            );
         }
-        let actor = &mut battle.actors[id];
-        actor.order = order;
-        actor.target = None;
-        if !(self.units[id].kind == RangeUnitKind::Spider
-            && actor.burst > 0
-            && order != Order::Hold)
-        {
-            stop_spider_beam(actor, self.units[id].kind, self.tick);
-            actor.charge = None;
-            actor.burst = 0;
-        }
-        actor.pursuit = 0;
-        true
+        outcome
     }
     pub fn allied(&self, id: usize) -> bool {
         self.layout
@@ -1042,11 +1174,42 @@ impl BlastRange {
             .is_some_and(|u| u.allied)
     }
     pub fn start_battle(&mut self) -> Result<(), &'static str> {
+        self.execute_battle_lifecycle(commands::BattleLifecycle::StartBattle)
+            .map(|_| ())
+    }
+    /// The same typed executor as CommandRuntime, with the existing UI reason.
+    pub fn execute_battle_lifecycle(
+        &mut self,
+        command: commands::BattleLifecycle,
+    ) -> Result<commands::Outcome, &'static str> {
+        use commands::{BattleLifecycle, Command, Outcome};
+        let result = match command {
+            BattleLifecycle::StartBattle => self.apply_start_battle().map(|()| Outcome::Applied),
+            BattleLifecycle::FreeControl => self.apply_free_control().map(|()| Outcome::Applied),
+            BattleLifecycle::Autonomy { enabled } => {
+                if !self.battle_mode() || self.battle.phase != Phase::Setup {
+                    Err("Режим ИИ для обеих сторон задаётся до начала боя")
+                } else if self.battle.autonomous == enabled {
+                    Ok(Outcome::Unchanged)
+                } else {
+                    self.battle.autonomous = enabled;
+                    Ok(Outcome::Applied)
+                }
+            }
+        };
+        self.record_player_command(
+            Command::BattleLifecycle(command),
+            result.unwrap_or(Outcome::Rejected),
+        );
+        result
+    }
+    /// Shared preflight for execution and diagnostic replay of a queued start.
+    fn battle_start_rejection(&self) -> Option<&'static str> {
         if !self.battle_mode() {
-            return Err("Сначала включите режим боя");
+            return Some("Сначала включите режим боя");
         }
         if self.battle.phase != Phase::Setup {
-            return Err("Бой уже начат; восстановите расстановку для нового боя");
+            return Some("Бой уже начат; восстановите расстановку для нового боя");
         }
         if !self
             .units
@@ -1059,12 +1222,18 @@ impl BlastRange {
                 .enumerate()
                 .any(|(i, u)| u.status.alive && !self.allied(i))
         {
-            return Err("Нужен хотя бы один свой и один вражеский юнит");
+            return Some("Нужен хотя бы один свой и один вражеский юнит");
+        }
+        None
+    }
+    fn apply_start_battle(&mut self) -> Result<(), &'static str> {
+        if let Some(error) = self.battle_start_rejection() {
+            return Err(error);
         }
         if self.units.len() >= 16 && self.navigation_workers > 1 && self.navigation_pool.is_none() {
             self.set_navigation_workers(self.navigation_workers);
         }
-        self.control();
+        self.control_inner();
         self.fire_tick = u32::MAX;
         self.patrols_running = true;
         for u in &mut self.units {
@@ -1078,10 +1247,14 @@ impl BlastRange {
     }
     /// Drive the prepared roster without starting AI, combat or victory checks.
     pub fn start_free_control(&mut self) -> Result<(), &'static str> {
+        self.execute_battle_lifecycle(commands::BattleLifecycle::FreeControl)
+            .map(|_| ())
+    }
+    fn apply_free_control(&mut self) -> Result<(), &'static str> {
         if !self.battle_mode() || self.battle.phase != Phase::Setup {
             return Err("Свободное управление доступно до начала боя");
         }
-        self.control();
+        self.control_inner();
         self.fire_tick = u32::MAX;
         self.patrols_running = true;
         for u in &mut self.units {
@@ -1094,58 +1267,170 @@ impl BlastRange {
         Ok(())
     }
     pub fn battle_order(&mut self, id: usize, order: Order, destination: Option<[i32; 2]>) -> bool {
-        if !self.battle_mode()
+        self.execute_battle_command(commands::Command::Order {
+            actor: id,
+            order,
+            destination,
+        })
+        .accepted()
+    }
+    /// Opt-in bounded diagnostics. Capture IDs are scoped to this session and
+    /// are not authoritative acknowledgements or saved replay input.
+    pub fn start_battle_command_capture(&mut self, max_records: usize) -> Result<(), &'static str> {
+        if !self.battle_mode() {
+            return Err("command capture needs battle mode");
+        }
+        self.start_command_capture(max_records)
+    }
+    /// Bounded external input diagnostics for either a range or a battle.
+    pub fn start_command_capture(&mut self, max_records: usize) -> Result<(), &'static str> {
+        if self.battle.command_capture.is_some() {
+            return Err("command capture already active");
+        }
+        self.battle.command_capture =
+            Some(Box::new(commands::Capture::new(self.tick, max_records)?));
+        Ok(())
+    }
+    pub fn finish_battle_command_capture(&mut self) -> Option<commands::CommandTrace> {
+        self.finish_command_capture()
+    }
+    pub fn finish_command_capture(&mut self) -> Option<commands::CommandTrace> {
+        self.battle
+            .command_capture
+            .take()
+            .map(|capture| capture.finish(self.tick))
+    }
+    /// Synchronous player ingress; formation search remains a continuation.
+    pub fn execute_battle_command(&mut self, command: commands::Command) -> commands::Outcome {
+        self.execute_command(command)
+    }
+    /// Shared synchronous ingress. Setup tuning and battle orders retain their
+    /// own admission rules; external owners schedule this same operation.
+    pub fn execute_command(&mut self, command: commands::Command) -> commands::Outcome {
+        let (id, order, destination, fallback) = match command {
+            commands::Command::Gun(input) => {
+                let outcome = self.apply_gun_command(input);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::SetPatrols { enabled } => {
+                let outcome = if self.patrols_running == enabled {
+                    commands::Outcome::Unchanged
+                } else {
+                    self.patrols_running = enabled;
+                    commands::Outcome::Applied
+                };
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::ConfigureEnemyAi { tuning } => {
+                return self
+                    .configure_enemy_ai_command(tuning)
+                    .unwrap_or(commands::Outcome::Rejected);
+            }
+            commands::Command::BattleLifecycle(lifecycle) => {
+                return self
+                    .execute_battle_lifecycle(lifecycle)
+                    .unwrap_or(commands::Outcome::Rejected);
+            }
+            commands::Command::SetBattleWeapon { actor, weapon } => {
+                let outcome = self.apply_battle_weapon(actor, weapon);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::ConfigureWeapon { config } => {
+                let outcome = self.configure_weapon(config);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::TuneMaterial {
+                material,
+                field,
+                value,
+            } => {
+                let outcome = self.tune_material(material, field, value);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::TuneDebris { field, value } => {
+                let outcome = self.tune_debris(field, value);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::TuneMotion {
+                kind,
+                include_gun,
+                field,
+                value,
+            } => {
+                let outcome = self.tune_motion(kind, include_gun, field, value);
+                self.record_player_command(command, outcome);
+                return outcome;
+            }
+            commands::Command::Order {
+                actor,
+                order,
+                destination,
+            } => (actor, order, destination, None),
+            commands::Command::FormationMove {
+                actor,
+                destination,
+                fallback,
+            } => (actor, Order::Move, Some(destination), Some(fallback)),
+        };
+        let outcome = if !self.battle_mode()
             || !(self.battle.phase == Phase::Fighting
                 || self.battle.phase == Phase::Setup && matches!(order, Order::Move | Order::Hold))
-            || !self.allied(id)
-            || !self.units.get(id).is_some_and(|u| u.status.alive)
         {
-            return false;
-        }
-        if let Order::Attack(other) = order {
-            if self.allied(other) || !self.units.get(other).is_some_and(|u| u.status.alive) {
-                return false;
-            }
-        }
-        if let Order::Ground(p) = order {
-            if (0..3).any(|a| p[a] < 0 || p[a] >= self.size[a] as i32) {
-                return false;
-            }
-        }
-        if order == Order::Move {
-            if self.units[id].kind.emplacement() {
-                return false;
-            }
-            let Some(p) = destination else {
-                return false;
+            commands::Outcome::Rejected
+        } else {
+            let request = orders::Request {
+                actor: id,
+                order,
+                destination,
             };
-            let others: Vec<_> = self
-                .units
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != id)
-                .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
-                .collect();
-            // Between ticks: the rubble of the present state (ADR-426).
-            let rubble = self.current_rubble();
-            let u = &mut self.units[id];
-            u.motion.route.clear();
-            if !u.motion.move_to(&self.world, p, &u.body, &others, &rubble) {
-                return false;
+            match orders::validate(
+                self,
+                &self.battle.actors,
+                request,
+                true,
+                orders::Replacement::Explicit,
+            ) {
+                orders::Admission::Rejected => commands::Outcome::Rejected,
+                orders::Admission::Unchanged => commands::Outcome::Unchanged,
+                orders::Admission::Apply => {
+                    // Between ticks, a manual Move uses the current physical rubble.
+                    let current =
+                        (order == Order::Move && fallback.is_none()).then(|| self.current_rubble());
+                    let mut executor = orders::Executor {
+                        units: &mut self.units,
+                        actors: &mut self.battle.actors,
+                        world: &self.world,
+                        rubble: current.as_ref().unwrap_or(&self.rubble),
+                        tick: self.tick,
+                    };
+                    if let Some(fallback) = fallback {
+                        executor.queue(request, fallback)
+                    } else {
+                        executor.apply(request, orders::Replacement::Explicit)
+                    }
+                }
             }
-        } else if order == Order::Hold {
-            self.units[id].motion.stop();
+        };
+        self.record_player_command(command, outcome);
+        outcome
+    }
+    fn record_player_command(&mut self, command: commands::Command, outcome: commands::Outcome) {
+        if let Some(capture) = &mut self.battle.command_capture {
+            capture.record(
+                self.tick,
+                self.tick,
+                commands::CommandPhase::BetweenTicks,
+                commands::Producer::Player,
+                command,
+                outcome,
+            );
         }
-        let a = &mut self.battle.actors[id];
-        a.order = order;
-        a.target = None;
-        if !(self.units[id].kind == RangeUnitKind::Spider && a.burst > 0 && order != Order::Hold) {
-            stop_spider_beam(a, self.units[id].kind, self.tick);
-            a.charge = None;
-            a.burst = 0;
-        }
-        a.pursuit = 0;
-        true
     }
     /// Accept a formation immediately. Route searches begin during motion
     /// ticks, under the existing global start budget, instead of multiplying
@@ -1156,30 +1441,35 @@ impl BlastRange {
         fallback: [i32; 2],
     ) -> usize {
         if !self.battle_mode() || !self.battle_movement_active() {
+            // A rejected group has no physical effects. Record only the
+            // bounded prefix, then count omissions without walking the rest.
+            if let Some(capture) = &self.battle.command_capture {
+                let count = destinations.len().min(capture.remaining());
+                for &(actor, destination) in &destinations[..count] {
+                    self.execute_battle_command(commands::Command::FormationMove {
+                        actor,
+                        destination,
+                        fallback,
+                    });
+                }
+                self.battle
+                    .command_capture
+                    .as_mut()
+                    .unwrap()
+                    .omit(destinations.len() - count);
+            }
             return 0;
         }
         let mut accepted = 0;
         for &(id, target) in destinations {
-            if !self.allied(id)
-                || !self.units.get(id).is_some_and(|u| u.status.alive)
-                || self.units[id].kind.emplacement()
-            {
-                continue;
-            }
-            let unit = &mut self.units[id];
-            let moved = unit.motion.queue_move(&self.world, target)
-                || unit.motion.queue_move(&self.world, fallback);
-            if moved {
-                let actor = &mut self.battle.actors[id];
-                actor.order = Order::Move;
-                actor.target = None;
-                if self.units[id].kind != RangeUnitKind::Spider || actor.burst == 0 {
-                    actor.charge = None;
-                    actor.burst = 0;
-                }
-                actor.pursuit = 0;
-                accepted += 1;
-            }
+            accepted += usize::from(
+                self.execute_battle_command(commands::Command::FormationMove {
+                    actor: id,
+                    destination: target,
+                    fallback,
+                })
+                .accepted(),
+            );
         }
         accepted
     }
@@ -1403,6 +1693,9 @@ impl BlastRange {
             ai: self.battle.ai.clone(),
             autonomous: self.battle.autonomous,
             fire_trace: None,
+            command_capture: None,
+            plan_execution: None,
+            ai_step: None,
         };
         let mut battle = std::mem::replace(&mut self.battle, empty);
         battle.impacts.clear();
@@ -1440,6 +1733,11 @@ impl BlastRange {
         let revisions: Vec<_> = self.units.iter().map(|u| u.revision).collect();
         self.battle_flight(&mut battle);
         completed("battle_flight");
+        self.matter.reserve_damage(
+            battle.has_material_work() || self.pending_kinetic_impacts() > 0,
+            u64::from(self.tick),
+        );
+        self.reserve_thermal_fragments();
         self.battle_waves(&mut battle, &mut completed);
         completed("battle_waves");
         for (id, (u, old)) in self.units.iter_mut().zip(revisions).enumerate() {
@@ -1551,6 +1849,11 @@ impl BlastRange {
                 }
             }
         }
+        // Terminal battles cannot execute a future plan. Retaining it made
+        // their physical snapshots fail Controller::load's fighting guard.
+        if battle.phase != Phase::Fighting {
+            battle.ai.pending = None;
+        }
         self.battle = battle;
     }
     fn battle_orders(
@@ -1614,37 +1917,14 @@ impl BlastRange {
             }
             a.target = target;
             // A tank loads for what it aims at (ADR-456).
-            let weapon = if kind == RangeUnitKind::Tank {
-                let ammo = b.tuning.tank_ammo;
-                let choice = match (a.order, target) {
-                    (Order::Ground(_), _) | (_, None) => ammo.ground,
-                    (_, Some(t))
-                        if matches!(
-                            self.units[t].kind,
-                            RangeUnitKind::Tank
-                                | RangeUnitKind::Artillery
-                                | RangeUnitKind::ArtilleryT2
-                                | RangeUnitKind::Base
-                        ) =>
-                    {
-                        ammo.tank
-                    }
-                    _ => ammo.strider,
-                };
-                a.weapon.unwrap_or(Weapon::ammo(choice))
-            } else if kind.canister() {
-                Weapon::Canister
-            } else if kind == RangeUnitKind::Artillery {
-                a.weapon.unwrap_or(Weapon::Blast)
-            } else if kind == RangeUnitKind::TurretT1 {
-                Weapon::Kinetic
-            } else if kind == RangeUnitKind::TurretT2 {
-                Weapon::Energy
-            } else if kind == RangeUnitKind::Spider {
-                Weapon::Laser
-            } else {
-                Weapon::MachineGun
-            };
+            let weapon = effective_weapon(
+                kind,
+                a.weapon,
+                matches!(a.order, Order::Ground(_)),
+                target.map(|id| self.units[id].kind),
+                &b.tuning,
+            )
+            .expect("armed actor has a weapon");
             let range = attack_range(&b.tuning, kind, weapon, stream.range);
             // Borrow individual config fields independently of the mutable actor.
             let config = match weapon {
@@ -2428,7 +2708,14 @@ impl BlastRange {
                     self.matter.remaining_mj = old;
                     b.waves.push(Burst {
                         weapon: r.weapon,
-                        wave: Explosion::begin(at, &config, &self.units),
+                        wave: Explosion::begin_impact(
+                            &self.world,
+                            at,
+                            prev,
+                            &config,
+                            &self.units,
+                            self.matter.tuning.body_energy_pct,
+                        ),
                         energy,
                     });
                     self.heat.deposit(
@@ -2499,11 +2786,14 @@ impl BlastRange {
                 let old = self.matter.remaining_mj;
                 self.matter.remaining_mj = w.energy;
                 self.matter.fragment_size(config.fragment_box);
-                let before: Vec<_> = self
-                    .units
-                    .iter()
-                    .map(|u| (u.removed.len(), u.seg_removed.len()))
-                    .collect();
+                // Only annihilation consumes removed-cell deltas. Ordinary
+                // waves need neither this full roster walk nor its allocation.
+                let before = (config.material_energy_j == 0).then(|| {
+                    self.units
+                        .iter()
+                        .map(|u| (u.removed.len(), u.seg_removed.len()))
+                        .collect::<Vec<_>>()
+                });
                 let room = room.get_or_insert_with(|| self.matter.claim_room());
                 w.wave.step_with_room::<true>(
                     &mut self.world,
@@ -2515,7 +2805,7 @@ impl BlastRange {
                     Some(&mut self.matter),
                     Some(room),
                 );
-                if config.material_energy_j == 0 {
+                if let Some(before) = before {
                     for (id, (u, (root, seg))) in self.units.iter().zip(before).enumerate() {
                         self.matter.annihilate_body(
                             id,
@@ -2565,3 +2855,7 @@ mod tracking_tests;
 #[cfg(test)]
 #[path = "range_burst_admission_tests.rs"]
 mod burst_admission_tests;
+
+#[cfg(test)]
+#[path = "range_battle_lifecycle_tests.rs"]
+mod lifecycle_tests;

@@ -17,7 +17,15 @@ import statistics
 
 def read_csv(path):
     with Path(path).open(encoding="utf-8-sig", newline="") as source:
-        yield from csv.DictReader(source)
+        for row in csv.DictReader(source):
+            # Legacy OS captures used Export-Csv's current culture. Only OS
+            # numeric fields accept decimal commas; names and raw files stay intact.
+            if Path(path).name.startswith("cpu-"):
+                for key, value in row.items():
+                    if (key not in ("Name", "Utc", "StartedUtc", "CreatedAt", "State", "WaitReason")
+                            and value and re.fullmatch(r"-?\d+,\d+(?:[eE][+-]?\d+)?", value)):
+                        row[key] = value.replace(",", ".")
+            yield row
 
 
 def optional_int(row, key):

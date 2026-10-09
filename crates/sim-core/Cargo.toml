@@ -14,8 +14,8 @@ phys = { path = "../phys" }
 nav = { path = "../nav" }
 voxel = { path = "../voxel" }
 worldgen = { path = "../worldgen" }
-rayon = "1"
-rustc-hash = "1"
+rayon = "=1.12.0"
+rustc-hash = "=1.1.0"
 
 [lib]
 name = "sim_core"

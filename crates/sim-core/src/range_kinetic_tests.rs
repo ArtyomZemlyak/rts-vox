@@ -31,6 +31,15 @@ fn range_with_t2(include_t2: bool) -> BlastRange {
     }
     BlastRange::with_layout(c, layout).unwrap()
 }
+// Reference damage runs without the deliberately small working/flying pool.
+// Restore now preserves tuning; opening the pool must be an explicit test action.
+#[cfg(test)]
+fn unconstrained(r: &BlastRange) -> BlastRange {
+    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    assert_eq!(reference.matter.tuning, r.matter.tuning);
+    reference.matter.tuning = r.debris_defaults;
+    reference
+}
 fn shot(r: &mut BlastRange) {
     let p = r.units[0].world_pos([30, 11, 0]);
     assert_eq!(r.units[0].hit(p), Some((0, [30, 11, 0])));
@@ -78,6 +87,31 @@ fn complete(r: &mut BlastRange) {
     }
     panic!("finite impact never completed");
 }
+#[cfg(test)]
+#[test]
+fn weapon_configuration_keeps_captured_pending_damage_and_restores_with_another_preset() {
+    use crate::blast::battle::commands::{Command, Outcome};
+    let mut r = range();
+    occupy(&mut r);
+    let mut reference = unconstrained(&r);
+    shot(&mut reference);
+    shot(&mut r);
+    assert_eq!(r.pending_kinetic_impacts(), 1);
+    let mut c = ExplosionConfig::from_ron(include_str!("../../../data/energy-cannon.ron")).unwrap();
+    c.energy = 1;
+    c.unit_role_resistance_milli = [10_000; 5];
+    assert_eq!(
+        r.execute_command(Command::ConfigureWeapon { config: c }),
+        Outcome::Applied
+    );
+    let mut copy = BlastRange::restore(c, &r.snapshot()).unwrap();
+    assert_eq!(r.snapshot(), copy.snapshot());
+    complete(&mut r);
+    complete(&mut copy);
+    same_damage(&r, &reference);
+    assert_eq!(r.snapshot(), copy.snapshot());
+    assert_eq!(r.pending_kinetic_impacts(), 0);
+}
 fn same_damage(a: &BlastRange, b: &BlastRange) {
     for (a, b) in a.units.iter().zip(&b.units) {
         assert_eq!(a.removed, b.removed);
@@ -94,7 +128,7 @@ fn same_damage(a: &BlastRange, b: &BlastRange) {
 fn deferred_contact_waits_without_repaying_and_follows_original_local_cells() {
     let mut r = range();
     occupy(&mut r);
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     shot(&mut reference);
     let before = r.units[0].revision;
     shot(&mut r);
@@ -122,7 +156,7 @@ fn deferred_contact_waits_without_repaying_and_follows_original_local_cells() {
 #[test]
 fn partially_applied_channel_survives_save_and_matches_unconstrained_damage() {
     let mut r = range();
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     shot(&mut reference);
     r.matter.tuning.max_flying = 1;
     r.matter.tuning.max_fragments = 1;
@@ -133,16 +167,22 @@ fn partially_applied_channel_survives_save_and_matches_unconstrained_damage() {
     assert_eq!(r.pending_kinetic_impacts(), 1);
     assert_eq!(
         u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
-        49
+        55
     );
     let mut restored =
         BlastRange::restore(r.config.clone(), &r.snapshot()).expect("pending snapshot");
-    restored.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(restored.matter.tuning, r.matter.tuning);
     assert_eq!(r.snapshot(), restored.snapshot());
     complete(&mut r);
     complete(&mut restored);
     assert_eq!(r.snapshot(), restored.snapshot());
     same_damage(&r, &reference);
+    assert_eq!(r.kinetic.version(), 48);
+    assert_eq!(
+        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        55
+    );
+    r.matter.tuning = r.debris_defaults;
     assert_eq!(
         u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
         48
@@ -159,7 +199,7 @@ fn deferred_lateral_share_keeps_cursor_finite_work_and_replay() {
         radius: 1,
         work_milli: 900,
     });
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     shot(&mut reference);
     r.matter.tuning.max_flying = 1;
     r.matter.tuning.max_fragments = 1;
@@ -169,7 +209,7 @@ fn deferred_lateral_share_keeps_cursor_finite_work_and_replay() {
     assert!(job.spall.is_some());
     assert_eq!(job.cursor, job.ray.len());
     let mut b = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
-    b.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(b.matter.tuning, r.matter.tuning);
     r.streams.tuning.kinetic.cells_per_tick = 1;
     b.streams.tuning.kinetic.cells_per_tick = 1;
     let start = r.kinetic_progress()[1];
@@ -271,7 +311,7 @@ fn bullet(r: &mut BlastRange, cell: [usize; 3]) {
 fn machine_gun_continuation_follows_local_cell_and_does_not_repay() {
     let mut r = range();
     occupy(&mut r);
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     bullet(&mut reference, [30, 11, 0]);
     let before = r.units[0].revision;
     bullet(&mut r, [30, 11, 0]);
@@ -301,7 +341,7 @@ fn mixed_machine_gun_and_penetrator_queue_replays_and_validates_its_tail() {
     assert_eq!(r.pending_kinetic_impacts(), 2);
     assert_eq!(r.kinetic.version(), 50);
     let mut copy = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
-    copy.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(copy.matter.tuning, r.matter.tuning);
     assert_eq!(r.snapshot(), copy.snapshot());
     complete(&mut r);
     complete(&mut copy);
@@ -357,14 +397,14 @@ fn deferred_machine_gun_preserves_terrain_contact_and_credited_dents() {
     let mut tuning = r.streams.tuning.machine_gun.clone();
     tuning.work = material_work(mat, &r.config) / 2 + 1;
     r.surface_work.insert(p, tuning.work);
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     reference.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
     r.stream_contact(p, &tuning, false, r.gun.at, &r.config.clone());
     assert_eq!(r.pending_machine_gun_contacts(), 1);
     assert_eq!(material(&r.world, p), mat);
     let supplied = r.matter.supplied_mj;
     let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
-    restored.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(restored.matter.tuning, r.matter.tuning);
     complete(&mut r);
     complete(&mut restored);
     r.world.flush();
@@ -392,7 +432,7 @@ fn old_independent_flight_reservations_can_drain_without_overflowing_new_queue()
     assert_eq!(r.pending_kinetic_impacts(), cap * 2);
     assert!(!r.solid_flight_room(&[], 1));
     let mut restored = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
-    restored.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(restored.matter.tuning, r.matter.tuning);
     assert_eq!(r.snapshot(), restored.snapshot());
     complete(&mut r);
     complete(&mut restored);
@@ -404,7 +444,7 @@ fn old_independent_flight_reservations_can_drain_without_overflowing_new_queue()
 fn stock_machine_gun_dents_are_credited_once_before_and_after_waiting() {
     let mut r = range();
     occupy(&mut r);
-    let mut reference = BlastRange::restore(r.config.clone(), &r.snapshot()).unwrap();
+    let mut reference = unconstrained(&r);
     let p = r.units[0].world_pos([30, 11, 0]);
     let mut tuning = r.streams.tuning.machine_gun.clone();
     tuning.work = 500;
@@ -429,14 +469,18 @@ fn stock_machine_gun_dents_are_credited_once_before_and_after_waiting() {
 #[test]
 fn heavy_artillery_snapshot_preserves_mixed_pending_contacts_and_the_empty_tail() {
     let mut r = range_with_t2(true);
+    assert_eq!(
+        u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
+        52
+    );
     occupy(&mut r);
     bullet(&mut r, [30, 11, 0]);
     shot(&mut r);
     assert_eq!(r.pending_kinetic_impacts(), 2);
     let snapshot = r.snapshot();
-    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 52);
+    assert_eq!(u32::from_le_bytes(snapshot[..4].try_into().unwrap()), 55);
     let mut copy = BlastRange::restore(r.config.clone(), &snapshot).unwrap();
-    copy.matter.tuning = r.matter.tuning.clone();
+    assert_eq!(copy.matter.tuning, r.matter.tuning);
     assert_eq!(snapshot, copy.snapshot());
     complete(&mut r);
     complete(&mut copy);

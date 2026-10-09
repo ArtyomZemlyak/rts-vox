@@ -1,15 +1,14 @@
 //! Live tuning of the range (ADR-298): a second panel of knobs the owner
 //! turns while the range runs, saved to and loaded from
 //! `out/range-tuning.txt`. Simulation numbers go through the range's own
-//! control surface — the weapon preset, the units' chassis, the debris
-//! tuning, the material registry — and picture numbers through the
-//! look's overrides; the window never writes into the simulation's state
-//! behind its back.
+//! control surface. Chassis, debris, material strength and melt are typed engine
+//! commands. Density affects newly extracted terrain. Picture is render-only.
 use super::panel::Action;
 use super::*;
 use bevy::post_process::bloom::Bloom;
 use modding::tuning::Chassis;
-use sim_core::blast::motion::Motion;
+use sim_core::blast::battle::commands::{Command, DebrisField, MaterialField, MotionField};
+use sim_core::blast::read_model::{MotionParameters, Parameters};
 use std::collections::BTreeMap;
 
 /// Where the saved knobs live; a plain `key value` per line.
@@ -242,7 +241,7 @@ const WEAPON: [Knob; 13] = [
         "Энергия на обломки, Дж",
         1_000_000.0,
         0.0,
-        4_000_000_000.0,
+        1_000_000_000.0,
     ),
     k(
         "weapon.hull_impulse_milli",
@@ -282,7 +281,7 @@ const WEAPON: [Knob; 13] = [
         "Броня машин, тысячные",
         50.0,
         1.0,
-        100_000.0,
+        10_000.0,
     ),
     k(
         "weapon.fragment_box",
@@ -298,7 +297,7 @@ const WEAPON: [Knob; 13] = [
         "Радиус нагрева",
         1.0,
         0.0,
-        64.0,
+        32.0,
     ),
     k(
         "weapon.heat_per_cell",
@@ -322,7 +321,7 @@ const WEAPON: [Knob; 13] = [
         "Работа волны за тик",
         512.0,
         64.0,
-        65_536.0,
+        8192.0,
     ),
     k(
         "weapon.capture_cells_per_tick",
@@ -657,6 +656,7 @@ pub struct Overrides {
     started: bool,
     ignore_saved: bool,
     last_tick: u32,
+    last_generation: Option<u64>,
     pub notice: String,
     /// The row whose number is being typed, and the digits so far.
     pub editing: Option<(usize, String)>,
@@ -699,17 +699,17 @@ fn i(v: f64) -> i32 {
 fn set_weapon(c: &mut ExplosionConfig, f: &str, v: f64) {
     match f {
         "energy" => c.energy = u(v).clamp(1, 1_000_000),
-        "material_energy_j" => c.material_energy_j = u(v),
+        "material_energy_j" => c.material_energy_j = u(v).min(1_000_000_000),
         "hull_impulse_milli" => c.hull_impulse_milli = u(v).min(100_000),
         "soil_resistance" => c.soil_resistance = u(v).max(1),
         "concrete_resistance" => c.concrete_resistance = u(v).max(1),
         "steel_resistance" => c.steel_resistance = u(v).max(1),
-        "armour_milli" => c.unit_role_resistance_milli[0] = u(v).max(1),
+        "armour_milli" => c.unit_role_resistance_milli[0] = u(v).clamp(1, 10_000),
         "fragment_box" => c.fragment_box = u(v).clamp(1, 4),
-        "heat_units" => c.heat_units = i(v).max(0),
+        "heat_units" => c.heat_units = i(v).clamp(0, 32),
         "heat_per_cell" => c.heat_per_cell = u(v),
         "gas_source_radius" => c.gas_source_radius = i(v).max(1),
-        "wave_work_per_tick" => c.wave_work_per_tick = u(v).max(64) as usize,
+        "wave_work_per_tick" => c.wave_work_per_tick = u(v).clamp(64, 8192) as usize,
         "capture_cells_per_tick" => c.capture_cells_per_tick = u(v).max(1000) as usize,
         _ => {}
     }
@@ -754,8 +754,12 @@ fn chassis_field<'a>(c: &'a mut Chassis, f: &str) -> Option<&'a mut i32> {
     })
 }
 fn stock_chassis(kind: RangeUnitKind) -> Chassis {
-    let t = modding::tuning::Tuning::from_ron(include_str!("../../../../../data/sim.ron"))
-        .expect("sim tuning");
+    // Immutable embedded defaults are presentation data. Never parse the whole
+    // tuning file per field/per frame when a kind is absent from the roster.
+    static STOCK: std::sync::OnceLock<modding::Tuning> = std::sync::OnceLock::new();
+    let t = STOCK.get_or_init(|| {
+        modding::Tuning::from_ron(include_str!("../../../../../data/sim.ron")).expect("sim tuning")
+    });
     if matches!(
         kind,
         RangeUnitKind::Tank | RangeUnitKind::Artillery | RangeUnitKind::ArtilleryT2
@@ -774,7 +778,7 @@ fn kind_of(key: &str) -> Option<(RangeUnitKind, &str)> {
             .map(|f| (RangeUnitKind::Strider, f))
     }
 }
-fn motion_get(m: &Motion, f: &str) -> Option<f64> {
+fn motion_get(m: &MotionParameters, f: &str) -> Option<f64> {
     match f {
         "speed" => Some(f64::from(m.speed)),
         "step" => Some(f64::from(m.step)),
@@ -784,16 +788,28 @@ fn motion_get(m: &Motion, f: &str) -> Option<f64> {
         }
     }
 }
-fn motion_set(m: &mut Motion, f: &str, v: f64) {
-    match f {
-        "speed" => m.speed = i(v).max(1),
-        "step" => m.step = i(v).clamp(1, 8),
-        _ => {
-            if let Some(slot) = chassis_field(&mut m.chassis, f) {
-                *slot = i(v);
-            }
-        }
-    }
+fn motion_field(f: &str) -> Option<MotionField> {
+    Some(match f {
+        "speed" => MotionField::Speed,
+        "step" => MotionField::Step,
+        "stiffness" => MotionField::Stiffness,
+        "damping" => MotionField::Damping,
+        "travel_cm" => MotionField::TravelCm,
+        "clearance_cm" => MotionField::ClearanceCm,
+        "inertia" => MotionField::Inertia,
+        "ang_damp" => MotionField::AngularDamping,
+        "max_tilt_pct" => MotionField::MaxTiltPct,
+        "contact_cm" => MotionField::ContactCm,
+        "approach_pct" => MotionField::ApproachPct,
+        "settle_pct" => MotionField::SettlePct,
+        "settle_tilt_pct" => MotionField::SettleTiltPct,
+        "thrust" => MotionField::Thrust,
+        "brake" => MotionField::Brake,
+        "turn" => MotionField::Turn,
+        "climb" => MotionField::Climb,
+        "descend" => MotionField::Descend,
+        _ => return None,
+    })
 }
 fn debris_get(t: &modding::tuning::Blast, f: &str) -> Option<f64> {
     Some(match f {
@@ -814,24 +830,24 @@ fn debris_get(t: &modding::tuning::Blast, f: &str) -> Option<f64> {
         _ => return None,
     })
 }
-fn debris_set(t: &mut modding::tuning::Blast, f: &str, v: f64) {
-    match f {
-        "drag_pct" => t.drag_pct = u(v).min(100),
-        "bounce_pct" => t.bounce_pct = u(v).min(99),
-        "friction_pct" => t.friction_pct = u(v).min(100),
-        "sleep_mm_s" => t.sleep_mm_s = u(v).max(1),
-        "push_pct" => t.push_pct = u(v),
-        "push_up_pct" => t.push_up_pct = u(v).min(100),
-        "rest_check_ticks" => t.rest_check_ticks = u(v).max(1),
-        "pile_cell" => t.pile_cell = u(v).max(1),
-        "scatter_pct" => t.scatter_pct = u(v).min(100),
-        "speed_min_pct" => t.speed_min_pct = u(v).min(100),
-        "small_piece_pct" => t.small_piece_pct = u(v).min(100),
-        "lift_pct" => t.lift_pct = u(v).min(100),
-        "motion_pct" => t.motion_pct = u(v).min(99),
-        "max_flying" => t.max_flying = u(v).clamp(1, t.max_fragments),
-        _ => {}
-    }
+fn debris_field(f: &str) -> Option<DebrisField> {
+    Some(match f {
+        "drag_pct" => DebrisField::DragPct,
+        "bounce_pct" => DebrisField::BouncePct,
+        "friction_pct" => DebrisField::FrictionPct,
+        "sleep_mm_s" => DebrisField::SleepMmS,
+        "push_pct" => DebrisField::PushPct,
+        "push_up_pct" => DebrisField::PushUpPct,
+        "rest_check_ticks" => DebrisField::RestCheckTicks,
+        "pile_cell" => DebrisField::PileCell,
+        "scatter_pct" => DebrisField::ScatterPct,
+        "speed_min_pct" => DebrisField::SpeedMinPct,
+        "small_piece_pct" => DebrisField::SmallPiecePct,
+        "lift_pct" => DebrisField::LiftPct,
+        "motion_pct" => DebrisField::MotionPct,
+        "max_flying" => DebrisField::MaxFlying,
+        _ => return None,
+    })
 }
 fn material_key(key: &str) -> Option<(&str, u16)> {
     let (field, id) = key.split_once('.')?;
@@ -879,7 +895,7 @@ pub fn read(key: &str, scene: &Scene, gas: &GasInput) -> Option<f64> {
                 .map(|u| &u.motion)
         };
         return match live {
-            Some(m) => motion_get(m, f),
+            Some(m) => motion_get(&MotionParameters::new(m), f),
             None => {
                 let course = scene.sim.layout.as_ref().and_then(|l| l.course.as_ref());
                 match f {
@@ -910,6 +926,46 @@ pub fn read(key: &str, scene: &Scene, gas: &GasInput) -> Option<f64> {
     None
 }
 
+/// The fixed UI schema bounds the requested materials; registry holes and
+/// unrelated mod materials do not enlarge this export.
+pub(super) fn material_ids() -> impl Iterator<Item = u16> {
+    knobs().filter_map(|k| material_key(k.key).map(|(_, id)| id))
+}
+
+fn read_parameters(key: &str, view: &Parameters, gas: &GasInput) -> Option<f64> {
+    if let Some(f) = key.strip_prefix("weapon.") {
+        return get_weapon(&view.weapon, f);
+    }
+    if let Some((kind, f)) = kind_of(key) {
+        let live = if kind == RangeUnitKind::Tank {
+            Some(&view.gun)
+        } else {
+            view.motions[kind.index()].as_ref()
+        };
+        return match live {
+            Some(m) => motion_get(m, f),
+            None => match f {
+                "speed" => view.course.map(|c| f64::from(c[0])),
+                "step" => view.course.map(|c| f64::from(c[1])),
+                _ => chassis_field(&mut stock_chassis(kind), f).map(|v| f64::from(*v)),
+            },
+        };
+    }
+    if let Some(f) = key.strip_prefix("debris.") {
+        return debris_get(&view.debris, f);
+    }
+    if let Some((field, id)) = material_key(key) {
+        let d = view.material(id)?;
+        return Some(f64::from(match field {
+            "density" => d.density,
+            "strength" => d.strength,
+            _ => d.melt,
+        }));
+    }
+    key.strip_prefix("picture.")
+        .and_then(|f| picture_get(f, gas))
+}
+
 /// Everything a knob may reach when it is turned.
 pub struct Reach<'a, 'w, 's, 'b> {
     pub scene: &'a mut Scene,
@@ -929,7 +985,9 @@ pub fn apply(key: &str, v: f64, r: &mut Reach, o: &Overrides) {
             r.scene.sim.config.delivery,
             o,
         );
-        r.scene.sim.reconfigure(cfg);
+        r.scene
+            .sim
+            .execute_command(Command::ConfigureWeapon { config: cfg });
         let origin = r.gas.params.origin;
         configure_gas(&r.scene.sim, r.scene.energy, r.scene.anni, r.gas);
         r.gas.params.origin = origin;
@@ -940,28 +998,38 @@ pub fn apply(key: &str, v: f64, r: &mut Reach, o: &Overrides) {
         return;
     }
     if let Some((kind, f)) = kind_of(key) {
-        if kind == RangeUnitKind::Tank {
-            motion_set(&mut r.scene.sim.gun.motion, f, v);
-        }
-        for u in r.scene.sim.units.iter_mut().filter(|u| u.kind == kind) {
-            motion_set(&mut u.motion, f, v);
+        if let Some(field) = motion_field(f) {
+            r.scene.sim.execute_command(Command::TuneMotion {
+                kind,
+                include_gun: kind == RangeUnitKind::Tank,
+                field,
+                value: i(v),
+            });
         }
         return;
     }
     if let Some(f) = key.strip_prefix("debris.") {
-        debris_set(&mut r.scene.sim.matter.tuning, f, v);
+        if let Some(field) = debris_field(f) {
+            r.scene
+                .sim
+                .execute_command(Command::TuneDebris { field, value: u(v) });
+        }
         return;
     }
     if let Some((field, id)) = material_key(key) {
-        let mats = &mut r.scene.sim.matter.economy.mats;
-        if let Some(d) = mats.get(id) {
-            let mut d = *d;
-            match field {
-                "density" => d.density = u(v).max(1),
-                "strength" => d.strength = u(v).max(1),
-                _ => d.melt = u(v),
-            }
-            let _ = mats.replace(d);
+        let property = match field {
+            "strength" => Some(MaterialField::Strength),
+            "melt" => Some(MaterialField::Melt),
+            "density" => Some(MaterialField::Density),
+            _ => None,
+        };
+        if let Some(field) = property {
+            r.scene.sim.execute_command(Command::TuneMaterial {
+                material: id,
+                field,
+                value: u(v),
+            });
+            return;
         }
         return;
     }
@@ -1271,7 +1339,10 @@ pub fn actions(
             }
         }
     }
-    if reach.scene.sim.tick < o.last_tick {
+    if o.last_generation
+        .is_some_and(|g| g != reach.scene.generation)
+        || reach.scene.sim.tick < o.last_tick
+    {
         // The range was rebuilt from the layout: its units and debris
         // tuning are stock again, and the turned knobs go back on.
         let again: Vec<(&'static str, f64)> = o
@@ -1285,6 +1356,7 @@ pub fn actions(
         }
     }
     o.last_tick = reach.scene.sim.tick;
+    o.last_generation = Some(reach.scene.generation);
     // A number typed for the row under edit: digits, a point, a leading
     // minus, Backspace; Enter puts it in force, Escape drops it.
     if let Some((slot, mut buffer)) = o.editing.take() {
@@ -1391,7 +1463,7 @@ pub fn actions(
 /// knobs with a mark on the turned ones, and the notice.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn refresh(
-    scene: Res<Scene>,
+    snapshot: Res<ui_snapshot::UiSnapshot>,
     gas: Res<GasInput>,
     o: Res<Overrides>,
     mut roots: Query<&mut Node, With<SettingsRoot>>,
@@ -1407,6 +1479,12 @@ pub fn refresh(
     if !o.open {
         return;
     }
+    let parameters = snapshot.parameters.as_ref().filter(|p| {
+        snapshot
+            .view
+            .as_ref()
+            .is_some_and(|v| (v.generation, v.tick) == (p.generation, p.tick))
+    });
     let list = shown(&o);
     for (slot, mut n) in &mut slots {
         n.display = if slot.0 < list.len() {
@@ -1432,7 +1510,11 @@ pub fn refresh(
                 .as_ref()
                 .filter(|(s, _)| *s == slot.0)
                 .map(|(_, buffer)| format!("{buffer}_"));
-            let v = read(knob.key, &scene, &gas);
+            let v = if let Some(f) = knob.key.strip_prefix("picture.") {
+                picture_get(f, &gas)
+            } else {
+                parameters.and_then(|p| read_parameters(knob.key, p, &gas))
+            };
             *t =
                 Text::new(typed.unwrap_or_else(|| {
                     v.map_or_else(|| "—".to_string(), |v| format_value(knob, v))
@@ -1468,6 +1550,17 @@ pub fn refresh(
         };
     }
     for mut t in &mut notice {
-        *t = Text::new(o.notice.clone());
+        *t = Text::new(if Group::ALL[o.group] == Group::Density {
+            format!(
+                "Плотность грунта: новые извлечения. Тела, обломки и топливо сохраняют массу.\n{}",
+                o.notice
+            )
+        } else {
+            o.notice.clone()
+        });
     }
 }
+
+#[cfg(test)]
+#[path = "knobs_tests.rs"]
+mod tests;

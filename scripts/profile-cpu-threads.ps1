@@ -185,17 +185,17 @@ try {
     try { $exited = $target.HasExited } catch { }
     if (-not $exited) { $samplerFailure = $_.Exception.Message }
 } finally { $target.Dispose() }
-$samples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
-$processSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-samples.csv') -NoTypeInformation -Encoding UTF8
+$samples | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-threads.csv') -NoTypeInformation -Encoding UTF8
+$processSamples | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-samples.csv') -NoTypeInformation -Encoding UTF8
 if ($OsPressure) {
     if ($osProcessSamples.Count -gt 0) {
-        $osProcessSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-os-processes.csv') -NoTypeInformation -Encoding UTF8
+        $osProcessSamples | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-os-processes.csv') -NoTypeInformation -Encoding UTF8
     } else {
         '"Seconds","Utc","ProcessId","Name","StartedUtc","CpuMs","IsTarget","IsSampler"' | Set-Content -LiteralPath (Join-Path $directory 'cpu-os-processes.csv') -Encoding utf8
     }
 }
 if ($environmentSamples.Count -gt 0) {
-    $environmentSamples | Export-Csv -LiteralPath (Join-Path $directory 'cpu-environment.csv') -NoTypeInformation -Encoding UTF8
+    $environmentSamples | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-environment.csv') -NoTypeInformation -Encoding UTF8
 } else {
     '"Seconds","Utc","ProcessId","Name","StartedUtc","CpuMs"' | Set-Content -LiteralPath (Join-Path $directory 'cpu-environment.csv') -Encoding UTF8
 }
@@ -211,7 +211,7 @@ $summary = @($samples | Group-Object ThreadId,CreatedAt | ForEach-Object {
         CpuSharePercent = if ($totalCpu -gt 0) { [Math]::Round(100.0 * $cpu / $totalCpu, 2) } else { 0 }
     }
 } | Sort-Object CpuMs -Descending)
-$summary | Export-Csv -LiteralPath (Join-Path $directory 'cpu-thread-summary.csv') -NoTypeInformation -Encoding UTF8
+$summary | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-thread-summary.csv') -NoTypeInformation -Encoding UTF8
 [pscustomobject]@{
     ProcessId = $TargetProcessId
     LogicalProcessors = $logical
@@ -219,7 +219,7 @@ $summary | Export-Csv -LiteralPath (Join-Path $directory 'cpu-thread-summary.csv
     CpuSeconds = [Math]::Round($processCpuMs / 1000.0, 3)
     SampledThreadCpuSeconds = [Math]::Round($totalCpu / 1000.0, 3)
     MeanProcessPercent = if ($lastMs -gt 0) { [Math]::Round(100.0 * $processCpuMs / $lastMs / $logical, 2) } else { 0 }
-} | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-summary.csv') -NoTypeInformation -Encoding UTF8
+} | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'cpu-process-summary.csv') -NoTypeInformation -Encoding UTF8
 $summary | Select-Object -First 12 | Format-Table -AutoSize
 [pscustomobject]@{
     ProcessId = $TargetProcessId

@@ -5,7 +5,7 @@ use fx::blob::{Blob, Scan};
 use modding::battle_ai::Tuning;
 use modding::range::RangeRoad;
 
-pub const OBSERVATION_VERSION: u32 = 1;
+pub const OBSERVATION_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnitObservation {
@@ -14,9 +14,28 @@ pub struct UnitObservation {
     pub alive: bool,
     pub armed: bool,
     pub mobile: bool,
+    /// Can attempt to reposition. Temporary loss of support/traction may make
+    /// mobile false while this remains true, allowing normal recovery to run.
+    pub can_reposition: bool,
     pub kind: RangeUnitKind,
     pub position: [i32; 2],
     pub ordered_target: Option<usize>,
+    /// Effective attack range against each target kind, indexed by kind.index().
+    /// Quantized world units from the live loadout/tuning; zero means no weapon.
+    /// This is coarse reach, not a promise of LOS or ballistic feasibility.
+    pub attack_ranges: [i32; RangeUnitKind::COUNT],
+}
+
+impl UnitObservation {
+    /// Coarse horizontal weapon reach; it does not evaluate LOS or trajectories.
+    pub fn in_weapon_reach(&self, target: &UnitObservation) -> bool {
+        let range = i64::from(self.attack_ranges[target.kind.index()]);
+        // Reach uses Euclidean distance, independently of the L1 tactical score.
+        // i128 also bounds observations near opposite i32 coordinate extremes.
+        let dx = i128::from(self.position[0]) - i128::from(target.position[0]);
+        let dz = i128::from(self.position[1]) - i128::from(target.position[1]);
+        range > 0 && dx * dx + dz * dz <= i128::from(range).pow(2)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,6 +65,61 @@ pub struct Decision {
 /// Returned decisions must still pass `submit_enemy_ai_plan` validation.
 pub trait Policy {
     fn decide(&self, observation: &Observation) -> Vec<Decision>;
+}
+
+#[cfg(test)]
+mod support_tests {
+    use super::*;
+
+    #[test]
+    fn focus_fire_scores_match_scalar_with_sparse_ids_and_radius_boundaries() {
+        let mut tuning = Tuning::from_ron(include_str!("../../../data/battle-ai.ron")).unwrap();
+        let units: Vec<_> = (0..24)
+            .map(|i| UnitObservation {
+                attack_ranges: [1600; RangeUnitKind::COUNT],
+                id: 10 + i * 17,
+                allied: true,
+                alive: true,
+                armed: i % 2 == 0,
+                mobile: i % 3 == 0,
+                can_reposition: i % 3 == 0,
+                kind: RangeUnitKind::Tank,
+                position: [i as i32 * 150 - 1500, (i % 2) as i32],
+                ordered_target: (i % 4 != 0).then_some(10 + (i % 5) * 17),
+            })
+            .collect();
+        let allies: Vec<_> = units.iter().collect();
+        for focus_fire in [false, true] {
+            tuning.focus_fire = focus_fire;
+            let rules = Rules {
+                tuning: &tuning,
+                controlled_allied: true,
+            };
+            for actor in &units {
+                let support = rules.support(actor, &allies);
+                for target in &units {
+                    let scalar = if focus_fire {
+                        allies
+                            .iter()
+                            .filter(|u| {
+                                u.id != actor.id
+                                    && u.ordered_target == Some(target.id)
+                                    && Rules::distance(u, actor) <= 600
+                            })
+                            .count()
+                            .min(2) as i64
+                    } else {
+                        0
+                    };
+                    let score = Rules::distance(actor, target)
+                        - i64::from(tuning.armed_bonus) * i64::from(target.armed)
+                        - i64::from(tuning.mobile_bonus) * i64::from(target.mobile)
+                        - scalar * i64::from(tuning.switch_margin);
+                    assert_eq!(rules.score(actor, target, &support), score);
+                }
+            }
+        }
+    }
 }
 
 /// One short, authored-road waypoint toward a distant objective. Roads are
@@ -181,30 +255,59 @@ pub struct Rules<'a> {
 }
 
 impl Rules<'_> {
+    /// Complete the policy output for external whole-plan admission, in
+    /// observation slot order. Actors omitted by the policy receive Hold;
+    /// this does not change the default policy's actor selection.
+    pub fn whole_plan(&self, observation: &Observation) -> Vec<Decision> {
+        let decisions = self.decide(observation);
+        observation
+            .units
+            .iter()
+            .filter(|unit| unit.allied == self.controlled_allied && unit.alive)
+            .map(|unit| {
+                decisions
+                    .iter()
+                    .find(|decision| decision.actor == unit.id)
+                    .copied()
+                    .unwrap_or(Decision {
+                        actor: unit.id,
+                        order: AiOrder::Hold,
+                    })
+            })
+            .collect()
+    }
+
     fn distance(a: &UnitObservation, b: &UnitObservation) -> i64 {
         (i64::from(a.position[0]) - i64::from(b.position[0])).abs()
             + (i64::from(a.position[1]) - i64::from(b.position[1])).abs()
+    }
+
+    fn support(
+        &self,
+        actor: &UnitObservation,
+        allies: &[&UnitObservation],
+    ) -> std::collections::BTreeMap<usize, i64> {
+        let mut support = std::collections::BTreeMap::new();
+        if self.tuning.focus_fire {
+            for ally in allies {
+                if ally.id != actor.id && Self::distance(ally, actor) <= 600 {
+                    if let Some(target) = ally.ordered_target {
+                        let count = support.entry(target).or_insert(0);
+                        *count = (*count + 1).min(2);
+                    }
+                }
+            }
+        }
+        support
     }
 
     fn score(
         &self,
         actor: &UnitObservation,
         target: &UnitObservation,
-        allies: &[&UnitObservation],
+        support: &std::collections::BTreeMap<usize, i64>,
     ) -> i64 {
-        let support = if self.tuning.focus_fire {
-            allies
-                .iter()
-                .filter(|u| {
-                    u.id != actor.id
-                        && u.ordered_target == Some(target.id)
-                        && Self::distance(u, actor) <= 600
-                })
-                .count()
-                .min(2) as i64
-        } else {
-            0
-        };
+        let support = support.get(&target.id).copied().unwrap_or(0);
         Self::distance(actor, target)
             - i64::from(self.tuning.armed_bonus) * i64::from(target.armed)
             - i64::from(self.tuning.mobile_bonus) * i64::from(target.mobile)
@@ -294,78 +397,81 @@ impl Policy for Rules<'_> {
         });
         allies
             .iter()
-            .map(|u| Decision {
-                actor: u.id,
-                order: if guard == Some(u.id) {
-                    if let Some(base) = own_base {
-                        targets
-                            .iter()
-                            .filter(|v| {
-                                v.armed
-                                    && v.kind != RangeUnitKind::Base
-                                    && (i64::from(v.position[0] - base[0]).abs()
-                                        + i64::from(v.position[1] - base[1]).abs())
-                                        <= if u.ordered_target == Some(v.id) {
-                                            2200
-                                        } else {
-                                            1800
-                                        }
-                            })
-                            .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                            .map_or(AiOrder::Move(guard_post.unwrap()), |v| {
-                                AiOrder::Attack(v.id)
-                            })
-                    } else {
-                        AiOrder::Auto
-                    }
-                } else {
-                    AiOrder::Attack({
-                        // Artillery assaults the base from the outset. Once
-                        // the enemy has no armed field units left, every
-                        // surviving mobile gun joins that assault instead of
-                        // pursuing harmless disabled hulls across rough ground.
-                        let siege = (u.armed
-                            && (u.kind.artillery() || (u.mobile && enemy_field == 0)))
-                            .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
-                            .flatten();
-                        if let Some(base) = siege {
-                            let threat_radius = 1200
-                                + if u.ordered_target == Some(base.id) {
-                                    0
-                                } else {
-                                    self.tuning.switch_margin
-                                };
-                            if let Some(threat) = targets
-                                .iter()
-                                .filter(|v| {
-                                    v.kind != RangeUnitKind::Base
-                                        && v.armed
-                                        && Self::distance(u, v) <= i64::from(threat_radius)
-                                })
-                                .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                            {
-                                threat.id
-                            } else {
-                                base.id
-                            }
-                        } else {
-                            let best = targets
-                                .iter()
-                                .min_by_key(|v| (self.score(u, v, &allies), v.id))
-                                .expect("nonempty targets");
+            .map(|u| {
+                let support = self.support(u, &allies);
+                Decision {
+                    actor: u.id,
+                    order: if guard == Some(u.id) {
+                        if let Some(base) = own_base {
                             targets
                                 .iter()
-                                .find(|v| Some(v.id) == u.ordered_target)
-                                .filter(|old| {
-                                    self.score(u, old, &allies)
-                                        <= self.score(u, best, &allies)
-                                            + i64::from(self.tuning.switch_margin)
+                                .filter(|v| {
+                                    v.armed
+                                        && v.kind != RangeUnitKind::Base
+                                        && (i64::from(v.position[0] - base[0]).abs()
+                                            + i64::from(v.position[1] - base[1]).abs())
+                                            <= if u.ordered_target == Some(v.id) {
+                                                2200
+                                            } else {
+                                                1800
+                                            }
                                 })
-                                .unwrap_or(best)
-                                .id
+                                .min_by_key(|v| (self.score(u, v, &support), v.id))
+                                .map_or(AiOrder::Move(guard_post.unwrap()), |v| {
+                                    AiOrder::Attack(v.id)
+                                })
+                        } else {
+                            AiOrder::Auto
                         }
-                    })
-                },
+                    } else {
+                        AiOrder::Attack({
+                            // Artillery assaults the base from the outset. Once
+                            // the enemy has no armed field units left, every
+                            // surviving mobile gun joins that assault instead of
+                            // pursuing harmless disabled hulls across rough ground.
+                            let siege = (u.armed
+                                && (u.kind.artillery() || (u.mobile && enemy_field == 0)))
+                                .then(|| targets.iter().find(|v| v.kind == RangeUnitKind::Base))
+                                .flatten();
+                            if let Some(base) = siege {
+                                let threat_radius = 1200
+                                    + if u.ordered_target == Some(base.id) {
+                                        0
+                                    } else {
+                                        self.tuning.switch_margin
+                                    };
+                                if let Some(threat) = targets
+                                    .iter()
+                                    .filter(|v| {
+                                        v.kind != RangeUnitKind::Base
+                                            && v.armed
+                                            && Self::distance(u, v) <= i64::from(threat_radius)
+                                    })
+                                    .min_by_key(|v| (self.score(u, v, &support), v.id))
+                                {
+                                    threat.id
+                                } else {
+                                    base.id
+                                }
+                            } else {
+                                let best = targets
+                                    .iter()
+                                    .min_by_key(|v| (self.score(u, v, &support), v.id))
+                                    .expect("nonempty targets");
+                                targets
+                                    .iter()
+                                    .find(|v| Some(v.id) == u.ordered_target)
+                                    .filter(|old| {
+                                        self.score(u, old, &support)
+                                            <= self.score(u, best, &support)
+                                                + i64::from(self.tuning.switch_margin)
+                                    })
+                                    .unwrap_or(best)
+                                    .id
+                            }
+                        })
+                    },
+                }
             })
             .collect()
     }

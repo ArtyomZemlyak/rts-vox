@@ -42,6 +42,7 @@ fn app() -> App {
         seen: Vec::new(),
         pending: Vec::new(),
         emitted: Vec::new(),
+        geometry: default(),
         next_mesh: 0,
         generation: 0,
     };

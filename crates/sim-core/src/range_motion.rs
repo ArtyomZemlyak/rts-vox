@@ -713,7 +713,9 @@ impl Motion {
         // What yields to a shoved hull falls as it does to a driven one
         // (ADR-452): slid into standing trunks, the hull stood in them
         // until it next drove.
-        if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
+        if self.rigs.is_empty()
+            && ((allowed && target.crush > 0) || (!allowed && current.crush > 0))
+        {
             self.cut = ground.crushed_limit(
                 [self.pos[0], self.pos[2]],
                 self.drive.head,
@@ -739,6 +741,13 @@ impl Motion {
     }
     pub(super) fn can_drive(&self, response: crate::mobility::Mobility) -> bool {
         response.engine > Fx::ZERO && response.traction > Fx::ZERO && self.carried()
+    }
+    /// Installed propulsion can try to recover a stance. Buckled legs do not
+    /// permanently remove this ability; lost legs and severed machinery do.
+    pub(super) fn can_reposition(&self, response: crate::mobility::Mobility) -> bool {
+        response.engine > Fx::ZERO
+            && response.traction > Fx::ZERO
+            && (self.rigs.is_empty() || self.legs_lost.iter().filter(|lost| !**lost).count() >= 2)
     }
     /// The ride of this hull now: the chassis' ride at the range's gravity
     /// and the body's own mobility (ADR-305), low on its legs when none
@@ -883,10 +892,15 @@ impl Motion {
             .div(Fx::from_int(self.speed.max(1)))
             .min(Fx::ONE);
         // A resting heap of debris is floor for a foot too (ADR-292).
+        let ground = std::cell::RefCell::new(nav::vehicle::Probe::for_search(
+            w,
+            &self.yielding,
+            Default::default(),
+        ));
         let floor = |x: Fx, z: Fx| {
             let (x, z) = (x.to_int_trunc(), z.to_int_trunc());
             let top = rubble.get(&[x, z]).map_or(0, |t| i32::from(*t));
-            Fx::from_int(floor(w, x, z).max(top))
+            Fx::from_int(ground.borrow_mut().floor(x, z).max(top))
         };
         let stance = crate::gait::Stance {
             grounded: self.hull.grounded(),
@@ -915,6 +929,77 @@ impl Motion {
             } else {
                 foot.step(rig, &stance);
             }
+        }
+        self.cut_feet(w, b);
+    }
+    /// Yielding vegetation touches a walker's actual feet, including a
+    /// swinging foot, rather than the empty rectangle between its legs.
+    fn cut_feet(&mut self, w: &World, b: &UnitBody) {
+        if self.rigs.is_empty() {
+            return;
+        }
+        self.cut.clear();
+        let root = self.frame(b);
+        let mut frames = crate::damage::segment_frames(&root, b, self.drive.head, self.drive.head);
+        let mut cells = std::collections::BTreeSet::new();
+        for (leg, rig) in self.rigs.iter().enumerate() {
+            if self.legs_lost[leg] {
+                continue;
+            }
+            let (Some(part), Some(contact)) = (rig.foot, self.feet[leg].contact.as_ref()) else {
+                continue;
+            };
+            crate::gait::leg_frames(rig, &root, contact, &mut frames);
+            let foot = &b.segments[part].body;
+            let frame = &frames[part];
+            let dims = [foot.vol.nx, foot.vol.ny, foot.vol.nz].map(i32::from);
+            let mut lo = [i32::MAX; 3];
+            let mut hi = [i32::MIN; 3];
+            for corner in 0..8 {
+                let p = frame.world(
+                    [0, 1, 2]
+                        .map(|a| Fx::from_int(if corner & (1 << a) == 0 { 0 } else { dims[a] })),
+                );
+                for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[a] = lo[a].min((v.raw() >> 32) as i32);
+                    hi[a] = hi[a].max((v.raw() >> 32) as i32);
+                }
+            }
+            for z in lo[2].max(0)..=hi[2].min(w.nz as i32 - 1) {
+                for y in lo[1].max(0)..=hi[1].min(w.ny as i32 - 1) {
+                    for x in lo[0].max(0)..=hi[0].min(w.nx as i32 - 1) {
+                        let p = [x as u32, y as u32, z as u32];
+                        if !self.yielding.contains(&w.material(p[0], p[1], p[2])) {
+                            continue;
+                        }
+                        let local = frame.local(V3::new(
+                            Fx::from_int(x).add(Fx::from_ratio(1, 2)),
+                            Fx::from_int(y).add(Fx::from_ratio(1, 2)),
+                            Fx::from_int(z).add(Fx::from_ratio(1, 2)),
+                        ));
+                        if (0..3).all(|a| local[a] >= Fx::ZERO && local[a] < Fx::from_int(dims[a]))
+                        {
+                            let q = local.map(|v| v.to_int_trunc() as usize);
+                            if foot.vol.get(q[0], q[1], q[2]) {
+                                cells.insert(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Same column order and claim quota as the tracked hull's cut.
+        let mut cells: Vec<_> = cells.into_iter().collect();
+        cells.sort_unstable_by_key(|p| (p[2], p[0], p[1]));
+        let mut claimed = 0;
+        for p in cells {
+            if !w.on_frame(p[0], p[1], p[2]) {
+                if claimed == self.cut_limit {
+                    break;
+                }
+                claimed += 1;
+            }
+            self.cut.push(p);
         }
     }
     /// Ask for a route to `to` and walk one tick's worth of the search
@@ -2065,7 +2150,9 @@ impl Motion {
             Fx::ZERO
         };
         self.brake_shove(&lim);
-        if (allowed && target.crush > 0) || (!allowed && current.crush > 0) {
+        if self.rigs.is_empty()
+            && ((allowed && target.crush > 0) || (!allowed && current.crush > 0))
+        {
             self.cut = ground.crushed_limit(
                 [self.pos[0], self.pos[2]],
                 self.drive.head,
@@ -2569,6 +2656,59 @@ mod tests {
         assert!(!occupied.searching());
         assert_eq!(occupied.path, empty.path);
         assert_eq!(occupied.path.last(), Some(&goal));
+    }
+
+    #[test]
+    fn spider_cuts_only_occupied_feet_and_keeps_trees_between_legs() {
+        struct Forest;
+        impl voxel::Generator for Forest {
+            fn material(&self, _x: u32, y: u32, _z: u32) -> u16 {
+                if y < 16 {
+                    1
+                } else if y < 42 {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+        let w = World::new(320, 96, 320, 100, Box::new(Forest));
+        let mut body = voxel::unit::spider();
+        let mut m = Motion::new([160, 16, 160], RangeUnitKind::Spider, &body);
+        m.enabled = false;
+        m.passive(
+            &w,
+            &nav::vehicle::Rubble::new(),
+            &body,
+            98,
+            crate::mobility::Mobility::intact(true),
+            &[],
+        );
+        assert!(!m.cut.is_empty(), "feet did not touch any trees");
+        assert!(
+            m.cut
+                .iter()
+                .all(|p| p[0].abs_diff(160) > 24 || p[2].abs_diff(160) > 24),
+            "empty space below the hull cut trees"
+        );
+        assert!(m.cut.iter().all(|p| p[1] < 24), "feet stood on tree crowns");
+        let foot_parts: Vec<_> = m.rigs.iter().filter_map(|r| r.foot).collect();
+        for i in foot_parts {
+            let foot = &mut body.segments[i].body;
+            for z in 0..foot.vol.nz as usize {
+                for y in 0..foot.vol.ny as usize {
+                    for x in 0..foot.vol.nx as usize {
+                        foot.remove(x, y, z);
+                    }
+                }
+            }
+        }
+        m.cut_feet(&w, &body);
+        assert!(m.cut.is_empty(), "destroyed feet still fell trees");
+        let body = voxel::unit::spider();
+        m.legs_lost.fill(true);
+        m.cut_feet(&w, &body);
+        assert!(m.cut.is_empty(), "missing legs still fell trees");
     }
 
     #[test]

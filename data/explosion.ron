@@ -4,7 +4,9 @@
     half_cells: 20,
     cell_units: 2,
     energy: 3500,
-    material_energy_j: 45000000,
+    // The authored 40% body share retains the former 45 MJ hull budget;
+    // the remaining 67.5 MJ pays terrain fracture instead of starving it.
+    material_energy_j: 112500000,
     air_cost: 100,
     soil_resistance: 165,
     concrete_resistance: 380,

@@ -23,6 +23,13 @@ use voxel::{
     world::{snapshot::Snapshot, Edit},
 };
 
+/// Two competing admission queues share slots equally. The odd slot rotates
+/// with the authoritative tick, including a pool with only one free slot.
+pub(crate) fn routine_fragment_share(room: u32, damage_waiting: bool, tick: u64) -> u32 {
+    let queues = 1 + u32::from(damage_waiting);
+    room / queues + u32::from(tick % u64::from(queues) < u64::from(room % queues))
+}
+
 /// One independent physics job (or Rayon leaf batch), not an actor ID.
 /// Timers and collection belong to the observer. The no-op observer carries
 /// no clocks, allocation, thread lookup or synchronization into ordinary play.
@@ -44,8 +51,14 @@ impl<F: Fn(usize, &'static str)> Drop for PhysicsTask<'_, F> {
 
 #[path = "chunk.rs"]
 pub mod chunk;
+#[path = "hull_queries.rs"]
+mod hull_queries;
+pub use hull_queries::HullQueries;
 #[path = "corpse.rs"]
 mod corpse;
+#[cfg(test)]
+#[path = "hull_query_tests.rs"]
+mod hull_query_tests;
 #[path = "unit_debris.rs"]
 mod unit_debris;
 
@@ -407,6 +420,30 @@ mod tests {
         }
     }
     // ADR-479 implementation retained as the differential oracle.
+    #[test]
+    fn rubble_column_radix_paths_match_stable_sort_with_duplicate_and_extreme_keys() {
+        for count in [0, 1, 31, 4095, 4096, 4097, 8192, 131_074] {
+            for wide in [false, true] {
+                let limit = if wide { 65_536 } else { 64 };
+                let mut actual: Vec<_> = (0..count)
+                    .map(|i| {
+                        let at = if i % 7 == 0 {
+                            [limit - 1, limit - 1]
+                        } else {
+                            [(i * 17 + 3) % limit, (i * 31 + 1) % limit]
+                        };
+                        (at.map(|v| v as i32), (i % 65_536) as u16)
+                    })
+                    .collect();
+                let mut expected = actual.clone();
+                // Independent stable comparison sort retains every duplicate's
+                // original top/order, not just the final map's maximum height.
+                expected.sort_by_key(|c| c.0);
+                sort_columns(&mut actual);
+                assert_eq!(actual, expected, "count={count} wide={wide}");
+            }
+        }
+    }
     impl Bursts {
         fn reference_rubble(
             &self,
@@ -1007,6 +1044,63 @@ mod tests {
         }
     }
     #[test]
+    fn compact_wake_queries_keep_source_slots_and_evaluate_every_fragment() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for len in [0, 1, 1023, 1024, 1100, 39_495] {
+            let fragments: Vec<_> = (0..len)
+                .map(|i| Fragment {
+                    id: (len - i) as u64,
+                    position: V3::ZERO,
+                    velocity: V3::ZERO,
+                    material: 1,
+                    paint: None,
+                    mm: 100,
+                    basis: IDENTITY,
+                    mass_g: 1,
+                    count: 1,
+                    shape: 1,
+                    side: 1,
+                    chunk: None,
+                    held: i as u32,
+                    resting: true,
+                })
+                .collect();
+            for workers in [1, 4, 8] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap();
+                for mode in 0..3 {
+                    let seen = AtomicUsize::new(0);
+                    let query = |(i, f): (usize, &Fragment)| {
+                        assert_eq!(f.id, (len - i) as u64);
+                        seen.fetch_add(1, Ordering::Relaxed);
+                        let push = (mode != 0 && (mode == 2 || i % 257 == 0)).then_some(V3::ZERO);
+                        let unsupported = mode == 1 && push.is_none() && i % 511 == 0;
+                        (push, unsupported)
+                    };
+                    let dense = pool
+                        .install(|| fragment_wake_queries::<false>(&fragments, query, &|_, _| {}));
+                    let compact = pool
+                        .install(|| fragment_wake_queries::<true>(&fragments, query, &|_, _| {}));
+                    let expected: Vec<_> = dense
+                        .into_iter()
+                        .filter(|(_, (push, unsupported))| push.is_some() || *unsupported)
+                        .collect();
+                    assert_eq!(
+                        compact, expected,
+                        "len={len}, workers={workers}, mode={mode}"
+                    );
+                    assert_eq!(seen.load(Ordering::Relaxed), 2 * len);
+                    assert!(compact.windows(2).all(|p| p[0].0 < p[1].0));
+                    if mode == 0 {
+                        assert!(compact.is_empty());
+                    }
+                }
+            }
+        }
+    }
+    #[test]
     fn settled_query_words_match_cells_across_negative_and_word_boundaries() {
         for bottom in [-129, -65, -64, -1, 0, 1, 63, 64, 127] {
             for height in [1, 2, 63, 64, 65, 131] {
@@ -1178,9 +1272,9 @@ mod tests {
             let cells = box_cells(side);
             let mask = u64::MAX >> (64 - cells);
             let shapes: Vec<_> = if side == 2 {
-                (1..=mask).collect()
+                (0..=mask).collect()
             } else {
-                vec![1, 1 << (cells - 1), mask, mask & 0x9d37_a518_6fc2_0be1]
+                vec![0, 1, 1 << (cells - 1), mask, mask & 0x9d37_a518_6fc2_0be1]
             };
             for shape in shapes {
                 let centre = arr(walked_shape_geometry(shape, side).0);
@@ -3844,10 +3938,23 @@ impl Fragment {
             Some(chunk) => chunk.bounds,
             None => {
                 let (lo, hi) = shape_bounds(self.shape, self.side);
-                let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
-                (lo.map(|v| v.mul(scale)), hi.map(|v| v.mul(scale)))
+                if self.mm == voxel::unit::WORLD_MM {
+                    (lo, hi)
+                } else {
+                    let scale = Fx::from_ratio(self.mm as i32, voxel::unit::WORLD_MM as i32);
+                    (lo.map(|v| v.mul(scale)), hi.map(|v| v.mul(scale)))
+                }
             }
         };
+        if self.basis == IDENTITY {
+            // Multiplication by zero/one and addition of zero are exact in
+            // Fx. Retain endpoint ordering for empty shapes or unusual
+            // captured bounds, just as the general reduction below does.
+            return (
+                [0, 1, 2].map(|a| lo[a].min(hi[a])),
+                [0, 1, 2].map(|a| lo[a].max(hi[a])),
+            );
+        }
         let mut low = [Fx::ZERO; 3];
         let mut high = [Fx::ZERO; 3];
         // Each corner sum chooses one endpoint independently per local
@@ -4661,7 +4768,20 @@ impl Bursts {
         completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
-        self.step_fragments_reserved(world, e, t, gravity, tick, around, 0, completed, task);
+        self.step_fragments_reserved(
+            world,
+            e,
+            t,
+            gravity,
+            tick,
+            around,
+            0,
+            self.jobs
+                .iter()
+                .any(|j| j.energy_mj > 0 || j.body_energy_mj > 0),
+            completed,
+            task,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4674,11 +4794,50 @@ impl Bursts {
         tick: u64,
         around: Surroundings<'_>,
         thermal_reserve: u32,
+        damage_waiting: bool,
+        completed: impl FnMut(&'static str),
+        task: &(impl Fn(usize, &'static str) + Sync),
+    ) {
+        self.step_fragments_kernel::<true, true>(
+            world,
+            e,
+            t,
+            gravity,
+            tick,
+            around,
+            thermal_reserve,
+            damage_waiting,
+            completed,
+            task,
+        );
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn step_fragments_kernel<const INDEXED_HULLS: bool, const COMPACT_WAKE: bool>(
+        &mut self,
+        world: &voxel::World,
+        e: &mut Economy,
+        t: &Blast,
+        gravity: Fx,
+        tick: u64,
+        around: Surroundings<'_>,
+        thermal_reserve: u32,
+        damage_waiting: bool,
         mut completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
     ) {
         let (hulls, yielding) = (around.hulls, around.yielding);
+        let hull_queries = if INDEXED_HULLS {
+            HullQueries::new(hulls)
+        } else {
+            HullQueries::scalar(hulls)
+        };
         let motion = FragmentMotion::new(t);
+        // Tilted hulls on a crater floor can shed cells whose captured centre
+        // is below the map. Apply the common boundary rule before freezing
+        // support queries, including newly admitted sections and resting pieces.
+        for f in self.fragments.iter_mut().chain(self.corpses.values_mut()) {
+            f.keep_on_map([world.nx, world.nz]);
+        }
         // What has already landed is ground for what is still falling
         // (ADR-308), gathered once for the whole tick.
         let mut settled = std::mem::take(&mut self.settled_scratch);
@@ -4706,6 +4865,21 @@ impl Bursts {
             .saturating_sub(pool.flying + self.claims.len() + thermal_reserve as usize);
         let mut working_room = (t.max_fragments as usize)
             .saturating_sub(pool.working + self.claims.len() + thermal_reserve as usize);
+        if damage_waiting {
+            // The routine queue (heat, felling, wakeups) shares free capacity
+            // with waiting damage. Keep the damage share for the next tick;
+            // otherwise old pieces can repeatedly take every newly free slot.
+            let free = room.min(working_room);
+            let routine = routine_fragment_share(
+                (free + thermal_reserve as usize) as u32,
+                true,
+                tick.wrapping_add(1),
+            )
+            .saturating_sub(thermal_reserve) as usize;
+            let reserve = free.saturating_sub(routine);
+            room -= reserve;
+            working_room -= reserve;
+        }
         // Wakeups claim working slots in the frozen source order. A parked
         // piece never borrows a slot reserved by a pending terrain dig.
         // These queries read the frozen surroundings and only this piece.
@@ -4716,7 +4890,7 @@ impl Bursts {
             let mut push = None;
             if f.chunk.is_none() && t.push_pct > 0 && (!f.resting || can_wake) {
                 let (low, high) = settled.fragment_bounds(i as u32, f);
-                if let Some(h) = hull_hit(arr(f.position), low, high, hulls, 0) {
+                if let Some(h) = hull_queries.hit(arr(f.position), low, high, 0) {
                     // What the hull climbs as floor it does not push: a
                     // piece of a yielding material, or one rising above
                     // the hull's step, is bulldozed; the rest is ridden.
@@ -4736,26 +4910,19 @@ impl Bursts {
                     }
                 }
             }
+            // A single free slot alternates between damage and wakeups. Check
+            // the missed deadline too: otherwise that alternation can alias an
+            // even rest-check period and leave a piece unsupported forever.
             let unsupported = can_wake
                 && push.is_none()
                 && f.resting
-                && due(f.id, tick, t)
+                && (due(f.id, tick, t) || (damage_waiting && tick > 0 && due(f.id, tick - 1, t)))
                 && !supported(f, world, hulls, &settled, i as u32);
             (push, unsupported)
         };
-        let wakeups: Vec<_> = if self.fragments.len() >= 1024 {
-            self.fragments
-                .par_iter()
-                .enumerate()
-                .map_init(
-                    || PhysicsTask::new(task, "physics_wake_begin", "physics_wake_end"),
-                    |_, item| query(item),
-                )
-                .collect()
-        } else {
-            self.fragments.iter().enumerate().map(query).collect()
-        };
-        for (i, (f, (push, unsupported))) in self.fragments.iter_mut().zip(wakeups).enumerate() {
+        let wakeups = fragment_wake_queries::<COMPACT_WAKE>(&self.fragments, query, task);
+        for (i, (push, unsupported)) in wakeups {
+            let f = &mut self.fragments[i];
             let parked = i < parked_end && f.parkable();
             let can_wake = room > 0 && (!parked || working_room > 0);
             if let Some(velocity) = push.filter(|_| !f.resting || can_wake) {
@@ -5620,6 +5787,58 @@ fn due(id: u64, tick: u64, t: &Blast) -> bool {
     id.wrapping_add(tick)
         .is_multiple_of(u64::from(t.rest_check_ticks.max(1)))
 }
+/// All predicates read the frozen phase input. Empty answers have no commit
+/// effects, including no reservation changes; keep only actions and their
+/// original indices. Chunk-index collection preserves admission order.
+fn fragment_wake_queries<const COMPACT: bool>(
+    fragments: &[Fragment],
+    query: impl Fn((usize, &Fragment)) -> (Option<V3>, bool) + Sync,
+    task: &(impl Fn(usize, &'static str) + Sync),
+) -> Vec<(usize, (Option<V3>, bool))> {
+    if !COMPACT {
+        // Dense oracle retains every answer, including the no-op commits.
+        return if fragments.len() >= 1024 {
+            fragments
+                .par_iter()
+                .enumerate()
+                .map_init(
+                    || PhysicsTask::new(task, "physics_wake_begin", "physics_wake_end"),
+                    |_, item| (item.0, query(item)),
+                )
+                .collect()
+        } else {
+            fragments
+                .iter()
+                .enumerate()
+                .map(|item| (item.0, query(item)))
+                .collect()
+        };
+    }
+    let action = |(i, f)| {
+        let answer = query((i, f));
+        (answer.0.is_some() || answer.1).then_some((i, answer))
+    };
+    if fragments.len() < 1024 {
+        return fragments.iter().enumerate().filter_map(action).collect();
+    }
+    let groups: Vec<Vec<_>> = fragments
+        .par_chunks(256)
+        .enumerate()
+        .map(|(chunk, pieces)| {
+            let _task = PhysicsTask::new(task, "physics_wake_begin", "physics_wake_end");
+            pieces
+                .iter()
+                .enumerate()
+                .filter_map(|(offset, f)| action((chunk * 256 + offset, f)))
+                .collect()
+        })
+        .collect();
+    let mut actions = Vec::with_capacity(groups.iter().map(Vec::len).sum());
+    for group in groups {
+        actions.extend(group);
+    }
+    actions
+}
 /// Whether material or a live hull still holds the piece up: its box half
 /// a unit lower, the most a settling step moves, meets the world or a hull.
 fn supported(
@@ -5641,15 +5860,47 @@ fn supported(
             Some(f.position.y.add(low[1])),
         )
 }
-/// Columns in ascending column order, stably (ADR-465): four passes of
-/// a byte each, over Z and then X. The columns of the rubble map lie in
-/// `0..65536` on both axes, as a map is no wider than 16384; a comparison
-/// sort of a battlefield's fifteen thousand columns cost more than half a
-/// millisecond a step.
+/// Stable ascending columns (ADR-465/641). Dense maps use two full-axis
+/// passes; small/sparse maps retain four byte passes, over Z and then X.
+/// Coordinates lie in `0..65536`: the world is no wider than 16384.
 fn sort_columns(columns: &mut Vec<([i32; 2], u16)>) {
     debug_assert!(columns
         .iter()
         .all(|(c, _)| c.iter().all(|v| (0..1 << 16).contains(v))));
+    // Large rubble maps repeat many coordinates. Count both complete axes
+    // from the immutable input once, then scatter Z and X stably. Histograms
+    // are independent of the first scatter's order. Keep byte passes for
+    // small/sparse inputs whose coordinate range costs more than their data.
+    if columns.len() >= 4096 {
+        let mut maximum = [0usize; 2];
+        for &(at, _) in columns.iter() {
+            for a in 0..2 {
+                maximum[a] = maximum[a].max(at[a] as usize);
+            }
+        }
+        if maximum[0] + maximum[1] + 2 <= columns.len() {
+            let mut starts = maximum.map(|v| vec![0usize; v + 2]);
+            for &(at, _) in columns.iter() {
+                starts[0][at[0] as usize + 1] += 1;
+                starts[1][at[1] as usize + 1] += 1;
+            }
+            for start in &mut starts {
+                for d in 0..start.len() - 1 {
+                    start[d + 1] += start[d];
+                }
+            }
+            let mut out = vec![([0, 0], 0u16); columns.len()];
+            for axis in [1, 0] {
+                for c in columns.iter() {
+                    let d = c.0[axis] as usize;
+                    out[starts[axis][d]] = *c;
+                    starts[axis][d] += 1;
+                }
+                std::mem::swap(columns, &mut out);
+            }
+            return;
+        }
+    }
     let mut out = vec![([0, 0], 0u16); columns.len()];
     for (axis, shift) in [(1, 0), (1, 8), (0, 0), (0, 8)] {
         let digit = |c: &([i32; 2], u16)| ((c.0[axis] >> shift) & 0xff) as usize;

@@ -244,8 +244,12 @@ fn resumed_ground_finishes_a_partial_coarse_cell_before_reaching_the_next_actor(
         assert_eq!(x.queued, 8);
         assert_eq!(a.matter.debris.claims(), 8);
         assert!(x.pending.is_empty());
-        // A successful first ground retry still needs geometry for the rest.
-        assert_eq!(a.matter.admission.wave_geometry, [1, 3, 1, 0]);
+        // Local-cell waves have no later body samples; legacy points still
+        // need bounds to decide whether subsequent subcells visit a body.
+        assert_eq!(
+            a.matter.admission.wave_geometry,
+            [u64::from(points), 0, 1, 0]
+        );
     }
 }
 
@@ -274,9 +278,11 @@ fn deferred_body_cursor_uses_eager_geometry_and_can_resume_after_settling() {
     }
     assert_eq!(a.matter.admission.wave_geometry[3], 0);
     assert_eq!(
-        a.matter.admission.wave_geometry,
-        b.matter.admission.wave_geometry
+        a.matter.admission.wave_geometry[0],
+        b.matter.admission.wave_geometry[0]
     );
+    assert!(a.matter.admission.wave_geometry[1] > 0);
+    assert!(a.matter.admission.wave_geometry[1] < b.matter.admission.wave_geometry[1]);
     for r in [&mut a, &mut b] {
         r.matter.tuning.max_flying = 128;
     }
@@ -471,4 +477,252 @@ fn battle_contact_queue_obeys_small_and_zero_work_slices() {
         "fixture must exhaust material admission"
     );
     assert!(r.matter.economy.ledger.balanced());
+}
+
+// Reference keeps eager actor transforms while using the same fair queue rules.
+fn fair_eager(r: &mut BlastRange, e: &mut Explosion, c: &ExplosionConfig, budget: usize) {
+    r.matter.begin_body_batch();
+    e.step_contacts::<false, true>(
+        &mut r.world,
+        budget,
+        &mut r.units,
+        &mut r.surface_work,
+        &mut r.surface_changed,
+        c,
+        Some(&mut r.matter),
+    );
+    r.matter.finish_body_batch();
+}
+
+#[test]
+fn lazy_wave_frames_match_eager_fair_queue_after_capacity_and_frozen_pose_changes() {
+    for points in [false, true] {
+        let (mut a, mut x, c) = fixture(2, points);
+        let (mut b, mut y, _) = fixture(2, points);
+        for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+            push(e, body_point(r, e), 1_000_000);
+            e.contact_cursor = r.units.len();
+            r.matter.tuning.max_flying = 0;
+        }
+        for turn in 0..64 {
+            if turn == 3 {
+                // Lazy construction must use the captured frames, even when
+                // the live actor has turned and moved before room returns.
+                for r in [&mut a, &mut b] {
+                    r.units[0].motion.pos[0] = r.units[0].motion.pos[0].add(Fx::from_int(6));
+                    r.units[0].update_pose(1234);
+                    r.matter.tuning.max_flying = 128;
+                }
+            }
+            let budget = [0, 1, 2, 8][turn % 4];
+            fair_step(&mut a, &mut x, &c, budget);
+            fair_eager(&mut b, &mut y, &c, budget);
+            same(&a, &x, &b, &y);
+            assert_eq!(saved_queue(&x), saved_queue(&y));
+            flush(&mut a);
+            flush(&mut b);
+            same(&a, &x, &b, &y);
+            if !x.working() {
+                break;
+            }
+        }
+        assert!(!x.working(), "point sampling={points}");
+        assert!(a.matter.debris.body_removed > 0, "no real body contact");
+        assert!(a.matter.admission.ground[0] > 0, "no real ground contact");
+        assert!(a.matter.admission.wave_geometry[1] < b.matter.admission.wave_geometry[1]);
+    }
+}
+
+#[test]
+fn ground_only_fair_queue_never_prepares_actor_frames() {
+    let (mut a, mut x, c) = fixture(1, false);
+    let (mut b, mut y, _) = fixture(1, false);
+    for e in [&mut x, &mut y] {
+        push(e, [41, 2, 40], 1_000_000);
+        push(e, [42, 2, 40], 1_000_000);
+    }
+    for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+        e.contact_cursor = r.units.len();
+        r.matter.tuning.max_flying = 0;
+    }
+    for turn in 0..8 {
+        if turn == 3 {
+            a.matter.tuning.max_flying = 128;
+            b.matter.tuning.max_flying = 128;
+        }
+        fair_step(&mut a, &mut x, &c, 3);
+        fair_eager(&mut b, &mut y, &c, 3);
+        same(&a, &x, &b, &y);
+        assert_eq!(saved_queue(&x), saved_queue(&y));
+        assert_eq!(a.matter.admission.wave_geometry[1], 0);
+        flush(&mut a);
+        flush(&mut b);
+    }
+    assert!(!x.working());
+    assert_eq!(x.queued, 3);
+    assert!(b.matter.admission.wave_geometry[1] > 0);
+}
+
+// Author real soil in each tested coarse cell so every queue entry must
+// actually claim matter; procedural air must not make the probe pass empty.
+fn soil_contacts(r: &mut BlastRange, e: &Explosion, cells: &[[i32; 3]]) {
+    for &p in cells {
+        for dz in 0..e.cell {
+            for dy in 0..e.cell {
+                for dx in 0..e.cell {
+                    r.world.queue_edit(voxel::world::Edit::put(
+                        (p[0] + dx) as u32,
+                        (p[1] + dy) as u32,
+                        (p[2] + dz) as u32,
+                        1,
+                    ));
+                }
+            }
+        }
+    }
+    while r.world.flush().queued > 0 {}
+}
+
+#[test]
+fn completed_body_prefixes_skip_bounds_and_preserve_every_ground_subcell_on_restore() {
+    for (edge, points) in [(1, false), (1, true), (2, false), (4, false)] {
+        let (mut a, mut x, c) = fixture(edge, points);
+        let (mut b, mut y, _) = fixture(edge, points);
+        for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+            // This column is outside every physical body. Run the real body
+            // prefix before refusing ground, instead of forging its cursors.
+            push(e, [40, 2, 40 + edge], 1_000_000);
+            push(e, [40, 2, 40 + edge * 2], 1_000_000);
+            soil_contacts(
+                r,
+                e,
+                &[[40, 2, 40], [40, 2, 40 + edge], [40, 2, 40 + edge * 2]],
+            );
+            r.matter.tuning.max_flying = 0;
+        }
+        fair_step(&mut a, &mut x, &c, 3);
+        fair_eager(&mut b, &mut y, &c, 3);
+        same(&a, &x, &b, &y);
+        assert_eq!(saved_queue(&x), saved_queue(&y));
+        assert_eq!(x.pending.len(), 3, "real ground waits required");
+        assert!(x.only_ground_contacts(a.units.len()));
+        let bytes = saved_queue(&y);
+        let mut scan = Scan::new(&bytes);
+        y = Explosion::load(&mut scan, &b.units, b.size, true).unwrap();
+        y.load_contacts(&mut scan, &b.units, false).unwrap();
+        y.load_resumes(&mut scan, &b.units).unwrap();
+        assert!(scan.ok() && scan.left() == 0);
+        let bounds = a.matter.admission.wave_geometry[0];
+        for turn in 0..128 {
+            if turn == 3 {
+                for r in [&mut a, &mut b] {
+                    r.units[0].motion.pos[0] = r.units[0].motion.pos[0].add(Fx::from_int(6));
+                    r.units[0].update_pose(1234);
+                    r.matter.tuning.max_flying = 128;
+                }
+            }
+            let budget = [0, 1, 3, 8][turn % 4];
+            fair_step(&mut a, &mut x, &c, budget);
+            fair_eager(&mut b, &mut y, &c, budget);
+            same(&a, &x, &b, &y);
+            assert_eq!(saved_queue(&x), saved_queue(&y));
+            assert_eq!(a.matter.admission.wave_geometry[0], bounds);
+            flush(&mut a);
+            flush(&mut b);
+            if !x.working() {
+                break;
+            }
+        }
+        assert!(!x.working(), "edge={edge}");
+        assert!(a.matter.admission.wave_ground_only[0] > 0);
+        assert!(a.matter.admission.wave_ground_only[1] > 0);
+        assert!(a.matter.admission.ground[0] > 0);
+        // A completed pressure queue can still own conditional world edits.
+        // Confirm every admitted claim too, without discarding its matter.
+        for _ in 0..256 {
+            if a.matter.debris.claims() == 0 {
+                break;
+            }
+            flush(&mut a);
+            flush(&mut b);
+            same(&a, &x, &b, &y);
+        }
+        assert_eq!(a.matter.debris.claims(), 0);
+        assert_eq!(a.matter.debris.removed, x.queued as u64);
+    }
+}
+
+#[test]
+fn legacy_early_ground_cursor_keeps_later_body_samples() {
+    let (mut a, mut x, c) = fixture(4, true);
+    let (mut b, mut y, _) = fixture(4, true);
+    for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+        e.pending.clear();
+        push(e, body_point(r, e), 1_000_000);
+        e.contact_cursor = r.units.len();
+        r.matter.tuning.max_flying = 0;
+    }
+    // The first ground subcell is below the body. Later samples in this same
+    // coarse cell do hit it; the ground cursor alone cannot bypass bounds.
+    fair_step(&mut a, &mut x, &c, 1);
+    fair_eager(&mut b, &mut y, &c, 1);
+    same(&a, &x, &b, &y);
+    assert_eq!(a.matter.admission.wave_ground_only[0], 0);
+    for r in [&mut a, &mut b] {
+        r.matter.tuning.max_flying = 128;
+    }
+    for _ in 0..128 {
+        fair_step(&mut a, &mut x, &c, 1);
+        fair_eager(&mut b, &mut y, &c, 1);
+        same(&a, &x, &b, &y);
+        assert_eq!(saved_queue(&x), saved_queue(&y));
+        flush(&mut a);
+        flush(&mut b);
+        if !x.working() {
+            break;
+        }
+    }
+    assert!(!x.working());
+    assert!(
+        a.matter.debris.body_removed > 0,
+        "legacy body sample was skipped"
+    );
+}
+
+#[test]
+fn new_body_contact_leaves_the_proven_ground_only_path() {
+    let (mut a, mut x, c) = fixture(2, false);
+    let (mut b, mut y, _) = fixture(2, false);
+    for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+        push(e, [40, 2, 42], 1_000_000);
+        soil_contacts(r, e, &[[40, 2, 40], [40, 2, 42]]);
+        r.matter.tuning.max_flying = 0;
+    }
+    for _ in 0..3 {
+        fair_step(&mut a, &mut x, &c, 3);
+        fair_eager(&mut b, &mut y, &c, 3);
+        same(&a, &x, &b, &y);
+    }
+    assert!(a.matter.admission.wave_ground_only[0] > 0);
+    for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+        push(e, body_point(r, e), 1_000_000);
+        r.matter.tuning.max_flying = 1;
+    }
+    for _ in 0..128 {
+        fair_step(&mut a, &mut x, &c, 2);
+        fair_eager(&mut b, &mut y, &c, 2);
+        same(&a, &x, &b, &y);
+        assert_eq!(saved_queue(&x), saved_queue(&y));
+        flush(&mut a);
+        flush(&mut b);
+        if !x.working() {
+            break;
+        }
+    }
+    assert!(!x.working());
+    assert!(
+        a.matter.debris.body_removed > 0,
+        "new body contact was starved"
+    );
+    assert!(a.matter.admission.ground[0] > 0);
 }

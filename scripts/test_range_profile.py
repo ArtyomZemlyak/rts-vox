@@ -1197,6 +1197,26 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(result['sampled_threads'][0]['observed_roles'], ['local_advance'])
         self.assertEqual(result['process_minus_sampled_threads_ms'], 20)
 
+    def test_legacy_decimal_comma_os_capture_aligns_without_rewriting_raw(self):
+        folder = self.path / 'world-battle-cpu'; folder.mkdir()
+        samples = [dict(Seconds='2,0', Utc='1970-01-01T00:00:02Z', CpuMs='100,5'),
+                   dict(Seconds='3,0', Utc='1970-01-01T00:00:03Z', CpuMs='150,75')]
+        path = folder / 'cpu-process-samples.csv'
+        with path.open('w', newline='') as out:
+            writer = csv.DictWriter(out, samples[0]); writer.writeheader(); writer.writerows(samples)
+        raw = path.read_bytes()
+        with (folder / 'cpu-threads.csv').open('w', newline='') as out:
+            writer = csv.DictWriter(out, ['Seconds', 'ThreadId', 'CreatedAt', 'CpuMs', 'Name'])
+            writer.writeheader()
+            writer.writerow(dict(Seconds='3,0', ThreadId='2', CreatedAt='a', CpuMs='30,25', Name='12,34'))
+        result = profile.os_window(self.path, 'world-battle', 'epoch_unix_ns=2000000000',
+                                   [dict(frame_end_ns='1000000000')], {})
+        self.assertEqual(result['intervals'], 1)
+        self.assertEqual(result['process_cpu_ms'], 50.25)
+        self.assertEqual(result['sampled_threads'][0]['cpu_ms'], 30.25)
+        self.assertEqual(list(profile.read_csv(folder / 'cpu-threads.csv'))[0]['Name'], '12,34')
+        self.assertEqual(path.read_bytes(), raw)
+
     def test_os_pressure_capture_is_diagnostic_and_requires_actual_samples(self):
         self.write()
         manifest_path = self.path / 'world-battle.manifest.json'

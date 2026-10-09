@@ -20,7 +20,7 @@ pub enum Delivery {
 
 /// Optional material-specific deflection for a solid projectile. All
 /// percentages are thousandths, matching other weapon tuning values.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct Ricochet {
     pub material: u16,
     pub min_speed: i32,
@@ -31,13 +31,13 @@ pub struct Ricochet {
 }
 
 /// Finite lateral work carried by fragments behind a penetrated surface.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct Spall {
     pub radius: u8,
     pub work_milli: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub struct ExplosionConfig {
     #[serde(default)]
     pub delivery: Delivery,
@@ -129,6 +129,13 @@ impl ExplosionConfig {
 
     pub fn from_ron(text: &str) -> Result<Self, String> {
         let c: Self = ron::from_str(text).map_err(|e| e.to_string())?;
+        c.validate()?;
+        Ok(c)
+    }
+
+    /// Shared bounds for authored data, live commands and applied snapshots.
+    pub fn validate(&self) -> Result<(), String> {
+        let c = self;
         if !(1..=32).contains(&c.half_cells)
             || c.charge_ticks > c.fire_tick
             || !(1..=4).contains(&c.cell_units)
@@ -180,7 +187,7 @@ impl ExplosionConfig {
         {
             return Err("explosion parameters exceed supported bounds".into());
         }
-        Ok(c)
+        Ok(())
     }
 }
 

@@ -29,6 +29,18 @@ struct TickProfile {
     kinetic_resume_us: u128,
     pending_kinetic: usize,
     heat_flush_us: u128,
+    battle_wave_step_us: u128,
+    battle_wave_steps: u128,
+    battle_capture_us: u128,
+    battle_flight_us: u128,
+    battle_damage_us: u128,
+    flight_us: u128,
+    capture_us: u128,
+    wave_us: u128,
+    unit_fire_us: u128,
+    heat_exchange_us: u128,
+    accounting_us: u128,
+    observed_phases_us: u128,
     collapse_us: u128,
     collapse_work: sim_core::blast::CollapseWork,
     searching: usize,
@@ -38,14 +50,54 @@ struct TickProfile {
     flying: usize,
     chunks: usize,
     felling: usize,
+    felling_work: [u64; 5],
+    felling_head_observed_age_ticks: u32,
+    collapse_backlog_observed_age_ticks: u32,
+    ordinary_room_scans: u64,
+    ordinary_room_items: u64,
+}
+
+/// Bench-local clocks. No timestamps or queue scans enter the simulation.
+#[derive(Default)]
+struct QueueAge<T> {
+    identity: Option<T>,
+    since: u32,
+}
+impl<T: PartialEq> QueueAge<T> {
+    fn observe(&mut self, tick: u32, identity: Option<T>) -> u32 {
+        if identity != self.identity {
+            self.since = tick;
+            self.identity = identity;
+        }
+        if self.identity.is_some() {
+            tick - self.since + 1
+        } else {
+            0
+        }
+    }
 }
 
 impl TickProfile {
     fn record_phase(&mut self, name: &str, us: u128) {
+        // The observer closes consecutive intervals, not nested inclusive scopes.
+        self.observed_phases_us += us;
         match name {
-            "motion" => self.motion_us = us,
-            "debris" => self.debris_us = us,
-            "battle_ai" => self.battle_ai_us = us,
+            "battle_wave_step" => {
+                self.battle_wave_step_us += us;
+                self.battle_wave_steps += 1;
+            }
+            "battle_capture" => self.battle_capture_us += us,
+            "battle_flight" => self.battle_flight_us += us,
+            "battle_damage" => self.battle_damage_us += us,
+            "flight" => self.flight_us += us,
+            "capture" => self.capture_us += us,
+            "wave" | "battle_waves" => self.wave_us += us,
+            "unit_fire" => self.unit_fire_us += us,
+            "heat_exchange" => self.heat_exchange_us += us,
+            "accounting" => self.accounting_us += us,
+            "motion" => self.motion_us += us,
+            "debris" => self.debris_us += us,
+            "battle_ai" => self.battle_ai_us += us,
             "orders_pose" => {
                 self.battle_pose_us += us;
                 self.battle_orders_us += us;
@@ -71,9 +123,9 @@ impl TickProfile {
             name if name.starts_with("orders_") || name == "battle_orders" => {
                 self.battle_orders_us += us
             }
-            "rubble" => self.rubble_us = us,
-            "kinetic_resume" => self.kinetic_resume_us = us,
-            "heat_flush" => self.heat_flush_us = us,
+            "rubble" => self.rubble_us += us,
+            "kinetic_resume" => self.kinetic_resume_us += us,
+            "heat_flush" => self.heat_flush_us += us,
             name if name == "collapse" || name.starts_with("collapse_") => self.collapse_us += us,
             _ => {}
         }
@@ -105,6 +157,7 @@ fn main() {
     let progress = args.iter().any(|a| a == "--progress");
     let trace = args.iter().any(|a| a == "--trace");
     let damage_trace = args.iter().any(|a| a == "--damage-trace");
+    let terrain_trace = args.iter().any(|a| a == "--terrain-trace");
     let fire_trace = args.iter().any(|a| a == "--fire-trace");
     let wave_trace = args.iter().any(|a| a == "--wave-trace");
     let profile_workers = args.iter().any(|a| a == "--profile-workers");
@@ -112,6 +165,23 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--tick-csv")
         .map(|w| w[1].as_str());
+    let command_csv = args
+        .windows(2)
+        .find(|w| w[0] == "--command-csv")
+        .map(|w| w[1].as_str());
+    let command_limit = args
+        .windows(2)
+        .find(|w| w[0] == "--command-limit")
+        .map_or(100_000, |w| {
+            w[1].parse::<usize>().expect("command record limit")
+        });
+    assert!(
+        command_csv.is_none()
+            || !args
+                .iter()
+                .any(|a| matches!(a.as_str(), "--group-order-bench" | "--restore-file")),
+        "--command-csv requires the ordinary fixed-tick loop"
+    );
     let workers = args
         .windows(2)
         .find(|w| w[0] == "--workers")
@@ -371,6 +441,10 @@ fn main() {
         println!("group_first_ticks_phase_p95_us={phase_p95:?}");
         return;
     }
+    if command_csv.is_some() {
+        sim.start_battle_command_capture(command_limit)
+            .expect("command capture");
+    }
     if assault {
         assert!(sim.set_battle_weapon(1, Some(Weapon::Annihilation)));
         assert!(sim.battle_order(1, Order::Attack(2), None));
@@ -388,6 +462,33 @@ fn main() {
         .find(|w| w[0] == "--ticks")
         .map_or(900, |w| w[1].parse::<usize>().expect("ticks"));
     assert!(ticks > 0);
+    // Publication is measured separately from the physical tick, including
+    // repeated no-tick frames. It never becomes authoritative state.
+    let read_model_exports = args
+        .windows(2)
+        .find(|w| w[0] == "--read-model-exports")
+        .map_or(0, |w| w[1].parse::<usize>().expect("read model exports"));
+    assert!(read_model_exports <= 16);
+    let mut read_model =
+        (read_model_exports > 0).then(|| sim_core::blast::read_model::View::new(&sim, 1));
+    let mut export_ns = Vec::with_capacity(ticks * read_model_exports);
+    let inspect = args.iter().any(|a| a == "--read-model-inspection");
+    assert!(!inspect || read_model_exports > 0);
+    let mut inspection = inspect.then(|| sim_core::blast::read_model::Inspection::new(&sim, 1));
+    let mut inspection_ns = Vec::with_capacity(if inspect {
+        ticks * read_model_exports
+    } else {
+        0
+    });
+    let parameters_enabled = args.iter().any(|a| a == "--read-model-parameters");
+    assert!(!parameters_enabled || read_model_exports > 0);
+    let mut parameters =
+        parameters_enabled.then(|| sim_core::blast::read_model::Parameters::new(&sim, 1, 0..=9));
+    let mut parameters_ns = Vec::with_capacity(if parameters_enabled {
+        ticks * read_model_exports
+    } else {
+        0
+    });
     let snapshot_tick = args
         .windows(2)
         .find(|w| w[0] == "--snapshot-tick")
@@ -425,9 +526,19 @@ fn main() {
     let mut damage_previous = [0u64; 2];
     let mut shots_previous = [0u64; 2];
     let mut impact_window = [0usize; Weapon::COUNT];
+    let mut terrain_dug = std::collections::BTreeMap::new();
+    let mut terrain_filled = std::collections::BTreeMap::new();
+    let mut terrain_soil_holes = std::collections::BTreeSet::new();
     let mut laser_contacts = 0usize;
     // Actual ray contact events, captured before endpoint geometry is edited.
     let mut laser_contact_kinds = [0usize; 4];
+    let mut felling_head_age = QueueAge::default();
+    let mut collapse_backlog_age = QueueAge::default();
+    let mut felling_previous = sim.matter.admission.felling;
+    let mut ordinary_room_previous = [
+        sim.matter.admission.ordinary_room_scans,
+        sim.matter.admission.ordinary_room_items,
+    ];
     for tick_index in 0..ticks {
         let start = Instant::now();
         let mut last = start;
@@ -574,6 +685,49 @@ fn main() {
         );
         // Measure the authoritative tick, excluding optional replay and log I/O.
         let elapsed = start.elapsed().as_micros();
+        if terrain_trace {
+            for &(edit, before) in sim.world.completed() {
+                if edit.mat == 0 && before != 0 {
+                    *terrain_dug.entry(before).or_insert(0usize) += 1;
+                    if matches!(before, 1 | 7 | 8) {
+                        terrain_soil_holes.insert([edit.x, edit.y, edit.z]);
+                    }
+                } else if edit.mat != 0 && before != edit.mat {
+                    *terrain_filled.entry(edit.mat).or_insert(0usize) += 1;
+                }
+            }
+            if sim.tick % 150 == 0 {
+                let remaining = terrain_soil_holes
+                    .iter()
+                    .filter(|p| sim.world.material(p[0], p[1], p[2]) == 0)
+                    .count();
+                println!("terrain_window tick={} dug={:?} filled={:?} unique_soil_dug={} soil_air={} ground_admission={:?}",
+                    sim.tick, terrain_dug, terrain_filled, terrain_soil_holes.len(), remaining,
+                    sim.matter.admission.ground);
+                terrain_dug.clear();
+                terrain_filled.clear();
+            }
+        }
+        if let Some(view) = &mut read_model {
+            for _ in 0..read_model_exports {
+                let began = Instant::now();
+                view.update(&sim, 1);
+                std::hint::black_box(&view);
+                export_ns.push(began.elapsed().as_nanos());
+                if let Some(parameters) = &mut parameters {
+                    let began = Instant::now();
+                    parameters.update(&sim, 1, 0..=9);
+                    std::hint::black_box(&parameters);
+                    parameters_ns.push(began.elapsed().as_nanos());
+                }
+                if let Some(details) = &mut inspection {
+                    let began = Instant::now();
+                    details.update(&sim, 1);
+                    std::hint::black_box(&details);
+                    inspection_ns.push(began.elapsed().as_nanos());
+                }
+            }
+        }
         if let Some(profile) = &worker_profile {
             profile.collect(&mut worker_windows[tick_index / 300]);
         }
@@ -616,6 +770,23 @@ fn main() {
             profile.pending_kinetic = sim.pending_kinetic_impacts();
             profile.fragments = sim.matter.debris.fragments.len();
             profile.felling = sim.matter.felling_pending();
+            let felling_work = sim.matter.admission.felling;
+            profile.felling_work = std::array::from_fn(|i| felling_work[i] - felling_previous[i]);
+            felling_previous = felling_work;
+            let ordinary_room = [
+                sim.matter.admission.ordinary_room_scans,
+                sim.matter.admission.ordinary_room_items,
+            ];
+            profile.ordinary_room_scans = ordinary_room[0] - ordinary_room_previous[0];
+            profile.ordinary_room_items = ordinary_room[1] - ordinary_room_previous[1];
+            ordinary_room_previous = ordinary_room;
+            profile.felling_head_observed_age_ticks =
+                felling_head_age.observe(sim.tick, sim.matter.felling_head());
+            profile.collapse_backlog_observed_age_ticks = collapse_backlog_age
+                .observe(sim.tick, (sim.collapse_work.queued != 0).then_some(()));
+            if sim.collapse_work.submitted != 0 {
+                collapse_backlog_age.observe(sim.tick, None);
+            }
             for fragment in &sim.matter.debris.fragments {
                 profile.flying += usize::from(!fragment.resting);
                 profile.chunks += usize::from(fragment.chunk.is_some());
@@ -788,6 +959,13 @@ fn main() {
                         .map(|i| admission.wave_geometry[i] - admission_previous.wave_geometry[i])
                 );
                 println!(
+                    "damage_wave_ground_only tick={} calls_visits={:?}",
+                    sim.tick,
+                    [0, 1]
+                        .map(|i| admission.wave_ground_only[i]
+                            - admission_previous.wave_ground_only[i])
+                );
+                println!(
                     "damage_terrain_melt tick={} attempts_applied_scans_items={:?}",
                     sim.tick,
                     [0, 1, 2, 3]
@@ -907,6 +1085,50 @@ fn main() {
         );
     }
     assert!(sim.matter.economy.ledger.balanced());
+    if let Some(view) = &read_model {
+        assert_eq!(view.tick, sim.tick);
+        assert_eq!(view.counts, sim.battle_counts());
+        assert_eq!(view.base_integrity, sim.battle_base_integrity());
+        for (window, samples) in export_ns.chunks(600 * read_model_exports).enumerate() {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            println!("read_model window={} exports={} mean_ns={} p99_ns={} max_ns={} payload_bytes={} retained_roster_bytes={}",
+                window, samples.len(), samples.iter().sum::<u128>() / samples.len() as u128,
+                sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)], sorted.last().unwrap(),
+                view.payload_bytes(), view.units.capacity() * std::mem::size_of::<sim_core::blast::read_model::Unit>());
+        }
+    }
+    if let Some(view) = &parameters {
+        assert_eq!(view.tick, sim.tick);
+        for (window, samples) in parameters_ns.chunks(600 * read_model_exports).enumerate() {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            println!("read_model_parameters window={} exports={} mean_ns={} p99_ns={} max_ns={} payload_bytes={} retained_material_bytes={}",
+                window, samples.len(), samples.iter().sum::<u128>() / samples.len() as u128,
+                sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)], sorted.last().unwrap(),
+                view.payload_bytes(), view.materials.capacity() * std::mem::size_of::<modding::MatDef>());
+        }
+    }
+    if let Some(view) = &inspection {
+        assert_eq!(view.fragments, sim.matter.debris.fragments.len());
+        assert_eq!(
+            view.resting_fragments,
+            sim.matter
+                .debris
+                .fragments
+                .iter()
+                .filter(|f| f.resting)
+                .count()
+        );
+        assert_eq!(view.bodies, sim.bodies.list.len());
+        for (window, samples) in inspection_ns.chunks(600 * read_model_exports).enumerate() {
+            let mut sorted = samples.to_vec();
+            sorted.sort_unstable();
+            println!("read_model_inspection window={} exports={} mean_ns={} p99_ns={} max_ns={} payload_bytes={}",
+                window, samples.len(), samples.iter().sum::<u128>() / samples.len() as u128,
+                sorted[(sorted.len() * 99 / 100).min(sorted.len() - 1)], sorted.last().unwrap(), view.payload_bytes());
+        }
+    }
     if !world_battle {
         assert_eq!(
             sim.matter
@@ -915,13 +1137,47 @@ fn main() {
             0
         );
     }
+    if let Some(path) = command_csv {
+        let trace = sim
+            .finish_battle_command_capture()
+            .expect("active command capture");
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("command CSV"));
+        writeln!(
+            out,
+            "requested_tick,assigned_tick,phase,producer,sequence,command,outcome"
+        )
+        .unwrap();
+        for record in &trace.records {
+            writeln!(
+                out,
+                "{},{},{:?},{:?},{},\"{:?}\",{:?}",
+                record.requested_tick,
+                record.assigned_tick,
+                record.phase,
+                record.producer,
+                record.sequence,
+                record.command,
+                record.outcome
+            )
+            .unwrap();
+        }
+        out.flush().unwrap();
+        println!(
+            "command_capture start_tick={} end_tick={} records={} omitted={} complete={}",
+            trace.start_tick,
+            trace.end_tick,
+            trace.records.len(),
+            trace.omitted,
+            trace.complete()
+        );
+    }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic,battle_wave_step_us,battle_wave_steps,battle_capture_us,battle_flight_us,battle_damage_us,flight_us,capture_us,wave_us,unit_fire_us,heat_exchange_us,accounting_us,observed_phases_us,unobserved_us,felling_arrivals,felling_visits,felling_retired,felling_released,felling_capacity_deferrals,felling_head_observed_age_ticks,collapse_backlog_observed_age_ticks,ordinary_room_scans,ordinary_room_items").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -955,7 +1211,29 @@ fn main() {
                 p.collapse_work.gather_candidates,
                 p.collapse_work.gather_buffer_peak,
                 p.kinetic_resume_us,
-                p.pending_kinetic
+                p.pending_kinetic,
+                p.battle_wave_step_us,
+                p.battle_wave_steps,
+                p.battle_capture_us,
+                p.battle_flight_us,
+                p.battle_damage_us,
+                p.flight_us,
+                p.capture_us,
+                p.wave_us,
+                p.unit_fire_us,
+                p.heat_exchange_us,
+                p.accounting_us,
+                p.observed_phases_us,
+                p.total_us.saturating_sub(p.observed_phases_us),
+                p.felling_work[0],
+                p.felling_work[1],
+                p.felling_work[2],
+                p.felling_work[3],
+                p.felling_work[4],
+                p.felling_head_observed_age_ticks,
+                p.collapse_backlog_observed_age_ticks,
+                p.ordinary_room_scans,
+                p.ordinary_room_items
             )
             .unwrap();
         }
@@ -1127,7 +1405,9 @@ fn main() {
     for (name, mut values) in phases {
         values.sort_unstable();
         println!(
-            "phase={name} mean_us={} p95_us={} p99_us={} max_us={}",
+            "phase={name} unit=callback_interval calls={} mean_us_per_tick={} mean_us={} p95_us={} p99_us={} max_us={}",
+            values.len(),
+            values.iter().sum::<u128>() / samples.len() as u128,
             values.iter().sum::<u128>() / values.len() as u128,
             values[values.len() * 95 / 100],
             values[values.len() * 99 / 100],
@@ -1146,6 +1426,35 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repeated_wave_callbacks_accumulate_without_double_counting_orders() {
+        let mut profile = TickProfile::default();
+        profile.record_phase("battle_wave_step", 12);
+        profile.record_phase("battle_wave_step", 31);
+        profile.record_phase("battle_capture", 9);
+        profile.record_phase("orders_pose", 7);
+        profile.record_phase("battle_orders", 2);
+        profile.record_phase("heat_exchange", 11);
+        profile.record_phase("motion", 5);
+        profile.record_phase("motion", 8);
+        assert_eq!(profile.battle_wave_step_us, 43);
+        assert_eq!(profile.battle_wave_steps, 2);
+        assert_eq!(profile.battle_capture_us, 9);
+        assert_eq!(profile.battle_orders_us, 9);
+        assert_eq!(profile.motion_us, 13);
+        assert_eq!(profile.observed_phases_us, 85);
+    }
+
+    #[test]
+    fn queue_age_resets_on_progress_or_empty_queue() {
+        let mut age = QueueAge::default();
+        assert_eq!(age.observe(10, Some((3, 4))), 1);
+        assert_eq!(age.observe(17, Some((3, 4))), 8);
+        assert_eq!(age.observe(18, Some((3, 5))), 1);
+        assert_eq!(age.observe(19, None), 0);
+        assert_eq!(age.observe(21, Some((3, 5))), 1);
+    }
+
     #[test]
     fn pursuit_subphases_remain_in_the_total_order_time() {
         let mut profile = TickProfile::default();

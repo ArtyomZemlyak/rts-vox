@@ -18,42 +18,34 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// Parse `struct Params { ... }` of a WGSL source. Every field is a
-    /// `vec4<f32>` or a `mat4x4<f32>`: both are 16-byte aligned, so the
-    /// fields follow each other without padding. Another type is refused
-    /// rather than guessed.
+    /// Read WGSL's actual layout, including nested structures, arrays and
+    /// padding. Use the same parser as wgpu instead of splitting generic
+    /// types at commas or maintaining a second set of alignment rules.
     pub fn of(wgsl: &str) -> Layout {
-        let start = wgsl
-            .find("struct Params {")
-            .expect("the shader declares struct Params");
-        let body = &wgsl[start + "struct Params {".len()..];
-        let body = &body[..body.find('}').expect("struct Params is closed")];
-        // Comments carry commas of their own ("xyz world origin, w cell edge").
-        let code: String = body
-            .lines()
-            .map(|l| l.split("//").next().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let mut fields = Vec::new();
-        let mut at = 0usize;
-        for field in code.split(',') {
-            let field = field.trim();
-            if field.is_empty() {
-                continue;
-            }
-            let (name, ty) = field.split_once(':').expect("field is `name: type`");
-            let ty = ty.trim();
-            let size = if ty.starts_with("mat4x4") {
-                16
-            } else if ty.starts_with("vec4") {
-                4
-            } else {
-                panic!("Params field {name} has type {ty}, not a vec4 or mat4x4");
-            };
-            fields.push((name.trim().to_string(), at));
-            at += size;
+        let module = wgpu::naga::front::wgsl::parse_str(wgsl).expect("valid WGSL");
+        let (_, params) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Params"))
+            .expect("the shader declares Params");
+        let wgpu::naga::TypeInner::Struct { members, span } = &params.inner else {
+            panic!("Params must be a structure");
+        };
+        assert_eq!(span % 4, 0, "uniform size must fit float storage");
+        let fields = members
+            .iter()
+            .map(|member| {
+                assert_eq!(member.offset % 4, 0, "field offset must fit float storage");
+                (
+                    member.name.clone().expect("named Params field"),
+                    member.offset as usize / 4,
+                )
+            })
+            .collect();
+        Layout {
+            fields,
+            floats: *span as usize / 4,
         }
-        Layout { fields, floats: at }
     }
 
     /// First float of the named field.

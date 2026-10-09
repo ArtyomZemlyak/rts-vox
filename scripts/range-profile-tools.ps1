@@ -1,4 +1,19 @@
 # Shared by the runner and OS sampler; no simulation code or dependencies.
+function ConvertTo-RangeInvariantCsvRow {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject)
+    process {
+        $row = [ordered]@{}
+        foreach ($property in $InputObject.PSObject.Properties) {
+            $value = $property.Value
+            if ($value -is [double] -or $value -is [single] -or $value -is [decimal]) {
+                $value = $value.ToString($null, [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            $row[$property.Name] = $value
+        }
+        [pscustomobject]$row
+    }
+}
+
 function Get-RangeBuildEvidence {
     param([string]$BinaryPath, [string]$BinarySha256)
     $path = "$BinaryPath.build.json"

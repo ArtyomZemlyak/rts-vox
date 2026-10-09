@@ -11,12 +11,12 @@
         standoff_milli: 750,
         spread_milli: 3, work: 500, heat: 0, heat_radius: 0,
         fracture_j: 100000, reload_ticks: 12),
-    // A continuous hitscan beam deposits modest heat each tick at the first
+    // A continuous hitscan beam deposits heat each tick at the first
     // solid cell and a 40 cm halo along its visible path, fading toward the edge.
     // Cover blocks the halo; the thermal field melts surfaces over time.
     laser: (burst_ticks: 150, interval_ticks: 1, range: 2000,
         standoff_milli: 800,
-        spread_milli: 0, work: 40, heat: 40, heat_radius: 4,
+        spread_milli: 0, work: 120, heat: 400, heat_radius: 4,
         fracture_j: 1, reload_ticks: 30),
     // Large, short-lived cubic puffs from moving tank tracks. Visual only;
     // the separate cap leaves room in the shared pool for impacts and fire.

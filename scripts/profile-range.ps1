@@ -205,7 +205,7 @@ try {
             if (-not $validity.ValidForComparison) { Write-Warning "$scenario comparison invalid: $($result.InvalidReasons)" }
             $result
             # Retain completed scenarios even if a later launch fails.
-            $result | Export-Csv -LiteralPath (Join-Path $directory "$scenario.summary.csv") -NoTypeInformation -Encoding UTF8
+            $result | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory "$scenario.summary.csv") -NoTypeInformation -Encoding UTF8
         } catch {
             if ($null -ne $manifest) {
                 $manifest.Error = $_.Exception.Message
@@ -218,7 +218,7 @@ try {
             throw
         }
     }
-    $report | Export-Csv -LiteralPath (Join-Path $directory 'summary.csv') -NoTypeInformation -Encoding UTF8
+    $report | ConvertTo-RangeInvariantCsvRow | Export-Csv -LiteralPath (Join-Path $directory 'summary.csv') -NoTypeInformation -Encoding UTF8
     $report | Format-Table -AutoSize
     Write-Host "Results: $directory"
     if ($CheckBudget -and @($report | Where-Object { -not $_.MeetsP99 -or ($CheckEveryFrame -and -not $_.MeetsEveryFrame) }).Count -gt 0) {

@@ -47,6 +47,8 @@ mod panel;
 mod profile;
 #[path = "blast/streaming.rs"]
 mod streaming;
+#[path = "blast/ui_snapshot.rs"]
+mod ui_snapshot;
 #[path = "blast/witness.rs"]
 mod witness;
 #[path = "blast/workbench.rs"]
@@ -108,6 +110,7 @@ struct WitnessArt {
     seen: Vec<Option<witness::Revision>>,
     pending: Vec<Option<witness::Pending>>,
     emitted: Vec<usize>,
+    geometry: sim_core::blast::read_model::geometry::View,
     next_mesh: usize,
     generation: u64,
 }
@@ -197,6 +200,23 @@ fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
     })
     .transpose()
 }
+impl Scene {
+    fn reset_world(
+        &mut self,
+        config: ExplosionConfig,
+        layout: Option<RangeLayout>,
+        validator: &sim_core::blast::placement::Validator,
+    ) -> Result<(), String> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "Scene generation exhausted".to_string())?;
+        self.sim.reset_world(config, layout, validator)?;
+        self.generation = generation;
+        Ok(())
+    }
+}
+
 fn range_sim(
     c: ExplosionConfig,
     layout: Option<&RangeLayout>,
@@ -942,6 +962,7 @@ fn main() {
         .insert_resource(gas)
         .init_resource::<streaming::Streaming>()
         .init_resource::<overview::Distant>()
+        .init_resource::<ui_snapshot::UiSnapshot>()
         .add_plugins((GasPlugin, OcclusionPlugin))
         .add_systems(Startup, (setup, workbench::setup, panel::setup))
         .add_systems(
@@ -951,12 +972,13 @@ fn main() {
                 profile::actions,
                 (
                     panel::actions,
-                    panel::minimap::update,
+                    panel::minimap::input,
                     panel::scroll,
                     knobs::actions,
                     workbench::input,
                     advance,
                     panel::scenario_progress,
+                    panel::minimap::update_terrain,
                     profile::stamp,
                     gun_art::refresh,
                     orient_gun,
@@ -974,16 +996,21 @@ fn main() {
                     weapon_art,
                     animate_energy,
                     overview::sync,
-                    panel::minimap::update_view,
                     overview::atmosphere,
                     streaming::camera,
                     workbench::camera,
                     workbench::ghost::update,
                     workbench::overlay,
-                    panel::refresh,
-                    panel::hud::refresh,
+                    (
+                        ui_snapshot::publish,
+                        panel::refresh,
+                        panel::minimap::refresh_markers,
+                        panel::minimap::update_view,
+                        panel::hud::refresh,
+                        knobs::refresh,
+                    )
+                        .chain(),
                     panel::hud::refresh_selection_box,
-                    knobs::refresh,
                     panel::release_keys,
                     record,
                     capture,
@@ -999,13 +1026,20 @@ fn main() {
 fn surface_material(sim: &BlastRange, p: [i32; 3], m: u16) -> u32 {
     let work = sim.surface_work.get(&p).copied().unwrap_or(0);
     if work == 0 {
-        return m as u32;
+        return u32::from(m);
     }
     let cost = sim_core::blast::material_work(m, &sim.config).max(1);
+    surface_tint(m, work, cost)
+}
+fn surface_tint(m: u16, work: u32, cost: u32) -> u32 {
+    if work == 0 {
+        return m as u32;
+    }
+    let level = (u64::from(work) * 3 / u64::from(cost.max(1))).min(2) as u32;
     if m == 3 {
-        9 + (work * 3 / cost).min(2)
+        9 + level
     } else if m == 2 || m == 6 {
-        12 + (work * 3 / cost).min(2)
+        12 + level
     } else {
         m as u32
     }
@@ -1043,8 +1077,18 @@ fn write_window(
     window: TerrainWindow,
     had: Option<TerrainWindow>,
 ) {
-    write_window_in(
+    write_window_for(sim, 0, gas, window, had);
+}
+fn write_window_for(
+    sim: &BlastRange,
+    generation: u64,
+    gas: &mut GasInput,
+    window: TerrainWindow,
+    had: Option<TerrainWindow>,
+) {
+    write_window_in_for(
         sim,
+        generation,
         gas,
         window,
         had,
@@ -1052,8 +1096,19 @@ fn write_window(
     );
 }
 
+#[cfg(test)]
 fn write_window_in(
     sim: &BlastRange,
+    gas: &mut GasInput,
+    window: TerrainWindow,
+    had: Option<TerrainWindow>,
+    pool: Option<&bevy::tasks::TaskPool>,
+) {
+    write_window_in_for(sim, 0, gas, window, had, pool);
+}
+fn write_window_in_for(
+    sim: &BlastRange,
+    generation: u64,
     gas: &mut GasInput,
     window: TerrainWindow,
     had: Option<TerrainWindow>,
@@ -1075,6 +1130,7 @@ fn write_window_in(
     let mut write = |xs: std::ops::Range<i32>, zs: std::ops::Range<i32>, highest: &mut i32| {
         let (top, patches) = streaming::write_slab(
             sim,
+            generation,
             window,
             words,
             tops,
@@ -1085,29 +1141,6 @@ fn write_window_in(
         );
         *highest = (*highest).max(top);
         dirty.extend(patches);
-        // Surface work is sparse and ordered by X. Apply only actual dents in
-        // this entering slab; a BTree lookup at every intact voxel dominated
-        // camera panning after the first shot. Publish dents even if the raw
-        // toroidal word happened to match its previous value.
-        for (p, _) in sim
-            .surface_work
-            .range([xs.start, i32::MIN, i32::MIN]..[xs.end, i32::MIN, i32::MIN])
-        {
-            if !zs.contains(&p[2]) {
-                continue;
-            }
-            let Some(i) = window.index(*p) else {
-                continue;
-            };
-            let shift = (i % 8) * 4;
-            let material = ((words[i / 8] >> shift) & 15) as u16;
-            let m = surface_material(sim, *p, material);
-            let changed = (words[i / 8] & !(15 << shift)) | (m << shift);
-            if changed != words[i / 8] {
-                words[i / 8] = changed;
-                dirty.push(i / 8..i / 8 + 1);
-            }
-        }
     };
     match had {
         None => write(window.span(0), window.span(2), &mut highest),
@@ -1321,6 +1354,7 @@ fn setup(
         seen: Vec::new(),
         pending: Vec::new(),
         emitted: Vec::new(),
+        geometry: default(),
         next_mesh: 0,
         generation: scene.generation,
     });
@@ -1554,6 +1588,10 @@ fn advance(
         || keys.just_pressed(KeyCode::Enter)
         || (scene.repeat && !scene.paused && scene.sim.tick >= scene.finish && scene.out.is_none())
     {
+        if scene.generation == u64::MAX {
+            scene.notice = "Scene generation exhausted".into();
+            return;
+        }
         let reloaded = if keys.just_pressed(KeyCode::F5) {
             match read_layout(scene.layout_file.as_deref()) {
                 Ok(r) => r,
@@ -1570,17 +1608,13 @@ fn advance(
             uncovered = false;
             kind = None;
         }
-        moving::before(&scene.sim, &mut visual, &gas.window);
-        fire_fx.before(&scene.sim);
         let mut keep_terrain = false;
         let mut rebuild = |config, layout: RangeLayout| {
             keep_terrain = !streaming.loading()
                 && scene.sim.same_authored_terrain(&layout)
                 && scene.sim.world.touched_chunks() == 0
                 && scene.sim.surface_work.is_empty();
-            scene
-                .sim
-                .rebuilt_with_layout(config, layout, &workshop.validator)
+            scene.reset_world(config, Some(layout), &workshop.validator)
         };
         let next = if let Some((config, layout)) = authored.filter(|_| !changed) {
             rebuild(config, layout)
@@ -1595,19 +1629,18 @@ fn advance(
             }
             rebuild(weapon_config(energy, anni, power, delivery), layout)
         } else {
-            range_sim(
+            scene.reset_world(
                 weapon_config(energy, anni, power, delivery),
                 None,
-                uncovered,
-                kind,
+                &workshop.validator,
             )
         };
-        let Ok(mut sim) = next else {
+        let Ok(()) = next else {
             scene.notice = format!("Layout rejected: {}", next.err().unwrap());
             eprintln!("{}", scene.notice);
             return;
         };
-        profile.configure_navigation(&mut sim);
+        profile.configure_navigation(&mut scene.sim);
         scene.notice.clear();
         if keys.just_pressed(KeyCode::F5) {
             *workshop = Workshop::new(reloaded, workshop.editing);
@@ -1615,9 +1648,7 @@ fn advance(
         if keys.just_pressed(KeyCode::Enter) {
             workshop.editing = false;
         }
-        scene.sim = sim;
         fire_fx.clear();
-        scene.generation += 1;
         if panel.drive {
             scene.sim.control();
         }
@@ -1780,7 +1811,11 @@ fn advance(
         moving::occupancy(&scene.sim, &mut gas, &mut visual);
         profile.measure(3, occupancy_started.elapsed());
         let observe_started = profile.camera_tour.then(std::time::Instant::now);
-        streaming.observe(&scene.sim, &gas.terrain_dirty[patch_start..]);
+        streaming.observe(
+            &scene.sim,
+            scene.generation,
+            &gas.terrain_dirty[patch_start..],
+        );
         if let Some(start) = observe_started {
             profile.measure_camera(0, start.elapsed());
         }

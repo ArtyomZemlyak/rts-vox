@@ -1,6 +1,124 @@
 use super::*;
 use std::time::Instant;
 
+#[cfg(test)]
+#[test]
+fn ai_artillery_crater_is_published_to_visible_terrain() {
+    artillery_crater_publication(false);
+}
+
+#[test]
+fn ai_artillery_surface_crater_is_published_while_felling_competes() {
+    artillery_crater_publication(true);
+}
+
+fn artillery_crater_publication(contended: bool) {
+    use modding::range::{RangeUnitDef, RangeUnitKind};
+    use sim_core::blast::battle::Weapon;
+    let mut layout =
+        RangeLayout::from_ron(include_str!("../../../../../data/range-cover.ron")).unwrap();
+    layout.battle = true;
+    layout.size = [640, 192, 640];
+    layout.blocks.clear();
+    layout.shields.clear();
+    layout.course = None;
+    layout.clear_min = [64, 64];
+    layout.clear_max = [600, 600];
+    layout.units = vec![
+        RangeUnitDef {
+            kind: RangeUnitKind::Artillery,
+            allied: false,
+            at: [170, 16, 336],
+            weapon: None,
+        },
+        RangeUnitDef {
+            kind: RangeUnitKind::Tank,
+            allied: true,
+            at: [450, 16, 336],
+            weapon: None,
+        },
+    ];
+    if contended {
+        layout.blocks.push(modding::range::RangeBlock {
+            min: [250, 16, 250],
+            max: [300, 64, 300],
+            material: 5,
+        });
+    }
+    let mut sim = BlastRange::with_layout(config(false, false), layout).unwrap();
+    if contended {
+        use sim_core::blast::battle::commands::{Command, DebrisField};
+        sim.execute_command(Command::TuneDebris {
+            field: DebrisField::MaxFlying,
+            value: 128,
+        });
+        assert_eq!(
+            sim.matter.fell(
+                &mut sim.world,
+                &[[260, 16, 260]],
+                [260, 16, 260],
+                &sim.navigation.fell
+            ),
+            1
+        );
+    }
+    sim.start_battle().unwrap();
+    assert!(sim.battle_order(1, sim_core::blast::battle::Order::Hold, None));
+    let mut gas = GasInput::default();
+    fill_terrain(&sim, &mut gas);
+    let mut impacts = 0;
+    let mut published = 0;
+    let mut surface = 0;
+    for _ in 0..600 {
+        let start: Vec<_> = sim.units.iter().map(|u| u.removed.len()).collect();
+        sim.step();
+        impacts += sim
+            .battle
+            .impacts
+            .iter()
+            .filter(|p| p.weapon == Weapon::Blast)
+            .count();
+        apply_terrain(&sim, &mut gas, &start);
+        for (edit, before) in sim.world.completed() {
+            let p = [edit.x as i32, edit.y as i32, edit.z as i32];
+            if edit.mat != 0 || !matches!(before, 1 | 7 | 8) || sim.units.iter().any(|u| u.solid(p))
+            {
+                continue;
+            }
+            if sim.world.material(edit.x, edit.y, edit.z) != 0 {
+                continue;
+            }
+            let index = gas.window.index(p).expect("crater inside visible window");
+            assert_eq!(
+                gas.terrain_words[index / 8] >> (index % 8 * 4) & 15,
+                0,
+                "soil stayed visible at {p:?}"
+            );
+            published += 1;
+            if edit.y == 15 && sim.world.material(edit.x, edit.y + 1, edit.z) == 0 {
+                surface += 1;
+            }
+        }
+        gas.terrain_dirty.clear();
+        if impacts > 0 && published >= 64 && surface > 0 {
+            break;
+        }
+    }
+    assert!(
+        sim.battle.actors[0].fired > 0 && impacts > 0,
+        "enemy AI never fired artillery"
+    );
+    assert_eq!(
+        sim.battle.actors[1].fired, 0,
+        "the target must not dig by shooting back"
+    );
+    assert!(published >= 64, "AI impact did not publish a soil crater");
+    assert!(
+        surface > 0,
+        "only buried soil changed; no surface crater was published"
+    );
+}
+
 #[test]
 fn tick_coordinator_does_not_enter_the_shared_render_compute_executor() {
     use bevy::ecs::system::{IntoSystem, System, SystemStateFlags};
@@ -9,6 +127,41 @@ fn tick_coordinator_does_not_enter_the_shared_render_compute_executor() {
     assert!(system.flags().contains(SystemStateFlags::NON_SEND));
     // A main-thread coordinator does not take an exclusive World borrow.
     assert!(!system.flags().contains(SystemStateFlags::EXCLUSIVE));
+}
+
+#[test]
+fn scene_reset_commits_epoch_with_world_and_rejects_invalid_or_exhausted_requests() {
+    let mut app = panel::hud::tests::app();
+    let mut scene = app.world_mut().resource_mut::<Scene>();
+    let validator = sim_core::blast::placement::Validator::default();
+    let config = scene.sim.config;
+    let layout = scene.sim.layout.clone().unwrap();
+    let before = scene.sim.snapshot();
+    let mut invalid = config;
+    invalid.edits_per_tick = 0;
+    assert!(scene
+        .reset_world(invalid, Some(layout.clone()), &validator)
+        .is_err());
+    assert_eq!(scene.generation, 0);
+    assert_eq!(before, scene.sim.snapshot());
+    scene.generation = u64::MAX;
+    assert!(scene
+        .reset_world(config, Some(layout.clone()), &validator)
+        .is_err());
+    assert_eq!(scene.generation, u64::MAX);
+    assert_eq!(before, scene.sim.snapshot());
+    scene.generation = 0;
+    let bits = scene.sim.world.bits().as_ptr();
+    scene
+        .reset_world(config, Some(layout.clone()), &validator)
+        .unwrap();
+    assert_eq!(scene.generation, 1);
+    assert_eq!(bits, scene.sim.world.bits().as_ptr());
+    let fresh = BlastRange::with_layout(config, layout).unwrap();
+    assert_eq!(scene.sim.snapshot(), fresh.snapshot());
+    scene.reset_world(config, None, &validator).unwrap();
+    assert_eq!(scene.generation, 2);
+    assert_eq!(scene.sim.snapshot(), BlastRange::new(config).snapshot());
 }
 
 #[test]

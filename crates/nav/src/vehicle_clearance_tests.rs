@@ -55,6 +55,87 @@ fn rubble_box_upper_matches_full_scan_across_sparse_and_dense_strips() {
 }
 
 #[test]
+fn rubble_rectangles_follow_replacements_removals_clones_and_small_map_transition() {
+    let check = |r: &Rubble| {
+        for x in [-40, -7, 0, 15, 40] {
+            for z in [-100, -5, 0, 63, 100] {
+                for width in [0, 3, 70] {
+                    let lo = [x, z];
+                    let hi = [x + width, z + width];
+                    let selected: Vec<_> = r
+                        .iter()
+                        .filter(|(p, _)| (0..2).all(|a| p[a] >= lo[a] && p[a] <= hi[a]))
+                        .collect();
+                    assert_eq!(r.touches(lo, hi), !selected.is_empty());
+                    assert_eq!(
+                        r.upper_in(lo, hi),
+                        selected.iter().map(|(_, h)| **h).max().unwrap_or(0)
+                    );
+                }
+            }
+        }
+        assert!(!r.touches([0, 1], [0, 0]));
+        assert_eq!(r.upper_in([0, 1], [0, 0]), 0);
+    };
+    let mut columns: Vec<_> = (-8..8)
+        .flat_map(|x| (-16..48).map(move |z| ([x, z], ((x * x + z * z) % 97) as u16)))
+        .collect();
+    columns.extend([([i32::MIN; 2], 0), ([i32::MAX; 2], u16::MAX)]);
+    columns.sort_unstable_by_key(|&(p, _)| p);
+    let mut r = Rubble::from_sorted(columns);
+    check(&r);
+    // Zero height still denotes a present column; membership is independent
+    // of the maximum value. The maximum must decrease after replacement.
+    assert!(r.touches([i32::MIN; 2], [i32::MIN; 2]));
+    assert_eq!(r.upper_in([i32::MAX; 2], [i32::MAX; 2]), u16::MAX);
+    assert_eq!(r.insert([i32::MAX; 2], 0), Some(u16::MAX));
+    assert_eq!(r.upper_in([i32::MAX; 2], [i32::MAX; 2]), 0);
+    let clone = r.clone();
+    assert_eq!(r.insert([0, 0], u16::MAX), Some(0));
+    check(&r);
+    check(&clone);
+    assert_eq!(clone.get(&[0, 0]), Some(&0));
+    assert_eq!(r.remove(&[0, 0]), Some(u16::MAX));
+    let keys: Vec<_> = r.iter().map(|(p, _)| *p).collect();
+    for p in &keys[..600] {
+        assert!(r.remove(p).is_some());
+    }
+    assert!(r.1.is_empty(), "small maps must release the old index");
+    check(&r);
+    for &p in &keys[..600] {
+        r.insert(p, 1);
+    }
+    assert!(!r.1.is_empty());
+    check(&r);
+    // Collection retains the last input value just like ordered insertion,
+    // and equality depends only on the canonical columns.
+    let expected = r.clone();
+    let mut entries: Vec<_> = r.iter().map(|(p, h)| (*p, *h)).collect();
+    entries.reverse();
+    entries.insert(0, ([0, 1], 999));
+    let collected: Rubble = entries.into_iter().collect();
+    assert_eq!(expected, collected);
+    check(&collected);
+}
+
+#[test]
+fn local_rubble_upper_query_does_not_scan_distant_sleeping_history() {
+    for height in [64, 1024, 4096] {
+        let r = Rubble::from_sorted(
+            (0..64)
+                .flat_map(|x| (0..height).map(move |z| ([x, z], if z < 4 { 7 } else { 99 })))
+                .collect(),
+        );
+        let mut examined = 0;
+        let actual = r.1.upper(&r.0, [31, 1], [31, 2], &mut || examined += 1);
+        assert_eq!(actual, 7, "a high distant heap cannot enter the answer");
+        assert!(examined <= 64, "height={height}, examined={examined}");
+        assert!(r.touches([31, 1], [31, 2]));
+        assert!(!r.touches([31, -3], [31, -2]));
+    }
+}
+
+#[test]
 fn goal_refusal_matches_full_geometry_with_trees_debris_tilt_and_live_edits() {
     let mut world = World::new(384, 64, 384, 100_000, Box::new(Flat));
     for x in 152..160 {
