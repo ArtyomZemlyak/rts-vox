@@ -711,7 +711,45 @@ fn main() {
         sim.matter.admission.ordinary_room_scans,
         sim.matter.admission.ordinary_room_items,
     ];
+    let search_probe_tick = args
+        .windows(2)
+        .find(|w| w[0] == "--search-probe-tick")
+        .map(|w| w[1].parse::<usize>().expect("probe tick"));
     for tick_index in 0..ticks {
+        // Why does each hull that is searching not have a whole-map route?
+        // The answer the coarse planner gives from where it stands now.
+        if search_probe_tick == Some(tick_index) {
+            for (id, u) in sim.units.iter().enumerate() {
+                let m = &u.motion;
+                if !m.searching() {
+                    continue;
+                }
+                let Some(to) = m.destination else { continue };
+                let result = nav::vehicle::coarse::plan_explained(
+                    &sim.world,
+                    &sim.rubble,
+                    m.probe_shape(&u.body),
+                    [m.pos[0], m.pos[2]],
+                    to,
+                    nav::vehicle::coarse::Config {
+                        cell: sim.navigation.global_cell_units,
+                        nodes: sim.navigation.global_nodes,
+                        yielding: sim.navigation.fell.materials,
+                        local_grade: u.kind == modding::range::RangeUnitKind::Spider,
+                    },
+                );
+                let here = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
+                let d = (here[0] - to[0]).abs().max((here[1] - to[1]).abs());
+                println!(
+                    "search_probe tick={tick_index} id={id} kind={:?} dist={d} blocked={} recovering={} frontier={} coarse={:?}",
+                    u.kind,
+                    m.blocked,
+                    m.recovering(),
+                    m.frontier_nodes(),
+                    result.map(|r| (r.partial, r.path.len()))
+                );
+            }
+        }
         let start = Instant::now();
         let mut last = start;
         let mut detail_last = start;
