@@ -396,7 +396,7 @@ grep -rn '\[QUESTION' docs/
 | [08-economy-and-factions.md](docs/analysis/08-economy-and-factions.md) | Экономика материи и энергии, асимметрия фракций |
 | [09-gpu-compute.md](docs/analysis/09-gpu-compute.md) | Вычисления на GPU: почему симуляция остаётся на CPU |
 | [10-decisions-full.md](docs/analysis/10-decisions-full.md) | ADR целиком: контекст, основание, цена, поправки |
-| [238-mega-review-october.md](docs/analysis/238-mega-review-october.md) | Сквозное ревью 09.10.2026: два ядра, физика, баланс, играбельность, план работ |
+| [239-mega-review-october.md](docs/analysis/239-mega-review-october.md) | Сквозное ревью 09.10.2026: два ядра, физика, баланс, играбельность, план работ |
 
 **Замеры — `docs/analysis/11`…`20`.** Всё, что ниже, получено на работающем
 коде в `crates/`, а не оценкой. Каждый документ говорит и что померено,
