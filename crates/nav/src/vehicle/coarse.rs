@@ -20,8 +20,44 @@ pub fn plan(
     to: [i32; 2],
     cfg: Config,
 ) -> Option<Route> {
+    plan_explained(world, rubble, shape, from, to, cfg).ok()
+}
+
+/// Why the whole-map planner gave no route. Diagnostics only: the planner
+/// itself treats every refusal alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Cell too small or no node allowance.
+    Config,
+    /// Start or goal off the lattice.
+    OffLattice,
+    /// The corridor from the start to its node, or from the goal's node
+    /// to the goal, is not clear.
+    StartCorridor,
+    GoalCorridor,
+    /// One frontier ran dry: that side is enclosed for this shape.
+    /// 0 is the start's side, 1 the goal's.
+    Enclosed {
+        side: usize,
+        expanded: usize,
+    },
+    /// The node allowance ran out.
+    Budget,
+    /// The route has more turns than a route may hold.
+    TooLong,
+}
+
+/// [`plan`], with the reason for a refusal.
+pub fn plan_explained(
+    world: &World,
+    rubble: &Rubble,
+    shape: Shape,
+    from: [Fx; 2],
+    to: [i32; 2],
+    cfg: Config,
+) -> Result<Route, Refusal> {
     if cfg.cell < 8 || cfg.nodes == 0 {
-        return None;
+        return Err(Refusal::Config);
     }
     let n = (world.nx as i32).div_euclid(cfg.cell) as usize;
     let rows = (world.nz as i32).div_euclid(cfg.cell) as usize;
@@ -39,8 +75,8 @@ pub fn plan(
         (c[0] >= 0 && c[1] >= 0 && c[0] < n as i32 && c[1] < rows as i32)
             .then(|| c[0] as usize + n * c[1] as usize)
     };
-    let start = index(origin.map(|v| v + cfg.cell / 2))?;
-    let end = index(to.map(|v| v + cfg.cell / 2))?;
+    let start = index(origin.map(|v| v + cfg.cell / 2)).ok_or(Refusal::OffLattice)?;
+    let end = index(to.map(|v| v + cfg.cell / 2)).ok_or(Refusal::OffLattice)?;
     // A broad travel corridor, not an oriented turning/clearance proof.
     // Short maneuvers and actual movement keep the detailed footprint probe.
     let radius = shape.half[0].min(shape.half[1]) + 1;
@@ -113,7 +149,7 @@ pub fn plan(
         true
     };
     if straight(origin, to) {
-        return Some(Route {
+        return Ok(Route {
             path: vec![to],
             partial: false,
             stranded: false,
@@ -124,8 +160,11 @@ pub fn plan(
             exhausted: false,
         });
     }
-    if !clear(origin, point(start)) || !clear(point(end), to) {
-        return None;
+    if !clear(origin, point(start)) {
+        return Err(Refusal::StartCorridor);
+    }
+    if !clear(point(end), to) {
+        return Err(Refusal::GoalCorridor);
     }
     let mut distance = vec![[u32::MAX; 2]; n * rows];
     let mut previous = vec![[u32::MAX; 2]; n * rows];
@@ -148,7 +187,9 @@ pub fn plan(
         // Alternate the two frontiers under one shared deterministic cap.
         // A remote obstacle cannot monopolize a one-sided greedy search.
         let side = expanded % 2;
-        let Reverse((_, cost, i)) = open[side].pop()?;
+        let Some(Reverse((_, cost, i))) = open[side].pop() else {
+            return Err(Refusal::Enclosed { side, expanded });
+        };
         if cost != distance[i][side] {
             continue;
         }
@@ -190,9 +231,9 @@ pub fn plan(
                 last = p;
             }
             if compact.len() > 6400 {
-                return None;
+                return Err(Refusal::TooLong);
             }
-            return Some(Route {
+            return Ok(Route {
                 path: compact,
                 partial: false,
                 stranded: false,
@@ -204,7 +245,7 @@ pub fn plan(
             });
         }
         if expanded >= cfg.nodes {
-            return None;
+            return Err(Refusal::Budget);
         }
         expanded += 1;
         let at = point(i);

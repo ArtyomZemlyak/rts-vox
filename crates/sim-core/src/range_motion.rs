@@ -308,7 +308,7 @@ impl Motion {
         };
         let r = crate::ride::ride_of(&chassis);
         let c = &packs.course;
-        let navigation = packs.navigation.clone();
+        let navigation = packs.navigation;
         let yielding = navigation.fell.materials.to_vec();
         let rigs = crate::gait::rigs_of(body);
         let feet = vec![crate::gait::Foot::default(); rigs.len()];

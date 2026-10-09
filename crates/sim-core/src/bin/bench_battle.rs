@@ -504,6 +504,33 @@ fn main() {
                 let u = &sim.units[id];
                 let m = &u.motion;
                 let dest = m.destination.unwrap_or([5000, 5000]);
+                for (what, c) in [
+                    ("slot", dest),
+                    ("stand", [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()]),
+                ] {
+                    let mut rows = Vec::new();
+                    for dz in -6i32..=6 {
+                        let row: Vec<String> = (-6i32..=6)
+                            .map(|dx| {
+                                let t = sim.world.floor_tile(
+                                    (c[0] / 8 + dx) as u32,
+                                    (c[1] / 8 + dz) as u32,
+                                    sim.navigation.fell.materials,
+                                );
+                                let lo = [(c[0] / 8 + dx) * 8, (c[1] / 8 + dz) * 8];
+                                let d = sim.rubble.upper_in(lo, [lo[0] + 7, lo[1] + 7]);
+                                t.map_or("--".into(), |[b, t]| format!("{b}-{t}/{d}"))
+                            })
+                            .collect();
+                        rows.push(row.join(" "));
+                    }
+                    println!(
+                        "tiles id={id} {what} at={c:?} step={} half={:?}\n  {}",
+                        m.probe_shape(&u.body).step,
+                        m.probe_shape(&u.body).half,
+                        rows.join("\n  ")
+                    );
+                }
                 let here = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
                 for (label, to) in [
                     ("slot", dest),
@@ -512,7 +539,7 @@ fn main() {
                 ] {
                     let nodes = 1 << 20;
                     {
-                        let plan = nav::vehicle::coarse::plan(
+                        let plan = nav::vehicle::coarse::plan_explained(
                             &sim.world,
                             &sim.rubble,
                             m.probe_shape(&u.body),
@@ -526,10 +553,9 @@ fn main() {
                             },
                         );
                         println!(
-                        "coarse_probe id={id} {label} to={to:?} nodes_cap={nodes} found={} expanded={:?}",
-                        plan.is_some(),
-                        plan.map(|p| p.nodes)
-                    );
+                            "coarse_probe id={id} {label} to={to:?} nodes_cap={nodes} result={:?}",
+                            plan.map(|p| p.nodes)
+                        );
                     }
                 }
             }
