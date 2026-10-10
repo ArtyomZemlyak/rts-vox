@@ -22,17 +22,7 @@ sim-core = { path = "../sim-core" }
 modding = { path = "../modding" }
 fx = { path = "../fx" }
 
-# Трассировка лучей — **выключенная фича**, а не часть обычной сборки.
-#
-# Причина в замере, а не в осторожности: на нашей сцене она сейчас
-# не работает, потому что `bevy_solari` пересобирает структуру
-# ускорения на каждый изменившийся меш, а у разрушаемого мира они
-# меняются постоянно (ADR-222). Держать её включённой значит платить
-# сборкой и размером двоичного файла за то, чем нельзя пользоваться.
-#
-# Включается явно: `cargo run -p render --bin battle --features rt -- --rt 1`.
 [features]
-rt = ["bevy/bevy_solari"]
 # Opt-in ECS tracing and real system names; only existing Bevy dependencies.
 render-tasks = ["bevy/detailed_trace", "bevy/debug"]
 

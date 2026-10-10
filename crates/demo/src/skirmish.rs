@@ -1,10 +1,9 @@
-//! Матч: две стороны, фиксированные силы, кто-то побеждает.
+//! Матч с экономикой на прежнем ядре `World` — сцена D-9 «База».
 //!
-//! **Чем это отличается от эталонного сценария.** Тот каждый тик
-//! добавляет подкрепления и потому не кончается никогда — так и надо
-//! нагрузочному гейту, где важна ровная нагрузка тысячу тиков подряд.
-//! Игре нужно обратное: силы конечны, потери невосполнимы, и матч
-//! обязан прийти к исходу.
+//! Матч с конечными силами живёт на полигоне (`crate::range_match`,
+//! ADR-663). Здесь остаётся партия, которой нужна экономика копки:
+//! копатели, склады, завод. У полигона этих механик нет, и сцена ждёт
+//! их переноса (ADR-662).
 //!
 //! **Ничья — законный исход, а не отсутствие исхода.** Карта, которую
 //! копают, распадается: на D-7 замерено 4 419 компонент связности,
@@ -32,7 +31,7 @@ pub struct Setup {
     pub side: u32,
     /// Машин у каждой стороны.
     pub per_side: usize,
-    /// Копателей на карте. Копка — экономика, а не спецэффект
+    /// Краулеров у каждой стороны. Копка — экономика, а не спецэффект
     /// (`CLAUDE.md`), и матч без неё показывал бы не ту игру.
     pub diggers: usize,
     /// Сколько тиков матч ждёт исхода, прежде чем объявить ничью.
@@ -40,13 +39,6 @@ pub struct Setup {
     /// Через сколько тиков стороны перенацеливают поле направлений
     /// на **живого** противника. Ноль — не перенацеливать.
     pub hunt_period: u64,
-    /// Вести ли экономику: запас стороны, стройка, производство
-    /// (ADR-230).
-    ///
-    /// Когда она включена, `diggers` — это **настоящие краулеры**,
-    /// а не оснастка, выедающая карту мимо учёта: копка это экономика,
-    /// а не спецэффект (`CLAUDE.md`).
-    pub economy: bool,
     /// Через сколько тиков бот раздаёт приказы. Ноль — не раздавать:
     /// приказы отдаёт игрок.
     pub bot_period: u64,
@@ -74,7 +66,6 @@ impl Default for Setup {
             // значило бы решать его вхолостую, поэтому раз в десять
             // секунд игрового времени — 300 тиков при 30 Гц.
             hunt_period: 300,
-            economy: true,
             // Бот думает раз в секунду. Чаще незачем: приказ копать
             // занимает копателя на сотни тиков, а очередь завода —
             // на сотни тиков сборки.
@@ -112,9 +103,6 @@ impl Outcome {
 pub struct Skirmish {
     pub world: World,
     pub terrain: Terrain,
-    /// Оснастка, выедающая карту, — только когда экономики нет.
-    /// С экономикой копают настоящие краулеры.
-    dig: Option<crate::dig::Dig>,
     setup: Setup,
     /// Базы сторон.
     pub bases: [Base; 2],
@@ -154,28 +142,12 @@ impl Skirmish {
                 seed: setup.seed,
             }),
         );
-        // Оснастка, выедающая карту, нужна только когда экономики нет.
-        // С экономикой копают настоящие краулеры: копка это экономика,
-        // а не спецэффект (`CLAUDE.md`), и две копки в одной сцене
-        // означали бы, что половина выработки идёт мимо учёта.
-        let dig = if setup.economy {
-            None
-        } else {
-            Some(crate::dig::Dig::clustered(
-                &vw,
-                |x, z| terrain.surface(x, z),
-                setup.diggers,
-                2,
-                4,
-                setup.seed ^ 0x5C1,
-            ))
-        };
+        // Копают настоящие краулеры, а не оснастка, выедающая карту мимо
+        // учёта: копка это экономика, а не спецэффект (`CLAUDE.md`).
         let mut world = World::new(2, setup.per_side * 2 + setup.diggers * 2 + 16, t);
         world.attach_ground(Ground::new(vw, &t));
         world.attach_weapons(crate::weapons());
-        if setup.economy {
-            world.attach_economy(crate::kinds(), crate::materials());
-        }
+        world.attach_economy(crate::kinds(), crate::materials());
 
         // Базы по углам: одна в ближнем, другая в дальнем. Не по
         // середине сторон — так между ними лежит диагональ, то есть
@@ -197,50 +169,28 @@ impl Skirmish {
                 z: bz,
                 factory: sim_core::NO_TARGET,
             };
-            if setup.economy {
-                // База: завод и склад стоят готовыми. Строить первый
-                // завод не из чего, а партия, которая не может
-                // начаться, — не партия.
-                let f = world.spawn_kind(bx, bz, owner as u8, KIND_FACTORY);
-                built[owner].factory = f.unwrap_or(sim_core::NO_TARGET);
-                let dx = (spread / 2).max(2);
-                world.spawn_kind((bx + dx).clamp(0, ex - 1), bz, owner as u8, KIND_DEPOT);
-                for k in 0..setup.diggers {
-                    let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
-                    let z = (bz + r.range(-spread, spread)).clamp(0, ez - 1);
-                    let _ = k;
-                    world.spawn_kind(x, z, owner as u8, KIND_CRAWLER);
-                }
+            // База: завод и склад стоят готовыми. Строить первый
+            // завод не из чего, а партия, которая не может
+            // начаться, — не партия.
+            let f = world.spawn_kind(bx, bz, owner as u8, KIND_FACTORY);
+            built[owner].factory = f.unwrap_or(sim_core::NO_TARGET);
+            let dx = (spread / 2).max(2);
+            world.spawn_kind((bx + dx).clamp(0, ex - 1), bz, owner as u8, KIND_DEPOT);
+            for _ in 0..setup.diggers {
+                let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
+                let z = (bz + r.range(-spread, spread)).clamp(0, ez - 1);
+                world.spawn_kind(x, z, owner as u8, KIND_CRAWLER);
             }
             for k in 0..setup.per_side {
                 let x = (bx + r.range(-spread, spread)).clamp(0, ex - 1);
                 let z = (bz + r.range(-spread, spread)).clamp(0, ez - 1);
-                if setup.economy {
-                    // Смесь **внутри** стороны: замерено, что сторона
-                    // с одним лучом теряет всех шестьдесят против
-                    // двенадцати потерь у стороны с болтом — луч
-                    // требует чистой прямой, а карту всё время копают
-                    // (ADR-205). Тип несёт оружие сам (ADR-230).
-                    let kind = if k % 2 == 0 { KIND_TANK } else { KIND_WALKER };
-                    world.spawn_kind(x, z, owner as u8, kind);
-                } else {
-                    world.spawn_ground(x, z, owner as u8, r.range(2, 6), 300);
-                }
-            }
-        }
-        if !setup.economy {
-            // Оружие раздаётся **явным номером вида**, как в эталонном
-            // сценарии (ADR-192): без этого все остаются со слотом ноль,
-            // то есть с болтом, и луч в матче не стреляет ни разу.
-            // С экономикой оружие приходит из типа, и раздавать его
-            // руками значило бы два источника одной величины.
-            for k in 0..world.units.len() {
-                let id = sim_core::REF_WEAPON_IDS[k % 2];
-                world.units.weapon[k] = world
-                    .weapons
-                    .index_of(id)
-                    .unwrap_or_else(|| panic!("вид оружия {id} не загружен"))
-                    as u16;
+                // Смесь **внутри** стороны: замерено, что сторона
+                // с одним лучом теряет всех шестьдесят против
+                // двенадцати потерь у стороны с болтом — луч
+                // требует чистой прямой, а карту всё время копают
+                // (ADR-205). Тип несёт оружие сам (ADR-230).
+                let kind = if k % 2 == 0 { KIND_TANK } else { KIND_WALKER };
+                world.spawn_kind(x, z, owner as u8, kind);
             }
         }
 
@@ -252,7 +202,6 @@ impl Skirmish {
         let mut m = Skirmish {
             world,
             terrain,
-            dig,
             setup,
             bases: built,
             alive: [setup.per_side; 2],
@@ -266,11 +215,6 @@ impl Skirmish {
 
     /// Один тик матча. Возвращает хеш тика.
     pub fn step(&mut self) -> u64 {
-        if let Some(dig) = self.dig.as_mut() {
-            let g = self.world.ground_mut().expect("земля");
-            let terrain = &self.terrain;
-            dig.step(&mut g.world, &|x, z| terrain.surface(x, z));
-        }
         if self.setup.bot_period != 0 && self.tick.is_multiple_of(self.setup.bot_period) {
             self.bot();
         }
@@ -332,9 +276,6 @@ impl Skirmish {
     /// из **своего** генератора: приказы не имеют права зависеть
     /// от того, сколько раз к генератору мира обратился кто-то ещё.
     fn bot(&mut self) {
-        if !self.setup.economy {
-            return;
-        }
         let (ex, ez) = (self.setup.side as i32, self.setup.side as i32);
         let spread = (ex / 10).clamp(4, 48);
         let mut orders: Vec<sim_core::Order> = Vec::new();

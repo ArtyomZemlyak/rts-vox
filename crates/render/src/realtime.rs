@@ -50,43 +50,68 @@ impl Poses {
             _ => gait::StepMotion::default(),
         }
     }
-    pub fn capture(&mut self, world: &sim_core::World) {
+    /// Start a tick: the current poses become the previous ones, and
+    /// `unit(i)` gives slot `i`'s identity (kind, owner) and simulated pose.
+    ///
+    /// A slot whose identity changed, or that is listed in `deaths`, is a
+    /// new unit: it appears at its pose instead of flying in from the old
+    /// occupant's. A death and a same-kind spawn can reuse a slot within one
+    /// tick, so identity alone does not catch it.
+    pub fn capture_with(
+        &mut self,
+        count: usize,
+        mut unit: impl FnMut(usize) -> ((u16, u8), Pose),
+        deaths: impl IntoIterator<Item = usize>,
+    ) {
         self.previous.clone_from(&self.current);
-        let u = &world.units;
-        self.previous.resize(u.len(), Pose::default());
-        self.current.resize(u.len(), Pose::default());
-        self.identities.resize(u.len(), (u16::MAX, u8::MAX));
-        for i in 0..u.len() {
-            let identity = (u.kind[i], u.owner[i]);
+        self.previous.resize(count, Pose::default());
+        self.current.resize(count, Pose::default());
+        self.identities.resize(count, (u16::MAX, u8::MAX));
+        for i in 0..count {
+            let (identity, pose) = unit(i);
             if self.identities[i] != identity {
                 self.previous[i].alive = false;
             }
             self.identities[i] = identity;
-            let n = u.up[i];
-            self.current[i] = Pose {
-                pos: Vec3::new(
-                    u.x[i] as f32 + u.fx[i].to_f64_lossy() as f32,
-                    u.body_y(i).to_f64_lossy() as f32,
-                    u.z[i] as f32 + u.fz[i].to_f64_lossy() as f32,
-                ),
-                yaw: crate::yaw_of(u.head[i]),
-                up: Vec3::new(
-                    n.x.to_f64_lossy() as f32,
-                    n.y.to_f64_lossy() as f32,
-                    n.z.to_f64_lossy() as f32,
-                ),
-                phase: gait::phase_of(u.gait[i]),
-                alive: u.alive[i],
-            };
+            self.current[i] = pose;
         }
-        // A death and same-kind spawn can reuse a slot within one tick.
-        for e in world.events() {
-            if let sim_core::SimEvent::Death { unit, .. } = *e {
-                if let Some(p) = self.previous.get_mut(unit as usize) {
-                    p.alive = false;
-                }
+        for unit in deaths {
+            if let Some(p) = self.previous.get_mut(unit) {
+                p.alive = false;
             }
         }
+    }
+    /// The `play` window's adapter over the old kernel; it leaves together
+    /// with that window's port to the range (ADR-662).
+    pub fn capture(&mut self, world: &sim_core::World) {
+        let u = &world.units;
+        let deaths = world.events().iter().filter_map(|e| match *e {
+            sim_core::SimEvent::Death { unit, .. } => Some(unit as usize),
+            _ => None,
+        });
+        self.capture_with(
+            u.len(),
+            |i| {
+                let n = u.up[i];
+                let pose = Pose {
+                    pos: Vec3::new(
+                        u.x[i] as f32 + u.fx[i].to_f64_lossy() as f32,
+                        u.body_y(i).to_f64_lossy() as f32,
+                        u.z[i] as f32 + u.fz[i].to_f64_lossy() as f32,
+                    ),
+                    yaw: crate::yaw_of(u.head[i]),
+                    up: Vec3::new(
+                        n.x.to_f64_lossy() as f32,
+                        n.y.to_f64_lossy() as f32,
+                        n.z.to_f64_lossy() as f32,
+                    ),
+                    phase: gait::phase_of(u.gait[i]),
+                    alive: u.alive[i],
+                };
+                ((u.kind[i], u.owner[i]), pose)
+            },
+            deaths,
+        );
     }
     pub fn sample(&mut self, fraction: f32) {
         self.visible.clear();
@@ -109,23 +134,29 @@ pub fn hull_rotation(up: Vec3, yaw: f32) -> Quat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn at(x: f32) -> Pose {
+        Pose {
+            pos: Vec3::new(x, 0.0, 20.0),
+            alive: true,
+            ..Pose::default()
+        }
+    }
     #[test]
     fn poses_are_continuous_and_new_units_do_not_fly_from_old_slots() {
-        let tuning = modding::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
-        let mut w = sim_core::World::new(2, 1, tuning);
-        let id = w.units.spawn(10, 20, 0, 30, 300) as usize;
-        w.units.refresh_live();
         let mut p = Poses::default();
-        p.capture(&w);
-        w.units.x[id] = 12;
-        p.capture(&w);
+        let tank = (0u16, 0u8);
+        p.capture_with(1, |_| (tank, at(10.0)), []);
+        p.capture_with(1, |_| (tank, at(12.0)), []);
         p.sample(0.5);
-        assert_eq!(p.visible[id].pos.x, 11.0);
-        w.units.owner[id] = 1;
-        w.units.x[id] = 500;
-        p.capture(&w);
+        assert_eq!(p.visible[0].pos.x, 11.0);
+        // Another owner in the same slot is another unit.
+        p.capture_with(1, |_| ((0, 1), at(500.0)), []);
         p.sample(0.1);
-        assert_eq!(p.visible[id].pos.x, 500.0);
+        assert_eq!(p.visible[0].pos.x, 500.0);
+        // So is a same-kind spawn into a slot freed on this tick.
+        p.capture_with(1, |_| ((0, 1), at(-40.0)), [0]);
+        p.sample(0.1);
+        assert_eq!(p.visible[0].pos.x, -40.0);
     }
     #[test]
     fn hitch_debt_is_paid_and_pause_keeps_the_fraction() {
@@ -144,6 +175,8 @@ mod tests {
         assert!((ticks as f64 * dt + c.debt - 0.71).abs() < 1e-10);
     }
 
+    /// Checks the `play` window's adapter over the old kernel and leaves
+    /// with it (ADR-662).
     #[test]
     fn heave_is_interpolated_in_the_same_space_as_the_collision_origin() {
         let tuning = modding::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();

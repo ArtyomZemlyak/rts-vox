@@ -544,100 +544,126 @@ fn run_haul(seed: u64, ticks: u64) -> (u64, [u64; SINKS.len()], i128) {
 }
 
 // ---------------------------------------------------------------------
-// Матч: партия, у которой есть исход (ADR-205).
+// Матч на полигоне: партия, у которой есть исход (ADR-205, ADR-663).
 // ---------------------------------------------------------------------
 
-/// Маленький матч — чтобы тесты оставались быстрыми.
-fn small_match(seed: u64, hunt: u64) -> demo::skirmish::Skirmish {
-    demo::skirmish::Skirmish::new(demo::skirmish::Setup {
-        seed,
-        side: 128,
-        per_side: 30,
-        diggers: 12,
-        patience: 1500,
-        hunt_period: hunt,
-        // This fixture tests a match with finite forces. Setup's interactive
-        // default enables factories; the economy has separate small_base tests.
-        economy: false,
-        ..demo::skirmish::Setup::default()
+use demo::range_match::{Match, Outcome, Preset, Setup};
+
+/// Малый матч: сценарий «3 на 3» на углу карты до участка боя — чтобы
+/// тесты оставались быстрыми.
+fn small_match(preset: Preset, ai_vs_ai: bool, workers: usize) -> Match {
+    Match::new(Setup {
+        preset,
+        patience: 3000,
+        ai_vs_ai,
+        workers,
+        whole_map: false,
     })
+    .unwrap_or_else(|e| panic!("{}: {e}", preset.name()))
 }
 
 /// **У партии есть исход, и обе стороны в ней воюют.**
 ///
 /// Исход сам по себе ничего не значит: партия, где никто не выстрелил,
-/// тоже «кончится» по сроку. Поэтому требуется результат боя —
-/// выстрелы, попадания, воронки и смерти.
+/// тоже «кончится» по сроку. Поэтому требуется результат боя: исход
+/// до срока, выстрелы обеих сторон, смерти, живой победитель и
+/// сошедшаяся материя.
 #[test]
 fn a_match_ends_and_both_sides_actually_fight() {
-    for seed in [42u64, 7, 99] {
-        let mut m = small_match(seed, 60);
+    for preset in [Preset::Breakthrough, Preset::Pincer, Preset::Spider] {
+        let name = preset.name();
+        let mut m = small_match(preset, true, 1);
         let (out, _) = m.play_out();
-        assert!(out.over(), "сид {seed}: партия не пришла к исходу");
-        let w = &m.world;
-        assert!(w.deaths > 0, "сид {seed}: никто не погиб");
-        assert!(w.shots_fired > 0, "сид {seed}: ни одного выстрела");
-        assert!(w.shots_hit > 0, "сид {seed}: ни одного попадания");
-        assert!(w.blasts > 0, "сид {seed}: ни одной воронки");
         assert!(
-            w.beams_fired > 0,
-            "сид {seed}: лучом не стреляли — оружие роздано не всем"
+            matches!(out, Outcome::Won(_)),
+            "{name}: бой не решился до срока: {out:?} на тике {}",
+            m.tick()
+        );
+        assert_eq!(m.decided_at, Some(m.tick()), "{name}: тик исхода");
+        let fired = m.fired();
+        assert!(
+            fired.iter().all(|&n| n > 0),
+            "{name}: сторона не стреляла: {fired:?}"
+        );
+        assert!(m.dead() > 0, "{name}: никто не погиб");
+        let winner = out.winner().expect("победитель") as usize;
+        assert!(m.alive()[winner] > 0, "{name}: у победителя нет живых");
+        assert!(
+            m.sim.matter.economy.ledger.balanced(),
+            "{name}: материя не сошлась"
         );
     }
 }
 
-/// **Тот же сид — та же партия.**
+/// **Тот же сценарий — та же партия**, и от числа воркеров физики она
+/// не зависит.
 #[test]
 fn a_match_is_deterministic() {
-    let (mut a, mut b) = (small_match(42, 60), small_match(42, 60));
+    let (mut a, mut b) = (
+        small_match(Preset::Breakthrough, true, 1),
+        small_match(Preset::Breakthrough, true, 2),
+    );
     let (oa, ha) = a.play_out();
     let (ob, hb) = b.play_out();
-    assert_eq!(oa, ob, "тот же сид дал другой исход");
-    assert_eq!(ha, hb, "тот же сид дал другой хеш");
-    assert_eq!(a.tick, b.tick);
-    assert_eq!(a.alive, b.alive);
+    assert_eq!(oa, ob, "тот же сценарий дал другой исход");
+    assert_eq!(ha, hb, "тот же сценарий дал другой хеш");
+    assert_eq!(a.tick(), b.tick());
+    assert_eq!(a.alive(), b.alive());
 
-    let mut c = small_match(43, 60);
+    let mut c = small_match(Preset::Pincer, true, 1);
     let (_, hc) = c.play_out();
-    assert_ne!(ha, hc, "разные сиды дали один хеш");
+    assert_ne!(ha, hc, "разные сценарии дали один хеш");
 }
 
-/// **Охота за противником — не украшение, а условие исхода.**
+/// **ИИ своей стороны — не украшение: без него партия другая.**
 ///
-/// Поле направлений ведёт к точке. Если точка — база противника,
-/// то после первой сшибки выжившие расходятся, а стороны идут
-/// в пустые углы и не встречаются больше никогда: замерено двадцать
-/// тысяч тиков без единой победы (ADR-205).
-///
-/// Тест требует, чтобы **выключение охоты меняло партию** хотя бы
-/// на одном сиде. Без этого требования параметр мог бы вообще
-/// не быть подключён — ровно это и случилось при первом замере:
-/// три разных периода охоты дали побитово одинаковый результат,
-/// потому что ключ не разбирался.
-///
-/// Сравниваются исход, срок **и хеш**. Одного исхода мало: партия
-/// кончается по счёту машин, и победитель по счёту переживает
-/// довольно крупные перемены в ходе боя. С инерцией у машин
-/// (ADR-220) все три сида стали кончаться одинаковым победителем
-/// при разных потерях — то есть проверка по исходу проходила бы
-/// и на неподключённом ключе. Хеш ловит ровно то, от чего тест
-/// написан: побитово одинаковый результат.
+/// Наследник проверки охоты (ADR-205): тогда ключ охоты оказался
+/// не подключён, и три периода дали побитово одинаковый результат.
+/// Здесь то же требование к ключу `ai_vs_ai`: выключение обязано менять
+/// партию хотя бы в одном сценарии. Сравниваются исход, срок и выстрелы
+/// сторон, а не хеш снимка: флаг автономии сам входит в снимок и сдвинул
+/// бы хеш и на ключе, который ничем не управляет.
 #[test]
-fn hunting_the_enemy_changes_how_matches_end() {
+fn own_side_ai_changes_how_matches_end() {
     let mut differs = 0;
-    for seed in [42u64, 7, 99] {
-        let mut with = small_match(seed, 60);
-        let mut without = small_match(seed, 0);
-        let (a, ha) = with.play_out();
-        let (b, hb) = without.play_out();
-        if a != b || with.tick != without.tick || ha != hb {
+    for preset in [Preset::Breakthrough, Preset::Pincer] {
+        let mut with = small_match(preset, true, 1);
+        let mut without = small_match(preset, false, 1);
+        let (a, _) = with.play_out();
+        let (b, _) = without.play_out();
+        if a != b || with.tick() != without.tick() || with.fired() != without.fired() {
             differs += 1;
+            break;
         }
     }
     assert!(
         differs > 0,
-        "охота ни на что не влияет — либо она не работает, либо ключ не подключён"
+        "ИИ своей стороны ни на что не влияет — либо он не работает, либо ключ не подключён"
     );
+}
+
+/// **Срок делает решённой каждую партию.** Бой, не решившийся к сроку,
+/// судится по счёту живых, при равенстве — ничья; после исхода
+/// симуляция не идёт.
+#[test]
+fn patience_decides_a_match_the_battle_has_not() {
+    let mut m = Match::new(Setup {
+        preset: Preset::Breakthrough,
+        patience: 60,
+        ..Setup::default()
+    })
+    .unwrap();
+    let (out, _) = m.play_out();
+    assert_eq!(m.tick(), 60, "срок не остановил матч");
+    let [a, b] = m.alive();
+    let expected = match a.cmp(&b) {
+        std::cmp::Ordering::Greater => Outcome::OnPoints(0),
+        std::cmp::Ordering::Less => Outcome::OnPoints(1),
+        std::cmp::Ordering::Equal => Outcome::Draw,
+    };
+    assert_eq!(out, expected);
+    m.step();
+    assert_eq!(m.tick(), 60, "после исхода симуляция пошла дальше");
 }
 
 /// **Главный порог сцены: материя сохраняется на каждом тике.**

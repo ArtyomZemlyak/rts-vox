@@ -180,10 +180,10 @@ fn production_sources(dir: &Path) -> Vec<(PathBuf, String)> {
 /// Исходники крейта **вместе** с `src/bin`.
 ///
 /// У sim-крейтов `src/bin` — стенды, и пропускать их правильно.
-/// У рендера в `src/bin` лежит весь код окна: `battle`, `view`,
+/// У рендера в `src/bin` лежит весь код окна: `blast`, `view`,
 /// `parade`. Первая редакция проверки границы слоёв пользовалась
 /// `production_sources` и потому смотрела куда угодно, кроме предмета
-/// проверки, — подложенная в `battle.rs` запись в состояние симуляции
+/// проверки, — подложенная в окно боя запись в состояние симуляции
 /// прошла мимо неё (ADR-184).
 fn all_sources(dir: &Path) -> Vec<(PathBuf, String)> {
     sources(dir, false)
@@ -485,7 +485,7 @@ fn the_render_layer_never_writes_into_the_simulation() {
     // к тому, что проверяет.
     let files = all_sources(&root().join("crates").join("render"));
     assert!(
-        files.iter().any(|(f, _)| f.ends_with("battle.rs")),
+        files.iter().any(|(f, _)| f.ends_with("bin/blast.rs")),
         "проверка не видит окно боя — она смотрит не туда"
     );
     for (f, text) in files {

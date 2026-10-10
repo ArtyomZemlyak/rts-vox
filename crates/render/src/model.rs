@@ -682,12 +682,15 @@ mod tests {
                 }
             }
         }
-        let mut bodies = sim_core::damage::Bodies::new(vec![template.clone()]);
-        bodies.spawn_at(0, 0);
-        let t = sim_core::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
-        let mut w = sim_core::World::new(42, 16, t);
-        w.units.spawn(0, 0, 0, 0, 100);
-        let frames = bodies.frames(&w.units)[0].unwrap();
+        // Hull and turret frames of an unrotated unit at the origin with no
+        // target: both point along its heading.
+        let root = sim_core::damage::Frame::new(
+            &template,
+            sim_core::damage::V3::ZERO,
+            0,
+            sim_core::damage::V3::UP,
+        );
+        let frames = [root, root];
         let chunk = sim_core::burst::chunk::Chunk::from_body(
             0,
             0,
@@ -717,17 +720,19 @@ mod tests {
     #[test]
     fn detached_geometry_matches_the_captured_pose_and_collision_envelope() {
         let body = voxel::unit::tank();
-        let mut bodies = sim_core::damage::Bodies::new(vec![body.clone()]);
-        bodies.spawn_at(0, 0);
-        let t = sim_core::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
-        let mut w = sim_core::World::new(42, 16, t);
-        let id = w.units.spawn(300, 300, 0, 0, 100);
-        assert_eq!(id, 0);
-        w.units.y[0] = 20;
-        w.units.head[0] = fx::angle::FULL / 7;
-        let target = w.units.spawn(300, 500, 1, 0, 100);
-        w.units.target[0] = target;
-        let frames = bodies.frames(&w.units)[0].unwrap();
+        // A hull at (300, 20, 300) heading a seventh of a turn, its turret
+        // turned at a target 200 units along +z: the two frames differ.
+        let base = sim_core::damage::V3::new(
+            fx::Fx::from_int(300),
+            fx::Fx::from_int(20),
+            fx::Fx::from_int(300),
+        );
+        let up = sim_core::damage::V3::UP;
+        let aim = fx::angle::atan2(fx::Fx::from_int(200).raw(), 0);
+        let frames = [
+            sim_core::damage::Frame::new(&body, base, fx::angle::FULL / 7, up),
+            sim_core::damage::Frame::new(&body, base, aim, up),
+        ];
         let mut shape = sim_core::burst::chunk::Shape::default();
         let mut cells = Vec::new();
         for z in 0..body.vol.nz {

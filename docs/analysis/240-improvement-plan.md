@@ -377,7 +377,7 @@ ADR-660), бюджет узлов поиска маршрута на тик (к�
 | # | Работа | Размер | Статус |
 |---|---|---|---|
 | H1 | Эталон: `BlastRange::world_battle`, `sim-cli` на полигоне, golden 600 тиков в `tests/golden.rs` | S | сделано: хеш `b5e87f81b44c681c`, не зависит от воркеров и записи-загрузки |
-| H2 | Перенос без новых механик: тесты `realtime`/`model`/`mobility`/`ride`, бенчи `bench_material`/`bench_tick`/`bench_movement_pool`, окно `battle`, схватка демо, `move_report`, свойства записи, фикстуры `sim-cli` с `--load` у окна `blast` | S–M каждое | — |
+| H2 | Перенос без новых механик: тесты `realtime`/`model`/`mobility`/`ride`, бенчи `bench_material`/`bench_tick`/`bench_movement_pool`, окно `battle`, схватка демо, `move_report`, свойства записи, фикстуры `sim-cli` с `--load` у окна `blast` | S–M каждое | рендер и демо сделаны (ADR-663): окно `battle` снято, матч — `demo::range_match`, `move_report` на полигоне, тесты `realtime`/`model` без `World`; у окна `play` остаётся адаптер `Poses::capture(&World)` |
 | H3 | Механики, которых у полигона нет: экономика копки (приказ копать, бак, склад, производство, стройка — `tests/economy.rs`, петля демо, D-1, окно `play`), седоки и урон падением (D-2), масштаб 5000 юнитов (D-7, бюджет тика при 5000) | XL | решение владельца |
 | H4 | Удаление ядра `World`, его модулей, сохранения v15 и зависимости `sim-core` от `worldgen` | M | после H2–H3 |
 | H5 | Канон: `CLAUDE.md`, `02-architecture`, `03-determinism`, `07-economy`, `10-budgets`, `11-roadmap`, `14-demo-scenes`; поправки ADR-048, 114, 116/157, 217, 228–230 | M | по ходу |
