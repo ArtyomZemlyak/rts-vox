@@ -2825,7 +2825,8 @@ impl BlastRange {
         let first = self.tick as usize % n;
         // No physics or claim confirmation runs between these atomic batches.
         // Component commits consume exactly their reservations; terrain claims
-        // keep one slot per conditional edit. Recount at the next phase/tick.
+        // hold one slot per connected component of their group (ADR-659).
+        // Recount at the next phase/tick.
         let mut room = None;
         for offset in 0..b.waves.len() {
             let w = &mut b.waves[(first + offset) % n];
