@@ -1,0 +1,393 @@
+//! Dig economy of the range (plan 245, slices 0 and 1; ADR-672).
+//!
+//! A unit whose kind has a tank takes `Order::Dig(face)`. Within reach of
+//! its face it queues the ball of `dig_radius` around it, a cell at a time,
+//! into the world's one edit queue, each edit tagged [`DIG`] with its slot.
+//! The drain credits what an edit actually removed: the ground reveals the
+//! cell's matter and transfers it into the digger's tank. Matter is never
+//! made: a reveal is the world's own volume × density, and a credit is a
+//! transfer between two containers.
+//!
+//! **Room is reserved before the edit is queued.** A cell goes into the
+//! queue only while the tank's room, less what is already in flight for it,
+//! holds that cell's matter; the first cell that does not fit makes the
+//! tank full, and a full tank stops digging (Q-56 default). The reservation
+//! is per cell, so no two diggers queue one voxel.
+//!
+//! **Digging has a sub-pool of its own** inside the shared edit ceiling:
+//! all diggers together keep at most `dig_edits_in_flight` edits waiting,
+//! so a dig never starves combat edits. When the sub-pool runs out the
+//! rest wait for the next tick, with the first digger served rotated by
+//! tick, and the tick is counted (ADR-114).
+use super::{battle, BlastRange, RangeUnit};
+use crate::matter::{Amount, ContainerId, Kind, Ledger};
+use fx::blob::{Blob, Scan};
+use modding::range_economy::RangeEconomy;
+use std::collections::BTreeMap;
+use voxel::store::AIR;
+
+#[cfg(test)]
+#[path = "range_economy_tests.rs"]
+mod tests;
+
+/// Requester tag of a dig edit: this prefix with the digger's slot. Below
+/// the compare-and-remove range (`0xfffe0000`), the fire tag and NOBODY.
+pub const DIG: u32 = 0xfffd_0000;
+const TAG: u32 = 0xffff_0000;
+
+/// The digger a dig edit was queued for.
+pub fn dig_slot(by: u32) -> Option<usize> {
+    (by & TAG == DIG).then_some((by & !TAG) as usize)
+}
+
+/// A voxel queued for a digger: what it held and the matter set aside for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reservation {
+    slot: u16,
+    material: u16,
+    amount: Amount,
+}
+
+/// The economy's state on a range whose layout has an economy section.
+pub struct Mining {
+    data: RangeEconomy,
+    /// Tank of each unit slot; `None` for a kind that does not dig.
+    tanks: Vec<Option<ContainerId>>,
+    /// Voxels queued for digging and not yet drained, by cell.
+    reserved: BTreeMap<[u32; 3], Reservation>,
+    /// Matter reserved in flight per slot; derived from `reserved`.
+    inflight: Vec<Amount>,
+    /// Matter credited to tanks, voxels credited, dig edits drained with
+    /// nothing to credit, ticks the sub-pool ran out with work waiting.
+    pub mined: Amount,
+    pub cells: u64,
+    pub misses: u64,
+    pub deferred: u64,
+}
+
+impl Mining {
+    /// Tanks are created after every other container of the scene, so the
+    /// numbering of bodies and fuel is that of a layout without economy.
+    pub(super) fn new(data: RangeEconomy, units: &[RangeUnit], ledger: &mut Ledger) -> Self {
+        let tanks = units
+            .iter()
+            .map(|u| {
+                data.kind(u.kind)
+                    .filter(|k| k.tank > 0)
+                    .map(|k| ledger.create(Kind::Hauler, 0, k.tank))
+            })
+            .collect();
+        Self {
+            data,
+            tanks,
+            reserved: BTreeMap::new(),
+            inflight: vec![0; units.len()],
+            mined: 0,
+            cells: 0,
+            misses: 0,
+            deferred: 0,
+        }
+    }
+    pub fn data(&self) -> &RangeEconomy {
+        &self.data
+    }
+    /// Whether a unit of this kind digs.
+    pub fn digs(&self, kind: modding::range::RangeUnitKind) -> bool {
+        self.data.digs(kind)
+    }
+    pub fn tank(&self, id: usize) -> Option<ContainerId> {
+        self.tanks.get(id).copied().flatten()
+    }
+    /// Dig edits waiting in the world's queue.
+    pub fn in_flight(&self) -> usize {
+        self.reserved.len()
+    }
+    /// Matter reserved for edits of this digger still in the queue.
+    pub fn reserved(&self, id: usize) -> Amount {
+        self.inflight.get(id).copied().unwrap_or(0)
+    }
+    pub(super) fn save(&self, b: &mut Blob) {
+        b.u64(self.mined);
+        b.u64(self.cells);
+        b.u64(self.misses);
+        b.u64(self.deferred);
+        b.u32(self.reserved.len() as u32);
+        for (cell, r) in &self.reserved {
+            for v in cell {
+                b.u32(*v);
+            }
+            b.u16(r.slot);
+            b.u16(r.material);
+            b.u64(r.amount);
+        }
+    }
+}
+
+/// Offsets of the ball of radius `r`, top layer first, then by z and x:
+/// a fixed order, so ties go by linear index.
+fn ball(r: i32) -> impl Iterator<Item = [i32; 3]> {
+    (-r..=r).rev().flat_map(move |dy| {
+        (-r..=r).flat_map(move |dz| {
+            (-r..=r).filter_map(move |dx| {
+                (dx * dx + dy * dy + dz * dz <= r * r).then_some([dx, dy, dz])
+            })
+        })
+    })
+}
+
+impl BlastRange {
+    pub fn mining(&self) -> Option<&Mining> {
+        self.mining.as_ref()
+    }
+    /// Matter in this unit's tank; `None` for a unit without one.
+    pub fn tank_held(&self, id: usize) -> Option<Amount> {
+        let tank = self.mining.as_ref()?.tank(id)?;
+        Some(self.matter.economy.ledger.held(tank))
+    }
+    pub(super) fn has_economy(&self) -> bool {
+        self.mining.is_some()
+    }
+    /// Where a digger outside the reach of its face drives: the face's
+    /// column. The dig phase stops it as soon as the face is in reach.
+    pub(super) fn dig_approach(&self, id: usize, face: [i32; 3]) -> Option<[i32; 2]> {
+        let u = &self.units[id];
+        (!u.kind.emplacement() && !self.in_dig_reach(u, face)).then_some([face[0], face[2]])
+    }
+    fn in_dig_reach(&self, u: &RangeUnit, face: [i32; 3]) -> bool {
+        let Some(k) = self.mining.as_ref().and_then(|m| m.data.kind(u.kind)) else {
+            return false;
+        };
+        within(u, face, k.dig_reach)
+    }
+
+    /// Queue this tick's digging, before the drain. A digger digs while it
+    /// is alive, ordered to dig, within reach of its face and has room for
+    /// the next cell; cells claimed by debris, already reserved, air and
+    /// the world's frame are passed over.
+    pub(super) fn dig_phase(&mut self) {
+        let Self {
+            mining,
+            units,
+            battle,
+            world,
+            matter,
+            tick,
+            ..
+        } = self;
+        let Some(m) = mining.as_mut() else {
+            return;
+        };
+        if !matches!(battle.phase, battle::Phase::Setup | battle::Phase::Fighting) {
+            return;
+        }
+        let ledger = &matter.economy.ledger;
+        let mut diggers = Vec::new();
+        for (id, u) in units.iter_mut().enumerate() {
+            let (Some(tank), Some(actor)) = (m.tank(id), battle.actors.get(id)) else {
+                continue;
+            };
+            let battle::Order::Dig(face) = actor.order else {
+                continue;
+            };
+            let k = m.data.kind(u.kind).expect("a tank has its kind's entry");
+            if !u.status.alive || !within(u, face, k.dig_reach) {
+                continue;
+            }
+            // At the face: a digger driving to it stops here.
+            if u.motion.destination.is_some() {
+                u.motion.stop();
+            }
+            if ledger.room(tank) > m.inflight[id] {
+                diggers.push((id, face, *k));
+            }
+        }
+        if diggers.is_empty() {
+            return;
+        }
+        // At least one edit a tick stays with everything else.
+        let pool =
+            (m.data.dig_edits_in_flight as usize).min(world.max_edits_per_tick.saturating_sub(1));
+        let mut left = pool.saturating_sub(m.reserved.len());
+        let n = diggers.len();
+        let start = *tick as usize % n;
+        let mut cursor = voxel::World::mat_cursor();
+        let mut starved = false;
+        'diggers: for step in 0..n {
+            let (id, face, k) = diggers[(start + step) % n];
+            let tank = m.tank(id).expect("digger has a tank");
+            let mut room = ledger.room(tank) - m.inflight[id];
+            let mut rate = k.dig_edits_per_tick;
+            for d in ball(k.dig_radius as i32) {
+                let p = [face[0] + d[0], face[1] + d[1], face[2] + d[2]];
+                if p.iter().any(|v| *v < 0) {
+                    continue;
+                }
+                let [x, y, z] = p.map(|v| v as u32);
+                if !world.inside(x, y, z)
+                    || world.on_frame(x, y, z)
+                    || !world.solid(x, y, z)
+                    || m.reserved.contains_key(&[x, y, z])
+                    || matter.debris.claimed([x, y, z])
+                {
+                    continue;
+                }
+                let material = world.material_cached(&mut cursor, x, y, z);
+                let amount = matter.economy.per_voxel(material);
+                if material == AIR || amount == 0 {
+                    continue;
+                }
+                // The next voxel does not fit: the tank is full.
+                if amount > room {
+                    continue 'diggers;
+                }
+                if left == 0 {
+                    starved = true;
+                    break 'diggers;
+                }
+                world.queue_dig_by(x, y, z, DIG | id as u32);
+                m.reserved.insert(
+                    [x, y, z],
+                    Reservation {
+                        slot: id as u16,
+                        material,
+                        amount,
+                    },
+                );
+                m.inflight[id] += amount;
+                room -= amount;
+                left -= 1;
+                rate -= 1;
+                if rate == 0 {
+                    continue 'diggers;
+                }
+            }
+        }
+        if starved {
+            m.deferred += 1;
+        }
+    }
+
+    /// Credit what this tick's drain removed for diggers, right after the
+    /// drain. The cell's matter is revealed from the ground and transferred
+    /// into the tank. A voxel already gone, one that holds another material
+    /// than the one reserved, or one dug for a digger that has died
+    /// credits nothing: the edit was nobody's, as a crater's.
+    pub(super) fn credit_digs(&mut self) {
+        let Some(m) = self.mining.as_mut() else {
+            return;
+        };
+        if m.reserved.is_empty() {
+            return;
+        }
+        let e = &mut self.matter.economy;
+        for &(edit, previous) in self.world.completed() {
+            let Some(slot) = dig_slot(edit.by) else {
+                continue;
+            };
+            let r = m
+                .reserved
+                .remove(&[edit.x, edit.y, edit.z])
+                .expect("a dig edit drains with its reservation");
+            debug_assert_eq!(usize::from(r.slot), slot);
+            m.inflight[slot] -= r.amount;
+            if previous == AIR || previous != r.material || !self.units[slot].status.alive {
+                m.misses += 1;
+                continue;
+            }
+            let tank = m.tank(slot).expect("digger has a tank");
+            // Volume × density at removal. A density tuned up while the edit
+            // waited may not fit: the rest stays in the ground container.
+            let amount = e.per_voxel(previous);
+            e.ledger.reveal(e.ground, amount);
+            m.mined += e.ledger.transfer(e.ground, tank, amount);
+            m.cells += 1;
+        }
+    }
+
+    /// Version 62 tail: the economy's state. Everything it refers to —
+    /// units, world queue, ledger, orders — is already loaded.
+    pub(super) fn load_mining(&mut self, s: &mut Scan) -> Option<()> {
+        let m = self.mining.as_mut()?;
+        m.mined = s.u64();
+        m.cells = s.u64();
+        m.misses = s.u64();
+        m.deferred = s.u64();
+        let n = s.u32() as usize;
+        if n > m.data.dig_edits_in_flight as usize || n > s.left() / 24 {
+            return None;
+        }
+        let ledger = &self.matter.economy.ledger;
+        for (id, u) in self.units.iter().enumerate() {
+            if let Some(tank) = m.tank(id) {
+                let c = ledger.try_get(tank)?;
+                let k = m.data.kind(u.kind)?;
+                if !c.alive || c.kind != Kind::Hauler || c.cap != k.tank {
+                    return None;
+                }
+            }
+        }
+        m.reserved.clear();
+        m.inflight.iter_mut().for_each(|v| *v = 0);
+        for _ in 0..n {
+            let cell: [u32; 3] = std::array::from_fn(|_| s.u32());
+            let r = Reservation {
+                slot: s.u16(),
+                material: s.u16(),
+                amount: s.u64(),
+            };
+            let slot = usize::from(r.slot);
+            let [x, y, z] = cell;
+            if !self.world.inside(x, y, z)
+                || self.world.on_frame(x, y, z)
+                || m.tank(slot).is_none()
+                || r.material == AIR
+                || r.amount == 0
+                || m.reserved.insert(cell, r).is_some()
+            {
+                return None;
+            }
+            m.inflight[slot] = m.inflight[slot].checked_add(r.amount)?;
+        }
+        for (id, reserved) in m.inflight.iter().enumerate() {
+            if let Some(tank) = m.tank(id) {
+                if *reserved > ledger.room(tank) {
+                    return None;
+                }
+            }
+        }
+        // Every reservation has its edit waiting, and every dig edit waiting
+        // has its reservation.
+        let mut queued = 0;
+        for e in self.world.queued_edits() {
+            let Some(slot) = dig_slot(e.by) else {
+                continue;
+            };
+            queued += 1;
+            if e.mat != AIR
+                || m.reserved
+                    .get(&[e.x, e.y, e.z])
+                    .map(|r| usize::from(r.slot))
+                    != Some(slot)
+            {
+                return None;
+            }
+        }
+        if queued != m.reserved.len() {
+            return None;
+        }
+        for (id, a) in self.battle.actors.iter().enumerate() {
+            if matches!(a.order, battle::Order::Dig(_)) && m.tank(id).is_none() {
+                return None;
+            }
+        }
+        s.ok().then_some(())
+    }
+}
+
+/// Horizontal distance from the unit to its face within `reach`, compared
+/// in squares.
+fn within(u: &RangeUnit, face: [i32; 3], reach: u32) -> bool {
+    let dx = i64::from(u.motion.pos[0].to_int_trunc() - face[0]);
+    let dz = i64::from(u.motion.pos[2].to_int_trunc() - face[2]);
+    dx * dx + dz * dz <= i64::from(reach) * i64::from(reach)
+}

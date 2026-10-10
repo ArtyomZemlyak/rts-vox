@@ -800,6 +800,7 @@ fn portable_commands_keep_invalid_gameplay_inputs_until_normal_execution() {
         order(usize::MAX, Order::Move, Some([-1, 336])),
         order(usize::MAX, Order::Attack(usize::MAX), None),
         order(usize::MAX, Order::Ground([i32::MIN, 7, i32::MAX]), None),
+        order(usize::MAX, Order::Dig([i32::MIN, 7, i32::MAX]), None),
         Command::FormationMove {
             actor: usize::MAX,
             destination: [-1, 7],

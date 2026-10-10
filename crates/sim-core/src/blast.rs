@@ -9,6 +9,8 @@ mod blast_source;
 mod capture;
 #[path = "range_debris_tuning.rs"]
 mod debris_tuning;
+#[path = "range_economy.rs"]
+pub mod economy;
 #[path = "range_gun_commands.rs"]
 mod gun_commands;
 #[path = "range_material_tuning.rs"]
@@ -2660,6 +2662,9 @@ pub struct BlastRange {
     /// further tick by tick.
     collapse_cap: usize,
     pub collapse_work: CollapseWork,
+    /// Dig economy, on a layout with an economy section (ADR-672). In the
+    /// snapshot from version 62.
+    mining: Option<economy::Mining>,
 }
 
 /// The refused source motion is already normal to the other hull. Subtract
@@ -3069,6 +3074,10 @@ impl BlastRange {
         }
         let mut matter = matter::Matter::new(&units);
         let combustion = fire::Combustion::new(&units, &mut matter);
+        let mining = layout
+            .as_ref()
+            .and_then(|l| l.economy.clone())
+            .map(|data| economy::Mining::new(data, &units, &mut matter.economy.ledger));
         let shield_tuning =
             modding::shield::ShieldTuning::from_ron(include_str!("../../../data/shield.ron"))
                 .expect("shield tuning");
@@ -3163,6 +3172,7 @@ impl BlastRange {
             collapse_backlog: CollapseBacklog::default(),
             collapse_cap: stock.max_body_cells as usize,
             collapse_work: CollapseWork::default(),
+            mining,
         };
         result.turret = crate::turret::Traverse::new(result.aim_angle());
         completed("components");
@@ -3218,7 +3228,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_open_claims() {
+        let version = if self.has_economy() {
+            62
+        } else if self.has_open_claims() {
             61
         } else if self.battle.has_wave_sides() {
             60
@@ -3405,8 +3417,10 @@ impl BlastRange {
         let debris_tuned = self.has_debris_tuning();
         let material_tuned = self.matter.density_history || self.has_material_tuning();
         let energy_split = self.has_wave_energy();
-        // Version 61 holds every section of 60 (ADR-659).
-        let claims = self.has_open_claims();
+        // Version 62 holds every section of 61 (ADR-672), and 61 every
+        // section of 60 (ADR-659).
+        let economy = self.has_economy();
+        let claims = self.has_open_claims() || economy;
         let sides = self.battle.has_wave_sides() || claims;
         let tuned = self.weapon_configured
             || motion_tuned
@@ -3468,7 +3482,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if claims {
+            let format = if economy {
+                62
+            } else if claims {
                 61
             } else if sides {
                 60
@@ -3507,6 +3523,9 @@ impl BlastRange {
         }
         if version < 60 && sides {
             self.battle.save_wave_sides(b);
+        }
+        if let Some(m) = self.mining.as_ref().filter(|_| version < 62) {
+            m.save(b);
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3577,7 +3596,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=61).contains(&version) {
+        if !(27..=62).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3614,6 +3633,9 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
+        if (version >= 62) != r.has_economy() {
+            return None;
+        }
         if let Some(current) = configured {
             // The constructor's pack and world limits come from the saved base.
             if r.config != config
@@ -4138,6 +4160,10 @@ impl BlastRange {
         }
         if version >= 60 {
             r.battle.load_wave_sides(&mut s)?;
+        }
+        if version >= 62 {
+            observe("economy", bytes.len() - s.left(), None);
+            r.load_mining(&mut s)?;
         }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
@@ -5183,7 +5209,11 @@ impl BlastRange {
         detail("heat_units");
         self.reserve_pending_damage();
         self.reserve_thermal_fragments();
+        // Digging joins the queue last, under its own sub-pool, and the
+        // drain's removals are credited before anything else reads them.
+        self.dig_phase();
         self.world.flush();
+        self.credit_digs();
         self.world_changed = nav::vehicle::Changed::default();
         for e in self.world.edits() {
             self.world_changed.column(e.x as i32, e.z as i32);

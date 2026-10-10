@@ -82,6 +82,9 @@ pub enum Order {
     Move,
     Attack(usize),
     Ground([i32; 3]),
+    /// Dig the ball around this face into the unit's tank (ADR-672). The
+    /// unit holds its fire, and the rules AI leaves the order alone.
+    Dig([i32; 3]),
 }
 /// Opt-in observations of actual fire gates, never input to simulation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -570,6 +573,12 @@ impl Battle {
                         b.i32(v);
                     }
                 }
+                Order::Dig(p) => {
+                    b.u8(5);
+                    for v in p {
+                        b.i32(v);
+                    }
+                }
             }
             b.usize(a.target.unwrap_or(usize::MAX));
             b.u32(a.next);
@@ -633,6 +642,14 @@ impl Battle {
                         return None;
                     }
                     Order::Ground(p)
+                }
+                // Only a layout with an economy digs; its snapshots are 62.
+                5 if version >= 62 => {
+                    let p = std::array::from_fn(|_| s.i32());
+                    if (0..3).any(|k| p[k] < 0 || p[k] >= size[k] as i32) {
+                        return None;
+                    }
+                    Order::Dig(p)
                 }
                 _ => return None,
             };
@@ -1440,7 +1457,8 @@ impl BlastRange {
         };
         let outcome = if !self.battle_mode()
             || !(self.battle.phase == Phase::Fighting
-                || self.battle.phase == Phase::Setup && matches!(order, Order::Move | Order::Hold))
+                || self.battle.phase == Phase::Setup
+                    && matches!(order, Order::Move | Order::Hold | Order::Dig(_)))
         {
             commands::Outcome::Rejected
         } else {
@@ -1459,9 +1477,19 @@ impl BlastRange {
                 orders::Admission::Rejected => commands::Outcome::Rejected,
                 orders::Admission::Unchanged => commands::Outcome::Unchanged,
                 orders::Admission::Apply => {
+                    // A digger out of reach drives to its face; the route
+                    // is derived, never part of the command (ADR-672).
+                    let request = match order {
+                        Order::Dig(face) => orders::Request {
+                            destination: self.dig_approach(id, face),
+                            ..request
+                        },
+                        _ => request,
+                    };
                     // Between ticks, a manual Move uses the current physical rubble.
-                    let current =
-                        (order == Order::Move && fallback.is_none()).then(|| self.current_rubble());
+                    let routed = order == Order::Move
+                        || matches!(order, Order::Dig(_)) && request.destination.is_some();
+                    let current = (routed && fallback.is_none()).then(|| self.current_rubble());
                     let mut executor = orders::Executor {
                         units: &mut self.units,
                         actors: &mut self.battle.actors,
@@ -1956,7 +1984,7 @@ impl BlastRange {
             {
                 a.order = Order::Auto;
             }
-            if a.order == Order::Hold {
+            if matches!(a.order, Order::Hold | Order::Dig(_)) {
                 record_gate(&mut b.fire_trace, id, FireGate::Hold);
                 a.target = None;
                 continue;

@@ -299,6 +299,7 @@ impl Reader<'_> {
                     2 => Order::Move,
                     3 => Order::Attack(self.size()?),
                     4 => Order::Ground([self.0.i32(), self.0.i32(), self.0.i32()]),
+                    5 => Order::Dig([self.0.i32(), self.0.i32(), self.0.i32()]),
                     _ => return None,
                 };
                 let destination = self.boolean()?.then(|| [self.0.i32(), self.0.i32()]);
@@ -699,6 +700,12 @@ pub(super) fn save_inbox(b: &mut Blob, inbox: &Inbox) {
                     }
                     Order::Ground(at) => {
                         b.u8(4);
+                        for x in at {
+                            b.i32(x);
+                        }
+                    }
+                    Order::Dig(at) => {
+                        b.u8(5);
                         for x in at {
                             b.i32(x);
                         }

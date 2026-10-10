@@ -1103,6 +1103,11 @@ impl World {
         self.queue.len() + self.transfers.len()
     }
 
+    /// Edits waiting in the queue, in drain order; transfers apart.
+    pub fn queued_edits(&self) -> impl Iterator<Item = &Edit> + '_ {
+        self.queue.iter()
+    }
+
     /// Передачи между миром и телом, ждущие дренажа (ADR-431).
     pub fn transfers_queued(&self) -> usize {
         self.transfers.len()

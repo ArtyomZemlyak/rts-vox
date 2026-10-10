@@ -51,6 +51,20 @@ pub(super) fn validate(
             return Admission::Rejected;
         }
     }
+    // A face inside the map, for a kind with a tank; the approach is the
+    // range's to derive, not the caller's to give (ADR-672).
+    if let Order::Dig(p) = order {
+        if (0..3).any(|a| p[a] < 0 || p[a] >= range.size[a] as i32)
+            || destination.is_some()
+            || !range.mining().is_some_and(|m| m.digs(range.units[id].kind))
+        {
+            return Admission::Rejected;
+        }
+    }
+    // The rules AI maintains orders; it never replaces a dig (ADR-672).
+    if replacement == Replacement::Maintain && matches!(actors[id].order, Order::Dig(_)) {
+        return Admission::Unchanged;
+    }
     if replacement == Replacement::Maintain && actors[id].order == order && order != Order::Move {
         return Admission::Unchanged;
     }
@@ -93,7 +107,8 @@ impl Executor<'_> {
             order,
             destination,
         } = request;
-        if order == Order::Move {
+        let digging = matches!(order, Order::Dig(_));
+        if order == Order::Move || digging && destination.is_some() {
             let others: Vec<_> = self
                 .units
                 .iter()
@@ -114,7 +129,7 @@ impl Executor<'_> {
             ) {
                 return commands::Outcome::PathFailed;
             }
-        } else if order == Order::Hold {
+        } else if order == Order::Hold || digging {
             self.units[id].motion.stop();
         }
         commit(&mut self.actors[id], self.units[id].kind, order, self.tick);
