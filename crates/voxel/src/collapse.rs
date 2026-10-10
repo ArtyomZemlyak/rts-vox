@@ -158,6 +158,23 @@ struct AnchorCandidate {
 }
 
 /// Компоненты одного чанка, как их видит граф.
+/// One chunk's labelling (see `CollapseLayer::label`).
+struct ChunkLabels {
+    n: usize,
+    faces: [Vec<(u16, u16, u16)>; FACES],
+    bedrock: Vec<bool>,
+}
+/// A chunk built from the world, if it was, and its labelling: the result
+/// of one task of a [`ChunkMap`].
+pub struct ChunkWork(Option<Box<TopoChunk>>, ChunkLabels);
+/// Runs `f(0..n)` and returns the results in index order (plan 240, G4).
+pub type ChunkMap =
+    Box<dyn Fn(usize, &(dyn Fn(usize) -> ChunkWork + Sync)) -> Vec<ChunkWork> + Send + Sync>;
+std::thread_local! {
+    /// Labelling scratch, one per thread that labels chunks.
+    static LABEL_SCRATCH: std::cell::RefCell<Components> =
+        std::cell::RefCell::new(Components::new());
+}
 struct ChunkNodes {
     cached_edges: usize,
     /// Derived adjacency grouped by local component. One link allocation
@@ -302,7 +319,8 @@ pub struct CollapseLayer {
     /// Буфер состава куска в мировых координатах.
     cells: Vec<(u32, u32, u32)>,
     /// Прежние отрезки — для сравнения при переразметке.
-    face_prev: [Vec<(u16, u16, u16)>; FACES],
+    /// Parallel map for chunk labelling, when the caller has threads.
+    chunk_map: Option<ChunkMap>,
     /// Буферы локальной проверки «пачка не расщепила».
     split: SplitBufs,
     /// Снятое в текущем чанке — вход этой проверки.
@@ -370,7 +388,7 @@ impl CollapseLayer {
             #[cfg(test)]
             queue: Vec::new(),
             face_todo: Vec::new(),
-            face_prev: Default::default(),
+            chunk_map: None,
             split: SplitBufs::new(),
             removed: Vec::new(),
             relabelled: 0,
@@ -598,12 +616,9 @@ impl CollapseLayer {
         let batch: Vec<u32> = self.pending.drain(..take).collect();
         st.relabel_pending = self.pending.len();
         for &ci in &batch {
-            let i = ci as usize;
-            self.stale[i] = false;
-            if self.relabel(i) {
-                self.mark_faces(i);
-            }
+            self.stale[ci as usize] = false;
         }
+        self.label_batch(w, &batch, false);
         self.rebuild_index();
         self.refresh_faces(w);
         completed("collapse_labels");
@@ -692,15 +707,8 @@ impl CollapseLayer {
             if batch.is_empty() {
                 break;
             }
-            for &ci in &batch {
-                let i = ci as usize;
-                let (cx, cy, cz) = self.coords(i);
-                self.chunks[i] = Some(Self::build(w, cx, cy, cz));
-                self.built += 1;
-                self.relabel(i);
-                self.mark_faces(i);
-                done += 1;
-            }
+            self.label_batch(w, &batch, true);
+            done += batch.len();
             self.frontier.retain(|&i| self.nodes[i as usize].is_none());
             self.rebuild_index();
             self.refresh_faces(w);
@@ -781,20 +789,23 @@ impl CollapseLayer {
     /// На реальной копке это девять из десяти чанков (ADR-126).
     fn relabel(&mut self, i: usize) -> bool {
         let c = self.chunks[i].take().expect("chunk present");
-        self.relabelled += 1;
-        let n = self.comps.build(&c);
-        let mut nd = self.nodes[i]
-            .take()
-            .unwrap_or_else(|| Box::new(ChunkNodes::new()));
-        for f in 0..FACES {
-            self.face_prev[f].clear();
-            self.face_prev[f].extend_from_slice(&nd.faces[f]);
-            nd.faces[f].clear();
-        }
-        nd.n = n;
-        nd.bedrock.clear();
-        nd.bedrock.resize(n, false);
-        let (cx, cy, cz) = self.coords(i);
+        let labels = Self::label(&c, self.coords(i), [self.wx, self.wz], &mut self.comps);
+        self.chunks[i] = Some(c);
+        self.apply_labels(i, labels)
+    }
+    /// The labelling of one chunk: its components, the labelled runs on
+    /// each face and which components stand on bedrock or the frame. A
+    /// function of the chunk and its place alone, so chunks label in
+    /// parallel (plan 240, G4); `comps` is scratch.
+    fn label(
+        c: &TopoChunk,
+        (cx, cy, cz): (u32, u32, u32),
+        [wx, wz]: [u32; 2],
+        comps: &mut Components,
+    ) -> ChunkLabels {
+        let n = comps.build(c);
+        let mut faces: [Vec<(u16, u16, u16)>; FACES] = Default::default();
+        let mut bedrock = vec![false; n];
         // The map's frame cannot be dug or built (ADR-034): what touches
         // it stands as on bedrock (ADR-433). Unanchored, a ledge against
         // the side wall fell as a body whose frame cells never left the
@@ -804,22 +815,21 @@ impl CollapseLayer {
         if cx == 0 {
             frame_x |= 1;
         }
-        if cx == (self.wx - 1) / cs {
-            frame_x |= 1 << ((self.wx - 1) % cs);
+        if cx == (wx - 1) / cs {
+            frame_x |= 1 << ((wx - 1) % cs);
         }
-        let frame_z = |lz: usize| {
-            (cz == 0 && lz == 0) || (cz == (self.wz - 1) / cs && lz as u32 == (self.wz - 1) % cs)
-        };
-        for (ri, r) in self.comps.runs.iter().enumerate() {
-            let lab = self.comps.label[ri] as u16;
+        let frame_z =
+            |lz: usize| (cz == 0 && lz == 0) || (cz == (wz - 1) / cs && lz as u32 == (wz - 1) % cs);
+        for (ri, r) in comps.runs.iter().enumerate() {
+            let lab = comps.label[ri] as u16;
             let col = r.col as usize;
             let (ly, lz) = (col % CS, col / CS);
             let m = r.mask;
             if m & 1 != 0 {
-                push_face(&mut nd.faces[0], lz * CS + ly, lab);
+                push_face(&mut faces[0], lz * CS + ly, lab);
             }
             if m & (1 << 31) != 0 {
-                push_face(&mut nd.faces[1], lz * CS + ly, lab);
+                push_face(&mut faces[1], lz * CS + ly, lab);
             }
             if ly == 0 || ly == CS - 1 || lz == 0 || lz == CS - 1 {
                 let (fy, fz) = (if ly == 0 { 2 } else { 3 }, if lz == 0 { 4 } else { 5 });
@@ -828,22 +838,35 @@ impl CollapseLayer {
                     let x = bits.trailing_zeros() as usize;
                     bits &= bits - 1;
                     if ly == 0 || ly == CS - 1 {
-                        push_face(&mut nd.faces[fy], lz * CS + x, lab);
+                        push_face(&mut faces[fy], lz * CS + x, lab);
                     }
                     if lz == 0 || lz == CS - 1 {
-                        push_face(&mut nd.faces[fz], ly * CS + x, lab);
+                        push_face(&mut faces[fz], ly * CS + x, lab);
                     }
                 }
             }
             // Коренная порода: самый низ мира держит всё, что на нём стоит.
             if cy == 0 && ly == 0 && m != 0 {
-                nd.bedrock[lab as usize] = true;
+                bedrock[lab as usize] = true;
             }
             if m & frame_x != 0 || (m != 0 && frame_z(lz)) {
-                nd.bedrock[lab as usize] = true;
+                bedrock[lab as usize] = true;
             }
         }
-        let changed = (0..FACES).any(|f| nd.faces[f] != self.face_prev[f]);
+        ChunkLabels { n, faces, bedrock }
+    }
+    /// Install a chunk's labelling, in chunk order: whether its faces
+    /// changed.
+    fn apply_labels(&mut self, i: usize, labels: ChunkLabels) -> bool {
+        self.relabelled += 1;
+        let ChunkLabels { n, faces, bedrock } = labels;
+        let mut nd = self.nodes[i]
+            .take()
+            .unwrap_or_else(|| Box::new(ChunkNodes::new()));
+        let changed = (0..FACES).any(|f| nd.faces[f] != faces[f]);
+        nd.faces = faces;
+        nd.n = n;
+        nd.bedrock = bedrock;
         // Keep the sorted active index instead of scanning every possible
         // chunk on the kilometre map. Empty/invalid entries are filtered at
         // the same rebuild boundary as before; bases retain their semantics.
@@ -854,8 +877,50 @@ impl CollapseLayer {
         }
         self.nodes[i] = Some(nd);
         self.cache_nodes(i);
-        self.chunks[i] = Some(c);
         changed
+    }
+    /// Label the chunks `batch` (built from `w` first when `build`), in
+    /// parallel where the caller supplied a map, then install them in
+    /// batch order and mark their faces as the serial loop did.
+    fn label_batch(&mut self, w: &World, batch: &[u32], build: bool) {
+        let coords: Vec<(u32, u32, u32)> =
+            batch.iter().map(|&ci| self.coords(ci as usize)).collect();
+        let size = [self.wx, self.wz];
+        let chunks = &self.chunks;
+        let work = |k: usize| -> ChunkWork {
+            let (cx, cy, cz) = coords[k];
+            LABEL_SCRATCH.with(|comps| {
+                let comps = &mut comps.borrow_mut();
+                if build {
+                    let c = Self::build(w, cx, cy, cz);
+                    let labels = Self::label(&c, (cx, cy, cz), size, comps);
+                    ChunkWork(Some(c), labels)
+                } else {
+                    let c = chunks[batch[k] as usize].as_ref().expect("chunk present");
+                    ChunkWork(None, Self::label(c, (cx, cy, cz), size, comps))
+                }
+            })
+        };
+        let done: Vec<ChunkWork> = match &self.chunk_map {
+            Some(map) => map(batch.len(), &work),
+            None => (0..batch.len()).map(work).collect(),
+        };
+        for (&ci, ChunkWork(chunk, labels)) in batch.iter().zip(done) {
+            let i = ci as usize;
+            if let Some(c) = chunk {
+                self.chunks[i] = Some(c);
+                self.built += 1;
+            }
+            if self.apply_labels(i, labels) || build {
+                self.mark_faces(i);
+            }
+        }
+    }
+    /// Let `map` run chunk labelling: `map(n, f)` returns `f(0..n)` in
+    /// index order, on whatever threads it likes. The layer's answers do
+    /// not depend on it.
+    pub fn set_chunk_map(&mut self, map: ChunkMap) {
+        self.chunk_map = Some(map);
     }
 
     /// Выкинуть снятые ячейки из отрезков граней чанка.
@@ -2511,6 +2576,40 @@ mod tests {
                 .collect()
         };
         assert_eq!(run(), run());
+    }
+
+    /// Chunk labelling may run on any threads in any order (plan 240,
+    /// G4): a map that runs the tasks backwards gives the same bodies and
+    /// the same saved layer as the serial loop.
+    #[test]
+    fn a_chunk_map_in_any_order_changes_nothing() {
+        let run = |map: bool| {
+            let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+            let mut c = CollapseLayer::new(&w);
+            if map {
+                c.set_chunk_map(Box::new(|n, f| {
+                    let mut out: Vec<_> = (0..n).rev().map(f).collect();
+                    out.reverse();
+                    out
+                }));
+            }
+            let mut b = Bodies::new(16, test_gravity());
+            cut(&mut w, 4);
+            w.flush();
+            let edits: Vec<Edit> = w.edits().to_vec();
+            c.apply(&mut w, &edits, &mut b);
+            let mut saved = fx::blob::Blob::new();
+            c.save(&mut saved);
+            let bodies: Vec<_> = b
+                .list
+                .iter()
+                .map(|x| (x.ox, x.oy, x.oz, x.voxels.len()))
+                .collect();
+            (bodies, saved.v)
+        };
+        let (serial, mapped) = (run(false), run(true));
+        assert!(!serial.0.is_empty(), "the fixture must tear something off");
+        assert_eq!(serial, mapped);
     }
 }
 

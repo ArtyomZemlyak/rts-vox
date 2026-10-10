@@ -1685,6 +1685,9 @@ impl Generator for RangeTerrain {
     }
 }
 
+/// A unit's box and the body sizes it was measured on (ADR-661).
+type MeasuredBox = (Vec<u16>, ([i32; 3], [i32; 3]));
+
 pub struct Explosion {
     pub at: [i32; 3],
     origin: [i32; 3],
@@ -1711,7 +1714,7 @@ pub struct Explosion {
     /// was measured on (plan 240, F3). The poses never change during the
     /// burst; a box is measured again only if the sizes did. Derived, not
     /// saved: a loaded burst measures on its first step.
-    boxes: Vec<(Vec<u16>, ([i32; 3], [i32; 3]))>,
+    boxes: Vec<MeasuredBox>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
     /// Cells of the grid whose resistance is captured (ADR-311). The
     /// capture runs under a ceiling per tick and the wave waits for all
@@ -2987,6 +2990,15 @@ impl BlastRange {
             crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("stock tuning");
         let mut collapse = CollapseLayer::new(&world);
         collapse.set_max_body_cells(stock.max_body_cells as usize);
+        // Chunks label on the tick's pool; results come back in index
+        // order, so the layer's answers do not depend on it (plan 240, G4).
+        collapse.set_chunk_map(Box::new(|n, f| {
+            if n < 4 {
+                (0..n).map(f).collect()
+            } else {
+                (0..n).into_par_iter().map(f).collect()
+            }
+        }));
         completed("collapse");
         let bodies = Bodies::new(
             stock.max_bodies,
