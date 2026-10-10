@@ -2,179 +2,71 @@
 //!
 //! `docs/03-determinism.md` объявляет golden-хеш центральной проверкой
 //! проекта: «изменение любого из перечисленного ломает golden-файлы».
-//! Ломаться было нечему. Хеш жил в `docs/11-roadmap.md` и в тексте ADR,
-//! то есть сверять его с выдачей `sim-cli` полагалось человеку, глазами,
-//! после каждой правки симуляции.
-//!
-//! Проверено ревизией: вес расталкивания изменён на одну единицу —
-//! траектория каждого юнита в игре, — `cargo test --release` дал
-//! 273 passed, 0 failed, а хеш уехал с `1d8c8fa345867fd1`
-//! на `dcb9123793d05b97` (ADR-181).
+//! Эталонный сценарий — бой на полигоне (ADR-662): тот же прогон,
+//! что печатает `sim-cli --ticks 600 --dump-hash`, и то же число,
+//! что записано в `docs/11-roadmap.md`.
 //!
 //! **Числа здесь и в каноне обязаны совпадать.** Если этот тест упал,
 //! а изменение симуляции было намеренным, — новый хеш записывается
 //! и сюда, и в `docs/11-roadmap.md`, одним коммитом. Если изменение
 //! не было намеренным, тест только что нашёл десинк.
+//!
+//! Хеш — свёртка снимка состояния целиком, рельеф полигона входит
+//! в него вместе с юнитами, обломками и волнами: отдельного слепка
+//! мира, как у прежнего ядра (ADR-217), не нужно.
 
-/// Хеш тысячного тика эталонного сценария: сид 42, пять тысяч юнитов.
-///
-/// Тот же прогон, что печатает `sim-cli --seed 42 --ticks 1000
-/// --dump-hash`, и то же число, что записано в `docs/11-roadmap.md`.
-const GOLDEN_1000: u64 = 0x61d6_a667_3241_19e8;
+use modding::explosion::ExplosionConfig;
+use modding::range::RangeLayout;
+use modding::range_skirmish::WorldBattle;
+use sim_core::blast::BlastRange;
 
-const SEED: u64 = 42;
-const UNITS: usize = 5000;
+/// Хеш шестисотого тика эталонного боя.
+const GOLDEN_600: u64 = 0xb5e8_7f81_b44c_681c;
 
-/// Сценарий собирается **из тех же данных, что у игры**.
-///
-/// `include_str!` разворачивается на сборке: ввода-вывода в тесте
-/// не появляется, а число из `data/*.ron` подставляется настоящее.
-/// Литералы здесь были бы вторым источником правды, и разошлись бы
-/// они молча.
-fn reference() -> sim_core::Reference {
-    let tuning =
-        sim_core::Tuning::from_ron(include_str!("../../../data/sim.ron")).expect("data/sim.ron");
-    let weapons = modding::weapons::from_ron(include_str!("../../../data/weapons.ron"))
-        .expect("data/weapons.ron");
-    sim_core::Reference::new(SEED, UNITS, tuning, weapons)
+/// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
+/// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
+/// здесь были бы вторым источником правды.
+fn reference() -> BlastRange {
+    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+    let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
+    let preset = WorldBattle::from_ron(include_str!("../../../data/battle-world.ron")).unwrap();
+    BlastRange::world_battle(config, layout, preset).unwrap()
 }
 
-/// **Эталонный сценарий даёт записанный хеш.**
+/// **Эталонный бой даёт записанный хеш**, и прогон нагружает то, что
+/// хеш объявляет покрытым (ADR-116): обе армии стреляют, юниты гибнут,
+/// слой обрушения роняет рельеф, волны живут, обломки летят. Хеш над
+/// холостой фазой не закреплял бы ничего.
 #[test]
-fn the_reference_scenario_hashes_what_was_recorded() {
-    let mut r = reference();
-    let mut hash = 0u64;
-    for _ in 0..1000 {
-        hash = r.tick();
+fn the_reference_battle_hashes_what_was_recorded() {
+    let mut sim = reference();
+    let mut waves = 0usize;
+    for _ in 0..600 {
+        sim.step();
+        waves = waves.max(sim.battle.wave_counts().iter().sum());
     }
+    let fired = [true, false].map(|side| {
+        (0..sim.units.len())
+            .filter(|&id| sim.allied(id) == side)
+            .map(|id| sim.battle.actors[id].fired)
+            .sum::<u32>()
+    });
+    let dead = sim.units.iter().filter(|u| !u.status.alive).count();
+    assert!(
+        fired.iter().all(|&n| n > 0),
+        "сторона не стреляла: {fired:?}"
+    );
+    assert!(dead > 0, "за 600 тиков боя никто не погиб");
+    assert!(sim.collapsed_cells > 0, "слой обрушения не работал");
+    assert!(waves > 0, "ни одной взрывной волны");
+    assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
+    assert!(sim.matter.economy.ledger.balanced());
+    let hash = sim.state_hash();
     assert_eq!(
-        hash, GOLDEN_1000,
-        "хеш эталонного сценария изменился: {hash:016x} вместо {GOLDEN_1000:016x}.\n\
+        hash, GOLDEN_600,
+        "хеш эталонного боя изменился: {hash:016x} вместо {GOLDEN_600:016x}.\n\
          Если симуляция менялась намеренно — записать новое число сюда \
          и в docs/11-roadmap.md одним коммитом.\n\
          Если нет — это десинк, и искать его надо сейчас."
-    );
-}
-
-/// **Число воркеров на хеш не влияет.**
-///
-/// Параллельная фаза читает снимок начала фазы и сводит только
-/// `wrapping_add` (`CLAUDE.md`). Нарушение этого даёт расхождение
-/// не на каждом прогоне, а изредка — значит, ловить его обязан тест,
-/// а не наблюдение.
-///
-/// Триста тиков, а не тысяча: расхождение по воркерам проявляется
-/// на первых же тиках, а полная тысяча здесь стоила бы вчетверо
-/// дольше ради того же ответа.
-#[test]
-fn the_hash_does_not_depend_on_the_number_of_workers() {
-    const TICKS: u32 = 300;
-    let mut serial = reference();
-    let mut want = 0u64;
-    for _ in 0..TICKS {
-        want = serial.tick();
-    }
-    for threads in [2usize, 4, 8] {
-        let mut r = reference();
-        let mut got = 0u64;
-        for _ in 0..TICKS {
-            got = r.tick_par(threads);
-        }
-        assert_eq!(
-            got, want,
-            "{threads} воркеров дают {got:016x} вместо {want:016x}"
-        );
-    }
-}
-
-/// **Хеш зависит от симуляции, а не от одного счётчика.**
-///
-/// Сторож на сам golden-тест. Хеш, в который входит слишком мало,
-/// пройдёт и на сломанной симуляции — ровно та болезнь, от которой
-/// ADR-116 лечил эталонный сценарий. Здесь проверяется обратное:
-/// сдвиг **одного** юнита на один воксель обязан менять хеш.
-#[test]
-fn a_single_voxel_of_difference_changes_the_hash() {
-    let mut a = reference();
-    let mut b = reference();
-    // Сдвинуть одного юнита до первого же тика.
-    let i = b.world.units.live()[0] as usize;
-    b.world.units.x[i] += 1;
-    let (mut ha, mut hb) = (0u64, 0u64);
-    for _ in 0..8 {
-        ha = a.tick();
-        hb = b.tick();
-    }
-    assert_ne!(
-        ha, hb,
-        "сдвиг юнита на воксель не изменил хеш — в него входит не то"
-    );
-}
-
-/// Слепок мира: материал по разреженной решётке плюс высота
-/// поверхности по колонкам.
-///
-/// **Существует потому, что хеш тика мира не видит.** `Ground::hash`
-/// сводит очередь правок и число тел — не содержимое. Значит материал
-/// входит в хеш только через правки, случившиеся **в хешируемый тик**,
-/// и перекладка материалов по всей карте проходит мимо: замерено, что
-/// правило залегания, сменившее материал на 11.9% поверхности
-/// эталонной карты, не сдвинуло хеш ни на тиках 300, 1000, ни на 1500
-/// (ADR-217).
-///
-/// Решётка редкая нарочно: полный обход 640×320×640 — сто тридцать
-/// миллионов обращений на каждый прогон теста. Восемь вокселей
-/// по горизонтали и четыре по высоте дают 512 000 точек, и этого
-/// хватает, чтобы заметить смену правила в генераторе.
-///
-/// Высота поверхности идёт отдельным слагаемым: выработку карты
-/// разрежённая решётка по объёму почти не видит, а по колонкам видит
-/// сразу.
-fn world_digest(w: &voxel::World) -> u64 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for z in (0..w.nz).step_by(8) {
-        for y in (0..w.ny).step_by(4) {
-            for x in (0..w.nx).step_by(8) {
-                let m = w.material(x, y, z) as u64;
-                h = h.wrapping_mul(0x1000_0000_01b3).wrapping_add(m);
-            }
-        }
-    }
-    for z in (0..w.nz).step_by(4) {
-        for x in (0..w.nx).step_by(4) {
-            let mut top = 0u32;
-            for y in (0..w.ny).rev() {
-                if w.material(x, y, z) != voxel::store::AIR {
-                    top = y;
-                    break;
-                }
-            }
-            h = h.wrapping_mul(0x1000_0000_01b3).wrapping_add(top as u64);
-        }
-    }
-    h
-}
-
-/// Слепок мира эталонного сценария после тысячи тиков.
-const GOLDEN_WORLD_1000: u64 = 0x9e18_bdc9_7b85_c557;
-
-/// **Мир эталонного прогона тот же, что записан.**
-#[test]
-fn the_reference_world_is_what_was_recorded() {
-    let mut r = reference();
-    let before = world_digest(&r.world.ground().expect("земля").world);
-    for _ in 0..1000 {
-        r.tick();
-    }
-    let after = world_digest(&r.world.ground().expect("земля").world);
-    assert_ne!(
-        before, after,
-        "за тысячу тиков мир не изменился — сценарий не копает и не стреляет"
-    );
-    assert_eq!(
-        after, GOLDEN_WORLD_1000,
-        "мир эталонного сценария изменился: {after:016x} вместо {GOLDEN_WORLD_1000:016x}.\n\
-         Если генератор или копка менялись намеренно — записать новое число сюда.\n\
-         Если нет — генератор разошёлся, и сохранения с ним."
     );
 }

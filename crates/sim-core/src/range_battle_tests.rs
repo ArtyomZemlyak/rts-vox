@@ -3477,60 +3477,6 @@ fn the_world_battle_hash_does_not_depend_on_physics_workers() {
     assert!(!r.set_physics_workers(0) && !r.set_physics_workers(9));
 }
 
-/// State hash of the stock world battle after 600 ticks (analysis 240,
-/// B7). The range engine had no pinned hash: an unintended change to the
-/// game the window plays passed every test. If this fails and the change
-/// was intended, record the new number here and say why in the commit;
-/// if it was not, it is a desync.
-const RANGE_GOLDEN_600: u64 = 0xb5e8_7f81_b44c_681c;
-
-/// **The world battle hashes what was recorded**, and the run loads what
-/// the hash claims to cover (ADR-116): both armies fire, hulls take
-/// damage, units die, the collapse layer brings terrain down, and pieces
-/// fly. A hash over an idle phase would pin nothing.
-#[test]
-fn the_world_battle_hashes_what_was_recorded() {
-    let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(
-        "../../../data/battle-world.ron"
-    ))
-    .unwrap();
-    let mut layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
-    layout.battle = true;
-    layout.units = preset.units;
-    layout.blocks.extend(preset.blocks);
-    layout.course.as_mut().unwrap().patrols.clear();
-    let config = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
-    let mut sim = BlastRange::with_layout(config, layout).unwrap();
-    assert!(sim.set_ai_vs_ai(true));
-    sim.start_battle().unwrap();
-    let mut waves = 0usize;
-    for _ in 0..600 {
-        sim.step();
-        waves = waves.max(sim.battle.waves.len());
-    }
-    let fired = [true, false].map(|side| {
-        (0..sim.units.len())
-            .filter(|&id| sim.allied(id) == side)
-            .map(|id| sim.battle.actors[id].fired)
-            .sum::<u32>()
-    });
-    let dead = sim.units.iter().filter(|u| !u.status.alive).count();
-    assert!(
-        fired.iter().all(|&n| n > 0),
-        "a side never fired: {fired:?}"
-    );
-    assert!(dead > 0, "nobody died in 600 ticks of battle");
-    assert!(sim.collapsed_cells > 0, "the collapse layer never ran");
-    assert!(waves > 0, "no blast wave ever lived");
-    assert!(!sim.matter.debris.fragments.is_empty(), "no pieces");
-    assert!(sim.matter.economy.ledger.balanced());
-    let hash = sim.state_hash();
-    assert_eq!(
-        hash, RANGE_GOLDEN_600,
-        "range battle hash changed: {hash:016x} instead of {RANGE_GOLDEN_600:016x}"
-    );
-}
-
 #[test]
 fn world_ai_armies_fire_standard_ammunition_without_annihilation() {
     let preset = modding::range_skirmish::WorldBattle::from_ron(include_str!(

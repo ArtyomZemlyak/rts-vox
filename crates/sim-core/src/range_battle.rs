@@ -827,6 +827,28 @@ pub(super) fn aim_point(u: &RangeUnit) -> [i32; 3] {
     u.world_pos(best.map_or(origin, |(_, _, p)| p))
 }
 impl BlastRange {
+    /// The reference scenario (ADR-662): the authored world battle on the
+    /// kilometre range, both sides under rules AI, already started. The
+    /// golden test and `sim-cli` hash exactly this, so the scenario is
+    /// built here and nowhere else (ADR-157). Files are read by the caller.
+    pub fn world_battle(
+        config: ExplosionConfig,
+        mut layout: RangeLayout,
+        preset: modding::range_skirmish::WorldBattle,
+    ) -> Result<Self, String> {
+        layout.battle = true;
+        layout.units = preset.units;
+        layout.blocks.extend(preset.blocks);
+        if let Some(course) = &mut layout.course {
+            course.patrols.clear();
+        }
+        let mut sim = Self::with_layout(config, layout)?;
+        if !sim.set_ai_vs_ai(true) {
+            return Err("world battle: rules AI refused".into());
+        }
+        sim.start_battle()?;
+        Ok(sim)
+    }
     pub fn battle_mode(&self) -> bool {
         self.layout.as_ref().is_some_and(|l| l.battle)
     }

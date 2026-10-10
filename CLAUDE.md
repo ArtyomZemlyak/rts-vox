@@ -219,7 +219,7 @@ Bevy ломает API каждые 3.5–5 месяцев, и обучающий
 ```
 cargo test                      # включая golden/property/replay
 cargo bench                     # пороги в docs/10-budgets.md — регрессия = провал
-cargo run -p sim-cli -- --seed 42 --ticks 1000 --dump-hash
+cargo run -p sim-cli -- --ticks 600 --dump-hash   # бой полигона, ADR-662
 ```
 
 Типы тестов и что они ловят — `docs/03-determinism.md`.
