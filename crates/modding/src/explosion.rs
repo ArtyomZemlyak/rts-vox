@@ -278,3 +278,50 @@ mod display_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod gravity_tests {
+    use super::*;
+
+    /// Одно тяготение на юнита, кусок и снаряд (ADR-173, ADR-658):
+    /// пресеты оружия и огонь полигона повторяют число `data/sim.ron`.
+    #[test]
+    fn every_gravity_in_data_is_the_one_from_sim_ron() {
+        let one = crate::tuning::Tuning::from_ron(include_str!("../../../data/sim.ron"))
+            .expect("data/sim.ron")
+            .gravity;
+        let presets = [
+            ("explosion", include_str!("../../../data/explosion.ron")),
+            (
+                "kinetic-shell",
+                include_str!("../../../data/kinetic-shell.ron"),
+            ),
+            (
+                "canister-shell",
+                include_str!("../../../data/canister-shell.ron"),
+            ),
+            (
+                "energy-cannon",
+                include_str!("../../../data/energy-cannon.ron"),
+            ),
+            ("anni-cannon", include_str!("../../../data/anni-cannon.ron")),
+            ("machine-gun", include_str!("../../../data/machine-gun.ron")),
+            (
+                "flamethrower",
+                include_str!("../../../data/flamethrower.ron"),
+            ),
+            ("laser", include_str!("../../../data/laser.ron")),
+        ];
+        for (name, text) in presets {
+            let c = ExplosionConfig::from_ron(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(c.gravity, one, "{name}.ron: тяготение не то, что в sim.ron");
+        }
+        let fire =
+            crate::range_fire::Tuning::from_ron(include_str!("../../../data/range-fire.ron"))
+                .expect("data/range-fire.ron");
+        assert_eq!(
+            fire.gravity, one,
+            "range-fire.ron: тяготение не то, что в sim.ron"
+        );
+    }
+}
