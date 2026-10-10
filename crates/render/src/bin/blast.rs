@@ -372,6 +372,7 @@ fn main() {
     let mut profile_core = false;
     let mut profile_trigger_ms = None;
     let mut navigation_workers = None;
+    let mut physics_workers = None;
     let mut compute_workers = None;
     let mut gas_cell_mm = None;
     let args: Vec<String> = std::env::args().collect();
@@ -417,6 +418,16 @@ fn main() {
                     .expect("--compute-workers 1..=16");
                 assert!((1..=16).contains(&workers), "--compute-workers 1..=16");
                 compute_workers = Some(workers);
+            }
+            "--physics-workers" => {
+                i += 1;
+                let workers = args
+                    .get(i)
+                    .expect("--physics-workers 1..=8")
+                    .parse::<usize>()
+                    .expect("--physics-workers 1..=8");
+                assert!((1..=8).contains(&workers), "--physics-workers 1..=8");
+                physics_workers = Some(workers);
             }
             "--nav-workers" => {
                 i += 1;
@@ -838,7 +849,8 @@ fn main() {
         );
     }
     profiler.navigation_workers = navigation_workers;
-    profiler.configure_navigation(&mut sim);
+    profiler.physics_workers = physics_workers;
+    profiler.configure_workers(&mut sim);
     profiler.clouds = profile_clouds;
     profiler.gpu = profile_gpu;
     assert!(
@@ -1640,7 +1652,7 @@ fn advance(
             eprintln!("{}", scene.notice);
             return;
         };
-        profile.configure_navigation(&mut scene.sim);
+        profile.configure_workers(&mut scene.sim);
         scene.notice.clear();
         if keys.just_pressed(KeyCode::F5) {
             *workshop = Workshop::new(reloaded, workshop.editing);

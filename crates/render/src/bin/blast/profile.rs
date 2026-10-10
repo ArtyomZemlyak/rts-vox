@@ -25,6 +25,8 @@ pub struct Profile {
     /// Optional fixed route pool for paired native performance experiments.
     /// Reapply when the workshop replaces the simulation, not every frame.
     pub navigation_workers: Option<usize>,
+    /// The scene's own pool; the global Rayon environment does not set it.
+    pub physics_workers: Option<usize>,
     action_step: u8,
     action_time: f64,
     gpu_samples: std::collections::BTreeMap<String, GpuSamples>,
@@ -257,7 +259,10 @@ impl Profile {
         );
         self.trigger = Some(core::Trigger::new(threshold_ms));
     }
-    pub fn configure_navigation(&self, sim: &mut BlastRange) {
+    pub fn configure_workers(&self, sim: &mut BlastRange) {
+        if let Some(workers) = self.physics_workers {
+            assert!(sim.set_physics_workers(workers), "--physics-workers 1..=8");
+        }
         if let Some(workers) = self.navigation_workers {
             assert!(
                 sim.set_navigation_workers(workers),
@@ -354,6 +359,7 @@ pub fn begin(
             bevy::tasks::ComputeTaskPool::try_get().map_or(0, |pool| pool.thread_num())
         );
         println!("PROFILE navigation_override={:?}", p.navigation_workers);
+        println!("PROFILE physics_override={:?}", p.physics_workers);
         let [physics, navigation] = scene.sim.worker_counts();
         println!("PROFILE physics_workers={physics} navigation_workers={navigation}");
         if p.core {

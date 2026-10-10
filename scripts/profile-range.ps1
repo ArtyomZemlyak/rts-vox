@@ -22,7 +22,10 @@ param(
     [switch]$CheckEveryFrame,
     # Existing frozen build: no overwriting target/release for A/B runs.
     [string]$BinaryPath = '',
-    [ValidateRange(0, 128)][int]$PhysicsWorkers = 0,
+    # Zero preserves the scene default. This is the owned simulation pool.
+    [ValidateRange(0, 8)][int]$PhysicsWorkers = 0,
+    # Separate global Rayon pool, including legacy frozen executables.
+    [ValidateRange(0, 128)][int]$RayonWorkers = 0,
     [ValidateRange(0, 16)][int]$ComputeWorkers = 0,
     [ValidateRange(960, 8192)][int]$WindowWidth = 1600,
     [ValidateRange(540, 8192)][int]$WindowHeight = 900,
@@ -35,7 +38,7 @@ $originalRayonEnvironment = $env:RAYON_NUM_THREADS
 $originalRustLog = $env:RUST_LOG
 Push-Location $repo
 try {
-    if ($PhysicsWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$PhysicsWorkers" }
+    if ($RayonWorkers -gt 0) { $env:RAYON_NUM_THREADS = "$RayonWorkers" }
     if ($CorePhases -and $TriggerMilliseconds -gt 0) { throw '-CorePhases and -TriggerMilliseconds are separate diagnostic modes.' }
     if ($BinaryPath -and -not $SkipBuild) { throw '-BinaryPath requires -SkipBuild.' }
     if ($RenderSpanLimit -gt 0 -and -not $RenderTimeline) { throw '-RenderSpanLimit requires -RenderTimeline.' }
@@ -79,6 +82,7 @@ try {
                 BinaryPath = $binary; BinarySha256 = $binaryHash; BuildEvidence = $buildEvidence
                 InputHashes = @(Get-RangeInputHashes -Repo $repo)
                 RayonEnvironment = $env:RAYON_NUM_THREADS; NavigationWorkers = $NavigationWorkers
+                PhysicsWorkers = $PhysicsWorkers
                 ComputeWorkers = $ComputeWorkers
                 CameraTour = [bool]$CameraTour
                 GpuTimestamps = [bool]$Gpu; CpuThreads = [bool]$CpuThreads; OsPressure = [bool]$OsPressure; CorePhases = [bool]$CorePhases; CoreTriggerMilliseconds = $TriggerMilliseconds; RenderTimeline = [bool]$RenderTimeline
@@ -125,6 +129,7 @@ try {
             if ($CorePhases) { $arguments += '--profile-core' }
             if ($TriggerMilliseconds -gt 0) { $arguments += @('--profile-trigger-ms', $TriggerMilliseconds) }
             if ($NavigationWorkers -gt 0) { $arguments += @('--nav-workers', $NavigationWorkers) }
+            if ($PhysicsWorkers -gt 0) { $arguments += @('--physics-workers', $PhysicsWorkers) }
             if ($ComputeWorkers -gt 0) { $arguments += @('--compute-workers', $ComputeWorkers) }
             $manifest.Arguments = $arguments
             $manifest.Status = 'running'
@@ -170,9 +175,9 @@ try {
                 $reasons.Add('render_timeline_artifact_missing')
             }
             if ($RenderTasks -and (-not (Test-Path -LiteralPath (Join-Path $directory "$scenario.tasks.csv")) -or -not (Test-Path -LiteralPath (Join-Path $directory "$scenario.task-names.csv")))) { $reasons.Add('render_tasks_artifact_missing') }
-            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure
+            $validity = Get-RangeValidity -Rows $rows -Reasons $reasons.ToArray() -Scenario $scenario -Log $content -CorePhases:$CorePhases -TriggerPhases:($TriggerMilliseconds -gt 0) -RenderTimeline:$RenderTimeline -RenderSpanLimit $renderBudget -RenderTasks:$RenderTasks -ComputeWorkers $ComputeWorkers -PhysicsWorkers $PhysicsWorkers -NavigationWorkers $NavigationWorkers -CameraTour:$CameraTour -OsPressure:$OsPressure
             $manifest.Validity = $validity
-            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|navigation_override=|simulation_ticks=|render_context)' })
+            $manifest.RuntimeEvidence = @($content -split '\r?\n' | Where-Object { $_ -match '^PROFILE (schema=|core_trace_schema=|stall_capture_schema=|stall_windows=|stall_frame_signal|stall_peak_signal|render_timeline_schema|render_tasks_|stall_retained_frame|physics_task_sampling=|tick_rate=|camera_tour_|adapter|state_hash=|battle=|compute_workers=|compute_override=|physics_workers=|physics_override=|navigation_override=|simulation_ticks=|render_context)' })
             $manifest.Status = 'completed'
             $manifest.FinishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             Save-RangeManifest $manifest $manifestPath

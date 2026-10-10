@@ -156,7 +156,7 @@ fn main() {
         collapse_stress(&mode[1]);
         return;
     }
-    println!("physics_workers={}", rayon::current_num_threads());
+    println!("rayon_global_workers={}", rayon::current_num_threads());
     let assault = args.iter().any(|a| a == "--assault");
     let siege = args
         .windows(2)
@@ -375,6 +375,14 @@ fn main() {
     if let Some(workers) = workers {
         assert!(sim.set_navigation_workers(workers), "workers: 1..=8");
     }
+    if let Some(w) = args.windows(2).find(|w| w[0] == "--physics-workers") {
+        assert!(
+            sim.set_physics_workers(w[1].parse().expect("physics workers")),
+            "physics workers: 1..=8"
+        );
+    }
+    let [physics, navigation] = sim.worker_counts();
+    println!("physics_workers={physics} navigation_workers={navigation}");
     if let Some(path) = args
         .windows(2)
         .find(|w| w[0] == "--restore-file")
@@ -1680,6 +1688,10 @@ fn restore_snapshot(config: modding::explosion::ExplosionConfig, bytes: &[u8]) -
 /// Isolated complete-batch qualification: setup, serialization and log I/O are
 /// outside the measured collapse calls. No weapon or timing semantics change.
 fn collapse_stress(mode: &str) {
+    if mode == "held" {
+        collapse_held_stress();
+        return;
+    }
     use voxel::{bodies::Bodies, collapse::CollapseLayer, world::Edit, Generator, World};
     struct Terrain(bool);
     impl Generator for Terrain {
@@ -1789,6 +1801,82 @@ fn collapse_stress(mode: &str) {
         samples[samples.len() * 95 / 100],
         samples.last().unwrap()
     );
+}
+
+/// Repeated regional holds must not change the eventual connected bodies.
+/// Setup and serialization are outside the measured passes.
+fn collapse_held_stress() {
+    use voxel::{bodies::Bodies, collapse::CollapseLayer, Generator, World};
+    struct Slabs;
+    impl Generator for Slabs {
+        fn material(&self, x: u32, y: u32, z: u32) -> u16 {
+            let slab_axis = |p| [16, 112, 208].iter().any(|&lo| (lo..lo + 80).contains(&p));
+            if y < 8 || ((36..40).contains(&y) && slab_axis(x) && slab_axis(z)) {
+                2
+            } else {
+                0
+            }
+        }
+    }
+    for repeat in 0..3 {
+        let mut world = World::new(320, 96, 320, 4_000_000, Box::new(Slabs));
+        world.max_materialize_per_tick = 4_000_000;
+        for x in [16, 112, 208] {
+            for z in [16, 112, 208] {
+                world.queue_dig(x, 36, z);
+            }
+        }
+        world.flush();
+        let edits = world.edits().to_vec();
+        assert_eq!(edits.len(), 9);
+        let mut collapse = CollapseLayer::new(&world);
+        collapse.set_max_body_cells(32_768);
+        let mut bodies = Bodies::new(16, fx::Fx::from_int(100));
+        collapse.apply_iter_held(&mut world, edits.into_iter(), &mut bodies, |_| {}, &|_| {
+            true
+        });
+        for _ in 0..64 {
+            collapse.apply_iter_held(&mut world, std::iter::empty(), &mut bodies, |_| {}, &|_| {
+                true
+            });
+        }
+        let mut samples = Vec::new();
+        let mut peak = 0;
+        for _ in 0..300 {
+            let start = Instant::now();
+            let st = collapse.apply_iter_held(
+                &mut world,
+                std::iter::empty(),
+                &mut bodies,
+                |_| {},
+                &|_| true,
+            );
+            samples.push(start.elapsed().as_micros());
+            assert_eq!(st.held, 9, "fixture must retain all connected slabs");
+            assert_eq!(st.gather_candidates, 9 * (80 * 4 * 80 - 1));
+            assert!(bodies.list.is_empty());
+            peak = peak.max(st.gather_buffer_peak);
+        }
+        let released =
+            collapse.apply_iter_held(&mut world, std::iter::empty(), &mut bodies, |_| {}, &|_| {
+                false
+            });
+        assert_eq!(released.detached, 9);
+        assert_eq!(released.cells, 9 * (80 * 4 * 80 - 1));
+        assert_eq!(bodies.list.len(), 9);
+        let mut snapshot = fx::blob::Blob::new();
+        world.save(&mut snapshot);
+        world.save_transfers(&mut snapshot);
+        collapse.save(&mut snapshot);
+        bodies.save(&mut snapshot);
+        let hash = snapshot.v.iter().fold(0xcbf29ce484222325u64, |h, v| {
+            (h ^ u64::from(*v)).wrapping_mul(0x100000001b3)
+        });
+        let sum: u128 = samples.iter().sum();
+        samples.sort_unstable();
+        println!("collapse_stress mode=held repeat={repeat} calls=300 mean_us={} p50_us={} p95_us={} p99_us={} max_us={} candidates={} buffer_peak={peak} released={} hash={hash:016x}",
+            sum / 300, samples[150], samples[285], samples[297], samples[299], released.cells, released.detached);
+    }
 }
 
 #[cfg(test)]

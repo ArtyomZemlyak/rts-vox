@@ -174,8 +174,10 @@ fn native_worker_override_preserves_battle_across_rebuild() {
     let mut parallel = BlastRange::with_layout(config(false, false), layout.clone()).unwrap();
     let mut serial_profile = profile::Profile::new(None, 20.0);
     serial_profile.navigation_workers = Some(1);
+    serial_profile.physics_workers = Some(1);
     let mut parallel_profile = profile::Profile::new(None, 20.0);
     parallel_profile.navigation_workers = Some(8);
+    parallel_profile.physics_workers = Some(8);
     for round in 0..2 {
         if round > 0 {
             serial = serial
@@ -185,8 +187,10 @@ fn native_worker_override_preserves_battle_across_rebuild() {
                 .rebuilt_with_layout(config(false, false), layout.clone(), &workshop.validator)
                 .unwrap();
         }
-        serial_profile.configure_navigation(&mut serial);
-        parallel_profile.configure_navigation(&mut parallel);
+        serial_profile.configure_workers(&mut serial);
+        parallel_profile.configure_workers(&mut parallel);
+        assert_eq!(serial.worker_counts(), [1, 1]);
+        assert_eq!(parallel.worker_counts(), [8, 8]);
         serial.start_battle().unwrap();
         parallel.start_battle().unwrap();
         assert_eq!(serial.snapshot(), parallel.snapshot());

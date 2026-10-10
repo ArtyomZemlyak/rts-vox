@@ -104,7 +104,7 @@ function Get-RangeTaskLogFilter {
 
 function Get-RangeValidity {
     param([object[]]$Rows, [string[]]$Reasons = @(), [string]$Scenario, [string]$Log,
-        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [switch]$CameraTour, [switch]$OsPressure)
+        [switch]$CorePhases, [switch]$TriggerPhases, [switch]$RenderTimeline, [int]$RenderSpanLimit = 0, [switch]$RenderTasks, [int]$ComputeWorkers = 0, [int]$PhysicsWorkers = 0, [int]$NavigationWorkers = 0, [switch]$CameraTour, [switch]$OsPressure)
     $issues = [System.Collections.Generic.List[string]]::new()
     foreach ($reason in $Reasons) { $issues.Add($reason) }
     $timing = Get-RangeFrameTimes -Rows $Rows
@@ -143,6 +143,19 @@ function Get-RangeValidity {
     if (@($focusValues | Select-Object -Unique).Count -gt 1) { $issues.Add('render_focus_changed_during_run') }
     if ($Log -notmatch 'PROFILE state_hash=[0-9a-f]{16}\b') { $issues.Add('state_hash_missing') }
     if ($Log -notmatch 'PROFILE physics_workers=\d+ navigation_workers=\d+') { $issues.Add('actual_worker_counts_missing') }
+    $workers = [regex]::Matches($Log, '(?m)^PROFILE physics_workers=(\d+) navigation_workers=(\d+)\r?$')
+    foreach ($pool in @(
+        @{ Name = 'physics'; Requested = $PhysicsWorkers; Group = 1 },
+        @{ Name = 'navigation'; Requested = $NavigationWorkers; Group = 2 }
+    )) {
+        if ($pool.Requested -le 0) { continue }
+        $override = [regex]::Matches($Log, ('(?m)^PROFILE ' + $pool.Name + '_override=Some\((\d+)\)\r?$'))
+        if ($workers.Count -ne 1 -or $override.Count -ne 1 -or
+            [int]$workers[0].Groups[$pool.Group].Value -ne $pool.Requested -or
+            [int]$override[0].Groups[1].Value -ne $pool.Requested) {
+            $issues.Add($pool.Name + '_workers_override_mismatch')
+        }
+    }
     if ($Log -notmatch 'PROFILE adapter_name=.+adapter_backend=.+adapter_device_type=') {
         $issues.Add('actual_adapter_missing')
     } elseif ($Log -match 'adapter_device_type=Cpu\b') {
@@ -193,7 +206,9 @@ function Get-RangeValidity {
         }
     }
     $valid = $issues.Count -eq 0
-    $meetsRate = $Scenario -ne 'world-battle' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
+    # Only the authored actions diagnostic deliberately pauses/resets the clock.
+    # A fast renderer over a slowed canister/drive/shell simulation is no FPS acceptance.
+    $meetsRate = $Scenario -eq 'actions' -or $ticks -ge ([long][Math]::Floor($seconds * $rate) - 1)
     [pscustomobject]@{
         ValidForComparison = $valid
         AcceptanceEligible = $valid -and -not $CorePhases -and -not $TriggerPhases -and -not $RenderTimeline -and -not $taskBuild -and -not $RenderTasks -and -not $OsPressure -and $meetsRate
