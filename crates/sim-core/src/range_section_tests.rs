@@ -37,6 +37,9 @@ fn sections_born_below_the_crater_floor_keep_matter_and_roundtrip() {
         .map(|f| r.matter.economy.ledger.held(f.held))
         .sum();
     let count = r.matter.debris.fragments.len();
+    // Only the boundary correction may change the pieces here: at the
+    // fixture's 8-unit pile cell no two of them merge.
+    r.matter.tuning.pile_cell = 8;
     r.world.flush();
     r.matter.flush(&r.world, true, 98, 0, &[], &[]);
     assert_eq!(count, r.matter.debris.fragments.len());

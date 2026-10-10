@@ -1707,6 +1707,11 @@ pub struct Explosion {
     turret_pitches: Vec<i32>,
     /// Segment frames of each unit when the burst began (ADR-278).
     seg_poses: Vec<Vec<crate::damage::Frame>>,
+    /// Each unit's box at the frozen poses above, with the body sizes it
+    /// was measured on (plan 240, F3). The poses never change during the
+    /// burst; a box is measured again only if the sizes did. Derived, not
+    /// saved: a loaded burst measures on its first step.
+    boxes: Vec<(Vec<u16>, ([i32; 3], [i32; 3]))>,
     pending: std::collections::VecDeque<phys::blast::Hit>,
     /// Cells of the grid whose resistance is captured (ADR-311). The
     /// capture runs under a ceiling per tick and the wave waits for all
@@ -1716,6 +1721,37 @@ pub struct Explosion {
 }
 
 impl Explosion {
+    /// Each unit's box at the burst's frozen poses: as
+    /// `bounds_aimed` measures it, measured once per body size.
+    fn unit_boxes(&mut self, units: &[RangeUnit]) -> Vec<([i32; 3], [i32; 3])> {
+        let mut memo = std::mem::take(&mut self.boxes);
+        memo.resize_with(units.len(), Default::default);
+        let out = units
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let b = &u.body;
+                let mut key = vec![b.vol.nx, b.vol.ny, b.vol.nz, b.turret_y];
+                for seg in &b.segments {
+                    key.extend([seg.body.vol.nx, seg.body.vol.ny, seg.body.vol.nz]);
+                }
+                let key: Vec<u16> = key.into_iter().map(u16::from).collect();
+                let (known, bounds) = &mut memo[i];
+                if *known != key || known.is_empty() {
+                    *bounds = u.bounds_aimed(
+                        Some(&self.poses[i]),
+                        &self.seg_poses[i],
+                        self.turret_deltas[i],
+                        self.turret_pitches[i],
+                    );
+                    *known = key;
+                }
+                *bounds
+            })
+            .collect::<Vec<_>>();
+        self.boxes = memo;
+        out
+    }
     /// Capture material resistance once. Results do not depend on how many
     /// edits the world has drained when a later piece of the wave is visited.
     pub fn new(w: &World, at: [i32; 3], c: &ExplosionConfig, units: &[RangeUnit]) -> Self {
@@ -1767,6 +1803,7 @@ impl Explosion {
             turret_deltas: units.iter().map(|u| u.turret_delta).collect(),
             turret_pitches: units.iter().map(|u| u.turret_pitch).collect(),
             seg_poses: units.iter().map(|u| u.seg_frames.clone()).collect(),
+            boxes: Default::default(),
             origin,
             cell: c.cell_units,
             wave: Wave::new(n, c.energy, vec![0; n * n * n]).expect("validated explosion"),
@@ -1976,18 +2013,7 @@ impl Explosion {
                 })
             })
             .collect();
-        let boxes: Vec<_> = units
-            .iter()
-            .enumerate()
-            .map(|(i, u)| {
-                u.bounds_aimed(
-                    Some(&self.poses[i]),
-                    &self.seg_poses[i],
-                    self.turret_deltas[i],
-                    self.turret_pitches[i],
-                )
-            })
-            .collect();
+        let boxes = self.unit_boxes(units);
         if FAIR && !self.contact_resumes.is_empty() {
             self.prefer_body_contacts(&boxes, units.len());
         }
@@ -5719,6 +5745,7 @@ impl Explosion {
             turret_pitches: vec![0; units.len()],
             poses,
             seg_poses,
+            boxes: Default::default(),
             pending,
             contact_cursor,
             body_cursor: 0,

@@ -2740,6 +2740,8 @@ mod tests {
         let mut t = tuning();
         t.blast.max_flying = 0;
         t.blast.push_pct = 0;
+        // The groups below lie one 8-unit pile cell apart.
+        t.blast.pile_cell = 8;
         let build = || {
             let (mut pieces, mut economy) = (Bursts::default(), economy());
             // Interleave donors so grouping cannot use adjacency; different
