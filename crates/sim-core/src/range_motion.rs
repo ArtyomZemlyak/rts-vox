@@ -987,8 +987,11 @@ impl Motion {
                 }
             }
             for z in lo[2].max(0)..=hi[2].min(w.nz as i32 - 1) {
-                for y in lo[1].max(0)..=hi[1].min(w.ny as i32 - 1) {
-                    for x in lo[0].max(0)..=hi[0].min(w.nx as i32 - 1) {
+                for x in lo[0].max(0)..=hi[0].min(w.nx as i32 - 1) {
+                    // Above the column's ceiling there is only air
+                    // (ADR-313): most of a foot's box asks nothing.
+                    let top = w.column_ceiling(x as u32, z as u32) as i32 - 1;
+                    for y in lo[1].max(0)..=hi[1].min(w.ny as i32 - 1).min(top) {
                         let p = [x as u32, y as u32, z as u32];
                         if !self.yielding.contains(&w.material(p[0], p[1], p[2])) {
                             continue;
