@@ -393,8 +393,7 @@ mod tests {
                 assert!(m.debris.claims() <= claims as usize);
                 assert!(m.debris.fragments.len() + m.debris.reserved() <= total as usize);
                 assert!(
-                    m.debris.fragments.iter().filter(|f| !f.resting).count()
-                        + m.debris.reserved()
+                    m.debris.fragments.iter().filter(|f| !f.resting).count() + m.debris.reserved()
                         <= flying as usize
                 );
                 assert!(m.economy.ledger.balanced());
