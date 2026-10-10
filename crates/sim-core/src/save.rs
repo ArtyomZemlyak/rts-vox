@@ -39,6 +39,8 @@
 //! Версия 11 читает версии 8–10 без материальных тел; скорость/дробная
 //! высота старого полёта переносится в подвеску (ADR-253). Сохранения
 //! материального боя до версии 11 отклоняются: правила отказов изменены.
+//! С версии 15 заявка на воксель грунта хранит ожидаемый материал
+//! (ADR-659); более старая берёт его из мира, где копка ещё не прошла.
 
 use crate::{ground, shot, Order, Reference, Tuning, Units, World};
 use fx::blob::{Blob, Scan};
@@ -48,7 +50,7 @@ use fx::rng::Rng;
 pub const MAGIC: [u8; 8] = *b"RTSVOXSV";
 
 /// Версия раскладки. Меняется **вместе** с любым полем формата.
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 
 /// Почему файл не прочитан.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +156,7 @@ pub fn load_with(
     }
     let mut s = Scan::new(&buf[MAGIC.len()..]);
     let v = s.u32();
-    if v != VERSION && !(8..=13).contains(&v) {
+    if v != VERSION && !(8..=14).contains(&v) {
         return Err(LoadError::Version {
             found: v,
             want: VERSION,
@@ -550,6 +552,7 @@ fn load_world(s: &mut Scan, w: &mut World, t: &Tuning, version: u32) -> Result<(
         w.material_bodies.as_ref(),
         w.units.len(),
         version < 13,
+        version >= 15,
     )
     .ok_or(LoadError::WorldMismatch)?;
     if !w.bursts.fragments.is_empty() || !w.bursts.corpses.is_empty() {

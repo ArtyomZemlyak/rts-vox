@@ -1111,7 +1111,7 @@ impl Matter {
         tick: u64,
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
-    ) {
+    ) -> Vec<([u32; 3], voxel::store::Mat)> {
         self.flush_observed(
             w,
             material,
@@ -1121,7 +1121,7 @@ impl Matter {
             yielding,
             |_| {},
             &|_, _| {},
-        );
+        )
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn flush_observed(
@@ -1134,7 +1134,7 @@ impl Matter {
         yielding: &[voxel::store::Mat],
         mut completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
-    ) {
+    ) -> Vec<([u32; 3], voxel::store::Mat)> {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
         for &(edit, old) in w.completed() {
@@ -1145,7 +1145,10 @@ impl Matter {
                 self.annihilate_cells(&[([edit.x, edit.y, edit.z], old)]);
             }
         }
-        self.debris
+        // Confirmed cells without a slot go back to the world (ADR-659);
+        // the caller queues them, as it owns the world.
+        let back = self
+            .debris
             .confirm(w.completed(), &mut self.economy, &self.tuning);
         for &(by, mat) in w.taken() {
             // A voxel consumed by fire went to the combustion sink whatever
@@ -1181,6 +1184,7 @@ impl Matter {
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
         self.damage_waiting = false;
+        back
     }
     pub fn save(&self, b: &mut Blob) {
         assert!(self.batch.is_none(), "fracture batches are atomic");
@@ -1213,6 +1217,17 @@ impl Matter {
         b.u32s(&free);
     }
     pub fn load(&mut self, s: &mut Scan, w: &World, units: &[RangeUnit]) -> Option<()> {
+        self.load_version(s, w, units, true)
+    }
+    /// `claim_materials`: the save holds each claim's material (ADR-659,
+    /// snapshot version 61).
+    pub fn load_version(
+        &mut self,
+        s: &mut Scan,
+        w: &World,
+        units: &[RangeUnit],
+        claim_materials: bool,
+    ) -> Option<()> {
         self.admission = AdmissionProfile::default();
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
@@ -1277,7 +1292,15 @@ impl Matter {
                 })
                 .collect(),
         );
-        self.debris = Bursts::load_material(s, Some(w), &self.tuning, Some(&templates), 0, false)?;
+        self.debris = Bursts::load_material(
+            s,
+            Some(w),
+            &self.tuning,
+            Some(&templates),
+            0,
+            false,
+            claim_materials,
+        )?;
         let n = s.usize();
         // An atomic body batch can use up to 64 temporary cell containers for
         // each final piece. Retired donor slots remain on the Ledger free list;

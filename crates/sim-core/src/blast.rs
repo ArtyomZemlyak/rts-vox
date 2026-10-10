@@ -3173,9 +3173,16 @@ impl BlastRange {
     pub fn size(&self) -> [u32; 3] {
         self.size
     }
+    /// Whether ground claims wait for their digs: their materials need
+    /// snapshot version 61 (ADR-659).
+    fn has_open_claims(&self) -> bool {
+        self.matter.debris.claims() > 0
+    }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.battle.has_wave_sides() {
+        let version = if self.has_open_claims() {
+            61
+        } else if self.battle.has_wave_sides() {
             60
         } else if self.has_wave_energy() {
             59
@@ -3360,7 +3367,9 @@ impl BlastRange {
         let debris_tuned = self.has_debris_tuning();
         let material_tuned = self.matter.density_history || self.has_material_tuning();
         let energy_split = self.has_wave_energy();
-        let sides = self.battle.has_wave_sides();
+        // Version 61 holds every section of 60 (ADR-659).
+        let claims = self.has_open_claims();
+        let sides = self.battle.has_wave_sides() || claims;
         let tuned = self.weapon_configured
             || motion_tuned
             || debris_tuned
@@ -3421,7 +3430,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if sides {
+            let format = if claims {
+                61
+            } else if sides {
                 60
             } else if energy_split {
                 59
@@ -3528,7 +3539,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=60).contains(&version) {
+        if !(27..=61).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3846,7 +3857,8 @@ impl BlastRange {
         }
         r.world.prepare_navigation(r.navigation.fell.materials);
         observe("matter", bytes.len() - s.left(), None);
-        r.matter.load(&mut s, &r.world, &r.units)?;
+        r.matter
+            .load_version(&mut s, &r.world, &r.units, version >= 61)?;
         observe("surface_validation", bytes.len() - s.left(), None);
         if r.surface_work.iter().any(|(p, work)| {
             let m = material(&r.world, *p);
@@ -4501,16 +4513,17 @@ impl BlastRange {
             .map(|u| motion::Obstacle::of(&u.motion, &u.body))
             .collect();
         // At most this many new terrain cells can be claimed before the
-        // fragment pool is full. Earlier hulls can claim no more than `room`
-        // cells in total; pre-existing claims are skipped. Therefore every
-        // hull needs at most `room + claims + 1` claimable candidates from
-        // its ordered crush list to reproduce the full `Matter::fell` pass.
-        let room = self.matter.debris.fragment_room(&self.matter.tuning) as usize;
-        let cut_limit = if room == 0 {
+        // claim ceiling is reached: a cell joining a reserved piece needs
+        // no pool slot (ADR-659), so the pool does not bound the count.
+        // Pre-existing claims are skipped. Therefore every hull needs at
+        // most `left + claims + 1` claimable candidates from its ordered
+        // crush list to reproduce the full `Matter::fell` pass.
+        let claims = self.matter.debris.claims();
+        let left = (self.matter.tuning.max_claims as usize).saturating_sub(claims);
+        let cut_limit = if left == 0 {
             0
         } else {
-            room.saturating_add(self.matter.debris.claims())
-                .saturating_add(1)
+            left.saturating_add(claims).saturating_add(1)
         };
         // Bound concurrent starts as well as each search's work (ADR-312,
         // ADR-326). Hulls over this ceiling retain their orders and ask
@@ -5402,7 +5415,7 @@ impl BlastRange {
         let hulls: Vec<crate::burst::Hull> =
             live.iter().map(|(v, was)| v.hull(Some(was))).collect();
         detail("debris_hulls");
-        self.matter.flush_observed(
+        let back = self.matter.flush_observed(
             &self.world,
             battle_mode || self.config.material_energy_j > 0,
             self.config.gravity,
@@ -5412,6 +5425,12 @@ impl BlastRange {
             detail,
             &|_, event| physics_detail(1, event),
         );
+        // Confirmed cells the pool had no slot for (ADR-659) go back in
+        // the next drain, as transfers: they did not leave the world.
+        for &(p, m) in &back {
+            self.world
+                .queue_transfer(voxel::world::Edit::put(p[0], p[1], p[2], m));
+        }
         completed("debris");
         for e in self.world.edits() {
             if e.mat == 0 {
@@ -5436,6 +5455,9 @@ impl BlastRange {
             } else {
                 dug.remove(&p);
             }
+        }
+        for (p, _) in &back {
+            dug.remove(p);
         }
         self.removed += dug.len();
         for &mat in dug.values() {

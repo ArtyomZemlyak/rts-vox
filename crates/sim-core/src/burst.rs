@@ -206,7 +206,7 @@ mod tests {
             "a wakeup stole the claim's working slot"
         );
         assert_eq!(b.wakeups, 0);
-        b.claims.clear();
+        b.clear_claims();
         b.step_fragments(
             &w,
             &mut e,
@@ -262,12 +262,14 @@ mod tests {
         }
         assert_eq!(legacy.len(), 80 + 4 * 152);
         let copy =
-            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true).unwrap();
+            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true, false)
+                .unwrap();
         assert_eq!(b.hash(), copy.hash());
         // Truncated data must still fail before allocating fragment records.
         legacy.truncate(legacy.len() - 1);
         assert!(
-            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true).is_none()
+            Bursts::load_material(&mut Scan::new(&legacy), Some(&w), &t, None, 0, true, false)
+                .is_none()
         );
         assert!(e.balanced());
     }
@@ -354,7 +356,13 @@ mod tests {
                                 ),
                                 "n={n}, resting_every={resting_every}, batch={batch}, p={p:?}"
                             );
-                            assert_eq!(before - room, u32::from(accepted));
+                            // A cell takes at most one slot: one for a new
+                            // piece, none for a cell joining one (ADR-659);
+                            // a rejected cell takes nothing.
+                            assert!(before as i64 - room as i64 <= i64::from(accepted));
+                            if !accepted {
+                                assert_eq!(before, room);
+                            }
                             assert_eq!(room, actual.fragment_room(&t));
                         }
                         let snapshot = |b: &Bursts, w: &voxel::World| {
@@ -1557,7 +1565,7 @@ mod tests {
             tick += 1;
             assert!(b.fragments[0].resting, "the piece took the claim's slot");
         }
-        b.claims.clear();
+        b.clear_claims();
         let mut woke = false;
         for _ in 0..t.blast.rest_check_ticks * 2 {
             b.step_fragments(&w, &mut e, &t.blast, g, tick, Surroundings::NONE);
@@ -3236,13 +3244,15 @@ mod tests {
         let p = [48, 11, 48];
         // Another command removes the same cell first, ahead of the blast claim.
         w.queue_dig(p[0], p[1], p[2]);
-        b.claims.insert(
+        b.add_claim(
             p,
             Claim {
                 at: [48, 13, 48],
                 motion_mj: 999,
                 side: 2,
+                mat: 1,
             },
+            &t,
         );
         w.queue_edit(Edit::dig_if(p[0], p[1], p[2], 1));
         w.flush();
@@ -3257,13 +3267,15 @@ mod tests {
         let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
         let t = tuning().blast;
         w.queue_edit(Edit::put(48, 11, 48, 3));
-        b.claims.insert(
+        b.add_claim(
             [48, 11, 48],
             Claim {
                 at: [48, 13, 48],
                 motion_mj: 999,
                 side: 2,
+                mat: 1,
             },
+            &t,
         );
         w.queue_edit(Edit::dig_if(48, 11, 48, 1));
         w.flush();
@@ -3272,6 +3284,109 @@ mod tests {
         assert_eq!(b.claims(), 0);
         assert!(b.fragments.is_empty());
         assert!(e.balanced());
+    }
+    /// A box's claims hold one pool slot per connected component, not
+    /// one per cell (ADR-659): a block of eight cells fills one slot and
+    /// becomes one piece; a cell apart from it would be a second piece
+    /// and waits for a slot.
+    #[test]
+    fn a_ground_component_holds_one_slot_not_one_per_cell() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let mut t = tuning().blast;
+        t.small_piece_pct = 0;
+        t.max_flying = 1;
+        let at = [48, 13, 48];
+        for z in 48..50 {
+            for y in 8..10 {
+                for x in 48..50 {
+                    assert!(b.claim_voxel(&mut w, [x, y, z], 1, at, 10, 4, &t));
+                }
+            }
+        }
+        assert_eq!((b.claims(), b.reserved()), (8, 1));
+        assert_eq!(b.fragment_room(&t), 0);
+        // Same box, not touching the block: a second piece, no slot.
+        let mut room = b.fragment_room(&t);
+        assert_eq!(
+            b.claim_voxel_checked(&mut w, [51, 8, 51], 1, at, 10, 4, &t, &mut room),
+            Err(GroundClaimError::NoRoom)
+        );
+        w.flush();
+        assert!(b.confirm(w.completed(), &mut e, &t).is_empty());
+        assert_eq!((b.claims(), b.reserved()), (0, 0));
+        assert_eq!(b.fragments.len(), 1);
+        assert_eq!(b.fragments[0].count, 8);
+        assert_eq!(b.removed, 8);
+        assert!(e.balanced());
+    }
+    /// A bridge cell that did not dig splits its component in two. The
+    /// pool had one slot for it: one half flies, the other goes back to
+    /// the world and keeps its matter in the ground (ADR-659).
+    #[test]
+    fn a_split_component_without_a_slot_goes_back_to_the_world() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let mut t = tuning().blast;
+        t.small_piece_pct = 0;
+        t.max_flying = 1;
+        let at = [48, 13, 48];
+        // Another command takes the middle cell ahead of the blast.
+        w.queue_dig(49, 9, 48);
+        for x in 48..51 {
+            assert!(b.claim_voxel(&mut w, [x, 9, 48], 1, at, 10, 4, &t));
+        }
+        assert_eq!((b.claims(), b.reserved()), (3, 1));
+        w.flush();
+        let back = b.confirm(w.completed(), &mut e, &t);
+        assert_eq!(b.fragments.len(), 1);
+        assert_eq!(back.len(), 1);
+        assert_eq!(b.returned, 1);
+        assert_eq!((b.claims(), b.reserved()), (0, 0));
+        assert!(e.balanced());
+        for (p, m) in back {
+            assert!(!w.solid(p[0], p[1], p[2]));
+            w.queue_transfer(Edit::put(p[0], p[1], p[2], m));
+        }
+        w.flush();
+        let solid = [48, 50].iter().filter(|&&x| w.solid(x, 9, 48)).count();
+        assert_eq!(solid, 1, "the piece that did not fly is ground again");
+    }
+    /// Groups are derived from the claims: a save keeps each claim's
+    /// material, and the load holds exactly the slots the save held.
+    #[test]
+    fn claim_groups_survive_a_save() {
+        let (mut b, mut w) = (Bursts::default(), world());
+        let mut t = tuning().blast;
+        t.small_piece_pct = 0;
+        for p in [[48, 9, 48], [49, 9, 48], [51, 9, 51], [60, 9, 60]] {
+            assert!(b.claim_voxel(&mut w, p, 1, [48, 13, 48], 10, 4, &t));
+        }
+        assert_eq!(b.reserved(), 3);
+        let mut bytes = Blob::new();
+        b.save(&mut bytes);
+        let copy = Bursts::load(&mut Scan::new(&bytes.v), Some(&w), &t).unwrap();
+        assert_eq!(copy.reserved(), 3);
+        assert_eq!(copy.hash(), b.hash());
+    }
+    #[test]
+    fn component_count_matches_the_component_list() {
+        let mut rng = fx::rng::Rng::new(659, 1);
+        for side in 1..=4u8 {
+            let n = u32::from(side).pow(3);
+            for _ in 0..2000 {
+                let mut mask = 0u64;
+                for i in 0..n {
+                    if rng.below(100) < 45 {
+                        mask |= 1 << i;
+                    }
+                }
+                let parts = shape_components(mask, side);
+                assert_eq!(shape_component_count(mask, side) as usize, parts.len());
+                assert_eq!(parts.iter().fold(0, |a, p| a | p), mask);
+                for part in parts {
+                    assert_eq!(shape_components(part, side), [part]);
+                }
+            }
+        }
     }
     #[test]
     fn different_work_slices_produce_identical_fracture_and_matter() {
@@ -3595,6 +3710,7 @@ mod tests {
                 Some(&bodies),
                 2,
                 false,
+                true,
             )
             .unwrap();
             assert_eq!(b.hash(), back.hash());
@@ -3684,7 +3800,13 @@ struct Claim {
     motion_mj: u64,
     /// Cells per side of the box this cell's piece is grouped in (ADR-284).
     side: u8,
+    /// The material the dig expects; the piece is made of it.
+    mat: Mat,
 }
+
+/// The pieces one box, material and blast make share their box; a claim
+/// belongs to the open group of exactly these.
+type ClaimGroup = ([u32; 3], Mat, [i32; 3], u8);
 
 /// A live hull a piece can land on (ADR-293): its footprint box about
 /// `pos` turned by `head`, standing `height` above `pos.y`; `vel` is how
@@ -3901,6 +4023,12 @@ pub(crate) enum GroundClaimError {
 pub struct Bursts {
     jobs: VecDeque<Job>,
     claims: BTreeMap<[u32; 3], Claim>,
+    /// Open claims of each group as a box mask. Each connected component
+    /// of a mask holds one slot of the fragment pool, since it becomes
+    /// at most one piece (ADR-659). Derived from `claims`; not saved.
+    groups: BTreeMap<ClaimGroup, u64>,
+    /// Slots the open claims hold: components summed over the groups.
+    reserved: usize,
     /// Reused only within a tick; neither cache affects save or ordering.
     settled_scratch: Settled,
     query_scratch: SettledQueries,
@@ -3914,6 +4042,9 @@ pub struct Bursts {
     pub body_removed: u64,
     /// Diagnostic only: actual resting-to-flying transitions; not saved or hashed.
     pub wakeups: u64,
+    /// Diagnostic only: confirmed cells put back for want of a slot
+    /// (ADR-659); not saved or hashed.
+    pub returned: u64,
 }
 
 pub const IDENTITY: [V3; 3] = [
@@ -4085,33 +4216,43 @@ pub fn shape_centre(shape: u64, side: u8) -> V3 {
 }
 /// Face-connected components of a mask, each a piece of its own.
 pub(crate) fn shape_components(mut left: u64, side: u8) -> Vec<u64> {
-    let s = u32::from(side.clamp(1, 4));
-    let strides = [1, s, s * s];
-    let n = box_cells(side);
     let mut out = Vec::new();
     while left != 0 {
-        let mut component = 1u64 << left.trailing_zeros();
-        loop {
-            let before = component;
-            for i in 0..n {
-                if component & (1 << i) != 0 {
-                    let p = shape_cell(i, side);
-                    for a in 0..3 {
-                        if p[a] + 1 < s as i32 {
-                            component |= left & (1 << (i + strides[a]));
-                        }
-                        if p[a] > 0 {
-                            component |= left & (1 << (i - strides[a]));
-                        }
-                    }
-                }
-            }
-            if before == component {
-                break;
-            }
-        }
+        let component = shape_component_at(left, side);
         left &= !component;
         out.push(component);
+    }
+    out
+}
+/// How many pieces [`shape_components`] makes of a mask, without the list.
+pub(crate) fn shape_component_count(mut left: u64, side: u8) -> u32 {
+    let mut n = 0;
+    while left != 0 {
+        left &= !shape_component_at(left, side);
+        n += 1;
+    }
+    n
+}
+/// The component of `left` holding its lowest cell.
+fn shape_component_at(left: u64, side: u8) -> u64 {
+    let mut component = 1u64 << left.trailing_zeros();
+    loop {
+        let next = shape_grow(component, side) & left;
+        if next == component {
+            return component;
+        }
+        component = next;
+    }
+}
+/// `m` and every cell sharing a face with it, inside the box.
+fn shape_grow(m: u64, side: u8) -> u64 {
+    let s = usize::from(side.clamp(1, 4));
+    let mut out = m;
+    let mut stride = 1;
+    for axis in &SHAPE_PLANES[s - 1] {
+        out |= (m & !axis[s - 1]) << stride;
+        out |= (m & !axis[0]) >> stride;
+        stride *= s;
     }
     out
 }
@@ -4187,7 +4328,9 @@ impl Bursts {
     }
 
     /// Ordered claim-only batch: fragments must remain unchanged while room
-    /// is consumed. Each successful claim reserves exactly one flying slot.
+    /// is consumed. A claim that starts a new component of its group takes
+    /// one slot; one that joins or bridges components takes none and gives
+    /// back what the bridge frees (ADR-659).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn claim_voxel_with_room(
         &mut self,
@@ -4219,7 +4362,14 @@ impl Bursts {
         // there would never be confirmed and never released, and every
         // wait on claims would wait forever (ADR-420). Callers check it
         // first; this is the last line.
-        if *room == 0 {
+        let claim = Claim {
+            at,
+            motion_mj,
+            side,
+            mat,
+        };
+        let delta = self.claim_delta(p, &claim, t);
+        if delta > 0 && *room == 0 {
             return Err(GroundClaimError::NoRoom);
         }
         if self.claims.len() >= t.max_claims as usize {
@@ -4234,16 +4384,9 @@ impl Bursts {
         if world.on_frame(p[0], p[1], p[2]) {
             return Err(GroundClaimError::Frame);
         }
-        self.claims.insert(
-            p,
-            Claim {
-                at,
-                motion_mj,
-                side,
-            },
-        );
+        self.add_claim(p, claim, t);
         world.queue_edit(Edit::dig_if(p[0], p[1], p[2], mat));
-        *room -= 1;
+        *room = (*room as i64 - delta).max(0) as u32;
         Ok(())
     }
     pub fn pending(&self) -> usize {
@@ -4259,11 +4402,61 @@ impl Bursts {
     pub fn claimed_cells(&self) -> impl Iterator<Item = &[u32; 3]> + '_ {
         self.claims.keys()
     }
+    /// Pool slots the open claims hold: one per connected component of
+    /// each group, not one per cell (ADR-659).
+    pub fn reserved(&self) -> usize {
+        self.reserved
+    }
+    /// The group a claim of `p` belongs to and its bit in the group's box.
+    fn claim_group(p: [u32; 3], c: &Claim, t: &Blast) -> (ClaimGroup, u64) {
+        let (origin, side) = fracture_box(p, c.side, t);
+        let s = u32::from(side);
+        let sub = (p[0] - origin[0]) + s * (p[1] - origin[1]) + s * s * (p[2] - origin[2]);
+        ((origin, c.mat, c.at, side), 1u64 << sub)
+    }
+    /// Slots a claim of `p` would change the reservation by: one for a new
+    /// component, none for a cell that joins one, less for a bridge.
+    fn claim_delta(&self, p: [u32; 3], c: &Claim, t: &Blast) -> i64 {
+        let (key, bit) = Self::claim_group(p, c, t);
+        let mask = self.groups.get(&key).copied().unwrap_or(0);
+        i64::from(shape_component_count(mask | bit, key.3))
+            - i64::from(shape_component_count(mask, key.3))
+    }
+    fn add_claim(&mut self, p: [u32; 3], c: Claim, t: &Blast) {
+        let (key, bit) = Self::claim_group(p, &c, t);
+        let mask = self.groups.entry(key).or_default();
+        let before = shape_component_count(*mask, key.3) as usize;
+        *mask |= bit;
+        let after = shape_component_count(*mask, key.3) as usize;
+        self.reserved = self.reserved + after - before;
+        self.claims.insert(p, c);
+    }
+    fn take_claim(&mut self, p: [u32; 3], t: &Blast) -> Option<Claim> {
+        let c = self.claims.remove(&p)?;
+        let (key, bit) = Self::claim_group(p, &c, t);
+        if let Some(mask) = self.groups.get_mut(&key) {
+            let before = shape_component_count(*mask, key.3) as usize;
+            *mask &= !bit;
+            let after = shape_component_count(*mask, key.3) as usize;
+            // Taking a bridge splits its component: the rest holds more.
+            self.reserved = self.reserved + after - before;
+            if *mask == 0 {
+                self.groups.remove(&key);
+            }
+        }
+        Some(c)
+    }
+    #[cfg(test)]
+    fn clear_claims(&mut self) {
+        self.claims.clear();
+        self.groups.clear();
+        self.reserved = 0;
+    }
     pub fn fragment_room(&self, t: &Blast) -> u32 {
         let pool = self.fragment_pools(t);
         (t.max_flying as usize)
-            .saturating_sub(pool.flying + self.claims.len())
-            .min((t.max_fragments as usize).saturating_sub(pool.working + self.claims.len()))
+            .saturating_sub(pool.flying + self.reserved)
+            .min((t.max_fragments as usize).saturating_sub(pool.working + self.reserved))
             as u32
     }
     /// Counts are derived from physical state, never a second copy of matter.
@@ -4522,63 +4715,47 @@ impl Bursts {
                         j.body_hit_done = false;
                         continue;
                     }
-                    if self.claims.len() >= t.max_claims as usize
-                        || self.claims.len() >= room
-                        || self.claims.len() + working >= t.max_fragments as usize
-                    {
+                    if self.claims.len() >= t.max_claims as usize {
                         break;
                     }
                     let q = ijk(j.subcell, j.cell as usize);
                     let p: [i32; 3] =
                         std::array::from_fn(|a| j.origin[a] + hit.cell[a] * j.cell + q[a]);
+                    let candidate = self.candidate(world, mats, p, j.energy_mj, t).map(
+                        |(key, mat, cost, motion_mj)| {
+                            let claim = Claim {
+                                at: j.at,
+                                motion_mj,
+                                side: t.fragment_box as u8,
+                                mat,
+                            };
+                            (key, cost, claim)
+                        },
+                    );
+                    // A cell that would start a new piece needs a free slot;
+                    // one that joins a reserved piece does not (ADR-659).
+                    // Without a slot the cell waits for the next tick.
+                    if let Some((key, _, claim)) = &candidate {
+                        if self.claim_delta(*key, claim, t) > 0
+                            && (self.reserved >= room
+                                || self.reserved + working >= t.max_fragments as usize)
+                        {
+                            break;
+                        }
+                    }
                     j.subcell += 1;
                     if j.subcell == (j.cell as usize).pow(3) {
                         j.subcell = 0;
                         j.hits.pop_front();
                         j.body_hit_done = false;
                     }
-                    if p[0] < 0
-                        || p[1] < 0
-                        || p[2] < 0
-                        || p[0] >= world.nx as i32
-                        || p[1] >= world.ny as i32
-                        || p[2] >= world.nz as i32
-                    {
-                        continue;
-                    }
-                    let key = p.map(|v| v as u32);
-                    // The frame takes no edit (ADR-034): a claim there would
-                    // never clear, and the energy paid for it would buy
-                    // nothing (ADR-420).
-                    if self.claims.contains_key(&key)
-                        || !world.solid(key[0], key[1], key[2])
-                        || world.on_frame(key[0], key[1], key[2])
-                    {
-                        continue;
-                    }
-                    let material = world.material(key[0], key[1], key[2]);
-                    // Snapshot determines reach; current material determines the work
-                    // and prevents a cheap old soil cell destroying new steel for free.
-                    let Some(d) = mats.get(material) else {
+                    let Some((key, cost, claim)) = candidate else {
                         continue;
                     };
-                    if d.density == 0 {
-                        continue;
-                    }
-                    let (cost, motion) = fracture_cost_mj(d.strength, voxel::unit::WORLD_MM, t);
-                    if cost > j.energy_mj {
-                        continue;
-                    }
                     j.energy_mj -= cost;
                     self.spent_mj = self.spent_mj.saturating_add(cost);
-                    self.claims.insert(
-                        key,
-                        Claim {
-                            at: j.at,
-                            motion_mj: motion,
-                            side: t.fragment_box as u8,
-                        },
-                    );
+                    let material = claim.mat;
+                    self.add_claim(key, claim, t);
                     world.queue_edit(Edit::dig_if(key[0], key[1], key[2], material));
                 }
             }
@@ -4589,39 +4766,114 @@ impl Bursts {
         }
     }
 
+    /// The cell a wave may claim at `p` with `energy_mj` left: its key,
+    /// material, fracture cost and motion. `None` for a cell it passes.
+    fn candidate(
+        &self,
+        world: &voxel::World,
+        mats: &Registry,
+        p: [i32; 3],
+        energy_mj: u64,
+        t: &Blast,
+    ) -> Option<([u32; 3], Mat, u64, u64)> {
+        if p[0] < 0
+            || p[1] < 0
+            || p[2] < 0
+            || p[0] >= world.nx as i32
+            || p[1] >= world.ny as i32
+            || p[2] >= world.nz as i32
+        {
+            return None;
+        }
+        let key = p.map(|v| v as u32);
+        // The frame takes no edit (ADR-034): a claim there would
+        // never clear, and the energy paid for it would buy
+        // nothing (ADR-420).
+        if self.claims.contains_key(&key)
+            || !world.solid(key[0], key[1], key[2])
+            || world.on_frame(key[0], key[1], key[2])
+        {
+            return None;
+        }
+        let material = world.material(key[0], key[1], key[2]);
+        // Snapshot determines reach; current material determines the work
+        // and prevents a cheap old soil cell destroying new steel for free.
+        let d = mats.get(material)?;
+        if d.density == 0 {
+            return None;
+        }
+        let (cost, motion) = fracture_cost_mj(d.strength, voxel::unit::WORLD_MM, t);
+        if cost > energy_mj {
+            return None;
+        }
+        Some((key, material, cost, motion))
+    }
+
     /// A no-op consumes its reservation too. Only solid -> air creates debris.
-    pub fn confirm(&mut self, completed: &[(Edit, Mat)], e: &mut Economy, t: &Blast) {
-        type GroundGroup = ([u32; 3], Mat, [i32; 3], u8);
-        let mut groups: BTreeMap<GroundGroup, (u64, u64)> = BTreeMap::new();
+    ///
+    /// A group reserves a slot per connected component of its open claims
+    /// (ADR-659). A component confirmed in parts, or split by a cell that
+    /// did not dig, makes more pieces than it reserved; those are made
+    /// while the pool has room, and a shape without room goes back into
+    /// the world cell by cell, as crumbs do (ADR-431). Returns the cells
+    /// to put back: the caller queues them as transfers.
+    pub fn confirm(
+        &mut self,
+        completed: &[(Edit, Mat)],
+        e: &mut Economy,
+        t: &Blast,
+    ) -> Vec<([u32; 3], Mat)> {
+        let mut groups: BTreeMap<ClaimGroup, (u64, u64)> = BTreeMap::new();
         for &(edit, old) in completed {
             let Some(expected) = edit.expected_material() else {
                 continue;
             };
             let key = [edit.x, edit.y, edit.z];
-            let Some(claim) = self.claims.remove(&key) else {
+            let Some(claim) = self.take_claim(key, t) else {
                 continue;
             };
             if old == AIR || old != expected {
                 continue;
             }
-            let (origin, side) = fracture_box(key, claim.side, t);
-            let side = u32::from(side);
-            let sub = (key[0] - origin[0])
-                + side * (key[1] - origin[1])
-                + side * side * (key[2] - origin[2]);
-            let group = groups
-                .entry((origin, old, claim.at, side as u8))
-                .or_default();
-            group.0 |= 1u64 << sub;
+            let (group, bit) = Self::claim_group(key, &claim, t);
+            let group = groups.entry(group).or_default();
+            group.0 |= bit;
             group.1 = group.1.saturating_add(claim.motion_mj);
         }
+        let mut back = Vec::new();
+        if groups.is_empty() {
+            return back;
+        }
+        // The confirmed cells no longer hold their slots: the room is what
+        // the pool has besides the claims still open.
+        let mut room = self.fragment_room(t);
         for ((key, old, at, side), (whole, total_motion_mj)) in groups {
             for shape in shape_components(whole, side) {
+                if room == 0 {
+                    for i in 0..box_cells(side) {
+                        if shape & (1 << i) != 0 {
+                            let c = shape_cell(i, side);
+                            back.push((
+                                [
+                                    key[0] + c[0] as u32,
+                                    key[1] + c[1] as u32,
+                                    key[2] + c[2] as u32,
+                                ],
+                                old,
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 let count = shape.count_ones();
                 let motion_mj = total_motion_mj * count as u64 / whole.count_ones() as u64;
-                self.spawn(key, old, at, side, shape, motion_mj, e, t);
+                if self.spawn(key, old, at, side, shape, motion_mj, e, t) {
+                    room -= 1;
+                }
             }
         }
+        self.returned += back.len() as u64;
+        back
     }
 
     /// One piece: the `shape` cells of `old` in the `side`-box at `key`,
@@ -4885,12 +5137,13 @@ impl Bursts {
         // Waking pieces count against the flying budget like new ones; a
         // piece without room waits for its next turn. A claim holds its
         // flying slot until its dig lands and it becomes a piece: a
-        // waking piece does not take it (ADR-443).
+        // waking piece does not take it (ADR-443). A group of claims holds
+        // a slot per component, not per cell (ADR-659).
         let (pool, parked_end) = self.fragment_pool_snapshot(t);
         let mut room = (t.max_flying as usize)
-            .saturating_sub(pool.flying + self.claims.len() + thermal_reserve as usize);
+            .saturating_sub(pool.flying + self.reserved + thermal_reserve as usize);
         let mut working_room = (t.max_fragments as usize)
-            .saturating_sub(pool.working + self.claims.len() + thermal_reserve as usize);
+            .saturating_sub(pool.working + self.reserved + thermal_reserve as usize);
         if damage_waiting {
             // The routine queue (heat, felling, wakeups) shares free capacity
             // with waiting damage. Keep the damage share for the next tick;
@@ -5414,6 +5667,7 @@ impl Bursts {
             }
             mix(&mut h, c.motion_mj);
             mix(&mut h, u64::from(c.side));
+            mix(&mut h, u64::from(c.mat));
         }
         mix(&mut h, self.fragments.len() as u64);
         if !self.corpses.is_empty() {
@@ -5499,6 +5753,7 @@ impl Bursts {
             }
             b.u64(c.motion_mj);
             b.u8(c.side);
+            b.u16(c.mat);
         }
         b.usize(self.fragments.len());
         b.usize(self.corpses.len());
@@ -5530,10 +5785,14 @@ impl Bursts {
         }
     }
     pub fn load(s: &mut Scan, world: Option<&voxel::World>, t: &Blast) -> Option<Self> {
-        Self::load_material(s, world, t, None, 0, false)
+        Self::load_material(s, world, t, None, 0, false, true)
     }
     /// `two_cell_masks`: the save predates ADR-284 and holds eight-bit
     /// masks without a box side; every piece is read as a two-cell box.
+    /// `claim_materials`: each claim holds the material its dig expects
+    /// (ADR-659). An older save reads it from the world, where the dig
+    /// has not landed yet.
+    #[allow(clippy::too_many_arguments)]
     pub fn load_material(
         s: &mut Scan,
         world: Option<&voxel::World>,
@@ -5541,6 +5800,7 @@ impl Bursts {
         bodies: Option<&crate::damage::Bodies>,
         units: usize,
         two_cell_masks: bool,
+        claim_materials: bool,
     ) -> Option<Self> {
         let mut out = Self {
             next_id: s.u64(),
@@ -5646,20 +5906,25 @@ impl Bursts {
                 || p[1] >= w.ny
                 || p[2] >= w.nz
                 || !(1..=4).contains(&side)
-                || out
-                    .claims
-                    .insert(
-                        p,
-                        Claim {
-                            at,
-                            motion_mj,
-                            side,
-                        },
-                    )
-                    .is_some()
+                || out.claims.contains_key(&p)
             {
                 return None;
             }
+            let mat = if claim_materials {
+                s.u16()
+            } else {
+                w.material(p[0], p[1], p[2])
+            };
+            out.add_claim(
+                p,
+                Claim {
+                    at,
+                    motion_mj,
+                    side,
+                    mat,
+                },
+                t,
+            );
         }
         let count = s.usize();
         let corpses = s.usize();

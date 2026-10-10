@@ -1939,8 +1939,12 @@ impl World {
             g.stats.max_fall = g.stats.max_fall.max(fallen);
             u.riding[i] = 0;
         }
-        if let (Some(g), Some(e)) = (self.ground.as_ref(), self.econ.as_mut()) {
-            self.bursts.confirm(&g.completed, e, &self.tuning.blast);
+        if let (Some(g), Some(e)) = (self.ground.as_mut(), self.econ.as_mut()) {
+            // Confirmed cells the pool had no slot for go back (ADR-659).
+            for (p, m) in self.bursts.confirm(&g.completed, e, &self.tuning.blast) {
+                g.world
+                    .queue_transfer(voxel::world::Edit::put(p[0], p[1], p[2], m));
+            }
             self.bursts.step_fragments(
                 &g.world,
                 e,
