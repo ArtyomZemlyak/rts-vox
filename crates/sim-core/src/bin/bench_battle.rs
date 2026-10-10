@@ -4,6 +4,8 @@ use sim_core::blast::BlastRange;
 use std::io::Write;
 use std::time::Instant;
 
+#[path = "bench_battle/drain.rs"]
+mod drain;
 #[path = "bench_battle/workers.rs"]
 mod workers;
 
@@ -152,6 +154,19 @@ impl TickProfile {
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
+    let drain_ticks = args
+        .windows(2)
+        .find(|w| w[0] == "--drain-ticks")
+        .map(|w| w[1].parse::<u32>().expect("drain ticks"));
+    let drain_csv = args
+        .windows(2)
+        .find(|w| w[0] == "--drain-csv")
+        .map(|w| w[1].as_str());
+    assert!(drain_ticks != Some(0), "drain ticks must be positive");
+    assert!(
+        drain_csv.is_none() || drain_ticks.is_some(),
+        "--drain-csv requires --drain-ticks"
+    );
     if let Some(mode) = args.windows(2).find(|w| w[0] == "--collapse-stress") {
         collapse_stress(&mode[1]);
         return;
@@ -1669,6 +1684,9 @@ fn main() {
             Phase::Victory,
             "cross-map assault did not finish"
         );
+    }
+    if let Some(ticks) = drain_ticks {
+        drain::run(&mut sim, ticks, drain_csv);
     }
 }
 
