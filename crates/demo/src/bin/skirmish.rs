@@ -1,4 +1,4 @@
-//! Матч на полигоне до исхода, headless (ADR-205, ADR-663).
+//! Матч на полигоне до исхода, headless (ADR-205, ADR-670).
 //!
 //! ```text
 //! skirmish [--preset breakthrough|pincer|spider|turrets|canister|world]
