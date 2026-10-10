@@ -2135,18 +2135,32 @@ mod tests {
         assert_eq!(layout.units.len(), 6);
         assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryTurretT2);
         assert_eq!(workshop.controlled, Some(0));
+        assert_eq!(layout.units[1].kind, RangeUnitKind::ArtilleryT2);
+        assert!(layout.units[0].allied && layout.units[1].allied);
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_battle().unwrap();
+        sim.battle.trace_fire(true);
+        use sim_core::blast::battle::{FireGate, Weapon};
+        // Both allied guns fire canister. A side owns half of the wave
+        // ceiling (ADR-649) and one six-pellet salvo fills it, so the side
+        // holds one canister salvo at a time: the first gun charged fires,
+        // the other is ready and queued on wave capacity, not stuck on aim,
+        // muzzle or ammunition.
+        let mut queued = false;
         for _ in 0..120 {
             sim.step();
+            queued |= sim.battle.fire_gate(0) == Some(FireGate::WaveCapacity);
         }
+        assert_eq!(sim.battle_weapon(0), Some(Weapon::Canister));
+        assert_eq!(sim.battle_weapon(1), Some(Weapon::Canister));
+        let fired = [0, 1].map(|id| sim.battle.actors[id].fired);
         assert!(
-            sim.battle.actors[0].fired > 0,
+            fired.iter().any(|&n| n > 0),
             "canister scenario never fired"
         );
-        assert_eq!(
-            sim.battle_weapon(0),
-            Some(sim_core::blast::battle::Weapon::Canister)
+        assert!(
+            fired[0] > 0 || queued,
+            "the controlled turret neither fired nor queued for wave room: {fired:?}"
         );
     }
 
