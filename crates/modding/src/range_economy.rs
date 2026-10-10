@@ -1,9 +1,10 @@
-//! Dig economy of the range, by unit kind (plan 245, slice 0; ADR-672).
+//! Dig economy of the range, by unit kind (plan 245, slices 0 and 3;
+//! ADR-672, ADR-673).
 //!
-//! Every quantity is in world units: a tank holds matter units (one cell
-//! of a material carries its density, `range-materials.ron`), radii and
-//! reach are world cells. The one count of voxels is the dig sub-pool:
-//! it protects the tick, not the economy (ADR-045).
+//! Every quantity is in world units: a tank and a store hold matter units
+//! (one cell of a material carries its density, `range-materials.ron`),
+//! radii and reach are world cells. The one count of voxels is the dig
+//! sub-pool: it protects the tick, not the economy (ADR-045).
 use crate::range::RangeUnitKind;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,17 @@ pub const MAX_DIG_REACH: u32 = 1024;
 pub const MAX_TANK: u64 = 1 << 40;
 /// Largest dig sub-pool, edits in flight.
 pub const MAX_DIG_POOL: u32 = 1 << 20;
+/// Largest store of a dock and largest base store, matter units: sixty-four
+/// docks and the base together stay far from overflow.
+pub const MAX_STORE: u64 = 1 << 48;
+/// Largest denominator of the refining yield.
+pub const MAX_REFINE_DEN: u64 = 1 << 20;
+/// Largest number of dock searches in a tick.
+pub const MAX_DOCK_SEARCHES: u32 = 1024;
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
 
 /// What one kind does in the economy. A kind with an empty tank does not
 /// dig, and then carries no dig parameters at all.
@@ -31,6 +43,29 @@ pub struct KindEconomy {
     pub dig_reach: u32,
     /// Dig edits one digger may queue in a tick.
     pub dig_edits_per_tick: u32,
+    /// Capacity a living unit of this kind adds to its side's store,
+    /// matter units (ADR-673). A kind with a store is a dock: haulers of
+    /// its side unload there. Absent in the RON of a slice-1 layout.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub store: u64,
+}
+
+/// The sides' stores and unloading (plan 245, slice 3; ADR-673). Without
+/// it a full tank stops digging and nobody hauls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeBank {
+    /// Capacity of each side's store with no dock standing, matter units.
+    pub base_store: u64,
+    /// Refining yield at unloading, `refine_num / refine_den`, below one:
+    /// the rest goes to the RefiningLoss sink.
+    pub refine_num: u64,
+    pub refine_den: u64,
+    /// Horizontal distance from a hauler to its dock within which it
+    /// unloads, world units.
+    pub unload_reach: u32,
+    /// Dock searches of all haulers together in one tick; the rest wait
+    /// for the next tick (ADR-114).
+    pub dock_searches_per_tick: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -41,6 +76,9 @@ pub struct RangeEconomy {
     pub dig_edits_in_flight: u32,
     /// At most one entry per kind; a kind without one does not dig.
     pub kinds: Vec<KindEconomy>,
+    /// Stores and hauling; absent in the RON of a slice-1 layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bank: Option<RangeBank>,
 }
 
 impl RangeEconomy {
@@ -72,8 +110,18 @@ impl RangeEconomy {
                     && (1..=MAX_DIG_REACH).contains(&k.dig_reach)
                     && (1..=self.dig_edits_in_flight).contains(&k.dig_edits_per_tick)
             };
-            if !valid {
+            if !valid || k.store > MAX_STORE || (k.store > 0 && self.bank.is_none()) {
                 return Err("range economy kind exceeds supported bounds".into());
+            }
+        }
+        if let Some(b) = &self.bank {
+            if b.base_store > MAX_STORE
+                || !(1..=MAX_REFINE_DEN).contains(&b.refine_den)
+                || !(1..b.refine_den).contains(&b.refine_num)
+                || !(1..=MAX_DIG_REACH).contains(&b.unload_reach)
+                || !(1..=MAX_DOCK_SEARCHES).contains(&b.dock_searches_per_tick)
+            {
+                return Err("range economy bank exceeds supported bounds".into());
             }
         }
         Ok(())
@@ -89,6 +137,10 @@ impl RangeEconomy {
     pub fn digs(&self, kind: RangeUnitKind) -> bool {
         self.kind(kind).is_some_and(|k| k.tank > 0)
     }
+    /// Store a living unit of this kind adds to its side; a dock has one.
+    pub fn store(&self, kind: RangeUnitKind) -> u64 {
+        self.kind(kind).map_or(0, |k| k.store)
+    }
 }
 
 #[cfg(test)]
@@ -102,6 +154,20 @@ mod tests {
             assert!(e.kind(kind).is_some(), "{kind:?}");
             assert!(!e.digs(kind), "the owner has not chosen the digger");
         }
+        // The base is the stock dock (ADR-673).
+        assert!(e.bank.is_some());
+        assert!(e.store(RangeUnitKind::Base) > 0);
+        assert_eq!(e.store(RangeUnitKind::Tank), 0);
+    }
+
+    #[test]
+    fn a_slice_one_economy_reads_and_writes_without_a_bank() {
+        let mut e = RangeEconomy::stock();
+        e.bank = None;
+        e.kinds.iter_mut().for_each(|k| k.store = 0);
+        let text = ron::ser::to_string(&e).unwrap();
+        assert!(!text.contains("store") && !text.contains("bank"), "{text}");
+        assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
     }
 
     #[test]
@@ -115,7 +181,7 @@ mod tests {
         e.validate().unwrap();
         let text = ron::ser::to_string(&e).unwrap();
         assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
-        let broken: [fn(&mut RangeEconomy); 7] = [
+        let broken: [fn(&mut RangeEconomy); 13] = [
             |e| e.dig_edits_in_flight = 0,
             |e| e.kinds[0].dig_radius = 0,
             |e| e.kinds[0].dig_radius = MAX_DIG_RADIUS + 1,
@@ -124,6 +190,17 @@ mod tests {
             // An empty tank carries no inert dig parameters.
             |e| e.kinds[1].dig_reach = 5,
             |e| e.kinds[1].kind = e.kinds[0].kind,
+            // A dock needs the bank its store raises.
+            |e| e.bank = None,
+            |e| e.kinds[0].store = MAX_STORE + 1,
+            |e| e.bank.as_mut().unwrap().refine_num = 0,
+            // The refining yield is below one: the sink is on (07-economy).
+            |e| {
+                let b = e.bank.as_mut().unwrap();
+                b.refine_num = b.refine_den;
+            },
+            |e| e.bank.as_mut().unwrap().unload_reach = 0,
+            |e| e.bank.as_mut().unwrap().dock_searches_per_tick = 0,
         ];
         for f in broken {
             let mut b = e.clone();

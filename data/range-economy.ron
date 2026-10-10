@@ -1,10 +1,11 @@
-// Dig economy of the range, by unit kind (plan 245, ADR-672). Tank in
-// matter units: one cell of a material carries its density
-// (range-materials.ron). Radius and reach in world units.
+// Dig economy of the range, by unit kind (plan 245, ADR-672, ADR-673).
+// Tank and store in matter units: one cell of a material carries its
+// density (range-materials.ron). Radius and reach in world units.
 //
 // No kind digs: who digs is the owner's choice (plan 245, section 4,
 // item 7). A kind with an empty tank carries no dig parameters; a layout
-// that wants a digger names one in its own `economy` section.
+// that wants a digger names one in its own `economy` section. The base is
+// the dock: a living one adds its store to its side's.
 (
     // Dig edits of all diggers waiting in the edit queue at once: the dig
     // sub-pool inside the edit ceiling (8192 for the stock weapons).
@@ -16,8 +17,20 @@
         (kind: Artillery, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: TurretT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: TurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
-        (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0, store: 1000000),
         (kind: ArtilleryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
         (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
     ],
+    bank: Some((
+        // Each side's store with no dock standing.
+        base_store: 100000,
+        // Unloading refines 7 of every 10 units; 3 go to RefiningLoss.
+        refine_num: 7,
+        refine_den: 10,
+        // A hauler unloads within this horizontal distance of its dock;
+        // a base is 80 wide.
+        unload_reach: 100,
+        // Dock searches of all haulers in one tick.
+        dock_searches_per_tick: 8,
+    )),
 )
