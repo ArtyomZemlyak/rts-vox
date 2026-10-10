@@ -388,9 +388,13 @@ mod tests {
                 let _ = m.body(0, u, [1, 1, 1], &u.root_frame(1), [200, 16, 330]);
                 let profile = m.admission;
                 m.finish_body_batch();
-                assert!(m.debris.fragments.len() + m.debris.claims() <= total as usize);
+                // Claims hold slots per piece they will make, not per cell
+                // (ADR-659); the claim ceiling still counts cells.
+                assert!(m.debris.claims() <= claims as usize);
+                assert!(m.debris.fragments.len() + m.debris.reserved() <= total as usize);
                 assert!(
-                    m.debris.fragments.iter().filter(|f| !f.resting).count() + m.debris.claims()
+                    m.debris.fragments.iter().filter(|f| !f.resting).count()
+                        + m.debris.reserved()
                         <= flying as usize
                 );
                 assert!(m.economy.ledger.balanced());

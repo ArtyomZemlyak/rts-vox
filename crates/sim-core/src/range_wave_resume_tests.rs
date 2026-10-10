@@ -349,6 +349,11 @@ fn battle_damage_reaches_a_body_before_an_older_crater_can_drain() {
         push(e, p, 1_000_000);
         e.contact_cursor = r.units.len();
         r.matter.tuning.max_flying = 1;
+        // One-cell pieces: every crater cell is a piece of its own and needs
+        // a slot of its own, so the crater really waits on the pool. With
+        // larger boxes its cells join one reserved piece (ADR-659) and the
+        // crater never waits.
+        r.matter.fragment_size(1);
     }
     for _ in 0..2 {
         fair_step(&mut a, &mut x, &c, 2);
