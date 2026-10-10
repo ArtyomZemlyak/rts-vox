@@ -5,8 +5,12 @@ param(
     [ValidateRange(0.1,3600)][double]$Seconds = 10,
     [double]$Distance = 0.42,
     [double]$Pitch = 0.78,
-    [double]$Yaw = -0.5
+    [double]$Yaw = -0.5,
+    [ValidateRange(0.3,32)][double]$Zoom = 1
 )
+# SavePath: a range snapshot of a sim-cli fixture, recorded by the range
+# window (blast --load, ADR-671); Zoom sets its camera. ScenarioPath: a
+# play scenario; Distance, Pitch and Yaw set its camera.
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if ($SavePath -and $ScenarioPath) { throw 'Choose SavePath or ScenarioPath.' }
@@ -14,8 +18,9 @@ if (!$SavePath -and !$ScenarioPath) { $ScenarioPath = 'data/battlefield.ron' }
 if (!$OutputDir) { $OutputDir = 'out/play-capture-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') }
 $destination = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
 if (Test-Path -LiteralPath $destination) { throw 'OutputDir must be new; old captures are never overwritten.' }
-$binary = Join-Path $repoRoot 'target/release/play.exe'
-if (!(Test-Path -LiteralPath $binary)) { throw 'Build first: scripts/cargo-local.ps1 build --release -p render --bin play' }
+$window = if ($SavePath) { 'blast' } else { 'play' }
+$binary = Join-Path $repoRoot "target/release/$window.exe"
+if (!(Test-Path -LiteralPath $binary)) { throw "Build first: scripts/cargo-local.ps1 build --release -p render --bin $window" }
 $ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
 $ffmpegPath = if ($ffmpegCmd) { $ffmpegCmd.Source } else {
     Join-Path $repoRoot 'cache/video-tools/imageio_ffmpeg/binaries/ffmpeg-win-x86_64-v7.1.exe'
@@ -25,10 +30,14 @@ $framesPath = Join-Path $destination 'frames'
 New-Item -ItemType Directory -Path $framesPath -Force | Out-Null
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 $secondsText = $Seconds.ToString($culture)
-$captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $secondsText,
-    '--speed', '1', '--dist', $Distance.ToString($culture), '--pitch', $Pitch.ToString($culture), '--yaw', $Yaw.ToString($culture))
-if ($SavePath) { $captureArgs += @('--load', ('"{0}"' -f $SavePath)) }
-else { $captureArgs += @('--scenario', ('"{0}"' -f $ScenarioPath)) }
+$captureArgs = @('--record', ('"{0}"' -f $framesPath), '--record-seconds', $secondsText)
+if ($SavePath) {
+    $env:WGPU_BACKEND = 'vulkan'
+    $captureArgs += @('--load', ('"{0}"' -f $SavePath), '--zoom', $Zoom.ToString($culture))
+} else {
+    $captureArgs += @('--speed', '1', '--dist', $Distance.ToString($culture), '--pitch', $Pitch.ToString($culture),
+        '--yaw', $Yaw.ToString($culture), '--scenario', ('"{0}"' -f $ScenarioPath))
+}
 $process = Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru -Wait `
     -ArgumentList $captureArgs `
     -RedirectStandardOutput (Join-Path $destination 'capture.log') `

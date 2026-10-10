@@ -2,6 +2,7 @@
 //! `blast --capture out/blast --frames 330` writes reproducible PNG frames.
 //! `--weapon energy` selects the long range and seven energy stages.
 //! `--shots out/blast` writes key stages. Space pauses, R restarts, Esc exits.
+//! `--load out/x/fixture.bin` opens a range snapshot (`sim-cli` fixtures).
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::atmosphere::ScatteringMedium;
@@ -200,6 +201,29 @@ fn read_layout(file: Option<&str>) -> Result<Option<RangeLayout>, String> {
     })
     .transpose()
 }
+/// A range snapshot written by `BlastRange::snapshot` (the `sim-cli`
+/// fixtures, ADR-671). The file is read here, in the render binary; the
+/// simulation decodes bytes with the window's weapon configuration.
+fn read_snapshot(file: &str, c: ExplosionConfig) -> Result<BlastRange, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    BlastRange::restore(c, &bytes).ok_or_else(|| format!("{file}: not a range snapshot"))
+}
+/// The fixtures write with `explosion.ron` as it stands: the window's
+/// default weapon must be that preset, or `--load` would read their saves
+/// with another configuration.
+#[test]
+fn a_fixture_save_loads_with_the_default_weapon() {
+    let c = weapon_config(false, false, 1000, Delivery::Blast);
+    assert!(c == config(false, false));
+    let layout = RangeLayout::from_ron(include_str!("../../../../data/fixture-turn.ron")).unwrap();
+    let r = BlastRange::with_layout(c, layout).unwrap();
+    let file = std::env::temp_dir().join(format!("blast-load-{}.bin", std::process::id()));
+    std::fs::write(&file, r.snapshot()).unwrap();
+    let loaded = read_snapshot(file.to_str().unwrap(), c);
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(loaded.unwrap().snapshot(), r.snapshot());
+    assert!(read_snapshot(file.to_str().unwrap(), c).is_err());
+}
 impl Scene {
     fn reset_world(
         &mut self,
@@ -340,6 +364,7 @@ fn main() {
     let mut settings = false;
     let mut stock_tuning = false;
     let mut layout_file = None;
+    let mut load_file: Option<String> = None;
     let mut power = 1000;
     let mut uncovered = false;
     let mut edit = false;
@@ -539,6 +564,10 @@ fn main() {
                 i += 1;
                 layout_file = Some(args[i].clone());
             }
+            "--load" => {
+                i += 1;
+                load_file = Some(args.get(i).expect("--load FILE").clone());
+            }
             "--power" => {
                 i += 1;
                 power = args[i].parse().expect("power in thousandths");
@@ -648,6 +677,26 @@ fn main() {
         "--realtime supports --shots; use offline capture for a gap-free movie"
     );
     let mut layout = read_layout(layout_file.as_deref()).expect("range file");
+    // The save carries its own layout and state. It starts running; R
+    // restarts its layout from scratch.
+    let loaded = load_file.as_deref().map(|file| {
+        assert!(
+            layout_file.is_none()
+                && zone.is_none()
+                && gun_kind.is_none()
+                && !edit
+                && !battle_preset
+                && !world_battle
+                && skirmish.is_none(),
+            "--load excludes --range, --zone, --chassis, --edit and the battle presets"
+        );
+        let sim = read_snapshot(file, weapon_config(energy, anni, power, delivery))
+            .expect("--load snapshot");
+        layout = sim.layout.clone();
+        view = 1;
+        drive = sim.player;
+        sim
+    });
     if let Some(id) = zone {
         let r = layout.as_mut().expect("--zone needs --range");
         let z = r
@@ -737,13 +786,16 @@ fn main() {
     hud.drawer = hud_drawer;
     hud.projectile_markers = projectile_markers;
     workshop.zoom = camera_zoom;
-    let mut sim = range_sim(
-        weapon_config(energy, anni, power, delivery),
-        workshop.layout.as_ref(),
-        uncovered,
-        None,
-    )
-    .expect("valid range");
+    let mut sim = match loaded {
+        Some(sim) => sim,
+        None => range_sim(
+            weapon_config(energy, anni, power, delivery),
+            workshop.layout.as_ref(),
+            uncovered,
+            None,
+        )
+        .expect("valid range"),
+    };
     if ai_vs_ai {
         assert!(world_battle, "--ai-vs-ai requires --world-battle");
         assert!(sim.set_ai_vs_ai(true));

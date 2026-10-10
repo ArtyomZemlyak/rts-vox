@@ -1,0 +1,21 @@
+// Visual-QA fixture `drive_fixture` (ADR-671): three tanks in parallel
+// lanes. The fixture leaves the first intact, melts the layer under the
+// second one's turret and half of the third one's engine cells, then
+// orders all three to the far side. One world cell is 0.1 m.
+// `blast --range` opens it without the damage or the orders.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Tank, allied: true, at: (280, 16, 260)),
+        (kind: Tank, allied: true, at: (280, 16, 384)),
+        (kind: Tank, allied: true, at: (280, 16, 508)),
+    ],
+    blocks: [],
+    power_milli: [1000],
+    unit_resistance: 180,
+)

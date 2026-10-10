@@ -1,0 +1,19 @@
+// Visual-QA fixture `turn_fixture` (ADR-671): two striders facing +x on a
+// cleared pad. The fixture orders each to a point behind it, on opposite
+// sides of its heading, so they turn in place in opposite directions and
+// walk. One world cell is 0.1 m. `blast --range` opens it without orders.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Strider, allied: true, at: (410, 16, 330)),
+        (kind: Strider, allied: true, at: (410, 16, 438)),
+    ],
+    blocks: [],
+    power_milli: [1000],
+    unit_resistance: 180,
+)

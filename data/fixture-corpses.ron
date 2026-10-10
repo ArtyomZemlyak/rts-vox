@@ -1,0 +1,19 @@
+// Visual-QA fixture `corpse_fixture` (ADR-671): a tank driving across the
+// pad and a parked tank for comparison. The fixture melts columns through
+// the moving tank's roof and core; the dead hull stays as a wreck.
+// One world cell is 0.1 m. `blast --range` opens it without the dose.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Tank, allied: true, at: (230, 16, 384)),
+        (kind: Tank, allied: true, at: (470, 16, 440)),
+    ],
+    blocks: [],
+    power_milli: [1000],
+    unit_resistance: 180,
+)

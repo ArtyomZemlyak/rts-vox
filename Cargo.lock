@@ -4516,7 +4516,6 @@ dependencies = [
  "fx",
  "modding",
  "sim-core",
- "worldgen",
 ]
 
 [[package]]

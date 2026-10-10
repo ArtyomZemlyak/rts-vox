@@ -1,0 +1,19 @@
+// Visual-QA fixture `support_fixture` (ADR-671): two standing striders on a
+// cleared pad. The fixture digs a trench between the feet of the first and
+// a pit under all feet of the second. One world cell is 0.1 m.
+// `blast --range` opens it without the digs.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Strider, allied: true, at: (365, 16, 335)),
+        (kind: Strider, allied: true, at: (365, 16, 445)),
+    ],
+    blocks: [],
+    power_milli: [1000],
+    unit_resistance: 180,
+)
