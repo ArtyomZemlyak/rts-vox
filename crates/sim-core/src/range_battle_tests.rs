@@ -780,6 +780,23 @@ fn annihilation_hit_on_base_ends_a_real_battle() {
     let restored = BlastRange::restore(battle.config, &battle.snapshot())
         .expect("battle with a destroyed command base restores");
     assert_eq!(battle.state_hash(), restored.state_hash());
+    let mut restored = restored;
+    let shots: Vec<_> = battle.battle.actors.iter().map(|a| a.fired).collect();
+    let finished_tick = battle.tick;
+    for _ in 0..180 {
+        battle.step();
+        restored.step();
+        assert_eq!(battle.battle.phase, Phase::Victory);
+        assert_eq!(battle.state_hash(), restored.state_hash());
+        assert!(battle
+            .battle
+            .actors
+            .iter()
+            .zip(&shots)
+            .all(|(actor, &fired)| actor.fired == fired));
+        assert!(battle.matter.economy.ledger.balanced());
+    }
+    assert_eq!(battle.tick, finished_tick + 180);
 }
 
 #[test]

@@ -44,6 +44,16 @@ native пары не доказали роста общего FPS. Бой 120 с
 debris 1,8 и motion 1,3 мс. EP-07/10 требует точного reuse/dirty пути;
 нельзя просто отключать физику осевших кусков при изменении опор.
 
+Дополнительная lifecycle-проверка 244/668: по 20 headless reset/restart
+после 600 тиков настоящего большого боя и картечи прошли с прежними хешами.
+Большой бой: тёплый reset ~187 мс, первый tick restart ~226 мс; EP-03/08
+остаются P1. Private bytes увеличились в сравниваемых окнах на ~13/1,2 МиБ;
+отсутствие утечки и полный native lifecycle этим не доказаны. Найден и
+исправлен общий выбор detail/map по aspect и направлению камеры (669),
+который срывал native actions на узком окне: повтор прошёл все восемь шагов.
+Полный blast — 168/0/4; новые обычные native-хеши tick 900 прежние, но
+большой бой снова не прошёл строгий rate gate и p99. Подробности — 244.
+
 Профиль 236/hash `bd7ada90567d88ab` исторический: после 644–662 физическое поведение
 изменилось. Текущий закреплённый golden600 — `e85ad6aa0597af3d`; Windows
 проверки этого изменения записаны в 243. Профиль 240/241 на Linux/4 vCPU даёт позднее среднее около 41–43 мс,
@@ -63,7 +73,7 @@ debris 1,8 и motion 1,3 мс. EP-07/10 требует точного reuse/dirt
 | EP-08 | Частично | RON разбирается один раз, coarse reuse, ротация стартов, partial routes и исправление доворота; 17/18 начинают движение до 100 тиков. | P1: синхронный coarse в orders, bounded continuation; паук без чистого start corridor, динамическая fairness, цена fine search и command-to-visible. Бюджет поиска не снижать ради метрики тика. | 240 B1/B2/B6/C3/C5/F4, 244 |
 | EP-09 | Частично | Радиусы из battle-ai.ron; неподвижные установки фильтруют цели по attack_ranges; потолок волн делится между сторонами. | Общая исполнимость: LOS/баллистика, отказы и повторный выбор, мобильные цели/позиции; отдельная регрессия реального выстрела турели. | 240 B3/C2/C6 |
 | EP-10 | Частично | Stable fragment slots, часть owned geometry/terrain и buffer reuse уже есть; оба клиента используют общий внешний меш обломков, краткая native/визуальная проверка — в 243. | Все terrain/occupancy/distant/effects readers, coherent dirty publication, GPU-газ и полная native/визуальная приёмка. | 231–232, 240–243 |
-| EP-11 | Частично | Snapshot до 61 при ожидающих claims, стороны волн, checkpoint/replay, synchronous reset/epoch; golden боя 600 тиков в репозитории. | 30 минут боя, 20 reset/restart, attribution/transient peaks памяти; незавершённые работы и удержанные exports во всём async lifecycle. | 240 B7, blast.rs::snapshot |
+| EP-11 | Частично | Snapshot до 61 при ожидающих claims, стороны волн, checkpoint/replay, synchronous reset/epoch; golden боя 600 тиков; 20 headless reset/restart большого боя и картечи (244/668). | 30 минут боя, полный native reset/restart, attribution/transient peaks памяти; незавершённые работы и удержанные exports во всём async lifecycle. | 240 B7, blast.rs::snapshot |
 | EP-12 | Частично | Основной путь выбран: BlastRange (657); gravity=98 согласована (658); общие команды/физика и данные сценария частично есть. | Миграция economy/build/reclaim/vision и consumers World, runtime owners/objectives, gun/battle контракт, data models; материал 64→5000 и paged 10 км. | ADR-657/658, 240 D |
 
 ## Следующий порядок и условия завершения
@@ -731,7 +741,7 @@ EP-10a выполняется на текущем синхронном пути:
 
 ## EP-11. Память, сохранение, reset и долгий бой
 
-**Статус 10.10 / 242: Частично.** 30 минут боя, 20 reset/restart, attribution/transient peaks памяти; незавершённые работы и удержанные exports во всём async lifecycle.
+**Статус 10.10 / 244: Частично.** 20 headless reset/restart выполнены для двух боевых нагрузок; открыты 30 минут боя, полный native lifecycle, attribution/transient peaks памяти, незавершённые работы и удержанные exports во всём async lifecycle.
 Выполненные части перечислены в текущей таблице; исходная диагностика ниже историческая.
 
 Снять high-water и текущий объём отдельно для authoritative cells, фрагментов, очередей, navigation caches, presentation pages, meshes/assets, GPU buffers и трассировки. Диагностический render trace сам резервирует заметную память; его нельзя принять за обычную утечку игры.

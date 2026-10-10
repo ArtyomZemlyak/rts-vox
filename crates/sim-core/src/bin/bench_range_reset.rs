@@ -5,7 +5,28 @@ use modding::range::RangeLayout;
 use sim_core::blast::{placement::Validator, BlastRange};
 use std::time::Instant;
 
+#[path = "bench_range_reset/battle.rs"]
+mod battle;
+
 fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    let number = |flag: &str, default| {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map_or(default, |w| w[1].parse::<u32>().expect(flag))
+    };
+    let runs = number("--runs", 3);
+    assert!(runs > 0, "--runs must be positive");
+    if let Some(mode) = args.windows(2).find(|w| w[0] == "--battle") {
+        battle::run(
+            &mode[1],
+            runs,
+            number("--ticks", 600),
+            number("--physics-workers", 4) as usize,
+            number("--nav-workers", 4) as usize,
+        );
+        return;
+    }
     let layout = RangeLayout::from_ron(include_str!("../../../../data/range-km.ron"))
         .expect("stock kilometre range");
     let config = ExplosionConfig::from_ron(include_str!("../../../../data/energy-cannon.ron"))
@@ -38,7 +59,7 @@ fn main() {
         .rebuilt_with_layout(config, layout.clone(), &validator)
         .expect("warm reset");
 
-    for run in 0..3 {
+    for run in 0..runs {
         for dz in 0..10 {
             for dx in 0..10 {
                 sim.world.queue_dig(3220 + dx * 32, 8, 2120 + dz * 32);

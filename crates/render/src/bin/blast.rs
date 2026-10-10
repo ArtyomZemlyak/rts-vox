@@ -2553,7 +2553,12 @@ fn framing(
                     // The kilometre overview needs a distant plane, but
                     // using it in the local battle wastes depth precision
                     // on tank panels and thin terrain faces while panning.
-                    let base = if streaming::map_scale(scene.sim.size(), height, stream.map_scale) {
+                    let base = if streaming::map_scale(
+                        scene.sim.size(),
+                        height,
+                        local_limit,
+                        stream.map_scale,
+                    ) {
                         30_000.0
                     } else {
                         1200.0

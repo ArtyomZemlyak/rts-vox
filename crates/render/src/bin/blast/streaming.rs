@@ -7,16 +7,24 @@ use sim_core::blast::read_model::terrain::{Budget, Changes, Header, Request, Row
 
 const ROWS_PER_FRAME: i32 = 8;
 
-pub(super) fn map_scale(size: [u32; 3], height: f32, was_map_scale: bool) -> bool {
+pub(super) fn map_scale(
+    size: [u32; 3],
+    height: f32,
+    local_limit: f32,
+    was_map_scale: bool,
+) -> bool {
     if size[0] <= TERRAIN_WINDOW[0] && size[2] <= TERRAIN_WINDOW[2] {
         return false;
     }
-    // A scroll wheel can hover on the boundary for several frames. Keep the
-    // detail-streaming policy until the camera clears a return threshold.
+    // Use the same projected footprint as framing: a fixed height switched
+    // ordinary narrow-window sector views to the map and left detail behind.
+    // The default local fit always returns to detail, even after map scale.
     if was_map_scale {
-        height > 590.0
+        // Framing uses the eye offset, streaming reconstructs its direction;
+        // allow their floating-point roundoff at the same projected boundary.
+        height > local_limit * 1.001
     } else {
-        height >= 675.0
+        height >= local_limit * 1.1
     }
 }
 
@@ -482,13 +490,13 @@ fn write_rows(
 
 pub fn camera(
     scene: Res<Scene>,
-    mut camera: Query<(&mut Transform, &mut Projection), With<GasCamera>>,
+    mut camera: Query<(&mut Transform, &mut Projection, &Camera), With<GasCamera>>,
     mut gas: ResMut<GasInput>,
     mut visual: ResMut<moving::Visual>,
     mut stream: ResMut<Streaming>,
     mut profile: ResMut<profile::Profile>,
 ) {
-    let Ok((mut transform, mut projection)) = camera.single_mut() else {
+    let Ok((mut transform, mut projection, camera)) = camera.single_mut() else {
         return;
     };
     let started = profile.camera_tour.then(std::time::Instant::now);
@@ -497,12 +505,16 @@ pub fn camera(
         kind: "idle",
         ..default()
     };
+    let aspect = camera
+        .logical_viewport_size()
+        .map_or(16.0 / 9.0, |v| v.x / v.y.max(1.0));
+    let local_limit = window_height_limit(-*transform.forward(), aspect, scene.sim.size());
     // At map scale leave the detailed window in place. The same raytracer
     // continues into compact world columns outside it; no picture replacement.
     if matches!(
         *projection,
             Projection::Orthographic(ref p)
-                if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if map_scale(scene.sim.size(), viewport_height, stream.map_scale))
+                if matches!(p.scaling_mode, bevy::camera::ScalingMode::FixedVertical { viewport_height } if map_scale(scene.sim.size(), viewport_height, local_limit, stream.map_scale))
     ) {
         work.measure(3, || {
             if let Some(job) = stream.job.take() {
@@ -889,11 +901,33 @@ mod tests {
 
     #[test]
     fn map_scale_hysteresis_only_suspends_streaming_on_large_maps() {
-        assert!(!map_scale([640, 192, 640], 10_000.0, false));
-        assert!(!map_scale([10_000, 192, 10_000], 674.0, false));
-        assert!(map_scale([10_000, 192, 10_000], 675.0, false));
-        assert!(map_scale([10_000, 192, 10_000], 600.0, true));
-        assert!(!map_scale([10_000, 192, 10_000], 590.0, true));
+        let size = [10_000, 192, 10_000];
+        assert!(!map_scale([640, 192, 640], 10_000.0, 600.0, false));
+        assert!(!map_scale(size, 659.0, 600.0, false));
+        assert!(map_scale(size, 661.0, 600.0, false));
+        assert!(map_scale(size, 630.0, 600.0, true));
+        assert!(!map_scale(size, 600.0, 600.0, true));
+    }
+    #[test]
+    fn default_sector_fit_returns_to_detail_at_any_aspect_and_orientation() {
+        let size = [10_000, 192, 10_000];
+        for aspect in [1332.0 / 1022.0, 16.0 / 9.0, 9.0 / 16.0] {
+            for orbit in [0.0, 1.2, 2.6, 4.8] {
+                for pitch in [-0.3, 0.0, 0.3] {
+                    let offset = orbit_offset(Vec3::new(-155.0, 420.0, 320.0), orbit, pitch);
+                    let local_limit = window_height_limit(offset, aspect, size);
+                    let direction_limit = window_height_limit(offset.normalize(), aspect, size);
+                    assert!((direction_limit - local_limit).abs() < 0.001);
+                    for was_map in [false, true] {
+                        assert!(
+                            !map_scale(size, local_limit, direction_limit, was_map),
+                            "default sector suspended detail: {aspect} {orbit} {pitch} {was_map}"
+                        );
+                    }
+                    assert!(map_scale(size, local_limit * 1.2, direction_limit, false));
+                }
+            }
+        }
     }
     #[test]
     fn staged_rows_match_whole_window_after_wrapping_and_damage() {
