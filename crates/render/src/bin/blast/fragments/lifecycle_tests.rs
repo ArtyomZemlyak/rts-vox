@@ -98,27 +98,45 @@ fn assert_drawn_bounds(app: &App, entity: Entity, f: &sim_core::burst::Fragment)
         .unwrap();
     let mut lo = Vec3::splat(f32::INFINITY);
     let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut local_lo = lo;
+    let mut local_hi = hi;
     for p in mesh
         .attribute(Mesh::ATTRIBUTE_POSITION)
         .unwrap()
         .as_float3()
         .unwrap()
     {
-        let p = tr.rotation * (Vec3::from(*p) * tr.scale);
+        let local = Vec3::from(*p) * tr.scale;
+        local_lo = local_lo.min(local);
+        local_hi = local_hi.max(local);
+        let p = tr.rotation * local;
         lo = lo.min(p);
         hi = hi.max(p);
     }
     let (low, high) = f.bounds();
+    assert!((lo - pos(low)).min_element() > -0.0001, "count={}", f.count);
     assert!(
-        (lo - pos(low)).abs().max_element() < 0.0001,
+        (pos(high) - hi).min_element() > -0.0001,
         "count={}",
         f.count
     );
-    assert!(
-        (hi - pos(high)).abs().max_element() < 0.0001,
-        "count={}",
-        f.count
-    );
+    // Bevels cut corners inside the collision envelope. Check the unturned
+    // extents exactly too, so enclosure cannot hide an incorrect mesh scale.
+    let axis = |x, y, z| {
+        sim_core::damage::V3::new(
+            fx::Fx::from_int(x),
+            fx::Fx::from_int(y),
+            fx::Fx::from_int(z),
+        )
+    };
+    let unturned = sim_core::burst::Fragment {
+        basis: [axis(1, 0, 0), axis(0, 1, 0), axis(0, 0, 1)],
+        chunk: None,
+        ..*f
+    };
+    let (low, high) = unturned.bounds();
+    assert!((local_lo - pos(low)).abs().max_element() < 0.0001);
+    assert!((local_hi - pos(high)).abs().max_element() < 0.0001);
     assert_eq!(
         tr.translation,
         pos([f.position.x, f.position.y, f.position.z])

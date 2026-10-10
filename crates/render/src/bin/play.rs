@@ -1474,31 +1474,9 @@ fn debris(
                 |f| art.finish[f as usize].clone(),
             );
             if let std::collections::btree_map::Entry::Vacant(entry) = shown.mesh.entry(key) {
-                let c = sim_core::burst::shape_centre(f.shape, f.side);
-                let centre = position(c.x, c.y, c.z);
-                let mut combined: Option<Mesh> = None;
-                let side = u32::from(f.side.clamp(1, 4));
-                for i in 0..side * side * side {
-                    if f.shape & (1 << i) != 0 {
-                        let offset = Vec3::new(
-                            (i % side) as f32,
-                            ((i / side) % side) as f32,
-                            (i / (side * side)) as f32,
-                        ) - centre;
-                        let mut cube =
-                            Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
-                        cube.insert_attribute(
-                            Mesh::ATTRIBUTE_COLOR,
-                            vec![colour; cube.count_vertices()],
-                        );
-                        if let Some(mesh) = combined.as_mut() {
-                            mesh.merge(&cube).expect("same cube vertex attributes");
-                        } else {
-                            combined = Some(cube);
-                        }
-                    }
-                }
-                entry.insert(meshes.add(combined.expect("nonempty authoritative fragment")));
+                entry.insert(meshes.add(buf_to_mesh(&render::model::fragment_to_mesh(
+                    f.shape, f.side, colour,
+                ))));
             }
             commands
                 .spawn((

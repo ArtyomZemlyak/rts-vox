@@ -14,6 +14,13 @@ fn main() {
     ))
     .unwrap();
     let mut sim = BlastRange::restore(config, &bytes).expect("battle snapshot");
+    if args.iter().any(|a| a == "--settle-fragments") {
+        settle_fragments(&mut sim);
+        if args.iter().any(|a| a == "--trace-wakeups") {
+            trace_wakeups(&mut sim);
+        }
+        return;
+    }
     if args.iter().any(|a| a == "--profile-tick") {
         let ticks = args
             .windows(2)
@@ -79,6 +86,74 @@ fn main() {
     assert_eq!(sim.state_hash(), before);
     times.sort_unstable();
     println!("tick={} hash={before:016x} workers={} fragments={} hulls={} columns={columns} rounds={rounds} mean_ns={} p50_ns={} p95_ns={} p99_ns={} checksum={checksum:016x}", sim.tick, rayon::current_num_threads(), sim.matter.debris.fragments.len(), hulls.len(), times.iter().sum::<u128>() / rounds as u128, times[rounds / 2], times[rounds * 95 / 100], times[rounds * 99 / 100]);
+}
+
+/// Stop firing, terrain edits and hull motion to distinguish a busy battle
+/// from a debris pile that keeps moving without any external input.
+fn settle_fragments(sim: &mut BlastRange) {
+    let tuning = sim_core::Tuning::from_ron(include_str!("../../../../data/sim.ron")).unwrap();
+    let gravity = sim_core::gravity_per_tick(&tuning);
+    let mut elapsed = 0;
+    let mut wakeups = sim.matter.debris.wakeups;
+    for tick in 0..1800 {
+        let start = Instant::now();
+        sim.matter.debris.step_fragments(
+            &sim.world,
+            &mut sim.matter.economy,
+            &sim.matter.tuning,
+            gravity,
+            u64::from(sim.tick + tick),
+            sim_core::burst::Surroundings::NONE,
+        );
+        elapsed += start.elapsed().as_micros();
+        if (tick + 1) % 300 == 0 {
+            let debris = &sim.matter.debris;
+            println!(
+                "settle_tick={} fragments={} flying={} wakeups={} mean_us={} balanced={}",
+                tick + 1,
+                debris.fragments.len(),
+                debris.fragments.iter().filter(|f| !f.resting).count(),
+                debris.wakeups - wakeups,
+                elapsed / 300,
+                sim.matter.economy.balanced()
+            );
+            elapsed = 0;
+            wakeups = debris.wakeups;
+        }
+    }
+}
+
+fn trace_wakeups(sim: &mut BlastRange) {
+    let tuning = sim_core::Tuning::from_ron(include_str!("../../../../data/sim.ron")).unwrap();
+    let gravity = sim_core::gravity_per_tick(&tuning);
+    let mut blast = sim.matter.tuning;
+    // Diagnostic only: one unique ID is due per probe, so a wake-and-sleep
+    // within the same tick can be attributed without instrumenting the kernel.
+    blast.rest_check_ticks = u32::MAX;
+    let ids: Vec<_> = sim.matter.debris.fragments.iter().map(|f| f.id).collect();
+    for id in ids {
+        let before = sim.matter.debris.wakeups;
+        let tick = u64::from(u32::MAX) - id % u64::from(u32::MAX);
+        sim.matter.debris.step_fragments(
+            &sim.world,
+            &mut sim.matter.economy,
+            &blast,
+            gravity,
+            tick,
+            sim_core::burst::Surroundings::NONE,
+        );
+        if sim.matter.debris.wakeups > before {
+            let f = sim
+                .matter
+                .debris
+                .fragments
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap();
+            println!("wake_loop id={id} pos={:?} velocity={:?} mm={} material={} shape={:016x} side={} basis={:?} bounds={:?}",
+                f.position, f.velocity, f.mm, f.material, f.shape, f.side, f.basis, f.bounds());
+        }
+    }
 }
 
 fn profile_ticks(sim: &mut BlastRange, ticks: u128) {

@@ -82,6 +82,64 @@ const SIDES: [([i32; 3], usize, bool); 6] = [
 /// с игровой камеры (ADR-206).
 pub const BEVEL: f32 = 0.5;
 
+/// A connected debris volume has one closed outer surface. Internal voxel
+/// faces and seams do not become geometry; only actual outer edges are cut.
+pub fn fragment_to_mesh(shape: u64, side: u8, colour: [f32; 4]) -> MeshBuf {
+    let side = i32::from(side.clamp(1, 4));
+    let solid = |p: [i32; 3]| {
+        p.iter().all(|&v| v >= 0 && v < side)
+            && shape & (1 << (p[0] + side * p[1] + side * side * p[2])) != 0
+    };
+    let centre = sim_core::burst::shape_centre(shape, side as u8);
+    let centre = [centre.x, centre.y, centre.z].map(|v| v.to_f64_lossy() as f32);
+    let cells: Vec<[i32; 3]> = (0..side.pow(3))
+        .filter(|&i| shape & (1 << i) != 0)
+        .map(|i| [i % side, i / side % side, i / (side * side)])
+        .collect();
+    let lo: [f32; 3] = std::array::from_fn(|a| cells.iter().map(|p| p[a]).min().unwrap() as f32);
+    let hi: [f32; 3] =
+        std::array::from_fn(|a| cells.iter().map(|p| p[a]).max().unwrap() as f32 + 1.0);
+    let mut out = MeshBuf::default();
+    let span: [f32; 3] = std::array::from_fn(|a| hi[a] - lo[a]);
+    if cells.len() == span.iter().product::<f32>() as usize {
+        // Most consolidated piles are solid boxes. Mesh their six surfaces
+        // directly, rather than tessellating every voxel of the same plane.
+        let put = |p: [f32; 3]| {
+            std::array::from_fn(|a| lo[a] + 0.01 + p[a] * (span[a] - 0.02) - 0.5 - centre[a])
+        };
+        let bevel = BEVEL / span.into_iter().fold(f32::INFINITY, f32::min);
+        for (_, axis, positive) in SIDES {
+            face(axis, positive, bevel, colour, &|_, _| true, &put, &mut out);
+        }
+        corners(bevel, colour, &|_, _| true, &put, &mut out);
+        return out;
+    }
+    let mid: [f32; 3] = std::array::from_fn(|a| (lo[a] + hi[a]) * 0.5);
+    let shrink: [f32; 3] = std::array::from_fn(|a| (span[a] - 0.02) / span[a]);
+    let offset: [f32; 3] = std::array::from_fn(|a| mid[a] - 0.5 - centre[a]);
+    for at in cells {
+        let put = |p: [f32; 3]| {
+            std::array::from_fn(|a| {
+                // One shrink of the whole connected volume matches the physical
+                // .49-cell outer margin without opening cracks between voxels.
+                (at[a] as f32 + p[a] - mid[a]) * shrink[a] + offset[a]
+            })
+        };
+        let free = |a: usize, sign: i32| {
+            let mut p = at;
+            p[a] += sign;
+            !solid(p)
+        };
+        for (d, axis, positive) in SIDES {
+            if !solid(std::array::from_fn(|a| at[a] + d[a])) {
+                face(axis, positive, BEVEL, colour, &free, &put, &mut out);
+            }
+        }
+        corners(BEVEL, colour, &free, &put, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "model/integrity_tests.rs"]
 mod integrity_tests;

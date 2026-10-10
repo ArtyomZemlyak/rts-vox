@@ -36,27 +36,7 @@ pub fn pos(v: [fx::Fx; 3]) -> Vec3 {
     Vec3::from(v.map(|a| a.to_f64_lossy() as f32))
 }
 fn piece_mesh(shape: u64, side: u8, colour: [f32; 4]) -> Mesh {
-    let c = sim_core::burst::shape_centre(shape, side);
-    let centre = pos([c.x, c.y, c.z]);
-    let mut combined: Option<Mesh> = None;
-    let side = u32::from(side.clamp(1, 4));
-    for i in 0..side * side * side {
-        if shape & (1 << i) != 0 {
-            let offset = Vec3::new(
-                (i % side) as f32,
-                ((i / side) % side) as f32,
-                (i / (side * side)) as f32,
-            ) - centre;
-            let mut cube = Mesh::from(Cuboid::new(0.98, 0.98, 0.98)).translated_by(offset);
-            cube.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![colour; cube.count_vertices()]);
-            if let Some(m) = combined.as_mut() {
-                m.merge(&cube).expect("same fragment attributes");
-            } else {
-                combined = Some(cube);
-            }
-        }
-    }
-    combined.expect("nonempty physical shape")
+    super::mesh(&render::model::fragment_to_mesh(shape, side, colour))
 }
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
@@ -209,6 +189,22 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn solid_piles_have_one_closed_bevelled_surface() {
+        let mesh = piece_mesh(u64::MAX, 4, [1.0; 4]);
+        assert_eq!(mesh.indices().unwrap().len() / 3, 44);
+        // Sixty-four independent cubes used to submit 768 triangles.
+        let buf = render::model::fragment_to_mesh(u64::MAX, 4, [1.0; 4]);
+        for tri in buf.idx.chunks_exact(3) {
+            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from(buf.pos[i as usize]));
+            let normal = Vec3::from(buf.nrm[tri[0] as usize]);
+            assert!((b - a).cross(c - a).dot(normal) > 0.0);
+            let centre = (a + b + c) / 3.0;
+            assert!(centre.dot(normal) > 1.0, "an internal face survived");
+        }
+        let shard = piece_mesh(1, 1, [1.0; 4]);
+        assert_eq!(shard.indices().unwrap().len() / 3, 8);
+    }
     #[test]
     fn saturated_pile_mesh_matches_physical_bounds() {
         for (shape, side, count) in [(1, 2, 1), (u64::MAX, 4, 64), (u64::MAX, 4, 4096)] {
