@@ -1,67 +1,56 @@
-//! Two independently commanded walkers pivot in opposite directions, then walk.
-use sim_core::{Order, Reference, Tuning};
+//! Two independently commanded striders turn in opposite directions, then
+//! walk (range, ADR-671). The save holds the orders just given; the check
+//! runs on the restored save.
+#[path = "../fixture.rs"]
+mod fixture;
+use fx::Fx;
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "out/walker-turn/fixture.bin".into());
-    let t = Tuning::from_ron(include_str!("../../../../data/sim.ron")).unwrap();
-    let weapons = modding::weapons::from_ron(include_str!("../../../../data/weapons.ron")).unwrap();
-    let kinds = modding::kinds::from_ron(include_str!("../../../../data/kinds.ron"), 30).unwrap();
-    let mats =
-        modding::data::materials_from_ron(include_str!("../../../../data/materials.ron")).unwrap();
-    let mut params = worldgen::Params::sized(768, 128, 768);
-    params.relief = 1;
-    let mut r = Reference::with_params(42, 0, t, weapons, params);
-    r.world.attach_economy(kinds, mats);
-    let mut ids = Vec::new();
-    for z in [330, 438] {
-        let id = r.world.spawn_kind(410, z, 0, 3).unwrap();
-        ids.push(id);
-        r.world.push_order(Order::Hold { unit: id });
+    let path = fixture::path("out/walker-turn/fixture.bin");
+    let mut r = fixture::range(include_str!("../../../../data/fixture-turn.ron"));
+    r.step();
+    // Targets behind each walker, on opposite sides of its heading.
+    for (unit, z) in [(0, 360), (1, 408)] {
+        fixture::order_move(&mut r, unit, [270, z]);
     }
-    r.world.units.refresh_live();
-    r.world.tick();
-    for (&unit, z) in ids.iter().zip([360, 408]) {
-        r.world.push_order(Order::MoveTo { unit, x: 270, z });
-    }
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&path, sim_core::save::save(&r)).unwrap();
-    let mut csv = String::from("tick,unit,x,z,head,gait,speed_raw,yaw_rate\n");
+    let mut r = fixture::save(&path, &r);
+    let mut csv = String::from("tick,unit,x_raw,z_raw,head,speed_raw,yaw_rate,planted\n");
     let mut pivots = [0; 2];
-    for tick in 0..300 {
-        r.world.tick();
-        for (k, &id) in ids.iter().enumerate() {
-            let i = id as usize;
-            let u = &r.world.units;
-            if u.vel[i] == fx::Fx::ZERO && u.yaw_step[i] != 0 {
-                pivots[k] += 1;
-                assert_ne!(u.gait[i], 0);
+    let heads = [0, 1].map(|i| r.units[i].motion.drive.head);
+    for _ in 0..300 {
+        r.step();
+        for (k, pivot) in pivots.iter_mut().enumerate() {
+            let m = &r.units[k].motion;
+            if m.drive.vel == Fx::ZERO && m.drive.yaw_rate != 0 {
+                *pivot += 1;
             }
+            let planted = m.feet.iter().filter(|f| f.planted()).count();
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{}\n",
-                r.world.tick,
-                id,
-                u.x[i],
-                u.z[i],
-                u.head[i],
-                u.gait[i],
-                u.vel[i].raw(),
-                u.yaw_rate[i]
+                "{},{k},{},{},{},{},{},{planted}\n",
+                r.tick,
+                m.pos[0].raw(),
+                m.pos[2].raw(),
+                m.drive.head,
+                m.drive.vel.raw(),
+                m.drive.yaw_rate
             ));
         }
-        if tick == 4 {
-            assert!(pivots.iter().all(|&n| n > 0));
-        }
     }
-    for &id in &ids {
-        assert!(r.world.units.x[id as usize] < 400);
+    let turned = [0, 1].map(|i| {
+        let d = r.units[i].motion.drive.head - heads[i];
+        d.rem_euclid(fx::angle::FULL)
+    });
+    println!("heads {heads:?} -> turned {turned:?}, pivot ticks {pivots:?}");
+    assert!(pivots.iter().all(|&n| n > 0), "no stationary pivot");
+    for i in 0..2 {
+        assert!(
+            r.units[i].motion.pos[0] < Fx::from_int(400),
+            "walker {i} did not walk back: {:?}",
+            r.units[i].motion.pos
+        );
     }
-    assert!(r.world.econ.as_ref().unwrap().balanced());
+    assert!(fixture::balanced(&r));
     std::fs::write(std::path::Path::new(&path).with_extension("csv"), csv).unwrap();
     println!(
-        "two walkers: stationary pivot ticks {:?}; 300 ticks; balanced=true",
-        pivots
+        "two walkers: stationary pivot ticks {pivots:?}; 300 ticks; balanced=true; save {path}"
     );
 }

@@ -1,0 +1,19 @@
+// Visual-QA fixture `section_fixture` (ADR-671): a tank driving across the
+// pad and a parked tank for comparison. The fixture melts the layer under
+// the moving tank's turret; the turret leaves as a whole section.
+// One world cell is 0.1 m. `blast --range` opens it without the cut.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Tank, allied: true, at: (230, 16, 384)),
+        (kind: Tank, allied: true, at: (470, 16, 460)),
+    ],
+    blocks: [],
+    power_milli: [1000],
+    unit_resistance: 180,
+)

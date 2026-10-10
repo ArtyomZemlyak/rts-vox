@@ -1,91 +1,63 @@
-//! Two walking lanes: level ground and an excavated stepped depression.
-use sim_core::{Order, Reference, Tuning};
+//! Two strider lanes: level ground and a stepped depression authored in the
+//! layout (range, ADR-671). The save holds the move orders just given; the
+//! check runs on the restored save.
+#[path = "../fixture.rs"]
+mod fixture;
+use fx::Fx;
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "out/walker-terrain/fixture.bin".into());
-    let t = Tuning::from_ron(include_str!("../../../../data/sim.ron")).unwrap();
-    let weapons = modding::weapons::from_ron(include_str!("../../../../data/weapons.ron")).unwrap();
-    let kinds = modding::kinds::from_ron(include_str!("../../../../data/kinds.ron"), 30).unwrap();
-    let mats =
-        modding::data::materials_from_ron(include_str!("../../../../data/materials.ron")).unwrap();
-    let mut params = worldgen::Params::sized(768, 128, 768);
-    params.relief = 1;
-    let mut r = Reference::with_params(42, 0, t, weapons, params);
-    r.world.attach_economy(kinds, mats);
-    let ground = r.world.ground_mut().unwrap();
-    for x in 360..450 {
-        let depth = if (380..430).contains(&x) { 8 } else { 4 };
-        for z in 400..476 {
-            let top = (1..ground.world.ny)
-                .rev()
-                .find(|&y| ground.world.solid(x, y - 1, z))
-                .unwrap();
-            for y in top - depth..top {
-                ground.world.queue_dig(x, y, z);
-            }
-        }
+    let path = fixture::path("out/walker-terrain/fixture.bin");
+    let mut r = fixture::range(include_str!("../../../../data/fixture-terrain.ron"));
+    r.step();
+    for (unit, z) in [(0, 330), (1, 438)] {
+        fixture::order_move(&mut r, unit, [580, z]);
     }
-    while r.world.ground().unwrap().world.queued() > 0 {
-        r.world.tick();
-    }
-    let mut ids = Vec::new();
-    for z in [330, 438] {
-        let id = r.world.spawn_kind(325, z, 0, 3).unwrap();
-        ids.push(id);
-        r.world.push_order(Order::Hold { unit: id });
-    }
-    r.world.units.refresh_live();
-    r.world.tick();
-    for (&unit, z) in ids.iter().zip([330, 438]) {
-        r.world.push_order(Order::MoveTo { unit, x: 580, z });
-    }
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&path, sim_core::save::save(&r)).unwrap();
-    let mut csv =
-        String::from("tick,unit,x,y,z,head,gait,up_x,up_y,up_z,body_y_raw,heave_raw,heave_v_raw\n");
-    let mut heights = [(i32::MAX, i32::MIN); 2];
+    let mut r = fixture::save(&path, &r);
+    let mut csv = String::from(
+        "tick,unit,x_raw,y_raw,z_raw,head,up_x,up_y,up_z,hull_y_raw,hull_vy_raw,load_raw,planted\n",
+    );
+    let mut heights = [(Fx::from_int(i32::MAX / 2), Fx::from_int(i32::MIN / 2)); 2];
     for _ in 0..420 {
-        r.world.tick();
-        for (k, &id) in ids.iter().enumerate() {
-            let i = id as usize;
-            let u = &r.world.units;
-            heights[k].0 = heights[k].0.min(u.y[i]);
-            heights[k].1 = heights[k].1.max(u.y[i]);
+        r.step();
+        for (k, h) in heights.iter_mut().enumerate() {
+            let m = &r.units[k].motion;
+            h.0 = h.0.min(m.pos[1]);
+            h.1 = h.1.max(m.pos[1]);
+            let planted = m.feet.iter().filter(|f| f.planted()).count();
             csv.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-                r.world.tick,
-                id,
-                u.x[i],
-                u.y[i],
-                u.z[i],
-                u.head[i],
-                u.gait[i],
-                u.up[i].x.raw(),
-                u.up[i].y.raw(),
-                u.up[i].z.raw(),
-                u.body_y(i).raw(),
-                u.heave[i].raw(),
-                u.heave_v[i].raw()
+                "{},{k},{},{},{},{},{},{},{},{},{},{},{planted}\n",
+                r.tick,
+                m.pos[0].raw(),
+                m.pos[1].raw(),
+                m.pos[2].raw(),
+                m.drive.head,
+                m.hull.up.x.raw(),
+                m.hull.up.y.raw(),
+                m.hull.up.z.raw(),
+                m.hull.y.raw(),
+                m.hull.vy.raw(),
+                m.hull.load.raw()
             ));
         }
     }
+    let drop = heights.map(|(lo, hi)| hi.sub(lo).to_int_trunc());
+    println!(
+        "height range per lane {drop:?} cells, lowest {:?}",
+        heights.map(|h| h.0)
+    );
+    assert!(drop[0] <= 1, "the level lane changed height");
+    // The floor of the depression is at 8: 0.8 m below the pad.
     assert!(
-        heights[1].1 - heights[1].0 >= 8,
+        heights[1].0 < Fx::from_int(9),
         "walker did not descend the test steps"
     );
-    for &id in &ids {
+    for i in 0..2 {
         assert!(
-            r.world.units.x[id as usize] > 450,
-            "walker did not leave the pit"
+            r.units[i].motion.pos[0] > Fx::from_int(450),
+            "walker {i} did not leave the depression: {:?}",
+            r.units[i].motion.pos
         );
     }
-    assert!(r.world.econ.as_ref().unwrap().balanced());
+    assert!(fixture::balanced(&r));
     std::fs::write(std::path::Path::new(&path).with_extension("csv"), csv).unwrap();
-    println!(
-        "two walking lanes: heights {:?}; 420 ticks; balanced=true",
-        heights
-    );
+    println!("two walking lanes: height ranges {drop:?}; 420 ticks; balanced=true; save {path}");
 }

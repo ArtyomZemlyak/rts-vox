@@ -1,0 +1,22 @@
+// Visual-QA fixture `terrain_fixture` (ADR-671): two strider lanes, level
+// ground and a stepped depression cut out of the pad by air blocks: 0.4 m
+// steps either side of a 0.8 m floor. The fixture orders both across.
+// One world cell is 0.1 m. `blast --range` opens it without orders.
+(
+    battle: true,
+    size: (768, 128, 768),
+    target: (600, 16, 384),
+    airburst_on_target: false,
+    clear_min: (64, 64),
+    clear_max: (704, 704),
+    units: [
+        (kind: Strider, allied: true, at: (325, 16, 330)),
+        (kind: Strider, allied: true, at: (325, 16, 438)),
+    ],
+    blocks: [
+        (min: (360, 12, 400), max: (450, 16, 476), material: 0),
+        (min: (380, 8, 400), max: (430, 12, 476), material: 0),
+    ],
+    power_milli: [1000],
+    unit_resistance: 180,
+)
