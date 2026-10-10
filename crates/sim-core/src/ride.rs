@@ -162,26 +162,29 @@ pub fn step_hull(
 mod tests {
     use super::*;
 
+    /// The hull in the air carries its height, its fall speed and its
+    /// lost load into the hash: two clients that disagree on where a
+    /// falling hull is desync before it lands, not when it does.
     #[test]
     fn airborne_history_changes_the_hash_before_the_landing() {
-        let tuning = crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
-        let mut w = crate::World::new(2, 1, tuning);
-        let i = w.units.spawn(10, 10, 0, 30, 300) as usize;
-        w.units.refresh_live();
-        w.units.fall_from[i] = 100;
-        let before = w.phase_hash();
-        w.units.fall_from[i] = 101;
+        let config = modding::explosion::ExplosionConfig::from_ron(include_str!(
+            "../../../data/explosion.ron"
+        ))
+        .unwrap();
+        let mut r = crate::blast::BlastRange::new(config);
+        let before = r.state_hash();
+        r.gun.motion.hull.y = r.gun.motion.hull.y.add(Fx::ONE);
         assert_ne!(
             before,
-            w.phase_hash(),
-            "landing energy history was invisible to the hash"
+            r.state_hash(),
+            "the height of a hull in the air was invisible to the hash"
         );
-        let before = w.phase_hash();
-        w.units.fall_v[i] = Fx::ONE;
-        assert_ne!(before, w.phase_hash());
-        let before = w.phase_hash();
-        w.units.fall_f[i] = Fx::from_ratio(1, 2);
-        assert_ne!(before, w.phase_hash());
+        let before = r.state_hash();
+        r.gun.motion.hull.vy = r.gun.motion.hull.vy.sub(Fx::ONE);
+        assert_ne!(before, r.state_hash());
+        let before = r.state_hash();
+        r.gun.motion.hull.load = Fx::from_ratio(1, 2);
+        assert_ne!(before, r.state_hash());
     }
 
     fn chassis() -> Chassis {

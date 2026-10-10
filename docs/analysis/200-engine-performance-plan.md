@@ -888,7 +888,7 @@ backpressure; принятая команда не исчезает. Presentatio
 - `range_wave_admission_tests`, `range_burst_admission_tests`, `range_wave_budget_tests`, `range_wave_resume_tests` и `range_kinetic_tests` — резервы, частичные контакты и продолжения. Дополнять oracle, а не писать тест, повторяющий новый алгоритм.
 - `range_battle_tests`, `range_laser_tracking_tests`, `range_artillery_tests`, `range_support_tests` и `voxel::bodies` tests — оружие, материал, опоры и реальные последствия.
 - `range_reset_tests`, `voxel/world_reset_tests` и `sim-core/tests/save.rs` — восстановление мира и различающиеся контракты двух runtime. Поддерживаемые свойства сохраняются при переносе.
-- `bench_route_latency`, `bench_ai_movement`, `bench_movement_pool`, `bench_placement`, `bench_range_reset` — готовые узкие стенды. Они не заменяют ordinary native и бой на общем kernel.
+- `bench_route_latency`, `bench_ai_movement`, `bench_placement`, `bench_range_reset` — готовые узкие стенды (`bench_movement_pool` мерил ядро `World` и удалён по ADR-662). Они не заменяют ordinary native и бой на общем kernel.
 - `render/blast/interaction_tests`, moving/fragments lifecycle tests, `harness/tests/architecture.rs`, `scripts/test_range_profile.py` и `scripts/test-profile-tools.ps1` — границы, визуальные поколения и достоверность профиля. После изменения схемы обновляются вместе с потребителем.
 
 Наличие теста в этом списке не означает его новый запуск в ревизии плана.

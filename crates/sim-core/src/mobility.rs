@@ -128,13 +128,17 @@ impl Mobility {
 mod tests {
     use super::*;
     use crate::damage::Bodies;
-    use crate::{Tuning, World};
+    use crate::drive::{advance, Drive, Move, NO_WAY};
     use voxel::{Part, UnitBody};
 
-    fn fixture() -> World {
-        let mut t = Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap();
-        t.impact.work_kj_m3 = [1; 5];
-        t.gravity = 0;
+    /// The nominal speed the ride runs at, world units per second.
+    const SPEED: i32 = 90;
+
+    /// One 9x3x9 armoured hull with a core and two engine cells, damaged
+    /// through the same body queue the battle uses. No world around it:
+    /// the drive below is the same composition every driven hull runs,
+    /// the mobility of the body over the chassis' nominal limits.
+    fn fixture() -> Bodies {
         let mut body = UnitBody::new_scaled(9, 3, 9, 1, 100);
         for x in 0..9 {
             for y in 0..3 {
@@ -147,18 +151,11 @@ mod tests {
         body.set(1, 1, 4, Part::Engine);
         body.set(2, 1, 4, Part::Engine);
         assert!(body.seat_core());
-        let mut w = World::new(42, 16, t);
-        w.units.spawn(300, 300, 0, 90, 99);
-        w.units.refresh_live();
         let mut bodies = Bodies::new(vec![body]);
         bodies.spawn_at(0, 0);
-        w.material_bodies = Some(bodies);
-        w.delta.resize(w.units.len(), crate::drive::Want::default());
-        w.delta[0].way = 0;
-        w
+        bodies
     }
-    fn hit(w: &mut World, cells: Vec<[u8; 3]>) {
-        let b = w.material_bodies.as_mut().unwrap();
+    fn hit(b: &mut Bodies, cells: Vec<[u8; 3]>) {
         assert!(b.queue_cells(
             0,
             b.generations[0],
@@ -166,14 +163,39 @@ mod tests {
             1_000_000,
             0,
             phys::V3::ZERO,
-            w.tuning.impact.max_pending
+            4096
         ));
-        w.apply_material_damage();
+        b.step(&[1; 5], 16_384, 32);
+    }
+    fn response(b: &Bodies) -> Mobility {
+        b.state(0).unwrap().mobility
+    }
+    /// One tick of a hull's drive: thrust only while the machinery is
+    /// whole enough to give it, the top speed scaled by the engine left,
+    /// and the brake always the hull's own.
+    fn drive(m: Mobility, d: Drive, way: i32) -> (Drive, Move) {
+        let nominal =
+            crate::drive::Limits::of(&crate::test_tuning().tracked, crate::TICKS_PER_SECOND);
+        let powered = m.engine > Fx::ZERO && m.traction > Fx::ZERO;
+        let way = if powered { way } else { NO_WAY };
+        let vmax = if powered {
+            Fx::from_int(SPEED).mul(m.engine.mul(m.traction))
+        } else {
+            Fx::ZERO
+        };
+        advance(
+            d,
+            way,
+            vmax,
+            &m.limits(&nominal, way == NO_WAY),
+            Fx::ONE,
+            Fx::from_ratio(1, crate::TICKS_PER_SECOND),
+        )
     }
 
     #[test]
     fn lost_armour_changes_actual_acceleration_with_the_same_installed_engine() {
-        let mut whole = fixture();
+        let whole = fixture();
         let mut light = fixture();
         let mut cut = Vec::new();
         for x in 7..9 {
@@ -184,60 +206,49 @@ mod tests {
             }
         }
         hit(&mut light, cut);
-        let response = light
-            .material_bodies
-            .as_ref()
-            .unwrap()
-            .state(0)
-            .unwrap()
-            .mobility;
-        assert_eq!(response.engine, Fx::ONE);
-        assert!(response.inverse_mass > Fx::ONE);
-        whole.apply_deltas();
-        light.apply_deltas();
-        assert!(light.units.vel[0] > whole.units.vel[0]);
-        assert!(light.units.fx[0] > whole.units.fx[0]);
+        let (whole, light) = (response(&whole), response(&light));
+        assert_eq!(whole, Mobility::intact(true));
+        assert_eq!(light.engine, Fx::ONE);
+        assert!(light.inverse_mass > Fx::ONE);
+        let (w, wm) = drive(whole, Drive::default(), 0);
+        let (l, lm) = drive(light, Drive::default(), 0);
+        assert!(l.vel > w.vel);
+        assert!(lm.dx > wm.dx);
         // Losing peripheral material also changes angular acceleration.
-        whole.delta[0].way = fx::angle::QUARTER;
-        light.delta[0].way = fx::angle::QUARTER;
-        whole.apply_deltas();
-        light.apply_deltas();
-        assert!(light.units.yaw_rate[0] > whole.units.yaw_rate[0]);
+        let (w, _) = drive(whole, w, fx::angle::QUARTER);
+        let (l, _) = drive(light, l, fx::angle::QUARTER);
+        assert!(l.yaw_rate > w.yaw_rate);
     }
 
     #[test]
     fn partial_engine_damage_reduces_thrust_and_failure_keeps_the_coasting_motion() {
-        let mut whole = fixture();
-        let mut damaged = fixture();
-        hit(&mut damaged, vec![[1, 1, 4]]);
-        assert_eq!(
-            damaged
-                .material_bodies
-                .as_ref()
-                .unwrap()
-                .state(0)
-                .unwrap()
-                .mobility
-                .engine,
-            Fx::from_ratio(1, 2)
-        );
-        whole.apply_deltas();
-        damaged.apply_deltas();
-        assert!(damaged.units.vel[0] > whole.units.vel[0].mul(Fx::from_ratio(1, 3)));
-        assert!(damaged.units.vel[0] < whole.units.vel[0].mul(Fx::from_ratio(2, 3)));
-        damaged.units.vel[0] = Fx::from_int(60);
-        let x = damaged.units.x[0];
-        hit(&mut damaged, vec![[2, 1, 4]]);
-        damaged.apply_deltas();
-        assert!(damaged.units.vel[0] > Fx::ZERO && damaged.units.vel[0] < Fx::from_int(60));
-        assert!(damaged.units.x[0] > x);
+        let whole = response(&fixture());
+        let mut b = fixture();
+        hit(&mut b, vec![[1, 1, 4]]);
+        let damaged = response(&b);
+        assert_eq!(damaged.engine, Fx::from_ratio(1, 2));
+        let (w, _) = drive(whole, Drive::default(), 0);
+        let (d, _) = drive(damaged, Drive::default(), 0);
+        assert!(d.vel > w.vel.mul(Fx::from_ratio(1, 3)));
+        assert!(d.vel < w.vel.mul(Fx::from_ratio(2, 3)));
+        // The last engine cell goes while the hull runs: it coasts on its
+        // brake, still moving forward, and stops.
+        hit(&mut b, vec![[2, 1, 4]]);
+        let failed = response(&b);
+        assert_eq!(failed.engine, Fx::ZERO);
+        let coasting = Drive {
+            vel: Fx::from_int(60),
+            ..d
+        };
+        let (mut d, mv) = drive(failed, coasting, 0);
+        assert!(d.vel > Fx::ZERO && d.vel < Fx::from_int(60));
+        assert!(mv.dx > Fx::ZERO);
         for _ in 0..120 {
-            damaged.apply_deltas();
+            d = drive(failed, d, 0).0;
         }
-        assert_eq!(damaged.units.vel[0], Fx::ZERO);
-        let b = damaged.material_bodies.as_mut().unwrap();
+        assert_eq!(d.vel, Fx::ZERO);
         b.spawn_at(0, 0);
-        assert_eq!(b.state(0).unwrap().mobility, Mobility::intact(true));
+        assert_eq!(response(&b), Mobility::intact(true));
     }
 
     #[test]
