@@ -129,6 +129,34 @@ fn under(roof: &RangeBlock, e: &Edit) -> bool {
         && (e.z as i32) < roof.max[2]
         && (e.y as i32) <= roof.max[1]
 }
+/// The lowest edit in each tile of `1 << EditTiles::SHIFT` columns: a roof
+/// over no tile that holds an edit at or below its top has no edit under
+/// it, and the exact test is skipped for it.
+struct EditTiles(BTreeMap<[i32; 2], i32>);
+impl EditTiles {
+    const SHIFT: i32 = 4;
+    fn of(edits: impl Iterator<Item = Edit>) -> Self {
+        let mut tiles = BTreeMap::new();
+        for e in edits {
+            let key = [e.x as i32 >> Self::SHIFT, e.z as i32 >> Self::SHIFT];
+            let low = tiles.entry(key).or_insert(i32::MAX);
+            *low = (*low).min(e.y as i32);
+        }
+        Self(tiles)
+    }
+    /// False only if no edit lies under the roof.
+    fn may_reach(&self, roof: &RangeBlock) -> bool {
+        let lo = [roof.min[0] >> Self::SHIFT, roof.min[2] >> Self::SHIFT];
+        let hi = [
+            (roof.max[0] - 1) >> Self::SHIFT,
+            (roof.max[2] - 1) >> Self::SHIFT,
+        ];
+        self.0
+            .range([lo[0], i32::MIN]..=[hi[0], i32::MAX])
+            .any(|(k, &y)| (lo[1]..=hi[1]).contains(&k[1]) && y <= roof.max[1])
+    }
+}
+
 /// Whether an edit would make the plate check look at any roof
 /// (ADR-645: such an edit in a waiting region is kept for later).
 pub(super) fn watches(layout: &RangeLayout, e: &Edit) -> bool {
@@ -149,6 +177,7 @@ pub(super) fn fracture_iter(
     material: impl Fn(u16) -> Option<(u32, u32, u32)>,
 ) -> usize {
     let mut torn = 0;
+    let near = EditTiles::of(edits.clone());
     for roof in &layout.blocks {
         let sx = roof.max[0] - roof.min[0];
         let sz = roof.max[2] - roof.min[2];
@@ -159,7 +188,11 @@ pub(super) fn fracture_iter(
         let Some((strength, density, bend_span)) = material(roof.material) else {
             continue;
         };
-        if strength == 0 || density == 0 || !edits.clone().any(|e| under(roof, &e)) {
+        if strength == 0
+            || density == 0
+            || !near.may_reach(roof)
+            || !edits.clone().any(|e| under(roof, &e))
+        {
             continue;
         }
         let needed = (sx as u64 * sz as u64 * thick as u64 * density as u64)

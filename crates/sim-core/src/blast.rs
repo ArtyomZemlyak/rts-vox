@@ -5380,11 +5380,15 @@ impl BlastRange {
                 {
                     self.collapse_backlog.insert(*e);
                 }
+                // Which edits wait is asked once per edit, not once per
+                // roof the plate check walks.
+                let free: Vec<voxel::world::Edit> =
+                    ready.iter().copied().filter(|e| !waiting(e)).collect();
                 plate::fracture_iter(
                     layout,
                     &mut self.world,
                     &mut self.bodies,
-                    ready.iter().copied().filter(|e| !waiting(e)),
+                    free.iter().copied(),
                     &mut crumbs,
                     |mat| {
                         self.matter

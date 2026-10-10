@@ -42,6 +42,8 @@ struct TickProfile {
     accounting_us: u128,
     observed_phases_us: u128,
     collapse_us: u128,
+    /// admit, edits, labels, promote, resolve, detach, crumble, plate, rest.
+    collapse_parts: [u128; 9],
     collapse_work: sim_core::blast::CollapseWork,
     searching: usize,
     moving: usize,
@@ -126,7 +128,23 @@ impl TickProfile {
             "rubble" => self.rubble_us += us,
             "kinetic_resume" => self.kinetic_resume_us += us,
             "heat_flush" => self.heat_flush_us += us,
-            name if name == "collapse" || name.starts_with("collapse_") => self.collapse_us += us,
+            name if name == "collapse" || name.starts_with("collapse_") => {
+                self.collapse_us += us;
+                let part = [
+                    "collapse_admit",
+                    "collapse_edits",
+                    "collapse_labels",
+                    "collapse_promote",
+                    "collapse_resolve",
+                    "collapse_detach",
+                    "collapse_crumble",
+                    "collapse_plate",
+                ]
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or(8);
+                self.collapse_parts[part] += us;
+            }
             _ => {}
         }
     }
@@ -1459,6 +1477,18 @@ fn main() {
         );
         for (index, window) in tick_profiles.chunks(300).enumerate() {
             let len = window.len() as u128;
+            let mut parts = [0u128; 9];
+            for p in window {
+                for (sum, v) in parts.iter_mut().zip(p.collapse_parts) {
+                    *sum += v;
+                }
+            }
+            println!(
+                "collapse_parts_window={}..{} admit_edits_labels_promote_resolve_detach_crumble_plate_rest_us={:?}",
+                window[0].tick,
+                window[window.len() - 1].tick,
+                parts.map(|v| v / len)
+            );
             println!("collapse_window={}..{} mean_us={} queued_max={} submitted_max={} blocked_ticks_max={} candidates_max={} buffer_peak_max={}",
                 window[0].tick, window[window.len()-1].tick,
                 window.iter().map(|p| p.collapse_us).sum::<u128>() / len,
