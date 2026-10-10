@@ -15,7 +15,11 @@ fn main() {
     .unwrap();
     let mut sim = BlastRange::restore(config, &bytes).expect("battle snapshot");
     if args.iter().any(|a| a == "--profile-tick") {
-        profile_ticks(&mut sim);
+        let ticks = args
+            .windows(2)
+            .find(|w| w[0] == "--profile-ticks")
+            .map_or(64, |w| w[1].parse().expect("tick count"));
+        profile_ticks(&mut sim, ticks);
         return;
     }
     let before = sim.state_hash();
@@ -77,12 +81,12 @@ fn main() {
     println!("tick={} hash={before:016x} workers={} fragments={} hulls={} columns={columns} rounds={rounds} mean_ns={} p50_ns={} p95_ns={} p99_ns={} checksum={checksum:016x}", sim.tick, rayon::current_num_threads(), sim.matter.debris.fragments.len(), hulls.len(), times.iter().sum::<u128>() / rounds as u128, times[rounds / 2], times[rounds * 95 / 100], times[rounds * 99 / 100]);
 }
 
-fn profile_ticks(sim: &mut BlastRange) {
+fn profile_ticks(sim: &mut BlastRange, ticks: u128) {
     use std::{collections::BTreeMap, sync::Mutex};
     let starts = Mutex::new(BTreeMap::new());
     let work = Mutex::new(BTreeMap::<&str, (u128, u128, usize)>::new());
     let mut phases = BTreeMap::<&str, u128>::new();
-    for _ in 0..64 {
+    for _ in 0..ticks {
         let mut last = Instant::now();
         sim.step_observed_all_tasks(
             |phase| {
@@ -120,11 +124,11 @@ fn profile_ticks(sim: &mut BlastRange) {
     for (name, (ns, max, calls)) in work.into_inner().unwrap() {
         println!(
             "task={name} sum_ns_per_tick={} max_ns={max} calls={calls}",
-            ns / 64
+            ns / ticks
         );
     }
     for (name, ns) in phases {
-        println!("phase={name} mean_ns={}", ns / 64);
+        println!("phase={name} mean_ns={}", ns / ticks);
     }
     println!(
         "profile_final_tick={} hash={:016x}",
