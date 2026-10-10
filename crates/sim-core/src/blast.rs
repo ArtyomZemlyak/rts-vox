@@ -2656,12 +2656,12 @@ fn relative_contact_velocity(
     }
 }
 
-// The crowded full-map battle uses a larger persistent pool; smaller
-// rosters retain the training battle's pool. This affects scheduling only.
 /// Physics workers of a scene until told otherwise: a constant, never the
 /// machine's core count (CLAUDE.md, ADR-080).
 const DEFAULT_PHYSICS_WORKERS: usize = 4;
 
+// The crowded full-map battle uses a larger persistent pool; smaller
+// rosters retain the training battle's pool. This affects scheduling only.
 fn default_navigation_workers(units: usize) -> usize {
     if units >= 48 {
         8
@@ -5144,11 +5144,11 @@ impl BlastRange {
         // bodies. The cohesive cells of a body fall on as the body and
         // bake back where it lands (ADR-300); its loose cells crumble
         // into debris pieces at once, or sink under an annihilating
-        // weapon. The layer waits for the wave to finish — a slow wave
-        // would otherwise lose cells to bodies torn off a half-dug crater
-        // — and for its claims to clear, so that it never takes a claimed
-        // cell from under the wave. Cohesive bodies have their own pool;
-        // spare particle slots must not decide whether a building can fall.
+        // weapon. Edits in a live wave's field, or next to a claimed cell,
+        // wait for it (ADR-645) — a slow wave would otherwise lose cells to
+        // bodies torn off a half-dug crater, or have a claimed cell taken
+        // from under it. Cohesive bodies have their own pool; spare
+        // particle slots must not decide whether a building can fall.
         for e in self.world.edits() {
             self.collapse_backlog.insert(*e);
         }
@@ -5196,28 +5196,33 @@ impl BlastRange {
                 .list
                 .iter()
                 .any(|b| b.awaiting_removal(&self.world));
-        // Per chunk, not per edit: a waiting chunk is not touched, so a
-        // backlog parked under a long fight costs nothing a tick.
-        let (mut by_wave, mut by_claim) = (false, false);
+        // Every edit reaches the layer at once: it learns about the world
+        // only from edits it is shown, and a pass over a copy missing some
+        // would tear off cells already dug, or hold ones already gone
+        // (ADR-421). What waits is the tearing off: a group touching a
+        // chunk in a live wave's field, or next to a claimed cell, is left
+        // for a later pass (ADR-645).
+        let by_wave = std::cell::Cell::new(false);
+        let by_claim = std::cell::Cell::new(false);
+        let held = |c: [u32; 3]| -> bool {
+            let lo = c.map(|v| v as i32 * chunk);
+            let in_wave = wave_boxes
+                .iter()
+                .any(|(blo, bhi)| (0..3).all(|a| lo[a] < bhi[a] && lo[a] + chunk > blo[a]));
+            let near_claim = claim_chunks.contains(&c.map(|v| v as i32));
+            by_wave.set(by_wave.get() | in_wave);
+            by_claim.set(by_claim.get() | (!in_wave && near_claim));
+            in_wave || near_claim
+        };
         let mut ready: Vec<voxel::world::Edit> = Vec::new();
         if has_collapse && !awaiting {
-            ready = self.collapse_backlog.admit(|c| {
-                let lo = c.map(|v| v as i32 * chunk);
-                let in_wave = wave_boxes
-                    .iter()
-                    .any(|(blo, bhi)| (0..3).all(|a| lo[a] < bhi[a] && lo[a] + chunk > blo[a]));
-                let near_claim = claim_chunks.contains(&c.map(|v| v as i32));
-                by_wave |= in_wave;
-                by_claim |= !in_wave && near_claim;
-                !in_wave && !near_claim
-            });
+            ready = self.collapse_backlog.admit(|_| true);
         }
-        let blocked_by = u8::from(by_wave) | (u8::from(by_claim) << 1) | (u8::from(awaiting) << 2);
         let runs = has_collapse && !awaiting && (!ready.is_empty() || self.collapse.pending());
         let queued = ready.len() + self.collapse_backlog.len();
         self.collapse_work = CollapseWork {
             queued,
-            blocked_by,
+            blocked_by: u8::from(awaiting) << 2,
             blocked_ticks: if has_collapse && !runs {
                 self.collapse_work.blocked_ticks.saturating_add(1)
             } else {
@@ -5229,12 +5234,17 @@ impl BlastRange {
         if runs {
             self.collapse.set_max_body_cells(self.collapse_cap);
             self.collapse_work.submitted = ready.len();
-            let collapse_stats = self.collapse.apply_iter_observed(
+            let collapse_stats = self.collapse.apply_iter_held(
                 &mut self.world,
                 ready.iter().copied(),
                 &mut self.bodies,
                 &mut completed,
+                &held,
             );
+            if collapse_stats.held > 0 {
+                self.collapse_work.blocked_by |=
+                    u8::from(by_wave.get()) | (u8::from(by_claim.get()) << 1);
+            }
             self.collapse_work.gather_candidates = collapse_stats.gather_candidates;
             self.collapse_work.gather_buffer_peak = collapse_stats.gather_buffer_peak;
             // Each cell goes by its own matter, not by the body it came
@@ -5292,7 +5302,14 @@ impl BlastRange {
                         voxel::bodies::Body::from_world_cells(&self.world, &cells)
                     })
                     .flatten();
-                let crumbling = shed.len() + if rest.is_none() { keep.len() } else { 0 };
+                // Pieces, not cells: one piece holds a box of cells.
+                let side = self.matter.fragment_box();
+                let crumbling = crate::burst::Bursts::pieces_needed(&shed, side)
+                    + if rest.is_none() {
+                        crate::burst::Bursts::pieces_needed(&keep, side)
+                    } else {
+                        0
+                    };
                 if crumbling > crumb_room {
                     whole.push(b);
                     continue;
@@ -5312,11 +5329,23 @@ impl BlastRange {
             completed("collapse_crumble");
             if let Some(layout) = &self.layout {
                 let before = self.bodies.list.len();
+                // Plates in a waiting region are checked once it is free;
+                // the edits that would look at them wait in the backlog,
+                // and showing them to the layer again is idempotent: it
+                // keeps the latest edit per cell.
+                let cs = voxel::store::CS as u32;
+                let waiting = |e: &voxel::world::Edit| held([e.x / cs, e.y / cs, e.z / cs]);
+                for e in ready
+                    .iter()
+                    .filter(|e| waiting(e) && plate::watches(layout, e))
+                {
+                    self.collapse_backlog.insert(*e);
+                }
                 plate::fracture_iter(
                     layout,
                     &mut self.world,
                     &mut self.bodies,
-                    ready.iter().copied(),
+                    ready.iter().copied().filter(|e| !waiting(e)),
                     &mut crumbs,
                     |mat| {
                         self.matter
@@ -5684,8 +5713,6 @@ impl Explosion {
     }
 }
 
-/// One pending edit per world cell. Bound by the actual encoded records and
-/// map volume instead of rejecting a valid long battle at a fixed count.
 /// Who is offered a search start this tick (analysis 240, C3): all who
 /// want one when they fit, else a window of `starts` over them that moves
 /// with the tick. Ascending slot order in and out; no scheduler state.
@@ -5756,6 +5783,8 @@ impl CollapseBacklog {
     }
 }
 
+/// One pending edit per world cell. Bound by the actual encoded records and
+/// map volume instead of rejecting a valid long battle at a fixed count.
 fn load_collapse_backlog(
     s: &mut fx::blob::Scan,
     size: [u32; 3],
@@ -8595,6 +8624,43 @@ mod tests {
                 );
             }
         }
+    }
+    /// **A body falls whole when the piece pool cannot take its crumbs**
+    /// (ADR-645). The concrete block under a soil cap normally sheds the
+    /// soil into pieces and falls as 64 cells; with no room in the pool the
+    /// soil stays on it, no soil piece appears, and nothing is put back to
+    /// hang and be torn off again.
+    #[test]
+    fn a_body_with_no_room_for_its_crumbs_falls_whole() {
+        let mut a = BlastRange::new(config());
+        a.patrols_running = false;
+        a.fire_tick = u32::MAX;
+        // A full pool: no slot for a flying piece.
+        a.matter.tuning.max_flying = 0;
+        let base = [GUN[0] - 40, FLOOR + 8, GUN[2] + 20];
+        assert_eq!(a.matter.debris.fragment_room(&a.matter.tuning), 0);
+        for x in 0..4 {
+            for z in 0..4 {
+                for y in 0..5 {
+                    a.world.queue_edit(voxel::world::Edit::put(
+                        (base[0] + x) as u32,
+                        (base[1] + y) as u32,
+                        (base[2] + z) as u32,
+                        if y == 4 { 1 } else { 2 },
+                    ));
+                }
+            }
+        }
+        let pieces_before = a.matter.debris.fragments.len();
+        a.step();
+        assert_eq!(a.bodies.list.len(), 1, "no body torn loose");
+        assert_eq!(a.bodies.list[0].voxels.len(), 80, "the soil was shed");
+        assert!(
+            a.matter.debris.fragments[pieces_before..]
+                .iter()
+                .all(|f| f.material != 1),
+            "a soil piece appeared without room"
+        );
     }
     /// **Collapse waits only where a wave is** (ADR-645). A concrete block
     /// left in the air falls in the same tick while a live wave works far

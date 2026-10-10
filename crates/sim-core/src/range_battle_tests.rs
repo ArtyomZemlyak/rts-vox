@@ -2427,8 +2427,10 @@ fn long_pursuit(borrow_idle: bool, global: bool) {
     // | whole-map     | 1263 / 1878, 9.4  | 1255 / 1688, 9.4  |
     //
     // At this period the old turn fired first at 700 (fine) and 983
-    // (whole-map); the new one at 976 and 1688. The fine-planner bounds
-    // still reject both regressions above.
+    // (whole-map); the new one at 976 and 1688. Only the fine-planner
+    // bounds reject the regressions above: the whole-map bounds hold the
+    // measured spread and would pass the second one (1665, six rounds),
+    // which lies inside it.
     assert!(
         taken_at_speed >= if borrow_idle { 1 } else { 2 },
         "routes taken up at speed: {taken_at_speed}"
@@ -3447,13 +3449,22 @@ fn the_world_battle_hash_does_not_depend_on_physics_workers() {
         assert_eq!(sim.worker_counts()[0], workers);
         assert!(sim.set_ai_vs_ai(true));
         sim.start_battle().unwrap();
+        let mut waves = 0;
         for _ in 0..150 {
             sim.step();
+            waves = waves.max(sim.battle.waves.len());
         }
+        // ADR-116: the parallel phases this pins have to do work in it.
         assert!(
             sim.battle.actors.iter().any(|a| a.fired > 0),
             "nobody fired"
         );
+        assert!(waves > 0, "no blast wave lived");
+        assert!(
+            sim.matter.debris.fragments.len() > 100,
+            "the debris phase was idle"
+        );
+        assert!(!sim.rubble.is_empty(), "no rubble to refresh");
         sim.state_hash()
     };
     let one = run(1);
@@ -3471,7 +3482,7 @@ fn the_world_battle_hash_does_not_depend_on_physics_workers() {
 /// game the window plays passed every test. If this fails and the change
 /// was intended, record the new number here and say why in the commit;
 /// if it was not, it is a desync.
-const RANGE_GOLDEN_600: u64 = 0x52cf_ed27_81dd_123f;
+const RANGE_GOLDEN_600: u64 = 0xdc34_0c9b_9b06_dfa9;
 
 /// **The world battle hashes what was recorded**, and the run loads what
 /// the hash claims to cover (ADR-116): both armies fire, hulls take

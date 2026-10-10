@@ -86,7 +86,13 @@ mod tests {
         let r = Radii::from_ron(src).unwrap();
         assert_eq!((r.support, r.siege_threat), (600, 1200));
         assert!(Tuning::from_ron(src).is_ok());
-        let broken = src.replace("defend_keep: 2200", "defend_keep: 100");
-        assert!(Radii::from_ron(&broken).is_err());
+        for broken in [
+            src.replace("defend_keep: 2200", "defend_keep: 100"),
+            src.replace("support: 600", "support: 0"),
+            src.replace("guard_post: 300", "guard_post: -1"),
+            src.replace("siege_threat: 1200", "siege_threat: 100001"),
+        ] {
+            assert!(Radii::from_ron(&broken).is_err(), "{broken}");
+        }
     }
 }

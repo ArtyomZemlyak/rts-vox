@@ -175,4 +175,14 @@ fn wave_sides_survive_a_snapshot() {
     assert_eq!(sides, [Some(true), Some(false), None]);
     assert_eq!(restored.state_hash(), r.state_hash());
     assert_eq!(restored.snapshot(), saved);
+    // Waves with no side save in an older format without the section, as
+    // before version 60, and come back with none: they count against the
+    // whole ceiling only.
+    for w in &mut r.battle.waves {
+        w.side = None;
+    }
+    let older = r.snapshot();
+    assert!(u32::from_le_bytes(older[..4].try_into().unwrap()) < 60);
+    let restored = BlastRange::restore(r.config, &older).unwrap();
+    assert!(restored.battle.waves.iter().all(|w| w.side.is_none()));
 }

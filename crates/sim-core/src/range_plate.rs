@@ -109,6 +109,35 @@ pub(super) fn fracture(
     fracture_iter(layout, w, bodies, edits.iter().copied(), crumbs, material)
 }
 
+/// A block the plate check treats as a roof. Long narrow spans use the
+/// same maximum cell budget as square roofs.
+fn is_roof(roof: &RangeBlock) -> bool {
+    let sx = roof.max[0] - roof.min[0];
+    let sz = roof.max[2] - roof.min[2];
+    let thick = roof.max[1] - roof.min[1];
+    (48..=512).contains(&sx)
+        && (48..=512).contains(&sz)
+        && sx * sz <= 256 * 256
+        && (2..=12).contains(&thick)
+        && roof.min[1] > 8
+}
+/// Whether an edit makes the plate check look at this roof.
+fn under(roof: &RangeBlock, e: &Edit) -> bool {
+    (e.x as i32) >= roof.min[0]
+        && (e.x as i32) < roof.max[0]
+        && (e.z as i32) >= roof.min[2]
+        && (e.z as i32) < roof.max[2]
+        && (e.y as i32) <= roof.max[1]
+}
+/// Whether an edit would make the plate check look at any roof
+/// (ADR-645: such an edit in a waiting region is kept for later).
+pub(super) fn watches(layout: &RangeLayout, e: &Edit) -> bool {
+    layout
+        .blocks
+        .iter()
+        .any(|roof| is_roof(roof) && under(roof, e))
+}
+
 /// Cloneable traversal keeps plate checks on the same complete batch without
 /// allocating a second copy of a possibly million-cell collapse backlog.
 pub(super) fn fracture_iter(
@@ -124,28 +153,13 @@ pub(super) fn fracture_iter(
         let sx = roof.max[0] - roof.min[0];
         let sz = roof.max[2] - roof.min[2];
         let thick = roof.max[1] - roof.min[1];
-        // Long narrow spans use the same maximum cell budget as square roofs.
-        if !(48..=512).contains(&sx)
-            || !(48..=512).contains(&sz)
-            || sx * sz > 256 * 256
-            || !(2..=12).contains(&thick)
-            || roof.min[1] <= 8
-        {
+        if !is_roof(roof) {
             continue;
         }
         let Some((strength, density, bend_span)) = material(roof.material) else {
             continue;
         };
-        if strength == 0
-            || density == 0
-            || !edits.clone().any(|e| {
-                (e.x as i32) >= roof.min[0]
-                    && (e.x as i32) < roof.max[0]
-                    && (e.z as i32) >= roof.min[2]
-                    && (e.z as i32) < roof.max[2]
-                    && (e.y as i32) <= roof.max[1]
-            })
-        {
+        if strength == 0 || density == 0 || !edits.clone().any(|e| under(roof, &e)) {
             continue;
         }
         let needed = (sx as u64 * sz as u64 * thick as u64 * density as u64)

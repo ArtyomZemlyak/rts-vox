@@ -224,9 +224,19 @@ pub fn plan_explained(
     // search from the start returns a partial route to the reached node
     // nearest the goal, ties by index: the hull drives there, and the fine
     // search covers the rest. A node not a full cell nearer the goal than
-    // the start is no progress, and the refusal stands. `heuristic` counts
-    // twenty per cell along an axis.
-    let approach = |refusal: Refusal| -> Result<Route, Refusal> {
+    // the hull itself is no progress, and the refusal stands: the snapped
+    // start node may lie behind the hull. `heuristic` counts twenty per
+    // cell along an axis. The search shares the plan's node allowance with
+    // any two-sided search that ran before it.
+    let from_hull = {
+        let d = [
+            (origin[0] - to[0]).unsigned_abs(),
+            (origin[1] - to[1]).unsigned_abs(),
+        ];
+        (10 * d[0].max(d[1]) + 4 * d[0].min(d[1])) * 2 / cfg.cell as u32
+    };
+    let approach = |refusal: Refusal, spent: usize| -> Result<Route, Refusal> {
+        let allowance = cfg.nodes.saturating_sub(spent);
         let mut distance = vec![u32::MAX; n * rows];
         let mut previous = vec![u32::MAX; n * rows];
         let mut open = BinaryHeap::new();
@@ -239,7 +249,7 @@ pub fn plan_explained(
                 continue;
             }
             best = best.min((heuristic(i, 0), i));
-            if expanded >= cfg.nodes {
+            if expanded >= allowance {
                 break;
             }
             expanded += 1;
@@ -258,7 +268,7 @@ pub fn plan_explained(
                 open.push(Reverse((next + heuristic(j, 0), next, j)));
             }
         }
-        if best.1 == start || best.0 + 20 > heuristic(start, 0) {
+        if best.1 == start || best.0 + 20 > from_hull {
             return Err(refusal);
         }
         let mut path = Vec::new();
@@ -285,7 +295,7 @@ pub fn plan_explained(
         })
     };
     if !clear(point(end), to) {
-        return approach(Refusal::GoalCorridor);
+        return approach(Refusal::GoalCorridor, 0);
     }
     for (side, root) in [start, end].into_iter().enumerate() {
         distance[root][side] = 0;
@@ -297,12 +307,9 @@ pub fn plan_explained(
         // A remote obstacle cannot monopolize a one-sided greedy search.
         let side = expanded % 2;
         let Some(Reverse((_, cost, i))) = open[side].pop() else {
-            let refusal = Refusal::Enclosed { side, expanded };
-            return if side == 1 {
-                approach(refusal)
-            } else {
-                Err(refusal)
-            };
+            // Either frontier running dry means the two never meet; which
+            // one ran dry first only says which side is smaller.
+            return approach(Refusal::Enclosed { side, expanded }, expanded);
         };
         if cost != distance[i][side] {
             continue;
@@ -447,6 +454,10 @@ mod tests {
     fn stops_before(route: Option<Route>, x: i32) -> bool {
         route.is_none_or(|r| r.partial && r.path.iter().all(|p| p[0] < x))
     }
+    /// A partial route that ends before `x`: the goal approached, not refused.
+    fn approaches(route: Option<Route>, x: i32) -> bool {
+        route.is_some_and(|r| r.partial && r.path.iter().all(|p| p[0] < x))
+    }
     fn complete(route: Option<Route>) -> bool {
         route.is_some_and(|r| !r.partial)
     }
@@ -465,11 +476,11 @@ mod tests {
         while world.queued() > 0 {
             world.flush();
         }
-        assert!(stops_before(
+        assert!(approaches(
             plan(&world, &Rubble::new(), shape(), from, to, config()),
             248
         ));
-        assert!(stops_before(
+        assert!(approaches(
             plan(
                 &world,
                 &Rubble::new(),
@@ -493,7 +504,7 @@ mod tests {
             config()
         )));
         let rubble = Rubble::from_sorted((0..256).map(|z| ([256, z], 26)).collect());
-        assert!(stops_before(
+        assert!(approaches(
             plan(&world, &rubble, shape(), from, to, config()),
             256
         ));
@@ -676,6 +687,77 @@ mod tests {
                 .path,
             "the debris wall must shape the route, or this proves nothing"
         );
+    }
+    /// A pillar in the corridor from the stand to its nearest lattice
+    /// node no longer refuses the route: the start snaps to the nearest
+    /// node within two cells with a clear corridor (ADR-654). Origin
+    /// (100, 128) has nearest node (104, 136); its corridor box spans x
+    /// 94..110, z 122..142 and holds the pillar at x 104..110, z 138..142.
+    /// Node (104, 120), as near, has a box ending at z 134.
+    #[test]
+    fn the_start_snaps_past_a_pillar_by_its_nearest_node() {
+        let mut world = World::new(512, 32, 512, 100000, Box::new(Floor));
+        for x in 104..110 {
+            for z in 138..142 {
+                for y in 6..26 {
+                    world.queue_edit(voxel::Edit::put(x, y, z, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let from = [100, 128].map(Fx::from_int);
+        let route = plan_explained(&world, &Rubble::new(), shape(), from, [100, 400], config());
+        assert!(
+            route.as_ref().is_ok_and(|r| !r.partial),
+            "{:?}",
+            route.map(|r| r.path)
+        );
+    }
+    /// A goal sealed in a room gives a partial route up to the room from
+    /// afar, and a refusal from beside the room: a node not a full cell
+    /// nearer the goal than the start is no progress (ADR-654).
+    #[test]
+    fn a_sealed_goal_is_approached_from_afar_and_refused_from_beside_it() {
+        let mut world = World::new(512, 32, 256, 100000, Box::new(Floor));
+        for y in 6..26 {
+            for k in 260..=340 {
+                for (x, z) in [(k, 88), (k, 168), (260, k - 172), (340, k - 172)] {
+                    world.queue_edit(voxel::Edit::put(x, y, z as u32, 3));
+                }
+            }
+        }
+        while world.queued() > 0 {
+            world.flush();
+        }
+        let r = Rubble::new();
+        let goal = [300, 128];
+        let far = plan_explained(
+            &world,
+            &r,
+            shape(),
+            [64, 128].map(Fx::from_int),
+            goal,
+            config(),
+        );
+        let far = far.expect("partial route from afar");
+        assert!(far.partial);
+        assert!(far.path.iter().all(|p| p[0] < 260), "{:?}", far.path);
+        assert!(
+            far.path.last().is_some_and(|p| p[0] >= 230),
+            "{:?}",
+            far.path
+        );
+        let beside = plan_explained(
+            &world,
+            &r,
+            shape(),
+            [244, 128].map(Fx::from_int),
+            goal,
+            config(),
+        );
+        assert!(beside.is_err(), "{:?}", beside.map(|r| r.path));
     }
 }
 

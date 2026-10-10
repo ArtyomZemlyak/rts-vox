@@ -103,6 +103,9 @@ pub struct CollapseStats {
     pub detached: usize,
     /// Компонент отвалилось, но не влезло в потолок тела.
     pub too_big: usize,
+    /// Отделений отложено: группа касается удержанного чанка, и её отрыв
+    /// ждёт следующего прохода (ADR-645).
+    pub held: usize,
     /// Unsupported voxel candidates, counted from run masks before allocation.
     pub gather_candidates: usize,
     /// Peak retained candidate cells; oversized groups release their prefix.
@@ -459,7 +462,22 @@ impl CollapseLayer {
         w: &mut World,
         edits: impl Iterator<Item = Edit>,
         bodies: &mut Bodies,
+        completed: impl FnMut(&'static str),
+    ) -> CollapseStats {
+        self.apply_iter_held(w, edits, bodies, completed, &|_| false)
+    }
+
+    /// The same pass, with `held` chunks (by chunk coordinates) whose
+    /// unsupported groups are not torn off yet (ADR-645): every edit still
+    /// updates the layer's copy of the world, and a held group is found
+    /// again by a later pass, once its region is released.
+    pub fn apply_iter_held(
+        &mut self,
+        w: &mut World,
+        edits: impl Iterator<Item = Edit>,
+        bodies: &mut Bodies,
         mut completed: impl FnMut(&'static str),
+        held: &dyn Fn([u32; 3]) -> bool,
     ) -> CollapseStats {
         let cs = CS as u32;
         let mut st = CollapseStats::default();
@@ -599,7 +617,7 @@ impl CollapseLayer {
             st.rounds = round + 1;
             self.resolve(&mut st);
             completed("collapse_resolve");
-            let torn = self.detach_unanchored(w, bodies, &mut st);
+            let torn = self.detach_unanchored(w, bodies, &mut st, held);
             completed("collapse_detach");
             if round > 0 {
                 st.torn_after_first += torn;
@@ -622,7 +640,7 @@ impl CollapseLayer {
         // потолком, срабатывающим каждый тик (ADR-440, ADR-116).
         // Отрыв меняет граф: безопорное ищется заново.
         self.extend_frontier();
-        self.recheck = torn_total > 0 || bodies.refused > refused_before;
+        self.recheck = torn_total > 0 || bodies.refused > refused_before || st.held > 0;
         st.rounds_capped = self.recheck;
         self.report(&mut st);
         st
@@ -1304,6 +1322,7 @@ impl CollapseLayer {
         w: &mut World,
         bodies: &mut Bodies,
         st: &mut CollapseStats,
+        held: &dyn Fn([u32; 3]) -> bool,
     ) -> usize {
         st.probed += self.reached.len();
         if self.unsupported_chunks.is_empty() {
@@ -1317,11 +1336,13 @@ impl CollapseLayer {
         // None means the complete connected group exceeded the body cap.
         // Do not enumerate or retain the rest of a body that cannot be taken.
         let mut group_cells: Vec<Option<Vec<(u32, u32, u32)>>> = Vec::new();
+        let mut group_held: Vec<bool> = Vec::new();
         let mut buffered = 0usize;
         for k in 0..self.unsupported_chunks.len() {
             let i = self.unsupported_chunks[k] as usize;
             let base = self.base[i] as usize;
             let (cx, cy, cz) = self.coords(i);
+            let chunk_held = held([cx, cy, cz]);
             let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
             let c = self.chunks[i].take().expect("chunk present");
             self.gathered += 1;
@@ -1336,8 +1357,10 @@ impl CollapseLayer {
                 let next = group_cells.len();
                 let gi = *groups.entry(root).or_insert_with(|| {
                     group_cells.push(Some(Vec::new()));
+                    group_held.push(false);
                     next
                 });
+                group_held[gi] |= chunk_held;
                 let r = self.comps.runs[ri];
                 let count = r.mask.count_ones() as usize;
                 st.gather_candidates += count;
@@ -1369,12 +1392,16 @@ impl CollapseLayer {
 
         let mut torn = 0usize;
         let mut touched: Vec<u32> = Vec::new();
-        for group in &group_cells {
+        for (gi, group) in group_cells.iter().enumerate() {
             let Some(cells) = group else {
                 st.too_big += 1;
                 continue;
             };
             if cells.is_empty() {
+                continue;
+            }
+            if group_held[gi] {
+                st.held += 1;
                 continue;
             }
             self.cells.clear();

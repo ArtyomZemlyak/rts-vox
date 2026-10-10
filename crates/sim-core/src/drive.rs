@@ -290,10 +290,19 @@ pub fn advance(
             let (k, r) = (w / a, w % a);
             a * k * (k + 1) / 2 + if r == 0 { 0 } else { (k + 1) * r }
         };
-        let mut brake_rate = ((a * a + 8 * a * e).isqrt() - a) / 2;
-        while brake_rate > 0 && stop_sum(brake_rate) > e {
-            brake_rate -= 1;
+        // `stop_sum` grows with w, so the largest w at or below the
+        // estimate whose sum fits is found by bisection: bounded work per
+        // hull and tick, whatever the ratio of error to acceleration.
+        let (mut lo, mut hi) = (0u64, ((a * a + 8 * a * e).isqrt() - a) / 2);
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if stop_sum(mid) <= e {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
         }
+        let brake_rate = lo;
         let wanted = (brake_rate.min(e).min(l.turn.max(0) as u64) as i32) * err.signum();
         (err, wanted)
     };

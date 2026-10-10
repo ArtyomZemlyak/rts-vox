@@ -4723,16 +4723,7 @@ impl Bursts {
         side: u8,
     ) -> (usize, usize) {
         let side = side.clamp(1, 4);
-        let s = u32::from(side);
-        let mut groups: BTreeMap<([u32; 3], Mat), u64> = BTreeMap::new();
-        for &(p, m) in cells {
-            if m == AIR {
-                continue;
-            }
-            let origin = p.map(|v| v / s * s);
-            let sub = (p[0] - origin[0]) + s * (p[1] - origin[1]) + s * s * (p[2] - origin[2]);
-            *groups.entry((origin, m)).or_default() |= 1u64 << sub;
-        }
+        let groups = crumb_boxes(cells, side);
         let (mut made, mut returned) = (0, 0);
         // One scan of the pool, not one per shape: each spawn takes one
         // slot from both the flying and the working budget.
@@ -4767,6 +4758,16 @@ impl Bursts {
             }
         }
         (made, returned)
+    }
+
+    /// How many pieces [`Bursts::pieces_from_cells`] makes of these cells:
+    /// one per connected shape of each box and material.
+    pub fn pieces_needed(cells: &[([u32; 3], Mat)], side: u8) -> usize {
+        let side = side.clamp(1, 4);
+        crumb_boxes(cells, side)
+            .into_values()
+            .map(|whole| shape_components(whole, side).len())
+            .sum()
     }
 
     pub fn step_fragments(
@@ -6158,6 +6159,20 @@ impl SettledQueries {
             .get(&[x, y.div_euclid(64), z])
             .is_some_and(|word| word & (1 << y.rem_euclid(64)) != 0)
     }
+}
+/// Loose cells grouped by fragment box and material, as cell masks.
+fn crumb_boxes(cells: &[([u32; 3], Mat)], side: u8) -> BTreeMap<([u32; 3], Mat), u64> {
+    let s = u32::from(side);
+    let mut groups: BTreeMap<([u32; 3], Mat), u64> = BTreeMap::new();
+    for &(p, m) in cells {
+        if m == AIR {
+            continue;
+        }
+        let origin = p.map(|v| v / s * s);
+        let sub = (p[0] - origin[0]) + s * (p[1] - origin[1]) + s * s * (p[2] - origin[2]);
+        *groups.entry((origin, m)).or_default() |= 1u64 << sub;
+    }
+    groups
 }
 fn settled_cells(lo: [Fx; 3], hi: [Fx; 3]) -> ([i32; 3], [i32; 3]) {
     let cell = |v: Fx| v.to_int_trunc().div_euclid(SETTLED_CELL);
