@@ -2137,13 +2137,23 @@ mod tests {
         assert_eq!(workshop.controlled, Some(0));
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_battle().unwrap();
-        for _ in 0..120 {
+        // A whole canister salvo reserves six slots of its side's half.
+        // The second T2 waits for the first waves to complete (ADR-649).
+        for _ in 0..900 {
             sim.step();
+            if sim.battle.actors[..2].iter().all(|a| a.fired > 0) {
+                break;
+            }
         }
         assert!(
-            sim.battle.actors[0].fired > 0,
-            "canister scenario never fired"
+            sim.battle.actors[..2].iter().all(|a| a.fired > 0),
+            "both canister installations must eventually fire: {:?}",
+            sim.battle.actors[..2]
+                .iter()
+                .map(|a| a.fired)
+                .collect::<Vec<_>>()
         );
+        assert!(sim.matter.economy.ledger.balanced());
         assert_eq!(
             sim.battle_weapon(0),
             Some(sim_core::blast::battle::Weapon::Canister)
