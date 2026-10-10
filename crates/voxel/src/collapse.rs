@@ -29,7 +29,7 @@
 use crate::bodies::Bodies;
 use crate::topo::{batch_cannot_split, Chunk as TopoChunk, Components, SplitBufs, CS};
 use crate::{Edit, World};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Потолок на размер одного отвала в вокселях **по умолчанию**.
 ///
@@ -1394,6 +1394,24 @@ impl CollapseLayer {
             return 0;
         }
 
+        // A connected group may reach a held chunk only at the end of the
+        // gather order. Find those roots before expanding any runs. Counting
+        // their volume below still preserves the oversized-group precedence.
+        let mut held_roots = BTreeSet::new();
+        for &ci in &self.unsupported_chunks {
+            let i = ci as usize;
+            let (cx, cy, cz) = self.coords(i);
+            if !held([cx, cy, cz]) {
+                continue;
+            }
+            let base = self.base[i] as usize;
+            for lab in 0..self.nodes[i].as_ref().expect("known").n {
+                if !self.reached[base + lab] {
+                    held_roots.insert(self.component_roots[base + lab]);
+                }
+            }
+        }
+
         // Состав групп. Обход по чанкам в порядке возрастания индекса,
         // внутри чанка — по пробегам: порядок вокселей детерминирован.
         let cs = CS as u32;
@@ -1402,12 +1420,12 @@ impl CollapseLayer {
         // Do not enumerate or retain the rest of a body that cannot be taken.
         let mut group_cells: Vec<Option<Vec<(u32, u32, u32)>>> = Vec::new();
         let mut group_held: Vec<bool> = Vec::new();
+        let mut group_sizes: Vec<usize> = Vec::new();
         let mut buffered = 0usize;
         for k in 0..self.unsupported_chunks.len() {
             let i = self.unsupported_chunks[k] as usize;
             let base = self.base[i] as usize;
             let (cx, cy, cz) = self.coords(i);
-            let chunk_held = held([cx, cy, cz]);
             let (ox, oy, oz) = (cx * cs, cy * cs, cz * cs);
             let c = self.chunks[i].take().expect("chunk present");
             self.gathered += 1;
@@ -1422,13 +1440,17 @@ impl CollapseLayer {
                 let next = group_cells.len();
                 let gi = *groups.entry(root).or_insert_with(|| {
                     group_cells.push(Some(Vec::new()));
-                    group_held.push(false);
+                    group_held.push(held_roots.contains(&root));
+                    group_sizes.push(0);
                     next
                 });
-                group_held[gi] |= chunk_held;
                 let r = self.comps.runs[ri];
                 let count = r.mask.count_ones() as usize;
                 st.gather_candidates += count;
+                group_sizes[gi] += count;
+                if group_held[gi] {
+                    continue;
+                }
                 let Some(cells) = group_cells[gi].as_mut() else {
                     continue;
                 };
@@ -1458,15 +1480,19 @@ impl CollapseLayer {
         let mut torn = 0usize;
         let mut touched: Vec<u32> = Vec::new();
         for (gi, group) in group_cells.iter().enumerate() {
+            if group_held[gi] {
+                if group_sizes[gi] > self.max_body_cells {
+                    st.too_big += 1;
+                } else if group_sizes[gi] > 0 {
+                    st.held += 1;
+                }
+                continue;
+            }
             let Some(cells) = group else {
                 st.too_big += 1;
                 continue;
             };
             if cells.is_empty() {
-                continue;
-            }
-            if group_held[gi] {
-                st.held += 1;
                 continue;
             }
             self.cells.clear();
@@ -2329,6 +2355,102 @@ mod tests {
         assert!(!w.solid(50, DECK, 8), "правая половина осталась");
         // Основание опоры ниже подреза стоит.
         assert!(w.solid(PIER, 2, 8), "низ опоры пропал");
+    }
+
+    #[test]
+    fn a_hold_in_the_last_chunk_keeps_the_whole_group_without_cell_buffers() {
+        let run = |hold: bool| {
+            let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+            let mut c = CollapseLayer::new(&w);
+            let mut b = Bodies::new(16, test_gravity());
+            cut(&mut w, 4);
+            w.flush();
+            let mut edits = w.edits().to_vec();
+            let mut seen = false;
+            for _ in 0..8 {
+                let st = c.apply_iter_held(&mut w, edits.drain(..), &mut b, |_| {}, &|p| {
+                    hold && p[0] == 1
+                });
+                if hold {
+                    assert_eq!(st.gather_buffer_peak, 0, "held group expanded: {st:?}");
+                    assert!(b.list.is_empty(), "only part of a connected span detached");
+                    seen |= st.held > 0;
+                }
+            }
+            if hold {
+                assert!(seen && c.pending());
+                assert!(w.solid(20, DECK, 8) && w.solid(50, DECK, 8));
+                assert_eq!(c.apply(&mut w, &[], &mut b).detached, 1);
+            }
+            assert_eq!(b.list.len(), 1);
+            w.flush();
+            assert!(!w.solid(20, DECK, 8) && !w.solid(50, DECK, 8));
+            let mut saved = fx::blob::Blob::new();
+            b.save(&mut saved);
+            saved.v
+        };
+        assert_eq!(
+            run(true),
+            run(false),
+            "release changed body order or contents"
+        );
+    }
+
+    #[test]
+    fn an_oversized_held_group_does_not_create_a_permanent_retry() {
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(Bridge));
+        let mut c = CollapseLayer::new(&w);
+        c.set_max_body_cells(8);
+        let mut b = Bodies::new(16, test_gravity());
+        cut(&mut w, 4);
+        w.flush();
+        let mut edits = w.edits().to_vec();
+        let mut rejected = 0;
+        for _ in 0..8 {
+            let st = c.apply_iter_held(&mut w, edits.drain(..), &mut b, |_| {}, &|_| true);
+            assert_eq!(st.held, 0, "oversized takes precedence over hold");
+            assert_eq!(st.gather_buffer_peak, 0);
+            rejected += st.too_big;
+            if !c.pending() {
+                break;
+            }
+        }
+        assert!(rejected > 0);
+        assert!(!c.pending());
+        assert!(b.list.is_empty() && w.solid(50, DECK, 8));
+        c.set_max_body_cells(MAX_BODY_CELLS);
+        assert_eq!(c.apply(&mut w, &[], &mut b).detached, 1);
+    }
+
+    #[test]
+    fn a_held_group_does_not_block_a_separate_ready_group() {
+        struct TwoGroups;
+        impl crate::Generator for TwoGroups {
+            fn material(&self, x: u32, y: u32, z: u32) -> Mat {
+                if (2..4).contains(&x) && (20..22).contains(&y) && (20..22).contains(&z) {
+                    3
+                } else {
+                    Bridge.material(x, y, z)
+                }
+            }
+        }
+        let mut w = World::new(64, 64, 64, 100_000, Box::new(TwoGroups));
+        let mut c = CollapseLayer::new(&w);
+        let mut b = Bodies::new(16, test_gravity());
+        cut(&mut w, 4);
+        w.queue_dig(2, 20, 20);
+        w.flush();
+        let mut edits = w.edits().to_vec();
+        for _ in 0..8 {
+            c.apply_iter_held(&mut w, edits.drain(..), &mut b, |_| {}, &|p| p[0] == 1);
+        }
+        assert_eq!(b.list.len(), 1);
+        assert_eq!(b.list[0].voxels.len(), 7);
+        w.flush();
+        assert!(!w.solid(3, 21, 21));
+        assert!(w.solid(50, DECK, 8));
+        assert_eq!(c.apply(&mut w, &[], &mut b).detached, 1);
+        assert_eq!(b.list.len(), 2);
     }
 
     /// **A cut on a chunk's face drops what stood past it** (ADR-460).

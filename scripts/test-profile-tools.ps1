@@ -133,6 +133,17 @@ Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $computeLog
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('compute_workers=8','compute_workers=4')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Ignored worker override accepted'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log ($computeLog.Replace('Some(8)','None')) -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Missing compute CLI identity accepted'
 Assert-Profile ((Get-RangeValidity $rows -Scenario world-battle -Log $log -ComputeWorkers 8).Reasons -contains 'compute_workers_override_mismatch') 'Old frozen binary silently accepted override'
+$poolLog = $log + "`nPROFILE physics_override=Some(8)`nPROFILE navigation_override=Some(8)"
+Assert-Profile ((Get-RangeValidity $rows -Scenario canister -Log $poolLog -PhysicsWorkers 8 -NavigationWorkers 8).ValidForComparison) 'Owned worker overrides rejected'
+Assert-Profile ((Get-RangeValidity $rows -Scenario canister -Log ($poolLog.Replace('physics_workers=8', 'physics_workers=4')) -PhysicsWorkers 8).Reasons -contains 'physics_workers_override_mismatch') 'Global Rayon value accepted instead of owned physics count'
+Assert-Profile ((Get-RangeValidity $rows -Scenario canister -Log $log -PhysicsWorkers 8).Reasons -contains 'physics_workers_override_mismatch') 'Old frozen binary silently accepted physics override'
+Assert-Profile ((Get-RangeValidity $rows -Scenario canister -Log ($poolLog.Replace('navigation_workers=8', 'navigation_workers=4')) -NavigationWorkers 8).Reasons -contains 'navigation_workers_override_mismatch') 'Ignored navigation override accepted'
+$halfRateRows = @([pscustomobject]@{frame_ms='4.5';simulation_ticks='15';seconds='1.0';frame_start_ns='0';frame_end_ns='1000000000';frame_gap_ns='0';observed_frame_ms='4.5'})
+foreach ($scenario in @('canister', 'battle', 'energy', 'drive', 'shell', 'world-battle')) {
+    $slow = Get-RangeValidity $halfRateRows -Scenario $scenario -Log $log
+    Assert-Profile ($slow.ValidForComparison -and -not $slow.AcceptanceEligible -and -not $slow.MeetsSimulationRate) "Slowed $scenario accepted as normal-speed FPS"
+}
+Assert-Profile ((Get-RangeValidity $halfRateRows -Scenario actions -Log $log).MeetsSimulationRate) 'Authored pause/reset diagnostic requires uninterrupted simulation'
 $evidenceTestBinary = Join-Path ([IO.Path]::GetTempPath()) ("rts-build-evidence-" + [guid]::NewGuid().ToString('N') + '.exe')
 $evidenceTestPath = "$evidenceTestBinary.build.json"
 try {

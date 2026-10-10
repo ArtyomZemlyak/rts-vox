@@ -2102,6 +2102,278 @@ mod tests {
     fn tuning() -> crate::Tuning {
         crate::Tuning::from_ron(include_str!("../../../data/sim.ron")).unwrap()
     }
+    #[test]
+    fn thin_stacked_fragments_sleep_until_their_support_is_removed() {
+        let (mut b, mut e) = (Bursts::default(), economy());
+        let mut w = world();
+        let t = tuning();
+        w.queue_edit(Edit::put(48, 15, 48, 2));
+        w.flush();
+        // A thin plate overhangs a ledge; a smaller shard sits on its lip,
+        // with no terrain beneath it for the old endpoint probe to find.
+        for (id, x, y, mm, material, shape, side) in [
+            (1, 487, 1610, 20, 2, 0x000f000f000f000fu64, 4),
+            (2, 4905, 1625, 10, 3, 1, 1),
+        ] {
+            b.fragments.push(Fragment {
+                id,
+                position: V3::new(
+                    Fx::from_ratio(x, if id == 1 { 10 } else { 100 }),
+                    Fx::from_ratio(y, 100),
+                    Fx::from_ratio(485, 10),
+                ),
+                velocity: V3::ZERO,
+                material,
+                paint: None,
+                mm,
+                basis: IDENTITY,
+                mass_g: 1,
+                count: shape.count_ones(),
+                shape,
+                side,
+                chunk: None,
+                held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+                resting: true,
+            });
+        }
+        let hash = b.hash();
+        let settled = Settled::around(&b.fragments, &[], |_, _| true);
+        assert!(supported(&b.fragments[1], &w, &[], &settled, 1));
+        assert_eq!(b.rubble(&w, &[], &[]).get(&[49, 48]), Some(&17));
+        for tick in 0..300 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert_eq!(b.wakeups, 0, "a support probe skipped the thin plate below");
+        assert_eq!(b.hash(), hash);
+        b.fragments.remove(0);
+        for tick in 300..316 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert!(b.wakeups > 0, "removing the plate did not wake its rider");
+        assert!(b.fragments[0].position.y < Fx::from_ratio(1625, 100));
+        assert!(e.balanced());
+    }
+    #[test]
+    fn an_existing_ceiling_overlap_does_not_hold_a_piece_in_midair() {
+        let (mut b, mut w, mut e) = (Bursts::default(), world(), economy());
+        let t = tuning();
+        w.queue_edit(Edit::put(48, 22, 48, 2));
+        w.flush();
+        b.fragments.push(Fragment {
+            id: 1,
+            position: V3::new(
+                Fx::from_ratio(485, 10),
+                Fx::from_ratio(21823, 1000),
+                Fx::from_ratio(485, 10),
+            ),
+            velocity: V3::ZERO,
+            material: 4,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 8,
+            shape: 0x000f000f,
+            side: 4,
+            chunk: None,
+            held: e.ledger.create(matter::Kind::Debris, 0, u64::MAX),
+            resting: true,
+        });
+        for tick in 0..120 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert!(b.fragments[0].resting);
+        assert!(
+            b.fragments[0].position.y < Fx::from_int(14),
+            "the ceiling was mistaken for a floor"
+        );
+        let stable = b.hash();
+        let wakes = b.wakeups;
+        for tick in 120..240 {
+            b.step_fragments(
+                &w,
+                &mut e,
+                &t.blast,
+                crate::gravity_per_tick(&t),
+                tick,
+                Surroundings::NONE,
+            );
+        }
+        assert_eq!(b.hash(), stable);
+        assert_eq!(b.wakeups, wakes);
+    }
+    #[test]
+    fn escaping_an_old_overlap_still_blocks_new_solid_and_deeper_motion() {
+        let mut w = world();
+        w.queue_edit(Edit::put(48, 22, 48, 2));
+        w.queue_edit(Edit::put(49, 22, 48, 2));
+        w.flush();
+        let f = Fragment {
+            id: 1,
+            position: V3::new(
+                Fx::from_ratio(485, 10),
+                Fx::from_ratio(218, 10),
+                Fx::from_ratio(485, 10),
+            ),
+            velocity: V3::ZERO,
+            material: 1,
+            paint: None,
+            mm: 100,
+            basis: IDENTITY,
+            mass_g: 1,
+            count: 1,
+            shape: 1,
+            side: 1,
+            chunk: None,
+            held: 0,
+            resting: false,
+        };
+        let (lo, hi) = f.bounds();
+        let contact = |axis: usize, delta: Fx| {
+            let mut p = arr(f.position);
+            p[axis] = p[axis].add(delta);
+            fragment_motion_contact(&f, &w, p, lo, hi, [w.nx, w.ny, w.nz])
+        };
+        assert!(
+            !contact(1, Fx::from_ratio(-1, 10)),
+            "cannot leave the ceiling"
+        );
+        assert!(
+            contact(1, Fx::from_ratio(1, 10)),
+            "moved deeper into the ceiling"
+        );
+        assert!(contact(0, Fx::from_ratio(1, 2)), "entered a new solid cell");
+    }
+    #[test]
+    fn tumbling_does_not_rotate_a_piece_into_its_floor() {
+        let w = world();
+        let t = tuning();
+        let motion = FragmentMotion::new(&t.blast);
+        for id in 1..65 {
+            let mut f = Fragment {
+                id,
+                position: V3::new(
+                    Fx::from_int(48),
+                    Fx::from_ratio(1401, 100),
+                    Fx::from_int(48),
+                ),
+                velocity: V3::new(Fx::from_ratio(1, 2), Fx::ZERO, Fx::from_ratio(1, 2)),
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 76800,
+                count: 64,
+                shape: u64::MAX,
+                side: 4,
+                chunk: None,
+                held: 0,
+                resting: false,
+            };
+            assert!(!fragment_contact(
+                &f,
+                &w,
+                arr(f.position),
+                f.bounds().0,
+                f.bounds().1,
+                [w.nx, w.ny, w.nz]
+            ));
+            advance_fragment(
+                &mut f,
+                &w,
+                &t.blast,
+                &motion,
+                crate::gravity_per_tick(&t),
+                &[],
+                &Settled::default(),
+                u32::MAX,
+                true,
+            );
+            let (lo, hi) = f.bounds();
+            assert!(
+                !fragment_contact(&f, &w, arr(f.position), lo, hi, [w.nx, w.ny, w.nz]),
+                "rotation penetrated the floor: id={id} pos={:?}",
+                f.position
+            );
+        }
+    }
+    #[test]
+    fn tumbling_does_not_rotate_a_piece_into_a_settled_neighbour() {
+        let w = world();
+        let t = tuning();
+        let motion = FragmentMotion::new(&t.blast);
+        for id in 1..65 {
+            let mut f = Fragment {
+                id,
+                position: V3::new(Fx::from_int(48), Fx::from_int(20), Fx::from_int(48)),
+                velocity: V3::new(Fx::from_ratio(1, 2), Fx::ZERO, Fx::from_ratio(1, 2)),
+                material: 1,
+                paint: None,
+                mm: 100,
+                basis: IDENTITY,
+                mass_g: 76800,
+                count: 64,
+                shape: u64::MAX,
+                side: 4,
+                chunk: None,
+                held: 0,
+                resting: false,
+            };
+            let neighbour = Fragment {
+                position: V3::new(Fx::from_int(52), f.position.y, f.position.z),
+                velocity: V3::ZERO,
+                resting: true,
+                chunk: None,
+                ..f
+            };
+            let input = Fragment { chunk: None, ..f };
+            let settled = Settled::around(&[input, neighbour], &[], |_, _| true);
+            advance_fragment(
+                &mut f,
+                &w,
+                &t.blast,
+                &motion,
+                crate::gravity_per_tick(&t),
+                &[],
+                &settled,
+                0,
+                true,
+            );
+            assert!(f.velocity.x < Fx::ZERO, "fixture missed the neighbour");
+            let (lo, hi) = f.bounds();
+            let p = arr(f.position);
+            assert!(
+                !settled.hit(
+                    [0, 1, 2].map(|a| p[a].add(lo[a])),
+                    [0, 1, 2].map(|a| p[a].add(hi[a])),
+                    0,
+                    None
+                ),
+                "rotation penetrated the neighbour: id={id}"
+            );
+        }
+    }
     /// A flying piece tumbles (ADR-309): thrown, it turns as it goes and
     /// keeps the face it landed on; laid down with no speed, it never
     /// turns. Its axes stay square to one another whatever it did.
@@ -5620,14 +5892,7 @@ impl Bursts {
                 floor.extend(stacked.into_iter().filter(|&i| {
                     let f = &self.fragments[i];
                     let (low, high) = bounds[i].unwrap();
-                    let mut p = arr(f.position);
-                    p[1] = p[1].sub(Fx::from_ratio(1, 2));
-                    settled.hit(
-                        [0, 1, 2].map(|a| p[a].add(low[a])),
-                        [0, 1, 2].map(|a| p[a].add(high[a])),
-                        i as u32,
-                        Some(f.position.y.add(low[1])),
-                    )
+                    settled.supports(arr(f.position), low, high, i as u32)
                 }));
             }
             // Temporary contact tables can own many small lists. Their release
@@ -6271,12 +6536,7 @@ fn supported(
     p[1] = p[1].sub(Fx::from_ratio(1, 2));
     fragment_contact(f, world, p, low, high, [world.nx, world.ny, world.nz])
         || hull_hit(p, low, high, hulls, 0).is_some()
-        || settled.hit(
-            [0, 1, 2].map(|a| p[a].add(low[a])),
-            [0, 1, 2].map(|a| p[a].add(high[a])),
-            skip,
-            Some(f.position.y.add(low[1])),
-        )
+        || settled.supports(arr(f.position), low, high, skip)
 }
 /// Stable ascending columns (ADR-465/641). Dense maps use two full-axis
 /// passes; small/sparse maps retain four byte passes, over Z and then X.
@@ -6582,11 +6842,10 @@ enum SettledReach {
     Support,
 }
 impl SettledReach {
-    fn cells(self, f: &Fragment, (mut lo, mut hi): ([Fx; 3], [Fx; 3])) -> ([i32; 3], [i32; 3]) {
+    fn cells(self, f: &Fragment, (mut lo, hi): ([Fx; 3], [Fx; 3])) -> ([i32; 3], [i32; 3]) {
         match self {
             Self::Support => {
                 lo[1] = lo[1].sub(Fx::from_ratio(1, 2));
-                hi[1] = hi[1].sub(Fx::from_ratio(1, 2));
                 settled_cells(lo, hi)
             }
             Self::Motion => {
@@ -6826,6 +7085,15 @@ impl Settled {
             .build(&selected, want, fragments.len() >= 1024, task);
         completed("settled_cells");
     }
+    /// Sweep down to the support, rather than teleporting the whole box
+    /// half a unit down: that endpoint can lie below a thin plate entirely.
+    fn supports(&self, p: [Fx; 3], low: [Fx; 3], high: [Fx; 3], skip: u32) -> bool {
+        let mut lo = [0, 1, 2].map(|a| p[a].add(low[a]));
+        let hi = [0, 1, 2].map(|a| p[a].add(high[a]));
+        let bottom = lo[1];
+        lo[1] = bottom.sub(Fx::from_ratio(1, 2));
+        self.hit(lo, hi, skip, Some(bottom))
+    }
     /// Whether the box `lo..hi` shares space with a resting piece other
     /// than `skip`. The pieces are boxes here, as they are to the world.
     fn hit(&self, lo: [Fx; 3], hi: [Fx; 3], skip: u32, from_above: Option<Fx>) -> bool {
@@ -7040,8 +7308,24 @@ fn advance_fragment(
             &mut supported,
         );
     }
-    if spin {
+    if spin && !supported {
+        let basis = f.basis;
         tumble(f, t, motion);
+        if f.basis != basis {
+            let (low, high) = f.bounds();
+            let p = arr(f.position);
+            if fragment_contact(f, world, p, low, high, bounds)
+                || hull_hit(p, low, high, hulls, inside).is_some()
+                || settled.hit(
+                    [0, 1, 2].map(|a| p[a].add(low[a])),
+                    [0, 1, 2].map(|a| p[a].add(high[a])),
+                    skip,
+                    None,
+                )
+            {
+                f.basis = basis;
+            }
+        }
     }
     let sleep = motion.sleep;
     if supported && f.velocity.len_sq() <= sleep.mul(sleep) {
@@ -7136,6 +7420,10 @@ fn substeps(
     let bounds = [world.nx, world.ny, world.nz];
     // Eviction changes position, not shape/basis; tumble happens afterward.
     let (low, high) = local_bounds;
+    // A clear starting pose cannot acquire a penetration through moves the
+    // strict query accepts. Only legacy/merged overlaps need the separation
+    // query; ordinary impacts do not rescan the starting shape per substep.
+    let embedded = fragment_contact(f, world, arr(f.position), low, high, bounds);
     for _ in 0..steps {
         for axis in 0..3 {
             if delta[axis] == Fx::ZERO {
@@ -7143,7 +7431,12 @@ fn substeps(
             }
             let mut p = arr(f.position);
             p[axis] = p[axis].add(delta[axis]);
-            let blocked = fragment_contact(f, world, p, low, high, bounds)
+            let world_contact = if embedded {
+                fragment_motion_contact(f, world, p, low, high, bounds)
+            } else {
+                fragment_contact(f, world, p, low, high, bounds)
+            };
+            let blocked = world_contact
                 || hull_hit(p, low, high, hulls, inside).is_some()
                 || settled.hit(
                     [0, 1, 2].map(|a| p[a].add(low[a])),
@@ -7337,6 +7630,88 @@ fn fragment_contact(
             if box_contact(world, at, radius.map(Fx::neg), radius, bounds) {
                 return true;
             }
+        }
+    }
+    false
+}
+
+/// A pre-existing penetration (old saves, a pile growing beside terrain)
+/// is not a new impact. Permit separation from those same world cells;
+/// entering any other solid cell or moving deeper remains a collision.
+fn fragment_motion_contact(
+    f: &Fragment,
+    world: &voxel::World,
+    p: [Fx; 3],
+    low: [Fx; 3],
+    high: [Fx; 3],
+    bounds: [u32; 3],
+) -> bool {
+    if !fragment_contact(f, world, p, low, high, bounds) {
+        return false;
+    }
+    let from = arr(f.position);
+    if !fragment_contact(f, world, from, low, high, bounds) {
+        return true;
+    }
+    let axis = (0..3).find(|&a| p[a] != from[a]).expect("one moving axis");
+    let delta = p[axis].sub(from[axis]);
+    let separates = |offset: [Fx; 3], lo: [Fx; 3], hi: [Fx; 3]| {
+        let now = [0, 1, 2].map(|a| from[a].add(offset[a]));
+        let next = [0, 1, 2].map(|a| p[a].add(offset[a]));
+        let qlo = [0, 1, 2].map(|a| (next[a].add(lo[a]).raw() >> 32) as i32);
+        let qhi = [0, 1, 2].map(|a| (next[a].add(hi[a]).raw() >> 32) as i32);
+        if qlo[1] < 0
+            || [0, 2]
+                .iter()
+                .any(|&a| qlo[a] < 0 || qhi[a] >= bounds[a] as i32)
+        {
+            return false;
+        }
+        for y in qlo[1]..=qhi[1].min(bounds[1] as i32 - 1) {
+            for z in qlo[2]..=qhi[2] {
+                for x in qlo[0]..=qhi[0] {
+                    if !world.solid(x as u32, y as u32, z as u32) {
+                        continue;
+                    }
+                    let cell = [x, y, z];
+                    let already = (0..3).all(|a| {
+                        now[a].add(lo[a]) < Fx::from_int(cell[a] + 1)
+                            && now[a].add(hi[a]) >= Fx::from_int(cell[a])
+                    });
+                    let centre = now[axis].add(lo[axis].add(hi[axis]).div(Fx::from_int(2)));
+                    let away = centre.sub(Fx::from_int(cell[axis]).add(Fx::from_ratio(1, 2)));
+                    if !already || (away != Fx::ZERO && (away < Fx::ZERO) != (delta < Fx::ZERO)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    };
+    if f.chunk.is_some() || f.shape.count_ones() == 1 {
+        return !separates([Fx::ZERO; 3], low, high);
+    }
+    let scale = Fx::from_ratio(f.mm as i32, voxel::unit::WORLD_MM as i32);
+    let half = Fx::from_ratio(49, 100).mul(scale);
+    let radius: [Fx; 3] = std::array::from_fn(|a| {
+        arr(f.basis[0])[a]
+            .abs()
+            .add(arr(f.basis[1])[a].abs())
+            .add(arr(f.basis[2])[a].abs())
+            .mul(half)
+    });
+    let centre = arr(shape_centre(f.shape, f.side));
+    for i in 0..box_cells(f.side) {
+        if f.shape & (1 << i) == 0 {
+            continue;
+        }
+        let cell = shape_cell(i, f.side);
+        let mut offset = V3::ZERO;
+        for a in 0..3 {
+            offset = offset.add(f.basis[a].scale(Fx::from_int(cell[a]).sub(centre[a]).mul(scale)));
+        }
+        if !separates(arr(offset), radius.map(Fx::neg), radius) {
+            return true;
         }
     }
     false

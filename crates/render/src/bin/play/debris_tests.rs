@@ -183,9 +183,26 @@ fn debris_merge_replaces_mesh_and_material_but_keeps_tick_interpolation() {
     let merged = mesh(&app, 7);
     assert_ne!(original, merged, "a merged heap still shows its old shape");
     let meshes = app.world().resource::<Assets<Mesh>>();
+    let points = meshes
+        .get(&merged)
+        .unwrap()
+        .attribute(Mesh::ATTRIBUTE_POSITION)
+        .unwrap()
+        .as_float3()
+        .unwrap();
+    let low = points.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min);
+    let high = points
+        .iter()
+        .map(|p| p[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    assert!(
+        (high - low - 1.98).abs() < 0.0001,
+        "the merged inventory did not grow its silhouette"
+    );
     assert_eq!(
-        meshes.get(&merged).unwrap().count_vertices(),
-        2 * meshes.get(&original).unwrap().count_vertices()
+        meshes.get(&merged).unwrap().indices().unwrap().len() / 3,
+        8,
+        "internal cube faces survived"
     );
     let e = app.world().entity(entity(&app, 7));
     assert_eq!(

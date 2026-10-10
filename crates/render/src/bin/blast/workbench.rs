@@ -2135,32 +2135,28 @@ mod tests {
         assert_eq!(layout.units.len(), 6);
         assert_eq!(layout.units[0].kind, RangeUnitKind::ArtilleryTurretT2);
         assert_eq!(workshop.controlled, Some(0));
-        assert_eq!(layout.units[1].kind, RangeUnitKind::ArtilleryT2);
-        assert!(layout.units[0].allied && layout.units[1].allied);
         let mut sim = BlastRange::with_layout(config, layout.clone()).unwrap();
         sim.start_battle().unwrap();
-        sim.battle.trace_fire(true);
-        use sim_core::blast::battle::{FireGate, Weapon};
-        // Both allied guns fire canister. A side owns half of the wave
-        // ceiling (ADR-649) and one six-pellet salvo fills it, so the side
-        // holds one canister salvo at a time: the first gun charged fires,
-        // the other is ready and queued on wave capacity, not stuck on aim,
-        // muzzle or ammunition.
-        let mut queued = false;
-        for _ in 0..120 {
+        // A whole canister salvo reserves six slots of its side's half.
+        // The second T2 waits for the first waves to complete (ADR-649).
+        for _ in 0..900 {
             sim.step();
-            queued |= sim.battle.fire_gate(0) == Some(FireGate::WaveCapacity);
+            if sim.battle.actors[..2].iter().all(|a| a.fired > 0) {
+                break;
+            }
         }
-        assert_eq!(sim.battle_weapon(0), Some(Weapon::Canister));
-        assert_eq!(sim.battle_weapon(1), Some(Weapon::Canister));
-        let fired = [0, 1].map(|id| sim.battle.actors[id].fired);
         assert!(
-            fired.iter().any(|&n| n > 0),
-            "canister scenario never fired"
+            sim.battle.actors[..2].iter().all(|a| a.fired > 0),
+            "both canister installations must eventually fire: {:?}",
+            sim.battle.actors[..2]
+                .iter()
+                .map(|a| a.fired)
+                .collect::<Vec<_>>()
         );
-        assert!(
-            fired[0] > 0 || queued,
-            "the controlled turret neither fired nor queued for wave room: {fired:?}"
+        assert!(sim.matter.economy.ledger.balanced());
+        assert_eq!(
+            sim.battle_weapon(0),
+            Some(sim_core::blast::battle::Weapon::Canister)
         );
     }
 
