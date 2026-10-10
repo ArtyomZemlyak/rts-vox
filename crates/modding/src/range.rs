@@ -213,6 +213,10 @@ pub struct RangeLayout {
     pub shields: Vec<RangeShieldDef>,
     pub power_milli: Vec<u32>,
     pub unit_resistance: u32,
+    /// Dig economy of this layout (ADR-672). A layout without one has no
+    /// tanks and no dig orders, and reads and writes as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economy: Option<crate::range_economy::RangeEconomy>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeRamp {
@@ -414,6 +418,9 @@ impl RangeLayout {
             {
                 return Err("course exceeds supported bounds".into());
             }
+        }
+        if let Some(e) = &r.economy {
+            e.validate()?;
         }
         Ok(())
     }

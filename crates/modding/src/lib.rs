@@ -21,6 +21,7 @@ pub mod kinds;
 pub mod navigation;
 pub mod range;
 pub mod range_battle;
+pub mod range_economy;
 pub mod range_fire;
 pub mod range_weapon;
 pub mod shield;

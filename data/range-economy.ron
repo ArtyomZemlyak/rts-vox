@@ -1,0 +1,23 @@
+// Dig economy of the range, by unit kind (plan 245, ADR-672). Tank in
+// matter units: one cell of a material carries its density
+// (range-materials.ron). Radius and reach in world units.
+//
+// No kind digs: who digs is the owner's choice (plan 245, section 4,
+// item 7). A kind with an empty tank carries no dig parameters; a layout
+// that wants a digger names one in its own `economy` section.
+(
+    // Dig edits of all diggers waiting in the edit queue at once: the dig
+    // sub-pool inside the edit ceiling (8192 for the stock weapons).
+    dig_edits_in_flight: 512,
+    kinds: [
+        (kind: Tank, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Strider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Spider, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Artillery, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: TurretT1, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: TurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: Base, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: ArtilleryT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+        (kind: ArtilleryTurretT2, tank: 0, dig_radius: 0, dig_reach: 0, dig_edits_per_tick: 0),
+    ],
+)
