@@ -438,8 +438,13 @@ fn ground_admission_reports_the_first_actual_gate_without_spending_on_retries() 
     ));
     m.tuning.max_claims = 1;
     m.tuning.max_flying = 1;
+    // A cell joining the held piece needs no slot (ADR-659); one that
+    // would be a piece of its own does, and the full pool turns it away.
+    let apart = [44, 2, 40];
+    assert_ne!(material(&r.world, apart), 0);
+    let m = &mut r.matter;
     assert!(matches!(
-        m.ground(&mut r.world, q, p),
+        m.ground(&mut r.world, apart, p),
         matter::ClaimResult::Deferred
     ));
     assert_eq!(m.admission.ground, [1, 1, 1, 2, 1, 3]);
