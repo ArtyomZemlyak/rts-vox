@@ -929,10 +929,10 @@ fn main() {
                     .iter()
                     .filter(|p| sim.world.material(p[0], p[1], p[2]) == 0)
                     .count();
-                println!("terrain_window tick={} dug={:?} filled={:?} unique_soil_dug={} soil_air={} ground_admission={:?} claims={} reserved={} returned={}",
+                println!("terrain_window tick={} dug={:?} filled={:?} unique_soil_dug={} soil_air={} ground_admission={:?} claims={} reserved={} dusted={}",
                     sim.tick, terrain_dug, terrain_filled, terrain_soil_holes.len(), remaining,
                     sim.matter.admission.ground, sim.matter.debris.claims(),
-                    sim.matter.debris.reserved(), sim.matter.debris.returned);
+                    sim.matter.debris.reserved(), sim.matter.debris.dusted);
                 terrain_dug.clear();
                 terrain_filled.clear();
             }

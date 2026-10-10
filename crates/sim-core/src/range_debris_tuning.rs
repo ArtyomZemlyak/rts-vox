@@ -137,6 +137,8 @@ impl BlastRange {
             return Outcome::Unchanged;
         }
         *slot = value;
+        // Claim groups are keyed by the piece boxes this tuning draws.
+        self.matter.debris.regroup(&self.matter.tuning);
         Outcome::Applied
     }
 

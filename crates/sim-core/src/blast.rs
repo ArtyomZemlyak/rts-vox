@@ -5393,14 +5393,17 @@ impl BlastRange {
                     self.collapse_backlog.insert(*e);
                 }
                 // Which edits wait is asked once per edit, not once per
-                // roof the plate check walks.
-                let free: Vec<voxel::world::Edit> =
-                    ready.iter().copied().filter(|e| !waiting(e)).collect();
+                // roof the plate check walks; a byte each, not a copy.
+                let waits: Vec<bool> = ready.iter().map(waiting).collect();
                 plate::fracture_iter(
                     layout,
                     &mut self.world,
                     &mut self.bodies,
-                    free.iter().copied(),
+                    ready
+                        .iter()
+                        .zip(&waits)
+                        .filter(|(_, w)| !**w)
+                        .map(|(e, _)| *e),
                     &mut crumbs,
                     |mat| {
                         self.matter
@@ -5457,7 +5460,7 @@ impl BlastRange {
         let hulls: Vec<crate::burst::Hull> =
             live.iter().map(|(v, was)| v.hull(Some(was))).collect();
         detail("debris_hulls");
-        let back = self.matter.flush_observed(
+        self.matter.flush_observed(
             &self.world,
             battle_mode || self.config.material_energy_j > 0,
             self.config.gravity,
@@ -5467,12 +5470,6 @@ impl BlastRange {
             detail,
             &|_, event| physics_detail(1, event),
         );
-        // Confirmed cells the pool had no slot for (ADR-659) go back in
-        // the next drain, as transfers: they did not leave the world.
-        for &(p, m) in &back {
-            self.world
-                .queue_transfer(voxel::world::Edit::put(p[0], p[1], p[2], m));
-        }
         completed("debris");
         for e in self.world.edits() {
             if e.mat == 0 {
@@ -5497,9 +5494,6 @@ impl BlastRange {
             } else {
                 dug.remove(&p);
             }
-        }
-        for (p, _) in &back {
-            dug.remove(p);
         }
         self.removed += dug.len();
         for &mat in dug.values() {

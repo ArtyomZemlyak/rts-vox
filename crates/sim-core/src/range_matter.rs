@@ -1111,7 +1111,7 @@ impl Matter {
         tick: u64,
         hulls: &[crate::burst::Hull],
         yielding: &[voxel::store::Mat],
-    ) -> Vec<([u32; 3], voxel::store::Mat)> {
+    ) {
         self.flush_observed(
             w,
             material,
@@ -1134,7 +1134,7 @@ impl Matter {
         yielding: &[voxel::store::Mat],
         mut completed: impl FnMut(&'static str),
         task: &(impl Fn(usize, &'static str) + Sync),
-    ) -> Vec<([u32; 3], voxel::store::Mat)> {
+    ) {
         // Unclaimed compare-and-remove edits are ablation, even alongside a
         // conventional wave. Claimed edits belong to debris, not this sink.
         for &(edit, old) in w.completed() {
@@ -1145,11 +1145,13 @@ impl Matter {
                 self.annihilate_cells(&[([edit.x, edit.y, edit.z], old)]);
             }
         }
-        // Confirmed cells without a slot go back to the world (ADR-659);
-        // the caller queues them, as it owns the world.
-        let back = self
-            .debris
-            .confirm(w.completed(), &mut self.economy, &self.tuning);
+        // Extra pieces keep clear of the thermal reserve (ADR-659).
+        self.debris.confirm_reserving(
+            w.completed(),
+            &mut self.economy,
+            &self.tuning,
+            self.thermal_reserve,
+        );
         for &(by, mat) in w.taken() {
             // A voxel consumed by fire went to the combustion sink whatever
             // the weapon; the rest of an annihilating weapon's take is its.
@@ -1184,7 +1186,6 @@ impl Matter {
         self.thermal_reserve = 0;
         self.body_heat_reserve = 0;
         self.damage_waiting = false;
-        back
     }
     pub fn save(&self, b: &mut Blob) {
         assert!(self.batch.is_none(), "fracture batches are atomic");

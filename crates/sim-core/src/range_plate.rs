@@ -177,6 +177,9 @@ pub(super) fn fracture_iter(
     material: impl Fn(u16) -> Option<(u32, u32, u32)>,
 ) -> usize {
     let mut torn = 0;
+    if !layout.blocks.iter().any(is_roof) {
+        return torn;
+    }
     let near = EditTiles::of(edits.clone());
     for roof in &layout.blocks {
         let sx = roof.max[0] - roof.min[0];
