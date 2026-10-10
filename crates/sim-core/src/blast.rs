@@ -3074,10 +3074,21 @@ impl BlastRange {
         }
         let mut matter = matter::Matter::new(&units);
         let combustion = fire::Combustion::new(&units, &mut matter);
-        let mining = layout
-            .as_ref()
-            .and_then(|l| l.economy.clone())
-            .map(|data| economy::Mining::new(data, &units, &mut matter.economy.ledger));
+        let mining = layout.as_ref().and_then(|l| {
+            let data = l.economy.clone()?;
+            // Sides as `allied` reads them (ADR-673).
+            let sides = (0..units.len())
+                .map(|id| l.units.get(id).is_some_and(|u| u.allied))
+                .collect();
+            let allied_store = matter.economy.banks[0].stock;
+            Some(economy::Mining::new(
+                data,
+                &units,
+                sides,
+                &mut matter.economy.ledger,
+                allied_store,
+            ))
+        });
         let shield_tuning =
             modding::shield::ShieldTuning::from_ron(include_str!("../../../data/shield.ron"))
                 .expect("shield tuning");
@@ -3228,7 +3239,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_economy() {
+        let version = if self.has_banks() {
+            63
+        } else if self.has_economy() {
             62
         } else if self.has_open_claims() {
             61
@@ -3482,7 +3495,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if economy {
+            let format = if self.has_banks() {
+                63
+            } else if economy {
                 62
             } else if claims {
                 61
@@ -3526,6 +3541,12 @@ impl BlastRange {
         }
         if let Some(m) = self.mining.as_ref().filter(|_| version < 62) {
             m.save(b);
+        }
+        // Version 63 holds every section of 62 and then the haul (ADR-673).
+        if let Some(h) = self.mining.as_ref().and_then(|m| m.haul()) {
+            if version < 63 {
+                h.save(b);
+            }
         }
     }
     fn save_laser_tracking(&self, b: &mut fx::blob::Blob) {
@@ -3596,7 +3617,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=62).contains(&version) {
+        if !(27..=63).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3633,7 +3654,7 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
-        if (version >= 62) != r.has_economy() {
+        if (version >= 62) != r.has_economy() || (version >= 63) != r.has_banks() {
             return None;
         }
         if let Some(current) = configured {
@@ -4164,6 +4185,10 @@ impl BlastRange {
         if version >= 62 {
             observe("economy", bytes.len() - s.left(), None);
             r.load_mining(&mut s)?;
+        }
+        if version >= 63 {
+            observe("haul", bytes.len() - s.left(), None);
+            r.load_haul(&mut s)?;
         }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
@@ -5214,6 +5239,8 @@ impl BlastRange {
         self.dig_phase();
         self.world.flush();
         self.credit_digs();
+        // A tank this drain filled turns to haul the same tick (ADR-673).
+        self.haul_phase();
         self.world_changed = nav::vehicle::Changed::default();
         for e in self.world.edits() {
             self.world_changed.column(e.x as i32, e.z as i32);

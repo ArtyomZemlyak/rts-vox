@@ -1314,7 +1314,7 @@ impl Matter {
         let ledger_limit = (self.tuning.max_fragments as usize)
             .saturating_mul(4usize.pow(3))
             .saturating_add(self.tuning.max_resting_fragments as usize)
-            .saturating_add(units.len().saturating_mul(3).saturating_add(2));
+            .saturating_add(units.len().saturating_mul(3).saturating_add(3));
         if n > ledger_limit || n > s.left() / 18 {
             return None;
         }

@@ -23,6 +23,9 @@ fn layout(tank: u64, rate: u32, pool: u32) -> RangeLayout {
         material: 6,
     });
     let mut e = RangeEconomy::stock();
+    // Slice 1: no stores, so a full tank stops and the snapshot is 62.
+    e.bank = None;
+    e.kinds.iter_mut().for_each(|k| k.store = 0);
     e.dig_edits_in_flight = pool;
     let k = e.kind_mut(RangeUnitKind::Tank).unwrap();
     k.tank = tank;

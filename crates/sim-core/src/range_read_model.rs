@@ -39,6 +39,11 @@ pub struct Unit {
     pub attack_range: Option<i32>,
     pub order: Option<Order>,
     pub patrol_laps: Option<u32>,
+    /// Matter in the unit's tank and its capacity; `None` without a tank
+    /// (ADR-672, ADR-673).
+    pub tank: Option<[u64; 2]>,
+    /// The digger is away hauling to a dock.
+    pub hauling: bool,
 }
 impl Unit {
     fn from_unit(unit: &RangeUnit, allied: bool) -> Self {
@@ -57,6 +62,8 @@ impl Unit {
             attack_range: None,
             order: None,
             patrol_laps: (!unit.motion.route.is_empty()).then_some(unit.motion.laps),
+            tank: None,
+            hauling: false,
         }
     }
 }
@@ -80,6 +87,9 @@ pub struct View {
     pub ready: bool,
     pub gun: Unit,
     pub units: Vec<Unit>,
+    /// Each side's store, allied first: matter held and its cap; `None`
+    /// without a bank (ADR-673).
+    pub stores: Option<[[u64; 2]; 2]>,
 }
 impl View {
     pub fn new(world: &BlastRange, generation: u64) -> Self {
@@ -99,6 +109,7 @@ impl View {
             ready: false,
             gun: Unit::from_unit(&world.gun, true),
             units: Vec::with_capacity(world.units.len()),
+            stores: None,
         };
         view.update(world, generation);
         view
@@ -120,6 +131,10 @@ impl View {
         self.counts = [0; 2];
         self.base_integrity = world.battle_base_integrity();
         self.ready = world.ready();
+        self.stores = world
+            .side_store(true)
+            .zip(world.side_store(false))
+            .map(|(a, e)| [[a.0, a.1], [e.0, e.1]]);
         self.gun = Unit::from_unit(&world.gun, true);
         self.units.clear();
         for (id, unit) in world.units.iter().enumerate() {
@@ -131,6 +146,8 @@ impl View {
             item.loadout = world.battle.actors.get(id).map(|actor| actor.weapon);
             item.attack_range = world.battle_attack_range(id);
             item.order = world.battle.actors.get(id).map(|actor| actor.order);
+            item.tank = world.tank_fill(id).map(|(held, cap)| [held, cap]);
+            item.hauling = world.hauling(id);
             self.units.push(item);
         }
     }

@@ -1505,6 +1505,15 @@ impl BlastRange {
                 }
             }
         };
+        // A new order ends a haul: it decides where to go (ADR-673).
+        if matches!(
+            outcome,
+            commands::Outcome::Applied | commands::Outcome::Queued
+        ) {
+            if let Some(m) = self.mining.as_mut() {
+                m.reset_leg(id);
+            }
+        }
         self.record_player_command(command, outcome);
         outcome
     }

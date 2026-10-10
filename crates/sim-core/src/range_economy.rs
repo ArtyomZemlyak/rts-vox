@@ -1,4 +1,5 @@
-//! Dig economy of the range (plan 245, slices 0 and 1; ADR-672).
+//! Dig economy of the range (plan 245, slices 0, 1 and 3; ADR-672,
+//! ADR-673). Hauling to the docks and the sides' stores — [`haul`].
 //!
 //! A unit whose kind has a tank takes `Order::Dig(face)`. Within reach of
 //! its face it queues the ball of `dig_radius` around it, a cell at a time,
@@ -26,6 +27,8 @@ use modding::range_economy::RangeEconomy;
 use std::collections::BTreeMap;
 use voxel::store::AIR;
 
+#[path = "range_haul.rs"]
+pub mod haul;
 #[cfg(test)]
 #[path = "range_economy_tests.rs"]
 mod tests;
@@ -63,12 +66,22 @@ pub struct Mining {
     pub cells: u64,
     pub misses: u64,
     pub deferred: u64,
+    /// Hauling and the sides' stores, with a bank section (ADR-673).
+    haul: Option<haul::Haul>,
 }
 
 impl Mining {
     /// Tanks are created after every other container of the scene, so the
     /// numbering of bodies and fuel is that of a layout without economy.
-    pub(super) fn new(data: RangeEconomy, units: &[RangeUnit], ledger: &mut Ledger) -> Self {
+    /// With a bank section the enemy side's store follows the tanks;
+    /// container 1, the allied store, only takes its cap.
+    pub(super) fn new(
+        data: RangeEconomy,
+        units: &[RangeUnit],
+        sides: Vec<bool>,
+        ledger: &mut Ledger,
+        allied_store: ContainerId,
+    ) -> Self {
         let tanks = units
             .iter()
             .map(|u| {
@@ -77,6 +90,10 @@ impl Mining {
                     .map(|k| ledger.create(Kind::Hauler, 0, k.tank))
             })
             .collect();
+        let haul = data
+            .bank
+            .is_some()
+            .then(|| haul::Haul::new(&data, units, sides, ledger, allied_store));
         Self {
             data,
             tanks,
@@ -86,6 +103,7 @@ impl Mining {
             cells: 0,
             misses: 0,
             deferred: 0,
+            haul,
         }
     }
     pub fn data(&self) -> &RangeEconomy {
@@ -190,7 +208,8 @@ impl BlastRange {
                 continue;
             };
             let k = m.data.kind(u.kind).expect("a tank has its kind's entry");
-            if !u.status.alive || !within(u, face, k.dig_reach) {
+            // A hauler is away from its face, even when it drives past it.
+            if !u.status.alive || m.hauling(id) || !within(u, face, k.dig_reach) {
                 continue;
             }
             // At the face: a digger driving to it stops here.
@@ -199,6 +218,8 @@ impl BlastRange {
             }
             if ledger.room(tank) > m.inflight[id] {
                 diggers.push((id, face, *k));
+            } else {
+                m.mark_full(id);
             }
         }
         if diggers.is_empty() {
@@ -238,6 +259,7 @@ impl BlastRange {
                 }
                 // The next voxel does not fit: the tank is full.
                 if amount > room {
+                    m.mark_full(id);
                     continue 'diggers;
                 }
                 if left == 0 {
