@@ -396,6 +396,23 @@ fn main() {
             "physics workers: 1..=8"
         );
     }
+    // Whole-map search allowance per tick and per search (ADR-678), for
+    // calibration runs: `--coarse-work 1048576,262144`.
+    if let Some(w) = args.windows(2).find(|w| w[0] == "--coarse-work") {
+        let [total, each] = [0, 1].map(|k| {
+            w[1].split(',')
+                .nth(k)
+                .expect("total,each")
+                .parse::<u64>()
+                .expect("work")
+        });
+        sim.navigation.global_work_per_tick = total;
+        sim.navigation.global_work_per_search = each.min(total);
+    }
+    println!(
+        "coarse_work_per_tick={} coarse_work_per_search={}",
+        sim.navigation.global_work_per_tick, sim.navigation.global_work_per_search
+    );
     let [physics, navigation] = sim.worker_counts();
     println!("physics_workers={physics} navigation_workers={navigation}");
     if let Some(path) = args
@@ -605,6 +622,7 @@ fn main() {
                                 nodes,
                                 yielding: sim.navigation.fell.materials,
                                 local_grade: u.kind == modding::range::RangeUnitKind::Spider,
+                                restarts: 0,
                             },
                         );
                         println!(
@@ -756,6 +774,19 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--search-probe-tick")
         .map(|w| w[1].parse::<usize>().expect("probe tick"));
+    // Order to first motion in the running battle (ADR-678): a hull that
+    // stands with a new destination waits until its position first changes.
+    // Not part of the tick: observed after it, never fed back.
+    let mut order_wait: Vec<Option<u32>> = vec![None; sim.units.len()];
+    let mut order_prev: Vec<_> = sim
+        .units
+        .iter()
+        .map(|u| (u.motion.pos, u.motion.destination))
+        .collect();
+    let mut order_latency: Vec<u32> = Vec::new();
+    // Whole-map search work per tick and searches in flight (ADR-678).
+    let mut coarse_previous = sim.coarse_work;
+    let mut coarse_ticks: Vec<(u64, usize, u128)> = Vec::new();
     for tick_index in 0..ticks {
         // Why does each hull that is searching not have a whole-map route?
         // The answer the coarse planner gives from where it stands now.
@@ -777,6 +808,7 @@ fn main() {
                         nodes: sim.navigation.global_nodes,
                         yielding: sim.navigation.fell.materials,
                         local_grade: u.kind == modding::range::RangeUnitKind::Spider,
+                        restarts: 0,
                     },
                 );
                 let here = [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()];
@@ -795,6 +827,7 @@ fn main() {
         let mut last = start;
         let mut detail_last = start;
         let mut motion_detail = [0u128; 4];
+        let mut coarse_us = 0u128;
         let mut ground_us = 0;
         let mut feet_us = 0;
         let mut debris_detail = [0u128; 16];
@@ -856,7 +889,12 @@ fn main() {
                     detail_last = now;
                     match name {
                         "motion_begin" => {}
-                        "motion_routes" => motion_detail[0] = elapsed,
+                        // The coarse continuation (ADR-678) counts as route work.
+                        "motion_coarse" => {
+                            motion_detail[0] = elapsed;
+                            coarse_us = elapsed;
+                        }
+                        "motion_routes" => motion_detail[0] += elapsed,
                         "motion_ground" => ground_us = elapsed,
                         "motion_commit" => motion_detail[1] = elapsed,
                         "motion_feet" => feet_us = elapsed,
@@ -984,6 +1022,31 @@ fn main() {
             profile.collect(&mut worker_windows[tick_index / 300]);
         }
         samples.push(elapsed);
+        coarse_ticks.push((
+            sim.coarse_work - coarse_previous,
+            sim.units
+                .iter()
+                .filter(|u| u.motion.coarse_waited().is_some())
+                .count(),
+            coarse_us,
+        ));
+        coarse_previous = sim.coarse_work;
+        for (id, u) in sim.units.iter().enumerate() {
+            let (pos, dest) = (u.motion.pos, u.motion.destination);
+            let (old_pos, old_dest) = order_prev[id];
+            let moved = pos != old_pos;
+            if let Some(t0) = order_wait[id] {
+                if moved {
+                    order_latency.push(sim.tick - t0);
+                    order_wait[id] = None;
+                } else if dest.is_none() || !u.status.alive {
+                    order_wait[id] = None;
+                }
+            } else if !moved && dest.is_some() && dest != old_dest && u.status.alive {
+                order_wait[id] = Some(sim.tick);
+            }
+            order_prev[id] = (pos, dest);
+        }
         if tick_csv.is_some() {
             ground_windows[tick_index / 300].0 += ground_us;
             for (sum, value) in settled_phase_windows[tick_index / 300]
@@ -1281,12 +1344,13 @@ fn main() {
             if sim.tick >= focus_from && sim.tick.is_multiple_of(focus_every) {
                 let u = &sim.units[id];
                 let a = &sim.battle.actors[id];
-                println!("focus tick={} unit={} at={:?} alive={} weapon_ok={} order={:?} target={:?} ammo={:?} range={:?} fired={} damage={} motor={} traction={} dest={:?} path={}/{} searching={} blocked={} recovery={:?}",
+                println!("focus tick={} unit={} at={:?} alive={} weapon_ok={} order={:?} target={:?} ammo={:?} range={:?} fired={} damage={} motor={} traction={} dest={:?} path={}/{} searching={} blocked={} recovery={:?} frontier={} coarse={:?} last_plan={:?}",
                     sim.tick, id, u.at, u.status.alive, u.status.weapon, a.order, a.target,
                     sim.battle_weapon(id), sim.battle_attack_range(id), a.fired,
                     u.revision, u.mobility.engine.to_f64_lossy(), u.mobility.traction.to_f64_lossy(),
                     u.motion.destination, u.motion.cursor, u.motion.path.len(), u.motion.searching(),
-                    u.motion.blocked, u.motion.recovery_state());
+                    u.motion.blocked, u.motion.recovery_state(), u.motion.frontier_nodes(),
+                    u.motion.coarse_waited(), u.motion.last_plan);
                 if fire_trace {
                     println!(
                         "fire_focus tick={} unit={} gate={:?}",
@@ -1421,6 +1485,50 @@ fn main() {
             trace.records.len(),
             trace.omitted,
             trace.complete()
+        );
+    }
+    println!(
+        "coarse_work total={} max_tick={} ticks_with_work={} max_in_flight={} ticks_in_flight={} pass_us_total={} pass_us_max={}",
+        sim.coarse_work,
+        coarse_ticks.iter().map(|c| c.0).max().unwrap_or(0),
+        coarse_ticks.iter().filter(|c| c.0 > 0).count(),
+        coarse_ticks.iter().map(|c| c.1).max().unwrap_or(0),
+        coarse_ticks.iter().filter(|c| c.1 > 0).count(),
+        coarse_ticks.iter().map(|c| c.2).sum::<u128>(),
+        coarse_ticks.iter().map(|c| c.2).max().unwrap_or(0)
+    );
+    {
+        order_latency.sort_unstable();
+        let pick = |q: usize| {
+            order_latency
+                .get((order_latency.len() * q / 100).min(order_latency.len().saturating_sub(1)))
+                .copied()
+        };
+        let waiting: Vec<u32> = order_wait
+            .iter()
+            .flatten()
+            .map(|t0| sim.tick - t0)
+            .collect();
+        for (id, t0) in order_wait.iter().enumerate() {
+            let Some(t0) = t0 else { continue };
+            let u = &sim.units[id];
+            let m = &u.motion;
+            println!(
+                "order_waiting id={id} kind={:?} since={t0} searching={} coarse_waited={:?} coarse_work={:?} frontier={} path={} cursor={} blocked={} recovering={} dest={:?} pos={:?}",
+                u.kind, m.searching(), m.coarse_waited(), m.coarse_work(), m.frontier_nodes(), m.path.len(), m.cursor, m.blocked, m.recovering(), m.destination,
+                [m.pos[0].to_int_trunc(), m.pos[2].to_int_trunc()]
+            );
+        }
+        println!(
+            "battle_order_to_motion_ticks events={} p50={:?} p95={:?} max={:?} mean_milli={} still_waiting={} oldest_wait={:?}",
+            order_latency.len(),
+            pick(50),
+            pick(95),
+            order_latency.last(),
+            order_latency.iter().map(|&t| u64::from(t)).sum::<u64>() * 1000
+                / (order_latency.len().max(1) as u64),
+            waiting.len(),
+            waiting.iter().max()
         );
     }
     if let Some(path) = tick_csv {
