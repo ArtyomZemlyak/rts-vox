@@ -118,11 +118,12 @@ fn ordinary_shell_destruction_lands_within_fifteen_ticks() {
 }
 
 /// The parallel parts of the wave phase (frontiers, chunk builds, matter
-/// read ahead, captures) are functions of each wave alone: the same salvo
-/// on one, two and four physics workers gives the same state every tick.
+/// and body maps read ahead, captures side by side, sorts in runs) are
+/// functions of each wave alone or have one answer: the same salvo on one
+/// to four physics workers gives the same state every tick.
 #[test]
 fn salvo_state_is_independent_of_physics_workers() {
-    let runs: Vec<Vec<u64>> = [1, 2, 4]
+    let runs: Vec<Vec<u64>> = [1, 2, 3, 4]
         .into_iter()
         .map(|workers| {
             let mut r = salvo_range();
@@ -137,7 +138,8 @@ fn salvo_state_is_independent_of_physics_workers() {
         })
         .collect();
     assert_eq!(runs[0], runs[1], "two workers changed the salvo");
-    assert_eq!(runs[0], runs[2], "four workers changed the salvo");
+    assert_eq!(runs[0], runs[2], "three workers changed the salvo");
+    assert_eq!(runs[0], runs[3], "four workers changed the salvo");
 }
 
 /// A salvo saved while its waves still capture and dig, restored and run

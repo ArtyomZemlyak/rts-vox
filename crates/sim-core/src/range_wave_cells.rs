@@ -216,6 +216,10 @@ pub(super) struct Grid {
     pub(super) n: usize,
 }
 
+/// An owning wave cell, its conservative box of local cells, and whether
+/// the part may meet it at all.
+type OwnerBox = ([i32; 3], [i32; 3], [i32; 3], bool);
+
 impl Grid {
     pub(super) fn index(&self, cell: [i32; 3]) -> u32 {
         ((cell[2] as usize * self.n + cell[1] as usize) * self.n + cell[0] as usize) as u32
@@ -245,7 +249,7 @@ fn bucket(
     let span = i64::from(grid.edge) << 32;
     let origin = grid.origin.map(|v| i64::from(v) << 32);
     // The box of the last owning cell asked: neighbours share it.
-    let mut last: Option<([i32; 3], [i32; 3], [i32; 3], bool)> = None;
+    let mut last: Option<OwnerBox> = None;
     for (z, dz) in (min[2]..max[2]).zip(&tz) {
         let plane = frame.base.add(*dz);
         for (y, dy) in (min[1]..max[1]).zip(&ty) {
