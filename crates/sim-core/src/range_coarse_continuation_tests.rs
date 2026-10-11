@@ -233,7 +233,7 @@ fn a_range_restored_mid_search_steps_as_the_continuing_one() {
             // The last answer: the snapshot falls back to its plain version.
             assert_ne!(
                 u32::from_le_bytes(r.snapshot()[..4].try_into().unwrap()),
-                65
+                66
             );
         }
         searching = now;

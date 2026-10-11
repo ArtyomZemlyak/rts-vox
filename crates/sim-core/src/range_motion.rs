@@ -1499,6 +1499,7 @@ impl Motion {
         changed: &nav::vehicle::Changed,
         budget: u64,
         first: bool,
+        full_tick_budget: bool,
     ) -> u64 {
         let Some(mut pending) = self.coarse.take() else {
             return 0;
@@ -1521,6 +1522,15 @@ impl Motion {
         let spent = self.coarse_spent;
         self.allow_coarse(None);
         match result {
+            CoarseAdvance::Pending if spent == 0 && budget > 0 && full_tick_budget => {
+                // Its next atomic corridor test cannot fit even in an
+                // otherwise empty tick. Keep the order and hand it to the
+                // existing fine planner instead of overspending or waiting
+                // forever. The range supplies this flag: its active budget
+                // can differ from this motion's cloned navigation settings.
+                self.coarse = None;
+                self.start_fine(w, to, b, others, rubble, None, |_| {});
+            }
             CoarseAdvance::Pending if first => {
                 if let Some(c) = &mut self.coarse {
                     c.waited = c.waited.saturating_add(1);
@@ -2346,9 +2356,17 @@ impl Motion {
         // pose, and an escape manoeuvre disregards it altogether, since it
         // exists to leave a spot where every planned move met exactly that
         // refusal. Belly, tilt, bounds and collisions still hold.
-        let clear = (target.blocked == 0 || target.blocked < current.blocked)
-            && !target.tilt
-            && (self.escape_left > 0 || !target.steep || current.steep);
+        let belly_clear = target.blocked == 0
+            || target.blocked < current.blocked
+            || (self.escape_left > 0
+                && target.blocked == current.blocked
+                && ground.keeps_belly_contacts(
+                    ([self.pos[0], self.pos[2]], old.head, current),
+                    ([nx, nz], next.head, target),
+                    shape,
+                ));
+        let clear =
+            belly_clear && !target.tilt && (self.escape_left > 0 || !target.steep || current.steep);
         let terrain_allowed = clear
             && x >= EDGE
             && z >= EDGE
@@ -2669,6 +2687,10 @@ pub fn floor(w: &World, x: i32, z: i32) -> i32 {
     // height voxel by voxel here repeats that work for every foot contact.
     w.column_ceiling(x as u32, z as u32) as i32
 }
+
+#[cfg(test)]
+#[path = "range_coarse_budget_tests.rs"]
+mod coarse_budget_tests;
 
 #[cfg(test)]
 mod tests {

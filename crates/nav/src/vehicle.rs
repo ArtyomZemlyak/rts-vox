@@ -1032,6 +1032,59 @@ impl<'a> Probe<'a> {
         }
         self.probe_pose(pos, head, s, false)
     }
+    /// A recovery step may retain existing belly contacts while crossing a
+    /// fraction of a column, but must not acquire a new blocked column.
+    /// Exact subset check; a matching count alone cannot establish this.
+    pub fn keeps_belly_contacts(
+        &mut self,
+        from: ([Fx; 2], i32, Pose),
+        to: ([Fx; 2], i32, Pose),
+        s: Shape,
+    ) -> bool {
+        if to.2.blocked == 0 {
+            return true;
+        }
+        if from.2.blocked == 0 || to.2.blocked > from.2.blocked {
+            return false;
+        }
+        let plane = |p: Pose| {
+            [
+                p.height,
+                p.floors[1]
+                    .add(p.floors[3])
+                    .sub(p.floors[0])
+                    .sub(p.floors[2])
+                    .div(Fx::from_int(4 * s.support[0].max(1))),
+                p.floors[2]
+                    .add(p.floors[3])
+                    .sub(p.floors[0])
+                    .sub(p.floors[1])
+                    .div(Fx::from_int(4 * s.support[1].max(1))),
+            ]
+        };
+        let (source, target) = (plane(from.2), plane(to.2));
+        let clearance = s.clearance.max(Fx::from_int(s.step));
+        let belly =
+            |p: [Fx; 3], u: Fx, v: Fx| p[0].add(p[1].mul(u)).add(p[2].mul(v)).add(clearance);
+        let (c0, s0) = (angle::cos(from.1), angle::sin(from.1));
+        let (c1, s1) = (angle::cos(to.1), angle::sin(to.1));
+        let (lo, hi) = self.extent(to.0, to.1, s);
+        for z in lo[1]..=hi[1] {
+            for (x, u, v) in Self::row(to.0, c1, s1, s, lo[0], hi[0], z) {
+                let floor = Fx::from_int(self.floor(x, z));
+                if floor <= belly(target, u, v) {
+                    continue;
+                }
+                let Some((_, u, v)) = Self::row(from.0, c0, s0, s, x, x, z).next() else {
+                    return false;
+                };
+                if floor <= belly(source, u, v) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
     /// Planning only consumes the full depth/crush counts of legal poses.
     /// An illegal pose may stop at the first proof of refusal. Execution
     /// still uses `pose`: decreasing penetration must retain exact counts.
@@ -2587,6 +2640,40 @@ impl Hunt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_escape_keeps_existing_contacts_but_cannot_exchange_them_for_a_wall() {
+        let w = world(false, false, false);
+        let mut rubble = Rubble::new();
+        rubble.insert([80, 100], 30);
+        rubble.insert([86, 100], 30);
+        let mut probe = Probe::new(&w).with_rubble(&rubble);
+        let shape = Shape {
+            half: [4, 4],
+            support: [4, 4],
+            clearance: Fx::from_int(2),
+            step: 2,
+            min_up: Fx::from_ratio(4, 5),
+            height: 8,
+            span: 0,
+            ramp: Fx::ZERO,
+        };
+        let from = [80, 100].map(Fx::from_int);
+        let old = probe.pose(from, 0, shape);
+        assert_eq!(old.blocked, 1);
+        for fraction in [Fx(1), Fx::from_ratio(1, 4), Fx::from_ratio(1, 2)] {
+            let to = [from[0].add(fraction), from[1]];
+            let next = probe.pose(to, 0, shape);
+            assert_eq!(next.blocked, old.blocked);
+            assert!(probe.keeps_belly_contacts((from, 0, old), (to, 0, next), shape));
+        }
+        let to = [86, 100].map(Fx::from_int);
+        let next = probe.pose(to, 0, shape);
+        assert_eq!(
+            next.blocked, old.blocked,
+            "equal counts can hide a new wall"
+        );
+        assert!(!probe.keeps_belly_contacts((from, 0, old), (to, 0, next), shape));
+    }
     impl Probe<'_> {
         fn reference_contact(
             &mut self,

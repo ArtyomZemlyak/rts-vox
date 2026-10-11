@@ -198,6 +198,10 @@ pub struct World {
     wx: u32,
     /// Очередь отложенных правок. FIFO — порядок дренажа детерминирован.
     queue: std::collections::VecDeque<Edit>,
+    /// Derived counts of queued removals, including transfers. A cell
+    /// already paid for must not be claimed again before its edit drains.
+    /// Counts retain duplicates from legacy queues; never saved or hashed.
+    pending_digs: std::collections::BTreeMap<u64, usize>,
     /// Передачи материи между миром и телом (ADR-431): исходные ячейки
     /// оторванного тела и запекание приземлившегося. Дренаж берёт их
     /// первыми и целиком — их число ограничено тем, кто их ставит, —
@@ -462,6 +466,7 @@ impl World {
                 .collect(),
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
+            pending_digs: std::collections::BTreeMap::new(),
             transfers: std::collections::VecDeque::new(),
             applied: Vec::new(),
             taken: Vec::new(),
@@ -1015,6 +1020,7 @@ impl World {
     fn finish_reset(&mut self) {
         self.queue.clear();
         self.transfers.clear();
+        self.pending_digs.clear();
         self.applied_in_tick = 0;
         self.examined_in_tick = 0;
         self.applied.clear();
@@ -1098,6 +1104,7 @@ impl World {
     /// при дренаже заняли бы.
     pub fn queue_edit(&mut self, e: Edit) {
         if self.inside(e.x, e.y, e.z) && !self.on_frame(e.x, e.y, e.z) {
+            self.remember_dig(e);
             self.queue.push_back(e);
         }
     }
@@ -1107,6 +1114,7 @@ impl World {
     /// мира, отбрасываются, как у приказа.
     pub fn queue_transfer(&mut self, e: Edit) {
         if self.inside(e.x, e.y, e.z) && !self.on_frame(e.x, e.y, e.z) {
+            self.remember_dig(e);
             self.transfers.push_back(e);
         }
     }
@@ -1135,6 +1143,40 @@ impl World {
     /// Edits waiting in the queue, in drain order; transfers apart.
     pub fn queued_edits(&self) -> impl Iterator<Item = &Edit> + '_ {
         self.queue.iter()
+    }
+
+    fn dig_key(&self, x: u32, y: u32, z: u32) -> u64 {
+        (u64::from(z) * u64::from(self.ny) + u64::from(y)) * u64::from(self.nx) + u64::from(x)
+    }
+    fn remember_dig(&mut self, e: Edit) {
+        if e.mat == AIR {
+            let key = self.dig_key(e.x, e.y, e.z);
+            *self.pending_digs.entry(key).or_default() += 1;
+        }
+    }
+    fn forget_dig(&mut self, e: Edit) {
+        if e.mat == AIR {
+            let key = self.dig_key(e.x, e.y, e.z);
+            let count = self.pending_digs.get_mut(&key).expect("queued dig indexed");
+            *count -= 1;
+            if *count == 0 {
+                self.pending_digs.remove(&key);
+            }
+        }
+    }
+    fn rebuild_pending_digs(&mut self) {
+        self.pending_digs.clear();
+        for e in self.queue.iter().chain(&self.transfers) {
+            if e.mat == AIR {
+                let key = self.dig_key(e.x, e.y, e.z);
+                *self.pending_digs.entry(key).or_default() += 1;
+            }
+        }
+    }
+    /// A removal already waits in either queue. Live material is unchanged
+    /// until drain, but another producer must wait instead of paying twice.
+    pub fn has_pending_dig(&self, x: u32, y: u32, z: u32) -> bool {
+        self.inside(x, y, z) && self.pending_digs.contains_key(&self.dig_key(x, y, z))
     }
 
     /// Передачи между миром и телом, ждущие дренажа (ADR-431).
@@ -1200,11 +1242,7 @@ impl World {
         // в теле), а не потолок дренажа: отложенная передача оставляет
         // одну материю и в теле, и в мире. Свежий чанк им тоже не
         // помеха, но в счёт материализаций тика идёт.
-        while let Some(e) = self.transfers.pop_front() {
-            st.examined += 1;
-            self.examined_in_tick += 1;
-            self.take(e, &mut st);
-        }
+        self.drain_transfers(&mut st);
         let mut deferred = std::mem::take(&mut self.defer_buf);
         deferred.clear();
         while self.applied_in_tick < self.max_edits_per_tick
@@ -1237,9 +1275,29 @@ impl World {
         st
     }
 
+    /// Complete the body/world transfers produced after the main drain.
+    /// Append to its deltas: accounting, navigation and publication still
+    /// need every earlier edit. Producers bound transfers (ADR-431); normal
+    /// edits keep their FIFO and the already consumed tick allowance.
+    pub fn flush_transfers(&mut self) -> FlushStats {
+        let mut st = FlushStats::default();
+        self.drain_transfers(&mut st);
+        st.queued = self.queue.len();
+        st
+    }
+
+    fn drain_transfers(&mut self, st: &mut FlushStats) {
+        while let Some(e) = self.transfers.pop_front() {
+            st.examined += 1;
+            self.examined_in_tick += 1;
+            self.take(e, st);
+        }
+    }
+
     /// Применить одну правку дренажа и учесть её: в список завершённых,
     /// изъятого и применённого, в счёт тика.
     fn take(&mut self, e: Edit, st: &mut FlushStats) {
+        self.forget_dig(e);
         let fresh = self.chunks[self.chunk_index(e.x, e.y, e.z)].is_none();
         let previous = self.material(e.x, e.y, e.z);
         self.completed.push((e, previous));
@@ -1443,6 +1501,7 @@ impl World {
         self.transfers = load_edits(s, self.nx, self.ny, self.nz)
             .into_iter()
             .collect();
+        self.rebuild_pending_digs();
         s.ok()
     }
 
@@ -1517,6 +1576,7 @@ impl World {
         self.applied = load_edits(s, self.nx, self.ny, self.nz);
         // Снимок старше очереди передач её не несёт: пустая.
         self.transfers.clear();
+        self.rebuild_pending_digs();
         s.ok()
     }
 
@@ -2020,6 +2080,80 @@ mod tests {
         assert_eq!(back.queued(), 31);
         back.flush();
         assert_eq!(back.material(5, 25, 5), 7);
+    }
+
+    #[test]
+    fn pending_digs_follow_duplicate_deferred_and_restored_queues() {
+        let make = || World::new(64, 32, 64, 1000, Box::new(Layers { h: 30 }));
+        let mut w = make();
+        let p = [5, 10, 5];
+        w.queue_edit(Edit::dig_if(p[0], p[1], p[2], 1));
+        w.queue_edit(Edit::dig_if(p[0], p[1], p[2], 1));
+        w.queue_transfer(Edit::dig(p[0], p[1], p[2]));
+        w.queue_edit(Edit::put(6, 10, 5, 2));
+        w.queue_dig(0, 10, 5);
+        assert!(w.has_pending_dig(p[0], p[1], p[2]));
+        assert!(!w.has_pending_dig(6, 10, 5));
+        assert!(!w.has_pending_dig(0, 10, 5));
+
+        let (mut saved, mut transfers) = (fx::blob::Blob::new(), fx::blob::Blob::new());
+        w.save(&mut saved);
+        w.save_transfers(&mut transfers);
+        let mut back = make();
+        assert!(back.load(&mut fx::blob::Scan::new(&saved.v)));
+        assert!(back.load_transfers(&mut fx::blob::Scan::new(&transfers.v)));
+        let mut same = fx::blob::Blob::new();
+        back.save(&mut same);
+        assert_eq!(
+            same.v, saved.v,
+            "the derived index changes no snapshot bytes"
+        );
+        for world in [&mut w, &mut back] {
+            world.max_edits_per_tick = 1;
+            world.begin_tick();
+            world.flush(); // the transfer uses the applied allowance
+            assert!(world.has_pending_dig(p[0], p[1], p[2]));
+            world.begin_tick();
+            world.flush(); // first duplicate is a no-op; one still waits
+            assert!(world.has_pending_dig(p[0], p[1], p[2]));
+            world.begin_tick();
+            world.flush();
+            assert!(!world.has_pending_dig(p[0], p[1], p[2]));
+        }
+        let mut deferred = make();
+        deferred.max_materialize_per_tick = 0;
+        deferred.queue_dig(8, 10, 8);
+        assert!(deferred.flush().materialize_capped);
+        assert!(deferred.has_pending_dig(8, 10, 8));
+        deferred.max_materialize_per_tick = 4;
+        deferred.flush();
+        assert!(!deferred.has_pending_dig(8, 10, 8));
+        deferred.queue_dig(9, 10, 9);
+        deferred.reset_generator_regions(Box::new(Layers { h: 30 }), &[]);
+        assert!(!deferred.has_pending_dig(9, 10, 9));
+    }
+
+    #[test]
+    fn late_transfers_append_deltas_without_reopening_the_regular_allowance() {
+        let mut w = World::new(64, 32, 64, 1, Box::new(Layers { h: 30 }));
+        w.begin_tick();
+        w.queue_dig(5, 10, 5);
+        assert_eq!(w.flush().applied, 1);
+        let first = w.completed()[0];
+        w.queue_transfer(Edit::dig(6, 10, 5));
+        w.queue_dig(7, 10, 5);
+        assert_eq!(w.flush_transfers().applied, 1);
+        assert_eq!(w.completed().len(), 2);
+        assert_eq!(w.completed()[0], first);
+        assert_eq!(w.edits().len(), 2);
+        assert_eq!(w.taken().len(), 2);
+        assert_eq!(w.transfers_queued(), 0);
+        assert!(!w.has_pending_dig(6, 10, 5));
+        assert!(w.has_pending_dig(7, 10, 5));
+        assert_eq!(w.flush().applied, 0, "normal edits still have no allowance");
+        assert!(w.solid(7, 10, 5));
+        w.begin_tick();
+        assert_eq!(w.flush().applied, 1);
     }
 
     /// Правки в уже материализованный чанк потолок не трогает: он
