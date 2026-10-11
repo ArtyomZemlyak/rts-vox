@@ -52,7 +52,9 @@ pub(super) struct CoarsePending {
 enum CoarseAdvance {
     Pending,
     Planned(nav::vehicle::Route, [Fx; 2]),
-    Refused,
+    /// Refused; with the lattice entry the fine planner leads the hull to
+    /// when no corridor leaves its start (ADR-691).
+    Refused(Option<[i32; 2]>),
 }
 enum HuntAdvance {
     Pending(Box<nav::vehicle::Hunt>),
@@ -220,6 +222,10 @@ pub struct Motion {
     coarse_budget: Option<u64>,
     /// Coarse work spent since the range last set the allowance. Scratch.
     coarse_spent: u64,
+    /// The coming call sets a fine search up without walking it
+    /// (ADR-691): the range's continuation shares pay its work. Scratch
+    /// set by the range around a call; never saved.
+    fine_unwalked: bool,
     /// The last search ran its open set dry after expanding nodes. Read in
     /// the same tick it is written, never across one: not state.
     dry: bool,
@@ -448,6 +454,7 @@ impl Motion {
             coarse: None,
             coarse_budget: None,
             coarse_spent: 0,
+            fine_unwalked: false,
             dry: false,
             drive_scale: drive::drive_factor(
                 i64::from(chassis.mass) * 1000,
@@ -1207,7 +1214,11 @@ impl Motion {
                         self.take_plan(plan);
                         return true;
                     }
-                    CoarseAdvance::Refused => {}
+                    CoarseAdvance::Refused(Some(entry)) => {
+                        completed("plan_coarse");
+                        return self.start_fine(w, entry, b, others, rubble, prepared, completed);
+                    }
+                    CoarseAdvance::Refused(None) => {}
                 }
             }
             completed("plan_coarse");
@@ -1245,7 +1256,10 @@ impl Motion {
                 CoarseAdvance::Pending
             }
             Some(Ok(plan)) => CoarseAdvance::Planned(plan, pending.search.origin()),
-            Some(Err(_)) => CoarseAdvance::Refused,
+            Some(Err(nav::vehicle::coarse::Refusal::Entry { at })) => {
+                CoarseAdvance::Refused(Some(at))
+            }
+            Some(Err(_)) => CoarseAdvance::Refused(None),
         }
     }
     /// Begin the oriented fine search toward `to` from where the hull
@@ -1264,6 +1278,36 @@ impl Motion {
     ) -> bool {
         let from = [self.pos[0], self.pos[2]];
         let shape = self.shape(b);
+        if self.fine_unwalked {
+            // Set up only: the goal ring, the direct sweep and the frontier
+            // walk under the range's continuation shares from the next
+            // motion phase (ADR-691). Nothing of the scene's work is spent
+            // where the order is given.
+            let mut ground = nav::vehicle::Probe::for_search(
+                w,
+                &self.yielding,
+                nav::vehicle::Columns::default(),
+            )
+            .with_rubble(rubble);
+            match nav::vehicle::Hunt::begin(
+                &mut ground,
+                shape,
+                from,
+                self.drive.head,
+                to,
+                self.search(w),
+            ) {
+                nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
+                nav::vehicle::Hunting::Open(hunt) => {
+                    self.hunt = Some(hunt);
+                    self.blocked = false;
+                    self.needs_recovery = false;
+                    self.dry = false;
+                }
+            }
+            completed("plan_fine");
+            return !self.blocked;
+        }
         let half = shape.half.map(Fx::from_int);
         let blockers = self.local_blockers(from, shape, others);
         let clear = |p: [Fx; 2], head: i32| {
@@ -1350,7 +1394,10 @@ impl Motion {
             prepare,
             &mut completed,
         ) {
-            nav::vehicle::Hunting::Done(plan) => self.take_plan(plan),
+            nav::vehicle::Hunting::Done(mut plan) => {
+                self.mark_entry(to, &mut plan);
+                self.take_plan(plan);
+            }
             nav::vehicle::Hunting::Open(hunt) => {
                 // Starting consumed this tick's bounded share. Goal probes,
                 // the direct sweep and frontier resume on the next tick.
@@ -1461,6 +1508,12 @@ impl Motion {
     pub(super) fn hunting(&self) -> bool {
         self.hunt.is_some()
     }
+    /// Whether the fine search in flight is still in its start; such
+    /// searches share the start allowance, not the continuation's
+    /// (ADR-691).
+    pub(super) fn starting(&self) -> bool {
+        self.hunt.as_ref().is_some_and(|h| h.starting())
+    }
     /// Ticks a whole-map search in flight has waited, if there is one.
     pub fn coarse_waited(&self) -> Option<u32> {
         self.coarse.as_ref().map(|c| c.waited)
@@ -1483,19 +1536,23 @@ impl Motion {
     pub fn coarse_spent(&self) -> u64 {
         self.coarse_spent
     }
+    /// Whether the coming call sets fine searches up without walking them
+    /// (ADR-691); the range clears it after the call.
+    pub fn defer_fine(&mut self, unwalked: bool) {
+        self.fine_unwalked = unwalked;
+    }
     /// The range's continuation of a whole-map search in flight (ADR-680):
     /// note what changed in the world since the last tick, walk on with
     /// `budget`, and take the answer up. Returns the work spent. The
     /// first call of a tick counts the tick as waited; a second round of
-    /// the range's leftover passes no changes and counts nothing. The
-    /// other hulls are asked for only when the order passes to the fine
-    /// planner: walking the search does not read them.
+    /// the range's leftover passes no changes and counts nothing. Other
+    /// hulls are not read: a hand-over sets the fine search up unwalked,
+    /// and its slices read the hulls near it then (ADR-691).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn continue_coarse(
         &mut self,
         w: &World,
         b: &UnitBody,
-        others: impl FnOnce() -> Vec<Obstacle>,
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
@@ -1531,7 +1588,7 @@ impl Motion {
                 // forever. The range supplies this flag: its active budget
                 // can differ from this motion's cloned navigation settings.
                 self.coarse = None;
-                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
+                self.hand_over(w, to, b, rubble);
             }
             CoarseAdvance::Pending if first => {
                 if let Some(c) = &mut self.coarse {
@@ -1546,13 +1603,23 @@ impl Motion {
                 self.take_plan(plan);
                 self.take_up(from);
             }
-            CoarseAdvance::Refused => {
+            CoarseAdvance::Refused(entry) => {
                 // A refusal hands the order to the fine planner, exactly as
-                // the one-call planner did.
-                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
+                // the one-call planner did; its work is the fine
+                // planner's continuation, from the next tick (ADR-691).
+                // With no corridor out of the start, the fine planner
+                // leads the hull to the lattice entry, not to the goal.
+                self.hand_over(w, entry.unwrap_or(to), b, rubble);
             }
         }
         spent
+    }
+    /// A whole-map search passes its order to the fine planner, which is
+    /// set up here and walked by the continuation shares (ADR-691).
+    fn hand_over(&mut self, w: &World, to: [i32; 2], b: &UnitBody, rubble: &nav::vehicle::Rubble) {
+        let unwalked = std::mem::replace(&mut self.fine_unwalked, true);
+        self.start_fine(w, to, b, &[], rubble, None, |_| {});
+        self.fine_unwalked = unwalked;
     }
     /// The whole-map search in flight as bytes (ADR-680), for the range's
     /// snapshot section; nothing when there is none.
@@ -1590,6 +1657,11 @@ impl Motion {
     /// in flight or when it has not walked yet (ADR-314).
     pub fn frontier_nodes(&self) -> u32 {
         self.hunt.as_ref().map_or(0, |h| h.nodes())
+    }
+    /// Nodes expanded and poses probed by the fine search in flight, if
+    /// there is one; both zero for one set up unwalked (ADR-691).
+    pub fn fine_work(&self) -> Option<[u32; 2]> {
+        self.hunt.as_ref().map(|h| [h.nodes(), h.poses()])
     }
     /// One tick's worth of the search in flight, if there is one. A world
     /// that changed under it drops what it scanned, not the search.
@@ -1752,8 +1824,25 @@ impl Motion {
         let plan = hunt.advance_in_prepared(w, rubble, &clear, slice, prepared);
         detail("route_query_end");
         match plan {
-            Some(plan) => HuntAdvance::Planned(plan, hunt.origin()),
+            Some(mut plan) => {
+                self.mark_entry(hunt.goal(), &mut plan);
+                HuntAdvance::Planned(plan, hunt.origin())
+            }
             None => HuntAdvance::Pending(hunt),
+        }
+    }
+    /// A route to a lattice entry (ADR-691) is a prefix of the order: the
+    /// hull keeps its destination and asks for the rest on arriving. A
+    /// search's goal lies within its goal ring, four cells, of the order's
+    /// destination unless it leads to an entry instead.
+    fn mark_entry(&self, goal: [i32; 2], plan: &mut nav::vehicle::Route) {
+        let ring = 4 * self.navigation.cell_units;
+        if !plan.path.is_empty()
+            && self
+                .destination
+                .is_some_and(|d| (0..2).any(|a| (goal[a] - d[a]).abs() > ring))
+        {
+            plan.partial = true;
         }
     }
     fn apply_hunt(&mut self, result: HuntAdvance, tick: u32) {
@@ -2579,6 +2668,7 @@ impl Motion {
         // (ADR-680), read after every hull.
         self.coarse = None;
         self.allow_coarse(None);
+        self.fine_unwalked = false;
         self.terrain_columns = nav::vehicle::Columns::default();
         self.cut_limit = usize::MAX;
         self.pos = std::array::from_fn(|_| s.fx());

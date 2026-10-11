@@ -1639,6 +1639,54 @@ impl Hunt {
         prepare: Option<&mut PrepareStart<'_>>,
         completed: impl FnMut(&'static str),
     ) -> Hunting {
+        let mut hunt = match Self::fresh(ground, shape, from, head, to, cfg) {
+            Ok(hunt) => hunt,
+            Err(refused) => return refused,
+        };
+        let result = hunt.prepare_sweep(ground, clear, &mut budget.max(1), prepare, completed);
+        hunt.scans = ground.scans;
+        hunt.samples = ground.samples;
+        if let Some(mut route) = result {
+            route.scans = hunt.scans;
+            route.samples = hunt.samples;
+            Hunting::Done(route)
+        } else {
+            hunt.columns = ground.take_columns();
+            Hunting::Open(Box::new(hunt))
+        }
+    }
+    /// A search set up but not walked (ADR-691): the goal ring, the direct
+    /// sweep and the frontier are all left to the slices that continue it.
+    /// Only the request is checked, and the contact under the start pose
+    /// read once; a request the planner refuses outright is answered.
+    pub fn begin(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+    ) -> Hunting {
+        match Self::fresh(ground, shape, from, head, to, cfg) {
+            Ok(mut hunt) => {
+                hunt.scans = ground.scans;
+                hunt.samples = ground.samples;
+                hunt.columns = ground.take_columns();
+                Hunting::Open(Box::new(hunt))
+            }
+            Err(refused) => refused,
+        }
+    }
+    /// The search as asked, before any of its work; a request refused
+    /// without a search comes back as its answer.
+    fn fresh(
+        ground: &mut Probe<'_>,
+        shape: Shape,
+        from: [Fx; 2],
+        head: i32,
+        to: [i32; 2],
+        cfg: Search,
+    ) -> Result<Hunt, Hunting> {
         let none = |stranded, exhausted, nodes, poses| {
             Hunting::Done(Route {
                 path: vec![],
@@ -1680,7 +1728,7 @@ impl Hunt {
             || ground.world.nx as i32 % cfg.cell != 0
             || ground.world.nz as i32 % cfg.cell != 0
         {
-            return none(false, false, 0, 0);
+            return Err(none(false, false, 0, 0));
         }
         let n = (ground.world.nx as i32).div_euclid(cfg.cell) as usize;
         let rows = (ground.world.nz as i32).div_euclid(cfg.cell) as usize;
@@ -1698,7 +1746,7 @@ impl Hunt {
         let mut open = BinaryHeap::new();
         distance.insert(initial, 0);
         open.push(Reverse((0, 0, initial)));
-        let mut hunt = Hunt {
+        let hunt = Hunt {
             shape,
             cfg,
             from,
@@ -1731,17 +1779,7 @@ impl Hunt {
             connection: None,
             expansion: None,
         };
-        let result = hunt.prepare_sweep(ground, clear, &mut budget.max(1), prepare, completed);
-        hunt.scans = ground.scans;
-        hunt.samples = ground.samples;
-        if let Some(mut route) = result {
-            route.scans = hunt.scans;
-            route.samples = hunt.samples;
-            Hunting::Done(route)
-        } else {
-            hunt.columns = ground.take_columns();
-            Hunting::Open(Box::new(hunt))
-        }
+        Ok(hunt)
     }
     /// Probe the target ring in the original order, then the exact swept run.
     fn prepare(
@@ -1880,6 +1918,16 @@ impl Hunt {
     /// Frontier still open and nodes expanded so far.
     pub fn nodes(&self) -> u32 {
         self.nodes
+    }
+    /// Whether the search is still in its start: the goal ring or the
+    /// direct sweep, before the frontier (ADR-691). Saved with the search.
+    pub fn starting(&self) -> bool {
+        self.prelude.is_some()
+    }
+    /// Poses probed so far in this run of the search: none for a search
+    /// set up unwalked (ADR-691). Not saved; a restored search counts anew.
+    pub fn poses(&self) -> u32 {
+        self.probed
     }
     /// Swept edges were checked from this exact position and heading. A
     /// displaced caller must request a new search rather than reuse them.

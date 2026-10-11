@@ -3297,6 +3297,15 @@ fn battle_worker_pool_restore_and_start_preserve_the_same_fight() {
         for _ in 0..20 {
             parallel.step();
         }
+        // Restore with a search in flight. Spider 22 used to search from
+        // its pad for hundreds of ticks; it now leaves it by a lattice
+        // entry (ADR-691), so wait for the next pursuit search instead.
+        for _ in 0..300 {
+            if parallel.units.iter().any(|u| u.motion.searching()) {
+                break;
+            }
+            parallel.step();
+        }
         assert!(parallel.units.iter().any(|u| u.motion.searching()));
         let mut serial = BlastRange::restore(config, &parallel.snapshot()).unwrap();
         assert_eq!(

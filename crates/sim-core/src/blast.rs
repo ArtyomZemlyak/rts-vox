@@ -5086,33 +5086,6 @@ impl BlastRange {
         // again next tick, in the same stable spatial order as motion below.
         let battle_mode = self.battle_mode();
         let mut starts = self.navigation.searches_started_per_tick;
-        // Share continuation work before stepping any hull. Slot-order ranks
-        // and tick-based remainders survive saves without scheduler state.
-        let searching = |m: &motion::Motion| m.enabled && m.hunting();
-        let count = self.units.iter().filter(|u| searching(&u.motion)).count()
-            + usize::from(!battle_mode && searching(&self.gun.motion));
-        let mut rank = 0;
-        for m in self
-            .units
-            .iter_mut()
-            .map(|u| &mut u.motion)
-            .chain((!battle_mode).then_some(&mut self.gun.motion))
-        {
-            let work = if searching(m) {
-                let work = motion::resume_share(
-                    self.navigation.search_resume_budget,
-                    self.navigation.search_resume_per_unit,
-                    count,
-                    rank,
-                    self.tick,
-                );
-                rank += 1;
-                work
-            } else {
-                0
-            };
-            m.allow_resume(work);
-        }
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         // Whole-map searches in flight walk on before any hull moves
         // (ADR-680): one shared work allowance a tick, the oldest search
@@ -5157,21 +5130,9 @@ impl BlastRange {
                     if round == 1 && (budget == 0 || u.motion.coarse_waited().is_none()) {
                         continue;
                     }
-                    // The other hulls matter only to a hand-over to the
-                    // fine planner; the list is built then, not for every
-                    // search walked (review 252).
-                    let gun = (!battle_mode && id != gun_id)
-                        .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
-                    let positions = &positions;
-                    let others = move || -> Vec<motion::Obstacle> {
-                        positions
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, _)| *i != id)
-                            .map(|(_, p)| *p)
-                            .chain(gun)
-                            .collect()
-                    };
+                    // No hull list: walking a search does not read other
+                    // hulls, and a hand-over sets the fine search up
+                    // unwalked (review 252, ADR-691).
                     let u = if id == gun_id {
                         &mut self.gun
                     } else {
@@ -5180,7 +5141,6 @@ impl BlastRange {
                     let spent = u.motion.continue_coarse(
                         &self.world,
                         &u.body,
-                        others,
                         &self.rubble,
                         self.tick,
                         if round == 0 { &changed } else { &unchanged },
@@ -5194,6 +5154,53 @@ impl BlastRange {
             }
         }
         detail("motion_coarse");
+        // Share continuation work before stepping any hull, and after the
+        // whole-map phase: a fine search it handed an order to walks in
+        // this tick's shares (ADR-691). Slot-order ranks and tick-based
+        // remainders survive saves without scheduler state.
+        // Searches still in their start share the start allowance, each up
+        // to one start slice; the others share the continuation's
+        // (ADR-691). Which is which is saved with each search.
+        let searching = |m: &motion::Motion| m.enabled && m.hunting();
+        let count = self.units.iter().filter(|u| searching(&u.motion)).count()
+            + usize::from(!battle_mode && searching(&self.gun.motion));
+        let starting = self
+            .units
+            .iter()
+            .map(|u| &u.motion)
+            .chain((!battle_mode).then_some(&self.gun.motion))
+            .filter(|m| searching(m) && m.starting())
+            .count();
+        let pools = [
+            (
+                self.navigation.search_start_budget,
+                self.navigation.search_nodes_per_tick,
+                starting,
+            ),
+            (
+                self.navigation.search_resume_budget,
+                self.navigation.search_resume_per_unit,
+                count - starting,
+            ),
+        ];
+        let mut ranks = [0; 2];
+        for m in self
+            .units
+            .iter_mut()
+            .map(|u| &mut u.motion)
+            .chain((!battle_mode).then_some(&mut self.gun.motion))
+        {
+            let work = if searching(m) {
+                let pool = usize::from(!m.starting());
+                let (total, cap, count) = pools[pool];
+                let work = motion::resume_share(total, cap, count, ranks[pool], self.tick);
+                ranks[pool] += 1;
+                work
+            } else {
+                0
+            };
+            m.allow_resume(work);
+        }
         // Fair start allowance (analysis 240, C3). Spatial order decides who
         // commits motion first, but it used to decide who may begin a search
         // too: the hull with the smallest X took the single start every tick

@@ -789,6 +789,8 @@ fn main() {
     // stands with a new destination waits until its position first changes.
     // Not part of the tick: observed after it, never fed back.
     let mut order_wait: Vec<Option<u32>> = vec![None; sim.units.len()];
+    // Each answered order with its wait, for the latency distribution.
+    let order_trace = args.iter().any(|a| a == "--order-latency-trace");
     let mut order_prev: Vec<_> = sim
         .units
         .iter()
@@ -1049,6 +1051,13 @@ fn main() {
             if let Some(t0) = order_wait[id] {
                 if moved {
                     order_latency.push(sim.tick - t0);
+                    if order_trace {
+                        println!(
+                            "order_motion id={id} kind={:?} since={t0} ticks={}",
+                            u.kind,
+                            sim.tick - t0
+                        );
+                    }
                     order_wait[id] = None;
                 } else if dest.is_none() || !u.status.alive {
                     order_wait[id] = None;

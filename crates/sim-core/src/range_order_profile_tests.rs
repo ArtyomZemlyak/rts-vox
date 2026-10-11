@@ -52,7 +52,8 @@ fn pursuit_observations_and_worker_counts_preserve_ordered_state() {
         "orders_firing_point",
         "orders_flank",
         "orders_retarget_setup",
-        "orders_retarget_target",
+        // The goal ring and the direct sweep are the continuation's
+        // (ADR-691): an order sets the fine search up unwalked.
         "orders_retarget_fine",
         "orders_retarget",
     ] {

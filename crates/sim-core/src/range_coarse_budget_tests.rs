@@ -1,6 +1,5 @@
 //! Valid data must not raise the range's whole-map work ceiling (review 252).
 use crate::blast::{battle::Order, BlastRange};
-use fx::Fx;
 use modding::explosion::ExplosionConfig;
 use modding::range::{RangeLayout, RangeUnitDef, RangeUnitKind};
 
@@ -107,69 +106,53 @@ fn a_corridor_larger_than_a_full_tick_falls_back_without_stalling_or_losing_the_
     }
 }
 
-/// The other hulls are listed only when a search hands its order to the
-/// fine planner (review 252): a search walking on, or holding with no
-/// share, never asks for them, and the hand-over given the list lazily
-/// leaves the hull exactly as the list built up front did.
+/// A hand-over reads no other hull and spends no fine work where it is
+/// made (review 252, ADR-691): the fine search is set up unwalked, toward
+/// the order's goal, and the continuation shares walk it to an answer
+/// that keeps the order.
 #[test]
-fn the_obstacle_list_is_built_only_on_hand_over_and_changes_nothing() {
-    use std::cell::Cell;
+fn a_hand_over_sets_the_fine_search_up_unwalked_and_the_shares_finish_it() {
     let r = range(RangeUnitKind::Spider);
     let rubble = r.current_rubble();
     let unchanged = nav::vehicle::Changed::default();
-    let others: Vec<_> = (0..3)
-        .map(|k| super::Obstacle {
-            pos: [
-                Fx::from_int(330 + 40 * k),
-                Fx::from_int(16),
-                Fx::from_int(300),
-            ],
-            head: 0,
-            half: [Fx::from_int(12), Fx::from_int(8)],
-        })
-        .collect();
-    let asked = Cell::new(0u32);
-    let lazy = || {
-        asked.set(asked.get() + 1);
-        others.clone()
-    };
-    let save = |m: &super::Motion| {
-        let mut b = fx::blob::Blob::new();
-        m.save(&mut b);
-        b.v
-    };
     let body = &r.units[0].body;
     let mut m = r.units[0].motion.clone();
-    // No share, and a share below any test: the search holds, no list.
+    // No share, and a share below any test: the search holds.
     for budget in [0, 1] {
         m.continue_coarse(
-            &r.world, body, lazy, &rubble, r.tick, &unchanged, budget, true, false,
+            &r.world, body, &rubble, r.tick, &unchanged, budget, true, false,
         );
-        assert_eq!(asked.get(), 0, "budget {budget}");
-        assert!(m.coarse_waited().is_some());
+        assert!(m.coarse_waited().is_some() && m.fine_work().is_none());
     }
     // A test dearer than a whole tick: the order passes to the fine
-    // planner, the list is asked for once, and the hull ends as with the
-    // list built up front.
+    // planner without any of its work.
     let budget = r.navigation.global_work_per_tick;
     assert!(m.coarse_max_test() > budget);
-    let mut eager = m.clone();
-    let list = others.clone();
-    eager.continue_coarse(
-        &r.world,
-        body,
-        move || list,
-        &rubble,
-        r.tick,
-        &unchanged,
-        budget,
-        true,
-        true,
+    let spent = m.continue_coarse(
+        &r.world, body, &rubble, r.tick, &unchanged, budget, true, true,
     );
-    m.continue_coarse(
-        &r.world, body, lazy, &rubble, r.tick, &unchanged, budget, true, true,
-    );
-    assert_eq!(asked.get(), 1);
-    assert!(m.coarse_waited().is_none() && m.searching() || !m.path.is_empty());
-    assert_eq!(save(&eager), save(&m));
+    assert_eq!(spent, 0);
+    assert_eq!(m.coarse_waited(), None);
+    assert_eq!(m.fine_work(), Some([0, 0]), "set up, not walked");
+    assert_eq!(m.destination, Some(GOAL));
+    // The range walks it under its continuation shares to an answer.
+    let mut a = range(RangeUnitKind::Spider);
+    let mut answered = false;
+    let mut poses = 0;
+    for _ in 0..400 {
+        a.step();
+        let u = &a.units[0].motion;
+        // A tick's slice of it stays within one hull's share.
+        if let Some([_, now]) = u.fine_work() {
+            assert!((now - poses) as usize <= a.navigation.search_resume_per_unit);
+            poses = now;
+        }
+        if u.coarse_waited().is_none() && !u.searching() {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "the handed-over search never answered");
+    assert_eq!(a.units[0].motion.destination, Some(GOAL));
+    assert!(!a.units[0].motion.path.is_empty());
 }
