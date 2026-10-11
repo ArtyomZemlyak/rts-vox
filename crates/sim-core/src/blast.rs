@@ -2016,27 +2016,25 @@ impl Explosion {
         let visits = self.pending.len().min(budget);
         let roster = &units[..self.roster(units.len())];
         let boxes = self.unit_boxes(roster);
-        let (domain_lo, domain_hi) = self.domain();
-        let near = boxes
-            .iter()
-            .any(|(lo, hi)| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]));
-        let order: Vec<phys::blast::Hit> = if self.contact_resumes.is_empty() || !near {
-            self.pending.range(..visits).copied().collect()
-        } else {
-            let count = roster.len();
-            let mut first: Vec<phys::blast::Hit> = Vec::new();
-            let mut rest: Vec<phys::blast::Hit> = Vec::new();
-            for (k, hit) in self.pending.iter().enumerate() {
-                if self.owes_body_work(hit, k == 0, &boxes, count) {
-                    first.push(*hit);
-                } else if rest.len() < visits {
-                    rest.push(*hit);
+        let near_boxes = self.near_boxes(&boxes);
+        let order: Vec<phys::blast::Hit> =
+            if self.contact_resumes.is_empty() || near_boxes.is_empty() {
+                self.pending.range(..visits).copied().collect()
+            } else {
+                let count = roster.len();
+                let mut first: Vec<phys::blast::Hit> = Vec::new();
+                let mut rest: Vec<phys::blast::Hit> = Vec::new();
+                for (k, hit) in self.pending.iter().enumerate() {
+                    if self.owes_body_work(hit, k == 0, &near_boxes, count) {
+                        first.push(*hit);
+                    } else if rest.len() < visits {
+                        rest.push(*hit);
+                    }
                 }
-            }
-            first.extend(rest);
-            first.truncate(visits);
-            first
-        };
+                first.extend(rest);
+                first.truncate(visits);
+                first
+            };
         let mut left_mj = spent.map(|(_, _, energy)| self.ground_share(energy));
         let mut prices = Prices::default();
         let (origin, edge) = (self.origin, self.cell);
@@ -2819,6 +2817,7 @@ impl Explosion {
         let Some(front) = self.pending.front() else {
             return;
         };
+        let boxes = self.near_boxes(boxes);
         self.contact_resumes
             .insert(front.cell, (self.contact_cursor, self.body_cursor));
         let (mut body, mut ground) = (
@@ -2826,7 +2825,7 @@ impl Explosion {
             std::collections::VecDeque::new(),
         );
         for hit in std::mem::take(&mut self.pending) {
-            if self.owes_body_work(&hit, false, boxes, count) {
+            if self.owes_body_work(&hit, false, &boxes, count) {
                 body.push_back(hit);
             } else {
                 ground.push_back(hit);
@@ -2839,11 +2838,13 @@ impl Explosion {
     /// A pending contact has body work left: a body cursor inside a hull,
     /// or a hull box still ahead of its actor cursor that meets the cell.
     /// The front's cursor is the live one when `front` is set.
+    /// `near` holds the hull boxes that meet the field, with their actors
+    /// ([`Explosion::near_boxes`]): no other box meets one of its cells.
     fn owes_body_work(
         &self,
         hit: &phys::blast::Hit,
         front: bool,
-        boxes: &[([i32; 3], [i32; 3])],
+        near: &[(usize, [i32; 3], [i32; 3])],
         count: usize,
     ) -> bool {
         let (cursor, local) = if front {
@@ -2859,9 +2860,19 @@ impl Explosion {
         let low: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
         local > 0
             || ((self.point_contacts || subcell == 0)
-                && boxes.iter().enumerate().skip(actor).any(|(_, (lo, hi))| {
-                    (0..3).all(|a| low[a] <= hi[a] && low[a] + self.cell > lo[a])
+                && near.iter().any(|&(i, lo, hi)| {
+                    i >= actor && (0..3).all(|a| low[a] <= hi[a] && low[a] + self.cell > lo[a])
                 }))
+    }
+    /// The hull boxes that meet the field's domain, with their actors.
+    fn near_boxes(&self, boxes: &[([i32; 3], [i32; 3])]) -> Vec<(usize, [i32; 3], [i32; 3])> {
+        let (domain_lo, domain_hi) = self.domain();
+        boxes
+            .iter()
+            .enumerate()
+            .filter(|(_, (lo, hi))| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]))
+            .map(|(i, &(lo, hi))| (i, lo, hi))
+            .collect()
     }
     /// Apply exactly one live terrain contact. False leaves its cursor and
     /// unpaid work intact, so the same contact can be retried after admission.
