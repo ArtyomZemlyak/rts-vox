@@ -21,8 +21,10 @@ use modding::range_skirmish::WorldBattle;
 use sim_core::blast::BlastRange;
 
 /// Хеш шестисотого тика эталонного боя.
-// ADR-663: stable debris support, contact separation and checked tumble.
-const GOLDEN_600: u64 = 0xe85a_d6aa_0597_af3d;
+// ADR-678: дальний поиск продолжается по тикам под общим бюджетом работы.
+// Число снято на Linux; значение Windows владелец перепроверяет (прежний
+// `e85ad6aa0597af3d` Windows против `af4fe0b1d46d78ea` Linux не сведён).
+const GOLDEN_600: u64 = 0x1e1b_293e_30ae_19bc;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы
@@ -62,6 +64,9 @@ fn the_reference_battle_hashes_what_was_recorded() {
     assert!(waves > 0, "ни одной взрывной волны");
     assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
     assert!(sim.matter.economy.ledger.balanced());
+    // Маршруты боя строятся продолжением по тикам (ADR-678): работа
+    // дальнего поиска входит в прогон, а не обходит его.
+    assert!(sim.coarse_work > 0, "дальний поиск не работал");
     let hash = sim.state_hash();
     assert_eq!(
         hash, GOLDEN_600,

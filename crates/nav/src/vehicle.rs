@@ -1360,6 +1360,7 @@ fn connects(
     Some(crush)
 }
 /// The outcome of a route search.
+#[derive(Clone, Debug)]
 pub struct Route {
     /// Turn points to the goal; empty when there is none.
     pub path: Vec<[i32; 2]>,

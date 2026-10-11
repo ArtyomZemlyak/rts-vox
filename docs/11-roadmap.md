@@ -161,8 +161,13 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=e85ad6aa0597af3d
+battle ticks=600 threads=1 hash=1e1b293e30ae19bc
 ```
+
+Число записано на Linux после ADR-678 (дальний поиск продолжается по
+тикам). Значение на Windows требует перепроверки владельцем: прежний
+эталон `e85ad6aa0597af3d` (Windows) и `af4fe0b1d46d78ea` (Linux) того же
+кода не сведены.
 
 Хеш стабилен между запусками, **совпадает между одним и восемью
 воркерами физики** и переживает запись-загрузку на середине боя.

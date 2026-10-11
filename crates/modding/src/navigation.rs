@@ -6,6 +6,16 @@ pub struct Navigation {
     pub global_cell_units: i32,
     pub global_nodes: usize,
     pub global_min_distance: i32,
+    /// Whole-map search work the range spends in one tick, shared by every
+    /// search in flight, oldest first (ADR-678). Counted in 8×8 terrain
+    /// tiles a corridor test reads plus one per frontier pop.
+    pub global_work_per_tick: u64,
+    /// Ceiling of that work for one search in one tick: one long search
+    /// cannot hold the others back for the whole of its answer.
+    pub global_work_per_search: u64,
+    /// Times a search in flight starts its route check, or itself, over
+    /// because the world changed where it had read.
+    pub global_restarts: u32,
     pub search_nodes: usize,
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
@@ -60,6 +70,9 @@ impl Navigation {
             || !(n.global_cell_units as u32).is_power_of_two()
             || !(64..=32768).contains(&n.global_nodes)
             || !(0..=16384).contains(&n.global_min_distance)
+            || !(1024..=1 << 30).contains(&n.global_work_per_tick)
+            || !(1024..=n.global_work_per_tick).contains(&n.global_work_per_search)
+            || n.global_restarts > 16
             || n.searches_started_per_tick == 0
             || !(1..=51200).contains(&n.search_nodes_per_tick)
             || !(1..=51200).contains(&n.search_resume_budget)
@@ -100,6 +113,9 @@ mod tests {
             "global_cell_units: 32,",
             "global_nodes: 16384,",
             "global_min_distance: 256,",
+            "global_work_per_tick: ",
+            "global_work_per_search: ",
+            "global_restarts: ",
             "search_nodes_per_tick: 96,",
             "search_resume_budget: 768,",
             "search_resume_per_unit: 192,",

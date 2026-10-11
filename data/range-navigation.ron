@@ -6,6 +6,16 @@
     global_nodes: 16384,
     // Below eight coarse cells, use the oriented search for local maneuvers.
     global_min_distance: 256,
+    // Whole-map searches walk on over ticks (ADR-678). Work is counted in
+    // 8x8 terrain tiles a corridor test reads (three for a walker's local
+    // grade) plus one per frontier pop. Searches in flight share the tick's
+    // total, oldest first; one search takes at most its ceiling, so a long
+    // one never holds the queue behind it.
+    global_work_per_tick: 1048576,
+    global_work_per_search: 262144,
+    // A world change where a search has read sends its found route through
+    // a recheck; a leg no longer clear starts it over, this many times.
+    global_restarts: 2,
     search_nodes: 16000,
     // Graph work counts popped nodes, endpoint queries and swept edge poses.
     // Work per tick also includes goal selection and direct/final connections.
