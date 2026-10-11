@@ -6,7 +6,7 @@
     global_nodes: 16384,
     // Below eight coarse cells, use the oriented search for local maneuvers.
     global_min_distance: 256,
-    // Whole-map searches walk on over ticks (ADR-678). Work is counted in
+    // Whole-map searches walk on over ticks (ADR-680). Work is counted in
     // 8x8 terrain tiles a corridor test reads (three for a walker's local
     // grade) plus one per frontier pop. Searches in flight share the tick's
     // total, oldest first; one search takes at most its ceiling, so a long

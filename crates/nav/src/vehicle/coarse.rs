@@ -1,7 +1,7 @@
 //! Whole-map terrain routes. The coarse corridor guides movement; live
 //! oriented collision probes still authorize every step and local replanning.
 //!
-//! A search is a value that walks on under a work allowance (ADR-678): a
+//! A search is a value that walks on under a work allowance (ADR-680): a
 //! caller may run it to the end in one call, or a slice per tick, and on a
 //! world that does not change both give the same route. Work is counted in
 //! terrain tiles a corridor test reads, not in nodes: one node of a wide
@@ -18,7 +18,7 @@ pub struct Config {
     pub local_grade: bool,
     /// How many times a search in flight starts its check of a found route,
     /// or the whole search, over because the world changed under it
-    /// (ADR-678). A search run in one call never restarts.
+    /// (ADR-680). A search run in one call never restarts.
     pub restarts: u32,
 }
 
@@ -319,7 +319,7 @@ enum Step {
     Done(Result<Route, Refusal>),
 }
 
-/// A whole-map search in flight (ADR-678). Its answer is a function of
+/// A whole-map search in flight (ADR-680). Its answer is a function of
 /// the request and the world each test read: sliced over ticks on an
 /// unchanged world it equals the answer of one call. When the world
 /// changes where it has read, the route it finds is tested again, leg by
@@ -1746,7 +1746,7 @@ mod tests {
         }
     }
     /// **A search walked a slice per tick finds what one call finds**, on
-    /// an unchanged world (ADR-678): routes around a wall, through a gap,
+    /// an unchanged world (ADR-680): routes around a wall, through a gap,
     /// partial up to a sealed room, refusals, for a belt and for a walker
     /// grading locally. Each slice respects its allowance — the largest
     /// single test of these shapes is far below every budget tried — and
@@ -1838,7 +1838,7 @@ mod tests {
         assert_eq!(calls.iter().sum::<u64>(), total);
         assert!(calls.len() as u64 >= total / 1000);
     }
-    /// **A world change under a search in flight** (ADR-678). The gap the
+    /// **A world change under a search in flight** (ADR-680). The gap the
     /// search is routing through is sealed between two slices: the found
     /// route fails its recheck, the search starts over on the world as it
     /// now is, and answers what one call on that world answers. Without

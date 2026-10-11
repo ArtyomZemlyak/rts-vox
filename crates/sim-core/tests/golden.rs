@@ -21,7 +21,7 @@ use modding::range_skirmish::WorldBattle;
 use sim_core::blast::BlastRange;
 
 /// Хеш шестисотого тика эталонного боя.
-// ADR-678: дальний поиск продолжается по тикам под общим бюджетом работы.
+// ADR-680: дальний поиск продолжается по тикам под общим бюджетом работы.
 // Число снято на Linux после ADR-676 (канонические переносы строк
 // раскладки), то есть должно совпасть с Windows; владелец перепроверяет.
 const GOLDEN_600: u64 = 0x3c08_018b_b402_3154;
@@ -64,7 +64,7 @@ fn the_reference_battle_hashes_what_was_recorded() {
     assert!(waves > 0, "ни одной взрывной волны");
     assert!(!sim.matter.debris.fragments.is_empty(), "нет обломков");
     assert!(sim.matter.economy.ledger.balanced());
-    // Маршруты боя строятся продолжением по тикам (ADR-678): работа
+    // Маршруты боя строятся продолжением по тикам (ADR-680): работа
     // дальнего поиска входит в прогон, а не обходит его.
     assert!(sim.coarse_work > 0, "дальний поиск не работал");
     let hash = sim.state_hash();

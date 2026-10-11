@@ -7,7 +7,7 @@ pub struct Navigation {
     pub global_nodes: usize,
     pub global_min_distance: i32,
     /// Whole-map search work the range spends in one tick, shared by every
-    /// search in flight, oldest first (ADR-678). Counted in 8×8 terrain
+    /// search in flight, oldest first (ADR-680). Counted in 8×8 terrain
     /// tiles a corridor test reads plus one per frontier pop.
     pub global_work_per_tick: u64,
     /// Ceiling of that work for one search in one tick: one long search

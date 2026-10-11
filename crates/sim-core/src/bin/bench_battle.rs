@@ -396,7 +396,7 @@ fn main() {
             "physics workers: 1..=8"
         );
     }
-    // Whole-map search allowance per tick and per search (ADR-678), for
+    // Whole-map search allowance per tick and per search (ADR-680), for
     // calibration runs: `--coarse-work 1048576,262144`.
     if let Some(w) = args.windows(2).find(|w| w[0] == "--coarse-work") {
         let [total, each] = [0, 1].map(|k| {
@@ -774,7 +774,7 @@ fn main() {
         .windows(2)
         .find(|w| w[0] == "--search-probe-tick")
         .map(|w| w[1].parse::<usize>().expect("probe tick"));
-    // Order to first motion in the running battle (ADR-678): a hull that
+    // Order to first motion in the running battle (ADR-680): a hull that
     // stands with a new destination waits until its position first changes.
     // Not part of the tick: observed after it, never fed back.
     let mut order_wait: Vec<Option<u32>> = vec![None; sim.units.len()];
@@ -784,7 +784,7 @@ fn main() {
         .map(|u| (u.motion.pos, u.motion.destination))
         .collect();
     let mut order_latency: Vec<u32> = Vec::new();
-    // Whole-map search work per tick and searches in flight (ADR-678).
+    // Whole-map search work per tick and searches in flight (ADR-680).
     let mut coarse_previous = sim.coarse_work;
     let mut coarse_ticks: Vec<(u64, usize, u128)> = Vec::new();
     for tick_index in 0..ticks {
@@ -889,7 +889,7 @@ fn main() {
                     detail_last = now;
                     match name {
                         "motion_begin" => {}
-                        // The coarse continuation (ADR-678) counts as route work.
+                        // The coarse continuation (ADR-680) counts as route work.
                         "motion_coarse" => {
                             motion_detail[0] = elapsed;
                             coarse_us = elapsed;

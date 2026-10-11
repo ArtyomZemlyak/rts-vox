@@ -51,7 +51,7 @@ impl BlastRange {
                 .map(|(_, u)| motion::Obstacle::of(&u.motion, &u.body))
                 .collect();
             let u = &mut self.units[id];
-            // The whole-map search is walked by the range (ADR-678).
+            // The whole-map search is walked by the range (ADR-680).
             u.motion.allow_coarse(Some(0));
             let accepted = u
                 .motion
@@ -119,7 +119,7 @@ impl BlastRange {
             let rubble = self.current_rubble();
             let u = &mut self.units[id];
             u.motion.route.clear();
-            // The whole-map search is walked by the range (ADR-678).
+            // The whole-map search is walked by the range (ADR-680).
             u.motion.allow_coarse(Some(0));
             let accepted = u.motion.move_to(&self.world, p, &u.body, &others, &rubble);
             u.motion.allow_coarse(None);

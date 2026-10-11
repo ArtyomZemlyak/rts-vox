@@ -1,5 +1,5 @@
 //! Whole-map searches walked over ticks under the range's shared work
-//! allowance (ADR-678).
+//! allowance (ADR-680).
 use super::*;
 use modding::range::{RangeBlock, RangeUnitDef};
 
@@ -195,7 +195,7 @@ fn a_new_order_cancels_the_search_in_flight() {
     assert!(r.units[1].motion.coarse_waited().is_none());
 }
 
-/// **A range saved mid-search restores to the same run** (ADR-678): the
+/// **A range saved mid-search restores to the same run** (ADR-680): the
 /// snapshot wraps its format in version 66 only while a search is in
 /// flight, reads back to the same bytes, and the restored range hashes
 /// the same as the continuing one on every tick, through the answers.
@@ -263,7 +263,7 @@ fn a_hull_on_a_route_drives_on_while_its_new_search_walks() {
     assert!(!m.path.is_empty() && m.cursor < m.path.len());
     starve(&mut r);
     // A pursuit retarget keeps the current route while the search runs
-    // (ADR-462); the orders phase gives it no work (ADR-678).
+    // (ADR-462); the orders phase gives it no work (ADR-680).
     let others: Vec<_> = (1..r.units.len())
         .map(|i| motion::Obstacle::of(&r.units[i].motion, &r.units[i].body))
         .collect();

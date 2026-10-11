@@ -121,7 +121,7 @@ impl Executor<'_> {
                 u.motion.route.clear();
             }
             // A whole-map search begins with no work here; the range walks
-            // it under its shared allowance from the next tick (ADR-678).
+            // it under its shared allowance from the next tick (ADR-680).
             u.motion.allow_coarse(Some(0));
             let accepted = u.motion.move_to(
                 self.world,

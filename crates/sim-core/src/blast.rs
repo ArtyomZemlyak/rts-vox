@@ -2710,7 +2710,7 @@ pub struct BlastRange {
     /// further tick by tick.
     collapse_cap: usize,
     pub collapse_work: CollapseWork,
-    /// Whole-map search work spent since construction (ADR-678), in the
+    /// Whole-map search work spent since construction (ADR-680), in the
     /// units of `global_work_per_tick`. Diagnostics: not saved, not hashed.
     pub coarse_work: u64,
     /// Dig economy, on a layout with an economy section (ADR-672). In the
@@ -3265,7 +3265,7 @@ impl BlastRange {
         self.matter.debris.claims() > 0
     }
     /// Whether a hull has a whole-map search in flight: the snapshot then
-    /// wraps its format in version 66 and appends the searches (ADR-678).
+    /// wraps its format in version 66 and appends the searches (ADR-680).
     fn has_coarse_searches(&self) -> bool {
         self.units
             .iter()
@@ -3315,7 +3315,7 @@ impl BlastRange {
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
         // Whole-map searches in flight wrap the format below in version 66
-        // and follow everything else (ADR-678); without one the bytes are
+        // and follow everything else (ADR-680); without one the bytes are
         // those of the version the range otherwise needs.
         let coarse = self.has_coarse_searches();
         if coarse {
@@ -3727,7 +3727,7 @@ impl BlastRange {
         let mut s = fx::blob::Scan::new(bytes);
         let mut version = s.u32();
         // Version 66 wraps another with the whole-map searches in flight
-        // (ADR-678).
+        // (ADR-680).
         let coarse = version == 66;
         if coarse {
             version = s.u32();
@@ -4793,7 +4793,7 @@ impl BlastRange {
         }
         let driven = self.patrols_running && (!battle_mode || self.battle_movement_active());
         // Whole-map searches in flight walk on before any hull moves
-        // (ADR-678): one shared work allowance a tick, the oldest search
+        // (ADR-680): one shared work allowance a tick, the oldest search
         // first, ties by slot, each up to its ceiling; what the first round
         // leaves goes round once more in the same order without the
         // ceiling. A search that reaches its share continues next tick;

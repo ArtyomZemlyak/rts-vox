@@ -2342,7 +2342,7 @@ impl BlastRange {
                         // route is searched (ADR-462). A whole-map search
                         // begins with no work in the orders phase; the
                         // next tick's continuation walks it under the
-                        // shared allowance (ADR-678).
+                        // shared allowance (ADR-680).
                         u.motion.allow_coarse(Some(0));
                         u.motion.retarget_observed(
                             &self.world,

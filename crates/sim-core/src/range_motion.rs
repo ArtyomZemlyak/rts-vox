@@ -42,7 +42,7 @@ pub(super) struct PreparedGround<'a> {
     current: nav::vehicle::Pose,
     probe: nav::vehicle::Probe<'a>,
 }
-/// A whole-map search in flight (ADR-678) and the ticks it has waited
+/// A whole-map search in flight (ADR-680) and the ticks it has waited
 /// for its answer: the range serves the oldest first, ties by slot.
 #[derive(Clone, Debug)]
 pub(super) struct CoarsePending {
@@ -211,7 +211,7 @@ pub struct Motion {
     /// still checks the current terrain and hulls.
     hunt: Option<Box<nav::vehicle::Hunt>>,
     /// A whole-map search still walking under the range's shared work
-    /// allowance (ADR-678). Like `hunt`, it keeps the current route usable
+    /// allowance (ADR-680). Like `hunt`, it keeps the current route usable
     /// while it runs. Saved by the range in its own snapshot section.
     coarse: Option<Box<CoarsePending>>,
     /// Coarse work this hull may spend in the current call; `None` runs a
@@ -1164,7 +1164,7 @@ impl Motion {
             .then_some(to);
         self.enabled = true;
         // A new request supersedes any search of the old one, fine or
-        // whole-map (ADR-678): the hull owns at most one of each.
+        // whole-map (ADR-680): the hull owns at most one of each.
         self.hunt = None;
         self.coarse = None;
         // Global routing is terrain-only. A hull enters dynamic avoidance
@@ -1183,7 +1183,7 @@ impl Motion {
             })
         {
             // The whole-map search walks under the range's shared work
-            // allowance (ADR-678). An answer within this call's share is
+            // allowance (ADR-680). An answer within this call's share is
             // taken at once; otherwise the order stands, the current route
             // stays usable, and the range continues the search next tick.
             if let Ok(search) = nav::vehicle::coarse::Search::new(
@@ -1453,7 +1453,7 @@ impl Motion {
         self.plan_to_observed(w, to, b, others, rubble, None, completed)
     }
     /// Whether a route search is still walking its frontier (ADR-306),
-    /// fine or whole-map (ADR-678).
+    /// fine or whole-map (ADR-680).
     pub fn searching(&self) -> bool {
         self.hunt.is_some() || self.coarse.is_some()
     }
@@ -1473,7 +1473,7 @@ impl Motion {
     pub fn coarse_work(&self) -> Option<u64> {
         self.coarse.as_ref().map(|c| c.search.spent())
     }
-    /// The coarse work this hull may spend in the coming call (ADR-678);
+    /// The coarse work this hull may spend in the coming call (ADR-680);
     /// `None` runs a whole-map search to its end at once.
     pub fn allow_coarse(&mut self, budget: Option<u64>) {
         self.coarse_budget = budget;
@@ -1483,7 +1483,7 @@ impl Motion {
     pub fn coarse_spent(&self) -> u64 {
         self.coarse_spent
     }
-    /// The range's continuation of a whole-map search in flight (ADR-678):
+    /// The range's continuation of a whole-map search in flight (ADR-680):
     /// note what changed in the world since the last tick, walk on with
     /// `budget`, and take the answer up. Returns the work spent. The
     /// first call of a tick counts the tick as waited; a second round of
@@ -1542,7 +1542,7 @@ impl Motion {
         }
         spent
     }
-    /// The whole-map search in flight as bytes (ADR-678), for the range's
+    /// The whole-map search in flight as bytes (ADR-680), for the range's
     /// snapshot section; nothing when there is none.
     pub(super) fn save_coarse(&self, b: &mut Blob) {
         if let Some(c) = &self.coarse {
@@ -2556,7 +2556,7 @@ impl Motion {
         self.dry = false;
         self.prepared_hunt = false;
         // A whole-map search in flight is the range's own snapshot section
-        // (ADR-678), read after every hull.
+        // (ADR-680), read after every hull.
         self.coarse = None;
         self.allow_coarse(None);
         self.terrain_columns = nav::vehicle::Columns::default();
