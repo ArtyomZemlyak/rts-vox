@@ -287,7 +287,10 @@ pub const fn stock_size() -> [u32; 3] {
 impl RangeLayout {
     pub fn to_ron(&self) -> Result<String, String> {
         self.validate()?;
-        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default())
+        // The text is part of the authoritative snapshot/hash. RON's
+        // default newline depends on the target OS; keep the established
+        // Windows bytes on every platform (ADR-676).
+        ron::ser::to_string_pretty(self, ron::ser::PrettyConfig::default().new_line("\r\n"))
             .map_err(|e| e.to_string())
     }
     pub fn from_ron(text: &str) -> Result<Self, String> {
@@ -429,6 +432,19 @@ impl RangeLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_layout_text_is_canonical_across_input_line_endings() {
+        let source = include_str!("../../../data/range-km.ron").replace("\r\n", "\n");
+        let lf = RangeLayout::from_ron(&source).unwrap().to_ron().unwrap();
+        let crlf = RangeLayout::from_ron(&source.replace('\n', "\r\n"))
+            .unwrap()
+            .to_ron()
+            .unwrap();
+        assert_eq!(lf, crlf);
+        assert!(lf.contains("\r\n"));
+        assert!(!lf.replace("\r\n", "").contains('\n'));
+        assert_eq!(RangeLayout::from_ron(&lf).unwrap().to_ron().unwrap(), lf);
+    }
     #[test]
     fn stock_scenarios_are_bounded_sequences_in_their_sectors() {
         let layout = RangeLayout::from_ron(include_str!("../../../data/range-km.ron")).unwrap();
