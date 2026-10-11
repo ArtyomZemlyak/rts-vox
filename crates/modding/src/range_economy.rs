@@ -1,5 +1,5 @@
-//! Dig economy of the range, by unit kind (plan 245, slices 0 and 3;
-//! ADR-672, ADR-673).
+//! Dig economy of the range, by unit kind (plan 245, slices 0, 3 and 6;
+//! ADR-672, ADR-673, ADR-674).
 //!
 //! Every quantity is in world units: a tank and a store hold matter units
 //! (one cell of a material carries its density, `range-materials.ron`),
@@ -24,6 +24,8 @@ pub const MAX_STORE: u64 = 1 << 48;
 pub const MAX_REFINE_DEN: u64 = 1 << 20;
 /// Largest number of dock searches in a tick.
 pub const MAX_DOCK_SEARCHES: u32 = 1024;
+/// Largest number of reclaim searches in a tick.
+pub const MAX_RECLAIM_SEARCHES: u32 = 1024;
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
@@ -68,6 +70,27 @@ pub struct RangeBank {
     pub dock_searches_per_tick: u32,
 }
 
+/// Reclaim at the face and the wreck of a dead digger's tank (plan 245,
+/// slice 6; ADR-674). Without it nothing is reclaimed and a dead digger's
+/// cargo stays whole in its tank.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RangeReclaim {
+    /// Distance from a digger's face to the centre of a resting piece, or
+    /// to a dead digger's hull, within which the digger takes it, world
+    /// units.
+    pub reach: u32,
+    /// Reclaim searches of all diggers together in one tick; the rest wait
+    /// for the next tick (ADR-114).
+    pub searches_per_tick: u32,
+    /// Share of a dead digger's cargo lost to ContainerBreach,
+    /// `breach_num / breach_den`; the rest lies with the hull.
+    pub breach_num: u64,
+    pub breach_den: u64,
+    /// Matter one dig edit takes from a dead digger's tank, which has no
+    /// cells to count, matter units.
+    pub cargo_per_edit: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RangeEconomy {
     /// Dig edits of all diggers together that may wait in the world's edit
@@ -79,6 +102,9 @@ pub struct RangeEconomy {
     /// Stores and hauling; absent in the RON of a slice-1 layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bank: Option<RangeBank>,
+    /// Reclaim; absent in the RON of a slice-1 or slice-3 layout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reclaim: Option<RangeReclaim>,
 }
 
 impl RangeEconomy {
@@ -124,6 +150,16 @@ impl RangeEconomy {
                 return Err("range economy bank exceeds supported bounds".into());
             }
         }
+        if let Some(r) = &self.reclaim {
+            if !(1..=MAX_DIG_REACH).contains(&r.reach)
+                || !(1..=MAX_RECLAIM_SEARCHES).contains(&r.searches_per_tick)
+                || !(1..=MAX_REFINE_DEN).contains(&r.breach_den)
+                || r.breach_num > r.breach_den
+                || !(1..=u64::from(crate::MAX_DENSITY)).contains(&r.cargo_per_edit)
+            {
+                return Err("range economy reclaim exceeds supported bounds".into());
+            }
+        }
         Ok(())
     }
     /// The kind's entry, if it has one.
@@ -158,15 +194,30 @@ mod tests {
         assert!(e.bank.is_some());
         assert!(e.store(RangeUnitKind::Base) > 0);
         assert_eq!(e.store(RangeUnitKind::Tank), 0);
+        // Reclaim is on (ADR-674).
+        assert!(e.reclaim.is_some());
     }
 
     #[test]
     fn a_slice_one_economy_reads_and_writes_without_a_bank() {
         let mut e = RangeEconomy::stock();
         e.bank = None;
+        e.reclaim = None;
         e.kinds.iter_mut().for_each(|k| k.store = 0);
         let text = ron::ser::to_string(&e).unwrap();
-        assert!(!text.contains("store") && !text.contains("bank"), "{text}");
+        assert!(
+            !text.contains("store") && !text.contains("bank") && !text.contains("reclaim"),
+            "{text}"
+        );
+        assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
+    }
+
+    #[test]
+    fn a_slice_three_economy_reads_and_writes_without_reclaim() {
+        let mut e = RangeEconomy::stock();
+        e.reclaim = None;
+        let text = ron::ser::to_string(&e).unwrap();
+        assert!(text.contains("bank") && !text.contains("reclaim"), "{text}");
         assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
     }
 
@@ -181,7 +232,7 @@ mod tests {
         e.validate().unwrap();
         let text = ron::ser::to_string(&e).unwrap();
         assert_eq!(RangeEconomy::from_ron(&text).unwrap(), e);
-        let broken: [fn(&mut RangeEconomy); 13] = [
+        let broken: [fn(&mut RangeEconomy); 19] = [
             |e| e.dig_edits_in_flight = 0,
             |e| e.kinds[0].dig_radius = 0,
             |e| e.kinds[0].dig_radius = MAX_DIG_RADIUS + 1,
@@ -201,6 +252,16 @@ mod tests {
             },
             |e| e.bank.as_mut().unwrap().unload_reach = 0,
             |e| e.bank.as_mut().unwrap().dock_searches_per_tick = 0,
+            |e| e.reclaim.as_mut().unwrap().reach = 0,
+            |e| e.reclaim.as_mut().unwrap().reach = MAX_DIG_REACH + 1,
+            |e| e.reclaim.as_mut().unwrap().searches_per_tick = 0,
+            |e| e.reclaim.as_mut().unwrap().breach_den = 0,
+            // The breach loses no more than the cargo.
+            |e| {
+                let r = e.reclaim.as_mut().unwrap();
+                r.breach_num = r.breach_den + 1;
+            },
+            |e| e.reclaim.as_mut().unwrap().cargo_per_edit = 0,
         ];
         for f in broken {
             let mut b = e.clone();
