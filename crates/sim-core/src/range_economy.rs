@@ -27,6 +27,7 @@ use crate::matter::{Amount, ContainerId, Kind, Ledger};
 use fx::blob::{Blob, Scan};
 use modding::range_economy::{KindEconomy, RangeEconomy};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use voxel::store::AIR;
 
 #[path = "range_haul.rs"]
@@ -71,6 +72,9 @@ struct Digger {
 /// The economy's state on a range whose layout has an economy section.
 pub struct Mining {
     data: RangeEconomy,
+    /// Exact X spans, by configured radius. Derived geometry prepared once,
+    /// never a cached answer about the mutable world's occupancy.
+    balls: BTreeMap<u32, Arc<[[i32; 3]]>>,
     /// Tank of each unit slot; `None` for a kind that does not dig.
     tanks: Vec<Option<ContainerId>>,
     /// Voxels queued for digging and not yet drained, by cell.
@@ -103,6 +107,14 @@ impl Mining {
         ledger: &mut Ledger,
         allied_store: ContainerId,
     ) -> Self {
+        let mut balls = BTreeMap::new();
+        for k in &data.kinds {
+            if k.tank > 0 {
+                balls
+                    .entry(k.dig_radius)
+                    .or_insert_with(|| Arc::from(ball_spans(k.dig_radius as i32)));
+            }
+        }
         let tanks = units
             .iter()
             .map(|u| {
@@ -119,6 +131,7 @@ impl Mining {
         let production = data.production.as_ref().map(produce::Production::new);
         Self {
             data,
+            balls,
             tanks,
             reserved: BTreeMap::new(),
             inflight: vec![0; units.len()],
@@ -180,6 +193,7 @@ impl Mining {
 
 /// Offsets of the ball of radius `r`, top layer first, then by z and x:
 /// a fixed order, so ties go by linear index.
+#[cfg(test)]
 fn ball(r: i32) -> impl Iterator<Item = [i32; 3]> {
     (-r..=r).rev().flat_map(move |dy| {
         (-r..=r).flat_map(move |dz| {
@@ -187,6 +201,57 @@ fn ball(r: i32) -> impl Iterator<Item = [i32; 3]> {
                 (dx * dx + dy * dy + dz * dz <= r * r).then_some([dx, dy, dz])
             })
         })
+    })
+}
+
+/// `(dy, dz, half_width)` in the original ball's order. A radius is
+/// prepared outside the tick and shared by every kind that uses it.
+fn ball_spans(r: i32) -> Vec<[i32; 3]> {
+    let mut spans = Vec::new();
+    for dy in (-r..=r).rev() {
+        for dz in -r..=r {
+            let squared = r * r - dy * dy - dz * dz;
+            if squared < 0 {
+                continue;
+            }
+            let mut half = r;
+            while half * half > squared {
+                half -= 1;
+            }
+            spans.push([dy, dz, half]);
+        }
+    }
+    spans
+}
+
+/// Read this row's current occupancy as at most two 64-bit words (the
+/// largest diameter is 65). The returned iterator owns its bits so edits
+/// may be queued during iteration. Bits are visited from low to high X;
+/// frame cells are excluded exactly as in the original scalar walk.
+fn occupied_row(
+    world: &voxel::World,
+    face: [i32; 3],
+    [dy, dz, half]: [i32; 3],
+) -> impl Iterator<Item = [u32; 3]> {
+    let y = i64::from(face[1]) + i64::from(dy);
+    let z = i64::from(face[2]) + i64::from(dz);
+    let x = (i64::from(face[0]) - i64::from(half)).max(1);
+    let end = (i64::from(face[0]) + i64::from(half) + 1).min(i64::from(world.nx) - 1);
+    let mut bits = 0u128;
+    if y > 0 && y < i64::from(world.ny) && z > 0 && z + 1 < i64::from(world.nz) && x < end {
+        let n = (end - x) as u32;
+        bits = u128::from(world.solid_bits(x as u32, y as u32, z as u32, n));
+        if n > 64 {
+            bits |= u128::from(world.solid_bits(x as u32 + 64, y as u32, z as u32, n - 64)) << 64;
+        }
+    }
+    std::iter::from_fn(move || {
+        if bits == 0 {
+            return None;
+        }
+        let dx = bits.trailing_zeros();
+        bits &= bits - 1;
+        Some([x as u32 + dx, y as u32, z as u32])
     })
 }
 
@@ -293,49 +358,42 @@ impl BlastRange {
             let tank = m.tank(id).expect("digger has a tank");
             let mut room = ledger.room(tank) - m.inflight[id];
             let mut rate = rate;
-            for d in ball(k.dig_radius as i32) {
-                let p = [face[0] + d[0], face[1] + d[1], face[2] + d[2]];
-                if p.iter().any(|v| *v < 0) {
-                    continue;
-                }
-                let [x, y, z] = p.map(|v| v as u32);
-                if !world.inside(x, y, z)
-                    || world.on_frame(x, y, z)
-                    || !world.solid(x, y, z)
-                    || m.reserved.contains_key(&[x, y, z])
-                    || matter.debris.claimed([x, y, z])
-                {
-                    continue;
-                }
-                let material = world.material_cached(&mut cursor, x, y, z);
-                let amount = matter.economy.per_voxel(material);
-                if material == AIR || amount == 0 {
-                    continue;
-                }
-                // The next voxel does not fit: the tank is full.
-                if amount > room {
-                    m.mark_full(id);
-                    continue 'diggers;
-                }
-                if left == 0 {
-                    starved = true;
-                    break 'diggers;
-                }
-                world.queue_dig_by(x, y, z, DIG | id as u32);
-                m.reserved.insert(
-                    [x, y, z],
-                    Reservation {
-                        slot: id as u16,
-                        material,
-                        amount,
-                    },
-                );
-                m.inflight[id] += amount;
-                room -= amount;
-                left -= 1;
-                rate -= 1;
-                if rate == 0 {
-                    continue 'diggers;
+            let spans = Arc::clone(m.balls.get(&k.dig_radius).expect("dig ball is prepared"));
+            for &span in spans.iter() {
+                for [x, y, z] in occupied_row(world, face, span) {
+                    if m.reserved.contains_key(&[x, y, z]) || matter.debris.claimed([x, y, z]) {
+                        continue;
+                    }
+                    let material = world.material_cached(&mut cursor, x, y, z);
+                    let amount = matter.economy.per_voxel(material);
+                    if material == AIR || amount == 0 {
+                        continue;
+                    }
+                    // The next voxel does not fit: the tank is full.
+                    if amount > room {
+                        m.mark_full(id);
+                        continue 'diggers;
+                    }
+                    if left == 0 {
+                        starved = true;
+                        break 'diggers;
+                    }
+                    world.queue_dig_by(x, y, z, DIG | id as u32);
+                    m.reserved.insert(
+                        [x, y, z],
+                        Reservation {
+                            slot: id as u16,
+                            material,
+                            amount,
+                        },
+                    );
+                    m.inflight[id] += amount;
+                    room -= amount;
+                    left -= 1;
+                    rate -= 1;
+                    if rate == 0 {
+                        continue 'diggers;
+                    }
                 }
             }
         }

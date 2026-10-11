@@ -300,3 +300,147 @@ fn a_digger_out_of_reach_drives_to_its_face_and_stops_there() {
         "it stopped at the face"
     );
 }
+
+#[test]
+fn occupied_rows_match_the_scalar_ball_order_at_every_radius_and_world_edge() {
+    let mut r = range(layout(1_000_000, 16, 64));
+    // The radius-32 middle row has 65 cells, crosses an occupancy word,
+    // and includes the separate high bit. The world's top is not a frame.
+    for cell in [[31, 96, 64], [94, 96, 64], [95, 96, 64], [384, 127, 384]] {
+        r.world
+            .queue_edit(voxel::world::Edit::put(cell[0], cell[1], cell[2], 6));
+    }
+    r.world.flush();
+    assert!(r.world.solid(95, 96, 64));
+    let faces = [
+        [63, 96, 64],
+        [64, 8, 64],
+        [127, 8, 127],
+        [128, 8, 128],
+        FACE,
+        [0, 0, 0],
+        [767, 127, 767],
+        [384, 127, 384],
+        [-16, 8, 64],
+        [64, -16, 64],
+        [64, 8, -16],
+    ];
+    for radius in 0..=modding::range_economy::MAX_DIG_RADIUS as i32 {
+        let spans = super::ball_spans(radius);
+        let offsets: Vec<_> = spans
+            .iter()
+            .flat_map(|&[dy, dz, half]| (-half..=half).map(move |dx| [dx, dy, dz]))
+            .collect();
+        assert_eq!(offsets, super::ball(radius).collect::<Vec<_>>());
+        for face in faces {
+            let expected: Vec<_> = super::ball(radius)
+                .filter_map(|d| {
+                    let p = std::array::from_fn::<_, 3, _>(|i| face[i] + d[i]);
+                    if p.iter().any(|v| *v < 0) {
+                        return None;
+                    }
+                    let [x, y, z] = p.map(|v| v as u32);
+                    (r.world.inside(x, y, z)
+                        && !r.world.on_frame(x, y, z)
+                        && r.world.solid(x, y, z))
+                    .then_some([x, y, z])
+                })
+                .collect();
+            let actual: Vec<_> = spans
+                .iter()
+                .flat_map(|&span| super::occupied_row(&r.world, face, span))
+                .collect();
+            assert_eq!(actual, expected, "radius={radius} face={face:?}");
+        }
+    }
+}
+
+#[test]
+fn an_empty_face_sees_refilled_rock_immediately_after_restore() {
+    let mut l = layout(1_000_000, 16, 64);
+    l.economy
+        .as_mut()
+        .unwrap()
+        .kind_mut(RangeUnitKind::Tank)
+        .unwrap()
+        .dig_radius = 32;
+    let face = [280, 64, 330];
+    let cell = [280, 32, 330]; // Last row of the radius-32 ball.
+    let mut a = range(l);
+    assert!(a.battle_order(0, Order::Dig(face), None));
+    a.step();
+    assert_eq!(a.mining().unwrap().cells, 0);
+    a.world
+        .queue_edit(voxel::world::Edit::put(cell[0], cell[1], cell[2], 6));
+    a.world.flush();
+    let bytes = a.snapshot();
+    let mut b = BlastRange::restore(config(), &bytes).unwrap();
+    assert_eq!(b.snapshot(), bytes);
+    for r in [&mut a, &mut b] {
+        r.step();
+        assert!(!r.world.solid(cell[0], cell[1], cell[2]));
+        assert_eq!((r.mining().unwrap().cells, r.tank_held(0)), (1, Some(ROCK)));
+        assert_books(r);
+    }
+    assert_eq!(a.state_hash(), b.state_hash());
+}
+
+#[test]
+fn competing_diggers_keep_cell_order_reservations_and_first_nonfitting_material() {
+    let mut l = layout(4 * ROCK, 16, 64);
+    // Keep delayed edits supported while the rest of the common tick runs;
+    // an isolated floating cell is correctly detached before a later drain.
+    l.blocks.push(RangeBlock {
+        min: [280, 1, 330],
+        max: [282, 96, 331],
+        material: 6,
+    });
+    l.economy
+        .as_mut()
+        .unwrap()
+        .kind_mut(RangeUnitKind::Tank)
+        .unwrap()
+        .dig_radius = 32;
+    let face = [280, 64, 330];
+    let mut a = range(l);
+    // The first digger reserves rock, cannot fit the next steel cell and
+    // stops before the cheaper cell. The second skips that reservation
+    // and takes steel, stopping before the rock that no longer fits it.
+    for (cell, material) in [
+        ([280, 96, 330], 6),
+        ([280, 95, 330], 3),
+        ([281, 95, 330], 6),
+    ] {
+        a.world
+            .queue_edit(voxel::world::Edit::put(cell[0], cell[1], cell[2], material));
+    }
+    a.world.flush();
+    assert!(a.battle_order(0, Order::Dig(face), None));
+    assert!(a.battle_order(1, Order::Dig(face), None));
+    a.dig_phase();
+    assert_eq!(a.mining().unwrap().in_flight(), 2);
+    assert_eq!(a.mining().unwrap().reserved(0), ROCK);
+    assert_eq!(a.mining().unwrap().reserved(1), 785);
+    assert!(!a
+        .mining
+        .as_ref()
+        .unwrap()
+        .reserved
+        .contains_key(&[281, 95, 330]));
+    // Preserve both competing reservations across a byte-exact save, then
+    // drain only one edit each tick to exercise the in-flight room.
+    let bytes = a.snapshot();
+    let mut b = BlastRange::restore(config(), &bytes).unwrap();
+    assert_eq!(b.snapshot(), bytes);
+    a.world.max_edits_per_tick = 1;
+    b.world.max_edits_per_tick = 1;
+    for _ in 0..4 {
+        a.step();
+        b.step();
+        assert_eq!(a.state_hash(), b.state_hash());
+        assert!(b.matter.economy.ledger.balanced());
+    }
+    assert_eq!(a.tank_held(0), Some(ROCK));
+    assert_eq!(a.tank_held(1), Some(785));
+    assert!(a.world.solid(281, 95, 330));
+}
