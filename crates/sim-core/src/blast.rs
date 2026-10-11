@@ -55,6 +55,9 @@ use voxel::{Generator, World};
 #[path = "range_contact_read_tests.rs"]
 mod contact_read_tests;
 #[cfg(test)]
+#[path = "range_deferred_felling_tests.rs"]
+mod deferred_felling_tests;
+#[cfg(test)]
 #[path = "range_reset_tests.rs"]
 mod reset_tests;
 #[path = "range_structure.rs"]
@@ -5087,7 +5090,9 @@ impl BlastRange {
         // no pool slot (ADR-659), so the pool does not bound the count.
         // Pre-existing claims are skipped. Therefore every hull needs at
         // most `left + claims + 1` claimable candidates from its ordered
-        // crush list to reproduce the full `Matter::fell` pass.
+        // crush list to reproduce its immediate claims. ADR-688 retains only
+        // this prepared prefix on refusal; bounded capture of the remaining
+        // footprint (including left == 0) is still open in EP-06.
         let claims = self.matter.debris.claims();
         let left = (self.matter.tuning.max_claims as usize).saturating_sub(claims);
         let cut_limit = if left == 0 {
@@ -5109,8 +5114,16 @@ impl BlastRange {
         // none stops the queue. What is left after both rounds goes to
         // searches hulls begin in their own steps.
         let mut coarse_left = self.navigation.global_work_per_tick;
+        // One allowance a tick for fine searches started in place (ADR-691):
+        // coarse hand-overs, then the orders phase's pursuit starts, each
+        // priced at one start slice. Past it, searches are set up unwalked
+        // and walk under the continuation shares.
+        let start_slice = self.navigation.search_nodes_per_tick;
+        let mut start_left = self.navigation.search_start_budget;
         {
             let gun_id = self.units.len();
+            let gun_obstacle =
+                (!battle_mode).then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
             let mut queue: Vec<(std::cmp::Reverse<u32>, usize)> = self
                 .units
                 .iter()
@@ -5144,17 +5157,30 @@ impl BlastRange {
                     if round == 1 && (budget == 0 || u.motion.coarse_waited().is_none()) {
                         continue;
                     }
-                    // No hull list: walking a search does not read other
-                    // hulls, and a hand-over sets the fine search up
-                    // unwalked (review 252, ADR-691).
+                    // No hull has committed motion yet. Only a fine fallback
+                    // reads this exact snapshot, with the same slot order.
+                    let others = || {
+                        positions
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != id)
+                            .map(|(_, p)| *p)
+                            .chain(gun_obstacle.filter(|_| id != gun_id))
+                            .collect()
+                    };
                     let u = if id == gun_id {
                         &mut self.gun
                     } else {
                         &mut self.units[id]
                     };
+                    // A hand-over starts its fine search in place while
+                    // the tick's start allowance holds a whole slice, and
+                    // sets it up unwalked past it (ADR-691).
+                    u.motion.defer_fine(start_left < start_slice);
                     let spent = u.motion.continue_coarse(
                         &self.world,
                         &u.body,
+                        others,
                         &self.rubble,
                         self.tick,
                         if round == 0 { &changed } else { &unchanged },
@@ -5162,6 +5188,10 @@ impl BlastRange {
                         round == 0,
                         budget == self.navigation.global_work_per_tick,
                     );
+                    if u.motion.walked_start() {
+                        start_left -= start_slice;
+                    }
+                    u.motion.defer_fine(false);
                     coarse_left = coarse_left.saturating_sub(spent);
                     self.coarse_work = self.coarse_work.wrapping_add(spent);
                 }
@@ -5172,33 +5202,10 @@ impl BlastRange {
         // whole-map phase: a fine search it handed an order to walks in
         // this tick's shares (ADR-691). Slot-order ranks and tick-based
         // remainders survive saves without scheduler state.
-        // Searches still in their start share the start allowance, each up
-        // to one start slice; the others share the continuation's
-        // (ADR-691). Which is which is saved with each search.
         let searching = |m: &motion::Motion| m.enabled && m.hunting();
         let count = self.units.iter().filter(|u| searching(&u.motion)).count()
             + usize::from(!battle_mode && searching(&self.gun.motion));
-        let starting = self
-            .units
-            .iter()
-            .map(|u| &u.motion)
-            .chain((!battle_mode).then_some(&self.gun.motion))
-            .filter(|m| searching(m) && m.starting())
-            .count();
-        let pools = [
-            (
-                self.navigation.search_start_budget,
-                self.navigation.search_nodes_per_tick,
-                starting,
-            ),
-            (
-                self.navigation.search_resume_budget,
-                self.navigation.search_resume_per_unit,
-                count - starting,
-            ),
-        ];
-        let mut ranks = [0; 2];
-        let mut start_left = self.navigation.search_start_budget;
+        let mut rank = 0;
         for m in self
             .units
             .iter_mut()
@@ -5206,19 +5213,22 @@ impl BlastRange {
             .chain((!battle_mode).then_some(&mut self.gun.motion))
         {
             let work = if searching(m) {
-                let pool = usize::from(!m.starting());
-                let (total, cap, count) = pools[pool];
-                let work = motion::resume_share(total, cap, count, ranks[pool], self.tick);
-                ranks[pool] += 1;
+                let work = motion::resume_share(
+                    self.navigation.search_resume_budget,
+                    self.navigation.search_resume_per_unit,
+                    count,
+                    rank,
+                    self.tick,
+                );
+                rank += 1;
                 work
             } else {
                 0
             };
-            let given = m.allow_resume(work);
-            if m.starting() {
-                start_left = start_left.saturating_sub(given);
-            }
+            m.allow_resume(work);
         }
+        // What the hand-overs left of the start allowance goes to the
+        // orders phase's pursuit starts (ADR-691).
         self.fine_start_left = start_left;
         // Fair start allowance (analysis 240, C3). Spatial order decides who
         // commits motion first, but it used to decide who may begin a search

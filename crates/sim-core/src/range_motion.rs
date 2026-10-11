@@ -1513,9 +1513,9 @@ impl Motion {
     pub(super) fn hunting(&self) -> bool {
         self.hunt.is_some()
     }
-    /// Whether the fine search in flight is still in its start; such
-    /// searches share the start allowance, not the continuation's
-    /// (ADR-691).
+    /// Whether the fine search in flight is still in its start: the goal
+    /// ring or the direct sweep (ADR-691).
+    #[cfg(test)]
     pub(super) fn starting(&self) -> bool {
         self.hunt.as_ref().is_some_and(|h| h.starting())
     }
@@ -1556,14 +1556,16 @@ impl Motion {
     /// note what changed in the world since the last tick, walk on with
     /// `budget`, and take the answer up. Returns the work spent. The
     /// first call of a tick counts the tick as waited; a second round of
-    /// the range's leftover passes no changes and counts nothing. Other
-    /// hulls are not read: a hand-over sets the fine search up unwalked,
-    /// and its slices read the hulls near it then (ADR-691).
+    /// the range's leftover passes no changes and counts nothing.
+    /// The terrain-only planner needs hull obstacles only on a fine fallback.
+    /// Build them at most once from this phase's frozen positions; a
+    /// fallback the range sets up unwalked needs none (ADR-691).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn continue_coarse(
         &mut self,
         w: &World,
         b: &UnitBody,
+        others: impl FnOnce() -> Vec<Obstacle>,
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
@@ -1599,7 +1601,7 @@ impl Motion {
                 // forever. The range supplies this flag: its active budget
                 // can differ from this motion's cloned navigation settings.
                 self.coarse = None;
-                self.hand_over(w, to, b, rubble);
+                self.hand_over(w, to, b, others, rubble);
             }
             CoarseAdvance::Pending if first => {
                 if let Some(c) = &mut self.coarse {
@@ -1616,21 +1618,32 @@ impl Motion {
             }
             CoarseAdvance::Refused(entry) => {
                 // A refusal hands the order to the fine planner, exactly as
-                // the one-call planner did; its work is the fine
-                // planner's continuation, from the next tick (ADR-691).
+                // the one-call planner did: in place while the range's
+                // start allowance lasts, set up unwalked past it (ADR-691).
                 // With no corridor out of the start, the fine planner
                 // leads the hull to the lattice entry, not to the goal.
-                self.hand_over(w, entry.unwrap_or(to), b, rubble);
+                self.hand_over(w, entry.unwrap_or(to), b, others, rubble);
             }
         }
         spent
     }
-    /// A whole-map search passes its order to the fine planner, which is
-    /// set up here and walked by the continuation shares (ADR-691).
-    fn hand_over(&mut self, w: &World, to: [i32; 2], b: &UnitBody, rubble: &nav::vehicle::Rubble) {
-        let unwalked = std::mem::replace(&mut self.fine_unwalked, true);
-        self.start_fine(w, to, b, &[], rubble, None, |_| {});
-        self.fine_unwalked = unwalked;
+    /// A whole-map search passes its order to the fine planner (ADR-691):
+    /// started in place, with the other hulls, unless the range set fine
+    /// searches up unwalked for this call; then no hull list is built.
+    fn hand_over(
+        &mut self,
+        w: &World,
+        to: [i32; 2],
+        b: &UnitBody,
+        others: impl FnOnce() -> Vec<Obstacle>,
+        rubble: &nav::vehicle::Rubble,
+    ) {
+        let others = if self.fine_unwalked {
+            Vec::new()
+        } else {
+            others()
+        };
+        self.start_fine(w, to, b, &others, rubble, None, |_| {});
     }
     /// The whole-map search in flight as bytes (ADR-680), for the range's
     /// snapshot section; nothing when there is none.
@@ -2021,10 +2034,8 @@ impl Motion {
     /// May this hull begin a search this tick, and did it. The range
     /// hands the permission out under a ceiling (ADR-312); a hull refused
     /// keeps its order and asks again next tick.
-    pub(super) fn allow_resume(&mut self, work: usize) -> usize {
-        let work = work.min(self.search_slice_limit);
-        self.resume_budget = Some(work);
-        work
+    pub(super) fn allow_resume(&mut self, work: usize) {
+        self.resume_budget = Some(work.min(self.search_slice_limit));
     }
     pub fn allow_start(&mut self, may: bool) {
         self.may_start = may;
@@ -2800,6 +2811,10 @@ mod coarse_budget_tests;
 #[cfg(test)]
 #[path = "range_fine_start_tests.rs"]
 mod fine_start_tests;
+
+#[cfg(test)]
+#[path = "range_coarse_obstacle_tests.rs"]
+mod coarse_obstacle_tests;
 
 #[cfg(test)]
 mod tests {

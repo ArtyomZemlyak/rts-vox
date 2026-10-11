@@ -7,8 +7,8 @@ use modding::range::{RangeLayout, RangeUnitDef, RangeUnitKind};
 /// Short goals: under `global_min_distance`, the fine planner's own.
 const GOALS: [[i32; 2]; 4] = [[440, 200], [440, 330], [440, 460], [440, 590]];
 
-/// Four tanks in a flat field, free control, a start allowance of one
-/// start slice: a tick admits one search's start at a time.
+/// Four tanks in a flat field, free control, a small continuation
+/// allowance: the searches set up unwalked share it over several ticks.
 fn field() -> BlastRange {
     let mut l = RangeLayout::from_ron(include_str!("../../../data/fixture-drive.ron")).unwrap();
     l.units = (0..4)
@@ -27,7 +27,8 @@ fn field() -> BlastRange {
 }
 /// Tuning is data, not snapshot state: a restored range is given it again.
 fn starve(r: &mut BlastRange) {
-    r.navigation.search_start_budget = r.navigation.search_nodes_per_tick;
+    r.navigation.search_resume_budget = 96;
+    r.navigation.search_resume_per_unit = 48;
 }
 /// The orders' way of starting: the search set up, none of its work done.
 fn order_unwalked(r: &mut BlastRange) {
@@ -42,23 +43,21 @@ fn order_unwalked(r: &mut BlastRange) {
     }
 }
 
-/// **Starts share the start allowance, and every one of them answers.**
-/// No tick spends more on searches in their start than the allowance, nor
-/// more than one start slice on one of them; the starts that do not fit
-/// wait, and the queue does not stop: all four tanks get routes and drive.
+/// **Searches set up unwalked walk under the continuation shares, and
+/// every one of them answers** (ADR-691). No tick spends more on them than
+/// the allowance, nor more than one hull's share on one of them; what
+/// does not fit waits, and the queue does not stop: all four tanks get
+/// routes and drive.
 #[test]
 fn unwalked_starts_share_the_start_allowance_and_all_answer() {
     let mut r = field();
     order_unwalked(&mut r);
-    let budget = r.navigation.search_start_budget;
-    let slice = r.navigation.search_nodes_per_tick;
+    let budget = r.navigation.search_resume_budget;
+    let slice = r.navigation.search_resume_per_unit;
     let mut answered = [None; 4];
     for tick in 1..=200u32 {
         let before: Vec<Option<u32>> = (0..4)
-            .map(|k| {
-                let m = &r.units[k].motion;
-                m.starting().then(|| m.fine_work().unwrap()[1])
-            })
+            .map(|k| r.units[k].motion.fine_work().map(|[_, poses]| poses))
             .collect();
         r.step();
         let mut spent = 0;

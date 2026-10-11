@@ -362,8 +362,8 @@ impl Matter {
     }
     /// Cut every listed cell now: the hull stands in them. The fracture work
     /// is the vehicle's, supplied and spent in the same call; the kinetic
-    /// share throws the pieces away from the hull. A full pool stops the cut
-    /// where it is, and the hull keeps standing in the rest.
+    /// share throws the pieces away from the hull. Rejected contact cells join
+    /// the saved felling frontier: the hull may leave before room is available.
     pub fn fell(&mut self, w: &mut World, cells: &[[u32; 3]], at: [i32; 3], f: &Felling) -> usize {
         self.fell_in(w, cells, at, f, true)
     }
@@ -402,13 +402,25 @@ impl Matter {
         room: &mut Option<u32>,
     ) -> usize {
         let mut cut = 0;
+        let mut deferred = false;
         for &p in cells {
+            let key = fell_key(p.map(|v| v as i32));
+            // After a refusal this call only registers contacts. An existing
+            // self-seed already owns that work: do not re-read terrain and
+            // claims on every tick while the hull remains over the plant.
+            if optimized && deferred && self.felling.contains(&(key, key)) {
+                continue;
+            }
             let m = w.material(p[0], p[1], p[2]);
             if m == AIR
                 || !f.materials.contains(&m)
                 || self.debris.claimed(p)
                 || !claimable(w, p.map(|v| v as i32))
             {
+                continue;
+            }
+            if deferred {
+                self.admission.felling[0] += u64::from(self.felling.insert((key, key)));
                 continue;
             }
             let (cost, motion) = self.cost(m);
@@ -429,8 +441,11 @@ impl Matter {
                     .claim_voxel(w, p, m, at, motion, self.fragment_box, &self.tuning)
             };
             if !claimed {
-                break;
+                deferred = true;
+                self.admission.felling[0] += u64::from(self.felling.insert((key, key)));
+                continue;
             }
+            self.admission.felling[2] += u64::from(self.felling.remove(&(key, key)));
             self.supplied_mj += cost;
             self.spent_mj += cost;
             cut += 1;
@@ -494,6 +509,14 @@ impl Matter {
                 self.admission.felling[2] -= 1;
                 self.admission.felling[4] += 1;
                 break;
+            }
+            // A self-seed is a hull contact rejected before a successful cut.
+            // Charge its fracture once, on admission. The hull has already
+            // left, so delayed contact debris starts without an outward kick.
+            if p == seed {
+                let (cost, _) = self.cost(m);
+                self.supplied_mj += cost;
+                self.spent_mj += cost;
             }
             self.admission.felling[3] += 1;
             self.spread(p, seed, f.radius);
@@ -1657,6 +1680,16 @@ mod felling_key_tests {
                         reference.fell_in(&mut old_world, &cuts, [3, 4, 3], &f, false)
                     );
                     assert_eq!(snapshot(&actual, &world), snapshot(&reference, &old_world));
+                    // Warm rejected self-seeds must skip only redundant reads,
+                    // including duplicate contacts and all pool boundaries.
+                    for _ in 0..3 {
+                        assert_eq!(
+                            actual.fell_in(&mut world, &cuts, [3, 4, 3], &f, true),
+                            reference.fell_in(&mut old_world, &cuts, [3, 4, 3], &f, false)
+                        );
+                        assert_eq!(snapshot(&actual, &world), snapshot(&reference, &old_world));
+                        assert_eq!(actual.admission.felling, reference.admission.felling);
+                    }
                     for tick in 0..4 {
                         if tick == 2 {
                             reference.tuning.max_claims = 4096;

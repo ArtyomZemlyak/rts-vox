@@ -20,10 +20,10 @@ pub struct Navigation {
     /// Search work in one tick: one frontier node or one swept pose.
     /// Target selection and connections share the same bounded allowance.
     pub search_nodes_per_tick: usize,
-    /// Work across the range for fine searches still in their start (goal
-    /// ring and direct sweep), shared by them each tick; each takes at most
-    /// `search_nodes_per_tick` (ADR-691). Orders set searches up unwalked,
-    /// and this allowance walks them.
+    /// Work a tick for fine searches started in place by coarse hand-overs
+    /// and pursuit retargets, each priced at one `search_nodes_per_tick`
+    /// slice (ADR-691). Past it, searches are set up unwalked and walk
+    /// under the continuation shares.
     pub search_start_budget: usize,
     /// Aggregate continuation work across the range, shared by pending hunts.
     pub search_resume_budget: usize,
