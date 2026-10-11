@@ -52,6 +52,9 @@ use voxel::unit::{Status, UnitBody};
 use voxel::{Generator, World};
 
 #[cfg(test)]
+#[path = "range_contact_read_tests.rs"]
+mod contact_read_tests;
+#[cfg(test)]
 #[path = "range_reset_tests.rs"]
 mod reset_tests;
 #[path = "range_structure.rs"]
@@ -1963,17 +1966,21 @@ impl Explosion {
     /// step that follows uses it and drops it.
     pub(crate) fn read_contacts(&mut self, w: &World, budget: usize) {
         self.drop_contacts();
+        if budget == 0 || self.pending.is_empty() {
+            return;
+        }
         let offsets = subcell_offsets(self.cell);
-        let cells: Vec<[i32; 3]> = self.pending.iter().map(|h| h.cell).collect();
         // The same pace as the visits: a cell and each voxel of matter in it.
+        // Copy only the current coordinate, not the unbudgeted queue tail.
+        // Indexing keeps the wrapped deque borrowed only until read_cell.
         let mut left = budget;
-        for cell in cells {
-            if left == 0 {
-                break;
-            }
+        let mut next = 0;
+        while left > 0 && next < self.pending.len() {
+            let cell = self.pending[next].cell;
             let (mask, start) = self.read_cell(w, cell, &offsets);
             self.solid.push((cell, mask, start as u32));
             left = left.saturating_sub(1 + mask.count_ones() as usize);
+            next += 1;
         }
     }
     fn drop_contacts(&mut self) {
