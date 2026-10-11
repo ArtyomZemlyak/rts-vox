@@ -117,6 +117,178 @@ fn ordinary_shell_destruction_lands_within_fifteen_ticks() {
     assert!(r.matter.economy.ledger.balanced());
 }
 
+/// One authored firing event (a stream's complete burst), on the same flat
+/// soil. Canister here is one submunition; the six-round salvo is separate.
+fn soil_presets() -> [(&'static str, &'static str); 9] {
+    [
+        ("shell", include_str!("../../../data/explosion.ron")),
+        (
+            "canister_round",
+            include_str!("../../../data/canister-shell.ron"),
+        ),
+        ("kinetic", include_str!("../../../data/kinetic-shell.ron")),
+        ("energy", include_str!("../../../data/energy-cannon.ron")),
+        ("energy_t2", include_str!("../../../data/energy-cannon.ron")),
+        (
+            "annihilation",
+            include_str!("../../../data/anni-cannon.ron"),
+        ),
+        ("machine_gun", include_str!("../../../data/machine-gun.ron")),
+        ("laser", include_str!("../../../data/laser.ron")),
+        ("flame", include_str!("../../../data/flamethrower.ron")),
+    ]
+}
+
+fn soil_config(name: &str, text: &str) -> ExplosionConfig {
+    if name == "energy_t2" {
+        salvo_range()
+            .battle
+            .shot_config(Weapon::Energy, RangeUnitKind::TurretT2)
+    } else {
+        ExplosionConfig::from_ron(text).unwrap()
+    }
+}
+
+fn soil_trial(config: ExplosionConfig) -> BlastRange {
+    let mut layout = salvo_range().layout.take().unwrap();
+    layout.battle = false;
+    layout.airburst_on_target = false;
+    layout.units.clear();
+    layout.target = [420, 15, 330];
+    let mut r = BlastRange::with_layout(config, layout).unwrap();
+    r.set_physics_workers(4);
+    r.control();
+    r.aim = Some([420, 15, 330]);
+    assert!(r.refire());
+    r
+}
+
+fn soil_removed(r: &BlastRange) -> usize {
+    r.removed_materials[1] + r.removed_materials[7] + r.removed_materials[8]
+}
+
+/// Empty cells of the fixture's original 16-cell soil slab, and the
+/// deepest opening from its surface. Settled debris can refill a hole.
+fn crater(r: &BlastRange) -> (usize, usize) {
+    let mut empty = 0;
+    let mut depth = 0;
+    for z in 210..450 {
+        for x in 300..540 {
+            let mut opening = 0;
+            for y in (0..16).rev() {
+                if !r.world.solid(x, y, z) {
+                    empty += 1;
+                    if opening == 15 - y {
+                        opening += 1;
+                    }
+                }
+            }
+            depth = depth.max(opening as usize);
+        }
+    }
+    (empty, depth)
+}
+
+fn former_soil(r: &mut BlastRange) {
+    for (mat, strength) in [(1, 30), (7, 30), (8, 40)] {
+        r.tune_material(
+            mat,
+            super::super::material_tuning::MaterialField::Strength,
+            strength,
+        );
+    }
+}
+
+#[test]
+fn stock_weapons_soil_balance_and_replay() {
+    for (name, text) in soil_presets() {
+        let config = soil_config(name, text);
+        let mut now = soil_trial(config);
+        let mut before = soil_trial(config);
+        former_soil(&mut before);
+        let mut replay = None;
+        for t in 0..240 {
+            now.step();
+            before.step();
+            assert!(now.matter.economy.ledger.balanced(), "{name}");
+            assert!(before.matter.economy.ledger.balanced(), "{name} reference");
+            if let Some(copy) = replay.as_mut() {
+                BlastRange::step(copy);
+                assert_eq!(now.state_hash(), copy.state_hash(), "{name} tick={t}");
+            } else if t == config.charge_ticks + 10 {
+                replay = Some(BlastRange::restore(config, &now.snapshot()).unwrap());
+            }
+        }
+        let (new, old) = (soil_removed(&now), soil_removed(&before));
+        let (new_crater, old_crater) = (crater(&now), crater(&before));
+        eprintln!("{name}: removed={old}->{new} empty_depth={old_crater:?}->{new_crater:?}");
+        match name {
+            "shell" | "canister_round" => {
+                assert!(new > 0 && new * 3 < old, "{name}: {new} vs {old}");
+                assert!(
+                    new_crater.0 * 2 < old_crater.0,
+                    "{name}: net crater did not shrink"
+                );
+            }
+            "kinetic" | "machine_gun" => assert!(new > 0 && new <= old, "{name}: {new} vs {old}"),
+            "laser" | "flame" => assert_eq!((new, old), (0, 0), "{name}"),
+            _ => assert_eq!(new, old, "{name}: annihilation has no fracture budget"),
+        }
+    }
+}
+
+#[test]
+fn canister_salvo_digs_less_soil_and_still_finishes() {
+    let mut now = salvo_range();
+    let mut before = salvo_range();
+    former_soil(&mut before);
+    for r in [&mut now, &mut before] {
+        land(r, Weapon::Canister, [420, 330], 6);
+        assert!(ticks_to_rest(r, 15).is_some());
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    assert!(soil_removed(&now) > 0);
+    assert!(soil_removed(&now) * 3 < soil_removed(&before));
+}
+
+#[test]
+#[ignore = "terrain balance and timing measurement"]
+fn probe_all_weapon_soil() {
+    for (name, text) in soil_presets() {
+        let config = soil_config(name, text);
+        let mut r = soil_trial(config);
+        let start = std::time::Instant::now();
+        for _ in 0..240 {
+            r.step();
+            assert!(r.matter.economy.ledger.balanced(), "{name}");
+        }
+        let soil = r.removed_materials[1] + r.removed_materials[7] + r.removed_materials[8];
+        println!(
+            "{name}: soil={soil} fragments={} pulverized={} ms={:.3} hash={:016x}",
+            r.matter.debris.fragments.len(),
+            r.matter.admission.pulverized,
+            start.elapsed().as_secs_f64() * 1000.0,
+            r.state_hash()
+        );
+    }
+    let mut r = salvo_range();
+    r.set_physics_workers(4);
+    land(&mut r, Weapon::Canister, [420, 330], 6);
+    let start = std::time::Instant::now();
+    for _ in 0..240 {
+        r.step();
+        assert!(r.matter.economy.ledger.balanced());
+    }
+    println!(
+        "canister_salvo: soil={} fragments={} pulverized={} ms={:.3} hash={:016x}",
+        r.removed_materials[1] + r.removed_materials[7] + r.removed_materials[8],
+        r.matter.debris.fragments.len(),
+        r.matter.admission.pulverized,
+        start.elapsed().as_secs_f64() * 1000.0,
+        r.state_hash()
+    );
+}
+
 /// The parallel parts of the wave phase (frontiers, chunk builds, matter
 /// and body maps read ahead, captures side by side, sorts in runs) are
 /// functions of each wave alone or have one answer: the same salvo on one

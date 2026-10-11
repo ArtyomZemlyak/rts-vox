@@ -51,6 +51,12 @@ mod fragment_admission_tests;
 #[path = "range_section_tests.rs"]
 mod section_tests;
 
+#[cfg(test)]
+#[path = "range_ground_price_tests.rs"]
+mod ground_price_tests;
+
+type FracturePrice = ([u32; 3], (u64, u64));
+
 // A signed 21-bit coordinate per axis fits the game's current and planned
 // world sizes. Biasing each component preserves the old lexicographic order
 // of `(position, seed)` while making a queued pair 16 instead of 24 bytes.
@@ -70,6 +76,9 @@ fn fell_cell(key: u64) -> [i32; 3] {
 }
 
 pub struct Matter {
+    /// Derived exact memo: strength, fracture coefficient and motion share.
+    /// Validated on every access, excluded from snapshots and hashes.
+    prices: [Option<FracturePrice>; 8],
     batch: Option<fracture::Batch>,
     /// Derived phase-local admission guard, rebuilt from the saved heat field.
     /// It is not additional capacity and never survives a simulation tick.
@@ -220,6 +229,7 @@ impl Matter {
             .map(|d| (d.id, d.density))
             .collect();
         Self {
+            prices: [None; 8],
             source_densities,
             density_history: false,
             batch: None,
@@ -428,7 +438,7 @@ impl Matter {
                 self.admission.felling[0] += u64::from(self.felling.insert((key, key)));
                 continue;
             }
-            let (cost, motion) = self.cost(m);
+            let (cost, motion) = self.cost_cached(m);
             let claimed = if optimized {
                 let capacity = room.get_or_insert_with(|| self.routine_fragment_room());
                 self.debris.claim_voxel_with_room(
@@ -519,7 +529,7 @@ impl Matter {
             // Charge its fracture once, on admission. The hull has already
             // left, so delayed contact debris starts without an outward kick.
             if p == seed {
-                let (cost, _) = self.cost(m);
+                let (cost, _) = self.cost_cached(m);
                 self.supplied_mj += cost;
                 self.spent_mj += cost;
             }
@@ -552,6 +562,24 @@ impl Matter {
     fn cost(&self, mat: u16) -> (u64, u64) {
         let d = self.economy.mats.get(mat).expect("range material");
         crate::burst::fracture_cost_mj(d.strength, voxel::unit::WORLD_MM, &self.tuning)
+    }
+
+    #[inline]
+    fn cost_cached(&mut self, mat: u16) -> (u64, u64) {
+        let key = [
+            self.economy.mats.get(mat).expect("range material").strength,
+            self.tuning.fracture_kj_m3_per_strength,
+            self.tuning.motion_pct,
+        ];
+        let index = usize::from(mat) % self.prices.len();
+        if let Some((saved, price)) = self.prices[index] {
+            if saved == key {
+                return price;
+            }
+        }
+        let price = self.cost(mat);
+        self.prices[index] = Some((key, price));
+        price
     }
 
     fn pay(&mut self, cost: u64) {
@@ -703,7 +731,7 @@ impl Matter {
             return ClaimResult::Indestructible;
         }
         let m = material(w, p);
-        let (cost, motion) = self.cost(m);
+        let (cost, motion) = self.cost_cached(m);
         if cost > self.remaining_mj {
             self.admission.ground[1] += 1;
             return ClaimResult::Unaffordable;
@@ -758,7 +786,7 @@ impl Matter {
             self.admission.ground[4] += 1;
             return ClaimResult::Deferred;
         }
-        let (cost, motion) = self.cost(m);
+        let (cost, motion) = self.cost_cached(m);
         if cost > self.remaining_mj {
             self.admission.ground[1] += 1;
             return ClaimResult::Unaffordable;
@@ -901,7 +929,7 @@ impl Matter {
         frame: &crate::damage::Frame,
         from: Option<[i32; 3]>,
     ) -> ClaimResult {
-        let (mut cost, mut motion) = self.cost(3);
+        let (mut cost, mut motion) = self.cost_cached(3);
         if from.is_none() {
             (cost, motion) = (cost - motion, 0);
         }

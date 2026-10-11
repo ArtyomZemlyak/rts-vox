@@ -7737,8 +7737,19 @@ mod tests {
     /// diagonals as along the axes.
     #[test]
     fn a_shell_crater_in_flat_soil_is_round() {
-        let mut r = BlastRange::new(config());
-        // Flat lane soil short of the concrete target and the steel revetment.
+        // Actual authored 1x shell and a flat clearing: the historical 18 MJ
+        // structural fixture and lane shoulders are not a stock crater test.
+        let c = ExplosionConfig::from_ron(include_str!("../../../data/explosion.ron")).unwrap();
+        let mut layout =
+            RangeLayout::from_ron(include_str!("../../../data/range-cover.ron")).unwrap();
+        layout.course = None;
+        layout.units.clear();
+        layout.blocks.clear();
+        layout.shields.clear();
+        layout.clear_min = [64, 64];
+        layout.clear_max = [600, 600];
+        layout.airburst_on_target = false;
+        let mut r = BlastRange::with_layout(c, layout).unwrap();
         r.aim = Some([200, FLOOR, 336]);
         for _ in 0..600 {
             r.step();
@@ -7756,14 +7767,13 @@ mod tests {
                 .take_while(|&k| material(&r.world, [at[0] + dx * k, layer, at[2] + dz * k]) == 0)
                 .count() as i64
         };
-        // The widest layer: the rim. Across the lane the rock-strewn shoulders
-        // clip the bowl, so the lane axis and the four diagonals are compared;
-        // the diagonals stay inside the lane at this radius.
+        // The widest layer: the rim. The clearing has no shoulders clipping
+        // it, so both horizontal axes and all four diagonals are compared.
         let layer = (at[1] - 8..=at[1].min(FLOOR - 1))
             .max_by_key(|&y| reach_at(y, 1, 0) + reach_at(y, -1, 0))
             .unwrap();
         let reach = |dx: i32, dz: i32| reach_at(layer, dx, dz);
-        let axes = [(1, 0), (-1, 0)].map(|(dx, dz)| reach(dx, dz) * 1000);
+        let axes = [(1, 0), (-1, 0), (0, 1), (0, -1)].map(|(dx, dz)| reach(dx, dz) * 1000);
         let diagonals = [(1, 1), (1, -1), (-1, 1), (-1, -1)].map(|(dx, dz)| reach(dx, dz) * 1414);
         let radii: Vec<i64> = axes.into_iter().chain(diagonals).collect();
         let (low, high) = (

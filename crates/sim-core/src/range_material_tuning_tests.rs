@@ -531,10 +531,15 @@ fn density_body_melt_fracture_and_annihilation_use_original_stock_quantities_and
 #[test]
 fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncation() {
     let mut r = arena();
+    let default_strength = r.matter.economy.mats.get(1).unwrap().strength;
     r.execute_command(Command::TuneMaterial {
         material: 1,
         field: MaterialField::Strength,
-        value: 17,
+        value: if default_strength == modding::MAX_STRENGTH {
+            default_strength - 1
+        } else {
+            default_strength + 1
+        },
     });
     r.execute_command(Command::TuneMaterial {
         material: 3,
@@ -549,7 +554,7 @@ fn material_prelude_rejects_bad_counts_ids_order_masks_values_flags_and_truncati
         (0, u32::MAX),
         (7, 0),
         (7, modding::MAX_STRENGTH + 1),
-        (7, 30),
+        (7, default_strength),
     ] {
         let mut bad = bytes.clone();
         bad[at + offset..at + offset + 4].copy_from_slice(&value.to_le_bytes());

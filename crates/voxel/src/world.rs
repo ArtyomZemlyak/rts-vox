@@ -131,6 +131,10 @@ struct PendingDigs {
     chunks: Vec<Option<Box<[u32]>>>,
     totals: Vec<u32>,
 }
+
+#[cfg(test)]
+#[path = "world_pending_dig_tests.rs"]
+mod pending_dig_tests;
 impl PendingDigs {
     fn new(chunks: usize) -> Self {
         Self {

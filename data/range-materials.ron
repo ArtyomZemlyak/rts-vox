@@ -3,7 +3,9 @@
     (id: 0, density: 0, strength: 0, harmful: false),
     // Loose matter crumbles into pieces when its support goes; cohesive
     // matter (concrete, steel, a trunk, rock) falls as one body (ADR-300).
-    (id: 1, density: 120, strength: 30, harmful: false, loose: true),
+    // Compacted soil: fracture costs four times the former loose-ground
+    // preset. Weapon pressure, vegetation and hull materials are unchanged.
+    (id: 1, density: 120, strength: 120, harmful: false, loose: true),
     // Concrete and steel do not burn, but heat enough and they run off as
     // debris (ADR-290): a bolt's spot is 120, a burning trunk feeds its
     // neighbours 600 over its two seconds.
@@ -15,8 +17,8 @@
     (id: 4, density: 6, strength: 5, harmful: false, fuel: 240, kindling: 30, loose: true), // foliage
     (id: 5, density: 70, strength: 10, bend_span: 3, harmful: false, fuel: 600, kindling: 120), // trunk
     (id: 6, density: 260, strength: 220, bend_span: 7, harmful: false), // rock
-    (id: 7, density: 120, strength: 30, harmful: false, loose: true), // grass-covered soil
-    (id: 8, density: 180, strength: 40, harmful: false, loose: true),
+    (id: 7, density: 120, strength: 120, harmful: false, loose: true), // grass-covered soil
+    (id: 8, density: 180, strength: 160, harmful: false, loose: true),
     // Inventory-only liquid fuel; range-fire.ron controls its finite combustion.
     // Never a voxel, so its strength is never read; the loader asks one of
     // every material but air (ADR-429).
