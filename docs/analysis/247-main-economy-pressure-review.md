@@ -176,6 +176,36 @@ diagnostic bins и doc tests. В этот полный прогон входят
 Это свежая Windows-квалификация; межплатформенные 600/300 тиков остаются
 отдельными результатами 246, здесь Linux заново не запускался.
 
+### Свежая сборка полигона и native после исправления
+
+Код и стенд опубликованы в `02f5896`. После полного workspace выполнена
+отдельная `cargo build --release --locked --offline -p render --bin blast`.
+Свежий `target/release/blast.exe` заморожен как `blast-677.exe`; SHA256
+`4e15fecf4b1cacc6cfe30e56823c6b81c4012f982883ca215221bbe1b6a8bc63`.
+
+Два последовательных 30-секундных запуска через `profile-range.ps1`:
+окно 1332×1022, physics/nav/global Rayon 4/4/4, фактический compute 4,
+RTX 5090/Vulkan, AutoNoVsync. Обе сцены сохранили фокус и render context;
+`PreflightProcesses=[]`, exit0, `ValidForComparison=true`, без panic,
+validation error или device lost в stderr. Бой — `--ai-vs-ai`, картечь —
+обычный сценарий с ИИ противника, как в native-таблице 246.
+
+| Сцена | Mean FPS | p99 кадра, мс | Максимум, мс | Mean core tick, мс | Темп симуляции |
+|---|---:|---:|---:|---:|---|
+| world-battle | 70,1 | 32,410 | 244,692 | 14,199 | 900/30,075 с; ratio 0,997500; gate false |
+| canister | 218,5 | 12,616 | 20,023 | 4,855 | 900/30,013 с; ratio 0,999565; gate true |
+
+Метрика кадра — `profile_begin_interval`. Выше бюджета 165 FPS:
+1511/2107 кадров боя и 1182/6555 картечи; `MeetsP99=false` и
+`MeetsEveryFrame=false` для обеих сцен. `AcceptanceEligible=true` у картечи
+означает пригодность для применения FPS-гейта, не прохождение этого гейта.
+
+Конечные native-хеши на tick900 совпали с 246:
+world `17699af799c18b34`, canister `d826b5e37b77ebdc`. Это свежий короткий
+smoke и профиль, не новая парная A/B-серия и не доказательство ускорения
+всего боя. Полные параметры/входные хеши/runtime evidence и CSV находятся
+в `native-677/`; привязка сборки — `native-binary.json`.
+
 В штатных `battle-world`, `range-km`, `skirmish-canister` economy по-прежнему
 выключена. Текущая правка не ускоряет их: coarse continuation, владелец
 симуляции вне кадра, dirty publication и долгий прогресс очередей остаются
