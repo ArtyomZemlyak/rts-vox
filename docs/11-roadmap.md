@@ -161,7 +161,7 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=00b7bec9fb9dfa7b
+battle ticks=600 threads=1 hash=4db395ed9c6111d8
 ```
 
 Число записано на Linux после ADR-681 (мгновенный взрыв); владелец

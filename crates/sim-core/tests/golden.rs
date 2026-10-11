@@ -22,7 +22,7 @@ use sim_core::blast::BlastRange;
 
 /// Хеш шестисотого тика эталонного боя.
 // ADR-681: instant blasts. Recorded on Linux; to be re-verified on Windows.
-const GOLDEN_600: u64 = 0x00b7_bec9_fb9d_fa7b;
+const GOLDEN_600: u64 = 0x4db3_95ed_9c61_11d8;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

@@ -168,7 +168,7 @@ p50 всего прогона: 35,3–44,1 мс до, 27,9–28,4 после. Ж
 
 ## Хеш
 
-`sim-cli --ticks 600 --dump-hash` на Linux: `00b7bec9fb9dfa7b` (было
+`sim-cli --ticks 600 --dump-hash` на Linux: `4db395ed9c6111d8` (было
 `e85ad6aa0597af3d` в golden, `af4fe0b1d46d78ea` печатал CLI).
 Перепроверка на Windows — за владельцем.
 
