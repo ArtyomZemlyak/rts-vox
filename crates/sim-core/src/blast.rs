@@ -3040,7 +3040,7 @@ fn last_per_cell<T>(items: &[T], cell: impl Fn(&T) -> [u32; 3]) -> Vec<usize> {
         && items.iter().all(|t| cell(t).iter().all(|&v| v < 1 << BITS));
     let mut out = Vec::new();
     if fits {
-        let mut keys: Vec<u128> = items
+        let keys: Vec<u128> = items
             .iter()
             .enumerate()
             .map(|(i, t)| {
@@ -3048,7 +3048,7 @@ fn last_per_cell<T>(items: &[T], cell: impl Fn(&T) -> [u32; 3]) -> Vec<usize> {
                 (((x << (2 * BITS)) | (y << BITS) | z) << 32) | i as u128
             })
             .collect();
-        keys.sort_unstable();
+        let keys = sort_distinct(keys);
         for (k, key) in keys.iter().enumerate() {
             if keys.get(k + 1).is_none_or(|next| next >> 32 != key >> 32) {
                 out.push((key & u128::from(u32::MAX)) as usize);
@@ -3066,6 +3066,36 @@ fn last_per_cell<T>(items: &[T], cell: impl Fn(&T) -> [u32; 3]) -> Vec<usize> {
                 out.push(key.1);
             }
         }
+    }
+    out
+}
+
+/// Distinct keys in ascending order. A long list is sorted in four runs
+/// side by side and the runs merged: keys are distinct, so the order is
+/// the one order there is, whoever sorts which run.
+fn sort_distinct(mut keys: Vec<u128>) -> Vec<u128> {
+    const RUNS: usize = 4;
+    if keys.len() < 8192 {
+        keys.sort_unstable();
+        return keys;
+    }
+    let run = keys.len().div_ceil(RUNS);
+    keys.par_chunks_mut(run).for_each(|r| r.sort_unstable());
+    let runs: Vec<&[u128]> = keys.chunks(run).collect();
+    let mut heads = vec![0usize; runs.len()];
+    let mut out = Vec::with_capacity(keys.len());
+    while out.len() < keys.len() {
+        let mut best: Option<(usize, u128)> = None;
+        for (r, slice) in runs.iter().enumerate() {
+            if let Some(&key) = slice.get(heads[r]) {
+                if best.is_none_or(|(_, b)| key < b) {
+                    best = Some((r, key));
+                }
+            }
+        }
+        let (r, key) = best.expect("a run with keys left");
+        heads[r] += 1;
+        out.push(key);
     }
     out
 }
@@ -6163,9 +6193,8 @@ impl BlastRange {
         // A tank this drain filled turns to haul the same tick (ADR-673).
         self.haul_phase();
         self.world_changed = nav::vehicle::Changed::default();
-        for e in self.world.edits() {
-            self.world_changed.column(e.x as i32, e.z as i32);
-        }
+        self.world_changed
+            .columns(self.world.edits().iter().map(|e| [e.x as i32, e.z as i32]));
         detail("heat_edits");
         completed("heat_flush");
         // Everything without support falls (ADR-299): the batch's collapse

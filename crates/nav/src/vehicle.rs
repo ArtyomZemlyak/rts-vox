@@ -243,6 +243,18 @@ impl Changed {
     pub fn column(&mut self, x: i32, z: i32) {
         self.pages.insert(page_of(x, z));
     }
+    /// The pages holding these columns changed. A run of columns on one
+    /// page (a drain's edits) asks the set once.
+    pub fn columns(&mut self, columns: impl IntoIterator<Item = [i32; 2]>) {
+        let mut last = None;
+        for [x, z] in columns {
+            let page = page_of(x, z);
+            if last != Some(page) {
+                self.pages.insert(page);
+                last = Some(page);
+            }
+        }
+    }
     pub fn merge(&mut self, other: &Changed) {
         self.all |= other.all;
         self.pages.extend(other.pages.iter().copied());
