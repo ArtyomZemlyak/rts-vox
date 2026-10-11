@@ -1,6 +1,6 @@
 //! Pristine range placement, independent of the dense world's allocation.
-//! The editor and scene constructor use the same occupied cells, including
-//! articulated segments and the firing tank. Templates are cached by the caller.
+//! The editor, scene constructor and production use the same occupied cells,
+//! including articulated segments. Templates are cached by the caller.
 use super::{RangeTerrain, RangeUnit, GUN};
 use modding::range::{RangeLayout, RangeUnitKind};
 use std::collections::BTreeMap;
@@ -89,6 +89,43 @@ impl Validator {
     fn footprint(&self, kind: RangeUnitKind, reverse: bool) -> &Footprint {
         self.footprints[kind.index() + usize::from(reverse) * RangeUnitKind::COUNT]
             .get_or_init(|| Footprint::of(kind, if reverse { fx::angle::FULL / 2 } else { 0 }))
+    }
+
+    /// Prepare both spawn orientations outside the simulation tick. Only
+    /// kinds named by a producer need these derived, unsaved masks.
+    pub(super) fn prepare_product(&self, kind: RangeUnitKind) {
+        for reverse in [false, true] {
+            self.footprint(kind, reverse);
+        }
+    }
+
+    /// Exact body-cell collision against the current world. The producer's
+    /// probe still supplies the original box/grid; clipping preserves its
+    /// bounds even where truncation at zero differs from an integer shift.
+    /// No pose lookup or lazy mask construction happens during the tick.
+    pub(super) fn product_intersects(
+        &self,
+        kind: RangeUnitKind,
+        reverse: bool,
+        world: &voxel::World,
+        at: [i32; 3],
+        bounds: ([i32; 3], [i32; 3]),
+    ) -> bool {
+        let shape = self.footprints[kind.index() + usize::from(reverse) * RangeUnitKind::COUNT]
+            .get()
+            .expect("product geometry is prepared at scene construction");
+        let (lo, hi) = bounds;
+        shape.columns.iter().any(|(p, ys)| {
+            let (x, z) = (at[0] + p[0], at[2] + p[1]);
+            x >= lo[0]
+                && x < hi[0]
+                && z >= lo[2]
+                && z < hi[2]
+                && ys.iter().any(|y| {
+                    let y = at[1] + y;
+                    y >= lo[1] && y < hi[1] && world.solid(x as u32, y as u32, z as u32)
+                })
+        })
     }
 
     /// Collision checks cover one footprint per kind and side; the terrain
@@ -219,6 +256,48 @@ mod tests {
                 if reverse { fx::angle::HALF } else { 0 },
             );
             assert_eq!(t2.columns, fresh.columns);
+        }
+    }
+
+    #[test]
+    fn product_masks_match_fresh_bodies_in_both_orientations_and_across_zero() {
+        use std::collections::BTreeSet;
+        let v = Validator::default();
+        for kind in RangeUnitKind::ALL {
+            v.prepare_product(kind);
+            for reverse in [false, true] {
+                let shape = v.footprint(kind, reverse);
+                for at in [[95, 37, 127], [0; 3]] {
+                    let unit = RangeUnit::placed(kind, !reverse, at, true);
+                    let (lo, hi) = unit.bounds();
+                    let mut expected = BTreeSet::new();
+                    for z in lo[2]..hi[2] {
+                        for y in lo[1]..hi[1] {
+                            for x in lo[0]..hi[0] {
+                                if unit.solid([x, y, z]) {
+                                    expected.insert([x, y, z]);
+                                }
+                            }
+                        }
+                    }
+                    let actual: BTreeSet<_> = shape
+                        .columns
+                        .iter()
+                        .flat_map(|(p, ys)| {
+                            ys.iter()
+                                .map(move |y| [at[0] + p[0], at[1] + y, at[2] + p[1]])
+                        })
+                        .filter(|p| (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]))
+                        .collect();
+                    assert!(!expected.is_empty());
+                    assert!(
+                        actual == expected,
+                        "{kind:?} reverse={reverse} at={at:?}: missing {:?}, extra {:?}",
+                        expected.difference(&actual).take(4).collect::<Vec<_>>(),
+                        actual.difference(&expected).take(4).collect::<Vec<_>>()
+                    );
+                }
+            }
         }
     }
 }

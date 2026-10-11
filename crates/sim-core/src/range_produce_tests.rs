@@ -687,3 +687,85 @@ fn the_rules_ai_treats_a_produced_unit_like_an_authored_one() {
     }
     assert!(decided, "the rules AI ordered the produced tank");
 }
+
+#[test]
+fn a_paid_blocked_product_sees_an_opening_in_the_same_tick_after_restore() {
+    use super::super::super::RangeUnit;
+    for kind in [RangeUnitKind::Tank, RangeUnitKind::Strider] {
+        for allied in [true, false] {
+            let at = [384, 16, 384];
+            let mut l = layout();
+            l.units = vec![base(allied, at)];
+            // The first free spot is fixed before adding any obstruction.
+            let clear = range(l.clone());
+            let chosen = clear.free_spot(0, kind, allied).unwrap();
+            drop(clear);
+            let (lo, hi) = RangeUnit::of_kind(RangeUnitKind::Base, at).bounds();
+            let (x0, x1, z0, z1) = (lo[0] - 1, hi[0] + 1, lo[2] - 1, hi[2] + 1);
+            // A supported one-cell layer catches tracks/feet at every
+            // candidate, but leaves the undamaged producer's box clear.
+            for (min, max) in [
+                ([64, 16, 64], [x0, 17, 704]),
+                ([x1, 16, 64], [704, 17, 704]),
+                ([x0, 16, 64], [x1, 17, z0]),
+                ([x0, 16, z1], [x1, 17, 704]),
+            ] {
+                l.blocks.push(RangeBlock {
+                    min,
+                    max,
+                    material: 6,
+                });
+            }
+            let mut a = range(l);
+            let cost = a.production_cost(kind).unwrap();
+            seed(&mut a, allied, cost);
+            assert_eq!(a.enqueue_product(0, kind, allied), Outcome::Applied);
+            run(&mut a, cost, BUILD as usize + 2, |_| false);
+            assert_eq!(a.units.len(), 1, "{kind:?} allied={allied}");
+            assert_eq!(a.production_paid(0), Some(cost));
+            assert_eq!(a.production_mut().blocked, 3);
+            let bytes = a.snapshot();
+            let mut b = BlastRange::restore(config(), &bytes).expect("blocked product restores");
+            assert_eq!(b.snapshot(), bytes);
+            for _ in 0..3 {
+                a.step();
+                b.step();
+                assert_eq!(a.state_hash(), b.state_hash());
+                assert_books(&a, cost);
+                assert_books(&b, cost);
+            }
+            assert_eq!(a.production_mut().blocked, 6);
+            // Clear only the actual feet/tracks at the formerly first spot.
+            // Both the restored and uninterrupted line must see this drain
+            // immediately, without a stale cached "blocked" result.
+            let probe = RangeUnit::placed(kind, allied, chosen, true);
+            let (plo, phi) = probe.bounds();
+            let mut opened = 0;
+            for z in plo[2]..phi[2] {
+                for x in plo[0]..phi[0] {
+                    if probe.solid([x, 16, z]) && a.world.solid(x as u32, 16, z as u32) {
+                        a.world.queue_dig(x as u32, 16, z as u32);
+                        b.world.queue_dig(x as u32, 16, z as u32);
+                        opened += 1;
+                    }
+                }
+            }
+            assert!(opened > 0 && opened <= a.world.max_edits_per_tick);
+            a.step();
+            b.step();
+            assert_eq!(a.state_hash(), b.state_hash());
+            assert_eq!(a.units.len(), 2, "{kind:?} allied={allied}");
+            assert_eq!(a.spawned()[0].def.at, chosen);
+            assert_eq!(a.spawned()[0].def.allied, allied);
+            assert_eq!(a.production_queue(0), None);
+            assert_eq!(a.production_mut().blocked, 6);
+            assert_books(&a, cost);
+            assert_books(&b, cost);
+            let bytes = a.snapshot();
+            assert_eq!(
+                BlastRange::restore(config(), &bytes).unwrap().snapshot(),
+                bytes
+            );
+        }
+    }
+}
