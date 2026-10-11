@@ -1997,6 +1997,7 @@ impl Explosion {
     /// too). Batches of cells are read in parallel and laid out in
     /// visiting order. What is read is the world's matter only: how far
     /// ahead the cache reaches never changes what a visit finds.
+    #[cfg(test)]
     pub(crate) fn read_contacts(&mut self, w: &World, budget: usize) {
         self.read_contacts_with(w, budget, &[], None);
     }
