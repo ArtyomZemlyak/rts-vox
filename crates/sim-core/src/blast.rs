@@ -55,6 +55,9 @@ use voxel::{Generator, World};
 #[path = "range_contact_read_tests.rs"]
 mod contact_read_tests;
 #[cfg(test)]
+#[path = "range_deferred_felling_tests.rs"]
+mod deferred_felling_tests;
+#[cfg(test)]
 #[path = "range_reset_tests.rs"]
 mod reset_tests;
 #[path = "range_structure.rs"]
@@ -5470,7 +5473,9 @@ impl BlastRange {
         // no pool slot (ADR-659), so the pool does not bound the count.
         // Pre-existing claims are skipped. Therefore every hull needs at
         // most `left + claims + 1` claimable candidates from its ordered
-        // crush list to reproduce the full `Matter::fell` pass.
+        // crush list to reproduce its immediate claims. ADR-688 retains only
+        // this prepared prefix on refusal; bounded capture of the remaining
+        // footprint (including left == 0) is still open in EP-06.
         let claims = self.matter.debris.claims();
         let left = (self.matter.tuning.max_claims as usize).saturating_sub(claims);
         let cut_limit = if left == 0 {
@@ -5521,6 +5526,8 @@ impl BlastRange {
         let mut coarse_left = self.navigation.global_work_per_tick;
         {
             let gun_id = self.units.len();
+            let gun_obstacle =
+                (!battle_mode).then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
             let mut queue: Vec<(std::cmp::Reverse<u32>, usize)> = self
                 .units
                 .iter()
@@ -5554,16 +5561,17 @@ impl BlastRange {
                     if round == 1 && (budget == 0 || u.motion.coarse_waited().is_none()) {
                         continue;
                     }
-                    let others: Vec<_> = positions
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != id)
-                        .map(|(_, p)| *p)
-                        .chain(
-                            (!battle_mode && id != gun_id)
-                                .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
-                        )
-                        .collect();
+                    // No hull has committed motion yet. Only a fine fallback
+                    // reads this exact snapshot, with the same slot order.
+                    let others = || {
+                        positions
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != id)
+                            .map(|(_, p)| *p)
+                            .chain(gun_obstacle.filter(|_| id != gun_id))
+                            .collect()
+                    };
                     let u = if id == gun_id {
                         &mut self.gun
                     } else {
@@ -5572,7 +5580,7 @@ impl BlastRange {
                     let spent = u.motion.continue_coarse(
                         &self.world,
                         &u.body,
-                        &others,
+                        others,
                         &self.rubble,
                         self.tick,
                         if round == 0 { &changed } else { &unchanged },
