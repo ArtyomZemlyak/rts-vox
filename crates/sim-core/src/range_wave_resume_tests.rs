@@ -133,6 +133,60 @@ fn flush(r: &mut BlastRange) {
 }
 
 #[test]
+fn read_ahead_and_live_fair_contacts_match_through_deferral_and_drain() {
+    for edge in [1, 2, 4] {
+        let (mut a, mut x, c) = fixture(edge, false);
+        let (mut b, mut y, _) = fixture(edge, false);
+        for (r, e) in [(&mut a, &mut x), (&mut b, &mut y)] {
+            push(e, body_point(r, e), 1_000_000);
+            r.matter.tuning.max_flying = 0;
+        }
+        let mut resumed = false;
+        for tick in 0..200 {
+            if tick == 6 {
+                a.matter.tuning.max_flying = 128;
+                b.matter.tuning.max_flying = 128;
+            }
+            let budget = [0, 1, 2, 5, 65, 129][tick % 6];
+            x.read_contacts(&a.world, budget);
+            x.step_with_room::<true>(
+                &mut a.world,
+                budget,
+                &mut a.units,
+                &mut a.surface_work,
+                &mut a.surface_changed,
+                &c,
+                Some(&mut a.matter),
+                None,
+            );
+            // The reference deliberately reads each contact live, with no prefetch.
+            y.step_with_room::<true>(
+                &mut b.world,
+                budget,
+                &mut b.units,
+                &mut b.surface_work,
+                &mut b.surface_changed,
+                &c,
+                Some(&mut b.matter),
+                None,
+            );
+            resumed |= !x.contact_resumes.is_empty() || x.contact_cursor > 0 || x.body_cursor > 0;
+            same(&a, &x, &b, &y);
+            flush(&mut a);
+            flush(&mut b);
+            same(&a, &x, &b, &y);
+            if x.pending.is_empty() {
+                break;
+            }
+        }
+        assert!(resumed, "fixture never deferred a contact");
+        assert!(x.pending.is_empty(), "edge={edge}: queue never finished");
+        assert!(a.matter.admission.ground[0] > 0);
+        assert!(!a.units[0].removed.is_empty());
+    }
+}
+
+#[test]
 fn deferred_ground_resumes_without_unit_geometry_and_keeps_every_subcell() {
     for edge in [1, 2, 4] {
         for points in [false, true] {
