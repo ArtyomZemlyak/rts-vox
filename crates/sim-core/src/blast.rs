@@ -1723,6 +1723,18 @@ pub struct Explosion {
     /// of them, so a charge that reaches further costs more ticks rather
     /// than one longer tick.
     captured: usize,
+    /// The frontier of this tick's step was already advanced, in
+    /// parallel with the other waves' (ADR-681). Read and cleared by the
+    /// contact step that follows in the same phase; never saved.
+    frontier_ready: bool,
+    /// The matter under the cells this tick's contacts visit, read ahead
+    /// in parallel with the other waves (ADR-681): per cell in visiting
+    /// order, a bit per subcell holding matter and the start of its
+    /// materials in `solid_mats`. The world's voxels do not change while
+    /// the waves step; the cache is dropped when the step ends. Never saved.
+    solid: Vec<([i32; 3], u64, u32)>,
+    solid_next: usize,
+    solid_mats: Vec<u16>,
 }
 
 impl Explosion {
@@ -1815,6 +1827,10 @@ impl Explosion {
             queued: 0,
             body_energy_mj: None,
             captured: 0,
+            frontier_ready: false,
+            solid: Vec::new(),
+            solid_next: 0,
+            solid_mats: Vec::new(),
         }
     }
 
@@ -1886,12 +1902,120 @@ impl Explosion {
             }
         }
         self.step_inner::<FAIR>(w, budget, units, dents, changed, c, matter.as_deref_mut());
+        self.drop_contacts();
         if let Some(m) = matter {
             if let Some(room) = room {
                 *room = m.body_batch_room();
             }
             m.finish_body_batch();
         }
+    }
+    /// Read ahead the matter under the cells the next fair step of
+    /// `budget` visits (ADR-681). Read-only on the world; the contact
+    /// step that follows uses it and drops it.
+    pub(crate) fn read_contacts(&mut self, w: &World, budget: usize) {
+        self.drop_contacts();
+        let offsets = subcell_offsets(self.cell);
+        let cells: Vec<[i32; 3]> = self.pending.iter().map(|h| h.cell).collect();
+        // The same pace as the visits: a cell and each voxel of matter in it.
+        let mut left = budget;
+        for cell in cells {
+            if left == 0 {
+                break;
+            }
+            let (mask, start) = self.read_cell(w, cell, &offsets);
+            self.solid.push((cell, mask, start as u32));
+            left = left.saturating_sub(1 + mask.count_ones() as usize);
+        }
+    }
+    fn drop_contacts(&mut self) {
+        self.solid.clear();
+        self.solid_next = 0;
+        self.solid_mats.clear();
+    }
+    /// Read a cell's matter: a bit per subcell holding some, and where its
+    /// materials start in `solid_mats`.
+    fn read_cell(&mut self, w: &World, cell: [i32; 3], offsets: &[[i32; 3]]) -> (u64, usize) {
+        let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + cell[a] * self.cell);
+        let start = self.solid_mats.len();
+        let mut mask = 0u64;
+        if !cell_is_air(w, p, self.cell) {
+            for (s, o) in offsets.iter().enumerate() {
+                let m = material(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
+                if m != 0 {
+                    mask |= 1 << s;
+                    self.solid_mats.push(m);
+                }
+            }
+        }
+        (mask, start)
+    }
+    /// Every voxel of matter in the cell would refuse the wave's claim for
+    /// want of energy, and none is a dent: its ground contacts change
+    /// nothing, and the wave does not walk them (ADR-681).
+    fn ground_spent(
+        &self,
+        matter: Option<&matter::Matter>,
+        c: &ExplosionConfig,
+        pressure: u32,
+        mask: u64,
+        start: usize,
+    ) -> bool {
+        let Some(m) = matter.filter(|_| c.material_energy_j > 0 && mask != 0) else {
+            return false;
+        };
+        // The ground's share, as `claim_energy` gives it.
+        let left = match self.body_energy_mj {
+            Some(reserved) => m.remaining_mj.saturating_sub(reserved),
+            None => m.remaining_mj,
+        };
+        self.solid_mats[start..start + mask.count_ones() as usize]
+            .iter()
+            .all(|&mat| pressure >= material_work(mat, c) && m.ground_price(mat) > left)
+    }
+    /// The matter of the cell being visited: as read ahead when it is the
+    /// next one read (or a few further on, past a cell that yielded before
+    /// its ground), else read now.
+    fn solid_cell(&mut self, w: &World, cell: [i32; 3], offsets: &[[i32; 3]]) -> (u64, usize) {
+        let end = (self.solid_next + 4).min(self.solid.len());
+        for k in self.solid_next..end {
+            let (c, mask, start) = self.solid[k];
+            if c == cell {
+                self.solid_next = k + 1;
+                return (mask, start as usize);
+            }
+        }
+        self.read_cell(w, cell, offsets)
+    }
+    /// Advance the frontier by the heap pops a fair step of `budget` would
+    /// take before its contacts: a function of this wave alone, so waves
+    /// advance theirs in parallel (ADR-681). The contact step that follows
+    /// does not advance again.
+    ///
+    /// A cell the frontier finds empty, with no matter in the world and
+    /// no hull's frozen box reaching it, has nothing to contact: it is not
+    /// queued for a visit (ADR-681).
+    pub(crate) fn advance_frontier(&mut self, budget: usize, w: &World, units: &[RangeUnit]) {
+        if budget == 0 {
+            return;
+        }
+        let room = budget.saturating_sub(self.pending.len());
+        let hits = self.wave.advance_contacts(room);
+        let boxes = self.unit_boxes(units);
+        let (domain_lo, domain_hi) = self.domain();
+        let near: Vec<([i32; 3], [i32; 3])> = boxes
+            .into_iter()
+            .filter(|(lo, hi)| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]))
+            .collect();
+        let (origin, edge) = (self.origin, self.cell);
+        self.pending.extend(hits.into_iter().filter(|hit| {
+            let p: [i32; 3] = std::array::from_fn(|a| origin[a] + hit.cell[a] * edge);
+            !cell_is_air(w, p, edge)
+                || near
+                    .iter()
+                    .any(|(lo, hi)| (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a]))
+        }));
+        self.frontier_ready = true;
     }
     #[allow(clippy::too_many_arguments)]
     fn step_inner<const FAIR: bool>(
@@ -1917,6 +2041,7 @@ impl Explosion {
         c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
     ) {
+        let advanced = std::mem::take(&mut self.frontier_ready);
         if FAIR && budget == 0 {
             return;
         }
@@ -1924,8 +2049,10 @@ impl Explosion {
         // but do not grow an unbounded retry backlog. The existing work slice
         // bounds both new heap pops and contacts revisited in this call.
         if FAIR {
-            let room = budget.saturating_sub(self.pending.len());
-            self.pending.extend(self.wave.advance_contacts(room));
+            if !advanced {
+                let room = budget.saturating_sub(self.pending.len());
+                self.pending.extend(self.wave.advance_contacts(room));
+            }
         } else if self.pending.is_empty() {
             self.pending.extend(self.wave.advance_contacts(budget));
         }
@@ -1937,6 +2064,9 @@ impl Explosion {
         } else {
             self.pending.len().min(budget)
         };
+        // The pace of a fair step (ADR-681): a cell visited and each voxel
+        // of matter its ground contacts work spend the same budget.
+        let mut work = if FAIR { budget } else { usize::MAX };
         let edge = self.cell as usize;
         let actors = units.len() + 1;
         let resume_ground = !self.pending.is_empty()
@@ -1985,7 +2115,7 @@ impl Explosion {
         if LAZY_GEOMETRY && self.only_ground_contacts(units.len()) {
             self.step_ground_contacts::<FAIR>(
                 w,
-                visits,
+                [visits, work],
                 units.len(),
                 dents,
                 changed,
@@ -2025,22 +2155,34 @@ impl Explosion {
         // For each coarse wave cell, skip actors whose complete frozen box
         // cannot intersect it. Keep the canonical contact cursor and actor
         // order: a deferred material claim resumes at exactly the same hit.
-        let mut next_actor = vec![units.len(); actors];
+        // Only bodies whose box meets the field's domain can meet one of
+        // its cells: the rest are left out of the per-cell test once.
+        let (domain_lo, domain_hi) = self.domain();
+        let near: Vec<usize> = (0..units.len())
+            .filter(|&i| {
+                let (lo, hi) = boxes[i];
+                (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a])
+            })
+            .collect();
+        let mut here: Vec<usize> = Vec::new();
+        let offsets = subcell_offsets(self.cell);
         let mut contacts = Vec::new();
-        'contact: while visits > 0 {
+        'contact: while visits > 0 && work > 0 {
             let Some(hit) = self.pending.front().copied() else {
                 break;
             };
             visits -= 1;
+            work -= 1;
             let p = std::array::from_fn::<_, 3, _>(|a| self.origin[a] + hit.cell[a] * self.cell);
-            let mut next = units.len();
-            for i in (0..units.len()).rev() {
+            here.clear();
+            here.extend(near.iter().copied().filter(|&i| {
                 let (lo, hi) = boxes[i];
-                if (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a]) {
-                    next = i;
-                }
-                next_actor[i] = next;
-            }
+                (0..3).all(|a| p[a] <= hi[a] && p[a] + self.cell > lo[a])
+            }));
+            // The first actor at or after `k` whose box meets this cell;
+            // the ground, numbered after every body, when none does.
+            let ground = units.len();
+            let next_actor = |k: usize| here.iter().copied().find(|&i| i >= k).unwrap_or(ground);
             while self.contact_cursor < edge.pow(3) * actors {
                 let subcell = self.contact_cursor / actors;
                 let actor = if self.body_cursor > 0 {
@@ -2048,14 +2190,11 @@ impl Explosion {
                     // its stable cursor before using the live broad phase.
                     self.contact_cursor % actors
                 } else {
-                    next_actor[self.contact_cursor % actors]
+                    next_actor(self.contact_cursor % actors)
                 };
                 self.contact_cursor = subcell * actors + actor;
-                let q = [
-                    p[0] + (subcell % edge) as i32,
-                    p[1] + (subcell / edge % edge) as i32,
-                    p[2] + (subcell / (edge * edge)) as i32,
-                ];
+                let o = offsets[subcell];
+                let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
                 // Advance only after successful application or an unaffordable
                 // hit. Pool pressure retries this exact actor on the next tick.
                 if let Some(u) = units.get_mut(actor) {
@@ -2202,6 +2341,56 @@ impl Explosion {
                         self.body_cursor += 1;
                     }
                     self.body_cursor = 0;
+                } else if !self.point_contacts {
+                    // Bodies meet a cell only in its first subcell: what is
+                    // left of it is ground alone, subcell by subcell in the
+                    // same order, without walking the bodies again; and an
+                    // empty cell has none (ADR-681).
+                    let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
+                    let mut bits = if subcell >= 64 {
+                        0
+                    } else {
+                        mask & (!0u64 << subcell)
+                    };
+                    if self.ground_spent(matter.as_deref(), c, hit.pressure, mask, start) {
+                        // As refused as each claim would be; nothing changes.
+                        if let Some(m) = matter.as_deref_mut() {
+                            for s in BitIter(bits) {
+                                let o = offsets[s];
+                                m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
+                            }
+                        }
+                        bits = 0;
+                    }
+                    while bits != 0 {
+                        let s = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let m = self.solid_mats
+                            [start + (mask & ((1u64 << s) - 1)).count_ones() as usize];
+                        self.contact_cursor = s * actors + units.len();
+                        let o = offsets[s];
+                        let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                        if !self.ground_contact_known(
+                            w,
+                            q,
+                            m,
+                            hit.pressure,
+                            dents,
+                            changed,
+                            c,
+                            matter.as_deref_mut(),
+                        ) {
+                            if !FAIR {
+                                return;
+                            }
+                            self.yield_contact();
+                            continue 'contact;
+                        }
+                        // A voxel of matter worked pays the pace.
+                        work = work.saturating_sub(1);
+                    }
+                    self.contact_cursor = edge.pow(3) * actors;
+                    break;
                 } else if !self.ground_contact(
                     w,
                     q,
@@ -2252,7 +2441,7 @@ impl Explosion {
     fn step_ground_contacts<const FAIR: bool>(
         &mut self,
         w: &mut World,
-        mut visits: usize,
+        [mut visits, mut work]: [usize; 2],
         count: usize,
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
@@ -2262,30 +2451,51 @@ impl Explosion {
         if let Some(m) = matter.as_deref_mut() {
             m.admission.wave_ground_only[0] += 1;
         }
-        let edge = self.cell as usize;
         let actors = count + 1;
-        'contact: while visits > 0 {
+        let offsets = subcell_offsets(self.cell);
+        'contact: while visits > 0 && work > 0 {
             let Some(hit) = self.pending.front().copied() else {
                 break;
             };
             visits -= 1;
+            work -= 1;
             if let Some(m) = matter.as_deref_mut() {
                 m.admission.wave_ground_only[1] += 1;
             }
             let p: [i32; 3] = std::array::from_fn(|a| self.origin[a] + hit.cell[a] * self.cell);
-            while self.contact_cursor < edge.pow(3) * actors {
-                let subcell = self.contact_cursor / actors;
+            let from = self.contact_cursor / actors;
+            // Only ground is left of this contact: its cells with matter,
+            // read ahead, or read now.
+            let (mask, start) = self.solid_cell(w, hit.cell, &offsets);
+            let mut bits = if from >= 64 {
+                0
+            } else {
+                mask & (!0u64 << from)
+            };
+            if self.ground_spent(matter.as_deref(), c, hit.pressure, mask, start) {
+                // As refused as each claim would be; nothing changes.
+                if let Some(m) = matter.as_deref_mut() {
+                    for s in BitIter(bits) {
+                        let o = offsets[s];
+                        m.count_unpaid(w, [p[0] + o[0], p[1] + o[1], p[2] + o[2]]);
+                    }
+                }
+                bits = 0;
+            }
+            while bits != 0 {
+                let subcell = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let m =
+                    self.solid_mats[start + (mask & ((1u64 << subcell) - 1)).count_ones() as usize];
                 // No body can remain in this subcell. Preserve the canonical
                 // ground cursor before attempting a possibly deferred claim.
                 self.contact_cursor = subcell * actors + count;
-                let q = [
-                    p[0] + (subcell % edge) as i32,
-                    p[1] + (subcell / edge % edge) as i32,
-                    p[2] + (subcell / (edge * edge)) as i32,
-                ];
-                if !self.ground_contact(
+                let o = offsets[subcell];
+                let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
+                if !self.ground_contact_known(
                     w,
                     q,
+                    m,
                     hit.pressure,
                     dents,
                     changed,
@@ -2298,6 +2508,8 @@ impl Explosion {
                     self.yield_contact();
                     continue 'contact;
                 }
+                // A voxel of matter worked pays the pace.
+                work = work.saturating_sub(1);
                 self.contact_cursor += 1;
             }
             self.finish_contact();
@@ -2376,16 +2588,38 @@ impl Explosion {
         dents: &mut SurfaceWork,
         changed: &mut Vec<[i32; 3]>,
         c: &ExplosionConfig,
+        matter: Option<&mut matter::Matter>,
+    ) -> bool {
+        let mat = material(w, q);
+        self.ground_contact_known(w, q, mat, pressure, dents, changed, c, matter)
+    }
+    /// [`Explosion::ground_contact`] with the voxel's material already read.
+    #[allow(clippy::too_many_arguments)]
+    fn ground_contact_known(
+        &mut self,
+        w: &mut World,
+        q: [i32; 3],
+        mat: u16,
+        pressure: u32,
+        dents: &mut SurfaceWork,
+        changed: &mut Vec<[i32; 3]>,
+        c: &ExplosionConfig,
         mut matter: Option<&mut matter::Matter>,
     ) -> bool {
-        let m = material(w, q);
-        if m != 0 && pressure > 0 {
-            let total = dents.get(&q).copied().unwrap_or(0).saturating_add(pressure);
+        if mat != 0 && pressure > 0 {
+            let work = material_work(mat, c);
+            // A dent only matters to a pressure that alone would not break
+            // the cell; the sum is the same either way.
+            let total = if pressure >= work {
+                pressure
+            } else {
+                dents.get(&q).copied().unwrap_or(0).saturating_add(pressure)
+            };
             let mut apply = true;
-            if total >= material_work(m, c) {
+            if total >= work {
                 if let Some(m) = matter.as_deref_mut().filter(|_| c.material_energy_j > 0) {
                     let at = self.at;
-                    match self.claim_energy(m, false, |m| m.ground(w, q, at)) {
+                    match self.claim_energy(m, false, |m| m.ground_or_pulverize(w, q, mat, at)) {
                         matter::ClaimResult::Applied => (),
                         matter::ClaimResult::Unaffordable | matter::ClaimResult::Indestructible => {
                             apply = false
@@ -2402,11 +2636,13 @@ impl Explosion {
                         q[0] as u32,
                         q[1] as u32,
                         q[2] as u32,
-                        m,
+                        mat,
                     ));
                 }
                 if apply {
-                    dents.remove(&q);
+                    if !dents.is_empty() {
+                        dents.remove(&q);
+                    }
                     self.queued += 1;
                 }
             } else {
@@ -2470,7 +2706,55 @@ pub fn material(w: &World, p: [i32; 3]) -> u16 {
     {
         return 0;
     }
+    // Above its column's ceiling a voxel is air: the same answer without
+    // asking the generator of a chunk nobody has edited (ADR-681).
+    if p[1] as u32 >= w.column_ceiling(p[0] as u32, p[2] as u32) {
+        return 0;
+    }
     w.material(p[0] as u32, p[1] as u32, p[2] as u32)
+}
+
+/// The set bits of a mask, lowest first.
+struct BitIter(u64);
+impl Iterator for BitIter {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        (self.0 != 0).then(|| {
+            let s = self.0.trailing_zeros() as usize;
+            self.0 &= self.0 - 1;
+            s
+        })
+    }
+}
+
+/// Each subcell's offset in its wave cell, in the canonical contact order:
+/// x fastest, then y, then z.
+fn subcell_offsets(edge: i32) -> Vec<[i32; 3]> {
+    let e = edge as usize;
+    (0..e * e * e)
+        .map(|s| [(s % e) as i32, (s / e % e) as i32, (s / (e * e)) as i32])
+        .collect()
+}
+
+/// No voxel of the wave cell at `p` with edge `edge` holds matter: every
+/// column under it tops out below it (ADR-681). Exact, from the world's
+/// column ceilings; a cell partly outside the world counts only its inside.
+fn cell_is_air(w: &World, p: [i32; 3], edge: i32) -> bool {
+    // Outside the world in height there is no matter; inside, only the
+    // part of the cell from the floor up counts.
+    let floor = p[1].max(0);
+    if p[1] + edge <= 0 || floor >= w.ny as i32 {
+        return true;
+    }
+    (p[2]..p[2] + edge).all(|z| {
+        (p[0]..p[0] + edge).all(|x| {
+            x < 0
+                || z < 0
+                || x >= w.nx as i32
+                || z >= w.nz as i32
+                || floor >= w.column_ceiling(x as u32, z as u32) as i32
+        })
+    })
 }
 
 /// A dome on the range (ADR-276): geometry from the layout, charge in the
@@ -4471,6 +4755,42 @@ impl BlastRange {
     pub fn step(&mut self) {
         self.step_observed(|_| {});
     }
+    /// The untouched chunks the coming drain changes are built ahead on
+    /// the physics pool, in the order the queue meets them, up to the
+    /// battle tuning's ceiling (ADR-681). Each is a function of the
+    /// generator alone, collected by index; the drain then finds it
+    /// built, and its own ceiling on materialisation does not hold the
+    /// crater back. A dig of air changes nothing and builds nothing.
+    fn build_drain_chunks(&mut self) {
+        use rayon::prelude::*;
+        let ceiling = self.battle.tuning.drain_chunk_ceiling;
+        if ceiling == 0 {
+            return;
+        }
+        let w = &self.world;
+        let mut wanted: Vec<usize> = Vec::new();
+        for e in w.queued_edits().take(w.max_edits_per_tick) {
+            let Some(ci) = w.chunk_of(e.x, e.y, e.z) else {
+                continue;
+            };
+            if wanted.last() == Some(&ci) || !w.chunk_fresh(ci) {
+                continue;
+            }
+            if e.mat == voxel::store::AIR && !w.solid(e.x, e.y, e.z) {
+                continue;
+            }
+            if !wanted.contains(&ci) {
+                wanted.push(ci);
+                if wanted.len() == ceiling {
+                    break;
+                }
+            }
+        }
+        let built: Vec<_> = wanted.par_iter().map(|&ci| w.build_chunk(ci)).collect();
+        for (ci, chunk) in wanted.into_iter().zip(built) {
+            self.world.install_chunk(ci, chunk);
+        }
+    }
     /// Resting debris is floor for this tick's motion (ADR-292), except
     /// a piece lying against a live hull's flank under that hull
     /// (ADR-302). Returns where the floor changed since the last step:
@@ -5176,6 +5496,8 @@ impl BlastRange {
             completed("capture");
             self.reserve_pending_damage();
             self.reserve_thermal_fragments();
+            self.matter.hull_reserve = self.battle.tuning.hull_piece_reserve;
+            self.matter.ground_waits = self.battle.tuning.ground_waits_for_pool;
             if let Some(e) = self.explosion.as_mut().filter(|e| !e.capturing()) {
                 let before: Vec<_> = self
                     .units
@@ -5257,6 +5579,7 @@ impl BlastRange {
         // Digging joins the queue last, under its own sub-pool, and the
         // drain's removals are credited before anything else reads them.
         self.dig_phase();
+        self.build_drain_chunks();
         self.world.flush();
         self.credit_digs();
         // A tank this drain filled turns to haul the same tick (ADR-673).
@@ -5277,9 +5600,9 @@ impl BlastRange {
         // bodies torn off a half-dug crater, or have a claimed cell taken
         // from under it. Cohesive bodies have their own pool; spare
         // particle slots must not decide whether a building can fall.
-        for e in self.world.edits() {
-            self.collapse_backlog.insert(*e);
-        }
+        // This drain's edits join the backlog below: in one pass when the
+        // layer takes the whole backlog this tick, one by one when it waits.
+        let fresh: Vec<voxel::world::Edit> = self.world.edits().to_vec();
         let mut crumbs: Vec<([u32; 3], u16)> = Vec::new();
         // Regional readiness (analysis 240, C1). The layer used to wait for
         // every wave and claim on the map, and under steady fire it never ran
@@ -5314,7 +5637,8 @@ impl BlastRange {
                 })
                 .collect()
         };
-        let has_collapse = !self.collapse_backlog.is_empty() || self.collapse.pending();
+        let has_collapse =
+            !self.collapse_backlog.is_empty() || !fresh.is_empty() || self.collapse.pending();
         // A body whose source digs have not drained yet still stands in the
         // world; a pass now could tear the same cells off twice. Global, and
         // short: the transfer queue drains whole each flush (ADR-431).
@@ -5344,7 +5668,19 @@ impl BlastRange {
         };
         let mut ready: Vec<voxel::world::Edit> = Vec::new();
         if has_collapse && !awaiting {
+            // The latest edit of each cell, in cell order: what inserting
+            // the drain into the backlog and admitting all of it gives
+            // (ADR-681), without a map entry per edit.
             ready = self.collapse_backlog.admit(|_| true);
+            ready.extend_from_slice(&fresh);
+            ready.sort_by_key(|e| [e.x, e.y, e.z]);
+            ready.reverse();
+            ready.dedup_by_key(|e| [e.x, e.y, e.z]);
+            ready.reverse();
+        } else {
+            for e in fresh {
+                self.collapse_backlog.insert(e);
+            }
         }
         let runs = has_collapse && !awaiting && (!ready.is_empty() || self.collapse.pending());
         let queued = ready.len() + self.collapse_backlog.len();
@@ -5548,17 +5884,23 @@ impl BlastRange {
             &|_, event| physics_detail(1, event),
         );
         completed("debris");
-        for e in self.world.edits() {
-            if e.mat == 0 {
-                self.surface_work
-                    .remove(&[e.x as i32, e.y as i32, e.z as i32]);
+        if !self.surface_work.is_empty() {
+            for e in self.world.edits() {
+                if e.mat == 0 {
+                    self.surface_work
+                        .remove(&[e.x as i32, e.y as i32, e.z as i32]);
+                }
             }
         }
         // What left the world for good this tick: a cell dug and put back
         // within one drain (ADR-299) was not removed, and nobody's digs —
         // the collapse layer's — are counted where they crumble (ADR-300)
         // or not at all when the body bakes back.
-        let mut dug: BTreeMap<[u32; 3], u16> = BTreeMap::new();
+        // Each cell's last say decides: a dig marks it removed with what it
+        // held, a fill clears the mark (zero), and a dig that removed
+        // nobody's matter says nothing. Sorted stably by cell, the last
+        // entry of each cell is that say.
+        let mut says: Vec<([u32; 3], u16)> = Vec::new();
         for &(e, previous) in self.world.completed() {
             let p = [e.x, e.y, e.z];
             if e.mat == 0 {
@@ -5566,14 +5908,18 @@ impl BlastRange {
                     && e.by != voxel::world::NOBODY
                     && e.expected_material().is_none_or(|x| x == previous)
                 {
-                    dug.insert(p, previous);
+                    says.push((p, previous));
                 }
             } else {
-                dug.remove(&p);
+                says.push((p, 0));
             }
         }
-        self.removed += dug.len();
-        for &mat in dug.values() {
+        says.sort_by_key(|(p, _)| *p);
+        for (i, &(p, mat)) in says.iter().enumerate() {
+            if mat == 0 || says.get(i + 1).is_some_and(|(q, _)| *q == p) {
+                continue;
+            }
+            self.removed += 1;
             if let Some(n) = self.removed_materials.get_mut(mat as usize) {
                 *n += 1;
             }
@@ -5720,7 +6066,9 @@ impl Explosion {
         }
         let contact_cursor = s.usize();
         let n = s.usize();
-        if n > 8192 {
+        // Each queued contact is a distinct cell of the grid; a wave's
+        // budget no longer bounds the queue at the old 8192 (ADR-681).
+        if n > wave.size().pow(3) || n > s.left() / 17 {
             return None;
         }
         let mut pending = std::collections::VecDeque::new();
@@ -5848,6 +6196,10 @@ impl Explosion {
             wave,
             captured,
             body_energy_mj: None,
+            frontier_ready: false,
+            solid: Vec::new(),
+            solid_next: 0,
+            solid_mats: Vec::new(),
         })
     }
 }
@@ -8826,6 +9178,9 @@ mod tests {
                 }
             }
             let at = [base[0] + 4 + offset, base[1], base[2]];
+            // A stock burst now finishes within its first tick (ADR-681);
+            // a small capture slice keeps this one live across the step.
+            a.config.capture_cells_per_tick = 1000;
             a.explosion = Some(Explosion::begin(at, &a.config, &a.units));
             let (lo, hi) = a.explosion.as_ref().unwrap().domain();
             assert!(
@@ -9785,54 +10140,67 @@ mod tests {
             "the wall must still protect the rear tank"
         );
     }
+    /// Re-qualified for ADR-681. Under the stock policy a ground cell the
+    /// small pool has no slot for is pulverised: the wave never waits, the
+    /// pieces stay within the pool, and every removed cell is a piece or
+    /// pulverised. Under the waiting policy a mod may keep, the wave
+    /// stalls on the pool and discards no matter, as before. Either way
+    /// the crater and the energy spent are those of an ordinary pool.
     #[test]
-    fn small_fragment_pool_defers_the_wave_without_discarding_matter() {
-        let mut r = BlastRange::new(config());
-        r.matter.tuning.max_flying = 16;
-        let mut stalled = false;
-        for _ in 0..6000 {
-            let before = r.removed;
-            r.step();
-            let m = &r.matter;
-            assert!(m.debris.fragments.iter().filter(|f| !f.resting).count() <= 16);
-            assert_eq!(
-                m.debris
-                    .fragments
-                    .iter()
-                    .map(|f| u64::from(f.count))
-                    .sum::<u64>(),
-                r.removed as u64
-            );
-            assert!(m.economy.ledger.balanced());
-            stalled |=
-                r.explosion.as_ref().is_some_and(|e| !e.pending.is_empty()) && r.removed == before;
-            if r.impact.is_some() && r.ready() {
-                break;
-            }
-        }
-        assert!(
-            stalled && r.ready() && r.removed > 100,
-            "stalled={stalled} ready={} removed={} moving={} first={:?}",
-            r.ready(),
-            r.removed,
-            r.matter
-                .debris
-                .fragments
-                .iter()
-                .filter(|f| !f.resting)
-                .count(),
-            r.matter
-                .debris
-                .fragments
-                .first()
-                .map(|f| (f.position, f.velocity))
-        );
+    fn small_fragment_pool_pulverises_or_defers_without_changing_the_crater() {
         let mut ordinary = BlastRange::new(config());
         for _ in 0..500 {
             ordinary.step();
         }
-        assert_eq!(r.removed_materials, ordinary.removed_materials);
-        assert_eq!(r.matter.spent_mj, ordinary.matter.spent_mj);
+        for waits in [false, true] {
+            let mut r = BlastRange::new(config());
+            r.matter.tuning.max_flying = 16;
+            let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
+            t.ground_waits_for_pool = waits;
+            let mut stalled = false;
+            let mut working = 0;
+            for _ in 0..6000 {
+                let before = r.removed;
+                r.step();
+                let m = &r.matter;
+                assert!(m.debris.fragments.iter().filter(|f| !f.resting).count() <= 16);
+                let pieces = m
+                    .debris
+                    .fragments
+                    .iter()
+                    .map(|f| u64::from(f.count))
+                    .sum::<u64>();
+                if waits {
+                    assert_eq!(pieces, r.removed as u64);
+                } else {
+                    assert!(pieces <= r.removed as u64);
+                    assert!(r.removed as u64 - pieces <= m.admission.pulverized);
+                }
+                assert!(m.economy.ledger.balanced());
+                stalled |= r.explosion.as_ref().is_some_and(|e| !e.pending.is_empty())
+                    && r.removed == before;
+                working += usize::from(r.explosion.as_ref().is_some_and(|e| e.working()));
+                if r.impact.is_some() && r.ready() {
+                    break;
+                }
+            }
+            assert!(
+                r.ready() && r.removed > 100,
+                "waits={waits} removed={}",
+                r.removed
+            );
+            if waits {
+                assert!(stalled, "the waiting policy no longer waits");
+            } else {
+                assert!(working <= 15, "the pulverising wave worked {working} ticks");
+                assert!(r.matter.admission.pulverized > 0, "nothing was pulverised");
+            }
+            assert_eq!(
+                r.removed_materials, ordinary.removed_materials,
+                "waits={waits}"
+            );
+            assert_eq!(r.matter.spent_mj, ordinary.matter.spent_mj, "waits={waits}");
+        }
     }
     #[test]
     fn switching_to_annihilation_keeps_existing_physical_debris() {
@@ -10116,6 +10484,9 @@ mod tests {
         }
     }
 
+    /// Re-qualified for ADR-681: under the stock policy a ground cell with
+    /// no slot is pulverised and the wave never stops inside a contact.
+    /// The waiting policy a mod may keep still stops there and resumes.
     #[test]
     fn a_single_fragment_slot_progresses_and_resumes_inside_a_contact() {
         let mut layout =
@@ -10125,6 +10496,7 @@ mod tests {
         let c = config();
         let mut a = BlastRange::with_layout(c, layout).unwrap();
         a.matter.tuning.max_flying = 1;
+        std::sync::Arc::make_mut(&mut a.battle.tuning).ground_waits_for_pool = true;
         for _ in 0..400 {
             a.step();
             if a.explosion
@@ -10141,6 +10513,7 @@ mod tests {
         assert_eq!(a.matter.debris.fragments.len(), 1);
         let mut b = BlastRange::restore(c, &a.snapshot()).unwrap();
         b.matter.tuning.max_flying = 1;
+        std::sync::Arc::make_mut(&mut b.battle.tuning).ground_waits_for_pool = true;
         for _ in 0..300 {
             a.step();
             b.step();
@@ -10731,7 +11104,9 @@ mod tests {
                             y as i32 - half as i32,
                             z as i32 - half as i32,
                         );
-                        let want = if cx * cx + cy * cy + cz * cz > radius2 {
+                        // Wholly under the world's floor is bedrock (ADR-681).
+                        let under = origin[1] + (y as i32 + 1) * c.cell_units <= 0;
+                        let want = if cx * cx + cy * cy + cz * cz > radius2 || under {
                             u32::MAX
                         } else {
                             let p = [
@@ -10920,6 +11295,11 @@ mod tests {
                                 continue;
                             }
                             let base = [0, 1, 2].map(|a| at[a] + q[a] * edge);
+                            // Wholly under the world's floor is bedrock (ADR-681).
+                            if base[1] + edge <= 0 {
+                                assert_eq!(e.wave.resistance_at([x, y, z]), u32::MAX);
+                                continue;
+                            }
                             let mut expected = 0;
                             for dz in 0..edge {
                                 for dy in 0..edge {

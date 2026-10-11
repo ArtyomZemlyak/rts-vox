@@ -11,15 +11,20 @@ fn crowded_waves(count: usize, capture: usize, propagation: usize) -> BlastRange
         .replace("energy: 3500", "energy: 1")
         .replace("material_energy_j: 45000000", "material_energy_j: 0")
         .replace(
-            "capture_cells_per_tick: 40000",
+            "capture_cells_per_tick: 49152",
             &format!("capture_cells_per_tick: {capture}"),
         )
         .replace(
-            "wave_work_per_tick: 4096",
+            "wave_work_per_tick: 32768",
             &format!("wave_work_per_tick: {propagation}"),
         );
     // These are accepted mod configurations, not invalid zero budgets.
     r.battle.shell_config = ExplosionConfig::from_ron(&text).unwrap();
+    assert_eq!(r.battle.shell_config.capture_cells_per_tick, capture);
+    assert_eq!(r.battle.shell_config.wave_work_per_tick, propagation);
+    // The tick's ceiling as small as one wave's budget: the legal quota
+    // is smaller than the queue, as the shared quota was (ADR-681).
+    ceilings(&mut r, capture, propagation);
     for i in 0..count {
         r.battle.waves.push(Burst {
             side: None,
@@ -33,6 +38,13 @@ fn crowded_waves(count: usize, capture: usize, propagation: usize) -> BlastRange
         });
     }
     r
+}
+
+fn ceilings(r: &mut BlastRange, capture: usize, work: usize) {
+    let t = std::sync::Arc::make_mut(&mut r.battle.tuning);
+    t.wave_capture_ceiling = capture;
+    t.wave_work_ceiling = work;
+    t.wave_contact_ceiling = work;
 }
 
 fn apply(r: &mut BlastRange) {
@@ -103,6 +115,9 @@ fn crowded_wave_budget_turn_survives_loading_a_partial_capture() {
     let mut scan = Scan::new(&bytes.v);
     let mut restored = Battle::new(&b.units, 1);
     restored.shell_config = b.battle.shell_config;
+    // The ceilings are data, not saved state: the restored battle runs the
+    // same tuning (ADR-681).
+    restored.tuning = b.battle.tuning.clone();
     let allied: Vec<_> = (0..b.units.len()).map(|id| b.allied(id)).collect();
     restored
         .load(
@@ -128,35 +143,35 @@ fn crowded_wave_budget_turn_survives_loading_a_partial_capture() {
     assert!(a.battle.waves.is_empty());
 }
 
+/// Re-qualified for ADR-681: the shared quota split into shares is gone;
+/// each wave takes its preset's own budget while the tick's ceiling over
+/// all waves lasts. The ceiling still caps the tick, a wave past it waits
+/// and is counted, and the rotation brings every wave into service.
 #[test]
-fn wave_shares_preserve_phase_caps_and_rotate_every_remainder() {
-    for count in 1..=16 {
-        for budget in [0, 1, 2, 3, 15, 16, 17, 4095, 4096, 8192, 40000, 1_000_000] {
-            let mut totals = vec![0; count];
-            for tick in 0..count {
-                let shares: Vec<_> = (0..count)
-                    .map(|turn| wave_share(budget, count, turn))
-                    .collect();
-                assert_eq!(shares.iter().sum::<usize>(), budget, "lost quota");
-                assert!(shares.iter().max().unwrap() - shares.iter().min().unwrap() <= 1);
-                for (turn, share) in shares.into_iter().enumerate() {
-                    totals[(tick + turn) % count] += share;
+fn wave_ceilings_hold_the_tick_and_rotate_every_wave_into_service() {
+    for count in [1, 3, 16] {
+        for ceiling in [1, 2, 5] {
+            let mut r = crowded_waves(count, 1, 1);
+            ceilings(&mut r, ceiling, ceiling);
+            let mut served = vec![0; count];
+            for _ in 0..count {
+                let before: Vec<_> = r.battle.waves.iter().map(|w| w.wave.captured).collect();
+                apply(&mut r);
+                assert_eq!(r.battle.waves.len(), count);
+                let mut charged = 0;
+                for (k, w) in r.battle.waves.iter().enumerate() {
+                    if w.wave.captured > before[k] {
+                        served[k] += 1;
+                        charged += 1;
+                    }
                 }
+                assert!(charged <= ceiling, "the ceiling did not cap the tick");
+                assert_eq!(r.battle.wave_held[0], count.saturating_sub(ceiling));
             }
             assert!(
-                totals.iter().all(|&paid| paid == budget),
-                "remainder starved a wave"
+                served.iter().all(|&s| s >= 1),
+                "a wave never came into service: {served:?}"
             );
-        }
-        // Different weapon profiles retain the common upper phase cap. A
-        // small charge cannot increase the share granted to a larger one.
-        let budgets: Vec<_> = (0..count).map(|i| 1 + i * 631).collect();
-        let cap = *budgets.iter().max().unwrap();
-        for tick in 0..count {
-            let paid: usize = (0..count)
-                .map(|turn| wave_share(budgets[(tick + turn) % count], count, turn))
-                .sum();
-            assert!(paid <= cap, "mixed profiles exceeded the phase cap");
         }
     }
 }

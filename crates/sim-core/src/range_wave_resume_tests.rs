@@ -37,6 +37,11 @@ fn fixture(edge: i32, points: bool) -> (BlastRange, Explosion, ExplosionConfig) 
     u.update_pose(0);
     r.matter = matter::Matter::new(&r.units);
     r.matter.begin(u32::MAX, 4);
+    // These tests hold contacts on a full pool and resume their exact
+    // cursors: the waiting policy a mod may keep (ADR-681). Under the stock
+    // one a ground cell with no slot is pulverised and never waits; hulls
+    // and cells another claim holds still wait on the same machinery.
+    r.matter.ground_waits = true;
     r.world.max_edits_per_tick = 1;
     let mut e = Explosion::with_damage(&r.world, [40, 2, 40], &c, &r.units, &r.surface_work);
     e.wave.advance_contacts(usize::MAX);

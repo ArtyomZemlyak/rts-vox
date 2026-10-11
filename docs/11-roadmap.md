@@ -161,8 +161,11 @@ grep -rn 'QUESTION' docs/ | grep stage-0
 
 ```
 sim-cli --ticks 600 --dump-hash
-battle ticks=600 threads=1 hash=e85ad6aa0597af3d
+battle ticks=600 threads=1 hash=00b7bec9fb9dfa7b
 ```
+
+Число записано на Linux после ADR-681 (мгновенный взрыв); владелец
+перепроверяет его на Windows.
 
 Хеш стабилен между запусками, **совпадает между одним и восемью
 воркерами физики** и переживает запись-загрузку на середине боя.

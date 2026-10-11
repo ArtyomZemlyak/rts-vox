@@ -21,8 +21,8 @@ use modding::range_skirmish::WorldBattle;
 use sim_core::blast::BlastRange;
 
 /// Хеш шестисотого тика эталонного боя.
-// ADR-663: stable debris support, contact separation and checked tumble.
-const GOLDEN_600: u64 = 0xe85a_d6aa_0597_af3d;
+// ADR-681: instant blasts. Recorded on Linux; to be re-verified on Windows.
+const GOLDEN_600: u64 = 0x00b7_bec9_fb9d_fa7b;
 
 /// Сценарий собирается **из тех же данных, что у игры**: `include_str!`
 /// разворачивается на сборке, ввода-вывода в тесте нет, а литералы

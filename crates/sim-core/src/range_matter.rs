@@ -71,6 +71,14 @@ pub struct Matter {
     /// Derived phase-local admission guard, rebuilt from the saved heat field.
     /// It is not additional capacity and never survives a simulation tick.
     thermal_reserve: u32,
+    /// Pool slots a wave's ground cells leave to the hulls it strikes
+    /// (ADR-681): the battle tuning's, set before each wave phase. Data,
+    /// not state; never saved.
+    pub(crate) hull_reserve: u32,
+    /// A wave's ground cell with no slot waits for one instead of being
+    /// pulverised (ADR-681): the battle tuning's choice, set like
+    /// `hull_reserve`. Data, not state; never saved.
+    pub(crate) ground_waits: bool,
     body_heat_reserve: u32,
     damage_waiting: bool,
     damage_tick: u64,
@@ -113,6 +121,8 @@ pub struct AdmissionProfile {
     pub terrain_melt: [u64; 4],
     /// Body melt: applied, pool deferred.
     pub melt: [u64; 2],
+    /// Wave ground cells dug with no piece: no slot or no claim room (ADR-681).
+    pub pulverized: u64,
     /// Fragment scans through claim_room (not all capacity/physics queries).
     pub room_scans: u64,
     pub room_items: u64,
@@ -192,6 +202,8 @@ impl Matter {
             density_history: false,
             batch: None,
             thermal_reserve: 0,
+            hull_reserve: 0,
+            ground_waits: false,
             body_heat_reserve: 0,
             damage_waiting: false,
             damage_tick: 0,
@@ -481,6 +493,16 @@ impl Matter {
         self.remaining_mj = u64::from(joules) * 1000;
         self.supplied_mj += self.remaining_mj;
     }
+    /// Count a ground claim the wave has no energy for, as `ground`
+    /// would refuse it: on the frame, or unaffordable. Diagnostic only.
+    pub(crate) fn count_unpaid(&mut self, w: &World, p: [i32; 3]) {
+        let gate = if claimable(w, p) { 1 } else { 5 };
+        self.admission.ground[gate] += 1;
+    }
+    /// What claiming one voxel of this ground costs, millijoules.
+    pub(crate) fn ground_price(&self, mat: u16) -> u64 {
+        self.cost(mat).0
+    }
     fn cost(&self, mat: u16) -> (u64, u64) {
         let d = self.economy.mats.get(mat).expect("range material");
         crate::burst::fracture_cost_mj(d.strength, voxel::unit::WORLD_MM, &self.tuning)
@@ -665,6 +687,75 @@ impl Matter {
             return ClaimResult::Deferred;
         }
         self.admission.ground[0] += 1;
+        self.pay(cost);
+        ClaimResult::Applied
+    }
+    /// A wave's ground cell (ADR-681). It becomes a piece where the pool
+    /// has a slot and the claim ceiling has room; where neither has, the
+    /// cell is dug all the same and its matter, taken by nobody, is the
+    /// crater's (the "pulverised by a crater" sink). The price is the
+    /// same either way, so the crater does not depend on how full the
+    /// pool is. A cell another claim already holds still waits for it.
+    /// `m` is the cell's material, as the caller has just read it.
+    pub fn ground_or_pulverize(
+        &mut self,
+        w: &mut World,
+        p: [i32; 3],
+        m: voxel::store::Mat,
+        at: [i32; 3],
+    ) -> ClaimResult {
+        if !claimable(w, p) {
+            self.admission.ground[5] += 1;
+            return ClaimResult::Indestructible;
+        }
+        let (cost, motion) = self.cost(m);
+        if cost > self.remaining_mj {
+            self.admission.ground[1] += 1;
+            return ClaimResult::Unaffordable;
+        }
+        // Ground pieces take only the room above the hulls' reserve. A
+        // ground cell that waits for a slot waits for any: a reserve as
+        // large as the pool would hold it for ever.
+        let room = self.claim_room();
+        let reserve = if self.ground_waits {
+            0
+        } else {
+            self.hull_reserve
+        };
+        let before = room.saturating_sub(reserve);
+        let mut ground = before;
+        let applied = self.debris.claim_voxel_checked(
+            w,
+            p.map(|v| v as u32),
+            m,
+            at,
+            motion,
+            self.fragment_box,
+            &self.tuning,
+            &mut ground,
+        );
+        let room = (i64::from(room) - i64::from(before) + i64::from(ground)).max(0) as u32;
+        if let Some(cached) = self.batch.as_mut().and_then(|batch| batch.room.as_mut()) {
+            *cached = room;
+        }
+        use crate::burst::GroundClaimError;
+        match applied {
+            Ok(()) => self.admission.ground[0] += 1,
+            Err(GroundClaimError::NoRoom | GroundClaimError::ClaimLimit) if !self.ground_waits => {
+                let [x, y, z] = p.map(|v| v as u32);
+                w.queue_edit(voxel::world::Edit::dig_if(x, y, z, m));
+                self.admission.pulverized += 1;
+            }
+            Err(reason) => {
+                self.admission.ground[match reason {
+                    GroundClaimError::NoRoom => 2,
+                    GroundClaimError::ClaimLimit => 3,
+                    GroundClaimError::PendingCell => 4,
+                    GroundClaimError::Outside | GroundClaimError::Frame => 5,
+                }] += 1;
+                return ClaimResult::Deferred;
+            }
+        }
         self.pay(cost);
         ClaimResult::Applied
     }

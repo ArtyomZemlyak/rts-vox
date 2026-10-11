@@ -59,6 +59,9 @@ struct TickProfile {
     collapse_backlog_observed_age_ticks: u32,
     ordinary_room_scans: u64,
     ordinary_room_items: u64,
+    /// Live waves after the tick, and waves its ceilings held (ADR-681).
+    waves: usize,
+    waves_held: usize,
 }
 
 /// Bench-local clocks. No timestamps or queue scans enter the simulation.
@@ -1032,6 +1035,8 @@ fn main() {
             profile.ordinary_room_scans = ordinary_room[0] - ordinary_room_previous[0];
             profile.ordinary_room_items = ordinary_room[1] - ordinary_room_previous[1];
             ordinary_room_previous = ordinary_room;
+            profile.waves = sim.battle.wave_counts().iter().sum();
+            profile.waves_held = sim.battle.wave_held.iter().sum();
             profile.felling_head_observed_age_ticks =
                 felling_head_age.observe(sim.tick, sim.matter.felling_head());
             profile.collapse_backlog_observed_age_ticks = collapse_backlog_age
@@ -1425,11 +1430,11 @@ fn main() {
     }
     if let Some(path) = tick_csv {
         let mut out = std::io::BufWriter::new(std::fs::File::create(path).expect("tick CSV path"));
-        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic,battle_wave_step_us,battle_wave_steps,battle_capture_us,battle_flight_us,battle_damage_us,flight_us,capture_us,wave_us,unit_fire_us,heat_exchange_us,accounting_us,observed_phases_us,unobserved_us,felling_arrivals,felling_visits,felling_retired,felling_released,felling_capacity_deferrals,felling_head_observed_age_ticks,collapse_backlog_observed_age_ticks,ordinary_room_scans,ordinary_room_items").unwrap();
+        writeln!(out, "tick,total_us,motion_us,route_us,commit_us,contact_us,felling_us,debris_us,battle_ai_us,battle_orders_us,battle_pose_us,battle_los_us,battle_laser_us,battle_beam_us,battle_halo_us,rubble_us,heat_flush_us,searching,moving,blocked,fragments,flying,chunks,felling,feet_us,collapse_us,collapse_queued,collapse_submitted,collapse_blocked_by,collapse_blocked_ticks,collapse_candidates,collapse_buffer_peak,kinetic_resume_us,pending_kinetic,battle_wave_step_us,battle_wave_steps,battle_capture_us,battle_flight_us,battle_damage_us,flight_us,capture_us,wave_us,unit_fire_us,heat_exchange_us,accounting_us,observed_phases_us,unobserved_us,felling_arrivals,felling_visits,felling_retired,felling_released,felling_capacity_deferrals,felling_head_observed_age_ticks,collapse_backlog_observed_age_ticks,ordinary_room_scans,ordinary_room_items,waves,waves_held").unwrap();
         for p in &tick_profiles {
             writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 p.tick,
                 p.total_us,
                 p.motion_us,
@@ -1485,7 +1490,9 @@ fn main() {
                 p.felling_head_observed_age_ticks,
                 p.collapse_backlog_observed_age_ticks,
                 p.ordinary_room_scans,
-                p.ordinary_room_items
+                p.ordinary_room_items,
+                p.waves,
+                p.waves_held
             )
             .unwrap();
         }

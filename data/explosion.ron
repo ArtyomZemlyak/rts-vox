@@ -14,9 +14,9 @@
     // charge can tear the exposed face instead of leaving it immaculate.
     steel_resistance: 6000,
     unit_role_resistance_milli: (1000, 1800, 650, 1100, 350),
-    wave_work_per_tick: 4096,
-    capture_cells_per_tick: 40000,
-    edits_per_tick: 8192,
+    wave_work_per_tick: 32768,
+    capture_cells_per_tick: 49152,
+    edits_per_tick: 65536,
     // Connected large fragments mixed with smaller chips (ADR-475).
     fragment_box: 4,
     // Push on a hull: thousandths of a newton-second per unit of wave
