@@ -3239,7 +3239,9 @@ impl BlastRange {
     }
     pub fn snapshot(&self) -> Vec<u8> {
         let mut b = fx::blob::Blob::new();
-        let version = if self.has_banks() {
+        let version = if self.has_reclaim() {
+            64
+        } else if self.has_banks() {
             63
         } else if self.has_economy() {
             62
@@ -3495,7 +3497,9 @@ impl BlastRange {
                     .any(|u| u.kind.canister() || artillery::elevates(u.kind))
                 || artillery::elevates(self.gun.kind))
         {
-            let format = if self.has_banks() {
+            let format = if self.has_reclaim() {
+                64
+            } else if self.has_banks() {
                 63
             } else if economy {
                 62
@@ -3546,6 +3550,13 @@ impl BlastRange {
         if let Some(h) = self.mining.as_ref().and_then(|m| m.haul()) {
             if version < 63 {
                 h.save(b);
+            }
+        }
+        // Version 64 holds every section of 62, the haul when the range has
+        // banks, and then the reclaim (ADR-674).
+        if let Some(rc) = self.mining.as_ref().and_then(|m| m.reclaim()) {
+            if version < 64 {
+                rc.save(b);
             }
         }
     }
@@ -3617,7 +3628,7 @@ impl BlastRange {
         observe("header", 0, None);
         let mut s = fx::blob::Scan::new(bytes);
         let version = s.u32();
-        if !(27..=63).contains(&version) {
+        if !(27..=64).contains(&version) {
             return None;
         }
         let extended = s.bool();
@@ -3654,7 +3665,12 @@ impl BlastRange {
         } else {
             Self::build_scene(config, None, extended, witness)
         };
-        if (version >= 62) != r.has_economy() || (version >= 63) != r.has_banks() {
+        // Version 64 is the reclaim's, with or without banks; below it 63
+        // is exactly the banks'.
+        if (version >= 62) != r.has_economy()
+            || (version >= 64) != r.has_reclaim()
+            || (version < 64 && (version >= 63) != r.has_banks())
+        {
             return None;
         }
         if let Some(current) = configured {
@@ -4186,9 +4202,13 @@ impl BlastRange {
             observe("economy", bytes.len() - s.left(), None);
             r.load_mining(&mut s)?;
         }
-        if version >= 63 {
+        if version >= 63 && r.has_banks() {
             observe("haul", bytes.len() - s.left(), None);
             r.load_haul(&mut s)?;
+        }
+        if version >= 64 {
+            observe("reclaim", bytes.len() - s.left(), None);
+            r.load_reclaim(&mut s)?;
         }
         observe("tail", bytes.len() - s.left(), None);
         if !s.ok() || s.left() != 0 {
@@ -5558,6 +5578,9 @@ impl BlastRange {
                 *n += 1;
             }
         }
+        // Every death of the tick is in: a dead digger's tank breaches
+        // (ADR-674).
+        self.breach_dead_tanks();
         self.tick += 1;
         completed("accounting");
     }

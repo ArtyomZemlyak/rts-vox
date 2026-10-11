@@ -1,5 +1,7 @@
-//! Dig economy of the range (plan 245, slices 0, 1 and 3; ADR-672,
-//! ADR-673). Hauling to the docks and the sides' stores — [`haul`].
+//! Dig economy of the range (plan 245, slices 0, 1, 3 and 6; ADR-672,
+//! ADR-673, ADR-674). Hauling to the docks and the sides' stores —
+//! [`haul`]; reclaim of resting debris and dead diggers' tanks —
+//! [`reclaim`].
 //!
 //! A unit whose kind has a tank takes `Order::Dig(face)`. Within reach of
 //! its face it queues the ball of `dig_radius` around it, a cell at a time,
@@ -23,12 +25,14 @@
 use super::{battle, BlastRange, RangeUnit};
 use crate::matter::{Amount, ContainerId, Kind, Ledger};
 use fx::blob::{Blob, Scan};
-use modding::range_economy::RangeEconomy;
+use modding::range_economy::{KindEconomy, RangeEconomy};
 use std::collections::BTreeMap;
 use voxel::store::AIR;
 
 #[path = "range_haul.rs"]
 pub mod haul;
+#[path = "range_reclaim.rs"]
+pub mod reclaim;
 #[cfg(test)]
 #[path = "range_economy_tests.rs"]
 mod tests;
@@ -51,6 +55,17 @@ struct Reservation {
     amount: Amount,
 }
 
+/// A digger at its face this tick: its kind's entry, the dig edits it has
+/// left this tick and whether its tank is full.
+#[derive(Clone, Copy, Debug)]
+struct Digger {
+    id: usize,
+    face: [i32; 3],
+    k: KindEconomy,
+    rate: u32,
+    full: bool,
+}
+
 /// The economy's state on a range whose layout has an economy section.
 pub struct Mining {
     data: RangeEconomy,
@@ -68,6 +83,8 @@ pub struct Mining {
     pub deferred: u64,
     /// Hauling and the sides' stores, with a bank section (ADR-673).
     haul: Option<haul::Haul>,
+    /// Reclaim, with a reclaim section (ADR-674).
+    reclaim: Option<reclaim::Reclaim>,
 }
 
 impl Mining {
@@ -94,6 +111,7 @@ impl Mining {
             .bank
             .is_some()
             .then(|| haul::Haul::new(&data, units, sides, ledger, allied_store));
+        let reclaim = data.reclaim.map(|r| reclaim::Reclaim::new(r, units.len()));
         Self {
             data,
             tanks,
@@ -104,6 +122,7 @@ impl Mining {
             misses: 0,
             deferred: 0,
             haul,
+            reclaim,
         }
     }
     pub fn data(&self) -> &RangeEconomy {
@@ -217,27 +236,45 @@ impl BlastRange {
                 u.motion.stop();
             }
             if ledger.room(tank) > m.inflight[id] {
-                diggers.push((id, face, *k));
+                diggers.push(Digger {
+                    id,
+                    face,
+                    k: *k,
+                    rate: k.dig_edits_per_tick,
+                    full: false,
+                });
             } else {
                 m.mark_full(id);
             }
-        }
-        if diggers.is_empty() {
-            return;
         }
         // At least one edit a tick stays with everything else.
         let pool =
             (m.data.dig_edits_in_flight as usize).min(world.max_edits_per_tick.saturating_sub(1));
         let mut left = pool.saturating_sub(m.reserved.len());
+        // Debris at the face goes first, from the same rate and sub-pool
+        // (ADR-674); a digger away from its face forgets its reclaim.
+        let mut starved = reclaim::reclaim(m, units, matter, *tick, &mut diggers, &mut left);
+        if diggers.is_empty() {
+            return;
+        }
+        let ledger = &matter.economy.ledger;
         let n = diggers.len();
         let start = *tick as usize % n;
         let mut cursor = voxel::World::mat_cursor();
-        let mut starved = false;
         'diggers: for step in 0..n {
-            let (id, face, k) = diggers[(start + step) % n];
+            let Digger {
+                id,
+                face,
+                k,
+                rate,
+                full,
+            } = diggers[(start + step) % n];
+            if full || rate == 0 {
+                continue;
+            }
             let tank = m.tank(id).expect("digger has a tank");
             let mut room = ledger.room(tank) - m.inflight[id];
-            let mut rate = k.dig_edits_per_tick;
+            let mut rate = rate;
             for d in ball(k.dig_radius as i32) {
                 let p = [face[0] + d[0], face[1] + d[1], face[2] + d[2]];
                 if p.iter().any(|v| *v < 0) {

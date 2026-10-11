@@ -5989,6 +5989,20 @@ impl Bursts {
         }
         nav::vehicle::Rubble::from_sorted(columns)
     }
+    /// Remove the resting pieces whose matter a digger took whole
+    /// (ADR-674): their geometry, their wreck entries and their emptied
+    /// containers, in order and in the tick they were taken. What rested on
+    /// them finds no support at its next rest check and falls (ADR-291).
+    pub(crate) fn retire_reclaimed(&mut self, e: &mut Economy, taken: &BTreeSet<u32>) {
+        retain_live(&mut self.fragments, taken, |f| f.held, true);
+        retain_live(&mut e.wrecks, taken, |w| w.held, true);
+        for &held in taken {
+            assert!(
+                e.ledger.retire_empty_debris(held),
+                "a reclaimed piece leaves empty debris"
+            );
+        }
+    }
     /// Before empty wreck containers are released/reused, remove their geometry.
     pub fn sweep(&mut self, e: &Economy) {
         self.corpses.retain(|held, _| e.ledger.held(*held) > 0);

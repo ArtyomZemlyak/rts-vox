@@ -35,6 +35,8 @@ fn layout(tank: u64, base_store: u64, store: u64) -> RangeLayout {
         weapon: None,
     });
     let mut e = RangeEconomy::stock();
+    // Slice 3: no reclaim, so the snapshot is 63.
+    e.reclaim = None;
     let k = e.kind_mut(RangeUnitKind::Tank).unwrap();
     k.tank = tank;
     k.dig_radius = 3;

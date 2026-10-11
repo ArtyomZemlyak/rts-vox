@@ -111,6 +111,10 @@ impl Haul {
             search_deferred: 0,
         }
     }
+    /// The dig phase found no room for the next cell or piece.
+    pub(crate) fn mark_full(&mut self, id: usize) {
+        self.full[id] = true;
+    }
     fn store_of(&self, id: usize) -> ContainerId {
         self.stores[usize::from(!self.sides[id])]
     }
@@ -170,7 +174,7 @@ impl Mining {
     /// full tank simply stops digging (ADR-672).
     pub(crate) fn mark_full(&mut self, id: usize) {
         if let Some(h) = self.haul.as_mut() {
-            h.full[id] = true;
+            h.mark_full(id);
         }
     }
     /// A new order ends the round trip: the order decides where to go.
