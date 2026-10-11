@@ -121,6 +121,51 @@ pub trait Generator: Send + Sync {
     }
 }
 
+/// Queued removals counted per voxel (ADR-683): a dense table per chunk,
+/// held only while the chunk has a removal queued. A count, not a flag:
+/// legacy queues may hold one cell twice. Derived from the queues; never
+/// saved or hashed. A salvo queues tens of thousands of digs a tick, and
+/// a count in place costs no search.
+#[derive(Clone, Default)]
+struct PendingDigs {
+    chunks: Vec<Option<Box<[u32]>>>,
+    totals: Vec<u32>,
+}
+impl PendingDigs {
+    fn new(chunks: usize) -> Self {
+        Self {
+            chunks: vec![None; chunks],
+            totals: vec![0; chunks],
+        }
+    }
+    fn add(&mut self, (chunk, voxel): (usize, usize)) {
+        let table =
+            self.chunks[chunk].get_or_insert_with(|| vec![0; CS * CS * CS].into_boxed_slice());
+        table[voxel] += 1;
+        self.totals[chunk] += 1;
+    }
+    fn remove(&mut self, (chunk, voxel): (usize, usize)) {
+        let table = self.chunks[chunk].as_mut().expect("queued dig indexed");
+        assert!(table[voxel] > 0, "queued dig indexed");
+        table[voxel] -= 1;
+        self.totals[chunk] -= 1;
+        if self.totals[chunk] == 0 {
+            self.chunks[chunk] = None;
+        }
+    }
+    fn contains(&self, (chunk, voxel): (usize, usize)) -> bool {
+        self.chunks[chunk].as_ref().is_some_and(|t| t[voxel] > 0)
+    }
+    fn clear(&mut self) {
+        for (table, total) in self.chunks.iter_mut().zip(&mut self.totals) {
+            if *total > 0 {
+                *table = None;
+                *total = 0;
+            }
+        }
+    }
+}
+
 /// Что вернул дренаж очереди.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct FlushStats {
@@ -201,7 +246,7 @@ pub struct World {
     /// Derived counts of queued removals, including transfers. A cell
     /// already paid for must not be claimed again before its edit drains.
     /// Counts retain duplicates from legacy queues; never saved or hashed.
-    pending_digs: std::collections::BTreeMap<u64, usize>,
+    pending_digs: PendingDigs,
     /// Передачи материи между миром и телом (ADR-431): исходные ячейки
     /// оторванного тела и запекание приземлившегося. Дренаж берёт их
     /// первыми и целиком — их число ограничено тем, кто их ставит, —
@@ -466,7 +511,7 @@ impl World {
                 .collect(),
             wx: nx.div_ceil(64),
             queue: std::collections::VecDeque::new(),
-            pending_digs: std::collections::BTreeMap::new(),
+            pending_digs: PendingDigs::new((cx * cy * cz) as usize),
             transfers: std::collections::VecDeque::new(),
             applied: Vec::new(),
             taken: Vec::new(),
@@ -1145,38 +1190,43 @@ impl World {
         self.queue.iter()
     }
 
-    fn dig_key(&self, x: u32, y: u32, z: u32) -> u64 {
-        (u64::from(z) * u64::from(self.ny) + u64::from(y)) * u64::from(self.nx) + u64::from(x)
+    /// The chunk and the voxel within it that a queued dig is counted at.
+    fn dig_key(&self, x: u32, y: u32, z: u32) -> (usize, usize) {
+        let cs = CS as u32;
+        (
+            self.chunk_index(x, y, z),
+            (((z % cs) * cs + y % cs) * cs + x % cs) as usize,
+        )
     }
     fn remember_dig(&mut self, e: Edit) {
         if e.mat == AIR {
             let key = self.dig_key(e.x, e.y, e.z);
-            *self.pending_digs.entry(key).or_default() += 1;
+            self.pending_digs.add(key);
         }
     }
     fn forget_dig(&mut self, e: Edit) {
         if e.mat == AIR {
             let key = self.dig_key(e.x, e.y, e.z);
-            let count = self.pending_digs.get_mut(&key).expect("queued dig indexed");
-            *count -= 1;
-            if *count == 0 {
-                self.pending_digs.remove(&key);
-            }
+            self.pending_digs.remove(key);
         }
     }
     fn rebuild_pending_digs(&mut self) {
         self.pending_digs.clear();
-        for e in self.queue.iter().chain(&self.transfers) {
-            if e.mat == AIR {
-                let key = self.dig_key(e.x, e.y, e.z);
-                *self.pending_digs.entry(key).or_default() += 1;
-            }
+        let digs: Vec<(usize, usize)> = self
+            .queue
+            .iter()
+            .chain(&self.transfers)
+            .filter(|e| e.mat == AIR)
+            .map(|e| self.dig_key(e.x, e.y, e.z))
+            .collect();
+        for key in digs {
+            self.pending_digs.add(key);
         }
     }
     /// A removal already waits in either queue. Live material is unchanged
     /// until drain, but another producer must wait instead of paying twice.
     pub fn has_pending_dig(&self, x: u32, y: u32, z: u32) -> bool {
-        self.inside(x, y, z) && self.pending_digs.contains_key(&self.dig_key(x, y, z))
+        self.inside(x, y, z) && self.pending_digs.contains(self.dig_key(x, y, z))
     }
 
     /// Передачи между миром и телом, ждущие дренажа (ADR-431).

@@ -1750,37 +1750,6 @@ fn same_sizes(u: &RangeUnit, sizes: &[u16]) -> bool {
         })
 }
 
-/// The body cells each wave cell of this step's visits owns, read ahead
-/// with the matter (ADR-681): by wave cell and actor, sorted, a range of
-/// `contacts`; and the body sizes each actor had when they were read.
-/// Never saved.
-#[derive(Default)]
-struct BodyAhead {
-    index: Vec<(([i32; 3], usize), u32, u32)>,
-    contacts: Vec<wave_cells::Contact>,
-    sizes: Vec<Vec<u16>>,
-}
-impl BodyAhead {
-    fn clear(&mut self) {
-        self.index.clear();
-        self.contacts.clear();
-        self.sizes.clear();
-    }
-    /// Where in `contacts` the cells of `u`, actor `actor`, that wave cell
-    /// `cell` owns lie, if they were read ahead at the body sizes `u` has.
-    fn get(&self, cell: [i32; 3], actor: usize, u: &RangeUnit) -> Option<(usize, usize)> {
-        if !self.sizes.get(actor).is_some_and(|s| same_sizes(u, s)) {
-            return None;
-        }
-        let k = self
-            .index
-            .binary_search_by_key(&(cell, actor), |e| e.0)
-            .ok()?;
-        let (_, start, len) = self.index[k];
-        Some((start as usize, len as usize))
-    }
-}
-
 pub struct Explosion {
     pub at: [i32; 3],
     origin: [i32; 3],
@@ -1828,7 +1797,10 @@ pub struct Explosion {
     solid_index: Vec<([i32; 3], u32)>,
     solid_next: usize,
     solid_mats: Vec<u16>,
-    body_ahead: BodyAhead,
+    /// Each hull's cells by the wave cell owning them, built when a
+    /// contact first needs them (ADR-681): a function of the frozen poses
+    /// and the body sizes, kept while the sizes hold. Never saved.
+    body_maps: Vec<Option<wave_cells::BodyMap>>,
 }
 
 impl Explosion {
@@ -1921,7 +1893,7 @@ impl Explosion {
             solid_index: Vec::new(),
             solid_next: 0,
             solid_mats: Vec::new(),
-            body_ahead: BodyAhead::default(),
+            body_maps: Vec::new(),
         }
     }
 
@@ -2030,17 +2002,27 @@ impl Explosion {
         spent: Option<(&matter::Matter, &ExplosionConfig, u64)>,
     ) {
         self.drop_contacts();
+        // A wave with no share of the tick's contacts visits nothing.
+        if budget == 0 || self.pending.is_empty() {
+            return;
+        }
         let offsets = subcell_offsets(self.cell);
-        // A step visits at most this many cells, in about this order: a
-        // step with contacts to resume visits those still owing body work
-        // first (`prefer_body_contacts`). Read in another order, the cells
-        // are found all the same, by the index below.
+        // A step visits at most this many cells, in about this order: the
+        // billable prefix of the queue, except that a step with contacts
+        // to resume visits those still owing body work first
+        // (`prefer_body_contacts`), which only a hull near the field can.
+        // Read in another order, the cells are found all the same, by the
+        // index below; a cell not read is read when visited.
         let visits = self.pending.len().min(budget);
-        let order: Vec<phys::blast::Hit> = if self.contact_resumes.is_empty() {
+        let roster = &units[..self.roster(units.len())];
+        let boxes = self.unit_boxes(roster);
+        let (domain_lo, domain_hi) = self.domain();
+        let near = boxes
+            .iter()
+            .any(|(lo, hi)| (0..3).all(|a| domain_lo[a] <= hi[a] && domain_hi[a] > lo[a]));
+        let order: Vec<phys::blast::Hit> = if self.contact_resumes.is_empty() || !near {
             self.pending.range(..visits).copied().collect()
         } else {
-            let roster = &units[..self.roster(units.len())];
-            let boxes = self.unit_boxes(roster);
             let count = roster.len();
             let mut first: Vec<phys::blast::Hit> = Vec::new();
             let mut rest: Vec<phys::blast::Hit> = Vec::new();
@@ -2143,69 +2125,48 @@ impl Explosion {
             return;
         }
         let (origin, edge) = (self.origin, self.cell);
-        let mut pairs: Vec<([i32; 3], usize)> = Vec::new();
-        for &(cell, _, _) in &self.solid {
-            let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
-            pairs.extend(near.iter().copied().filter_map(|i| {
+        // Hulls whose box meets a cell read ahead and whose map is missing
+        // or was built at other body sizes.
+        self.body_maps.resize_with(units.len(), || None);
+        let wanted: Vec<usize> = near
+            .into_iter()
+            .filter(|&i| {
                 let (lo, hi) = boxes[i];
-                (0..3)
-                    .all(|a| p[a] <= hi[a] && p[a] + edge > lo[a])
-                    .then_some((cell, i))
-            }));
-        }
-        if pairs.is_empty() {
+                !self.body_maps[i]
+                    .as_ref()
+                    .is_some_and(|m| same_sizes(&units[i], &m.sizes))
+                    && self.solid.iter().any(|&(cell, _, _)| {
+                        let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+                        (0..3).all(|a| p[a] <= hi[a] && p[a] + edge > lo[a])
+                    })
+            })
+            .collect();
+        if wanted.is_empty() {
             return;
         }
-        pairs.sort_unstable();
-        pairs.dedup();
-        let mut actors: Vec<usize> = pairs.iter().map(|&(_, i)| i).collect();
-        actors.sort_unstable();
-        actors.dedup();
-        let frames: Vec<HitFrames> = actors
-            .iter()
+        let grid = wave_cells::Grid {
+            origin,
+            edge,
+            n: self.wave.size(),
+        };
+        let (poses, seg_poses) = (&self.poses, &self.seg_poses);
+        let (deltas, pitches) = (&self.turret_deltas, &self.turret_pitches);
+        let maps: Vec<Option<wave_cells::BodyMap>> = wanted
+            .par_iter()
             .map(|&i| {
-                HitFrames::new(
+                let frames =
+                    HitFrames::new(&units[i], poses[i], &seg_poses[i], deltas[i], pitches[i]);
+                frames.body_map(
                     &units[i],
-                    self.poses[i],
-                    &self.seg_poses[i],
-                    self.turret_deltas[i],
-                    self.turret_pitches[i],
+                    &poses[i],
+                    &seg_poses[i],
+                    grid,
+                    body_sizes(&units[i]),
                 )
             })
             .collect();
-        let (poses, seg_poses) = (&self.poses, &self.seg_poses);
-        // Per task: how many cells each pair owns, and the cells in order.
-        let lists: Vec<(Vec<u32>, Vec<wave_cells::Contact>)> = pairs
-            .par_chunks(READ_PAIRS)
-            .map(|chunk| {
-                let mut lens = Vec::with_capacity(chunk.len());
-                let mut out = Vec::new();
-                let mut one = Vec::new();
-                for &(cell, i) in chunk {
-                    let p: [i32; 3] = std::array::from_fn(|a| origin[a] + cell[a] * edge);
-                    let frame = &frames[actors.binary_search(&i).expect("actor read")];
-                    frame.wave_cells(&units[i], &poses[i], &seg_poses[i], p, edge, &mut one);
-                    lens.push(one.len() as u32);
-                    out.extend_from_slice(&one);
-                }
-                (lens, out)
-            })
-            .collect();
-        let ahead = &mut self.body_ahead;
-        let mut pair = pairs.into_iter();
-        for (lens, out) in lists {
-            let mut start = ahead.contacts.len() as u32;
-            ahead.contacts.extend_from_slice(&out);
-            for len in lens {
-                ahead
-                    .index
-                    .push((pair.next().expect("pair read"), start, len));
-                start += len;
-            }
-        }
-        ahead.sizes = vec![Vec::new(); units.len()];
-        for &i in &actors {
-            ahead.sizes[i] = body_sizes(&units[i]);
+        for (i, map) in wanted.into_iter().zip(maps) {
+            self.body_maps[i] = map;
         }
     }
     /// The ground's share of `energy`, as `claim_energy` gives it.
@@ -2220,7 +2181,6 @@ impl Explosion {
         self.solid_index.clear();
         self.solid_next = 0;
         self.solid_mats.clear();
-        self.body_ahead.clear();
     }
     /// Read a cell's matter: a bit per subcell holding some, and where its
     /// materials start in `solid_mats`.
@@ -2519,7 +2479,14 @@ impl Explosion {
                     let query = queries[actor].as_ref().expect("prepared hit frames");
                     // The cells read ahead, or else asked now.
                     let read = (!self.point_contacts)
-                        .then(|| self.body_ahead.get(hit.cell, actor, u))
+                        .then(|| {
+                            let map = self.body_maps.get(actor)?.as_ref()?;
+                            same_sizes(u, &map.sizes).then(|| {
+                                let n = self.wave.size();
+                                let c = hit.cell.map(|v| v as usize);
+                                map.range(((c[2] * n + c[1]) * n + c[0]) as u32)
+                            })
+                        })
                         .flatten();
                     if self.point_contacts {
                         contacts.extend(query.hit(u, q));
@@ -2536,7 +2503,10 @@ impl Explosion {
                     let listed = read.map_or(contacts.len(), |(_, len)| len);
                     while self.body_cursor < listed {
                         let (part, cell) = match read {
-                            Some((start, _)) => self.body_ahead.contacts[start + self.body_cursor],
+                            Some((start, _)) => self.body_maps[actor]
+                                .as_ref()
+                                .expect("body map read")
+                                .contact(start + self.body_cursor),
                             None => contacts[self.body_cursor],
                         };
                         let solid = if part == 0 {
@@ -3126,7 +3096,6 @@ fn subcell_offsets(edge: i32) -> Vec<[i32; 3]> {
 /// per task within a batch (ADR-681). Sizes of work, not of the game.
 const READ_BATCH: usize = 2048;
 const READ_CHUNK: usize = 64;
-const READ_PAIRS: usize = 8;
 
 /// Ground prices by material, asked once each per read-ahead.
 #[derive(Default)]
@@ -6833,7 +6802,7 @@ impl Explosion {
             solid_index: Vec::new(),
             solid_next: 0,
             solid_mats: Vec::new(),
-            body_ahead: BodyAhead::default(),
+            body_maps: Vec::new(),
         })
     }
 }

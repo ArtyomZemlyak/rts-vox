@@ -9,16 +9,16 @@ use voxel::UnitBody;
 
 pub(super) type Contact = (usize, [usize; 3]);
 
-fn cells(
+/// The conservative box of local cells `cells` walks for the wave cell at
+/// `low`: the image of the world cube under the inverse frame, clipped to
+/// the body's layers.
+fn candidate_box(
     body: &UnitBody,
     frame: &Frame,
     layers: [usize; 2],
     low: [i32; 3],
     edge: i32,
-    part: usize,
-    visit: &mut impl FnMut(Contact) -> bool,
-) -> bool {
-    let high = low.map(|v| v + edge);
+) -> ([i32; 3], [i32; 3]) {
     let half = Fx::from_ratio(edge, 2);
     let p = low.map(|v| Fx::from_int(v).add(half));
     let centre = frame.local(V3::new(p[0], p[1], p[2]));
@@ -41,29 +41,47 @@ fn cells(
         lo[a] = lo[a].max(min[a]);
         hi[a] = hi[a].min(max[a]);
     }
+    (lo, hi)
+}
+
+/// The world term of local axis `a` for the local cells `from..to`: a
+/// voxel's world centre is the frame's base plus one term per local axis,
+/// each a function of that axis's coordinate alone. The sum is wrapping,
+/// so adding tabled terms in any grouping gives the same bits as the
+/// transform term by term.
+fn axis_terms(frame: &Frame, a: usize, from: i32, to: i32) -> Vec<V3> {
+    let axis = [frame.x, frame.y, frame.z][a];
+    (from..to)
+        .map(|c| {
+            let local = Fx::from_int(c)
+                .add(Fx::from_ratio(1, 2))
+                .sub(frame.centre[a]);
+            let v = if frame.scale == Fx::ONE {
+                local
+            } else {
+                local.div(frame.scale)
+            };
+            axis.scale(v)
+        })
+        .collect()
+}
+
+fn cells(
+    body: &UnitBody,
+    frame: &Frame,
+    layers: [usize; 2],
+    low: [i32; 3],
+    edge: i32,
+    part: usize,
+    visit: &mut impl FnMut(Contact) -> bool,
+) -> bool {
+    let high = low.map(|v| v + edge);
+    let (lo, hi) = candidate_box(body, frame, layers, low, edge);
     if (0..3).any(|a| lo[a] >= hi[a]) {
         return true;
     }
-    // A voxel's world centre is the frame's base plus one term per local
-    // axis, each a function of that axis's coordinate alone. The terms
-    // are tabled once per axis; the sum is wrapping, so adding them in
-    // any grouping gives the same bits as the transform term by term.
-    let term = |a: usize, axis: V3| -> Vec<V3> {
-        (lo[a]..hi[a])
-            .map(|c| {
-                let local = Fx::from_int(c)
-                    .add(Fx::from_ratio(1, 2))
-                    .sub(frame.centre[a]);
-                let v = if frame.scale == Fx::ONE {
-                    local
-                } else {
-                    local.div(frame.scale)
-                };
-                axis.scale(v)
-            })
-            .collect()
-    };
-    let (tx, ty, tz) = (term(0, frame.x), term(1, frame.y), term(2, frame.z));
+    let term = |a: usize| axis_terms(frame, a, lo[a], hi[a]);
+    let (tx, ty, tz) = (term(0), term(1), term(2));
     let (wlo, whi) = (low.map(Fx::from_int), high.map(Fx::from_int));
     for (z, dz) in (lo[2]..hi[2]).zip(&tz) {
         let plane = frame.base.add(*dz);
@@ -148,5 +166,160 @@ impl HitFrames {
                 return;
             }
         }
+    }
+}
+
+/// Every cell of one hull by the wave cell that owns it, as `wave_cells`
+/// lists them, for a whole field at once (ADR-681): each body cell's world
+/// centre is found once, instead of once per wave cell whose conservative
+/// box reaches it. Entries are (wave cell index, packed contact), sorted
+/// by wave cell and, within one, in `wave_cells` order. Valid for the
+/// frozen poses and the body sizes it was built at.
+///
+/// A packed contact is its layer (0 the root below the turret, 1 the
+/// turret, 2 + k segment k), then z, y and x: within one wave cell the
+/// walk order of `wave_cells` is the packed order, so one unstable sort of
+/// (cell, contact) keys gives it.
+pub(super) struct BodyMap {
+    pub(super) sizes: Vec<u16>,
+    entries: Vec<u64>,
+}
+
+impl BodyMap {
+    /// The entries of wave cell `index`, as a range of `entries`.
+    pub(super) fn range(&self, index: u32) -> (usize, usize) {
+        let index = u64::from(index);
+        let start = self.entries.partition_point(|e| e >> 32 < index);
+        let end = self.entries.partition_point(|e| e >> 32 <= index);
+        (start, end - start)
+    }
+    pub(super) fn contact(&self, k: usize) -> Contact {
+        let v = self.entries[k] as u32;
+        let layer = (v >> 24) as usize;
+        (
+            layer.saturating_sub(1),
+            [
+                v as usize & 0xff,
+                (v >> 8) as usize & 0xff,
+                (v >> 16) as usize & 0xff,
+            ],
+        )
+    }
+}
+
+/// A field's grid: the corner of its first cell, its cell edge and cells
+/// per side.
+#[derive(Clone, Copy)]
+pub(super) struct Grid {
+    pub(super) origin: [i32; 3],
+    pub(super) edge: i32,
+    pub(super) n: usize,
+}
+
+impl Grid {
+    pub(super) fn index(&self, cell: [i32; 3]) -> u32 {
+        ((cell[2] as usize * self.n + cell[1] as usize) * self.n + cell[0] as usize) as u32
+    }
+}
+
+/// Append the cells of one layer of one part, each under the wave cell
+/// owning it, if that cell's conservative box reaches it (as `cells`
+/// requires) and `reaches` admits the cell.
+#[allow(clippy::too_many_arguments)]
+fn bucket(
+    body: &UnitBody,
+    frame: &Frame,
+    layers: [usize; 2],
+    layer: usize,
+    grid: Grid,
+    reaches: impl Fn([i32; 3]) -> bool,
+    out: &mut Vec<u64>,
+) {
+    let min = [0, layers[0] as i32, 0];
+    let max = [body.vol.nx as i32, layers[1] as i32, body.vol.nz as i32];
+    if (0..3).any(|a| min[a] >= max[a]) {
+        return;
+    }
+    let term = |a: usize| axis_terms(frame, a, min[a], max[a]);
+    let (tx, ty, tz) = (term(0), term(1), term(2));
+    let span = i64::from(grid.edge) << 32;
+    let origin = grid.origin.map(|v| i64::from(v) << 32);
+    // The box of the last owning cell asked: neighbours share it.
+    let mut last: Option<([i32; 3], [i32; 3], [i32; 3], bool)> = None;
+    for (z, dz) in (min[2]..max[2]).zip(&tz) {
+        let plane = frame.base.add(*dz);
+        for (y, dy) in (min[1]..max[1]).zip(&ty) {
+            let row = plane.add(*dy);
+            for (x, dx) in (min[0]..max[0]).zip(&tx) {
+                let w = row.add(*dx);
+                let w = [w.x.raw(), w.y.raw(), w.z.raw()];
+                let cell: [i32; 3] =
+                    std::array::from_fn(|a| (w[a] - origin[a]).div_euclid(span) as i32);
+                if cell.iter().any(|&c| c < 0 || c as usize >= grid.n) {
+                    continue;
+                }
+                let (lo, hi, admitted) = match last {
+                    Some((c, lo, hi, admitted)) if c == cell => (lo, hi, admitted),
+                    _ => {
+                        let low: [i32; 3] =
+                            std::array::from_fn(|a| grid.origin[a] + cell[a] * grid.edge);
+                        let (lo, hi) = candidate_box(body, frame, layers, low, grid.edge);
+                        let admitted = reaches(low);
+                        last = Some((cell, lo, hi, admitted));
+                        (lo, hi, admitted)
+                    }
+                };
+                let p = [x, y, z];
+                if admitted && (0..3).all(|a| p[a] >= lo[a] && p[a] < hi[a]) {
+                    let packed =
+                        (layer as u32) << 24 | (z as u32) << 16 | (y as u32) << 8 | x as u32;
+                    out.push(u64::from(grid.index(cell)) << 32 | u64::from(packed));
+                }
+            }
+        }
+    }
+}
+
+impl HitFrames {
+    /// The map of `unit`'s cells over the field `grid` (see [`BodyMap`]);
+    /// `None` for a hull with more parts than a packed contact holds.
+    pub(super) fn body_map(
+        &self,
+        unit: &RangeUnit,
+        root: &Frame,
+        segments: &[Frame],
+        grid: Grid,
+        sizes: Vec<u16>,
+    ) -> Option<BodyMap> {
+        let body = &unit.body;
+        if body.segments.len() >= 254 {
+            return None;
+        }
+        let split = usize::from(body.turret_y);
+        let end = usize::from(body.vol.ny);
+        let mut entries = Vec::new();
+        let any = |_: [i32; 3]| true;
+        if self.shared_root {
+            bucket(body, root, [0, end], 0, grid, any, &mut entries);
+        } else {
+            bucket(body, root, [0, split], 0, grid, any, &mut entries);
+            bucket(body, &self.turret, [split, end], 1, grid, any, &mut entries);
+        }
+        for (i, (segment, frame)) in body.segments.iter().zip(segments).enumerate() {
+            let (lo, hi) = self.boxes[i];
+            let edge = grid.edge;
+            bucket(
+                &segment.body,
+                frame,
+                [0, usize::from(segment.body.vol.ny)],
+                i + 2,
+                grid,
+                |low| (0..3).all(|a| low[a] <= hi[a] && low[a] + edge > lo[a]),
+                &mut entries,
+            );
+        }
+        // Distinct keys; within a wave cell, packed order is walk order.
+        entries.sort_unstable();
+        Some(BodyMap { sizes, entries })
     }
 }

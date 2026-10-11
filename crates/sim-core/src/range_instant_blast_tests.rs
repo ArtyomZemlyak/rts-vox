@@ -162,6 +162,50 @@ fn salvo_restored_mid_wave_matches_the_continuous_run() {
     assert_eq!(c + w, 0, "the salvo did not finish after the restore");
 }
 
+/// The body map lists, for every wave cell of a field, exactly the cells
+/// `wave_cells` lists for it, in the same order: on turned and pitched
+/// hulls with segments, for each cell edge in use.
+#[test]
+fn body_map_lists_what_wave_cells_lists() {
+    use crate::blast::wave_cells::Grid;
+    let r = salvo_range();
+    for (k, u) in r.units.iter().enumerate() {
+        for (yaw, delta, pitch) in [(0, 0, 0), (5000, 9000, 0), (11000, -3000, 2500)] {
+            let pose = crate::damage::turned(&u.pose, yaw, 0);
+            let segs: Vec<_> = u
+                .seg_frames
+                .iter()
+                .map(|f| crate::damage::turned(f, yaw, 0))
+                .collect();
+            let frames = HitFrames::new(u, pose, &segs, delta, pitch);
+            let (lo, hi) = u.bounds_aimed(Some(&pose), &segs, delta, pitch);
+            for edge in [2, 3] {
+                let n = ((0..3).map(|a| hi[a] - lo[a]).max().unwrap() / edge + 4) as usize;
+                let origin = lo.map(|v| v - edge * 2 + k as i32 % edge);
+                let grid = Grid { origin, edge, n };
+                let map = frames
+                    .body_map(u, &pose, &segs, grid, body_sizes(u))
+                    .expect("map");
+                let mut listed = Vec::new();
+                let mut total = 0;
+                for i in 0..n * n * n {
+                    let cell = [i % n, i / n % n, i / (n * n)].map(|v| v as i32);
+                    let low = std::array::from_fn(|a| origin[a] + cell[a] * edge);
+                    frames.wave_cells(u, &pose, &segs, low, edge, &mut listed);
+                    let (start, len) = map.range(grid.index(cell));
+                    let mapped: Vec<_> = (start..start + len).map(|k| map.contact(k)).collect();
+                    assert_eq!(
+                        mapped, listed,
+                        "unit {k} yaw {yaw} edge {edge} cell {cell:?}"
+                    );
+                    total += len;
+                }
+                assert!(total > 0, "unit {k}: the field holds no body cell");
+            }
+        }
+    }
+}
+
 /// Measurement probe for analysis 251: per tick, live waves, heap pops,
 /// contacts, claims, edits and wall time per phase. Timing lives here,
 /// never in the simulation.
