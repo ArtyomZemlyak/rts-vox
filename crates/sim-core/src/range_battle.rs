@@ -23,6 +23,10 @@ mod order_handler_tests;
 #[path = "range_artillery_tests.rs"]
 mod artillery_tests;
 
+#[cfg(test)]
+#[path = "range_unit_felling_tests.rs"]
+mod unit_felling_tests;
+
 /// Weapon identity survives selection changes, flight and delayed wave work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

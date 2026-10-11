@@ -2930,7 +2930,7 @@ mod tests {
     }
 
     #[test]
-    fn spider_cuts_only_occupied_feet_and_keeps_trees_between_legs() {
+    fn walkers_cut_only_occupied_feet_and_keep_trees_between_legs() {
         struct Forest;
         impl voxel::Generator for Forest {
             fn material(&self, _x: u32, y: u32, _z: u32) -> u16 {
@@ -2944,42 +2944,78 @@ mod tests {
             }
         }
         let w = World::new(320, 96, 320, 100, Box::new(Forest));
-        let mut body = voxel::unit::spider();
-        let mut m = Motion::new([160, 16, 160], RangeUnitKind::Spider, &body);
-        m.enabled = false;
-        m.passive(
-            &w,
-            &nav::vehicle::Rubble::new(),
-            &body,
-            98,
-            crate::mobility::Mobility::intact(true),
-            &[],
-        );
-        assert!(!m.cut.is_empty(), "feet did not touch any trees");
-        assert!(
-            m.cut
-                .iter()
-                .all(|p| p[0].abs_diff(160) > 24 || p[2].abs_diff(160) > 24),
-            "empty space below the hull cut trees"
-        );
-        assert!(m.cut.iter().all(|p| p[1] < 24), "feet stood on tree crowns");
-        let foot_parts: Vec<_> = m.rigs.iter().filter_map(|r| r.foot).collect();
-        for i in foot_parts {
-            let foot = &mut body.segments[i].body;
-            for z in 0..foot.vol.nz as usize {
-                for y in 0..foot.vol.ny as usize {
-                    for x in 0..foot.vol.nx as usize {
-                        foot.remove(x, y, z);
+        for kind in [RangeUnitKind::Strider, RangeUnitKind::Spider] {
+            for head in [0, 730] {
+                let intact_body = match kind {
+                    RangeUnitKind::Strider => voxel::unit::strider(),
+                    _ => voxel::unit::spider(),
+                };
+                let mut body = intact_body.clone();
+                let mut m = Motion::new([160, 16, 160], kind, &body);
+                m.drive.head = head;
+                m.enabled = false;
+                m.passive(
+                    &w,
+                    &nav::vehicle::Rubble::new(),
+                    &body,
+                    98,
+                    crate::mobility::Mobility::intact(true),
+                    &[],
+                );
+                assert!(!m.cut.is_empty(), "feet did not touch any trees");
+                // Strider feet return under the hull; Spider feet stand much
+                // farther out. Check the central gap in hull coordinates,
+                // not an axis-aligned world square after turning the hull.
+                let empty = Fx::from_int(if kind == RangeUnitKind::Spider { 24 } else { 4 });
+                let (c, s) = (angle::cos(head), angle::sin(head));
+                assert!(
+                    m.cut.iter().all(|p| {
+                        let dx = Fx::from_int(p[0] as i32 - 160).add(Fx::from_ratio(1, 2));
+                        let dz = Fx::from_int(p[2] as i32 - 160).add(Fx::from_ratio(1, 2));
+                        dx.mul(c).add(dz.mul(s)).abs() > empty
+                            || dz.mul(c).sub(dx.mul(s)).abs() > empty
+                    }),
+                    "{kind:?} head={head}: empty space below the hull cut trees"
+                );
+                assert!(m.cut.iter().all(|p| p[1] < 24), "feet stood on tree crowns");
+                let all = m.cut.clone();
+                m.cut_limit = 7;
+                m.cut_feet(&w, &body);
+                assert_eq!(
+                    m.cut,
+                    all[..7],
+                    "{kind:?} head={head}: contact prefix order"
+                );
+                m.cut_limit = 0;
+                m.cut_feet(&w, &body);
+                assert!(m.cut.is_empty());
+                m.cut_limit = usize::MAX;
+                m.legs_lost[0] = true;
+                m.cut_feet(&w, &body);
+                assert!(
+                    !m.cut.is_empty(),
+                    "{kind:?}: remaining feet stopped cutting"
+                );
+                assert!(m.cut.len() < all.len(), "{kind:?}: lost foot still cuts");
+                m.legs_lost[0] = false;
+                let foot_parts: Vec<_> = m.rigs.iter().filter_map(|r| r.foot).collect();
+                for i in foot_parts {
+                    let foot = &mut body.segments[i].body;
+                    for z in 0..foot.vol.nz as usize {
+                        for y in 0..foot.vol.ny as usize {
+                            for x in 0..foot.vol.nx as usize {
+                                foot.remove(x, y, z);
+                            }
+                        }
                     }
                 }
+                m.cut_feet(&w, &body);
+                assert!(m.cut.is_empty(), "destroyed feet still fell trees");
+                m.legs_lost.fill(true);
+                m.cut_feet(&w, &intact_body);
+                assert!(m.cut.is_empty(), "missing legs still fell trees");
             }
         }
-        m.cut_feet(&w, &body);
-        assert!(m.cut.is_empty(), "destroyed feet still fell trees");
-        let body = voxel::unit::spider();
-        m.legs_lost.fill(true);
-        m.cut_feet(&w, &body);
-        assert!(m.cut.is_empty(), "missing legs still fell trees");
     }
 
     #[test]
