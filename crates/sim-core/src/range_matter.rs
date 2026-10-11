@@ -37,6 +37,9 @@ fn claimable(w: &World, p: [i32; 3]) -> bool {
 #[path = "range_fracture.rs"]
 mod fracture;
 
+#[path = "range_felling_front.rs"]
+mod felling_front;
+
 #[path = "range_ground_melt.rs"]
 mod ground_melt;
 
@@ -103,7 +106,7 @@ pub struct Matter {
     section_cursor: usize,
     /// Yielding cells still to be released after a cut, each with the cut
     /// cell it hangs from. Ordered, bounded per tick, saved whole.
-    felling: BTreeSet<(u64, u64)>,
+    felling: felling_front::Front,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AdmissionProfile {
@@ -137,6 +140,7 @@ pub struct AdmissionProfile {
 #[derive(Debug, Default)]
 pub struct FellingProfile {
     pub pending: usize,
+    pub storage_words: usize,
     pub positions: usize,
     pub seeds: usize,
     pub yielding: usize,
@@ -237,7 +241,7 @@ impl Matter {
             section_work: t.impact.detach_work_per_tick,
             section_jobs: t.impact.detach_jobs_per_tick,
             section_cursor: 0,
-            felling: BTreeSet::new(),
+            felling: felling_front::Front::default(),
         }
     }
     /// Density of initial stock, never a live registry price. The fixed world
@@ -309,18 +313,19 @@ impl Matter {
     /// Stable identity of the first pending record, without a full queue scan.
     /// Not a work selector: felling still uses its existing ordered queue.
     pub fn felling_head(&self) -> Option<(u64, u64)> {
-        self.felling.first().copied()
+        self.felling.first()
     }
     /// Read-only, potentially expensive diagnostic for a completed bench.
     /// It never influences the felling order or simulation state.
     pub fn felling_profile(&self, w: &World, f: &Felling) -> FellingProfile {
         let mut result = FellingProfile {
             pending: self.felling.len(),
+            storage_words: self.felling.words(),
             ..FellingProfile::default()
         };
         let mut last = None;
         let mut seeds = std::collections::BTreeSet::new();
-        for &(p, seed) in &self.felling {
+        for (p, seed) in self.felling.iter() {
             let (p, seed) = (fell_cell(p), fell_cell(seed));
             if last != Some(p) {
                 result.positions += 1;
@@ -1346,7 +1351,7 @@ impl Matter {
         b.u64(self.spent_mj);
         b.usize(self.section_cursor);
         b.u32(self.felling.len() as u32);
-        for &(p, seed) in &self.felling {
+        for (p, seed) in self.felling.iter() {
             let (p, seed) = (fell_cell(p), fell_cell(seed));
             for v in p.iter().chain(seed.iter()) {
                 b.i32(*v);
@@ -1572,6 +1577,7 @@ mod felling_key_tests {
             for reserve in [0, 1, 4] {
                 let mut actual = Matter::new(&[]);
                 let mut reference = Matter::new(&[]);
+                reference.felling = super::felling_front::Front::reference([]);
                 let mut world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
                 let mut old_world = voxel::World::new(32, 16, 32, 4096, Box::new(Grove));
                 let mut f = modding::navigation::Navigation::from_ron(include_str!(
@@ -1666,8 +1672,9 @@ mod felling_key_tests {
                 ] {
                     let mut reference = Matter::new(&[]);
                     let mut actual = Matter::new(&[]);
-                    reference.felling = initial.clone();
-                    actual.felling = initial.clone();
+                    reference.felling =
+                        super::felling_front::Front::reference(initial.iter().copied());
+                    actual.felling = initial.iter().copied().collect();
                     reference.tuning.max_claims = capacity;
                     actual.tuning.max_claims = capacity;
                     reference.tuning.max_flying = flying;
@@ -1735,7 +1742,7 @@ mod felling_key_tests {
                             assert!(world.queued() > 0);
                             assert!(actual.debris.claims() > 0);
                             assert!(
-                                actual.felling.iter().any(|key| !initial.contains(key)),
+                                actual.felling.iter().any(|key| !initial.contains(&key)),
                                 "new frontier must be admitted during this phase"
                             );
                         }
