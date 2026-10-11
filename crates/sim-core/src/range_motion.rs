@@ -1487,13 +1487,15 @@ impl Motion {
     /// note what changed in the world since the last tick, walk on with
     /// `budget`, and take the answer up. Returns the work spent. The
     /// first call of a tick counts the tick as waited; a second round of
-    /// the range's leftover passes no changes and counts nothing.
+    /// the range's leftover passes no changes and counts nothing. The
+    /// other hulls are asked for only when the order passes to the fine
+    /// planner: walking the search does not read them.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn continue_coarse(
         &mut self,
         w: &World,
         b: &UnitBody,
-        others: &[Obstacle],
+        others: impl FnOnce() -> Vec<Obstacle>,
         rubble: &nav::vehicle::Rubble,
         tick: u32,
         changed: &nav::vehicle::Changed,
@@ -1529,7 +1531,7 @@ impl Motion {
                 // forever. The range supplies this flag: its active budget
                 // can differ from this motion's cloned navigation settings.
                 self.coarse = None;
-                self.start_fine(w, to, b, others, rubble, None, |_| {});
+                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
             }
             CoarseAdvance::Pending if first => {
                 if let Some(c) = &mut self.coarse {
@@ -1547,7 +1549,7 @@ impl Motion {
             CoarseAdvance::Refused => {
                 // A refusal hands the order to the fine planner, exactly as
                 // the one-call planner did.
-                self.start_fine(w, to, b, others, rubble, None, |_| {});
+                self.start_fine(w, to, b, &others(), rubble, None, |_| {});
             }
         }
         spent

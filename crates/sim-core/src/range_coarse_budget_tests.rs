@@ -1,5 +1,6 @@
 //! Valid data must not raise the range's whole-map work ceiling (review 252).
 use crate::blast::{battle::Order, BlastRange};
+use fx::Fx;
 use modding::explosion::ExplosionConfig;
 use modding::range::{RangeLayout, RangeUnitDef, RangeUnitKind};
 
@@ -104,4 +105,71 @@ fn a_corridor_larger_than_a_full_tick_falls_back_without_stalling_or_losing_the_
         b.step();
         assert_eq!(a.state_hash(), b.state_hash());
     }
+}
+
+/// The other hulls are listed only when a search hands its order to the
+/// fine planner (review 252): a search walking on, or holding with no
+/// share, never asks for them, and the hand-over given the list lazily
+/// leaves the hull exactly as the list built up front did.
+#[test]
+fn the_obstacle_list_is_built_only_on_hand_over_and_changes_nothing() {
+    use std::cell::Cell;
+    let r = range(RangeUnitKind::Spider);
+    let rubble = r.current_rubble();
+    let unchanged = nav::vehicle::Changed::default();
+    let others: Vec<_> = (0..3)
+        .map(|k| super::Obstacle {
+            pos: [
+                Fx::from_int(330 + 40 * k),
+                Fx::from_int(16),
+                Fx::from_int(300),
+            ],
+            head: 0,
+            half: [Fx::from_int(12), Fx::from_int(8)],
+        })
+        .collect();
+    let asked = Cell::new(0u32);
+    let lazy = || {
+        asked.set(asked.get() + 1);
+        others.clone()
+    };
+    let save = |m: &super::Motion| {
+        let mut b = fx::blob::Blob::new();
+        m.save(&mut b);
+        b.v
+    };
+    let body = &r.units[0].body;
+    let mut m = r.units[0].motion.clone();
+    // No share, and a share below any test: the search holds, no list.
+    for budget in [0, 1] {
+        m.continue_coarse(
+            &r.world, body, lazy, &rubble, r.tick, &unchanged, budget, true, false,
+        );
+        assert_eq!(asked.get(), 0, "budget {budget}");
+        assert!(m.coarse_waited().is_some());
+    }
+    // A test dearer than a whole tick: the order passes to the fine
+    // planner, the list is asked for once, and the hull ends as with the
+    // list built up front.
+    let budget = r.navigation.global_work_per_tick;
+    assert!(m.coarse_max_test() > budget);
+    let mut eager = m.clone();
+    let list = others.clone();
+    eager.continue_coarse(
+        &r.world,
+        body,
+        move || list,
+        &rubble,
+        r.tick,
+        &unchanged,
+        budget,
+        true,
+        true,
+    );
+    m.continue_coarse(
+        &r.world, body, lazy, &rubble, r.tick, &unchanged, budget, true, true,
+    );
+    assert_eq!(asked.get(), 1);
+    assert!(m.coarse_waited().is_none() && m.searching() || !m.path.is_empty());
+    assert_eq!(save(&eager), save(&m));
 }

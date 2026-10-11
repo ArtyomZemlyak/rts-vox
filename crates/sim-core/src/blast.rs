@@ -5157,16 +5157,21 @@ impl BlastRange {
                     if round == 1 && (budget == 0 || u.motion.coarse_waited().is_none()) {
                         continue;
                     }
-                    let others: Vec<_> = positions
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != id)
-                        .map(|(_, p)| *p)
-                        .chain(
-                            (!battle_mode && id != gun_id)
-                                .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body)),
-                        )
-                        .collect();
+                    // The other hulls matter only to a hand-over to the
+                    // fine planner; the list is built then, not for every
+                    // search walked (review 252).
+                    let gun = (!battle_mode && id != gun_id)
+                        .then(|| motion::Obstacle::of(&self.gun.motion, &self.gun.body));
+                    let positions = &positions;
+                    let others = move || -> Vec<motion::Obstacle> {
+                        positions
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i != id)
+                            .map(|(_, p)| *p)
+                            .chain(gun)
+                            .collect()
+                    };
                     let u = if id == gun_id {
                         &mut self.gun
                     } else {
@@ -5175,7 +5180,7 @@ impl BlastRange {
                     let spent = u.motion.continue_coarse(
                         &self.world,
                         &u.body,
-                        &others,
+                        others,
                         &self.rubble,
                         self.tick,
                         if round == 0 { &changed } else { &unchanged },
